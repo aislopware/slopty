@@ -1,6 +1,6 @@
 //! Agents' turns that ended while nobody looked: which are left for the person to review. They
-//! are what the navigator's *To review* lists and what the bell counts beside the agents that
-//! need the person, those that failed and the tasks ready to merge.
+//! are what the icon badge counts beside the agents that need the person, those that failed and
+//! the tasks ready to merge, and what a note says while the app is away (`attention`).
 //!
 //! What is unread is the worker's word, not this device's: each thread's row carries its latest
 //! turn that ended and the person's seen mark, set by whichever device looked

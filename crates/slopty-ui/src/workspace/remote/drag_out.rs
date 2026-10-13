@@ -37,11 +37,6 @@ const CAUGHT_WAIT: Duration = Duration::from_secs(3);
 pub type DragSink = Rc<dyn Fn(Vec<Promise>) -> bool>;
 
 impl WorkspaceView {
-    /// Drag the files of a test's drags to `sink` instead of the system.
-    pub fn set_drag_sink(&mut self, sink: DragSink) {
-        self.drag_sink = Some(sink);
-    }
-
     /// A path shell `session` printed, ⌘-dragged out: the worker's file, the path made absolute
     /// against the shell's directory.
     pub(in crate::workspace) fn drag_shell_path(
@@ -124,6 +119,11 @@ impl WorkspaceView {
             Some(sink) => sink(files),
             None => slopty_platform::drag::drag_out_items(files, data, None),
         }
+    }
+
+    /// Drag the files of a test's drags to `sink` instead of the system.
+    pub fn set_drag_sink(&mut self, sink: DragSink) {
+        self.drag_sink = Some(sink);
     }
 }
 

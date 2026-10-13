@@ -13,14 +13,11 @@
 //! agent that speaks the Agent Client Protocol over ACP ([`acp`]). A Claude Code thread is
 //! started by opening the person's `claude` in one of the worker's [`terminals`] and observing
 //! it ([`claude::start`]); a Codex thread by asking the person's Codex daemon for one. The
-//! person's past prompts, as the agents record them, are searched by [`history`], and what was
-//! said in the threads held here by [`search`]. The windows and displays an agent drives are
-//! named from its tool calls by [`screens`], and which turn wrote a line of a file by
-//! [`authors`].
+//! person's past prompts, as the agents record them, are searched by [`history`]. The windows
+//! and displays an agent drives are named from its tool calls by [`screens`].
 
 pub mod acp;
 pub mod attach;
-pub mod authors;
 pub mod claude;
 pub mod codex;
 pub mod compose;
@@ -37,7 +34,6 @@ pub mod pulls;
 pub mod review;
 pub mod schedule;
 pub mod screens;
-pub mod search;
 pub mod table;
 pub mod terminals;
 

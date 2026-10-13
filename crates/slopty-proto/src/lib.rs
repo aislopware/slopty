@@ -372,10 +372,6 @@ pub enum WorkerMsg {
         /// How it went.
         outcome: git::GitOutcome,
     },
-    /// What was said in the worker's threads (`ClientMsg::Thread`'s `Search`).
-    ThreadHits(thread::wire::ThreadHits),
-    /// Which threads wrote a file's lines (`ClientMsg::Thread`'s `Authors`).
-    Authors(thread::wire::Authors),
     /// How far a clone `ClientMsg::CloneRepo` asked for has come, as it moves.
     RepoCloning {
         /// The request's number.
@@ -430,8 +426,6 @@ impl WorkerMsg {
             Self::GitDone { .. } => "GitDone",
             Self::RepoCloning { .. } => "RepoCloning",
             Self::RepoCloned { .. } => "RepoCloned",
-            Self::ThreadHits(_) => "ThreadHits",
-            Self::Authors(_) => "Authors",
         }
     }
 }

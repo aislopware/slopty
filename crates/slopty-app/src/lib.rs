@@ -1207,8 +1207,6 @@ fn apply_link_event(
             | WorkerMsg::Search(_)
             | WorkerMsg::FsDone { .. }
             | WorkerMsg::AgentBranch(_)
-            | WorkerMsg::ThreadHits(_)
-            | WorkerMsg::Authors(_)
             | WorkerMsg::RepoCloning { .. }
             | WorkerMsg::RepoCloned { .. }
             | WorkerMsg::Sessions(_)
@@ -1400,7 +1398,7 @@ pub fn open_workspace(cx: &mut App, handle: tokio::runtime::Handle) {
     bind_terminal_keys(&workspace, cx);
     let window = interface::open(&workspace, runtime, loaded, cx);
     // Every draw of the window, timed for the stream's overlay and the self-test's numbers.
-    let _timed = window.update(cx, |_, window, _| slopty_kit::frames::watch(window).detach());
+    let _timed = window.update(cx, |_, window, cx| slopty_kit::frames::watch(window, cx).detach());
     // GPUI's own animations hold still as the system asks, as Slopty's do, and follow the
     // setting as the system says it changed ([`Workspace::set_reduce_motion`]).
     cx.set_reduce_motion(slopty_platform::reduce_motion());

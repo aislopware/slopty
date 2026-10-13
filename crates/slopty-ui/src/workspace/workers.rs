@@ -270,9 +270,29 @@ impl WorkspaceView {
         let Some(w) = self.workers.get_mut(&key).filter(|w| w.link.is_some()) else { return };
         let changed = w.relay.path() != Some(&path);
         w.relay.observe(path, now);
+        let due = w.relay.due(now);
         if changed {
             cx.notify();
         }
+        self.say_relay(key, cx);
+        if let Some(wait) = due.map(|at| at.saturating_duration_since(now)) {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(wait).await;
+                let _gone = this.update(cx, |this, cx| this.say_relay(key, cx));
+            })
+            .detach();
+        }
+    }
+
+    /// Say, once per stay, that the link to `key` has stayed on a Tailscale DERP relay, with
+    /// the fix (`docs/decisions/transport.md`, "A link that stays on DERP says so").
+    fn say_relay(&mut self, key: WorkerKey, cx: &mut Context<Self>) {
+        let now = cx.background_executor().now();
+        let Some(notice) = self.workers.get_mut(&key).and_then(|w| w.relay.take_notice(now)) else {
+            return;
+        };
+        let name = self.worker_name(key);
+        Self::show_notice(format!("{name}: {}. {}", notice.note, notice.fix), cx);
     }
 
     /// What `key` can do changed: a permission granted, a display attached. The link's word
@@ -324,12 +344,6 @@ impl WorkspaceView {
             w.load = Some(load);
             cx.notify();
         }
-    }
-
-    /// How the tailnet carries the link to `key`, when its worker has said.
-    #[must_use]
-    pub fn link_path(&self, key: WorkerKey) -> Option<&LinkPath> {
-        self.workers.get(&key)?.relay.path()
     }
 
     /// A registry snapshot or delta from `key`.
@@ -555,11 +569,6 @@ impl WorkspaceView {
             // (`attention::Attention::program`).
             TerminalViewEvent::Notification { .. } => cx.emit(WorkspaceEvent::Program(sid)),
             TerminalViewEvent::Exited(status) => this.session_exited(sid, *status, cx),
-            TerminalViewEvent::CloseConfirmed => {
-                if let Some(key) = this.worker_of_session(sid) {
-                    this.close_session_on(key, sid);
-                }
-            }
             TerminalViewEvent::Cwd { path, repo, branch } => {
                 this.session_moved(sid, path, repo.as_deref(), branch.as_deref());
                 cx.notify();
@@ -823,14 +832,16 @@ impl WorkspaceView {
                 w.titles_requested = false;
             }
             ScreenEvent::Drag { stream, event } => {
+                #[cfg(target_os = "macos")]
                 for (id, view) in self.stream_views(key, stream, cx) {
                     let ended = view.update(cx, |v, cx| v.drag_heard(&event, cx));
-                    #[cfg(target_os = "macos")]
                     if let Some((drag, outcome)) = ended {
                         self.drag_ended(ItemRef { worker: key, item: id }, drag, outcome, cx);
                     }
-                    #[cfg(not(target_os = "macos"))]
-                    let _unheard = (id, ended);
+                }
+                #[cfg(not(target_os = "macos"))]
+                for (_, view) in self.stream_views(key, stream, cx) {
+                    view.update(cx, |v, cx| v.drag_heard(&event, cx));
                 }
             }
         }
@@ -939,4 +950,48 @@ pub(super) fn shares_clipboard(
     key: WorkerKey,
 ) -> bool {
     super::keys::worker_id(key).is_none_or(|id| sharing.shared_with(&id.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use gpui::{AppContext as _, TestAppContext};
+    use slopty_proto::tailnet::{DERP_NOTICE_AFTER, LinkPath};
+    use slopty_theme::Theme;
+
+    use crate::workspace::WorkspaceView;
+    use crate::workspace::rig::{KEY, hear, link, mac};
+
+    /// A link that stays on a DERP relay says so once, with the fix, after it has held there;
+    /// a direct path says nothing.
+    #[gpui::test]
+    fn a_link_that_stays_on_derp_says_so_once(cx: &mut TestAppContext) {
+        let workspace = cx.new(|_| WorkspaceView::new(Theme::default()));
+        let cx = cx.add_empty_window();
+        let heard = hear(&workspace, cx);
+        workspace.update(cx, |v, cx| v.add_worker(KEY, "studio".to_owned(), cx));
+        let _rx = link(&workspace, cx, mac(|_| {}), Vec::new());
+        let derp = LinkPath::Derp { region: "fra".to_owned() };
+        workspace.update(cx, |v, cx| v.set_link_path(KEY, derp.clone(), cx));
+        cx.run_until_parked();
+        assert!(heard.borrow().notices.is_empty(), "a path still settling says nothing");
+        cx.executor().advance_clock(DERP_NOTICE_AFTER.saturating_add(Duration::from_millis(1)));
+        cx.run_until_parked();
+        let notices = heard.borrow().notices.clone();
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(
+            notices[0].starts_with("studio: Relayed via fra — adds latency. ")
+                && notices[0].contains(LinkPath::relay_fix()),
+            "{notices:?}"
+        );
+        workspace.update(cx, |v, cx| v.set_link_path(KEY, derp, cx));
+        cx.executor().advance_clock(DERP_NOTICE_AFTER.saturating_mul(2));
+        cx.run_until_parked();
+        assert_eq!(heard.borrow().notices.len(), 1, "said once per stay");
+        workspace.update(cx, |v, cx| v.set_link_path(KEY, LinkPath::Direct, cx));
+        cx.executor().advance_clock(DERP_NOTICE_AFTER.saturating_mul(2));
+        cx.run_until_parked();
+        assert_eq!(heard.borrow().notices.len(), 1, "direct says nothing");
+    }
 }

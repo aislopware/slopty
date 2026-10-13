@@ -272,14 +272,6 @@ impl ClipSync {
         self.hold(board.as_ref(), count, me, now);
     }
 
-    /// A paste the person made where reading the clipboard asks them first (the system's paste
-    /// button on iOS): `pasted` holds what the clipboard holds now, so it stands for a read of
-    /// it, and the paste that follows reads nothing more.
-    pub fn pasted(&mut self, pasted: &dyn Pasteboard, me: ClientId) {
-        let count = self.board.change_count();
-        self.hold(pasted, count, me, Instant::now());
-    }
-
     /// Take `board`'s contents as the clipboard's at change `count`: every item's types, and
     /// the small text and file URLs among them, inline while they fit.
     fn hold(&mut self, board: &dyn Pasteboard, count: i64, me: ClientId, now: Instant) {

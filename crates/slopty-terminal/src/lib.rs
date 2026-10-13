@@ -26,8 +26,6 @@ mod view;
 #[cfg(test)]
 pub(crate) use element::captions_drawn;
 pub use element::{CellMetrics, Prepared, TerminalElement};
-#[cfg(any(test, feature = "e2e"))]
-pub use element::{family_picks, rows_prepared};
 pub use view::{
     AttachBlock, AttachProbe, AttachSelection, BACK_TO_LIVE, COPY_MODE, COPY_MODE_DONE, CTX,
     ClearScreen, ClipHook, ClipPaste, CloseFind, Copy, CopyBlockOutput, CopyLastOutput, CopyMode,

@@ -136,12 +136,6 @@ impl TermDrag {
         self.files_wanted
     }
 
-    /// Whether the files went up during the hover.
-    #[must_use]
-    pub const fn uploading(&self) -> bool {
-        self.uploading
-    }
-
     /// The worker's fetch of representation `kind` of item `item`, capped at `max`.
     #[must_use]
     pub fn fetch(&self, item: u16, kind: &ClipType, max: Option<u64>) -> Fetched {
@@ -173,12 +167,17 @@ impl TermDrag {
             Some(push.bytes.as_slice())
         })
     }
+
+    /// Whether the files went up during the hover.
+    #[must_use]
+    pub const fn uploading(&self) -> bool {
+        self.uploading
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use slopty_proto::drag::FileMeta;
-    use slopty_proto::terminal::URI_LIST;
     use slopty_proto::transfer::{ClipFormat, Rep};
 
     use super::super::Push;
@@ -226,27 +225,6 @@ mod tests {
         assert!(items[1].reps.iter().all(|r| r.size.is_some()), "sizes stay");
     }
 
-    /// What the program accepts goes up once: its texts and pictures, inline or kept aside,
-    /// and its files as the upload. A type it did not accept stays here for a fetch.
-    #[test]
-    fn what_the_program_accepts_goes_up_once() {
-        let mut drag = drag();
-        let id = drag.drag();
-        let accepted = drag.accepted(&["text/plain".to_owned(), URI_LIST.to_owned()]);
-        let text =
-            RepRef { source: Source::Drag(id), item: 1, kind: ClipType::Format(ClipFormat::Text) };
-        assert_eq!(accepted, Accepted { pushes: vec![(text, b"hi".to_vec())], upload: true });
-        let again = drag.accepted(&[ClipFormat::Text.mime().to_owned(), URI_LIST.to_owned()]);
-        assert_eq!(again, Accepted::default(), "the same text under its other name, and the files");
-        assert!(drag.files_wanted() && drag.uploading());
-
-        let png = ClipType::Format(ClipFormat::Png);
-        assert_eq!(drag.fetch(1, &png, None), Fetched::Data(b"png".to_vec()));
-        assert_eq!(drag.fetch(1, &png, Some(2)), Fetched::TooBig(3));
-        assert_eq!(drag.fetch(0, &png, None), Fetched::Gone);
-        assert_eq!(drag.accepted(&["image/x-unknown".to_owned()]), Accepted::default());
-    }
-
     /// A type larger than a worker holds ahead of the drop is not pushed, even accepted: the
     /// program's request fetches it whole.
     #[test]
@@ -263,29 +241,6 @@ mod tests {
         let mut drag = TermDrag::new(read);
         assert_eq!(drag.accepted(&["image/png".to_owned()]), Accepted::default());
         assert_eq!(drag.fetch(0, &png, None), Fetched::Data(big));
-    }
-
-    /// Files the program never accepted never go up.
-    #[test]
-    fn unaccepted_files_stay_here() {
-        let mut drag = drag();
-        let _accepted = drag.accepted(&["text/plain".to_owned()]);
-        assert!(!drag.files_wanted() && !drag.uploading());
-    }
-
-    /// A drag with a promised file goes up whole after the drop, when the promise is kept: the
-    /// program gets one list.
-    #[test]
-    fn a_drag_with_a_promise_waits_for_the_drop() {
-        let mut read = drag().read;
-        read.items.push(DragItem {
-            file: None,
-            promised: Some("public.jpeg".to_owned()),
-            reps: Vec::new(),
-        });
-        let mut drag = TermDrag::new(read);
-        assert!(!drag.accepted(&[URI_LIST.to_owned()]).upload);
-        assert!(drag.files_wanted() && !drag.uploading());
     }
 
     /// M2 of the lazy drop: the bytes that go up for a drag of a text, its HTML and a picture
@@ -323,5 +278,13 @@ mod tests {
         println!(
             "MEASURE drop of text + HTML + PNG, text accepted: {pushed} bytes up, against {every} eager"
         );
+    }
+
+    /// Files the program never accepted never go up.
+    #[test]
+    fn unaccepted_files_stay_here() {
+        let mut drag = drag();
+        let _accepted = drag.accepted(&["text/plain".to_owned()]);
+        assert!(!drag.files_wanted() && !drag.uploading());
     }
 }

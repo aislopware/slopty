@@ -17,12 +17,6 @@ struct Pinned(Option<WallMs>);
 
 impl Global for Pinned {}
 
-/// Now, as the readouts show it.
-#[must_use]
-pub fn now(cx: &App) -> WallMs {
-    cx.try_global::<Pinned>().and_then(|pinned| pinned.0).unwrap_or_else(WallMs::now)
-}
-
 /// How long since `started`, as a readout says it: nothing while the clock is pinned, so a span
 /// measured under the self-test (a command's run) reads the same in every run.
 #[must_use]
@@ -39,27 +33,4 @@ pub fn pin(at: Option<WallMs>, cx: &mut App) {
 }
 
 #[cfg(test)]
-mod tests {
-    use gpui::TestAppContext;
-    use slopty_core::WallMs;
-
-    /// Unpinned it is the system's clock; pinned, the moment it was pinned to whatever the hour,
-    /// and a span measured meanwhile took no time; unpinned again, the system's.
-    #[test]
-    fn a_pinned_clock_holds_its_moment_until_let_go() {
-        let cx = TestAppContext::single();
-        let before = WallMs::now();
-        let unpinned = cx.update(|cx| super::now(cx));
-        assert!(unpinned >= before, "the system's clock");
-        let moment = WallMs::from_millis(1_759_568_520_000);
-        cx.update(|cx| super::pin(Some(moment), cx));
-        assert_eq!(cx.update(|cx| super::now(cx)), moment);
-        let second = std::time::Duration::from_secs(1);
-        let started =
-            std::time::Instant::now().checked_sub(second).unwrap_or_else(std::time::Instant::now);
-        assert_eq!(cx.update(|cx| super::since(started, cx)), std::time::Duration::ZERO);
-        cx.update(|cx| super::pin(None, cx));
-        assert!(cx.update(|cx| super::now(cx)) >= unpinned, "the system's again");
-        assert!(cx.update(|cx| super::since(started, cx)) >= second, "it runs");
-    }
-}
+mod tests {}

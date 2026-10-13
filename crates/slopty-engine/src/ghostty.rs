@@ -2675,6 +2675,23 @@ fn may_touch_osc_state(bytes: &[u8]) -> bool {
 }
 
 impl GhosttyEngine {
+    /// What ⌘K feeds through the output path to erase the history, ahead of the ⌃L that the
+    /// shell answers with home and an erase of the screen.
+    ///
+    /// libghostty scrolls a screen erased at a prompt into the history rather than wiping it
+    /// (its own ⌃L, ghostty #905), which would put the cleared screen back where the history
+    /// was. So at a prompt on the main screen the screen goes up first and the history after
+    /// it, and the shell's erase then finds the screen blank and wipes it in place. Anywhere
+    /// else only the history goes, and the screen stays the program's.
+    #[must_use]
+    pub fn clear_history(&self) -> &'static [u8] {
+        if !self.on_alt && self.term.is_cursor_at_prompt().unwrap_or(false) {
+            b"\x1b[2J\x1b[3J"
+        } else {
+            b"\x1b[3J"
+        }
+    }
+
     /// Feed PTY output.
     pub fn write(&mut self, bytes: &[u8]) {
         if std::mem::take(&mut self.fresh) && carried::holds(bytes) {
@@ -4913,11 +4930,12 @@ mod tests {
     }
 
     /// ⌘K: the history is erased, then zsh answers ⌃L with home + erase and redraws its
-    /// prompt with the marks PS1 carries. The erased rows keep their numbers but lose their
-    /// marks, so the redrawn prompt is the one start on the screen and the prompt after the
-    /// next command carries its status without a stale start in between.
+    /// prompt with the marks PS1 carries. An erase at a prompt scrolls the screen into the
+    /// history rather than wiping it (libghostty's own ⌃L, ghostty #905 and #14660), so the old
+    /// rows keep their marks up there, the redrawn prompt is the one start on the screen, and
+    /// the prompt after the next command carries its status without a stale start in between.
     #[test]
-    fn a_screen_erased_in_place_drops_the_marks_of_its_rows() {
+    fn a_screen_erased_at_a_prompt_scrolls_its_rows_into_the_history() {
         let mut e = engine(80, 12);
         let ps1 = b"\x1b]133;A\x07\r\n\x1b[1m/tmp\x1b[0m \r\n> \x1b]133;B\x07".as_slice();
         e.write(ps1);
@@ -4928,9 +4946,12 @@ mod tests {
         let f = e.full_frame(0).unwrap();
         let marks: Vec<SemanticMark> = f.updates.iter().map(|u| u.line.mark).collect();
         let prompt = |exit| SemanticMark::Prompt { exit, input: None };
-        assert_eq!(f.first_visible_line, LineIndex(0), "numbering survives an erase in place");
+        assert_eq!(f.first_visible_line, LineIndex(7), "the seven rows written went up");
         assert_eq!(marks[0], prompt(None));
-        assert_eq!(marks[4], SemanticMark::Output, "the old prompt's start went with its row");
+        assert_eq!(marks[4], SemanticMark::Output, "nothing below the redrawn prompt");
+        let (_, lines) = e.lines(LineIndex(0), 7).unwrap();
+        let old: Vec<SemanticMark> = lines.iter().map(|l| l.mark).collect();
+        assert_eq!((old[0], old[4]), (prompt(None), prompt(Some(0))), "kept in the history");
         e.write(b"sleep 6\r\n\x1b]133;C\x07\x1b]133;D;0\x07");
         e.write(ps1);
         let f = e.full_frame(0).unwrap();
@@ -4938,6 +4959,35 @@ mod tests {
         assert_eq!(marks[3], prompt(Some(0)));
         assert_eq!(marks[4], SemanticMark::PromptContinuation { input: None });
         assert_eq!(marks[5], SemanticMark::PromptContinuation { input: None });
+    }
+
+    /// ⌘K at a prompt leaves no history: what the engine feeds first, then the shell's answer
+    /// to ⌃L (home, erase, its prompt again), and nothing of the old screen is above the new
+    /// prompt. Under a command that runs, only the history goes and the screen stays.
+    #[test]
+    fn a_clear_at_a_prompt_leaves_no_history() {
+        let mut e = engine(80, 12);
+        let ps1 = b"\x1b]133;A\x07~\r\n> \x1b]133;B\x07".as_slice();
+        e.write(ps1);
+        e.write(b"seq 20\r\n\x1b]133;C\x07");
+        for n in 1..=20 {
+            e.write(format!("{n}\r\n").as_bytes());
+        }
+        e.write(b"\x1b]133;D;0\x07");
+        e.write(ps1);
+        let f = e.full_frame(0).unwrap();
+        assert!(f.first_visible_line > f.oldest_line, "history before");
+        let clear = e.clear_history();
+        e.write(clear);
+        e.write(b"\x1b[H\x1b[2J");
+        e.write(ps1);
+        let f = e.full_frame(0).unwrap();
+        assert_eq!(f.first_visible_line, f.oldest_line, "no history after");
+        assert_eq!(f.updates[0].line.text().trim_end(), "~");
+        assert_eq!(f.updates[1].line.text().trim_end(), ">");
+
+        e.write(b"sleep 9\r\n\x1b]133;C\x07running\r\n");
+        assert_eq!(e.clear_history(), b"\x1b[3J", "under a command the screen is its own");
     }
 
     /// zsh writes `\r\r\n` and then `133;C` as two writes (app e2e run 345). The linefeed

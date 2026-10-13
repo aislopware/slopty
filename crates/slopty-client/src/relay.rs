@@ -11,14 +11,7 @@ use std::time::Instant;
 
 use slopty_proto::tailnet::{DERP_NOTICE_AFTER, LinkPath};
 
-/// One link's path, and since when it has been on DERP.
-#[derive(Clone, PartialEq, Eq, Debug, Default)]
-pub struct RelayWatch {
-    path: Option<LinkPath>,
-    derp_since: Option<Instant>,
-}
-
-/// What to show for a link that stays on DERP.
+/// What a person is told about a link that has stayed on DERP.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct RelayNotice {
     /// "Relayed via fra — adds latency".
@@ -29,11 +22,20 @@ pub struct RelayNotice {
     pub since: Instant,
 }
 
+/// One link's path, since when it has been on DERP, and whether that stay was said.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct RelayWatch {
+    path: Option<LinkPath>,
+    derp_since: Option<Instant>,
+    said: bool,
+}
+
 impl RelayWatch {
     /// The worker said the link's path is `path`, heard `now`.
     pub fn observe(&mut self, path: LinkPath, now: Instant) {
         if !path.relayed() {
             self.derp_since = None;
+            self.said = false;
         } else if self.derp_since.is_none() {
             self.derp_since = Some(now);
         }
@@ -61,6 +63,17 @@ impl RelayWatch {
         }
         let note = self.path.as_ref()?.relay_note()?;
         Some(RelayNotice { note, fix: LinkPath::relay_fix(), since })
+    }
+
+    /// [`Self::notice`], once per stay on DERP: the first time it is asked once due, then
+    /// nothing until the link has left DERP and come back to it.
+    pub fn take_notice(&mut self, now: Instant) -> Option<RelayNotice> {
+        if self.said {
+            return None;
+        }
+        let notice = self.notice(now)?;
+        self.said = true;
+        Some(notice)
     }
 
     /// When [`Self::notice`] next changes on its own, for a UI that redraws on a timer: the
@@ -105,6 +118,23 @@ mod tests {
         assert!(watch.notice(at(41)).is_some());
         watch.reset();
         assert_eq!(watch.notice(at(60)), None);
+    }
+
+    /// A stay on DERP is said once, and again only after the link left it and came back.
+    #[test]
+    fn a_stay_on_derp_is_said_once() {
+        let t0 = Instant::now();
+        let at = |secs: u64| t0 + Duration::from_secs(secs);
+        let mut watch = RelayWatch::default();
+        watch.observe(derp(), at(0));
+        assert_eq!(watch.take_notice(at(9)), None, "not due yet");
+        assert!(watch.take_notice(at(10)).is_some());
+        assert_eq!(watch.take_notice(at(11)), None, "said already");
+        watch.observe(derp(), at(12));
+        assert_eq!(watch.take_notice(at(30)), None, "the same stay");
+        watch.observe(LinkPath::Direct, at(31));
+        watch.observe(derp(), at(32));
+        assert!(watch.take_notice(at(42)).is_some(), "a new stay");
     }
 
     /// A peer relay is no detour worth a word.

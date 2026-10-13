@@ -407,8 +407,6 @@ pub struct ScreenView {
     paste_hook: Option<PasteHook>,
     /// Pastes of files still on their way to the worker, and the input held behind them.
     paste_hold: (u32, Vec<ScreenInput>),
-    /// Modifiers armed by the phone key bar; applied to the next key, then cleared.
-    sticky: Modifiers,
     /// Keys by position, composed text, Caps Lock and the input source (`keyboard`).
     keyboard: keyboard::Keyboard,
     /// The modifier keys as last reported, so a change forwards the key that moved.
@@ -588,8 +586,7 @@ pub struct HudInput<'a> {
     pub seams: Option<(u64, u64)>,
     /// The rate the stream is asked for, frames a second: its display period.
     pub target_fps: u16,
-    /// The stream's frames a second, and the frames that missed the display beside them
-    /// ([`ScreenView::paint_rate`]).
+    /// The stream's frames a second, and the frames that missed the display beside them.
     pub paint: PaintRate,
     /// Received megabits per second over the last sample period.
     pub mbps: f64,
@@ -869,15 +866,6 @@ pub const fn verdict_label(verdict: RateVerdict) -> &'static str {
     }
 }
 
-/// A modifier the phone key bar can arm for the next key.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Sticky {
-    /// ⌃.
-    Control,
-    /// ⌘.
-    Command,
-}
-
 impl std::fmt::Debug for ScreenView {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ScreenView")
@@ -1099,7 +1087,6 @@ impl ScreenView {
             screen: None,
             paste_hook: None,
             paste_hold: (0, Vec::new()),
-            sticky: Modifiers::default(),
             keyboard: keyboard::Keyboard::new(cx),
             marked: None,
             field: None,
@@ -1346,14 +1333,6 @@ impl ScreenView {
         self.size
     }
 
-    /// The stream's frames a second: pictures painted on this client over the last second,
-    /// and apart from them the frames that missed the display. The one rate every readout says,
-    /// the overlay's and any other. A still window paints nothing, and says so.
-    #[must_use]
-    pub fn paint_rate(&self) -> PaintRate {
-        self.glass.rate()
-    }
-
     /// Receiver counters.
     #[must_use]
     pub fn stats(&self) -> ScreenStats {
@@ -1518,12 +1497,6 @@ impl ScreenView {
             self.field = field;
             cx.notify();
         }
-    }
-
-    /// Whether the worker's field that has the keyboard is a password field.
-    #[must_use]
-    pub fn in_password_field(&self) -> bool {
-        self.field.is_some_and(|f| f.secure)
     }
 
     /// Where the worker's caret is drawn, from the view's window origin, in points: the
@@ -2734,24 +2707,6 @@ impl ScreenView {
         self.paste_hook = Some(hook);
     }
 
-    /// Whether `which` is armed for the next key.
-    #[must_use]
-    pub const fn sticky(&self, which: Sticky) -> bool {
-        match which {
-            Sticky::Control => self.sticky.control,
-            Sticky::Command => self.sticky.platform,
-        }
-    }
-
-    /// Arm or disarm a modifier for the next key (the phone key bar's ⌃ and ⌘).
-    pub fn set_sticky(&mut self, which: Sticky, on: bool, cx: &mut Context<Self>) {
-        match which {
-            Sticky::Control => self.sticky.control = on,
-            Sticky::Command => self.sticky.platform = on,
-        }
-        cx.notify();
-    }
-
     /// Touch: a long press over the picture is a right click on the worker (context menus);
     /// a plain drag stays the workspace's. Returns whether the gesture was claimed.
     fn long_press(&mut self, ev: &LongPressEvent, cx: &mut Context<Self>) -> bool {
@@ -2801,11 +2756,11 @@ impl ScreenView {
 
     /// Type the next burst of what waits to be typed, once the outbox has sent the last;
     /// whether more waits.
-    fn type_burst(&mut self, cx: &mut Context<Self>) -> bool {
+    fn type_burst(&mut self, _cx: &mut Context<Self>) -> bool {
         if self.out.is_clear() {
             let take = self.typing.len().min(TYPE_BURST);
             let burst: String = self.typing.drain(..take).collect();
-            self.commit_text(&burst, cx);
+            self.commit_text(&burst);
         }
         !self.typing.is_empty()
     }
@@ -2939,6 +2894,18 @@ impl ScreenView {
                     .size_full(),
                 ),
         )
+    }
+
+    /// Whether the worker's field that has the keyboard is a password field.
+    #[must_use]
+    pub fn in_password_field(&self) -> bool {
+        self.field.is_some_and(|f| f.secure)
+    }
+
+    /// Whether "Unlock here" lifted the scrim.
+    #[must_use]
+    pub const fn unlocking(&self) -> bool {
+        self.unlocking
     }
 }
 
@@ -3550,12 +3517,6 @@ impl ScreenView {
         cx.notify();
     }
 
-    /// Whether "Unlock here" lifted the scrim.
-    #[must_use]
-    pub const fn unlocking(&self) -> bool {
-        self.unlocking
-    }
-
     /// The slim line over a locked Mac's picture once "Unlock here" is pressed: what to type,
     /// on a lifted pill at the top, the rest of the body the stream's.
     fn unlock_line(&self) -> gpui::AnyElement {
@@ -3831,10 +3792,10 @@ impl EntityInputHandler for ScreenView {
         _range: Option<std::ops::Range<usize>>,
         text: &str,
         _window: &mut Window,
-        cx: &mut Context<Self>,
+        _cx: &mut Context<Self>,
     ) {
         self.marked = None;
-        self.commit_text(text, cx);
+        self.commit_text(text);
         self.follow_taking();
     }
 
@@ -4432,53 +4393,6 @@ mod tests {
         view.update(cx, |v, _| assert_eq!(v.wanted_width, None));
     }
 
-    /// The phone's key bar presses and releases a key in one go; an armed modifier rides on
-    /// it once, and a chord carries no text so the worker does not type it as well.
-    #[gpui::test]
-    fn a_pressed_key_is_a_press_and_a_release_with_the_armed_modifier(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let (view, mut rx) = view(cx);
-        view.update(cx, |v, cx| {
-            v.set_sticky(Sticky::Command, true, cx);
-            assert!(v.sticky(Sticky::Command));
-            v.press(chord("a"), cx);
-            assert!(!v.sticky(Sticky::Command), "armed for one key only");
-        });
-        let keys: Vec<(KeyAction, Mods)> = sent(&mut rx)
-            .into_iter()
-            .filter_map(|req| match req {
-                ScreenRequest::Input { input: ScreenInput::Key { action, mods, .. }, .. } => {
-                    Some((action, mods))
-                }
-                _ => None,
-            })
-            .collect();
-        assert_eq!(keys, [(KeyAction::Press, Mods::SUPER), (KeyAction::Release, Mods::SUPER)]);
-        // A plain key is its place; a character with none is typed as text.
-        let typed = Keystroke { key_char: Some("b".to_owned()), ..chord("b") };
-        view.update(cx, |v, cx| v.press(typed, cx));
-        let plain = sent(&mut rx);
-        assert!(
-            matches!(plain.as_slice(), [ScreenRequest::Input { input: ScreenInput::Key { code: KeyCode::B, mods, .. }, .. }, _] if mods.is_empty()),
-            "a plain key goes by its place: {plain:?}"
-        );
-        let ch = Keystroke { key_char: Some("ч".to_owned()), ..chord("ч") };
-        view.update(cx, |v, cx| v.press(ch, cx));
-        assert_eq!(
-            sent(&mut rx),
-            [ScreenRequest::Input {
-                stream: StreamId(4),
-                input: ScreenInput::Text { text: "ч".to_owned() }
-            }]
-        );
-        view.update(cx, |v, _| {
-            assert!(!v.muted());
-            v.toggle_mute();
-            assert!(v.muted());
-        });
-    }
-
     /// ⌘V sends this client's clipboard offer ahead of the key when the hook has one, and only
     /// the key when the worker already heard it.
     #[gpui::test]
@@ -4729,47 +4643,6 @@ mod tests {
         assert!(!console_notice(SourceState::Away).1.to_lowercase().contains("unlock"));
     }
 
-    /// "Unlock here" on a locked Mac's notice lifts the scrim to a line saying what to type and
-    /// gives the stream the keyboard, so the keys reach the lock screen; the login window offers
-    /// nothing of the kind, and the Mac back on its session takes the line away.
-    #[gpui::test]
-    fn unlock_here_hands_the_keys_to_the_lock_screen(cx: &mut gpui::TestAppContext) {
-        let (view, mut rx, cx) = windowed(cx);
-        view.update(cx, |v, cx| v.set_source_state(SourceState::Away, cx));
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("screen-unlock-here").is_none(), "not at the login window");
-        view.update(cx, |v, cx| v.set_source_state(SourceState::Locked, cx));
-        cx.run_until_parked();
-        let unlock = cx.debug_bounds("screen-unlock-here").expect("offered on a locked Mac");
-        cx.update(Window::blur);
-        cx.simulate_click(unlock.center(), Modifiers::default());
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("screen-console").is_none(), "the scrim lifted");
-        assert!(cx.debug_bounds("screen-unlocking").is_some(), "the line says what to type");
-        assert!(view.read_with(cx, |v, _| v.unlocking()));
-        let focused = cx.update(|window, cx| view.read(cx).focus.is_focused(window));
-        assert!(focused, "the stream has the keyboard");
-        let _before = sent(&mut rx);
-        cx.simulate_keystrokes("a");
-        let keys = sent(&mut rx)
-            .into_iter()
-            .filter(|r| {
-                matches!(
-                    r,
-                    ScreenRequest::Input {
-                        input: ScreenInput::Key { .. } | ScreenInput::Text { .. },
-                        ..
-                    }
-                )
-            })
-            .count();
-        assert!(keys > 0, "a typed key goes to the worker");
-        view.update(cx, |v, cx| v.set_source_state(SourceState::Live, cx));
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("screen-unlocking").is_none(), "unlocked: the line goes");
-        assert!(!view.read_with(cx, |v, _| v.unlocking()));
-    }
-
     /// The `Focused` requests the worker was sent for the test views' stream.
     fn told_focus(rx: &mut mpsc::Receiver<ClientMsg>) -> Vec<bool> {
         sent(rx)
@@ -4967,66 +4840,6 @@ mod tests {
                 _ => None,
             })
             .collect()
-    }
-
-    /// A screen an agent drives is watched: no move, press, key or scroll leaves this device,
-    /// nor does a press raise the window, and its pill says who drives. Taking control stops the
-    /// agent's turn once and the person's input goes from then; handing back watches again.
-    #[gpui::test]
-    fn an_agents_screen_is_watched_until_the_person_takes_control(cx: &mut gpui::TestAppContext) {
-        let (view, mut rx, cx) = windowed_on(cx, CaptureTarget::Window(slopty_core::WindowId(9)));
-        drop(sent(&mut rx));
-        let stops = Rc::new(std::cell::Cell::new(0_u32));
-        let counted = Rc::clone(&stops);
-        let driver = Driver {
-            agent: slopty_proto::thread::AgentId(
-                slopty_proto::thread::AgentId::CLAUDE_CODE.to_owned(),
-            ),
-            name: "Claude Code".to_owned(),
-            working: true,
-            take: Rc::new(move |_cx: &mut App| counted.set(counted.get().saturating_add(1))),
-        };
-        view.update(cx, |v, cx| v.set_driver(Some(driver.clone()), cx));
-        cx.run_until_parked();
-        let bounds = view.read_with(cx, |v, _| v.bounds);
-        let middle = bounds.center();
-        let poke = |cx: &mut gpui::VisualTestContext| {
-            cx.simulate_mouse_move(middle, None, Modifiers::default());
-            cx.simulate_mouse_down(middle, MouseButton::Left, Modifiers::default());
-            cx.simulate_mouse_up(middle, MouseButton::Left, Modifiers::default());
-            cx.simulate_keystrokes("a");
-            cx.run_until_parked();
-        };
-        poke(cx);
-        let watched = sent(&mut rx);
-        assert!(
-            !watched
-                .iter()
-                .any(|r| matches!(r, ScreenRequest::Input { .. } | ScreenRequest::Focus(_))),
-            "{watched:?}"
-        );
-        assert!(cx.debug_bounds("screen-driver").is_some(), "the pill says who drives");
-
-        let act = cx.debug_bounds("screen-driver-act").expect("the pill's button").center();
-        cx.simulate_click(act, Modifiers::default());
-        cx.run_until_parked();
-        assert_eq!(stops.get(), 1, "the agent's turn was stopped once");
-        assert!(view.read_with(cx, |v, _| !v.watching()));
-        drop(sent(&mut rx));
-        poke(cx);
-        let taken = inputs(&mut rx);
-        assert!(
-            taken.iter().any(|i| matches!(i, ScreenInput::Button { down: true, .. })),
-            "{taken:?}"
-        );
-
-        view.update(cx, |v, cx| v.set_driver(Some(driver), cx));
-        assert!(view.read_with(cx, |v, _| !v.watching()), "the same driver keeps who has control");
-        let back = cx.debug_bounds("screen-driver-act").expect("the pill's button").center();
-        cx.simulate_click(back, Modifiers::default());
-        cx.run_until_parked();
-        assert!(view.read_with(cx, |v, _| v.watching()), "handed back");
-        assert_eq!(stops.get(), 1, "handing back stops nothing");
     }
 
     /// The pointer reaches the worker in the stream's pixels: a point on the painted picture
@@ -5341,41 +5154,6 @@ mod tests {
         assert_eq!(caret(&view, cx), Some(half_quarter), "the sample sent before the ask");
         view.update(cx, |v, _| v.cursor = CursorState { x: 200, y: 75, visible: true });
         assert_eq!(caret(&view, cx), Some(half_quarter), "the first at the 400×300 asked for");
-    }
-
-    /// While this Mac composes for a remote field, the candidate window hangs under the
-    /// worker's caret once the worker says where it is, scaled as the pointer is; with no field
-    /// (or one that gives no caret) the pointer stands in. A password field is told apart.
-    #[gpui::test]
-    fn the_input_method_hangs_its_candidates_under_the_workers_caret(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        use slopty_proto::screen::Caret;
-        let (view, _rx, cx) = windowed(cx);
-        let caret = |view: &gpui::Entity<ScreenView>, cx: &mut gpui::VisualTestContext| {
-            cx.update(|window, cx| {
-                view.update(cx, |v, cx| v.bounds_for_range(0..0, Bounds::default(), window, cx))
-            })
-        };
-        let bounds = view.read_with(cx, |v, _| v.bounds);
-        view.update(cx, |v, _| v.cursor = CursorState { x: 400, y: 150, visible: true });
-        let pointer = caret(&view, cx).map(|b| b.origin);
-        let field = |caret, secure| Some(TextField { caret, secure });
-        let at = Caret { x: 200.0, y: 300.0, width: 0.0, height: 30.0 };
-        view.update(cx, |v, cx| v.set_field(field(Some(at), false), cx));
-        let got = caret(&view, cx).expect("a caret");
-        let quarter_half = point(
-            bounds.origin.x + bounds.size.width * 0.25,
-            bounds.origin.y + bounds.size.height * 0.5,
-        );
-        assert_eq!(got.origin, quarter_half, "at the caret, a quarter across and half down");
-        assert_eq!(got.size.height, bounds.size.height * (30.0 / 600.0), "the line's height");
-        assert!(!view.read_with(cx, |v, _| v.in_password_field()));
-        view.update(cx, |v, cx| v.set_field(field(None, true), cx));
-        assert_eq!(caret(&view, cx).map(|b| b.origin), pointer, "no caret: the pointer");
-        assert!(view.read_with(cx, |v, _| v.in_password_field()));
-        view.update(cx, |v, cx| v.set_field(None, cx));
-        assert!(!view.read_with(cx, |v, _| v.in_password_field()));
     }
 
     /// The button presses among `got`: button, down, and where.
@@ -6711,6 +6489,233 @@ mod tests {
         assert_eq!(renders(&view, cx), drawn.saturating_add(1), "only the hiding drew");
     }
 
+    /// A remote window follows its pane: once the body rests at a new size the window is asked
+    /// for the same proportion in its own pixels, once, at the end; the first rest is the
+    /// window's own and resizes nothing, and a display never asks.
+    #[gpui::test]
+    fn a_remote_window_follows_its_pane(cx: &mut gpui::TestAppContext) {
+        let resizes = |rx: &mut mpsc::Receiver<ClientMsg>| {
+            std::iter::from_fn(|| rx.try_recv().ok())
+                .filter_map(|m| match m {
+                    ClientMsg::Screen(ScreenRequest::Resize { width, height, scale, .. }) => {
+                        Some((width, height, scale))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let (view, mut rx, cx) = windowed_on(cx, CaptureTarget::Window(slopty_core::WindowId(9)));
+        view.update(cx, |v, cx| v.show_picture(picture(800, 600), cx));
+        cx.run_until_parked();
+        cx.executor().advance_clock(fit::SETTLE);
+        cx.run_until_parked();
+        assert!(resizes(&mut rx).is_empty(), "opening a window never resizes it");
+
+        cx.simulate_resize(size(px(500.0), px(300.0)));
+        cx.run_until_parked();
+        cx.simulate_resize(size(px(600.0), px(300.0)));
+        cx.run_until_parked();
+        assert!(resizes(&mut rx).is_empty(), "nothing while the pane moves");
+        cx.executor().advance_clock(fit::SETTLE);
+        cx.run_until_parked();
+        assert_eq!(resizes(&mut rx), [(1200, 600, None)], "half again as wide, once");
+    }
+
+    /// A display never asks to be resized with its pane: it letterboxes.
+    #[gpui::test]
+    fn a_display_keeps_its_size_with_its_pane(cx: &mut gpui::TestAppContext) {
+        let resizes = |rx: &mut mpsc::Receiver<ClientMsg>| {
+            std::iter::from_fn(|| rx.try_recv().ok())
+                .filter(|m| matches!(m, ClientMsg::Screen(ScreenRequest::Resize { .. })))
+                .count()
+        };
+        let (display, mut rx, cx) = windowed(cx);
+        display.update(cx, |v, cx| v.show_picture(picture(800, 600), cx));
+        cx.executor().advance_clock(fit::SETTLE);
+        cx.run_until_parked();
+        cx.simulate_resize(size(px(600.0), px(300.0)));
+        cx.run_until_parked();
+        cx.executor().advance_clock(fit::SETTLE);
+        cx.run_until_parked();
+        assert_eq!(resizes(&mut rx), 0, "a display letterboxes");
+    }
+
+    /// The phone's key bar presses and releases a key in one go, and a chord carries no text so
+    /// the worker does not type it as well.
+    #[gpui::test]
+    fn a_pressed_key_is_a_press_and_a_release(cx: &mut gpui::TestAppContext) {
+        let (view, mut rx) = view(cx);
+        view.update(cx, |v, cx| v.press(chord("cmd-a"), cx));
+        let keys: Vec<(KeyAction, Mods)> = sent(&mut rx)
+            .into_iter()
+            .filter_map(|req| match req {
+                ScreenRequest::Input { input: ScreenInput::Key { action, mods, .. }, .. } => {
+                    Some((action, mods))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(keys, [(KeyAction::Press, Mods::SUPER), (KeyAction::Release, Mods::SUPER)]);
+        // A plain key is its place; a character with none is typed as text.
+        let typed = Keystroke { key_char: Some("b".to_owned()), ..chord("b") };
+        view.update(cx, |v, cx| v.press(typed, cx));
+        let plain = sent(&mut rx);
+        assert!(
+            matches!(plain.as_slice(), [ScreenRequest::Input { input: ScreenInput::Key { code: KeyCode::B, mods, .. }, .. }, _] if mods.is_empty()),
+            "a plain key goes by its place: {plain:?}"
+        );
+        let ch = Keystroke { key_char: Some("ч".to_owned()), ..chord("ч") };
+        view.update(cx, |v, cx| v.press(ch, cx));
+        assert_eq!(
+            sent(&mut rx),
+            [ScreenRequest::Input {
+                stream: StreamId(4),
+                input: ScreenInput::Text { text: "ч".to_owned() }
+            }]
+        );
+        view.update(cx, |v, _| {
+            assert!(!v.muted());
+            v.toggle_mute();
+            assert!(v.muted());
+        });
+    }
+
+    /// "Unlock here" on a locked Mac's notice lifts the scrim to a line saying what to type and
+    /// gives the stream the keyboard, so the keys reach the lock screen; the login window offers
+    /// nothing of the kind, and the Mac back on its session takes the line away.
+    #[gpui::test]
+    fn unlock_here_hands_the_keys_to_the_lock_screen(cx: &mut gpui::TestAppContext) {
+        let (view, mut rx, cx) = windowed(cx);
+        view.update(cx, |v, cx| v.set_source_state(SourceState::Away, cx));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("screen-unlock-here").is_none(), "not at the login window");
+        view.update(cx, |v, cx| v.set_source_state(SourceState::Locked, cx));
+        cx.run_until_parked();
+        let unlock = cx.debug_bounds("screen-unlock-here").expect("offered on a locked Mac");
+        cx.update(Window::blur);
+        cx.simulate_click(unlock.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("screen-console").is_none(), "the scrim lifted");
+        assert!(cx.debug_bounds("screen-unlocking").is_some(), "the line says what to type");
+        assert!(view.read_with(cx, |v, _| v.unlocking()));
+        let focused = cx.update(|window, cx| view.read(cx).focus.is_focused(window));
+        assert!(focused, "the stream has the keyboard");
+        let _before = sent(&mut rx);
+        cx.simulate_keystrokes("a");
+        let keys = sent(&mut rx)
+            .into_iter()
+            .filter(|r| {
+                matches!(
+                    r,
+                    ScreenRequest::Input {
+                        input: ScreenInput::Key { .. } | ScreenInput::Text { .. },
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert!(keys > 0, "a typed key goes to the worker");
+        view.update(cx, |v, cx| v.set_source_state(SourceState::Live, cx));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("screen-unlocking").is_none(), "unlocked: the line goes");
+        assert!(!view.read_with(cx, |v, _| v.unlocking()));
+    }
+
+    /// A screen an agent drives is watched: no move, press, key or scroll leaves this device,
+    /// nor does a press raise the window, and its pill says who drives. Taking control stops the
+    /// agent's turn once and the person's input goes from then; handing back watches again.
+    #[gpui::test]
+    fn an_agents_screen_is_watched_until_the_person_takes_control(cx: &mut gpui::TestAppContext) {
+        let (view, mut rx, cx) = windowed_on(cx, CaptureTarget::Window(slopty_core::WindowId(9)));
+        drop(sent(&mut rx));
+        let stops = Rc::new(std::cell::Cell::new(0_u32));
+        let counted = Rc::clone(&stops);
+        let driver = Driver {
+            agent: slopty_proto::thread::AgentId(
+                slopty_proto::thread::AgentId::CLAUDE_CODE.to_owned(),
+            ),
+            name: "Claude Code".to_owned(),
+            working: true,
+            take: Rc::new(move |_cx: &mut App| counted.set(counted.get().saturating_add(1))),
+        };
+        view.update(cx, |v, cx| v.set_driver(Some(driver.clone()), cx));
+        cx.run_until_parked();
+        let bounds = view.read_with(cx, |v, _| v.bounds);
+        let middle = bounds.center();
+        let poke = |cx: &mut gpui::VisualTestContext| {
+            cx.simulate_mouse_move(middle, None, Modifiers::default());
+            cx.simulate_mouse_down(middle, MouseButton::Left, Modifiers::default());
+            cx.simulate_mouse_up(middle, MouseButton::Left, Modifiers::default());
+            cx.simulate_keystrokes("a");
+            cx.run_until_parked();
+        };
+        poke(cx);
+        let watched = sent(&mut rx);
+        assert!(
+            !watched
+                .iter()
+                .any(|r| matches!(r, ScreenRequest::Input { .. } | ScreenRequest::Focus(_))),
+            "{watched:?}"
+        );
+        assert!(cx.debug_bounds("screen-driver").is_some(), "the pill says who drives");
+
+        let act = cx.debug_bounds("screen-driver-act").expect("the pill's button").center();
+        cx.simulate_click(act, Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(stops.get(), 1, "the agent's turn was stopped once");
+        assert!(view.read_with(cx, |v, _| !v.watching()));
+        drop(sent(&mut rx));
+        poke(cx);
+        let taken = inputs(&mut rx);
+        assert!(
+            taken.iter().any(|i| matches!(i, ScreenInput::Button { down: true, .. })),
+            "{taken:?}"
+        );
+
+        view.update(cx, |v, cx| v.set_driver(Some(driver), cx));
+        assert!(view.read_with(cx, |v, _| !v.watching()), "the same driver keeps who has control");
+        let back = cx.debug_bounds("screen-driver-act").expect("the pill's button").center();
+        cx.simulate_click(back, Modifiers::default());
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |v, _| v.watching()), "handed back");
+        assert_eq!(stops.get(), 1, "handing back stops nothing");
+    }
+
+    /// While this Mac composes for a remote field, the candidate window hangs under the
+    /// worker's caret once the worker says where it is, scaled as the pointer is; with no field
+    /// (or one that gives no caret) the pointer stands in. A password field is told apart.
+    #[gpui::test]
+    fn the_input_method_hangs_its_candidates_under_the_workers_caret(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use slopty_proto::screen::Caret;
+        let (view, _rx, cx) = windowed(cx);
+        let caret = |view: &gpui::Entity<ScreenView>, cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| {
+                view.update(cx, |v, cx| v.bounds_for_range(0..0, Bounds::default(), window, cx))
+            })
+        };
+        let bounds = view.read_with(cx, |v, _| v.bounds);
+        view.update(cx, |v, _| v.cursor = CursorState { x: 400, y: 150, visible: true });
+        let pointer = caret(&view, cx).map(|b| b.origin);
+        let field = |caret, secure| Some(TextField { caret, secure });
+        let at = Caret { x: 200.0, y: 300.0, width: 0.0, height: 30.0 };
+        view.update(cx, |v, cx| v.set_field(field(Some(at), false), cx));
+        let got = caret(&view, cx).expect("a caret");
+        let quarter_half = point(
+            bounds.origin.x + bounds.size.width * 0.25,
+            bounds.origin.y + bounds.size.height * 0.5,
+        );
+        assert_eq!(got.origin, quarter_half, "at the caret, a quarter across and half down");
+        assert_eq!(got.size.height, bounds.size.height * (30.0 / 600.0), "the line's height");
+        assert!(!view.read_with(cx, |v, _| v.in_password_field()));
+        view.update(cx, |v, cx| v.set_field(field(None, true), cx));
+        assert_eq!(caret(&view, cx).map(|b| b.origin), pointer, "no caret: the pointer");
+        assert!(view.read_with(cx, |v, _| v.in_password_field()));
+        view.update(cx, |v, cx| v.set_field(None, cx));
+        assert!(!view.read_with(cx, |v, _| v.in_password_field()));
+    }
+
     /// The "…" in the picture's corner opens the controls: the stream's own rows always, the
     /// workspace's only where it offers them, each ticked as it stands. A view row acts in
     /// the view (the stats come up); a workspace row asks the workspace, and the menu closes
@@ -6782,56 +6787,5 @@ mod tests {
         assert!(!button.intersects(&stats), "the stats hang under the button: {stats:?}");
         click(cx, "screen-controls");
         assert!(view.read_with(cx, |v, _| v.controls_open()), "still within reach");
-    }
-
-    /// A remote window follows its pane: once the body rests at a new size the window is asked
-    /// for the same proportion in its own pixels, once, at the end; the first rest is the
-    /// window's own and resizes nothing, and a display never asks.
-    #[gpui::test]
-    fn a_remote_window_follows_its_pane(cx: &mut gpui::TestAppContext) {
-        let resizes = |rx: &mut mpsc::Receiver<ClientMsg>| {
-            std::iter::from_fn(|| rx.try_recv().ok())
-                .filter_map(|m| match m {
-                    ClientMsg::Screen(ScreenRequest::Resize { width, height, scale, .. }) => {
-                        Some((width, height, scale))
-                    }
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-        };
-        let (view, mut rx, cx) = windowed_on(cx, CaptureTarget::Window(slopty_core::WindowId(9)));
-        view.update(cx, |v, cx| v.show_picture(picture(800, 600), cx));
-        cx.run_until_parked();
-        cx.executor().advance_clock(fit::SETTLE);
-        cx.run_until_parked();
-        assert!(resizes(&mut rx).is_empty(), "opening a window never resizes it");
-
-        cx.simulate_resize(size(px(500.0), px(300.0)));
-        cx.run_until_parked();
-        cx.simulate_resize(size(px(600.0), px(300.0)));
-        cx.run_until_parked();
-        assert!(resizes(&mut rx).is_empty(), "nothing while the pane moves");
-        cx.executor().advance_clock(fit::SETTLE);
-        cx.run_until_parked();
-        assert_eq!(resizes(&mut rx), [(1200, 600, None)], "half again as wide, once");
-    }
-
-    /// A display never asks to be resized with its pane: it letterboxes.
-    #[gpui::test]
-    fn a_display_keeps_its_size_with_its_pane(cx: &mut gpui::TestAppContext) {
-        let resizes = |rx: &mut mpsc::Receiver<ClientMsg>| {
-            std::iter::from_fn(|| rx.try_recv().ok())
-                .filter(|m| matches!(m, ClientMsg::Screen(ScreenRequest::Resize { .. })))
-                .count()
-        };
-        let (display, mut rx, cx) = windowed(cx);
-        display.update(cx, |v, cx| v.show_picture(picture(800, 600), cx));
-        cx.executor().advance_clock(fit::SETTLE);
-        cx.run_until_parked();
-        cx.simulate_resize(size(px(600.0), px(300.0)));
-        cx.run_until_parked();
-        cx.executor().advance_clock(fit::SETTLE);
-        cx.run_until_parked();
-        assert_eq!(resizes(&mut rx), 0, "a display letterboxes");
     }
 }

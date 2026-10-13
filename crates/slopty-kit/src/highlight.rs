@@ -1,38 +1,26 @@
-//! Syntax colouring for code the workspace shows: a file tile's lines and a fenced block in an
-//! answer.
+//! Syntax colouring for a fenced code block in an answer.
 //!
 //! [`syntect`] parses with Sublime Text grammars (its bundled set, pure Rust through
 //! `fancy-regex`) and this module reduces its scopes to a handful of [`Token`]s, so the
 //! colours come from the app's own theme at draw time rather than from a `TextMate` theme:
 //! a theme swap or a settings reload recolours without parsing again, and every surface
 //! that shows code agrees with the terminal's palette. Parsing is the slow part (tens of
-//! milliseconds for a full file tile, see `docs/MEASUREMENTS.md`), so the file tile does it off
-//! the UI thread and draws plain text until the spans arrive.
+//! milliseconds for a whole file, see `docs/MEASUREMENTS.md`).
 
 use std::ops::Range;
 use std::str::FromStr as _;
 use std::sync::LazyLock;
 
-use gpui::{Font, FontStyle, FontWeight, HighlightStyle, Hsla, TextRun};
+use gpui::{FontStyle, FontWeight, HighlightStyle, Hsla};
 use gpui_kit::base::text::CodeBlock;
 use slopty_theme::Theme;
 use syntect::highlighting::{
     Color, FontStyle as SyntectStyle, HighlightIterator, HighlightState, Highlighter,
     ScopeSelectors, StyleModifier, Theme as ScopeTheme, ThemeItem,
 };
-use syntect::parsing::{ParseState, Scope, ScopeStack, SyntaxReference, SyntaxSet};
+use syntect::parsing::{ParseState, ScopeStack, SyntaxReference, SyntaxSet};
 
 use crate::colors::hsla;
-
-/// Text a file tile colours at most; a larger file is plain text.
-///
-/// The colours come from a parse of the whole text off the UI thread once typing pauses, about
-/// 80–160 µs a line (MEASUREMENTS, 2026-09-28): 3 s for 20 000 lines and 30 s for 200 000.
-/// A parse that has started runs to its end, so past this the pauses of ordinary typing would
-/// keep several cores parsing.
-pub const COLOURED_BYTES: usize = 2 << 20;
-
-pub mod editor;
 
 /// Lines longer than this are left plain: a minified bundle or a data line would cost
 /// seconds and read as noise anyway.
@@ -167,7 +155,7 @@ impl Syntax {
     }
 
     /// `syntax` unless it is the bundle's plain text (`.txt`), which colours nothing and would
-    /// only add a name to the file tile's summary.
+    /// only add a name to the block.
     fn coloured(syntax: &'static SyntaxReference) -> Option<Self> {
         (!std::ptr::eq(syntax, syntaxes().find_syntax_plain_text())).then_some(Self(syntax))
     }
@@ -191,72 +179,10 @@ impl Syntax {
     pub fn name(self) -> &'static str {
         &self.0.name
     }
-
-    /// How this language writes a comment, asked of the grammar itself: the first common
-    /// token that the grammar parses as opening a comment. A line comment wins over a block
-    /// pair, as editors toggle lines; none for a grammar with neither (JSON).
-    ///
-    /// The bundle's dump carries no `.tmPreferences` (syntect leaves the metadata out of its
-    /// packs), so the grammar's own scopes are the only word on it there is, and they cover
-    /// every grammar in the bundle with no table to keep. A probe parses one short line from
-    /// the start state, microseconds once the grammar's patterns are compiled.
-    #[must_use]
-    pub fn comment(self) -> Option<Comment> {
-        let line = LINE_COMMENTS.into_iter().find(|token| {
-            let probe = format!("{token} x\n");
-            self.comments_at(&probe, token.len().saturating_add(1))
-        });
-        line.map(Comment::Line).or_else(|| {
-            BLOCK_COMMENTS
-                .into_iter()
-                .find(|(open, close)| {
-                    let probe = format!("{open} x {close}\n");
-                    self.comments_at(&probe, open.len().saturating_add(1))
-                })
-                .map(|(open, close)| Comment::Block(open, close))
-        })
-    }
-
-    /// Whether byte `at` of `line`, parsed from the grammar's start, is inside a comment.
-    fn comments_at(self, line: &str, at: usize) -> bool {
-        let Ok(comment) = Scope::new("comment") else { return false };
-        let mut state = ParseState::new(self.0);
-        let Ok(ops) = state.parse_line(line, syntaxes()) else { return false };
-        let mut stack = ScopeStack::new();
-        for (offset, op) in &ops {
-            if *offset > at {
-                break;
-            }
-            if stack.apply(op).is_err() {
-                return false;
-            }
-        }
-        stack.as_slice().iter().any(|scope| comment.is_prefix_of(*scope))
-    }
 }
 
-/// How a language writes a comment ([`Syntax::comment`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Comment {
-    /// From the token to the end of the line (`//`, `#`, `--`).
-    Line(&'static str),
-    /// Between an opening and a closing token (`/*` and `*/`, `<!--` and `-->`).
-    Block(&'static str, &'static str),
-}
-
-/// Line-comment tokens in the order they are tried: C's family first, so a grammar with both
-/// `//` and `#` (PHP) gets the first; SQL's and Haskell's before the scripts' `#`, which the
-/// MySQL dialect also takes; then Lisp and INI's, TeX and Erlang's, Basic's, Fortran's and
-/// Vim's.
-const LINE_COMMENTS: [&str; 8] = ["//", "--", "#", ";", "%", "'", "!", "\""];
-
-/// Block-comment pairs, for a grammar with no line comment: C's (CSS), markup's, Haskell's
-/// and the ML family's.
-const BLOCK_COMMENTS: [(&str, &str); 4] =
-    [("/*", "*/"), ("<!--", "-->"), ("{-", "-}"), ("(*", "*)")];
-
-/// The grammars bat ships, loaded once on first use (a few tens of milliseconds, paid on a
-/// background thread by the first file tile): syntect's own set has no TOML, TypeScript,
+/// The grammars bat ships, loaded once on first use (a few tens of milliseconds, paid by the
+/// first block coloured): syntect's own set has no TOML, TypeScript,
 /// Dockerfile, Zig or Nix, all of which a remote project is made of.
 pub(crate) fn syntaxes() -> &'static SyntaxSet {
     static SET: LazyLock<SyntaxSet> = LazyLock::new(two_face::syntax::extra_newlines);
@@ -422,57 +348,6 @@ impl LineParser {
     }
 }
 
-/// GPUI runs for one line's spans: the theme's colour per token, `font` in the italic or
-/// bold face where the spans ask. A line with no spans (not parsed yet) is one plain run.
-#[must_use]
-pub fn runs(line_len: usize, spans: Option<&[Span]>, font: &Font, theme: &Theme) -> Vec<TextRun> {
-    let plain = |len: usize| TextRun {
-        len,
-        font: font.clone(),
-        color: Token::Plain.color(theme),
-        background_color: None,
-        underline: None,
-        strikethrough: None,
-    };
-    let Some(spans) = spans else { return vec![plain(line_len)] };
-    let mut out: Vec<TextRun> = spans
-        .iter()
-        .map(|span| {
-            let mut run_font = font.clone();
-            if span.italic {
-                run_font.style = FontStyle::Italic;
-            }
-            if span.bold {
-                run_font.weight = FontWeight::BOLD;
-            }
-            TextRun {
-                len: span.len,
-                font: run_font,
-                color: span.token.color(theme),
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            }
-        })
-        .collect();
-    // The runs must cover the text exactly: pad or trim to the line's length.
-    let covered: usize = out.iter().map(|r| r.len).sum();
-    if covered < line_len {
-        out.push(plain(line_len.saturating_sub(covered)));
-    } else if covered > line_len {
-        let mut left = line_len;
-        out.retain_mut(|r| {
-            if left == 0 {
-                return false;
-            }
-            r.len = r.len.min(left);
-            left = left.saturating_sub(r.len);
-            true
-        });
-    }
-    out
-}
-
 /// The coloured byte ranges of a fenced block's `code` under the grammar `lang` names.
 ///
 /// For gpui-kit's Markdown view: plain runs are left out (the block's own colour shows), so
@@ -506,7 +381,7 @@ pub fn code_ranges(code: &str, lang: &str, theme: &Theme) -> Vec<(Range<usize>, 
 }
 
 /// The code-block highlighter for gpui-kit's Markdown view, on `theme`'s colours: installed
-/// by [`crate::kit::sync`], so an answer's fenced code reads like a file tile.
+/// by [`crate::kit::sync`], so an answer's fenced code wears the terminal's palette.
 pub fn code_block(
     theme: Theme,
 ) -> impl Fn(&CodeBlock) -> Vec<(Range<usize>, HighlightStyle)> + Send + Sync + 'static {
@@ -588,37 +463,6 @@ mod tests {
             ("/w/flake.nix", "Nix"),
         ] {
             assert_eq!(Syntax::for_path(path, "").map(Syntax::name), Some(name), "{path}");
-        }
-        Ok(())
-    }
-
-    /// Each grammar says how it comments, with no table: C's family `//`, the scripts `#`,
-    /// SQL and Lua `--`, Lisp `;`, and a block pair where there is no line comment. JSON takes `//`
-    /// as Sublime does (JSONC).
-    #[test]
-    fn a_grammar_says_how_it_writes_a_comment() -> Result<(), String> {
-        for (tag, comment) in [
-            ("rs", Some(Comment::Line("//"))),
-            ("ts", Some(Comment::Line("//"))),
-            ("go", Some(Comment::Line("//"))),
-            ("c", Some(Comment::Line("//"))),
-            ("py", Some(Comment::Line("#"))),
-            ("sh", Some(Comment::Line("#"))),
-            ("toml", Some(Comment::Line("#"))),
-            ("yaml", Some(Comment::Line("#"))),
-            ("Dockerfile", Some(Comment::Line("#"))),
-            ("sql", Some(Comment::Line("--"))),
-            ("lua", Some(Comment::Line("--"))),
-            ("hs", Some(Comment::Line("--"))),
-            ("clj", Some(Comment::Line(";"))),
-            ("tex", Some(Comment::Line("%"))),
-            ("css", Some(Comment::Block("/*", "*/"))),
-            ("html", Some(Comment::Block("<!--", "-->"))),
-            ("md", Some(Comment::Block("<!--", "-->"))),
-            ("json", Some(Comment::Line("//"))),
-            ("diff", None),
-        ] {
-            assert_eq!(grammar(tag)?.comment(), comment, "{tag}");
         }
         Ok(())
     }
@@ -717,24 +561,6 @@ mod tests {
             first.iter().map(Vec::len).sum::<usize>()
         );
         Ok(())
-    }
-
-    #[test]
-    fn runs_cover_the_line_exactly_with_the_theme_colours() {
-        let theme = Theme::default();
-        let font = gpui::font(crate::fonts::MONO_FAMILY);
-        let spans = [
-            Span { len: 2, token: Token::Keyword, italic: false, bold: false },
-            Span { len: 3, token: Token::Comment, italic: true, bold: false },
-        ];
-        let padded = runs(7, Some(&spans), &font, &theme);
-        assert_eq!(padded.iter().map(|r| r.len).sum::<usize>(), 7, "padded to the line");
-        assert_eq!(padded.first().map(|r| r.color), Some(Token::Keyword.color(&theme)));
-        assert_eq!(padded.get(1).map(|r| r.font.style), Some(FontStyle::Italic));
-        assert_eq!(padded.get(2).map(|r| r.color), Some(Token::Plain.color(&theme)));
-        let trimmed = runs(3, Some(&spans), &font, &theme);
-        assert_eq!(trimmed.iter().map(|r| r.len).sum::<usize>(), 3, "trimmed to the line");
-        assert_eq!(runs(4, None, &font, &theme).len(), 1, "unparsed: one plain run");
     }
 
     /// A comment is the terminal's dim slot in both modes, quieter than the code beside it

@@ -1,8 +1,8 @@
 //! What a client asks of a worker's threads and what it is sent.
 //!
 //! - **The thread table.** One small replicated table per worker, a [`ThreadRow`] per thread, with
-//!   a cursor of its own ([`ThreadRequest::Table`], [`TableFrame`]), so every list (the navigator,
-//!   the inbox, the board) is right the moment a link comes back without following anything.
+//!   a cursor of its own ([`ThreadRequest::Table`], [`TableFrame`]), so every list of threads is
+//!   right the moment a link comes back without following anything.
 //! - **Following a thread.** [`ThreadRequest::Follow`] with the cursor the client holds is answered
 //!   on a stream of the thread's own by the actions after it, when the log still holds them in the
 //!   same epoch, else by a [`ThreadFrame::Snapshot`] of the last turns, then live
@@ -105,131 +105,6 @@ pub enum ThreadRequest {
         /// The most sessions to list.
         limit: u32,
     },
-    /// What was said in the threads this worker holds: every word of `query` in the person's
-    /// messages, the agent's answers and reasoning, its calls' titles and its notices, as the
-    /// worker's log of each thread keeps them (a text clipped there is searched as far as it
-    /// is kept). Answered with [`ThreadHits`] on the control stream.
-    Search {
-        /// The words; nothing is found for none.
-        query: String,
-        /// The most threads to answer with, up to [`SEARCH_THREADS`].
-        limit: u32,
-    },
-    /// Which threads wrote the lines of a file as it is on the worker now; answered with
-    /// [`Authors`] on the control stream.
-    Authors {
-        /// The thread whose repository a relative `path` is in; `None` for an absolute one.
-        thread: Option<ThreadId>,
-        /// The file: absolute, or relative to `thread`'s repository.
-        path: String,
-    },
-}
-
-/// What wrote the lines of a file, as a [`ThreadRequest::Authors`] asked.
-///
-/// A line is a thread's when the worker's snapshots of one of its turns show that turn bring it
-/// in, or, past what the snapshots keep, when the commit that brought it carries the thread in a
-/// `Slopty-Thread` trailer. A client keeps the answer for the file as it was read
-/// ([`Authors::modified_ms`], [`Authors::blob`]) and asks again only once it changes.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct Authors {
-    /// The thread, as asked.
-    pub thread: Option<ThreadId>,
-    /// The file, as asked.
-    pub path: String,
-    /// When the file read was last changed.
-    pub modified_ms: Option<WallMs>,
-    /// The id git gives the file read, as a review's [`FileDiff`] names its sides.
-    pub blob: Option<String>,
-    /// Runs of lines and who wrote them, in order; a line no thread is known to have written
-    /// is in none.
-    pub runs: Vec<AuthorRun>,
-    /// Why nothing could be said of the file, in words: not in git, unreadable.
-    pub absent: Option<String>,
-}
-
-/// Lines of a file that one thread wrote ([`Authors`]).
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct AuthorRun {
-    /// The first line, from 1.
-    pub start: u32,
-    /// How many lines.
-    pub lines: u32,
-    /// The thread that wrote them. It may be another worker's, known from a commit.
-    pub thread: ThreadId,
-    /// Its turn that brought them in, while the worker keeps that turn's snapshots.
-    pub turn: Option<TurnId>,
-    /// The commit that brought them in, where only its trailer names the thread.
-    pub commit: Option<String>,
-    /// When they were written: the turn's end, or the commit's.
-    pub at_ms: WallMs,
-}
-
-/// The most threads a [`ThreadRequest::Search`] answers with.
-pub const SEARCH_THREADS: u32 = 50;
-
-/// The most of a thread's items with a match a [`ThreadHit`] carries.
-pub const HITS_PER_THREAD: usize = 3;
-
-/// How much of an item an [`ItemHit`] carries, in bytes: the part round its first match.
-pub const ITEM_HIT_BYTES: usize = 240;
-
-/// What a [`ThreadRequest::Search`] found.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct ThreadHits {
-    /// The words asked for, as they were asked.
-    pub query: String,
-    /// The threads with a match, the best first: by their best item's match, then by when it
-    /// was said, the latest first.
-    pub threads: Vec<ThreadHit>,
-    /// The threads with a match left out past the limit.
-    pub more: u32,
-}
-
-/// A thread with a match. Its title, agent and folder are its row in the table.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct ThreadHit {
-    /// The thread.
-    pub thread: ThreadId,
-    /// Its items with a match, the best first, at most [`HITS_PER_THREAD`].
-    pub hits: Vec<ItemHit>,
-    /// Its items with a match left out.
-    pub more: u32,
-}
-
-/// An item that matched, as much of it as shows where.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct ItemHit {
-    /// The item, to scroll the thread to.
-    pub item: ItemId,
-    /// Its turn, to page the thread back to.
-    pub turn: TurnId,
-    /// Open, what kind of words they are: [`ItemHit::PERSON`], [`ItemHit::AGENT`],
-    /// [`ItemHit::REASONING`], [`ItemHit::TOOL`], [`ItemHit::NOTICE`].
-    pub said: String,
-    /// The words, cut to [`ITEM_HIT_BYTES`] round the first match.
-    pub text: String,
-    /// Where the words asked for are in [`Self::text`], in order, never overlapping.
-    pub spans: Vec<Span>,
-    /// Text of the item before [`Self::text`] was cut off.
-    pub cut_before: bool,
-    /// Text of the item after [`Self::text`] was cut off.
-    pub cut_after: bool,
-    /// When it was said.
-    pub at_ms: WallMs,
-}
-
-impl ItemHit {
-    /// The agent's answer.
-    pub const AGENT: &'static str = "agent";
-    /// A notice of the agent's own.
-    pub const NOTICE: &'static str = "notice";
-    /// The person's message.
-    pub const PERSON: &'static str = "person";
-    /// The agent's reasoning.
-    pub const REASONING: &'static str = "reasoning";
-    /// A call's title.
-    pub const TOOL: &'static str = "tool";
 }
 
 /// A thread to start.

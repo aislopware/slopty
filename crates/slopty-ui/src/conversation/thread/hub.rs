@@ -21,11 +21,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{Context, EventEmitter, Task};
-use slopty_client::threads::{Cache, Cached, Changed, Outbox, Stamp, Threads};
-use slopty_proto::git::{GitOp, GitOutcome};
+use slopty_client::threads::{Cache, Cached, Changed, Outbox, Threads};
+use slopty_proto::git::GitOutcome;
 use slopty_proto::thread::wire::{
-    Authors, Expanded, Intent, IntentDone, Outcome, Review, ReviewScope, SEARCH_THREADS, Start,
-    TableFrame, ThreadFrame, ThreadHits, ThreadRequest,
+    Intent, IntentDone, Outcome, Review, ReviewScope, Start, TableFrame, ThreadFrame, ThreadRequest,
 };
 use slopty_proto::thread::{AgentId, ContentRef, IntentId, ThreadId, ThreadState};
 use slopty_proto::{ClientMsg, RequestId};
@@ -35,9 +34,6 @@ use super::git::GitBook;
 /// How long a thread rests before what it is now is kept on disk: a busy one is written once
 /// it settles, not on every word.
 const KEEP_AFTER: Duration = Duration::from_secs(2);
-
-/// Turns asked for by a page of older ones.
-const PAGE_TURNS: u32 = 10;
 
 /// Refusals kept at most, the oldest let go first: a person reads the last few.
 const REFUSALS: usize = 32;
@@ -71,11 +67,6 @@ pub enum HubEvent {
     Review(ThreadId),
     /// A git op on the repository holding this folder was asked or answered.
     Git(String),
-    /// What the worker found in its threads for the words last asked
-    /// ([`ThreadHub::search`]).
-    Hits,
-    /// The worker said who wrote the lines of a file ([`ThreadHub::authors`]).
-    Authors,
     /// An intent on `from` started `thread`: a fork, a go in another agent, an edit from a
     /// turn. The workspace opens it, unless it is an aside, which its view shows.
     Started {
@@ -128,9 +119,6 @@ pub struct ThreadHub {
     git: GitBook,
     /// The agents this worker can start a thread of, as its link says.
     agents: Vec<AgentId>,
-    /// The words last searched for in this worker's threads, and what it found for them once
-    /// it answered.
-    searched: Option<(String, Option<ThreadHits>)>,
     /// The words a new thread's composer opens with, by the intent that starts it.
     seeds: HashMap<IntentId, String>,
     /// The same, by the thread it started, until a view takes them.
@@ -167,22 +155,9 @@ impl ThreadHub {
             waking: HashSet::new(),
             git: GitBook::default(),
             agents: Vec::new(),
-            searched: None,
             seeds: HashMap::new(),
             seeded: HashMap::new(),
         }
-    }
-
-    /// The worker's name for people.
-    #[must_use]
-    pub fn worker(&self) -> &str {
-        &self.worker
-    }
-
-    /// The agents this worker can start a thread of: what "Continue in…" offers.
-    #[must_use]
-    pub fn agents(&self) -> &[AgentId] {
-        &self.agents
     }
 
     /// The worker's link says which agents it can start.
@@ -191,68 +166,6 @@ impl ThreadHub {
             self.agents = agents;
             cx.notify();
         }
-    }
-
-    /// Ask the worker what was said in its threads with every word of `query`; the answer
-    /// comes back to [`Self::thread_hits`]. The same words again, or none, ask nothing.
-    pub fn search(&mut self, query: &str, cx: &mut Context<Self>) {
-        let query = query.trim();
-        if query.is_empty() {
-            self.searched = None;
-            return;
-        }
-        if self.searched.as_ref().is_some_and(|(asked, _)| asked == query) || !self.threads.linked()
-        {
-            return;
-        }
-        self.searched = Some((query.to_owned(), None));
-        let limit = SEARCH_THREADS;
-        let ask = ThreadRequest::Search { query: query.to_owned(), limit };
-        cx.emit(HubEvent::Send(vec![ClientMsg::Thread(ask)]));
-    }
-
-    /// What the worker found; an answer for words no longer asked is dropped.
-    pub fn thread_hits(&mut self, hits: ThreadHits, cx: &mut Context<Self>) {
-        let Some((asked, found)) = &mut self.searched else { return };
-        if *asked != hits.query {
-            return;
-        }
-        *found = Some(hits);
-        cx.emit(HubEvent::Hits);
-        cx.notify();
-    }
-
-    /// Who wrote the lines of `path` (absolute, or in `thread`'s repository) as `stamp` read it,
-    /// once the worker has said; until then it is asked, once, and [`HubEvent::Authors`] says
-    /// when it came.
-    pub fn authors(
-        &mut self,
-        thread: Option<ThreadId>,
-        path: &str,
-        stamp: &Stamp,
-        cx: &mut Context<Self>,
-    ) -> Option<Arc<Authors>> {
-        let held = self.threads.authors(thread, path, stamp);
-        if held.is_none()
-            && let Some(msg) = self.threads.ask_authors(thread, path, stamp)
-        {
-            cx.emit(HubEvent::Send(vec![msg]));
-        }
-        held
-    }
-
-    /// The worker said who wrote the lines of a file.
-    pub fn heard_authors(&mut self, authors: Authors, cx: &mut Context<Self>) {
-        self.threads.heard_authors(authors);
-        cx.emit(HubEvent::Authors);
-        cx.notify();
-    }
-
-    /// What the worker found for `query`, once it answered.
-    #[must_use]
-    pub fn hits(&self, query: &str) -> Option<&ThreadHits> {
-        let (asked, found) = self.searched.as_ref()?;
-        (asked == query.trim()).then_some(found.as_ref()?)
     }
 
     /// The threads.
@@ -275,7 +188,6 @@ impl ThreadHub {
     pub fn disconnected(&mut self, cx: &mut Context<Self>) {
         self.threads.disconnected();
         self.git.lost();
-        self.searched = None;
         for thread in self.threads.open() {
             cx.emit(HubEvent::Thread(thread));
         }
@@ -432,21 +344,6 @@ impl ThreadHub {
         id
     }
 
-    /// Let a failed intent go once the person has read why: one the thread draws itself, or
-    /// a [`Refusal`].
-    pub fn dismiss(&mut self, id: IntentId, cx: &mut Context<Self>) {
-        if let Some(gone) = self.threads.dismiss(id) {
-            self.keep_outbox(cx);
-            cx.emit(HubEvent::Thread(gone.thread));
-            cx.notify();
-        }
-        if let Some(at) = self.refusals.iter().position(|r| r.id == id) {
-            let gone = self.refusals.remove(at);
-            cx.emit(HubEvent::Thread(gone.thread));
-            cx.notify();
-        }
-    }
-
     /// What `thread` was turned down that it would not show, oldest first.
     pub fn refusals(&self, thread: ThreadId) -> impl DoubleEndedIterator<Item = &Refusal> {
         self.refusals.iter().filter(move |r| r.thread == thread)
@@ -487,29 +384,6 @@ impl ThreadHub {
         self.resuming.values().any(|(t, _)| *t == thread)
     }
 
-    /// The whole of `content`, when it came; asked for once, when it did not.
-    pub fn expanded(
-        &mut self,
-        thread: ThreadId,
-        content: &ContentRef,
-        cx: &mut Context<Self>,
-    ) -> Option<Arc<Expanded>> {
-        let held = self.threads.expanded(content);
-        if held.is_none()
-            && let Some(msg) = self.threads.expand(thread, content)
-        {
-            cx.emit(HubEvent::Send(vec![msg]));
-        }
-        held
-    }
-
-    /// Ask for older turns of `thread`.
-    pub fn page(&self, thread: ThreadId, cx: &mut Context<Self>) {
-        if let Some(msg) = self.threads.page(thread, PAGE_TURNS) {
-            cx.emit(HubEvent::Send(vec![msg]));
-        }
-    }
-
     /// Ask what `thread` changed over `scope`.
     pub fn ask_review(&mut self, thread: ThreadId, scope: ReviewScope, cx: &mut Context<Self>) {
         if let Some(msg) = self.threads.ask_review(thread, scope) {
@@ -524,32 +398,6 @@ impl ThreadHub {
     }
 
     // ----- git ---------------------------------------------------------------------------
-
-    /// Whether the link to the worker is up, so what is asked goes now.
-    #[must_use]
-    pub const fn linked(&self) -> bool {
-        self.threads.linked()
-    }
-
-    /// The git ops asked of this worker's repositories, and what each last said.
-    #[must_use]
-    pub const fn git(&self) -> &GitBook {
-        &self.git
-    }
-
-    /// Ask `op` of the repository holding the folder `repo`. Out of reach, nothing is asked
-    /// and the repository says so: an op is never held for later, since what it would do may
-    /// no longer be what the person meant.
-    pub fn git_op(&mut self, repo: &str, op: GitOp, cx: &mut Context<Self>) -> Option<RequestId> {
-        if !self.threads.linked() {
-            self.git.offline(repo, &op);
-            self.git_sent(repo, Vec::new(), cx);
-            return None;
-        }
-        let (request, msg) = self.git.ask(repo, op);
-        self.git_sent(repo, vec![msg], cx);
-        Some(request)
-    }
 
     /// The worker answered git op `request`: what the repository said shows, and what goes
     /// after it (a push, a fresh status) is sent.
@@ -622,6 +470,24 @@ impl ThreadHub {
                 cx.background_executor().spawn(async move { write(&cache, batch) }).await;
             }
         }));
+    }
+
+    /// The worker's name for people.
+    #[must_use]
+    pub fn worker(&self) -> &str {
+        &self.worker
+    }
+
+    /// Whether the link to the worker is up, so what is asked goes now.
+    #[must_use]
+    pub const fn linked(&self) -> bool {
+        self.threads.linked()
+    }
+
+    /// The git ops asked of this worker's repositories, and what each last said.
+    #[must_use]
+    pub const fn git(&self) -> &GitBook {
+        &self.git
     }
 }
 

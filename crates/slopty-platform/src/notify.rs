@@ -78,9 +78,6 @@ pub struct Note {
     pub body: String,
     /// What a tap hands back ([`Tap::info`]), carried in the notification's `userInfo`.
     pub info: BTreeMap<String, String>,
-    /// The thread it is shown in: notes of one thread stack together in Notification Centre.
-    /// None leaves it to the system, which groups by app.
-    pub thread: Option<String>,
     /// Its buttons, when it has any.
     pub category: Option<Category>,
     /// The labels of a question's options as buttons of their own, in its order
@@ -1318,9 +1315,6 @@ mod apple {
             content.setCategoryIdentifier(&NSString::from_str(&super::picking_id(&note.picks)));
         } else if let Some(category) = note.category {
             content.setCategoryIdentifier(&NSString::from_str(category.id));
-        }
-        if let Some(thread) = &note.thread {
-            content.setThreadIdentifier(&NSString::from_str(thread));
         }
         let mut info = note.info.clone();
         info.insert(super::info::NOTE.to_owned(), note.id.clone());

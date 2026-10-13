@@ -42,12 +42,6 @@ impl Blobs {
         Self { held: HashMap::new(), order: VecDeque::new(), bytes: 0, budget }
     }
 
-    /// The bytes held.
-    #[must_use]
-    pub const fn bytes(&self) -> usize {
-        self.bytes
-    }
-
     /// The expansion of `content`, made the most recent.
     pub fn get(&mut self, content: &ContentRef) -> Option<Arc<Expanded>> {
         let found = Arc::clone(self.held.get(content)?);
@@ -82,5 +76,11 @@ impl Blobs {
             self.order.remove(at);
         }
         self.order.push_back(content.clone());
+    }
+
+    /// The bytes held.
+    #[must_use]
+    pub const fn bytes(&self) -> usize {
+        self.bytes
     }
 }

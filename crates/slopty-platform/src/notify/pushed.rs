@@ -97,7 +97,6 @@ pub fn note_of(body: &PushBody) -> Note {
         title,
         body: notice_body(notice),
         info: keys,
-        thread: None,
         category: category_of(body),
         picks: Vec::new(),
         silent: body.quiet,
@@ -455,7 +454,7 @@ mod tests {
                 (info::ASK, "toolu_01".to_owned()),
             ])
         );
-        assert_eq!((note.category, note.urgent, note.thread), (Some(APPROVAL), true, None));
+        assert_eq!((note.category, note.urgent), (Some(APPROVAL), true));
         assert!(!note.silent, "the first push sounds");
         let moved = note_of(&PushBody { ask: None, picks: Vec::new(), quiet: true, ..body });
         assert_eq!(moved.id, note.id, "in place of the note up");
@@ -489,7 +488,7 @@ mod tests {
                 (info::SESSION, session.to_string())
             ])
         );
-        assert_eq!((note.category, note.urgent, note.thread), (None, true, None));
+        assert_eq!((note.category, note.urgent), (None, true));
     }
 
     /// A small question's options pushed with its request are the note's own buttons: each a

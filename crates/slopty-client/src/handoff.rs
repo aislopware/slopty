@@ -183,10 +183,6 @@ mod tests {
         HandoffEvent::Open(OpenUrl { id, session: None, url: url.to_owned(), asked_ms, offer })
     }
 
-    fn edit(id: HandoffId, wait: bool) -> EditFile {
-        EditFile { id, session: None, path: "/r/.git/COMMIT_EDITMSG".to_owned(), line: None, wait }
-    }
-
     fn offered(todo: &Todo) -> Option<(&str, &str, OfferReason)> {
         match todo {
             Todo::Offer { url, host, why, .. } => Some((url, host, *why)),
@@ -263,6 +259,10 @@ mod tests {
         let ahead = asked_at(2, "https://github.com/", None, now.saturating_add(hour));
         let held_up = h.heard(ahead, true, LATE_AFTER + Duration::from_millis(1));
         assert_eq!(offered(&held_up).map(|o| o.2), Some(OfferReason::Late), "a fast clock");
+    }
+
+    fn edit(id: HandoffId, wait: bool) -> EditFile {
+        EditFile { id, session: None, path: "/r/.git/COMMIT_EDITMSG".to_owned(), line: None, wait }
     }
 
     /// A waiting edit is kept until the person is done, recognised when asked again, and

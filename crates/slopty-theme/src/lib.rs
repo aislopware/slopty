@@ -600,9 +600,9 @@ pub struct TypeRoles {
     pub metadata: TypeRole,
     /// A menu's, a picker's, a tab's, a page's and a dialog's words: Zed's default label, 14/20.
     pub chrome: TypeRole,
-    /// The window's own rows: a navigator row and its section heads, a column's title in its
-    /// header, the composer's foot, a palette row, a toast. Delta's small label, 12/16,
-    /// measured from the signed-in app (`.research/delta-signed-in-2026-10-12.md` §3.1).
+    /// The window's own rows: a list row and its section heads, a header's title, a toast. Delta's
+    /// small label, 12/16, measured from the signed-in app
+    /// (`.research/delta-signed-in-2026-10-12.md` §3.1).
     pub row: TypeRole,
     /// A notice's words, which may run to a second line: the row's 12 on Delta's toast's 19,
     /// measured from the signed-in app (`.research/delta-signed-in-2026-10-12.md` §2.10).
@@ -759,9 +759,8 @@ pub struct Spacing {
 
 impl Spacing {
     /// The one edge grid: how far in from its region's edge every leading edge starts, Zed's
-    /// rows' `px_2` (8). A tile's header, a terminal's grid, a note's and a file's text, the
-    /// navigator's rows, the palette's, the inbox's and the status bar's all start here, so they
-    /// share one edge, clear of the dividers between flush panes.
+    /// rows' `px_2` (8). A header, a terminal's grid, a note's and a file's text and a list's
+    /// rows all start here, so they share one edge, clear of the dividers between flush panes.
     #[must_use]
     pub const fn inset(&self) -> f32 {
         self.sm
@@ -882,7 +881,7 @@ const LEVEL: f32 = 1.25;
 /// (`docs/decisions/ui.md`, "The design system is Zed's, with Delta's values").
 ///
 /// Three cool planes: the work darkest ([`Self::ground`], Zed's `editor.background`), the
-/// navigator a step up ([`Self::sidebar`], `panel.background`), and what floats a step more
+/// sidebar a step up ([`Self::sidebar`], `panel.background`), and what floats a step more
 /// ([`Self::elevated`]). Lines are opaque in two weights, [`Self::stroke`] between regions and
 /// [`Self::border`] round controls and cards. The states are opaque too, one hover and one
 /// selection, the same on every plane, as Zed's ghost elements are. Colour is spent on state
@@ -894,8 +893,8 @@ const LEVEL: f32 = 1.25;
 pub struct Surfaces {
     /// The work: every pane, the terminal's grid, the active tab. Zed's `editor.background`.
     pub ground: Rgb,
-    /// The navigator, the rail, the settings' sections, a column's title row and the status
-    /// bar: Zed's `panel.background`, a step up from the work in dark.
+    /// The sidebar, the settings' sections and a header: Zed's `panel.background`, a step up
+    /// from the work in dark.
     pub sidebar: Rgb,
     /// What floats: menus, popovers, the palette, dialogs, toasts. Zed's
     /// `elevated_surface.background`, standing off what it covers by its line and its shadow.
@@ -921,7 +920,7 @@ pub struct Surfaces {
     /// What is held down: Zed's `ghost_element.active`, the selection's tone.
     pub pressed: Tint,
     /// The one structural line, at 1 pt: every line that parts regions or rings a box. The top
-    /// rule, a bar's foot, a tab's sides, the sash between panes, the navigator's edge, a
+    /// rule, a bar's foot, a tab's sides, the sash between panes, the sidebar's edge, a
     /// divider inside a pane, a card, a well. Zed's `border.variant`, Delta's one `#dfdfe0`
     /// (`.research/warp-composition-2026-10-12.md` §1.10).
     pub stroke: Tint,
@@ -1617,53 +1616,18 @@ impl Default for Motion {
 /// round it grow.
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Density {
-    /// A one-line row: a worker's header, a palette or menu row, a row of *Needs you*.
+    /// A one-line row: a worker's header, a list row.
     pub row: f32,
-    /// A row of two lines: a title over its meta line.
-    pub row_two_line: f32,
-    /// The navigator's header row, and the top line it shares with the top panes' tab bars:
-    /// Zed's title bar's 34 on the Mac.
-    pub title: f32,
-    /// A pane's tab bar, its header: 34 on the Mac, so the top panes' bars meet the
-    /// navigator's header on one line.
-    pub header: f32,
-    /// A pane's own toolbar, apart from its tab bar: 32 on the Mac.
-    pub bar: f32,
-    /// A column's foot row (a thread's, a review's): Delta's 36, measured from the signed-in
-    /// app (`.research/delta-signed-in-2026-10-12.md` §2.2). The window has no status bar.
-    pub foot: f32,
-    /// A tab, a cell of its bar: 34 on the Mac, the bar's whole height.
-    pub tab: f32,
-    /// A navigator or settings-list row: Delta's 28 on the Mac
-    /// (`.research/delta-signed-in-2026-10-12.md` §3.5).
-    pub item: f32,
     /// A menu's row (a thing's own menu, the bar's menus, the effort menu): Delta's 23.
     pub menu: f32,
-    /// A row of a list typed at (the palette, a picker): Delta's palette's 27.
-    pub list: f32,
-    /// A row of the composer's slash commands or its files: Delta's 24.
-    pub slash: f32,
-    /// A row of the composer's model picker: Delta's 31.
-    pub picker: f32,
     /// An icon button's side: Zed's default button, 22 on the Mac.
     pub button: f32,
-    /// A status bar chip's height: 22 on the Mac.
-    pub chip: f32,
-    /// A decision's head band and the buttons of its foot, what waits on the person in the
-    /// thread: Zed's permission rows' 28 on the Mac.
-    pub decision: f32,
     /// A text button's, a dropdown's or a field's height, in a page, a dialog or a foot:
     /// Delta's 28 on the Mac, a row's, so a button in a row fills it. Icon buttons stay
     /// [`Self::button`].
     pub control: f32,
     /// The least side of anything tapped or clicked: an icon button, a key cap, a close box.
     pub hit: f32,
-    /// A search field heading a list (the settings'): Delta's 32 on the Mac, a step over a
-    /// control (`.research/delta-re-2026-10-12.md` §2.5).
-    pub search: f32,
-    /// How far across a sash's hit area reaches, centred on its 1 pt line: Zed's 4 pt on a
-    /// pointer, a finger's half target on touch.
-    pub sash: f32,
     /// How much larger a glyph and its slot are than the chrome's ([`Theme::glyph`],
     /// [`Theme::icon`]): none on a pointer; a finger's 4, a glyph 18 in a slot of 20
     /// (`.research/design-polish-2026-10-12.md` §4.12).
@@ -1672,51 +1636,11 @@ pub struct Density {
 
 impl Density {
     /// A pointer: the Mac.
-    pub const COMPACT: Self = Self {
-        row: 28.0,
-        row_two_line: 44.0,
-        title: 34.0,
-        header: 34.0,
-        bar: 32.0,
-        foot: 36.0,
-        tab: 34.0,
-        item: 28.0,
-        menu: 23.0,
-        list: 27.0,
-        slash: 24.0,
-        picker: 31.0,
-        button: 22.0,
-        chip: 22.0,
-        decision: 28.0,
-        control: 28.0,
-        hit: 22.0,
-        search: 32.0,
-        sash: 4.0,
-        glyph_step: 0.0,
-    };
+    pub const COMPACT: Self =
+        Self { row: 28.0, menu: 23.0, button: 22.0, control: 28.0, hit: 22.0, glyph_step: 0.0 };
     /// A finger: the iPhone and the iPad.
-    pub const TOUCH: Self = Self {
-        row: 44.0,
-        row_two_line: 56.0,
-        title: 44.0,
-        header: 44.0,
-        bar: 44.0,
-        foot: 44.0,
-        tab: 44.0,
-        item: 44.0,
-        menu: 44.0,
-        list: 44.0,
-        slash: 44.0,
-        picker: 44.0,
-        button: 44.0,
-        chip: 32.0,
-        decision: 44.0,
-        control: 44.0,
-        hit: 44.0,
-        search: 44.0,
-        sash: 24.0,
-        glyph_step: 4.0,
-    };
+    pub const TOUCH: Self =
+        Self { row: 44.0, menu: 44.0, button: 44.0, control: 44.0, hit: 44.0, glyph_step: 4.0 };
 }
 
 impl Default for Density {
@@ -2026,8 +1950,8 @@ mod tests {
         assert_eq!((s.inset(), s.inset_trailing()), (8.0, 6.0), "Zed's rows: 8 and 6");
     }
 
-    /// Three planes in dark, the work darkest, the navigator a step up and what floats a step
-    /// more (3 to 5 points of `OKLab` lightness over the work); in light the navigator and the
+    /// Three planes in dark, the work darkest, the sidebar a step up and what floats a step
+    /// more (3 to 5 points of `OKLab` lightness over the work); in light the sidebar and the
     /// floats share One Light's grey under the white work. The region line is quieter than a
     /// control's on every plane and still seen on each.
     #[test]
@@ -2157,7 +2081,7 @@ mod tests {
         assert_eq!(Theme::default().roles(), desk);
     }
 
-    /// The planes chrome text sits on: the work, the navigator, what floats, a tab bar, a
+    /// The planes chrome text sits on: the work, the sidebar, what floats, a tab bar, a
     /// column's header, a well and a card's head.
     fn planes(s: &Surfaces) -> [(&'static str, Rgb); 7] {
         [
@@ -2352,7 +2276,7 @@ mod tests {
         }
     }
 
-    /// Each mark reads as a mark: 3:1 and more on the work and the navigator in both modes, and
+    /// Each mark reads as a mark: 3:1 and more on the work and the sidebar in both modes, and
     /// on every ground text lands on in dark (WCAG's non-text contrast).
     #[test]
     fn a_status_fill_reads_as_a_mark() {
@@ -2471,9 +2395,7 @@ mod tests {
     /// Only what floats wears a shadow, in black: menus, popovers, the palette and toasts Zed's
     /// two crisp layers, tightest first, and a dialog its modal four, none blurred past 12 pt.
     /// The scrim under a modal is black at 0.40 in dark and 0.24 in light. A finger gets
-    /// Apple's 44 pt; a pointer Zed's density: one 34 pt top line (the navigator's header and
-    /// the top tab bars, whose tabs fill them), 28 pt rows, 23 pt menu rows, 22 pt buttons and
-    /// a 36 pt column foot.
+    /// Apple's 44 pt; a pointer Zed's density: 28 pt rows, 23 pt menu rows and 22 pt buttons.
     #[test]
     fn elevation_and_density() {
         let (dark, light) = (Theme::new(Variant::Dark), Theme::new(Variant::Light));
@@ -2498,39 +2420,13 @@ mod tests {
             assert!(e.dialog.windows(2).all(|w| w[0].y < w[1].y), "{v:?}: tightest first");
         }
         let (compact, touch) = (Density::COMPACT, Density::TOUCH);
-        assert!(touch.hit >= 44.0 && touch.row >= 44.0 && touch.header >= 44.0);
-        assert!(touch.control >= 44.0 && touch.bar >= 44.0, "a finger's button and bar");
+        assert!(touch.hit >= 44.0 && touch.row >= 44.0 && touch.menu >= 44.0);
+        assert!(touch.control >= 44.0 && touch.button >= 44.0, "a finger's buttons");
         assert_eq!(
-            (compact.title, compact.header, compact.bar, compact.foot),
-            (34.0, 34.0, 32.0, 36.0),
-            "one top line, Zed's bars, Delta's 36 pt foot"
+            (compact.row, compact.menu, compact.button, compact.control, compact.hit),
+            (28.0, 23.0, 22.0, 28.0, 22.0),
+            "Delta's rows, menu rows and controls, Zed's icon buttons"
         );
-        assert_eq!(
-            (compact.menu, compact.list, compact.slash, compact.picker),
-            (23.0, 27.0, 24.0, 31.0),
-            "Delta's menu, palette, slash and model rows"
-        );
-        assert!(
-            [touch.menu, touch.list, touch.slash, touch.picker].iter().all(|h| *h >= 44.0),
-            "a finger's menu rows"
-        );
-        assert_eq!(compact.header, compact.title, "the tab bars meet the navigator's header");
-        assert_eq!(
-            (compact.row, compact.item, compact.button, compact.chip, compact.control, compact.hit),
-            (28.0, 28.0, 22.0, 22.0, 28.0, 22.0),
-            "Delta's rows and controls, Zed's icon buttons"
-        );
-        assert_eq!(compact.row_two_line, 44.0, "Delta's two-line row");
-        assert_eq!(compact.search, 32.0, "Delta's search field");
-        assert!(touch.search >= 44.0);
-        assert_eq!(compact.tab, compact.header, "a tab is a cell of its bar");
-        assert_eq!(compact.decision, 28.0, "Zed's permission rows");
-        assert!(touch.decision >= 44.0, "a finger's answer");
-        assert_eq!(compact.sash, 4.0, "Zed's split hit area");
-        assert!(touch.tab >= 36.0 && touch.item >= 44.0 && touch.button >= 44.0);
-        assert!(touch.sash >= touch.hit / 2.0, "a finger finds the sash");
-        assert!(compact.row < touch.row && compact.row_two_line < touch.row_two_line);
-        assert!(compact.row < compact.row_two_line && touch.row < touch.row_two_line);
         assert_eq!(Theme::default().density, compact, "the Mac is the default");
     }
 

@@ -5,28 +5,12 @@ use chrono::{DateTime, Utc};
 use slopty_core::WallMs;
 use slopty_proto::thread::wire::ThreadRow;
 use slopty_proto::thread::{Phase, ThreadId};
-use slopty_view_proto::{Chat, Device, Session, SessionStatus, Space};
+use slopty_view_proto::{Chat, Session, SessionStatus, Space};
 
 /// A wall time as the shell's.
 #[must_use]
 pub fn time(at: WallMs) -> DateTime<Utc> {
     i64::try_from(at.as_millis()).ok().and_then(DateTime::from_timestamp_millis).unwrap_or_default()
-}
-
-/// A worker as a device: `id` is its worker id, `linked` whether this client reaches it now.
-#[must_use]
-pub fn device(id: &str, name: &str, linked: bool, now: DateTime<Utc>) -> Device {
-    Device {
-        id: id.to_owned(),
-        name: name.to_owned(),
-        platform: String::new(),
-        last_seen_at: linked.then_some(now),
-        created_at: None,
-        version: None,
-        cursor_sdk_version: None,
-        capabilities: Vec::new(),
-        actions: Vec::new(),
-    }
 }
 
 /// The space of the folder `path` on `device`: one id for one folder on one machine.

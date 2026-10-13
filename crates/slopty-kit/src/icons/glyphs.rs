@@ -173,7 +173,7 @@ fn read(svg: &str) -> Result<Drawing, String> {
     let grid = attribute(root, "viewBox")
         .and_then(|b| b.split_whitespace().nth(2)?.parse::<f64>().ok())
         .ok_or("no view box")?;
-    let outline = Outline::parse(&super::marks::path_data(svg)).map_err(|e| e.to_string())?;
+    let outline = Outline::parse(&path_data(svg)).map_err(|e| e.to_string())?;
     Ok(Drawing { outline, grid })
 }
 
@@ -210,6 +210,11 @@ pub(super) fn mask(symbol: Symbol, side: u32) -> Kept {
     let kept = rasterize_on_grid(&drawing.outline, drawing.grid, side)
         .map(|m| (Arc::new(m), SharedString::from(format!("glyph:{}:{side}", symbol.name()))));
     KEPT.write().entry(at).or_insert(kept).clone()
+}
+
+/// Every path's data (`d="…"`) in `svg`, in order.
+fn path_data(svg: &str) -> Vec<&str> {
+    svg.split(" d=\"").skip(1).filter_map(|rest| rest.split('"').next()).collect()
 }
 
 #[cfg(test)]

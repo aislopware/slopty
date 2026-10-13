@@ -1,6 +1,5 @@
-//! Answering an agent's yes or no away from its thread: "Allow" and "Deny" on its row under
-//! the navigator's *Needs you*, and the same buttons on the note posted while the app is away
-//! (`attention`).
+//! Answering an agent's yes or no away from its thread: "Allow" and "Deny" on the note posted
+//! while the app is away (`attention`).
 //!
 //! Every request an agent waits on shows in its worker's thread table, which this client keeps
 //! for every worker it links to; the worker holds a yes or no that nobody follows for the

@@ -60,21 +60,6 @@ impl std::fmt::Debug for Driver {
 }
 
 impl ScreenView {
-    /// The agent that drives this screen, or `None` for a screen of the person's own. A new
-    /// driver starts watched; the same one keeps whoever has control.
-    pub fn set_driver(&mut self, driver: Option<Driver>, cx: &mut Context<Self>) {
-        let same_agent = match (&self.driver, &driver) {
-            (Some(was), Some(now)) => was.agent == now.agent,
-            (None, None) => true,
-            _ => false,
-        };
-        if !same_agent {
-            self.control = false;
-        }
-        self.driver = driver;
-        cx.notify();
-    }
-
     /// The agent that drives this screen, as last named.
     #[must_use]
     pub const fn driver(&self) -> Option<&Driver> {
@@ -155,5 +140,20 @@ impl ScreenView {
                 .child(pill)
                 .into_any_element(),
         )
+    }
+
+    /// The agent that drives this screen, or `None` for a screen of the person's own. A new
+    /// driver starts watched; the same one keeps whoever has control.
+    pub fn set_driver(&mut self, driver: Option<Driver>, cx: &mut Context<Self>) {
+        let same_agent = match (&self.driver, &driver) {
+            (Some(was), Some(now)) => was.agent == now.agent,
+            (None, None) => true,
+            _ => false,
+        };
+        if !same_agent {
+            self.control = false;
+        }
+        self.driver = driver;
+        cx.notify();
     }
 }

@@ -348,12 +348,6 @@ impl ScreenView {
         }
     }
 
-    /// Whether the worker composes this view's text: it took this device's input source.
-    #[must_use]
-    pub const fn worker_composes(&self) -> bool {
-        self.keyboard.taking()
-    }
-
     /// Take the keys while the view has the keyboard and the worker types under this device's
     /// source, and nothing is being composed here; let them be otherwise, sending what was taken
     /// first. A composition under way when the worker answers finishes here, and its text goes
@@ -565,13 +559,9 @@ impl ScreenView {
     }
 
     /// Press and release one key on the worker: the phone key bar and the soft keyboard, which
-    /// have no key-up of their own. Armed modifiers apply and clear. A key with no place on a
-    /// keyboard types its character.
-    pub fn press(&mut self, mut keystroke: Keystroke, cx: &mut Context<Self>) {
+    /// have no key-up of their own. A key with no place on a keyboard types its character.
+    pub fn press(&mut self, keystroke: Keystroke, cx: &mut Context<Self>) {
         self.drain_taken();
-        let armed = std::mem::take(&mut self.sticky);
-        keystroke.modifiers.control |= armed.control;
-        keystroke.modifiers.platform |= armed.platform;
         let paste = is_paste_chord(&keystroke);
         if paste {
             self.push_clipboard(cx);
@@ -609,17 +599,9 @@ impl ScreenView {
 
     /// Text committed here (an input method's or a dead key's result, dictation, the soft
     /// keyboard, "Type the clipboard"): typed on the worker as it stands, a line break as ↩ and
-    /// a tab as ⇥. A single character with an armed modifier is that chord instead.
-    pub(super) fn commit_text(&mut self, text: &str, cx: &mut Context<Self>) {
+    /// a tab as ⇥.
+    pub(super) fn commit_text(&mut self, text: &str) {
         self.drain_taken();
-        let mut chars = text.chars();
-        if let (Some(c), None) = (chars.next(), chars.next())
-            && (self.sticky.control || self.sticky.platform)
-        {
-            let key = c.to_lowercase().to_string();
-            self.press(Keystroke { modifiers: Modifiers::default(), key, key_char: None }, cx);
-            return;
-        }
         let mut run = String::new();
         for c in text.chars() {
             let key = match c {
@@ -666,6 +648,12 @@ impl ScreenView {
             self.release_key(code, mods);
         }
         cx.notify();
+    }
+
+    /// Whether the worker composes this view's text: it took this device's input source.
+    #[must_use]
+    pub const fn worker_composes(&self) -> bool {
+        self.keyboard.taking()
     }
 }
 

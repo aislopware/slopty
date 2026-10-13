@@ -126,8 +126,7 @@ pub(super) fn agent_status_text(agent: &ThreadStand) -> String {
 const LIMIT_TEXT: &str = "Hit its usage limit";
 
 /// The agent's state in a word or two, without the detail: the one word for it wherever a
-/// state is said beside something else, a header's pill, a navigator row's trailing word, an
-/// *Needs you* row with nothing asked.
+/// state is said beside something else: a header's pill, a note with nothing asked.
 ///
 /// A tool call is "Working": the word names the state, and which call is the line's to say.
 #[must_use]

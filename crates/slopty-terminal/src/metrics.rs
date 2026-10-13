@@ -54,24 +54,6 @@ pub struct Face {
 }
 
 impl Face {
-    /// The same face measured at `scale` times the size (the display's pixel ratio).
-    #[must_use]
-    pub fn scaled(&self, scale: f64) -> Self {
-        let by = |v: Option<f64>| v.map(|v| v * scale);
-        Self {
-            cell_width: self.cell_width * scale,
-            ascent: self.ascent * scale,
-            descent: self.descent * scale,
-            line_gap: self.line_gap * scale,
-            underline_position: by(self.underline_position),
-            underline_thickness: by(self.underline_thickness),
-            strikethrough_position: by(self.strikethrough_position),
-            strikethrough_thickness: by(self.strikethrough_thickness),
-            cap_height: by(self.cap_height),
-            ex_height: by(self.ex_height),
-        }
-    }
-
     /// `ascent - descent + line_gap`.
     #[must_use]
     pub fn line_height(&self) -> f64 {
@@ -115,6 +97,24 @@ impl Face {
     pub fn strikethrough_position(&self) -> f64 {
         self.strikethrough_position
             .unwrap_or_else(|| f64::midpoint(self.ex_height(), self.strikethrough_thickness()))
+    }
+
+    /// The same face measured at `scale` times the size (the display's pixel ratio).
+    #[must_use]
+    pub fn scaled(&self, scale: f64) -> Self {
+        let by = |v: Option<f64>| v.map(|v| v * scale);
+        Self {
+            cell_width: self.cell_width * scale,
+            ascent: self.ascent * scale,
+            descent: self.descent * scale,
+            line_gap: self.line_gap * scale,
+            underline_position: by(self.underline_position),
+            underline_thickness: by(self.underline_thickness),
+            strikethrough_position: by(self.strikethrough_position),
+            strikethrough_thickness: by(self.strikethrough_thickness),
+            cap_height: by(self.cap_height),
+            ex_height: by(self.ex_height),
+        }
     }
 }
 
@@ -363,54 +363,6 @@ mod tests {
         }
     }
 
-    /// `Lilex` 2.630, the bundled face, from its tables as GPUI reports them: 1000 units per
-    /// em, advance 600, ascent 999, descent -301 (`hhea`), no line gap, cap height 698, ex
-    /// height 516. The `post` underline is left out, so the rows check ghostty's estimates.
-    fn lilex(size: f64) -> Face {
-        let em = |units: f64| units / 1000.0 * size;
-        Face {
-            cell_width: em(600.0),
-            ascent: em(999.0),
-            descent: em(-301.0),
-            line_gap: 0.0,
-            cap_height: Some(em(698.0)),
-            ex_height: Some(em(516.0)),
-            ..Face::default()
-        }
-    }
-
-    /// `Lilex` with what its `post` table says about the underline: position −140, thickness
-    /// 60 (per 1000). Core Text reports both, so this is the face the element measures in the
-    /// app; the plain [`lilex`] rows are the estimate a font without a `post` table gets.
-    fn lilex_tables(size: f64) -> Face {
-        let em = |units: f64| units / 1000.0 * size;
-        Face {
-            underline_position: Some(em(-140.0)),
-            underline_thickness: Some(em(60.0)),
-            ..lilex(size)
-        }
-    }
-
-    /// Menlo, macOS's own terminal face, from its font tables: 2048 units per em, advance
-    /// 1233, ascent 1901, descent -483, no line gap, underline -130 thick 90, cap height 1493,
-    /// ex height 1120. A face with every metric present, and a different em, so the
-    /// derivation is exercised on more than one shape.
-    fn menlo(size: f64) -> Face {
-        let em = |units: f64| units / 2048.0 * size;
-        Face {
-            cell_width: em(1233.0),
-            ascent: em(1901.0),
-            descent: em(-483.0),
-            line_gap: 0.0,
-            underline_position: Some(em(-130.0)),
-            underline_thickness: Some(em(90.0)),
-            strikethrough_position: None,
-            strikethrough_thickness: None,
-            cap_height: Some(em(1493.0)),
-            ex_height: Some(em(1120.0)),
-        }
-    }
-
     #[test]
     fn a_cell_is_the_rounded_advance_and_the_rounded_line_height() {
         // 13 pt: advance 7.8 → 8, line height (1020 + 300)/1000 * 13 = 17.16 → 17.
@@ -435,30 +387,6 @@ mod tests {
         // thickness, and a cursor is one pixel unless the cell is thinner.
         assert_eq!((m.overline_position, m.overline_thickness), (0, 2));
         assert_eq!((m.box_thickness, m.cursor_thickness, m.cursor_height), (2, 1, 17));
-    }
-
-    #[test]
-    fn the_same_face_at_a_bigger_size_and_on_a_retina_display() {
-        // 15 pt: advance 9.0 → 9, line height 19.8 → 20; the cell was rounded *up* this time,
-        // so the baseline moves down by half the difference: round(4.5 - 0.1) = 4.
-        let m = calc(&round_numbers(15.0));
-        assert_eq!((m.cell_width, m.cell_height, m.cell_baseline), (9, 20, 4));
-        // top_to_baseline 16: round(16 + 1.875) = 18, thickness ceil(1.5) = 2.
-        assert_eq!((m.underline_position, m.underline_thickness), (18, 2));
-
-        // DPR 2 at 13 pt: 15.6 → 16 and 34.32 → 34 device pixels, i.e. 8.0 × 17.0 points, so
-        // the cell is the same size as at DPR 1 but the baseline lands half a point higher.
-        let m = calc(&round_numbers(13.0).scaled(2.0));
-        assert_eq!((m.cell_width, m.cell_height), (16, 34));
-        // face_baseline 7.8, cell rounded down by 0.32: round(7.8 + 0.16) = 8.
-        assert_eq!(m.cell_baseline, 8);
-        assert_eq!((m.underline_position, m.underline_thickness), (29, 3));
-
-        let grid = Grid::new(&m, 2.0);
-        assert_eq!((grid.cell_width, grid.line_height), (px(8.0), px(17.0)));
-        assert_eq!(grid.baseline, px(13.0));
-        assert_eq!(grid.underline, Line { y: px(14.5), thickness: px(1.5) });
-        assert_eq!(grid.cursor_thickness, px(0.5), "one device pixel");
     }
 
     #[test]
@@ -517,6 +445,78 @@ mod tests {
         assert_eq!((m.underline_position, m.strikethrough_position), (43, 18));
         assert_eq!(m.overline_position, -12);
         assert!((m.face_y + 12.67).abs() < 1e-9, "{:?}", m.face_y);
+    }
+
+    /// `Lilex` 2.630, the bundled face, from its tables as GPUI reports them: 1000 units per
+    /// em, advance 600, ascent 999, descent -301 (`hhea`), no line gap, cap height 698, ex
+    /// height 516. The `post` underline is left out, so the rows check ghostty's estimates.
+    fn lilex(size: f64) -> Face {
+        let em = |units: f64| units / 1000.0 * size;
+        Face {
+            cell_width: em(600.0),
+            ascent: em(999.0),
+            descent: em(-301.0),
+            line_gap: 0.0,
+            cap_height: Some(em(698.0)),
+            ex_height: Some(em(516.0)),
+            ..Face::default()
+        }
+    }
+
+    /// `Lilex` with what its `post` table says about the underline: position −140, thickness
+    /// 60 (per 1000). Core Text reports both, so this is the face the element measures in the
+    /// app; the plain [`lilex`] rows are the estimate a font without a `post` table gets.
+    fn lilex_tables(size: f64) -> Face {
+        let em = |units: f64| units / 1000.0 * size;
+        Face {
+            underline_position: Some(em(-140.0)),
+            underline_thickness: Some(em(60.0)),
+            ..lilex(size)
+        }
+    }
+
+    /// Menlo, macOS's own terminal face, from its font tables: 2048 units per em, advance
+    /// 1233, ascent 1901, descent -483, no line gap, underline -130 thick 90, cap height 1493,
+    /// ex height 1120. A face with every metric present, and a different em, so the
+    /// derivation is exercised on more than one shape.
+    fn menlo(size: f64) -> Face {
+        let em = |units: f64| units / 2048.0 * size;
+        Face {
+            cell_width: em(1233.0),
+            ascent: em(1901.0),
+            descent: em(-483.0),
+            line_gap: 0.0,
+            underline_position: Some(em(-130.0)),
+            underline_thickness: Some(em(90.0)),
+            strikethrough_position: None,
+            strikethrough_thickness: None,
+            cap_height: Some(em(1493.0)),
+            ex_height: Some(em(1120.0)),
+        }
+    }
+
+    #[test]
+    fn the_same_face_at_a_bigger_size_and_on_a_retina_display() {
+        // 15 pt: advance 9.0 → 9, line height 19.8 → 20; the cell was rounded *up* this time,
+        // so the baseline moves down by half the difference: round(4.5 - 0.1) = 4.
+        let m = calc(&round_numbers(15.0));
+        assert_eq!((m.cell_width, m.cell_height, m.cell_baseline), (9, 20, 4));
+        // top_to_baseline 16: round(16 + 1.875) = 18, thickness ceil(1.5) = 2.
+        assert_eq!((m.underline_position, m.underline_thickness), (18, 2));
+
+        // DPR 2 at 13 pt: 15.6 → 16 and 34.32 → 34 device pixels, i.e. 8.0 × 17.0 points, so
+        // the cell is the same size as at DPR 1 but the baseline lands half a point higher.
+        let m = calc(&round_numbers(13.0).scaled(2.0));
+        assert_eq!((m.cell_width, m.cell_height), (16, 34));
+        // face_baseline 7.8, cell rounded down by 0.32: round(7.8 + 0.16) = 8.
+        assert_eq!(m.cell_baseline, 8);
+        assert_eq!((m.underline_position, m.underline_thickness), (29, 3));
+
+        let grid = Grid::new(&m, 2.0);
+        assert_eq!((grid.cell_width, grid.line_height), (px(8.0), px(17.0)));
+        assert_eq!(grid.baseline, px(13.0));
+        assert_eq!(grid.underline, Line { y: px(14.5), thickness: px(1.5) });
+        assert_eq!(grid.cursor_thickness, px(0.5), "one device pixel");
     }
 
     /// Two real faces at two sizes on two displays, against the numbers ghostty's `calc`

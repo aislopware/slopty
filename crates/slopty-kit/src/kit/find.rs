@@ -1,9 +1,8 @@
-//! One find bar for every surface that finds in what it shows: a terminal, a file tile, a
-//! thread and a page.
+//! One find bar for every surface that finds in what it shows.
 //!
 //! After Ely GPUI Components (`src/editor/find.rs`), Copyright (c) 2026 Ely GPUI Component
-//! contributors, MIT OR Apache-2.0: one widget whose toggles and replace row show only where
-//! the owner handles them, a bad pattern's word in the count's place, and one wording for every
+//! contributors, MIT OR Apache-2.0: one widget whose toggles show only where the owner handles
+//! them, a bad pattern's word in the count's place, and one wording for every
 //! surface. The owner places it and binds its keys round it; the bar draws the field, the
 //! toggles, the tally, the steps and the close, and hands each press back.
 
@@ -16,7 +15,6 @@ use gpui::{
     SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
 use gpui_kit::component::input::{Input, InputState};
-use regex::{Regex, RegexBuilder};
 use slopty_theme::Theme;
 
 use crate::colors::hsla;
@@ -24,16 +22,12 @@ use crate::icons::Symbol;
 
 /// What a find bar says before anything is typed.
 pub const PLACEHOLDER: &str = "Find";
-/// What a replace field says before anything is typed.
-pub const REPLACE_PLACEHOLDER: &str = "Replace";
 /// The case toggle's name, as a screen reader, the hint and the palette say it.
 pub const MATCH_CASE: &str = "Match case";
 /// The whole-word toggle's name.
 pub const WHOLE_WORD: &str = "Match whole word";
 /// The pattern toggle's name.
 pub const REGEX: &str = "Use regular expression";
-/// The button that replaces the match on show.
-pub const REPLACE: &str = "Replace";
 
 /// Match case's face: the letters it tells apart.
 pub const CASE_FACE: &str = "Aa";
@@ -43,8 +37,6 @@ pub const WORD_FACE: &str = "W";
 
 /// A pattern's face: what a regular expression is written with.
 pub const REGEX_FACE: &str = ".*";
-/// The button that replaces every match.
-pub const REPLACE_ALL: &str = "Replace all";
 /// What the tally says when nothing matches.
 pub const NO_MATCHES: &str = "No matches";
 /// What the tally says for a pattern that does not compile; the pattern's own word is its
@@ -55,10 +47,6 @@ pub const FINDING: &str = "Finding\u{2026}";
 
 /// The bar's width: room for a word or two, the toggles, the tally and the steps.
 pub const WIDTH: f32 = 360.0;
-
-/// The compiled program a pattern may grow to: a pathological one says it is too large instead
-/// of taking the UI thread's memory (the crate's default is 10 MiB).
-const PROGRAM_BYTES: usize = 4 << 20;
 
 /// What a find bar asks for.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -89,19 +77,6 @@ impl Query {
         Some(format!("(?{}){pattern}", if exact { "m-i" } else { "im" }))
     }
 
-    /// The matcher, `None` for an empty needle, or why the pattern does not compile.
-    ///
-    /// # Errors
-    /// The regular expression's own message, for a pattern it refuses.
-    pub fn matcher(&self) -> Result<Option<Regex>, String> {
-        let Some(source) = self.source() else { return Ok(None) };
-        RegexBuilder::new(&source)
-            .size_limit(PROGRAM_BYTES)
-            .build()
-            .map(Some)
-            .map_err(|e| first_line(&e.to_string()))
-    }
-
     /// Flip one of its toggles.
     pub const fn flip(&mut self, toggle: Toggle) {
         let on = match toggle {
@@ -111,16 +86,6 @@ impl Query {
         };
         *on = !*on;
     }
-}
-
-/// A regex error's own first line, without the pattern echoed above it.
-fn first_line(error: &str) -> String {
-    error
-        .lines()
-        .rev()
-        .find(|l| l.starts_with("error:"))
-        .unwrap_or("not a valid pattern")
-        .to_owned()
 }
 
 /// One of a query's toggles.
@@ -178,12 +143,10 @@ impl Tally {
 
 type OnToggle = Rc<dyn Fn(Toggle, &mut Window, &mut App)>;
 type OnStep = Rc<dyn Fn(i8, &mut Window, &mut App)>;
-type OnReplace = Rc<dyn Fn(bool, &mut Window, &mut App)>;
 type OnClose = Rc<dyn Fn(&mut Window, &mut App)>;
 
 /// The find bar, under `id`: its parts are `{id}-count`, `{id}-previous`, `{id}-next`,
-/// `{id}-close`, the toggles `{id}-case`, `{id}-word` and `{id}-regex`, and the replace row's
-/// `{id}-replace` and `{id}-replace-all`.
+/// `{id}-close`, and the toggles `{id}-case`, `{id}-word` and `{id}-regex`.
 #[derive(IntoElement)]
 pub struct FindBar {
     id: SharedString,
@@ -191,7 +154,6 @@ pub struct FindBar {
     field: Entity<InputState>,
     tally: Tally,
     query: Option<(Query, OnToggle)>,
-    replace: Option<(Entity<InputState>, OnReplace)>,
     on_step: Option<OnStep>,
     on_close: Option<OnClose>,
     theme: Theme,
@@ -222,7 +184,6 @@ impl FindBar {
             field: field.clone(),
             tally,
             query: None,
-            replace: None,
             on_step: None,
             on_close: None,
             theme: theme.clone(),
@@ -237,17 +198,6 @@ impl FindBar {
         on_toggle: impl Fn(Toggle, &mut Window, &mut App) + 'static,
     ) -> Self {
         self.query = Some((query.clone(), Rc::new(on_toggle)));
-        self
-    }
-
-    /// Show the replace row, its text in `field`; a press says whether it is every match.
-    #[must_use]
-    pub fn replace(
-        mut self,
-        field: &Entity<InputState>,
-        on_replace: impl Fn(bool, &mut Window, &mut App) + 'static,
-    ) -> Self {
-        self.replace = Some((field.clone(), Rc::new(on_replace)));
         self
     }
 
@@ -268,7 +218,7 @@ impl FindBar {
 
 impl RenderOnce for FindBar {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        let Self { id, label, field, tally, query, replace, on_step, on_close, theme } = self;
+        let Self { id, label, field, tally, query, on_step, on_close, theme } = self;
         let s = theme.surfaces;
         let part = |name: &str| SharedString::from(format!("{id}-{name}"));
         let words = tally.words();
@@ -336,48 +286,6 @@ impl RenderOnce for FindBar {
                     .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
                     .on_click(move |_ev, window, cx| on_close(window, cx))
             }));
-        let replace_row =
-            replace.map(|(field, on_replace)| {
-                // Replacing is said in words: a glyph for "replace" and one for "replace all"
-                // had to be told apart by a hint.
-                let button = |name: &str, label: &'static str, all: bool| {
-                    let on_replace = Rc::clone(&on_replace);
-                    let id = part(name);
-                    let selector = id.to_string();
-                    let el = div()
-                        .id(id)
-                        .debug_selector(move || selector)
-                        .role(Role::Button)
-                        .aria_label(label)
-                        .flex_none()
-                        .h(px(super::icon_button_side(&theme)))
-                        .px(px(theme.spacing.sm))
-                        .flex()
-                        .items_center()
-                        .rounded(px(theme.radii.sm))
-                        .text_size(px(theme.typography.small()))
-                        .text_color(hsla(s.text_secondary))
-                        .cursor_pointer()
-                        .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
-                        .active(move |el| el.bg(hsla(s.pressed)))
-                        .child(label);
-                    crate::a11y::tab_stop(el, s.focus)
-                        .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
-                        .on_click(move |_ev, window, cx| on_replace(all, window, cx))
-                };
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(theme.spacing.xs))
-                    // The replacement lines up under the query, past an empty lead: a word says
-                    // what the row does, and no symbol says replace.
-                    .child(div().flex_none().size(px(theme.icon())))
-                    .child(div().flex_1().min_w_0().child(
-                        Input::new(&field).appearance(false).aria_label(REPLACE_PLACEHOLDER),
-                    ))
-                    .child(button("replace", REPLACE, false))
-                    .child(button("replace-all", REPLACE_ALL, true))
-            });
         let selector = id.to_string();
         // The bar's own hairline of room round its buttons, which sit flush to its edge.
         let rim = theme.spacing.xxs;
@@ -402,12 +310,13 @@ impl RenderOnce for FindBar {
             .occlude()
             .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
             .child(find_row)
-            .children(replace_row)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use regex::RegexBuilder;
+
     use super::*;
 
     fn query(needle: &str) -> Query {

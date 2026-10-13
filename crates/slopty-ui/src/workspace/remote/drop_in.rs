@@ -263,6 +263,18 @@ impl WorkspaceView {
         Some(Over::Remote(drag_op(op)))
     }
 
+    /// The answer to a worker's fetch of a drag a shell carries; `None` when `rep` is no
+    /// shell's drag.
+    pub(in crate::workspace) fn drag_fetch(
+        &self,
+        rep: &RepRef,
+        max: Option<u64>,
+        cx: &gpui::App,
+    ) -> Option<Fetched> {
+        let Source::Drag(drag) = rep.source else { return None };
+        self.terminals.values().find_map(|v| v.read(cx).drag_fetch(drag, rep.item, &rep.kind, max))
+    }
+
     /// Where `tile`'s shell tells what goes up for its drag: run on the workspace once the
     /// terminal's own update is done.
     fn drop_hook(tile: ItemRef, cx: &Context<Self>) -> DropHook {
@@ -668,17 +680,19 @@ mod tests {
     use std::time::Duration;
 
     use gpui::{
-        AnyView, AppContext as _, Context, IntoElement, ParentElement as _, Render, Styled as _,
-        TestAppContext, VisualTestContext, div,
+        AnyView, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render,
+        Styled as _, TestAppContext, VisualTestContext, div,
     };
     use parking_lot::Mutex;
     use slopty_client::remote::Remote;
     use slopty_client::xfer::{Download, XferError};
     use slopty_core::XferId;
-    use slopty_platform::pasteboard::Memory;
+    use slopty_platform::pasteboard::{Memory, TEXT_UTI};
     use slopty_proto::drag::DragOps;
     use slopty_proto::items::{Item, ItemKind, ItemSync};
-    use slopty_proto::transfer::Dest;
+    use slopty_proto::terminal::TermEvent;
+    use slopty_proto::transfer::{ClipFormat, ClipMsg, ClipType, Dest};
+    use slopty_terminal::TerminalView;
     use slopty_theme::Theme;
 
     use super::*;
@@ -710,6 +724,32 @@ mod tests {
         }
     }
 
+    /// A worker that keeps the representations sent up to it.
+    #[derive(Debug, Default)]
+    struct Clips(Mutex<Vec<(RepRef, Fetched)>>);
+
+    impl Remote for Clips {
+        fn upload(&self, _xfer: XferId, _files: Vec<PathBuf>, _dest: Dest, _again: bool) {}
+
+        fn cancel(&self, _xfer: XferId) {}
+
+        fn download(&self, _ask: Download) -> Result<Vec<PathBuf>, XferError> {
+            Err(XferError::Worker("no downloads here".to_owned()))
+        }
+
+        fn clip_fetch(&self, _rep: &RepRef, _max: Option<u64>, _wait: Duration) -> Fetched {
+            Fetched::Gone
+        }
+
+        fn send_clip(&self, rep: RepRef, answer: Fetched, _urgent: bool) {
+            self.0.lock().push((rep, answer));
+        }
+
+        fn forward(&self, _port: u16) -> Option<u16> {
+            None
+        }
+    }
+
     /// The shell's window: a view in its left 400 points, nothing right of it.
     struct Host(Option<AnyView>);
 
@@ -719,16 +759,17 @@ mod tests {
         }
     }
 
-    /// A file dragged from the Finder over a shell's grid is the shell's: dropped, it goes up to
-    /// the shell's directory. Right of the shell the window's own handling takes the drag.
-    #[gpui::test]
-    fn a_file_dropped_on_a_shell_goes_to_its_directory(cx: &mut TestAppContext) {
+    /// A workspace linked to a worker through `remote`, one shell of it drawn in the window's
+    /// left 400 points.
+    fn shell_in_window(
+        cx: &mut TestAppContext,
+        remote: Arc<dyn Remote>,
+    ) -> (Entity<WorkspaceView>, Entity<TerminalView>, SessionId, &mut VisualTestContext) {
         let workspace = cx.new(|_| WorkspaceView::new(Theme::default()));
         let (host, cx) = cx.add_window_view(|_, _| Host(None));
         let session = SessionId::new();
         workspace.update(cx, |v, cx| v.add_worker(KEY, "studio".to_owned(), cx));
-        let uploads = Arc::new(Uploads::default());
-        let remote: Arc<dyn Remote> = Arc::<Uploads>::clone(&uploads);
+        // The link's receiver goes with the setup: what is sent down is not looked at.
         let _rx = link_with(&workspace, cx, mac(|_| {}), vec![shell(session)], Some(remote));
         let item = Item {
             id: slopty_core::ItemId::new(),
@@ -741,11 +782,22 @@ mod tests {
             .update(cx, |v, cx| v.apply_sync(KEY, ItemSync::Snapshot { version: 1, items }, cx));
         cx.run_until_parked();
         let terminal = workspace.read_with(cx, |v, _| v.terminals[&session].clone());
+        let shown = terminal.clone();
         host.update(cx, |host, cx| {
-            host.0 = Some(terminal.into());
+            host.0 = Some(shown.into());
             cx.notify();
         });
         cx.run_until_parked();
+        (workspace, terminal, session, cx)
+    }
+
+    /// A file dragged from the Finder over a shell's grid is the shell's: dropped, it goes up to
+    /// the shell's directory. Right of the shell the window's own handling takes the drag.
+    #[gpui::test]
+    fn a_file_dropped_on_a_shell_goes_to_its_directory(cx: &mut TestAppContext) {
+        let uploads = Arc::new(Uploads::default());
+        let remote: Arc<dyn Remote> = Arc::<Uploads>::clone(&uploads);
+        let (workspace, _terminal, session, cx) = shell_in_window(cx, remote);
 
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("notes.txt");
@@ -779,5 +831,38 @@ mod tests {
         workspace.update(cx, |v, cx| v.cancel_transfer(xfer, cx));
         let rows = workspace.read_with(cx, |v, _| v.transfer_rows(std::time::Instant::now()));
         assert!(rows.is_empty(), "stopped: {rows:?}");
+    }
+
+    /// A program asking for drops reads, on the drop, what the drag over it carries: the
+    /// worker's fetch of a representation is answered from the drag its shell holds, whether
+    /// or not the clipboard is shared. A fetch of no shell's drag gets nothing from it.
+    #[gpui::test]
+    fn a_program_fetches_what_the_drag_over_it_carries(cx: &mut TestAppContext) {
+        let clips = Arc::new(Clips::default());
+        let remote: Arc<dyn Remote> = Arc::<Clips>::clone(&clips);
+        let (workspace, terminal, _session, cx) = shell_in_window(cx, remote);
+        terminal.update(cx, |v, cx| v.apply(TermEvent::DropTarget { accepts: true }, cx));
+        cx.run_until_parked();
+        let board = Memory::default();
+        board.copy(&[(TEXT_UTI, b"hello")]);
+        let mut state = DropIn::default();
+        let carried = Carried { board: &board, allowed: DragOps::COPY };
+        let over = cx.update(|window, cx| {
+            workspace.update(cx, |v, cx| {
+                v.drag_over(&mut state, point(px(200.0), px(100.0)), carried, window, cx)
+            })
+        });
+        assert!(matches!(over, Over::Remote(_)), "the program's: {over:?}");
+        let drag = state.term.and_then(|t| t.drag).expect("the shell holds the drag");
+        let text = ClipType::Format(ClipFormat::Text);
+        let fetch = |rep: &RepRef, cx: &mut VisualTestContext| {
+            let msg = ClipMsg::Fetch { rep: rep.clone(), max: None, urgent: true };
+            workspace.update(cx, |v, cx| v.clip_message(KEY, msg, cx));
+        };
+        let rep = RepRef { source: Source::Drag(drag), item: 0, kind: text.clone() };
+        fetch(&rep, cx);
+        assert_eq!(clips.0.lock().clone(), [(rep, Fetched::Data(b"hello".to_vec()))]);
+        let other = RepRef { source: Source::Drag(DragId::new()), item: 0, kind: text };
+        assert!(workspace.read_with(cx, |v, cx| v.drag_fetch(&other, None, cx)).is_none());
     }
 }

@@ -242,6 +242,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     the yard's order and click; the yard asleep while the person is away); `slopty-settings`
     `companions_values` and the schema's choice.
 
+- ❌ **Deleted 2026-10-14: the marks went with the views that drew them.** zeron's shell draws
+  an agent's row itself, so nothing reached the kit's marks any more; the outlines, pi's cells,
+  their rasteriser and `assets/agents/` are deleted (`ui.md`, "Code nothing reaches is
+  deleted"). The ruling below is kept as the record.
 - ✅ **Each agent wears its owner's mark, in one colour** (2026-10-05,
   `.research/agent-marks-2026-10-05.md`, as ruled; supersedes "No agent wears a mark of its own"
   in `ui.md`). With the agent named only in words and every agent's row leading with one

@@ -4,8 +4,8 @@
 /// `gpui::deferred(..).with_priority(layer.priority())`.
 ///
 /// Named once, so a notice cannot fall under a dialog, nor a menu opened from a popover under
-/// the popover, nor the phone's home over the palette. A panel that is part of the frame (the
-/// docked or drawn-out navigator) is drawn at the default priority, under all of them.
+/// the popover. A panel that is part of the frame is drawn at the default priority, under all
+/// of them.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Layer {
     /// Anchored to what opened it and dismissed by a click away: the inbox, a menu, the hosts.

@@ -7,6 +7,26 @@ use slopty_view_rpc::{RpcError, memory_client, methods};
 use super::{Ask, ViewModel, rows, transcript};
 use crate::conversation::thread::fixtures;
 
+/// A worker as the shell's device: `linked` whether this client reaches it now.
+fn device(
+    id: &str,
+    name: &str,
+    linked: bool,
+    now: chrono::DateTime<Utc>,
+) -> slopty_view_proto::Device {
+    slopty_view_proto::Device {
+        id: id.to_owned(),
+        name: name.to_owned(),
+        platform: String::new(),
+        last_seen_at: linked.then_some(now),
+        created_at: None,
+        version: None,
+        cursor_sdk_version: None,
+        capabilities: Vec::new(),
+        actions: Vec::new(),
+    }
+}
+
 /// A recorded session's thread, as the shell's transcript, applied by the shell's own reducer.
 #[test]
 fn a_recorded_session_reads_as_the_shells_transcript() {
@@ -90,7 +110,7 @@ async fn a_list_watch_follows_the_feed() {
         .await
         .expect("the watch");
     assert_eq!(devices.recv().await, Some(serde_json::json!([])));
-    let mac = rows::device("1", "Mac", true, Utc::now());
+    let mac = device("1", "Mac", true, Utc::now());
     feed.devices(vec![mac.clone()]);
     feed.devices(vec![mac.clone()]);
     let next = devices.recv().await.expect("the change");

@@ -538,6 +538,17 @@ impl WorkspaceView {
     /// A clipboard message from `key`. Its fetch of another worker's offer, which this client
     /// relayed, is answered by fetching from that worker, off the main thread.
     pub fn clip_message(&self, key: WorkerKey, msg: ClipMsg, cx: &Context<Self>) {
+        // The program a drag was dropped on reads what it carries: the person's own drop,
+        // whatever the clipboard shares.
+        #[cfg(target_os = "macos")]
+        if let ClipMsg::Fetch { rep, max, urgent } = &msg
+            && let Some(fetched) = self.drag_fetch(rep, *max, cx)
+        {
+            if let Some(to) = self.remote(key) {
+                to.send_clip(rep.clone(), fetched, *urgent);
+            }
+            return;
+        }
         let Some(clip) = self.clip.clone() else { return };
         // Not shared: the worker's copies stay its own, and none of this Mac's is handed over.
         if !self.clip_shared(key) {

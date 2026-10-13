@@ -11875,3 +11875,48 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   drew in gpui-kit's stock colours after the old window, which called it, was deleted. Test:
   `slopty-ui` `remote::drop_in::tests::a_file_dropped_on_a_shell_goes_to_its_directory`
   (listed, then stopped).
+
+- ✅ **Code nothing reaches is deleted, not kept for later (2026-10-14).** After the move to
+  zeron's look, a sweep found the items in `slopty-kit`, `slopty-terminal`, `slopty-client`,
+  `slopty-ui` and `slopty-theme` that no caller reached any more and deleted them. A method that
+  only a test still calls stays when the test drives a live behaviour through it. The features
+  that went with this code were already unwired:
+  - the app's own release check (`update::latest_release_feed`, `newer_release`), since
+    updates come from the build and land path, not a feed;
+  - the terminal's close confirmation (`ask_close`, `CloseConfirmed`), whose old tile frame
+    was the only thing that asked, and its sticky modifiers;
+  - muting a project's notifications, and grouping notes by thread (`Note::thread`), which
+    had no setting and no view;
+  - the kit's components that only the old views drew: priority rows, rooms, panes,
+    disclosures, press states, shimmer, facts, fit, message bubbles, the git marks, and the
+    file tile's incremental highlighter (`highlight::editor`);
+  - the `Density` sizes of the deleted chrome (title, header, bar, foot, tab, list, picker,
+    chip and the rest), leaving `row`, `menu`, `button`, `control`, `hit` and `glyph_step`;
+  - the agents' own marks (`brand.md`), the kit's motion catalogue, presence and paces but the
+    settle, the progress bar and ring, the find bar's replace row, focus traps, a label's
+    cut and fade, the menu's separators, and the remote screen's sticky ⌃ and ⌘;
+  - search over the words said in a worker's threads and the line authorship of a file
+    (`ThreadRequest::Search` and `Authors`, the worker's `thread::search` and
+    `thread::authors`), which no client asked for any more, and a virtual display following
+    its tile's size, which letterboxes now.
+
+  A second pass found what the first missed: every public item made crate-private, then each
+  one a dependent needs (on macOS and iOS, tests included) made public again, so that rustc
+  names whatever no crate reaches.
+
+  The build with every target and feature stays warning-free. A crate's tests still cover
+  each behaviour that ships. The sweep also turned up a behaviour that the tiling deletion had
+  cut off: a program that asks for drops and reads a large type only on the drop got nothing,
+  because the worker's fetch of the drag never reached the shell holding it. The workspace
+  answers that fetch from the shell's drag again (`WorkspaceView::drag_fetch`), ahead of the
+  clipboard's sharing rule, as before. Test: `slopty-ui`
+  `remote::drop_in::tests::a_program_fetches_what_the_drag_over_it_carries`.
+  Two more came back the same way. A terminal sized by another client says so at its foot,
+  "Sized for another screen · Take", and a click asks the worker to drive from here
+  (`TerminalView::drive`), as the tiling header's Take did; typing alone hands the size over
+  only from a client that went quiet. Test: `slopty-terminal`
+  `view::tests::a_view_another_client_sizes_offers_to_take_the_size`. And a link that stays
+  on a DERP relay says so once per stay, with the fix, as a notice (`transport.md`, "A link
+  that stays on DERP says so"; `RelayWatch::take_notice`). Tests: `slopty-ui`
+  `workspace::workers::tests::a_link_that_stays_on_derp_says_so_once`, `slopty-client`
+  `relay::tests::a_stay_on_derp_is_said_once`.

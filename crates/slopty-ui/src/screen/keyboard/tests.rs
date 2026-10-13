@@ -364,7 +364,7 @@ fn typed_text_outside_ascii_goes_whole(cx: &mut gpui::TestAppContext) {
     let fake = Fake::on(US);
     let (view, mut rx, cx) = focused(cx, &fake);
     inputs(&mut rx);
-    view.update(cx, |v, cx| v.commit_text("Xin chào\nthế giới", cx));
+    view.update(cx, |v, _| v.commit_text("Xin chào\nthế giới"));
     assert_eq!(
         inputs(&mut rx),
         [

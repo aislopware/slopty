@@ -1,11 +1,11 @@
 //! Slopty's chrome kit: what every surface is drawn with, below any view of its own.
 //!
 //! * [`kit`] — gpui-kit's theme kept on the same tokens, and the chrome's parts (buttons, pills,
-//!   menus, hints, panes, motion).
-//! * [`icons`] — the chrome's glyphs, the agents' marks and the git vocabulary, drawn by us.
+//!   menus, hints, motion).
+//! * [`icons`] — the chrome's glyphs, the agents' marks, drawn by us.
 //! * [`colors`] — theme tokens → GPUI colours.
 //! * [`a11y`] — the keyboard ring and, for tests, the accessibility tree.
-//! * [`highlight`] — syntax colouring for a file and a fenced code block.
+//! * [`highlight`] — syntax colouring for a fenced code block.
 //! * [`markdown`] — the one `TextView` style every Markdown surface draws by.
 //! * [`fonts`] — bundled `IBM Plex Sans`, `Lilex` and Nerd symbols, registered at startup.
 //! * [`frames`] — the UI frame-time probe (draw percentiles, cadence, drops).
@@ -15,8 +15,7 @@
 //! * [`clock`], [`chrome_text`], [`file_types`] — the small pieces the views share.
 //! * `retained` — the oracle: the frame shown against the same state drawn from scratch (tests).
 //!
-//! zeron's own design system is the shell's (`slopty-shell`); [`motion`] is the part of it the
-//! kit's parts move by (zeron, MIT, `THIRD_PARTY_NOTICES.md`).
+//! zeron's own design system is the shell's (`slopty-shell`).
 //!
 //! The views (`slopty-ui`) sit on it; nothing here reaches up to them
 //! (`docs/decisions/ui.md`, "The chrome kit is a crate of its own").
@@ -40,7 +39,6 @@ pub mod keys;
 pub mod kit;
 pub mod layer;
 pub mod markdown;
-pub mod motion;
 #[cfg(any(test, feature = "e2e"))]
 pub mod retained;
 pub mod shown;

@@ -213,27 +213,6 @@ fn grep_cut(run: &str) -> Option<usize> {
     }
 }
 
-/// `s` as one word for a POSIX or fish shell: single-quoted, a quote inside spelled out.
-#[must_use]
-pub fn shell_word(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
-
-/// The shell line that opens `path` in a terminal editor, at `line` when one is known.
-///
-/// That is `$EDITOR`, else `vi`. Every session's `$EDITOR` is Slopty's own unless the person's
-/// shell files set one (`slopty_pty::shell_integration::EDITOR_SHIM`), and it edits in a file tile,
-/// which is what a file too large for a tile asks a terminal to avoid: then `$VISUAL`, else
-/// `vi`. The shell expands the variables itself.
-#[must_use]
-pub fn editor_command(path: &str, line: Option<u32>) -> String {
-    let at = line.map(|l| format!("+{l} ")).unwrap_or_default();
-    format!(
-        "e=${{EDITOR:-vi}}; [ \"${{e##*/}}\" = slopty-editor ] && e=${{VISUAL:-vi}}; $e {at}{}",
-        shell_word(path)
-    )
-}
-
 /// Byte range of the URL in `text` that covers byte `offset`.
 fn url_range_at(text: &str, offset: usize) -> Option<Range<usize>> {
     if offset >= text.len() {
@@ -427,47 +406,6 @@ mod tests {
                 ((0, 5), (1, 2), "https://real/")
             );
         }
-    }
-
-    #[test]
-    fn paths_are_found_with_their_line_and_nothing_else_is() {
-        let at = path_range_at;
-        assert_eq!(
-            at("error: src/main.rs:12:5 bad", 9),
-            Some((7..23, "src/main.rs".to_owned(), Some(12)))
-        );
-        assert_eq!(at("at ./notes.md.", 4), Some((3..13, "./notes.md".to_owned(), None)));
-        assert_eq!(at("open (~/.zshrc)", 8), Some((6..14, "~/.zshrc".to_owned(), None)));
-        assert_eq!(at("see Cargo.toml:3", 6), Some((4..16, "Cargo.toml".to_owned(), Some(3))));
-        assert_eq!(at("e.g. this", 1), None, "prose is not a file");
-        assert_eq!(at("https://x.y/a.rs", 12), None, "a URL is a link, not a path");
-        assert_eq!(at("12:30 now", 1), None);
-        assert_eq!(at("   ", 1), None);
-        let line = Line::from_text("in src/lib.rs:7", 20, Style::DEFAULT);
-        let span = path_at(&[&line], (0, 6)).unwrap();
-        assert_eq!(
-            (span.start, span.end, span.path.as_str(), span.line),
-            ((0, 3), (0, 15), "src/lib.rs", Some(7))
-        );
-        assert_eq!(path_at(&[&line], (0, 1)), None);
-        assert_eq!(shell_word("it's a b"), "'it'\\''s a b'");
-        // Run as the shell would, the editor an `echo` that says how it was called.
-        let run = |line: &str, editor: &str| {
-            std::process::Command::new("/bin/sh")
-                .args(["-c", line])
-                .env("EDITOR", editor)
-                .env("VISUAL", "echo visual")
-                .output()
-                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
-                .unwrap_or_default()
-        };
-        assert_eq!(run(&editor_command("a b.rs", Some(3)), "echo ed"), "ed +3 a b.rs");
-        assert_eq!(run(&editor_command("/x/y", None), "echo ed"), "ed /x/y");
-        assert_eq!(
-            run(&editor_command("/x/y", Some(2)), "/d/bin/slopty-editor"),
-            "visual +2 /x/y",
-            "Slopty's own editor is passed over"
-        );
     }
 
     #[test]

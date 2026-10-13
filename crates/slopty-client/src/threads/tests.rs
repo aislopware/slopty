@@ -359,9 +359,10 @@ fn blobs_keep_the_most_recent_within_their_budget() {
     blobs.put(c.clone(), Expanded::Bytes(vec![0; 4]));
     assert!(blobs.get(&b).is_none(), "b, least recent, went to make room");
     assert!(blobs.get(&a).is_some() && blobs.get(&c).is_some());
-    assert_eq!(blobs.bytes(), 8);
-    blobs.put(ContentRef("huge".to_owned()), Expanded::Text("x".repeat(11)));
-    assert_eq!(blobs.bytes(), 8, "one past the whole budget is not kept");
+    let huge = ContentRef("huge".to_owned());
+    blobs.put(huge.clone(), Expanded::Text("x".repeat(11)));
+    assert!(blobs.get(&huge).is_none(), "one past the whole budget is not kept");
+    assert!(blobs.get(&a).is_some() && blobs.get(&c).is_some(), "and takes nothing's room");
 }
 
 #[test]

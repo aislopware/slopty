@@ -56,8 +56,8 @@ pub(super) struct ThreadFaces {
     cache: Option<PathBuf>,
     /// Each thread's title as its worker's table last said, for its tile's header.
     titles: HashMap<ThreadId, String>,
-    /// The last line each thread's agent wrote as its worker's table last said, for the
-    /// navigator and the palette.
+    /// The last line each thread's agent wrote as its worker's table last said, for the note
+    /// on a turn that ended unwatched.
     lines: HashMap<ThreadId, String>,
     /// Each thread's agent as its worker's table last said, for the mark its tile leads with.
     agents: HashMap<ThreadId, AgentId>,
@@ -90,8 +90,8 @@ impl ThreadFaces {
 }
 
 impl WorkspaceView {
-    /// A thread's name, the one every surface calls it by: a thread tile's header, the
-    /// navigator, the inbox, and who wrote a line. Where its agent runs in a tile here, the
+    /// A thread's name, the one every surface calls it by: a header, a note, and who wrote a
+    /// line. Where its agent runs in a tile here, the
     /// tile's title (the name the person gave it, its project role, or what the agent titled
     /// itself); else its title as its worker's table says it, which every agent's adapter
     /// fills alike (the agent's own name for the session, else its first prompt); else, before
@@ -499,8 +499,8 @@ impl WorkspaceView {
     }
 }
 
-/// Where a thread stands as its worker's table row says it, for the navigator's glyph, the
-/// header's pill, and the bell: a thread driven over a protocol has no
+/// Where a thread stands as its worker's table row says it, for the header's pill and the icon
+/// badge: a thread driven over a protocol has no
 /// terminal whose agent status could say it.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(super) struct ThreadStand {

@@ -16,16 +16,6 @@ impl WorkerKey {
         Self(value)
     }
 
-    /// A key from the first 16 bytes of `bytes`, big-endian, zero-padded.
-    #[must_use]
-    pub fn from_bytes(bytes: &[u8]) -> Self {
-        let mut buf = [0_u8; 16];
-        for (to, from) in buf.iter_mut().zip(bytes) {
-            *to = *from;
-        }
-        Self(u128::from_be_bytes(buf))
-    }
-
     /// The value.
     #[must_use]
     pub const fn value(self) -> u128 {

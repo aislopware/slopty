@@ -108,13 +108,6 @@ impl MenuItem {
         }
     }
 
-    /// Muted words at the row's end: its keys, or a state.
-    #[must_use]
-    pub fn detail(mut self, detail: impl Into<SharedString>) -> Self {
-        self.detail = detail.into();
-        self
-    }
-
     /// An icon before its words.
     #[must_use]
     pub const fn icon(mut self, icon: Symbol) -> Self {
@@ -143,17 +136,10 @@ impl MenuItem {
     }
 }
 
-/// A menu's entries in order.
-#[derive(Clone, Debug)]
-enum Entry {
-    Item(MenuItem),
-    Separator,
-}
-
-/// Rows, and hairlines between groups of them.
+/// A menu's rows, in order.
 #[derive(Clone, Debug, Default)]
 pub struct Menu {
-    entries: Vec<Entry>,
+    rows: Vec<MenuItem>,
 }
 
 impl Menu {
@@ -163,31 +149,14 @@ impl Menu {
         Self::default()
     }
 
-    /// A row at the end.
-    #[must_use]
-    pub fn item(mut self, item: MenuItem) -> Self {
-        self.push(item);
-        self
-    }
-
     /// A row at the end, in place.
     pub fn push(&mut self, item: MenuItem) {
-        self.entries.push(Entry::Item(item));
-    }
-
-    /// A hairline before the next row, once there is a row before it.
-    pub fn separate(&mut self) {
-        if matches!(self.entries.last(), Some(Entry::Item(_))) {
-            self.entries.push(Entry::Separator);
-        }
+        self.rows.push(item);
     }
 
     /// The rows, in order.
     fn items(&self) -> impl Iterator<Item = &MenuItem> {
-        self.entries.iter().filter_map(|e| match e {
-            Entry::Item(item) => Some(item),
-            Entry::Separator => None,
-        })
+        self.rows.iter()
     }
 
     /// How many rows.
@@ -322,20 +291,6 @@ impl MenuPanel {
         self.on_dismiss = Some(Rc::new(on_dismiss));
         self
     }
-
-    /// What it shows above its rows, which is not chosen: a machine's facts.
-    #[must_use]
-    pub fn head(mut self, head: Vec<gpui::AnyElement>) -> Self {
-        self.head = head;
-        self
-    }
-
-    /// Drawn on its way out: it takes no keyboard and no press.
-    #[must_use]
-    pub const fn inert(mut self, inert: bool) -> Self {
-        self.inert = inert;
-        self
-    }
 }
 
 /// Choose row `at`: close the menu, then run it.
@@ -375,36 +330,9 @@ impl RenderOnce for MenuPanel {
         }
         let marked = cursor.read(cx).at;
         let mut rows = head;
-        rows.reserve(menu.entries.len());
-        let mut n = 0_usize;
-        for entry in &menu.entries {
-            match entry {
-                Entry::Separator => {
-                    let selector = format!("{id}-separator-{n}");
-                    rows.push(
-                        div()
-                            .debug_selector(move || selector)
-                            .flex_none()
-                            .py(px(theme.spacing.xs))
-                            .child(super::rule(theme.surfaces.stroke))
-                            .into_any_element(),
-                    );
-                }
-                Entry::Item(item) => {
-                    rows.push(row(
-                        &id,
-                        n,
-                        item,
-                        marked == Some(n),
-                        &menu,
-                        &cursor,
-                        &on_close,
-                        &theme,
-                    ));
-                    n = n.saturating_add(1);
-                }
-            }
-        }
+        rows.extend(menu.rows.iter().enumerate().map(|(n, item)| {
+            row(&id, n, item, marked == Some(n), &menu, &cursor, &on_close, &theme)
+        }));
         let (keys_menu, keys_cursor, keys_close) =
             (Rc::clone(&menu), cursor.clone(), Rc::clone(&dismiss));
         let (up_menu, up_cursor, up_close) =
@@ -530,7 +458,7 @@ fn row(
         (cursor.clone(), Rc::clone(menu), Rc::clone(close));
     let disabled = item.disabled;
     // Delta's menu row, 23 with 14 pt words (`.research/delta-signed-in-2026-10-12.md` §3.5).
-    super::sheet_row(theme, super::Row::One)
+    super::sheet_row(theme)
         .h(px(theme.density.menu))
         .id(ElementId::Name(selector.clone().into()))
         .debug_selector(move || selector)

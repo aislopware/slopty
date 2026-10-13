@@ -12,19 +12,17 @@ workspace = true
 
 [dependencies]
 anyhow.workspace = true
-# The syntax cache's content key (`syntax_cache`).
-# The installed families the type settings offer, and whether each is fixed width (`typography`).
 gpui.workspace = true
 gpui-kit.workspace = true
-# The palette's, the pickers' and the symbols' fuzzy match (`fuzzy`).
+# The icon caches (`icons`).
 parking_lot.workspace = true
+# A terminal's find (`kit::find`).
 regex.workspace = true
-# The file icons, embedded (`file_icons`).
 slopty-core.workspace = true
 slopty-platform.workspace = true
 slopty-proto.workspace = true
 slopty-theme.workspace = true
-# Syntax colouring for a file tile and a fenced code block (`highlight`).
+# Syntax colouring for a fenced code block (`highlight`).
 syntect.workspace = true
 two-face.workspace = true
 tracing.workspace = true

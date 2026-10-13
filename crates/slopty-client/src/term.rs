@@ -18,25 +18,6 @@ use slopty_proto::terminal::{
 /// go first (see [`Scrollback`]), so what was fetched to be looked at stays.
 pub const CACHE_LINES: usize = 20_000;
 
-/// The MIME type a drop of files is offered to a program as (Kitty drag and drop).
-pub const URI_LIST: &str = "text/uri-list";
-
-/// The `text/uri-list` a program asking for drops is given for `paths`.
-///
-/// `paths` are the worker's copies of the dropped files: one `file://` URL a line, each line
-/// ended by CRLF (RFC 2483). A path that is not absolute is left out. Drops come from the Apple
-/// clients only.
-#[cfg(target_vendor = "apple")]
-#[must_use]
-pub fn uri_list(paths: &[String]) -> Vec<u8> {
-    let mut list = String::new();
-    for url in paths.iter().filter_map(|p| crate::dnd::file_url(std::path::Path::new(p))) {
-        list.push_str(&url);
-        list.push_str("\r\n");
-    }
-    list.into_bytes()
-}
-
 /// What the program said of a client's drag over its terminal (Kitty drag and drop).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum DragAnswer {
@@ -1499,15 +1480,6 @@ mod tests {
         assert_eq!(state.drag_answer(), None);
     }
 
-    /// A drop's files go to the program as `file://` URLs, escaped, one a CRLF-ended line.
-    #[cfg(target_vendor = "apple")]
-    #[test]
-    fn a_uri_list_names_each_absolute_path_as_a_file_url() {
-        let paths = ["/w/a b.txt".to_owned(), "rel".to_owned(), "/w/ü".to_owned()];
-        assert_eq!(uri_list(&paths), b"file:///w/a%20b.txt\r\nfile:///w/%C3%BC\r\n");
-        assert_eq!(uri_list(&[]), b"");
-    }
-
     /// The program's pointer shape is kept from its report, the I-beam until one comes.
     #[test]
     fn the_programs_pointer_shape_is_kept() {
@@ -1834,64 +1806,6 @@ mod tests {
         let _fetches: Vec<Effect> = state.scroll_to_line(LineIndex(3));
         assert_eq!(state.index_at_row(0), LineIndex(3));
         assert_eq!(state.view_offset(), 3);
-    }
-
-    /// The rows of a failed block run from its prompt to the next prompt, which carries the
-    /// status; a block cut off by the view's bottom takes it from the prompt below; rows over
-    /// the first prompt are nobody's block; the open prompt and the alternate screen have none.
-    #[test]
-    fn failed_runs_cover_the_blocks_whose_command_failed() {
-        let prompt = |exit| SemanticMark::Prompt { exit, input: Some(2) };
-        let mut state = TermState::new(size());
-        let screen = |state: &mut TermState, newest: Option<u8>, modes: TermModes| {
-            let mut f = frame(2, true, 0, 6, 9, &[(0, "2"), (1, ""), (2, "$ ")]);
-            f.modes = modes;
-            Arc::make_mut(&mut f.updates[0].line).mark = SemanticMark::Output;
-            Arc::make_mut(&mut f.updates[1].line).mark = SemanticMark::Output;
-            Arc::make_mut(&mut f.updates[2].line).mark = prompt(newest);
-            state.apply(TermEvent::Frame(f));
-        };
-        screen(&mut state, Some(0), TermModes::empty());
-        state.apply(TermEvent::Lines {
-            start: LineIndex(0),
-            lines: vec![
-                marked("$ ls", prompt(None)),
-                marked("a", SemanticMark::Output),
-                marked("b", SemanticMark::Output),
-                marked("$ false", prompt(Some(0))),
-                marked("$ seq 2", prompt(Some(1))),
-                marked("1", SemanticMark::Output),
-            ],
-        });
-        let runs = |state: &TermState| {
-            let runs = state.failed_runs(&state.view());
-            runs.into_iter().map(|run| (run.start, run.end)).collect::<Vec<_>>()
-        };
-        assert_eq!(runs(&state), [], "`seq 2` succeeded; the open prompt has no status");
-        let _fetches = state.scroll_to_line(LineIndex(3));
-        assert_eq!(runs(&state), [(0, 1)], "`false` failed, `seq 2` below it did not");
-        let _fetches = state.scroll_to_line(LineIndex(0));
-        assert_eq!(runs(&state), [], "`ls` succeeded, `false` starts below the view");
-        let _fetches = state.scroll_to_line(LineIndex(1));
-        assert_eq!(runs(&state), [(2, 3)], "the `false` row, under `ls`'s cut-off output");
-
-        let _fetches = state.scroll_to(0);
-        screen(&mut state, Some(2), TermModes::empty());
-        assert_eq!(runs(&state), [(0, 2)], "`seq 2` failed: its output, cut off at the top");
-        let _fetches = state.scroll_to_line(LineIndex(4));
-        assert_eq!(runs(&state), [(0, 3)], "the whole `seq 2` block, the status from below");
-        let _fetches = state.scroll_to(0);
-        screen(&mut state, Some(2), TermModes::ALT_SCREEN);
-        assert_eq!(runs(&state), [], "the alternate screen has no blocks");
-
-        // A status on the first prompt says a command failed before any block was drawn.
-        let mut state = TermState::new(size());
-        let mut f = frame(1, true, 0, 0, 3, &[(0, "junk"), (1, "$ x"), (2, "y")]);
-        Arc::make_mut(&mut f.updates[0].line).mark = SemanticMark::Output;
-        Arc::make_mut(&mut f.updates[1].line).mark = prompt(Some(1));
-        Arc::make_mut(&mut f.updates[2].line).mark = SemanticMark::Output;
-        state.apply(TermEvent::Frame(f));
-        assert_eq!(runs(&state), [], "the junk over the first prompt is no block's");
     }
 
     /// A command continued on the next row (a `for` loop typed over two lines) is marked as
@@ -2449,5 +2363,63 @@ mod tests {
         assert_eq!((s.screen().cols(), s.screen().rows()), (20, 5));
         s.apply(TermEvent::Resized { cols: 8, rows: 2 });
         assert_eq!((s.screen().cols(), s.screen().rows()), (8, 2));
+    }
+
+    /// The rows of a failed block run from its prompt to the next prompt, which carries the
+    /// status; a block cut off by the view's bottom takes it from the prompt below; rows over
+    /// the first prompt are nobody's block; the open prompt and the alternate screen have none.
+    #[test]
+    fn failed_runs_cover_the_blocks_whose_command_failed() {
+        let prompt = |exit| SemanticMark::Prompt { exit, input: Some(2) };
+        let mut state = TermState::new(size());
+        let screen = |state: &mut TermState, newest: Option<u8>, modes: TermModes| {
+            let mut f = frame(2, true, 0, 6, 9, &[(0, "2"), (1, ""), (2, "$ ")]);
+            f.modes = modes;
+            Arc::make_mut(&mut f.updates[0].line).mark = SemanticMark::Output;
+            Arc::make_mut(&mut f.updates[1].line).mark = SemanticMark::Output;
+            Arc::make_mut(&mut f.updates[2].line).mark = prompt(newest);
+            state.apply(TermEvent::Frame(f));
+        };
+        screen(&mut state, Some(0), TermModes::empty());
+        state.apply(TermEvent::Lines {
+            start: LineIndex(0),
+            lines: vec![
+                marked("$ ls", prompt(None)),
+                marked("a", SemanticMark::Output),
+                marked("b", SemanticMark::Output),
+                marked("$ false", prompt(Some(0))),
+                marked("$ seq 2", prompt(Some(1))),
+                marked("1", SemanticMark::Output),
+            ],
+        });
+        let runs = |state: &TermState| {
+            let runs = state.failed_runs(&state.view());
+            runs.into_iter().map(|run| (run.start, run.end)).collect::<Vec<_>>()
+        };
+        assert_eq!(runs(&state), [], "`seq 2` succeeded; the open prompt has no status");
+        let _fetches = state.scroll_to_line(LineIndex(3));
+        assert_eq!(runs(&state), [(0, 1)], "`false` failed, `seq 2` below it did not");
+        let _fetches = state.scroll_to_line(LineIndex(0));
+        assert_eq!(runs(&state), [], "`ls` succeeded, `false` starts below the view");
+        let _fetches = state.scroll_to_line(LineIndex(1));
+        assert_eq!(runs(&state), [(2, 3)], "the `false` row, under `ls`'s cut-off output");
+
+        let _fetches = state.scroll_to(0);
+        screen(&mut state, Some(2), TermModes::empty());
+        assert_eq!(runs(&state), [(0, 2)], "`seq 2` failed: its output, cut off at the top");
+        let _fetches = state.scroll_to_line(LineIndex(4));
+        assert_eq!(runs(&state), [(0, 3)], "the whole `seq 2` block, the status from below");
+        let _fetches = state.scroll_to(0);
+        screen(&mut state, Some(2), TermModes::ALT_SCREEN);
+        assert_eq!(runs(&state), [], "the alternate screen has no blocks");
+
+        // A status on the first prompt says a command failed before any block was drawn.
+        let mut state = TermState::new(size());
+        let mut f = frame(1, true, 0, 0, 3, &[(0, "junk"), (1, "$ x"), (2, "y")]);
+        Arc::make_mut(&mut f.updates[0].line).mark = SemanticMark::Output;
+        Arc::make_mut(&mut f.updates[1].line).mark = prompt(Some(1));
+        Arc::make_mut(&mut f.updates[2].line).mark = SemanticMark::Output;
+        state.apply(TermEvent::Frame(f));
+        assert_eq!(runs(&state), [], "the junk over the first prompt is no block's");
     }
 }

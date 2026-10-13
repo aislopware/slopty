@@ -78,12 +78,6 @@ impl FolderPages {
         self.next()
     }
 
-    /// The folder holds entries not listed yet.
-    #[must_use]
-    pub fn has_more(&self) -> bool {
-        self.held() < self.total()
-    }
-
     const fn held(&self) -> usize {
         match &self.listing {
             Some(Listing::Listed { entries, .. }) => entries.len(),
@@ -107,6 +101,12 @@ impl FolderPages {
         let after = After::of(entries.last()?);
         self.asked = Some(after.clone());
         Some(ClientMsg::FolderPage { path: self.path.clone(), after })
+    }
+
+    /// The folder holds entries not listed yet.
+    #[must_use]
+    pub fn has_more(&self) -> bool {
+        self.held() < self.total()
     }
 }
 
@@ -246,26 +246,6 @@ mod tests {
         }
     }
 
-    /// The first page alone until the person wants more; then each page asks after the last
-    /// entry held, joins in order, and asks for no page past the end or twice at once.
-    #[test]
-    fn pages_join_in_order_as_the_person_wants_more() {
-        let mut big = FolderPages::new("~/big".to_owned());
-        assert!(big.listed(page(0, PAGE, 4500)).is_none(), "one page until more is wanted");
-        assert!(big.has_more());
-        let after = asked(big.more());
-        assert_eq!(after.name, "f01999");
-        assert!(big.more().is_none(), "one page on its way at a time");
-        assert!(big.page(&after, page(PAGE, PAGE, 4500)).is_none(), "only the page wanted");
-        let after = asked(big.more());
-        assert!(big.page(&after, page(2 * PAGE, 500, 4500)).is_none());
-        assert!(!big.has_more());
-        assert!(big.more().is_none(), "nothing past the end");
-        let Some(Listing::Listed { entries, total, .. }) = big.listing() else { panic!() };
-        assert_eq!((entries.len(), *total), (4500, 4500));
-        assert!(entries.windows(2).all(|w| w[0].name < w[1].name));
-    }
-
     /// A relist (the folder changed) puts its first page in place of every page, and asks
     /// again for as many as the person had; a page asked before it is dropped when it comes.
     #[test]
@@ -283,18 +263,6 @@ mod tests {
         big.page(&again, page(PAGE, PAGE, 4101));
         let Some(Listing::Listed { entries, .. }) = big.listing() else { panic!() };
         assert_eq!(entries.len(), 2 * PAGE);
-    }
-
-    /// A folder that went while a page was on its way says so in place of the pages.
-    #[test]
-    fn a_folder_gone_between_pages_says_so() {
-        let mut big = FolderPages::new("~/big".to_owned());
-        big.listed(page(0, PAGE, 3000));
-        let after = asked(big.more());
-        let gone = Listing::Missing { error: "No such file or directory".to_owned() };
-        assert!(big.page(&after, gone.clone()).is_none());
-        assert_eq!(big.listing(), Some(&gone));
-        assert!(!big.has_more());
     }
 
     /// Ops are numbered, held until their answer, and answered once; a lost link hands back
@@ -333,5 +301,37 @@ mod tests {
         );
         let failed = FsOutcome::Failed { error: "Permission denied".to_owned() };
         assert_eq!(sentence(&trash, &failed), "Could not trash “old”: Permission denied");
+    }
+
+    /// The first page alone until the person wants more; then each page asks after the last
+    /// entry held, joins in order, and asks for no page past the end or twice at once.
+    #[test]
+    fn pages_join_in_order_as_the_person_wants_more() {
+        let mut big = FolderPages::new("~/big".to_owned());
+        assert!(big.listed(page(0, PAGE, 4500)).is_none(), "one page until more is wanted");
+        assert!(big.has_more());
+        let after = asked(big.more());
+        assert_eq!(after.name, "f01999");
+        assert!(big.more().is_none(), "one page on its way at a time");
+        assert!(big.page(&after, page(PAGE, PAGE, 4500)).is_none(), "only the page wanted");
+        let after = asked(big.more());
+        assert!(big.page(&after, page(2 * PAGE, 500, 4500)).is_none());
+        assert!(!big.has_more());
+        assert!(big.more().is_none(), "nothing past the end");
+        let Some(Listing::Listed { entries, total, .. }) = big.listing() else { panic!() };
+        assert_eq!((entries.len(), *total), (4500, 4500));
+        assert!(entries.windows(2).all(|w| w[0].name < w[1].name));
+    }
+
+    /// A folder that went while a page was on its way says so in place of the pages.
+    #[test]
+    fn a_folder_gone_between_pages_says_so() {
+        let mut big = FolderPages::new("~/big".to_owned());
+        big.listed(page(0, PAGE, 3000));
+        let after = asked(big.more());
+        let gone = Listing::Missing { error: "No such file or directory".to_owned() };
+        assert!(big.page(&after, gone.clone()).is_none());
+        assert_eq!(big.listing(), Some(&gone));
+        assert!(!big.has_more());
     }
 }

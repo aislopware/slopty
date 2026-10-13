@@ -16,12 +16,6 @@ use super::TerminalView;
 pub(super) type Watch = Option<(AnyWindowHandle, [Subscription; 3])>;
 
 impl TerminalView {
-    /// Whether this view has the keyboard in the window in front, as last told to its worker.
-    #[must_use]
-    pub const fn has_keyboard(&self) -> bool {
-        self.keyboard
-    }
-
     /// Watch the focus in `window`, once per window the view is drawn in.
     pub(super) fn watch_keyboard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let here = window.window_handle();

@@ -14,8 +14,6 @@ use gpui::{
     StatefulInteractiveElement as _, Styled as _, Window, canvas, div, point, px,
 };
 
-use super::Pace;
-
 /// A sparkline of `values`, oldest first, in `steps` places across.
 ///
 /// The newest is at the right edge, each older one a step left, scaled to the series' own low and
@@ -177,9 +175,9 @@ impl RenderOnce for Spark {
         }
         let key = ElementId::Name(SharedString::from(format!("spark-slide-{came}")));
         host.child(
-            div().size_full().with_animation(key, Pace::Settle.animation(), move |el, t| {
-                el.child(draw(1.0 - t))
-            }),
+            div()
+                .size_full()
+                .with_animation(key, super::settle(), move |el, t| el.child(draw(1.0 - t))),
         )
         .into_any_element()
     }

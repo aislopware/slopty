@@ -114,12 +114,6 @@ impl ScreenView {
         self.offers
     }
 
-    /// Whether the controls' menu is open.
-    #[must_use]
-    pub const fn controls_open(&self) -> bool {
-        self.controls_open
-    }
-
     /// Open the controls' menu, or close it and give the picture the keyboard back.
     pub fn set_controls_open(
         &mut self,
@@ -265,6 +259,12 @@ impl ScreenView {
         )
         .with_priority(slopty_kit::layer::Layer::Submenu.priority())
         .into_any_element()
+    }
+
+    /// Whether the controls' menu is open.
+    #[must_use]
+    pub const fn controls_open(&self) -> bool {
+        self.controls_open
     }
 }
 

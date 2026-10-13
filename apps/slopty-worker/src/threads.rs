@@ -20,7 +20,7 @@ use slopty_net::{Connection, WorkerMsg};
 use slopty_proto::orchestration::ErrorCode;
 use slopty_proto::thread::wire::{
     Expanded, Intent, IntentDone, Outcome, PastSessions, ReviewScope, Setup, Start, TableFrame,
-    ThreadFrame, ThreadHits, ThreadRequest, ThreadRow,
+    ThreadFrame, ThreadRequest, ThreadRow,
 };
 use slopty_proto::thread::{
     Action, AgentId, Answerer, AskId, Cap, ContentRef, Cursor, Delivery, Drive, IntentId, Liveness,
@@ -32,7 +32,6 @@ use slopty_worker::orchestrate::{self, Agents, Conversations as _, Failure};
 use slopty_worker::repo::worktrees;
 use slopty_worker::session::SessionHandle;
 use slopty_worker::thread::acp::{self, Acp};
-use slopty_worker::thread::authors::Authorship;
 use slopty_worker::thread::claude::{self, Driver, Sources};
 use slopty_worker::thread::codex::{self, Codex};
 use slopty_worker::thread::compose::Terminals;
@@ -127,7 +126,6 @@ pub struct Threads {
     acp: Acp,
     composer: Composer,
     snapshots: Snapshots,
-    authors: Authorship,
     history: History,
     worker: Worker,
     starts: starts::Starts,
@@ -158,7 +156,6 @@ pub fn open(
                 Typing { worker: worker.clone(), agents: crate::server::DaemonAgents(agents) };
             let composer = Composer::new(host.clone(), Arc::new(typing));
             let git = slopty_worker::changes::git().map(Path::to_path_buf);
-            let authors = Authorship::new(host.clone(), git.clone());
             let snapshots = Snapshots::new(host.clone(), snapshots, git);
             // The threads live under the data directory, where pi's gate is written too.
             let data = dir.parent().unwrap_or(dir).to_path_buf();
@@ -181,7 +178,6 @@ pub fn open(
                 acp,
                 composer,
                 snapshots,
-                authors,
                 history,
                 worker,
                 starts: starts::Starts::default(),
@@ -567,14 +563,6 @@ impl Following {
             ThreadRequest::Review { thread, scope } => {
                 self.command(at, thread, Command::Review { scope });
             }
-            // Blame runs git over every turn: on a task of its own.
-            ThreadRequest::Authors { thread, path } => {
-                let (authors, out) = (threads.authors, at.out.clone());
-                at.tasks.spawn(async move {
-                    let _gone =
-                        out.send(WorkerMsg::Authors(authors.authors(thread, &path).await)).await;
-                });
-            }
             // Git takes its time: a keep or a revert is answered from a task of its own.
             ThreadRequest::Intent {
                 id,
@@ -680,22 +668,6 @@ impl Following {
                 at.tasks.spawn(async move {
                     let listed = sessions(&threads, agent, cwd, query, limit).await;
                     let _gone = out.send(WorkerMsg::Sessions(listed)).await;
-                });
-            }
-            // Every thread held is read: on the blocking pool.
-            ThreadRequest::Search { query, limit } => {
-                let (host, out) = (threads.host, at.out.clone());
-                at.tasks.spawn(async move {
-                    let asked = query.clone();
-                    let found = tokio::task::spawn_blocking(move || {
-                        slopty_worker::thread::search::search(&host, &query, limit)
-                    })
-                    .await
-                    .unwrap_or_else(|e| {
-                        tracing::warn!("a thread search failed: {e}");
-                        ThreadHits { query: asked, threads: Vec::new(), more: 0 }
-                    });
-                    let _gone = out.send(WorkerMsg::ThreadHits(found)).await;
                 });
             }
         }

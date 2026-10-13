@@ -16,10 +16,9 @@ mod golden_thread {
         WriteDetail,
     };
     use slopty_proto::thread::wire::{
-        AuthorRun, Authors, Expanded, FileDiff, FileKind, Intent, IntentDone, ItemHit, Modes,
-        NewWorktree, Outcome, Page, PastSession, PastSessions, Pick, PromptHit, PullSeen,
-        PullStands, Review, ReviewScope, Setup, Start, TableFrame, ThreadFrame, ThreadHit,
-        ThreadHits, ThreadRequest,
+        Expanded, FileDiff, FileKind, Intent, IntentDone, Modes, NewWorktree, Outcome, Page,
+        PastSession, PastSessions, Pick, PromptHit, PullSeen, PullStands, Review, ReviewScope,
+        Setup, Start, TableFrame, ThreadFrame, ThreadRequest,
     };
     use slopty_proto::thread::{
         Action, AgentId, AgentScreen, Answerer, AskId, BackgroundTask, Cap, Changed, Choice,
@@ -324,14 +323,6 @@ mod golden_thread {
                 query: "flaky login".to_owned(),
                 limit: 20,
             },
-        );
-        snap(
-            "client_thread_search",
-            &ThreadRequest::Search { query: "flaky login".to_owned(), limit: 20 },
-        );
-        snap(
-            "client_thread_authors",
-            &ThreadRequest::Authors { thread: Some(thread()), path: "src/auth.rs".to_owned() },
         );
         snap(
             "client_start",
@@ -947,55 +938,6 @@ mod golden_thread {
                 }],
                 absent: None,
                 cut: Some("Claude Code's prompt history is read from its last 64 MiB".to_owned()),
-            }),
-        );
-        snap(
-            "link_worker_thread_hits",
-            &WorkerMsg::ThreadHits(ThreadHits {
-                query: "flaky login".to_owned(),
-                threads: vec![ThreadHit {
-                    thread: thread(),
-                    hits: vec![ItemHit {
-                        item: ItemId("msg-4".to_owned()),
-                        turn: TurnId(3),
-                        said: ItemHit::AGENT.to_owned(),
-                        text: "The flaky login test races".to_owned(),
-                        spans: vec![Span { start: 4, end: 9 }, Span { start: 10, end: 15 }],
-                        cut_before: true,
-                        cut_after: false,
-                        at_ms: ms(1_850_000),
-                    }],
-                    more: 2,
-                }],
-                more: 1,
-            }),
-        );
-        snap(
-            "link_worker_authors",
-            &WorkerMsg::Authors(Authors {
-                thread: None,
-                path: "/Users/mira/atlas/src/auth.rs".to_owned(),
-                modified_ms: Some(ms(1_900_000)),
-                blob: Some("3b18e512dba79e4c8300dd08aeb37f8e728b8dad".to_owned()),
-                runs: vec![
-                    AuthorRun {
-                        start: 4,
-                        lines: 3,
-                        thread: thread(),
-                        turn: Some(TurnId(2)),
-                        commit: None,
-                        at_ms: ms(1_880_000),
-                    },
-                    AuthorRun {
-                        start: 12,
-                        lines: 1,
-                        thread: thread(),
-                        turn: None,
-                        commit: Some("9d1e7aa".to_owned()),
-                        at_ms: ms(1_700_000),
-                    },
-                ],
-                absent: None,
             }),
         );
         snap("link_uni_thread", &UniHead::Thread { thread: thread() });

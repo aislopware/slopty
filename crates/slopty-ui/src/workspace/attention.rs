@@ -5,11 +5,11 @@
 //! asks for), a program's status record starts to wait on them (`OSC 7501`'s `blocked`, said as
 //! an agent's need is and taken back the same way), an agent's turn that ran at least the
 //! slow-command time ends, or a shell command that ran that long ends. Nothing notifies while
-//! the app is in front, since the bell and the navigator say it there. A tile has at most
-//! one notification up: the note's identifier is its session's, so a newer one replaces the
-//! older, and an agent answered anywhere takes its own back. Coming back to the app takes back
-//! every note it posted, because the navigator now shows the same things. The icon badge is the
-//! bell's count.
+//! the app is in front, since the shell shows it there. A session has at most one
+//! notification up: the note's identifier is its session's, so a newer one replaces the older,
+//! and an agent answered anywhere takes its own back. Coming back to the app takes back every
+//! note it posted, because the shell now shows the same things. The icon badge counts what is
+//! left for the person.
 //!
 //! An agent that waits on a yes or no its thread's row shows (`approvals`) is posted with the
 //! approval buttons (`notify::APPROVAL`): "Allow" and "Deny" answer it where the note is,
@@ -202,7 +202,6 @@ impl Asking {
             picks: Vec::new(),
             silent,
             urgent: true,
-            thread: None,
         }
         .picking(&if self.approval.is_some() {
             self.picks.iter().map(|p| p.label.clone()).collect()
@@ -231,13 +230,8 @@ pub struct Look {
     /// The agents whose turn finished unwatched while this device heard their worker, and is
     /// unread.
     pub turns: Vec<Turn>,
-    /// The bell's count: the icon badge.
+    /// What is left for the person: the icon badge.
     pub unread: usize,
-    /// The project each terminal and thread is in, by its group's key: the thread its notes
-    /// stack in, so one project's notes sit together.
-    pub projects: HashMap<About, String>,
-    /// The projects muted in the navigator, by their group's key: their moments post nothing.
-    pub muted: HashSet<String>,
 }
 
 /// A notice the server picked this client for, as its note says it.
@@ -291,10 +285,6 @@ pub struct Attention {
     answers: HashMap<About, Option<String>>,
     /// The badge last set.
     badge: Option<usize>,
-    /// The project each terminal and thread was in at the last look.
-    projects: HashMap<About, String>,
-    /// The projects muted at the last look, by their group's key.
-    muted: HashSet<String>,
     /// A note went out while notifications were off, since the app last came back.
     unsaid: bool,
     /// The app has said this run that notifications are off.
@@ -332,8 +322,6 @@ impl Attention {
             posted: HashMap::new(),
             answers: HashMap::new(),
             badge: None,
-            projects: HashMap::new(),
-            muted: HashSet::new(),
             unsaid: false,
             said_off: false,
             listening: true,
@@ -439,7 +427,7 @@ impl Attention {
     }
 
     /// The server picked this client to say `heard`: posted while the app is not in front,
-    /// where the navigator already says it. A wait's note gets its approval buttons from the next
+    /// where the shell already shows it. A wait's note gets its approval buttons from the next
     /// [`Self::look`].
     pub fn notice(&mut self, heard: &Heard) {
         if self.active || !self.listening {
@@ -493,8 +481,6 @@ impl Attention {
     /// The workspace changed: an agent that has just started to wait notifies while the app is
     /// away, one that stopped takes its note back, and the badge follows the bell.
     pub fn look(&mut self, look: &Look) {
-        self.projects.clone_from(&look.projects);
-        self.muted.clone_from(&look.muted);
         let now: HashSet<About> = look.asking.iter().map(|a| a.route.about).collect();
         if self.away() {
             for asking in &look.asking {
@@ -614,11 +600,6 @@ impl Attention {
         if !self.enabled {
             return;
         }
-        note.thread = self.projects.get(&about).cloned();
-        // A muted project's moments post nothing; the bell and the navigator still say them.
-        if note.thread.as_ref().is_some_and(|project| self.muted.contains(project)) {
-            return;
-        }
         tracing::debug!(?about, ?why, "attention note");
         // Only an agent that needs the person breaks through a Focus.
         note.urgent = why == Why::Asks;
@@ -685,13 +666,7 @@ impl WorkspaceView {
                 Some(Turn { route, title, body })
             })
             .collect();
-        Look {
-            asking,
-            turns,
-            unread: self.bell_count(),
-            projects: HashMap::new(),
-            muted: HashSet::new(),
-        }
+        Look { asking, turns, unread: self.bell_count() }
     }
 
     /// The note the server's `notice` makes here; `None` for a finished turn shorter than the

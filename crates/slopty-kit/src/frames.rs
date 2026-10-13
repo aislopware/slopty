@@ -98,12 +98,6 @@ impl FrameProbe {
         }
     }
 
-    /// The display period.
-    #[must_use]
-    pub const fn nominal(&self) -> Duration {
-        self.nominal
-    }
-
     /// A frame starts drawing.
     pub fn begin(&mut self, now: Instant) {
         let interval = self
@@ -192,12 +186,12 @@ pub fn index(cx: &App) -> Option<u64> {
 }
 
 /// Time every draw of `window` on the app's probe ([`install`]), while the subscription lives.
-pub fn watch(window: &Window) -> gpui::Subscription {
-    window.observe_draws(|drawn, cx| {
+pub fn watch(window: &Window, cx: &mut App) -> gpui::Subscription {
+    window.observe_draws(cx, |started, took, cx| {
         if let Some(probe) = cx.try_global::<Probe>() {
             let mut probe = probe.0.borrow_mut();
-            probe.begin(drawn.started);
-            probe.end(drawn.started.checked_add(drawn.took).unwrap_or(drawn.started));
+            probe.begin(started);
+            probe.end(started.checked_add(took).unwrap_or(started));
         }
     })
 }
@@ -376,7 +370,7 @@ mod tests {
         cx.update(|window, _| window.refresh());
         cx.run_until_parked();
         assert_eq!(frames(cx), Some(0), "not watched");
-        let watching = cx.update(|window, _| watch(window));
+        let watching = cx.update(|window, cx| watch(window, cx));
         for _ in 0..3 {
             cx.update(|window, _| window.refresh());
             cx.run_until_parked();

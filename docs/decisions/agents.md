@@ -598,6 +598,9 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     - `the_screen_an_agent_drives_opens_beside_its_thread` (app e2e, over the drawn screen;
       goldens `agent-screen`, `agent-screen-dark`).
 
+- ❌ **Deleted 2026-10-14: the line authorship below.** Its views went with the tiling workspace and
+  no client asked for it any more, so the request, the answer and the worker's side are
+  deleted (`ui.md`, "Code nothing reaches is deleted"). The ruling is kept as the record.
 - ✅ **A line names the thread and turn that wrote it** (2026-10-04, frontier must-have M3).
   From a line of a file tile or a review, the person reaches the agent's thread at the turn
   that brought the line in.
@@ -1731,6 +1734,9 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `an_acp_threads_effort_is_set_through_its_thought_level_option`
     (`slopty-worker/tests/acp.rs`); golden `intent_set_effort`.
 
+- ❌ **Deleted 2026-10-14: the thread search below.** Its views went with the tiling workspace and
+  no client asked for it any more, so the request, the answer and the worker's side are
+  deleted (`ui.md`, "Code nothing reaches is deleted"). The ruling is kept as the record.
 - ✅ **What was said in the threads is searched on the worker that holds them** (2026-10-04,
   `crates/slopty-worker/src/thread/search.rs`). `ThreadRequest::Search { query, limit }` is
   answered with `WorkerMsg::ThreadHits` on the control stream.

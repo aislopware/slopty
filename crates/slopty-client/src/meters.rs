@@ -90,37 +90,6 @@ impl PlanMeters {
     }
 }
 
-/// A window's name as a readout says it: `five-hour` is `5h`, `seven-day` `7d`, `90-minute`
-/// `90m`; a name of any other shape as it is.
-#[must_use]
-pub fn short_name(name: &str) -> String {
-    let words = [
-        ("one", 1),
-        ("two", 2),
-        ("three", 3),
-        ("four", 4),
-        ("five", 5),
-        ("six", 6),
-        ("seven", 7),
-        ("eight", 8),
-        ("nine", 9),
-        ("ten", 10),
-    ];
-    let Some((count, unit)) = name.split_once('-') else { return name.to_owned() };
-    let count = count
-        .parse::<u32>()
-        .ok()
-        .or_else(|| words.iter().find(|(w, _)| *w == count).map(|(_, n)| *n));
-    let unit = match unit {
-        "minute" => "m",
-        "hour" => "h",
-        "day" => "d",
-        "week" => "w",
-        _ => return name.to_owned(),
-    };
-    count.map_or_else(|| name.to_owned(), |n| format!("{n}{unit}"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,15 +153,5 @@ mod tests {
         let (_, kept) = meters.shown(studio, Some("codex"), now).expect("kept");
         assert_eq!(kept.limits[0].used_bp, 200, "the older word is left");
         assert!(meters.shown(WorkerKey::new(2), None, now).is_none(), "another machine has none");
-    }
-
-    #[test]
-    fn a_windows_name_is_said_short() {
-        assert_eq!(short_name("five-hour"), "5h");
-        assert_eq!(short_name("seven-day"), "7d");
-        assert_eq!(short_name("90-minute"), "90m");
-        assert_eq!(short_name("2-week"), "2w");
-        assert_eq!(short_name("window"), "window");
-        assert_eq!(short_name("many-hour"), "many-hour");
     }
 }

@@ -99,12 +99,6 @@ impl Outgoing {
         &self.began
     }
 
-    /// Whether the catch is in.
-    #[must_use]
-    pub const fn is_caught(&self) -> bool {
-        self.caught.is_some()
-    }
-
     /// The worker said `event`: the catch's items are kept, and a failure's reason comes back.
     pub fn heard(&mut self, event: &DragEvent) -> Option<String> {
         match event {
@@ -230,6 +224,12 @@ impl Outgoing {
             },
             None => DataAt::Gone,
         }
+    }
+
+    /// Whether the catch is in.
+    #[must_use]
+    pub const fn is_caught(&self) -> bool {
+        self.caught.is_some()
     }
 }
 
@@ -396,69 +396,6 @@ mod tests {
         }
     }
 
-    /// A named file is offered by its path from the start, a promise by its content type until
-    /// the catch names it, and data in its types; the catch says where the promised file is
-    /// and where each type's bytes are, inline or fetched under the drag, and a failed catch
-    /// leaves the promises broken. A promise kept on another thread waits for the catch.
-    #[test]
-    fn a_drag_out_offers_its_items_and_finds_them_once_caught() {
-        let drag = DragId::new();
-        let text = rep(ClipFormat::Text, Some(b"fox"));
-        let png = rep(ClipFormat::Png, None);
-        let data = DragItem { file: None, promised: None, reps: vec![text, png.clone()] };
-        let promised =
-            DragItem { file: None, promised: Some("com.adobe.pdf".to_owned()), reps: Vec::new() };
-        let mut out = Outgoing::began(drag, vec![file("a.txt", "/w/a.txt"), promised, data]);
-        let text_uti = uti_of_type(&ClipType::Format(ClipFormat::Text)).to_owned();
-        let png_uti = uti_of_type(&ClipType::Format(ClipFormat::Png)).to_owned();
-        assert_eq!(
-            out.offers(),
-            [
-                Offer::File {
-                    name: "a.txt".to_owned(),
-                    path: Some("/w/a.txt".to_owned()),
-                    promise: None
-                },
-                Offer::File { name: "Dragged file.pdf".to_owned(), path: None, promise: Some(0) },
-                Offer::Data { item: 0, types: vec![text_uti.clone(), png_uti.clone()] },
-            ]
-        );
-        assert_eq!(out.promised(0), FileAt::Waiting);
-        assert_eq!(out.data(0, &text_uti), DataAt::Bytes(b"fox".to_vec()), "inline from the start");
-        assert_eq!(out.data(0, &png_uti), DataAt::Waiting);
-
-        let caught = vec![
-            file("a.txt", "/w/a.txt"),
-            file("Invoice.pdf", "/w/.slopty/drop/d/Invoice.pdf"),
-            DragItem { file: None, promised: None, reps: vec![png] },
-        ];
-        assert_eq!(out.heard(&DragEvent::OutCaught { drag, items: caught }), None);
-        assert!(out.is_caught());
-        assert_eq!(out.promised(0), FileAt::At("/w/.slopty/drop/d/Invoice.pdf".to_owned()));
-        assert_eq!(out.promised(1), FileAt::Gone);
-        let fetch =
-            RepRef { source: Source::Drag(drag), item: 2, kind: ClipType::Format(ClipFormat::Png) };
-        assert_eq!(out.data(0, &png_uti), DataAt::Fetch(fetch));
-        assert_eq!(out.data(0, "public.tiff"), DataAt::Gone);
-
-        let shared = Arc::new(Shared::new(Outgoing::began(drag, out.items().to_vec())));
-        let waiter = {
-            let shared = Arc::clone(&shared);
-            std::thread::spawn(move || shared.promised(0, Duration::from_secs(5)))
-        };
-        let caught = vec![file("a.txt", "/w/a.txt"), file("b.pdf", "/w/b.pdf")];
-        assert_eq!(shared.heard(&DragEvent::OutCaught { drag, items: caught }), None);
-        assert_eq!(waiter.join().unwrap(), FileAt::At("/w/b.pdf".to_owned()), "woken by the catch");
-
-        let mut failed = Outgoing::began(
-            drag,
-            vec![DragItem { file: None, promised: Some(String::new()), reps: Vec::new() }],
-        );
-        let error = DragEvent::OutFailed { drag, error: "no catch".to_owned() };
-        assert_eq!(failed.heard(&error).as_deref(), Some("no catch"));
-        assert_eq!(failed.promised(0), FileAt::Gone);
-    }
-
     /// Back onto its own worker a drag carries its files by their paths there, the promised one
     /// once the catch named it and not before, and only the data that rides inline: the rest
     /// would have to come down to go up again.
@@ -523,5 +460,68 @@ mod tests {
         assert_eq!(outs.watched.lock().len(), 2, "the gone one is still listed");
         outs.watch(&shared);
         assert_eq!(outs.watched.lock().len(), 1, "let go at the next watch, and none twice");
+    }
+
+    /// A named file is offered by its path from the start, a promise by its content type until
+    /// the catch names it, and data in its types; the catch says where the promised file is
+    /// and where each type's bytes are, inline or fetched under the drag, and a failed catch
+    /// leaves the promises broken. A promise kept on another thread waits for the catch.
+    #[test]
+    fn a_drag_out_offers_its_items_and_finds_them_once_caught() {
+        let drag = DragId::new();
+        let text = rep(ClipFormat::Text, Some(b"fox"));
+        let png = rep(ClipFormat::Png, None);
+        let data = DragItem { file: None, promised: None, reps: vec![text, png.clone()] };
+        let promised =
+            DragItem { file: None, promised: Some("com.adobe.pdf".to_owned()), reps: Vec::new() };
+        let mut out = Outgoing::began(drag, vec![file("a.txt", "/w/a.txt"), promised, data]);
+        let text_uti = uti_of_type(&ClipType::Format(ClipFormat::Text)).to_owned();
+        let png_uti = uti_of_type(&ClipType::Format(ClipFormat::Png)).to_owned();
+        assert_eq!(
+            out.offers(),
+            [
+                Offer::File {
+                    name: "a.txt".to_owned(),
+                    path: Some("/w/a.txt".to_owned()),
+                    promise: None
+                },
+                Offer::File { name: "Dragged file.pdf".to_owned(), path: None, promise: Some(0) },
+                Offer::Data { item: 0, types: vec![text_uti.clone(), png_uti.clone()] },
+            ]
+        );
+        assert_eq!(out.promised(0), FileAt::Waiting);
+        assert_eq!(out.data(0, &text_uti), DataAt::Bytes(b"fox".to_vec()), "inline from the start");
+        assert_eq!(out.data(0, &png_uti), DataAt::Waiting);
+
+        let caught = vec![
+            file("a.txt", "/w/a.txt"),
+            file("Invoice.pdf", "/w/.slopty/drop/d/Invoice.pdf"),
+            DragItem { file: None, promised: None, reps: vec![png] },
+        ];
+        assert_eq!(out.heard(&DragEvent::OutCaught { drag, items: caught }), None);
+        assert!(out.is_caught());
+        assert_eq!(out.promised(0), FileAt::At("/w/.slopty/drop/d/Invoice.pdf".to_owned()));
+        assert_eq!(out.promised(1), FileAt::Gone);
+        let fetch =
+            RepRef { source: Source::Drag(drag), item: 2, kind: ClipType::Format(ClipFormat::Png) };
+        assert_eq!(out.data(0, &png_uti), DataAt::Fetch(fetch));
+        assert_eq!(out.data(0, "public.tiff"), DataAt::Gone);
+
+        let shared = Arc::new(Shared::new(Outgoing::began(drag, out.items().to_vec())));
+        let waiter = {
+            let shared = Arc::clone(&shared);
+            std::thread::spawn(move || shared.promised(0, Duration::from_secs(5)))
+        };
+        let caught = vec![file("a.txt", "/w/a.txt"), file("b.pdf", "/w/b.pdf")];
+        assert_eq!(shared.heard(&DragEvent::OutCaught { drag, items: caught }), None);
+        assert_eq!(waiter.join().unwrap(), FileAt::At("/w/b.pdf".to_owned()), "woken by the catch");
+
+        let mut failed = Outgoing::began(
+            drag,
+            vec![DragItem { file: None, promised: Some(String::new()), reps: Vec::new() }],
+        );
+        let error = DragEvent::OutFailed { drag, error: "no catch".to_owned() };
+        assert_eq!(failed.heard(&error).as_deref(), Some("no catch"));
+        assert_eq!(failed.promised(0), FileAt::Gone);
     }
 }

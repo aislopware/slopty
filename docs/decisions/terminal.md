@@ -425,8 +425,12 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   is erased by feeding `CSI 3 J` through the host session's own output path (engine, tap,
   `after_output`) as if the program had printed it — a checkpoint replay then lands in the
   same place, and no engine API is needed; (2) the screen is left to the shell: ⌃L as PTY
-  input, which zsh, bash and fish all bind to repaint the prompt at the top (`CSI 2 J` erases
-  in place in ghostty, so nothing is pushed back into history); a program that is not a
+  input, which zsh, bash and fish all bind to repaint the prompt at the top. Since ghostty's
+  2026-10-12 change (#14660), its `CSI 2 J` at a prompt scrolls the screen into the history
+  rather than erasing it in place, so at a prompt on the main screen the worker feeds `CSI 2 J`
+  ahead of `CSI 3 J` (`GhosttyEngine::clear_history`): the screen goes up and then the history
+  with it, and the shell's own erase finds a blank screen (test
+  `a_clear_at_a_prompt_leaves_no_history`); a program that is not a
   shell gets the ⌃L it would have got from the keyboard; (3) the view resets its scroll
   offset and sends one `TermRequest::Clear`; ⌘K in the terminal context, "Clear the screen
   and history" in the palette. Tests: golden `client_term_clear`, the ⌘K assertion in
@@ -442,7 +446,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   row, so an erase is noticed on the next frame; a row scrolled into history is untouched);
   (5) the client treats any change of the newest prompt's index as a new prompt, not only an
   increase (gone 2026-10-05 with the prompt tracking itself). Test:
-  `a_screen_erased_in_place_drops_the_marks_of_its_rows` (engine bytes).
+  `a_screen_erased_at_a_prompt_scrolls_its_rows_into_the_history` (engine bytes; since
+  ghostty #14660 the old rows go up into the history with their marks, and the redrawn prompt
+  is still the one start on the screen).
 
 - ✅ **A slow command's row says how long it took** (2026-09-14). Warp writes a block's
   duration in its header; here the badge for a command that ended unwatched carried the

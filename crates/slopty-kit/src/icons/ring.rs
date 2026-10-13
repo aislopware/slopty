@@ -29,8 +29,6 @@ pub enum Ring {
     /// A quarter of the ring turned this many steps of [`super::SPIN_STEPS`] round from twelve
     /// o'clock, over the whole ring as a faint track: the working mark, Zed's turning circle.
     Turning(u32),
-    /// The ring with a check inside: verified, ready to merge.
-    Checked,
     /// A filled disc with a figure knocked out of it.
     Disc(Knock),
 }
@@ -92,8 +90,6 @@ pub(crate) struct Geometry {
     pub track: bool,
     /// The pie's radius and the turn it sweeps, from twelve o'clock clockwise.
     pub pie: Option<(f32, f32)>,
-    /// A line drawn in the ink inside the ring: a check.
-    pub inner: Option<Vec<At>>,
     /// The figure is a filled disc, these shapes knocked out of it.
     pub disc: Option<Vec<Vec<At>>>,
 }
@@ -121,11 +117,10 @@ impl Ring {
             arcs: Vec::new(),
             track: false,
             pie: None,
-            inner: None,
             disc: None,
         };
         match self {
-            Self::Empty | Self::Checked => geometry.arcs = whole,
+            Self::Empty => geometry.arcs = whole,
             Self::Dashed => {
                 let each = 1.0 / f32::from(DASHES);
                 let gap = each * (1.0 - DASH);
@@ -148,16 +143,6 @@ impl Ring {
                 geometry.track = true;
             }
             Self::Disc(knock) => geometry.disc = Some(knocked(knock, centre, outer, scale)),
-        }
-        if matches!(self, Self::Checked) {
-            // The check inside the ring, a size down from the one a disc knocks out.
-            let inside = stroke.mul_add(-2.0, outer);
-            geometry.inner = Some(
-                CHECK
-                    .iter()
-                    .map(|(x, y)| (x.mul_add(inside, centre.0), y.mul_add(inside, centre.1)))
-                    .collect(),
-            );
         }
         geometry
     }
@@ -221,12 +206,6 @@ impl Ring {
                 path.arc_to(pr, px(0.0), sweep > 0.5, true, at(radius, sweep));
                 path.close();
             }
-            paint(path, color);
-        }
-        if let Some(line) = &g.inner {
-            let mut path = PathBuilder::stroke(px(g.stroke));
-            let points: Vec<_> = line.iter().copied().map(on).collect();
-            path.add_polygon(&points, false);
             paint(path, color);
         }
         if let Some(holes) = &g.disc {
@@ -432,18 +411,6 @@ mod tests {
         assert_eq!(cross[0].len(), 12);
         let check = Ring::Disc(Knock::Check).geometry(SIDE, 1.0).disc.expect("a disc");
         assert_eq!(check[0].len(), 6, "three points either side");
-    }
-
-    /// A ready ring holds a check in its line's width, inside it.
-    #[test]
-    fn a_checked_ring_holds_its_check_inside() {
-        let g = Ring::Checked.geometry(SIDE, 1.0);
-        assert_eq!(g.arcs, [(0.0, 1.0)]);
-        let inner = g.inner.expect("a check");
-        for (x, y) in inner {
-            let from = (x - g.centre.0).hypot(y - g.centre.1);
-            assert!(from < g.radius - g.stroke, "{from} inside the ring");
-        }
     }
 
     /// A thick line's outline stands `half` off its segments at its ends and its joint.

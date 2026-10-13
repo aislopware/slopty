@@ -2700,20 +2700,6 @@ pub(super) fn sprite_masks(cx: &App) -> usize {
     cx.try_global::<Probe>().map_or(0, |probe| probe.sprite_masks)
 }
 
-/// How many times the installed fonts were listed (tests: once for every view of the app).
-#[cfg(any(test, feature = "e2e"))]
-#[must_use]
-pub fn family_picks(cx: &App) -> usize {
-    cx.try_global::<Probe>().map_or(0, |probe| probe.picks)
-}
-
-/// How many rows the last prepaint built (tests: only the rows inside the clip).
-#[cfg(any(test, feature = "e2e"))]
-#[must_use]
-pub fn rows_prepared(cx: &App) -> usize {
-    cx.try_global::<Probe>().map_or(0, |probe| probe.rows_prepared)
-}
-
 /// How many rows the last prepaint built from their cells, the rest taken from the row cache.
 #[cfg(test)]
 pub(super) fn rows_built(cx: &App) -> usize {

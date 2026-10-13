@@ -1991,3 +1991,29 @@ more full-window layer.
     took 1 min 12 s through the router and 8 min in the checkout (clippy 52 s, nextest 432 s;
     `docs/MEASUREMENTS.md`, "a lane's check here and on runners"). A lane directory's first check
     is cold: 5 min for `slopty-crash`, 8 min 40 s for `slopty-workerd`.
+
+- ✅ **Upstream sync of 2026-10-14: gpui-fast `f7294a8c`, gpui-kit `bb14d3c4`, ghostty
+  `e6198455`.** longbridge's gpui-fast `371769f1` and zed `36682547` are in the gpui-fast fork;
+  gpui-kit is rebased onto `c5f8eca4`; ghostty upstream `1f80eec0` is merged; libghostty-rs is
+  re-pinned to the new ghostty (`60f3c35f`).
+  - gpui-fast: the frame probe's hook (`Window::observe_draws`) took `window.rs` past its
+    hook budget, a field and a public `Drawn` type. The observers now live in an `App` global
+    in `fast/draw_timing.rs`, keyed by the window, and `window.rs` keeps two one-line calls; the
+    callback gets the draw's start and span. The allowlist grants `window.rs` two lines more,
+    and `docs/upstream-sync.md` lists the API. Upstream's own window profiler keeps only
+    histograms behind its `profiler` feature, so it cannot stand in.
+  - gpui-kit: two conflicts, both additions on each side. The input state keeps upstream's
+    `display_map` and `prewrap` beside our `line_number_gap`; the table keeps upstream's
+    `render_fixed_cols_border` with our re-layout when the fixed columns' bounds change.
+    Upstream's `prewrap` reads `RIGHT_MARGIN`, which our input state now imports.
+  - ghostty: upstream fixed a pending wrap over a blank cell in the formatter by printing a
+    space, saving the cursor (DECSC), erasing the space (ECH) and restoring the cursor
+    (DECRC). Our fork had moved that code into `formatCursorAt`, which also replays the saved
+    cursor and writes a space there. Upstream's sequence is taken where the save it makes
+    cannot replace a different saved cursor (`savesAsIs`); elsewhere the space stays.
+    Upstream's ED2 at a prompt now scrolls the screen into history even when the prompt is not
+    on the last row. One fork test then replayed without its trailing blank rows, and now
+    formats with `trailing_rows`, as Slopty's engine does. `zig build test-lib-vt`: 6919
+    passed.
+  - Checks: the sync's probe on runners (forks build and test) passed; the fork's
+    `fast::draw_timing` test passes.

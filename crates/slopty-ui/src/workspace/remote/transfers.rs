@@ -220,15 +220,6 @@ impl WorkspaceView {
         }
     }
 
-    /// Whether any transfer is in flight or waits for its worker.
-    #[must_use]
-    pub fn transfers_in_flight(&self) -> bool {
-        if !self.transfers.downloads.is_empty() {
-            return true;
-        }
-        self.uploads.values().any(Upload::listed) || !self.transfers.waiting.is_empty()
-    }
-
     fn write_ledger(&self) {
         if let Some(writer) = &self.transfers.writer {
             writer.send_replace(self.transfers.ledger.clone());

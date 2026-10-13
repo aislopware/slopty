@@ -2617,9 +2617,9 @@ impl Actor {
                 // The scrollback goes as if the program had printed the erase: through the
                 // engine and the tap, so a checkpoint replay ends up in the same place. The
                 // screen is the shell's: ⌃L repaints its prompt at the top.
-                const ERASE_SCROLLBACK: &[u8] = b"\x1b[3J";
-                self.engine.write(ERASE_SCROLLBACK);
-                self.tap_output(ERASE_SCROLLBACK);
+                let erase = self.engine.clear_history();
+                self.engine.write(erase);
+                self.tap_output(erase);
                 self.after_output();
                 self.checkpoint_if_owed();
                 bytes = vec![0x0c];

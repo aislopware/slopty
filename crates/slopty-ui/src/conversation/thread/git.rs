@@ -20,9 +20,6 @@ use slopty_proto::thread::Patch;
 use slopty_proto::thread::wire::{Against, Review, ReviewScope};
 use slopty_proto::{ClientMsg, RequestId};
 
-/// What an op asked while the machine is out of reach says.
-const OFFLINE: &str = "The machine is out of reach";
-
 /// The branch's pull request, as far as this client has heard.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub enum Pull {
@@ -192,26 +189,10 @@ pub struct GitBook {
 }
 
 impl GitBook {
-    /// What `repo` last said; `None` before anything was asked of it.
-    #[must_use]
-    pub fn repo(&self, repo: &str) -> Option<&Repo> {
-        self.repos.get(repo)
-    }
-
     /// Ask `op` of the repository holding the folder `repo`: the message that asks it, under
     /// its number. An op that changes something lets go of what the last one said.
     pub fn ask(&mut self, repo: &str, op: GitOp) -> (RequestId, ClientMsg) {
         self.ask_then(repo, op, false)
-    }
-
-    /// Commit `paths` with `message`, then push once the commit is made.
-    pub fn commit_and_push(
-        &mut self,
-        repo: &str,
-        paths: Vec<String>,
-        message: String,
-    ) -> (RequestId, ClientMsg) {
-        self.ask_then(repo, GitOp::Commit { paths, message }, true)
     }
 
     fn ask_then(&mut self, repo: &str, op: GitOp, then_push: bool) -> (RequestId, ClientMsg) {
@@ -224,26 +205,6 @@ impl GitBook {
         }
         self.asked.insert(request, Asked { repo: repo.to_owned(), op: op.clone(), then_push });
         (request, ClientMsg::Git { request, repo: repo.to_owned(), op })
-    }
-
-    /// The op that changes something in `repo` and is on its way, the oldest first; a commit
-    /// asked "and push" reads as the commit until it is made, then as the push.
-    #[must_use]
-    pub fn busy(&self, repo: &str) -> Option<&GitOp> {
-        self.asked.values().find(|a| a.repo == repo && changes(&a.op)).map(|a| &a.op)
-    }
-
-    /// Whether `op` is on its way to `repo`.
-    #[must_use]
-    pub fn asking(&self, repo: &str, op: &GitOp) -> bool {
-        self.asked.values().any(|a| a.repo == repo && a.op == *op)
-    }
-
-    /// Whether a read of `repo`'s status, or of its pull request with `pull`, is on its way.
-    #[must_use]
-    pub fn reading(&self, repo: &str, pull: bool) -> bool {
-        let read = if pull { GitOp::PullStatus } else { GitOp::Status };
-        self.asked.values().any(|a| a.repo == repo && a.op == read)
     }
 
     /// The worker answered `request`: the repository it was for, and what goes next (the push
@@ -282,17 +243,46 @@ impl GitBook {
         Some((name, msgs))
     }
 
-    /// The machine is out of reach, so `op` was not asked: the repository says so where the
-    /// op's part shows.
-    pub fn offline(&mut self, repo: &str, op: &GitOp) {
-        let repo = self.repos.entry(repo.to_owned()).or_default();
-        missed(repo, 0, op, OFFLINE.to_owned(), refused);
-    }
-
     /// The link went, and the answers on their way with it. What each op did shows in the
     /// next status.
     pub fn lost(&mut self) {
         self.asked.clear();
+    }
+
+    /// What `repo` last said; `None` before anything was asked of it.
+    #[must_use]
+    pub fn repo(&self, repo: &str) -> Option<&Repo> {
+        self.repos.get(repo)
+    }
+
+    /// Commit `paths` with `message`, then push once the commit is made.
+    pub fn commit_and_push(
+        &mut self,
+        repo: &str,
+        paths: Vec<String>,
+        message: String,
+    ) -> (RequestId, ClientMsg) {
+        self.ask_then(repo, GitOp::Commit { paths, message }, true)
+    }
+
+    /// The op that changes something in `repo` and is on its way, the oldest first; a commit
+    /// asked "and push" reads as the commit until it is made, then as the push.
+    #[must_use]
+    pub fn busy(&self, repo: &str) -> Option<&GitOp> {
+        self.asked.values().find(|a| a.repo == repo && changes(&a.op)).map(|a| &a.op)
+    }
+
+    /// Whether `op` is on its way to `repo`.
+    #[must_use]
+    pub fn asking(&self, repo: &str, op: &GitOp) -> bool {
+        self.asked.values().any(|a| a.repo == repo && a.op == *op)
+    }
+
+    /// Whether a read of `repo`'s status, or of its pull request with `pull`, is on its way.
+    #[must_use]
+    pub fn reading(&self, repo: &str, pull: bool) -> bool {
+        let read = if pull { GitOp::PullStatus } else { GitOp::Status };
+        self.asked.values().any(|a| a.repo == repo && a.op == read)
     }
 }
 
@@ -472,86 +462,12 @@ const fn changes(op: &GitOp) -> bool {
     )
 }
 
-/// A file's status in git's letters as the person reads it: the working tree's letter where it
-/// changed, else the index's; "new" for an untracked file; an unmerged one as git spells it.
-#[must_use]
-pub fn letters(xy: &str) -> String {
-    let mut chars = xy.chars();
-    let (x, y) = (chars.next().unwrap_or('.'), chars.next().unwrap_or('.'));
-    match (x, y) {
-        ('?', '?') => "new".to_owned(),
-        ('U', _) | (_, 'U') | ('A', 'A') | ('D', 'D') => xy.to_owned(),
-        (x, '.' | ' ') => x.to_string(),
-        (_, y) => y.to_string(),
-    }
-}
-
-/// Where the branch stands against its upstream: "main → origin/main · 2 ahead", "feature ·
-/// no upstream", "Detached HEAD".
-#[must_use]
-pub fn branch_line(status: &GitStatus) -> String {
-    let Some(branch) = &status.branch else { return "Detached HEAD".to_owned() };
-    let Some(upstream) = &status.upstream else { return format!("{branch} \u{b7} no upstream") };
-    let counts: Vec<String> = [(status.ahead, "ahead"), (status.behind, "behind")]
-        .into_iter()
-        .filter(|(n, _)| *n > 0)
-        .map(|(n, word)| format!("{n} {word}"))
-        .collect();
-    let line = format!("{branch} \u{2192} {upstream}");
-    if counts.is_empty() { line } else { format!("{line} \u{b7} {}", counts.join(", ")) }
-}
-
-/// How a pull request is merged, as gh names it.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Method {
-    /// One commit of the branch's.
-    Squash,
-    /// A merge commit.
-    Merge,
-    /// The branch's commits, replayed on the base.
-    Rebase,
-}
-
-impl Method {
-    /// Every method, in the menu's order.
-    pub const ALL: [Self; 3] = [Self::Squash, Self::Merge, Self::Rebase];
-
-    /// The methods `pull`'s repository allows, in the menu's order; every one where it says
-    /// none.
-    #[must_use]
-    pub fn offered(pull: &PullStatus) -> Vec<Self> {
-        let allowed: Vec<Self> =
-            Self::ALL.into_iter().filter(|m| pull.methods.iter().any(|w| w == m.wire())).collect();
-        if allowed.is_empty() { Self::ALL.to_vec() } else { allowed }
-    }
-
-    /// gh's name for it.
-    #[must_use]
-    pub const fn wire(self) -> &'static str {
-        match self {
-            Self::Squash => "squash",
-            Self::Merge => "merge",
-            Self::Rebase => "rebase",
-        }
-    }
-
-    /// What the button says.
-    #[must_use]
-    pub const fn verb(self) -> &'static str {
-        match self {
-            Self::Squash => "Squash and merge",
-            Self::Merge => "Merge",
-            Self::Rebase => "Rebase and merge",
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use slopty_proto::ClientMsg;
     use slopty_proto::git::{GitDone, GitFile, GitOp, GitOutcome, GitStatus, PullStatus};
 
-    use super::{GitBook, Pull, Said, branch_line, letters};
+    use super::{GitBook, Pull, Said};
 
     fn status(files: &[(&str, &str)]) -> GitStatus {
         GitStatus {
@@ -708,29 +624,5 @@ mod tests {
         let (read, _) = book.ask("/w/r", GitOp::Status);
         book.answer(read, GitOutcome::Done(GitDone::Status(Box::new(status(&[("??", "n")])))));
         assert!(book.repo("/w/r").and_then(|r| r.status.as_ref()).is_some());
-    }
-
-    /// A file's letters read as git's, the working tree's first; an untracked one as new.
-    #[test]
-    fn a_file_reads_in_git_s_letters() {
-        assert_eq!(letters(".M"), "M");
-        assert_eq!(letters("M."), "M");
-        assert_eq!(letters("A."), "A");
-        assert_eq!(letters("RM"), "M");
-        assert_eq!(letters("R."), "R");
-        assert_eq!(letters("??"), "new");
-        assert_eq!(letters("UU"), "UU");
-        assert_eq!(letters("AA"), "AA");
-    }
-
-    /// The branch line names the upstream and how far apart they are, or says there is none.
-    #[test]
-    fn the_branch_line_says_where_it_stands() {
-        assert_eq!(branch_line(&status(&[])), "feature \u{2192} origin/feature \u{b7} 2 ahead");
-        let mut none = status(&[]);
-        none.upstream = None;
-        assert_eq!(branch_line(&none), "feature \u{b7} no upstream");
-        none.branch = None;
-        assert_eq!(branch_line(&none), "Detached HEAD");
     }
 }

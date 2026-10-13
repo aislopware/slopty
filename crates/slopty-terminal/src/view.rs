@@ -60,6 +60,10 @@ const BELL_HALF: Duration = Duration::from_millis(75);
 const AUTOSCROLL_MAX: i64 = 8;
 /// The action on the pill that counts the lines below a view scrolled up into its history.
 pub const BACK_TO_LIVE: &str = "Back to live";
+/// What the pill of a view sized by another client says, and what a click on it does.
+const SIZED_ELSEWHERE: &str = "Sized for another screen";
+/// The action on that pill: this client's size becomes the PTY's.
+const TAKE: &str = "Take";
 /// How far a ⌘-press on a path moves, in points, before it is a drag of the file rather than
 /// a click that opens it.
 const DRAG_OUT_SLOP: f32 = 4.0;
@@ -338,9 +342,8 @@ pub enum TerminalViewEvent {
         body: String,
     },
     /// The working directory changed (OSC 7), or the branch checked out there did, with the
-    /// repository the worker resolved it to. What arrange-by-repo groups on and the navigator
-    /// and breadcrumb print, so it has to follow a `cd` or a checkout and not stay at whatever
-    /// the session opened in.
+    /// repository the worker resolved it to. What the shell prints of where the session stands,
+    /// so it has to follow a `cd` or a checkout and not stay at whatever the session opened in.
     Cwd {
         /// The new directory.
         path: String,
@@ -358,9 +361,6 @@ pub enum TerminalViewEvent {
     /// The program's progress report changed ([`TerminalView::progress`]): the tile's header
     /// draws it.
     Progress,
-    /// The human confirmed closing this shell while its command runs: the workspace sends
-    /// the worker `Close`.
-    CloseConfirmed,
     /// A shell command finished (shell integration marks): what was typed, its status, and how
     /// long it ran from the frame the cursor left its prompt to the frame the next prompt
     /// arrived. The workspace badges the item when that was long and nobody was watching.
@@ -840,24 +840,6 @@ impl TerminalView {
         cx.notify();
     }
 
-    /// Open the find bar on `query` (a search of the open tiles chose this one): the field
-    /// holds its needle, the toggles are its own, and the newest hit is revealed when the
-    /// worker answers.
-    pub fn find_with(&mut self, query: &Query, window: &mut Window, cx: &mut Context<Self>) {
-        self.find(&Find, window, cx);
-        let Some(search) = &mut self.search else { return };
-        search.input.update(cx, |input, cx| input.set_value(query.needle.clone(), window, cx));
-        search.query = query.clone();
-        self.find_toggles = Query { needle: String::new(), ..query.clone() };
-        self.restart_search(cx);
-    }
-
-    /// The find bar's query, when the bar is open.
-    #[must_use]
-    pub fn search_query(&self) -> Option<&Query> {
-        self.search.as_ref().map(|s| &s.query)
-    }
-
     /// ⌘G / Enter.
     pub fn find_next(&mut self, _: &FindNext, _window: &mut Window, cx: &mut Context<Self>) {
         self.step_match(1, cx);
@@ -874,12 +856,6 @@ impl TerminalView {
             self.focus.focus(window, cx);
             cx.notify();
         }
-    }
-
-    /// Whether the search bar is open.
-    #[must_use]
-    pub const fn finding(&self) -> bool {
-        self.search.is_some()
     }
 
     /// The hits to paint (oldest first) and which one is current.
@@ -1132,21 +1108,6 @@ impl TerminalView {
         }
     }
 
-    /// The file path printed under `at` (window points), as the text gave it (relative ones
-    /// are the shell's directory's to resolve), and whether it names a directory: printed
-    /// with a trailing `/`, which the path returned drops. The same path ⌘-click opens; a
-    /// link there is not one.
-    #[must_use]
-    pub fn path_at(&self, at: gpui::Point<Pixels>) -> Option<(String, bool)> {
-        let (col, row) = self.metrics?.cell_at(at)?;
-        let Under::Path(span) = self.under(self.state.index_at_row(row), col)?.1 else {
-            return None;
-        };
-        let file = span.path.trim_end_matches('/');
-        let folder = file.len() < span.path.len();
-        Some((if file.is_empty() { "/" } else { file }.to_owned(), folder))
-    }
-
     /// The strip that asks before a paste that could run: what it holds, Paste and Cancel.
     fn render_confirm(&self, cx: &Context<Self>) -> Option<gpui::Div> {
         let pending = self.pending.as_ref()?;
@@ -1162,13 +1123,6 @@ impl TerminalView {
                 };
                 (what, "paste-confirm", "Paste", "terminal-paste-confirm", "terminal-paste-cancel")
             }
-            Pending::Close(command) => (
-                format!("Close while `{command}` runs?"),
-                "close-confirm",
-                "Close",
-                "terminal-close-confirm",
-                "terminal-close-cancel",
-            ),
         };
         let button = move |id: &'static str, label: &'static str, accent: bool| {
             let row = div()
@@ -1748,12 +1702,6 @@ impl TerminalView {
         cx.emit(TerminalViewEvent::Attach(selection_context(&text, block.as_ref())));
     }
 
-    /// Whether some text is selected: the palette offers "Attach selection to agent" only then.
-    #[must_use]
-    pub fn has_selection(&self) -> bool {
-        self.selection_has_text()
-    }
-
     /// ⇧-arrow with a selection: where its head moves (a cell sideways, wrapping at the row's
     /// ends; a row up or down, within the lines the worker keeps). `None` when the keystroke is
     /// not that.
@@ -1892,26 +1840,6 @@ impl TerminalView {
                 .children(right)
                 .into_any_element(),
         )
-    }
-
-    /// Whether the newest finished command failed and its block shows in the grid, barred and
-    /// its head washed: the tile's header then leaves the failure to the grid rather than mark
-    /// it twice.
-    /// Two prompt lookups, so a frame can ask it of every tile.
-    #[must_use]
-    pub fn failure_in_view(&self) -> bool {
-        let state = &self.state;
-        if state.modes().contains(TermModes::ALT_SCREEN) {
-            return false;
-        }
-        let Some(newest) = state.prompt_before(LineIndex(u64::MAX)) else { return false };
-        if state.line(newest).and_then(|l| l.mark.exit()).is_none_or(|code| code == 0) {
-            return false;
-        }
-        let Some(start) = state.prompt_before(newest) else { return false };
-        let top = state.index_at_row(0);
-        let bottom = state.index_at_row(state.size().rows.saturating_sub(1));
-        start <= bottom && newest > top
     }
 
     /// What the block typed at `prompt` says about itself, in order, each in its tone: its
@@ -2291,14 +2219,12 @@ impl TerminalView {
         self.send(TermRequest::PastePicture(chord), cx);
     }
 
-    /// What waits goes through (↩, or the bar's first button): the paste is sent, the
-    /// close is confirmed to the workspace.
+    /// What waits goes through (↩, or the bar's first button): the paste is sent.
     pub fn confirm_pending(&mut self, cx: &mut Context<Self>) {
         match self.pending.take() {
             Some(Pending::Paste(text)) => {
                 self.send(TermRequest::Paste { text, confirmed: true }, cx);
             }
-            Some(Pending::Close(_)) => cx.emit(TerminalViewEvent::CloseConfirmed),
             None => return,
         }
         cx.notify();
@@ -2319,39 +2245,6 @@ impl TerminalView {
             Some(Pending::Paste(text)) => Some(text),
             _ => None,
         }
-    }
-
-    /// The workspace is about to close this shell: with a command running the bar asks first and
-    /// this says so (`true`); otherwise nothing stands in the way. A shell whose program exited
-    /// has nothing left to lose.
-    pub fn ask_close(&mut self, cx: &mut Context<Self>) -> bool {
-        if !self.state.command_running() || self.state.exited().is_some() {
-            return false;
-        }
-        let command = self
-            .state
-            .running_command()
-            .unwrap_or_default()
-            .lines()
-            .next()
-            .unwrap_or_default()
-            .to_owned();
-        self.pending = Some(Pending::Close(command));
-        cx.notify();
-        true
-    }
-
-    /// Whether the close of this shell waits on a confirmation.
-    #[cfg(test)]
-    #[must_use]
-    const fn close_asked(&self) -> bool {
-        matches!(self.pending, Some(Pending::Close(_)))
-    }
-
-    /// Session id.
-    #[must_use]
-    pub const fn session(&self) -> SessionId {
-        self.session
     }
 
     /// The state (for the element).
@@ -2413,12 +2306,6 @@ impl TerminalView {
         self.row_cache = rows;
     }
 
-    /// Paint the grid's rows under keys, drawn again from the last frame while unchanged (the
-    /// default), or afresh every frame: what keyed paint is measured and checked against.
-    pub const fn set_keyed_paint(&mut self, on: bool) {
-        self.keyed_paint = on;
-    }
-
     /// Place the grid as a host's chrome says: `frame.padding` round it and rows exactly
     /// `frame.line_height` tall, in place of the theme's inset and the font's own height.
     /// `None` gives the theme's back.
@@ -2446,13 +2333,6 @@ impl TerminalView {
     #[must_use]
     pub const fn renders(&self) -> u32 {
         self.renders
-    }
-
-    /// Whether its last drawing was of a view with the keyboard (`None`: not drawn yet).
-    #[cfg(any(test, feature = "e2e"))]
-    #[must_use]
-    pub const fn drawn_focused(&self) -> Option<bool> {
-        self.drawn_focused
     }
 
     /// Link RTT, for the prediction policy.
@@ -2492,43 +2372,6 @@ impl TerminalView {
     #[must_use]
     pub fn latency(&self) -> latency::LatencyStats {
         self.latency.borrow().stats()
-    }
-
-    /// Arm or disarm Control for the next key; a soft keyboard has no Control key of its own.
-    pub fn set_sticky_control(&mut self, on: bool, cx: &mut Context<Self>) {
-        self.sticky_control = on;
-        cx.notify();
-    }
-
-    /// Whether the next key gets Control.
-    #[must_use]
-    pub const fn sticky_control(&self) -> bool {
-        self.sticky_control
-    }
-
-    /// Arm or disarm Alt for the next key, sent as Meta (an escape before it).
-    pub fn set_sticky_alt(&mut self, on: bool, cx: &mut Context<Self>) {
-        self.sticky_alt = on;
-        cx.notify();
-    }
-
-    /// Whether the next key gets Alt.
-    #[must_use]
-    pub const fn sticky_alt(&self) -> bool {
-        self.sticky_alt
-    }
-
-    /// Arm or disarm ⌘ for the next tap: it opens the link under the finger, as ⌘-click
-    /// does with a mouse (a phone has no ⌘ to hold).
-    pub fn set_sticky_command(&mut self, on: bool, cx: &mut Context<Self>) {
-        self.sticky_command = on;
-        cx.notify();
-    }
-
-    /// Whether the next tap opens a link.
-    #[must_use]
-    pub const fn sticky_command(&self) -> bool {
-        self.sticky_command
     }
 
     /// Whether the ⌥ of the key being handled is Alt: the setting, for the side that is down.
@@ -2667,20 +2510,6 @@ impl TerminalView {
     #[must_use]
     pub fn title(&self) -> Option<&str> {
         self.state.title()
-    }
-
-    /// When this view saw the command the shell runs start; `None` at a prompt, or for a
-    /// command that was running when it attached.
-    #[must_use]
-    pub fn command_started(&self) -> Option<Instant> {
-        self.command_started.filter(|_| self.state.command_running())
-    }
-
-    /// The branch checked out where the shell stands, as the worker resolved it: what the
-    /// navigator and the breadcrumb print beside the repository.
-    #[must_use]
-    pub fn branch(&self) -> Option<&str> {
-        self.state.branch()
     }
 
     /// The cursor row's text, trailing spaces trimmed: what a screen reader reads as the
@@ -2939,25 +2768,18 @@ impl TerminalView {
         self.state.view_offset()
     }
 
-    /// Whether the tile draws its own pill at the body's foot, which hides the lines-below
-    /// pill. Returns whether that changed: a cached drawing of this view is then stale.
-    pub const fn set_covered(&mut self, covered: bool) -> bool {
-        let changed = self.covered != covered;
-        self.covered = covered;
-        changed
-    }
-
     /// The pill at the foot of a view scrolled up: how many lines are below and a way back to
     /// them, the whole pill one button (as ⇧⇲ is). It sits where the tile's state pill would,
     /// and gives way to it. It appears and goes with the scroll, with no motion of its own.
-    /// In copy mode the foot says so instead ([`Self::render_copy_mode`]).
+    /// In copy mode the foot says so instead ([`Self::render_copy_mode`]); following the
+    /// output in a view another client sizes, it offers to take the size ([`Self::render_take`]).
     fn render_lines_below(&self, cx: &Context<Self>) -> Option<gpui::Div> {
         if self.copy_mode.is_some() {
             return self.render_copy_mode(cx);
         }
         let below = self.lines_below();
         if below == 0 {
-            return None;
+            return self.render_take(cx);
         }
         let count: SharedString =
             if below == 1 { "1 line below".into() } else { format!("{below} lines below").into() };
@@ -2970,6 +2792,22 @@ impl TerminalView {
         self.render_foot_pill(pill, cx, |this, window, cx| {
             this.scroll_to_bottom(&ScrollToBottom, window, cx);
         })
+    }
+
+    /// The pill of a view whose PTY another client sizes, once it shows output: the grid is
+    /// laid out for that client's screen, and a click makes it this one's ([`Self::drive`]).
+    /// Typing alone takes the size only from a client that has gone quiet.
+    fn render_take(&self, cx: &Context<Self>) -> Option<gpui::Div> {
+        if self.state.driving() || self.state.frames() == 0 {
+            return None;
+        }
+        let pill = FootPill {
+            id: "take-size",
+            icon: slopty_kit::icons::Symbol::Display,
+            words: SIZED_ELSEWHERE.into(),
+            act: TAKE,
+        };
+        self.render_foot_pill(pill, cx, |this, _window, cx| this.drive(cx))
     }
 
     /// A pill at the foot of the grid: what is so, then in the accent what a click on it does.
@@ -3749,12 +3587,6 @@ impl TerminalView {
         self.pointer_hidden = false;
     }
 
-    /// Whether a key hid the pointer and it has not moved since.
-    #[must_use]
-    pub const fn pointer_hidden(&self) -> bool {
-        self.pointer_hidden
-    }
-
     /// The pointer came near the grid's right edge, or left it: the scrollbar shows while it
     /// is there and lingers once it goes.
     pub(super) fn pointer_near_scrollbar(&mut self, near: bool, cx: &mut Context<Self>) {
@@ -4063,6 +3895,85 @@ impl TerminalView {
         {
             cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
         }
+    }
+
+    /// Open the find bar on `query` (a search of the open tiles chose this one): the field
+    /// holds its needle, the toggles are its own, and the newest hit is revealed when the
+    /// worker answers.
+    pub fn find_with(&mut self, query: &Query, window: &mut Window, cx: &mut Context<Self>) {
+        self.find(&Find, window, cx);
+        let Some(search) = &mut self.search else { return };
+        search.input.update(cx, |input, cx| input.set_value(query.needle.clone(), window, cx));
+        search.query = query.clone();
+        self.find_toggles = Query { needle: String::new(), ..query.clone() };
+        self.restart_search(cx);
+    }
+
+    /// The find bar's query, when the bar is open.
+    #[must_use]
+    pub fn search_query(&self) -> Option<&Query> {
+        self.search.as_ref().map(|s| &s.query)
+    }
+
+    /// The file path printed under `at` (window points), as the text gave it (relative ones
+    /// are the shell's directory's to resolve), and whether it names a directory: printed
+    /// with a trailing `/`, which the path returned drops. The same path ⌘-click opens; a
+    /// link there is not one.
+    #[must_use]
+    pub fn path_at(&self, at: gpui::Point<Pixels>) -> Option<(String, bool)> {
+        let (col, row) = self.metrics?.cell_at(at)?;
+        let Under::Path(span) = self.under(self.state.index_at_row(row), col)?.1 else {
+            return None;
+        };
+        let file = span.path.trim_end_matches('/');
+        let folder = file.len() < span.path.len();
+        Some((if file.is_empty() { "/" } else { file }.to_owned(), folder))
+    }
+
+    /// Whether some text is selected: the palette offers "Attach selection to agent" only then.
+    #[must_use]
+    pub fn has_selection(&self) -> bool {
+        self.selection_has_text()
+    }
+
+    /// Whether the newest finished command failed and its block shows in the grid, barred and
+    /// its head washed: the tile's header then leaves the failure to the grid rather than mark
+    /// it twice.
+    /// Two prompt lookups, so a frame can ask it of every tile.
+    #[must_use]
+    pub fn failure_in_view(&self) -> bool {
+        let state = &self.state;
+        if state.modes().contains(TermModes::ALT_SCREEN) {
+            return false;
+        }
+        let Some(newest) = state.prompt_before(LineIndex(u64::MAX)) else { return false };
+        if state.line(newest).and_then(|l| l.mark.exit()).is_none_or(|code| code == 0) {
+            return false;
+        }
+        let Some(start) = state.prompt_before(newest) else { return false };
+        let top = state.index_at_row(0);
+        let bottom = state.index_at_row(state.size().rows.saturating_sub(1));
+        start <= bottom && newest > top
+    }
+
+    /// Paint the grid's rows under keys, drawn again from the last frame while unchanged (the
+    /// default), or afresh every frame: what keyed paint is measured and checked against.
+    pub const fn set_keyed_paint(&mut self, on: bool) {
+        self.keyed_paint = on;
+    }
+
+    /// Whether the tile draws its own pill at the body's foot, which hides the lines-below
+    /// pill. Returns whether that changed: a cached drawing of this view is then stale.
+    pub const fn set_covered(&mut self, covered: bool) -> bool {
+        let changed = self.covered != covered;
+        self.covered = covered;
+        changed
+    }
+
+    /// Whether a key hid the pointer and it has not moved since.
+    #[must_use]
+    pub const fn pointer_hidden(&self) -> bool {
+        self.pointer_hidden
     }
 }
 
@@ -4527,8 +4438,6 @@ struct BlockMenu {
 enum Pending {
     /// A paste the worker held back (paste protection) until ↩ or the Paste button sends it.
     Paste(String),
-    /// The close of a shell whose command (the first line of it) is still running.
-    Close(String),
 }
 
 /// What the right-click menu offers: a block's items on a block, the terminal's own after.
@@ -4675,6 +4584,8 @@ mod tests {
             view
         });
         cx.simulate_resize(size(px(400.0), px(300.0)));
+        // The only client, as the worker makes it: it drives.
+        view.update(cx, |view, cx| view.apply(TermEvent::Driver { you: true }, cx));
         cx.run_until_parked();
         (view, rx, cx)
     }
@@ -5756,92 +5667,6 @@ mod tests {
         );
     }
 
-    /// ⌘W on a shell whose command is running asks first: the workspace's `ask_close` puts the
-    /// bar up and says so; ↩ confirms (the workspace hears `CloseConfirmed`), Esc keeps the
-    /// shell, any other key keeps it and goes to the program; an idle shell never asks.
-    #[gpui::test]
-    fn closing_a_busy_shell_asks_first(cx: &mut TestAppContext) {
-        let (view, mut rx, cx) = terminal(cx);
-        let confirmed = Rc::new(std::cell::Cell::new(0_u32));
-        cx.update(|_window, cx| {
-            let confirmed = Rc::clone(&confirmed);
-            cx.subscribe(&view, move |_view, event, _cx| {
-                if matches!(event, TerminalViewEvent::CloseConfirmed) {
-                    confirmed.set(confirmed.get().saturating_add(1));
-                }
-            })
-            .detach();
-        });
-        let frame = |seq, rows: &[(&str, SemanticMark)], cursor_row| {
-            TermEvent::Frame(Frame {
-                seq,
-                full: true,
-                epoch: 0,
-                cols: 10,
-                rows: 3,
-                cursor: Cursor { row: cursor_row, ..Cursor::default() },
-                modes: TermModes::empty(),
-                oldest_line: LineIndex(0),
-                first_visible_line: LineIndex(0),
-                total_lines: 3,
-                input_ack: 0,
-                above: None,
-                // Running once the cursor left the prompt row, as the worker tells it.
-                blocks: (cursor_row > 0).then(|| slopty_proto::terminal::Blocks {
-                    whole: false,
-                    marks: vec![slopty_proto::terminal::BlockMark {
-                        prompt: LineIndex(0),
-                        end: None,
-                    }],
-                }),
-                images: Vec::new(),
-                updates: rows
-                    .iter()
-                    .enumerate()
-                    .map(|(row, (text, mark))| {
-                        let mut line = Line::from_text(text, 10, Style::DEFAULT);
-                        line.mark = *mark;
-                        RowUpdate { row: u16::try_from(row).unwrap(), line: line.into() }
-                    })
-                    .collect(),
-            })
-        };
-        let prompt = SemanticMark::Prompt { exit: None, input: Some(2) };
-        // Idle at the prompt: nothing to ask.
-        view.update_in(cx, |view, _window, cx| {
-            view.apply(frame(1, &[("$ ", prompt), ("", SemanticMark::Output)], 0), cx);
-        });
-        assert!(!view.update(cx, TerminalView::ask_close), "idle: closes at once");
-        // Running: the bar asks, ↩ confirms.
-        view.update_in(cx, |view, _window, cx| {
-            view.apply(frame(2, &[("$ make", prompt), ("", SemanticMark::Output)], 1), cx);
-        });
-        assert!(view.read_with(cx, |v, _| v.state.command_running()));
-        assert!(view.update(cx, TerminalView::ask_close), "running: asks");
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("close-confirm").is_some(), "the bar is up");
-        assert!(view.read_with(cx, |v, _| v.close_asked()));
-        cx.simulate_keystrokes("enter");
-        cx.run_until_parked();
-        assert_eq!(confirmed.get(), 1, "\u{21a9} confirms");
-        assert!(!view.read_with(cx, |v, _| v.close_asked()));
-        assert!(drain_input(&mut rx).is_empty(), "the \u{21a9} was not typed");
-        // Esc keeps it.
-        assert!(view.update(cx, TerminalView::ask_close));
-        cx.simulate_keystrokes("escape");
-        cx.run_until_parked();
-        assert!(!view.read_with(cx, |v, _| v.close_asked()), "Esc keeps the shell");
-        assert_eq!(confirmed.get(), 1);
-        assert_eq!(drain_input(&mut rx), Vec::<String>::new());
-        // Any other key keeps it and goes on to the program.
-        assert!(view.update(cx, TerminalView::ask_close));
-        cx.simulate_keystrokes("x");
-        cx.run_until_parked();
-        assert!(!view.read_with(cx, |v, _| v.close_asked()));
-        assert_eq!(drain_input(&mut rx), ["x"], "the key reached the program");
-        assert_eq!(confirmed.get(), 1);
-    }
-
     /// ⌘⇧C copies the output of the last finished command; with no marks it copies nothing.
     #[gpui::test]
     fn cmd_shift_c_copies_the_last_commands_output(cx: &mut TestAppContext) {
@@ -5989,44 +5814,6 @@ mod tests {
         assert!(chip_fill(cx, 1.0), "`seq 2` succeeded: its facts are on a chip");
     }
 
-    /// The newest failure shows in the grid while its block is in view: at the live bottom,
-    /// and not once the view scrolls above it. A success is never one.
-    #[gpui::test]
-    fn the_newest_failure_is_in_view_while_its_block_is(cx: &mut TestAppContext) {
-        let (view, _rx, cx) = terminal(cx);
-        with_command_blocks(&view, cx);
-        let in_view = |cx: &VisualTestContext| view.read_with(cx, |v, _| v.failure_in_view());
-        assert!(!in_view(cx), "the newest command, `seq 2`, succeeded");
-        view.update_in(cx, |view, _window, cx| {
-            let failed = SemanticMark::Prompt { exit: Some(1), input: Some(2) };
-            view.apply(
-                TermEvent::Frame(Frame {
-                    seq: 2,
-                    full: false,
-                    epoch: 0,
-                    cols: 10,
-                    rows: 3,
-                    cursor: Cursor::default(),
-                    modes: TermModes::empty(),
-                    oldest_line: LineIndex(0),
-                    first_visible_line: LineIndex(6),
-                    total_lines: 9,
-                    input_ack: 0,
-                    above: None,
-                    blocks: None,
-                    images: Vec::new(),
-                    updates: vec![RowUpdate { row: 2, line: marked("$ ", failed).into() }],
-                }),
-                cx,
-            );
-        });
-        cx.run_until_parked();
-        assert!(in_view(cx), "`seq 2` failed and its output is on screen");
-        cx.simulate_keystrokes("cmd-up cmd-up cmd-up");
-        assert_eq!(top_line(&view, cx), LineIndex(0));
-        assert!(!in_view(cx), "scrolled above it: only the header can say so");
-    }
-
     /// Dotted and dashed underlines are drawn in pieces on the device's pixels, in the
     /// underline's own colour: round dots as wide as the stroke is thick with gaps between,
     /// and a dash at each end of each cell, never one solid line under the run.
@@ -6114,174 +5901,6 @@ mod tests {
         cx.run_until_parked();
         assert!(outlined(cx, muted), "unfocused: a muted hollow block");
         assert!(!outlined(cx, hsla(theme.terminal.cursor)), "never the cursor colour");
-    }
-
-    /// A key hides the pointer once it is sent, and the next keys leave it be until the
-    /// pointer moves, which shows it and lets the next key hide it again.
-    #[gpui::test]
-    fn a_key_hides_the_pointer_once_until_it_moves(cx: &mut TestAppContext) {
-        let (view, _rx, cx) = terminal(cx);
-        let hidden = |cx: &VisualTestContext| view.read_with(cx, |v, _| v.pointer_hidden());
-        assert!(!hidden(cx));
-        cx.simulate_keystrokes("a");
-        assert!(hidden(cx), "the key hid it");
-        cx.simulate_mouse_move(point(px(20.0), px(20.0)), None, gpui::Modifiers::default());
-        cx.run_until_parked();
-        assert!(!hidden(cx), "a move shows it");
-        cx.simulate_keystrokes("b");
-        assert!(hidden(cx), "and the next key hides it again");
-    }
-
-    /// A right click on a block's row opens its menu: the typed command and the output to
-    /// the clipboard, the command run again (a paste, then ↩), the block selected; Esc and
-    /// any click close it; the terminal's own items come after the block's.
-    #[gpui::test]
-    fn a_right_click_on_a_block_offers_its_command_and_output(cx: &mut TestAppContext) {
-        let (view, mut rx, cx) = terminal(cx);
-        with_command_blocks(&view, cx);
-        cx.update(|window, _cx| window.set_a11y_active(true));
-        cx.run_until_parked();
-        drain_words(&mut rx);
-        // Row 0 of the viewport is line 6 ("2"), output of `seq 2` (prompt line 4).
-        let at = view.read_with(cx, |v, _| {
-            let m = v.metrics.expect("laid out");
-            m.origin + point(m.cell_width * 1.5, m.line_height * 0.5)
-        });
-        let right_click = |cx: &mut VisualTestContext| {
-            cx.simulate_mouse_down(at, MouseButton::Right, gpui::Modifiers::default());
-            cx.run_until_parked();
-        };
-        let pick = |cx: &mut VisualTestContext, key: &'static str| {
-            let selector: &'static str = Box::leak(format!("block-menu-{key}").into_boxed_str());
-            let bounds = cx.debug_bounds(selector).unwrap_or_else(|| panic!("{key} in the menu"));
-            cx.simulate_click(bounds.center(), gpui::Modifiers::default());
-            cx.run_until_parked();
-            assert!(cx.debug_bounds("block-menu").is_none(), "the menu closes after {key}");
-        };
-        let clipboard = |cx: &mut VisualTestContext| {
-            cx.update(|_, cx| cx.read_from_clipboard().and_then(|i| i.text()))
-        };
-
-        right_click(cx);
-        let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
-        assert!(tree.iter().any(|n| n.is("Menu", Some("Command block"))), "{tree:#?}");
-        for label in [
-            "Copy command",
-            "Copy output",
-            "Rerun",
-            "Select block",
-            "Paste",
-            "Find…",
-            "Clear screen",
-        ] {
-            assert!(tree.iter().any(|n| n.is("MenuItem", Some(label))), "{label}: {tree:#?}");
-        }
-        assert!(!tree.iter().any(|n| n.is("MenuItem", Some("Copy"))), "nothing selected yet");
-        let block = view.read_with(cx, |v, _| v.block_menu.as_ref().and_then(|m| m.block.clone()));
-        let block = block.expect("the menu holds its block");
-        assert_eq!(block.command.as_deref(), Some("seq 2"));
-        assert_eq!(block.output, "1\n2");
-        assert!(drain_input(&mut rx).is_empty(), "a right click on a block is not reported");
-        pick(cx, "copy-output");
-        assert_eq!(clipboard(cx).as_deref(), Some("1\n2"));
-
-        right_click(cx);
-        pick(cx, "copy-command");
-        assert_eq!(clipboard(cx).as_deref(), Some("seq 2"));
-
-        right_click(cx);
-        pick(cx, "rerun");
-        assert_eq!(drain_input(&mut rx), ["paste:seq 2", "enter"]);
-        view.update(cx, |view, cx| view.paste("seq 3".to_owned(), cx));
-        assert_eq!(drain_input(&mut rx), ["paste:seq 3"], "typed, not run");
-
-        right_click(cx);
-        pick(cx, "select-block");
-        let selected = view.read_with(cx, |v, _| v.selected_text());
-        assert_eq!(selected.as_deref(), Some("$ seq 2\n1\n2\n"), "prompt row to the blank row");
-
-        right_click(cx);
-        cx.simulate_keystrokes("escape");
-        assert!(cx.debug_bounds("block-menu").is_none(), "Esc closes it");
-        assert!(drain_input(&mut rx).is_empty(), "the Esc went to the menu, not the shell");
-        right_click(cx);
-        // Left of the menu (it hangs right and down from the click), on another row.
-        let elsewhere = view.read_with(cx, |v, _| {
-            let m = v.metrics.expect("laid out");
-            m.origin + point(m.cell_width * 0.5, m.line_height * 2.5)
-        });
-        cx.simulate_click(elsewhere, gpui::Modifiers::default());
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("block-menu").is_none(), "a click elsewhere closes it");
-
-        // The phone's armed ⌘ then a tap on a block row with no link or path under it opens
-        // the same menu, one tap, nothing to the program.
-        drain_input(&mut rx);
-        view.update(cx, |v, cx| v.set_sticky_command(true, cx));
-        cx.simulate_click(at, gpui::Modifiers::default());
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("block-menu").is_some(), "the armed tap opens the menu");
-        assert!(!view.read_with(cx, |v, _| v.sticky_command()), "one tap");
-        let tapped = view.read_with(cx, |v, _| v.block_menu.as_ref().and_then(|m| m.block.clone()));
-        assert_eq!(tapped.and_then(|b| b.command).as_deref(), Some("seq 2"));
-        assert!(drain_input(&mut rx).is_empty(), "the tap is not reported");
-        pick(cx, "copy-command");
-        assert_eq!(clipboard(cx).as_deref(), Some("seq 2"));
-        // Disarmed, a tap on the same row is a plain click: no menu.
-        cx.simulate_click(at, gpui::Modifiers::default());
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("block-menu").is_none());
-    }
-
-    /// "Attach selection to agent" hands the workspace the selected text fenced, named after
-    /// the command whose output it is; the menu offers it only with text selected and an agent
-    /// to take it, and the action says why it does nothing otherwise.
-    #[gpui::test]
-    fn a_selection_is_attached_named_after_its_command(cx: &mut TestAppContext) {
-        let (view, _rx, cx) = terminal(cx);
-        with_command_blocks(&view, cx);
-        let dispatch = |cx: &mut VisualTestContext, action: Box<dyn gpui::Action>| {
-            cx.update(|window, cx| window.dispatch_action(action, cx));
-            cx.run_until_parked();
-        };
-        let (attached, notices) =
-            (Rc::new(RefCell::new(Vec::new())), Rc::new(RefCell::new(Vec::new())));
-        let (seen, heard) = (Rc::clone(&attached), Rc::clone(&notices));
-        cx.update(|_window, cx| {
-            cx.subscribe(&view, move |_view, event, _cx| match event {
-                TerminalViewEvent::Attach(text) => seen.borrow_mut().push(text.clone()),
-                TerminalViewEvent::Notice(text) => heard.borrow_mut().push(text.clone()),
-                _ => {}
-            })
-            .detach();
-        });
-        let menu = |cx: &mut VisualTestContext| {
-            view.read_with(cx, |v, cx| {
-                TerminalView::block_menu_items(None, v.has_selection(), v.can_attach(cx))
-            })
-        };
-        // Lines 5 and 6 are `seq 2`'s output.
-        view.update(cx, |view, _cx| {
-            view.selection = Some(Selection::run((LineIndex(5), 0), (LineIndex(6), 9)));
-        });
-        dispatch(cx, Box::new(AttachSelection));
-        assert_eq!(notices.borrow().as_slice(), ["No agent to attach the selection to"]);
-        assert!(!menu(cx).contains(&BlockMenuItem::AttachSelection));
-
-        let probe: AttachProbe = Rc::new(|_cx: &App| true);
-        view.update(cx, |view, _cx| view.set_attach_probe(probe));
-        assert!(menu(cx).contains(&BlockMenuItem::AttachSelection));
-        dispatch(cx, Box::new(AttachSelection));
-        assert_eq!(
-            attached.borrow().as_slice(),
-            ["From the terminal, what `seq 2` printed:\n\n```\n1\n2\n```\n"]
-        );
-
-        view.update(cx, |view, _cx| view.selection = None);
-        assert!(!menu(cx).contains(&BlockMenuItem::AttachSelection), "nothing selected");
-        dispatch(cx, Box::new(AttachSelection));
-        assert_eq!(notices.borrow().last().map(String::as_str), Some("Nothing selected to attach"));
-        assert_eq!(attached.borrow().len(), 1);
     }
 
     /// Selected text off every block is "From the terminal", and a fence outruns the backticks
@@ -6925,30 +6544,41 @@ mod tests {
         assert!(cx.debug_bounds("lines-below").is_none(), "⇧⇲ goes back to live too");
     }
 
-    /// The tile's own pill (the worker away, the program exited) takes the place of the
-    /// lines below: covered, the view draws none, and uncovered it draws it again.
+    /// Sized by another client, a view showing output offers to take the size, and a click asks
+    /// the worker to drive from here; once the worker says it does, the pill goes. A view
+    /// scrolled up shows its lines below instead.
     #[gpui::test]
-    fn the_lines_below_give_way_to_the_tiles_pill(cx: &mut TestAppContext) {
-        let (view, _rx, cx) = terminal(cx);
-        view.update_in(cx, |view, _window, cx| {
-            view.apply(moved_frame(1, 10, &["a", "b", "c"]), cx);
-            view.scroll_lines(2, cx);
-        });
+    fn a_view_another_client_sizes_offers_to_take_the_size(cx: &mut TestAppContext) {
+        let (view, mut rx, cx) = terminal(cx);
+        view.update(cx, |view, cx| view.apply(TermEvent::Driver { you: false }, cx));
         cx.run_until_parked();
+        assert!(cx.debug_bounds("take-size").is_none(), "nothing shown yet: no pill");
+        view.update(cx, |view, cx| view.apply(moved_frame(1, 10, &["a", "b", "c"]), cx));
+        cx.run_until_parked();
+        let at = cx.debug_bounds("take-size").expect("the pill is drawn").center();
+        view.update(cx, |view, cx| view.scroll_lines(1, cx));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("take-size").is_none(), "scrolled up: the lines below instead");
         assert!(cx.debug_bounds("lines-below").is_some());
-        let changed = view.update_in(cx, |view, _window, cx| {
-            cx.notify();
-            view.set_covered(true)
-        });
+        cx.simulate_keystrokes("shift-end");
         cx.run_until_parked();
-        assert!(changed, "a cached drawing is stale");
-        assert!(cx.debug_bounds("lines-below").is_none(), "covered");
-        view.update_in(cx, |view, _window, cx| {
-            cx.notify();
-            view.set_covered(false)
-        });
+        while rx.try_recv().is_ok() {}
+        cx.simulate_click(at, gpui::Modifiers::none());
         cx.run_until_parked();
-        assert!(cx.debug_bounds("lines-below").is_some(), "uncovered");
+        let mut sent = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            sent.push(msg);
+        }
+        assert!(
+            sent.iter().any(|m| matches!(
+                m,
+                ClientMsg::Term { req: TermRequest::Drive { drive: true }, .. }
+            )),
+            "{sent:?}"
+        );
+        view.update(cx, |view, cx| view.apply(TermEvent::Driver { you: true }, cx));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("take-size").is_none(), "driving: the pill goes");
     }
 
     /// The window point at the middle of cell (`col`, `row`).
@@ -7546,38 +7176,6 @@ mod tests {
         assert!(shown(cx) <= 0.0, "then it is gone");
     }
 
-    /// ⌘← is `^A` on the wire and ⌥⌫ `ESC DEL`, as raw bytes, always: the Mac's line-editing
-    /// chords are the terminal's.
-    #[gpui::test]
-    fn the_macs_editing_keys_edit_the_line(cx: &mut TestAppContext) {
-        let (view, mut rx, cx) = terminal(cx);
-        let raw = |rx: &mut mpsc::Receiver<ClientMsg>| {
-            let mut out = Vec::new();
-            while let Ok(msg) = rx.try_recv() {
-                match msg {
-                    ClientMsg::Term { req: TermRequest::Raw(bytes), .. } => out.push(bytes),
-                    ClientMsg::Term { req: TermRequest::Key(key), .. } => {
-                        out.push(format!("key:{:?}", key.code).into_bytes());
-                    }
-                    _ => {}
-                }
-            }
-            out
-        };
-        let _attach = raw(&mut rx);
-        cx.simulate_keystrokes("cmd-left");
-        cx.simulate_keystrokes("alt-backspace");
-        cx.simulate_keystrokes("alt-right");
-        assert_eq!(raw(&mut rx), [b"\x01".to_vec(), b"\x1b\x7f".to_vec(), b"\x1bf".to_vec()]);
-        // The phone's key bar: ⌘ armed, then ⌫ from the bar.
-        view.update(cx, |view, cx| {
-            view.set_sticky_command(true, cx);
-            view.press(Keystroke { key: "backspace".to_owned(), ..Keystroke::default() }, cx);
-        });
-        assert_eq!(raw(&mut rx), [b"\x15".to_vec()], "armed ⌘⌫ is ^U");
-        assert!(!view.read_with(cx, |v, _| v.sticky_command()), "one key");
-    }
-
     /// Every key the terminal received, oldest first, with the paste texts in between.
     fn drain_input(rx: &mut mpsc::Receiver<ClientMsg>) -> Vec<String> {
         let mut out = Vec::new();
@@ -7627,70 +7225,6 @@ mod tests {
         assert_eq!(sent(), Some(TermRequest::Reached { marker: 2 }));
         cx.run_until_parked();
         assert_eq!(sent(), None, "one answer for both");
-    }
-
-    /// The terminal's find bar takes the kit bar's toggles: each one asks again, its rule
-    /// written into the pattern the worker compiles, and the next bar opens with them.
-    #[gpui::test]
-    fn the_find_bars_toggles_ask_the_worker_again(cx: &mut TestAppContext) {
-        let (view, mut rx, cx) = terminal(cx);
-        let mut asked = move || {
-            let mut last = None;
-            while let Ok(msg) = rx.try_recv() {
-                if let ClientMsg::Term { req: TermRequest::Search { needle, regex, .. }, .. } = msg
-                {
-                    last = Some((needle, regex));
-                }
-            }
-            last
-        };
-        let ok = Query { needle: "a.b".to_owned(), ..Query::default() };
-        view.update_in(cx, |view, window, cx| view.find_with(&ok, window, cx));
-        cx.run_until_parked();
-        assert_eq!(asked(), Some((r"(?im)a\.b".to_owned(), true)), "text, any case");
-        for part in ["terminal-find-case", "terminal-find-word"] {
-            let at = cx.debug_bounds(part).expect("the toggle");
-            cx.simulate_click(at.center(), gpui::Modifiers::default());
-            cx.run_until_parked();
-        }
-        assert_eq!(asked(), Some((r"(?m-i)\b(?:a\.b)\b".to_owned(), true)), "exact, whole words");
-        view.update_in(cx, |view, window, cx| {
-            view.close_find(&CloseFind, window, cx);
-            view.find(&Find, window, cx);
-        });
-        let kept = view.read_with(cx, |v, _| v.search_query().cloned());
-        assert!(kept.is_some_and(|q| q.match_case && q.whole_word && !q.regex), "remembered");
-    }
-
-    /// With the find bar open, output searches again at most every [`SEARCH_REFRESH`], and
-    /// output that stops inside the wait is still searched when the wait ends: the hits
-    /// include the last of a burst. Without output, nothing is searched again.
-    #[gpui::test]
-    fn the_find_bar_searches_the_end_of_a_burst(cx: &mut TestAppContext) {
-        let (view, mut rx, cx) = terminal(cx);
-        let mut searches = move || {
-            let mut n = 0;
-            while let Ok(msg) = rx.try_recv() {
-                let search = matches!(msg, ClientMsg::Term { req: TermRequest::Search { .. }, .. });
-                n = usize::from(search).saturating_add(n);
-            }
-            n
-        };
-        searches();
-        view.update_in(cx, |view, window, cx| {
-            view.find_with(&Query { needle: "ok".to_owned(), ..Query::default() }, window, cx);
-        });
-        cx.run_until_parked();
-        assert_eq!(searches(), 1, "the needle");
-        view.update_in(cx, |view, _window, cx| view.apply(moved_frame(1, 0, &["ok 1"]), cx));
-        cx.run_until_parked();
-        assert_eq!(searches(), 0, "output inside the wait waits");
-        cx.executor().advance_clock(SEARCH_REFRESH);
-        cx.run_until_parked();
-        assert_eq!(searches(), 1, "the end of the burst is searched");
-        cx.executor().advance_clock(SEARCH_REFRESH.saturating_mul(3));
-        cx.run_until_parked();
-        assert_eq!(searches(), 0, "nothing came since");
     }
 
     /// What a typed key costs on its way into the outbound queue, room or not. Run by hand (it
@@ -7835,104 +7369,6 @@ mod tests {
             view.unmark_text(window, cx);
             assert_eq!(view.marked(), None);
         });
-    }
-
-    /// The key bar's Alt arms Meta for exactly one key: a typed letter goes as Alt and that
-    /// letter, its case kept, for the worker to send as `ESC b`, whatever the ⌥ setting; the
-    /// bar's ← goes as the Mac's word motion, as ⌥← does on the desktop.
-    #[gpui::test]
-    fn sticky_alt_sends_the_next_key_as_meta(cx: &mut TestAppContext) {
-        let (tx, mut rx) = mpsc::channel(8);
-        let (view, cx) = cx.add_window_view(|_window, cx| {
-            TerminalView::new(SessionId::new(), TermSize::default(), tx, Theme::default(), cx)
-        });
-        while rx.try_recv().is_ok() {}
-        let sent = |rx: &mut mpsc::Receiver<ClientMsg>| {
-            let mut out = Vec::new();
-            while let Ok(ClientMsg::Term { req, .. }) = rx.try_recv() {
-                out.push(req);
-            }
-            out
-        };
-        view.update_in(cx, |view, window, cx| {
-            view.set_sticky_alt(true, cx);
-            view.replace_text_in_range(None, "B", window, cx);
-            assert!(!view.sticky_alt(), "consumed by the typed character");
-            view.replace_text_in_range(None, "d", window, cx);
-        });
-        let reqs = sent(&mut rx);
-        let [TermRequest::Key(meta), TermRequest::Raw(plain)] = reqs.as_slice() else {
-            panic!("one key event, then plain text: {reqs:?}")
-        };
-        assert!(meta.mods.contains(slopty_proto::input::Mods::ALT) && meta.option_as_alt);
-        assert_eq!(meta.text.as_deref(), Some("B"), "the letter, its case kept");
-        assert_eq!(plain.as_slice(), b"d");
-
-        view.update_in(cx, |view, _window, cx| {
-            view.set_sticky_alt(true, cx);
-            view.press(Keystroke { key: "left".into(), ..Keystroke::default() }, cx);
-        });
-        let reqs = sent(&mut rx);
-        assert!(
-            matches!(reqs.as_slice(), [TermRequest::Raw(bytes)] if bytes == b"\x1bb"),
-            "a word back: {reqs:?}"
-        );
-        assert!(!view.read_with(cx, |v, _| v.sticky_alt()));
-    }
-
-    /// The key bar's ⌃ arms Control for exactly one key, whether it comes from the bar
-    /// (`press`) or from the soft keyboard as typed text.
-    #[gpui::test]
-    fn sticky_control_applies_to_the_next_key_only(cx: &mut TestAppContext) {
-        let (tx, mut rx) = mpsc::channel(8);
-        let (view, cx) = cx.add_window_view(|_window, cx| {
-            TerminalView::new(SessionId::new(), TermSize::default(), tx, Theme::default(), cx)
-        });
-        while rx.try_recv().is_ok() {}
-        let keys = |rx: &mut mpsc::Receiver<ClientMsg>| {
-            let mut out = Vec::new();
-            while let Ok(msg) = rx.try_recv() {
-                if let ClientMsg::Term { req: TermRequest::Key(key), .. } = msg {
-                    out.push(key);
-                }
-            }
-            out
-        };
-        view.update_in(cx, |view, window, cx| {
-            view.set_sticky_control(true, cx);
-            assert!(view.sticky_control());
-            view.replace_text_in_range(None, "c", window, cx);
-            assert!(!view.sticky_control(), "consumed by the typed character");
-            view.replace_text_in_range(None, "d", window, cx);
-        });
-        let sent = keys(&mut rx);
-        assert_eq!(sent.len(), 1, "only the armed character became a key event");
-        assert!(sent[0].mods.contains(slopty_proto::input::Mods::CTRL));
-        assert_eq!(sent[0].unshifted, Some('c'));
-
-        view.update_in(cx, |view, _window, cx| {
-            view.set_sticky_control(true, cx);
-            view.press(
-                Keystroke {
-                    modifiers: gpui::Modifiers::default(),
-                    key: "left".into(),
-                    key_char: None,
-                },
-                cx,
-            );
-            view.press(
-                Keystroke {
-                    modifiers: gpui::Modifiers::default(),
-                    key: "up".into(),
-                    key_char: None,
-                },
-                cx,
-            );
-        });
-        let sent = keys(&mut rx);
-        assert_eq!(sent.len(), 2);
-        assert!(sent[0].mods.contains(slopty_proto::input::Mods::CTRL));
-        assert!(!sent[1].mods.contains(slopty_proto::input::Mods::CTRL));
     }
 
     /// ⌘-press on a path and a pull past the slop drags the file out instead of opening it:
@@ -8182,63 +7618,6 @@ mod tests {
         assert_eq!(drain_words(&mut rx), Vec::<String>::new(), "nothing typed into the build");
     }
 
-    /// The key bar's ⌘ arms exactly one tap: the next left press opens the link under it and
-    /// disarms; a press with nothing under it disarms too and selects as usual.
-    #[gpui::test]
-    fn sticky_command_opens_the_link_under_the_next_tap(cx: &mut TestAppContext) {
-        let (view, _rx, cx) = terminal(cx);
-        view.update_in(cx, |view, _window, cx| {
-            view.apply(
-                TermEvent::Frame(Frame {
-                    seq: 1,
-                    full: true,
-                    epoch: 0,
-                    cols: 10,
-                    rows: 3,
-                    cursor: Cursor::default(),
-                    modes: TermModes::empty(),
-                    oldest_line: LineIndex(0),
-                    first_visible_line: LineIndex(0),
-                    total_lines: 3,
-                    input_ack: 0,
-                    above: None,
-                    blocks: None,
-                    images: Vec::new(),
-                    updates: vec![
-                        RowUpdate {
-                            row: 0,
-                            line: Line::from_text("http://a.b", 10, Style::DEFAULT).into(),
-                        },
-                        RowUpdate {
-                            row: 1,
-                            line: Line::from_text("http://c.d", 10, Style::DEFAULT).into(),
-                        },
-                    ],
-                }),
-                cx,
-            );
-            view.set_sticky_command(true, cx);
-        });
-        cx.run_until_parked();
-        assert_eq!(cx.opened_url(), None);
-        let metrics = view.read_with(cx, |v, _| v.metrics.expect("laid out"));
-        let cell = |col: u16, row: u16| {
-            metrics.origin
-                + point(
-                    metrics.cell_width * (f32::from(col) + 0.5),
-                    metrics.line_height * (f32::from(row) + 0.5),
-                )
-        };
-        cx.simulate_click(cell(2, 0), gpui::Modifiers::default());
-        cx.run_until_parked();
-        assert_eq!(cx.opened_url().as_deref(), Some("http://a.b"));
-        assert!(!view.read_with(cx, |v, _| v.sticky_command()), "one tap");
-        // Disarmed, a press on the other link is a plain click: nothing opens.
-        cx.simulate_click(cell(2, 1), gpui::Modifiers::default());
-        cx.run_until_parked();
-        assert_eq!(cx.opened_url().as_deref(), Some("http://a.b"), "one tap, one link");
-    }
-
     /// ⌘-click on a program's link opens it for the machine the shell runs on: a `file://`
     /// link as a file tile of its path, a page on its loopback as a page tile through it, and
     /// nothing of either on this device.
@@ -8300,59 +7679,6 @@ mod tests {
         cx.simulate_click(cell(2), command);
         cx.run_until_parked();
         assert_eq!(cx.opened_url().as_deref(), Some("https://example.com/"));
-    }
-
-    /// The key bar's ⌘ then a tap on a path at a prompt views the file as a file tile, not the
-    /// editor: a phone has no comfortable `vi`.
-    #[gpui::test]
-    fn sticky_command_views_the_path_under_the_next_tap(cx: &mut TestAppContext) {
-        let (view, mut rx, cx) = terminal(cx);
-        let viewed = Rc::new(RefCell::new(Vec::new()));
-        let seen = Rc::clone(&viewed);
-        cx.update(|_window, cx| {
-            cx.subscribe(&view, move |_view, event, _cx| {
-                if let TerminalViewEvent::ViewFile { path, line } = event {
-                    seen.borrow_mut().push((path.clone(), *line));
-                }
-            })
-            .detach();
-        });
-        view.update_in(cx, |view, _window, cx| {
-            view.apply(
-                TermEvent::Frame(Frame {
-                    seq: 1,
-                    full: true,
-                    epoch: 0,
-                    cols: 30,
-                    rows: 3,
-                    cursor: Cursor::default(),
-                    modes: TermModes::empty(),
-                    oldest_line: LineIndex(0),
-                    first_visible_line: LineIndex(0),
-                    total_lines: 3,
-                    input_ack: 0,
-                    above: None,
-                    blocks: None,
-                    images: Vec::new(),
-                    updates: vec![RowUpdate {
-                        row: 0,
-                        line: Line::from_text("error: src/main.rs:12:5 bad", 30, Style::DEFAULT)
-                            .into(),
-                    }],
-                }),
-                cx,
-            );
-            view.set_sticky_command(true, cx);
-        });
-        cx.run_until_parked();
-        drain_words(&mut rx);
-        let metrics = view.read_with(cx, |v, _| v.metrics.expect("laid out"));
-        let cell = metrics.origin + point(metrics.cell_width * 10.5, metrics.line_height * 0.5);
-        cx.simulate_click(cell, gpui::Modifiers::default());
-        cx.run_until_parked();
-        assert_eq!(*viewed.borrow(), [("src/main.rs".to_owned(), Some(12))]);
-        assert_eq!(drain_words(&mut rx), Vec::<String>::new(), "nothing typed at the prompt");
-        assert!(!view.read_with(cx, |v, _| v.sticky_command()), "one tap");
     }
 
     /// The grid is a terminal to a screen reader: its title as the label, the cursor row as
@@ -9092,86 +8418,6 @@ mod tests {
         assert_eq!(reshaped, 0, "the first screen is still shaped");
     }
 
-    /// What the lines-below pill costs a frame: a 100 × 40 shell flooding one line a frame,
-    /// drawn while following, scrolled up with the pill hidden (`covered`), and scrolled up with
-    /// it shown, in alternating blocks. Each sample is the frame applied and drawn. Prints the
-    /// numbers MEASUREMENTS records; run by hand, in release:
-    /// `cargo test -p slopty-ui --release --lib lines_below_cost -- --ignored --nocapture`.
-    #[gpui::test]
-    #[ignore = "measurement, run by hand"]
-    fn lines_below_cost(cx: &mut TestAppContext) {
-        const ROWS: usize = 40;
-        const BLOCK: usize = 50;
-        const ROUNDS: u64 = 10;
-        let (tx, _rx) = mpsc::channel(1 << 16);
-        cx.update(gpui_kit::init);
-        let (view, cx) = cx.add_window_view(|window, cx| {
-            let size = TermSize { cols: 100, rows: 40, ..TermSize::default() };
-            let view = TerminalView::new(SessionId::new(), size, tx, Theme::default(), cx);
-            window.focus(&view.focus, cx);
-            view
-        });
-        cx.simulate_resize(size(px(1000.0), px(900.0)));
-        cx.run_until_parked();
-        let lines = prose(0x2545_f491, 4_000, 90);
-        let flood = |seq: u64| {
-            let first = seq.saturating_sub(1);
-            let at =
-                |row: usize| lines[usize::try_from(first).unwrap().saturating_add(row)].clone();
-            let rows: Vec<String> = (0..ROWS).map(at).collect();
-            let TermEvent::Frame(frame) = screen_of(seq, 100, &rows) else { panic!("a frame") };
-            let changed = if seq == 1 { frame.updates } else { frame.updates[ROWS - 1..].to_vec() };
-            TermEvent::Frame(Frame {
-                full: seq == 1,
-                first_visible_line: LineIndex(first),
-                total_lines: first.saturating_add(ROWS as u64),
-                updates: changed,
-                ..frame
-            })
-        };
-        let mut seq = 0_u64;
-        let mut draw = |cx: &mut VisualTestContext| {
-            seq = seq.saturating_add(1);
-            let event = flood(seq);
-            let started = Instant::now();
-            view.update_in(cx, |view, _window, cx| view.apply(event, cx));
-            cx.run_until_parked();
-            started.elapsed()
-        };
-        for _ in 0..60 {
-            draw(cx);
-        }
-        let (mut following, mut hidden, mut shown) = (Vec::new(), Vec::new(), Vec::new());
-        for _ in 0..ROUNDS {
-            view.update_in(cx, |view, _window, cx| view.scroll_lines(i64::MIN, cx));
-            following.extend(std::iter::repeat_with(|| draw(cx)).take(BLOCK));
-            view.update_in(cx, |view, _window, cx| {
-                view.scroll_lines(20, cx);
-                view.set_covered(true);
-            });
-            hidden.extend(std::iter::repeat_with(|| draw(cx)).take(BLOCK));
-            let renders = view.read_with(cx, |v, _| v.renders());
-            view.update_in(cx, |view, _window, _cx| view.set_covered(false));
-            shown.extend(std::iter::repeat_with(|| draw(cx)).take(BLOCK));
-            let drawn = view.read_with(cx, |v, _| v.renders()).saturating_sub(renders);
-            assert!(usize::try_from(drawn).is_ok_and(|d| d >= BLOCK), "every frame drew: {drawn}");
-            assert!(cx.debug_bounds("lines-below").is_some(), "the pill is up");
-        }
-        let row = |samples: &mut Vec<Duration>| {
-            samples.sort_unstable();
-            let at = |q: usize| samples[(samples.len().saturating_sub(1)).saturating_mul(q) / 100];
-            format!("{:?} / {:?} / {:?} / {:?}", at(50), at(95), at(99), at(100))
-        };
-        println!(
-            "MEASURE lines-below pill, frame applied and drawn (p50 / p95 / p99 / max, {} frames \
-             each): following {} · scrolled, pill hidden {} · scrolled, pill shown {}",
-            following.len(),
-            row(&mut following),
-            row(&mut hidden),
-            row(&mut shown),
-        );
-    }
-
     /// What command blocks cost a frame: a 100 × 40 screen of ten four-row blocks, every other
     /// one failed, redrawn with nothing changed, in alternating blocks with the pointer away and
     /// over a failed block (the first round warms up). Each sample is one notify and the draw
@@ -9414,6 +8660,425 @@ mod tests {
         );
     }
 
+    /// The program's `OSC 22` shape is the pointer over the grid, under a link's hand, and ⇧
+    /// under mouse reporting still takes the I-beam back.
+    #[gpui::test]
+    fn the_programs_pointer_shape_is_the_pointer_over_the_grid(cx: &mut TestAppContext) {
+        let (view, _rx, cx) = terminal(cx);
+        let pointer = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.pointer());
+        assert_eq!(pointer(cx), CursorStyle::IBeam, "text until the program asks");
+        view.update_in(cx, |view, _window, cx| {
+            view.apply(TermEvent::Pointer(PointerShape::ColResize), cx);
+        });
+        assert_eq!(pointer(cx), CursorStyle::ResizeColumn);
+        view.update_in(cx, |view, _window, cx| {
+            let mut frame = screen_of(1, 10, &["a".to_owned(), String::new(), String::new()]);
+            if let TermEvent::Frame(f) = &mut frame {
+                f.modes = TermModes::MOUSE_TRACKING;
+            }
+            view.apply(frame, cx);
+        });
+        assert_eq!(pointer(cx), CursorStyle::ResizeColumn, "asked for, over mouse reporting");
+        view.update(cx, |view, _| view.shift_held = true);
+        assert_eq!(pointer(cx), CursorStyle::IBeam, "⇧ takes the mouse back");
+        view.update(cx, |view, _| view.shift_held = false);
+        view.update_in(cx, |view, _window, cx| {
+            view.apply(TermEvent::Pointer(PointerShape::Text), cx);
+        });
+        assert_eq!(
+            pointer(cx),
+            CursorStyle::Arrow,
+            "the I-beam asked for, a program has the mouse"
+        );
+        assert_eq!(cursor_style(PointerShape::Pointer), CursorStyle::PointingHand);
+        assert_eq!(cursor_style(PointerShape::Wait), CursorStyle::Arrow, "nothing like it");
+    }
+
+    fn report(
+        view: &Entity<TerminalView>,
+        cx: &mut VisualTestContext,
+        state: ProgressState,
+        percent: Option<u8>,
+    ) {
+        view.update_in(cx, |view, _window, cx| {
+            view.apply(
+                TermEvent::Progress(slopty_proto::terminal::Progress { state, percent }),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+    }
+
+    /// A report is the tile header's to draw, in the kit's progress language: the terminal
+    /// draws no line of its own along its edge, and an unknown share asks for no frame of the
+    /// terminal's while it lasts.
+    #[gpui::test]
+    fn a_progress_report_is_told_not_drawn_on_the_edge(cx: &mut TestAppContext) {
+        use slopty_kit::kit::progress::Progress;
+        let (view, _rx, cx) = terminal(cx);
+        let progress = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.progress());
+        assert_eq!(progress(cx), None, "nothing reported");
+        report(&view, cx, ProgressState::Set, Some(40));
+        assert_eq!(progress(cx), Some(Progress::Share(0.4)));
+        assert!(cx.debug_bounds("terminal-progress").is_none(), "no line along the edge");
+        report(&view, cx, ProgressState::Error, None);
+        assert_eq!(progress(cx), Some(Progress::Failed(None)));
+        report(&view, cx, ProgressState::Indeterminate, None);
+        assert_eq!(progress(cx), Some(Progress::Busy));
+        let renders = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.renders());
+        let before = renders(cx);
+        cx.background_executor.advance_clock(slopty_kit::icons::SPIN_STEP.saturating_mul(6));
+        cx.run_until_parked();
+        assert_eq!(renders(cx), before, "the terminal draws nothing for it");
+        report(&view, cx, ProgressState::None, None);
+        assert_eq!(progress(cx), None, "removed");
+    }
+
+    fn restore(view: &Entity<TerminalView>, cx: &mut VisualTestContext, command: &[&str]) {
+        view.update_in(cx, |view, _window, cx| {
+            view.apply(
+                TermEvent::Restored(slopty_proto::terminal::Restored {
+                    saved_ms: slopty_core::WallMs::from_millis(1_790_000_000_000),
+                    command: command.iter().map(|w| (*w).to_owned()).collect(),
+                }),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+    }
+
+    /// A restored session says so, and offers what it ran again: typed and run only on the
+    /// person's click, after which the chip goes.
+    #[gpui::test]
+    fn a_restored_session_runs_its_command_again_only_on_a_click(cx: &mut TestAppContext) {
+        let (view, mut rx, cx) = terminal(cx);
+        drain_words(&mut rx);
+        restore(&view, cx, &["claude", "--resume"]);
+        assert!(cx.debug_bounds("terminal-restored").is_some(), "the chip");
+        assert!(drain_words(&mut rx).is_empty(), "nothing runs on the restore");
+        let pasted = |rx: &mut mpsc::Receiver<ClientMsg>| {
+            std::iter::from_fn(|| rx.try_recv().ok())
+                .filter_map(|msg| match msg {
+                    ClientMsg::Term { req: TermRequest::Paste { text, .. }, .. } => Some(text),
+                    ClientMsg::Term { req: TermRequest::Key(key), .. } => {
+                        Some(format!("{:?}", key.code))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let at = cx.debug_bounds("terminal-run-again").expect("the action").center();
+        cx.simulate_click(at, gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(pasted(&mut rx), ["claude --resume", "Enter"], "typed, then ↩");
+        assert!(cx.debug_bounds("terminal-restored").is_none(), "the chip goes");
+    }
+
+    /// A login shell restored has nothing to run again: the chip says so and can be put away.
+    #[gpui::test]
+    fn a_restored_login_shell_has_nothing_to_run_and_is_dismissed(cx: &mut TestAppContext) {
+        let (view, mut rx, cx) = terminal(cx);
+        restore(&view, cx, &[]);
+        assert!(cx.debug_bounds("terminal-restored").is_some());
+        assert!(cx.debug_bounds("terminal-run-again").is_none(), "nothing to run");
+        let at = cx.debug_bounds("terminal-restored-dismiss").expect("dismiss").center();
+        drain_words(&mut rx);
+        cx.simulate_click(at, gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("terminal-restored").is_none(), "put away");
+        assert!(drain_words(&mut rx).is_empty(), "and nothing typed");
+    }
+
+    /// Every message the worker received that types or clears, oldest first, as one word each.
+    fn drain_words(rx: &mut mpsc::Receiver<ClientMsg>) -> Vec<String> {
+        let mut out = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            out.push(match msg {
+                ClientMsg::Term { req: TermRequest::Key(_), .. } => "key".to_owned(),
+                ClientMsg::Term { req: TermRequest::Paste { .. }, .. } => "paste".to_owned(),
+                ClientMsg::Term { req: TermRequest::Clear, .. } => "clear".to_owned(),
+                // Resizes and the like: not what these tests are about.
+                _ => continue,
+            });
+        }
+        out
+    }
+
+    /// The newest failure shows in the grid while its block is in view: at the live bottom,
+    /// and not once the view scrolls above it. A success is never one.
+    #[gpui::test]
+    fn the_newest_failure_is_in_view_while_its_block_is(cx: &mut TestAppContext) {
+        let (view, _rx, cx) = terminal(cx);
+        with_command_blocks(&view, cx);
+        let in_view = |cx: &VisualTestContext| view.read_with(cx, |v, _| v.failure_in_view());
+        assert!(!in_view(cx), "the newest command, `seq 2`, succeeded");
+        view.update_in(cx, |view, _window, cx| {
+            let failed = SemanticMark::Prompt { exit: Some(1), input: Some(2) };
+            view.apply(
+                TermEvent::Frame(Frame {
+                    seq: 2,
+                    full: false,
+                    epoch: 0,
+                    cols: 10,
+                    rows: 3,
+                    cursor: Cursor::default(),
+                    modes: TermModes::empty(),
+                    oldest_line: LineIndex(0),
+                    first_visible_line: LineIndex(6),
+                    total_lines: 9,
+                    input_ack: 0,
+                    above: None,
+                    blocks: None,
+                    images: Vec::new(),
+                    updates: vec![RowUpdate { row: 2, line: marked("$ ", failed).into() }],
+                }),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        assert!(in_view(cx), "`seq 2` failed and its output is on screen");
+        cx.simulate_keystrokes("cmd-up cmd-up cmd-up");
+        assert_eq!(top_line(&view, cx), LineIndex(0));
+        assert!(!in_view(cx), "scrolled above it: only the header can say so");
+    }
+
+    /// A key hides the pointer once it is sent, and the next keys leave it be until the
+    /// pointer moves, which shows it and lets the next key hide it again.
+    #[gpui::test]
+    fn a_key_hides_the_pointer_once_until_it_moves(cx: &mut TestAppContext) {
+        let (view, _rx, cx) = terminal(cx);
+        let hidden = |cx: &VisualTestContext| view.read_with(cx, |v, _| v.pointer_hidden());
+        assert!(!hidden(cx));
+        cx.simulate_keystrokes("a");
+        assert!(hidden(cx), "the key hid it");
+        cx.simulate_mouse_move(point(px(20.0), px(20.0)), None, gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert!(!hidden(cx), "a move shows it");
+        cx.simulate_keystrokes("b");
+        assert!(hidden(cx), "and the next key hides it again");
+    }
+
+    /// "Attach selection to agent" hands the workspace the selected text fenced, named after
+    /// the command whose output it is; the menu offers it only with text selected and an agent
+    /// to take it, and the action says why it does nothing otherwise.
+    #[gpui::test]
+    fn a_selection_is_attached_named_after_its_command(cx: &mut TestAppContext) {
+        let (view, _rx, cx) = terminal(cx);
+        with_command_blocks(&view, cx);
+        let dispatch = |cx: &mut VisualTestContext, action: Box<dyn gpui::Action>| {
+            cx.update(|window, cx| window.dispatch_action(action, cx));
+            cx.run_until_parked();
+        };
+        let (attached, notices) =
+            (Rc::new(RefCell::new(Vec::new())), Rc::new(RefCell::new(Vec::new())));
+        let (seen, heard) = (Rc::clone(&attached), Rc::clone(&notices));
+        cx.update(|_window, cx| {
+            cx.subscribe(&view, move |_view, event, _cx| match event {
+                TerminalViewEvent::Attach(text) => seen.borrow_mut().push(text.clone()),
+                TerminalViewEvent::Notice(text) => heard.borrow_mut().push(text.clone()),
+                _ => {}
+            })
+            .detach();
+        });
+        let menu = |cx: &mut VisualTestContext| {
+            view.read_with(cx, |v, cx| {
+                TerminalView::block_menu_items(None, v.has_selection(), v.can_attach(cx))
+            })
+        };
+        // Lines 5 and 6 are `seq 2`'s output.
+        view.update(cx, |view, _cx| {
+            view.selection = Some(Selection::run((LineIndex(5), 0), (LineIndex(6), 9)));
+        });
+        dispatch(cx, Box::new(AttachSelection));
+        assert_eq!(notices.borrow().as_slice(), ["No agent to attach the selection to"]);
+        assert!(!menu(cx).contains(&BlockMenuItem::AttachSelection));
+
+        let probe: AttachProbe = Rc::new(|_cx: &App| true);
+        view.update(cx, |view, _cx| view.set_attach_probe(probe));
+        assert!(menu(cx).contains(&BlockMenuItem::AttachSelection));
+        dispatch(cx, Box::new(AttachSelection));
+        assert_eq!(
+            attached.borrow().as_slice(),
+            ["From the terminal, what `seq 2` printed:\n\n```\n1\n2\n```\n"]
+        );
+
+        view.update(cx, |view, _cx| view.selection = None);
+        assert!(!menu(cx).contains(&BlockMenuItem::AttachSelection), "nothing selected");
+        dispatch(cx, Box::new(AttachSelection));
+        assert_eq!(notices.borrow().last().map(String::as_str), Some("Nothing selected to attach"));
+        assert_eq!(attached.borrow().len(), 1);
+    }
+
+    /// The tile's own pill (the worker away, the program exited) takes the place of the
+    /// lines below: covered, the view draws none, and uncovered it draws it again.
+    #[gpui::test]
+    fn the_lines_below_give_way_to_the_tiles_pill(cx: &mut TestAppContext) {
+        let (view, _rx, cx) = terminal(cx);
+        view.update_in(cx, |view, _window, cx| {
+            view.apply(moved_frame(1, 10, &["a", "b", "c"]), cx);
+            view.scroll_lines(2, cx);
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("lines-below").is_some());
+        let changed = view.update_in(cx, |view, _window, cx| {
+            cx.notify();
+            view.set_covered(true)
+        });
+        cx.run_until_parked();
+        assert!(changed, "a cached drawing is stale");
+        assert!(cx.debug_bounds("lines-below").is_none(), "covered");
+        view.update_in(cx, |view, _window, cx| {
+            cx.notify();
+            view.set_covered(false)
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("lines-below").is_some(), "uncovered");
+    }
+
+    /// The terminal's find bar takes the kit bar's toggles: each one asks again, its rule
+    /// written into the pattern the worker compiles, and the next bar opens with them.
+    #[gpui::test]
+    fn the_find_bars_toggles_ask_the_worker_again(cx: &mut TestAppContext) {
+        let (view, mut rx, cx) = terminal(cx);
+        let mut asked = move || {
+            let mut last = None;
+            while let Ok(msg) = rx.try_recv() {
+                if let ClientMsg::Term { req: TermRequest::Search { needle, regex, .. }, .. } = msg
+                {
+                    last = Some((needle, regex));
+                }
+            }
+            last
+        };
+        let ok = Query { needle: "a.b".to_owned(), ..Query::default() };
+        view.update_in(cx, |view, window, cx| view.find_with(&ok, window, cx));
+        cx.run_until_parked();
+        assert_eq!(asked(), Some((r"(?im)a\.b".to_owned(), true)), "text, any case");
+        for part in ["terminal-find-case", "terminal-find-word"] {
+            let at = cx.debug_bounds(part).expect("the toggle");
+            cx.simulate_click(at.center(), gpui::Modifiers::default());
+            cx.run_until_parked();
+        }
+        assert_eq!(asked(), Some((r"(?m-i)\b(?:a\.b)\b".to_owned(), true)), "exact, whole words");
+        view.update_in(cx, |view, window, cx| {
+            view.close_find(&CloseFind, window, cx);
+            view.find(&Find, window, cx);
+        });
+        let kept = view.read_with(cx, |v, _| v.search_query().cloned());
+        assert!(kept.is_some_and(|q| q.match_case && q.whole_word && !q.regex), "remembered");
+    }
+
+    /// With the find bar open, output searches again at most every [`SEARCH_REFRESH`], and
+    /// output that stops inside the wait is still searched when the wait ends: the hits
+    /// include the last of a burst. Without output, nothing is searched again.
+    #[gpui::test]
+    fn the_find_bar_searches_the_end_of_a_burst(cx: &mut TestAppContext) {
+        let (view, mut rx, cx) = terminal(cx);
+        let mut searches = move || {
+            let mut n = 0;
+            while let Ok(msg) = rx.try_recv() {
+                let search = matches!(msg, ClientMsg::Term { req: TermRequest::Search { .. }, .. });
+                n = usize::from(search).saturating_add(n);
+            }
+            n
+        };
+        searches();
+        view.update_in(cx, |view, window, cx| {
+            view.find_with(&Query { needle: "ok".to_owned(), ..Query::default() }, window, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(searches(), 1, "the needle");
+        view.update_in(cx, |view, _window, cx| view.apply(moved_frame(1, 0, &["ok 1"]), cx));
+        cx.run_until_parked();
+        assert_eq!(searches(), 0, "output inside the wait waits");
+        cx.executor().advance_clock(SEARCH_REFRESH);
+        cx.run_until_parked();
+        assert_eq!(searches(), 1, "the end of the burst is searched");
+        cx.executor().advance_clock(SEARCH_REFRESH.saturating_mul(3));
+        cx.run_until_parked();
+        assert_eq!(searches(), 0, "nothing came since");
+    }
+
+    /// What the lines-below pill costs a frame: a 100 × 40 shell flooding one line a frame,
+    /// drawn while following, scrolled up with the pill hidden (`covered`), and scrolled up with
+    /// it shown, in alternating blocks. Each sample is the frame applied and drawn. Prints the
+    /// numbers MEASUREMENTS records; run by hand, in release:
+    /// `cargo test -p slopty-ui --release --lib lines_below_cost -- --ignored --nocapture`.
+    #[gpui::test]
+    #[ignore = "measurement, run by hand"]
+    fn lines_below_cost(cx: &mut TestAppContext) {
+        const ROWS: usize = 40;
+        const BLOCK: usize = 50;
+        const ROUNDS: u64 = 10;
+        let (tx, _rx) = mpsc::channel(1 << 16);
+        cx.update(gpui_kit::init);
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let size = TermSize { cols: 100, rows: 40, ..TermSize::default() };
+            let view = TerminalView::new(SessionId::new(), size, tx, Theme::default(), cx);
+            window.focus(&view.focus, cx);
+            view
+        });
+        cx.simulate_resize(size(px(1000.0), px(900.0)));
+        cx.run_until_parked();
+        let lines = prose(0x2545_f491, 4_000, 90);
+        let flood = |seq: u64| {
+            let first = seq.saturating_sub(1);
+            let at =
+                |row: usize| lines[usize::try_from(first).unwrap().saturating_add(row)].clone();
+            let rows: Vec<String> = (0..ROWS).map(at).collect();
+            let TermEvent::Frame(frame) = screen_of(seq, 100, &rows) else { panic!("a frame") };
+            let changed = if seq == 1 { frame.updates } else { frame.updates[ROWS - 1..].to_vec() };
+            TermEvent::Frame(Frame {
+                full: seq == 1,
+                first_visible_line: LineIndex(first),
+                total_lines: first.saturating_add(ROWS as u64),
+                updates: changed,
+                ..frame
+            })
+        };
+        let mut seq = 0_u64;
+        let mut draw = |cx: &mut VisualTestContext| {
+            seq = seq.saturating_add(1);
+            let event = flood(seq);
+            let started = Instant::now();
+            view.update_in(cx, |view, _window, cx| view.apply(event, cx));
+            cx.run_until_parked();
+            started.elapsed()
+        };
+        for _ in 0..60 {
+            draw(cx);
+        }
+        let (mut following, mut hidden, mut shown) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..ROUNDS {
+            view.update_in(cx, |view, _window, cx| view.scroll_lines(i64::MIN, cx));
+            following.extend(std::iter::repeat_with(|| draw(cx)).take(BLOCK));
+            view.update_in(cx, |view, _window, cx| {
+                view.scroll_lines(20, cx);
+                view.set_covered(true);
+            });
+            hidden.extend(std::iter::repeat_with(|| draw(cx)).take(BLOCK));
+            let renders = view.read_with(cx, |v, _| v.renders());
+            view.update_in(cx, |view, _window, _cx| view.set_covered(false));
+            shown.extend(std::iter::repeat_with(|| draw(cx)).take(BLOCK));
+            let drawn = view.read_with(cx, |v, _| v.renders()).saturating_sub(renders);
+            assert!(usize::try_from(drawn).is_ok_and(|d| d >= BLOCK), "every frame drew: {drawn}");
+            assert!(cx.debug_bounds("lines-below").is_some(), "the pill is up");
+        }
+        let row = |samples: &mut Vec<Duration>| {
+            samples.sort_unstable();
+            let at = |q: usize| samples[(samples.len().saturating_sub(1)).saturating_mul(q) / 100];
+            format!("{:?} / {:?} / {:?} / {:?}", at(50), at(95), at(99), at(100))
+        };
+        println!(
+            "MEASURE lines-below pill, frame applied and drawn (p50 / p95 / p99 / max, {} frames \
+             each): following {} · scrolled, pill hidden {} · scrolled, pill shown {}",
+            following.len(),
+            row(&mut following),
+            row(&mut hidden),
+            row(&mut shown),
+        );
+    }
+
     /// What the grid's frames cost as a person meets them, on a focused 200 × 60 screen of dense
     /// coloured text under a blinking block cursor: redrawn unchanged, the cursor blinking, a key
     /// echoed at the prompt on the bottom row, a line of output a frame, `yes` (a screen of the
@@ -9627,149 +9292,5 @@ mod tests {
             cx,
         );
         report.join("\n  ")
-    }
-
-    /// The program's `OSC 22` shape is the pointer over the grid, under a link's hand, and ⇧
-    /// under mouse reporting still takes the I-beam back.
-    #[gpui::test]
-    fn the_programs_pointer_shape_is_the_pointer_over_the_grid(cx: &mut TestAppContext) {
-        let (view, _rx, cx) = terminal(cx);
-        let pointer = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.pointer());
-        assert_eq!(pointer(cx), CursorStyle::IBeam, "text until the program asks");
-        view.update_in(cx, |view, _window, cx| {
-            view.apply(TermEvent::Pointer(PointerShape::ColResize), cx);
-        });
-        assert_eq!(pointer(cx), CursorStyle::ResizeColumn);
-        view.update_in(cx, |view, _window, cx| {
-            let mut frame = screen_of(1, 10, &["a".to_owned(), String::new(), String::new()]);
-            if let TermEvent::Frame(f) = &mut frame {
-                f.modes = TermModes::MOUSE_TRACKING;
-            }
-            view.apply(frame, cx);
-        });
-        assert_eq!(pointer(cx), CursorStyle::ResizeColumn, "asked for, over mouse reporting");
-        view.update(cx, |view, _| view.shift_held = true);
-        assert_eq!(pointer(cx), CursorStyle::IBeam, "⇧ takes the mouse back");
-        view.update(cx, |view, _| view.shift_held = false);
-        view.update_in(cx, |view, _window, cx| {
-            view.apply(TermEvent::Pointer(PointerShape::Text), cx);
-        });
-        assert_eq!(
-            pointer(cx),
-            CursorStyle::Arrow,
-            "the I-beam asked for, a program has the mouse"
-        );
-        assert_eq!(cursor_style(PointerShape::Pointer), CursorStyle::PointingHand);
-        assert_eq!(cursor_style(PointerShape::Wait), CursorStyle::Arrow, "nothing like it");
-    }
-
-    fn report(
-        view: &Entity<TerminalView>,
-        cx: &mut VisualTestContext,
-        state: ProgressState,
-        percent: Option<u8>,
-    ) {
-        view.update_in(cx, |view, _window, cx| {
-            view.apply(
-                TermEvent::Progress(slopty_proto::terminal::Progress { state, percent }),
-                cx,
-            );
-        });
-        cx.run_until_parked();
-    }
-
-    /// A report is the tile header's to draw, in the kit's progress language: the terminal
-    /// draws no line of its own along its edge, and an unknown share asks for no frame of the
-    /// terminal's while it lasts.
-    #[gpui::test]
-    fn a_progress_report_is_told_not_drawn_on_the_edge(cx: &mut TestAppContext) {
-        use slopty_kit::kit::progress::Progress;
-        let (view, _rx, cx) = terminal(cx);
-        let progress = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.progress());
-        assert_eq!(progress(cx), None, "nothing reported");
-        report(&view, cx, ProgressState::Set, Some(40));
-        assert_eq!(progress(cx), Some(Progress::Share(0.4)));
-        assert!(cx.debug_bounds("terminal-progress").is_none(), "no line along the edge");
-        report(&view, cx, ProgressState::Error, None);
-        assert_eq!(progress(cx), Some(Progress::Failed(None)));
-        report(&view, cx, ProgressState::Indeterminate, None);
-        assert_eq!(progress(cx), Some(Progress::Busy));
-        let renders = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.renders());
-        let before = renders(cx);
-        cx.background_executor.advance_clock(slopty_kit::icons::SPIN_STEP.saturating_mul(6));
-        cx.run_until_parked();
-        assert_eq!(renders(cx), before, "the terminal draws nothing for it");
-        report(&view, cx, ProgressState::None, None);
-        assert_eq!(progress(cx), None, "removed");
-    }
-
-    fn restore(view: &Entity<TerminalView>, cx: &mut VisualTestContext, command: &[&str]) {
-        view.update_in(cx, |view, _window, cx| {
-            view.apply(
-                TermEvent::Restored(slopty_proto::terminal::Restored {
-                    saved_ms: slopty_core::WallMs::from_millis(1_790_000_000_000),
-                    command: command.iter().map(|w| (*w).to_owned()).collect(),
-                }),
-                cx,
-            );
-        });
-        cx.run_until_parked();
-    }
-
-    /// A restored session says so, and offers what it ran again: typed and run only on the
-    /// person's click, after which the chip goes.
-    #[gpui::test]
-    fn a_restored_session_runs_its_command_again_only_on_a_click(cx: &mut TestAppContext) {
-        let (view, mut rx, cx) = terminal(cx);
-        drain_words(&mut rx);
-        restore(&view, cx, &["claude", "--resume"]);
-        assert!(cx.debug_bounds("terminal-restored").is_some(), "the chip");
-        assert!(drain_words(&mut rx).is_empty(), "nothing runs on the restore");
-        let pasted = |rx: &mut mpsc::Receiver<ClientMsg>| {
-            std::iter::from_fn(|| rx.try_recv().ok())
-                .filter_map(|msg| match msg {
-                    ClientMsg::Term { req: TermRequest::Paste { text, .. }, .. } => Some(text),
-                    ClientMsg::Term { req: TermRequest::Key(key), .. } => {
-                        Some(format!("{:?}", key.code))
-                    }
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-        };
-        let at = cx.debug_bounds("terminal-run-again").expect("the action").center();
-        cx.simulate_click(at, gpui::Modifiers::none());
-        cx.run_until_parked();
-        assert_eq!(pasted(&mut rx), ["claude --resume", "Enter"], "typed, then ↩");
-        assert!(cx.debug_bounds("terminal-restored").is_none(), "the chip goes");
-    }
-
-    /// A login shell restored has nothing to run again: the chip says so and can be put away.
-    #[gpui::test]
-    fn a_restored_login_shell_has_nothing_to_run_and_is_dismissed(cx: &mut TestAppContext) {
-        let (view, mut rx, cx) = terminal(cx);
-        restore(&view, cx, &[]);
-        assert!(cx.debug_bounds("terminal-restored").is_some());
-        assert!(cx.debug_bounds("terminal-run-again").is_none(), "nothing to run");
-        let at = cx.debug_bounds("terminal-restored-dismiss").expect("dismiss").center();
-        drain_words(&mut rx);
-        cx.simulate_click(at, gpui::Modifiers::none());
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("terminal-restored").is_none(), "put away");
-        assert!(drain_words(&mut rx).is_empty(), "and nothing typed");
-    }
-
-    /// Every message the worker received that types or clears, oldest first, as one word each.
-    fn drain_words(rx: &mut mpsc::Receiver<ClientMsg>) -> Vec<String> {
-        let mut out = Vec::new();
-        while let Ok(msg) = rx.try_recv() {
-            out.push(match msg {
-                ClientMsg::Term { req: TermRequest::Key(_), .. } => "key".to_owned(),
-                ClientMsg::Term { req: TermRequest::Paste { .. }, .. } => "paste".to_owned(),
-                ClientMsg::Term { req: TermRequest::Clear, .. } => "clear".to_owned(),
-                // Resizes and the like: not what these tests are about.
-                _ => continue,
-            });
-        }
-        out
     }
 }

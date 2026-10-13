@@ -114,35 +114,6 @@ fn diff(shown: &[String], scratch: &[String], limit: usize) -> Option<String> {
     ))
 }
 
-/// Which edges of `region` what the window last painted fades toward (`gpui::edge_fade`): an
-/// edge counts once a primitive is painted in a fade whose ramp rises from that edge of `region`.
-pub fn faded_edges(window: &Window, region: gpui::Bounds<gpui::Pixels>) -> gpui::Edges<bool> {
-    let scale = window.scale_factor();
-    let sides = [region.left(), region.top(), region.right(), region.bottom()]
-        .map(|side| f32::from(side) * scale);
-    let mut faded = [false; 4];
-    for line in window.painted_primitives() {
-        let Some(ramps) = line.split(" fade EdgeFadeRamps { ").nth(1) else { continue };
-        let (Some(edge), Some(rate)) = (ramp_field(ramps, "edge: ["), ramp_field(ramps, "rate: ["))
-        else {
-            continue;
-        };
-        for (((faded, side), edge), rate) in faded.iter_mut().zip(&sides).zip(edge).zip(rate) {
-            // A fade's region is snapped out to whole device pixels.
-            *faded |= rate != 0.0 && (edge - side).abs() <= 1.0;
-        }
-    }
-    let [left, top, right, bottom] = faded;
-    gpui::Edges { left, top, right, bottom }
-}
-
-/// The four figures after `key` in a fade's description.
-fn ramp_field(ramps: &str, key: &str) -> Option<[f32; 4]> {
-    let list = ramps.split(key).nth(1)?.split(']').next()?;
-    let figures: Vec<f32> = list.split(", ").filter_map(|f| f.parse().ok()).collect();
-    figures.try_into().ok()
-}
-
 #[cfg(test)]
 mod tests {
     use gpui::{
@@ -323,41 +294,5 @@ mod tests {
             text.contains("3 painted that a frame from scratch does not:\n  1\n  2\n  …"),
             "{text}"
         );
-    }
-
-    /// What fades in a region is told by the edges it fades toward, and what is painted with
-    /// no fade tells none.
-    #[gpui::test]
-    fn a_fade_is_told_by_its_edges(cx: &mut TestAppContext) {
-        struct Faded(bool);
-        impl Render for Faded {
-            fn render(&mut self, _w: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-                let fill = div().size_full().bg(gpui::black());
-                let foot = gpui::Edges { bottom: px(12.0), ..gpui::Edges::default() };
-                let fill = if self.0 {
-                    gpui::edge_fade(fill, gpui::EdgeFade::new(foot)).into_any_element()
-                } else {
-                    fill.into_any_element()
-                };
-                div().size_full().child(div().w(px(200.0)).h(px(100.0)).child(fill))
-            }
-        }
-        let (view, cx) = cx.add_window_view(|_, _| Faded(true));
-        cx.run_until_parked();
-        let region =
-            gpui::Bounds::new(gpui::point(px(0.0), px(0.0)), gpui::size(px(200.0), px(100.0)));
-        let edges = cx.update(|window, _| super::faded_edges(window, region));
-        assert_eq!(
-            edges,
-            gpui::Edges { bottom: true, ..gpui::Edges::default() },
-            "the foot fades, nothing else"
-        );
-        view.update(cx, |faded, cx| {
-            faded.0 = false;
-            cx.notify();
-        });
-        cx.run_until_parked();
-        let edges = cx.update(|window, _| super::faded_edges(window, region));
-        assert_eq!(edges, gpui::Edges::default(), "no fade, no edge");
     }
 }
