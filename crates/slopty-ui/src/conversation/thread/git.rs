@@ -17,7 +17,7 @@ use slopty_proto::git::{
     Worktrees,
 };
 use slopty_proto::thread::Patch;
-use slopty_proto::thread::wire::{Against, PullStands, Review, ReviewScope};
+use slopty_proto::thread::wire::{Against, Review, ReviewScope};
 use slopty_proto::{ClientMsg, RequestId};
 
 /// What an op asked while the machine is out of reach says.
@@ -501,28 +501,6 @@ pub fn branch_line(status: &GitStatus) -> String {
     if counts.is_empty() { line } else { format!("{line} \u{b7} {}", counts.join(", ")) }
 }
 
-/// Where a pull request stands, in a few words: "Ready to merge", "Checks failing".
-#[must_use]
-pub fn standing_words(pull: &PullStatus) -> String {
-    match pull.standing() {
-        PullStands::ChecksFailed => "Checks failing".to_owned(),
-        PullStands::Conflicted => format!("Conflicts with {}", pull.base),
-        PullStands::ChangesRequested => "Changes requested".to_owned(),
-        PullStands::Ready => "Ready to merge".to_owned(),
-        PullStands::Running => "Checks running".to_owned(),
-        PullStands::Waiting if pull.merge_state.eq_ignore_ascii_case("BEHIND") => {
-            format!("Behind {}", pull.base)
-        }
-        PullStands::Waiting if pull.review.eq_ignore_ascii_case("REVIEW_REQUIRED") => {
-            "Waiting for review".to_owned()
-        }
-        PullStands::Waiting => "Blocked".to_owned(),
-        PullStands::Draft => "Draft".to_owned(),
-        PullStands::Merged => "Merged".to_owned(),
-        PullStands::Closed => "Closed".to_owned(),
-    }
-}
-
 /// How a pull request is merged, as gh names it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Method {
@@ -537,12 +515,6 @@ pub enum Method {
 impl Method {
     /// Every method, in the menu's order.
     pub const ALL: [Self; 3] = [Self::Squash, Self::Merge, Self::Rebase];
-
-    /// The method gh calls `name`.
-    #[must_use]
-    pub fn of_wire(name: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|m| m.wire() == name)
-    }
 
     /// The methods `pull`'s repository allows, in the menu's order; every one where it says
     /// none.

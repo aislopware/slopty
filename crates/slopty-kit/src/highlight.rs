@@ -186,11 +186,6 @@ impl Syntax {
             .and_then(Self::coloured)
     }
 
-    /// The grammar itself.
-    pub(crate) const fn reference(self) -> &'static SyntaxReference {
-        self.0
-    }
-
     /// The grammar's name ("Rust").
     #[must_use]
     pub fn name(self) -> &'static str {

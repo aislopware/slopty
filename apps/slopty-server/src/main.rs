@@ -264,7 +264,7 @@ mod tests {
                 let _heard = told.send((now.allow.clone(), what));
             }));
         let after_a_poll = || tokio::time::sleep(every * 10);
-        std::fs::write(&path, "[font]\nmono_size = 15.0\n").unwrap();
+        std::fs::write(&path, "[terminal]\nminimum_contrast = 4.5\n").unwrap();
         after_a_poll().await;
         assert!(heard.try_recv().is_err(), "nothing of the server's changed");
         std::fs::write(&path, "[network]\nallow = [\"10.8.0.0/24\"]\n").unwrap();

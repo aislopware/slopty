@@ -3,7 +3,6 @@
 //! pull request each have their own glyph and their own ink ([`GitGlyph::state_ink`])
 //! (`docs/decisions/ui.md`, "The chrome's icons are Octicons at 14").
 
-use slopty_proto::thread::wire::PullStands;
 use slopty_theme::{Rgb, Theme};
 
 use super::Symbol;
@@ -50,23 +49,6 @@ impl GitGlyph {
             Self::Merge => Symbol::ArrowTriangleMerge,
             Self::Commit => Symbol::GitCommit,
             Self::Repo => Symbol::GitRepo,
-        }
-    }
-
-    /// A thread's pull request's glyph by where it `stands` as its worker's table says:
-    /// merged, closed, a draft, else open.
-    #[must_use]
-    pub const fn of_stands(stands: PullStands) -> Self {
-        match stands {
-            PullStands::Merged => Self::Merge,
-            PullStands::Closed => Self::PullRequestClosed,
-            PullStands::Draft => Self::PullRequestDraft,
-            PullStands::Conflicted
-            | PullStands::ChecksFailed
-            | PullStands::ChangesRequested
-            | PullStands::Running
-            | PullStands::Waiting
-            | PullStands::Ready => Self::PullRequest,
         }
     }
 

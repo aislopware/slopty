@@ -56,18 +56,6 @@ impl Room {
     pub fn wide_from(theme: &Theme) -> f32 {
         WIDE_FROM * scale(theme)
     }
-
-    /// Whether it is narrow.
-    #[must_use]
-    pub fn is_narrow(self) -> bool {
-        self == Self::Narrow
-    }
-
-    /// Whether it is wide.
-    #[must_use]
-    pub fn is_wide(self) -> bool {
-        self == Self::Wide
-    }
 }
 
 /// How far `theme`'s chrome is from the size the rooms are written at.

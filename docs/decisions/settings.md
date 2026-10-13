@@ -628,3 +628,32 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `a_narrow_sheet_keeps_its_head_whole`, `a_refusal_shows_until_the_next_change`,
     `a_change_on_its_way_outlives_the_file_changing`; workspace
     `a_phone_s_page_is_the_form_alone`; app `a_settings_change_applies_with_the_page_still_up`.
+
+- ✅ **`[client] editor` is deleted (2026-10-13).** It opened a file tile's file in the person's
+  own editor by a link (`zed://ssh/{host}{path}`). The file tiles went with the tiling
+  workspace, files now open in the shell's Files pane, and nothing read the link any more. Its
+  schema field and its test went with it. `[keys]` keeps one table, `[keys.terminal]`
+  (`docs/decisions/terminal.md`, "A terminal's own keys are bound inside the shell's keymap").
+
+- ✅ **`[font]`, `[theme]` and `[colors]` are deleted: the look is the shell's (2026-10-13).**
+  Once the window became the shell's, the hosted terminal took the shell's face, size and
+  palette over whatever these tables said, so they no longer did anything. Worse, the worker
+  still heard the file's palette, so a program asking for its background (OSC 11) got a colour
+  other than the one it was drawn on. And the chrome a terminal or a remote window draws (find
+  bar, menus, controls) kept the old Delta planes and IBM Plex beside zeron's.
+  - **One look.** The shell's Settings own the appearance, the theme family, the accent and
+    the fonts, as in zeron. The app reads them through `slopty_shell::live::{Chrome,
+    TerminalLook}`, wears them over the file's terminal behaviour
+    (`slopty_app::interface::wear`) and rebuilds Slopty's theme each time the shell's theme
+    changes (`live::observe_theme`). `WorkspaceView::set_theme` then sends the palette to every
+    shell's worker. The window-appearance watch went with it, since the shell follows the
+    system itself.
+  - **What stays.** `[terminal]` (contrast floor, copy on select, alert, Option as Alt,
+    secure entry), `[clipboard]`, `[keys.terminal]`, `[network]`, and the daemons' tables.
+  - **Gone.** `Font`, `ThemeSettings`, `Appearance`, `ColorSettings`, `Palette`, `Color`, the
+    schema's colour and font kinds, the size and line-height bounds, the app's
+    `colour_the_terminal`, the hosted terminal's own `themed` copy of the theme and its cache,
+    and the e2e harness's `[theme]` pin. The harness pins the shell's appearance alone; a
+    `[theme]` line would now be an unknown key in a toast, inside every golden.
+  - Tests: settings `the_look_is_the_shell_s`; app settings
+    `terminal_settings_ride_on_the_theme`.

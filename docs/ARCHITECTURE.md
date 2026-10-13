@@ -1190,23 +1190,9 @@ recognizer, the pinch) and not just GPUI's dispatch; the pure mappings (HID usag
 something it read in its last build changed: an entity updated and notified, a global written,
 a list's or a scroll handle's state moved. Every other view is replayed from the last frame, so
 a view must hear of everything it shows and must not read what changes more often than it
-does. The window's root is `frames::Framed` around the app's root, built again in every frame
-for the frame-time probe and for nothing else. The workspace draws its modal layers and hosts
-views of its own state: the chrome's (`ChromeView`, one per region: the title bar, the title
-tabs, the navigator and its rows) and the area's (`AreaHost`, the tab on show). They build from a read of the workspace through `draw::Draw`, which stands in for the
-workspace's `Context`: it hands out listeners bound to the workspace and holds back any write
-to another entity until the read is over (`draw::build`), since an update while drawing counts
-as a write and rebuilds whatever read that entity. What the area lays out each frame (where
-each tile went, the tiles on screen, the focus it drew, each pane's tab row) lives in cells on
-`area::Drawn`, which the area owns, so a sash drag builds the area alone. The area and the
-chrome never read a tile's body, because a terminal changes with every line of output, a stream with
-every frame and a face with every streamed word. They read `workspace::facts` instead: a copy
-of what they show of each body (a shell's title and command, a stream's first frame and header,
-a face's turn, approval and header chips), taken in the body's observer and passed on only to
-the views that show what changed. The area hands a body its size through `hand_over`, which compares with what it handed the frame before (`Handed`) rather than reading
-the body. The file tile's unsaved mark, a page's address, title, back button and placing, and a
-folder's parent button are facts too, so a caret's blink or a page's load builds the header
-that shows them and not the area.
+does. The window itself tells the frame-time probe of every draw it makes, whichever views it
+built again (`frames::watch` on gpui-fast's `Window::observe_draws`), so no view is built again
+on the probe's account. The shell is zeron's and draws as zeron does (`docs/decisions/ui.md`).
 A shell does not read where the pointer is while it draws, since that is news with every move
 over the window: its element lets the scrollbar go when the window goes inactive or the grid
 moves, and its listeners update the view only when a move changes something in it (a row
@@ -1378,50 +1364,36 @@ paint's own clock, or the next display tick, reads a refresh or more early. The 
 stops its arrival → present clock the same way. The iOS simulator reports no presentation;
 there the next display tick stands in.
 
-**Settings.** `<data dir>/settings.toml` (`slopty settings path|init`; the "Settings…" menu
-item, ⌘, and the palette's "Open settings" open it in the in-app editor, `SettingsEditor`
-in slopty-ui: a dialog with the text in a monospace field, ⌘↩ parses then writes and
-applies it, a parse error stays under the field).
-`slopty-settings` owns the schema: `[font] mono_family | mono_size | mono_line_height |
-ligatures | ui_size` (the line height is `Typography::mono_line_height`, ghostty's
-`adjust-cell-height`; ligatures toggle `calt`), `[theme] appearance = dark | light | system`,
-`[terminal] minimum_contrast | copy_on_select | alert = never | hidden | always |
-option_as_alt = false | true | left | right` (the ratio rides on `TerminalPalette`,
-copy-on-select and option-as-alt on `Theme::behaviour`,
-the last travelling on every `KeyEvent` to the worker's encoder, the alert is
-read by the app's bell and agent handlers, see decisions/terminal.md), `[colors.light]` and `[colors.dark]`
-`foreground | background | cursor | cursor_text | selection | ansi` (`"#rrggbb"` strings
-laid over that appearance's `TerminalPalette`, see decisions/settings.md),
-`[keys.<context>] <action> = "chord" | ["chord", …] | ""` (the
-keymap, below); every key has a
-default, unknown keys warn, a
-file that does not parse is skipped with the error in the top bar for a few seconds. The app
-polls the file's stamp once a second and on a change rebuilds the `Theme` (variant from
-`appearance`, `system` following `window.appearance()` through `observe_window_appearance`)
-and pushes it down `WorkspaceView::set_theme` → every terminal, window and the picker; the
-terminal element re-measures its cell grid from the new size on the next frame and `fitted`
-resizes the session. iOS reads the same path (in its sandbox); the in-app editor is its
-only way to change it.
+**Settings.** `<data dir>/settings.toml` (`slopty settings path|init`) holds what the shell's
+own Settings do not: the window's look, its fonts and its shortcuts are the shell's, as in
+zeron. `slopty-settings` owns the schema: `[terminal] minimum_contrast | copy_on_select |
+alert = never | hidden | always | option_as_alt = false | true | left | right |
+secure_keyboard_entry` (the ratio rides on `TerminalPalette`, copy-on-select, option-as-alt
+and secure entry on `Theme::behaviour`, option-as-alt travelling on every `KeyEvent` to the
+worker's encoder; the alert is read by the app's bell and agent handlers, see
+decisions/terminal.md), `[clipboard]`, `[keys.terminal]` (below), `[network]`, and the
+daemons' `[worker]`, `[server]` and `[agents]`; every key has a default, unknown keys warn,
+and a file that does not parse is skipped with the error in a toast. The app polls the file's
+stamp once a second. Its theme (`slopty_theme::Theme`, what the terminal and the remote
+screens draw with) is the shell's look worn over the file's behaviour
+(`slopty_app::interface::wear`): the appearance, the chrome's planes, lines, text and states,
+the interface face, and the terminal's face, size and palette all come from the shell's theme,
+read through `slopty_shell::live::{Chrome, TerminalLook}` and rebuilt each time the shell's
+theme global changes. `WorkspaceView::set_theme` pushes it to every terminal and window and
+sends the palette to every shell's worker, so a program asking for its colours (OSC 10/11)
+hears the ones it is drawn in; the terminal element re-measures its cell grid on the next
+frame and `fitted` resizes the session. iOS reads the same path, in its sandbox.
 
-**Keymap.** `slopty_ui::keymap` holds the one table of every command a key runs: its scope
-(`app`, `workspace`, `terminal`, `file`, `conversation`, `folder`, `search`, `page`, the
-`[keys.<scope>]` it is set under), its name there (`new_terminal`), its default chords and the
-GPUI key contexts it binds in (the workspace's ⇧⌘F also in any text field, the face's keys also
-in its composer). The app adds its own rows (`[keys.app]`: settings, add a worker, the server).
-`Keymap::new` lays the file's `[keys]` over the table: a chord is read in the palette's syntax
-(`keymap::chord`) and written as GPUI writes it, `""` or `"none"`
-unbinds, and one chord runs one command per context: the file's command takes it from a
-default, the first of two of the file's keeps it, and each clash is said naming both, with
-unknown contexts, actions and keys, in the settings notice. `keymap::install` swaps the bindings
-tagged as the keymap's for the new ones and keeps every other binding (gpui-kit's fields, the
-menu's) ahead of them, so a saved file rebinds at once; the map in effect is kept for the main
-thread, where `workspace::key_bindings`, `workspace::terminal_key_bindings` and the palette
-read the chord each line shows. The terminal declares its own commands (`terminal::commands`),
-which the table takes in as its own. Settings > Keyboard lists every command with its chords
-and its name in the file; a press on its chords takes the next keystroke through a GPUI
-keystroke interceptor (before any binding runs it) into `[keys.<scope>]`, and a set command has
-a reset that takes the line out. The terminal's key encoding is untouched: a chord bound in the
-terminal context runs its command, every other key still goes to the program.
+**Keymap.** The shell's keymap is zeron's, set in its Settings > Shortcuts. A terminal's own
+commands (`slopty_terminal::commands`: copy, paste, find, clear, the prompt jumps, copy mode,
+…) each carry their default chords and the terminal key context; `slopty_terminal::bindings`
+lays the file's `[keys.terminal]` over them (a chord in GPUI's syntax, `""` unbinding, a
+chord GPUI cannot read said in the settings toast). The app hands the result to
+`slopty_shell::live::keys`, and the shell's `apply_keymap`, which clears every binding before
+it binds its own, binds Slopty's last, so they outlive each rebind the shell makes and a saved
+file rebinds at once (`docs/decisions/terminal.md`, "A terminal's own keys are bound inside
+the shell's keymap"). The terminal's key encoding is untouched: a chord bound in the terminal
+context runs its command, every other key still goes to the program.
 
 **Workers.** The app holds every added worker at once: one `WorkerLink` (on the process's one
 client endpoint, with its own reconnect loop and silence check) per worker

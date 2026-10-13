@@ -650,10 +650,10 @@ mod tests {
         let loaded = slopty_settings::Settings::load(&path).settings;
         assert_eq!(loaded.network.server, Some(fresh), "a missing file starts from the defaults");
 
-        std::fs::write(&path, "[font]\nmono_size = 15.0 # mine\n").unwrap();
+        std::fs::write(&path, "[terminal]\nminimum_contrast = 4.5 # mine\n").unwrap();
         save_server(dir.path(), "100.64.0.9:7000").unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.starts_with("[font]\nmono_size = 15.0 # mine\n"), "{text}");
+        assert!(text.starts_with("[terminal]\nminimum_contrast = 4.5 # mine\n"), "{text}");
         assert!(text.contains("[network]\nserver = \"100.64.0.9:7000\""), "{text}");
 
         save_server(dir.path(), "a b").unwrap_err();
@@ -991,7 +991,7 @@ mod tests {
         std::fs::create_dir_all(data.join("threads/t1")).unwrap();
         std::fs::write(data.join("layout.json"), b"{}").unwrap();
         let settings = slopty_settings::path_in(&data);
-        std::fs::write(&settings, "[font]\nmono_size = 15.0 # mine\n").unwrap();
+        std::fs::write(&settings, "[terminal]\nminimum_contrast = 4.5 # mine\n").unwrap();
         save_server(&data, "studio").unwrap();
         let claude = session.home.join(".claude/settings.json");
         std::fs::create_dir_all(claude.parent().unwrap()).unwrap();
@@ -1019,7 +1019,7 @@ mod tests {
         assert!(!data.join("worker-id").exists() && !data.join("threads").exists());
         assert_eq!(std::fs::read(data.join("layout.json")).unwrap(), b"{}", "the app's kept");
         let text = std::fs::read_to_string(&settings).unwrap();
-        assert!(text.starts_with("[font]\nmono_size = 15.0 # mine\n"), "{text}");
+        assert!(text.starts_with("[terminal]\nminimum_contrast = 4.5 # mine\n"), "{text}");
         let loaded = slopty_settings::Settings::load(&settings).settings;
         let server = loaded.network.server.map(|s| s.to_string());
         assert_eq!(server.as_deref(), Some("studio:45560"), "the app's server stays");

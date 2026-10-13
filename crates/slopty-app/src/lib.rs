@@ -61,6 +61,9 @@ pub(crate) const TOUCH: bool = cfg!(target_os = "ios");
 /// Link events applied per foreground turn at most (see the link loop).
 const LINK_BATCH: usize = 256;
 
+/// How long a transfer's toast may stand: as long as any transfer takes.
+const TRANSFER_LASTS: std::time::Duration = std::time::Duration::from_hours(24);
+
 /// The window's root view.
 #[derive(Debug)]
 pub struct Workspace {
@@ -78,11 +81,11 @@ pub struct Workspace {
     view: Entity<WorkspaceView>,
     /// The system asks for motion to be reduced (polled with the settings).
     reduce_motion: bool,
+    /// Each transfer in flight, standing as a toast with its stop.
+    transfer_toasts: std::collections::HashMap<slopty_core::XferId, u64>,
     theme: Theme,
     /// The user's `settings.toml` as last loaded (defaults when absent or broken).
     settings: Settings,
-    /// The window's appearance is dark (`theme.appearance = "system"` follows it).
-    window_dark: bool,
     /// The workspace view's events and changes, heard for as long as the app runs.
     _subscriptions: Vec<gpui::Subscription>,
     /// The main window's watches (its appearance, its activation, where it stands), made again
@@ -259,6 +262,14 @@ impl Workspace {
                     }
                 });
             }
+            WorkspaceEvent::Attach { chat, text } => {
+                let (chat, text) = (chat.clone(), text.clone());
+                cx.defer(move |cx| {
+                    if !slopty_shell::live::attach(&chat, &text, cx) {
+                        slopty_shell::toast::error(cx, "Open the shell's chat to attach to it");
+                    }
+                });
+            }
             WorkspaceEvent::Withdrawn { worker, id } => {
                 if let Some(toast) = offered.remove(&(*worker, *id)) {
                     slopty_shell::toast::withdraw(cx, toast);
@@ -268,6 +279,7 @@ impl Workspace {
         let changes = cx.observe(&view, |ws, _view, cx| {
             ws.look(cx);
             ws.presence_changed(cx);
+            ws.show_transfers(cx);
         });
         let this_mac = this_mac::native(&runtime);
         let dial = network_dialer(runtime.clone());
@@ -284,9 +296,9 @@ impl Workspace {
             directory_cache,
             view,
             reduce_motion: slopty_platform::reduce_motion(),
+            transfer_toasts: std::collections::HashMap::new(),
             theme: Theme::default(),
             settings: Settings::default(),
-            window_dark: true,
             _subscriptions: vec![events, changes],
             window_subscriptions: Vec::new(),
             interface_feed: None,
@@ -492,32 +504,68 @@ impl Workspace {
         }
         let server = loaded.settings.network.server.clone();
         let sharing = loaded.settings.clipboard.clone();
+        let keys = loaded.settings.keys.clone();
+        let (_bound, wrong) =
+            slopty_terminal::bindings(|name| keys.get("terminal", name).map(|c| c.0.clone()));
+        if let Some(first) = wrong.first() {
+            Self::show_notice(format!("Settings: {first}"), cx);
+        }
+        let keys_moved = self.settings.keys != keys;
         self.settings = loaded.settings;
+        if keys_moved {
+            bind_terminal_keys(&cx.entity(), cx);
+        }
         self.view.update(cx, |v, cx| v.set_clipboard_sharing(sharing, cx));
         self.rebuild_theme(cx);
         self.set_server(server, None, cx);
     }
 
-    /// The window turned dark or light.
-    fn set_window_dark(&mut self, dark: bool, cx: &mut Context<Self>) {
-        if self.window_dark != dark {
-            self.window_dark = dark;
-            self.rebuild_theme(cx);
-        }
-    }
-
-    /// Derive the theme from the settings and the window, and push it everywhere.
+    /// Derive the theme from the shell's look and the settings, and push it everywhere.
     fn rebuild_theme(&mut self, cx: &mut Context<Self>) {
-        let theme = settings::theme_for(&self.settings, self.window_dark);
+        let theme = interface::theme(&self.settings, cx);
         if theme == self.theme {
             return;
         }
-        // gpui-kit widgets (inputs, Markdown) read gpui-kit's theme: keep it on
-        // the same tokens.
+        // gpui-kit's widgets (a terminal's find field) read gpui-kit's theme: keep it on the
+        // same tokens.
+        slopty_kit::kit::sync(&theme, cx);
         self.view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
         self.theme = theme;
         cx.refresh_windows();
         cx.notify();
+    }
+
+    /// Each file going up to a worker or coming down from one stands as a toast while it goes,
+    /// with a Stop that ends it; the toast goes when the transfer does. Its end, when it says
+    /// anything, is the workspace's notice.
+    fn show_transfers(&mut self, cx: &mut Context<Self>) {
+        let rows = self.view.read(cx).transfer_rows(std::time::Instant::now());
+        let going: std::collections::HashSet<_> = rows.iter().map(|row| row.xfer).collect();
+        self.transfer_toasts.retain(|xfer, toast| {
+            let goes = going.contains(xfer);
+            if !goes {
+                slopty_shell::toast::withdraw(cx, *toast);
+            }
+            goes
+        });
+        for row in rows {
+            if self.transfer_toasts.contains_key(&row.xfer) {
+                continue;
+            }
+            let text = if row.up {
+                format!("Sending {} to {}", row.name, row.machine)
+            } else {
+                format!("Bringing {} from {}", row.name, row.machine)
+            };
+            let (view, xfer) = (self.view.downgrade(), row.xfer);
+            let stop = move |cx: &mut App| {
+                let _gone = view.update(cx, |v, cx| v.cancel_transfer(xfer, cx));
+            };
+            if let Some(toast) = slopty_shell::toast::offer(cx, text, "Stop", TRANSFER_LASTS, stop)
+            {
+                self.transfer_toasts.insert(xfer, toast);
+            }
+        }
     }
 
     /// A word for the human, as a toast.
@@ -1349,7 +1397,10 @@ pub fn open_workspace(cx: &mut App, handle: tokio::runtime::Handle) {
         ws.set_notifier(notifier);
         ws
     });
+    bind_terminal_keys(&workspace, cx);
     let window = interface::open(&workspace, runtime, loaded, cx);
+    // Every draw of the window, timed for the stream's overlay and the self-test's numbers.
+    let _timed = window.update(cx, |_, window, _| slopty_kit::frames::watch(window).detach());
     // GPUI's own animations hold still as the system asks, as Slopty's do, and follow the
     // setting as the system says it changed ([`Workspace::set_reduce_motion`]).
     cx.set_reduce_motion(slopty_platform::reduce_motion());
@@ -1489,6 +1540,19 @@ fn watch_resumes(
 /// Reload `settings.toml` whenever its stamp changes (see [`settings`] for why this polls).
 /// The app's own saves are
 /// already applied and seen ([`settings::save`]), so they are not reloaded.
+/// The terminal's keys as the settings file's `[keys.terminal]` sets them, bound last in the
+/// shell's keymap each time it is bound.
+fn bind_terminal_keys(workspace: &Entity<Workspace>, cx: &mut App) {
+    let workspace = workspace.downgrade();
+    slopty_shell::live::keys(cx, move |cx| {
+        let keys = workspace.upgrade().map(|ws| ws.read(cx).settings.keys.clone());
+        let keys = keys.unwrap_or_default();
+        let (bindings, _warned) =
+            slopty_terminal::bindings(|name| keys.get("terminal", name).map(|c| c.0.clone()));
+        cx.bind_keys(bindings);
+    });
+}
+
 fn watch_settings(workspace: Entity<Workspace>, cx: &App) {
     cx.spawn(async move |cx| {
         loop {

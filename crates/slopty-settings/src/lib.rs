@@ -29,14 +29,6 @@ pub mod schema;
 pub mod bounds {
     use std::ops::RangeInclusive;
 
-    /// Terminal font size, in points.
-    pub const MONO_SIZE: RangeInclusive<f32> = 6.0..=72.0;
-    /// Chrome font size, in points.
-    pub const UI_SIZE: RangeInclusive<f32> = 8.0..=32.0;
-    /// What is read at length, in points: under 10 an answer is a footnote, past 32 a poster.
-    pub const PROSE_SIZE: RangeInclusive<f32> = 10.0..=32.0;
-    /// Half the font's line height packs rows past reading; twice it is a list, not a grid.
-    pub const LINE_HEIGHT: RangeInclusive<f32> = 0.5..=2.0;
     /// WCAG ratios run from 1 (the same colour) to 21 (black on white).
     pub const CONTRAST: RangeInclusive<f32> = 1.0..=21.0;
 }
@@ -54,22 +46,6 @@ pub fn path() -> PathBuf {
 #[must_use]
 pub fn path_in(data_dir: &Path) -> PathBuf {
     data_dir.join(FILE_NAME)
-}
-
-/// Which theme variant to use.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "lowercase")]
-pub enum Appearance {
-    /// Follow the window's appearance (System Settings ▸ Appearance).
-    #[default]
-    #[schemars(title = "System")]
-    System,
-    /// Always light.
-    #[schemars(title = "Light")]
-    Light,
-    /// Always dark.
-    #[schemars(title = "Dark")]
-    Dark,
 }
 
 /// When a terminal's bell, or an agent that needs the person, sounds the alert and bounces
@@ -136,180 +112,6 @@ pub enum KeepAwake {
     /// Nothing: the Mac sleeps as its own settings say, a stream's display too.
     #[schemars(title = "Never")]
     Never,
-}
-
-/// A colour as `"#rrggbb"` (or `"rrggbb"`), or `""` for the theme's own.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub struct Color(pub Option<[u8; 3]>);
-
-impl Color {
-    /// Parse `"#rrggbb"`, `"rrggbb"` or the empty string.
-    fn parse(text: &str) -> Option<Self> {
-        let text = text.trim();
-        let hex = text.strip_prefix('#').unwrap_or(text);
-        if hex.is_empty() {
-            return Some(Self(None));
-        }
-        if hex.len() != 6 || !hex.is_ascii() {
-            return None;
-        }
-        let byte = |at: usize| u8::from_str_radix(hex.get(at..at.checked_add(2)?)?, 16).ok();
-        Some(Self(Some([byte(0)?, byte(2)?, byte(4)?])))
-    }
-}
-
-impl Serialize for Color {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        match self.0 {
-            Some([r, g, b]) => serializer.serialize_str(&format!("#{r:02x}{g:02x}{b:02x}")),
-            None => serializer.serialize_str(""),
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for Color {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let text = String::deserialize(deserializer)?;
-        Self::parse(&text).ok_or_else(|| {
-            serde::de::Error::custom(format!("expected \"#rrggbb\" or \"\", got {text:?}"))
-        })
-    }
-}
-
-impl JsonSchema for Color {
-    fn schema_name() -> std::borrow::Cow<'static, str> {
-        "Color".into()
-    }
-
-    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        schemars::json_schema!({
-            "type": "string",
-            "format": schema::COLOR,
-            "pattern": "^#?([0-9a-fA-F]{6})?$",
-        })
-    }
-}
-
-/// `[colors]`: the terminal palette for each appearance, `[colors.light]` and
-/// `[colors.dark]`. A colour picked for one is rarely right on the other's ground, so neither
-/// reaches the other.
-#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
-#[schemars(title = "Terminal colours")]
-pub struct ColorSettings {
-    /// The palette in the light appearance.
-    #[schemars(title = "Light terminal colours")]
-    pub light: Palette,
-    /// The palette in the dark appearance.
-    #[schemars(title = "Dark terminal colours")]
-    pub dark: Palette,
-}
-
-impl ColorSettings {
-    /// The palette for the dark appearance, or the light one.
-    #[must_use]
-    pub const fn for_dark(&self, dark: bool) -> &Palette {
-        if dark { &self.dark } else { &self.light }
-    }
-}
-
-/// One appearance's terminal palette, each entry the theme's own unless set.
-#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
-pub struct Palette {
-    /// Empty keeps the theme's own.
-    ///
-    /// Default text.
-    #[schemars(title = "Text")]
-    pub foreground: Color,
-    /// The chrome's surfaces follow it.
-    ///
-    /// Default background.
-    #[schemars(title = "Background")]
-    pub background: Color,
-    /// The block, bar or underline.
-    #[schemars(title = "Cursor")]
-    pub cursor: Color,
-    /// Black or white against the cursor when empty.
-    ///
-    /// Text under the cursor block.
-    #[schemars(title = "Text under the cursor")]
-    pub cursor_text: Color,
-    /// Behind selected text.
-    #[schemars(title = "Selection")]
-    pub selection: Color,
-    /// Black to white, then their bright forms; fewer than 16 keep the rest.
-    ///
-    /// ANSI 0–15 in order; fewer than 16 leave the rest to the theme.
-    #[schemars(title = "ANSI colours", example = ["#15161e", "#f7768e"])]
-    pub ansi: Vec<Color>,
-}
-
-/// `[font]`.
-#[derive(Clone, PartialEq, Debug, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
-#[schemars(title = "Font")]
-pub struct Font {
-    /// Any monospace; Lilex is built in.
-    ///
-    /// Monospace family for terminals and code. The bundled face is `Lilex`; any installed
-    /// family works, with `Lilex` standing in when it is missing.
-    #[schemars(title = "Family", extend("format" = schema::FONT_FAMILY))]
-    pub mono_family: String,
-    /// Zooming a tile changes it for that tile only.
-    ///
-    /// Terminal font size in points.
-    #[schemars(title = "Size", range(min = *bounds::MONO_SIZE.start(), max = *bounds::MONO_SIZE.end()), extend("x-step" = 1.0, "x-unit" = "pt"))]
-    pub mono_size: f32,
-    /// A multiple of the font's own; 1.0 keeps it.
-    ///
-    /// Terminal line height as a multiple of the font's own (ghostty's `adjust-cell-height`):
-    /// `1.0` is the font's, `1.2` airier, `0.9` tighter.
-    #[schemars(
-        title = "Line height",
-        range(min = *bounds::LINE_HEIGHT.start(), max = *bounds::LINE_HEIGHT.end()),
-        extend("x-step" = 0.1, "x-unit" = "\u{d7}")
-    )]
-    pub mono_line_height: f32,
-    /// Draw => and != as one glyph where the font can.
-    ///
-    /// Whether the terminal font's ligatures are shaped.
-    #[schemars(title = "Ligatures")]
-    pub ligatures: bool,
-    /// Bars, lists and dialogs; every label scales with it.
-    ///
-    /// Chrome (top bar, pills, picker) font size in points.
-    #[schemars(title = "Text size", range(min = *bounds::UI_SIZE.start(), max = *bounds::UI_SIZE.end()), extend("x-step" = 1.0, "x-unit" = "pt"))]
-    pub ui_size: f32,
-    /// Agents' answers and your messages; the bars keep their size.
-    ///
-    /// What is read at length, in points: an agent's answers, the messages sent to it and the
-    /// field they are written in. The chrome keeps the text size.
-    #[schemars(title = "Reading size", range(min = *bounds::PROSE_SIZE.start(), max = *bounds::PROSE_SIZE.end()), extend("x-step" = 1.0, "x-unit" = "pt"))]
-    pub prose_size: f32,
-}
-
-impl Default for Font {
-    fn default() -> Self {
-        Self {
-            mono_family: "Lilex".to_owned(),
-            mono_size: 13.0,
-            mono_line_height: 1.0,
-            ligatures: true,
-            ui_size: 14.0,
-            prose_size: 15.0,
-        }
-    }
-}
-
-/// `[theme]`.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
-#[schemars(title = "Theme")]
-pub struct ThemeSettings {
-    /// Follow the system, or stay light or dark.
-    #[schemars(title = "Theme")]
-    pub appearance: Appearance,
 }
 
 /// `[terminal]`.
@@ -409,9 +211,9 @@ impl ClipboardSettings {
 
 /// `[keys]`: the app's key bindings the file changes.
 ///
-/// A table per context (`[keys.workspace]`, `[keys.terminal]`) of action names and their
-/// chords. An action the file does not name keeps its default; which names and contexts exist
-/// is the app's keymap's (`slopty_ui::keymap`), which says what it does not know.
+/// A table per context of action names and their chords: `[keys.terminal]` names a terminal's
+/// commands (`slopty_terminal::commands`), the shell's own shortcuts being set in its Settings.
+/// An action the file does not name keeps its default.
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(transparent)]
 #[schemars(title = "Keys")]
@@ -628,103 +430,6 @@ pub struct NetworkSettings {
     pub allow: Vec<String>,
 }
 
-/// `[client]`: the app's and the `slopty` CLI's own choices.
-#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
-#[schemars(title = "This app")]
-pub struct ClientSettings {
-    /// Opens files and folders in your own editor; empty uses the system's.
-    ///
-    /// A link holding `{path}` (the file or folder on its machine), and optionally `{host}`
-    /// (the machine's name) and `{line}` (the line in view, else 1), which any editor with a
-    /// link scheme opens, such as `zed://ssh/{host}{path}` or
-    /// `vscode://vscode-remote/ssh-remote+{host}{path}`. Empty opens the file with the
-    /// system's handler for its type.
-    #[schemars(title = "Editor", with = "String", example = "zed://ssh/{host}{path}")]
-    pub editor: EditorLink,
-}
-
-/// `[client] editor`: the link that opens a file in the person's editor, `""` for the system's.
-///
-/// It is a link rather than a command because every editor with remote editing publishes one,
-/// and a phone can open a link but run no command.
-#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize)]
-#[serde(transparent)]
-pub struct EditorLink(String);
-
-impl EditorLink {
-    /// Whether none is set: the system's handler opens files.
-    #[must_use]
-    pub const fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    /// The editor its scheme names, for the editors that publish one: `zed://` is Zed.
-    #[must_use]
-    pub fn editor_name(&self) -> Option<&'static str> {
-        let (scheme, _) = self.0.split_once(':')?;
-        Some(match scheme.to_ascii_lowercase().as_str() {
-            "zed" => "Zed",
-            "vscode" => "VS Code",
-            "vscode-insiders" => "VS Code Insiders",
-            "vscodium" => "VSCodium",
-            "cursor" => "Cursor",
-            "windsurf" => "Windsurf",
-            _ => return None,
-        })
-    }
-
-    /// The link that opens `path` on `host` at `line`, or `None` for the system's handler.
-    #[must_use]
-    #[expect(
-        clippy::literal_string_with_formatting_args,
-        reason = "the placeholders a person writes in the link, not Rust's"
-    )]
-    pub fn open(&self, host: &str, path: &str, line: Option<u32>) -> Option<String> {
-        if self.0.is_empty() {
-            return None;
-        }
-        Some(
-            self.0
-                .replace("{host}", host)
-                .replace("{line}", &line.unwrap_or(1).to_string())
-                .replace("{path}", &link_path(path)),
-        )
-    }
-}
-
-impl<'de> Deserialize<'de> for EditorLink {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let text = String::deserialize(deserializer)?.trim().to_owned();
-        let scheme = text.split_once(':').is_some_and(|(scheme, _)| {
-            scheme.starts_with(|c: char| c.is_ascii_alphabetic())
-                && scheme.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
-        });
-        if text.is_empty() || (scheme && text.contains("{path}")) {
-            Ok(Self(text))
-        } else {
-            Err(serde::de::Error::custom(
-                "an editor link starts with its scheme and holds {path}, as zed://ssh/{host}{path}",
-            ))
-        }
-    }
-}
-
-/// `path` as a link's path: every byte but the unreserved ones and `/` percent-encoded, so a
-/// space, `#` or `?` in a name stays part of it.
-#[must_use]
-pub fn link_path(path: &str) -> String {
-    use std::fmt::Write as _;
-    path.bytes().fold(String::with_capacity(path.len()), |mut out, b| {
-        if b.is_ascii_alphanumeric() || matches!(b, b'/' | b'-' | b'.' | b'_' | b'~') {
-            out.push(char::from(b));
-        } else {
-            let _infallible = write!(out, "%{b:02X}");
-        }
-        out
-    })
-}
-
 /// `Option<HostAddr>` as the string a person types, `""` for none, the port defaulting to
 /// [`SERVER_PORT`](slopty_net::endpoint::SERVER_PORT).
 mod server_address {
@@ -755,16 +460,10 @@ mod server_address {
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct Settings {
-    /// Fonts.
-    pub font: Font,
-    /// Theme.
-    pub theme: ThemeSettings,
     /// Terminal behaviour.
     pub terminal: TerminalSettings,
     /// The clipboard shared with the workers.
     pub clipboard: ClipboardSettings,
-    /// Terminal colours, per appearance.
-    pub colors: ColorSettings,
     /// The app's key bindings the file changes.
     pub keys: KeySettings,
     /// The server this Mac belongs to, and who may connect to its daemons.
@@ -775,8 +474,6 @@ pub struct Settings {
     pub server: ServerSettings,
     /// How the agents Slopty starts work.
     pub agents: AgentSettings,
-    /// The app's and the CLI's own choices.
-    pub client: ClientSettings,
 }
 
 /// Why a file could not be used.
@@ -864,25 +561,6 @@ impl Settings {
 # Unknown keys are ignored; a file that does not parse is skipped
 # and the defaults apply until the next save.
 
-[font]
-# Terminal and code family. \"Lilex\" ships with the app; any installed
-# family works (Lilex fills in when it is missing).
-mono_family = {mono_family}
-# Terminal size in points.
-mono_size = {mono_size}
-# Terminal line height as a multiple of the font's own (0.5 to 2.0).
-mono_line_height = {mono_line_height}
-# Shape the terminal font's ligatures (=> != as one glyph, in fonts that have them).
-ligatures = {ligatures}
-# Top bar, pills and picker size in points.
-ui_size = {ui_size}
-# Agents' answers and your messages, in points (10 to 32); the chrome keeps its size.
-prose_size = {prose_size}
-
-[theme]
-# \"dark\", \"light\" or \"system\" (follow the macOS appearance).
-appearance = {appearance}
-
 [terminal]
 # Least contrast ratio (1.0 to 21.0) between text and its background; text
 # under it moves toward black or white, only as far as needed, keeping its hue.
@@ -908,36 +586,14 @@ sync = {clipboard_sync}
 # [clipboard.workers]
 # 01999b6e-7c2a-7d4e-9f10-3a5b6c7d8e9f = false
 
-[colors.light]
-# Terminal colours as \"#rrggbb\" in the light appearance; \"\" keeps the
-# theme's own. [colors.dark] below holds the dark one's.
-foreground = \"\"
-background = \"\"
-cursor = \"\"
-# Text under the cursor block; black or white against the cursor when unset.
-cursor_text = \"\"
-selection = \"\"
-# ANSI 0-15 in order: black, red, green, yellow, blue, magenta, cyan, white,
-# then their bright forms. Fewer than 16 keep the rest.
-ansi = []
-
-[colors.dark]
-foreground = \"\"
-background = \"\"
-cursor = \"\"
-cursor_text = \"\"
-selection = \"\"
-ansi = []
-
 [keys]
-# The app's keys, a table per context: app, workspace, terminal, file,
-# conversation, folder, search and page. An action takes a chord in the
-# palette's syntax (\"cmd-shift-t\"), a list of them, or \"\" to unbind it; one
-# the file does not name keeps its default. Settings > Keyboard lists every
-# action by the name it has here, and records a new chord for it.
+# A terminal's keys, under [keys.terminal]: a command takes a chord
+# (\"cmd-shift-f\"), a list of them, or \"\" to unbind it; one the file does
+# not name keeps its default. The window's own shortcuts are set in Settings >
+# Shortcuts.
 #
-# [keys.workspace]
-# new_terminal = [\"cmd-t\", \"cmd-n\"]
+# [keys.terminal]
+# find = \"cmd-shift-f\"
 
 [network]
 # The server whose directory lists the machines this app and the slopty CLI
@@ -958,21 +614,7 @@ allow = []
 #
 # [worker.acp]
 # mine = [\"/opt/mine/bin/agent\", \"--acp\"]
-
-[client]
-# Opens files and folders in your own editor: a link holding {{path}}, and
-# optionally {{host}} and {{line}}, such as \"zed://ssh/{{host}}{{path}}\" or
-# \"vscode://vscode-remote/ssh-remote+{{host}}{{path}}\". Empty uses the system's
-# handler for the file's type.
-editor = \"\"
 ",
-            mono_family = toml_string(&d.font.mono_family),
-            mono_size = toml_float(d.font.mono_size),
-            mono_line_height = toml_float(d.font.mono_line_height),
-            ligatures = d.font.ligatures,
-            ui_size = toml_float(d.font.ui_size),
-            prose_size = toml_float(d.font.prose_size),
-            appearance = toml_string(appearance_name(d.theme.appearance)),
             minimum_contrast = toml_float(d.terminal.minimum_contrast),
             copy_on_select = d.terminal.copy_on_select,
             alert = toml_string(alert_name(d.terminal.alert)),
@@ -1061,8 +703,8 @@ impl Loaded {
     }
 }
 
-/// Tables whose keys the person names. `[keys]` names actions the keymap knows, not this
-/// crate, and the keymap says which it does not; a worker's ACP agents are anything.
+/// Tables whose keys the person names. `[keys]` names a terminal's commands, which the terminal
+/// knows and this crate does not; a worker's ACP agents are anything.
 const OPEN_TABLES: [&str; 3] = ["keys", "clipboard.workers", "worker.acp"];
 
 /// Keys in `given` with no counterpart in `known`, recursively through tables, except the
@@ -1096,14 +738,6 @@ fn reason(e: &toml::de::Error, text: &str) -> String {
     let Some(span) = e.span() else { return message };
     let line = text.get(..span.start).unwrap_or_default().split('\n').count();
     format!("line {line}: {message}")
-}
-
-const fn appearance_name(a: Appearance) -> &'static str {
-    match a {
-        Appearance::Dark => "dark",
-        Appearance::Light => "light",
-        Appearance::System => "system",
-    }
 }
 
 const fn option_as_alt_name(o: OptionAsAlt) -> &'static str {
@@ -1152,15 +786,9 @@ mod tests {
     #[test]
     fn defaults_match_the_brief() {
         let d = Settings::default();
-        assert_eq!(d.font.mono_family, "Lilex");
-        assert_eq!(d.font.mono_size, 13.0);
-        assert_eq!(d.font.mono_line_height, 1.0, "the font's own");
-        assert_eq!(d.font.ui_size, 14.0);
-        assert_eq!(d.theme.appearance, Appearance::System);
         assert_eq!(d.terminal.minimum_contrast, 3.0, "on: a dark prompt reads on light");
         assert!(!d.terminal.copy_on_select, "\u{2318}C copies, as on the Mac");
         assert_eq!(d.terminal.alert, Alert::Hidden, "heard while Slopty is hidden");
-        assert!(d.font.ligatures, "the font's own");
     }
 
     #[test]
@@ -1201,21 +829,21 @@ mod tests {
     #[test]
     fn key_bindings_by_context() {
         let loaded = Settings::parse(
-            "[keys.workspace]\nnew_terminal = \" cmd-alt-t \"\nfont_larger = [\"cmd-=\", \"cmd-+\"]\nclose_tile = \"\"\n[keys.terminal]\ncopy = \"none\"\npaste = []\n",
+            "[keys.terminal]\nfind = \" cmd-shift-f \"\nscroll_to_top = [\"cmd-home\", \"shift-home\"]\nclear_screen = \"\"\ncopy = \"none\"\npaste = []\n",
         );
         assert!(loaded.error.is_none() && loaded.warnings.is_empty(), "{loaded:?}");
         let keys = &loaded.settings.keys;
         let chords = |context, action| keys.get(context, action).map(|c| c.0.clone());
-        assert_eq!(chords("workspace", "new_terminal"), Some(vec!["cmd-alt-t".to_owned()]));
-        assert_eq!(chords("workspace", "font_larger").map(|c| c.len()), Some(2));
-        for (context, action) in [("workspace", "close_tile"), ("terminal", "copy")] {
+        assert_eq!(chords("terminal", "find"), Some(vec!["cmd-shift-f".to_owned()]));
+        assert_eq!(chords("terminal", "scroll_to_top").map(|c| c.len()), Some(2));
+        for (context, action) in [("terminal", "clear_screen"), ("terminal", "copy")] {
             assert_eq!(chords(context, action), Some(Vec::new()), "{action} unbound");
         }
         assert_eq!(chords("terminal", "paste"), Some(Vec::new()));
-        assert_eq!(chords("terminal", "find"), None, "not named: the default");
+        assert_eq!(chords("terminal", "select_all"), None, "not named: the default");
         assert_eq!(Settings::default().keys, KeySettings::default(), "every default");
 
-        let wrong = Settings::parse("[keys.workspace]\nnew_terminal = 3\n");
+        let wrong = Settings::parse("[keys.terminal]\nfind = 3\n");
         let error = wrong.error.map(|e| e.to_string()).unwrap_or_default();
         assert!(error.contains("a chord"), "{error}");
 
@@ -1248,55 +876,27 @@ mod tests {
         assert!(!shared.clipboard.shared_with(SHARED) && shared.clipboard.shared_with(STUDIO));
     }
 
+    /// The look is the shell's: its appearance, its fonts and its terminal palette are set in
+    /// its Settings, so the tables that set them here are only warned of.
     #[test]
-    fn colour_keys() {
-        let loaded = Settings::parse(
-            "[colors.dark]\nforeground = \"#c0caf5\"\nbackground = \"1a1b26\"\ncursor = \"\"\nansi = [\"#15161e\", \"#f7768e\"]\n",
+    fn the_look_is_the_shell_s() {
+        let gone = Settings::parse(
+            "[font]\nmono_size = 15\n[theme]\nappearance = \"dark\"\n[colors.dark]\nforeground = \"#c0caf5\"\n",
         );
-        assert!(loaded.error.is_none() && loaded.warnings.is_empty(), "{loaded:?}");
-        let c = &loaded.settings.colors.dark;
-        assert_eq!(c.foreground, Color(Some([0xc0, 0xca, 0xf5])));
-        assert_eq!(c.background, Color(Some([0x1a, 0x1b, 0x26])), "the # is optional");
-        assert_eq!(c.cursor, Color(None), "empty: the theme's own");
-        assert_eq!(c.ansi, [Color(Some([0x15, 0x16, 0x1e])), Color(Some([0xf7, 0x76, 0x8e]))]);
-        let colors = &loaded.settings.colors;
-        assert_eq!(colors.light, Palette::default(), "the dark palette leaves light alone");
-        assert_eq!(colors.for_dark(true), &colors.dark);
-        assert_eq!(colors.for_dark(false), &colors.light);
-        assert_eq!(Settings::default().colors, ColorSettings::default(), "nothing set");
-        // One table for both appearances is gone, not read as either.
-        let flat = Settings::parse("[colors]\nforeground = \"#c0caf5\"\n");
-        assert_eq!(flat.warnings, ["unknown key `colors.foreground`"]);
-        assert_eq!(flat.settings.colors, ColorSettings::default());
-        for bad in ["#12345", "#gg0000", "red"] {
-            let loaded = Settings::parse(&format!("[colors.light]\ncursor = \"{bad}\"\n"));
-            assert!(
-                loaded.error.as_ref().is_some_and(|e| e.to_string().contains("#rrggbb")),
-                "{bad}: {:?}",
-                loaded.error
-            );
-        }
+        assert!(gone.error.is_none(), "{:?}", gone.error);
+        assert_eq!(gone.settings, Settings::default());
         assert_eq!(
-            toml::to_string(&Palette {
-                cursor: Color(Some([1, 0xab, 0xff])),
-                ..Palette::default()
-            })
-            .unwrap_or_default()
-            .lines()
-            .find(|l| l.starts_with("cursor ="))
-            .unwrap_or_default(),
-            "cursor = \"#01abff\"",
-            "written back as #rrggbb"
+            gone.warnings,
+            ["unknown key `colors`", "unknown key `font`", "unknown key `theme`"],
         );
     }
 
     #[test]
     fn terminal_keys() {
         let loaded = Settings::parse(
-            "[font]\nmono_line_height = 1.2\n[terminal]\nminimum_contrast = 3\ncopy_on_select = true\nalert = \"always\"\n",
+            "[terminal]\nminimum_contrast = 3\ncopy_on_select = true\nalert = \"always\"\n",
         );
         assert!(loaded.error.is_none(), "{:?}", loaded.error);
-        assert_eq!(loaded.settings.font.mono_line_height, 1.2);
         assert_eq!(loaded.settings.terminal.minimum_contrast, 3.0);
         assert!(loaded.settings.terminal.copy_on_select);
         assert_eq!(loaded.settings.terminal.alert, Alert::Always);
@@ -1307,8 +907,6 @@ mod tests {
             ["unknown key `terminal.confirm_close`", "unknown key `terminal.cursor_blink`"],
             "decided: a key left in the file is only warned of"
         );
-        let loaded = Settings::parse("[font]\nligatures = false\n");
-        assert!(!loaded.settings.font.ligatures);
         for (text, want) in [
             ("false", OptionAsAlt::False),
             ("true", OptionAsAlt::True),
@@ -1322,54 +920,28 @@ mod tests {
             Settings::parse("[terminal]\noption_as_alt = \"sometimes\"\n").error.is_some(),
             "an unknown variant is an error"
         );
-        assert_eq!(loaded.settings.font.mono_family, Font::default().mono_family);
     }
 
     #[test]
     fn partial_file_fills_the_rest() {
-        let loaded = Settings::parse("[font]\nmono_size = 15.5\n");
+        let loaded = Settings::parse("[terminal]\nminimum_contrast = 4\n");
         assert!(loaded.error.is_none(), "{:?}", loaded.error);
-        assert_eq!(loaded.settings.font.mono_size, 15.5);
-        assert_eq!(loaded.settings.font.mono_family, "Lilex");
-        assert_eq!(loaded.settings.theme.appearance, Appearance::System);
-    }
-
-    #[test]
-    fn integer_sizes_are_accepted() {
-        let loaded = Settings::parse("[font]\nmono_size = 14\nui_size = 12\nprose_size = 18\n");
-        assert!(loaded.error.is_none(), "{:?}", loaded.error);
-        assert_eq!(loaded.settings.font.mono_size, 14.0);
-        assert_eq!(loaded.settings.font.ui_size, 12.0);
-        assert_eq!(loaded.settings.font.prose_size, 18.0, "reading has its own size");
-        assert_eq!(Settings::default().font.prose_size, 15.0, "Delta's reading size");
-    }
-
-    #[test]
-    fn appearance_values() {
-        for (text, want) in [
-            ("dark", Appearance::Dark),
-            ("light", Appearance::Light),
-            ("system", Appearance::System),
-        ] {
-            let loaded = Settings::parse(&format!("[theme]\nappearance = \"{text}\"\n"));
-            assert_eq!(loaded.settings.theme.appearance, want, "{text}");
-        }
-        let bad = Settings::parse("[theme]\nappearance = \"sepia\"\n");
-        assert!(bad.error.is_some(), "an unknown variant is an error");
-        assert_eq!(bad.settings, Settings::default());
+        assert_eq!(loaded.settings.terminal.minimum_contrast, 4.0, "an integer reads");
+        assert_eq!(loaded.settings.terminal.alert, Alert::Hidden);
+        assert_eq!(loaded.settings.clipboard, ClipboardSettings::default());
     }
 
     #[test]
     fn unknown_keys_warn_but_load() {
         let loaded = Settings::parse(
-            "[font]\nmono_size = 11.0\nkerning = true\n[terminal]\nscrollback_lines = 1\n",
+            "[clipboard]\nsync = false\nkerning = true\n[terminal]\nscrollback_lines = 1\n",
         );
         assert!(loaded.error.is_none(), "{:?}", loaded.error);
-        assert_eq!(loaded.settings.font.mono_size, 11.0);
+        assert!(!loaded.settings.clipboard.sync);
         assert_eq!(
             loaded.warnings,
             vec![
-                "unknown key `font.kerning`".to_owned(),
+                "unknown key `clipboard.kerning`".to_owned(),
                 "unknown key `terminal.scrollback_lines`".to_owned()
             ]
         );
@@ -1379,7 +951,7 @@ mod tests {
     fn broken_file_falls_back_with_error() {
         let dir = tempfile::tempdir().unwrap();
         let path = path_in(dir.path());
-        std::fs::write(&path, "[font\nmono_size = ").unwrap();
+        std::fs::write(&path, "[terminal\nminimum_contrast = ").unwrap();
         let loaded = Settings::load(&path);
         assert_eq!(loaded.settings, Settings::default());
         let err = loaded.error.expect("a parse error");
@@ -1391,7 +963,7 @@ mod tests {
 
     #[test]
     fn wrong_type_falls_back_with_error() {
-        let loaded = Settings::parse("[font]\nmono_size = \"big\"\n");
+        let loaded = Settings::parse("[terminal]\nminimum_contrast = \"big\"\n");
         assert!(loaded.error.is_some(), "a type error is an error");
         assert_eq!(loaded.settings, Settings::default());
     }
@@ -1417,20 +989,19 @@ mod tests {
         assert!(loaded.error.is_none(), "{:?}", loaded.error);
         assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
         assert_eq!(loaded.settings, Settings::default());
-        assert!(text.contains("mono_size = 13.0"), "{text}");
-        assert!(text.contains("appearance = \"system\""), "{text}");
+        assert!(!text.contains("[font]") && !text.contains("[theme]"), "the shell's: {text}");
+        assert!(!text.contains("[colors"), "the shell's: {text}");
         assert!(text.contains("minimum_contrast = 3.0"), "{text}");
         assert!(text.contains("copy_on_select = false"), "{text}");
         assert!(!text.contains("[remote]"), "{text}");
         assert!(text.contains("allow = []"), "{text}");
         assert!(text.contains("server = \"\""), "{text}");
-        assert!(text.contains("editor = \"\""), "{text}");
         assert!(!text.contains("[quick_terminal]"), "{text}");
-        assert!(text.contains("[keys]\n# The app's keys"), "{text}");
+        assert!(text.contains("[keys]\n# A terminal's keys"), "{text}");
     }
 
     /// `[network]` holds the one server and the one list of ranges every part of this Mac
-    /// reads; the keys they had under `[worker]`, `[server]` and `[client]` are unknown now.
+    /// reads; the keys they had under `[worker]` and `[server]` are unknown now.
     #[test]
     fn network_keys() {
         let loaded = Settings::parse(
@@ -1451,44 +1022,16 @@ mod tests {
         assert_eq!(blank.settings.network.server, None);
         assert!(blank.warnings.is_empty(), "the key is known even when empty");
 
-        let gone = Settings::parse(
-            "[worker]\nallow = []\nserver = \"a\"\n[server]\nallow = []\n[client]\nserver = \"a\"\n",
-        );
+        let gone = Settings::parse("[worker]\nallow = []\nserver = \"a\"\n[server]\nallow = []\n");
         assert!(gone.error.is_none(), "{gone:?}");
         assert_eq!(
             gone.warnings,
             [
-                "unknown key `client.server`",
                 "unknown key `server.allow`",
                 "unknown key `worker.allow`",
                 "unknown key `worker.server`",
             ]
         );
-    }
-
-    /// The editor link fills in the machine, the line and the path, the path percent-encoded so
-    /// a name with a space or `#` stays whole; empty is the system's handler, and a link that
-    /// cannot name the file is refused.
-    #[test]
-    fn the_editor_link_opens_the_file_on_its_machine() {
-        assert_eq!(Settings::default().client.editor.open("studio", "/a", None), None);
-        let zed = Settings::parse("[client]\neditor = \"zed://ssh/{host}{path}:{line}\"\n");
-        assert!(zed.error.is_none() && zed.warnings.is_empty(), "{zed:?}");
-        assert_eq!(
-            zed.settings.client.editor.open("me@studio", "/src/a b#1.rs", Some(42)).as_deref(),
-            Some("zed://ssh/me@studio/src/a%20b%231.rs:42")
-        );
-        assert_eq!(
-            zed.settings.client.editor.open("studio", "/src", None).as_deref(),
-            Some("zed://ssh/studio/src:1"),
-            "no line in view is the first"
-        );
-        for refused in ["zed://ssh/{host}", "/usr/local/bin/zed {path}", "1x://{path}"] {
-            let bad = Settings::parse(&format!("[client]\neditor = \"{refused}\"\n"));
-            assert!(bad.error.is_some_and(|e| e.to_string().contains("{path}")), "{refused}");
-        }
-        let blank = Settings::parse("[client]\neditor = \" \"\n");
-        assert_eq!(blank.settings.client.editor.open("studio", "/a", None), None);
     }
 
     #[test]
@@ -1500,20 +1043,20 @@ mod tests {
         let loaded = Settings::parse(&text);
         assert_eq!(loaded.settings.network.server.as_ref(), Some(&studio));
 
-        let custom = "[font]\nmono_size = 15.0 # mine\n";
+        let custom = "[terminal]\nminimum_contrast = 4.5 # mine\n";
         let set = with_server(custom, Some(&studio)).unwrap();
         assert_eq!(
             set,
-            "[font]\nmono_size = 15.0 # mine\n\n[network]\nserver = \"studio:45560\"\n"
+            "[terminal]\nminimum_contrast = 4.5 # mine\n\n[network]\nserver = \"studio:45560\"\n"
         );
         let cleared = with_server(&set, None).unwrap();
         assert!(cleared.ends_with("[network]\nserver = \"\"\n"), "{cleared}");
 
-        let keyless = "[network]\n[font]\nmono_size = 15.0\n";
+        let keyless = "[network]\n[terminal]\nminimum_contrast = 4.5\n";
         let set = with_server(keyless, Some(&studio)).unwrap();
-        assert!(set.starts_with("[network]\nserver = \"studio:45560\"\n[font]"), "{set}");
+        assert!(set.starts_with("[network]\nserver = \"studio:45560\"\n[terminal]"), "{set}");
 
-        with_server("[font\n", Some(&studio)).unwrap_err();
+        with_server("[terminal\n", Some(&studio)).unwrap_err();
     }
 
     /// `[worker.labels]` and `[worker.probes]` fed the cut placement rules and are gone: a file
@@ -1568,9 +1111,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nested").join(FILE_NAME);
         assert!(Settings::init(&path).unwrap(), "first init writes");
-        std::fs::write(&path, "[font]\nmono_size = 9.0\n").unwrap();
+        std::fs::write(&path, "[terminal]\nminimum_contrast = 9.0\n").unwrap();
         assert!(!Settings::init(&path).unwrap(), "second init keeps the file");
-        assert_eq!(Settings::load(&path).settings.font.mono_size, 9.0);
+        assert_eq!(Settings::load(&path).settings.terminal.minimum_contrast, 9.0);
     }
 
     #[test]

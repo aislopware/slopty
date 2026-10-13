@@ -46,28 +46,9 @@ impl ChromeText {
         self.fill = true;
         self
     }
-
-    /// [`Self::fill`], but the text gives way at its start, behind a leading ellipsis: a path
-    /// keeps the directory it ends in (`…/drop-here`).
-    #[must_use]
-    pub const fn fill_from_start(mut self) -> Self {
-        self.fill = true;
-        self.from_start = true;
-        self
-    }
 }
 
-impl ChromeText {
-    /// [`Self::fill`], but a label that does not fit fades out over its last `width` points,
-    /// every letter kept to the edge: a tab's title (`MonoCode`'s 2.5 rem mask). A label that
-    /// fits is drawn sharp to its last letter.
-    #[must_use]
-    pub const fn fill_fading(mut self, width: Pixels) -> Self {
-        self.fill = true;
-        self.fade = Some(width);
-        self
-    }
-}
+impl ChromeText {}
 
 impl IntoElement for ChromeText {
     type Element = Self;

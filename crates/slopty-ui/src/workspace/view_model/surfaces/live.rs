@@ -123,11 +123,11 @@ impl WorkspaceView {
         target.or_else(|| self.context_worker()).map(|worker| (worker, None))
     }
 
-    /// The terminal `id`, looking as the shell's `look` says; `None` until it is attached.
+    /// The terminal `id`, in the frame the shell's `look` says; `None` until it is attached.
     pub fn hosted_terminal(
         &self,
         id: &str,
-        look: &LiveLook,
+        look: LiveLook,
         cx: &mut Context<Self>,
     ) -> Option<LiveView> {
         self.live_terminal_view(id, look, cx)

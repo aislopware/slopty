@@ -173,14 +173,6 @@ impl PriorityRow {
         self
     }
 
-    /// [`Self::title`] standing the row's whole height, top to foot, rather than centred at its
-    /// own: a pane's lone tab, whose ground meets the row's foot.
-    #[must_use]
-    pub fn tall_title(mut self, element: impl IntoElement, floor: Pixels) -> Self {
-        self.title_tall = true;
-        self.title(element, floor)
-    }
-
     /// Items under `priority` leave before the title narrows at all ([`Priority::MEDIUM`] by
     /// default: a worktree's name goes before a word of the title, a pull request stays while
     /// the title narrows to its floor).

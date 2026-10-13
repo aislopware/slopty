@@ -432,25 +432,6 @@ impl ThreadHub {
         id
     }
 
-    /// [`ThreadHub::intent`] for an intent that starts a thread, whose composer then opens
-    /// with `seed`.
-    pub fn intent_seeded(
-        &mut self,
-        thread: ThreadId,
-        intent: Intent,
-        seed: String,
-        cx: &mut Context<Self>,
-    ) -> IntentId {
-        let id = self.intent(thread, intent, cx);
-        self.seeds.insert(id, seed);
-        id
-    }
-
-    /// The words `thread`'s composer opens with, given once to the first view of it.
-    pub fn take_seed(&mut self, thread: ThreadId) -> Option<String> {
-        self.seeded.remove(&thread)
-    }
-
     /// Let a failed intent go once the person has read why: one the thread draws itself, or
     /// a [`Refusal`].
     pub fn dismiss(&mut self, id: IntentId, cx: &mut Context<Self>) {
@@ -483,15 +464,6 @@ impl ThreadHub {
             cx.emit(HubEvent::Send(vec![msg]));
         }
         id
-    }
-
-    /// Take `thread` up again once it is known here, by its agent's own door
-    /// (`gone`): a start of its session, where its
-    /// agent takes one. One whose next message starts it, one that cannot go on, and one still
-    /// running are left as they are.
-    pub fn resume_when_known(&mut self, thread: ThreadId, cx: &mut Context<Self>) {
-        self.waking.insert(thread);
-        self.wake(thread, cx);
     }
 
     /// `thread` is known now: take it up again if it was asked to be.

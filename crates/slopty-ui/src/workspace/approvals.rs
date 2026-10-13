@@ -120,21 +120,6 @@ impl Approvals {
 }
 
 impl WorkspaceView {
-    /// Answer `thread`'s open request `ask` on `worker` with its plain allow or deny, through
-    /// the worker's thread hub as the thread's own tray would; `false` when it does not wait on
-    /// that request any more, or it was answered here already.
-    pub fn answer_thread(
-        &mut self,
-        worker: WorkerKey,
-        thread: ThreadId,
-        ask: &AskId,
-        allow: bool,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        let pressed = if allow { Pressed::Allow } else { Pressed::Deny };
-        self.answer_pressed(worker, thread, ask, &pressed, cx).is_some()
-    }
-
     /// Answer `thread`'s open request `ask` on `worker` as `pressed` says: Allow and Deny with
     /// its plain allow or deny while it is a yes or no they answer whole, a pick with its own
     /// choice while it offers that pick: the intent that carries it, or `None` when it does

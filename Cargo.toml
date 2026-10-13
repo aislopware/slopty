@@ -68,6 +68,7 @@ slopty-dnd = { path = "crates/slopty-dnd" }
 # core
 anyhow = "1.0.104"
 thiserror = "2.0.21"
+raw-window-handle = "0.6.2"
 regex = "1.13.1"
 bitflags = { version = "2.13.2", features = [ "serde" ] }
 bytes = { version = "1.12.1", features = [ "serde" ] }

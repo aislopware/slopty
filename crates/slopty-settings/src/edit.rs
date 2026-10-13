@@ -648,9 +648,9 @@ allow = [
         let array = remove(FILE, "terminal", "allow");
         assert!(array.ends_with("[terminal]\ncursor_style = \"program\"\n"), "{array}");
         assert_eq!(remove(FILE, "remote", "fps"), FILE, "nothing to remove");
-        let keys = write("", "keys.workspace", "new_note", "\"cmd-alt-n\"");
-        assert_eq!(keys, "[keys.workspace]\nnew_note = \"cmd-alt-n\"\n");
-        assert_eq!(remove(&keys, "keys.workspace", "new_note"), "[keys.workspace]\n");
+        let keys = write("", "keys.terminal", "find", "\"cmd-shift-f\"");
+        assert_eq!(keys, "[keys.terminal]\nfind = \"cmd-shift-f\"\n");
+        assert_eq!(remove(&keys, "keys.terminal", "find"), "[keys.terminal]\n");
     }
 
     /// What a control writes reads back as the same value.

@@ -41,14 +41,6 @@ pub const TITLE: &str = "Use this Mac";
 /// What a missing grant's line says to do: its button opens the list to do it in, and shows
 /// the worker in Finder, since a background worker's request may leave it out of that list.
 pub const TURN_ON: &str = "Turn on slopty-worker, or drag it in.";
-/// What the entry's row says under its words: what pressing it does.
-pub const ROW_META: &str = "Shares its shells and windows through your server";
-/// What the first run's choice says under its words: what working here means.
-pub const CHOICE: &str = "Work on this Mac. Your other devices reach it too.";
-/// What it says once the server lists this Mac: the way back to its checklist.
-pub const ROW_META_LISTED: &str = "Shared through your server. Check what it needs";
-/// The checklist's line under its heading.
-pub const BLURB: &str = "Slopty shares this Mac's shells and windows through your server.";
 /// Why Slopty moves before it installs: where it runs now is gone after a restart.
 pub const MISPLACED: &str =
     "Slopty runs from outside Applications, so this Mac would stop sharing after a restart.";

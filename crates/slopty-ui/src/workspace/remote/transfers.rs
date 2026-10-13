@@ -381,8 +381,9 @@ impl WorkspaceView {
         let Download { name, dest, bringing, .. } = download;
         let text = match (result, bringing) {
             (Ok(()), Bringing::Save) => Some(format!("Saved {}", super::tildes(&dest))),
-            // The paste it came down for goes on, or says why not.
-            (_, Bringing::Paste) => None,
+            // The drop's own window showed it land; the paste it came down for goes on, or
+            // says why not.
+            (Ok(()), Bringing::Drag) | (_, Bringing::Paste) => None,
             (Err(e), _) => Some(format!("{name} was not {}: {e}", bringing.done())),
         };
         if let Some(text) = text {
@@ -394,8 +395,12 @@ impl WorkspaceView {
     /// Stop transfer `xfer`, whichever way it goes, or one that waits for its worker; what the
     /// worker holds of an upload stays there.
     pub fn cancel_transfer(&mut self, xfer: XferId, cx: &mut Context<Self>) {
-        if self.uploads.contains_key(&xfer) {
-            self.cancel_upload(xfer, cx);
+        if let Some(upload) = self.uploads.get(&xfer) {
+            match upload.drag {
+                #[cfg(target_os = "macos")]
+                Some(drag) => self.cancel_drop(upload.tile, drag, cx),
+                _ => self.cancel_upload(xfer, cx),
+            }
             return;
         }
         if let Some(download) = self.transfers.downloads.remove(&xfer) {

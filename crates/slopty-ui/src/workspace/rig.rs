@@ -32,6 +32,8 @@ pub struct Heard {
     pub withdrawn: Vec<HandoffId>,
     /// The files it asked the shell to open: the chat and the link.
     pub files: Vec<(String, String)>,
+    /// What it asked the shell to put in a chat's draft: the chat and the text.
+    pub attached: Vec<(String, String)>,
 }
 
 /// What the worker was sent, and what the workspace said.
@@ -86,6 +88,9 @@ pub fn hear(workspace: &Entity<WorkspaceView>, cx: &mut VisualTestContext) -> Rc
                 WorkspaceEvent::OpenFile { chat, target } => {
                     kept.files.push((chat.clone(), target.clone()));
                 }
+                WorkspaceEvent::Attach { chat, text } => {
+                    kept.attached.push((chat.clone(), text.clone()));
+                }
                 _ => {}
             }
         })
@@ -102,12 +107,23 @@ pub fn link(
     caps: WorkerCaps,
     sessions: Vec<SessionSummary>,
 ) -> mpsc::Receiver<ClientMsg> {
+    link_with(workspace, cx, caps, sessions, None)
+}
+
+/// [`link`], its files and clipboard reached through `remote`.
+pub fn link_with(
+    workspace: &Entity<WorkspaceView>,
+    cx: &mut VisualTestContext,
+    caps: WorkerCaps,
+    sessions: Vec<SessionSummary>,
+    remote: Option<Arc<dyn slopty_client::remote::Remote>>,
+) -> mpsc::Receiver<ClientMsg> {
     let (out, rx) = mpsc::channel(256);
     let link = WorkerLink {
         me: ClientId::new(),
         out,
         open_screen: Arc::new(|stream, _codec| slopty_client::ScreenHandle::detached(stream)),
-        remote: None,
+        remote,
     };
     let ack = HelloAck {
         worker: WorkerId::new(),
@@ -121,4 +137,26 @@ pub fn link(
     workspace.update(cx, |v, cx| v.connect_worker(KEY, link, ack, cx));
     cx.run_until_parked();
     rx
+}
+
+/// A shell alive in `/w/app`.
+pub fn shell(id: slopty_core::SessionId) -> SessionSummary {
+    SessionSummary {
+        id,
+        title: String::new(),
+        cwd: Some("/w/app".to_owned()),
+        repo: None,
+        branch: None,
+        repo_id: None,
+        changes: None,
+        started_ms: slopty_core::WallMs::ZERO,
+        cols: 80,
+        rows: 24,
+        state: slopty_proto::terminal::SessionState::Running,
+        viewers: 1,
+        command: Vec::new(),
+        progress: None,
+        restored: None,
+        program: Vec::new(),
+    }
 }

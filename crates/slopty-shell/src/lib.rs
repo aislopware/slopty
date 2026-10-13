@@ -475,6 +475,16 @@ fn open_main_window(
                     .and_then(Result::ok)
                     .unwrap_or(false)
                 });
+                // slopty: a terminal's block or selection goes to its chat's draft.
+                let (drafter, here) = (shell.downgrade(), window.window_handle());
+                live::serve_drafts(cx, move |chat, text, cx| {
+                    here.update(cx, |_, window, cx| {
+                        drafter.update(cx, |shell, cx| shell.attach_to_chat(chat, text, window, cx))
+                    })
+                    .ok()
+                    .and_then(Result::ok)
+                    .unwrap_or(false)
+                });
                 let weak_shell = shell.downgrade();
                 window.on_window_should_close(cx, move |window, cx| {
                     let should_close = weak_shell

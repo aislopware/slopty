@@ -57,13 +57,6 @@ impl Forward {
     pub fn url(&self) -> Option<String> {
         self.local.map(|local| format!("http://localhost:{local}"))
     }
-
-    /// The address as the worker names it, the same on every client: what a browser tile's
-    /// item holds.
-    #[must_use]
-    pub fn worker_url(&self) -> String {
-        format!("http://localhost:{}/", self.port.number)
-    }
 }
 
 struct Listener {

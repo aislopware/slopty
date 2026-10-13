@@ -261,6 +261,13 @@ impl TerminalView {
         self.state.drop_target() && self.drop_point(at).is_some()
     }
 
+    /// Whether the window last drew this grid at `at`, on top: where a drag from another app
+    /// is this shell's.
+    #[must_use]
+    pub fn shows_at(&self, at: Point<Pixels>, window: &gpui::Window) -> bool {
+        self.spot.at(at, window)
+    }
+
     /// A drag the drop sink carries entered the grid, carrying `store`; what is to go up for
     /// it is told through `hook`. The program hears what the items are.
     pub fn sink_enter(&mut self, store: TermDrag, hook: DropHook, cx: &Context<Self>) {

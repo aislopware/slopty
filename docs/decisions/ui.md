@@ -11840,3 +11840,38 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   a_display_made_for_this_device_follows_its_view, a_window_is_never_offered_a_display,
   system_shortcuts_go_to_the_remote_mac_while_its_view_has_the_keyboard,
   the_clipboard_is_typed_into_the_window}`.
+
+- ✅ **The kit keeps only what Slopty's own views draw with (2026-10-13).** zeron's design system was
+  first copied into `slopty-kit`: its theme, typography, appearance, Solar and Symbols icons,
+  popovers, toasts, widgets, glass, frost, edge fades and loaders. zeron was then vendored whole as
+  `slopty-shell`, which carries its own copy of each, and nothing outside the kit used the first
+  one. So that copy is deleted with its assets (the Solar and Symbols icons and the Geist faces, all
+  also in the shell) and the seven dependencies only it used. Also deleted are `draw` and `fuzzy`,
+  which nothing used either. zeron's design system has one copy, the shell's. The kit keeps what the
+  terminal, the remote window and the workspace's views draw with: its parts, icons, highlighting,
+  Markdown style, fonts, the frame probe and `motion`.
+
+- ✅ **The window times its own draws for the frame probe (2026-10-13).** The probe drew a root
+  view, `frames::Framed`, that read a marker its last child wrote in every paint, so the root was
+  built again in each frame and timed it. The shell opens its own window with zeron's root, so
+  `Framed` was never mounted and the probe counted no frame; the stream's overlay and the
+  self-test's frame numbers read zeros. Wrapping zeron's root would mean a shell edit for every
+  place that names the window's type. So the gpui-fast fork gained `Window::observe_draws`,
+  which hands each draw's start and span (render, layout, prepaint, paint) to an observer, and
+  the app watches the shell's window with it (`frames::watch`). `Framed` and its marker are
+  deleted, and nothing is drawn again on the probe's account. Tests: `slopty-kit`
+  `frames::tests::each_draw_of_a_watched_window_is_a_frame`; in the fork,
+  `fast::draw_timing::tests::each_draw_is_told_once`.
+
+- ✅ **A transfer stands as a toast with its stop (2026-10-13).** The transfers popover went
+  with the tiling workspace's title bar, so a file going up to a worker or coming down from
+  one ran unseen and could not be stopped. Now each transfer in flight
+  (`WorkspaceView::transfer_rows`) is a shell toast for as long as it goes: "Sending notes.txt
+  to studio" or "Bringing report.pdf from studio", with Stop (`cancel_transfer`, which for a
+  drop's files lets go of the drop on the worker too). The toast goes when the transfer ends,
+  and the end's own notice (saved where, or why not) is the workspace's as before. The app
+  also keeps gpui-kit's theme on Slopty's tokens again (`slopty_kit::kit::sync` on every
+  theme rebuild), since a terminal's find field is a gpui-kit input. Without it, the field
+  drew in gpui-kit's stock colours after the old window, which called it, was deleted. Test:
+  `slopty-ui` `remote::drop_in::tests::a_file_dropped_on_a_shell_goes_to_its_directory`
+  (listed, then stopped).

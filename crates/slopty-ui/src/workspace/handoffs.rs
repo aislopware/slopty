@@ -125,11 +125,7 @@ impl WorkspaceView {
     ) {
         let Some(key) = self.worker_of_session(session) else { return };
         let Some(w) = self.workers.get(&key) else { return };
-        let chat = w
-            .doc
-            .item_for_session(session)
-            .and_then(|item| item.facts.get(super::CHAT_FACT).cloned());
-        let Some(chat) = chat else {
+        let Some(chat) = self.chat_of(session) else {
             Self::show_notice(format!("This shell has no chat to open {path} in"), cx);
             return;
         };
@@ -141,6 +137,21 @@ impl WorkspaceView {
         let at = line.map_or_else(String::new, |line| format!("#L{line}"));
         let target = format!("file://{}{at}", escaped(&absolute));
         cx.emit(WorkspaceEvent::OpenFile { chat, target });
+    }
+
+    /// A block or a selection the person attached in shell `session` goes to the draft of the
+    /// chat the shell was opened for ([`WorkspaceEvent::Attach`]).
+    pub(super) fn attach_to_chat(&self, session: SessionId, text: &str, cx: &mut Context<Self>) {
+        match self.chat_of(session) {
+            Some(chat) => cx.emit(WorkspaceEvent::Attach { chat, text: text.to_owned() }),
+            None => Self::show_notice("This shell has no chat to attach to".to_owned(), cx),
+        }
+    }
+
+    /// The chat shell `session` was opened for.
+    pub(super) fn chat_of(&self, session: SessionId) -> Option<String> {
+        let w = self.workers.get(&self.worker_of_session(session)?)?;
+        w.doc.item_for_session(session)?.facts.get(super::CHAT_FACT).cloned()
     }
 
     /// The page `url` on `key`'s loopback, at the port that forwards it here.
@@ -180,7 +191,7 @@ impl WorkspaceView {
 
 /// `path` as the shell printed it, absolute: as it is, under the worker's home for `~/`, else
 /// under the shell's directory `cwd`.
-fn absolute(path: &str, cwd: Option<&str>, home: Option<&str>) -> Option<String> {
+pub(super) fn absolute(path: &str, cwd: Option<&str>, home: Option<&str>) -> Option<String> {
     if path.starts_with('/') {
         return Some(path.to_owned());
     }
@@ -220,12 +231,11 @@ mod tests {
     };
     use slopty_proto::items::{Item, ItemKind, ItemSync};
     use slopty_proto::orchestration::Port;
-    use slopty_proto::terminal::{SessionState, SessionSummary};
     use slopty_theme::Theme;
 
     use super::{absolute, escaped, on_loopback};
     use crate::workspace::WorkspaceView;
-    use crate::workspace::rig::{KEY, hear, link, mac};
+    use crate::workspace::rig::{KEY, hear, link, mac, shell};
 
     /// A page on the loopback keeps its path and query; one elsewhere is not the worker's.
     #[test]
@@ -236,27 +246,6 @@ mod tests {
         assert_eq!(on_loopback("http://app.localhost:3000/"), Some((3000, "/".into())));
         assert_eq!(on_loopback("https://github.com/"), None);
         assert_eq!(on_loopback("file:///etc/hosts"), None);
-    }
-
-    fn shell(id: SessionId) -> SessionSummary {
-        SessionSummary {
-            id,
-            title: String::new(),
-            cwd: Some("/w/app".to_owned()),
-            repo: None,
-            branch: None,
-            repo_id: None,
-            changes: None,
-            started_ms: WallMs::ZERO,
-            cols: 80,
-            rows: 24,
-            state: SessionState::Running,
-            viewers: 1,
-            command: Vec::new(),
-            progress: None,
-            restored: None,
-            program: Vec::new(),
-        }
     }
 
     fn page(id: u64, session: SessionId, url: &str, offer: Option<OfferReason>) -> HandoffEvent {
@@ -379,5 +368,44 @@ mod tests {
         assert_eq!(heard.borrow().files.len(), 1, "no chat to open it in");
         let said = heard.borrow().notices.last().cloned();
         assert_eq!(said.as_deref(), Some("This shell has no chat to open a.rs in"));
+    }
+
+    /// A block or a selection attached in a shell opened for a chat goes to that chat's draft;
+    /// a shell opened for no chat offers no attaching, and a key bound to it says so.
+    #[gpui::test]
+    fn a_block_attached_in_a_shell_goes_to_its_chat_s_draft(cx: &mut TestAppContext) {
+        let workspace = cx.new(|_| WorkspaceView::new(Theme::default()));
+        let cx = cx.add_empty_window();
+        let heard = hear(&workspace, cx);
+        let (mine, loose) = (SessionId::new(), SessionId::new());
+        workspace.update(cx, |v, cx| v.add_worker(KEY, "studio".to_owned(), cx));
+        let _rx = link(&workspace, cx, mac(|_| {}), vec![shell(mine), shell(loose)]);
+        let item = |session, chat: Option<&str>| Item {
+            id: ItemId::new(),
+            kind: ItemKind::Terminal { session },
+            name: None,
+            facts: chat
+                .map(|chat| BTreeMap::from([("chat".to_owned(), chat.to_owned())]))
+                .unwrap_or_default(),
+        };
+        let items = vec![item(mine, Some("chat-1")), item(loose, None)];
+        workspace
+            .update(cx, |v, cx| v.apply_sync(KEY, ItemSync::Snapshot { version: 1, items }, cx));
+        cx.run_until_parked();
+
+        let (shown, bare) = workspace
+            .read_with(cx, |v, _| (v.terminals[&mine].clone(), v.terminals[&loose].clone()));
+        let block = "```sh\n$ make\nok\n```";
+        shown.update(cx, |_, cx| {
+            cx.emit(slopty_terminal::TerminalViewEvent::Attach(block.to_owned()));
+        });
+        assert_eq!(heard.borrow().attached, [("chat-1".to_owned(), block.to_owned())]);
+
+        cx.update(|window, cx| {
+            bare.update(cx, |v, cx| v.attach_block(&slopty_terminal::AttachBlock, window, cx));
+        });
+        assert_eq!(heard.borrow().attached.len(), 1, "no chat to attach to");
+        let said = heard.borrow().notices.last().cloned();
+        assert_eq!(said.as_deref(), Some("No agent to attach the block to"));
     }
 }

@@ -6,14 +6,13 @@
 
 use std::collections::{HashMap, HashSet};
 
-use gpui::{App, Context, Focusable as _, Hsla, SharedString, Subscription, Task};
+use gpui::{App, Context, Focusable as _, SharedString, Subscription, Task};
 use slopty_client::WorkerKey;
 use slopty_core::SessionId;
 use slopty_proto::items::{ItemKind, ItemOp};
 use slopty_proto::terminal::{OpenSession, SessionState, TermSize};
 use slopty_proto::{ClientMsg, RequestId};
 use slopty_terminal::{GridFrame, TerminalViewEvent};
-use slopty_theme::{Rgb, Theme};
 use slopty_view_proto::TerminalSession;
 use slopty_view_rpc::{RpcError, RpcReply};
 use tokio::sync::oneshot;
@@ -36,42 +35,6 @@ pub(super) struct Terminals {
     coming: HashMap<SessionId, (String, Reply)>,
     /// Shown in a tab of the interface.
     shown: HashSet<SessionId>,
-    /// The look last asked for, and the theme it makes.
-    look: Option<(LiveLook, Theme)>,
-}
-
-/// `color` laid over `under`, as the grid paints it: the palette is opaque.
-fn opaque(color: Hsla, under: Hsla) -> Rgb {
-    let top = gpui::Rgba::from(color);
-    let bottom = gpui::Rgba::from(under);
-    let mix = |a: f32, b: f32| {
-        let v = a.mul_add(top.a, b * (1.0 - top.a)).clamp(0.0, 1.0) * 255.0;
-        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "0..=255")]
-        let v = v.round() as u8;
-        v
-    };
-    let (r, g, b) = (mix(top.r, bottom.r), mix(top.g, bottom.g), mix(top.b, bottom.b));
-    Rgb { r, g, b }
-}
-
-/// `base` with the shell's terminal look: its family and size, no ligatures (a grid keeps a
-/// glyph per cell), and its palette.
-fn themed(base: &Theme, look: &LiveLook) -> Theme {
-    let mut theme = base.clone();
-    theme.typography.mono_families = vec![look.family.to_string()];
-    theme.typography.mono_size = look.font_size;
-    theme.typography.ligatures = false;
-    let bg = look.background.opacity(1.0);
-    let palette = &mut theme.terminal;
-    palette.bg = opaque(bg, bg);
-    palette.fg = opaque(look.foreground, bg);
-    palette.cursor = opaque(look.cursor, bg);
-    palette.cursor_text = palette.bg;
-    palette.selection = opaque(look.selection, bg);
-    for (slot, color) in palette.ansi.iter_mut().zip(look.ansi) {
-        *slot = opaque(color, bg);
-    }
-    theme
 }
 
 /// The program a session runs, as a tab names it: the command's last path part.
@@ -240,32 +203,17 @@ impl WorkspaceView {
         Ok(serde_json::json!({}))
     }
 
-    /// The terminal `id`'s view, looking as `look` says.
+    /// The terminal `id`'s view, in the frame `look` says.
     pub(super) fn live_terminal_view(
         &self,
         id: &str,
-        look: &LiveLook,
+        look: LiveLook,
         cx: &mut App,
     ) -> Option<LiveView> {
         let session: SessionId = id.parse().ok()?;
         let view = self.terminals.get(&session)?.clone();
-        let cached = cx
-            .default_global::<Live>()
-            .terminals
-            .look
-            .as_ref()
-            .filter(|(was, _)| was == look)
-            .map(|(_, theme)| theme.clone());
-        let theme = cached.unwrap_or_else(|| {
-            let theme = themed(&self.theme, look);
-            cx.global_mut::<Live>().terminals.look = Some((look.clone(), theme.clone()));
-            theme
-        });
         let frame = GridFrame { padding: look.padding, line_height: look.line_height };
-        view.update(cx, |view, cx| {
-            view.set_theme(theme, cx);
-            view.set_frame(Some(frame), cx);
-        });
+        view.update(cx, |view, cx| view.set_frame(Some(frame), cx));
         let read = view.read(cx);
         let title = read.title().map(|title| SharedString::from(title.to_owned()));
         let focus = read.focus_handle(cx);

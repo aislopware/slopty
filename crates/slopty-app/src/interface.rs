@@ -3,11 +3,12 @@
 //! The workspace runs as before, with no window of its own: its links, its threads and its
 //! terminals are the shell's data, served by Slopty's view model ([`slopty_ui::view_model`]).
 //! The shell keeps its own settings, typography, theme and window; the workspace hears the window
-//! come forward and go back, as it heard its own.
+//! come forward and go back, as it heard its own, and its views wear the shell's look ([`wear`]).
 
-use gpui::{AnyWindowHandle, App, Entity};
-use slopty_settings::Loaded;
-use slopty_shell::live::{Hosted, TerminalLook};
+use gpui::{AnyWindowHandle, App, Entity, Hsla};
+use slopty_settings::{Loaded, Settings};
+use slopty_shell::live::{Chrome, Hosted, TerminalLook};
+use slopty_theme::{Rgb, Theme, Tint};
 use slopty_ui::view_model::live::{LiveLook, LiveView};
 use slopty_ui::workspace::WorkspaceView;
 
@@ -51,12 +52,10 @@ pub(crate) fn open(
     slopty_ui::key_takers::release(cx);
     let watched = workspace.clone();
     let _open = shell.update(cx, move |_shell, window, cx| {
-        let observed = watched.clone();
-        let appearance = window.observe_window_appearance(move |window, cx| {
-            let dark = settings::is_dark(window.appearance());
-            observed.update(cx, |ws, cx| ws.set_window_dark(dark, cx));
+        let observed = watched.downgrade();
+        let look = slopty_shell::live::observe_theme(cx, move |cx| {
+            let _gone = observed.update(cx, Workspace::rebuild_theme);
         });
-        let dark = settings::is_dark(window.appearance());
         let handle = window.window_handle();
         watched.update(cx, |ws, cx| {
             let activation = cx.observe_window_activation(window, |ws, window, cx| {
@@ -68,9 +67,11 @@ pub(crate) fn open(
                     ws.wake_this_mac_run();
                 }
             });
-            ws.window_subscriptions = vec![appearance, activation];
-            ws.window_dark = dark;
+            ws.window_subscriptions = vec![look, activation];
             ws.window = Some(handle);
+            // Drags from other apps onto the window: a remote window or a shell takes its own.
+            #[cfg(target_os = "macos")]
+            ws.view.update(cx, |_, cx| WorkspaceView::accept_dropped_files(window, cx));
             // The clipboard follows the keyboard of this window's live views.
             ws.view.update(cx, |v, cx| v.set_pasteboard(crate::pasteboard(), Some(handle), cx));
             ws.apply_loaded(loaded, cx);
@@ -89,7 +90,7 @@ fn host_live_views(view: &Entity<WorkspaceView>, cx: &mut App) {
         cx,
         move |id, look, cx| {
             let look = live_look(look);
-            terminals.upgrade()?.update(cx, |v, cx| v.hosted_terminal(id, &look, cx)).map(hosted)
+            terminals.upgrade()?.update(cx, |v, cx| v.hosted_terminal(id, look, cx)).map(hosted)
         },
         move |id, cx| screens.upgrade()?.update(cx, |v, cx| v.hosted_screen(id, cx)).map(hosted),
         move |id, changed, cx| {
@@ -98,22 +99,189 @@ fn host_live_views(view: &Entity<WorkspaceView>, cx: &mut App) {
     );
 }
 
-/// The shell's terminal look, as the workspace takes it.
-fn live_look(look: &TerminalLook) -> LiveLook {
-    LiveLook {
-        family: look.family.clone(),
-        font_size: look.font_size,
-        line_height: look.line_height,
-        padding: look.padding,
-        background: look.background,
-        foreground: look.foreground,
-        cursor: look.cursor,
-        selection: look.selection,
-        ansi: look.ansi,
+/// The shell's terminal frame, as the workspace takes it.
+const fn live_look(look: &TerminalLook) -> LiveLook {
+    LiveLook { line_height: look.line_height, padding: look.padding }
+}
+
+/// The theme Slopty's own views draw with: the shell's look worn over the file's terminal
+/// behaviour, or the light theme before the shell has one.
+pub(crate) fn theme(settings: &Settings, cx: &App) -> Theme {
+    let Some(chrome) = Chrome::of(cx) else {
+        return settings::theme_for(settings, false);
+    };
+    let mut theme = settings::theme_for(settings, chrome.dark);
+    wear(&mut theme, &chrome, &TerminalLook::of(cx));
+    theme
+}
+
+/// Dress `theme` in the shell's look, so nothing Slopty draws reads as a seam: the chrome's
+/// planes, lines, text and states from `chrome`, the grid's face, size and palette from `look`.
+/// A translucent colour of the shell's is laid over its panel where the theme keeps an opaque
+/// one, and stays a wash where the theme keeps a [`Tint`].
+fn wear(theme: &mut Theme, chrome: &Chrome, look: &TerminalLook) {
+    let on = |color: Hsla| opaque(color, chrome.panel);
+    let s = &mut theme.surfaces;
+    s.ground = on(chrome.panel);
+    s.sidebar = on(chrome.surface);
+    s.tab_bar = s.sidebar;
+    s.header = s.sidebar;
+    s.elevated = on(chrome.overlay);
+    s.well = on(chrome.input);
+    s.card_head = on(chrome.card);
+    s.element = on(chrome.raised);
+    s.hover = tint(chrome.hover);
+    s.selected = tint(chrome.active);
+    s.keyed = s.selected;
+    s.pressed = s.selected;
+    s.stroke = tint(chrome.border);
+    s.border = tint(chrome.border_strong);
+    s.focus = on(chrome.border_strong);
+    s.selected_border = s.focus;
+    s.drop_target = tint(chrome.accent_wash);
+    s.text = on(chrome.text);
+    s.text_secondary = on(chrome.text_muted);
+    s.text_muted = on(chrome.text_faint);
+    s.icon = s.text;
+    s.icon_muted = s.text_secondary;
+    s.accent = on(chrome.accent);
+    s.accent_fill = on(chrome.accent_strong);
+    s.accent_ink = opaque(chrome.on_accent, chrome.accent_strong);
+    s.info_background = tint(chrome.accent_wash);
+    s.working = on(chrome.busy);
+    s.success = on(chrome.success);
+    s.warn = on(chrome.warning);
+    s.error = on(chrome.danger);
+    s.error_fill = on(chrome.danger_strong);
+    let type_ = &mut theme.typography;
+    type_.ui_family = chrome.sans.to_string();
+    let family = look.family.to_string();
+    type_.mono_families.retain(|f| *f != family);
+    type_.mono_families.insert(0, family);
+    type_.mono_size = look.font_size;
+    // A grid keeps a glyph per cell.
+    type_.ligatures = false;
+    let bg = look.background.opacity(1.0);
+    let palette = &mut theme.terminal;
+    palette.bg = opaque(bg, bg);
+    palette.fg = opaque(look.foreground, bg);
+    palette.cursor = opaque(look.cursor, bg);
+    palette.cursor_text = palette.bg;
+    palette.selection = opaque(look.selection, bg);
+    for (slot, color) in palette.ansi.iter_mut().zip(look.ansi) {
+        *slot = opaque(color, bg);
     }
+}
+
+/// `color` laid over `under`, opaque.
+fn opaque(color: Hsla, under: Hsla) -> Rgb {
+    let top = gpui::Rgba::from(color);
+    let bottom = gpui::Rgba::from(under.opacity(1.0));
+    let mix = |a: f32, b: f32| byte(a.mul_add(top.a, b * (1.0 - top.a)));
+    Rgb { r: mix(top.r, bottom.r), g: mix(top.g, bottom.g), b: mix(top.b, bottom.b) }
+}
+
+/// `color` as a wash: its ink opaque, its own opacity kept.
+fn tint(color: Hsla) -> Tint {
+    Tint { ink: opaque(color.opacity(1.0), color), alpha: byte(color.a) }
+}
+
+/// A 0–1 channel as a byte.
+fn byte(channel: f32) -> u8 {
+    #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "0..=255")]
+    let byte = (channel.clamp(0.0, 1.0) * 255.0).round() as u8;
+    byte
 }
 
 /// A workspace view, as the shell places it.
 fn hosted(view: LiveView) -> Hosted {
     Hosted { view: view.view, focus: view.focus, title: view.title, ended: view.ended }
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::{hsla, rgb};
+
+    use super::*;
+
+    /// A look of the shell's: a dark panel, a translucent hairline and hover, a red danger.
+    fn chrome() -> Chrome {
+        let grey = |l: f32| hsla(0.0, 0.0, l, 1.0);
+        Chrome {
+            dark: true,
+            sans: "Geist".into(),
+            panel: rgb(0x0006_0606).into(),
+            surface: grey(0.06),
+            raised: grey(0.09),
+            card: grey(0.07),
+            overlay: grey(0.12),
+            input: grey(0.08),
+            hover: hsla(0.0, 0.0, 1.0, 0.06),
+            active: hsla(0.0, 0.0, 1.0, 0.1),
+            border: hsla(0.0, 0.0, 1.0, 0.08),
+            border_strong: grey(0.3),
+            text: grey(0.95),
+            text_muted: grey(0.7),
+            text_faint: grey(0.5),
+            accent: hsla(0.6, 0.8, 0.6, 1.0),
+            accent_strong: hsla(0.6, 0.8, 0.5, 1.0),
+            accent_wash: hsla(0.6, 0.8, 0.5, 0.15),
+            on_accent: grey(1.0),
+            success: hsla(0.4, 0.6, 0.5, 1.0),
+            warning: hsla(0.12, 0.8, 0.5, 1.0),
+            danger: hsla(0.0, 0.8, 0.6, 1.0),
+            danger_strong: hsla(0.0, 0.8, 0.5, 1.0),
+            busy: hsla(0.6, 0.8, 0.6, 1.0),
+        }
+    }
+
+    /// The terminal's look of the same shell: Berkeley Mono at 12 on its own panel.
+    fn terminal() -> TerminalLook {
+        TerminalLook {
+            family: "Berkeley Mono".into(),
+            font_size: 12.0,
+            line_height: 18.0,
+            padding: 8.0,
+            background: rgb(0x000a_0a0a).into(),
+            foreground: rgb(0x00ee_eeee).into(),
+            cursor: rgb(0x00ff_ffff).into(),
+            selection: hsla(0.6, 0.8, 0.5, 0.3),
+            ansi: [rgb(0x00ff_0000).into(); 16],
+            dark: true,
+        }
+    }
+
+    /// What Slopty draws wears the shell's look: its planes and words as opaque colours, its
+    /// washes and hairlines at their own opacity, its interface face, and the grid's face,
+    /// size and palette, a translucent selection laid over the grid's own panel. The file's
+    /// behaviour stays.
+    #[test]
+    fn slopty_s_views_wear_the_shell_s_look() {
+        let mut settings = Settings::default();
+        settings.terminal.copy_on_select = true;
+        let mut theme = settings::theme_for(&settings, true);
+        wear(&mut theme, &chrome(), &terminal());
+        let s = &theme.surfaces;
+        assert_eq!(s.ground, Rgb::hex(0x0006_0606));
+        assert_eq!(theme.variant(), slopty_theme::Variant::Dark);
+        assert_eq!((s.stroke.ink, s.stroke.alpha), (Rgb::hex(0x00ff_ffff), 20), "8 % white");
+        assert_eq!(s.hover.alpha, 15);
+        assert_eq!(s.text, Rgb::hex(0x00f2_f2f2));
+        assert_eq!(s.text_muted, Rgb::hex(0x0080_8080), "the faint words");
+        assert_eq!(theme.typography.ui_family, "Geist");
+        assert_eq!(
+            theme.typography.mono_families.first().map(String::as_str),
+            Some("Berkeley Mono")
+        );
+        assert_eq!(theme.typography.mono_size, 12.0);
+        assert!(!theme.typography.ligatures, "a glyph per cell");
+        let palette = &theme.terminal;
+        assert_eq!((palette.bg, palette.fg), (Rgb::hex(0x000a_0a0a), Rgb::hex(0x00ee_eeee)));
+        assert_eq!(palette.cursor_text, palette.bg);
+        assert_eq!(palette.ansi[3], Rgb::hex(0x00ff_0000));
+        let wash = opaque(hsla(0.6, 0.8, 0.5, 0.3), rgb(0x000a_0a0a).into());
+        assert_eq!(palette.selection, wash, "over the grid's own panel");
+        assert_ne!(palette.selection, opaque(hsla(0.6, 0.8, 0.5, 1.0), rgb(0).into()));
+        assert!(theme.behaviour.copy_on_select, "the file's behaviour stays");
+    }
 }

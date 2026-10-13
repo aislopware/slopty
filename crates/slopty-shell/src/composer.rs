@@ -2261,6 +2261,26 @@ impl ComposerInput {
         cx.notify();
     }
 
+    // slopty: `text` from outside the composer at the selection, on lines of its own, as an undo
+    // step of its own; none while read-only or composing.
+    pub(crate) fn insert_context(
+        &mut self,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.read_only || self.marked_range.is_some() {
+            return false;
+        }
+        let before = &self.content[..self.selected_range.start];
+        let lead = if before.is_empty() || before.ends_with('\n') { "" } else { "\n" };
+        let text = format!("{lead}{}\n", text.trim_end_matches('\n'));
+        self.last_edit = None;
+        self.replace_text_in_range(None, &text, window, cx);
+        self.last_edit = None;
+        true
+    }
+
     /// Insert a canonical reference link at the selection, as one undo step.
     pub(crate) fn insert_reference(&mut self, link: &str, cx: &mut Context<Self>) -> bool {
         // The platform still owns the marked range during IME composition.
@@ -6205,6 +6225,23 @@ impl Composer {
             window.focus(&focus, cx);
             cx.notify();
         }
+    }
+
+    // slopty: context from Slopty's terminal at the caret, on lines of its own, and the keyboard
+    // here to go on writing.
+    pub(crate) fn add_context(
+        &mut self,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let put = self.input.update(cx, |input, cx| input.insert_context(text, window, cx));
+        if put {
+            let focus = self.input.read(cx).focus_handle.clone();
+            window.focus(&focus, cx);
+            cx.notify();
+        }
+        put
     }
 
     /// Mention another chat at the caret: a chip the agent receives as a
@@ -12162,6 +12199,27 @@ mod tests {
                     .iter()
                     .any(|(_, face)| *face == composer_markdown::Face::Bold)
             );
+        });
+    }
+
+    // slopty: a terminal's block lands on lines of its own at the caret, one undo takes it out
+    // whole, and a read-only composer takes none.
+    #[gpui::test]
+    fn context_from_a_terminal_lands_on_its_own_lines(cx: &mut gpui::TestAppContext) {
+        with_composer_input(cx, |input, window, cx| {
+            input.set_text("Why does this fail?", cx);
+            let end = input.text().len();
+            input.selected_range = end..end;
+            assert!(input.insert_context("```sh\n$ make\nerror\n```\n", window, cx));
+            assert_eq!(input.text(), "Why does this fail?\n```sh\n$ make\nerror\n```\n");
+            input.undo(&Undo, window, cx);
+            assert_eq!(input.text(), "Why does this fail?");
+            input.set_text("", cx);
+            assert!(input.insert_context("ok", window, cx));
+            assert_eq!(input.text(), "ok\n", "nothing before: no blank line first");
+            input.read_only = true;
+            assert!(!input.insert_context("more", window, cx));
+            assert_eq!(input.text(), "ok\n");
         });
     }
 

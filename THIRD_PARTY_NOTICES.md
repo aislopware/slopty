@@ -36,23 +36,20 @@ SOFTWARE.
 
 ## Geist and Geist Mono
 
-`crates/slopty-shell/assets/fonts/Geist*.ttf` and `crates/slopty-kit/assets/fonts/Geist*.ttf`,
-version 1.7.2. Copyright 2024 The Geist Project
+`crates/slopty-shell/assets/fonts/Geist*.ttf`, version 1.7.2. Copyright 2024 The Geist Project
 Authors (github.com/vercel/geist-font). SIL Open Font License 1.1; the full text is
-`crates/slopty-kit/assets/fonts/LICENSE-Geist.txt` (and
-`crates/slopty-shell/assets/fonts/licenses/Geist-OFL.txt`).
+`crates/slopty-shell/assets/fonts/licenses/Geist-OFL.txt`.
 
 ## Solar Icons
 
-`crates/slopty-kit/assets/solar/`: "Solar Icons" by 480 Design (Linear weight), under Creative
+The Solar glyphs in `crates/slopty-shell/assets/icons/`: "Solar Icons" by 480 Design (Linear weight), under Creative
 Commons Attribution 4.0 International (https://creativecommons.org/licenses/by/4.0/). The glyphs
 zeron drew in the same weight (terminal, stop, return, the expand arrows and their kin) come
 under zeron's licence above.
 
 ## Symbols
 
-`crates/slopty-shell/assets/file-icons/` and `crates/slopty-kit/assets/file-icons/`: the
-Symbols file and folder icons, copyright 2020-22 Miguel Solorio, under the MIT licence in each
+`crates/slopty-shell/assets/file-icons/`: the Symbols file and folder icons, copyright 2020-22 Miguel Solorio, under the MIT licence in each
 directory's `LICENSE.symbols`.
 `files/serverless.svg` is renamed from upstream's misspelt file name.
 

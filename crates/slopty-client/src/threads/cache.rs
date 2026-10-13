@@ -93,17 +93,6 @@ impl Cache {
         Ok(())
     }
 
-    /// Forget `thread`.
-    ///
-    /// # Errors
-    /// The file system's, other than the file being gone already.
-    pub fn forget_thread(&self, thread: ThreadId) -> Result<(), CacheError> {
-        match fs::remove_file(self.thread_file(thread)) {
-            Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e.into()),
-            _ => Ok(()),
-        }
-    }
-
     /// The outbox as last kept; empty when none was, or it is unreadable.
     #[must_use]
     pub fn outbox(&self) -> Outbox {

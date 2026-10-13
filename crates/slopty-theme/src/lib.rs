@@ -14,7 +14,6 @@
     reason = "`unreachable_pub` is on, so an item shared from a private module is `pub(crate)`"
 )]
 
-pub mod layout;
 pub mod model;
 
 use std::collections::BTreeMap;
@@ -854,9 +853,6 @@ pub mod alpha {
     /// How strongly a row wearing an identity colour is tinted in it, under its 2 pt bar:
     /// Delta's colour-coded threads (`.research/delta-re-2026-10-12.md` §2.9).
     pub const IDENTITY: f32 = 0.08;
-    /// The same on the selected row of a coloured run, under its 3 pt bar: Delta's strong tint,
-    /// measured from the signed-in app (`.research/delta-signed-in-2026-10-12.md` §2.3).
-    pub const IDENTITY_SELECTED: f32 = 0.2;
 }
 
 /// Slopty's green: OKLCH 0.72 0.16 150 (`docs/decisions/brand.md`). The mark's and the icon's
@@ -986,12 +982,8 @@ pub struct Surfaces {
     pub info_border: Rgb,
     /// Success's quiet ground: Zed's `success.background`.
     pub success_background: Tint,
-    /// The line round it: Zed's `success.border`.
-    pub success_border: Rgb,
     /// Warning's quiet ground: Zed's `warning.background`.
     pub warning_background: Tint,
-    /// The line round it: Zed's `warning.border`.
-    pub warning_border: Rgb,
     /// Error's quiet ground, the destructive button's under the [`Self::error`] word: Zed's
     /// `error.background`.
     pub error_background: Tint,
@@ -1323,7 +1315,7 @@ impl Surfaces {
         let accent = word(t.accent);
         let [info_background, success_background, warning_background, error_background] =
             t.backgrounds;
-        let [info_border, success_border, warning_border, error_border] = t.borders;
+        let [info_border, _, _, error_border] = t.borders;
         Self {
             ground: t.ground,
             sidebar: t.sidebar,
@@ -1363,9 +1355,7 @@ impl Surfaces {
             info_background,
             info_border,
             success_background,
-            success_border,
             warning_background,
-            warning_border,
             error_background,
             error_border,
             vc_added_line: t.vc_added_line,
@@ -1799,7 +1789,7 @@ pub struct Theme {
     pub terminal: TerminalPalette,
     /// Terminal behaviour.
     pub behaviour: Behaviour,
-    /// Chrome colours, the variant's; a `[colors]` background changes the terminal alone.
+    /// Chrome colours: the variant's, until the app dresses them in the shell's.
     pub surfaces: Surfaces,
     /// The shadow of what floats and the scrim under a modal.
     pub elevation: Elevation,
@@ -1867,7 +1857,6 @@ impl Theme {
     }
 
     /// The content step of the surface order: what tile headers and bodies sit on, the ground.
-    /// A shell's grid is the same surface unless a `[colors]` background repaints the grid alone.
     #[must_use]
     pub const fn content(&self) -> Rgb {
         self.surfaces.ground

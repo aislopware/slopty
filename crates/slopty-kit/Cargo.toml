@@ -13,19 +13,13 @@ workspace = true
 [dependencies]
 anyhow.workspace = true
 # The syntax cache's content key (`syntax_cache`).
-blake3.workspace = true
 # The installed families the type settings offer, and whether each is fixed width (`typography`).
-fontdb.workspace = true
 gpui.workspace = true
 gpui-kit.workspace = true
 # The palette's, the pickers' and the symbols' fuzzy match (`fuzzy`).
-nucleo-matcher.workspace = true
 parking_lot.workspace = true
 regex.workspace = true
 # The file icons, embedded (`file_icons`).
-rust-embed.workspace = true
-serde.workspace = true
-serde_json.workspace = true
 slopty-core.workspace = true
 slopty-platform.workspace = true
 slopty-proto.workspace = true
@@ -34,7 +28,6 @@ slopty-theme.workspace = true
 syntect.workspace = true
 two-face.workspace = true
 tracing.workspace = true
-ttf-parser.workspace = true
 
 [features]
 # `a11y::tree` and the retained-frame oracle for the self-test socket (`slopty/e2e`) and for the

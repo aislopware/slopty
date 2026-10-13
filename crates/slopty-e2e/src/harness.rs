@@ -843,14 +843,9 @@ const EMPTY_TAILNET: &str = r#"{"BackendState":"Running","Self":null,"Peer":null
 /// (`system`) would make each golden depend on System Settings on the day it runs.
 pub const APPEARANCE: &str = "light";
 
-/// Write a `settings.toml` into `app_dir` that pins [`APPEARANCE`] and a steady cursor, unless
-/// a test already put one there: a blinking cursor is in a golden or not by the 600 ms phase
-/// the frame lands in.
+/// Pin the interface of the app whose data directory is `app_dir` in [`APPEARANCE`], unless a
+/// test already put its settings there: the shell's look is the whole window's.
 fn pin_appearance(app_dir: &Path) -> Result<()> {
-    let path = app_dir.join("settings.toml");
-    if !path.exists() {
-        std::fs::write(&path, pinned_settings(APPEARANCE))?;
-    }
     if !interface_settings(app_dir).exists() {
         pin_interface(app_dir, APPEARANCE)?;
     }
@@ -884,27 +879,17 @@ pub fn pin_interface(app_dir: &Path, appearance: &str) -> Result<()> {
     Ok(())
 }
 
-/// An app's settings: [`pinned_settings`], and the server it follows when it has one.
-fn app_settings(appearance: &str, server: Option<&ServerDaemon>) -> String {
-    let pinned = pinned_settings(appearance);
-    match server {
-        Some(server) => format!("{pinned}\n[network]\nserver = \"{}\"\n", server.address()),
-        None => pinned,
-    }
+/// An app's settings when it follows `server`.
+fn following(server: &ServerDaemon) -> String {
+    format!("[network]\nserver = \"{}\"\n", server.address())
 }
 
-/// Point the app whose data directory is `app_dir` at `server`, in [`APPEARANCE`], before it
-/// starts: it comes up linked to it, as a set-up Mac's app does.
+/// Point the app whose data directory is `app_dir` at `server` before it starts: it comes up
+/// linked to it, as a set-up Mac's app does.
 fn follow(app_dir: &Path, server: &ServerDaemon) -> Result<()> {
     std::fs::create_dir_all(app_dir)?;
-    std::fs::write(app_dir.join("settings.toml"), app_settings(APPEARANCE, Some(server)))?;
+    std::fs::write(app_dir.join("settings.toml"), following(server))?;
     Ok(())
-}
-
-/// The settings an app under test runs with, in `appearance`.
-#[must_use]
-pub fn pinned_settings(appearance: &str) -> String {
-    format!("[theme]\nappearance = \"{appearance}\"\n")
 }
 
 /// Connect to `sock`, retrying for a few seconds: under heavy load the listener may not accept
@@ -1437,19 +1422,6 @@ impl Stack {
     #[must_use]
     pub fn path(&self, name: &str) -> PathBuf {
         self.dir.path().join(name)
-    }
-
-    /// Switch the app's theme to `appearance` (`dark`, `light`) by rewriting its
-    /// `settings.toml`, the server it follows kept, as a person editing the file would; the app
-    /// sees it within a second.
-    ///
-    /// # Errors
-    ///
-    /// When the file cannot be written.
-    pub fn set_appearance(&self, appearance: &str) -> Result<()> {
-        let path = self.path("app").join("settings.toml");
-        std::fs::write(&path, app_settings(appearance, self.follows.then_some(&self.server)))?;
-        Ok(())
     }
 
     /// One request over the worker's control socket (`{"cmd": …}`), and its reply.
@@ -2443,18 +2415,6 @@ impl ServerStack {
         self.dir.path().join(name)
     }
 
-    /// Switch the app's theme to `appearance` (`dark`, `light`) by rewriting its
-    /// `settings.toml`, as a person editing the file would; the app sees it within a second.
-    ///
-    /// # Errors
-    ///
-    /// When the file cannot be written.
-    pub fn set_appearance(&self, appearance: &str) -> Result<()> {
-        let path = self.path("app").join("settings.toml");
-        std::fs::write(&path, pinned_settings(appearance))?;
-        Ok(())
-    }
-
     /// `slopty <args> --server <this server> --json`, parsed.
     ///
     /// # Errors
@@ -2752,7 +2712,7 @@ impl ServedApp {
         }
         let app_dir = root.join("app");
         std::fs::create_dir_all(&app_dir)?;
-        std::fs::write(app_dir.join("settings.toml"), app_settings(APPEARANCE, Some(&server)))?;
+        std::fs::write(app_dir.join("settings.toml"), following(&server))?;
         let (app, mut driver) = spawn_app(root, "app", &log, &[]).await?;
         driver.ok(&crate::Command::Ping).await?;
         driver
@@ -2828,18 +2788,6 @@ impl ServedApp {
     pub async fn quit_app(mut app: Child, mut driver: Driver) {
         let _quit = driver.call(&crate::Command::Quit).await;
         reap(&mut app, "slopty-app").await;
-    }
-
-    /// Switch the app's theme to `appearance` (`dark`, `light`) by rewriting its
-    /// `settings.toml`, the server it follows kept; the app sees it within a second.
-    ///
-    /// # Errors
-    ///
-    /// When the file cannot be written.
-    pub fn set_appearance(&self, appearance: &str) -> Result<()> {
-        let path = self.path("app").join("settings.toml");
-        std::fs::write(&path, app_settings(appearance, Some(&self.server)))?;
-        Ok(())
     }
 
     /// `slopty <args> --server <this server> --json`, parsed.

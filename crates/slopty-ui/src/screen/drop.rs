@@ -97,6 +97,13 @@ impl ScreenView {
         self.drop.is_some_and(|d| d.hover.phase() == Phase::Hovering && d.hover.op().takes())
     }
 
+    /// Whether the window last drew this body at `position`, on top: where a drag from another
+    /// app is this window's or display's.
+    #[must_use]
+    pub fn shows_at(&self, position: Point<Pixels>, window: &gpui::Window) -> bool {
+        self.spot.at(position, window)
+    }
+
     /// Dropped at `position`, with the files its promises wrote: whether the drop goes to the
     /// worker. One the worker said nothing takes is refused here, and the worker's drag ends.
     pub fn drag_drop(

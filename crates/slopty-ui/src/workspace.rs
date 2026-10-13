@@ -138,6 +138,14 @@ pub enum WorkspaceEvent {
         /// The file, absolute on the shell's machine.
         target: String,
     },
+    /// A block or a selection attached in a shell opened for `chat`: the shell puts `text` in
+    /// that chat's draft, at the caret.
+    Attach {
+        /// The chat the shell was opened for.
+        chat: String,
+        /// The context, fenced and named after its command.
+        text: String,
+    },
     /// The worker took handoff `id` back: its notice goes.
     Withdrawn {
         /// The worker.
@@ -212,13 +220,6 @@ impl WorkerStatus {
     #[must_use]
     pub const fn is_up(&self) -> bool {
         matches!(self, Self::Connected | Self::Checking)
-    }
-
-    /// Whether what its tiles show may be stale: its link is being checked or dialled again
-    /// after a resume. They show it set back, not hidden.
-    #[must_use]
-    pub const fn in_doubt(&self) -> bool {
-        matches!(self, Self::Checking | Self::Relinking)
     }
 }
 
@@ -480,6 +481,9 @@ pub struct WorkspaceView {
     desktop: desktop::Desktop,
     /// The shell's window, whose keyboard the live views hold.
     keyboard_window: Option<gpui::AnyWindowHandle>,
+    /// Where a test's drags out go instead of the system's drag.
+    #[cfg(target_os = "macos")]
+    drag_sink: Option<remote::DragSink>,
 }
 
 impl std::fmt::Debug for WorkspaceView {
@@ -532,6 +536,8 @@ impl WorkspaceView {
             device_actions: HashMap::new(),
             desktop: desktop::Desktop::default(),
             keyboard_window: None,
+            #[cfg(target_os = "macos")]
+            drag_sink: None,
         }
     }
 

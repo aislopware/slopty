@@ -3913,3 +3913,52 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   a_loopback_page_keeps_its_way_in, a_path_clicked_in_a_shell_opens_in_its_chat_s_files,
   a_printed_path_is_made_absolute}`; `slopty-shell`
   `toast::tests::an_offer_waits_for_its_button`.
+
+- ✅ **A terminal's own keys are bound inside the shell's keymap (2026-10-13).** The old
+  workspace's keymap bound a terminal's commands (⌘F find, ⌘K clear, ⌘↑ and ⌘↓ between
+  prompts, the scroll keys, copy mode, ⌘⇧C the last output) with the settings file's `[keys]`
+  laid over them. It went with the tiling workspace, and nothing bound them after. Only ⌘C and
+  ⌘V still reached the grid, through the Edit menu. The app now binds them through
+  `slopty_shell::live::keys`, which the shell runs last each time it binds its keymap, since
+  that clears every binding first. In the terminal they hold over the shell's chords for the
+  same keys: ⌘K clears the screen there, and elsewhere it opens the palette. `[keys.terminal]`
+  names the commands to rebind, and none unbinds one (`slopty_terminal::bindings`). A chord
+  that is no chord is said as the file's other mistakes are, and a change binds the keymap
+  again. The shell's own shortcuts are set in its Settings, so `[keys.workspace]` is gone with
+  the actions it named. Tests: `slopty-terminal`
+  `view::tests::the_file_s_chords_lay_over_the_defaults`; `slopty-shell`
+  `live::tests::slopty_s_keys_outlive_the_shell_s_keymap`; `slopty-e2e`
+  `app::terminal_keys::the_terminal_s_own_keys_hold_in_the_dock`.
+
+- ✅ **A shell's block goes to its chat's draft, and its files leave and arrive by dragging
+  again (2026-10-13).** These went away with the tiling workspace and now come back on the
+  shell.
+  - **Attach.** "Attach block to agent" and "Attach selection to agent" (the block menu, the
+    commands, `[keys.terminal] attach_block`) are offered only on a shell opened for a chat:
+    the attach probe asks the workspace whether the shell's item carries the `chat` fact.
+    The fenced block becomes `WorkspaceEvent::Attach`, which reaches the shell through
+    `slopty_shell::live::attach`. There the chat's composer (the main chat or a side chat
+    showing it) puts the block at the caret, on lines of its own, as an undo step of its own,
+    and takes the keyboard. If the chat is not open in the window, a toast says so.
+  - **Drag out.** A path ⌘-dragged out of a shell (made absolute against its directory, `~/`
+    against the worker's home) and a drag an app on a worker began in its window both go on
+    as this Mac's own drag. The files are promises, brought down when the drop asks
+    (`workspace::remote::drag_out`). A failed fetch says why, and a machine that is away is
+    said at once.
+  - **Drop in.** The platform's drop sink is installed on the shell's window. Each hosted
+    view knows its place in the last drawn frame through a hitbox it takes each frame
+    (`slopty_kit::spot::Spot`, asked with `Hitbox::is_hovered_at`). So a drag is a remote
+    window's only where the window shows it on top, never under a menu or while hidden.
+    Over a remote window or display, the drag is the worker's, as before. Over a program
+    asking for drops (Kitty), it is the program's. Over any other shell's grid, a drop sends
+    its files to the shell's directory and types their paths. Anywhere else, the shell's
+    own drop handling takes it, with promised files handed over once written.
+  - **`$EDITOR` stays the worker's.** The client declares no edit handoff, so `git commit`,
+    `crontab -e` and the like run the worker's own editor in the shell. A GUI edit would
+    need a done/cancel signal from the shell's Files pane for a light editor the terminal
+    already gives; the terminal is one keystroke away.
+  - Tests: `slopty-ui` `handoffs::tests::a_block_attached_in_a_shell_goes_to_its_chat_s_draft`,
+    `remote::drag_out::tests::a_path_dragged_out_of_a_shell_comes_down_when_dropped`,
+    `remote::drop_in::tests::a_file_dropped_on_a_shell_goes_to_its_directory`; `slopty-shell`
+    `composer::tests::context_from_a_terminal_lands_on_its_own_lines`; `slopty-kit`
+    `spot::tests::a_body_is_at_a_point_it_shows`.

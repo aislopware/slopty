@@ -30,6 +30,10 @@ mod pair;
 mod resume;
 
 #[cfg(test)]
+#[path = "app/terminal_keys.rs"]
+mod terminal_keys;
+
+#[cfg(test)]
 #[path = "app/through_server.rs"]
 mod through_server;
 

@@ -23,8 +23,15 @@ use slopty_proto::drag::DragId;
 use slopty_proto::terminal::TermRequest;
 use slopty_proto::transfer::{ClipMsg, Dest, RepRef, XferMsg};
 
+#[cfg(target_os = "macos")]
+mod drag_out;
+#[cfg(target_os = "macos")]
+mod drop_in;
 pub mod transfers;
-
+#[cfg(target_os = "macos")]
+pub use drag_out::DragSink;
+#[cfg(target_os = "macos")]
+pub use drop_in::{Carried, DropIn};
 use slopty_terminal::{ClipHook, ClipPaste};
 
 use super::WorkspaceView;
@@ -95,6 +102,14 @@ impl Upload {
             taken_up: false,
             dropped: false,
         }
+    }
+
+    /// Nothing sent yet, into the landing on the worker of `drag`, a drag over `tile`, which
+    /// drops them at its point there.
+    #[cfg(target_os = "macos")]
+    #[must_use]
+    pub fn to_drag(tile: ItemRef, drag: DragId) -> Self {
+        Self { drag: Some(drag), ..Self::to_staging(tile) }
     }
 
     /// Nothing sent yet, to the worker's staging and its pasteboard.
@@ -800,14 +815,6 @@ impl WorkspaceView {
         self.ports.get(&session).map_or(&[], Vec::as_slice)
     }
 
-    /// Open a forwarded port in the default browser.
-    pub fn open_forward(forward: &Forward) {
-        if let Some(url) = forward.url() {
-            tracing::info!(%url, "opening a forwarded port");
-            slopty_platform::open_url(&url);
-        }
-    }
-
     /// Where downloads from `worker` through `via` that the view did not start itself tell it
     /// of themselves: each is listed while it goes, with its stop, and the person is told as
     /// `bringing` says when it ends. Listens until every sender is gone.
@@ -977,6 +984,9 @@ pub(in crate::workspace) enum Bringing {
     /// Saved where the Mac's save panel said: "Save a copy…" of a file tile's file and
     /// "Download…" of a folder tile's entry, two words for one save, or one an earlier run left.
     Save,
+    /// Dragged out of a shell or a remote window and dropped here.
+    #[cfg_attr(target_os = "ios", expect(dead_code, reason = "a drag out is the Mac's"))]
+    Drag,
     /// Copied on one machine and pasted on another: it comes down on its way there.
     #[cfg_attr(
         target_os = "ios",
@@ -990,12 +1000,13 @@ impl Bringing {
     const fn done(self) -> &'static str {
         match self {
             Self::Save => "saved",
+            Self::Drag => "dragged out",
             Self::Paste => "brought over",
         }
     }
 
-    /// Whether it still means something to the next run of the app: a paste is over with this
-    /// run.
+    /// Whether it still means something to the next run of the app: a drop's place may be
+    /// another app's scratch, and a paste is over with this run.
     const fn kept(self) -> bool {
         matches!(self, Self::Save)
     }

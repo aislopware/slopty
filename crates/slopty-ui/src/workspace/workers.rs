@@ -38,12 +38,6 @@ pub(super) struct Stopped {
 impl Stopped {}
 
 impl WorkspaceView {
-    /// Whether the clipboard is shared with `key`, as the settings say by its worker id.
-    #[must_use]
-    pub fn clipboard_shared(&self, key: WorkerKey) -> bool {
-        !self.workers.contains_key(&key) || shares_clipboard(&self.clip_sharing, key)
-    }
-
     /// A worker this client has added, before its first connection.
     pub fn add_worker(&mut self, key: WorkerKey, name: String, cx: &mut Context<Self>) {
         if let Some(w) = self.workers.get_mut(&key) {
@@ -541,11 +535,17 @@ impl WorkspaceView {
         });
         let theme = self.theme.clone();
         let clip = self.clip_hook(key);
+        // A block goes to an agent only from a shell opened for a chat.
+        let me = cx.entity().downgrade();
+        let attach: slopty_terminal::AttachProbe = std::rc::Rc::new(move |cx: &gpui::App| {
+            me.upgrade().is_some_and(|ws| ws.read(cx).chat_of(session).is_some())
+        });
         let view = cx.new(|cx| {
             let mut view = TerminalView::new(session, size, link.out.clone(), theme, cx);
             if let Some(clip) = clip {
                 view.set_clip_hook(clip);
             }
+            view.set_attach_probe(attach);
             view
         });
         let sid = session;
@@ -579,12 +579,13 @@ impl WorkspaceView {
             }
             TerminalViewEvent::OpenPage { url } => this.open_worker_page(sid, url, cx),
             TerminalViewEvent::ViewFile { path, line } => this.view_file(sid, path, *line, cx),
-            // The shell draws the title and the progress; a block or a drag out of a live
-            // terminal is the shell's to take up.
-            TerminalViewEvent::Title(_)
-            | TerminalViewEvent::Progress
-            | TerminalViewEvent::Attach(_)
-            | TerminalViewEvent::DragOut { .. } => {}
+            TerminalViewEvent::Attach(text) => this.attach_to_chat(sid, text, cx),
+            #[cfg(target_os = "macos")]
+            TerminalViewEvent::DragOut { path } => this.drag_shell_path(sid, path, cx),
+            #[cfg(not(target_os = "macos"))]
+            TerminalViewEvent::DragOut { .. } => {}
+            // The shell draws the title and the progress.
+            TerminalViewEvent::Title(_) | TerminalViewEvent::Progress => {}
         })
         .detach();
         w.send(ClientMsg::Term { session, req: TermRequest::Attach { size } });
@@ -727,10 +728,12 @@ impl WorkspaceView {
                         let view = view.downgrade();
                         this.paste_files_in_window(tile, &view, files.clone(), cx);
                     }
-                    // A drag out of a live window is the shell's to take up.
-                    crate::screen::ScreenViewEvent::DragOut(_) => {
-                        Self::show_notice("The drag could not go on here".to_owned(), cx);
+                    #[cfg(target_os = "macos")]
+                    crate::screen::ScreenViewEvent::DragOut(shared) => {
+                        this.drag_out_of(key, shared, cx);
                     }
+                    #[cfg(not(target_os = "macos"))]
+                    crate::screen::ScreenViewEvent::DragOut(_) => {}
                     crate::screen::ScreenViewEvent::CancelPaste => this.cancel_paste_of(&view, cx),
                     crate::screen::ScreenViewEvent::DragOutFailed(why) => {
                         Self::show_failure(format!("The drag did not come out: {why}"), cx);
@@ -820,11 +823,14 @@ impl WorkspaceView {
                 w.titles_requested = false;
             }
             ScreenEvent::Drag { stream, event } => {
-                for (_, view) in self.stream_views(key, stream, cx) {
+                for (id, view) in self.stream_views(key, stream, cx) {
                     let ended = view.update(cx, |v, cx| v.drag_heard(&event, cx));
+                    #[cfg(target_os = "macos")]
                     if let Some((drag, outcome)) = ended {
-                        tracing::debug!(?drag, ?outcome, "a drag into a window ended");
+                        self.drag_ended(ItemRef { worker: key, item: id }, drag, outcome, cx);
                     }
+                    #[cfg(not(target_os = "macos"))]
+                    let _unheard = (id, ended);
                 }
             }
         }

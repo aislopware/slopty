@@ -16,22 +16,16 @@ use serde_json::Value as Json;
 use crate::Settings;
 use crate::edit::Value;
 
-/// The `format` of a colour string (`"#rrggbb"`, or `""` for the theme's own).
-pub const COLOR: &str = "color";
-
-/// The `format` of a font family's name.
-pub const FONT_FAMILY: &str = "font-family";
-
 /// One key of the file.
 #[derive(Clone, PartialEq, Debug)]
 pub struct Field {
-    /// Its table (`font`).
+    /// Its table (`terminal`).
     pub table: String,
-    /// What the table is called (`Font`).
+    /// What the table is called (`Terminal`).
     pub table_title: String,
-    /// Its key in the table (`mono_size`).
+    /// Its key in the table (`minimum_contrast`).
     pub key: String,
-    /// What it is called (`Size`).
+    /// What it is called (`Minimum contrast`).
     pub title: String,
     /// What it does, in a phrase: its doc comment's first paragraph, without the full stop.
     pub summary: String,
@@ -56,10 +50,6 @@ pub enum Kind {
     Text,
     /// A list of strings.
     List,
-    /// A colour, or empty for the theme's own.
-    Colour,
-    /// A font family.
-    Font,
     /// A map from names the person picks to values of one kind (`[clipboard.workers]`, a
     /// machine's name to a switch); a map of maps is the Keyboard page's, not a row's.
     Map(Box<Self>),
@@ -94,7 +84,7 @@ impl Field {
     ///
     /// # Errors
     ///
-    /// Why not, as the parser says it: a colour that is not one, a host with a bad port.
+    /// Why not, as the parser says it: a host with a bad port, a word no choice spells.
     pub fn check(&self, literal: &str) -> Result<(), String> {
         let text = format!("[{}]\n{} = {literal}\n", self.table, self.key);
         toml::from_str::<Settings>(&text).map(drop).map_err(|e| e.message().trim().to_owned())
@@ -127,7 +117,7 @@ pub fn fields() -> &'static [Field] {
 }
 
 /// Every table of `schema` (a whole file's, subschemas inline), a nested one
-/// (`[colors.light]`) after the keys of the table it sits in, each by its dotted name.
+/// (`[server.push]`) after the keys of the table it sits in, each by its dotted name.
 fn tables(schema: &Json) -> Vec<(String, &Json)> {
     fn walk<'a>(schema: &'a Json, prefix: &str, out: &mut Vec<(String, &'a Json)>) {
         for (key, inner) in properties(schema) {
@@ -219,11 +209,7 @@ fn kind(schema: &Json) -> Option<Kind> {
                 unit: schema.get("x-unit").and_then(Json::as_str).unwrap_or_default().to_owned(),
             }))
         }
-        "string" => Some(match schema.get("format").and_then(Json::as_str) {
-            Some(COLOR) => Kind::Colour,
-            Some(FONT_FAMILY) => Kind::Font,
-            _ => Kind::Text,
-        }),
+        "string" => Some(Kind::Text),
         "array" => Some(Kind::List),
         "object" => {
             let entry = kind(schema.get("additionalProperties")?)?;
@@ -300,7 +286,7 @@ mod tests {
     }
 
     /// Every key of the default file is a field, with the default the file writes, and every
-    /// field names a key of it, a nested table's (`colors.light`) included. A map empty by
+    /// field names a key of it, a nested table's (`server.push`) included. A map empty by
     /// default (`clipboard.workers`) is a key of its own.
     #[test]
     fn every_key_is_a_field_with_its_default() {
@@ -331,21 +317,27 @@ mod tests {
     }
 
     /// A field says what it is from the attributes on the type: its words, its bounds, its
-    /// grid and unit, its choices by their titles, and a colour or a font by its format.
+    /// grid and unit, its choices by their titles.
     #[test]
     fn a_field_reads_its_type() {
-        let size = field("font", "mono_size");
-        assert_eq!((size.table_title.as_str(), size.title.as_str()), ("Font", "Size"));
-        assert_eq!(size.summary, "Zooming a tile changes it for that tile only");
-        assert_eq!(size.default, Value::Number(13.0));
+        let contrast = field("terminal", "minimum_contrast");
         assert_eq!(
-            size.kind,
+            (contrast.table_title.as_str(), contrast.title.as_str()),
+            ("Terminal", "Minimum contrast")
+        );
+        assert_eq!(
+            contrast.summary,
+            "Text under this ratio moves toward black or white; 1 keeps every colour"
+        );
+        assert_eq!(contrast.default, Value::Number(3.0));
+        assert_eq!(
+            contrast.kind,
             Kind::Number(Number {
-                min: 6.0,
-                max: 72.0,
-                step: 1.0,
+                min: 1.0,
+                max: 21.0,
+                step: 0.5,
                 integer: false,
-                unit: "pt".to_owned()
+                unit: ":1".to_owned()
             })
         );
         let Kind::Choice(autonomy) = &field("agents", "autonomy").kind else { panic!("a choice") };
@@ -361,16 +353,7 @@ mod tests {
             options,
             [("false", "Off"), ("true", "Both"), ("left", "Left"), ("right", "Right")]
         );
-        assert_eq!(field("theme", "appearance").default, Value::Str("system".to_owned()));
-        assert_eq!(field("font", "ligatures").kind, Kind::Switch);
-        for table in ["colors.light", "colors.dark"] {
-            assert_eq!(field(table, "cursor").kind, Kind::Colour, "{table}: a nested table's key");
-            assert_eq!(field(table, "ansi").kind, Kind::List);
-        }
-        assert_eq!(field("colors.light", "cursor").table_title, "Light terminal colours");
-        assert_eq!(field("colors.dark", "cursor").table_title, "Dark terminal colours");
-        assert_eq!(field("font", "mono_family").kind, Kind::Font);
-        assert_eq!(field("font", "mono_family").default, Value::Str("Lilex".to_owned()));
+        assert_eq!(field("terminal", "copy_on_select").kind, Kind::Switch);
         let shared = field("clipboard", "workers");
         assert_eq!(
             (&shared.kind, &shared.default),
@@ -386,18 +369,15 @@ mod tests {
     /// A value is checked against its key's type alone, and a refusal is the parser's reason.
     #[test]
     fn a_value_is_checked_by_its_key() {
-        field("colors.dark", "cursor").check("\"#01abff\"").unwrap();
-        field("colors.light", "cursor").check("\"\"").unwrap();
-        let bad = field("colors.light", "cursor").check("\"#12\"").unwrap_err();
-        assert!(bad.contains("#rrggbb") && !bad.contains('\n'), "{bad}");
+        field("terminal", "alert").check("\"always\"").unwrap();
+        let bad = field("terminal", "alert").check("\"loud\"").unwrap_err();
+        assert!(bad.contains("loud") && !bad.contains('\n'), "{bad}");
         field("network", "server").check("\"studio:45560\"").unwrap();
         field("clipboard", "workers").check_entry("my mac", "false").unwrap();
         assert!(field("clipboard", "workers").check_entry("studio", "\"no\"").is_err());
         field("worker", "acp").check_entry("mine", "[\"/opt/mine\", \"--acp\"]").unwrap();
-        field("client", "editor").check("\"zed://ssh/{host}{path}\"").unwrap();
-        assert!(field("client", "editor").check("\"zed://ssh/{host}\"").is_err());
         assert!(field("network", "server").check("\"studio:x\"").is_err());
-        assert!(field("font", "mono_size").check("\"big\"").is_err());
+        assert!(field("terminal", "minimum_contrast").check("\"big\"").is_err());
     }
 
     /// A key without a title is called by its words, and one without a range still steps. (Their

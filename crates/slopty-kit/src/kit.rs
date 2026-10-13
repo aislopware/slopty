@@ -267,14 +267,6 @@ pub fn presence<E>(el: E, id: impl Into<gpui::ElementId>, open: bool) -> Presenc
 }
 
 impl<E> Presence<E> {
-    /// Arriving whole in its first frame, as what a key summons does; it still leaves, and
-    /// turns back, eased.
-    #[must_use]
-    pub const fn arrives_whole(mut self, whole: bool) -> Self {
-        self.enters = !whole;
-        self
-    }
-
     /// Travelling `from` points below its place (above, when negative) on its way in, and back
     /// on its way out, beside its opacity. It is moved as a `relative` element by its `top`, so
     /// nothing round it shifts.
@@ -323,14 +315,6 @@ impl<E: IntoElement + Styled + gpui::ParentElement + 'static> gpui::RenderOnce f
 pub fn exit_time(cx: &App) -> Option<std::time::Duration> {
     motion(cx).then(|| Pace::Exit.duration())
 }
-
-/// How far a gpui-kit field at the medium size sets its text in from its edge, in points,
-/// with its frame or without it (`Size::Medium.input_px()`).
-///
-/// What has to line up with a field's text starts this far in: the approval that takes the
-/// composer's place, the foot under the composer's field. The approval sat at the shell's pad
-/// while the field's text sat this much further in, so the morph from one to the other jumped.
-pub const FIELD_INSET: f32 = 10.0;
 
 /// The sign of lines taken away: the figure dash, as wide as a digit, so a column of sizes
 /// keeps its figures on one grid, as `MonoCode` sets `+25 ‒15`.
@@ -644,31 +628,6 @@ pub fn field<E: Styled>(el: E, theme: &Theme) -> E {
     let el =
         el.bg(hsla(theme.surfaces.ground)).border(HAIR).border_color(hsla(theme.surfaces.border));
     sunk(el, theme, stroke::LINE)
-}
-
-/// A search field in chrome: a field a row tall in the hover's wash, at `radii.sm`, a field's
-/// radius.
-///
-/// The magnifier leads at the icon size in the muted ink, then whatever the caller puts in it (a
-/// scope's token, the input, a way to clear it).
-///
-/// It is chrome, not a document's field: no ring and no sunk shade, which made the navigator's
-/// filter the hardest-edged thing beside the traffic lights. While it holds the keyboard
-/// (`focused`) the focus green's 1 pt line runs just inside its edge, as Zed's focused field's
-/// border does.
-#[must_use]
-pub fn search_field(theme: &Theme, focused: bool) -> Div {
-    let (s, spacing) = (theme.surfaces, theme.spacing);
-    div()
-        .bg(hsla(s.hover))
-        .when(focused, |el| el.shadow(vec![ring_inside(s.focus)]))
-        .h(px(theme.density.row))
-        .px(px(spacing.sm))
-        .flex()
-        .items_center()
-        .gap(px(spacing.xs + spacing.xxs))
-        .rounded(px(theme.radii.sm))
-        .child(crate::icons::icon(theme, crate::icons::Symbol::Magnifyingglass, hsla(s.text_muted)))
 }
 
 /// A card: [`raised`] at `radii.md`, Zed's resting card's 6, the caller adding the identity and
@@ -991,31 +950,6 @@ pub fn selected<E: Styled>(el: E, theme: &Theme, focused: bool) -> E {
     }
 }
 
-/// Paint a selection into `bounds` at `radius`, as [`selected`] draws it, `keyed` where the
-/// keyboard is: for a selection that moves on its own (a list's plate).
-pub fn paint_chosen(
-    theme: &Theme,
-    bounds: gpui::Bounds<gpui::Pixels>,
-    radius: gpui::Pixels,
-    keyed: bool,
-    window: &mut Window,
-) {
-    let s = theme.surfaces;
-    let corners = gpui::Corners::all(radius);
-    if keyed {
-        window.paint_quad(gpui::quad(
-            bounds,
-            corners,
-            hsla(s.keyed),
-            HAIR,
-            hsla(s.focus),
-            gpui::BorderStyle::Solid,
-        ));
-    } else {
-        window.paint_quad(gpui::fill(bounds, hsla(s.selected)).corner_radii(corners));
-    }
-}
-
 /// A 1 pt ring just inside an element's edge in `color`, taking no room.
 fn ring_inside(color: Rgb) -> BoxShadow {
     BoxShadow {
@@ -1146,24 +1080,6 @@ pub fn hair_painted(scale: f32) -> gpui::Pixels {
 #[must_use]
 pub fn rule(tint: slopty_theme::Tint) -> Div {
     div().flex_none().w_full().border_t(HAIR).border_color(hsla(tint))
-}
-
-/// A rule parting a list's or a menu's groups, Zed's list separator: a [`rule`] in `stroke`
-/// (`border.variant`) across the list, [`slopty_theme::Spacing::xs`] above and below it.
-#[must_use]
-pub fn list_rule(theme: &Theme) -> gpui::AnyElement {
-    div()
-        .flex_none()
-        .w_full()
-        .py(px(theme.spacing.xs))
-        .child(rule(theme.surfaces.stroke))
-        .into_any_element()
-}
-
-/// A vertical rule: [`rule`] standing up, the height of its parent.
-#[must_use]
-pub fn rule_v(tint: slopty_theme::Tint) -> Div {
-    div().flex_none().h_full().border_l(HAIR).border_color(hsla(tint))
 }
 
 /// The pad round the rows of a floating sheet (a menu, the palette's list, the inbox): Zed's
@@ -1297,20 +1213,6 @@ pub fn hang<E: Styled>(el: E, theme: &Theme) -> E {
 /// The side of [`close_box`] at a pointer's density: `MonoCode`'s `size-5`.
 pub const CLOSE_BOX: f32 = 20.0;
 
-/// [`icon_button`] with its icon in `ink`, not its words' tier: the bell while something needs
-/// the person, in the warn fill.
-#[must_use]
-pub fn icon_button_inked(
-    theme: &Theme,
-    id: impl Into<SharedString>,
-    icon: crate::icons::Symbol,
-    label: &'static str,
-    ink: Rgb,
-) -> gpui::Stateful<Div> {
-    let s = theme.surfaces;
-    eased(square_icon(theme, id.into(), icon, label, ink)).hover(move |el| el.bg(hsla(s.hover)))
-}
-
 /// The square an icon button is drawn in, its icon in `ink`, before its hover.
 fn square_icon(
     theme: &Theme,
@@ -1410,32 +1312,6 @@ pub fn text_toggle(
         el.bg(hsla(s.selected))
     } else {
         eased(el).hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
-    }
-}
-
-/// A tick box, Zed's checkbox: 16 pt at radius 2.
-///
-/// The control's ground inside the `border` line while off, [`tinted`] with its check in the
-/// text's ink while on. The caller makes it, or the row it leads, the thing pressed, with
-/// `Role::CheckBox` and `aria_toggled`.
-#[must_use]
-pub fn tick_box(theme: &Theme, on: bool) -> Div {
-    let s = theme.surfaces;
-    let side = px(theme.icon());
-    let el = div()
-        .flex_none()
-        .size(side)
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(theme.radii.xs));
-    if on {
-        tinted(el, theme).child(
-            crate::icons::icon(theme, crate::icons::Symbol::Checkmark, hsla(s.text))
-                .size(px(theme.typography.small())),
-        )
-    } else {
-        el.bg(hsla(s.element)).border(HAIR).border_color(hsla(s.border))
     }
 }
 

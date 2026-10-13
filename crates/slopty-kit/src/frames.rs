@@ -1,32 +1,22 @@
 //! UI frame-time probe: how long each frame takes to draw and how evenly frames arrive.
 //!
-//! The window's root is a [`Framed`] view: it calls [`FrameProbe::begin`] first thing in its
-//! `render`, and its last child, a zero-size probe element, calls [`FrameProbe::end`] from its
-//! paint. The span between them is the frame's draw: every `render`, layout, prepaint (terminal
-//! shaping) and paint the window did. Consecutive `begin`s give the frame interval. A draw that
+//! The window tells the probe of each draw it makes ([`watch`], gpui-fast's
+//! `Window::observe_draws`): when it began and how long its render, layout, prepaint and paint
+//! took, whichever views it built again. Consecutive starts give the frame interval. A draw that
 //! runs past the display period costs the slots it ran through: that is the dropped-frame count
 //! (intervals cannot tell a drop from an app idling between keystrokes, so they are reported,
-//! not judged). Nothing here touches a clock: the callers pass `now`, so the ring and the
-//! percentiles are checked with hand-made instants.
+//! not judged). Nothing here touches a clock: the window passes the instants, so the ring and the
+//! percentiles are checked with hand-made ones.
 //!
-//! GPUI draws a view again only when something it read changed, so a frame that builds one
-//! terminal leaves the root as it was. [`Framed`] reads a marker global that its probe element
-//! writes in every paint: whatever else a frame draws, it builds [`Framed`] again, and only
-//! [`Framed`], whose render is a few elements. The numbers themselves live in a global the
-//! probe mutates through a cell, never written as a global, so reading them (the title bar's
-//! frame time, the stream's overlay) is no reason to draw anything again.
-//!
-//! The probe lives on the [`App`] as a global (one window per app), so the stats overlay and
-//! the self-test `dump` read the same numbers.
+//! The numbers live in a global the probe mutates through a cell, never written as a global, so
+//! reading them (the stream's overlay, the self-test's `dump`) is no reason to draw anything
+//! again. The probe lives on the [`App`] (one window per app), so both read the same numbers.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use gpui::{
-    AnyView, App, Context, IntoElement, ParentElement as _, Render, Styled as _, Window, canvas,
-    div,
-};
+use gpui::{App, Window};
 
 /// Frames kept for the percentiles: sixteen seconds at 60 Hz, eight at 120 Hz.
 pub const RING: usize = 1024;
@@ -189,12 +179,6 @@ struct Probe(RefCell<FrameProbe>);
 
 impl gpui::Global for Probe {}
 
-/// Written by the probe element in every paint and read by [`Framed`] as it renders: the one
-/// dependency that changes with every frame drawn, so the root's probe runs in each.
-struct Drawn(u64);
-
-impl gpui::Global for Drawn {}
-
 /// Put a probe on the app, measured against `nominal`. Call once, before the window opens.
 pub fn install(cx: &mut App, nominal: Duration) {
     cx.set_global(Probe(RefCell::new(FrameProbe::new(nominal))));
@@ -207,21 +191,15 @@ pub fn index(cx: &App) -> Option<u64> {
     cx.try_global::<Probe>().map(|probe| probe.0.borrow().index())
 }
 
-/// The frame starts drawing: [`Framed`]'s `render`.
-fn begin(cx: &App) {
-    if let Some(probe) = cx.try_global::<Probe>() {
-        probe.0.borrow_mut().begin(Instant::now());
-    }
-}
-
-/// The frame has been painted: the probe element's paint.
-fn end(cx: &mut App) {
-    let Some(probe) = cx.try_global::<Probe>() else { return };
-    let mut probe = probe.0.borrow_mut();
-    probe.end(Instant::now());
-    let drawn = probe.index();
-    drop(probe);
-    cx.set_global(Drawn(drawn));
+/// Time every draw of `window` on the app's probe ([`install`]), while the subscription lives.
+pub fn watch(window: &Window) -> gpui::Subscription {
+    window.observe_draws(|drawn, cx| {
+        if let Some(probe) = cx.try_global::<Probe>() {
+            let mut probe = probe.0.borrow_mut();
+            probe.begin(drawn.started);
+            probe.end(drawn.started.checked_add(drawn.took).unwrap_or(drawn.started));
+        }
+    })
 }
 
 /// The current numbers, when a probe is installed.
@@ -235,47 +213,6 @@ pub fn reset(cx: &App) {
     if let Some(probe) = cx.try_global::<Probe>() {
         probe.0.borrow_mut().reset();
     }
-}
-
-/// The window's root: `inner`, timed. Built again in every frame the window draws (see the
-/// module's docs), and nothing else is on its account.
-#[derive(Debug)]
-pub struct Framed {
-    inner: AnyView,
-    /// Times it was built, for the tests.
-    #[cfg(test)]
-    builds: usize,
-}
-
-impl Framed {
-    /// `inner`, timed as the window's root.
-    pub fn new(inner: impl Into<AnyView>) -> Self {
-        Self {
-            inner: inner.into(),
-            #[cfg(test)]
-            builds: 0,
-        }
-    }
-}
-
-impl Render for Framed {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(test)]
-        {
-            self.builds = self.builds.saturating_add(1);
-        }
-        let _drawn = cx.try_global::<Drawn>().map(|drawn| drawn.0);
-        begin(cx);
-        div().size_full().child(self.inner.clone()).child(probe())
-    }
-}
-
-/// The zero-size element that closes each frame's measurement: [`Framed`]'s last child.
-fn probe() -> gpui::AnyElement {
-    canvas(|_bounds, _window, _cx| (), |_bounds, (), _window, cx| end(cx))
-        .absolute()
-        .size_0()
-        .into_any_element()
 }
 
 /// The `p`th percentile of `sorted` by nearest rank, zero for none: the definition the
@@ -414,5 +351,40 @@ mod tests {
         assert!(line.starts_with("ui draw 5.0 / 5.0 / 5.0 ms (max 5.0)"), "{line}");
         assert!(line.contains("every 16.7 / 16.7 ms"), "{line}");
         assert!(line.ends_with("60 frames, 0 over 16.7 ms, 0 dropped"), "{line}");
+    }
+
+    struct Blank;
+
+    impl gpui::Render for Blank {
+        fn render(
+            &mut self,
+            _: &mut Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            gpui::div()
+        }
+    }
+
+    /// Every draw of a watched window lands on the app's probe, whichever views it built; an
+    /// unwatched one, or one whose watch went, adds nothing.
+    #[gpui::test]
+    fn each_draw_of_a_watched_window_is_a_frame(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| install(cx, FRAME));
+        let (_view, cx) = cx.add_window_view(|_, _| Blank);
+        let frames =
+            |cx: &mut gpui::VisualTestContext| cx.update(|_, cx| stats(cx).map(|s| s.frames));
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        assert_eq!(frames(cx), Some(0), "not watched");
+        let watching = cx.update(|window, _| watch(window));
+        for _ in 0..3 {
+            cx.update(|window, _| window.refresh());
+            cx.run_until_parked();
+        }
+        assert_eq!(frames(cx), Some(3));
+        drop(watching);
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        assert_eq!(frames(cx), Some(3), "the watch went");
     }
 }

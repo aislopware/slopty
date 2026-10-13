@@ -524,6 +524,8 @@ pub fn apply_keymap(
             ),
         ]
     }));
+    // slopty: Slopty's views' own keys, last, so they hold in their contexts.
+    crate::live::bind_keys(cx);
 }
 
 /// The settings sections (feature-inventory §1.5 routes).
@@ -3435,6 +3437,27 @@ impl Shell {
 
     /// The chat and state a transcript link resolves in: the main chat's, or
     /// an open side chat's own (its chat row may not reach the main list yet).
+    // slopty: a block or a selection from Slopty's terminal, put in chat `chat_id`'s draft when
+    // the chat is open here, the main one or a side chat.
+    pub(crate) fn attach_to_chat(
+        &mut self,
+        chat_id: &str,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let composer = if chat_id == self.active_chat {
+            Some(self.composer.clone())
+        } else {
+            self.side_chats
+                .values()
+                .find(|side| side.state.read(cx).selected_chat.as_deref() == Some(chat_id))
+                .map(|side| side.composer.clone())
+        };
+        let Some(composer) = composer else { return false };
+        composer.update(cx, |composer, cx| composer.add_context(text, window, cx))
+    }
+
     fn link_owner(&self, chat_id: &str, cx: &App) -> Option<(String, Entity<AppState>)> {
         if chat_id == self.active_chat {
             return Some((chat_id.to_owned(), self.state.clone()));

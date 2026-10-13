@@ -573,7 +573,7 @@ pub struct Dump {
     pub status: String,
     /// Who has the keyboard: `terminal:<session>`, `screen:<stream>`, `other`, or `none`.
     pub focused: String,
-    /// The theme is the dark variant (`[theme] appearance`, or the system's under `system`).
+    /// The theme is the dark variant: the shell's appearance.
     pub dark: bool,
     /// Every item of every worker, by id.
     pub items: Vec<ItemInfo>,

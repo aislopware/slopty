@@ -156,7 +156,7 @@ mod tests {
     fn a_daemon_s_own_keys_are_edited_in_place() {
         let dir = tempfile::tempdir().expect("temp");
         let path = dir.path().join("settings.toml");
-        std::fs::write(&path, "# mine\n[font]\nmono_size = 13.0\n").expect("written");
+        std::fs::write(&path, "# mine\n[terminal]\nminimum_contrast = 4.5\n").expect("written");
         let edits = [
             edit("worker", "keep_awake", Some(r#""never""#)),
             edit("network", "server", Some(r#""studio""#)),
@@ -177,7 +177,7 @@ mod tests {
             read.settings.worker.acp.get("gemini"),
             Some(&vec!["gemini".to_owned(), "--acp".to_owned()])
         );
-        assert!((read.settings.font.mono_size - 13.0).abs() < f32::EPSILON);
+        assert!((read.settings.terminal.minimum_contrast - 4.5).abs() < f32::EPSILON);
         assert!(file.text.starts_with("# mine\n"), "{}", file.text);
         assert_eq!(std::fs::read_to_string(&path).expect("read"), file.text);
 
@@ -198,7 +198,7 @@ mod tests {
         let first = edit("worker", "keep_awake", Some(r#""working""#));
         for wrong in [
             edit("agents", "autonomy", Some(r#""full""#)),
-            edit("font", "mono_size", Some("12.0")),
+            edit("terminal", "minimum_contrast", Some("4.5")),
             edit("worker", "no_such_key", Some("1")),
             edit("worker", "keep_awake", Some(r#""sometimes""#)),
             Edit { table: "worker", key: "keep_awake", entry: Some("x"), literal: Some("1") },
@@ -225,7 +225,7 @@ mod tests {
         read_and_edit(&path, &SERVER, &[allow]).expect("edited");
         assert_eq!(Settings::load(&path).settings.network.allow, ["10.8.0.0/24"]);
 
-        let text = "[server]\nallowed = []\n[network]\nallows = []\n[font]\nnope = 1\n";
+        let text = "[server]\nallowed = []\n[network]\nallows = []\n[terminal]\nnope = 1\n";
         std::fs::write(&path, text).expect("written");
         let read = read_and_edit(&path, &SERVER, &[]).expect("read");
         assert_eq!(read.problems, ["unknown key `network.allows`", "unknown key `server.allowed`"]);

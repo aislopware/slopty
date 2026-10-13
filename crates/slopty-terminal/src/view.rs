@@ -135,11 +135,10 @@ pub const CTX: &str = "Terminal";
 /// goes to the program.
 pub const SEARCH_CTX: &str = "TerminalSearch";
 
-/// One of the terminal's commands as the app's keymap takes it.
+/// One of the terminal's commands as the app binds it ([`bindings`]).
 ///
 /// Its name under `[keys.terminal]`, what it runs, its default chords (GPUI's syntax) and the
-/// key contexts it binds in. The keymap holds them in its one table, with the file's `[keys]`
-/// laid over them.
+/// key contexts it binds in.
 pub struct KeyCommand {
     /// Its name in `[keys.terminal]`: `copy_mode`.
     pub name: &'static str,
@@ -162,7 +161,7 @@ impl std::fmt::Debug for KeyCommand {
     }
 }
 
-/// The terminal's commands, in the order the keymap lists them.
+/// The terminal's commands, in the order they bind.
 #[must_use]
 pub fn commands() -> Vec<KeyCommand> {
     const GRID: &[Option<&str>] = &[Some(CTX)];
@@ -207,34 +206,46 @@ pub fn commands() -> Vec<KeyCommand> {
     out
 }
 
-/// The terminal's commands bound to their default chords, for its tests, which install no
-/// keymap. A chord bound here runs its command; every other key goes to the program.
-#[cfg(test)]
-fn key_bindings() -> Vec<gpui::KeyBinding> {
-    let mut out = Vec::new();
+/// The terminal's commands bound, with what was wrong in `chosen`.
+///
+/// Each binds at the chords `chosen` gives its name (the settings file's `[keys.terminal]`,
+/// where none unbinds it), else at its defaults. A chord bound here runs its command; every
+/// other key goes to the program. A chord that is no chord is left out and said in the
+/// warnings, as the file's other mistakes are.
+pub fn bindings(
+    chosen: impl Fn(&str) -> Option<Vec<String>>,
+) -> (Vec<gpui::KeyBinding>, Vec<String>) {
+    let (mut out, mut warnings) = (Vec::new(), Vec::new());
     for command in commands() {
-        for chord in command.chords {
+        let chords = chosen(command.name)
+            .unwrap_or_else(|| command.chords.iter().map(|c| (*c).to_owned()).collect());
+        for chord in &chords {
             for context in command.contexts {
                 let predicate = context
-                    .map(gpui::KeyBindingContextPredicate::parse)
-                    .transpose()
-                    .expect("a context")
+                    .and_then(|c| gpui::KeyBindingContextPredicate::parse(c).ok())
                     .map(Rc::new);
-                out.push(
-                    gpui::KeyBinding::load(
-                        chord,
-                        command.action.boxed_clone(),
-                        predicate,
-                        false,
-                        None,
-                        &gpui::DummyKeyboardMapper,
-                    )
-                    .expect("a chord"),
-                );
+                match gpui::KeyBinding::load(
+                    chord,
+                    command.action.boxed_clone(),
+                    predicate,
+                    false,
+                    None,
+                    &gpui::DummyKeyboardMapper,
+                ) {
+                    Ok(binding) => out.push(binding),
+                    Err(_) => warnings
+                        .push(format!("keys.terminal.{}: \"{chord}\" is no chord", command.name)),
+                }
             }
         }
     }
-    out
+    (out, warnings)
+}
+
+/// The terminal's commands at their defaults, for its tests.
+#[cfg(test)]
+fn key_bindings() -> Vec<gpui::KeyBinding> {
+    bindings(|_| None).0
 }
 
 /// The Escape key, pressed alone.
@@ -479,6 +490,8 @@ pub struct TerminalView {
     textures: HashMap<u32, Texture>,
     out: mpsc::Sender<ClientMsg>,
     focus: FocusHandle,
+    /// The grid's place in the last frame, for a drag from another app.
+    spot: slopty_kit::spot::Spot,
     theme: Theme,
     key_seq: u64,
     /// The keys whose press went to the program and whose release has not come: only their
@@ -696,6 +709,7 @@ impl TerminalView {
             textures: HashMap::new(),
             out,
             focus: cx.focus_handle(),
+            spot: slopty_kit::spot::Spot::default(),
             theme,
             key_seq: 0,
             keys_down: Vec::new(),
@@ -1532,13 +1546,6 @@ impl TerminalView {
         }
     }
 
-    /// Drop the selection.
-    pub fn clear_selection(&mut self, cx: &mut Context<Self>) {
-        if self.selection.take().is_some() {
-            cx.notify();
-        }
-    }
-
     /// ⌘C: the selection to the clipboard (nothing selected: nothing happens). History the
     /// client has not cached (a ⌘A over 50 000 lines) is fetched first, and the clipboard is
     /// written once all of it is in.
@@ -2242,14 +2249,6 @@ impl TerminalView {
         self.paste_as(paste, text, cx);
     }
 
-    /// A paste the person made with the system's paste button (iOS), which handed over the
-    /// clipboard's `text`: as ⌘V, with no read of the clipboard's text here, which would ask
-    /// them again.
-    pub fn paste_made(&mut self, text: Option<String>, cx: &mut Context<Self>) {
-        let paste = self.clip_paste();
-        self.paste_as(paste, text, cx);
-    }
-
     /// Paste what the clipboard holds as `paste` says, `text` being its text.
     fn paste_as(&mut self, paste: ClipPaste, text: Option<String>, cx: &mut Context<Self>) {
         // A paste is for the program: copy mode is over.
@@ -2347,14 +2346,6 @@ impl TerminalView {
     #[must_use]
     const fn close_asked(&self) -> bool {
         matches!(self.pending, Some(Pending::Close(_)))
-    }
-
-    /// Whether the program waits for a password: the tty buffers the line and does not echo
-    /// it (`ECHO` off, `ICANON` on), as `sudo`, `ssh` and `read -s` leave it.
-    #[must_use]
-    pub fn at_password_prompt(&self) -> bool {
-        self.state.exited().is_none()
-            && self.state.modes().contains(TermModes::ECHO_OFF | TermModes::CANONICAL)
     }
 
     /// Session id.
@@ -2683,13 +2674,6 @@ impl TerminalView {
     #[must_use]
     pub fn command_started(&self) -> Option<Instant> {
         self.command_started.filter(|_| self.state.command_running())
-    }
-
-    /// How long the command the shell runs has run, timed from when this view saw it start;
-    /// `None` at a prompt.
-    #[must_use]
-    pub fn running_for(&self) -> Option<Duration> {
-        self.command_started.filter(|_| self.state.command_running()).map(|at| at.elapsed())
     }
 
     /// The branch checked out where the shell stands, as the worker resolved it: what the
@@ -4373,7 +4357,7 @@ impl Render for TerminalView {
                     let label = self.title().unwrap_or("shell").to_owned();
                     grid = grid.a11y(label.into(), self.cursor_row_text().into());
                 }
-                el.child(grid)
+                el.child(grid).child(self.spot.element())
             })
             .children(self.render_restored(cx))
             .children(hovered)
@@ -4693,6 +4677,38 @@ mod tests {
         cx.simulate_resize(size(px(400.0), px(300.0)));
         cx.run_until_parked();
         (view, rx, cx)
+    }
+
+    /// The file's `[keys.terminal]` lays its chords over the defaults: a command it names binds
+    /// at those chords only, one it names with none is unbound, the rest keep theirs, and a
+    /// chord that is no chord is left out and said.
+    #[test]
+    fn the_file_s_chords_lay_over_the_defaults() {
+        let chosen = |name: &str| match name {
+            "find" => Some(vec!["cmd-shift-f".to_owned()]),
+            "copy" => Some(Vec::new()),
+            "clear_screen" => Some(vec!["cmd-k".to_owned(), "hyper-x".to_owned()]),
+            _ => None,
+        };
+        let (bound, wrong) = bindings(chosen);
+        let chords = |action: &dyn gpui::Action| {
+            bound
+                .iter()
+                .filter(|b| b.action().partial_eq(action))
+                .map(|b| {
+                    b.keystrokes()
+                        .iter()
+                        .map(gpui::KeybindingKeystroke::unparse)
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(chords(&Find), ["cmd-shift-f"]);
+        assert_eq!(chords(&Copy), Vec::<String>::new(), "unbound");
+        assert_eq!(chords(&Paste), ["cmd-v"], "the default");
+        assert_eq!(chords(&ClearScreen), ["cmd-k"]);
+        assert_eq!(wrong, [r#"keys.terminal.clear_screen: "hyper-x" is no chord"#]);
     }
 
     /// The worker hears this terminal take the keyboard and lose it, on each change only: in

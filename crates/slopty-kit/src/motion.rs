@@ -362,8 +362,6 @@ pub const HOVER_FADE: MotionSpec = MotionSpec::new(150, EASE_TAILWIND);
 pub const GLYPH_STATE: MotionSpec = MotionSpec::new(280, EASE_OUT_QUINT);
 /// A segmented control's selection glide: 260 ms.
 pub const INDICATOR_SLIDE: MotionSpec = MotionSpec::new(260, EASE_OUT_SOFT);
-/// The pixel-mark loader's period: 2.4 s.
-pub const ZERON_PULSE: MotionSpec = MotionSpec::new(2400, EASE);
 /// The 3×3 working spinner's period: 750 ms.
 pub const GRADIENT_SPIN: MotionSpec = MotionSpec::new(750, EASE);
 

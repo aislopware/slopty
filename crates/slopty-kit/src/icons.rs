@@ -585,20 +585,6 @@ impl Element for Arrive {
     }
 }
 
-/// `status` as an empty state's mark, in `color`.
-///
-/// Its symbol is drawn as [`Drawn::notice`] in the notice's slot, and a mark of ours at the
-/// heading's size, so a tile's state reads at the size of the notice it heads.
-#[must_use]
-pub fn notice_status(theme: &Theme, status: Status, color: Hsla) -> AnyElement {
-    match status.symbol() {
-        Some(symbol) => {
-            Drawn::notice(theme, symbol).slot(px(crate::kit::NOTICE_MARK), color).into_any_element()
-        }
-        None => status_icon(theme, status, px(theme.roles().page_heading.size), color),
-    }
-}
-
 /// `status`'s icon, `side` square, in `color`.
 ///
 /// [`Status::Working`]'s arc goes round ([`spin_step`]), the only mark that moves;
@@ -641,9 +627,6 @@ pub enum Phase {
 }
 
 impl Phase {
-    /// How far a verifier is said to be along when nothing says: half.
-    pub const VERIFYING: Self = Self::Verifying(0.5);
-
     /// The stage a live agent's `status` puts a task it works on in: its own lane's, unless
     /// the agent says more.
     #[must_use]
@@ -868,12 +851,6 @@ impl SpinClock {
 pub fn hold_steps(cx: &mut App, until: Instant) {
     let clock = SpinClock::get(cx);
     clock.hold_until = Some(clock.hold_until.map_or(until, |held| held.max(until)));
-}
-
-/// Until when the working marks' steps are held for a typed key's echo, if they are.
-#[cfg(any(test, feature = "e2e"))]
-pub fn steps_held_until(cx: &mut App) -> Option<Instant> {
-    SpinClock::get(cx).hold_until
 }
 
 /// A frame is coming anyway (a terminal changed): a step that waited on the hold rides it.

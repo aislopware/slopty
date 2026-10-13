@@ -389,6 +389,8 @@ pub struct ScreenView {
     out: Outbox,
     theme: Theme,
     focus: FocusHandle,
+    /// The body's place in the last frame, for a drag from another app (`workspace::remote`).
+    spot: slopty_kit::spot::Spot,
     bounds: Bounds<Pixels>,
     /// Keys whose press went to the worker, so a release for a locally-handled chord (its press
     /// was eaten by a workspace binding) is not forwarded as a stray key-up.
@@ -1086,6 +1088,7 @@ impl ScreenView {
             out: Outbox::new(out, hold, cx),
             theme,
             focus: cx.focus_handle(),
+            spot: slopty_kit::spot::Spot::default(),
             bounds: Bounds::default(),
             held: Vec::new(),
             buttons: Vec::new(),
@@ -2287,28 +2290,6 @@ impl ScreenView {
         self.set_trackpad(self.trackpad.is_none(), cx);
     }
 
-    /// The header's trackpad control for `view`, on a device whose fingers are its pointer:
-    /// a quiet toggle beside the tile's other buttons, pressed while the mode is on.
-    #[must_use]
-    pub fn trackpad_button(
-        view: &gpui::Entity<Self>,
-        header: StreamHeader,
-        theme: &Theme,
-    ) -> Option<gpui::AnyElement> {
-        if !header.touch {
-            return None;
-        }
-        let id = format!("trackpad-{}", header.stream);
-        let icon = slopty_kit::icons::Symbol::Cursorarrow;
-        let button = kit::icon_toggle(theme, id, icon, TRACKPAD_MODE, header.trackpad);
-        let view = view.clone();
-        Some(
-            button
-                .on_click(move |_ev, _w, cx| view.update(cx, Self::toggle_trackpad))
-                .into_any_element(),
-        )
-    }
-
     /// Send what the trackpad asked for, at its pointer, and keep the pointer in view.
     fn trackpad_acts(&mut self, pad: touch::Trackpad, acts: &[touch::Act], now: Instant) {
         let (x, y) = self.picture_to_stream(pad.at());
@@ -3481,6 +3462,7 @@ impl Render for ScreenView {
                 this.toggle_remote_gestures(cx);
             }))
             .child(picture)
+            .child(self.spot.element())
             .child(record_bounds)
             // The system's drag is the pointer while one is over the tile.
             .children(self.cursor_overlay(drawn.filter(|_| self.drop.is_none())))
