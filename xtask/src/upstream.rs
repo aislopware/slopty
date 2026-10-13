@@ -28,6 +28,7 @@
 mod ghostty;
 mod watch;
 mod zed;
+mod zeron;
 
 use std::fmt::Write as _;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -72,6 +73,19 @@ pub enum UpstreamCmd {
         /// Take the upstreams and build-check but neither push nor move the pins.
         #[arg(long)]
         no_push: bool,
+    },
+    /// Take zeron's interface changes into Slopty's copy of it, as `xtask/zeron.toml` maps it: a
+    /// three-way merge per file, conflicts left marked; `base` moves only when all merged cleanly.
+    Adopt {
+        /// The zeron commit to take (default: its branch's head).
+        #[arg(long)]
+        to: Option<String>,
+        /// Take from this zeron commit instead of `base` (to replay or test a range).
+        #[arg(long)]
+        from: Option<String>,
+        /// Say what would change and write nothing.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Print a line for each change upstream as it happens: a head that moved, a pull request
     /// opened, updated, merged or closed. Watches the forks' upstreams and noq; never syncs.
@@ -183,6 +197,7 @@ struct Config {
     #[serde(rename = "libghostty-rs")]
     libghostty_rs: Fork,
     noq: Vendored,
+    zeron: zeron::Copied,
 }
 
 impl Config {
@@ -369,6 +384,14 @@ pub fn run(sh: &Shell, cmd: &UpstreamCmd) -> Result<()> {
         UpstreamCmd::Sync { only, no_push } => {
             sync_all(sh, &root, &main, &config, only.as_deref(), *no_push)
         }
+        UpstreamCmd::Adopt { to, from, dry_run } => zeron::adopt(
+            sh,
+            &root,
+            &main,
+            &config.zeron,
+            zeron::Range { from: from.as_deref(), to: to.as_deref() },
+            *dry_run,
+        ),
     }
 }
 

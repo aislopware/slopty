@@ -6,7 +6,8 @@
 //! commits it is past the base in `xtask/upstream.toml`), or a pull request was opened, updated,
 //! merged, closed or reopened. It never syncs: the session that reads the lines decides.
 //!
-//! The forks' upstreams are watched, and the vendored noq. zed is left out: it merges
+//! The forks' upstreams are watched, the vendored noq, and zeron, which Slopty's interface was
+//! copied from (`upstream adopt`). zed is left out: it merges
 //! hundreds of pull requests a week, and `upstream check` reads what an import would take from it.
 //! An upstream with `paths` in the config (ghostty, which lands many changes a day, most of them
 //! in parts libghostty-vt never builds) is filtered: a head move is named only when the commits
@@ -109,6 +110,10 @@ pub fn run(sh: &Shell, root: &Utf8Path, interval: Duration, once: bool) -> Resul
             std::iter::once(&config.noq).map(|v| {
                 (v.upstream.as_str(), v.upstream_branch.as_str(), v.base.as_str(), &[][..])
             }),
+        )
+        .chain(
+            std::iter::once(config.zeron.watched())
+                .map(|(url, branch, base)| (url, branch, base, &[][..])),
         )
         .filter(|(url, ..)| url.contains("github.com"))
         .map(|(url, branch, base, paths)| Watched {

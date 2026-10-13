@@ -19,9 +19,9 @@ fork = "https://github.com/aislopware/gpui-fast.git"
 branch = "main"
 checkout = ".research/gpui-fast"
 strategy = "merge"
-base = "231f2cd339e96a9105d0d3b160b7c04ba358c762"
-base_date = "2026-10-12"
-checked = "2026-10-12"
+base = "9bdfdd8dc5320b4f584fda4d4a37dddc2b20c675"
+base_date = "2026-10-13"
+checked = "2026-10-13"
 check_every_days = 0
 
 # zed is not forked: the gpui-fast fork imports it (its `UPSTREAM` file and
@@ -101,3 +101,16 @@ upstream = "https://github.com/n0-computer/noq.git"
 upstream_branch = "main"
 vendored = "vendor/noq-proto"
 base = "c1f411562e6078852749b8bcf1190523096a107f"
+
+# zeron is the source Slopty's interface was copied from, not a fork and not a dependency: its UI
+# crate and the data types that crate compiles against live in `crates/slopty-shell` and its
+# siblings under Slopty's names. `xtask/zeron.toml` maps zeron's paths and names onto ours, and
+# lists what is not taken. Applying its renames to a zeron file at `base` gives our file, apart
+# from the edits marked `// slopty:`, so a sync is a three-way merge of base → new into our files.
+[zeron]
+kind = "copied-ui"
+upstream = "https://github.com/zeronsh/zeron.git"
+upstream_branch = "main"
+checkout = ".research/zeron"
+map = "xtask/zeron.toml"
+base = "053ce2eac0da83a008f99f79acc365468e7d6831"

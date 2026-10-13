@@ -54,6 +54,12 @@ slopty-terminal.workspace = true
 slopty-ui.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+# The app's window: the shell on the workspace (`interface`), with the Tokio bridge it
+# runs its engine calls on, and its deep-link channel.
+futures.workspace = true
+gpui_tokio.workspace = true
+slopty-view-proto.workspace = true
+slopty-shell.workspace = true
 
 # The test socket's UIKit-boundary delivery (`gpui_ios::inject`), with the `e2e` feature.
 [target.'cfg(target_os = "ios")'.dependencies]

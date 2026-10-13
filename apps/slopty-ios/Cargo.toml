@@ -23,7 +23,6 @@ crate-type = [ "staticlib", "rlib" ]
 [target.'cfg(target_os = "ios")'.dependencies]
 # The completion handler of a background push (`application:didReceiveRemoteNotification:…`).
 block2.workspace = true
-gpui.workspace = true
 gpui-kit.workspace = true
 gpui_ios.workspace = true
 objc2.workspace = true
@@ -54,3 +53,5 @@ slopty-platform.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+# The shell's icons and fonts, the assets the app runs with.
+slopty-shell.workspace = true

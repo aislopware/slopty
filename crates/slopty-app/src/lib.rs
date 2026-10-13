@@ -24,8 +24,8 @@ mod e2e;
 mod editors;
 pub mod finder;
 mod hangs;
+mod interface;
 mod invite;
-pub mod menus;
 pub mod net;
 mod presence;
 #[cfg(any(target_os = "ios", test))]
@@ -37,7 +37,6 @@ pub mod this_mac;
 #[cfg(target_os = "macos")]
 mod update;
 pub mod verdict;
-pub mod window;
 pub mod workers;
 
 use std::rc::Rc;
@@ -48,7 +47,7 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnimationExt as _, App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
     MouseButton, ParentElement as _, Render, ScrollHandle, SharedString,
-    StatefulInteractiveElement as _, Styled as _, WeakEntity, Window, WindowOptions, div, px,
+    StatefulInteractiveElement as _, Styled as _, WeakEntity, Window, div, px,
 };
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
 pub use invite::actions::ConnectDevice;
@@ -75,8 +74,6 @@ use slopty_ui::workspace::{
     WorkspaceEvent, WorkspaceView,
 };
 pub use ssh::actions::{UpdateAllWorkers, UpdateServer};
-pub use window::actions::{Minimize, OpenHelp, ShowWindow, Zoom};
-pub use window::{HELP_URL, show as show_main_window};
 pub use workers::actions::{AddWorker, ConnectServer, CopyTailnetGrant, CopyWorkerGrant};
 use workers::{Hearing, Tick, WorkerSlot};
 
@@ -526,7 +523,7 @@ pub struct Workspace {
     )]
     subscriptions: Vec<gpui::Subscription>,
     /// The main window's watches (its appearance, its activation, where it stands), made again
-    /// with each window ([`window::open`]).
+    /// with each window (`interface::open`).
     window_subscriptions: Vec<gpui::Subscription>,
     /// The system's Reduce Motion heard as it changes ([`watch_reduce_motion`]).
     motion_watch: Option<slopty_platform::motion::Watch>,
@@ -1084,7 +1081,6 @@ impl Workspace {
         }
         tracing::info!(said = keymap.diagnostics().len(), "keys rebound");
         slopty_ui::keymap::install(keymap, cx);
-        rebuild_app_menus(cx);
         self.refresh_menu(cx);
     }
 
@@ -1104,7 +1100,6 @@ impl Workspace {
         }
         // gpui-kit widgets (inputs, Markdown) read gpui-kit's theme: keep it on
         // the same tokens.
-        kit::sync(&theme, cx);
         self.view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
         if let Some(editor) = &self.settings_editor {
             editor.update(cx, |e, cx| e.set_theme(theme.clone(), cx));
@@ -4075,30 +4070,6 @@ fn layout_path() -> std::path::PathBuf {
     slopty_platform::dirs::data_dir().join("layout.json")
 }
 
-/// What builds the app's menu bar from the keys in effect.
-type BuildMenus = dyn Fn(&App) -> Vec<gpui::Menu>;
-
-/// What builds the app's menu bar, kept so a rebinding rebuilds it.
-struct AppMenus(Rc<BuildMenus>);
-
-impl gpui::Global for AppMenus {}
-
-/// Show the menus `build` makes in the menu bar, and again whenever the keys are rebound.
-///
-/// A menu's key equivalents are the chords bound when it is set, and AppKit runs them before
-/// any binding sees the key, so a menu built once would keep a chord the file took away.
-pub fn set_app_menus(cx: &mut App, build: impl Fn(&App) -> Vec<gpui::Menu> + 'static) {
-    cx.set_global(AppMenus(Rc::new(build)));
-    rebuild_app_menus(cx);
-}
-
-/// The menu bar again, from the keys bound now.
-fn rebuild_app_menus(cx: &App) {
-    if let Some(build) = cx.try_global::<AppMenus>().map(|menus| Rc::clone(&menus.0)) {
-        cx.set_menus(build(cx));
-    }
-}
-
 /// The person's alert: the sound chosen in System Settings and a bounce of the Dock icon.
 #[cfg(not(feature = "e2e"))]
 fn alert() {
@@ -4180,18 +4151,15 @@ pub const fn self_test() -> bool {
     false
 }
 
-/// Open the workspace window and start a link loop per added worker on `handle`'s runtime.
-/// Call once from inside the GPUI application callback, after `gpui_kit::init`.
+/// Open the app's window and start a link loop per added worker on `handle`'s runtime.
+///
+/// The window is the shell on the workspace (`interface`). Call once from inside the
+/// GPUI application callback, after `gpui_kit::init`.
 ///
 /// # Errors
 ///
 /// When the window cannot be opened.
-pub fn open_workspace(
-    cx: &mut App,
-    handle: tokio::runtime::Handle,
-    options: impl Fn(&App) -> WindowOptions + 'static,
-) -> anyhow::Result<()> {
-    let options: window::MakeOptions = Rc::new(options);
+pub fn open_workspace(cx: &mut App, handle: tokio::runtime::Handle) -> anyhow::Result<()> {
     // The self-test's window keeps the size its test asks for on any screen, a CI Mac's short
     // one too (`slopty_platform::asked_size`); before the window is made, which AppKit fits.
     #[cfg(feature = "e2e")]
@@ -4199,10 +4167,6 @@ pub fn open_workspace(
         let kept = slopty_platform::asked_size::keep_asked_sizes(c"GPUIWindow");
         tracing::info!(kept, "the self-test's windows keep the size they ask for");
     }
-    // The chrome's glyphs read and drawn on a background thread while the window is made, so
-    // the first frame does not pay for Core Graphics' first context (docs/MEASUREMENTS.md,
-    // "Octicons glyphs drawn on demand").
-    slopty_kit::icons::prewarm(&Theme::default());
     // VideoToolbox's first decoder session costs 150–400 ms; pay it before any worker is
     // dialed.
     slopty_client::warm_up_decoder();
@@ -4217,17 +4181,6 @@ pub fn open_workspace(
         async {}
     })
     .detach();
-    if let Err(e) = slopty_kit::fonts::install(cx) {
-        tracing::error!(error = %e, "bundled fonts");
-    }
-    // Every window and the terminal draw text at the weight it is set in: AppKit's smoothing
-    // would thicken light text on dark by up to 15 % ink (docs/decisions/ui.md).
-    cx.set_text_smoothing(gpui::TextSmoothing::Antialiased);
-    // The table's defaults until the settings are read, below, lay their `[keys]` over it.
-    slopty_ui::keymap::install(keymap_for(&slopty_settings::KeySettings::default()), cx);
-    // gpui-kit widgets follow their own theme; put it on the tokens now, and again once the
-    // window's appearance is known, below.
-    kit::sync(&Theme::default(), cx);
     slopty_kit::frames::install(cx, frame_nominal());
     let settings_path = slopty_settings::path();
     let settings_seen = settings::Seen::of(&settings_path);
@@ -4276,6 +4229,7 @@ pub fn open_workspace(
         handle.spawn(finder::follow(cache_writes.clone()));
     }
     handle.spawn(server::write_cache(server::cache_path(), cache_writes));
+    let runtime = handle.clone();
     let mut tapped = slopty_platform::notify::taps();
     let notifier = notifier();
     let workspace = cx.new(|cx| {
@@ -4298,8 +4252,7 @@ pub fn open_workspace(
         async {}
     })
     .detach();
-    let window = window::open(&workspace, options(cx), Some(loaded), cx)?;
-    window::install(&workspace, options, cx);
+    let window = interface::open(&workspace, runtime, loaded, cx);
     // GPUI's own animations hold still as the system asks, as Slopty's do, and follow the
     // setting as the system says it changed ([`Workspace::set_reduce_motion`]).
     cx.set_reduce_motion(slopty_platform::reduce_motion());
@@ -4334,7 +4287,7 @@ pub fn open_workspace(
             cx.update(|cx| {
                 if !verdict {
                     // The window comes back to show the tile, if it was closed.
-                    window::show(cx);
+                    slopty_shell::activate_main_window(cx);
                 }
                 let Some(window) = for_notifications.read(cx).window else { return };
                 let _handled = window.update(cx, |_root, _window, cx| {
@@ -4711,53 +4664,6 @@ mod tests {
             ws.server_event(slopty_client::server::ServerEvent::Message(Box::new(listing)), cx);
         });
         cx.run_until_parked();
-    }
-
-    /// Closing the main window leaves the workspace running; asking for the window again (the
-    /// Dock icon, ⌘N, Window ▸ Slopty) opens a new one on the same workspace, where the last one
-    /// stood; with a window up, it only comes to the front.
-    #[gpui::test]
-    fn a_closed_window_opens_again_on_the_same_workspace(cx: &mut TestAppContext) {
-        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let ws = workspace(cx, &runtime, &dir);
-        let options: window::MakeOptions = Rc::new(|_| WindowOptions::default());
-        cx.update(|cx| {
-            window::open(&ws, options(cx), None, cx).expect("the window");
-            window::install(&ws, options, cx);
-        });
-        cx.run_until_parked();
-        let first = ws.read_with(cx, |ws, _| ws.window).expect("shown");
-        let frame = slopty_client::layout::WindowFrame {
-            display: None,
-            x: 50.0,
-            y: 60.0,
-            width: 900.0,
-            height: 700.0,
-            fullscreen: false,
-        };
-        ws.update(cx, |ws, cx| ws.view.update(cx, |v, cx| v.set_window_frame(Some(frame), cx)));
-        cx.update(|cx| first.update(cx, |_root, window, _cx| window.remove_window())).unwrap();
-        cx.run_until_parked();
-        assert!(cx.update(|cx| cx.windows().is_empty()), "closed");
-
-        cx.update(window::show);
-        cx.run_until_parked();
-        let windows = cx.update(|cx| cx.windows());
-        let second = ws.read_with(cx, |ws, _| ws.window).expect("shown again");
-        assert_eq!(windows, [second], "one window, the new one");
-        assert_ne!(second, first);
-        let size = cx
-            .update(|cx| second.update(cx, |_r, window, _cx| window.window_bounds().get_bounds()))
-            .expect("open")
-            .size;
-        #[expect(clippy::cast_possible_truncation, reason = "whole points")]
-        let size = (f32::from(size.width) as i32, f32::from(size.height) as i32);
-        assert_eq!(size, (900, 700), "where the last one stood");
-
-        cx.update(window::show);
-        cx.run_until_parked();
-        assert_eq!(cx.update(|cx| cx.windows()), [second], "brought to the front, not opened");
     }
 
     /// A deployer for a test that only opens the SSH sheet: nothing is ever deployed.
@@ -6092,48 +5998,6 @@ mod tests {
         load(cx, "");
         assert!(press(cx, "cmd-,"), "the default again");
         assert!(!press(cx, "cmd-;"));
-    }
-
-    /// The menu bar is built again whenever the keys are rebound, from the keys bound then:
-    /// AppKit runs a menu item's key equivalent itself, so a menu built once would keep running
-    /// New Shell on ⇧⌘T after the file moved it to ⌘Y.
-    #[gpui::test]
-    fn the_menu_bar_follows_a_rebinding(cx: &mut TestAppContext) {
-        use slopty_ui::workspace::NewTerminal;
-        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let ws = workspace(cx, &runtime, &dir);
-        let built = Rc::new(std::cell::RefCell::new(Vec::new()));
-        let seen = Rc::clone(&built);
-        cx.update(|cx| {
-            set_app_menus(cx, move |cx| {
-                let keys = slopty_ui::keymap::current(cx).label_of(&NewTerminal).to_owned();
-                seen.borrow_mut().push(keys);
-                vec![
-                    gpui::Menu::new("File")
-                        .items([gpui::MenuItem::action("New Shell", NewTerminal)]),
-                ]
-            });
-        });
-        let file = "[keys.workspace]\nnew_terminal = \"cmd-y\"\n";
-        ws.update(cx, |ws, cx| ws.apply_loaded(Settings::parse(file), cx));
-        ws.update(cx, |ws, cx| ws.apply_loaded(Settings::parse(file), cx));
-        assert_eq!(*built.borrow(), ["⇧⌘T", "⌘Y"], "built at first, then once for the change");
-        let menus = cx.update(|cx| cx.get_menus()).unwrap_or_default();
-        assert_eq!(menus.iter().map(|m| m.name.to_string()).collect::<Vec<_>>(), ["File"]);
-        // The item's key equivalent as AppKit's menu takes it: the action's first binding
-        // that holds in the workspace (`gpui_macos`'s `create_menu_item`).
-        let equivalent = cx.update(|cx| {
-            let mut context = gpui::KeyContext::new_with_defaults();
-            context.add("Workspace");
-            let keymap = cx.key_bindings();
-            let keymap = keymap.borrow();
-            keymap
-                .bindings_for_action(&NewTerminal)
-                .find(|b| b.predicate().is_none_or(|p| p.eval(std::slice::from_ref(&context))))
-                .map(|b| b.keystrokes().iter().map(|k| k.inner().unparse()).collect::<String>())
-        });
-        assert_eq!(equivalent.as_deref(), Some("cmd-y"), "no ⇧⌘T left for the menu to take");
     }
 
     /// A settings file that does not parse changes no key: the keymap stays as last applied,

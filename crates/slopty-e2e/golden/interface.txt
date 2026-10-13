@@ -1,0 +1,6 @@
+Window (focused)
+Button │ Account menu: Local
+Button │ Start voice
+Button │ Pull requests
+Button │ Settings
+Button │ Sidebar view options

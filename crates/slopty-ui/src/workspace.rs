@@ -87,6 +87,7 @@ mod titlebar;
 mod toast;
 mod turns;
 mod unsaved;
+mod view_model;
 mod workers;
 mod worktrees;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -982,6 +983,8 @@ pub struct WorkspaceView {
     zoom_hold: Option<bool>,
     /// Agent terminals' conversation faces.
     faces: faces::Faces,
+    /// The shell, fed from here ([`crate::view_model`]).
+    view_model: view_model::Bridge,
     /// The shells behind threads' inline terminals.
     inline: inline_shells::InlineShells,
     /// The way to the server, while the app is linked to one.
@@ -1240,6 +1243,7 @@ impl WorkspaceView {
             pending_focus: None,
             zoom_hold: None,
             faces: faces::Faces::default(),
+            view_model: view_model::Bridge::default(),
             inline: inline_shells::InlineShells::default(),
             server: None,
             next_open: std::cell::Cell::new(1),

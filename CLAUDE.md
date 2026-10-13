@@ -2,11 +2,13 @@
 
 One app on macOS, iPhone and iPad for working on many remote machines as if they were one local
 one: coding agents (Claude Code, Codex, pi, any ACP agent), terminals, remote windows and
-desktops at Parsec quality or better, clipboard and files, all in tiled panes. Pure Rust on GPUI,
-over Tailscale or a VPN. The person directs and reviews agents, so the GUI leads: what needs them
-at a glance, fast review, everything else quiet, every surface feeling local. The terminal is one
-action away and the editor stays light, with no LSP. It looks like Zed and Delta, Zed's agent
-app. The person hands over whole goals and reviews only results.
+desktops at Parsec quality or better, clipboard and files, in tabs and a side pane. Pure Rust on
+GPUI, over Tailscale or a VPN. The person directs and reviews agents, so the GUI leads: what
+needs them at a glance, fast review, everything else quiet, every surface feeling local. The
+terminal is one action away and the editor stays light, with no LSP. Its interface is zeron's UI
+(MIT), copied and made Slopty's own; `cargo xtask upstream adopt` keeps taking zeron's interface
+improvements. The person hands over whole goals and reviews only results; frontier models get
+open tools to orchestrate with, never a prescribed workflow.
 
 Maps: `docs/ARCHITECTURE.md`, `docs/DECISIONS.md`, `docs/MEASUREMENTS.md`, `docs/DEV.md`,
 `docs/TESTING.md`. Progress lives in the memory's notes.

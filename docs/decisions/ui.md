@@ -11662,3 +11662,42 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `workspace::tests::projects::{the_board_is_one_grouped_list,
     a_ready_rows_title_and_project_keep_their_own_slots}`. Goldens: `design-system` and
     `design-system-dark` (`slopty-e2e` `app::marks`).
+
+- ✅ **The interface is zeron's UI and UX, copied as Slopty's own (2026-10-13).** The person's
+  word: the UI is identical to zeron (MIT), taken rather than redrawn, and nothing else of it is
+  taken; nothing in Slopty reads as an integration with it. Its UI crates were copied at
+  `053ce2e` and renamed: the shell (`crates/slopty-shell`), the view protocol, documents and RPC
+  it compiles against (`slopty-view-proto`, `slopty-view-doc`, `slopty-view-rpc`) and its
+  theme, syntax, Markdown and streaming-text crates (`slopty-shell-theme`, `slopty-syntax`,
+  `slopty-markdown`, `slopty-veil`). Its backend is not taken, nor what only it served: the
+  engine, sync, sign-in, organisations and agent accounts (Slopty never touches a credential),
+  voice, dictation and the orb, window captures, the self-updater, the pull-request pages (a pull
+  request opens in the web browser) and the "Star on GitHub" banner. The only mentions of zeron
+  are `THIRD_PARTY_NOTICES.md`, one provenance line atop each copied file and the sync's own data.
+  Slopty's view model (`slopty_ui::view_model`) is what feeds the shell, over the shell's
+  `RpcService`: spaces are folder @ machine, chats are Slopty threads, subagents are child agents.
+  Codex, pi and ACP agents are harness and model choices in the shell's picker, with no
+  per-agent screens.
+- ✅ **zeron's improvements keep coming, by machine (2026-10-13).** `xtask/upstream.toml`'s
+  `[zeron]` (kind `copied-ui`, its checkout and `base`) and `xtask/zeron.toml` say how a zeron
+  file becomes ours: `[paths]` moves it (the longest prefix wins), the ordered `[[rename]]`
+  rewrites its text, and `[skip]` names what is not taken. Applying them to a zeron file at
+  `base` gives our file apart from Slopty's edits, each marked `// slopty:`, so `cargo xtask
+  upstream adopt zeron` merges a new zeron into the copy three ways. The copied crates keep the
+  lints they arrived with, rustc's and clippy's defaults with warnings denied and the upstream
+  trips allowed by name in their manifests, and no rustfmt, typos or taplo pass, so the copy
+  stays a diff; Slopty's own code keeps the workspace lints. `objc` 0.2 is banned, so the
+  shell's few AppKit calls were ported to `objc2`; it fetches no images over HTTP of its own.
+
+- ✅ **The app's window is the shell's main window; the workspace runs without one (2026-10-13).**
+  `slopty-app` opens the shell with `slopty_shell::start` on Slopty's view model, whose lists and
+  transcripts `WorkspaceView` publishes and whose other calls it answers. The workspace keeps
+  every link, thread and terminal; it draws no window, menu or keymap of its own. The shell's
+  application, assets, menus, reopen and window geometry are the app's; its icon and dock mark are
+  Slopty's. The shell's settings (appearance, sidebar, fonts) are its own `ui-settings.json` under
+  the data directory's `interface/`, which the self-test pins to light. The view model's local
+  device is the client (`slopty-client`), never a worker, so every chat names the worker it runs
+  on. Upstream tests that need a platform made off the main thread are ignored with the reason;
+  two that counted paints refresh the window first, since gpui-fast keeps a frame nothing
+  invalidated. Tests: `slopty-ui` `view_model::tests`; e2e
+  `app::interface::the_interface_comes_up_on_the_stack`. Golden: `interface`.

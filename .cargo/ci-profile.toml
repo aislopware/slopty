@@ -30,6 +30,9 @@ opt-level = 0
 [profile.dev.package.const-random-macro]
 opt-level = 0
 
+[profile.dev.package.cssparser-macros]
+opt-level = 0
+
 [profile.dev.package.curve25519-dalek-derive]
 opt-level = 0
 
@@ -72,10 +75,16 @@ opt-level = 0
 [profile.dev.package.futures-macro]
 opt-level = 0
 
+[profile.dev.package.glib-macros]
+opt-level = 0
+
 [profile.dev.package.gpui-component-macros]
 opt-level = 0
 
 [profile.dev.package.gpui_macros]
+opt-level = 0
+
+[profile.dev.package.gtk3-macros]
 opt-level = 0
 
 [profile.dev.package.int-enum]
@@ -105,6 +114,9 @@ opt-level = 0
 [profile.dev.package.num-derive]
 opt-level = 0
 
+[profile.dev.package.num_enum_derive]
+opt-level = 0
+
 [profile.dev.package.paste]
 opt-level = 0
 
@@ -118,6 +130,9 @@ opt-level = 0
 opt-level = 0
 
 [profile.dev.package.pin-project-internal]
+opt-level = 0
+
+[profile.dev.package.proc-macro-error-attr]
 opt-level = 0
 
 [profile.dev.package.profiling-procmacros]
@@ -159,6 +174,9 @@ opt-level = 0
 [profile.dev.package.strum_macros]
 opt-level = 0
 
+[profile.dev.package.tao-macros]
+opt-level = 0
+
 [profile.dev.package.thiserror-impl]
 opt-level = 0
 
@@ -175,6 +193,9 @@ opt-level = 0
 opt-level = 0
 
 [profile.dev.package.wayland-scanner]
+opt-level = 0
+
+[profile.dev.package.webview2-com-macros]
 opt-level = 0
 
 [profile.dev.package.windows-implement]

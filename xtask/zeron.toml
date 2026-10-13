@@ -1,0 +1,216 @@
+# How zeron's text becomes Slopty's (`xtask/upstream.toml`, `[zeron]`).
+#
+# The rule: take a zeron file at `base`, move it by `[paths]`, rewrite its text with `[[rename]]`
+# and put `provenance` on its first line (Rust files). The result is our file, apart from the
+# edits marked `// slopty:`, which a sync keeps by a three-way merge. What `[skip]` names is not
+# taken: a sync reports changes there and copies nothing.
+
+# The first line of every Rust file copied from zeron; `{base}` is the short commit it was taken
+# at (THIRD_PARTY_NOTICES.md).
+provenance = "// Derived from zeron (MIT, github.com/zeronsh/zeron @ {base}), see THIRD_PARTY_NOTICES.md"
+
+# zeron's path prefix → ours. The longest prefix that matches wins.
+[paths]
+"crates/ui" = "crates/slopty-shell"
+"crates/proto" = "crates/slopty-view-proto"
+"crates/doc" = "crates/slopty-view-doc"
+"crates/rpc" = "crates/slopty-view-rpc"
+"crates/theme" = "crates/slopty-shell-theme"
+"crates/syntax" = "crates/slopty-syntax"
+"crates/markdown" = "crates/slopty-markdown"
+"crates/veil" = "crates/slopty-veil"
+"scripts/fixtures/markdown-preview" = "crates/slopty-shell/fixtures/markdown-preview"
+# Excerpts of the engine and the agent drivers: the types and helpers the shell reads.
+"crates/engine/src/registry.rs" = "crates/slopty-shell/src/catalog/registry.rs"
+"crates/engine/src/repos.rs" = "crates/slopty-shell/src/catalog/repos.rs"
+"crates/harness/src/claude/catalog.rs" = "crates/slopty-shell/src/catalog/claude.rs"
+"crates/harness/src/lib.rs" = "crates/slopty-shell/src/catalog/harness.rs"
+
+# Literal rewrites, applied in order to the whole text of every file taken. The specific come
+# before the general, which would otherwise take them first.
+[[rename]]
+from = "../../../../scripts/fixtures/markdown-preview/"
+to = "../../fixtures/markdown-preview/"
+
+[[rename]]
+from = "https://github.com/zeronsh/comet"
+to = "https://github.com/aislopware/slopty"
+
+[[rename]]
+from = "zeronsh/comet"
+to = "aislopware/slopty"
+
+[[rename]]
+from = "https://github.com/zeronsh/zeron"
+to = "https://github.com/aislopware/slopty"
+
+[[rename]]
+from = " (icons.zeron.sh)"
+to = ""
+
+[[rename]]
+from = "icons.zeron.sh "
+to = ""
+
+[[rename]]
+from = "sh.zeron.app"
+to = "dev.aislopware.slopty"
+
+[[rename]]
+from = "zeron_engine::registry::"
+to = "crate::catalog::registry::"
+
+[[rename]]
+from = "zeron_engine::repos::"
+to = "crate::catalog::repos::"
+
+[[rename]]
+from = "zeron_engine::DEFAULT_ORG_ID"
+to = "crate::catalog::DEFAULT_ORG_ID"
+
+[[rename]]
+from = "zeron_harness::claude::catalog::"
+to = "crate::catalog::claude::"
+
+[[rename]]
+from = "zeron_harness::install::"
+to = "crate::catalog::harness::install::"
+
+[[rename]]
+from = "zeron_harness::supports_titles"
+to = "crate::catalog::harness::supports_titles"
+
+[[rename]]
+from = "zeron_ui"
+to = "slopty_shell"
+
+[[rename]]
+from = "zeron-ui"
+to = "slopty-shell"
+
+[[rename]]
+from = "zeron_proto"
+to = "slopty_view_proto"
+
+[[rename]]
+from = "zeron-proto"
+to = "slopty-view-proto"
+
+[[rename]]
+from = "zeron_doc"
+to = "slopty_view_doc"
+
+[[rename]]
+from = "zeron-doc"
+to = "slopty-view-doc"
+
+[[rename]]
+from = "zeron_rpc"
+to = "slopty_view_rpc"
+
+[[rename]]
+from = "zeron-rpc"
+to = "slopty-view-rpc"
+
+[[rename]]
+from = "zeron_theme"
+to = "slopty_shell_theme"
+
+[[rename]]
+from = "zeron-theme"
+to = "slopty-shell-theme"
+
+[[rename]]
+from = "Zeron"
+to = "Slopty"
+
+[[rename]]
+from = "ZERON"
+to = "SLOPTY"
+
+[[rename]]
+from = "zeron"
+to = "slopty"
+
+# What is not taken from zeron. Paths are zeron's; a directory ends in `/`. A `[paths]` prefix
+# longer than a skipped one is taken all the same (`scripts/fixtures/markdown-preview`).
+[skip]
+paths = [
+    # Its backend, sync and accounts: Slopty's server and workers feed the interface.
+    "apps/",
+    "edge/",
+    "dist/",
+    "crates/audio/",
+    "crates/client/",
+    "crates/engine/",
+    "crates/harness/",
+    "crates/mcp/",
+    "crates/mobile/",
+    "crates/preview/",
+    "crates/sync/",
+    "crates/text/",
+    # Voice, dictation and the orb.
+    "crates/orb/",
+    "crates/voice/",
+    "crates/voice-media/",
+    "crates/voice-session/",
+    "crates/ui/src/dictation.rs",
+    "crates/ui/src/dictation/",
+    "crates/ui/src/composer_dictation_tests.rs",
+    "crates/ui/src/orb/",
+    "crates/ui/src/voice.rs",
+    "crates/ui/src/voice/",
+    "crates/ui/src/shell/voice_stage.rs",
+    "crates/proto/src/voice.rs",
+    "crates/proto/src/voice/",
+    "crates/ui/assets/sounds/voice-start.wav",
+    "crates/ui/assets/sounds/voice-end.wav",
+    # Its self-updater: Slopty updates through its own builds.
+    "crates/update/",
+    "crates/ui/src/app_update.rs",
+    # Window captures sent to an agent.
+    "crates/ui/src/appshots.rs",
+    "crates/ui/src/appshots/",
+    "crates/ui/src/settings/appshots.rs",
+    "crates/ui/src/settings/shortcuts/appshots_page.rs",
+    "crates/ui/assets/sounds/appshot.wav",
+    # Pull-request pages: a pull request opens in the web browser.
+    "crates/ui/src/pull_requests.rs",
+    "crates/ui/src/pull_request_detail.rs",
+    "crates/ui/src/pull_request_handoff.rs",
+    "crates/ui/src/pull_request_media.rs",
+    "crates/ui/src/pull_request_skeleton.rs",
+    "crates/ui/src/pull_request_test_support.rs",
+    "crates/ui/src/pull_request_code.rs",
+    "crates/ui/src/pull_request_interactions.rs",
+    # Agent accounts and their usage: Slopty never touches a credential.
+    "crates/ui/src/settings/accounts.rs",
+    # Images fetched over HTTP by the interface itself.
+    "crates/ui/src/asset_http.rs",
+    # The Linux and Windows browser hosts, examples and integration tests.
+    "crates/ui/src/browser/linux/",
+    "crates/ui/src/browser/windows_webview.rs",
+    "crates/ui/examples/",
+    "crates/ui/tests/voice_orb_geometry.rs",
+    "crates/ui/src/shell/files_panel_workspace_tests.rs",
+    "crates/ui/build.rs",
+    # zeron's mark: the shell draws Slopty's (`crates/slopty-shell/assets/icons/slopty-logo.svg`).
+    "crates/ui/assets/icons/zeron-logo.svg",
+    # The repository's own files: Slopty has its own.
+    "Cargo.toml",
+    "Cargo.lock",
+    "rust-toolchain.toml",
+    "LICENSE",
+    "README.md",
+    "README.es.md",
+    "README.ja.md",
+    "README.ko.md",
+    "README.zh-CN.md",
+    "ARCHITECTURE.md",
+    "CONTEXT.md",
+    "CONTRIBUTORS.md",
+    "THIRD_PARTY_NOTICES.md",
+    "docs/",
+    "scripts/",
+    ".github/",
+]

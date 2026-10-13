@@ -31,15 +31,15 @@ required-features = [ "e2e" ]
 
 [dependencies]
 anyhow.workspace = true
-gpui.workspace = true
 gpui-kit.workspace = true
 slopty-app.workspace = true
 slopty-crash.workspace = true
 slopty-platform.workspace = true
-slopty-ui.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+# The application the app runs: the shell's, with its assets.
+slopty-shell.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

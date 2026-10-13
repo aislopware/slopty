@@ -12,10 +12,16 @@ workspace = true
 
 [dependencies]
 anyhow.workspace = true
+# The interface's RPC service (`view_model`).
+async-trait.workspace = true
 # A file tile's picture or PDF, shared with its link without a copy (`file::decode`).
 bytes.workspace = true
 core-foundation.workspace = true
 core-video.workspace = true
+# Times on the interface's rows (`view_model`).
+chrono.workspace = true
+# The interface's watches, as streams (`view_model`).
+futures.workspace = true
 gpui.workspace = true
 # A stream's `VideoLayer` (`screen::glass`).
 gpui_apple.workspace = true
@@ -73,6 +79,11 @@ serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+# The view model serves the shell through one RPC service (`view_model`): its envelope, its rows
+# and its transcript frames.
+slopty-view-doc.workspace = true
+slopty-view-proto.workspace = true
+slopty-view-rpc.workspace = true
 
 [features]
 # `a11y::tree` for the self-test socket (`slopty/e2e`); tests get it through `cfg(test)`.

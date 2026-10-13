@@ -1,0 +1,28 @@
+[package]
+name = "slopty-view-doc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# slopty: upstream code that clippy 1.99's defaults flag, allowed by name rather than edited, so
+# the copy stays diffable (`vendor/slopty/README.md`).
+[lints.clippy]
+cloned_ref_to_slice_refs = "allow"
+explicit_counter_loop = "allow"
+large_enum_variant = "allow"
+
+[dependencies]
+slopty-view-proto = { path = "../slopty-view-proto" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+# slopty: chrono served only the cut document layer.
+tracing = "0.1"
+similar = "2"
+
+# slopty: upstream docs that Slopty's rustdoc check (private items, warnings denied) trips.
+[lints.rustdoc]
+broken_intra_doc_links = "allow"
+invalid_html_tags = "allow"
+private_intra_doc_links = "allow"

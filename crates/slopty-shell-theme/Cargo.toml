@@ -1,0 +1,26 @@
+[package]
+name = "slopty-shell-theme"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# slopty: upstream code that clippy 1.99's defaults flag, allowed by name rather than edited, so
+# the copy stays diffable (`vendor/slopty/README.md`).
+[lints.clippy]
+derivable_impls = "allow"
+if_same_then_else = "allow"
+too_many_arguments = "allow"
+
+[dependencies]
+anyhow = "1"
+# slopty: the theme-import CLI is cut, and clap with it.
+json5 = "0.4"
+plist = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"

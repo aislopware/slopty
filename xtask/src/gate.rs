@@ -174,6 +174,9 @@ impl Shard {
                 "slopty-theme",
                 "slopty-ios",
                 "slopty-notify",
+                // The shell and the GPUI-tokio bridge it runs on.
+                "slopty-shell",
+                "gpui_tokio",
             ],
             Self::Worker => &[
                 "slopty-workerd",
@@ -209,6 +212,15 @@ impl Shard {
                 "slopty-core",
                 "slopty-platform",
                 "slopty-testkit",
+                // The shell's pure crates: its view protocol, documents and RPC, its theme,
+                // syntax, Markdown and the streaming-text veil.
+                "slopty-view-proto",
+                "slopty-view-doc",
+                "slopty-view-rpc",
+                "slopty-shell-theme",
+                "slopty-syntax",
+                "slopty-markdown",
+                "slopty-veil",
                 // Here, not with the UI: the UI's shard is the critical path and CPU-bound on its
                 // three cores, which xtask's build took 38 s of, and the rest has the most slack
                 // since its pure crates went to Linux (.research/ui-test-compile-2026-10-11.md).

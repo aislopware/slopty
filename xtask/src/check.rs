@@ -124,9 +124,17 @@ pub fn run(sh: &Shell, crates: &[String], quick: bool, part: Part) -> Result<()>
         rustdoc(sh, &names().collect::<Vec<_>>())?;
     }
     quiet_step("cargo shear", cmd!(sh, "cargo shear {p...}"))?;
-    let dirs: Vec<String> = owned.iter().map(|p| p.dir.to_string()).collect();
+    // Relative, with `--force-exclude`: `typos.toml`'s excludes hold for the named directories
+    // too, as they do for the gate's run over the whole tree; typos matches them against a path
+    // as given, so an absolute one escapes them.
+    let here = sh.current_dir();
+    let dirs: Vec<String> = owned
+        .iter()
+        .map(|p| p.dir.as_std_path().strip_prefix(&here).unwrap_or(p.dir.as_std_path()))
+        .map(|dir| dir.display().to_string())
+        .collect();
     let d = &dirs;
-    quiet_step("typos", cmd!(sh, "typos {d...}"))?;
+    quiet_step("typos", cmd!(sh, "typos --force-exclude {d...}"))?;
     println!("✔ checked {} ({:.1?})", crates.join(", "), started.elapsed());
     Ok(())
 }

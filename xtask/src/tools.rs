@@ -235,7 +235,8 @@ pub fn packages_in(root: &Utf8Path) -> Result<Vec<Package>> {
     struct Named {
         name: String,
     }
-    let mut dirs = vec![root.join("xtask")];
+    // The one vendored member: the GPUI-tokio bridge the shell runs on.
+    let mut dirs = vec![root.join("xtask"), root.join("vendor/gpui_tokio")];
     for group in ["crates", "apps"] {
         for entry in root.join(group).read_dir_utf8().with_context(|| format!("listing {group}"))? {
             dirs.push(entry?.into_path());

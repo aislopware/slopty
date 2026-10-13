@@ -486,11 +486,17 @@ mod tests {
                 if code.starts_with("//") {
                     continue;
                 }
-                let reads = code.contains("include_str!")
+                let includes = code.contains("include_str!")
                     || code.contains("include_bytes!")
-                    || code.contains("CARGO_MANIFEST_DIR")
-                    || code.contains("../");
-                if reads && needles.iter().any(|needle| code.contains(needle)) {
+                    || code.contains("CARGO_MANIFEST_DIR");
+                // A relative path reads only what follows its `../`: a test's link literals
+                // (`"docs/a.md"`, `"../b.md"`) name nothing in the repository.
+                let climbs =
+                    |needle: &str| code.split("../").skip(1).any(|rest| rest.starts_with(needle));
+                if needles
+                    .iter()
+                    .any(|needle| if includes { code.contains(needle) } else { climbs(needle) })
+                {
                     readers.push(format!("{}:{}: {code}", file.display(), n + 1));
                 }
             }

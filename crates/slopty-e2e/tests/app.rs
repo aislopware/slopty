@@ -26,6 +26,10 @@ mod gallery;
 mod hangs;
 
 #[cfg(test)]
+#[path = "app/interface.rs"]
+mod interface;
+
+#[cfg(test)]
 #[path = "app/marks.rs"]
 mod marks;
 

@@ -1,0 +1,3 @@
+# Zed formats with its own options: vendored as it is, never
+# reformatted, so it stays byte-for-byte diffable with upstream.
+disable_all_formatting = true

@@ -12,7 +12,6 @@
 
 use std::ffi::{c_char, c_int, c_void};
 
-use gpui::WindowOptions;
 use gpui_ios::ios::ffi;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObjectProtocol};
@@ -228,16 +227,12 @@ fn run() {
     let handle = Box::leak(Box::new(runtime)).handle().clone();
     ffi::set_app_callback(Box::new(move |cx| {
         gpui_kit::init(cx);
-        if let Err(e) = slopty_app::open_workspace(cx, handle, |_| WindowOptions::default()) {
+        if let Err(e) = slopty_app::open_workspace(cx, handle) {
             tracing::error!(error = %e, "open workspace");
-            return;
         }
-        // After `open_workspace`, as on the Mac: the menus read their chords from the keymap
-        // the workspace fills in. An iPad with a keyboard shows them in its menu bar and in
-        // the sheet a held ⌘ brings up.
-        slopty_app::set_app_menus(cx, |_| slopty_app::menus::menus(Vec::new(), true));
     }));
-    ffi::run_app_with_assets(gpui_kit::assets::Assets);
+    // The shell's icons and fonts.
+    ffi::run_app_with_assets(slopty_shell::icons::Assets);
 }
 
 /// Logs go to stderr, which `simctl launch --console-pty` and `devicectl --console` stream.

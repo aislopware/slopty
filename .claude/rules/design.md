@@ -1,8 +1,8 @@
 ---
 paths:
+  - "crates/slopty-shell/**"
+  - "crates/slopty-shell-theme/**"
   - "crates/slopty-ui/**"
-  - "crates/slopty-kit/**"
-  - "crates/slopty-theme/**"
   - "crates/slopty-app/**"
   - "crates/slopty-e2e/golden/**"
   - "apps/slopty/**"
@@ -11,16 +11,12 @@ paths:
 
 # Design
 
-The bar: someone who works in Zed and Delta (delta.dev, Zed Industries' agent app) all day sees
-no seam. Zed sets the design system and components; Delta sets the thread, sidebar, review and
-composer. Square, technical and very modern; minimal, never plain.
+The interface is zeron's look and behaviour, through Slopty's copy of its shell
+(`crates/slopty-shell`; `docs/decisions/ui.md`, "The interface is zeron's UI and UX, copied as
+Slopty's own"). The spec is zeron's own code: when unsure, do what it does. Nothing Slopty draws
+may read as a seam.
 
-- The rulings and measured values: `.research/zed-clone-2026-10-11.md`, then
-  `.research/design-polish-2026-10-12.md`, `.research/delta-re-2026-10-12.md` and
-  `.research/delta-signed-in-2026-10-12.md`, where a later file wins.
-- Every colour, size and spacing comes from the theme tokens; `crates/slopty-ui/src/lints.rs`
-  enforces it.
-- Light and dark only, both equally premium. Solid planes, no translucency. Reduce Motion is
-  honoured. Chrome text is sentence case. Keybindings live in the palette, not on buttons.
-- Icons are GitHub Octicons with our own state marks, a hue per state.
+- Change the shell only by a minimal edit marked `// slopty:`; zeron's improvements arrive by
+  `cargo xtask upstream adopt zeron` through `xtask/zeron.toml`.
+- Slopty's data reaches the shell only through its view model (`slopty_ui::view_model`).
 - Look at the renders, not only the diff: a golden can encode a defect its numbers never see.

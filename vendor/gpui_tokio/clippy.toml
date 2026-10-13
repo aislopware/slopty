@@ -1,0 +1,2 @@
+# Zed's code keeps clippy's defaults, not the workspace's settings
+# (`vendor/gpui_tokio/README.md`).

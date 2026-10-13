@@ -15,6 +15,7 @@
 //! * [`search`] — search in files on a worker: the matches grouped by file as they stream in.
 //! * [`paste_key`] — the system's paste button over the iOS key bar's Paste.
 //! * [`keymap`] — every command a key runs, its default chords, and `[keys]` laid over them.
+//! * [`view_model`] — what feeds the shell (`slopty-shell`) from the server and the workers.
 //! * `lints` — the chrome's source lints, as tests, over every crate it is drawn in.
 
 #![warn(unreachable_pub)]
@@ -47,6 +48,7 @@ pub mod screen;
 pub mod search;
 pub mod settings_editor;
 pub mod settings_form;
+pub mod view_model;
 pub mod window_frame;
 #[expect(
     unreachable_pub,

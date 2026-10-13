@@ -1,8 +1,22 @@
 [workspace]
 resolver = "3"
-members = [ "crates/*", "apps/*", "xtask", "workspace-hack" ]
+members = [
+    "crates/*",
+    "apps/*",
+    "xtask",
+    "workspace-hack",
+    # Zed's bridge between GPUI and Tokio, which the shell's code runs its calls on.
+    "vendor/gpui_tokio",
+]
 # default-members: every member builds on the worker; iOS-only crates are cfg-gated internally
-exclude = [ "vendor", ".research", "fuzz" ]
+exclude = [
+    "vendor/block",
+    "vendor/ghostty",
+    "vendor/noq-proto",
+    "vendor/noq-udp",
+    ".research",
+    "fuzz",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -397,6 +411,22 @@ gpui_apple = { git = "https://github.com/aislopware/gpui-fast.git" }
 # The native view under a GPUI window (the browser tile puts a web view in it).
 raw-window-handle = "0.6.2"
 gpui_platform = { git = "https://github.com/aislopware/gpui-fast.git" }
+# The shell (`crates/slopty-shell`): GPUI's helpers for the Tokio bridge, the bridge itself, and
+# gpui-kit's own base crate (editor, input, scrollbar), which the shell calls gpui-base.
+gpui_util = { git = "https://github.com/aislopware/gpui-fast.git" }
+gpui_tokio = { path = "vendor/gpui_tokio" }
+gpui-base = { git = "https://github.com/aislopware/gpui-kit.git" }
+# The shell and the view types it reads: its RPC envelope, its data shapes and its transcript
+# frames, which `slopty-ui::view_model` serves.
+slopty-shell = { path = "crates/slopty-shell" }
+slopty-view-doc = { path = "crates/slopty-view-doc" }
+slopty-view-proto = { path = "crates/slopty-view-proto" }
+slopty-view-rpc = { path = "crates/slopty-view-rpc" }
+# The view model's service is an async trait, its watches are streams, and its rows carry chrono
+# times (`slopty-ui::view_model`).
+async-trait = "0.1.92"
+chrono = { version = "0.4.45", default-features = false, features = [ "clock", "serde" ] }
+futures = "0.3.34"
 # PNG in/out for the e2e render snapshots; the version gpui already builds.
 image = { version = "0.25.10", default-features = false, features = [ "png" ] }
 # The kitty graphics PNG decoder the engine hands libghostty (the version it builds with).

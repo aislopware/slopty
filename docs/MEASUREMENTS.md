@@ -16815,3 +16815,63 @@ answers: base64 (16 MiB) inside escapes, written into its tty. Each layer was th
 cargo nextest run -p slopty-pty --release --test input_rate --run-ignored only --no-capture
 cargo nextest run -p slopty-worker --release --test session_actor -E 'test(a_dropped_stream_goes_as_fast_as_the_program_reads)' --no-capture
 ```
+
+## 2026-10-13 — frosted surfaces: what a backdrop blur costs a frame
+
+The shell frosts its popovers, composer, tooltips and file badges. gpui-fast `1cb5741`
+draws each frost with `paint_backdrop_blur`. Each blur ended the Metal pass, which stored and
+loaded the whole drawable and encoded its own gaussian, as zui does. `d7b5523`
+lets blurs of one radius share one pass break: they are copied, blurred and drawn back
+together. Slopty pins `d7b5523`.
+
+Setup: `frosted_popover_frame_cost`, release, 3024×1964, a list scrolling under the surfaces,
+sigma 32. The figures are medians, given as CPU encode then GPU time. The machine was busy, so
+compare within a run only.
+
+| frame | before (`1cb5741`) | after (`d7b5523`) |
+| --- | --- | --- |
+| the list alone | 42 µs, 0.74 ms | 27 µs, 0.74 ms |
+| a frosted popover | 190 µs, 1.26 ms | 120 µs, 1.26 ms |
+| popover + composer + tooltip, frosted | 204 µs, 1.88 ms | 120 µs, 1.76 ms |
+| the same three opaque | 30 µs, 1.36 ms | 39 µs, 1.45 ms |
+| 20 frosted file badges | 836 µs, 3.24 ms | 112 µs, 1.05 ms |
+| 20 opaque file badges | 19 µs, 0.75 ms | 26 µs, 0.75 ms |
+
+- **Frost now costs about what one opaque layer does.** Twenty frosted badges went from 4× the
+  opaque frame's GPU time to 1.4×.
+- **One frosted popover still adds 0.5 ms of GPU time** over the list alone. That is the copy
+  and blur of its own region, which no batching removes.
+
+```sh
+# in gpui-fast
+cargo test -p gpui_apple --release --lib frosted_popover_frame_cost -- --ignored --nocapture
+```
+
+## 2026-10-13 — what the copied shell adds to a clean build
+
+The shell came in as fifteen copied crates and Zed's `gpui_tokio`. Its own
+dependencies beyond Slopty's are mostly tree-sitter grammars, `alacritty_terminal`, `vte` and
+image codecs. Setup: a clean build of the shell crate alone (`slopty-shell` today), `dev` profile
+(optimised, with debug info), `aarch64-apple-darwin`, on this Mac at full power, in an empty
+target directory.
+
+| measure | value |
+| --- | --- |
+| wall time | 3 min 53 s |
+| units built | 725 (506 crates compiled) |
+| CPU time, all units | 1,513 s |
+| the shell crate itself | 49.4 s |
+| its view protocol, theme and documents | 11.1 s, 6.5 s, 3.9 s |
+| the crates kept then only for voice, the orb and the updater | 5.9 s |
+| `alacritty_terminal` | 2.6 s |
+
+- **The shell crate is the long pole.** At 49 s it is a third of the critical path. The rest
+  overlaps on a Mac's cores.
+- **The voice, orb and updater crates cost under 6 s of CPU and nothing on the critical path.**
+  They have since been cut with the rest of what the shell does not take (`docs/decisions/ui.md`),
+  so today's build is that much smaller; not re-measured.
+
+```sh
+# in the lane's tree, which `cargo xtask remote` keeps (target/local/<lane>/tree)
+CARGO_TARGET_DIR=../clean cargo build --timings -p slopty-shell --target aarch64-apple-darwin
+```

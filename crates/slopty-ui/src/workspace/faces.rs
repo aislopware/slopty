@@ -572,6 +572,11 @@ impl WorkspaceView {
         self.faces.threads.hubs.get(&key)
     }
 
+    /// Every worker's threads made so far.
+    pub(super) fn hubs(&self) -> impl Iterator<Item = (WorkerKey, &Entity<ThreadHub>)> {
+        self.faces.threads.hubs.iter().map(|(key, hub)| (*key, hub))
+    }
+
     /// `thread` as a line's author: its agent, and its name ([`Self::thread_title`]).
     pub(super) fn writer_of(&self, thread: ThreadId) -> Option<crate::authorship::Writer> {
         let agent = self.faces.threads.agents.get(&thread)?.clone();
@@ -836,6 +841,9 @@ impl WorkspaceView {
     /// `key`'s answer to one of this client's intents. A start answered with its thread
     /// opens the thread as a tile there; one refused says why.
     pub fn thread_done(&mut self, key: WorkerKey, done: &IntentDone, cx: &mut Context<Self>) {
+        if self.view_start_done(key, done, cx) {
+            return;
+        }
         if self.faces.threads.starts.get(&done.id).is_some_and(|(at, ..)| *at == key) {
             let Some((_, start, item)) = self.faces.threads.starts.remove(&done.id) else {
                 return;

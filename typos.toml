@@ -39,4 +39,14 @@ extend-exclude = [
     ".research/",
     "**/*.metal",
     "**/fixtures/",
+    # The copied UI crates keep their text as written, so a sync's merge sees only real edits
+    # (`xtask/zeron.toml`, docs/decisions/ui.md).
+    "crates/slopty-markdown/",
+    "crates/slopty-shell/",
+    "crates/slopty-shell-theme/",
+    "crates/slopty-syntax/",
+    "crates/slopty-veil/",
+    "crates/slopty-view-doc/",
+    "crates/slopty-view-proto/",
+    "crates/slopty-view-rpc/",
 ]

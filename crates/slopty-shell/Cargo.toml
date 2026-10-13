@@ -1,0 +1,118 @@
+[package]
+name = "slopty-shell"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# slopty: the data comes from Slopty's view model (`slopty-ui::view_model`) through the
+# `RpcService` installed as `EngineService`. Voice, dictation, the orb, appshots, the updater,
+# sign-in, sync, agent accounts, the pull-request pages, the examples and the Linux and Windows
+# browser hosts are not taken (docs/decisions/ui.md), nor the dependencies only they used.
+
+[dependencies]
+slopty-veil = { path = "../slopty-veil" }
+url = "2"
+slopty-view-proto = { path = "../slopty-view-proto" }
+similar = "2"
+slopty-view-doc = { path = "../slopty-view-doc" }
+slopty-view-rpc = { path = "../slopty-view-rpc" }
+slopty-syntax = { path = "../slopty-syntax" }
+slopty-shell-theme = { path = "../slopty-shell-theme" }
+gpui.workspace = true
+gpui_platform.workspace = true
+gpui_tokio.workspace = true
+gpui-base.workspace = true
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+pulldown-cmark = "0.12"
+slopty-markdown = { path = "../slopty-markdown" }
+base64 = "0.22"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff", "ico"] }
+usvg = "0.46"
+mermaid-rs-renderer = { version = "=0.3.1", default-features = false }
+unicode-segmentation = "1"
+alacritty_terminal = "0.26"
+unicode-width = "0.2"
+fontdb = "0.23"
+ttf-parser = "0.25.1"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+anyhow = "1"
+tracing = "0.1"
+sha2 = "0.10"
+thiserror = "2"
+# slopty: one rust-embed 8 in the graph, the workspace's.
+rust-embed = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+wry = { version = "0.56", default-features = false, features = ["os-webview"] }
+objc2 = "0.6"
+block2 = "0.6"
+objc2-app-kit = { version = "0.3.2", features = ["NSApplication", "NSHapticFeedback", "NSBitmapImageRep", "NSImage", "NSEvent", "NSResponder", "NSView", "NSWindow"] }
+objc2-foundation = "0.3.2"
+objc2-web-kit = { version = "0.3.2", features = ["WKWebView", "WKNavigationDelegate", "WKNavigationAction", "WKSnapshotConfiguration"] }
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+tempfile = "3"
+
+# slopty: upstream's fixture features are cut with the examples they built; they are declared so
+# the check stays on for everything else. Upstream builds leave helpers dead on macOS whose only
+# callers are Linux-only tests or test paths; Slopty's own CI is Linux.
+[lints.rust]
+dead_code = "allow"
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(feature, values("browser-fixture", "compact-picker-fixture", "project-palette-fixture"))',
+] }
+
+# slopty: upstream trips these default lints; they keep upstream's code as written.
+[lints.clippy]
+assertions_on_constants = "allow"
+assign_op_pattern = "allow"
+chunks_exact_to_as_chunks = "allow"
+cloned_ref_to_slice_refs = "allow"
+collapsible_if = "allow"
+doc_lazy_continuation = "allow"
+double_ended_iterator_last = "allow"
+empty_line_after_doc_comments = "allow"
+field_reassign_with_default = "allow"
+format_in_format_args = "allow"
+identity_op = "allow"
+items_after_test_module = "allow"
+large_enum_variant = "allow"
+len_without_is_empty = "allow"
+let_unit_value = "allow"
+manual_clamp = "allow"
+manual_is_multiple_of = "allow"
+manual_range_contains = "allow"
+match_like_matches_macro = "allow"
+missing_transmute_annotations = "allow"
+module_inception = "allow"
+needless_borrow = "allow"
+needless_borrows_for_generic_args = "allow"
+needless_return = "allow"
+obfuscated_if_else = "allow"
+question_mark = "allow"
+redundant_closure = "allow"
+redundant_iter_cloned = "allow"
+result_unit_err = "allow"
+single_char_add_str = "allow"
+single_element_loop = "allow"
+too_many_arguments = "allow"
+type_complexity = "allow"
+unnecessary_cast = "allow"
+unnecessary_lazy_evaluations = "allow"
+unnecessary_sort_by = "allow"
+unnecessary_unwrap = "allow"
+useless_conversion = "allow"
+
+# slopty: upstream docs that Slopty's rustdoc check (private items, warnings denied) trips.
+[lints.rustdoc]
+bare_urls = "allow"
+broken_intra_doc_links = "allow"
+private_intra_doc_links = "allow"

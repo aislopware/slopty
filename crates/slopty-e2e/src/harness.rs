@@ -851,6 +851,30 @@ fn pin_appearance(app_dir: &Path) -> Result<()> {
     if !path.exists() {
         std::fs::write(&path, pinned_settings(APPEARANCE))?;
     }
+    if !interface_settings(app_dir).exists() {
+        pin_interface(app_dir, APPEARANCE)?;
+    }
+    Ok(())
+}
+
+/// Where the shell keeps its own settings in the app whose data directory is
+/// `app_dir`.
+fn interface_settings(app_dir: &Path) -> PathBuf {
+    app_dir.join("interface").join("ui-settings.json")
+}
+
+/// Put the interface of the app whose data directory is `app_dir` in `appearance` (`light` or
+/// `dark`), as its Appearance settings would, before it starts.
+///
+/// # Errors
+///
+/// When the file cannot be written.
+pub fn pin_interface(app_dir: &Path, appearance: &str) -> Result<()> {
+    let path = interface_settings(app_dir);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(&path, serde_json::json!({ "appearance": appearance }).to_string())?;
     Ok(())
 }
 

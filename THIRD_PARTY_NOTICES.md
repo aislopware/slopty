@@ -1,12 +1,14 @@
 # Third-party notices
 
-Slopty's interface is zeron's. Its code, fonts and icons come from the works below, each kept
-under its own licence.
+Slopty's interface is copied from zeron. Its code, fonts and icons come from the works below,
+each kept under its own licence.
 
 ## Zeron
 
 Every file whose first line reads `// Derived from zeron (MIT, github.com/zeronsh/zeron @
-053ce2e)` is copied from or adapted from zeron at that commit.
+053ce2e)` is copied from or adapted from zeron at that commit; so are the other files of
+`crates/slopty-shell`, `slopty-view-proto`, `slopty-view-doc`, `slopty-view-rpc`,
+`slopty-shell-theme`, `slopty-syntax`, `slopty-markdown` and `slopty-veil`.
 
 ```text
 MIT License
@@ -34,9 +36,11 @@ SOFTWARE.
 
 ## Geist and Geist Mono
 
-`crates/slopty-kit/assets/fonts/Geist*.ttf`, version 1.7.2. Copyright 2024 The Geist Project
+`crates/slopty-shell/assets/fonts/Geist*.ttf` and `crates/slopty-kit/assets/fonts/Geist*.ttf`,
+version 1.7.2. Copyright 2024 The Geist Project
 Authors (github.com/vercel/geist-font). SIL Open Font License 1.1; the full text is
-`crates/slopty-kit/assets/fonts/LICENSE-Geist.txt`.
+`crates/slopty-kit/assets/fonts/LICENSE-Geist.txt` (and
+`crates/slopty-shell/assets/fonts/licenses/Geist-OFL.txt`).
 
 ## Solar Icons
 
@@ -47,8 +51,9 @@ under zeron's licence above.
 
 ## Symbols
 
-`crates/slopty-kit/assets/file-icons/`: the Symbols file and folder icons, copyright 2020-22
-Miguel Solorio, under the MIT licence in `crates/slopty-kit/assets/file-icons/LICENSE.symbols`.
+`crates/slopty-shell/assets/file-icons/` and `crates/slopty-kit/assets/file-icons/`: the
+Symbols file and folder icons, copyright 2020-22 Miguel Solorio, under the MIT licence in each
+directory's `LICENSE.symbols`.
 `files/serverless.svg` is renamed from upstream's misspelt file name.
 
 ## zui
@@ -56,3 +61,9 @@ Miguel Solorio, under the MIT licence in `crates/slopty-kit/assets/file-icons/LI
 The renderer features zeron's interface needs (backdrop blur, the rounded clip, the edge fade's
 shape, the list's tail reservation, image eviction) are ported into gpui-fast from zui, zeron's
 GPUI fork, under the Apache License 2.0 like GPUI itself; gpui-fast keeps the notice per port.
+
+## gpui_tokio
+
+`vendor/gpui_tokio` is Zed's bridge between GPUI and Tokio (github.com/zed-industries/zed,
+`crates/gpui_tokio`), under the Apache License 2.0, whose text is in
+`vendor/gpui_tokio/LICENSE-APACHE`.

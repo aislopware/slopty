@@ -10,8 +10,21 @@ include = [
     "xtask/**/*.toml",
 ]
 # Vendored crates keep their published manifests byte for byte (`*.toml` above reaches them);
-# `cargo hakari` writes the workspace-hack manifest in its own style.
-exclude = [ "vendor/**", "workspace-hack/Cargo.toml" ]
+# `cargo hakari` writes the workspace-hack manifest in its own style. The copied UI crates keep
+# the style they arrived in, as they keep its rustfmt and lints, so a sync's merge sees only real
+# edits (`xtask/zeron.toml`, docs/decisions/ui.md).
+exclude = [
+    "vendor/**",
+    "workspace-hack/Cargo.toml",
+    "crates/slopty-markdown/Cargo.toml",
+    "crates/slopty-shell/Cargo.toml",
+    "crates/slopty-shell-theme/Cargo.toml",
+    "crates/slopty-syntax/Cargo.toml",
+    "crates/slopty-veil/Cargo.toml",
+    "crates/slopty-view-doc/Cargo.toml",
+    "crates/slopty-view-proto/Cargo.toml",
+    "crates/slopty-view-rpc/Cargo.toml",
+]
 
 [formatting]
 align_entries = false

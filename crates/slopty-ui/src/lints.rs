@@ -103,8 +103,8 @@ fn chrome_lines(dir: &str) -> Vec<(String, usize, String)> {
                 walk(&path, out);
             } else if path.extension().is_some_and(|e| e == "rs") {
                 let text = std::fs::read_to_string(&path).expect("a source file reads");
-                // Zeron's design system, landing beside the old chrome: judged by zeron's rules
-                // once the old views are gone, never by these.
+                // The shell's copied design system, landing beside the old chrome: judged by its
+                // own rules once the old views are gone, never by these.
                 if text.starts_with("// Derived from zeron") {
                     continue;
                 }
