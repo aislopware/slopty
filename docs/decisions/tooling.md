@@ -276,6 +276,25 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   it grew, as before. A `Serialize` impl that encodes a frame while it is being encoded gets a
   fresh buffer instead of a borrow panic.
 
+**gpui-kit moves to upstream `b02dc60c` (fork `b5e95a36`), GPUI to the fork's `1113d1db`.** ✅
+2026-10-13
+- Twelve upstream commits rebased under our 66, with two real conflicts:
+  - Table: upstream's column-resize tests (#3472) and our `lay_columns_out_again` landed on the
+    same lines; both are kept.
+  - Input: #3477 clamps the vertical scroll in every layout mode. Our `ScrollRequest` model
+    already resolves and clamps the scroll before it picks lines (`resolve_scroll_top`), so
+    ours is kept and its `clamp_vertical_scroll_offset` dropped; its two
+    `set_scroll_offset_past_the_end` tests stay and pass. Our ghost-lines fix was applied again
+    on top.
+  - The lock-only conflicts took the rebased lock, and the pin commit stays as an empty commit
+    so the replayed patches keep their order.
+- Judged against Slopty: #3480 lets `Editor` take a size, #3475 skips a needless notify in
+  `set_line_number`, #3470 names the sidebar's submenu caret for assistive tech, and the table
+  takes Home/End in row mode (#3471) and stops swallowing events in `set_selected_row` (#3469).
+  #3478 adds `ResizablePanel::fixed` and #3485 the message scroller's `logical_scroll_top`, which
+  the shell does not use yet. #3464/#3479 fold `gpui-component-shell` into `gpui-shell`, so
+  the sync's runner probe tests `gpui-shell` alone.
+
 **gpui-kit moves to upstream `201b55a4`, GPUI to the fork's `f994c345`.** ✅ 2026-09-30
 - gpui-kit's one new commit (#3320) takes `notify` 8.2 and keeps the theme watcher alive when
   a watched theme file is replaced rather than written. Slopty watches no gpui-kit theme and
