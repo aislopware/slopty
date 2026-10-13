@@ -190,7 +190,12 @@ impl Workspace {
         directory_cache: tokio::sync::watch::Sender<server::Cache>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let events = cx.subscribe(&view, |ws: &mut Self, _view, event, cx| match event {
+        // The notice of each page held back, by its worker and handoff, so one taken back goes.
+        let mut offered: std::collections::HashMap<
+            (WorkerKey, slopty_proto::handoff::HandoffId),
+            u64,
+        > = std::collections::HashMap::new();
+        let events = cx.subscribe(&view, move |ws: &mut Self, _view, event, cx| match event {
             // The badge is the inbox's count, which `Self::look` follows.
             WorkspaceEvent::NeedsYou(_) => {}
             // The Dock bounces while the human is elsewhere; the shell's "Input required" chime
@@ -233,6 +238,31 @@ impl Workspace {
             }
             WorkspaceEvent::Notice { text, failure: true } => {
                 slopty_shell::toast::error(cx, text.clone());
+            }
+            WorkspaceEvent::Offer { worker, id, text, url } => {
+                let url = url.clone();
+                let open = move |cx: &mut App| cx.open_url(&url);
+                let lasts = slopty_ui::workspace::OFFER_FOR;
+                if let Some(toast) =
+                    slopty_shell::toast::offer(cx, text.clone(), "Open", lasts, open)
+                {
+                    offered.retain(|_, shown| slopty_shell::toast::showing(cx, *shown));
+                    offered.insert((*worker, *id), toast);
+                }
+            }
+            WorkspaceEvent::OpenFile { chat, target } => {
+                let (chat, target) = (chat.clone(), target.clone());
+                // Once the press that asked has been dispatched: the shell opens it in the window.
+                cx.defer(move |cx| {
+                    if !slopty_shell::live::open_file(&chat, &target, cx) {
+                        slopty_shell::toast::error(cx, "The file could not be opened");
+                    }
+                });
+            }
+            WorkspaceEvent::Withdrawn { worker, id } => {
+                if let Some(toast) = offered.remove(&(*worker, *id)) {
+                    slopty_shell::toast::withdraw(cx, toast);
+                }
             }
         });
         let changes = cx.observe(&view, |ws, _view, cx| {
@@ -1093,6 +1123,9 @@ fn apply_link_event(
         LinkEvent::Ports { session, forwards } => {
             view.update(cx, |v, cx| v.ports_changed(session, forwards, cx));
         }
+        LinkEvent::Handoff { event, received } => {
+            view.update(cx, |v, cx| v.handoff_event(key, event, received, cx));
+        }
         LinkEvent::XferFailed { xfer, error } => {
             view.update(cx, |v, cx| v.xfer_failed(xfer, &error.to_string(), cx));
         }
@@ -1110,9 +1143,9 @@ fn apply_link_event(
         }
         // The handshake's ack was read when the link connected; the tick pings to draw a
         // restarted worker's reset, so the pong carries nothing; the app's link forwards
-        // ports itself (`LinkEvent::Ports`). A file, folder, search or git answer nobody on
-        // the surfaces asked for, a handoff, and the old workspace's thread news have no
-        // reader.
+        // ports itself (`LinkEvent::Ports`); a handoff comes as `LinkEvent::Handoff`. A file,
+        // folder, search or git answer nobody on the surfaces asked for and the old
+        // workspace's thread news have no reader.
         LinkEvent::Control(
             WorkerMsg::HelloAck(_)
             | WorkerMsg::Pong { .. }
@@ -1132,8 +1165,7 @@ fn apply_link_event(
             | WorkerMsg::RepoCloned { .. }
             | WorkerMsg::Sessions(_)
             | WorkerMsg::SettingUp { .. },
-        )
-        | LinkEvent::Handoff { .. } => {}
+        ) => {}
         LinkEvent::Disconnected(why) => {
             tracing::info!(worker = ?key, %why, "link ended");
             let status = WorkerStatus::Reconnecting(server::DROPPED.to_owned());

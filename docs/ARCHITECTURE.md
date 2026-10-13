@@ -935,6 +935,11 @@ through each worker's own verbs:
 **Around the shell**, the workspace keeps what makes a worker feel local and what reaches the
 person away from it:
 
+- a page a worker's shell hands over (`workspace::handoffs`): opened in the browser, or held
+  back in a notice with Open, a page on the worker's loopback at its forward here; a path
+  ⌘-clicked in a shell, opened in its chat's Files pane (`slopty_shell::live::open_file`); and the
+  keyboard told to each terminal's worker, so the handoff and the program's focus reports go
+  to the shell the person is looking at;
 - the clipboard shared with the workers, following the keyboard into whichever live view has it
   (`workspace::remote`, `clipboard`), files dropped onto a terminal or a window, uploaded and
   typed or pasted there (`remote::transfers`), and the forwarded ports;

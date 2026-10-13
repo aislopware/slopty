@@ -6,6 +6,9 @@
 //! installs a [`Host`] here that hands the shell the view for an id the view model gave it
 //! (a terminal's from `OpenTerminal`, a screen's from its surface list), and the shell draws it
 //! in the shell's own places: the terminal panel's body, a right-pane surface.
+//!
+//! The other way round, a path a person ⌘-clicks in a shell opens where a transcript's file link
+//! opens, in its chat's Files pane ([`open_file`]): the shell serves that once its window is up.
 
 pub mod screen;
 
@@ -118,4 +121,24 @@ pub fn screen(id: &str, cx: &mut App) -> Option<Hosted> {
 pub fn watch(id: &str, changed: Box<dyn FnMut(&mut App)>, cx: &mut App) -> Option<Subscription> {
     let host = cx.try_global::<Host>()?.watch.clone();
     host(id, changed, cx)
+}
+
+type OpenFileFn = dyn Fn(&str, &str, &mut App) -> bool;
+
+/// How the shell opens a file link for a chat, once its window is up.
+#[derive(Clone)]
+struct Files(Rc<OpenFileFn>);
+
+impl Global for Files {}
+
+/// The shell opens a chat's file links by `open`: chat, then the link.
+pub(crate) fn serve_files(cx: &mut App, open: impl Fn(&str, &str, &mut App) -> bool + 'static) {
+    cx.set_global(Files(Rc::new(open)));
+}
+
+/// Open `target` (a path or a `file://` link, its line as `#L12`) in chat `chat`'s Files pane, as
+/// a transcript's file link opens: whether the shell took it.
+pub fn open_file(chat: &str, target: &str, cx: &mut App) -> bool {
+    let Some(Files(open)) = cx.try_global::<Files>().cloned() else { return false };
+    open(chat, target, cx)
 }

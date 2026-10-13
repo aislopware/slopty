@@ -20,9 +20,12 @@ pub mod attention;
 mod commands;
 mod desktop;
 mod faces;
+mod handoffs;
 mod keys;
 mod presence;
 pub mod remote;
+#[cfg(test)]
+mod rig;
 mod server_calls;
 mod turns;
 mod view_model;
@@ -34,6 +37,7 @@ use std::time::{Duration, Instant};
 
 pub use agents::{banner_title, program_banner};
 use gpui::{Context, Entity, EventEmitter, Task};
+pub use handoffs::OFFER_FOR;
 pub use keys::worker_key;
 use slopty_client::relay::RelayWatch;
 use slopty_client::{ItemDoc, ItemRef, WorkerKey};
@@ -113,6 +117,33 @@ pub enum WorkspaceEvent {
         text: String,
         /// It went wrong.
         failure: bool,
+    },
+    /// A page a shell on `worker` handed over, held back: a notice saying `text` with an Open
+    /// button that opens `url`, for [`OFFER_FOR`].
+    Offer {
+        /// The worker whose shell asked.
+        worker: WorkerKey,
+        /// Its handoff, which the worker may take back.
+        id: slopty_proto::handoff::HandoffId,
+        /// Who wants to open which host, and why it was held back.
+        text: String,
+        /// What Open opens.
+        url: String,
+    },
+    /// A path a person ⌘-clicked in a shell opened for `chat`: the shell opens `target` (a
+    /// `file://` link, its line as `#L12`) in that chat's Files pane.
+    OpenFile {
+        /// The chat the shell was opened for.
+        chat: String,
+        /// The file, absolute on the shell's machine.
+        target: String,
+    },
+    /// The worker took handoff `id` back: its notice goes.
+    Withdrawn {
+        /// The worker.
+        worker: WorkerKey,
+        /// The handoff.
+        id: slopty_proto::handoff::HandoffId,
     },
 }
 
@@ -269,6 +300,8 @@ struct Worker {
     sized: Option<desktop::Sized>,
     /// Where its curtain stands for this device.
     curtain: desktop::Curtain,
+    /// The pages its shells handed over, as `slopty_client::handoff` keeps them.
+    handoffs: slopty_client::handoff::Handoffs,
 }
 
 /// The most a worker out of reach holds for its return: far more than a human closes, names
@@ -304,6 +337,7 @@ impl Worker {
             fs_ops: slopty_client::folders::FsOps::default(),
             sized: None,
             curtain: desktop::Curtain::default(),
+            handoffs: slopty_client::handoff::Handoffs::default(),
         }
     }
 
@@ -457,6 +491,9 @@ impl std::fmt::Debug for WorkspaceView {
 }
 
 impl EventEmitter<WorkspaceEvent> for WorkspaceView {}
+
+/// The fact a shell opened for a chat carries: the chat's id.
+pub(crate) const CHAT_FACT: &str = "chat";
 
 impl WorkspaceView {
     /// An empty workspace, its workers yet to come.

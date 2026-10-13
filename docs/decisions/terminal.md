@@ -3889,3 +3889,27 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     These inputs hit no such check.
   - Tests: engine `a_prompt_erased_hands_its_status_down_in_the_same_frame`; the inputs are
     `fuzz/regressions/terminal/frame-erased-prompt-hands-status-to-clean-row-{1,2,3}`.
+
+- ✅ **A shell's pages and paths reach the client again, and its worker knows who is looking
+  (2026-10-13).**
+  With the tiling workspace deleted, nothing declared which handoffs this client takes and no
+  terminal told its worker when it had the keyboard. So a page a shell opened (`gh auth login`)
+  went nowhere, a program that asked for focus reports (DEC 1004) heard none, and Claude Code
+  pushed to the phone while the person was watching. The terminal view now tells its worker
+  `TermRequest::Focus` on each change of the keyboard: it holds the keyboard while its focus,
+  or its find bar's, is in a window in front, and it says so again on a new link. The client
+  declares pages and no edits on each link. The shell's files live in its own Files pane, which
+  nothing outside it opens, so an `$EDITOR` stays the worker's (`vi`) rather than waiting on a
+  client that cannot show the file. A page `slopty_client::handoff` lets open goes to the
+  browser, behind a remote window that has the keyboard. One held back is a notice naming its
+  host and why, with an Open button for twenty seconds: zeron's toast gained one action, a
+  `// slopty:` edit. A page on the worker's loopback opens at the port that forwards it here,
+  whether a handoff or a ⌘-clicked link; a link with no forward says so. A path ⌘-clicked in a
+  shell opens where a transcript's file link opens: in the Files pane of the chat the shell was
+  opened for (its `chat` fact), made absolute against the shell's directory and at its line,
+  through `slopty_shell::live::open_file`, which the shell serves once its window is up. Tests:
+  `slopty-terminal` `view::tests::the_worker_hears_who_has_the_keyboard`; `slopty-ui`
+  `workspace::handoffs::tests::{a_shell_hands_this_client_its_pages,
+  a_loopback_page_keeps_its_way_in, a_path_clicked_in_a_shell_opens_in_its_chat_s_files,
+  a_printed_path_is_made_absolute}`; `slopty-shell`
+  `toast::tests::an_offer_waits_for_its_button`.

@@ -14,6 +14,7 @@
 //! Push from anywhere with [`error`], [`success`] or [`info`]; the shell
 //! mounts [`render_toaster`] once per window.
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui::{
@@ -88,10 +89,21 @@ impl Glide {
     }
 }
 
+// slopty: a toast may carry one action, sonner's `action` (a page a worker's shell asked to
+// open, held back until the person opens it).
+/// What a toast's button says and does.
+#[derive(Clone)]
+struct Action {
+    label: SharedString,
+    run: Rc<dyn Fn(&mut App)>,
+}
+
 struct Toast {
     id: u64,
     kind: ToastKind,
     message: SharedString,
+    // slopty: its button, if any.
+    action: Option<Action>,
     created: Instant,
     /// Countdown left, and when it last resumed (`None` while paused).
     remaining: Duration,
@@ -147,9 +159,20 @@ struct ToastStore {
 impl Global for ToastStore {}
 
 fn push(cx: &mut App, kind: ToastKind, message: SharedString) {
+    push_for(cx, kind, message, None, DURATION);
+}
+
+// slopty: with an action and a duration of its own; the toast's id, to take it down early.
+fn push_for(
+    cx: &mut App,
+    kind: ToastKind,
+    message: SharedString,
+    action: Option<Action>,
+    lasts: Duration,
+) -> Option<u64> {
     let message: SharedString = message.trim().to_owned().into();
     if message.is_empty() {
-        return;
+        return None;
     }
     let now = Instant::now();
     let store = cx.default_global::<ToastStore>();
@@ -161,9 +184,14 @@ fn push(cx: &mut App, kind: ToastKind, message: SharedString) {
         .find(|toast| toast.closing.is_none())
         && front.kind == kind
         && front.message == message
+        && action.is_none()
+        && front.action.is_none()
     {
-        front.remaining = DURATION;
+        front.remaining = lasts;
         front.resumed = (!store.hovered).then_some(now);
+        let id = front.id;
+        cx.refresh_windows();
+        return Some(id);
     } else {
         store.next_id += 1;
         let id = store.next_id;
@@ -172,8 +200,9 @@ fn push(cx: &mut App, kind: ToastKind, message: SharedString) {
             id,
             kind,
             message,
+            action,
             created: now,
-            remaining: DURATION,
+            remaining: lasts,
             resumed: (!hovered).then_some(now),
             closing: None,
             height: 0.0,
@@ -183,7 +212,9 @@ fn push(cx: &mut App, kind: ToastKind, message: SharedString) {
             swipe_from: None,
         });
     }
+    let id = store.next_id;
     cx.refresh_windows();
+    Some(id)
 }
 
 /// A toast of `kind`.
@@ -204,6 +235,33 @@ pub fn success(cx: &mut App, message: impl Into<SharedString>) {
 /// A neutral notice.
 pub fn info(cx: &mut App, message: impl Into<SharedString>) {
     push(cx, ToastKind::Info, message.into());
+}
+
+// slopty: a notice that waits on a choice: its button runs `run` and takes it down. It lasts
+// `lasts`, the countdown paused as every toast's is. Its id takes it down early ([`withdraw`]).
+/// A neutral notice with one button.
+pub fn offer(
+    cx: &mut App,
+    message: impl Into<SharedString>,
+    label: impl Into<SharedString>,
+    lasts: Duration,
+    run: impl Fn(&mut App) + 'static,
+) -> Option<u64> {
+    let action = Action { label: label.into(), run: Rc::new(run) };
+    push_for(cx, ToastKind::Info, message.into(), Some(action), lasts)
+}
+
+// slopty: whether toast `id` is still up, so a caller keeping ids lets go of the rest.
+/// Whether toast `id` is up and not on its way out.
+pub fn showing(cx: &App, id: u64) -> bool {
+    cx.try_global::<ToastStore>()
+        .is_some_and(|store| store.toasts.iter().any(|t| t.id == id && t.closing.is_none()))
+}
+
+// slopty: what was offered is no longer there to take.
+/// Take toast `id` down, if it is still up.
+pub fn withdraw(cx: &mut App, id: u64) {
+    dismiss(id, cx);
 }
 
 /// Surface a view's pending error as a toast, once: takes it out of `slot`.
@@ -467,6 +525,23 @@ pub fn render_toaster(window: &mut Window, cx: &mut App) -> Option<AnyElement> {
         }
         let kind = toast.kind;
         let message = toast.message.clone();
+        // slopty: its button, after the words.
+        let action = toast.action.clone().map(|action| {
+            let label = action.label.clone();
+            crate::settings::widgets::text_action(
+                &theme,
+                crate::settings::widgets::ActionTone::Solid,
+                label.clone(),
+            )
+            .id(("toast-action", id as usize))
+            .debug_selector(move || format!("toast-action-{label}"))
+            .flex_none()
+            .min_h(px(26.0))
+            .on_click(move |_, _, cx| {
+                (action.run)(cx);
+                dismiss(id, cx);
+            })
+        });
         let content = div()
             .id(("toast-content", id as usize))
             .w_full()
@@ -480,6 +555,7 @@ pub fn render_toaster(window: &mut Window, cx: &mut App) -> Option<AnyElement> {
             .text_color(theme.text)
             .child(kind_icon(kind, &theme))
             .child(div().flex_1().min_w_0().child(message.clone()))
+            .children(action)
             .child(
                 // Measure the natural height for the stack's layout.
                 gpui::canvas(
@@ -641,6 +717,7 @@ mod tests {
             id: store.next_id,
             kind: ToastKind::Error,
             message: message.to_owned().into(),
+            action: None,
             created: now,
             remaining: DURATION,
             resumed: Some(now),
@@ -704,6 +781,40 @@ mod tests {
         let id = cx.update(|_, cx| cx.global::<ToastStore>().toasts[1].id);
         cx.update(|_, cx| dismiss(id, cx));
         cx.update(|_, cx| assert_eq!(messages(cx), ["Couldn't save"]));
+    }
+
+    // slopty: an offer's button runs once and takes it down; withdrawn, it goes untaken; it
+    // stays past a plain toast's four seconds.
+    #[gpui::test]
+    fn an_offer_waits_for_its_button(cx: &mut gpui::TestAppContext) {
+        // Still: a toast rising in on the wall clock is not where its last frame drew it.
+        cx.update(|cx| {
+            cx.set_global(Theme::dark());
+            cx.set_reduce_motion(true);
+        });
+        let (_, cx) = cx.add_window_view(|_, _| Host);
+        cx.update(|window, _| window.activate_window());
+        let taken = Rc::new(std::cell::Cell::new(0_u32));
+        let ran = Rc::clone(&taken);
+        let lasts = Duration::from_secs(20);
+        cx.update(|_, cx| {
+            offer(cx, "studio wants to open x.test", "Open", lasts, move |_| {
+                ran.set(ran.get() + 1);
+            });
+        });
+        cx.run_until_parked();
+        let left = cx.update(|_, cx| cx.global::<ToastStore>().toasts[0].remaining);
+        assert!(left > DURATION * 4, "longer than a plain toast: {left:?}");
+        cx.run_until_parked();
+        let button = cx.debug_bounds("toast-action-Open").expect("its button").center();
+        cx.simulate_click(button, gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(taken.get(), 1, "opened once");
+        cx.update(|_, cx| assert!(messages(cx).is_empty(), "taken down"));
+
+        let id = cx.update(|_, cx| offer(cx, "again", "Open", lasts, |_| {}));
+        cx.update(|_, cx| withdraw(cx, id.expect("shown")));
+        cx.update(|_, cx| assert!(messages(cx).is_empty(), "withdrawn"));
     }
 
     #[test]

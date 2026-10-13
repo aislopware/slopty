@@ -22,7 +22,7 @@ use super::{Live, LiveLook, LiveView, later, now, param};
 use crate::workspace::WorkspaceView;
 
 /// The fact a shell opened for the interface carries: the chat it was opened for.
-const CHAT: &str = "chat";
+const CHAT: &str = crate::workspace::CHAT_FACT;
 
 /// Where an open's answer goes.
 type Reply = oneshot::Sender<Result<RpcReply, RpcError>>;

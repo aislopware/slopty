@@ -3599,7 +3599,8 @@ impl Shell {
     /// as a host file; the first known root that owns the path wins. A chat
     /// root opens the file in that chat's context; a project root and a host
     /// file open by absolute path through the linking chat.
-    fn open_workspace_file_link(
+    // slopty: and Slopty's views' (`live::open_file`).
+    pub(crate) fn open_workspace_file_link(
         &mut self,
         chat_id: &str,
         target: &str,

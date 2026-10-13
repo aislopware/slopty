@@ -462,6 +462,19 @@ fn open_main_window(
                     shell::Shell::new(state, boot, cx)
                 });
                 save_main_window_geometry(window, cx);
+                // slopty: a file link Slopty's views ask for (a path ⌘-clicked in a shell) opens
+                // as a transcript's does.
+                let (opener, here) = (shell.downgrade(), window.window_handle());
+                live::serve_files(cx, move |chat, target, cx| {
+                    here.update(cx, |_, window, cx| {
+                        opener.update(cx, |shell, cx| {
+                            shell.open_workspace_file_link(chat, target, window, cx)
+                        })
+                    })
+                    .ok()
+                    .and_then(Result::ok)
+                    .unwrap_or(false)
+                });
                 let weak_shell = shell.downgrade();
                 window.on_window_should_close(cx, move |window, cx| {
                     let should_close = weak_shell

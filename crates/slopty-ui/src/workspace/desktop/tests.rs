@@ -6,57 +6,25 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
-use std::sync::Arc;
-use std::time::Duration;
 
 use gpui::{
     AppContext as _, ClipboardItem, Entity, IntoElement, ParentElement as _, Render, Styled as _,
     TestAppContext, VisualTestContext, div, px, size,
 };
-use slopty_core::{ClientId, DisplayId, ItemId, StreamId, WindowId, WorkerId};
-use slopty_proto::handshake::HelloAck;
+use slopty_core::{DisplayId, ItemId, StreamId, WindowId};
 use slopty_proto::input::{KeyAction, KeyCode, Mods};
 use slopty_proto::items::{Item, ItemSync};
 use slopty_proto::screen::{CaptureTarget, ScreenEvent, ScreenInput, VideoCodec};
-use slopty_proto::server::{Os, WorkerCaps};
+use slopty_proto::server::WorkerCaps;
 use slopty_theme::Theme;
 use tokio::sync::mpsc;
 
 use super::*;
-use crate::workspace::{WorkerLink, WorkerStatus, WorkspaceEvent};
-
-/// The one worker's key.
-const KEY: WorkerKey = WorkerKey::new(1);
+use crate::workspace::WorkerStatus;
+use crate::workspace::rig::{Fake, KEY, hear, link, mac};
 
 /// This device's display key, set so a test never draws one in the data directory.
 const DEVICE: DisplayKey = DisplayKey([7; 16]);
-
-/// What the worker was sent, and the notices the workspace said.
-struct Fake {
-    rx: mpsc::Receiver<ClientMsg>,
-    notices: Rc<RefCell<Vec<String>>>,
-}
-
-impl Fake {
-    /// Everything sent so far, paced typing given its frames.
-    fn sent(&mut self, cx: &VisualTestContext) -> Vec<ClientMsg> {
-        let mut all = Vec::new();
-        let mut quiet = 0_u8;
-        while quiet < 3 {
-            cx.run_until_parked();
-            let more: Vec<ClientMsg> = std::iter::from_fn(|| self.rx.try_recv().ok()).collect();
-            quiet = if more.is_empty() { quiet.saturating_add(1) } else { 0 };
-            all.extend(more);
-            cx.executor().advance_clock(Duration::from_millis(16));
-        }
-        all
-    }
-
-    /// The last notice said.
-    fn said(&self) -> Option<String> {
-        self.notices.borrow().last().cloned()
-    }
-}
 
 /// A window that shows the workspace's view of one item, as the shell's surface does.
 struct Host {
@@ -68,40 +36,6 @@ impl Render for Host {
     fn render(&mut self, _window: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
         div().size_full().children(self.workspace.read(cx).screen(self.item).cloned())
     }
-}
-
-/// A worker that is a Mac and can do what `caps` adds.
-fn mac(caps: impl FnOnce(&mut WorkerCaps)) -> WorkerCaps {
-    let mut out = WorkerCaps { can_capture: true, can_inject: true, ..WorkerCaps::bare(Os::MacOs) };
-    caps(&mut out);
-    out
-}
-
-/// The link to the worker comes up: what it is sent goes to the returned channel.
-fn link(
-    workspace: &Entity<WorkspaceView>,
-    cx: &mut VisualTestContext,
-    caps: WorkerCaps,
-) -> mpsc::Receiver<ClientMsg> {
-    let (out, rx) = mpsc::channel(256);
-    let link = WorkerLink {
-        me: ClientId::new(),
-        out,
-        open_screen: Arc::new(|stream, _codec| slopty_client::ScreenHandle::detached(stream)),
-        remote: None,
-    };
-    let ack = HelloAck {
-        worker: WorkerId::new(),
-        name: "studio".to_owned(),
-        home: String::new(),
-        settings: String::new(),
-        caps,
-        load: 0.0,
-        sessions: Vec::new(),
-    };
-    workspace.update(cx, |v, cx| v.connect_worker(KEY, link, ack, cx));
-    cx.run_until_parked();
-    rx
 }
 
 /// A workspace whose one worker, linked with `caps`, holds `kind`, streaming as `stream` at
@@ -118,16 +52,6 @@ fn streaming(
         v.desktop.keys = None;
         v
     });
-    let notices = Rc::new(RefCell::new(Vec::new()));
-    let heard = Rc::clone(&notices);
-    cx.update(|cx| {
-        cx.subscribe(&workspace, move |_, event, _| {
-            if let WorkspaceEvent::Notice { text, .. } = event {
-                heard.borrow_mut().push(text.clone());
-            }
-        })
-        .detach();
-    });
     let item = ItemId::new();
     let shown = workspace.clone();
     let (host, cx) = cx.add_window_view(|_window, cx| {
@@ -135,8 +59,9 @@ fn streaming(
         Host { workspace: shown, item }
     });
     cx.simulate_resize(size(px(400.0), px(300.0)));
+    let heard = hear(&workspace, cx);
     workspace.update(cx, |v, cx| v.add_worker(KEY, "studio".to_owned(), cx));
-    let rx = link(&workspace, cx, caps);
+    let rx = link(&workspace, cx, caps, Vec::new());
     workspace.update(cx, |v, cx| {
         let items = vec![Item { id: item, kind, name: None, facts: BTreeMap::new() }];
         v.apply_sync(KEY, ItemSync::Snapshot { version: 1, items }, cx);
@@ -146,7 +71,7 @@ fn streaming(
         ItemKind::Display { display } => CaptureTarget::Display(display),
         ItemKind::Terminal { .. } => panic!("a terminal does not stream"),
     };
-    let mut fake = Fake { rx, notices };
+    let mut fake = Fake { rx, heard };
     assert!(
         fake.sent(cx).iter().any(|m| matches!(
             m,
@@ -235,7 +160,7 @@ fn the_curtain_is_held_from_this_device_and_asked_again_on_each_link(cx: &mut Te
     workspace.update(cx, |v, cx| {
         v.disconnect_worker(KEY, WorkerStatus::Relinking, cx);
     });
-    let mut again = link(&workspace, cx, caps);
+    let mut again = link(&workspace, cx, caps, Vec::new());
     let resent: Vec<ClientMsg> = std::iter::from_fn(|| again.try_recv().ok()).collect();
     assert_eq!(curtains(&resent), [true], "the hold is asked again on the new link");
     fake.rx = again;

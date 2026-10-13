@@ -99,6 +99,7 @@ impl WorkspaceView {
         if let Some(sized) = w.sized.as_mut() {
             sized.lost();
         }
+        self.declare_handoffs(key);
         self.desktop_relinked(key);
         self.reset_remote(key, &known, cx);
         self.relink_terminals(key, &known, cx);
@@ -576,13 +577,13 @@ impl WorkspaceView {
             TerminalViewEvent::PasteFiles(files) => {
                 this.paste_files_in_shell(sid, files.clone(), cx);
             }
-            // The shell draws the title and the progress; a block, a file, a page or a drag out
-            // of a live terminal is the shell's to take up.
+            TerminalViewEvent::OpenPage { url } => this.open_worker_page(sid, url, cx),
+            TerminalViewEvent::ViewFile { path, line } => this.view_file(sid, path, *line, cx),
+            // The shell draws the title and the progress; a block or a drag out of a live
+            // terminal is the shell's to take up.
             TerminalViewEvent::Title(_)
             | TerminalViewEvent::Progress
             | TerminalViewEvent::Attach(_)
-            | TerminalViewEvent::ViewFile { .. }
-            | TerminalViewEvent::OpenPage { .. }
             | TerminalViewEvent::DragOut { .. } => {}
         })
         .detach();

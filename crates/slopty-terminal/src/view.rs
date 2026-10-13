@@ -505,6 +505,10 @@ pub struct TerminalView {
     renders: u32,
     #[cfg(any(test, feature = "e2e"))]
     drawn_focused: Option<bool>,
+    /// The keyboard is this view's, as its worker was told ([`keyboard`]).
+    keyboard: bool,
+    /// What tells it, in the window the view is drawn in.
+    keyboard_watch: keyboard::Watch,
     predictor: Predictor,
     /// Keystroke → paint, predicted and echoed (see [`latency`]). Shared with the element,
     /// which times a key when its frame reaches the display: after the frame, where an update
@@ -708,6 +712,8 @@ impl TerminalView {
             renders: 0,
             #[cfg(any(test, feature = "e2e"))]
             drawn_focused: None,
+            keyboard: false,
+            keyboard_watch: None,
             predictor: predictor(),
             latency: Rc::default(),
             marked: None,
@@ -2215,6 +2221,7 @@ impl TerminalView {
         self.reached_task = None;
         self.pending_size = None;
         self.post(TermRequest::Attach { size: self.state.size() }, cx);
+        self.keyboard_relinked(cx);
         cx.notify();
     }
 
@@ -4282,6 +4289,7 @@ impl Render for TerminalView {
         if self.file_drag.is_some() && !cx.has_active_drag() {
             self.file_drag_left(cx);
         }
+        self.watch_keyboard(window, cx);
         let focused = self.focus.is_focused(window);
         #[cfg(any(test, feature = "e2e"))]
         {
@@ -4650,6 +4658,7 @@ fn texture_of(pixels: &TermImage) -> Option<Arc<gpui::RenderImage>> {
 
 mod copy;
 mod file_drag;
+mod keyboard;
 
 pub use copy::{COPY_MODE, COPY_MODE_DONE};
 #[cfg(target_os = "macos")]
@@ -4684,6 +4693,47 @@ mod tests {
         cx.simulate_resize(size(px(400.0), px(300.0)));
         cx.run_until_parked();
         (view, rx, cx)
+    }
+
+    /// The worker hears this terminal take the keyboard and lose it, on each change only: in
+    /// a window in front, focused (or its find bar focused); out when focus leaves or the
+    /// window goes behind; and again on a new link, which starts from nobody looking.
+    #[gpui::test]
+    fn the_worker_hears_who_has_the_keyboard(cx: &mut TestAppContext) {
+        let (view, mut rx, cx) = terminal(cx);
+        let told = |rx: &mut mpsc::Receiver<ClientMsg>| {
+            std::iter::from_fn(|| rx.try_recv().ok())
+                .filter_map(|m| match m {
+                    ClientMsg::Term { req: TermRequest::Focus { focused }, .. } => Some(focused),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(told(&mut rx), Vec::<bool>::new(), "a window behind has nobody's keyboard");
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        assert_eq!(told(&mut rx), [true], "in front and focused");
+        view.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        assert_eq!(told(&mut rx), Vec::<bool>::new(), "a frame tells nothing new");
+        cx.update(Window::blur);
+        cx.run_until_parked();
+        assert_eq!(told(&mut rx), [false], "focus left");
+        let focus = view.read_with(cx, |v, _| v.focus.clone());
+        cx.update(|window, cx| window.focus(&focus, cx));
+        cx.run_until_parked();
+        assert_eq!(told(&mut rx), [true]);
+        cx.deactivate_window();
+        cx.run_until_parked();
+        assert_eq!(told(&mut rx), [false], "the window went behind");
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        assert_eq!(told(&mut rx), [true]);
+
+        let (out, mut again) = mpsc::channel(64);
+        view.update(cx, |v, cx| v.relink(out, None, cx));
+        cx.run_until_parked();
+        assert_eq!(told(&mut again), [true], "told again on the new link");
     }
 
     fn marked(text: &str, mark: SemanticMark) -> Line {
