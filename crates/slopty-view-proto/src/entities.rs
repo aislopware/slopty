@@ -349,70 +349,7 @@ pub struct RepoRef {
     pub worktree_path: Option<String>,
 }
 
-/// Public Git reference attached to a commit in the history graph.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum GitHistoryRefKind {
-    Branch,
-    Remote,
-    Tag,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GitHistoryRef {
-    pub kind: GitHistoryRefKind,
-    pub label: String,
-}
-
-/// One topologically ordered row in the repository history graph.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GitHistoryCommit {
-    pub sha: String,
-    pub parent_shas: Vec<String>,
-    pub subject: String,
-    pub author_name: String,
-    pub author_email: String,
-    pub authored_at: String,
-    #[serde(default)]
-    pub refs: Vec<GitHistoryRef>,
-}
-
-/// Divergence between the checked-out branch and the repository's integration
-/// branch. Counts are computed only from locally available refs; callers must
-/// fetch explicitly when they want newer remote state.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GitHistoryComparison {
-    /// The local remote-tracking ref used as the comparison base, e.g.
-    /// `upstream/main`.
-    pub base: String,
-    /// Commits reachable from HEAD but not from [`Self::base`].
-    pub ahead: usize,
-    /// Commits reachable from [`Self::base`] but not from HEAD.
-    pub behind: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GitHistoryPage {
-    pub commits: Vec<GitHistoryCommit>,
-    /// Deduplicated tips of every public local/remote branch. Populated with
-    /// the first page so clients can switch to the compact overview without
-    /// another round trip or loading the complete history.
-    #[serde(default)]
-    pub branch_tips: Vec<GitHistoryCommit>,
-    pub head_sha: Option<String>,
-    pub next_cursor: Option<usize>,
-    pub total_count: Option<usize>,
-    /// Number of commits reachable from the active checkout's HEAD.
-    #[serde(default)]
-    pub head_commit_count: Option<usize>,
-    /// Current branch divergence from the preferred integration branch.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub comparison: Option<GitHistoryComparison>,
-}
+// slopty: no History surface (ruled out).
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1454,6 +1391,17 @@ pub struct Connectivity {
     /// fall back to the global state).
     #[serde(default)]
     pub chats: Vec<ChatConnectivity>,
+    // slopty: the server this client follows, shown at the sidebar's foot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<ServerPresence>,
+}
+
+// slopty: the server this client follows: its name, and whether the link to it is up.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerPresence {
+    pub name: String,
+    pub online: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

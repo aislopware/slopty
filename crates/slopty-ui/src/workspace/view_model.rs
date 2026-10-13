@@ -6,7 +6,7 @@
 //! starts its thread; the thread then goes by the chat's id, so the interface never sees the
 //! switch.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -61,6 +61,8 @@ pub(super) struct Bridge {
     minted: HashMap<String, Minted>,
     /// Starts sent for minted chats, by their intent.
     starts: HashMap<IntentId, String>,
+    /// What the right-pane surfaces wait on from the workers ([`surfaces`]).
+    surfaces: surfaces::Surfaces,
 }
 
 impl std::fmt::Debug for Bridge {
@@ -175,7 +177,8 @@ impl WorkspaceView {
             .collect();
         let mut chats = Vec::new();
         let mut sessions = Vec::new();
-        let mut folders: BTreeSet<(String, String)> = BTreeSet::new();
+        // Each folder, and whether a thread in it named it as its repository.
+        let mut folders: BTreeMap<(String, String), bool> = BTreeMap::new();
         // Every worker's rows at once: an agent may start its subagents on other machines.
         let all: Vec<(String, &ThreadRow)> = self
             .hubs()
@@ -193,7 +196,8 @@ impl WorkspaceView {
                 chat.parent_chat_id = Some(self.chat_id(parent));
             }
             if let Some(folder) = rows::folder(row) {
-                folders.insert((device.clone(), folder.to_owned()));
+                let git = row.repo.as_deref() == Some(folder);
+                *folders.entry((device.clone(), folder.to_owned())).or_default() |= git;
             }
             let running = rows::running_children(row.id, all.iter().map(|(_, row)| *row));
             let mut session = rows::session(row, device, running, now);
@@ -203,7 +207,7 @@ impl WorkspaceView {
         }
         for (id, minted) in &self.view_model.minted {
             let device = minted.worker.to_string();
-            folders.insert((device.clone(), minted.cwd.clone()));
+            folders.entry((device.clone(), minted.cwd.clone())).or_default();
             chats.push(slopty_view_proto::Chat {
                 id: id.clone(),
                 device_id: device.clone(),
@@ -227,7 +231,7 @@ impl WorkspaceView {
         }
         let spaces = folders
             .into_iter()
-            .map(|(device, path)| rows::space(&device, &path, false, now))
+            .map(|((device, path), git)| rows::space(&device, &path, git, now))
             .collect();
         feed.devices(devices);
         feed.spaces(spaces);

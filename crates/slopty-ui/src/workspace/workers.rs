@@ -1150,6 +1150,7 @@ impl WorkspaceView {
     pub fn screen_event(&mut self, key: WorkerKey, event: ScreenEvent, cx: &mut Context<Self>) {
         match event {
             ScreenEvent::Listing { windows, displays } => {
+                self.live_listing(key, &windows, &displays, cx);
                 self.fill_titles(key, &windows);
                 let Some(w) = self.workers.get_mut(&key) else { return };
                 w.titles_requested = false;
@@ -1311,6 +1312,7 @@ impl WorkspaceView {
             ScreenEvent::OpenFailed { asked, why } => self.screen_refused(key, asked, why, cx),
             ScreenEvent::Curtain(state) => self.curtain_heard(key, state, cx),
             ScreenEvent::ListFailed { why } => {
+                self.live_listing_failed(key, &why, cx);
                 let Some(w) = self.workers.get_mut(&key) else { return };
                 w.titles_requested = false;
                 w.display_wanted = false;

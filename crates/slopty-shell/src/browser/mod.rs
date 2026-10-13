@@ -797,3 +797,13 @@ mod tests {
         });
     }
 }
+
+/// slopty: a preview's address. Slopty forwards each port to one of this client's own
+/// (`proxy_port` 0, the forward in the hostname) rather than serving them through one proxy.
+pub(crate) fn preview_url(service: &slopty_view_proto::PreviewService, proxy_port: u16) -> String {
+    if proxy_port == 0 {
+        format!("http://{}", service.hostname)
+    } else {
+        service.url(proxy_port)
+    }
+}

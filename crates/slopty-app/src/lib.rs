@@ -525,6 +525,9 @@ pub struct Workspace {
     /// The main window's watches (its appearance, its activation, where it stands), made again
     /// with each window (`interface::open`).
     window_subscriptions: Vec<gpui::Subscription>,
+    /// What the shell watches, for what the app itself tells it: the server it follows
+    /// (`server::tell_server_presence`).
+    interface_feed: Option<std::sync::Arc<slopty_ui::view_model::Feed>>,
     /// The system's Reduce Motion heard as it changes ([`watch_reduce_motion`]).
     motion_watch: Option<slopty_platform::motion::Watch>,
     /// A hardware keyboard heard as it comes and goes ([`watch_hardware_keyboard`]).
@@ -707,6 +710,7 @@ impl Workspace {
             window_dark: true,
             subscriptions: vec![events, changes],
             window_subscriptions: Vec::new(),
+            interface_feed: None,
             motion_watch: None,
             #[cfg(target_os = "ios")]
             keyboard_watch: None,
@@ -3672,6 +3676,11 @@ fn apply_link_event(
     cx: &mut App,
 ) -> bool {
     tracing::trace!(?event, "link event");
+    if let LinkEvent::Control(msg) = &event
+        && view.update(cx, |v, _| v.surface_heard(key, msg))
+    {
+        return false;
+    }
     match event {
         LinkEvent::Term { session, event } => {
             view.update(cx, |v, cx| v.term_event(session, event, cx));
@@ -3682,13 +3691,21 @@ fn apply_link_event(
         LinkEvent::Control(WorkerMsg::Items(sync)) => {
             view.update(cx, |v, cx| v.apply_sync(key, sync, cx));
         }
-        LinkEvent::Control(
-            WorkerMsg::SessionOpened { summary, .. } | WorkerMsg::SessionChanged(summary),
-        ) => {
+        LinkEvent::Control(WorkerMsg::SessionOpened { request, summary }) => {
+            let session = summary.id;
+            view.update(cx, |v, cx| {
+                v.session_opened(key, summary, cx);
+                v.live_session_opened(key, request, session, cx);
+            });
+        }
+        LinkEvent::Control(WorkerMsg::SessionChanged(summary)) => {
             view.update(cx, |v, cx| v.session_opened(key, summary, cx));
         }
         LinkEvent::Control(WorkerMsg::Failed { request, message, .. }) => {
-            view.update(cx, |v, cx| v.open_failed(key, request, &message, cx));
+            view.update(cx, |v, cx| {
+                v.open_failed(key, request, &message, cx);
+                v.live_open_failed(key, request, &message, cx);
+            });
         }
         LinkEvent::Control(WorkerMsg::Load(load)) => {
             view.update(cx, |v, cx| v.set_worker_load(key, load, cx));

@@ -21,6 +21,7 @@ use slopty_proto::orchestration::{Happening, Outcome};
 use slopty_proto::server::{FromServer, Liveness, Refusal, WorkerCaps};
 use slopty_proto::wire;
 use slopty_ui::workspace::WorkerStatus;
+use slopty_view_proto::ServerPresence;
 
 use crate::net::DialFailed;
 use crate::workers::{WorkerSlot, worker_key};
@@ -92,6 +93,8 @@ pub(crate) const HOLD_RETRY: Duration = Duration::from_secs(10);
 pub(crate) struct ServerSlot {
     /// Where it is.
     address: HostAddr,
+    /// The name it gave when it last linked.
+    name: Option<String>,
     /// The link once it is started; dropping it ends the link and its redials.
     task: Option<ServerTask>,
     /// It answered last on a different build: what to say of it, and what updates it.
@@ -108,7 +111,7 @@ pub(crate) struct ServerSlot {
 impl ServerSlot {
     /// The server at `address`, its link not started: what a test sets to have a server.
     pub(crate) const fn stand_in(address: HostAddr) -> Self {
-        Self { address, task: None, other_build: None, behind: None, caller: None }
+        Self { address, name: None, task: None, other_build: None, behind: None, caller: None }
     }
 
     /// [`Self::stand_in`], the verbs sent to it queued for the test to answer.
@@ -263,6 +266,7 @@ impl Workspace {
         let Some(address) = address else {
             self.directory = Directory::default();
             self.drop_unlisted(&unlisted, cx);
+            self.tell_server_presence();
             return;
         };
         self.directory = Directory::cached(Directory::load(&cache_path(), &address));
@@ -281,12 +285,14 @@ impl Workspace {
         let generation = self.server_generation;
         self.server = Some(ServerSlot {
             address,
+            name: None,
             task: None,
             other_build: None,
             behind: None,
             #[cfg(test)]
             caller: None,
         });
+        self.tell_server_presence();
         cx.spawn(async move |this, cx| {
             let (task, mut events) = match rx.await {
                 Ok(Ok(started)) => started,
@@ -359,6 +365,7 @@ impl Workspace {
                 tracing::info!(%name, link, %build, "server linked");
                 if let Some(slot) = &mut self.server {
                     slot.other_build = None;
+                    slot.name = Some(name.clone());
                 }
                 self.directory.set_server(ServerState::Linked { name, link });
                 self.view.update(cx, |v, cx| v.set_server_status(None, cx));
@@ -392,8 +399,21 @@ impl Workspace {
                 }
             }
         }
+        self.tell_server_presence();
         self.refresh_menu(cx);
         cx.notify();
+    }
+
+    /// Tell the interface the server this app follows: its name (its address until it has
+    /// linked once) and whether the link is up now.
+    pub(crate) fn tell_server_presence(&self) {
+        let presence = self.server.as_ref().map(|slot| ServerPresence {
+            name: slot.name.clone().unwrap_or_else(|| slot.address.host().to_owned()),
+            online: matches!(self.directory.server(), ServerState::Linked { .. }),
+        });
+        if let Some(feed) = &self.interface_feed {
+            feed.server(presence);
+        }
     }
 
     /// The server answers on a different build: the cluster says so (not that it is

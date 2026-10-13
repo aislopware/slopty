@@ -2594,13 +2594,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
             settings::init(settings::UiSettings::default(), dir.path(), cx);
-            crate::history::init(
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                cx,
-            );
+            // slopty: no History surface (ruled out).
             crate::composer::init(cx, ComposerSendBehavior::default());
             apply_keymap(
                 cx,

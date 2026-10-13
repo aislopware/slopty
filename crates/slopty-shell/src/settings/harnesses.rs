@@ -47,6 +47,14 @@ const DETAILS_INSET: f32 = 4.0 + 36.0 + 12.0;
 
 /// Update policies in menu order: the short label, and the note shown under
 /// the row title for the chosen one.
+// slopty: how freely agents act (`[agents] autonomy`): the value, its label, and the note under
+// the row title for the chosen one.
+const AUTONOMY: [(&str, &str, &str); 3] = [
+    ("auto", "Auto", "Each agent's own judgement decides what needs you."),
+    ("full", "Full", "Agents never stop to ask permission."),
+    ("ask", "Ask", "Agents ask before what their harness guards."),
+];
+
 const UPDATE_POLICIES: [(HarnessUpdatePolicy, &str, &str); 3] = [
     (
         HarnessUpdatePolicy::Notify,
@@ -189,6 +197,10 @@ pub struct HarnessesPage {
     /// "Check now" is running: the button says so, since rows no longer
     /// show "Checking…" while a check is in flight.
     checking_updates: bool,
+    // slopty: the person's one autonomy setting (`[agents] autonomy`), its index in AUTONOMY.
+    autonomy: Option<usize>,
+    autonomy_select: widgets::SelectState,
+    autonomy_task: Option<Task<()>>,
 }
 
 impl HarnessesPage {
@@ -213,6 +225,9 @@ impl HarnessesPage {
             update_task: None,
             update_action_task: None,
             checking_updates: false,
+            autonomy: None, // slopty
+            autonomy_select: widgets::SelectState::default(), // slopty
+            autonomy_task: None, // slopty
         };
         page.load(cx);
         page
@@ -326,6 +341,82 @@ impl HarnessesPage {
         )
     }
 
+    // slopty: read `[agents] autonomy`, after writing `set` (an index in AUTONOMY) when given.
+    fn load_autonomy(
+        &mut self,
+        engine: crate::state::EngineHandle,
+        set: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        let (method, params) = match set.and_then(|ix| AUTONOMY.get(ix)) {
+            Some((value, ..)) => (
+                methods::SET_AGENT_SETTINGS,
+                serde_json::json!({ "autonomy": value }),
+            ),
+            None => (methods::GET_AGENT_SETTINGS, serde_json::json!({})),
+        };
+        if set.is_some() {
+            self.autonomy = set;
+        }
+        self.autonomy_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine.client().call(method, params).await;
+            this.update(cx, |page, cx| {
+                match result {
+                    Ok(value) => {
+                        let now = value.get("autonomy").and_then(serde_json::Value::as_str);
+                        page.autonomy = AUTONOMY.iter().position(|(v, ..)| Some(*v) == now);
+                    }
+                    Err(error) => page.error = Some(error.to_string()),
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    // slopty: the Autonomy section under the agents.
+    fn render_autonomy(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let selected = self.autonomy.unwrap_or(0);
+        let select = widgets::select(
+            "agents-autonomy",
+            "Autonomy",
+            theme,
+            |page: &mut Self| &mut page.autonomy_select,
+        )
+        .options(
+            AUTONOMY.iter().map(|(_, label, _)| widgets::SelectOption::new(*label)),
+            selected,
+        )
+        .width(136.0)
+        .on_select(|page, selected, _, cx| {
+            if let Some(engine) = page.state.read(cx).engine().cloned() {
+                page.load_autonomy(engine, Some(selected), cx);
+            }
+        })
+        .render(&self.autonomy_select, cx);
+        let note = AUTONOMY.get(selected).map_or("", |(.., note)| *note);
+        widgets::section(
+            theme,
+            "Autonomy",
+            widgets::section_card(theme).mt_0().child(
+                widgets::card_row(theme, true)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(widgets::row_title(theme, "How freely agents act"))
+                            .child(widgets::meta_line(
+                                theme,
+                                vec![div().child(note).into_any_element()],
+                            )),
+                    )
+                    .child(select),
+            ),
+        )
+        .into_any_element()
+    }
+
     /// Params with the `targetDeviceId` passthrough merged in.
     fn with_target(&self, mut value: serde_json::Value) -> serde_json::Value {
         if let (Some(target), Some(object)) = (&self.target_device, value.as_object_mut()) {
@@ -391,6 +482,7 @@ impl HarnessesPage {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
+        self.load_autonomy(engine.clone(), None, cx); // slopty
         let params = self.with_target(serde_json::json!({}));
         let update_params = params.clone();
         let supports_updates = self.supports_updates(cx);
@@ -1191,6 +1283,7 @@ impl Render for HarnessesPage {
             _ => None,
         };
         let switcher = self.render_device_switcher(&theme, cx);
+        let autonomy = self.render_autonomy(&theme, cx); // slopty
 
         let can_control = self.can_control_updates(cx);
         let check = div()
@@ -1249,7 +1342,8 @@ impl Render for HarnessesPage {
                                         ),
                                 )
                                 .children(update_error)
-                                .child(body),
+                                .child(body)
+                                .child(autonomy), // slopty
                         ),
                 )
                 .fade_overflow_y(&self.scroll.scroll),

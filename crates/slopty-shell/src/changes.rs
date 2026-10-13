@@ -44,15 +44,12 @@ use gpui::{
 };
 use unicode_width::UnicodeWidthChar as _;
 
-use slopty_view_proto::{Chat, CheckoutDiff, GitHistoryCommit};
+use slopty_view_proto::{Chat, CheckoutDiff}; // slopty: no History surface (ruled out)
 use slopty_view_rpc::methods;
 
 use crate::comments::{self, CommentSide, ReviewComment};
 use crate::composer::{ComposerInput, ComposerInputEvent};
-use crate::history::{
-    GitHistory, GitHistoryCount, GitHistoryEvent, GitHistoryFetchButton, GitHistorySearchControl,
-    GitHistoryViewButton,
-};
+
 use crate::markdown::render;
 use crate::motion::{self, AnimationExt as _, CHEVRON, COLLAPSE};
 use crate::popover::{self, Popup};
@@ -878,14 +875,7 @@ pub enum DiffScope {
     Branch,
     /// Changes since the current chat's last turn started.
     LatestTurn,
-    /// Repository commit graph. History owns this scope in its own right-pane
-    /// surface tab; it remains a `Changes` variant so commit rows can open
-    /// their corresponding diff tabs through the existing event path.
-    History,
-    /// One commit's own changes (parent vs commit) — the per-commit tab a
-    /// History row click opens. Never listed in the scope menu
-    /// ([`Self::ALL`]); a commit-pinned pane is born this way and stays.
-    Commit,
+    // slopty: no History surface (ruled out)
 }
 
 impl DiffScope {
@@ -898,8 +888,6 @@ impl DiffScope {
             Self::WorkingTree => "Working tree",
             Self::Branch => "Branch changes",
             Self::LatestTurn => "Latest turn",
-            Self::History => "History",
-            Self::Commit => "Commit",
         }
     }
 
@@ -909,8 +897,6 @@ impl DiffScope {
             Self::WorkingTree => "workingTree",
             Self::Branch => "branch",
             Self::LatestTurn => "turn",
-            Self::History => "history",
-            Self::Commit => "commit",
         }
     }
 }
@@ -925,8 +911,6 @@ pub fn scope_label(scope: DiffScope, count: usize, base: Option<&str>) -> String
             None => format!("{count} Changed {files}"),
         },
         DiffScope::LatestTurn => format!("{count} Changed {files} this turn"),
-        DiffScope::History => "History".to_string(),
-        DiffScope::Commit => format!("{count} Changed {files} in this commit"),
     }
 }
 
@@ -960,8 +944,6 @@ pub fn clean_message(scope: DiffScope, base: Option<&str>) -> String {
             None => "No branch changes".to_string(),
         },
         DiffScope::LatestTurn => "No changes this turn".to_string(),
-        DiffScope::History => "No commits found".to_string(),
-        DiffScope::Commit => "Empty commit".to_string(),
     }
 }
 
@@ -1687,15 +1669,7 @@ pub struct Changes {
     draft: Option<CommentDraft>,
     hover: Option<HoverRow>,
     comment_key: u64,
-    history: Option<Entity<GitHistory>>,
-    history_count: Option<Entity<GitHistoryCount>>,
-    history_search_control: Option<Entity<GitHistorySearchControl>>,
-    history_fetch_button: Option<Entity<GitHistoryFetchButton>>,
-    history_view_button: Option<Entity<GitHistoryViewButton>>,
-    history_events: Option<Subscription>,
-    /// Pinned commit for a [`DiffScope::Commit`] pane (sha + subject drive
-    /// the fetch and the surface-tab title).
-    commit: Option<GitHistoryCommit>,
+    // slopty: no History surface (ruled out)
     _observe: Subscription,
 }
 
@@ -1710,8 +1684,7 @@ pub struct DiscardWorkingTreeRequest {
 }
 
 pub enum ChangesEvent {
-    /// A History row was clicked — open this commit as its own diff tab.
-    OpenCommit(GitHistoryCommit),
+    // slopty: no History surface (ruled out)
     /// Open the post-change path in the workspace file browser.
     OpenFile(String),
     /// The working-tree trash button was clicked. The shell owns the global
@@ -1780,52 +1753,14 @@ impl Changes {
             draft: None,
             hover: None,
             comment_key: 0,
-            history: None,
-            history_count: None,
-            history_search_control: None,
-            history_fetch_button: None,
-            history_view_button: None,
-            history_events: None,
-            commit: None,
             _observe: observe,
         }
     }
 
-    /// A pane pinned to one commit's diff (a History row click) — fetches
-    /// `parent vs commit` once and never offers the scope menu.
-    pub fn for_commit(
-        state: Entity<AppState>,
-        commit: GitHistoryCommit,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let mut changes = Self::new(state, cx);
-        changes.scope = DiffScope::Commit;
-        changes.commit = Some(commit);
-        changes
-    }
+    // slopty: no History surface (ruled out)
 
-    /// A dedicated History surface. It shares the commit-opening event path
-    /// with diffs, but is never offered as an item in a Diff tab's scope menu.
-    pub fn for_history(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
-        let mut changes = Self::new(state, cx);
-        changes.scope = DiffScope::History;
-        changes
-    }
-
-    pub fn is_history(&self) -> bool {
-        self.scope == DiffScope::History
-    }
-
-    /// The surface-tab title (contextual, user request): the pinned commit's
-    /// subject (short sha for subject-less commits), else the scope's label.
+    /// The surface-tab title: the scope's label. // slopty: no History surface (ruled out)
     pub fn tab_title(&self) -> gpui::SharedString {
-        if let Some(commit) = &self.commit {
-            let subject = commit.subject.trim();
-            if !subject.is_empty() {
-                return subject.to_string().into();
-            }
-            return commit.sha.chars().take(7).collect::<String>().into();
-        }
         gpui::SharedString::from(self.scope.label())
     }
 
@@ -1947,8 +1882,7 @@ impl Changes {
     fn active_diff(&self, cx: &App) -> Option<CheckoutDiff> {
         match self.scope {
             DiffScope::WorkingTree => self.resolved(cx),
-            DiffScope::Branch | DiffScope::LatestTurn | DiffScope::Commit => self.scoped.clone(),
-            DiffScope::History => None,
+            DiffScope::Branch | DiffScope::LatestTurn => self.scoped.clone(), // slopty: no History surface (ruled out)
         }
     }
 
@@ -1977,11 +1911,6 @@ impl Changes {
             DiffScope::WorkingTree => "wt".to_string(),
             DiffScope::Branch => format!("br:{}", self.base_ref.as_deref().unwrap_or("")),
             DiffScope::LatestTurn => "turn".to_string(),
-            DiffScope::History => "history".to_string(),
-            DiffScope::Commit => format!(
-                "commit:{}",
-                self.commit.as_ref().map(|c| c.sha.as_str()).unwrap_or("")
-            ),
         }
     }
 
@@ -2062,7 +1991,7 @@ impl Changes {
     /// checksum-only refresh keeps the old diff visible until the new one
     /// lands.
     fn ensure_scoped(&mut self, cx: &mut Context<Self>) {
-        if matches!(self.scope, DiffScope::WorkingTree | DiffScope::History) {
+        if matches!(self.scope, DiffScope::WorkingTree) { // slopty: no History surface (ruled out)
             self.scoped_inflight = None;
             self.scoped_task = None;
             return;
@@ -2085,22 +2014,14 @@ impl Changes {
             },
             _ => None,
         };
-        let commit_sha = match self.scope {
-            DiffScope::Commit => match &self.commit {
-                Some(commit) => Some(commit.sha.clone()),
-                None => return, // a commit pane without its pin never fetches
-            },
-            _ => None,
-        };
         let target = self.desired_target(cx);
         let context = format!(
-            "{}|{}|{}|{}|{}|{}",
+            "{}|{}|{}|{}|{}",
             target.as_deref().unwrap_or("local"),
             chat_id,
             cwd,
             self.scope.mode(),
-            base.as_deref().unwrap_or(""),
-            commit_sha.as_deref().unwrap_or("")
+            base.as_deref().unwrap_or("") // slopty: no commit scope
         );
         let watch_sum = self.resolved(cx).map(|d| d.checksum).unwrap_or_default();
         let key = format!("{context}|{watch_sum}");
@@ -2129,9 +2050,6 @@ impl Changes {
             params.insert("chatId".into(), serde_json::Value::String(chat_id));
             if let Some(base) = base {
                 params.insert("baseRef".into(), serde_json::Value::String(base));
-            }
-            if let Some(sha) = commit_sha {
-                params.insert("commitSha".into(), serde_json::Value::String(sha));
             }
             if let Some(target) = target {
                 params.insert("targetDeviceId".into(), serde_json::Value::String(target));
@@ -2180,90 +2098,13 @@ impl Changes {
     fn set_scope(&mut self, scope: DiffScope, cx: &mut Context<Self>) {
         if self.scope != scope {
             self.scope = scope;
-            self.reset_horizontal_scroll();
-            if scope == DiffScope::History {
-                self.history_pane(cx)
-                    .update(cx, |history, cx| history.ensure_loaded(cx));
-            }
+            self.reset_horizontal_scroll(); // slopty: no History surface (ruled out)
             self.sync(cx);
         }
         cx.notify();
     }
 
-    fn history_pane(&mut self, cx: &mut Context<Self>) -> Entity<GitHistory> {
-        if let Some(history) = &self.history {
-            return history.clone();
-        }
-        let history = cx.new(|cx| GitHistory::new(self.state.clone(), cx));
-        self.history_events =
-            Some(
-                cx.subscribe(&history, |this: &mut Self, _, event, cx| match event {
-                    GitHistoryEvent::OpenCommit(commit) => {
-                        // Bubble to the host — the surface strip opens the tab.
-                        cx.emit(ChangesEvent::OpenCommit(commit.clone()));
-                    }
-                    GitHistoryEvent::FetchSucceeded => {
-                        // Remote refs affect branch choices and every scoped diff
-                        // based on a ref. Force fresh reads after the engine has
-                        // also kicked its checkout-status watcher.
-                        this.branches_for = None;
-                        this.scoped_for = None;
-                        this.scoped_inflight = None;
-                        this.scoped_task = None;
-                        this.ensure_branches(cx);
-                        if this.scope != DiffScope::History {
-                            this.ensure_scoped(cx);
-                        }
-                        cx.notify();
-                    }
-                }),
-            );
-        self.history = Some(history.clone());
-        history
-    }
-
-    fn history_count(&mut self, cx: &mut Context<Self>) -> Entity<GitHistoryCount> {
-        if let Some(count) = &self.history_count {
-            return count.clone();
-        }
-        let history = self.history_pane(cx);
-        let count = cx.new(|cx| GitHistoryCount::new(history, cx));
-        self.history_count = Some(count.clone());
-        count
-    }
-
-    fn history_fetch_button(&mut self, cx: &mut Context<Self>) -> Entity<GitHistoryFetchButton> {
-        if let Some(button) = &self.history_fetch_button {
-            return button.clone();
-        }
-        let history = self.history_pane(cx);
-        let button = cx.new(|cx| GitHistoryFetchButton::new(history, cx));
-        self.history_fetch_button = Some(button.clone());
-        button
-    }
-
-    fn history_search_control(
-        &mut self,
-        cx: &mut Context<Self>,
-    ) -> Entity<GitHistorySearchControl> {
-        if let Some(control) = &self.history_search_control {
-            return control.clone();
-        }
-        let history = self.history_pane(cx);
-        let control = cx.new(|cx| GitHistorySearchControl::new(history, cx));
-        self.history_search_control = Some(control.clone());
-        control
-    }
-
-    fn history_view_button(&mut self, cx: &mut Context<Self>) -> Entity<GitHistoryViewButton> {
-        if let Some(button) = &self.history_view_button {
-            return button.clone();
-        }
-        let history = self.history_pane(cx);
-        let button = cx.new(|cx| GitHistoryViewButton::new(history, cx));
-        self.history_view_button = Some(button.clone());
-        button
-    }
+    // slopty: no History surface (ruled out)
 
     fn set_base_ref(&mut self, base: String, cx: &mut Context<Self>) {
         if self.base_ref.as_deref() != Some(base.as_str()) {
@@ -2286,14 +2127,7 @@ impl Changes {
         // The watch follows the selected chat's host device (idempotent when
         // the target is unchanged); a boot-deferred attempt retries here too.
         self.ensure_watch(cx);
-        if self.scope == DiffScope::History {
-            self.history_pane(cx)
-                .update(cx, |history, cx| history.ensure_loaded(cx));
-            return;
-        }
-        if self.scope != DiffScope::Commit {
-            self.ensure_branches(cx);
-        }
+        self.ensure_branches(cx); // slopty: no History surface (ruled out)
         self.ensure_scoped(cx);
         let Some(diff) = self.active_diff(cx) else {
             if self.parsed.take().is_some() {
@@ -3121,9 +2955,6 @@ impl Changes {
             .map(|chat| chat.id.clone());
         let mode = self.scope.mode().to_string();
         let base_ref = self.base_ref.clone();
-        let commit_sha = (self.scope == DiffScope::Commit)
-            .then(|| self.commit.as_ref().map(|commit| commit.sha.clone()))
-            .flatten();
         let fetch_file = file.clone();
         let fetch_path = path.clone();
         let fetch_task = match (active, engine) {
@@ -3135,7 +2966,7 @@ impl Changes {
                     mode,
                     base_ref,
                     chat_id,
-                    commit_sha,
+                    commit_sha: None, // slopty: no History surface (ruled out)
                     diff_checksum: diff.checksum,
                 };
                 let mut params = serde_json::to_value(request)
@@ -3803,71 +3634,8 @@ impl Changes {
     /// alongside, shell-owned (they mutate shell state).
     pub fn render_header_controls(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
-        // Commit-pinned pane: the pin never changes, so a fixed identity
-        // chip (mono short sha + subject) replaces the scope dropdown;
-        // fold-all still trails.
-        if let Some(commit) = self.commit.clone() {
-            let short: String = commit.sha.chars().take(7).collect();
-            return div()
-                .size_full()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(crate::surface_chrome::CONTROL_GAP))
-                .child(
-                    div()
-                        .flex_none()
-                        .h(px(crate::surface_chrome::CONTROL_SIZE))
-                        .px(px(6.0))
-                        .rounded(px(crate::surface_chrome::CONTROL_RADIUS))
-                        .flex()
-                        .items_center()
-                        .bg(crate::theme::ink(0.05))
-                        .font_family(theme.font_mono.clone())
-                        .text_size(px(10.5))
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from(short)),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .text_size(px(12.0))
-                        .text_color(theme.text)
-                        .child(SharedString::from(commit.subject.clone())),
-                )
-                .child(self.split_toggle(&theme, cx))
-                .child(self.wrap_toggle(&theme, cx))
-                .child(
-                    Self::header_button(
-                        "changes-fold-all",
-                        crate::icons::FOLD_VERTICAL,
-                        self.fold_all_label(),
-                        &theme,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        cx.stop_propagation();
-                        this.toggle_collapse_all(cx);
-                    })),
-                )
-                .into_any_element();
-        }
+        // slopty: no History surface (ruled out)
         let scope = self.scope;
-        let history_branch = (scope == DiffScope::History).then(|| {
-            self.state
-                .read(cx)
-                .selected_chat_row()
-                .and_then(|chat| chat.branch.clone())
-                .unwrap_or_else(|| "HEAD".to_string())
-        });
-        let history_count = (scope == DiffScope::History).then(|| self.history_count(cx));
-        let history_search_control =
-            (scope == DiffScope::History).then(|| self.history_search_control(cx));
-        let history_fetch_button =
-            (scope == DiffScope::History).then(|| self.history_fetch_button(cx));
-        let history_view_button =
-            (scope == DiffScope::History).then(|| self.history_view_button(cx));
         let scope_trigger = div()
             .id("changes-scope-trigger")
             .h(px(crate::surface_chrome::CONTROL_SIZE))
@@ -3914,26 +3682,8 @@ impl Changes {
                     .size(px(12.0))
                     .text_color(theme.text_muted.opacity(0.7)),
             );
-        let trigger = if scope == DiffScope::History {
-            // The tab already identifies this as History; use the fixed title
-            // slot for the current branch instead of repeating the surface name.
-            div()
-                .id("history-surface-title")
-                .min_w_0()
-                .max_w(px(160.0))
-                .truncate()
-                .h(px(crate::surface_chrome::CONTROL_SIZE))
-                .px(px(8.0))
-                .flex_shrink(1.0)
-                .flex()
-                .items_center()
-                .font_family(theme.font_mono.clone())
-                .text_size(px(11.5))
-                .line_height(px(14.0))
-                .text_color(theme.text_dim)
-                .child(SharedString::from(history_branch.unwrap_or_default()))
-                .into_any_element()
-        } else if self.scope_menu.get().is_some() {
+        // slopty: no History surface (ruled out)
+        let trigger = if self.scope_menu.get().is_some() {
             let closing = self.scope_menu.closing_since();
             let menu = self.render_scope_menu(&theme, cx);
             scope_trigger
@@ -3949,54 +3699,14 @@ impl Changes {
             scope_trigger.into_any_element()
         };
 
-        let trailing: AnyElement = if scope == DiffScope::History {
-            div()
-                .min_w_0()
-                .flex_shrink(1.0)
-                .flex()
-                .items_center()
-                .gap(px(crate::surface_chrome::CONTROL_GAP))
-                .children(history_search_control)
-                .children(history_fetch_button)
-                .children(history_view_button)
-                .child(
-                    Self::header_button(
-                        "history-refresh",
-                        crate::icons::REFRESH,
-                        "Refresh",
-                        &theme,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        cx.stop_propagation();
-                        this.history_pane(cx)
-                            .update(cx, |history, cx| history.refresh(cx));
-                    })),
-                )
-                .into_any_element()
-        } else {
-            let discard = self.discard_request(cx);
-            let discard_enabled = discard.is_some();
-            let discard_button = Self::header_button(
-                "changes-discard-working-tree",
-                crate::icons::TRASH_BIN_MINIMALISTIC,
-                "Discard changes",
-                &theme,
-            )
-            .when(!discard_enabled, |button| button.opacity(0.35))
-            .when_some(discard, |button, request| {
-                button.on_click(cx.listener(move |_, _, _, cx| {
-                    cx.stop_propagation();
-                    cx.emit(ChangesEvent::DiscardWorkingTree(request.clone()));
-                }))
-            });
+        // slopty: no History surface (ruled out)
+        let trailing: AnyElement = {
+            // slopty: no Discard changes: the person reviews, agents fix (ruled out).
             div()
                 .flex_none()
                 .flex()
                 .items_center()
                 .gap(px(crate::surface_chrome::CONTROL_GAP))
-                .when(scope == DiffScope::WorkingTree, |element| {
-                    element.child(discard_button)
-                })
                 .child(self.split_toggle(&theme, cx))
                 .child(self.wrap_toggle(&theme, cx))
                 .child(
@@ -4021,22 +3731,8 @@ impl Changes {
             .items_center()
             .gap(px(crate::surface_chrome::CONTROL_GAP))
             .child(trigger)
-            .when_some(history_count, |element, count| {
-                element.child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .h(px(crate::surface_chrome::CONTROL_SIZE))
-                        .flex()
-                        .items_center()
-                        .child(count),
-                )
-            })
             .children(self.render_ref_selector(&theme, cx))
-            .when(scope != DiffScope::History, |element| {
-                element.child(div().flex_1())
-            })
+            .child(div().flex_1()) // slopty: no History surface (ruled out)
             .child(trailing)
             .into_any_element()
     }
@@ -4968,11 +4664,7 @@ fn render_file_body_upto(
 
 impl Render for Changes {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.scope == DiffScope::History {
-            let history = self.history_pane(cx);
-            history.update(cx, |history, cx| history.ensure_loaded(cx));
-            return div().size_full().child(history).into_any_element();
-        }
+        // slopty: no History surface (ruled out)
         let theme = Theme::of(cx).clone();
         let active = self.active_diff(cx);
         let scope = self.scope;
@@ -6182,7 +5874,8 @@ rename to new_name.rs
     }
 
     #[test]
-    fn diff_scope_menu_keeps_history_as_a_separate_surface() {
+    // slopty: no History surface (ruled out)
+    fn diff_scope_menu_offers_three_scopes() {
         assert_eq!(
             DiffScope::ALL,
             [
@@ -6191,7 +5884,6 @@ rename to new_name.rs
                 DiffScope::LatestTurn,
             ]
         );
-        assert!(!DiffScope::ALL.contains(&DiffScope::History));
     }
 
     #[test]

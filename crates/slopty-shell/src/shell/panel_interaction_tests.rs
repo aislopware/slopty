@@ -9,13 +9,7 @@ fn setup(cx: &mut TestAppContext) -> (tempfile::TempDir, Entity<Shell>, &mut Vis
         gpui_base::init(cx);
         cx.set_global(Theme::default());
         crate::app_menus::init(cx);
-        crate::history::init(
-            Default::default(),
-            Default::default(),
-            Default::default(),
-            Default::default(),
-            cx,
-        );
+        // slopty: no History surface (ruled out).
         let mut config = UiSettings::default();
         config.sidebar_width = 300.0;
         config.files_panel_width = 377.0;

@@ -7,8 +7,9 @@ publish.workspace = true
 
 # slopty: the data comes from Slopty's view model (`slopty-ui::view_model`) through the
 # `RpcService` installed as `EngineService`. Voice, dictation, the orb, appshots, the updater,
-# sign-in, sync, agent accounts, the pull-request pages, the examples and the Linux and Windows
-# browser hosts are not taken (docs/decisions/ui.md), nor the dependencies only they used.
+# sign-in, sync, agent accounts, the pull-request pages, Git History, the terminal emulator
+# (Slopty's terminals are libghostty's), the examples and the Linux and Windows browser hosts are
+# not taken (docs/decisions/ui.md), nor the dependencies only they used.
 
 [dependencies]
 slopty-veil = { path = "../slopty-veil" }
@@ -35,7 +36,6 @@ image = { version = "0.25.10", default-features = false, features = ["png", "jpe
 usvg = "0.46"
 mermaid-rs-renderer = { version = "=0.3.1", default-features = false }
 unicode-segmentation = "1"
-alacritty_terminal = "0.26"
 unicode-width = "0.2"
 fontdb = "0.23"
 ttf-parser = "0.25.1"

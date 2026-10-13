@@ -141,11 +141,7 @@ pub mod methods {
     pub const CREATE_REPO: &str = "CreateRepo";
     pub const LIST_BRANCHES: &str = "ListBranches";
     pub const LIST_REFS: &str = "ListRefs";
-    pub const LIST_GIT_HISTORY: &str = "ListGitHistory";
-    /// Fuzzy commit-subject / SHA search over the complete public history.
-    pub const SEARCH_GIT_HISTORY: &str = "SearchGitHistory";
-    /// Resolve hosted profile images for a page of Git commit authors.
-    pub const RESOLVE_GIT_AVATARS: &str = "ResolveGitAvatars";
+    // slopty: no History surface (ruled out).
     /// Update remote-tracking refs without changing HEAD, the index, or files.
     pub const FETCH_ALL: &str = "FetchAll";
     pub const SWITCH_REF: &str = "SwitchRef";
@@ -233,6 +229,10 @@ pub mod methods {
     pub const CANCEL_HARNESS_UPDATE: &str = "CancelHarnessUpdate";
     pub const DISMISS_HARNESS_UPDATE: &str = "DismissHarnessUpdate";
     pub const SET_HARNESS_UPDATE_POLICY: &str = "SetHarnessUpdatePolicy";
+    // slopty: the person's one setting for how freely agents act, `[agents] autonomy` in
+    // Slopty's settings: `{ "autonomy": "auto" | "full" | "ask" }` read and written.
+    pub const GET_AGENT_SETTINGS: &str = "GetAgentSettings";
+    pub const SET_AGENT_SETTINGS: &str = "SetAgentSettings";
 }
 
 /// Stable capability error codes transported without provider stderr.

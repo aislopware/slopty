@@ -924,6 +924,20 @@ fn apply(
             }
             Reply::Ok
         }
+        Command::Appearance { dark } => {
+            use slopty_shell::appearance::{AppearanceMode, set_mode};
+            set_mode(if dark { AppearanceMode::Dark } else { AppearanceMode::Light }, cx);
+            window.refresh();
+            Reply::Ok
+        }
+        Command::Surface { frosted } => {
+            use slopty_shell_theme::SurfacePreference;
+            let surface =
+                if frosted { SurfacePreference::Frosted } else { SurfacePreference::Opaque };
+            slopty_shell::appearance::set_surface(surface, cx);
+            window.refresh();
+            Reply::Ok
+        }
         Command::Dump
         | Command::PushRegister { .. }
         | Command::OpenPush { .. }
@@ -1007,10 +1021,11 @@ fn render(window: &mut Window, cx: &mut App, path: &str, scale: Option<f32>) -> 
         Some(scale) => window.render_to_image_at(scale, cx),
         None => window.render_to_image(),
     };
-    let image = match image {
+    let mut image = match image {
         Ok(image) => image,
         Err(e) => return Reply::Error { message: format!("render: {e:#}") },
     };
+    over_backdrop(&mut image);
     let stale = stale(window, cx);
     let (width, height) = image.dimensions();
     if let Err(e) = image.save(path) {
@@ -1038,6 +1053,25 @@ fn render(window: &mut Window, cx: &mut App, path: &str, scale: Option<f32>) -> 
             }
             Reply::Error { message: format!("the frame drawn is stale ({scratch}): {stale}") }
         }
+    }
+}
+
+/// What a render shows behind a window that lets its backdrop through (frosted surfaces): a fixed
+/// slate, where on a Mac the desktop would be, so a frosted frame is the same on every machine.
+#[cfg(feature = "e2e")]
+const BACKDROP: [u8; 3] = [72, 96, 128];
+
+/// Composite `image`, whose colours are premultiplied by their alpha as GPUI draws them, over
+/// [`BACKDROP`]: every pixel comes out opaque, and an opaque one unchanged.
+#[cfg(feature = "e2e")]
+fn over_backdrop(image: &mut image::RgbaImage) {
+    for pixel in image.pixels_mut() {
+        let clear = 255 - u16::from(pixel[3]);
+        for (channel, backdrop) in pixel.0.iter_mut().zip(BACKDROP) {
+            let under = (clear * u16::from(backdrop) + 127) / 255;
+            *channel = u8::try_from(u16::from(*channel) + under).unwrap_or(u8::MAX);
+        }
+        pixel[3] = u8::MAX;
     }
 }
 

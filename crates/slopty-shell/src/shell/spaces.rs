@@ -226,13 +226,7 @@ mod pinned_session_tests {
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
-            crate::history::init(
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                cx,
-            );
+            // slopty: no History surface (ruled out).
         });
         cx.add_window(|_, cx| {
             let state = cx.new(|_| AppState::new());
@@ -1215,13 +1209,7 @@ mod pinned_session_tests {
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
-            crate::history::init(
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                cx,
-            );
+            // slopty: no History surface (ruled out).
         });
         let (host, cx) = cx.add_window_view(|_, cx| {
             SidebarHost(cx.new(|cx| {
@@ -1717,13 +1705,7 @@ mod pinned_session_tests {
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
-            crate::history::init(
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                cx,
-            );
+            // slopty: no History surface (ruled out).
         });
         let (host, cx) = cx.add_window_view(|_, cx| {
             SidebarHost(cx.new(|cx| {
@@ -8213,15 +8195,7 @@ mod home_folder_search_tests {
             (r"\\server\share\Ana", r"\\?\UNC\server\share\Ana"),
         ] {
             let (window, _dir, mut engine) = picker(cx, "remote");
-            cx.update(|cx| {
-                crate::history::init(
-                    Default::default(),
-                    Default::default(),
-                    Default::default(),
-                    Default::default(),
-                    cx,
-                );
-            });
+            // slopty: no History surface (ruled out).
             engine.listing["path"] = home.into();
             go_home(window, cx);
             let warm = engine.take(methods::SEARCH_HOME_FOLDERS, cx);

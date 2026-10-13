@@ -1,18 +1,16 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
-//! Terminal panel (feature-inventory §1.10): an `alacritty_terminal`-backed
-//! emulator fed by the engine's PTY stream over the generic RPC client.
+//! Terminal panel (feature-inventory §1.10).
 //!
-//! - [`emulator`] — pure Term + vte state machine (bytes in, grid out);
-//! - [`view`] — cell palette, keystroke→bytes encoding, input coalescing, and
-//!   the custom grid-painting element;
-//! - [`panel`] — session-scoped tabs, subscriptions with reconnect backoff,
-//!   drag-reorder, and the Cmd/Ctrl+J toggle action.
+//! slopty: each tab shows Slopty's own terminal view of a session ([`crate::live`]);
+//! upstream's `alacritty_terminal` emulator is not taken.
+//!
+//! - [`view`] — the font metrics, padding and panel fill;
+//! - [`panel`] — session-scoped tabs, drag-reorder, and the Cmd/Ctrl+J toggle action.
 //!
 //! Method names come from `slopty_view_rpc::methods` and wire types from
-//! `slopty_view_proto` (`TerminalSession`, `TerminalEvent`) — the same contract the
-//! engine serves (feature-inventory §2.1).
+//! `slopty_view_proto` (`TerminalSession`) — the same contract the engine serves
+//! (feature-inventory §2.1).
 
 pub(crate) mod dock;
-pub mod emulator;
 pub mod panel;
 pub mod view;

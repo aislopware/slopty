@@ -126,7 +126,7 @@ impl BrowserSurface {
                     .child(subtitle),
             );
         for service in &snapshot.services {
-            let url = service.url(snapshot.proxy_port);
+            let url = super::preview_url(service, snapshot.proxy_port); // slopty: forwards
             let row_url = url.clone();
             let border_strong = theme.border_strong;
             let label = if snapshot.remote {

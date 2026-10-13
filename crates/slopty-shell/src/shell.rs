@@ -90,6 +90,7 @@ pub(crate) mod spaces;
 mod thread_search;
 use side_chats::SideChatTab;
 mod tabs;
+mod live_surfaces; // slopty: remote window and desktop surfaces
 // slopty: voice removed.
 
 use spaces::{AddSpaceFlow, RenameSpaceDialog};
@@ -702,6 +703,7 @@ pub enum RightSurface {
     /// keys [`Shell::subagent_tabs`].
     Subagent(u64),
     SideChat(u64),
+    Screen(u64), // slopty: a remote window or desktop (`live_surfaces`)
 }
 
 fn push_unique_right_surface(tabs: &mut Vec<RightSurface>, surface: RightSurface) -> bool {
@@ -1557,27 +1559,17 @@ enum DiscardWorkingTreeFlow {
 /// The sidebar footer's profile label and the account menu's identity line.
 /// Anything without a signed-in account reads "Local"; the menu carries the
 /// storage/sync detail.
-fn sidebar_account_identity(
-    scope: Option<WorkspaceScope>,
-    user: Option<&slopty_view_proto::UserProfile>,
-) -> (SharedString, SharedString) {
-    match scope {
-        Some(WorkspaceScope::Local) => ("Local".into(), "Stored on this device".into()), // slopty: no accounts, sync or sign-in.
-        Some(WorkspaceScope::Development) => {
-            ("Development".into(), "Authentication disabled".into())
+// slopty: the foot names the server this client follows, not an account: its name, a line
+// saying whether the link is up, and that state for the avatar's dot (`None` without a server).
+fn sidebar_server_identity(
+    server: Option<&slopty_view_proto::ServerPresence>,
+) -> (SharedString, SharedString, Option<bool>) {
+    match server {
+        Some(server) => {
+            let line = if server.online { "Connected" } else { "Offline" };
+            (server.name.clone().into(), line.into(), Some(server.online))
         }
-        Some(WorkspaceScope::Synced) | None => match user {
-            Some(user) => {
-                let name = user
-                    .name
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|name| !name.is_empty())
-                    .unwrap_or(&user.email);
-                (name.to_owned().into(), user.email.clone().into())
-            }
-            None => ("Local".into(), "Not signed in".into()),
-        },
+        None => ("No server".into(), "Not following a server".into(), None),
     }
 }
 
@@ -2985,6 +2977,7 @@ impl Shell {
                         browser.page.url.clone().map(Into::into),
                     )
                 }),
+                RightSurface::Screen(id) => self.screen_surface_row(*id, cx), // slopty:
                 RightSurface::Picker => None,
             })
             .collect()
@@ -3035,6 +3028,7 @@ impl Shell {
             | RightSurface::Terminal(_)
             | RightSurface::SideChat(_)
             | RightSurface::Subagent(_)
+            | RightSurface::Screen(_) // slopty:
             | RightSurface::Browser(_) => {
                 return None;
             }
@@ -3177,6 +3171,7 @@ impl Shell {
                 }
             }
             RightSurface::Subagent(_) | RightSurface::Browser(_) => {}
+            RightSurface::Screen(id) => self.focus_screen_surface(id, cx), // slopty:
             RightSurface::Picker => {}
         }
         self.sync_explorer_selection(cx);
@@ -3699,24 +3694,7 @@ impl Shell {
         cx.notify();
     }
 
-    /// The dedicated History surface. Keeping it as its own tab preserves its
-    /// graph/search state while Diff tabs retain their ordinary scope picker.
-    fn add_history_surface(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let history = cx.new(|cx| Changes::for_history(self.state.clone(), cx));
-        self.register_diff_surface(history, window, cx);
-    }
-
-    /// A History row click: the commit opens as its own pinned diff tab
-    /// (user request).
-    fn add_commit_diff_surface(
-        &mut self,
-        commit: slopty_view_proto::GitHistoryCommit,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let changes = cx.new(|cx| Changes::for_commit(self.state.clone(), commit, cx));
-        self.register_diff_surface(changes, window, cx);
-    }
+    // slopty: no History surface (ruled out).
 
     fn register_diff_surface(
         &mut self,
@@ -3731,9 +3709,7 @@ impl Shell {
                 &changes,
                 window,
                 |this: &mut Self, _, event, window, cx| match event {
-                    ChangesEvent::OpenCommit(commit) => {
-                        this.add_commit_diff_surface(commit.clone(), window, cx);
-                    }
+                    // slopty: no History surface (ruled out).
                     ChangesEvent::OpenFile(path) => {
                         this.add_file_surface(path.clone(), window, cx);
                     }
@@ -4019,6 +3995,7 @@ impl Shell {
                         .update(cx, |s, _| s.unwatch_subagent_doc(&tab.doc_id));
                 }
             }
+            RightSurface::Screen(id) => self.close_screen_surface(id, cx), // slopty:
             RightSurface::Picker => {}
         }
         self.close_empty_right_pane(&key, cx);
@@ -4392,10 +4369,7 @@ impl Shell {
     /// store owns the single debounce task and the only production writer.
     fn schedule_save(&mut self, cx: &mut Context<Self>) {
         self.settings.appearance = crate::appearance::mode(cx);
-        self.settings.git_history_columns = crate::history::configured_columns(cx);
-        self.settings.git_history_column_widths = crate::history::configured_column_widths(cx);
-        self.settings.git_history_column_order = crate::history::configured_column_order(cx);
-        self.settings.git_history_author_display = crate::history::configured_author_display(cx);
+        // slopty: no History surface (ruled out).
         self.settings.theme_selection = crate::appearance::themes(cx);
         self.settings.accent = crate::appearance::accent(cx);
         self.settings.surface = crate::appearance::surface(cx);
@@ -8126,17 +8100,18 @@ impl Shell {
     // slopty: no pull-request pages.
 
     fn render_sidebar_footer(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let (user_line, menu_identity) = {
+        let (user_line, menu_identity, online) = {
             let state = self.state.read(cx);
-            sidebar_account_identity(state.workspace_scope, state.auth_user())
+            sidebar_server_identity(state.connectivity.server.as_ref()) // slopty: the server, not an account.
         };
-        self.render_user_menu(user_line, menu_identity, theme, cx)
+        self.render_user_menu(user_line, menu_identity, online, theme, cx)
     }
 
     fn render_user_menu(
         &mut self,
         user_line: SharedString,
         menu_identity: SharedString,
+        online: Option<bool>, // slopty: the server's link, as the avatar's dot.
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -8157,7 +8132,7 @@ impl Shell {
             .id("user-menu")
             .debug_selector(|| "user-menu".into())
             .role(gpui::Role::Button)
-            .aria_label(format!("Account menu: {user_line}"))
+            .aria_label(format!("Server: {user_line}, {menu_identity}")) // slopty: the server, not an account.
             .aria_expanded(open)
             .tab_index(0)
             .focus_visible(|s| s.border_2().border_color(theme.accent))
@@ -8222,7 +8197,20 @@ impl Shell {
                     .line_height(px(SIDEBAR_FOOTER_AVATAR_SIZE))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(theme.bg)
-                    .child(div().w_full().text_center().child(initial)),
+                    .child(div().w_full().text_center().child(initial))
+                    // slopty: the server's link: green while it is up, muted while it is down.
+                    .relative()
+                    .children(online.map(|online| {
+                        div()
+                            .absolute()
+                            .right(px(-2.0))
+                            .bottom(px(-2.0))
+                            .size(px(7.0))
+                            .rounded_full()
+                            .border_1()
+                            .border_color(theme.bg)
+                            .bg(if online { theme.success } else { theme.text_muted })
+                    })),
             )
             .child(sidebar_faded_label(
                 "user-menu-label".into(),
@@ -9688,6 +9676,7 @@ impl Shell {
                         .children(pill)
                         .into_any_element()
                 }
+                RightSurface::Screen(id) => self.render_screen_surface(id, cx), // slopty:
                 _ => self.render_surface_picker(cx),
             }
         } else {
@@ -9761,6 +9750,8 @@ impl Shell {
         let row = |id: &'static str, icon_path: &'static str, title: &'static str| {
             div()
                 .id(id)
+                .role(gpui::Role::Button) // slopty: named for a screen reader
+                .aria_label(title)
                 .w_full()
                 .h(px(44.0))
                 .px(px(14.0))
@@ -9809,6 +9800,12 @@ impl Shell {
                             }),
                         ),
                     )
+                    // slopty: a remote window or desktop of the chat's machine.
+                    .child(
+                        row("surface-card-screen", icons::MONITOR, "Remote window").on_click(
+                            cx.listener(|this, _, _, cx| this.add_screen_surface(cx)),
+                        ),
+                    )
                     // Git surfaces only where there IS git — the pane itself
                     // no longer gates on it (terminals work anywhere).
                     .when(self.space_git_detected(cx), |el| {
@@ -9817,13 +9814,7 @@ impl Shell {
                                 this.add_diff_surface(window, cx);
                             }),
                         ))
-                        .child(
-                            row("surface-card-history", icons::GIT_BRANCH, "History").on_click(
-                                cx.listener(|this, _, window, cx| {
-                                    this.add_history_surface(window, cx);
-                                }),
-                            ),
-                        )
+                        // slopty: no History surface (ruled out).
                     }),
             )
             .into_any_element()
@@ -9923,21 +9914,12 @@ impl Shell {
             let file_identity_path = detail.as_ref().cloned().unwrap_or_else(|| title.clone());
             let icon_path = match surface {
                 RightSurface::File(_) => icons::DOCUMENT,
-                RightSurface::Diff(id) => self
-                    .diffs
-                    .get(&id)
-                    .map(|changes| {
-                        if changes.read(cx).is_history() {
-                            icons::GIT_BRANCH
-                        } else {
-                            icons::LIST
-                        }
-                    })
-                    .unwrap_or(icons::LIST),
+                RightSurface::Diff(_) => icons::LIST, // slopty: no History surface (ruled out).
                 RightSurface::SideChat(_) => icons::CHAT_ROUND_LINE,
                 RightSurface::Subagent(_) => icons::BOT,
                 RightSurface::Terminal(_) => icons::TERMINAL,
                 RightSurface::Browser(_) => icons::GLOBE,
+                RightSurface::Screen(_) => icons::MONITOR, // slopty:
                 RightSurface::Picker => icons::PLUS,
             };
             // A live subagent tab swaps its icon for the mini working
@@ -10328,20 +10310,7 @@ impl Shell {
                                     )
                                     .child(SharedString::from("Diffs")),
                             )
-                            .child(
-                                popover::menu_row(&theme, false, "right-plus-history")
-                                    .id("right-plus-history-row")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.add_history_surface(window, cx);
-                                        this.close_right_plus(cx);
-                                    }))
-                                    .child(
-                                        icon(icons::GIT_BRANCH)
-                                            .size(px(13.0))
-                                            .text_color(theme.text_muted),
-                                    )
-                                    .child(SharedString::from("History")),
-                            )
+                            // slopty: no History surface (ruled out).
                         }),
                 )
                 .into_any_element();
@@ -12214,27 +12183,21 @@ mod tests {
 
     // slopty: no accounts, sync or sign-in.
 
+    // slopty: the foot names the server this client follows.
     #[test]
-    fn sidebar_footer_names_the_account_or_falls_back_to_local() {
-        let named = slopty_view_proto::UserProfile {
-            id: "u".into(),
-            email: "wing@example.com".into(),
-            name: Some("Wing".into()),
-        };
-        let unnamed = slopty_view_proto::UserProfile {
-            name: Some("  ".into()),
-            ..named.clone()
-        };
-        let label = |scope, user| sidebar_account_identity(scope, user).0; // slopty: no accounts, sync or sign-in.
-        assert_eq!(label(Some(WorkspaceScope::Synced), Some(&named)), "Wing");
+    fn sidebar_footer_names_the_server_and_its_link() {
+        let server = |online| slopty_view_proto::ServerPresence { name: "studio".into(), online };
+        let up = server(true);
+        let down = server(false);
         assert_eq!(
-            label(Some(WorkspaceScope::Synced), Some(&unnamed)),
-            "wing@example.com"
+            sidebar_server_identity(Some(&up)),
+            ("studio".into(), "Connected".into(), Some(true))
         );
-        assert_eq!(label(None, None), "Local");
-        assert_eq!(label(Some(WorkspaceScope::Synced), None), "Local");
-        // Local-only storage stays "Local" even with a cached profile.
-        assert_eq!(label(Some(WorkspaceScope::Local), Some(&named)), "Local");
+        assert_eq!(
+            sidebar_server_identity(Some(&down)),
+            ("studio".into(), "Offline".into(), Some(false))
+        );
+        assert_eq!(sidebar_server_identity(None).2, None);
     }
 
     // slopty: no accounts, sync or sign-in.
@@ -12722,13 +12685,7 @@ mod exit_regressions {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
             settings::init(settings::UiSettings::default(), dir.path(), cx);
-            crate::history::init(
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                cx,
-            );
+            // slopty: no History surface (ruled out).
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
@@ -12767,13 +12724,7 @@ mod exit_regressions {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
             settings::init(settings::UiSettings::default(), dir.path(), cx);
-            crate::history::init(
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                cx,
-            );
+            // slopty: no History surface (ruled out).
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
@@ -12874,13 +12825,7 @@ mod exit_regressions {
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
-            crate::history::init(
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                cx,
-            );
+            // slopty: no History surface (ruled out).
             settings::init(settings::UiSettings::default(), dir.path(), cx);
         });
         let window = cx.add_window(|_, cx| {
@@ -13012,13 +12957,7 @@ mod exit_regressions {
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
-            crate::history::init(
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                cx,
-            );
+            // slopty: no History surface (ruled out).
             settings::init(settings::UiSettings::default(), dir.path(), cx);
         });
         let window = cx.add_window(|_, cx| {
@@ -13077,13 +13016,7 @@ mod exit_regressions {
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
-            crate::history::init(
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                cx,
-            );
+            // slopty: no History surface (ruled out).
             settings::init(settings::UiSettings::default(), dir.path(), cx);
         });
         let window = cx.add_window(|_, cx| {
@@ -13145,13 +13078,7 @@ mod exit_regressions {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
             settings::init(settings::UiSettings::default(), dir.path(), cx);
-            crate::history::init(
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                cx,
-            );
+            // slopty: no History surface (ruled out).
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
@@ -13191,13 +13118,7 @@ mod exit_regressions {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
             settings::init(settings::UiSettings::default(), dir.path(), cx);
-            crate::history::init(
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                cx,
-            );
+            // slopty: no History surface (ruled out).
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
@@ -13314,13 +13235,7 @@ mod exit_regressions {
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
-            crate::history::init(
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                cx,
-            );
+            // slopty: no History surface (ruled out).
             settings::init(settings::UiSettings::default(), dir.path(), cx);
         });
         let window = cx.add_window(|_, cx| {
@@ -13395,13 +13310,7 @@ mod exit_regressions {
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
-            crate::history::init(
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                cx,
-            );
+            // slopty: no History surface (ruled out).
             settings::init(settings::UiSettings::default(), dir.path(), cx);
         });
         let window = cx.add_window(|_, cx| {
@@ -13472,13 +13381,7 @@ mod exit_regressions {
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
-            crate::history::init(
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                cx,
-            );
+            // slopty: no History surface (ruled out).
             settings::init(settings::UiSettings::default(), dir.path(), cx);
         });
         let window = cx.add_window(|_, cx| {
@@ -13540,13 +13443,7 @@ mod exit_regressions {
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
-            crate::history::init(
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                cx,
-            );
+            // slopty: no History surface (ruled out).
             settings::init(settings::UiSettings::default(), dir.path(), cx);
         });
         let window = cx.add_window(|_, cx| {
@@ -13617,13 +13514,7 @@ mod exit_regressions {
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
-            crate::history::init(
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                cx,
-            );
+            // slopty: no History surface (ruled out).
             settings::init(settings::UiSettings::default(), dir.path(), cx);
         });
         let window = cx.add_window(|_, cx| {
@@ -13812,13 +13703,7 @@ mod exit_regressions {
         std::fs::create_dir_all(outside.parent().unwrap()).unwrap();
         std::fs::write(&outside, "# Informe\n").unwrap();
         cx.update(|cx| {
-            crate::history::init(
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                cx,
-            );
+            // slopty: no History surface (ruled out).
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
@@ -14903,13 +14788,7 @@ mod settings_modal_regressions {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
             settings::init(settings::UiSettings::default(), dir.path(), cx);
-            crate::history::init(
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                cx,
-            );
+            // slopty: no History surface (ruled out).
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
@@ -14959,13 +14838,7 @@ mod settings_modal_regressions {
     ) {
         cx.update(|cx| {
             settings::init(saved, dir, cx);
-            crate::history::init(
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                cx,
-            );
+            // slopty: no History surface (ruled out).
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);

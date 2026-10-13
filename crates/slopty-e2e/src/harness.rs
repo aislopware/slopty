@@ -864,7 +864,10 @@ fn interface_settings(app_dir: &Path) -> PathBuf {
 }
 
 /// Put the interface of the app whose data directory is `app_dir` in `appearance` (`light` or
-/// `dark`), as its Appearance settings would, before it starts.
+/// `dark`), on opaque surfaces, as its Appearance settings would, before it starts.
+///
+/// Frost shows what is behind the window, which differs between machines, while the opaque
+/// planes are the designed ones; [`crate::Command::Surface`] frosts them over a fixed backdrop.
 ///
 /// # Errors
 ///
@@ -874,7 +877,10 @@ pub fn pin_interface(app_dir: &Path, appearance: &str) -> Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    std::fs::write(&path, serde_json::json!({ "appearance": appearance }).to_string())?;
+    std::fs::write(
+        &path,
+        serde_json::json!({ "appearance": appearance, "surface": "opaque" }).to_string(),
+    )?;
     Ok(())
 }
 

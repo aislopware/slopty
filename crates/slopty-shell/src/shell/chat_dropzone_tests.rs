@@ -87,13 +87,7 @@ fn setup_with_shell(
         cx.set_global(Theme::default());
         crate::app_menus::init(cx);
         settings::init(UiSettings::default(), dir.path(), cx);
-        crate::history::init(
-            Default::default(),
-            Default::default(),
-            Default::default(),
-            Default::default(),
-            cx,
-        );
+        // slopty: no History surface (ruled out).
     });
     let (host, cx) = cx.add_window_view(|_, cx| {
         let shell = cx.new(|cx| {

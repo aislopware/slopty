@@ -60,13 +60,7 @@ fn setup(cx: &mut TestAppContext) -> (Entity<Shell>, &mut VisualTestContext) {
         cx.set_global(Theme::default());
         crate::app_menus::init(cx);
         settings::init(UiSettings::default(), dir.path(), cx);
-        crate::history::init(
-            Default::default(),
-            Default::default(),
-            Default::default(),
-            Default::default(),
-            cx,
-        );
+        // slopty: no History surface (ruled out).
         apply_keymap(
             cx,
             &KeymapConfig::default(),

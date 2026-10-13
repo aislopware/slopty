@@ -678,3 +678,8 @@ mod tests {
         stack.shutdown().await;
     }
 }
+
+/// The phone's anatomy: its Sessions page, a chat over the whole screen.
+#[cfg(test)]
+#[path = "ios/compact.rs"]
+mod compact;

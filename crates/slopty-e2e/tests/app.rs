@@ -58,6 +58,14 @@ mod stream;
 mod threads_start;
 
 #[cfg(test)]
+#[path = "app/surfaces_files.rs"]
+mod surfaces_files;
+
+#[cfg(test)]
+#[path = "app/surfaces_live.rs"]
+mod surfaces_live;
+
+#[cfg(test)]
 #[path = "app/tiles.rs"]
 mod tiles;
 

@@ -10270,13 +10270,7 @@ mod tests {
             gpui_base::init(cx);
             cx.set_global(Theme::dark());
             crate::app_menus::init(cx);
-            crate::history::init(
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                cx,
-            );
+            // slopty: no History surface (ruled out).
             crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
         });
         let window = cx.add_window(|_, cx| {

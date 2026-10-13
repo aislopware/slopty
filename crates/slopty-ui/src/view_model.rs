@@ -13,6 +13,7 @@
 //! - a **chat** is a thread, and its **session** is the thread's live status;
 //! - a **subagent** is a thread's child, nested under its parent with the running count.
 
+pub mod live;
 pub mod rows;
 pub mod transcript;
 
@@ -26,7 +27,8 @@ use parking_lot::Mutex;
 use serde::Serialize;
 use slopty_view_doc::{SessionMessageEntry, TranscriptBaseline, TranscriptFrame, TranscriptUpdate};
 use slopty_view_proto::{
-    Chat, Connectivity, Device, EngineInfo, Session, SidebarPreferencesState, Space, WorkspaceScope,
+    Chat, Connectivity, Device, EngineInfo, ServerPresence, Session, SidebarPreferencesState,
+    Space, WorkspaceScope,
 };
 use slopty_view_rpc::{RpcError, RpcReply, RpcService, methods};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -71,6 +73,8 @@ pub struct Feed {
     spaces: watch::Sender<Arc<[Space]>>,
     chats: watch::Sender<Arc<[Chat]>>,
     sessions: watch::Sender<Arc<[Session]>>,
+    /// The link to the server, for the sidebar's foot.
+    connectivity: watch::Sender<Connectivity>,
     /// Each followed chat's transcript, `None` until its thread has come.
     transcripts: Mutex<HashMap<String, Transcript>>,
 }
@@ -89,6 +93,7 @@ impl Feed {
             spaces: watch::Sender::new(Arc::default()),
             chats: watch::Sender::new(Arc::default()),
             sessions: watch::Sender::new(Arc::default()),
+            connectivity: watch::Sender::new(Connectivity::default()),
             transcripts: Mutex::new(HashMap::new()),
         }
     }
@@ -111,6 +116,19 @@ impl Feed {
     /// The threads' live status, as sessions.
     pub fn sessions(&self, sessions: Vec<Session>) {
         publish(&self.sessions, sessions);
+    }
+
+    /// The server this client follows, and whether it is linked now; `None` without one.
+    /// Only the server is said: the edge state stays `Disabled`, since a chat's delivery goes
+    /// to its worker over its own link, which the devices' presence already tells.
+    pub fn server(&self, server: Option<ServerPresence>) {
+        self.connectivity.send_if_modified(|now| {
+            if now.server == server {
+                return false;
+            }
+            now.server = server;
+            true
+        });
     }
 
     /// The chats followed now: the workspace keeps their threads open and publishes them.
@@ -288,6 +306,21 @@ where
     .boxed()
 }
 
+/// A watch of one value, a frame each time it changes.
+fn value_frames<T>(rx: watch::Receiver<T>) -> BoxStream<'static, serde_json::Value>
+where
+    T: Serialize + Send + Sync + 'static,
+{
+    futures::stream::unfold((rx, true), async |(mut rx, first)| {
+        if !first && rx.changed().await.is_err() {
+            return None;
+        }
+        let value = serde_json::to_value(&*rx.borrow_and_update()).ok()?;
+        Some((value, (rx, false)))
+    })
+    .boxed()
+}
+
 /// A watch whose one value never changes, held open so the interface does not ask again.
 fn still<T: Serialize>(value: &T) -> Result<RpcReply, RpcError> {
     let value = serde_json::to_value(value)
@@ -325,8 +358,9 @@ impl RpcService for ViewModel {
                 pinned_session_ids: Vec::new(),
                 sections: Vec::new(),
             }),
-            // No edge room to be connected to: the pill stays hidden.
-            methods::WATCH_CONNECTIVITY => still(&Connectivity::default()),
+            methods::WATCH_CONNECTIVITY => {
+                Ok(RpcReply::Stream(value_frames(self.feed.connectivity.subscribe())))
+            }
             methods::WATCH_TRANSFERS => still(&Vec::<serde_json::Value>::new()),
             methods::AUTH_STATUS => still(&serde_json::json!({ "_tag": "SignedOut" })),
             _ => self.ask(method, params).await,

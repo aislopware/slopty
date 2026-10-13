@@ -31,9 +31,10 @@ pub use element::{family_picks, rows_prepared};
 pub use view::{
     AttachBlock, AttachProbe, AttachSelection, BACK_TO_LIVE, COPY_MODE, COPY_MODE_DONE, CTX,
     ClearScreen, ClipHook, ClipPaste, CloseFind, Copy, CopyBlockOutput, CopyLastOutput, CopyMode,
-    Find, FindNext, FindPrev, Guesses, KeyCommand, LinkArrival, NextPrompt, Paste, PlacedImage,
-    PrevPrompt, RerunLast, SEARCH_CTX, ScrollPageDown, ScrollPageUp, ScrollToBottom, ScrollToTop,
-    SelectAll, Selection, SendEscape, TOOK_MIN, TerminalView, TerminalViewEvent, commands, escape,
+    Find, FindNext, FindPrev, GridFrame, Guesses, KeyCommand, LinkArrival, NextPrompt, Paste,
+    PlacedImage, PrevPrompt, RerunLast, SEARCH_CTX, ScrollPageDown, ScrollPageUp, ScrollToBottom,
+    ScrollToTop, SelectAll, Selection, SendEscape, TOOK_MIN, TerminalView, TerminalViewEvent,
+    commands, escape,
 };
 #[cfg(target_os = "macos")]
 pub use view::{DropHook, DropNews, SinkDropped};

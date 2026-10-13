@@ -446,6 +446,12 @@ impl Shell {
                 // second row; expand stays in this band (user request).
                 let show_pane_controls =
                     widths.surface_reveal >= RIGHT_PANE_HEADER_CONTROLS_MIN_WIDTH;
+                // slopty: the expand button's name, said and shown.
+                let expand_label = if self.right_pane_expanded {
+                    "Collapse panel"
+                } else {
+                    "Expand panel"
+                };
                 // The toggle is the fixed right-edge anchor, like the left
                 // sidebar control. Only the tabs + expand section reveals to
                 // its left; including the toggle in this animated width
@@ -484,19 +490,20 @@ impl Shell {
                                                 .overflow_hidden()
                                                 .child(self.render_right_tab_strip(cx)),
                                         )
-                                        .child(header_icon_button(
-                                            "expand-changes",
-                                            right_pane_expand_icon(self.right_pane_expanded),
-                                            if self.right_pane_expanded {
-                                                "Collapse panel"
-                                            } else {
-                                                "Expand panel"
-                                            },
-                                            &theme,
-                                            cx.listener(|this, _, _, cx| {
-                                                this.toggle_right_pane_expand(cx)
-                                            }),
-                                        ))
+                                        .child(
+                                            header_icon_button(
+                                                "expand-changes",
+                                                right_pane_expand_icon(self.right_pane_expanded),
+                                                expand_label,
+                                                &theme,
+                                                cx.listener(|this, _, _, cx| {
+                                                    this.toggle_right_pane_expand(cx)
+                                                }),
+                                            )
+                                            // slopty: named for a screen reader.
+                                            .role(gpui::Role::Button)
+                                            .aria_label(expand_label),
+                                        )
                                 }),
                         ),
                 );

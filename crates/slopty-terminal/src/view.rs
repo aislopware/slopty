@@ -463,6 +463,15 @@ pub struct LinkArrival(pub Instant);
 
 impl gpui::Global for LinkArrival {}
 
+/// Where a host places the grid ([`TerminalView::set_frame`]), in points.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GridFrame {
+    /// The inset between the view's edges and the grid.
+    pub padding: f32,
+    /// Each row's height.
+    pub line_height: f32,
+}
+
 /// One session's view.
 pub struct TerminalView {
     session: SessionId,
@@ -489,6 +498,9 @@ pub struct TerminalView {
     /// The grid's rows are painted under keys and drawn again from the last frame while
     /// unchanged (`Window::paint_keyed`); off, every row is painted afresh every frame.
     keyed_paint: bool,
+    /// The grid's place in a host's chrome, when the host sets it rather than the theme
+    /// ([`Self::set_frame`]).
+    frame: Option<GridFrame>,
     /// Times this view was rendered rather than replayed from the view cache (tests).
     #[cfg(any(test, feature = "e2e"))]
     renders: u32,
@@ -692,6 +704,7 @@ impl TerminalView {
             font_family: None,
             row_cache: RowCache::default(),
             keyed_paint: true,
+            frame: None,
             #[cfg(any(test, feature = "e2e"))]
             renders: 0,
             #[cfg(any(test, feature = "e2e"))]
@@ -2407,6 +2420,22 @@ impl TerminalView {
     /// default), or afresh every frame: what keyed paint is measured and checked against.
     pub const fn set_keyed_paint(&mut self, on: bool) {
         self.keyed_paint = on;
+    }
+
+    /// Place the grid as a host's chrome says: `frame.padding` round it and rows exactly
+    /// `frame.line_height` tall, in place of the theme's inset and the font's own height.
+    /// `None` gives the theme's back.
+    pub fn set_frame(&mut self, frame: Option<GridFrame>, cx: &mut Context<Self>) {
+        if self.frame != frame {
+            self.frame = frame;
+            cx.notify();
+        }
+    }
+
+    /// The grid's place in a host's chrome ([`Self::set_frame`]).
+    #[must_use]
+    pub const fn frame(&self) -> Option<GridFrame> {
+        self.frame
     }
 
     /// Whether the grid's rows are painted under keys ([`Self::set_keyed_paint`]).

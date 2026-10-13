@@ -389,6 +389,18 @@ pub enum Command {
         /// Height in points.
         height: f32,
     },
+    /// Put the interface in dark or light, as its Appearance settings would: the window
+    /// redraws in the other theme at once, for goldens taken in both.
+    Appearance {
+        /// Dark when true, light otherwise.
+        dark: bool,
+    },
+    /// Frost the interface's surfaces, or make them opaque again, as its Appearance settings
+    /// would. A render composites a frosted frame over a fixed backdrop, so its golden holds.
+    Surface {
+        /// Frosted when true, opaque otherwise.
+        frosted: bool,
+    },
     /// A hardware key press delivered at the UIKit boundary (iOS only): what the metal
     /// view's `pressesBegan:` / `pressesEnded:` reads out of the `UIPress`, run through the
     /// same delivery; a plain key while a text input is up is typed through `insertText:`

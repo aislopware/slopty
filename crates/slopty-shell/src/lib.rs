@@ -37,11 +37,12 @@ pub mod files;
 pub mod frost;
 mod glass;
 mod haptics;
-pub mod history;
+// slopty: no History surface (ruled out).
 pub mod icons;
 pub(crate) mod image_media;
 pub(crate) mod image_viewer;
 pub mod links;
+pub mod live; // slopty: Slopty's terminals and remote screens in the shell's chrome
 pub mod loaders;
 pub mod markdown;
 pub mod motion;
@@ -206,13 +207,7 @@ pub fn start(
             ui_settings.surface,
             cx,
         );
-        history::init(
-            ui_settings.git_history_columns,
-            ui_settings.git_history_column_widths,
-            ui_settings.git_history_column_order,
-            ui_settings.git_history_author_display,
-            cx,
-        );
+        // slopty: no History surface (ruled out).
         motion::init(
             ui_settings.reduce_motion,
             ui_settings.pause_animations_in_background,

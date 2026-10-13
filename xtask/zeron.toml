@@ -22,7 +22,6 @@ provenance = "// Derived from zeron (MIT, github.com/zeronsh/zeron @ {base}), se
 "scripts/fixtures/markdown-preview" = "crates/slopty-shell/fixtures/markdown-preview"
 # Excerpts of the engine and the agent drivers: the types and helpers the shell reads.
 "crates/engine/src/registry.rs" = "crates/slopty-shell/src/catalog/registry.rs"
-"crates/engine/src/repos.rs" = "crates/slopty-shell/src/catalog/repos.rs"
 "crates/harness/src/claude/catalog.rs" = "crates/slopty-shell/src/catalog/claude.rs"
 "crates/harness/src/lib.rs" = "crates/slopty-shell/src/catalog/harness.rs"
 
@@ -59,10 +58,6 @@ to = "dev.aislopware.slopty"
 [[rename]]
 from = "zeron_engine::registry::"
 to = "crate::catalog::registry::"
-
-[[rename]]
-from = "zeron_engine::repos::"
-to = "crate::catalog::repos::"
 
 [[rename]]
 from = "zeron_engine::DEFAULT_ORG_ID"
@@ -174,6 +169,10 @@ paths = [
     "crates/ui/src/settings/appshots.rs",
     "crates/ui/src/settings/shortcuts/appshots_page.rs",
     "crates/ui/assets/sounds/appshot.wav",
+    # The shell's own terminal emulator: its terminals are Slopty's (libghostty).
+    "crates/ui/src/terminal/emulator.rs",
+    # The Git History surface (ruled out).
+    "crates/ui/src/history.rs",
     # Pull-request pages: a pull request opens in the web browser.
     "crates/ui/src/pull_requests.rs",
     "crates/ui/src/pull_request_detail.rs",

@@ -1,0 +1,6 @@
+Window
+Button │ Server: e2e-server, Connected
+Button │ Settings
+Group (focused)
+Terminal │ shell │ ~ %
+Button │ Sidebar view options

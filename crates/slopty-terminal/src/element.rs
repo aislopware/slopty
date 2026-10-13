@@ -1474,17 +1474,26 @@ impl Element for TerminalElement {
             self.view.update(cx, |view, cx| view.set_font_family(picked.clone(), cx));
             picked
         });
-        let (base_size, height_mult, base_pad, ligatures) = {
-            let theme = self.view.read(cx).theme();
+        let (base_size, height_mult, base_pad, ligatures, frame) = {
+            let view = self.view.read(cx);
+            let theme = view.theme();
             (
                 px(theme.typography.mono_size),
                 theme.typography.mono_line_height,
                 px(theme.spacing.inset()),
                 theme.typography.ligatures,
+                view.frame(),
             )
         };
+        // A host's chrome sets the inset and the row height itself: the row is the font's own
+        // height stretched to it, as `mono_line_height` stretches it.
+        let base_pad = frame.map_or(base_pad, |frame| px(frame.padding));
         // The cell is derived once per family, size and scale, not once per frame.
         let (grid, base_derived, face) = cx.update_global::<ShapeCache, _>(|cache, _| {
+            let height_mult = frame.map_or(height_mult, |frame| {
+                let natural = cache.grid(window, &family, ligatures, base_size, 1.0).0.line_height;
+                frame.line_height / f32::from(natural).max(1.0)
+            });
             cache.grid(window, &family, ligatures, base_size, height_mult)
         });
         let (base_cell_width, base_line_height) = (grid.cell_width, grid.line_height);

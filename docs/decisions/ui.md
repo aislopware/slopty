@@ -11701,3 +11701,45 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   two that counted paints refresh the window first, since gpui-fast keeps a frame nothing
   invalidated. Tests: `slopty-ui` `view_model::tests`; e2e
   `app::interface::the_interface_comes_up_on_the_stack`. Golden: `interface`.
+
+- ✅ **The sidebar's foot names the server, not an account (2026-10-13).** Slopty has no
+  accounts, so the foot that held zeron's account pill says what is real: the server this client
+  follows, by the name it gave when it linked (its address before then), with the avatar's
+  initial and a dot that is `success` while the link is up and muted while it is down; its menu
+  line reads "Connected" or "Offline", and with no server the foot reads "No server". The app
+  tells the view model directly (`Feed::server`), carried on the view's connectivity as
+  `server`; the edge state stays `Disabled`, since a chat's delivery goes to its worker over its
+  own link and the devices' presence already says that. Test: `slopty-shell`
+  `sidebar_footer_names_the_server_and_its_link`.
+
+- ✅ **No Git History surface (2026-10-13).** Ruled out with the commit scope: Changes keeps the
+  working tree and branch diffs. The shell's `history.rs`, its settings and the history search are
+  not taken (`xtask/zeron.toml` `[skip]`).
+
+- ✅ **Goldens are taken on opaque surfaces; frost over a fixed backdrop (2026-10-13).** Frost
+  lets the window's backdrop through, which differs between machines, and a render saved its
+  premultiplied pixels as they were (the light frost read as grey). The self-test pins the
+  shell's surfaces to Opaque, its designed planes, in light and dark; `Command::Surface` frosts
+  them, and every render is composited over one slate backdrop, which leaves an opaque frame
+  unchanged. Goldens: `interface`, `interface-dark`, `interface-frosted`,
+  `interface-frosted-dark`.
+
+- ✅ **Slopty's live views sit in the shell's own places (2026-10-13).** A shell's terminal and
+  a remote window or desktop are views the workspace keeps, each with its own link, prediction and
+  picture path, so no view model can carry them as data. The app installs a host
+  (`slopty_shell::live`) that, given an id the view model answered, hands the shell the view:
+  `OpenTerminal` opens a session on the chat's machine in its folder and answers the session's
+  id, and the terminal panel (zeron's dock and right-pane tab, ⌘J) draws Slopty's libghostty
+  terminal in its body at zeron's look: Geist Mono 13/18 (the grid's row height and inset are
+  set by `slopty_terminal::GridFrame`), 12 pt padding and the theme's ANSI palette. zeron's
+  `alacritty_terminal` emulator is not taken. A shell keeps a `chat` fact, so a chat asked for
+  its terminal again (the app came back, and the session lived on in its worker) gets the same
+  shell. "Remote window" in the right pane's picker lists the chat's machine's desktops and
+  windows (`slopty.ListScreens`), shows the chosen one as a window or display item whose stream
+  the workspace opens as for any (`slopty.OpenScreen`), and the pane's expand gives it the whole
+  window. The browser previews are the worker's forwarded ports (`proxy_port` 0: the preview's
+  own `localhost:<local>`). Tests: `slopty-e2e`
+  `app::surfaces_live::{the_terminal_dock_holds_a_shell_of_the_worker,
+  screen_recording::a_remote_window_is_a_right_pane_surface_and_takes_the_window}`. Goldens:
+  `surface-live-terminal`, `surface-live-screen` and `surface-live-screen-takeover`, each in
+  light and dark.

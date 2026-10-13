@@ -1,4 +1,4 @@
 Window (focused)
-Button │ Account menu: Local
+Button │ Server: e2e-server, Connected
 Button │ Settings
 Button │ Sidebar view options

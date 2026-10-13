@@ -7,6 +7,9 @@
 
 use gpui::{AnyWindowHandle, App, Entity};
 use slopty_settings::Loaded;
+use slopty_shell::live::{Hosted, TerminalLook};
+use slopty_ui::view_model::live::{LiveLook, LiveView};
+use slopty_ui::workspace::WorkspaceView;
 
 use crate::{Workspace, self_test, settings};
 
@@ -25,7 +28,12 @@ pub(crate) fn open(
     gpui_tokio::init_from_handle(cx, runtime);
     let (view_model, feed, asks) = slopty_ui::view_model::ViewModel::new(CLIENT.to_owned());
     let view = workspace.read(cx).view.clone();
+    workspace.update(cx, |ws, _| {
+        ws.interface_feed = Some(std::sync::Arc::clone(&feed));
+        ws.tell_server_presence();
+    });
     view.update(cx, |v, cx| v.serve_interface(feed, asks, cx));
+    host_live_views(&view, cx);
     // The shell's own deep links are not Slopty's: nothing sends on this.
     let (_links, links) = futures::channel::mpsc::unbounded();
     let config = slopty_shell::UiConfig {
@@ -63,4 +71,43 @@ pub(crate) fn open(
         });
     });
     shell.into()
+}
+
+/// Hand the shell the workspace's own views by the ids its view model answers: a shell's
+/// terminal and a remote window or desktop (`slopty_shell::live`).
+fn host_live_views(view: &Entity<WorkspaceView>, cx: &mut App) {
+    let terminals = view.downgrade();
+    let screens = view.downgrade();
+    let watched = view.downgrade();
+    slopty_shell::live::install(
+        cx,
+        move |id, look, cx| {
+            let look = live_look(look);
+            terminals.upgrade()?.update(cx, |v, cx| v.hosted_terminal(id, &look, cx)).map(hosted)
+        },
+        move |id, cx| screens.upgrade()?.update(cx, |v, cx| v.hosted_screen(id, cx)).map(hosted),
+        move |id, changed, cx| {
+            watched.upgrade()?.update(cx, |v, cx| v.hosted_watch(id, changed, cx))
+        },
+    );
+}
+
+/// The shell's terminal look, as the workspace takes it.
+fn live_look(look: &TerminalLook) -> LiveLook {
+    LiveLook {
+        family: look.family.clone(),
+        font_size: look.font_size,
+        line_height: look.line_height,
+        padding: look.padding,
+        background: look.background,
+        foreground: look.foreground,
+        cursor: look.cursor,
+        selection: look.selection,
+        ansi: look.ansi,
+    }
+}
+
+/// A workspace view, as the shell places it.
+fn hosted(view: LiveView) -> Hosted {
+    Hosted { view: view.view, focus: view.focus, title: view.title, ended: view.ended }
 }

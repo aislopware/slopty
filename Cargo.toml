@@ -419,6 +419,7 @@ gpui-base = { git = "https://github.com/aislopware/gpui-kit.git" }
 # The shell and the view types it reads: its RPC envelope, its data shapes and its transcript
 # frames, which `slopty-ui::view_model` serves.
 slopty-shell = { path = "crates/slopty-shell" }
+slopty-shell-theme = { path = "crates/slopty-shell-theme" }
 slopty-view-doc = { path = "crates/slopty-view-doc" }
 slopty-view-proto = { path = "crates/slopty-view-proto" }
 slopty-view-rpc = { path = "crates/slopty-view-rpc" }
