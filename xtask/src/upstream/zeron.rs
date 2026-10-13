@@ -174,9 +174,10 @@ fn blob(sh: &Shell, rev: &str, path: &str) -> Option<Vec<u8>> {
 }
 
 /// The zeron commits to take between: `from` (default `base`) and `to` (default the branch head).
+#[derive(Clone, Copy)]
 pub(super) struct Range<'a> {
-    pub(super) from: Option<&'a str>,
-    pub(super) to: Option<&'a str>,
+    pub from: Option<&'a str>,
+    pub to: Option<&'a str>,
 }
 
 /// Take zeron from `copied.base` (or `range.from`) to `range.to` (default: its branch's head) into
