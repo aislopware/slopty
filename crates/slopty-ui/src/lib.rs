@@ -12,7 +12,6 @@
 //! * [`folder`] — a directory on a worker, browsed in place: files open beside it, rows drag out,
 //!   drops go up into it.
 //! * [`picker`] — the "add a window" chooser.
-//! * [`project`] — a project's board in its orchestrator's tile: the tree, the lanes, the timeline.
 //! * [`search`] — search in files on a worker: the matches grouped by file as they stream in.
 //! * [`paste_key`] — the system's paste button over the iOS key bar's Paste.
 //! * [`keymap`] — every command a key runs, its default chords, and `[keys]` laid over them.
