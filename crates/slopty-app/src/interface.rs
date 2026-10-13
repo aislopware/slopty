@@ -40,7 +40,7 @@ pub(crate) fn open(
     let config = slopty_shell::UiConfig {
         data_dir: slopty_platform::dirs::data_dir().join("interface"),
         // slopty: Slopty's server is the only backend.
-        default_harness: slopty_view_proto::HarnessId::ClaudeCode,
+        default_harness: slopty_view_proto::HarnessId::CLAUDE_CODE,
         initial_url: None,
         service: view_model,
         activate: !self_test(),

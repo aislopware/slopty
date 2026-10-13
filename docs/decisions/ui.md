@@ -11762,7 +11762,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   a toast cannot settle (a host key to trust, a password) names the Add device dialog, which
   can. The self-test's drag, open, reveal and page commands and its `smooth`, `showcase`,
   `pair`, `workers`, `through-server` and iOS UIKit suites drove the old tiles and went with
-  them; the suites that remain drive the shell. Tests: `slopty-app`
+  them; the suites that remain drive the shell, and `pair` and `through_server` came back on it
+  (`docs/TESTING.md`). Tests: `slopty-app`
   `ssh::tests::{a_removal_takes_the_worker_off_then_the_server_forgets_it,
   the_server_s_row_updates_a_server_on_another_build,
   an_update_that_ends_sessions_goes_on_only_when_pressed_again,
@@ -11803,3 +11804,15 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   a_device_reaches_the_server_as_it_can}`; `slopty-shell`
   `settings::invite::tests::{the_code_keeps_its_quiet_zone, the_code_is_dark_on_light}`;
   `slopty-e2e` `app::devices::the_server_s_code_carries_this_mac_s_tailnet_name`.
+
+- ✅ **A harness is a name, so any agent a worker offers is one (2026-10-13).** zeron's
+  `HarnessId` was a closed enum of the agents it drove, so an ACP agent zeron did not know (Gemini
+  CLI, any other in the registry) could not be offered, and one it did know was started as Claude
+  Code: the view model mapped every harness but Codex and pi to Claude Code. `HarnessId` is now an
+  interned name (`HarnessId::named`), written and read as that name; zeron's agents are its
+  constants (`HarnessId::CLAUDE_CODE`, …), and `xtask/zeron.toml` renames zeron's variants to them
+  as its improvements come in. zeron's three exhaustive matches gained a fallback: any other agent
+  wears the agent mark and is named by its harness. A chat starts the agent its harness names:
+  Claude Code, Codex and pi by their own ids, any other as the ACP agent of that registry name.
+  Tests: `slopty-view-proto` `agent::harness_id_tests::a_harness_is_its_name`; `slopty-ui`
+  `workspace::view_model::tests::a_harness_starts_its_own_agent`.

@@ -58,7 +58,7 @@ fn default_installed() -> bool {
 /// off (the composer needs something it can actually run); the dev rig opts it
 /// in through `COMET_HARNESS=mock`, which bypasses enablement in the pickers.
 fn auto_enabled(id: HarnessId) -> bool {
-    id != HarnessId::Mock
+    id != HarnessId::MOCK
 }
 
 /// A descriptor's effective enabled flag. `None` — a catalog from an engine

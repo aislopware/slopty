@@ -3,29 +3,94 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum HarnessId {
-    ClaudeCode,
-    Codex,
-    Cursor,
+// slopty: an agent is named, not enumerated: any agent a worker offers (Claude Code, Codex, pi,
+// any ACP agent by its registry's name) is a harness, so the type is an open, interned name. The
+// names zeron knew stay as constants, and its matches on them keep a fallback arm.
+/// An agent harness, by its wire name (`claude-code`, `codex`, an ACP agent's registry name).
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct HarnessId(&'static str);
+
+impl HarnessId {
+    pub const CLAUDE_CODE: Self = Self("claude-code");
+    pub const CODEX: Self = Self("codex");
+    pub const CURSOR: Self = Self("cursor");
     /// Cognition's Devin agent, driven over ACP (`devin acp`).
-    Devin,
+    pub const DEVIN: Self = Self("devin");
     /// xAI's Grok Build agent, driven over ACP (`grok agent stdio`).
-    Grok,
+    pub const GROK: Self = Self("grok");
     /// Nous Research's Hermes Agent, driven over ACP (`hermes acp`).
-    Hermes,
+    pub const HERMES: Self = Self("hermes");
     /// The Pi coding agent (pi.dev), driven over its native JSONL RPC protocol.
-    Pi,
-    /// SST's opencode agent, driven natively over its own HTTP/SSE server
-    /// protocol (`opencode serve` — the same wire the opencode desktop app
-    /// speaks).
-    Opencode,
-    /// google's antigravity agent over acp (`agy_acp_server`, installed from
-    /// its pinned release archive).
-    Antigravity,
+    pub const PI: Self = Self("pi");
+    /// SST's opencode agent.
+    pub const OPENCODE: Self = Self("opencode");
+    /// Google's Antigravity agent over ACP.
+    pub const ANTIGRAVITY: Self = Self("antigravity");
     /// Test harness; never shown in production pickers.
-    Mock,
+    pub const MOCK: Self = Self("mock");
+
+    /// The names known at build time, the rest interned as they are first seen.
+    const KNOWN: [Self; 10] = [
+        Self::CLAUDE_CODE,
+        Self::CODEX,
+        Self::CURSOR,
+        Self::DEVIN,
+        Self::GROK,
+        Self::HERMES,
+        Self::PI,
+        Self::OPENCODE,
+        Self::ANTIGRAVITY,
+        Self::MOCK,
+    ];
+
+    /// The harness named `name`: one of the constants, or a name interned for the life of the
+    /// process (agents are few, so the names kept stay few).
+    pub fn named(name: &str) -> Self {
+        if let Some(known) = Self::KNOWN.iter().find(|known| known.0 == name) {
+            return *known;
+        }
+        static SEEN: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
+        let mut seen = SEEN.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(kept) = seen.iter().find(|kept| **kept == name) {
+            return Self(kept);
+        }
+        let kept: &'static str = Box::leak(name.to_owned().into_boxed_str());
+        seen.push(kept);
+        Self(kept)
+    }
+
+    /// Its wire name.
+    pub const fn as_str(self) -> &'static str {
+        self.0
+    }
+}
+
+impl std::fmt::Debug for HarnessId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "HarnessId({})", self.0)
+    }
+}
+
+impl std::fmt::Display for HarnessId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl Serialize for HarnessId {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for HarnessId {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let name = std::borrow::Cow::<'de, str>::deserialize(deserializer)?;
+        if name.is_empty() {
+            return Err(serde::de::Error::custom("an empty harness name"));
+        }
+        Ok(Self::named(&name))
+    }
 }
 
 /// Durable user preference for one agent's independently-installed CLI.
@@ -786,7 +851,7 @@ mod tests {
     #[test]
     fn harness_id_uses_kebab_case() {
         assert_eq!(
-            serde_json::to_string(&HarnessId::ClaudeCode).unwrap(),
+            serde_json::to_string(&HarnessId::CLAUDE_CODE).unwrap(),
             "\"claude-code\""
         );
     }
@@ -794,7 +859,7 @@ mod tests {
     #[test]
     fn harness_update_status_uses_stable_wire_names() {
         let status = HarnessUpdateStatus {
-            harness: HarnessId::ClaudeCode,
+            harness: HarnessId::CLAUDE_CODE,
             installed_version: Some("1.0.0".into()),
             latest_version: Some("1.1.0".into()),
             channel: Some("stable".into()),
@@ -942,5 +1007,25 @@ mod todo_item_tests {
         assert_eq!(TodoStatus::parse("pending"), TodoStatus::Pending);
         assert_eq!(TodoStatus::parse("cancelled"), TodoStatus::Pending);
         assert_eq!(TodoStatus::parse(""), TodoStatus::Pending);
+    }
+}
+
+#[cfg(test)]
+mod harness_id_tests {
+    use super::HarnessId;
+
+    // slopty: the open harness name.
+    /// A harness reads and writes as its wire name: a known one is its constant, any other is
+    /// kept by its name, the same value each time it is read; an empty name is no harness.
+    #[test]
+    fn a_harness_is_its_name() {
+        let read = |text: &str| serde_json::from_str::<HarnessId>(text);
+        assert_eq!(read("\"claude-code\"").unwrap(), HarnessId::CLAUDE_CODE);
+        assert_eq!(serde_json::to_string(&HarnessId::OPENCODE).unwrap(), "\"opencode\"");
+        let gemini = read("\"gemini\"").unwrap();
+        assert_eq!(gemini.as_str(), "gemini");
+        assert_eq!(gemini, HarnessId::named("gemini"));
+        assert!(std::ptr::eq(gemini.as_str(), HarnessId::named("gemini").as_str()), "interned");
+        assert!(read("\"\"").is_err());
     }
 }

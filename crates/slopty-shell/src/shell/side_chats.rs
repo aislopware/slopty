@@ -390,7 +390,7 @@ mod tests {
                 EngineBootConfig {
                     data_dir: dir.path().into(),
                     // slopty: Slopty's server is the only backend.
-                    default_harness: slopty_view_proto::HarnessId::Mock,
+                    default_harness: slopty_view_proto::HarnessId::MOCK,
                 },
                 cx,
             )
@@ -440,7 +440,7 @@ mod tests {
                 EngineBootConfig {
                     data_dir: dir.into(),
                     // slopty: Slopty's server is the only backend.
-                    default_harness: slopty_view_proto::HarnessId::Mock,
+                    default_harness: slopty_view_proto::HarnessId::MOCK,
                 },
                 cx,
             )
@@ -532,7 +532,7 @@ mod tests {
                 assert_eq!(create["cwd"], "/tmp/main");
                 assert_eq!(create["config"]["harness"], "codex");
                 let row = side.read(cx).selected_chat_row().cloned().unwrap();
-                assert_eq!(row.config.unwrap().harness, slopty_view_proto::HarnessId::Codex);
+                assert_eq!(row.config.unwrap().harness, slopty_view_proto::HarnessId::CODEX);
                 assert_eq!(shell.state.read(cx).chats.len(), 1, "no row yet");
                 // A draft cannot keep it: no row could reopen it.
                 let composer = shell.side_chats[&id].composer.clone();

@@ -74,11 +74,11 @@ const UPDATE_POLICIES: [(HarnessUpdatePolicy, &str, &str); 3] = [
 ];
 
 fn offers_install(harness: HarnessId, installed: bool, can_install: bool) -> bool {
-    harness != HarnessId::Mock && !installed && can_install
+    harness != HarnessId::MOCK && !installed && can_install
 }
 
 fn install_hint(harness: HarnessId, enabled: bool, can_install: bool) -> String {
-    if harness == HarnessId::Antigravity {
+    if harness == HarnessId::ANTIGRAVITY {
         return if can_install {
             "Install Antigravity to enable"
         } else {
@@ -112,16 +112,18 @@ fn install_params(harness: HarnessId, target: &Option<String>) -> serde_json::Va
 /// The CLI named in the not-installed hint.
 pub fn cli_name(harness: HarnessId) -> &'static str {
     match harness {
-        HarnessId::ClaudeCode => "claude",
-        HarnessId::Codex => "codex",
-        HarnessId::Cursor => "cursor-agent",
-        HarnessId::Devin => "devin",
-        HarnessId::Grok => "grok",
-        HarnessId::Hermes => "hermes",
-        HarnessId::Pi => "pi",
-        HarnessId::Opencode => "opencode",
-        HarnessId::Antigravity => "Antigravity",
-        HarnessId::Mock => "mock",
+        HarnessId::CLAUDE_CODE => "claude",
+        HarnessId::CODEX => "codex",
+        HarnessId::CURSOR => "cursor-agent",
+        HarnessId::DEVIN => "devin",
+        HarnessId::GROK => "grok",
+        HarnessId::HERMES => "hermes",
+        HarnessId::PI => "pi",
+        HarnessId::OPENCODE => "opencode",
+        HarnessId::ANTIGRAVITY => "Antigravity",
+        HarnessId::MOCK => "mock",
+        // slopty: any other agent's program is named by its harness.
+        other => other.as_str(),
     }
 }
 
@@ -1380,13 +1382,13 @@ mod tests {
         window
             .update(cx, |page, _, cx| {
                 page.harnesses = super::Loadable::Ready(vec![
-                    descriptor(slopty_view_proto::HarnessId::ClaudeCode, "Claude Code"),
-                    descriptor(slopty_view_proto::HarnessId::Codex, "Codex"),
+                    descriptor(slopty_view_proto::HarnessId::CLAUDE_CODE, "Claude Code"),
+                    descriptor(slopty_view_proto::HarnessId::CODEX, "Codex"),
                 ]);
-                page.toggle_agent_details(slopty_view_proto::HarnessId::ClaudeCode, cx);
+                page.toggle_agent_details(slopty_view_proto::HarnessId::CLAUDE_CODE, cx);
                 assert_eq!(
                     page.expanded_harness,
-                    Some(slopty_view_proto::HarnessId::ClaudeCode)
+                    Some(slopty_view_proto::HarnessId::CLAUDE_CODE)
                 );
                 // slopty: no agent accounts: Slopty never touches a credential.
             })
@@ -1395,8 +1397,8 @@ mod tests {
             .unwrap();
         window
             .update(cx, |page, _, cx| {
-                page.toggle_agent_details(slopty_view_proto::HarnessId::Codex, cx);
-                assert_eq!(page.expanded_harness, Some(slopty_view_proto::HarnessId::Codex));
+                page.toggle_agent_details(slopty_view_proto::HarnessId::CODEX, cx);
+                assert_eq!(page.expanded_harness, Some(slopty_view_proto::HarnessId::CODEX));
                 // slopty: no agent accounts: Slopty never touches a credential.
             })
             .unwrap();
@@ -1410,33 +1412,33 @@ mod tests {
 #[test]
 fn install_visibility_and_hint_follow_target_capabilities() {
     for id in [
-        HarnessId::Antigravity,
-        HarnessId::Codex,
-        HarnessId::Opencode,
-        HarnessId::ClaudeCode,
-        HarnessId::Cursor,
-        HarnessId::Pi,
-        HarnessId::Grok,
-        HarnessId::Hermes,
-        HarnessId::Devin,
-        HarnessId::Mock,
+        HarnessId::ANTIGRAVITY,
+        HarnessId::CODEX,
+        HarnessId::OPENCODE,
+        HarnessId::CLAUDE_CODE,
+        HarnessId::CURSOR,
+        HarnessId::PI,
+        HarnessId::GROK,
+        HarnessId::HERMES,
+        HarnessId::DEVIN,
+        HarnessId::MOCK,
     ] {
         for installed in [false, true] {
             for available in [false, true] {
                 assert_eq!(
                     offers_install(id, installed, available),
-                    id != HarnessId::Mock && !installed && available
+                    id != HarnessId::MOCK && !installed && available
                 );
             }
         }
     }
-    assert_eq!(cli_name(HarnessId::Antigravity), "Antigravity");
+    assert_eq!(cli_name(HarnessId::ANTIGRAVITY), "Antigravity");
     assert_eq!(
-        install_hint(HarnessId::Antigravity, false, true),
+        install_hint(HarnessId::ANTIGRAVITY, false, true),
         "Install Antigravity to enable"
     );
     assert!(
-        install_hint(HarnessId::Antigravity, false, false).contains("ANTIGRAVITY_ACP_EXECUTABLE")
+        install_hint(HarnessId::ANTIGRAVITY, false, false).contains("ANTIGRAVITY_ACP_EXECUTABLE")
     );
 }
 
@@ -1446,7 +1448,7 @@ fn install_phase_copy_and_cancel_target_match_install() {
     assert_eq!(install_label("Claude Code"), "Installing Claude Code…");
     assert_eq!(install_label("Pi"), "Installing Pi…");
     for target in [None, Some("remote-device".to_string())] {
-        let params = install_params(HarnessId::Pi, &target);
+        let params = install_params(HarnessId::PI, &target);
         assert_eq!(params["harness"], "pi");
         assert_eq!(
             params["targetDeviceId"],
@@ -1454,11 +1456,11 @@ fn install_phase_copy_and_cancel_target_match_install() {
         );
     }
     assert_eq!(
-        install_hint(HarnessId::Codex, false, false),
+        install_hint(HarnessId::CODEX, false, false),
         "Install the codex CLI to enable. Install with `npm install -g @openai/codex`"
     );
     assert!(
-        install_hint(HarnessId::Codex, true, false)
+        install_hint(HarnessId::CODEX, true, false)
             .starts_with("codex CLI not installed — turn it off or install it.")
     );
 }

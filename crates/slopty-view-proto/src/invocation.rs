@@ -213,7 +213,7 @@ pub fn harness_prompt(text: &str, harness: crate::HarnessId) -> String {
             &crate::chat_mentions::chat_mention_prompt(text),
         ),
     );
-    if harness == crate::HarnessId::Codex {
+    if harness == crate::HarnessId::CODEX {
         return text;
     }
     let mut result = String::new();
@@ -297,15 +297,15 @@ mod tests {
     }
 
     const HARNESSES: [crate::HarnessId; 9] = [
-        crate::HarnessId::ClaudeCode,
-        crate::HarnessId::Codex,
-        crate::HarnessId::Cursor,
-        crate::HarnessId::Devin,
-        crate::HarnessId::Grok,
-        crate::HarnessId::Hermes,
-        crate::HarnessId::Pi,
-        crate::HarnessId::Antigravity,
-        crate::HarnessId::Opencode,
+        crate::HarnessId::CLAUDE_CODE,
+        crate::HarnessId::CODEX,
+        crate::HarnessId::CURSOR,
+        crate::HarnessId::DEVIN,
+        crate::HarnessId::GROK,
+        crate::HarnessId::HERMES,
+        crate::HarnessId::PI,
+        crate::HarnessId::ANTIGRAVITY,
+        crate::HarnessId::OPENCODE,
     ];
 
     #[test]
@@ -403,7 +403,7 @@ mod tests {
     }
     #[test]
     fn selected_native_skills_route_by_provider_and_keep_arguments() {
-        for harness in [crate::HarnessId::ClaudeCode, crate::HarnessId::Opencode] {
+        for harness in [crate::HarnessId::CLAUDE_CODE, crate::HarnessId::OPENCODE] {
             let skill = Invocation::Skill {
                 name: "plugin:review".into(),
                 path: "/repo/SKILL.md".into(),
@@ -417,7 +417,7 @@ mod tests {
                 harness_prompt(&raw, harness),
                 "/plugin:review inspect tests"
             );
-            assert!(harness_prompt(&raw, crate::HarnessId::Cursor).starts_with("Use the skill "));
+            assert!(harness_prompt(&raw, crate::HarnessId::CURSOR).starts_with("Use the skill "));
             assert!(
                 harness_prompt(&format!("Please {}", skill.link()), harness)
                     .contains("Use the skill ")
@@ -425,11 +425,11 @@ mod tests {
             assert_eq!(invocation_links(&raw)[0].1, skill);
         }
         for harness in [
-            crate::HarnessId::Cursor,
-            crate::HarnessId::Devin,
-            crate::HarnessId::Grok,
-            crate::HarnessId::Hermes,
-            crate::HarnessId::Pi,
+            crate::HarnessId::CURSOR,
+            crate::HarnessId::DEVIN,
+            crate::HarnessId::GROK,
+            crate::HarnessId::HERMES,
+            crate::HarnessId::PI,
         ] {
             let skill = skill("review", "/repo/SKILL.md");
             assert_eq!(
@@ -446,13 +446,13 @@ mod tests {
             path: "opencode-skill:plugin:review".into(),
             command: Some(SkillCommand {
                 name: "plugin:review".into(),
-                harness: crate::HarnessId::Opencode,
+                harness: crate::HarnessId::OPENCODE,
             }),
         };
         let raw = format!("{} inspect tests", skill.link());
         for harness in HARNESSES {
             let result = validate_harness_invocations(&raw, harness);
-            if harness == crate::HarnessId::Opencode {
+            if harness == crate::HarnessId::OPENCODE {
                 assert!(result.is_ok(), "{harness:?}: {result:?}");
             } else {
                 let error = result.expect_err("foreign native skill must be rejected");
@@ -468,16 +468,16 @@ mod tests {
             path: "/repo/with space/SKILL.md".into(),
             command: Some(SkillCommand {
                 name: "plugin:review".into(),
-                harness: crate::HarnessId::Opencode,
+                harness: crate::HarnessId::OPENCODE,
             }),
         };
         let raw = format!("{} inspect tests", skill.link());
         for harness in HARNESSES {
             validate_harness_invocations(&raw, harness).unwrap();
             let delivered = harness_prompt(&raw, harness);
-            if harness == crate::HarnessId::Opencode {
+            if harness == crate::HarnessId::OPENCODE {
                 assert_eq!(delivered, "/plugin:review inspect tests");
-            } else if harness == crate::HarnessId::Codex {
+            } else if harness == crate::HarnessId::CODEX {
                 assert_eq!(invocation_links(&delivered)[0].1, skill);
             } else {
                 assert_eq!(
@@ -492,7 +492,7 @@ mod tests {
     fn native_skill_prefixes_follow_the_same_whitespace_rules_as_commands() {
         for harness in HARNESSES
             .into_iter()
-            .filter(|harness| *harness != crate::HarnessId::Codex)
+            .filter(|harness| *harness != crate::HarnessId::CODEX)
         {
             let skill = Invocation::Skill {
                 name: "review".into(),
@@ -530,10 +530,10 @@ mod tests {
             skill.link(),
             crate::file_mentions::local_file_link("src/lib.rs", false)
         );
-        let codex = harness_prompt(&raw, crate::HarnessId::Codex);
+        let codex = harness_prompt(&raw, crate::HarnessId::CODEX);
         assert_eq!(invocation_links(&codex)[0].1, skill);
         assert!(codex.ends_with("[lib.rs](src/lib.rs)"));
-        for harness in [crate::HarnessId::ClaudeCode, crate::HarnessId::Opencode] {
+        for harness in [crate::HarnessId::CLAUDE_CODE, crate::HarnessId::OPENCODE] {
             let prompt = harness_prompt(&raw, harness);
             assert_eq!(
                 prompt,
@@ -564,7 +564,7 @@ mod tests {
         assert_eq!(crate::file_mentions::file_mention_links(&raw).len(), 1);
         for harness in HARNESSES {
             let delivered = harness_prompt(&raw, harness);
-            if harness == crate::HarnessId::Codex {
+            if harness == crate::HarnessId::CODEX {
                 assert_eq!(invocation_links(&delivered).len(), 2);
             } else {
                 assert!(

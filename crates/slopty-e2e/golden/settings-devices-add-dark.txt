@@ -23,4 +23,4 @@ Tab │ This Mac
 Tab │ Over SSH
 Tab │ A server
 Button
-Button
+Button │ Use this Mac

@@ -823,7 +823,7 @@ mod tests {
         fold_event_into_parts(
             &mut parts,
             &AgentEvent::SessionStarted {
-                harness: slopty_view_proto::HarnessId::Mock,
+                harness: slopty_view_proto::HarnessId::MOCK,
                 model: "m".into(),
                 tools: vec![],
                 cwd: "/".into(),

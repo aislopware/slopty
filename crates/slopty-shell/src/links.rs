@@ -73,7 +73,7 @@ pub fn parse_slopty_conversation_link(url: &str) -> Result<ConversationDeepLink,
 /// clipboards yet.
 pub fn harness_conversation_link(chat: &Chat) -> Option<HarnessConversationLink> {
     let id = chat.harness_session_id.as_deref()?.trim();
-    if id.is_empty() || chat.config.as_ref()?.harness != HarnessId::Codex {
+    if id.is_empty() || chat.config.as_ref()?.harness != HarnessId::CODEX {
         return None;
     }
     Some(HarnessConversationLink {
@@ -221,11 +221,11 @@ mod tests {
     #[test]
     fn codex_link_is_exact_and_unverified_harnesses_are_omitted() {
         assert_eq!(
-            harness_conversation_link(&harness_chat(HarnessId::Codex))
+            harness_conversation_link(&harness_chat(HarnessId::CODEX))
                 .unwrap()
                 .url,
             "codex://threads/thread%2Fone"
         );
-        assert!(harness_conversation_link(&harness_chat(HarnessId::Hermes)).is_none());
+        assert!(harness_conversation_link(&harness_chat(HarnessId::HERMES)).is_none());
     }
 }

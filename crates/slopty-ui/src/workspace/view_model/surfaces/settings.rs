@@ -18,17 +18,17 @@ use crate::workspace::WorkspaceView;
 /// The agents every machine is offered with, as the shell names them, with the agent ids their
 /// workers give; an ACP agent is offered where it is installed, by its registry's name.
 const AGENTS: [(HarnessId, &str, &str); 3] = [
-    (HarnessId::ClaudeCode, "Claude Code", AgentId::CLAUDE_CODE),
-    (HarnessId::Codex, "Codex", AgentId::CODEX),
-    (HarnessId::Pi, "pi", AgentId::PI),
+    (HarnessId::CLAUDE_CODE, "Claude Code", AgentId::CLAUDE_CODE),
+    (HarnessId::CODEX, "Codex", AgentId::CODEX),
+    (HarnessId::PI, "pi", AgentId::PI),
 ];
 
 /// The efforts each agent takes.
 fn efforts(harness: HarnessId) -> Vec<ReasoningLevel> {
     use ReasoningLevel::{High, Low, Max, Medium, Minimal, XHigh};
     match harness {
-        HarnessId::ClaudeCode => vec![Low, Medium, High, XHigh, Max],
-        HarnessId::Codex | HarnessId::Pi => vec![Minimal, Low, Medium, High, XHigh],
+        HarnessId::CLAUDE_CODE => vec![Low, Medium, High, XHigh, Max],
+        HarnessId::CODEX | HarnessId::PI => vec![Minimal, Low, Medium, High, XHigh],
         _ => Vec::new(),
     }
 }
@@ -76,8 +76,7 @@ impl WorkspaceView {
         });
         let acp = startable.iter().filter_map(|id| {
             let name = id.acp_name()?;
-            let harness: HarnessId = serde_json::from_value(serde_json::json!(name)).ok()?;
-            Some((harness, name.to_owned(), true))
+            Some((HarnessId::named(name), name.to_owned(), true))
         });
         core.chain(acp)
             .map(|(harness, name, installed)| {

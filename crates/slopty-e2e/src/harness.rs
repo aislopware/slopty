@@ -1328,16 +1328,13 @@ impl Stack {
     }
 
     /// [`Self::launch`] plus a second app on the same worker: `b` gets its own data directory,
-    /// identity and socket, and follows the same server. The
-    /// first app is left to open its first shell before the second comes up, so the two do not
-    /// both find an empty workspace and open one each.
+    /// identity and socket, and follows the same server.
     ///
     /// # Errors
     ///
     /// As [`Self::launch`], for either app.
     pub async fn launch_pair(worker_name: &str) -> Result<Pair> {
-        let mut stack = Self::launch(worker_name).await?;
-        stack.wait_first_shell().await?;
+        let stack = Self::launch(worker_name).await?;
         follow(&stack.path("b"), &stack.server)?;
         let (child, mut driver) = spawn_app(stack.dir.path(), "b", &stack.log, &[]).await?;
         linked(&mut driver).await?;
@@ -1354,25 +1351,12 @@ impl Stack {
         worker_name: &str,
         simulator: Simulator,
     ) -> Result<Pair> {
-        let mut stack = Self::launch(worker_name).await?;
-        stack.wait_first_shell().await?;
+        let stack = Self::launch(worker_name).await?;
         follow(&stack.path("b"), &stack.server)?;
         let mut driver =
             spawn_simulator_app(stack.dir.path(), "b", &stack.log, &simulator, &[]).await?;
         linked(&mut driver).await?;
         Ok(Pair { stack, b: SecondApp { driver, child: None, simulator: Some(simulator) } })
-    }
-
-    /// Wait until the first app has its first shell in the workspace with a prompt.
-    async fn wait_first_shell(&mut self) -> Result<()> {
-        self.driver
-            .wait_for("the first shell with a prompt", STARTUP, |d| {
-                d.status == "connected"
-                    && d.item("terminal").is_some()
-                    && d.terminals.iter().any(|t| t.rows.iter().any(|r| !r.is_empty()))
-            })
-            .await?;
-        Ok(())
     }
 
     /// Start the server, ptyd and the worker here and the app in a booted simulator (`simctl

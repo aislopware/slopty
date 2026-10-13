@@ -1487,7 +1487,7 @@ mod tests {
                 EngineBootConfig {
                     data_dir: dir.path().into(),
                     // slopty: Slopty's server is the only backend.
-                    default_harness: slopty_view_proto::HarnessId::Mock,
+                    default_harness: slopty_view_proto::HarnessId::MOCK,
                 },
                 cx,
             )

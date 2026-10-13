@@ -54,6 +54,17 @@ Tests make no sound on this Mac: the drawn screen's worker sounds only under `SL
    starts takes GPUI's presented handler as the glass when the display reports no scan-out
    (`GPUI_PRESENTED_AT_CALLBACK=1`): this Mac is reached over Parsec, whose virtual display
    gives every frame a zero presentation time.
+   Two cases in the `app` suite stand for how the app is used beyond one window. `app::pair`
+   runs two app processes on one worker, each on its own socket and data dir
+   (`Stack::launch_pair`): the dock's shell of the same place is one shell on both, what either
+   types runs there once and in order, and one client dying leaves the other's shell live.
+   `app::through_server` is the app at its first run (`harness::ServerFleet`): a server with two
+   workers registered, one on loopback and one behind a relay shaped like the tailnet
+   (`harness::TAILNET`: 8 to 12 ms round trip, 3 % loss), which the directory lists at the
+   relay's address. The server's address is typed into Settings → Devices' Add device, and both
+   workers must come from the directory, connected. The far worker is killed and restarted
+   twice, as soon as it shows down and again after the server has called it unreachable; it
+   must show down within 5 s and be connected within 2 s of each restart.
    `cargo xtask e2e ios [--sim iphone|ipad]` is the same socket with the app in the simulator.
    A note's button pressed on a killed app is the one press simctl cannot make (it delivers
    pushes, not presses), so the e2e build alone reads `SLOPTY_E2E_LAUNCH_TAP` at launch and

@@ -907,6 +907,7 @@ impl Render for AddDeviceDialog {
                             .id("add-device-go")
                             .tab_index(0)
                             .role(gpui::Role::Button)
+                            .aria_label(label) // slopty: named in the accessibility tree.
                             .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
                             .on_click(cx.listener(|this, _, window, cx| this.go(window, cx)))
                     })),

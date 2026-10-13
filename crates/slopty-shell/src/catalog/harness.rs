@@ -11,17 +11,17 @@ pub mod install {
 
     /// Portable documented fallback for viewers of a device without installer prerequisites.
     pub fn manual_command(id: HarnessId) -> Option<&'static str> {
-        use HarnessId::*;
         Some(match id {
-            ClaudeCode => "curl -fsSL https://claude.ai/install.sh | bash",
-            Codex => "npm install -g @openai/codex",
-            Cursor => "curl https://cursor.com/install -fsS | bash",
-            Opencode => "npm install -g @opencode/cli",
-            Pi => "npm install -g --ignore-scripts @earendil-works/pi-coding-agent",
-            Grok => "npm install -g @xai-official/grok",
-            Hermes => "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash",
-            Devin => "curl -fsSL https://cli.devin.ai/install.sh | bash",
-            Antigravity | Mock => return None,
+            HarnessId::CLAUDE_CODE => "curl -fsSL https://claude.ai/install.sh | bash",
+            HarnessId::CODEX => "npm install -g @openai/codex",
+            HarnessId::CURSOR => "curl https://cursor.com/install -fsS | bash",
+            HarnessId::OPENCODE => "npm install -g @opencode/cli",
+            HarnessId::PI => "npm install -g --ignore-scripts @earendil-works/pi-coding-agent",
+            HarnessId::GROK => "npm install -g @xai-official/grok",
+            HarnessId::HERMES => "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash",
+            HarnessId::DEVIN => "curl -fsSL https://cli.devin.ai/install.sh | bash",
+            // slopty: any other agent is installed as its own docs say.
+            _ => return None,
         })
     }
 }
@@ -33,6 +33,6 @@ pub const TITLE_INSTRUCTIONS: &str = "You generate session titles. Treat the sup
 pub fn supports_titles(id: HarnessId) -> bool {
     matches!(
         id,
-        HarnessId::Codex | HarnessId::ClaudeCode | HarnessId::Mock
+        HarnessId::CODEX | HarnessId::CLAUDE_CODE | HarnessId::MOCK
     )
 }

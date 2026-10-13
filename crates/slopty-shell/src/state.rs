@@ -4445,7 +4445,7 @@ mod tests {
         assert!(!state.apply_auth_value(serde_json::json!({ "bogus": true })));
 
         let status = |phase| HarnessUpdateStatus {
-            harness: HarnessId::Codex,
+            harness: HarnessId::CODEX,
             installed_version: Some("1.0".into()),
             latest_version: Some("2.0".into()),
             channel: None,
@@ -4469,7 +4469,7 @@ mod tests {
         let mut state = AppState::new();
         state.apply_chats(vec![chat("a", 0, None), chat("b", 1, None)]);
         let config = slopty_view_proto::ChatConfig {
-            harness: HarnessId::ClaudeCode,
+            harness: HarnessId::CLAUDE_CODE,
             model: Some("claude-fable-5".into()),
             reasoning: Some(slopty_view_proto::ReasoningLevel::XHigh),
             model_options: serde_json::Map::new(),
@@ -4493,7 +4493,7 @@ mod tests {
         state.apply_chat_config(
             "missing",
             slopty_view_proto::ChatConfig {
-                harness: HarnessId::ClaudeCode,
+                harness: HarnessId::CLAUDE_CODE,
                 model: None,
                 reasoning: None,
                 model_options: serde_json::Map::new(),

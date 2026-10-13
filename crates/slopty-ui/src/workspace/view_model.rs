@@ -79,12 +79,16 @@ impl std::fmt::Debug for Bridge {
     }
 }
 
-/// The agent a shell harness names.
+/// The agent a shell harness names: Claude Code, Codex and pi by their own ids, any other an
+/// ACP agent by its registry's name; Claude Code when the shell names none.
 fn agent_of(harness: Option<HarnessId>) -> AgentId {
     match harness {
-        Some(HarnessId::Codex) => AgentId::named(AgentId::CODEX),
-        Some(HarnessId::Pi) => AgentId::named(AgentId::PI),
-        _ => AgentId::named(AgentId::CLAUDE_CODE),
+        None | Some(HarnessId::CLAUDE_CODE | HarnessId::MOCK) => {
+            AgentId::named(AgentId::CLAUDE_CODE)
+        }
+        Some(HarnessId::CODEX) => AgentId::named(AgentId::CODEX),
+        Some(HarnessId::PI) => AgentId::named(AgentId::PI),
+        Some(other) => AgentId::acp(other.as_str()),
     }
 }
 
@@ -464,5 +468,26 @@ impl WorkspaceView {
         }
         self.view_changed(cx);
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use slopty_proto::thread::AgentId;
+    use slopty_view_proto::HarnessId;
+
+    use super::agent_of;
+
+    /// A chat starts the agent its harness names: Claude Code, Codex and pi by their own ids,
+    /// any other harness an ACP agent by its registry's name, and Claude Code when none is named.
+    #[test]
+    fn a_harness_starts_its_own_agent() {
+        assert!(agent_of(None).is(AgentId::CLAUDE_CODE));
+        assert!(agent_of(Some(HarnessId::CLAUDE_CODE)).is(AgentId::CLAUDE_CODE));
+        assert!(agent_of(Some(HarnessId::CODEX)).is(AgentId::CODEX));
+        assert!(agent_of(Some(HarnessId::PI)).is(AgentId::PI));
+        assert_eq!(agent_of(Some(HarnessId::OPENCODE)).acp_name(), Some("opencode"));
+        let gemini = HarnessId::named("gemini");
+        assert_eq!(agent_of(Some(gemini)).acp_name(), Some("gemini"));
     }
 }

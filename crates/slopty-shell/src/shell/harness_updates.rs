@@ -93,16 +93,18 @@ fn visible_rows(
 
 fn agent_name(harness: HarnessId) -> &'static str {
     match harness {
-        HarnessId::ClaudeCode => "Claude Code",
-        HarnessId::Codex => "Codex",
-        HarnessId::Cursor => "Cursor",
-        HarnessId::Devin => "Devin",
-        HarnessId::Grok => "Grok",
-        HarnessId::Hermes => "Hermes",
-        HarnessId::Pi => "Pi",
-        HarnessId::Opencode => "OpenCode",
-        HarnessId::Antigravity => "Antigravity",
-        HarnessId::Mock => "Mock",
+        HarnessId::CLAUDE_CODE => "Claude Code",
+        HarnessId::CODEX => "Codex",
+        HarnessId::CURSOR => "Cursor",
+        HarnessId::DEVIN => "Devin",
+        HarnessId::GROK => "Grok",
+        HarnessId::HERMES => "Hermes",
+        HarnessId::PI => "Pi",
+        HarnessId::OPENCODE => "OpenCode",
+        HarnessId::ANTIGRAVITY => "Antigravity",
+        HarnessId::MOCK => "Mock",
+        // slopty: any other agent by its harness's name.
+        other => other.as_str(),
     }
 }
 
@@ -925,7 +927,7 @@ mod tests {
 
     fn status(phase: Phase) -> HarnessUpdateStatus {
         HarnessUpdateStatus {
-            harness: HarnessId::Codex,
+            harness: HarnessId::CODEX,
             installed_version: Some("1.0".into()),
             latest_version: Some("2.0".into()),
             channel: None,

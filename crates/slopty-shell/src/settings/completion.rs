@@ -113,28 +113,28 @@ mod completion_tests {
         let state = cx.new(|_| crate::state::AppState::new());
         let page = cx.new(|cx| HarnessesPage::new(state, cx));
         page.update(cx, |page, cx| {
-            page.toggle_completion(HarnessId::ClaudeCode, true, cx);
-            page.toggle_completion(HarnessId::ClaudeCode, false, cx);
-            page.toggle_completion(HarnessId::Opencode, true, cx);
+            page.toggle_completion(HarnessId::CLAUDE_CODE, true, cx);
+            page.toggle_completion(HarnessId::CLAUDE_CODE, false, cx);
+            page.toggle_completion(HarnessId::OPENCODE, true, cx);
         });
         // Both default on, so each flip turns its own preference off.
         let loaded = settings::UiSettings::load(dir.path());
-        assert!(!loaded.skill_completion(HarnessId::ClaudeCode).dollar);
+        assert!(!loaded.skill_completion(HarnessId::CLAUDE_CODE).dollar);
         assert!(
             !loaded
-                .skill_completion(HarnessId::ClaudeCode)
+                .skill_completion(HarnessId::CLAUDE_CODE)
                 .separate_from_slash
         );
-        assert!(!loaded.skill_completion(HarnessId::Opencode).dollar);
+        assert!(!loaded.skill_completion(HarnessId::OPENCODE).dollar);
         assert!(
             loaded
-                .skill_completion(HarnessId::Opencode)
+                .skill_completion(HarnessId::OPENCODE)
                 .separate_from_slash
         );
         assert!(
             loaded
                 .skill_completion_by_harness
-                .contains_key(&HarnessId::ClaudeCode)
+                .contains_key(&HarnessId::CLAUDE_CODE)
         );
     }
 }

@@ -235,7 +235,7 @@ mod pinned_session_tests {
                 EngineBootConfig {
                     data_dir: path.into(),
                     // slopty: Slopty's server is the only backend.
-                    default_harness: slopty_view_proto::HarnessId::Mock,
+                    default_harness: slopty_view_proto::HarnessId::MOCK,
                 },
                 cx,
             )
@@ -1109,7 +1109,7 @@ mod pinned_session_tests {
                     EngineBootConfig {
                         data_dir: dir.path().into(),
                         // slopty: Slopty's server is the only backend.
-                        default_harness: slopty_view_proto::HarnessId::Mock,
+                        default_harness: slopty_view_proto::HarnessId::MOCK,
                     },
                     cx,
                 );
@@ -1219,7 +1219,7 @@ mod pinned_session_tests {
                     EngineBootConfig {
                         data_dir: dir.path().into(),
                         // slopty: Slopty's server is the only backend.
-                        default_harness: slopty_view_proto::HarnessId::Mock,
+                        default_harness: slopty_view_proto::HarnessId::MOCK,
                     },
                     cx,
                 );
@@ -1715,7 +1715,7 @@ mod pinned_session_tests {
                     EngineBootConfig {
                         data_dir: dir.path().into(),
                         // slopty: Slopty's server is the only backend.
-                        default_harness: slopty_view_proto::HarnessId::Mock,
+                        default_harness: slopty_view_proto::HarnessId::MOCK,
                     },
                     cx,
                 );
@@ -7744,7 +7744,7 @@ mod project_flow_tests {
                 EngineBootConfig {
                     data_dir: data.path().into(),
                     // slopty: Slopty's server is the only backend.
-                    default_harness: slopty_view_proto::HarnessId::Mock,
+                    default_harness: slopty_view_proto::HarnessId::MOCK,
                 },
                 cx,
             )
@@ -7887,7 +7887,7 @@ mod home_folder_search_tests {
                 crate::EngineBootConfig {
                     data_dir,
                     // slopty: Slopty's server is the only backend.
-                    default_harness: slopty_view_proto::HarnessId::Mock,
+                    default_harness: slopty_view_proto::HarnessId::MOCK,
                 },
                 cx,
             )

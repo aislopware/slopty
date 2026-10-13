@@ -213,3 +213,45 @@ paths = [
     "scripts/",
     ".github/",
 ]
+
+# Slopty's harness is an open name (`slopty_view_proto::HarnessId`): zeron's variants are its
+# constants.
+[[rename]]
+from = "HarnessId::ClaudeCode"
+to = "HarnessId::CLAUDE_CODE"
+
+[[rename]]
+from = "HarnessId::Codex"
+to = "HarnessId::CODEX"
+
+[[rename]]
+from = "HarnessId::Cursor"
+to = "HarnessId::CURSOR"
+
+[[rename]]
+from = "HarnessId::Devin"
+to = "HarnessId::DEVIN"
+
+[[rename]]
+from = "HarnessId::Grok"
+to = "HarnessId::GROK"
+
+[[rename]]
+from = "HarnessId::Hermes"
+to = "HarnessId::HERMES"
+
+[[rename]]
+from = "HarnessId::Pi"
+to = "HarnessId::PI"
+
+[[rename]]
+from = "HarnessId::Opencode"
+to = "HarnessId::OPENCODE"
+
+[[rename]]
+from = "HarnessId::Antigravity"
+to = "HarnessId::ANTIGRAVITY"
+
+[[rename]]
+from = "HarnessId::Mock"
+to = "HarnessId::MOCK"

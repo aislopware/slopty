@@ -12337,7 +12337,7 @@ mod tests {
                 EngineBootConfig {
                     data_dir: dir.path().into(),
                     // slopty: Slopty's server is the only backend.
-                    default_harness: slopty_view_proto::HarnessId::Mock,
+                    default_harness: slopty_view_proto::HarnessId::MOCK,
                 },
                 cx,
             )
@@ -12611,7 +12611,7 @@ mod exit_regressions {
         let boot = EngineBootConfig {
             data_dir: dir.path().into(),
             // slopty: Slopty's server is the only backend.
-            default_harness: slopty_view_proto::HarnessId::Mock,
+            default_harness: slopty_view_proto::HarnessId::MOCK,
         };
         for (connection, expected) in [
             (ConnectionStatus::Connecting, SplashPhase::Visible),
@@ -12654,7 +12654,7 @@ mod exit_regressions {
                 EngineBootConfig {
                     data_dir: dir.path().into(),
                     // slopty: Slopty's server is the only backend.
-                    default_harness: slopty_view_proto::HarnessId::Mock,
+                    default_harness: slopty_view_proto::HarnessId::MOCK,
                 },
                 cx,
             )
@@ -12753,7 +12753,7 @@ mod exit_regressions {
                 EngineBootConfig {
                     data_dir: dir.path().into(),
                     // slopty: Slopty's server is the only backend.
-                    default_harness: slopty_view_proto::HarnessId::Mock,
+                    default_harness: slopty_view_proto::HarnessId::MOCK,
                 },
                 cx,
             )
@@ -12803,7 +12803,7 @@ mod exit_regressions {
                         settings.code_font_size = code_size;
                         settings.transcript_width = transcript_width;
                         settings.skill_completion_by_harness.insert(
-                            slopty_view_proto::HarnessId::ClaudeCode,
+                            slopty_view_proto::HarnessId::CLAUDE_CODE,
                             settings::SkillCompletionSettings {
                                 dollar: open_links_in_slopty,
                                 separate_from_slash: true,
@@ -12833,13 +12833,13 @@ mod exit_regressions {
                         assert_eq!(current.transcript_width, transcript_width);
                         assert_eq!(
                             current
-                                .skill_completion(slopty_view_proto::HarnessId::ClaudeCode)
+                                .skill_completion(slopty_view_proto::HarnessId::CLAUDE_CODE)
                                 .dollar,
                             open_links_in_slopty
                         );
                         assert!(
                             current
-                                .skill_completion(slopty_view_proto::HarnessId::ClaudeCode)
+                                .skill_completion(slopty_view_proto::HarnessId::CLAUDE_CODE)
                                 .separate_from_slash
                         );
                     }
@@ -12885,7 +12885,7 @@ mod exit_regressions {
                 EngineBootConfig {
                     data_dir: dir.path().into(),
                     // slopty: Slopty's server is the only backend.
-                    default_harness: slopty_view_proto::HarnessId::Mock,
+                    default_harness: slopty_view_proto::HarnessId::MOCK,
                 },
                 cx,
             )
@@ -12944,7 +12944,7 @@ mod exit_regressions {
                 EngineBootConfig {
                     data_dir: dir.path().into(),
                     // slopty: Slopty's server is the only backend.
-                    default_harness: slopty_view_proto::HarnessId::Mock,
+                    default_harness: slopty_view_proto::HarnessId::MOCK,
                 },
                 cx,
             )
@@ -13008,7 +13008,7 @@ mod exit_regressions {
                 EngineBootConfig {
                     data_dir: dir.path().into(),
                     // slopty: Slopty's server is the only backend.
-                    default_harness: slopty_view_proto::HarnessId::Mock,
+                    default_harness: slopty_view_proto::HarnessId::MOCK,
                 },
                 cx,
             )
@@ -13048,7 +13048,7 @@ mod exit_regressions {
                 EngineBootConfig {
                     data_dir: dir.path().into(),
                     // slopty: Slopty's server is the only backend.
-                    default_harness: slopty_view_proto::HarnessId::Mock,
+                    default_harness: slopty_view_proto::HarnessId::MOCK,
                 },
                 cx,
             )
@@ -13120,7 +13120,7 @@ mod exit_regressions {
                     EngineBootConfig {
                         data_dir: dir.path().into(),
                         // slopty: Slopty's server is the only backend.
-                        default_harness: slopty_view_proto::HarnessId::Mock,
+                        default_harness: slopty_view_proto::HarnessId::MOCK,
                     },
                     cx,
                 )
@@ -13163,7 +13163,7 @@ mod exit_regressions {
                 EngineBootConfig {
                     data_dir: dir.path().into(),
                     // slopty: Slopty's server is the only backend.
-                    default_harness: slopty_view_proto::HarnessId::Mock,
+                    default_harness: slopty_view_proto::HarnessId::MOCK,
                 },
                 cx,
             )
@@ -13238,7 +13238,7 @@ mod exit_regressions {
                 EngineBootConfig {
                     data_dir: dir.path().into(),
                     // slopty: Slopty's server is the only backend.
-                    default_harness: slopty_view_proto::HarnessId::Mock,
+                    default_harness: slopty_view_proto::HarnessId::MOCK,
                 },
                 cx,
             )
@@ -13309,7 +13309,7 @@ mod exit_regressions {
                 EngineBootConfig {
                     data_dir: dir.path().into(),
                     // slopty: Slopty's server is the only backend.
-                    default_harness: slopty_view_proto::HarnessId::Mock,
+                    default_harness: slopty_view_proto::HarnessId::MOCK,
                 },
                 cx,
             )
@@ -13371,7 +13371,7 @@ mod exit_regressions {
                 EngineBootConfig {
                     data_dir: dir.path().into(),
                     // slopty: Slopty's server is the only backend.
-                    default_harness: slopty_view_proto::HarnessId::Mock,
+                    default_harness: slopty_view_proto::HarnessId::MOCK,
                 },
                 cx,
             )
@@ -13442,7 +13442,7 @@ mod exit_regressions {
                 EngineBootConfig {
                     data_dir: dir.path().into(),
                     // slopty: Slopty's server is the only backend.
-                    default_harness: slopty_view_proto::HarnessId::Mock,
+                    default_harness: slopty_view_proto::HarnessId::MOCK,
                 },
                 cx,
             )
@@ -13494,7 +13494,7 @@ mod exit_regressions {
                 EngineBootConfig {
                     data_dir: dir.path().into(),
                     // slopty: Slopty's server is the only backend.
-                    default_harness: slopty_view_proto::HarnessId::Mock,
+                    default_harness: slopty_view_proto::HarnessId::MOCK,
                 },
                 cx,
             )
@@ -13634,7 +13634,7 @@ mod exit_regressions {
                 EngineBootConfig {
                     data_dir: dir.path().into(),
                     // slopty: Slopty's server is the only backend.
-                    default_harness: slopty_view_proto::HarnessId::Mock,
+                    default_harness: slopty_view_proto::HarnessId::MOCK,
                 },
                 cx,
             )
@@ -13749,7 +13749,7 @@ mod exit_regressions {
                 EngineBootConfig {
                     data_dir: dir.path().into(),
                     // slopty: Slopty's server is the only backend.
-                    default_harness: slopty_view_proto::HarnessId::Mock,
+                    default_harness: slopty_view_proto::HarnessId::MOCK,
                 },
                 cx,
             )
@@ -13843,7 +13843,7 @@ mod exit_regressions {
                 EngineBootConfig {
                     data_dir: dir.path().into(),
                     // slopty: Slopty's server is the only backend.
-                    default_harness: slopty_view_proto::HarnessId::Mock,
+                    default_harness: slopty_view_proto::HarnessId::MOCK,
                 },
                 cx,
             )
@@ -13905,7 +13905,7 @@ mod exit_regressions {
                 EngineBootConfig {
                     data_dir: dir.path().into(),
                     // slopty: Slopty's server is the only backend.
-                    default_harness: slopty_view_proto::HarnessId::Mock,
+                    default_harness: slopty_view_proto::HarnessId::MOCK,
                 },
                 cx,
             )
@@ -13979,7 +13979,7 @@ mod exit_regressions {
                 EngineBootConfig {
                     data_dir: dir.path().into(),
                     // slopty: Slopty's server is the only backend.
-                    default_harness: slopty_view_proto::HarnessId::Mock,
+                    default_harness: slopty_view_proto::HarnessId::MOCK,
                 },
                 cx,
             )
@@ -14073,7 +14073,7 @@ mod exit_regressions {
                 EngineBootConfig {
                     data_dir: dir.path().into(),
                     // slopty: Slopty's server is the only backend.
-                    default_harness: slopty_view_proto::HarnessId::Mock,
+                    default_harness: slopty_view_proto::HarnessId::MOCK,
                 },
                 cx,
             )
@@ -14238,7 +14238,7 @@ mod right_tab_mouse_regressions {
                     EngineBootConfig {
                         data_dir: dir.path().into(),
                         // slopty: Slopty's server is the only backend.
-                        default_harness: slopty_view_proto::HarnessId::Mock,
+                        default_harness: slopty_view_proto::HarnessId::MOCK,
                     },
                     cx,
                 );
@@ -14718,7 +14718,7 @@ mod settings_modal_regressions {
                 EngineBootConfig {
                     data_dir: dir.path().into(),
                     // slopty: Slopty's server is the only backend.
-                    default_harness: slopty_view_proto::HarnessId::Mock,
+                    default_harness: slopty_view_proto::HarnessId::MOCK,
                 },
                 cx,
             )
@@ -14770,7 +14770,7 @@ mod settings_modal_regressions {
             EngineBootConfig {
                 data_dir: dir.into(),
                 // slopty: Slopty's server is the only backend.
-                default_harness: slopty_view_proto::HarnessId::Mock,
+                default_harness: slopty_view_proto::HarnessId::MOCK,
             },
             cx,
         )

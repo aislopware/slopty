@@ -22,8 +22,16 @@ mod hangs;
 mod interface;
 
 #[cfg(test)]
+#[path = "app/pair.rs"]
+mod pair;
+
+#[cfg(test)]
 #[path = "app/resume.rs"]
 mod resume;
+
+#[cfg(test)]
+#[path = "app/through_server.rs"]
+mod through_server;
 
 #[cfg(test)]
 #[path = "app/surfaces_files.rs"]

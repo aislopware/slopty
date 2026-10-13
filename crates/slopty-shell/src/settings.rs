@@ -673,15 +673,15 @@ impl SkillCompletionSettings {
 }
 
 pub const SKILL_COMPLETION_HARNESSES: [(slopty_view_proto::HarnessId, &str); 9] = [
-    (slopty_view_proto::HarnessId::Antigravity, "Antigravity"),
-    (slopty_view_proto::HarnessId::ClaudeCode, "Claude Code"),
-    (slopty_view_proto::HarnessId::Codex, "Codex"),
-    (slopty_view_proto::HarnessId::Cursor, "Cursor"),
-    (slopty_view_proto::HarnessId::Devin, "Devin"),
-    (slopty_view_proto::HarnessId::Grok, "Grok"),
-    (slopty_view_proto::HarnessId::Hermes, "Hermes"),
-    (slopty_view_proto::HarnessId::Pi, "Pi"),
-    (slopty_view_proto::HarnessId::Opencode, "OpenCode"),
+    (slopty_view_proto::HarnessId::ANTIGRAVITY, "Antigravity"),
+    (slopty_view_proto::HarnessId::CLAUDE_CODE, "Claude Code"),
+    (slopty_view_proto::HarnessId::CODEX, "Codex"),
+    (slopty_view_proto::HarnessId::CURSOR, "Cursor"),
+    (slopty_view_proto::HarnessId::DEVIN, "Devin"),
+    (slopty_view_proto::HarnessId::GROK, "Grok"),
+    (slopty_view_proto::HarnessId::HERMES, "Hermes"),
+    (slopty_view_proto::HarnessId::PI, "Pi"),
+    (slopty_view_proto::HarnessId::OPENCODE, "OpenCode"),
 ];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1777,14 +1777,14 @@ mod tests {
             assert!(preferences.separate_from_slash);
         }
         settings.skill_completion_by_harness.insert(
-            HarnessId::ClaudeCode,
+            HarnessId::CLAUDE_CODE,
             SkillCompletionSettings {
                 dollar: false,
                 separate_from_slash: true,
             },
         );
         settings.skill_completion_by_harness.insert(
-            HarnessId::Opencode,
+            HarnessId::OPENCODE,
             SkillCompletionSettings {
                 dollar: true,
                 separate_from_slash: false,
@@ -1796,15 +1796,15 @@ mod tests {
             settings.skill_completion_by_harness,
             loaded.skill_completion_by_harness
         );
-        assert!(!loaded.skill_completion(HarnessId::ClaudeCode).dollar);
-        assert!(loaded.skill_completion(HarnessId::Cursor).dollar);
+        assert!(!loaded.skill_completion(HarnessId::CLAUDE_CODE).dollar);
+        assert!(loaded.skill_completion(HarnessId::CURSOR).dollar);
         let legacy: UiSettings = serde_json::from_str(r#"{"skillsInSlashMenu":true}"#).unwrap();
         assert!(
             !legacy
-                .skill_completion(HarnessId::Codex)
+                .skill_completion(HarnessId::CODEX)
                 .separate_from_slash
         );
-        assert!(legacy.skill_completion(HarnessId::Codex).dollar);
+        assert!(legacy.skill_completion(HarnessId::CODEX).dollar);
     }
 
     #[test]
