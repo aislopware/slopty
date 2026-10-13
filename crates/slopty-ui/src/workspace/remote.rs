@@ -168,6 +168,7 @@ impl WorkspaceView {
         cx: &Context<Self>,
     ) {
         self.clip = Some(Rc::new(RefCell::new(ClipSync::new(board))));
+        self.keyboard_window = window;
         self.clip_tick = Some(cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(CLIP_TICK).await;

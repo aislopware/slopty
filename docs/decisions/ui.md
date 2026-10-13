@@ -11816,3 +11816,27 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   Claude Code, Codex and pi by their own ids, any other as the ACP agent of that registry name.
   Tests: `slopty-view-proto` `agent::harness_id_tests::a_harness_is_its_name`; `slopty-ui`
   `workspace::view_model::tests::a_harness_starts_its_own_agent`.
+
+- ✅ **A remote window's controls are a "…" in its corner (2026-10-13).** The tiles' headers,
+  palette rows and context menus were deleted with the tiling workspace, and so was every way to
+  ask a stream for what only the client can give: the system's shortcuts sent to a remote Mac,
+  the curtain over it, a display the worker makes at this device's size, the clipboard typed in,
+  the stream's stats. The picture takes every press, key and right click for the worker, so these
+  cannot be a context menu on it: the view draws one quiet "…" in its top right corner (shown
+  while the pointer is over the picture, the menu is open or the stream is unwell; always on
+  touch), and its menu lists the stream's own rows (stats, mute; trackpad, gestures, copy and
+  paste on a phone) and the workspace's, each only where the workspace offers it and ticked as
+  it stands (`screen::Offers`, asked for by `ScreenViewEvent::Control`). The stats hang under the
+  button rather than over it. A press that dismisses the menu by landing on the button leaves it
+  closed: the pill notes in the capture phase, before the menu's outside press, that it was open.
+  The workspace closes the stream it replaces (a physical display for one made for this device,
+  and back) at once with `ScreenView::end`, rather than when a later frame lets the old view go.
+  A remote window follows its pane as a local one would: once the body holds a new size for
+  `fit::SETTLE`, the window is asked for the same proportion in its own pixels, once; the first
+  size is the window's own, and a display letterboxes. Tests: `slopty-ui`
+  `screen::tests::{the_corner_button_opens_the_stream_s_controls,
+  a_remote_window_follows_its_pane, a_display_keeps_its_size_with_its_pane}`;
+  `workspace::desktop::tests::{the_curtain_is_held_from_this_device_and_asked_again_on_each_link,
+  a_display_made_for_this_device_follows_its_view, a_window_is_never_offered_a_display,
+  system_shortcuts_go_to_the_remote_mac_while_its_view_has_the_keyboard,
+  the_clipboard_is_typed_into_the_window}`.

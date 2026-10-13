@@ -58,14 +58,17 @@ use tokio::sync::{mpsc, watch};
 
 use crate::outbox::Outbox;
 
+mod controls;
 mod driver;
 mod drop;
+pub(crate) mod fit;
 mod glass;
 mod health;
 mod keyboard;
 mod touch;
 mod zoom;
 
+pub use controls::{CONTROLS, Control, Offers};
 pub use driver::{Driver, HAND_BACK, IN_CONTROL, TAKE_CONTROL};
 pub use health::{Figure, Health, RTT_WARN_FROM, fps_label};
 pub use zoom::Zoom;
@@ -168,6 +171,13 @@ pub enum ScreenViewEvent {
     /// The person stopped the paste of files the input waits for, from the tile's line: the
     /// workspace stops what goes up for it.
     CancelPaste,
+    /// A row of the window's controls asks what only the workspace can do ([`Offers`]).
+    Control(Control),
+    /// The view took the keyboard in the window in front, or lost it
+    /// ([`ScreenView::has_keyboard`]).
+    Keyboard(bool),
+    /// The body came to rest at a size it had not rested at ([`ScreenView::body_pixels`]).
+    Rested,
 }
 
 /// The line over a window whose input waits for a paste of files.
@@ -486,6 +496,16 @@ pub struct ScreenView {
     /// The system's own shortcuts (⌘Tab, ⌘Space, Mission Control) go to the worker while
     /// this tile has the keyboard: the person turned it on for this tile.
     system_keys: bool,
+    /// What the workspace offers this view's controls, and whether their menu is open.
+    offers: Offers,
+    controls_open: bool,
+    /// The press now under way found the controls' menu open: the press closed it, so its
+    /// click leaves it closed.
+    controls_pressed_open: bool,
+    /// Its stream was closed already ([`Self::end`]): dropping the view closes nothing.
+    ended: bool,
+    /// Where the body last rested, which a window's size follows ([`fit`]).
+    fit: fit::Fit,
     /// What "Type the clipboard" has still to type, and the task typing it.
     typing: VecDeque<char>,
     typer: Option<Task<()>>,
@@ -1028,6 +1048,11 @@ impl ScreenView {
             host: None,
             lower_host: None,
             system_keys: false,
+            offers: Offers::default(),
+            controls_open: false,
+            controls_pressed_open: false,
+            ended: false,
+            fit: fit::Fit::default(),
             typing: VecDeque::new(),
             typer: None,
             size,
@@ -1781,13 +1806,28 @@ impl ScreenView {
         self.out.send(ClientMsg::Screen(req));
     }
 
+    /// Close the stream now, rather than when the last holder of the view lets it go (a frame
+    /// drawn with it keeps it until the next): the workspace replacing it says so at once.
+    pub fn end(&mut self) {
+        if !std::mem::replace(&mut self.ended, true) {
+            self.send(ScreenRequest::Close(self.stream));
+        }
+    }
+
     /// Tell the worker whether this tile has the keyboard in an active window, on a change
     /// only: it favours the focused stream when its encoders are full.
-    fn tell_focus(&mut self, focused: bool) {
+    fn tell_focus(&mut self, focused: bool, cx: &mut Context<Self>) {
         if focused != self.focus_told {
             self.focus_told = focused;
             self.send(ScreenRequest::Focused { stream: self.stream, focused });
+            cx.emit(ScreenViewEvent::Keyboard(focused));
         }
+    }
+
+    /// Whether the view has the keyboard in the window in front, as it last told the worker.
+    #[must_use]
+    pub const fn has_keyboard(&self) -> bool {
+        self.focus_told
     }
 
     /// Send `input` after the keys taken ahead of it (`keyboard`).
@@ -3048,7 +3088,7 @@ impl Drop for ScreenView {
     fn drop(&mut self) {
         self.handle.set_present(None);
         self.glass.detach();
-        self.send(ScreenRequest::Close(self.stream));
+        self.end();
     }
 }
 
@@ -3135,28 +3175,28 @@ impl Render for ScreenView {
                 self.let_go(cx);
             }
             let blur = cx.on_blur(&self.focus, window, |this, _window, cx| {
-                this.tell_focus(false);
+                this.tell_focus(false, cx);
                 this.let_go(cx);
             });
             // Taking the keyboard tells the worker this device's input source and Caps Lock.
-            let focus = cx.on_focus(&self.focus, window, |this, window, _cx| {
+            let focus = cx.on_focus(&self.focus, window, |this, window, cx| {
                 this.keyboard_focused();
-                this.tell_focus(window.is_window_active());
+                this.tell_focus(window.is_window_active(), cx);
             });
             let inactive = cx.observe_window_activation(window, |this, window, cx| {
                 if !window.is_window_active() {
-                    this.tell_focus(false);
+                    this.tell_focus(false, cx);
                     this.let_go(cx);
                 } else if this.focus.is_focused(window) {
                     this.keyboard_focused();
-                    this.tell_focus(true);
+                    this.tell_focus(true, cx);
                 }
             });
             let moved =
                 cx.observe_window_bounds(window, |this, window, cx| this.follow_screen(window, cx));
             self.let_go = Some((here, [blur, focus, inactive, moved]));
             // A view made for a stream a reconnect opened may have the keyboard already.
-            self.tell_focus(self.focus.is_focused(window) && window.is_window_active());
+            self.tell_focus(self.focus.is_focused(window) && window.is_window_active(), cx);
             self.follow_screen(window, cx);
         }
         self.place_layer(here, window, cx);
@@ -3185,9 +3225,10 @@ impl Render for ScreenView {
                     // The pointer was laid out at the old bounds in this frame (the layer is
                     // placed from the body as painted): the next one lays it out at these, and
                     // asks for the stream's size again at the width it is now drawn.
-                    entity.update(cx, |this, _| {
+                    entity.update(cx, |this, cx| {
                         this.bounds = bounds;
                         this.scale_factor = scale_factor;
+                        this.body_moved(cx);
                     });
                     let entity = entity.downgrade();
                     window.on_next_frame(move |_window, cx| {
@@ -3404,6 +3445,7 @@ impl Render for ScreenView {
             .aria_label(self.a11y_label().clone())
             .track_focus(&self.focus)
             .relative()
+            .group(controls::GROUP)
             .size_full()
             .overflow_hidden()
             // A picture sits on the stage, dark in both appearances as media is, so its edge
@@ -3450,6 +3492,7 @@ impl Render for ScreenView {
             .children(console)
             .children(readout)
             .children(self.driver_pill(cx))
+            .child(self.controls(cx))
             .children(hud)
     }
 }
@@ -3651,9 +3694,10 @@ impl ScreenView {
             )
             .children(trends)
             .children(lines);
+        // Under the controls' pill, which shares the corner.
         div()
             .absolute()
-            .top(px(theme.spacing.sm))
+            .top(px(controls::under_controls(theme)))
             .right(px(theme.spacing.sm))
             .child(panel)
             .into_any_element()
@@ -6683,5 +6727,129 @@ mod tests {
         cursor.send(CursorState { x: 5, y: 5, visible: false }).expect("the pump listens");
         cx.run_until_parked();
         assert_eq!(renders(&view, cx), drawn.saturating_add(1), "only the hiding drew");
+    }
+
+    /// The "…" in the picture's corner opens the controls: the stream's own rows always, the
+    /// workspace's only where it offers them, each ticked as it stands. A view row acts in
+    /// the view (the stats come up); a workspace row asks the workspace, and the menu closes
+    /// either way, the picture keeping its presses.
+    #[gpui::test]
+    fn the_corner_button_opens_the_stream_s_controls(cx: &mut gpui::TestAppContext) {
+        let (view, mut rx, cx) = windowed(cx);
+        let asked = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen = Rc::clone(&asked);
+        cx.update(|_window, cx| {
+            cx.subscribe(&view, move |_view, event, _cx| {
+                if let ScreenViewEvent::Control(control) = event {
+                    seen.borrow_mut().push(*control);
+                }
+            })
+            .detach();
+        });
+        let click = |cx: &mut gpui::VisualTestContext, selector: &'static str| {
+            let at = cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector}")).center();
+            cx.simulate_click(at, Modifiers::default());
+            cx.run_until_parked();
+        };
+        let asks = [
+            "screen-controls-menu-send-system-shortcuts",
+            "screen-controls-menu-curtain-over-the-remote-mac",
+            "screen-controls-menu-type-the-clipboard",
+        ];
+        assert!(cx.debug_bounds("screen-controls-menu").is_none(), "closed at first");
+        click(cx, "screen-controls");
+        assert!(view.read_with(cx, |v, _| v.controls_open()));
+        assert!(cx.debug_bounds("screen-controls-menu-stream-stats").is_some(), "always there");
+        for row in asks {
+            assert!(cx.debug_bounds(row).is_none(), "{row}: not offered");
+        }
+        click(cx, "screen-controls");
+        assert!(cx.debug_bounds("screen-controls-menu").is_none(), "the button closes it too");
+
+        view.update(cx, |v, cx| {
+            let offers = Offers {
+                system_keys: Some(false),
+                curtain: Some(true),
+                sized: None,
+                type_clipboard: true,
+            };
+            v.set_offers(offers, cx);
+        });
+        click(cx, "screen-controls");
+        for row in asks {
+            assert!(cx.debug_bounds(row).is_some(), "{row}: offered");
+        }
+        let sized = "screen-controls-menu-display-sized-to-this-window";
+        assert!(cx.debug_bounds(sized).is_none(), "not offered");
+        let inputs = |rx: &mut mpsc::Receiver<ClientMsg>| {
+            std::iter::from_fn(|| rx.try_recv().ok())
+                .filter(|m| matches!(m, ClientMsg::Screen(ScreenRequest::Input { .. })))
+                .count()
+        };
+        inputs(&mut rx);
+        click(cx, "screen-controls-menu-curtain-over-the-remote-mac");
+        assert_eq!(*asked.borrow(), [Control::Curtain], "the workspace is asked");
+        assert_eq!(inputs(&mut rx), 0, "the click never reached the worker");
+        assert!(!view.read_with(cx, |v, _| v.controls_open()), "the pick closed the menu");
+
+        click(cx, "screen-controls");
+        click(cx, "screen-controls-menu-stream-stats");
+        assert!(view.read_with(cx, |v, _| v.hud()), "the stats came up");
+        let button = cx.debug_bounds("screen-controls").expect("the button");
+        let stats = cx.debug_bounds("stream-stats").expect("the stats");
+        assert!(!button.intersects(&stats), "the stats hang under the button: {stats:?}");
+        click(cx, "screen-controls");
+        assert!(view.read_with(cx, |v, _| v.controls_open()), "still within reach");
+    }
+
+    /// A remote window follows its pane: once the body rests at a new size the window is asked
+    /// for the same proportion in its own pixels, once, at the end; the first rest is the
+    /// window's own and resizes nothing, and a display never asks.
+    #[gpui::test]
+    fn a_remote_window_follows_its_pane(cx: &mut gpui::TestAppContext) {
+        let resizes = |rx: &mut mpsc::Receiver<ClientMsg>| {
+            std::iter::from_fn(|| rx.try_recv().ok())
+                .filter_map(|m| match m {
+                    ClientMsg::Screen(ScreenRequest::Resize { width, height, scale, .. }) => {
+                        Some((width, height, scale))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let (view, mut rx, cx) = windowed_on(cx, CaptureTarget::Window(slopty_core::WindowId(9)));
+        view.update(cx, |v, cx| v.show_picture(picture(800, 600), cx));
+        cx.run_until_parked();
+        cx.executor().advance_clock(fit::SETTLE);
+        cx.run_until_parked();
+        assert!(resizes(&mut rx).is_empty(), "opening a window never resizes it");
+
+        cx.simulate_resize(size(px(500.0), px(300.0)));
+        cx.run_until_parked();
+        cx.simulate_resize(size(px(600.0), px(300.0)));
+        cx.run_until_parked();
+        assert!(resizes(&mut rx).is_empty(), "nothing while the pane moves");
+        cx.executor().advance_clock(fit::SETTLE);
+        cx.run_until_parked();
+        assert_eq!(resizes(&mut rx), [(1200, 600, None)], "half again as wide, once");
+    }
+
+    /// A display never asks to be resized with its pane: it letterboxes.
+    #[gpui::test]
+    fn a_display_keeps_its_size_with_its_pane(cx: &mut gpui::TestAppContext) {
+        let resizes = |rx: &mut mpsc::Receiver<ClientMsg>| {
+            std::iter::from_fn(|| rx.try_recv().ok())
+                .filter(|m| matches!(m, ClientMsg::Screen(ScreenRequest::Resize { .. })))
+                .count()
+        };
+        let (display, mut rx, cx) = windowed(cx);
+        display.update(cx, |v, cx| v.show_picture(picture(800, 600), cx));
+        cx.executor().advance_clock(fit::SETTLE);
+        cx.run_until_parked();
+        cx.simulate_resize(size(px(600.0), px(300.0)));
+        cx.run_until_parked();
+        cx.executor().advance_clock(fit::SETTLE);
+        cx.run_until_parked();
+        assert_eq!(resizes(&mut rx), 0, "a display letterboxes");
     }
 }

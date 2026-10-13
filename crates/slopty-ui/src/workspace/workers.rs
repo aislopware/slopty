@@ -18,7 +18,7 @@ use slopty_proto::terminal::{SessionState, SessionSummary, TermEvent, TermReques
 use slopty_terminal::{TerminalView, TerminalViewEvent};
 
 use super::attention::About;
-use super::{Finished, Worker, WorkerLink, WorkerStatus, WorkspaceEvent, WorkspaceView};
+use super::{Finished, Worker, WorkerLink, WorkerStatus, WorkspaceEvent, WorkspaceView, desktop};
 use crate::screen::ScreenView;
 
 /// A stream the worker ends unasked again within this of the last is not asked for again: its
@@ -96,6 +96,10 @@ impl WorkspaceView {
         w.failed_opens.clear();
         w.stopped.clear();
         w.sessions = sessions.into_iter().map(|s| (s.id, s)).collect();
+        if let Some(sized) = w.sized.as_mut() {
+            sized.lost();
+        }
+        self.desktop_relinked(key);
         self.reset_remote(key, &known, cx);
         self.relink_terminals(key, &known, cx);
         self.sync_approvals(cx);
@@ -127,6 +131,9 @@ impl WorkspaceView {
         w.rtt = None;
         w.relay.reset();
         w.pending_opens.clear();
+        if let Some(sized) = w.sized.as_mut() {
+            sized.lost();
+        }
         // A stream opened on the link that dropped has nothing more coming.
         w.fresh_screens.clear();
         let sessions: Vec<SessionId> = w.sessions.keys().copied().collect();
@@ -284,6 +291,7 @@ impl WorkspaceView {
             if agents_moved {
                 self.hub_agents(key, cx);
             }
+            self.refresh_offers(cx);
             cx.notify();
         }
     }
@@ -590,6 +598,7 @@ impl WorkspaceView {
     /// Open streams for remote windows that should have one and lack it; let go of the rest.
     pub(super) fn reconcile_screens(&mut self) {
         let quality = quality_for();
+        let key = self.desktop_key();
         let mut keep: Vec<ItemId> = Vec::new();
         for w in self.workers.values_mut() {
             if w.link.is_none() {
@@ -598,6 +607,27 @@ impl WorkspaceView {
                 keep.extend(w.doc.items().map(|i| i.id).filter(|id| screens.contains_key(id)));
                 continue;
             }
+            // A desktop streamed from a display made for this device opens its own way; one
+            // gone from the registry goes back to nothing.
+            let sized = w.sized.as_ref().map(desktop::Sized::item);
+            if let Some(id) = sized {
+                if key.is_none() || !w.doc.items().any(|i| i.id == id) {
+                    w.sized = None;
+                } else {
+                    keep.push(id);
+                    let streaming = (self.screens.contains_key(&id)
+                        && !w.stale_screens.contains(&id))
+                        || w.fresh_screens.contains_key(&id);
+                    let open =
+                        w.sized.as_mut().zip(key).and_then(|(s, key)| {
+                            (!streaming).then(|| s.open(key, quality)).flatten()
+                        });
+                    if let Some(open) = open {
+                        w.send(open);
+                    }
+                }
+            }
+            let sized = w.sized.as_ref().map(desktop::Sized::item);
             let untitled = w.doc.items().any(|i| {
                 matches!(i.kind, ItemKind::Window { .. }) && !self.titles.contains_key(&i.id)
             });
@@ -608,6 +638,7 @@ impl WorkspaceView {
             let wanted: Vec<(ItemId, CaptureTarget)> = w
                 .doc
                 .items()
+                .filter(|i| Some(i.id) != sized)
                 .filter_map(|i| match i.kind {
                     ItemKind::Window { window } => Some((i.id, CaptureTarget::Window(window))),
                     ItemKind::Display { display } => Some((i.id, CaptureTarget::Display(display))),
@@ -652,16 +683,18 @@ impl WorkspaceView {
                 let Some(w) = self.workers.get_mut(&key) else { return };
                 w.titles_requested = false;
             }
-            // A display made for this device is the desktop's own way, which the shell does
-            // not take.
-            ScreenEvent::Display { .. } | ScreenEvent::Curtain(_) => {}
+            ScreenEvent::Display { stream, key: display_key, display } => {
+                self.display_told(key, stream, display_key, display, cx);
+            }
+            ScreenEvent::Curtain(state) => self.curtain_heard(key, state, cx),
             ScreenEvent::Opened { stream, target, codec, width, height, .. } => {
                 let theme = self.theme.clone();
                 let quality = quality_for();
                 let pinned = self.pinned_rtt;
                 let Some(w) = self.workers.get_mut(&key) else { return };
                 let Some(link) = w.link.clone() else { return };
-                let Some(id) = w.pending_opens.remove(&target) else {
+                let sized = w.sized.as_mut().and_then(|s| s.opened(stream).then(|| s.item()));
+                let Some(id) = sized.or_else(|| w.pending_opens.remove(&target)) else {
                     tracing::debug!(%stream, ?target, "opened stream nobody asked for; closing");
                     w.send(ClientMsg::Screen(ScreenRequest::Close(stream)));
                     return;
@@ -701,17 +734,30 @@ impl WorkspaceView {
                     crate::screen::ScreenViewEvent::DragOutFailed(why) => {
                         Self::show_failure(format!("The drag did not come out: {why}"), cx);
                     }
+                    crate::screen::ScreenViewEvent::Control(control) => {
+                        this.screen_control(id, *control, cx);
+                    }
+                    crate::screen::ScreenViewEvent::Keyboard(_) => this.arm_system_keys(cx),
+                    crate::screen::ScreenViewEvent::Rested => this.screen_rested(id, cx),
                 })
                 .detach();
                 if behind_stale {
                     if let Some(w) = self.workers.get_mut(&key) {
-                        w.fresh_screens.insert(id, view);
+                        w.fresh_screens.insert(id, view.clone());
                     }
                 } else {
-                    self.screens.insert(id, view);
+                    self.screens.insert(id, view.clone());
                 }
+                self.screen_arrived(id, &view, cx);
             }
             ScreenEvent::Closed { stream, reason } => {
+                // A display made for this device that ends goes back to the physical one,
+                // rather than being asked for again and again.
+                if let Some(w) = self.workers.get_mut(&key)
+                    && w.sized.as_ref().is_some_and(|s| s.streams(stream))
+                {
+                    w.sized = None;
+                }
                 // A view still held was not let go by this client: the worker ended it.
                 let now = std::time::Instant::now();
                 for (id, _) in self.stream_views(key, stream, cx) {
@@ -793,11 +839,16 @@ impl WorkspaceView {
         why: ScreenFailure,
         _cx: &mut Context<Self>,
     ) {
-        let Some(w) = self.workers.get_mut(&key) else { return };
         let OpenAsk::Target(target) = asked else {
-            tracing::debug!(?asked, ?why, "a refused display made for this device");
+            // Not made: its desktop goes back to its physical display, and this worker is not
+            // asked again unasked on this link.
+            tracing::info!(?why, "a display made for this device refused");
+            if self.display_declined(key).is_some() {
+                self.reconcile_screens();
+            }
             return;
         };
+        let Some(w) = self.workers.get_mut(&key) else { return };
         let Some(id) = w.pending_opens.remove(&target) else {
             tracing::debug!(?asked, ?why, "a refused open nobody waits on");
             return;
@@ -863,14 +914,10 @@ impl WorkspaceView {
     }
 }
 
-impl WorkspaceView {}
-
 /// The round trip a readout shows for a link measured at `live`: `pinned` once there is one.
 fn shown_rtt(pinned: Option<Duration>, live: Option<Duration>) -> Option<Duration> {
     live.map(|live| pinned.unwrap_or(live))
 }
-
-impl WorkspaceView {}
 
 /// Requested quality for a new stream: full scale at the main screen's refresh. The view then
 /// asks for a scale matching the width it paints at, and for the refresh of the screen it is

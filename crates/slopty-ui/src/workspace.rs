@@ -18,6 +18,7 @@ mod agents;
 mod approvals;
 pub mod attention;
 mod commands;
+mod desktop;
 mod faces;
 mod keys;
 mod presence;
@@ -264,6 +265,10 @@ struct Worker {
     queued: Vec<ClientMsg>,
     /// The changes to its files this client asked for, until it answers each.
     fs_ops: slopty_client::folders::FsOps,
+    /// The display it streams for this device's key, when a desktop of it shows one.
+    sized: Option<desktop::Sized>,
+    /// Where its curtain stands for this device.
+    curtain: desktop::Curtain,
 }
 
 /// The most a worker out of reach holds for its return: far more than a human closes, names
@@ -297,6 +302,8 @@ impl Worker {
             awaiting_snapshot: false,
             queued: Vec::new(),
             fs_ops: slopty_client::folders::FsOps::default(),
+            sized: None,
+            curtain: desktop::Curtain::default(),
         }
     }
 
@@ -435,6 +442,10 @@ pub struct WorkspaceView {
     awake: Option<Task<()>>,
     /// What Settings → Devices offers to do to each machine, as the app says.
     device_actions: HashMap<WorkerKey, Vec<slopty_view_proto::DeviceAction>>,
+    /// What the remote windows and desktops get beyond their pictures ([`desktop`]).
+    desktop: desktop::Desktop,
+    /// The shell's window, whose keyboard the live views hold.
+    keyboard_window: Option<gpui::AnyWindowHandle>,
 }
 
 impl std::fmt::Debug for WorkspaceView {
@@ -482,6 +493,8 @@ impl WorkspaceView {
             ports: HashMap::new(),
             awake: None,
             device_actions: HashMap::new(),
+            desktop: desktop::Desktop::default(),
+            keyboard_window: None,
         }
     }
 

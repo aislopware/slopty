@@ -919,7 +919,11 @@ through each worker's own verbs:
 - *Remote window*: the machine's windows and displays to pick from (`slopty.ListScreens`), one
   shown (`slopty.OpenScreen`, which puts a window or display item on the worker whose stream
   `reconcile_screens` opens) and let go (`slopty.CloseScreen`); the shell hosts the
-  `ScreenView`.
+  `ScreenView`. Its "…" in the corner opens the stream's controls (`screen::controls`): what
+  the view does itself, and what the workspace offers it (`workspace::desktop`: the system's
+  shortcuts through the session tap, the curtain held from this device, a display the worker
+  makes at the view's size and follows, the clipboard typed in). A window follows its pane's
+  size once it rests (`screen::fit`).
 - *Browser*: the ports the chat's machine listens on, each forwarded to a loopback port here
   (`slopty_client::tunnel`), so a preview loads the worker's page at a local address.
 - *Settings*: the agents each machine offers (from its worker's caps; installed by the person,
