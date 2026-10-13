@@ -2999,3 +2999,32 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `live_blocks_stream_after_their_prompt_then_the_transcript_settles_them` (`observed`
     tests). The measurements are `a_transcript_write_reaches_its_follower` and
     `observed_sessions_at_rest` (`apps/slopty-worker/tests/e2e.rs`, ignored).
+
+- ✅ **How freely a started agent acts is one setting** (2026-10-13, with "The task engine is
+  gone; agents start agents" in `projects.md`). An agent that starts another names no harness
+  arguments of its own: no permission mode, no flags. The server builds the start from the
+  person's `[agents] autonomy` in the server's `settings.toml`, in each harness's own words
+  (`hub::agents::mode_for`):
+
+  | `autonomy` | Claude Code `--permission-mode` | Codex approval policy | pi gate |
+  |------------|---------------------------------|-----------------------|---------|
+  | `auto` (default) | `auto` | `on-request` | `edits` |
+  | `full` | `bypassPermissions` | `never` | `own` |
+  | `ask` | the harness's own default | `untrusted` | `ask` |
+
+  An ACP agent starts on its own default, having no mode Slopty can name. The setting is read
+  again when the file changes and applies to the next start; an agent already running keeps
+  the mode it started in, and the person changes it there as any agent's mode.
+  - **Why one setting.** The person decides how far agents go, once, as Claude Code's own
+    `defaultMode` does. An agent choosing its child's flags could start it looser than itself.
+    `auto` is the default because Claude Code's classifier and Codex's `on-request` let routine
+    work go and still ask about anything risky; `full` is there for a sandboxed machine.
+  - **Deleted with it.** The allowlist that judged every `claude` start's flags
+    (`SAFE_FLAGS`), the worker's judge of what loosened a running agent (`loosening`,
+    `AgentReport::Loosened`) and the terminal it closed, the held-to-asking start for terminals
+    an agent opened (`ASKING_ENV`, `held_to_asking`), and the per-project autonomy with the
+    server's watch on each task's mode. Each guarded a project's agents against a mode the
+    project had not granted; with one setting for every start, the harness's own mode is the
+    guard, and Slopty never answers in the person's place.
+  - Tests: `a_start_names_its_parent_and_takes_the_person_s_autonomy` (`slopty-server`), the
+    settings' `agents_autonomy`, and `apps/slopty-cli/tests/agents.rs` end to end.

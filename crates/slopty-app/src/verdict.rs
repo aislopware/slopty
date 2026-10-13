@@ -116,12 +116,8 @@ pub async fn answer_press(caller: &ServerCaller, press: Press) -> Answered {
 /// the choice that allows or denies once, or for the request a pick answers, then answer with
 /// it.
 pub async fn answer(caller: &ServerCaller, verdict: Verdict) -> Answered {
-    let read = Verb::ReadThread {
-        of: verdict.of.clone(),
-        view: ThreadView::Messages,
-        after: None,
-        hold: false,
-    };
+    let read =
+        Verb::ReadThread { of: verdict.of, view: ThreadView::Messages, after: None, hold: false };
     let choice = match caller.call(read).await {
         Outcome::Thread(read) => read
             .requests
@@ -348,7 +344,7 @@ mod tests {
         typed.text = Some("  run the tests too ".to_owned());
         let press = press_of(&typed).expect("a reply");
         let of = ThreadOf::Thread(thread);
-        assert_eq!(press, Press::Reply { of: of.clone(), text: "run the tests too".to_owned() });
+        assert_eq!(press, Press::Reply { of, text: "run the tests too".to_owned() });
         let (caller, mut queue) = ServerCaller::queued();
         let sending = tokio::spawn(async move { answer_press(&caller, press).await });
         let sent = loop {

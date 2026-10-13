@@ -3,13 +3,14 @@
 //!
 //! Each worker publishes its thread table
 //! ([`slopty_proto::server::ToServer::Threads`]); the hub keeps the rows and ranks them again
-//! whenever a row, a terminal or a project moves: a subagent folds into the thread it hangs from,
-//! and the rest roll up per tile, worker, project node, project and the fleet. A ladder that
-//! differs from the last goes to every link.
+//! whenever a row or a terminal moves: a subagent folds into the thread it hangs from, and the
+//! rest roll up per tile, worker, agent tree (an agent with every agent it started, at any
+//! depth, across workers), space (a folder on a machine) and the fleet. A ladder that differs
+//! from the last goes to every link.
 //!
 //! A thread that hangs from no other and climbs to needing the person, fails, or comes to rest
-//! from working, is a notice; a project task's agent coming to rest is not, since its work
-//! comes to the person when it is ready to merge and its orchestrator hears of the rest. It goes to
+//! from working, is a notice; an agent another agent started coming to rest is not, since its
+//! parent hears of it and the person hears what the parent makes of it. It goes to
 //! no client when the thread's tile is on screen where the person is, to the desks they are at when
 //! they are at one, to the handhelds they hold when not, and to every client when they are at none.
 //!
@@ -27,39 +28,28 @@
 //! that a turn finished is taken back once the person has seen the turn ([`Shown::finished`]).
 //! A thread first seen already needing the person is pushed to a phone not showing it
 //! ([`Told::first`]).
-//!
-//! A project's change that holds its work up is a notice too ([`tell_project`]): its pull
-//! request (as its thread's row names it) failing a check, asked to change or conflicting, its
-//! verifier or a step for it failing (a rebase that conflicts among them), or the push after its
-//! merge not going. It is one notice per timeline entry, about the project, routed by the
-//! orchestrator's terminal as a thread's is by its own.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use slopty_agent::status::{AgentStatus, BlockReason};
 use slopty_core::{ClientId, SessionId, WallMs, WorkerId};
+use slopty_proto::agent::{PARENT_FACT, SEAT_FACT};
 use slopty_proto::orchestration::{TermAgent, TermRef};
-use slopty_proto::project::{
-    AgentReport, Merge, Moment, SEAT_FACT, StepKind, StepState, Task, TaskId, TaskStep,
-    TimelineEntry,
-};
 use slopty_proto::push::{PushBody, PushDevice};
 use slopty_proto::server::FromServer;
 use slopty_proto::terminal::{ProgramState, ProgramStatus, SessionSummary};
 use slopty_proto::thread::attention::{
-    Ladder, NodeAt, Notice, NoticeKind, Presence, Present, Ranked, Rung, Seat, Standing, Subject,
+    Ladder, Notice, NoticeKind, Presence, Present, Ranked, Rung, Seat, SpaceAt, Standing, Subject,
     ThreadAt, Via,
 };
 use slopty_proto::thread::wire::{PullSeen, TableFrame, ThreadRow};
-use slopty_proto::thread::{AgentId, AskId, Liveness, Phase, Request, ThreadId, TurnId, Wait};
+use slopty_proto::thread::{AskId, Liveness, Phase, ThreadId, TurnId};
 use tokio::sync::{Notify, broadcast, mpsc, watch};
 
 use super::awake::{Awake, Hold, Policy as KeepAwake};
 use super::{Hub, State, WeakHub};
-use crate::project::{Kept, Projects};
 use crate::push::{Outgoing, Sending};
 
 /// The rows every worker published, the ladder made of them, and the clients the person may
@@ -79,30 +69,15 @@ pub(super) struct Board {
     next_link: u64,
     /// Wakes [`Hub::publish_ladder`] when rows came.
     wake: Arc<Notify>,
-    /// What the agent at each seat was last said to be doing, by its seat: the terminal its
-    /// TUI runs in, or the seat a task's thread was started at ([`Self::seat_moves`]).
-    seat_said: HashMap<TermRef, AgentStatus>,
     /// Where each thread hanging from no other was last said to stand ([`Self::rung_moves`]).
     rungs_said: HashMap<(WorkerId, ThreadId), TermAgent>,
-    /// Every task's thread a table has shown, by its worker: one gone from it since ended.
-    seen: HashSet<(WorkerId, ThreadId)>,
-    /// Each subagent thread last told to the projects as a native ([`Self::native_moves`]),
-    /// with the seat it was told under and whether it had stopped.
-    natives_said: HashMap<(WorkerId, ThreadId), (SessionId, bool)>,
-    /// Each Codex or pi thread's mode and sandbox last said ([`Self::settings_moves`]).
-    settings_said: HashMap<(WorkerId, ThreadId), Settings>,
     /// The hold on the server's machine that the seats and the tables imply.
     awake: Awake,
     /// The phones notices are pushed to when the person is at no client.
     phones: Phones,
-    /// Each project whose work turned ready to merge and is still to be told, with the
-    /// timeline entry that made the latest ready ([`Hub::ready_soon`]).
-    ready_due: HashMap<slopty_proto::project::ProjectId, u64>,
+    /// Counts each frame of rows taken in, for a wait on the agents ([`Self::rows_changed`]).
+    rows: watch::Sender<u64>,
 }
-
-/// A seated thread's mode (Codex's approval policy, pi's gate) and its sandbox (Codex's
-/// alone), as its row says them.
-pub(super) type Settings = (Option<String>, Option<String>);
 
 /// How long a take-back the push queue could not take waits before it is tried again.
 pub(crate) const TAKE_BACK_RETRY: Duration = Duration::from_secs(2);
@@ -196,7 +171,7 @@ impl Shown {
         ask: Option<&AskId>,
         turn: Option<TurnId>,
     ) {
-        let Some(about) = asked_about(&notice.about) else { return };
+        let about = asked_about(&notice.about);
         let finished = self.finished.entry(client).or_default();
         if let Asked::Thread(at) = about {
             finished.retain(|(t, _)| *t != at);
@@ -239,8 +214,6 @@ struct Pushing<'a> {
     unheard: &'a [u64],
     /// Only to the phones not already showing a note about its subject that needs the person.
     new_only: bool,
-    /// The task a ready-to-merge note's Merge merges.
-    merges: Option<TaskId>,
     /// The turn a finished turn's note is about, to take it back once seen.
     turn: Option<TurnId>,
 }
@@ -279,7 +252,7 @@ impl Phones {
         for (client, device) in &self.devices {
             let shown =
                 |about: Asked| self.shown.asked.get(client).is_some_and(|a| a.contains(&about));
-            if how.new_only && about.is_some_and(shown) {
+            if how.new_only && shown(about) {
                 continue;
             }
             let listening = seats.iter().any(|(link, s)| {
@@ -297,15 +270,12 @@ impl Phones {
                 ask: how.ask.map(|a| a.id.clone()),
                 picks: how.ask.map(|a| a.picks.clone()).unwrap_or_default(),
                 quiet: false,
-                merges: how.merges,
             };
             // A note waiting for room, or a take-back owed, about the same subject is older
             // than this one, which replaces it on the phone.
             self.owed_notes
                 .retain(|(c, owed, _)| *c != *client || owed.notice.about != notice.about);
-            if let Some(about) = about
-                && let Some(owed) = self.owed.get_mut(client)
-            {
+            if let Some(owed) = self.owed.get_mut(client) {
                 owed.remove(&about);
             }
             let ask = body.ask.clone();
@@ -344,7 +314,7 @@ impl Phones {
     /// one it showed went), the note is pushed again quietly, `ask` its buttons' now, to
     /// replace it under the same collapse id with no sound and no banner.
     fn follow(&mut self, client: ClientId, notice: &Notice, ask: Option<&Ask>) {
-        let Some(about) = asked_about(&notice.about) else { return };
+        let about = asked_about(&notice.about);
         let now = ask.map(|a| a.id.clone());
         if self.shown.asks.get(&(client, about)) == Some(&now) {
             return;
@@ -355,7 +325,6 @@ impl Phones {
             ask: now.clone(),
             picks: ask.map(|a| a.picks.clone()).unwrap_or_default(),
             quiet: true,
-            merges: None,
         };
         self.owed_notes.retain(|(c, owed, _)| *c != client || owed.notice.about != notice.about);
         let push = Outgoing { client, device: device.clone(), what: Sending::Note(body) };
@@ -387,8 +356,7 @@ impl Phones {
         self.shown.finished.retain(|client, _| devices.contains_key(client));
         // A note still waiting for room about what no longer needs the person goes unsent.
         self.owed_notes.retain(|(client, body, _)| {
-            devices.contains_key(client)
-                && asked_about(&body.notice.about).is_none_or(|about| !answered(&about))
+            devices.contains_key(client) && !answered(&asked_about(&body.notice.about))
         });
         let owed = &mut self.owed;
         self.shown.asked.retain(|client, asked| {
@@ -503,29 +471,11 @@ impl Phones {
 }
 
 /// What a note about `subject` puts up on a phone that a take-back can take down: one per
-/// thread or terminal; a project's note has none.
-const fn asked_about(subject: &Subject) -> Option<Asked> {
+/// thread or terminal.
+const fn asked_about(subject: &Subject) -> Asked {
     match subject {
-        Subject::Thread(at) => Some(Asked::Thread(*at)),
-        Subject::Terminal(term) => Some(Asked::Terminal(*term)),
-        Subject::Project { .. } => None,
-    }
-}
-
-impl Board {
-    /// `project`'s work turned ready at the timeline's `entry`: whether it is the first since
-    /// the person was last told, so a tell is to be set ([`Hub::ready_soon`]).
-    pub(super) fn ready_due(
-        &mut self,
-        project: &slopty_proto::project::ProjectId,
-        entry: u64,
-    ) -> bool {
-        self.ready_due.insert(project.clone(), entry).is_none()
-    }
-
-    /// The entry `project`'s ready work is to be told at, now, once.
-    pub(super) fn ready_now(&mut self, project: &slopty_proto::project::ProjectId) -> Option<u64> {
-        self.ready_due.remove(project)
+        Subject::Thread(at) => Asked::Thread(*at),
+        Subject::Terminal(term) => Asked::Terminal(*term),
     }
 }
 
@@ -611,10 +561,33 @@ impl Board {
             }
         }
         self.wake.notify_one();
-        self.seen.extend(table.values().filter(|r| seat_fact(r).is_some()).map(|r| (worker, r.id)));
+        self.rows.send_modify(|n| *n = n.wrapping_add(1));
     }
 
-    /// The thread seated at `term` (its TUI runs there, or a task's thread was started there)
+    /// Says each frame of rows taken in.
+    pub(super) fn rows_changed(&self) -> watch::Receiver<u64> {
+        self.rows.subscribe()
+    }
+
+    /// Every thread on every worker, with the worker it is on.
+    pub(super) fn rows(&self) -> impl Iterator<Item = (WorkerId, &ThreadRow)> {
+        self.tables.iter().flat_map(|(worker, table)| table.values().map(|r| (*worker, r)))
+    }
+
+    /// Every thread on every worker that hangs from no other there: the agents, without the
+    /// subagents their harness runs inside them.
+    pub(super) fn agent_rows(&self) -> impl Iterator<Item = (WorkerId, &ThreadRow)> {
+        self.tables.iter().flat_map(|(worker, table)| {
+            table.values().filter(|r| root_of(table, r) == r.id).map(|r| (*worker, r))
+        })
+    }
+
+    /// The row of `thread`, with the worker that holds it.
+    pub(super) fn row(&self, thread: ThreadId) -> Option<(WorkerId, &ThreadRow)> {
+        self.tables.iter().find_map(|(worker, table)| Some((*worker, table.get(&thread)?)))
+    }
+
+    /// The thread seated at `term` (its TUI runs there, or an agent's thread was started there)
     /// and hanging from no other, the latest to change when there were several.
     fn thread_in(&self, term: TermRef) -> Option<&ThreadRow> {
         let table = self.tables.get(&term.worker)?;
@@ -624,27 +597,9 @@ impl Board {
             .max_by_key(|r| (r.updated_ms, r.id))
     }
 
-    /// The thread whose agent ran or is seated at `term`, there or exited: its id, its agent
-    /// and the folder it worked in.
-    pub(super) fn ran_at(&self, term: TermRef) -> Option<(ThreadId, AgentId, Option<String>)> {
-        self.thread_in(term).map(|r| (r.id, r.agent.clone(), r.cwd.clone()))
-    }
-
     /// The thread whose agent runs or is seated at `term`, hanging from no other.
     pub(super) fn thread_at(&self, term: TermRef) -> Option<ThreadId> {
         self.thread_in(term).map(|r| r.id)
-    }
-
-    /// The terminal `thread` runs in on `worker` now, while its agent has not ended.
-    pub(super) fn running_at(&self, worker: WorkerId, thread: ThreadId) -> Option<SessionId> {
-        let row = self.tables.get(&worker)?.get(&thread)?;
-        if there(row) { seat_of(row) } else { None }
-    }
-
-    /// Whether `worker`'s table holds `thread`, its agent there or exited; `None` when the
-    /// worker has published no table.
-    pub(super) fn holds(&self, worker: WorkerId, thread: ThreadId) -> Option<bool> {
-        Some(self.tables.get(&worker)?.contains_key(&thread))
     }
 
     /// The worker whose table holds `thread`.
@@ -652,7 +607,7 @@ impl Board {
         self.tables.iter().find(|(_, table)| table.contains_key(&thread)).map(|(w, _)| *w)
     }
 
-    /// The seat `session` of a task's thread on any worker, as its row's [`SEAT_FACT`] says.
+    /// The seat `session` of a thread on any worker, as its row's [`SEAT_FACT`] says.
     pub(super) fn seat(&self, session: SessionId) -> Option<TermRef> {
         self.tables.iter().find_map(|(worker, table)| {
             table
@@ -662,14 +617,8 @@ impl Board {
         })
     }
 
-    /// The thread a task's start seated at `term`, as its row's [`SEAT_FACT`] says.
-    pub(super) fn seated_thread(&self, term: TermRef) -> Option<ThreadId> {
-        let table = self.tables.get(&term.worker)?;
-        table.values().find(|r| seat_fact(r) == Some(term.session)).map(|r| r.id)
-    }
-
-    /// Every task's thread with no terminal of its own whose agent runs, by its seat: it
-    /// counts as a live terminal does. One asleep does not, since its agent ended.
+    /// Every thread with no terminal of its own whose agent runs, by its seat: it counts as a
+    /// live terminal does. One asleep does not, since its agent ended.
     pub(super) fn live_seats(&self) -> Vec<TermRef> {
         self.tables
             .iter()
@@ -682,79 +631,10 @@ impl Board {
             .collect()
     }
 
-    /// Whether the thread `thread` on `worker` is in its table with its agent there; `None`
-    /// when the worker has published no table.
-    pub(super) fn thread_there(&self, worker: WorkerId, thread: ThreadId) -> Option<bool> {
-        let table = self.tables.get(&worker)?;
-        Some(table.get(&thread).is_some_and(there))
-    }
-
-    /// Whether a table of `worker`'s has shown the task's thread `thread`.
-    pub(super) fn seen(&self, worker: WorkerId, thread: ThreadId) -> bool {
-        self.seen.contains(&(worker, thread))
-    }
-
-    /// What the agent seated at `term` is doing, as an agent's status reads; `None` with no
-    /// thread there, and [`AgentStatus::None`] once its agent ended.
-    pub(super) fn seat_status(&self, term: TermRef) -> Option<AgentStatus> {
-        self.thread_in(term).map(status_of)
-    }
-
     /// The agent at work or seated at `term`, as its thread's row says; `None` with none there
     /// or once its agent ended.
     pub(super) fn agent_at(&self, term: TermRef) -> Option<TermAgent> {
         self.thread_in(term).filter(|r| there(r)).map(TermAgent::of)
-    }
-
-    /// Each seat on `worker` whose agent's status moved since last asked, with its status now:
-    /// a terminal its TUI runs in, or the seat a task's thread was started at. A seat whose
-    /// thread left the table says [`AgentStatus::None`] once, and is forgotten.
-    pub(super) fn seat_moves(&mut self, worker: WorkerId) -> Vec<(TermRef, AgentStatus)> {
-        let mut now: HashMap<TermRef, (WallMs, ThreadId, AgentStatus)> = HashMap::new();
-        if let Some(table) = self.tables.get(&worker) {
-            for r in table.values().filter(|r| root_of(table, r) == r.id) {
-                let Some(session) = seat_of(r) else { continue };
-                let latest = (r.updated_ms, r.id, status_of(r));
-                let term = TermRef { worker, session };
-                // Several threads at one seat: the latest to change speaks for it.
-                if now.get(&term).is_none_or(|(at, id, _)| (*at, *id) < (latest.0, latest.1)) {
-                    now.insert(term, latest);
-                }
-            }
-        }
-        let mut moves = Vec::new();
-        self.seat_said.retain(|term, said| {
-            if term.worker != worker || now.contains_key(term) {
-                return true;
-            }
-            if *said != AgentStatus::None {
-                moves.push((*term, AgentStatus::None));
-            }
-            false
-        });
-        let mut now: Vec<_> = now.into_iter().collect();
-        now.sort_by_key(|(term, _)| (term.worker, term.session));
-        for (term, (_, _, status)) in now {
-            if self.seat_said.insert(term, status.clone()).as_ref() != Some(&status) {
-                moves.push((term, status));
-            }
-        }
-        moves
-    }
-
-    /// What each seat's thread on `worker` says of its branch's pull request, the latest to
-    /// change speaking for a seat several threads share: what a task's card follows.
-    pub(super) fn pulls(&self, worker: WorkerId) -> Vec<(SessionId, Option<PullSeen>)> {
-        let Some(table) = self.tables.get(&worker) else { return Vec::new() };
-        let mut latest: HashMap<SessionId, &ThreadRow> = HashMap::new();
-        for r in table.values().filter(|r| root_of(table, r) == r.id) {
-            let Some(seat) = seat_of(r) else { continue };
-            let later = |was: &&ThreadRow| (was.updated_ms, was.id) < (r.updated_ms, r.id);
-            if latest.get(&seat).is_none_or(later) {
-                latest.insert(seat, r);
-            }
-        }
-        latest.into_iter().map(|(seat, r)| (seat, r.pull.clone())).collect()
     }
 
     /// Each thread on `worker` hanging from no other whose rung, phase or ask moved since last
@@ -780,131 +660,6 @@ impl Board {
             }
         }
         moves
-    }
-
-    /// Each Codex or pi thread on `worker` at a seat, hanging from no other, whose mode or
-    /// sandbox (its fact) moved since last asked, with that seat and its agent: what holds a
-    /// task's Codex or pi to its project's level (`Hub::held_settings`). One gone from the table
-    /// is forgotten.
-    pub(super) fn settings_moves(
-        &mut self,
-        worker: WorkerId,
-    ) -> Vec<(SessionId, AgentId, Settings)> {
-        let Some(table) = self.tables.get(&worker) else { return Vec::new() };
-        let held: Vec<(&ThreadRow, SessionId)> = table
-            .values()
-            .filter(|r| r.agent.is(AgentId::CODEX) || r.agent.is(AgentId::PI))
-            .filter(|r| root_of(table, r) == r.id)
-            .filter_map(|r| Some((r, seat_of(r)?)))
-            .collect();
-        self.settings_said
-            .retain(|(w, id), _| *w != worker || held.iter().any(|(r, _)| r.id == *id));
-        let mut moves = Vec::new();
-        for (row, seat) in held {
-            let now = (row.meters.mode.clone(), row.facts.get("sandbox").cloned());
-            if self.settings_said.get(&(worker, row.id)) != Some(&now) {
-                self.settings_said.insert((worker, row.id), now.clone());
-                moves.push((seat, row.agent.clone(), now));
-            }
-        }
-        moves
-    }
-
-    /// Each subagent thread on `worker` that started or stopped since last asked, as the
-    /// report a hook would make of it under the seat its family runs at: the natives of
-    /// every agent but Claude Code, whose own hooks report its subagents. A subagent gone
-    /// from the table stopped.
-    pub(super) fn native_moves(&mut self, worker: WorkerId) -> Vec<AgentReport> {
-        let mut reports = Vec::new();
-        let table = self.tables.get(&worker);
-        let now: Vec<(ThreadId, SessionId, &ThreadRow)> = table
-            .map(|table| {
-                table
-                    .values()
-                    .filter_map(|row| {
-                        let root = table.get(&root_of(table, row)).filter(|r| r.id != row.id)?;
-                        let hooked = root.agent == AgentId::named(AgentId::CLAUDE_CODE);
-                        Some((row.id, seat_of(root).filter(|_| !hooked)?, row))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        for (id, session, row) in &now {
-            let at_work =
-                matches!(row.status.phase, Phase::Working | Phase::Waiting | Phase::NeedsYou);
-            let stopped = !there(row) || !at_work;
-            let said = self.natives_said.insert((worker, *id), (*session, stopped));
-            let agent = id.to_string();
-            if said.is_none() {
-                let kind = Some(row.title.trim()).filter(|t| !t.is_empty());
-                let kind = kind.map_or_else(|| row.agent.0.clone(), str::to_owned);
-                let session = *session;
-                reports.push(AgentReport::SubagentStarted { session, agent: agent.clone(), kind });
-            }
-            if stopped && said.is_none_or(|(_, was)| !was) {
-                let last = row.last_line.clone().filter(|l| !l.trim().is_empty());
-                let session = *session;
-                reports.push(AgentReport::SubagentStopped {
-                    session,
-                    agent,
-                    transcript: None,
-                    last,
-                });
-            }
-        }
-        self.natives_said.retain(|(w, id), (session, stopped)| {
-            if *w != worker || now.iter().any(|(t, ..)| t == id) {
-                return true;
-            }
-            if !*stopped {
-                let (session, agent) = (*session, id.to_string());
-                reports.push(AgentReport::SubagentStopped {
-                    session,
-                    agent,
-                    transcript: None,
-                    last: None,
-                });
-            }
-            false
-        });
-        reports
-    }
-
-    /// The last line the agent in `term` wrote, as its thread's row says.
-    pub(super) fn last_words(&self, term: TermRef) -> Option<String> {
-        self.thread_in(term)?.last_line.clone().filter(|l| !l.trim().is_empty())
-    }
-
-    /// What the agent in `term` asks the person, as the first open request on its thread's
-    /// row names it.
-    pub(super) fn asking(&self, term: TermRef) -> Option<String> {
-        let row = self.thread_in(term)?;
-        row.requests.first().map(|r| r.title.clone()).filter(|t| !t.trim().is_empty())
-    }
-
-    /// Whether any thread seated at `term`, or under one there, has a request open.
-    pub(super) fn asks(&self, term: TermRef) -> bool {
-        self.tables.get(&term.worker).is_some_and(|table| {
-            table.values().any(|r| {
-                !r.requests.is_empty()
-                    && table.get(&root_of(table, r)).and_then(seat_of) == Some(term.session)
-            })
-        })
-    }
-
-    /// What the agent seated at `term` waits on, when that is only commands it left running
-    /// ([`Wait::COMMAND`]): the wait's words.
-    pub(super) fn left_running(&self, term: TermRef) -> Option<String> {
-        let wait = self.thread_in(term)?.status.wait.as_ref()?;
-        (wait.kind == Wait::COMMAND).then(|| wait.text.clone())
-    }
-
-    /// Whether `term`'s tile is on screen, or has the keyboard, on any client.
-    pub(super) fn shown(&self, term: TermRef) -> bool {
-        self.seats
-            .values()
-            .filter_map(|s| s.presence.as_ref())
-            .any(|p| p.showing.contains(&term) || p.focus == Some(term))
     }
 
     /// Where the person is on every client that said.
@@ -949,7 +704,7 @@ impl Drop for Seated {
         let gone = state.board.seats.remove(&self.link);
         if gone.as_ref().is_some_and(|s| at_desk(s.presence.as_ref())) {
             let state = &mut *state;
-            left(&mut state.board, &state.projects);
+            left(&mut state.board);
         }
         if gone.is_some_and(|s| s.presence.is_some()) {
             hub.announce(FromServer::Present(state.board.present()));
@@ -996,7 +751,7 @@ impl Hub {
         let leaves = at_desk(seat.presence.as_ref()) && !presence.active;
         seat.presence = Some(presence);
         if leaves {
-            left(board, &state.projects);
+            left(board);
         }
         self.announce(FromServer::Present(board.present()));
         drop(guard);
@@ -1125,15 +880,15 @@ impl Hub {
         let live = &state.workers;
         state.board.tables.retain(|worker, _| live.contains_key(worker));
         state.board.settle_awake();
-        let ladder = ladder(&state.board.tables, &state.projects);
+        let ladder = ladder(&state.board.tables);
         let board = &mut state.board;
         board.phones.take_back(&ladder, &board.tables);
-        follow_asks(board, &state.projects);
+        follow_asks(board);
         board.retry_owed();
         if ladder == board.published {
             return;
         }
-        let notices = moved(board, &ladder, &state.projects);
+        let notices = moved(board, &ladder);
         self.announce(FromServer::Ladder(Box::new(ladder.clone())));
         state.board.published = ladder;
         for Told { notice, ask, turn, first } in notices {
@@ -1234,35 +989,6 @@ pub(super) fn programs_back(board: &mut Board, worker: WorkerId, waiting: &[Sess
     board.retry_owed();
 }
 
-/// A project's change that holds its work up goes to the person as a notice, where they are.
-pub(super) fn tell_project(state: &mut State, kept: &Kept) {
-    if let Some(notice) = project_notice(&state.projects, kept) {
-        tell(&mut state.board, &notice, None);
-    }
-}
-
-/// A project's orchestrator said its goal is met, at the timeline's `entry`: the person hears
-/// it once, where they are, its summary's first line the words ([`NoticeKind::GoalDone`]).
-pub(super) fn tell_goal_met(
-    state: &mut State,
-    project: &slopty_proto::project::ProjectId,
-    entry: u64,
-) {
-    let Ok(record) = state.projects.project(project) else { return };
-    let summary = record.progress.as_ref().map_or("", |p| p.summary.as_str());
-    let first = summary.lines().next().unwrap_or_default().trim();
-    let notice = Notice {
-        kind: NoticeKind::GoalDone,
-        about: Subject::Project { project: project.clone(), entry },
-        tile: record.orchestrator,
-        title: record.title.clone(),
-        text: format!("Goal met: {first}"),
-        worked_ms: None,
-        via: None,
-    };
-    tell(&mut state.board, &notice, None);
-}
-
 /// The request a pushed note's buttons answer, and the labels of the answers it offers as
 /// buttons of their own: a small question's options; none for a yes or no, which Allow and Deny
 /// answer.
@@ -1275,14 +1001,8 @@ pub(super) struct Ask {
 }
 
 /// Send `notice` to the links [`route`] picks among the board's seats, and push it to the
-/// phones when it finds the person at none of them, with `ask`, the request its note's buttons
-/// answer.
-fn tell(board: &mut Board, notice: &Notice, ask: Option<&Ask>) {
-    tell_pushing(board, notice, Pushing { ask, ..Pushing::default() });
-}
-
-/// [`tell`], pushed to the phones as `how` says: a ready-to-merge note's Merge merging a task,
-/// or a finished turn's note to take back once the turn is seen.
+/// phones when it finds the person at none of them, as `how` says: with the request its
+/// note's buttons answer, or a finished turn's note to take back once the turn is seen.
 fn tell_pushing(board: &mut Board, notice: &Notice, how: Pushing<'_>) {
     let reach = route(&board.seats, notice);
     let mut unheard = Vec::new();
@@ -1300,155 +1020,34 @@ fn tell_pushing(board: &mut Board, notice: &Notice, how: Pushing<'_>) {
     }
 }
 
-/// How long a project's work turning ready waits before the person hears of it, so tasks
-/// verified close together make one note ([`tell_ready`]).
-pub(super) const READY_SETTLE: Duration = Duration::from_secs(20);
-
-/// The person hears how many of `project`'s tasks wait on their merge, in one notice about the
-/// project at `entry`, the timeline entry that made the latest ready; its note's Merge merges
-/// the one ready longest ([`NoticeKind::ReadyToMerge`]). None ready, nothing is said.
-pub(super) fn tell_ready(
-    state: &mut State,
-    project: &slopty_proto::project::ProjectId,
-    entry: u64,
-) {
-    let Ok(record) = state.projects.project(project) else { return };
-    let (tile, title) = (record.orchestrator, record.title.clone());
-    let Ok(tasks) = state.projects.tasks(project) else { return };
-    let ready: Vec<&Task> = tasks.iter().filter(|t| ready_to_merge(t)).collect();
-    let Some(oldest) = ready.iter().min_by_key(|t| (t.updated_ms, t.id)).map(|t| t.id) else {
-        return;
-    };
-    let text = match ready.as_slice() {
-        [one] if one.title.trim().is_empty() => format!("#{} is ready to merge", one.id),
-        [one] => format!("#{} {} is ready to merge", one.id, one.title.trim()),
-        many => format!("{} ready to merge", many.len()),
-    };
-    let notice = Notice {
-        kind: NoticeKind::ReadyToMerge,
-        about: Subject::Project { project: project.clone(), entry },
-        tile,
-        title,
-        text,
-        worked_ms: None,
-        via: None,
-    };
-    tell_pushing(&mut state.board, &notice, Pushing { merges: Some(oldest), ..Pushing::default() });
-}
-
-/// Whether `task`'s work waits on the person's merge: done, writing, and in no merge yet.
-pub(super) fn ready_to_merge(task: &Task) -> bool {
-    task.state == slopty_proto::project::TaskState::Done && !task.read_only && task.merge.is_none()
-}
-
-/// The notice `kept` makes: a timeline entry that holds a task's work up, named by the task, and
-/// said to wait on the person once the task's give-backs are spent.
-fn project_notice(projects: &Projects, kept: &Kept) -> Option<Notice> {
-    let entry = kept.entry.as_ref()?;
-    let project = projects.project(&kept.project).ok()?;
-    let task = kept.task.as_ref().filter(|t| Some(t.id) == entry.task);
-    let words = held_up(entry, task, &project.target)?;
-    let text = match (entry.task, task.map(|t| t.title.trim()).filter(|t| !t.is_empty())) {
-        (Some(id), Some(title)) => format!("#{id} {title}: {words}"),
-        (Some(id), None) => format!("#{id}: {words}"),
-        (None, _) => words,
-    };
-    let text = if task.is_some_and(|t| t.give_backs.held) {
-        format!("{text}. It waits on you")
-    } else {
-        text
-    };
-    Some(Notice {
-        kind: NoticeKind::Project,
-        about: Subject::Project { project: kept.project.clone(), entry: entry.seq },
-        tile: project.orchestrator,
-        title: project.title.clone(),
-        text,
-        worked_ms: None,
-        via: None,
-    })
-}
-
-/// What `entry` says when it holds `task`'s work up, the project's work merging into `target`;
-/// `None` for the rest, which the board shows where it is looked at.
-fn held_up(entry: &TimelineEntry, task: Option<&Task>, target: &str) -> Option<String> {
-    let first = |text: &str| text.lines().next().unwrap_or_default().trim().to_owned();
-    Some(match &entry.what {
-        Moment::Pull(pull) if pull.stands.needs_you() => {
-            format!("its {} {}", pull.forge.noun(), pull.line())
-        }
-        Moment::Verified(run) if !run.passed => "its verifier failed".to_owned(),
-        Moment::Step(TaskStep { kind, state: StepState::Failed { why }, .. }) => match kind {
-            StepKind::Rebase => format!("its work conflicts with {target}: {}", first(why)),
-            StepKind::Clone => format!("the clone it needs failed: {}", first(why)),
-            StepKind::Send => format!("its clone was not sent its start: {}", first(why)),
-            StepKind::Home => format!("its branch did not come home: {}", first(why)),
-            StepKind::Verify => format!("its verifier did not run: {}", first(why)),
-            StepKind::Merge => format!("its merge stopped: {}", first(why)),
-        },
-        Moment::Step(TaskStep { kind: StepKind::Merge, state: StepState::Done { .. }, .. }) => {
-            match task.and_then(|t| t.merge.as_ref()) {
-                Some(Merge::Merged { target, push_failed: Some(why), .. }) => {
-                    format!("merged into {target}, but the push to origin failed: {}", first(why))
-                }
-                _ => return None,
-            }
-        }
-        _ => return None,
-    })
-}
-
 /// A thread that hangs from no other, standing as high as its subagents.
 struct Root<'a> {
     ranked: Ranked,
     row: &'a ThreadRow,
 }
 
-/// The thread `row` hangs from in `table`, through every parent there; itself when none.
-/// Where `row`'s thread sits, as the projects know its agent: the seat a task's thread was
-/// started at ([`SEAT_FACT`]), which stays its seat while the person's TUI joins it in a
-/// terminal of its own; else the terminal its TUI runs in.
-fn seat_of(row: &ThreadRow) -> Option<SessionId> {
+/// Where `row`'s thread sits: the seat it was started at ([`SEAT_FACT`]), which stays its seat
+/// while the person's TUI joins it in a terminal of its own; else the terminal its TUI runs in.
+pub(super) fn seat_of(row: &ThreadRow) -> Option<SessionId> {
     seat_fact(row).or(row.terminal)
 }
 
-/// The seat a task's thread was started at, as its row's [`SEAT_FACT`] says.
+/// The seat a thread was started at, as its row's [`SEAT_FACT`] says.
 fn seat_fact(row: &ThreadRow) -> Option<SessionId> {
     row.facts.get(SEAT_FACT)?.parse().ok()
 }
 
+/// The agent that started `row`'s, as its row's [`PARENT_FACT`] says.
+pub(super) fn parent_of(row: &ThreadRow) -> Option<ThreadId> {
+    row.facts.get(PARENT_FACT)?.parse().ok()
+}
+
 /// Whether `row`'s thread is still to be had: its process has not ended.
-const fn there(row: &ThreadRow) -> bool {
+pub(super) const fn there(row: &ThreadRow) -> bool {
     !matches!(row.status.liveness, Liveness::Exited { .. })
 }
 
-/// `row`'s phase as an agent's status reads, what the projects follow: a request open is a
-/// block on the person, by what it asks, and an agent that ended is none.
-fn status_of(row: &ThreadRow) -> AgentStatus {
-    if !there(row) {
-        return AgentStatus::None;
-    }
-    let limited = row.status.wait.as_ref().is_some_and(|w| w.kind == Wait::LIMIT);
-    match row.status.phase {
-        Phase::Working => AgentStatus::Working,
-        Phase::Waiting => AgentStatus::Waiting { tasks: 1, crons: 0 },
-        Phase::NeedsYou => AgentStatus::Blocked(match row.requests.first() {
-            Some(r) if r.kind == Request::APPROVAL => {
-                BlockReason::Permission { tool: r.title.clone() }
-            }
-            Some(r) if r.kind == Request::ELICITATION => BlockReason::Elicitation,
-            _ => BlockReason::Question,
-        }),
-        Phase::Done => AgentStatus::Done,
-        Phase::Failed if limited => {
-            AgentStatus::Failed { error: AgentStatus::RATE_LIMIT.to_owned(), until_ms: None }
-        }
-        // The row names no other error; the turn it ended is said by the outcome notice.
-        Phase::Failed => AgentStatus::Failed { error: "unknown".to_owned(), until_ms: None },
-        Phase::Idle | Phase::Stopped => AgentStatus::Idle,
-    }
-}
-
+/// The thread `row` hangs from in `table`, through every parent there; itself when none.
 fn root_of(table: &BTreeMap<ThreadId, ThreadRow>, row: &ThreadRow) -> ThreadId {
     let mut at = row.id;
     // A parent chain longer than the table loops: it ends where it started over.
@@ -1521,22 +1120,19 @@ fn roots(tables: &HashMap<WorkerId, BTreeMap<ThreadId, ThreadRow>>) -> Vec<Root<
     roots
 }
 
-/// The project node `term` works under: its task, or the project's orchestrator.
-fn node_of(projects: &Projects, term: TermRef) -> Option<NodeAt> {
-    projects.working_on(term).map(|(project, task)| NodeAt { project, task })
-}
-
-/// The ladder of `tables`, with the project nodes `projects` puts their terminals under.
-fn ladder(
-    tables: &HashMap<WorkerId, BTreeMap<ThreadId, ThreadRow>>,
-    projects: &Projects,
-) -> Ladder {
+/// The ladder of `tables`: each agent's tree, by the parent its row names across workers,
+/// and each space, by the clone or folder its agent works in.
+fn ladder(tables: &HashMap<WorkerId, BTreeMap<ThreadId, ThreadRow>>) -> Ladder {
     let roots = roots(tables);
     let mut tiles: BTreeMap<(WorkerId, SessionId), Standing> = BTreeMap::new();
     let mut workers: BTreeMap<WorkerId, Standing> = BTreeMap::new();
-    let mut nodes: BTreeMap<NodeAt, Standing> = BTreeMap::new();
-    let mut by_project: BTreeMap<slopty_proto::project::ProjectId, Standing> = BTreeMap::new();
+    let mut spaces: BTreeMap<SpaceAt, Standing> = BTreeMap::new();
     let mut fleet = Standing::default();
+    let at_of: HashMap<ThreadId, ThreadAt> =
+        roots.iter().map(|r| (r.ranked.at.thread, r.ranked.at)).collect();
+    let parents: HashMap<ThreadId, ThreadId> =
+        roots.iter().filter_map(|r| Some((r.ranked.at.thread, parent_of(r.row)?))).collect();
+    let mut trees: BTreeMap<ThreadAt, Standing> = BTreeMap::new();
     for root in &roots {
         let ranked = &root.ranked;
         fleet.add(ranked);
@@ -1544,11 +1140,26 @@ fn ladder(
         if let Some(session) = root.row.terminal {
             tiles.entry((ranked.at.worker, session)).or_default().add(ranked);
         }
-        let Some(session) = seat_of(root.row) else { continue };
-        let term = TermRef { worker: ranked.at.worker, session };
-        if let Some(node) = node_of(projects, term) {
-            by_project.entry(node.project.clone()).or_default().add(ranked);
-            nodes.entry(node).or_default().add(ranked);
+        if let Some(folder) = root.row.repo.as_ref().or(root.row.cwd.as_ref()) {
+            let space = SpaceAt { worker: ranked.at.worker, folder: folder.clone() };
+            spaces.entry(space).or_default().add(ranked);
+        }
+        // Each agent above it, at any depth: a chain longer than the fleet loops.
+        let mut at = ranked.at.thread;
+        for _ in 0..roots.len() {
+            let Some(parent) = parents.get(&at).copied() else { break };
+            let Some(parent_at) = at_of.get(&parent).copied() else { break };
+            trees.entry(parent_at).or_default().add(ranked);
+            if parent == ranked.at.thread {
+                break;
+            }
+            at = parent;
+        }
+    }
+    // A tree holds the agent at its top too.
+    for root in &roots {
+        if let Some(tree) = trees.get_mut(&root.ranked.at) {
+            tree.add(&root.ranked);
         }
     }
     Ladder {
@@ -1558,8 +1169,8 @@ fn ladder(
             .map(|((worker, session), s)| (TermRef { worker, session }, s))
             .collect(),
         workers: workers.into_iter().collect(),
-        nodes: nodes.into_iter().collect(),
-        projects: by_project.into_iter().collect(),
+        trees: trees.into_iter().collect(),
+        spaces: spaces.into_iter().collect(),
         fleet,
     }
 }
@@ -1581,12 +1192,11 @@ struct Told {
 /// The notices `ladder` makes against the one `board` published, keeping how long each
 /// thread has been busy, each with the request its note's buttons answer: a thread's own
 /// first, when it needs the person for a plain yes or no ([`RequestCard::answerable`]). A
-/// thread first seen needing the person counts too ([`Told::first`]). A project task's agent
-/// that finished says nothing: what it made reaches the person as work ready to merge, and its
-/// orchestrator hears of the rest.
+/// thread first seen needing the person counts too ([`Told::first`]). An agent another started
+/// that finished says nothing: its parent hears of it.
 ///
 /// [`RequestCard::answerable`]: slopty_proto::thread::wire::RequestCard::answerable
-fn moved(board: &mut Board, ladder: &Ladder, projects: &Projects) -> Vec<Told> {
+fn moved(board: &mut Board, ladder: &Ladder) -> Vec<Told> {
     let before: HashMap<ThreadAt, Rung> =
         board.published.threads.iter().map(|r| (r.at, r.rung)).collect();
     let busy = |rung: Rung| matches!(rung, Rung::Working | Rung::Waiting);
@@ -1614,7 +1224,7 @@ fn moved(board: &mut Board, ladder: &Ladder, projects: &Projects) -> Vec<Told> {
         let Some(kind) = kind else { continue };
         let finished = kind == NoticeKind::Finished;
         let worked_ms = finished.then_some(worked_ms).flatten();
-        let Some((notice, ask)) = notice_of(board, projects, now.at, (kind, worked_ms)) else {
+        let Some((notice, ask)) = notice_of(board, now.at, (kind, worked_ms)) else {
             continue;
         };
         let row = board.tables.get(&now.at.worker).and_then(|t| t.get(&now.at.thread));
@@ -1628,24 +1238,15 @@ fn moved(board: &mut Board, ladder: &Ladder, projects: &Projects) -> Vec<Told> {
 
 /// The notice of `kind` about the thread at `at`, with how long it worked when it finished,
 /// and the request its note's buttons answer; `None` for a thread no table holds, and for
-/// what a project task's agent says through its project instead.
+/// the finish of an agent another started, which its parent hears of instead.
 fn notice_of(
     board: &Board,
-    projects: &Projects,
     at: ThreadAt,
     (kind, worked_ms): (NoticeKind, Option<u64>),
 ) -> Option<(Notice, Option<Ask>)> {
     let table = board.tables.get(&at.worker)?;
     let row = table.get(&at.thread)?;
-    let task_agent = || {
-        let term = seat_of(row).map(|session| TermRef { worker: at.worker, session });
-        term.and_then(|t| projects.working_on(t)).is_some_and(|(_, task)| task.is_some())
-    };
-    // A task's pull request is the project's to tell of ([`tell_project`]), once.
-    let by_pull = kind == NoticeKind::NeedsYou
-        && row.requests.is_empty()
-        && row.status.phase != Phase::NeedsYou;
-    if (kind == NoticeKind::Finished || by_pull) && task_agent() {
+    if kind == NoticeKind::Finished && parent_of(row).is_some() {
         return None;
     }
     let family: Vec<&ThreadRow> =
@@ -1676,15 +1277,14 @@ fn notice_of(
 /// Each note a phone shows that its thread needs the person follows the request the thread asks
 /// now ([`Phones::follow`]), for a thread that needed them at the last ranking too; one that
 /// came to need them since is told anew ([`moved`]).
-fn follow_asks(board: &mut Board, projects: &Projects) {
+fn follow_asks(board: &mut Board) {
     for (client, at) in board.phones.asking() {
         let threads = &board.published.threads;
         let before = threads.binary_search_by_key(&at, |r| r.at).ok().and_then(|i| threads.get(i));
         if before.is_none_or(|r| r.rung != Rung::NeedsYou) {
             continue;
         }
-        let Some((notice, ask)) = notice_of(board, projects, at, (NoticeKind::NeedsYou, None))
-        else {
+        let Some((notice, ask)) = notice_of(board, at, (NoticeKind::NeedsYou, None)) else {
             continue;
         };
         board.phones.follow(client, &notice, ask.as_ref());
@@ -1702,12 +1302,11 @@ fn at_desk(presence: Option<&Presence>) -> bool {
 /// on the phone in their hand goes with them, so leaving that pushes nothing. The clients
 /// already hold it, so no link is told it again, and a phone already showing it, by the kept
 /// push state, is not pushed twice.
-fn left(board: &mut Board, projects: &Projects) {
+fn left(board: &mut Board) {
     let waiting: Vec<ThreadAt> =
         board.published.threads.iter().filter(|r| r.rung == Rung::NeedsYou).map(|r| r.at).collect();
     for at in waiting {
-        let Some((notice, ask)) = notice_of(board, projects, at, (NoticeKind::NeedsYou, None))
-        else {
+        let Some((notice, ask)) = notice_of(board, at, (NoticeKind::NeedsYou, None)) else {
             continue;
         };
         if route(&board.seats, &notice).away {
@@ -1728,11 +1327,9 @@ fn text(kind: NoticeKind, row: &ThreadRow) -> String {
             .or(wait)
             .or_else(|| row.pull.as_ref().filter(|p| p.stands.needs_you()).map(PullSeen::line))
             .unwrap_or_default(),
-        NoticeKind::Failed
-        | NoticeKind::Finished
-        | NoticeKind::Project
-        | NoticeKind::ReadyToMerge
-        | NoticeKind::GoalDone => wait.or_else(|| row.last_line.clone()).unwrap_or_default(),
+        NoticeKind::Failed | NoticeKind::Finished => {
+            wait.or_else(|| row.last_line.clone()).unwrap_or_default()
+        }
     }
 }
 

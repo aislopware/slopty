@@ -1,8 +1,8 @@
 //! A daemon's own tables of the file, read and edited from another device.
 //!
-//! A worker reads `[worker]` and the server `[server]` of the `settings.toml` on their own
-//! machine, and both read `[network]`. A settings page on another device sends the edits it would
-//! make to its own file ([`Edit`]), and [`read_and_edit`] makes them here:
+//! A worker reads `[worker]` and the server `[server]` and `[agents]` of the `settings.toml` on
+//! their own machine, and both read `[network]`. A settings page on another device sends the edits
+//! it would make to its own file ([`Edit`]), and [`read_and_edit`] makes them here:
 //! - only to the daemon's own tables ([`WORKER`], [`SERVER`]);
 //! - only to keys of the file's schema ([`crate::schema::fields`]), each value checked as the form
 //!   checks it;
@@ -19,12 +19,12 @@ use crate::{Settings, edit};
 /// The tables a worker reads and takes edits to.
 pub const WORKER: [&str; 2] = ["worker", "network"];
 /// The tables the server reads and takes edits to.
-pub const SERVER: [&str; 2] = ["server", "network"];
+pub const SERVER: [&str; 3] = ["server", "agents", "network"];
 
 /// One edit, as the settings form makes it to its own file.
 #[derive(Clone, Copy, Debug)]
 pub struct Edit<'a> {
-    /// The table, dotted (`worker`, `server.projects`).
+    /// The table, dotted (`worker`, `server.push`).
     pub table: &'a str,
     /// The key in it.
     pub key: &'a str,
@@ -57,7 +57,7 @@ pub enum Refused {
     Io(String),
 }
 
-/// Whether `table` is `root` or one of its own (`server.projects` under `server`).
+/// Whether `table` is `root` or one of its own (`server.push` under `server`).
 #[must_use]
 pub fn under(table: &str, root: &str) -> bool {
     table == root || table.strip_prefix(root).is_some_and(|rest| rest.starts_with('.'))
@@ -197,7 +197,7 @@ mod tests {
         std::fs::write(&path, "[worker]\nkeep_awake = \"never\"\n").expect("written");
         let first = edit("worker", "keep_awake", Some(r#""working""#));
         for wrong in [
-            edit("server.projects", "live_agents", Some("4")),
+            edit("agents", "autonomy", Some(r#""full""#)),
             edit("font", "mono_size", Some("12.0")),
             edit("worker", "no_such_key", Some("1")),
             edit("worker", "keep_awake", Some(r#""sometimes""#)),
@@ -210,7 +210,7 @@ mod tests {
             std::fs::read_to_string(&path).expect("read"),
             "[worker]\nkeep_awake = \"never\"\n"
         );
-        assert!(under("server.projects", "server") && !under("serverless", "server"));
+        assert!(under("server.push", "server") && !under("serverless", "server"));
     }
 
     /// A file not there yet reads as empty and is made by the first edit; what in the daemon's

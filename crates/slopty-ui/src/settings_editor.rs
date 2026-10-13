@@ -622,10 +622,10 @@ mod tests {
         let quiet = crate::settings_form::NO_MATCHES;
         assert!(tree.iter().any(|n| n.is("Status", Some(quiet))), "{tree:#?}");
         cx.simulate_keystrokes("cmd-a backspace");
-        cx.simulate_input("live_agents");
+        cx.simulate_input("autonomy");
         cx.run_until_parked();
-        assert_eq!(value_of(cx, "SpinButton", "Live agents").as_deref(), Some("24"));
         let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
+        assert!(tree.iter().any(|n| n.is("RadioButton", Some("Auto"))), "{tree:#?}");
         assert!(tree.iter().any(|n| n.is("Heading", Some("Agents"))), "{tree:#?}");
     }
 

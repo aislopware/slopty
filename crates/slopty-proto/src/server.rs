@@ -9,6 +9,8 @@
 //! naming its role; the server answers [`FromServer::Welcome`] or [`FromServer::Refused`]. After
 //! that each side sends its role's messages, framed by [`crate::codec`] like the rest.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use slopty_core::{ClientId, SessionId, WallMs, WorkerId};
 
@@ -35,8 +37,8 @@ pub enum Role {
         vouch: Option<Vouch>,
     },
     /// The CLI run inside a Slopty terminal (`SLOPTY_SESSION` set): a person's shell or an
-    /// agent's. The server treats it as an agent when an agent runs in that terminal or it
-    /// is on a project's task.
+    /// agent's. The server treats it as an agent when an agent runs in that terminal or an
+    /// agent started it.
     Shell {
         /// What it calls itself, for logs.
         name: String,
@@ -273,13 +275,13 @@ pub enum ToServer {
     },
     /// A worker's one-minute load average moved.
     Load(f32),
-    /// What a worker's agent did beyond its status: where its work lands, Claude Code's own
-    /// subagents and task list (`docs/decisions/projects.md`).
-    Report(crate::project::AgentReport),
+    /// What a worker's agent did beyond its status: where its work lands, and the words the
+    /// server sent it read.
+    Report(AgentReport),
     /// What a worker is and has beyond its capabilities: its toolchains, agents, GPUs and power
     /// (`docs/decisions/projects.md`). Sent after registering and when they change; each
     /// replaces the last.
-    Facts(crate::project::Facts),
+    Facts(Facts),
     /// How far a clone the server asked for ([`crate::orchestration::Verb::CloneRepo`]) has
     /// come, sent as it moves.
     Cloning {
@@ -356,17 +358,11 @@ pub enum FromServer {
         /// Its 1-minute load average.
         load: f32,
     },
-    /// For a client or agent: every project's tree (its cards and its timeline's latest
-    /// entries), sent after the terminals in as many parts as keep each under a frame. The
-    /// first part replaces what the client showed; each change after the snapshot comes as a
-    /// [`crate::orchestration::Happening::Project`], and one whose event `seq` is at or below
-    /// the parts' `seq` is already in it and is dropped.
-    Projects(Box<crate::project::ProjectsPart>),
-    /// For a worker: reports ([`crate::project::Report`]) for the agent in `session`, which its
-    /// hooks hand it as context (`slopty hook reports`) and then acknowledge as
-    /// [`crate::project::AgentReport::Delivered`]. A later batch for the session replaces one
-    /// not yet handed over, and holds its reports too; the worker leaves out each one its agent
-    /// read already ([`ReportBlock::id`]).
+    /// For a worker: news for the agent in `session` (its children's, words told it), which
+    /// its hooks hand it as context (`slopty hook reports`) and then acknowledge as
+    /// [`AgentReport::Delivered`]. A later batch for the session replaces one not yet handed
+    /// over, and holds its words too; the worker leaves out each one its agent read already
+    /// ([`ReportBlock::id`]).
     Deliver {
         /// The agent's terminal on this worker.
         session: SessionId,
@@ -375,7 +371,7 @@ pub enum FromServer {
         /// The reports, as the agent reads them.
         reports: Reports,
     },
-    /// For a client or agent: the fleet's attention ladder, sent after the projects and again
+    /// For a client or agent: the fleet's attention ladder, sent after the directory and again
     /// whenever a rung moves. Each replaces the last.
     Ladder(Box<crate::thread::attention::Ladder>),
     /// For a client: every client where the person is, sent after the ladder and again on
@@ -462,4 +458,51 @@ impl Reports {
             self.blocks.iter().filter(|b| !read(b.id)).cloned().collect();
         (!blocks.is_empty()).then(|| Self { blocks, ..self.clone() })
     }
+}
+
+/// A value of a worker's facts: open, so a new fact needs no new type.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub enum Fact {
+    /// A flag (`ac_power`).
+    Bool(bool),
+    /// A count or a size (`cpus`, `memory_mb`).
+    Int(i64),
+    /// A measure (`load`).
+    Float(f64),
+    /// A word or a version (`os`, `agents.claude`).
+    Text(String),
+    /// Several (`gpus`, `rust_targets`).
+    List(Vec<Self>),
+    /// Named parts (`agents`, `acp`, `toolchains`, `repos`).
+    Map(BTreeMap<String, Self>),
+}
+
+/// What a worker is and has, by name: an open map an agent reads to pick a machine.
+///
+/// The server fills in what it knows itself (`name`, `worker`, `os`, `cpus`, `load`,
+/// `online`, `agents_live`, `repos`); the worker reports the rest.
+pub type Facts = BTreeMap<String, Fact>;
+
+/// One worker's facts.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct WorkerFacts {
+    /// Which worker.
+    pub worker: WorkerId,
+    /// Its facts, the server's and its own together.
+    pub facts: Facts,
+}
+
+/// What a worker tells the server of an agent beyond its thread's row.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum AgentReport {
+    /// Where an agent's work lands: its worktree.
+    Branch(crate::agent::AgentBranch),
+    /// A batch of news ([`FromServer::Deliver`]) reached the agent in a session through its
+    /// hooks.
+    Delivered {
+        /// The session.
+        session: SessionId,
+        /// The batch.
+        batch: u64,
+    },
 }

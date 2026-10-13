@@ -96,7 +96,7 @@ mod tests {
                 pair("TERM", "xterm-256color"),
                 pair("BASH_SILENCE_DEPRECATION_WARNING", "1"),
                 pair(slopty_proto::ctl::SESSION_ENV, &slopty_core::SessionId::new().to_string()),
-                pair(slopty_proto::project::SERVER_ENV, "server.tail:7480"),
+                pair(slopty_proto::ctl::SERVER_ENV, "server.tail:7480"),
                 pair(slopty_agent::claude_mod::DIR_ENV, &lossy(self.path("mod"))),
                 pair(slopty_agent::claude_mod::SOCKET_ENV, &lossy(self.path("mod.sock"))),
                 pair("SLOPTY_NO_CLAUDE_MOD", "0"),
@@ -140,9 +140,9 @@ mod tests {
     }
 
     /// Typed in a Slopty shell, `claude` starts with the relay's hooks and status line on the
-    /// one `--settings`, the person's own settings merged in, the pointer to Slopty's CLI
-    /// rather than its tools (it is no project's agent), a pinned conversation and the mod with
-    /// its switch; the person's flags and prompt follow as typed.
+    /// one `--settings`, the person's own settings merged in, Slopty's tools and the line that
+    /// names them, a pinned conversation and the mod with its switch; the person's flags and
+    /// prompt follow as typed.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_typed_claude_is_wired_as_one_slopty_starts() {
         let relay = relay();
@@ -168,9 +168,9 @@ mod tests {
             assert!(hook.as_str().is_some_and(|c| c.contains(&relay)), "{shell}: {hook}");
             let line = settings["statusLine"]["command"].as_str().unwrap_or_default();
             assert!(line.contains(&relay), "{shell}: the status-line wrapper: {line}");
-            assert!(!args.iter().any(|a| a.starts_with("--mcp-config")), "{shell}: {args:?}");
-            let pointer = format!("--append-system-prompt={}", slopty_agent::hooks::POINTER);
-            assert!(args.contains(&pointer), "{shell}: {args:?}");
+            assert!(args.iter().any(|a| a.starts_with("--mcp-config")), "{shell}: {args:?}");
+            let line = format!("--append-system-prompt={}", slopty_agent::hooks::TOOLS_LINE);
+            assert!(args.contains(&line), "{shell}: {args:?}");
             let cwd = std::fs::read_to_string(place.path("ran.cwd")).unwrap();
             assert_eq!(
                 Path::new(cwd.trim()).canonicalize().unwrap(),

@@ -156,7 +156,7 @@ const LAYOUT: &[(Section, &str, &[&str])] = &[
         &["clipboard.sync", "clipboard.workers", "terminal.copy_on_select"],
     ),
     (Section::Agents, "ACP agents", &["worker.acp"]),
-    (Section::Agents, "Projects", &["server.projects.live_agents"]),
+    (Section::Agents, "Autonomy", &["agents.autonomy"]),
     (
         Section::Agents,
         "Notes on your phone",
@@ -210,10 +210,10 @@ const THIS_APP: &str = "This app";
 /// The group of `[network]`, which this app and the daemons read alike.
 const NETWORK: &str = "Server and access";
 
-/// The page a key of `table` that [`LAYOUT`] does not name goes on: the project bounds' and
-/// the phone's notes' on Agents, any other nested table's (`server.x`) its root table's.
+/// The page a key of `table` that [`LAYOUT`] does not name goes on: the agents' and the
+/// phone's notes' on Agents, any other nested table's (`server.x`) its root table's.
 fn home(table: &str) -> Section {
-    if matches!(table, "server.projects" | "server.push") {
+    if matches!(table, "agents" | "server.push") {
         return Section::Agents;
     }
     let root = table.split_once('.').map_or(table, |(root, _)| root);
@@ -332,11 +332,11 @@ static OPEN_AT_LOGIN: LazyLock<Field> = LazyLock::new(|| Field {
 });
 
 /// Whether `table` is read by a daemon, and so may be another machine's
-/// ([`super::remote`]): a worker's, the server's, or `[network]`, which they share with this
-/// app ([`shared`]).
+/// ([`super::remote`]): a worker's, the server's (`[server]` and `[agents]`), or `[network]`, which
+/// they share with this app ([`shared`]).
 pub(in crate::settings_form) fn daemons(table: &str) -> bool {
     let root = table.split_once('.').map_or(table, |(root, _)| root);
-    matches!(root, "worker" | "server") || shared(table)
+    matches!(root, "worker" | "server" | "agents") || shared(table)
 }
 
 /// Whether `table` is read by this app and by the daemons alike (`[network]`): on this device
@@ -646,11 +646,11 @@ mod tests {
         assert_eq!(figure(3.0, 0.5), "3.0");
     }
 
-    /// A nested table's keys go on the page of the table they sit in, but for the projects'
-    /// bounds and the phone's notes, which are the Agents page's.
+    /// A nested table's keys go on the page of the table they sit in, but for the phone's
+    /// notes, which are the Agents page's, as the agents' own table is.
     #[test]
     fn a_nested_table_is_on_its_roots_page() {
-        assert_eq!(home("server.projects"), Section::Agents);
+        assert_eq!(home("agents"), Section::Agents);
         assert_eq!(home("server.push"), Section::Agents);
         assert_eq!(home("server"), Section::Network);
     }
@@ -750,18 +750,15 @@ mod tests {
         );
 
         let mut fields = schema::fields().to_vec();
-        let mut extra = fields
-            .iter()
-            .find(|f| f.key == "live_agents")
-            .cloned()
-            .expect("a [server.projects] key");
+        let mut extra =
+            fields.iter().find(|f| f.key == "autonomy").cloned().expect("an [agents] key");
         "sound_on_connect".clone_into(&mut extra.key);
         "Sound on connect".clone_into(&mut extra.title);
         fields.push(extra);
         let fields: &'static [Field] = fields.leak();
         let rows = rows_of(&fields.iter().collect::<Vec<_>>());
         let row = rows.iter().find(|r| r.key() == "sound_on_connect").expect("its row");
-        assert_eq!((row.section, row.group), (Section::Agents, "Projects"));
+        assert_eq!((row.section, row.group), (Section::Agents, "Agents"));
         let last = rows.iter().rposition(|r| r.group == row.group);
         let last = last.and_then(|at| rows.get(at)).map(Row::key);
         assert_eq!(last, Some("sound_on_connect"), "last in its group, after the group's own keys");
@@ -790,10 +787,10 @@ mod tests {
     }
 
     /// The Agents page holds what the machines run agents by: the ACP agents beside the known
-    /// ones, the bounds every project stays under, and how notes reach the phone, each its
-    /// own group in that order.
+    /// ones, how freely a started agent acts, and how notes reach the phone, each its own
+    /// group in that order.
     #[test]
-    fn the_agents_page_holds_the_agents_projects_and_notes() {
+    fn the_agents_page_holds_the_agents_autonomy_and_notes() {
         let page: Vec<(&str, String)> = rows()
             .iter()
             .filter(|r| r.section == Section::Agents)
@@ -801,7 +798,7 @@ mod tests {
             .collect();
         let expected: Vec<(&str, String)> = [
             ("ACP agents", "worker.acp"),
-            ("Projects", "server.projects.live_agents"),
+            ("Autonomy", "agents.autonomy"),
             ("Notes on your phone", "server.push.apns_key"),
             ("Notes on your phone", "server.push.key_id"),
             ("Notes on your phone", "server.push.team_id"),

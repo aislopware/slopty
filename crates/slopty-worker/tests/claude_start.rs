@@ -492,20 +492,23 @@ mod claude_start {
         assert!(matches!(twice, Outcome::Refused { .. }), "{twice:?}");
     }
 
-    /// A server task's thread opens Claude Code in a terminal under the seat, with the seat's
-    /// variables beside the `PATH` and its role added to the system prompt; the first message
-    /// goes as written. Its row names the seat, kept through what the transcript says, and a
-    /// start repeated at the seat opens nothing.
+    /// A seated thread (an agent another started) opens Claude Code in a terminal under the
+    /// seat, with the seat's variables beside the `PATH` and its system text added to the
+    /// system prompt; the first message goes as written. Its row names the seat and its parent,
+    /// kept through what the transcript says, and a start repeated at the seat opens nothing.
     #[tokio::test]
-    async fn a_seated_start_opens_claude_under_the_seat_with_its_role() {
+    async fn a_seated_start_opens_claude_under_the_seat_with_its_system_text() {
         let rig = Rig::new();
         let prompt = first_message("edit");
         let seat = SessionId::new();
         let variable = ("SLOPTY_SESSION".to_owned(), seat.to_string());
+        rig.host
+            .set_seat_env(Arc::new(|seat| vec![("SLOPTY_SESSION".to_owned(), seat.to_string())]));
+        let parent = (slopty_proto::agent::PARENT_FACT.to_owned(), "parent-thread".to_owned());
         let seated = Seated {
             seat,
-            env: vec![variable.clone()],
-            role: Some("You review.".to_owned()),
+            facts: vec![parent.clone()],
+            system: Some("You review.".to_owned()),
             relay: None,
         };
         let outcome = rig.starter.start_seated(rig.start(Some(&prompt)), seated.clone()).await;
@@ -525,11 +528,12 @@ mod claude_start {
 
         rig.write("edit");
         let state = until(&rig.host, thread, |s| !users(s).is_empty()).await;
-        let fact = state.meta.facts.get(slopty_proto::project::SEAT_FACT);
+        let fact = state.meta.facts.get(slopty_proto::agent::SEAT_FACT);
         assert_eq!(fact, Some(&seat.to_string()), "kept through the transcript");
+        assert_eq!(state.meta.facts.get(&parent.0), Some(&parent.1), "its parent too");
 
         // Gone, its session is taken up again where it was started: under the seat, with the
-        // seat's variables and its role.
+        // seat's variables and its system text.
         let native = thread_native(&rig, thread);
         gone(&rig, seat, &native);
         until(&rig.host, thread, |s| matches!(s.status.liveness, Liveness::Exited { .. })).await;
@@ -634,7 +638,7 @@ mod claude_start {
     }
 
     /// What a start cannot be is refused in words, and opens nothing: arguments of a client's
-    /// other than a resume, a mode that skips every permission or that is none, an effort
+    /// other than a resume, a mode that is none, an effort
     /// `--effort` does not take, a file that is not here,
     /// another way to drive it, a folder that is not here, and a worker with no `claude`.
     #[tokio::test]
@@ -643,7 +647,7 @@ mod claude_start {
         let mut args = rig.start(None);
         args.args = vec!["--dangerously-skip-permissions".to_owned()];
         let mut bypass = rig.start(None);
-        bypass.mode = Some("bypassPermissions".to_owned());
+        bypass.mode = Some("yolo".to_owned());
         let mut flagged = rig.start(None);
         flagged.args = vec!["--permission-mode".to_owned(), "plan".to_owned()];
         let mut effort = rig.start(None);

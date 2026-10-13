@@ -4,12 +4,12 @@
 //! terminal's history), a file, a folder, a page, a note and a remote window; agents that need
 //! the person, work, or are done; the navigator, the palette, the menus, the settings
 //! and a toast; a Claude Code thread mid-turn with every kind of step, a request and a
-//! questionnaire; and a project's board with tasks in every state and a merge queue.
+//! questionnaire; and threads of every agent kind started from the palette.
 //!
 //! Everything shown is made by the test: a repository in a home of the run's own, stand-in
 //! programs (`cargo`, `docker`) first on the shells' `PATH`, transcripts laid out as Claude Code
 //! keeps them with their hooks handed to the worker's control socket or relayed by
-//! `slopty hook`, and `slopty-stub-claude` for the project's agents. No agent runs, nothing is
+//! `slopty hook`, and `slopty-stub-claude` for the served app's agents. No agent runs, nothing is
 //! typed into a remote window, and no golden is compared: the renders land in
 //! `target/e2e/artifacts/showcase/`, light and dark, at the app's own window size. They run only
 //! as their own case, `cargo xtask e2e showcase`; the app suite leaves them out.
@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
-use slopty_e2e::harness::{ProjectStack, SecondWorker, artifacts_dir, pinned_settings};
+use slopty_e2e::harness::{SecondWorker, ServedApp, artifacts_dir, pinned_settings};
 use slopty_e2e::{Command, Driver, Dump, Stack};
 
 use crate::gallery::STEP;
@@ -2199,11 +2199,11 @@ async fn showcase_a_claude_code_thread_mid_turn() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// A project's board.
+// The served app's frame.
 // ---------------------------------------------------------------------------------------------
 
-/// Write the project stack's settings in `appearance`, still pointed at its server.
-fn project_appearance(stack: &ProjectStack, appearance: &str) {
+/// Write the served app's settings in `appearance`, still pointed at its server.
+fn served_appearance(stack: &ServedApp, appearance: &str) {
     let settings = format!(
         "{}\n[network]\nserver = \"{}\"\n",
         pinned_settings(appearance),
@@ -2212,13 +2212,14 @@ fn project_appearance(stack: &ProjectStack, appearance: &str) {
     std::fs::write(stack.path("app").join("settings.toml"), settings).unwrap();
 }
 
-/// Render the board's `name`, light and dark.
-async fn board_both(stack: &mut ProjectStack, name: &str) {
+/// Render the served app's frame as `name`, light and dark.
+async fn served_both(stack: &mut ServedApp, name: &str) {
+    stack.driver.ok(&Command::Move { x: PARK.0, y: PARK.1 }).await.unwrap();
     shot(&mut stack.driver, &format!("{name}-light")).await;
-    project_appearance(stack, "dark");
+    served_appearance(stack, "dark");
     wait(&mut stack.driver, "the dark theme", |d| d.dark).await;
     shot(&mut stack.driver, &format!("{name}-dark")).await;
-    project_appearance(stack, "light");
+    served_appearance(stack, "light");
     wait(&mut stack.driver, "the light theme", |d| !d.dark).await;
 }
 
@@ -2402,11 +2403,11 @@ async fn codex_serve(mut ws: Ws) {
     }
 }
 
-/// A project stack whose worker has Codex (its daemon played by the test), pi
+/// A served app whose worker has Codex (its daemon played by the test), pi
 /// (`slopty-stub-pi`) and `opencode` (`slopty-stub-acp`) beside Claude Code, with a shell in a
 /// repository of the day's work.
 pub struct Threads {
-    pub stack: ProjectStack,
+    pub stack: ServedApp,
     pub shell: String,
     /// What the agents stand on until [`Self::end`].
     pub held: Held,
@@ -2434,10 +2435,9 @@ impl Threads {
         let acp = claude.with_file_name("slopty-stub-acp");
         let codex_env = codex_home.path().to_string_lossy().into_owned();
         let programs: [(&str, &Path); 3] = [("codex", &codex), ("pi", &pi), ("opencode", &acp)];
-        let mut stack =
-            ProjectStack::launch_with("studio", &programs, &[("CODEX_HOME", &codex_env)])
-                .await
-                .unwrap();
+        let mut stack = ServedApp::launch_with("studio", &programs, &[("CODEX_HOME", &codex_env)])
+            .await
+            .unwrap();
         let bin = stack.path("programs");
         for (stub, recording) in [("pi", "pi/gate.jsonl"), ("acp", "acp/turns.jsonl")] {
             let config = json!({
@@ -2579,12 +2579,6 @@ fn says(d: &Dump, text: &str) -> bool {
     })
 }
 
-/// Render the project stack's frame as `name`, light and dark.
-async fn project_both(stack: &mut ProjectStack, name: &str) {
-    stack.driver.ok(&Command::Move { x: PARK.0, y: PARK.1 }).await.unwrap();
-    board_both(stack, name).await;
-}
-
 /// `agent`'s thread from the palette: a first turn answered, then a second that waits on the
 /// person's approval. Its tile beside the shell, light, then maximised in both themes.
 async fn agent_thread(t: &mut Threads, agent: &str, name: &str, turns: [(&str, &str); 2]) {
@@ -2600,7 +2594,7 @@ async fn agent_thread(t: &mut Threads, agent: &str, name: &str, turns: [(&str, &
     drv.ok(&Command::Move { x: PARK.0, y: PARK.1 }).await.unwrap();
     shot(drv, &format!("{name}-tile-light")).await;
     drv.keys("cmd-shift-enter").await.unwrap();
-    project_both(&mut t.stack, name).await;
+    served_both(&mut t.stack, name).await;
     t.stack.driver.keys("cmd-shift-enter").await.unwrap();
 }
 
@@ -2618,7 +2612,7 @@ async fn showcase_the_palette_starting_a_codex_thread() {
             .all(|a| offering(d, &format!("New {a} agent")))
     })
     .await;
-    project_both(&mut t.stack, "palette-new-thread").await;
+    served_both(&mut t.stack, "palette-new-thread").await;
     let drv = &mut t.stack.driver;
     drv.keys("escape").await.unwrap();
     wait(drv, "the palette closed", |d| !palette_up(d)).await;

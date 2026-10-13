@@ -1,6 +1,6 @@
 //! Keeping the server's machine out of idle sleep while the fleet needs it.
 //!
-//! Every notice that reaches the person on another device, every project step and every wake
+//! Every notice that reaches the person on another device, every word to an agent and every wake
 //! goes through the server, so a server's Mac that idles to sleep silences them all, the agents
 //! on other machines included. The server holds its machine awake while a person's client is
 //! linked or an agent works on any worker (a thread working, or waiting on its own background

@@ -392,7 +392,7 @@ itself: `Events`, a long poll on a bounded log of what it hears from every worke
 terminals opened and closed, agent status changes) read from a cursor, which is how one agent
 watches the whole fleet (`slopty events`); and `ForgetWorker`. Each event it logs is pushed
 as it is, `FromServer::Event(HubEvent)`, to every client and agent link. A link gets the state
-(`Directory`, then `Terminals`, then `Projects`) on connect and again when it falls behind, and replaces what it
+(`Directory`, then the attention `Ladder`, then where the person is) on connect and again when it falls behind, and replaces what it
 showed with it. Files are read in ranges of at
 most 8 MiB with the whole size reported, directories listed with `ListDir`, paths checked with
 `Stat`; a terminal opened by a verb takes a size, and `ResizeTerminal` resizes one no client
@@ -402,94 +402,47 @@ lost its answer to a timeout or a dropped link asks again and gets the first out
 terminal. The CLI and MCP give every mutating verb a key and resend under it on `Interrupted`.
 Rulings in `docs/decisions/topology.md`.
 
-**Projects.** The server also keeps projects: one goal, its tasks side by side (one level, with
-dependencies), and a timeline, beside `workers.json` in `projects.json`
-(`slopty-server::project`, persisted by `store::ProjectStore`). The hub sends every durable
-change to a keeper, which keeps its own replica and appends the change to `projects.log` as a
-JSON line once a burst settles (250 ms). It writes the whole file again, compact, only when the
-log passes 8 MiB and at shutdown, so nothing the store does holds the hub's lock. A file that
-fails to read stops the server; one that fails to parse is set aside as `<name>.bad-<ms>`, and
-a log line cut short at its end is passed over. The hub answers the project verbs itself
-(`ProjectCreate` … `TaskSpawn`, `TaskReport`, `TaskGet`, `TaskTell`, `WorkingOn`,
-`WorkerFacts`, `slopty-proto::orchestration`):
+**Agents across machines.** Any agent can start, tell, read, wait for and stop agents on any
+worker, and carry a branch between machines (`docs/decisions/projects.md`). A space is a folder
+on a machine; an orchestrator is any agent that started others; each agent's row names its
+parent (`slopty_proto::agent::PARENT_FACT`), so every device draws one tree. The server keeps no
+task, plan or outcome of its own. The hub answers the agents' verbs itself
+(`slopty-server::hub::agents`: `AgentStart`, `AgentTell`, `AgentWait`, `AgentStop`, `Agents`,
+`BranchBring`, `WorkerFacts`):
 - Every link says who it speaks for (`slopty_server::Speaker`): a client is the person, an MCP
   surface an agent, and the CLI inside a Slopty terminal (`Role::Shell`) an agent when an agent
-  runs there, when it works on a project, when an agent opened or typed into it, or when the
-  server does not know it. Only the person answers a permission, merges a task or records its
-  verifier, and only the person's read of a thread holds its prompts. Only the orchestrator
-  makes, starts and tells tasks; a task's agent moves and reports its own.
-- The hub chooses every terminal's id (the start's token): a start whose answer was lost still
-  counts, and its terminal goes on its task when the worker announces it. An agent it starts
-  begins in `default` mode with bypass mode locked off in its settings, unless the person allows
-  looser modes for the project, and a report of a looser mode from such a terminal closes it.
-- A task's agent reports its work done to the orchestrator (`TaskReport`). The hub batches
-  what goes to each agent (`slopty-server::deliver`): reports, the person's and the
-  orchestrator's words, and the server's notices of a task's agent that ended its turn, waits
-  on the person or exited without reporting (`project::turns`). It pushes a batch to the
-  agent's worker (`FromServer::Deliver`), and the agent's own `SessionStart`,
-  `UserPromptSubmit` and `Stop` hooks hand it over (`slopty hook reports`,
-  `slopty_agent::reports`). Nothing is typed into a terminal.
-- Each worker reports open facts (`ToServer::Facts`: agents, toolchains, GPUs and power, from
-  `slopty-worker::facts`), gathered the first time the hub asks (`Verb::WorkerFacts`, forwarded
-  once per registration) and kept current from then on. The hub adds the facts it knows
-  itself (os, cpus, memory, load, live agents, repos), and `slopty workers --json` shows them
-  all. The orchestrator reads them and names the worker in `task_start`.
-- `TaskSpawn` starts a task on its pinned worker, or on one with room: beside a clone of the
-  project's repository when the task named no directory, then the fewest live agents, the least
-  load and the name (`slopty-server::placement`). Either way the worker is online and has the
-  agent installed. The hub reserves the worker under its lock, and a start counts against the
-  fleet's live agents from that reservation until its terminal is live. The hub then forwards
-  an ordinary `SpawnAgent`, an `OpenTerminal` for a command task, or a `StartThread` for an
-  agent run as a thread, with `SLOPTY_PROJECT` and `SLOPTY_TASK` last in its env. The new
-  terminal or thread is assigned to the task, and a start that can no longer be assigned is
-  closed.
-- The person's `[server.projects]` bounds in `settings.toml` (`Hub::set_bounds`) hold the
-  fleet-wide count of live agents. How far a project's agents go is its autonomy, which the
-  person sets and the server pins on each agent it starts. A project's own `Limits` hold its
-  review limit: while that many of its tasks wait on the person, no new task starts.
-- Every move between states is checked. An assigned task follows its agent's status while it
-  is running, waiting or blocked. Its assignment ends when the session closes. A worker that
-  registers again is reconciled against its session list.
-- Workers send `ToServer::Report`: the `AgentBranch` from the status line, plus the native
-  subagents and task-list items from the `SubagentStart`/`SubagentStop`/`TaskCreated`/
-  `TaskCompleted` hooks (`Hook::report`, forwarded by `ctl` on the daemon's `reports`
-  channel). The hub keeps these per task, beside the tasks. A report that arrives before its
-  session is assigned is held until it is.
+  runs there, when an agent opened or typed into it, or when the server does not know it. A
+  terminal's token (`SLOPTY_SESSION_TOKEN`) proves which terminal a program speaks from, and so
+  which agent is the parent of what it starts. Only the person answers a request, sends a
+  composer's message, restarts a worker or changes settings, and only the person's read of a
+  thread holds its prompts. An agent tells and stops only agents of its own tree.
+- `AgentStart` picks the folder, or has the worker clone the repository named
+  (`Verb::CloneRepo`), then forwards a `StartThread` at a seat derived from the caller and its
+  idempotency key, so a repeat takes the same seat. The start's mode is the person's
+  `[agents] autonomy` in each harness's words (`hub::agents::mode_for`); an agent names no
+  harness arguments. The child's facts name its parent, and its system text is one line that
+  says so.
+- What a child comes to (a rest after 10 s, a wait on the person after 30 s, an end at once)
+  and words told to an agent wait per recipient in `slopty-server::deliver`, kept in
+  `deliveries.json` across restarts. A batch goes to the recipient's worker
+  (`FromServer::Deliver`), whose hooks hand it over (`slopty hook reports`,
+  `slopty_agent::reports`) or, for a thread with no terminal, as a message; the worker answers
+  `AgentReport::Delivered`. Nothing is typed into a terminal. `AgentWait` watches the agents'
+  rows and answers once one (or each) rests, needs the person or ends; a parent that saw a
+  rest is not told it again.
+- Each worker reports open facts (`ToServer::Facts`: agents, toolchains, GPUs, power and its
+  clones, from `slopty-worker::facts`), gathered the first time the hub asks and kept current
+  from then on. The hub adds what it knows itself (os, cpus, memory, load, live agents, repos)
+  and cuts them to bounds; `machines` and `slopty workers --json` show them.
+- `BranchBring` has the source worker bundle the branch (`Verb::BundleBranch`), reads it in
+  4 MiB parts, uploads it to the target worker and has it fetched there (`Verb::FetchBundle`).
 
-Every change is logged and pushed as `Happening::Project(ProjectUpdate)`, a delta: the record,
-the one task as its card, or the one native that changed, and the timeline entry.
-`FromServer::Projects` comes in parts of at most 8 MiB and carries the event sequence number it
-is current as of, so a client can drop a replayed update logged at or below it. The worker's
-own agent spawn adds `--mcp-config=` naming `slopty mcp` (`slopty_agent::hooks::with_mcp`),
-which serves the project's eight tools (`slopty_tools::tools`: `project_status`, `task_get`,
-`task_start`, `task_update`, `task_report`, `task_tell`, `task_wait`, `read_thread`). Every
-other verb is the `slopty` CLI, which an agent runs in its shell. Every session gets
-`SLOPTY_SERVER`, so `slopty mcp` and the CLI inside it find the server. With no project or task
-named, they act on the session's own: the server's record of the session first, then
-`SLOPTY_PROJECT` and `SLOPTY_TASK` (`slopty_tools::Scope`). Tests start `slopty-stub-claude`,
-never `claude`. Rulings in `docs/decisions/projects.md`.
-
-**Verify and merge.** Each project has one lane on the server (`slopty-server::hub::queue`). It
-runs one job at a time, and it reads each next job from the tasks (`Projects::next_job`), so
-the store is the queue and a restart takes it up where it stood:
-- A task whose branch is in the orchestrator's clone, and whose verifier applies, moves to
-  verifying. The lane runs the verifier there as a terminal of its own (`Verb::Verify`), in a
-  detached checkout the project keeps in that clone (`~/slopty/verify/<project>`,
-  `slopty-worker::repo::verify`). The step carries that terminal, and the last line shows as
-  progress. The exit comes from the session's own exit state.
-- A pass leaves the task ready to merge, and the person's Merge (`TaskMerge`) queues it
-  (`Merge::Queued`). The head of the queue is rebased onto the target in the same checkout
-  (`Verb::Rebase`), each commit carrying its task and thread as trailers, verified again unless
-  the rebase left the tree that passed, and the target is fast-forwarded (`Verb::FastForward`).
-  That is a compare and swap on the commit it was rebased onto, made with `merge --ff-only` in a
-  worktree that has the target checked out, and `update-ref` otherwise. It pushes only when the
-  project's `push` is on.
-- A failure or a conflict gives the task back (`Hub::give_back`) as a notice through
-  `deliver`, which the agent's hooks hand over; past three give-backs it waits for the person
-  instead. A task on another machine is first sent the target, as `slopty/<project>/target` in
-  its clone (`Hub::send_target`, the home trip reversed), so it can rebase onto what the queue
-  judged it against with pushing off. A reason that is not the task's holds the lane until a
-  worker registers or the project changes.
+The worker's seated starts add `--mcp-config=` naming `slopty mcp` (`slopty_agent::hooks`),
+which serves the eight tools (`slopty_tools::tools`: `machines`, `agent_start`, `agent_tell`,
+`agent_read`, `agent_wait`, `agent_stop`, `agents`, `branch_bring`), each also a `slopty`
+command. Every session gets `SLOPTY_SERVER`, so `slopty mcp` and the CLI inside it find the
+server. The attention ladder rolls up by thread, tree, space and fleet
+(`slopty-server::hub::ladder`). Tests start `slopty-stub-claude`, never `claude`.
 
 Crates: `slopty-engine` (trait + libghostty-vt backend), `slopty-grid` (frame model, diff, cache),
 `slopty-predict`, `slopty-pty` (openpty/spawn, async master, ptyd protocol + client),
@@ -581,7 +534,7 @@ steps with a clock that jumped; the decoder's callback places each picture's cap
 client's clock through its newest anchor (`FrameStamp::captured`), and the pacer times it to the
 layer's glass time. The overlay's plain line leads with capture → glass and says its bound
 (DECISIONS.md, "Capture to glass on any link").
-A stream's rate, wherever it shows (the overlay, the status bar), is one number from the pacer:
+A stream's rate, wherever it shows (the overlay), is one number from the pacer:
 the pictures painted on this client in the last second, with the frames that missed the display
 counted apart and shown as their own flag (`Pacer::rate`, `PaintRate`; DECISIONS.md, "A
 stream's rate is one number").
@@ -822,8 +775,8 @@ sent at −1: above files, below video.
     with a notice), so origins, cookies and OAuth redirects keep working.
   - Each accepted connection becomes a tunnel, which the worker joins to `127.0.0.1` (then `::1`)
     with a half-close.
-  - The status bar counts the forwarded ports, and the count opens the palette's port list:
-    each port opens in a browser tile or in the default browser. The shell's header shows none.
+  - The palette's "Forwarded ports" lists the forwarded ports: each opens in a browser tile or
+    in the default browser. Neither the shell's header nor the window's cluster counts them.
   - A browser tile names the worker's port, and a client serves any port it names on demand
     (`Remote::forward`, a pin in `tunnel::Forwards` kept while the link lives), so a page opens
     on every client even when no session lists its port there any more (§4).
@@ -958,11 +911,9 @@ map of facts (`machine`, `kind`, `os`, `agent`, `cwd`, `repo`, `folder`, `branch
 `facts.<key>` from its thread; `slopty-ui::workspace::grouping` assembles them from what the
 client holds), a grouping is a chain of fact keys (by default `project`, `repo`, `folder`,
 `machine`), and tiles that share any value of their first fact on the chain are one group, so
-one repository's clones on three machines are one project. The server's declared projects
-claim the tiles in their repository's clones (`Project::repo_id`), and an item pinned to a
-project says so in its own `project` fact (`ItemOp::SetFact`). The navigator lists
-*Projects*, each declared one led by its board's row and followed by its threads at work that
-have no tile here, then *Machines* (each machine's health and what has no project); a
+one repository's clones on three machines are one project. An item pinned to a project says
+so in its own `project` fact (`ItemOp::SetFact`). The navigator lists *Projects*, each
+followed by its threads at work that have no tile here, then *Machines* (each machine's health and what has no project); a
 notification stacks in its project's thread; the palette goes to a project by frecency, scopes
 the frame to one and regroups the navigator by any fact (`docs/decisions/ui.md`, "The
 navigator groups by project; the machine is a facet"). A worker that drops keeps its tiles
@@ -998,19 +949,20 @@ The view draws the tab on show (`workspace::area`, `workspace::panes`):
   Split View. The focused pane fills the tab, its title is the way to the tab's other panes and
   the project's tabs, and every new tile is a tab.
 
-The title bar holds, in order:
+The window has no title bar and no status bar. Its top line is the navigator's header and every
+top pane's tab bar, one row on one rule; a top tab bar's empty run drags the window. A project's
+tabs are its rows in the navigator; every pane shows its tab bar, one cell for a lone tile. The
+top line's two ends are views of their own drawn in the top-left and top-right tab bars
+(`workspace::cluster`), or in a line of the window's own while no pane meets the top:
 
-- the navigator's toggle;
-- the breadcrumb (`project ▾ / checkout ▾ / branch`);
-- the project's tabs (a new tile comes from the palette, the File menu or ⌘T, on the worker in
-  context);
-- the notices about no one tile's work;
-- the readouts, each only while it has something to say (`workspace::readouts`);
-- the bell and "…" (settings and adding a machine; on a phone the palette too).
+- the lead: the lights' room and the navigator's toggle while it is hidden, then back and
+  forward through the tabs visited;
+- the cluster: the tab's terminal toggle, the breadcrumb (`project ▾ / checkout ▾ / branch`)
+  while the navigator is hidden, the readouts only while they warn (`workspace::readouts`), the
+  transfers in flight, the bell and "…" (settings and adding a machine; on a phone the palette
+  too). The notices about no one tile's work hang under it.
 
-Along the window's foot runs the foot bar (`workspace::foot`): the plan's usage and the
-focused agent on the left; the ports, the transfers, and a
-chip for each shell whose command runs out of sight on the right.
+A file's language, indent and caret end its own tab bar (`file::FileFacts`).
 
 A shell's title is, first that says something, the command it runs, a title its program set
 (not the shell's own name, a path or a `user@host:path` prompt), its repository or directory,
@@ -1020,7 +972,7 @@ and a path under the worker's home, which its `HelloAck` names, reads `~/…`. A
 `RUNNING_AFTER` (3 s) is `Status::Running`: the neutral tone and a calm mark that steps once a
 second, beside its running time, the least of what a rollup counts. A menu that closes hands the keyboard back to the
 focused tile (`WorkspaceView::return_keyboard`), as the settings and the add-worker dialog do. ⌘W on any tile takes it off and offers it
-back for `UNDO_CLOSE` (5 s): ⌘Z, the palette's "Undo close" or the notice's "Undo" (in the title bar, `workspace::toast`) put the
+back for `UNDO_CLOSE` (5 s): ⌘Z, the palette's "Undo close" or the notice's "Undo" (under the cluster, `workspace::toast`) put the
 item back as it was (`remember_closed`, `take_back`), else `forget_closed` lets go. An idle
 shell keeps its session and its attached view through the wait, so its rows come back
 untouched and `forget_closed` sends the worker `Close`; every other tile is its item, so the
@@ -1148,7 +1100,7 @@ back; what the header and the dump show is put back on the worker's port
 (`browser::worker_url`). The header shows the page's title and its
 address as text, "←" while there is history and "↻"; the title and address are read after
 each navigation and every second while the page is open. The ways in: the port list (the
-status bar's count) opens the worker's port in a tile or the default browser, "Open URL…" in the
+palette's "Forwarded ports") opens the worker's port in a tile or the default browser, "Open URL…" in the
 palette starts at `http://localhost:`, and an address typed into the palette is an "Open
 <address> in a tile" line. Only http and https open (`browser::is_web_url`). The picker (⌘O, a field at
 the top filtering by every word typed, ↑/↓/↩ choosing) lists the workspace's sessions first — agents waiting on the human, then other agents with their status
@@ -1231,10 +1183,12 @@ differs from what the person kept is to review (`Action::ToReview`). Each worker
 table to the server too (`ToServer::Threads`), and the server ranks the fleet on one
 attention ladder (`slopty_proto::thread::attention`, `slopty_server::hub`'s `ladder`): Needs
 you, Failed, To review, Working, Waiting, Idle, a subagent folded into its parent, rolled up
-per tile, worker, project node, project and fleet, and sent to every link as
+per thread, tile, worker, tree (an agent and every agent it started, across machines), space
+(a folder or a repository's clones) and fleet, and sent to every link as
 `FromServer::Ladder` whenever a rung moves. A person's client says where they are
 (`ToServer::Presence`: desk or handheld, active, the tiles on screen). A thread that comes to
-need them, fails or finishes is a `FromServer::Notice` to the clients they are at, none while
+need them, fails or finishes is a `FromServer::Notice` to the clients they are at (a finish
+of an agent another started goes to that agent, not the person), none while
 its tile is on screen and no handheld while they are at a desk. Claude Code reaches it as
 described below.
 
@@ -1723,8 +1677,8 @@ same deploy with `--update` runs from a wrong-build tile's "Update"
 | `slopty-agent` | Claude Code hook payloads → per-session `AgentStatus` | worker |
 | `slopty-worker` | session manager, mux, fan-out, the orchestration verbs, worker capabilities, listening ports | worker |
 | `slopty-tailnet` | the local Tailscale daemon's `LocalAPI`: peers and paths, `whois` and grants, admission policy | all |
-| `slopty-tools` | the orchestration verbs as one contract: name resolution, each verb, bulk files, JSON/text views, and a project's MCP tools | all |
-| `slopty-server` | the control plane: worker registry and leases, verb dispatch, the state file, projects (store, placement, verify and merge), the QUIC front end | server |
+| `slopty-tools` | the orchestration verbs as one contract: name resolution, each verb, bulk files, JSON/text views, and the agents' MCP tools | all |
+| `slopty-server` | the control plane: worker registry and leases, verb dispatch, the state file, the agents' verbs and their deliveries, the QUIC front end | server |
 | `slopty-client` | client session state, the item registry mirror, the layout model, grouping tiles by their facts (`groups`) | client |
 | `slopty-settings` | `settings.toml` schema, defaults, loading with fallback, data dir | client |
 | `slopty-theme` | design tokens, dark and light variants | client |

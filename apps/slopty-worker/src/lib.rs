@@ -216,9 +216,9 @@ pub(crate) struct Daemon {
     /// Where a session's presence file is made (`true`) or removed, in order
     /// ([`handoff::presence`]).
     pub presence: tokio::sync::mpsc::UnboundedSender<(SessionId, bool)>,
-    /// What the hooks said of an agent that the server's project tree takes and no client
-    /// needs: Claude Code's own subagents and task list ([`ctl`]), for the server link.
-    pub reports: broadcast::Sender<slopty_proto::project::AgentReport>,
+    /// What the hooks said of an agent that the server takes and no client needs: a batch
+    /// of news handed over ([`ctl`]), for the server link.
+    pub reports: broadcast::Sender<slopty_proto::server::AgentReport>,
     /// Where the reports the server sends an agent wait for its hooks to hand them over
     /// ([`slopty_agent::reports`]), beside the control socket.
     pub deliveries: PathBuf,
@@ -380,20 +380,15 @@ fn join_server(
         }
     };
     server::stands(daemon, &addr, slopty_proto::ctl::LinkState::Dialling);
-    let launch = slopty_worker::orchestrate::Launch {
-        relay: slopty_agent::hooks::relay_beside_this_binary(),
-        claude_mod: daemon.claude_mod.clone(),
-    };
     let orchestrator = slopty_worker::orchestrate::Orchestrator::new(
         daemon.id,
         daemon.worker.clone(),
         daemon.items.clone(),
         (daemon.events.clone(), daemon.heard.clone()),
-        launch,
         (Arc::new(threads::hold::Orchestrated(daemon.clone())), daemon.cloner.clone()),
     );
     if let Some(threads) = &daemon.threads {
-        orchestrator.set_task_threads(Arc::new(threads.clone()));
+        orchestrator.set_seated_threads(Arc::new(threads.clone()));
         orchestrator
             .set_thread_reads(Arc::new(threads::Reads::new(threads.clone(), daemon.clone())));
     }
@@ -404,9 +399,6 @@ fn join_server(
     }
     let kept = slopty_worker::facts::Kept::default();
     orchestrator.set_facts(kept.clone());
-    // The agents it started before a restart live on in ptyd: followed again, a brief owed
-    // typed once.
-    orchestrator.take_up();
     let facts = kept.subscribe();
     let own = move || slopty_settings::Settings::load(&settings).settings.worker.acp;
     let facts_task = tokio::spawn(slopty_worker::facts::watch(kept, own));
@@ -427,7 +419,7 @@ fn session_env(
     let mut env =
         vec![("SLOPTY_WORKER_SOCKET".to_owned(), ctl_path.to_string_lossy().into_owned())];
     if let Some(addr) = server {
-        env.push((slopty_proto::project::SERVER_ENV.to_owned(), addr.to_string()));
+        env.push((slopty_proto::ctl::SERVER_ENV.to_owned(), addr.to_string()));
     }
     if let Some(installed) = claude_mod {
         env.extend(installed.session_env());
@@ -902,10 +894,6 @@ async fn run(
             None
         }
     };
-    agents.lock().set_own(slopty_agent::loosening::Own {
-        slopty: slopty_agent::hooks::relay_beside_this_binary(),
-        plugin_dir: claude_mod.as_ref().map(|installed| installed.dir.clone()),
-    });
     let presence_dir = data_dir.join("presence");
     let (presence, presence_changes) = tokio::sync::mpsc::unbounded_channel();
     let (reports, _none) = broadcast::channel(EVENT_BUFFER);

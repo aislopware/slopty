@@ -87,11 +87,16 @@ pub(super) struct Remote {
 }
 
 impl Remote {
-    /// Whether `table` is this machine's own: `worker…` for a worker, `server…` for the server,
-    /// and `[network]` for either.
+    /// Whether `table` is this machine's own: `worker…` for a worker, `server…` and `[agents]`
+    /// for the server, and `[network]` for either.
     fn owns(&self, table: &str) -> bool {
         let root = table.split_once('.').map_or(table, |(root, _)| root);
-        shared(table) || if self.machine.of.is_some() { root == "worker" } else { root == "server" }
+        shared(table)
+            || if self.machine.of.is_some() {
+                root == "worker"
+            } else {
+                matches!(root, "server" | "agents")
+            }
     }
 }
 

@@ -310,7 +310,6 @@ fn note(device: &PushDevice, body: &PushBody) -> Result<apns::Note, SealError> {
     let sealed = slopty_push::seal::seal(&device.key, &device.token, &bytes)?;
     let thread = match &body.notice.about {
         Subject::Thread(at) => format!("thread {} {}", at.worker, at.thread),
-        Subject::Project { project, .. } => format!("project {project}"),
         Subject::Terminal(term) => format!("terminal {} {}", term.worker, term.session),
     };
     Ok(apns::Note {
@@ -321,12 +320,11 @@ fn note(device: &PushDevice, body: &PushBody) -> Result<apns::Note, SealError> {
     })
 }
 
-/// What a note about `about` replaces, before it is made opaque: a thread's last note, a
-/// terminal's program's, or a project's at one timeline entry.
+/// What a note about `about` replaces, before it is made opaque: a thread's last note, or a
+/// terminal's program's.
 fn collapse_of(about: &Subject) -> String {
     match about {
         Subject::Thread(at) => format!("thread {} {}", at.worker, at.thread),
-        Subject::Project { project, entry } => format!("project {project} {entry}"),
         Subject::Terminal(term) => format!("terminal {} {}", term.worker, term.session),
     }
 }
@@ -374,7 +372,7 @@ impl Latest {
         let what = match &out.what {
             Sending::Note(body) => mine(&body.notice.about).then(|| Sending::Note(body.clone()))?,
             Sending::TakeBack(about) => {
-                let left: Vec<Subject> = about.iter().filter(|a| mine(a)).cloned().collect();
+                let left: Vec<Subject> = about.iter().filter(|a| mine(a)).copied().collect();
                 (!left.is_empty()).then_some(Sending::TakeBack(left))?
             }
         };
@@ -547,7 +545,6 @@ mod tests {
                 ask: Some(request.id),
                 picks: buttons.iter().map(|b| b.label.clone()).collect(),
                 quiet: true,
-                merges: None,
             }),
         };
         let push = sealed(&out).unwrap();
@@ -582,17 +579,11 @@ mod tests {
             topic: "dev.aislopware.slopty".to_owned(),
             quiet_ms: 0,
         };
-        let about = notice.about.clone();
+        let about = notice.about;
         let out = Outgoing {
             client: ClientId::new(),
             device: device.clone(),
-            what: Sending::Note(PushBody {
-                notice,
-                ask: None,
-                picks: Vec::new(),
-                quiet: false,
-                merges: None,
-            }),
+            what: Sending::Note(PushBody { notice, ask: None, picks: Vec::new(), quiet: false }),
         };
         let push = sealed(&out).unwrap();
         let request = apns::request(&push, &device.topic, "token").unwrap();
@@ -641,7 +632,7 @@ mod tests {
         let about = Subject::Thread(ThreadAt { worker, thread: ThreadId::new() });
         let notice = Notice {
             kind: NoticeKind::NeedsYou,
-            about: about.clone(),
+            about,
             tile: Some(TermRef { worker, session: SessionId::new() }),
             title: "Allow?".to_owned(),
             text: "Bash".to_owned(),
@@ -659,13 +650,7 @@ mod tests {
         let note = Outgoing {
             client,
             device: device.clone(),
-            what: Sending::Note(PushBody {
-                notice,
-                ask: None,
-                picks: Vec::new(),
-                quiet: false,
-                merges: None,
-            }),
+            what: Sending::Note(PushBody { notice, ask: None, picks: Vec::new(), quiet: false }),
         };
         let back = Outgoing { client, device, what: Sending::TakeBack(vec![about]) };
         let hub = crate::Hub::new("server".to_owned(), Vec::new());

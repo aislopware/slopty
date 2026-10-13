@@ -598,7 +598,6 @@ fn a_pushed_note_is_the_note_the_app_would_post(cx: &mut TestAppContext) {
             ask: None,
             picks: Vec::new(),
             quiet: false,
-            merges: None,
         });
         let mut info = posted.info.clone();
         info.remove(ITEM);

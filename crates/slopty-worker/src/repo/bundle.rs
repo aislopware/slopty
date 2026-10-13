@@ -395,12 +395,12 @@ mod tests {
         assert_eq!(fetch_bundle(git, &stranger, &got, want).await, Ok(head));
     }
 
-    /// The other way, for a task the merge queue gives back: the orchestrator's `main`, with
-    /// commits the forge never saw, reaches the task's clone on another machine as a branch
-    /// only the server names, from its commits beyond the forge's `main` alone. The agent's
-    /// work then rebases onto it there. A `main` the forge has already is nothing new to carry.
+    /// The other way: one machine's `main`, with commits the forge never saw, reaches a clone
+    /// on another machine as a branch only the server names, from its commits beyond the
+    /// forge's `main` alone, so work there can rebase onto it. A `main` the forge has already
+    /// is nothing new to carry.
     #[tokio::test]
-    async fn the_target_reaches_a_task_s_clone_the_same_way_with_what_the_forge_lacks() {
+    async fn a_target_reaches_another_machine_s_clone_the_same_way_with_what_the_forge_lacks() {
         let Some(git) = crate::changes::git() else { return };
         let tmp = tempfile::tempdir().expect("temp");
         let origin = tmp.path().join("origin");

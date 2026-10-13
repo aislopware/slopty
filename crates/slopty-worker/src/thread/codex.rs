@@ -493,9 +493,9 @@ impl Codex {
         }
     }
 
-    /// Start a server task's thread as `start` says, once per seat: Codex loads it with the
-    /// seat's variables in its commands and Slopty's tools among its MCP servers
-    /// ([`slopty_agent::codex::shared::seated`]), the role as its developer instructions
+    /// Start a seated thread (an agent another started) as `start` says, once per seat: Codex loads
+    /// it with the seat's variables in its commands and Slopty's tools among its MCP servers
+    /// ([`slopty_agent::codex::shared::seated`]), the system text as its developer instructions
     /// (`developerInstructions`), the approval policy the start's mode names, and a sandbox that
     /// writes only in its workspace. Taken up again after Codex let it go, it is loaded the same.
     pub async fn start_seated(&self, start: Start, seated: Seated) -> Outcome {
@@ -1544,7 +1544,7 @@ impl Session {
                     .as_ref()
                     .map_or_else(slopty_agent::codex::shared::unclaimed, |s| tools(&self.host, s)),
             ),
-            developer_instructions: seated.and_then(|s| s.role),
+            developer_instructions: seated.and_then(|s| s.system),
             ..p::ThreadResumeParams::default()
         };
         self.request(&params, Waiting::Resume { native }).await
@@ -1899,7 +1899,7 @@ impl Session {
                     Ok(Begin::New(mut params)) => {
                         if let Some(seated) = seated.as_deref() {
                             params.config = Some(tools(&self.host, seated));
-                            params.developer_instructions.clone_from(&seated.role);
+                            params.developer_instructions.clone_from(&seated.system);
                             // A server task writes only in its workspace, at every level.
                             params.sandbox = Some(p::SandboxMode::WorkspaceWrite);
                         }

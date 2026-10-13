@@ -27,8 +27,9 @@ use slopty_proto::WorkerMsg;
 use slopty_proto::codec::CodecError;
 use slopty_proto::ctl::{LinkState, ServerHealth};
 use slopty_proto::orchestration::{ErrorCode, Outcome, Verb};
-use slopty_proto::project::{AgentReport, Facts};
-use slopty_proto::server::{FromServer, Refusal, Registration, Role, ToServer, WorkerCaps};
+use slopty_proto::server::{
+    AgentReport, Facts, FromServer, Refusal, Registration, Role, ToServer, WorkerCaps,
+};
 use slopty_worker::orchestrate::{Agents, Orchestrator};
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinSet;
@@ -258,20 +259,9 @@ async fn session(
     if out.send(ToServer::Load(load)).await.is_err() {
         return Ok("the writer stopped");
     }
-    // Nor where each agent's work lands, which the status lines said before this link, nor
-    // each agent's permissions, which the server's guard judges, nor each agent's own
-    // subagents and task list, which the tree shows.
-    let standing = {
-        let agents = daemon.agents.lock();
-        let branches = agents.branches().into_iter().map(AgentReport::Branch);
-        let natives = agents.native_reports();
-        branches.chain(agents.permission_reports()).chain(natives).collect::<Vec<_>>()
-    };
-    // And the agents a reboot cut off, back on their own conversations: said once, on the
-    // first registration after, so the server tells each to carry on.
-    let resumed =
-        daemon.worker.take_resumed().into_iter().map(|session| AgentReport::Resumed { session });
-    for report in standing.into_iter().chain(resumed) {
+    // Nor where each agent's work lands, which the status lines said before this link.
+    let standing = daemon.agents.lock().branches();
+    for report in standing.into_iter().map(AgentReport::Branch) {
         if out.send(ToServer::Report(report)).await.is_err() {
             return Ok("the writer stopped");
         }
@@ -416,19 +406,11 @@ async fn session(
             report = reports.recv() => {
                 let msg = match report {
                     Ok(report) => ToServer::Report(report),
-                    // What was dropped of each agent's permissions, subagents and task list
-                    // is told again whole, and so is the last batch each agent read.
+                    // What was dropped is the last batch each agent read: told again.
                     Err(broadcast::error::RecvError::Lagged(missed)) => {
-                        tracing::warn!(missed, "agent reports dropped; their standing told again");
-                        let mut standing = {
-                            let agents = daemon.agents.lock();
-                            let mut standing = agents.permission_reports();
-                            standing.extend(agents.native_reports());
-                            standing
-                        };
-                        standing.extend(read_last(daemon).await);
+                        tracing::warn!(missed, "agent reports dropped; the batches read told again");
                         let mut sent = true;
-                        for report in standing {
+                        for report in read_last(daemon).await {
                             sent &= out.send(ToServer::Report(report)).await.is_ok();
                         }
                         if !sent {

@@ -13,9 +13,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use slopty_agent::managed::ManagedSettings;
-use slopty_proto::project::{Fact, Facts};
 use slopty_proto::screen::{DisplayInfo, VideoCodec};
-use slopty_proto::server::{Form, InstalledAgent, Os, WorkerCaps};
+use slopty_proto::server::{Fact, Facts, Form, InstalledAgent, Os, WorkerCaps};
 use slopty_proto::thread::{AgentId, Offers};
 use tokio::sync::watch;
 

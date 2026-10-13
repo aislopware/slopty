@@ -21,8 +21,8 @@ use slopty_proto::search::SearchQuery;
 use slopty_proto::server::{Role, Vouch};
 use slopty_tools::bulk::Here;
 use slopty_tools::ops::{
-    self, AgentSpec, DEFAULT_MAX_ENTRIES, DEFAULT_MAX_LINES, DEFAULT_MAX_MATCHES, DEFAULT_WAIT_MS,
-    Spec,
+    self, AgentWanted, DEFAULT_MAX_ENTRIES, DEFAULT_MAX_LINES, DEFAULT_MAX_MATCHES,
+    DEFAULT_WAIT_MS, Spec,
 };
 use slopty_tools::resolve::Resolver;
 use slopty_tools::{Dispatch as _, ToolError, bulk, view};
@@ -100,20 +100,34 @@ pub enum VerbCmd {
         #[arg(long)]
         agent_input: bool,
     },
-    /// Coding agents in terminals.
+    /// Coding agents: start one on any worker, tell it, read it, wait for it, stop it.
     Agent {
         #[command(subcommand)]
-        cmd: AgentCmd,
+        cmd: Box<AgentCmd>,
     },
-    /// Projects: one goal many agents work on across the workers, as a tree of tasks.
-    Project {
-        #[command(subcommand)]
-        cmd: Box<crate::projects::ProjectCmd>,
-    },
-    /// A project's tasks: make, update, and start their agents.
-    Task {
-        #[command(subcommand)]
-        cmd: Box<crate::projects::TaskCmd>,
+    /// Every agent on the fleet, under the agent that started it.
+    Agents,
+    /// Copy a branch from a clone on one worker into a clone on another.
+    BranchBring {
+        /// The worker the branch is on, by id or name.
+        #[arg(long)]
+        from: String,
+        /// The clone or worktree it is in there.
+        #[arg(long)]
+        repo: String,
+        /// The branch.
+        #[arg(long)]
+        branch: String,
+        /// The worker it goes to, by id or name.
+        #[arg(long)]
+        to: String,
+        /// The clone it lands in there; that worker's clone of the same repository when
+        /// omitted.
+        #[arg(long)]
+        into: Option<String>,
+        /// The name it lands as; its own when omitted.
+        #[arg(long)]
+        name: Option<String>,
     },
     /// Type into a terminal.
     Send {
@@ -323,29 +337,21 @@ impl TargetArgs {
     }
 }
 
-/// Which thread: exactly one of a task, a thread's id and a terminal.
+/// Which thread: exactly one of an agent's (or a thread's) id and a terminal.
 #[derive(Args, Debug)]
 #[group(required = true, multiple = false)]
 pub struct ThreadWhich {
-    /// The task whose agent's thread it is (its project with `--project`).
-    #[arg(long)]
-    task: Option<String>,
-    /// A thread's id, a subagent's too.
-    #[arg(long)]
-    thread: Option<String>,
+    /// An agent's id, or a subagent's thread id.
+    #[arg(long, alias = "thread")]
+    agent: Option<String>,
     /// The terminal an agent runs in: worker/session.
     #[arg(long)]
     term: Option<String>,
 }
 
 impl ThreadWhich {
-    fn arg<'a>(&'a self, project: Option<&'a str>) -> ops::ThreadArg<'a> {
-        ops::ThreadArg {
-            thread: self.thread.as_deref(),
-            term: self.term.as_deref(),
-            project,
-            task: self.task.as_deref(),
-        }
+    fn arg(&self) -> ops::ThreadArg<'_> {
+        ops::ThreadArg { thread: self.agent.as_deref(), term: self.term.as_deref() }
     }
 }
 
@@ -435,25 +441,58 @@ pub enum WorkersCmd {
 /// `slopty agent …`.
 #[derive(Subcommand, Debug)]
 pub enum AgentCmd {
-    /// Start Claude Code in a new terminal and print its TERM.
-    Spawn {
-        /// Worker id or name (the only worker online when omitted).
+    /// Start an agent on a worker and print its id. Inside an agent's terminal, that agent
+    /// is its parent.
+    Start {
+        /// Worker id or name.
+        worker: String,
+        /// The folder it works in, absolute or `~/…`.
         #[arg(long)]
-        worker: Option<String>,
-        /// Working directory, usually a repository.
+        folder: Option<String>,
+        /// A remote repository's address: the worker's clone of it is the folder, made first
+        /// when there is none.
         #[arg(long)]
-        cwd: String,
-        /// A first prompt, typed once the agent is ready.
+        repo: Option<String>,
+        /// A fresh git worktree of the folder's clone, by this name.
         #[arg(long)]
-        prompt: Option<String>,
-        /// An environment variable, `KEY=VALUE`; repeatable.
-        #[arg(long = "env", value_name = "KEY=VALUE", value_parser = key_value)]
-        env: Vec<(String, String)>,
-        #[command(flatten)]
-        size: SizeArgs,
-        /// Arguments for `claude` after `--`.
-        #[arg(last = true)]
-        args: Vec<String>,
+        worktree: Option<String>,
+        /// `claude` (the default), `codex`, `pi`, or an ACP agent by its registry name.
+        #[arg(long)]
+        agent: Option<String>,
+        /// The model, by the agent's own id.
+        #[arg(long)]
+        model: Option<String>,
+        /// How hard it thinks, by the agent's own name.
+        #[arg(long)]
+        effort: Option<String>,
+        /// What it is told first.
+        #[arg(required = true, num_args = 1..)]
+        prompt: Vec<String>,
+    },
+    /// Send an agent words; from inside an agent's terminal they are that agent's.
+    Tell {
+        /// The agent's id.
+        agent: String,
+        /// What to say.
+        #[arg(required = true, num_args = 1..)]
+        words: Vec<String>,
+    },
+    /// Wait until agents come to rest, need you, or end.
+    Wait {
+        /// The agents' ids.
+        #[arg(required = true, num_args = 1..)]
+        agents: Vec<String>,
+        /// Wait for every one, not the first.
+        #[arg(long)]
+        all: bool,
+        /// Give up after this many milliseconds.
+        #[arg(long, default_value_t = DEFAULT_WAIT_MS)]
+        timeout: u32,
+    },
+    /// End an agent and every agent under it, their conversations kept.
+    Stop {
+        /// The agent's id.
+        agent: String,
     },
     /// The agent in a terminal and what it is doing.
     Status {
@@ -465,9 +504,6 @@ pub enum AgentCmd {
     Read {
         #[command(flatten)]
         which: ThreadWhich,
-        /// The task's project (yours when omitted).
-        #[arg(long)]
-        project: Option<String>,
         /// Every tool call and notice too, not only what was said.
         #[arg(long)]
         activity: bool,
@@ -479,9 +515,6 @@ pub enum AgentCmd {
     Answer {
         #[command(flatten)]
         which: ThreadWhich,
-        /// The task's project (yours when omitted).
-        #[arg(long)]
-        project: Option<String>,
         /// The request, as `slopty agent read` lists it.
         ask: String,
         /// The choice it offers, by its id (`allow`, `deny`), or the answers to its questions.
@@ -507,13 +540,6 @@ impl SizeArgs {
     pub fn size(&self) -> Option<Size> {
         Some(Size { cols: self.cols?, rows: self.rows? })
     }
-}
-
-pub fn key_value(s: &str) -> Result<(String, String), String> {
-    s.split_once('=')
-        .filter(|(key, _)| !key.is_empty())
-        .map(|(key, value)| (key.to_owned(), value.to_owned()))
-        .ok_or_else(|| format!("{s:?} is not KEY=VALUE"))
 }
 
 /// What to type: exactly one form.
@@ -664,10 +690,19 @@ async fn execute(cmd: VerbCmd, link: &Link, json: bool, key: Option<IdempotencyK
             let term = ops::open(&mut res, worker.as_deref(), spec, key).await?;
             print_term(term, json)?;
         }
-        VerbCmd::Agent { cmd: AgentCmd::Spawn { worker, cwd, prompt, env, size, args } } => {
-            let spec = AgentSpec { cwd, prompt, args, env, size: size.size() };
-            let term = ops::spawn_agent(&mut res, worker.as_deref(), spec, key).await?;
-            print_term(term, json)?;
+        VerbCmd::Agent { cmd } => agent(*cmd, &mut res, json, key).await?,
+        VerbCmd::Agents => {
+            let agents = ops::agents(link).await?;
+            print_agents(link, &agents, false, json).await?;
+        }
+        VerbCmd::BranchBring { from, repo, branch, to, into, name } => {
+            let from = (from.as_str(), repo, branch);
+            let (branch, head) = ops::branch_bring(&mut res, from, (&to, into, name), key).await?;
+            if json {
+                print_json(&serde_json::json!({ "branch": branch, "head": head }))?;
+            } else {
+                println!("{branch} at {head}");
+            }
         }
         VerbCmd::Resize { term, cols, rows } => {
             ops::resize(&mut res, &term, Size { cols, rows }, key).await?;
@@ -676,14 +711,6 @@ async fn execute(cmd: VerbCmd, link: &Link, json: bool, key: Option<IdempotencyK
         VerbCmd::Events { since, timeout, follow, agent_input } => {
             let filter = if agent_input { EventFilter::AgentNeedsInput } else { EventFilter::All };
             events(link, since, timeout, follow, filter, json).await?;
-        }
-        VerbCmd::Agent { cmd: AgentCmd::Status { term } } => {
-            let agent = ops::agent_status(&mut res, &term).await?;
-            if json {
-                print_json(&view::agent(agent.as_ref()))?;
-            } else {
-                println!("{}", view::agent_text(agent.as_ref()));
-            }
         }
         VerbCmd::Send { term, input } => {
             ops::send(&mut res, &term, input.input()?, key).await?;
@@ -836,21 +863,6 @@ async fn execute(cmd: VerbCmd, link: &Link, json: bool, key: Option<IdempotencyK
                 print!("{}", view::screens_text(&windows, &displays));
             }
         }
-        VerbCmd::Agent { cmd: AgentCmd::Read { which, project, activity, after } } => {
-            let view = if activity { ThreadView::Activity } else { ThreadView::Messages };
-            let read =
-                ops::read_thread(&mut res, which.arg(project.as_deref()), view, after).await?;
-            if json {
-                print_json(&view::thread_read(&read))?;
-            } else {
-                print!("{}", view::thread_read_text(&read));
-            }
-        }
-        VerbCmd::Agent { cmd: AgentCmd::Answer { which, project, ask, choice, message } } => {
-            let of = which.arg(project.as_deref());
-            ops::answer_request(&mut res, of, (ask, choice, message), key).await?;
-            print_done(json)?;
-        }
         VerbCmd::Capture { worker, target, out } => {
             let still = ops::capture_still(&mut res, worker.as_deref(), target.target()?).await?;
             tokio::fs::write(&out, &still.png)
@@ -880,10 +892,89 @@ async fn execute(cmd: VerbCmd, link: &Link, json: bool, key: Option<IdempotencyK
                 print_moved(&moved, json)?;
             }
         }
-        VerbCmd::Project { cmd } => crate::projects::project(*cmd, link, json, key).await?,
-        VerbCmd::Task { cmd } => crate::projects::task(*cmd, link, json, key).await?,
     }
     Ok(())
+}
+
+/// `slopty agent …`.
+async fn agent(
+    cmd: AgentCmd,
+    res: &mut Resolver<'_, Link>,
+    json: bool,
+    key: Option<IdempotencyKey>,
+) -> Result<()> {
+    match cmd {
+        AgentCmd::Start { worker, folder, repo, worktree, agent, model, effort, prompt } => {
+            let prompt = prompt.join(" ");
+            let wanted =
+                AgentWanted { worker, folder, prompt, agent, model, effort, worktree, repo };
+            let (id, worktree) = ops::agent_start(res, wanted, key).await?;
+            if json {
+                print_json(&serde_json::json!({ "agent": id.to_string(), "worktree": worktree }))?;
+            } else {
+                println!("{id}");
+            }
+        }
+        AgentCmd::Tell { agent, words } => {
+            let agent = ops::agent_named(&agent)?;
+            ops::agent_tell(res.dispatch(), agent, words.join(" "), key).await?;
+            print_done(json)?;
+        }
+        AgentCmd::Wait { agents, all, timeout } => {
+            let agents =
+                agents.iter().map(|a| ops::agent_named(a)).collect::<Result<Vec<_>, _>>()?;
+            let (agents, timed_out) = ops::agent_wait(res.dispatch(), agents, all, timeout).await?;
+            print_agents(res.dispatch(), &agents, timed_out, json).await?;
+        }
+        AgentCmd::Stop { agent } => {
+            ops::agent_stop(res.dispatch(), ops::agent_named(&agent)?, key).await?;
+            print_done(json)?;
+        }
+        AgentCmd::Status { term } => {
+            let agent = ops::agent_status(res, &term).await?;
+            if json {
+                print_json(&view::agent(agent.as_ref()))?;
+            } else {
+                println!("{}", view::agent_text(agent.as_ref()));
+            }
+        }
+        AgentCmd::Read { which, activity, after } => {
+            let view = if activity { ThreadView::Activity } else { ThreadView::Messages };
+            let read = ops::read_thread(res, which.arg(), view, after).await?;
+            if json {
+                print_json(&view::thread_read(&read))?;
+            } else {
+                print!("{}", view::thread_read_text(&read));
+            }
+        }
+        AgentCmd::Answer { which, ask, choice, message } => {
+            ops::answer_request(res, which.arg(), (ask, choice, message), key).await?;
+            print_done(json)?;
+        }
+    }
+    Ok(())
+}
+
+/// Agents as they stand, each worker by its name.
+async fn print_agents(
+    link: &Link,
+    agents: &[slopty_proto::agent::AgentEntry],
+    timed_out: bool,
+    json: bool,
+) -> Result<()> {
+    let names: HashMap<slopty_core::WorkerId, String> = match link.call(Verb::ListWorkers).await {
+        Outcome::Workers(list) => list.into_iter().map(|w| (w.worker, w.name)).collect(),
+        _ => HashMap::new(),
+    };
+    if json {
+        print_json(&view::agents_tree::agents(agents, timed_out, &names))
+    } else {
+        print!("{}", view::agents_tree::agents_text(agents, &names));
+        if timed_out {
+            println!("(timed out)");
+        }
+        Ok(())
+    }
 }
 
 /// A place here: `-` for standard input or output, else a path.
@@ -1081,37 +1172,58 @@ mod tests {
         parse(&["wait", "t", "--exit", "--command-done"]).unwrap_err();
     }
 
+    /// The agent verbs, as `slopty agent …` parses them: a start names its worker and takes
+    /// its prompt as the rest of the line, and no harness arguments.
+    fn agent(args: &[&str]) -> Result<AgentCmd, clap::Error> {
+        let mut line = vec!["agent"];
+        line.extend_from_slice(args);
+        match parse(&line)? {
+            VerbCmd::Agent { cmd } => Ok(*cmd),
+            other => panic!("{other:?}"),
+        }
+    }
+
     #[test]
-    fn agent_spawn_needs_a_directory() {
-        let VerbCmd::Agent { cmd: AgentCmd::Spawn { worker, cwd, prompt, env, args, .. } } =
-            parse(&[
-                "agent",
-                "spawn",
-                "--cwd",
-                "~/src/app",
-                "--prompt",
-                "fix the build",
-                "--env",
-                "A=b=c",
-            ])
-            .unwrap()
+    fn an_agent_starts_on_a_worker_with_its_prompt() {
+        let AgentCmd::Start { worker, folder, worktree, agent: harness, prompt, .. } = agent(&[
+            "start",
+            "studio",
+            "--folder",
+            "~/src/app",
+            "--worktree",
+            "login",
+            "--agent",
+            "codex",
+            "fix",
+            "the",
+            "login",
+        ])
+        .unwrap() else {
+            panic!()
+        };
+        assert_eq!((worker.as_str(), folder.as_deref()), ("studio", Some("~/src/app")));
+        assert_eq!((worktree.as_deref(), harness.as_deref()), (Some("login"), Some("codex")));
+        assert_eq!(prompt.join(" "), "fix the login");
+        agent(&["start", "studio"]).unwrap_err();
+        let AgentCmd::Wait { agents, all, timeout } =
+            agent(&["wait", "a1", "a2", "--all"]).unwrap()
         else {
             panic!()
         };
-        assert_eq!(
-            (worker, cwd.as_str(), prompt.as_deref()),
-            (None, "~/src/app", Some("fix the build"))
-        );
-        assert_eq!(env, [("A".to_owned(), "b=c".to_owned())]);
-        assert_eq!(args, Vec::<String>::new());
-        let VerbCmd::Agent { cmd: AgentCmd::Spawn { args, .. } } =
-            parse(&["agent", "spawn", "--cwd", "/r", "--", "--model", "opus"]).unwrap()
+        assert_eq!((agents.len(), all, timeout), (2, true, DEFAULT_WAIT_MS));
+        let AgentCmd::Tell { agent: to, words } = agent(&["tell", "a1", "go", "on"]).unwrap()
         else {
             panic!()
         };
-        assert_eq!(args, ["--model", "opus"]);
-        parse(&["agent", "spawn"]).unwrap_err();
-        parse(&["agent", "spawn", "--cwd", "/r", "--env", "=x"]).unwrap_err();
+        assert_eq!((to.as_str(), words.join(" ").as_str()), ("a1", "go on"));
+        let VerbCmd::Agents = parse(&["agents"]).unwrap() else { panic!() };
+        let VerbCmd::BranchBring { from, to, into, .. } =
+            parse(&["branch-bring", "--from", "a", "--repo", "/r", "--branch", "b", "--to", "c"])
+                .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!((from.as_str(), to.as_str(), into), ("a", "c", None));
     }
 
     #[test]
@@ -1155,23 +1267,17 @@ mod tests {
 
     #[test]
     fn the_agent_screen_and_file_verbs_parse() {
-        let VerbCmd::Agent { cmd: AgentCmd::Read { which, activity, after, .. } } =
-            parse(&["agent", "read", "--thread", "a1", "--activity", "--after", "4"]).unwrap()
+        let AgentCmd::Read { which, activity, after } =
+            agent(&["read", "--agent", "a1", "--activity", "--after", "4"]).unwrap()
         else {
             panic!()
         };
-        let of = which.arg(None);
-        assert_eq!((of.thread, of.task, activity, after), (Some("a1"), None, true, Some(4)));
-        let VerbCmd::Agent { cmd: AgentCmd::Read { which, project, .. } } =
-            parse(&["agent", "read", "--task", "3", "--project", "demo"]).unwrap()
-        else {
-            panic!()
-        };
-        assert_eq!((which.arg(None).task, project.as_deref()), (Some("3"), Some("demo")));
-        parse(&["agent", "read"]).unwrap_err();
-        parse(&["agent", "read", "--task", "3", "--term", "t"]).unwrap_err();
-        let VerbCmd::Agent { cmd: AgentCmd::Answer { which, ask, choice, message, .. } } =
-            parse(&["agent", "answer", "--term", "t", "7", "deny", "--message", "no"]).unwrap()
+        let of = which.arg();
+        assert_eq!((of.thread, of.term, activity, after), (Some("a1"), None, true, Some(4)));
+        agent(&["read"]).unwrap_err();
+        agent(&["read", "--agent", "a1", "--term", "t"]).unwrap_err();
+        let AgentCmd::Answer { which, ask, choice, message } =
+            agent(&["answer", "--term", "t", "7", "deny", "--message", "no"]).unwrap()
         else {
             panic!()
         };

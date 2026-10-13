@@ -352,7 +352,7 @@ impl WorkspaceView {
             }
         }
         let refs: Vec<&Facts> = facts.iter().collect();
-        let grouped = groups::group(&refs, chain, &[]);
+        let grouped = groups::group(&refs, chain);
         let at = kept.iter().enumerate().map(|(i, t)| (*t, i)).collect();
         Grouping { tiles: kept, facts, grouped, at }
     }

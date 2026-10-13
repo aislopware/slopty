@@ -380,9 +380,6 @@ impl Workspace {
                 self.server_down(why.text().to_owned(), status, cx);
             }
             ServerEvent::Message(msg) => {
-                if let FromServer::Projects(_) = *msg {
-                    return;
-                }
                 let listing = matches!(*msg, FromServer::Directory(_) | FromServer::Worker(_));
                 let changes = self.directory.apply(*msg);
                 for change in changes {
@@ -532,8 +529,7 @@ impl Workspace {
             Change::Event(event) => match event.what {
                 // The directory carries liveness, a worker's own link its terminals, and the
                 // ladder where every agent's thread stands, its rungs among them.
-                Happening::Project(_)
-                | Happening::Worker { .. }
+                Happening::Worker { .. }
                 | Happening::WorkerRemoved { .. }
                 | Happening::SessionOpened { .. }
                 | Happening::SessionClosed { .. }

@@ -42,12 +42,11 @@ pub fn notice_body(notice: &Notice) -> String {
 /// The identifier of a note about `notice`.
 ///
 /// It is its terminal's session (a thread's tile, or a program's own terminal), else its
-/// thread's, else its project's timeline entry. The app's note about the same moment has the
-/// same one, so either replaces the other.
+/// thread's. The app's note about the same moment has the same one, so either replaces the
+/// other.
 #[must_use]
 pub fn note_id(notice: &Notice) -> String {
     match (&notice.about, notice.tile) {
-        (Subject::Project { project, entry }, _) => format!("project-{project}-{entry}"),
         (Subject::Thread(_), Some(tile)) => tile.session.to_string(),
         (Subject::Thread(at), None) => format!("{}-{}", info::THREAD, at.thread),
         (Subject::Terminal(term), _) => term.session.to_string(),
@@ -71,7 +70,6 @@ pub fn note_of(body: &PushBody) -> Note {
     let worker = match (&notice.about, notice.tile) {
         (Subject::Thread(at), _) => Some(at.worker),
         (Subject::Terminal(term), _) => Some(term.worker),
-        (Subject::Project { .. }, tile) => tile.map(|t| t.worker),
     };
     if let Some(worker) = worker {
         keys.insert(info::WORKER.to_owned(), worker.as_uuid().as_u128().to_string());
@@ -86,32 +84,20 @@ pub fn note_of(body: &PushBody) -> Note {
         (Subject::Terminal(term), None) => {
             keys.insert(info::SESSION.to_owned(), term.session.to_string());
         }
-        (Subject::Project { .. }, None) => {}
     }
     if let Some(ask) = &body.ask {
         keys.insert(info::ASK.to_owned(), ask.0.clone());
     }
-    if let (Some(task), Subject::Project { project, .. }) = (body.merges, &notice.about) {
-        keys.insert(info::PROJECT.to_owned(), project.to_string());
-        keys.insert(info::TASK.to_owned(), task.0.to_string());
-    }
-    if let (NoticeKind::GoalDone, Subject::Project { project, .. }) = (notice.kind, &notice.about) {
-        keys.insert(info::PROJECT.to_owned(), project.to_string());
-    }
     let title = Some(notice.title.trim())
         .filter(|t| !t.is_empty())
         .map_or_else(|| slopty_push::apns::TITLE.to_owned(), str::to_owned);
-    let thread = match &notice.about {
-        Subject::Project { project, .. } => Some(project.as_str().to_owned()),
-        Subject::Thread(_) | Subject::Terminal(_) => None,
-    };
     let picks = if body.ask.is_some() { body.picks.as_slice() } else { &[] };
     Note {
         id: note_id(notice),
         title,
         body: notice_body(notice),
         info: keys,
-        thread,
+        thread: None,
         category: category_of(body),
         picks: Vec::new(),
         silent: body.quiet,
@@ -122,20 +108,11 @@ pub fn note_of(body: &PushBody) -> Note {
 
 /// The buttons a pushed note carries: a question's options are its picks ([`Note::picking`]),
 /// which take a category of their own; else Allow and Deny on a yes or no, else a reply on an
-/// agent's own moment (one that needs the person, failed or finished), else Merge on a
-/// project's work ready to merge that names the task to merge ([`PushBody::merges`]), else
-/// "Open pull request" on a project's goal met. A program's record and a project's other
-/// notices have none.
+/// agent's own moment (one that needs the person, failed or finished). A program's record has
+/// none.
 fn category_of(body: &PushBody) -> Option<super::Category> {
     if body.ask.is_some() && !body.picks.is_empty() {
         return None;
-    }
-    if body.merges.is_some() && matches!(body.notice.about, Subject::Project { .. }) {
-        return Some(super::MERGING);
-    }
-    let project = matches!(body.notice.about, Subject::Project { .. });
-    if project && body.notice.kind == NoticeKind::GoalDone {
-        return Some(super::LANDING);
     }
     if body.ask.is_some() {
         return Some(APPROVAL);
@@ -428,7 +405,6 @@ pub mod keychain {
 mod tests {
     use slopty_core::{SessionId, WorkerId};
     use slopty_proto::orchestration::TermRef;
-    use slopty_proto::project::ProjectId;
     use slopty_proto::thread::attention::{ThreadAt, Via};
     use slopty_proto::thread::{AskId, ThreadId};
 
@@ -446,81 +422,9 @@ mod tests {
         }
     }
 
-    /// Work ready to merge carries "Merge" with the project and the task it merges, which a
-    /// press hands back to merge with no round trip; the same notice naming no task, or a
-    /// thread's note, has no Merge.
-    #[test]
-    fn a_ready_note_merges_the_task_it_names() {
-        let project = ProjectId::new("store").expect("a name");
-        let about = Subject::Project { project: project.clone(), entry: 7 };
-        let body = PushBody {
-            notice: notice(NoticeKind::ReadyToMerge, about, None),
-            ask: None,
-            picks: Vec::new(),
-            quiet: false,
-            merges: Some(slopty_proto::project::TaskId(4)),
-        };
-        let note = note_of(&body);
-        assert_eq!(note.category, Some(super::super::MERGING));
-        assert_eq!(note.info.get(info::PROJECT), Some(&"store".to_owned()));
-        assert_eq!(note.info.get(info::TASK), Some(&"4".to_owned()));
-        let tap = super::super::Tap {
-            id: note.id.clone(),
-            info: note.info,
-            action: Some(super::super::MERGE.to_owned()),
-            text: None,
-        };
-        assert_eq!(
-            super::super::merge_of(&tap),
-            Some((project, slopty_proto::project::TaskId(4))),
-            "a press merges the task the note names"
-        );
-        assert!(tap.finished_later(), "answered where the note is");
-        let shown = super::super::Tap { action: Some(super::super::SHOW.to_owned()), ..tap };
-        assert_eq!(super::super::merge_of(&shown), None, "Show only opens");
-
-        let unnamed = note_of(&PushBody { merges: None, ..body });
-        assert_eq!(unnamed.category, None, "no task, no Merge");
-        assert!(!unnamed.info.contains_key(info::TASK));
-    }
-
-    /// A goal met carries "Open pull request" with the project whose goal it lands, which a
-    /// press hands back with no round trip; the project's other notices carry none.
-    #[test]
-    fn a_goal_met_note_opens_its_pull_request() {
-        let project = ProjectId::new("store").expect("a name");
-        let about = Subject::Project { project: project.clone(), entry: 9 };
-        let body = PushBody {
-            notice: notice(NoticeKind::GoalDone, about, None),
-            ask: None,
-            picks: Vec::new(),
-            quiet: false,
-            merges: None,
-        };
-        let note = note_of(&body);
-        assert_eq!(note.category, Some(super::super::LANDING));
-        assert_eq!(note.info.get(info::PROJECT), Some(&"store".to_owned()));
-        let tap = super::super::Tap {
-            id: note.id.clone(),
-            info: note.info,
-            action: Some(super::super::LAND.to_owned()),
-            text: None,
-        };
-        assert_eq!(super::super::land_of(&tap), Some(project), "a press lands the goal it names");
-        assert!(tap.finished_later(), "answered where the note is");
-        let shown = super::super::Tap { action: Some(super::super::SHOW.to_owned()), ..tap };
-        assert_eq!(super::super::land_of(&shown), None, "Show only opens");
-
-        let mut other = body.notice.clone();
-        other.kind = NoticeKind::Project;
-        let plain = note_of(&PushBody { notice: other, ..body });
-        assert_eq!(plain.category, None, "a project's other notice has no button");
-        assert!(!plain.info.contains_key(info::PROJECT));
-    }
-
     /// A thread at a terminal is that terminal's note, with its worker and session for the
     /// tap, urgent and with the buttons when it asks a yes or no; one with no terminal is its
-    /// thread's, and a project's is its timeline entry's, stacked under the project.
+    /// thread's.
     #[test]
     fn a_pushed_note_carries_what_a_tap_routes_by() {
         let (worker, session, thread) = (WorkerId::new(), SessionId::new(), ThreadId::new());
@@ -528,11 +432,10 @@ mod tests {
         let tile = TermRef { worker, session };
         let ask = AskId("toolu_01".to_owned());
         let body = PushBody {
-            notice: notice(NoticeKind::NeedsYou, at.clone(), Some(tile)),
+            notice: notice(NoticeKind::NeedsYou, at, Some(tile)),
             ask: Some(ask),
             picks: Vec::new(),
             quiet: false,
-            merges: None,
         };
         let note = note_of(&body);
         assert_eq!(note.id, session.to_string());
@@ -562,13 +465,7 @@ mod tests {
         let mut done = notice(NoticeKind::Finished, at, None);
         done.via = Some(Via { thread: ThreadId::new(), title: "Explore".to_owned() });
         done.title = " ".to_owned();
-        let note = note_of(&PushBody {
-            notice: done,
-            ask: None,
-            picks: Vec::new(),
-            quiet: false,
-            merges: None,
-        });
+        let note = note_of(&PushBody { notice: done, ask: None, picks: Vec::new(), quiet: false });
         assert_eq!(note.id, format!("thread-{thread}"));
         assert_eq!(
             note.info,
@@ -580,29 +477,10 @@ mod tests {
         );
         assert_eq!((note.category, note.urgent), (Some(super::super::REPLYING), false));
 
-        let project = ProjectId::new("ladder").unwrap();
-        let about = Subject::Project { project: project.clone(), entry: 7 };
-        let note = note_of(&PushBody {
-            notice: notice(NoticeKind::Project, about, Some(tile)),
-            ask: None,
-            picks: Vec::new(),
-            quiet: false,
-            merges: None,
-        });
-        assert_eq!(note.id, format!("project-{project}-7"));
-        assert_eq!(note.thread.as_deref(), Some("ladder"));
-        assert_eq!(note.category, None, "a project's notice takes no reply");
-        assert_eq!(note.info.get(info::SESSION), Some(&session.to_string()));
-
         // A program's own wait leads to its terminal, under the id the app's own note has.
         let program = notice(NoticeKind::NeedsYou, Subject::Terminal(tile), None);
-        let note = note_of(&PushBody {
-            notice: program,
-            ask: None,
-            picks: Vec::new(),
-            quiet: false,
-            merges: None,
-        });
+        let note =
+            note_of(&PushBody { notice: program, ask: None, picks: Vec::new(), quiet: false });
         assert_eq!(note.id, session.to_string());
         assert_eq!(
             note.info,
@@ -631,7 +509,6 @@ mod tests {
             ask: Some(AskId("toolu_02".to_owned())),
             picks: picks.clone(),
             quiet: false,
-            merges: None,
         };
         let note = note_of(&body);
         assert_eq!(note.picks, picks);
@@ -673,7 +550,6 @@ mod tests {
             ask: None,
             picks: Vec::new(),
             quiet: false,
-            merges: None,
         };
         let bytes = slopty_proto::codec::encode_body(&body).unwrap();
         let sealed = slopty_push::seal::seal(&key.public(), &token, &bytes).unwrap();

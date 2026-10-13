@@ -67,21 +67,8 @@ mod agent_open {
 
     /// Open `command` and read what the stub was started with.
     async fn started(worker: &Worker, dir: &Path, command: &[&str]) -> Value {
-        started_in(worker, dir, command, None).await
-    }
-
-    /// [`started`], as `project`'s agent when one is named.
-    async fn started_in(
-        worker: &Worker,
-        dir: &Path,
-        command: &[&str],
-        project: Option<&str>,
-    ) -> Value {
         let record = dir.join(format!("record-{}.json", SessionId::new()));
-        let mut env = vec![("STUB_RECORD".to_owned(), record.to_string_lossy().into_owned())];
-        if let Some(project) = project {
-            env.push((slopty_proto::project::PROJECT_ENV.to_owned(), project.to_owned()));
-        }
+        let env = vec![("STUB_RECORD".to_owned(), record.to_string_lossy().into_owned())];
         let open = OpenSession {
             size: TermSize::default(),
             cwd: Some(dir.to_string_lossy().into_owned()),
@@ -117,8 +104,8 @@ mod agent_open {
     }
 
     /// A bare `claude` gets the relay, so its status and its permission prompts reach the app,
-    /// the pointer to Slopty's CLI rather than its tools (it is no project's agent), the mod,
-    /// and a conversation id of its own, and the person's mode is not locked. One already wired, a
+    /// Slopty's tools (at any depth: any agent may start others), the mod, and a conversation
+    /// id of its own. One already wired, a
     /// `--print` run, and a worker with no relay to hand out start as asked.
     #[tokio::test]
     async fn claude_opened_in_a_tile_is_started_as_slopty_starts_its_agents() {
@@ -132,7 +119,7 @@ mod agent_open {
         let mod_dir = dir.join("claude-mod/abc");
         std::fs::create_dir_all(&mod_dir).unwrap();
         worker.set_session_env(vec![
-            (slopty_proto::project::SERVER_ENV.to_owned(), "127.0.0.1:9".to_owned()),
+            (slopty_proto::ctl::SERVER_ENV.to_owned(), "127.0.0.1:9".to_owned()),
             (slopty_agent::claude_mod::DIR_ENV.to_owned(), mod_dir.to_string_lossy().into_owned()),
             (slopty_agent::claude_mod::SOCKET_ENV.to_owned(), "/tmp/mod.sock".to_owned()),
         ]);
@@ -145,8 +132,12 @@ mod agent_open {
         let seen = started(&worker, &dir, &["claude", "--model", "opus"]).await;
         let args = argv(&seen);
         let kept = slopty_agent::resume::invocation(&args);
-        assert!(kept.relay && !kept.mcp && !kept.locked, "{args:?}");
-        assert_eq!(kept.role.as_deref(), Some(slopty_agent::hooks::POINTER), "{args:?}");
+        assert!(kept.relay, "{args:?}");
+        // Slopty's tools, unless this machine's managed settings keep them out: then the
+        // pointer to its CLI.
+        let line =
+            if kept.mcp { slopty_agent::hooks::TOOLS_LINE } else { slopty_agent::hooks::POINTER };
+        assert!(args.contains(&format!("--append-system-prompt={line}")), "{args:?}");
         assert_eq!(kept.args, ["--model", "opus"], "its own flags kept");
         let pinned = args.iter().position(|a| a == "--session-id").expect("a conversation id");
         assert!(uuid_like(&args[pinned + 1]), "{args:?}");
@@ -167,10 +158,9 @@ mod agent_open {
         assert!(argv(&seen).is_empty(), "no relay to hand out: {:?}", argv(&seen));
     }
 
-    /// A `codex` opened in a terminal starts as asked, a project's as much as a tile's: no
-    /// configuration override goes on its line, since one keeps Codex's TUI off the person's
-    /// daemon, where the worker follows its thread (`docs/decisions/projects.md`, "An agent's
-    /// Codex in a terminal stays on the daemon").
+    /// A `codex` opened in a terminal starts as asked: no configuration override goes on its
+    /// line, since one keeps Codex's TUI off the person's daemon, where the worker follows its
+    /// thread (`docs/decisions/agents.md`).
     #[tokio::test]
     async fn a_codex_opened_in_a_terminal_starts_as_asked_so_it_joins_the_daemon() {
         let dir = tempfile::tempdir().unwrap();
@@ -185,15 +175,13 @@ mod agent_open {
         std::os::unix::fs::symlink("/usr/bin/true", &relay).unwrap();
         worker.set_relay(Some(relay));
         worker.set_session_env(vec![(
-            slopty_proto::project::SERVER_ENV.to_owned(),
+            slopty_proto::ctl::SERVER_ENV.to_owned(),
             "127.0.0.1:9".to_owned(),
         )]);
 
         let line = ["codex", "--model", "o3", "Read the brief"];
         let seen = started(&worker, &dir, &line).await;
         assert_eq!(argv(&seen), line[1..], "a tile's Codex: as asked");
-        let seen = started_in(&worker, &dir, &line, Some("slopty")).await;
-        assert_eq!(argv(&seen), line[1..], "a project's Codex: as asked");
     }
 
     fn uuid_like(word: &str) -> bool {

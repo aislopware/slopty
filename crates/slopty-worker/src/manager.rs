@@ -15,7 +15,7 @@ use tokio::sync::{Notify, mpsc};
 
 use crate::WorkerError;
 use crate::orchestrate::Agents;
-use crate::restore::{AgentLaunch, Keeper, Orchestrated, Recipe};
+use crate::restore::{AgentLaunch, Keeper, Recipe};
 use crate::session::{self, Probe, SessionHandle, SessionStart, Tap};
 
 /// Scrollback lines the engine retains per session.
@@ -156,13 +156,6 @@ struct Inner {
     lost: Mutex<HashMap<SessionId, Recipe>>,
     /// What the sessions' programs read of the clipboard ([`Worker::share_clipboard`]).
     clipboard: Mutex<Option<Arc<dyn crate::clip::ForSessions>>>,
-    /// The sessions whose agent orchestration started, with what is kept of each
-    /// ([`Worker::orchestrated`]).
-    orchestrated: Mutex<HashMap<SessionId, Orchestrated>>,
-    /// The sessions [`Worker::restore`] reopened with their agent's conversation resumed, and
-    /// the seats of the task agents the last worker drove ([`Worker::cut_off`]), not yet said to
-    /// the server ([`Worker::take_resumed`]).
-    resumed: Mutex<Vec<SessionId>>,
 }
 
 /// A session being opened, from before ptyd starts it until it is in the table or the open
@@ -232,7 +225,6 @@ impl Worker {
                 (info, recipe)
             })
             .collect();
-        let orchestrated = taken_up(&held, &keeper);
         let (tap, tap_rx) = mpsc::channel(TAP_QUEUE);
         let (exits_tx, exits) = mpsc::unbounded_channel();
         let (port_hints, port_hints_rx) = mpsc::unbounded_channel();
@@ -262,8 +254,6 @@ impl Worker {
                 keeper,
                 lost: Mutex::new(recipes),
                 clipboard: Mutex::new(None),
-                orchestrated: Mutex::new(orchestrated),
-                resumed: Mutex::new(Vec::new()),
             }),
         };
         tokio::spawn(tap_loop(Arc::downgrade(&worker.inner), tap_rx));
@@ -395,12 +385,11 @@ impl Worker {
         *self.inner.relay.lock() = relay;
     }
 
-    /// What a terminal opened under `seat` would find in its environment, with `extra` under
-    /// the worker's own: for a server task's thread that runs in no terminal, whose agent and
-    /// Slopty tools speak as the seat all the same.
+    /// What a terminal opened under `seat` would find in its environment: for a seated thread
+    /// that runs in no terminal, whose agent and Slopty tools speak as the seat all the same.
     #[must_use]
-    pub fn seat_env(&self, seat: SessionId, extra: &[(String, String)]) -> Vec<(String, String)> {
-        self.env_for(seat, extra)
+    pub fn seat_env(&self, seat: SessionId) -> Vec<(String, String)> {
+        self.env_for(seat, &[])
     }
 
     /// What session `id` is spawned with: the request's `extra`, then every session's
@@ -456,7 +445,6 @@ impl Worker {
             restored: None,
             agent: None,
             typed: None,
-            orchestrated: None,
         };
         let pid = self.inner.ptyd.lock().await.spawn(id, spec).await?;
         let cwd = recipe.cwd.clone();
@@ -468,8 +456,8 @@ impl Worker {
     /// What a request runs, and with what environment. One whose program is Claude Code itself
     /// and which Slopty has not wired yet (a tile opened on `claude`, ⌘⇧T) is started the way
     /// the worker starts an agent of its own: with the hook relay, so its status and its
-    /// permission prompts reach the app; with Slopty's tools when its session names a project,
-    /// else the pointer to Slopty's CLI; with the mod; and
+    /// permission prompts reach the app; with Slopty's tools, else (where managed settings keep
+    /// them out) the pointer to Slopty's CLI; with the mod; and
     /// pinned to a conversation id, so it can come back after a reboot. It is the person's own,
     /// so the mode that asks no permission is not locked. The request's
     /// arguments and variables are kept, and the mod's variables go last. Anything else, Codex
@@ -479,8 +467,6 @@ impl Worker {
         let unchanged = (req.command.clone(), req.env.clone());
         let Some(program) = req.command.first() else { return unchanged };
         let name = program.rsplit('/').next().unwrap_or(program);
-        let project =
-            req.env.iter().any(|(k, v)| k == slopty_proto::project::PROJECT_ENV && !v.is_empty());
         if name != "claude" || !slopty_agent::detect::is_claude(name, &req.command) {
             return unchanged;
         }
@@ -491,10 +477,9 @@ impl Worker {
             crate::file::expand_home(Path::new(cwd))
         });
         // Reads the person's settings files for their status line: blocking I/O.
-        let wired = tokio::task::spawn_blocking(move || {
-            slopty_agent::hooks::wired(args, &relay, &cwd, project)
-        })
-        .await;
+        let wired =
+            tokio::task::spawn_blocking(move || slopty_agent::hooks::wired(args, &relay, &cwd))
+                .await;
         let Ok(Some(args)) = wired else { return unchanged };
         let (args, env) = match &launch.claude_mod {
             Some(installed) => (
@@ -576,16 +561,6 @@ impl Worker {
         };
         let pid = self.inner.ptyd.lock().await.spawn(id, spec).await?;
         let cwd = plan.cwd.map(|cwd| cwd.to_string_lossy().into_owned());
-        // The agent orchestration started, back on its own conversation (Claude Code resumed,
-        // or a Codex or pi with its resuming line typed), is still orchestration's: followed
-        // again as it was, with no brief owed, since it had its own. A new program in its place
-        // is not.
-        let mut resumed = plan.agent.is_some() || plan.launch.is_some();
-        let orchestrated =
-            recipe.orchestrated.as_ref().filter(|_| resumed).map(|_| Orchestrated { brief: None });
-        if let Some(kept) = &orchestrated {
-            self.inner.orchestrated.lock().insert(id, kept.clone());
-        }
         self.inner.keeper.opened(
             id,
             Recipe {
@@ -593,7 +568,6 @@ impl Worker {
                 cwd: cwd.clone(),
                 restored: Some(plan.restored.clone()),
                 agent: plan.agent,
-                orchestrated,
                 ..recipe.clone()
             },
         );
@@ -610,10 +584,6 @@ impl Worker {
             && let Err(e) = handle.type_at_first_prompt(line)
         {
             tracing::warn!(session = %id, error = %e, "agent not resumed");
-            resumed = false;
-        }
-        if resumed {
-            self.inner.resumed.lock().push(id);
         }
         Ok(handle)
     }
@@ -732,43 +702,13 @@ impl Worker {
         tokio::time::timeout(within, adopted).await.map_err(|_elapsed| WorkerError::NoSuchSession)
     }
 
-    /// A task's agent the worker before this one ran as its own child, seated at `seat`, ended
-    /// with it; it goes on in its own session with the next message sent to it, which the
-    /// server is told to send ([`Self::take_resumed`]).
-    pub fn cut_off(&self, seat: SessionId) {
-        self.inner.resumed.lock().push(seat);
-    }
-
-    /// The sessions reopened since this was last asked with their agent's conversation resumed
-    /// ([`Self::restore`]), and the seats of the agents [`Self::cut_off`]: each agent was cut
-    /// off mid-work, which the server is told once.
-    #[must_use]
-    pub fn take_resumed(&self) -> Vec<SessionId> {
-        std::mem::take(&mut *self.inner.resumed.lock())
-    }
-
-    /// The sessions whose agent orchestration started and that this worker holds or is taking
-    /// over from ptyd, with what is kept of each: a worker that started again follows them and
-    /// types a brief still owed.
-    #[must_use]
-    pub fn orchestrated(&self) -> Vec<(SessionId, Orchestrated)> {
-        self.inner.orchestrated.lock().iter().map(|(id, kept)| (*id, kept.clone())).collect()
-    }
-
-    /// Orchestration started the agent in session `id`, as `kept` says: returns once that is
-    /// on disk, so a brief is owed there before any of it is typed.
-    pub async fn keep_orchestrated(&self, id: SessionId, kept: Orchestrated) {
-        self.inner.orchestrated.lock().insert(id, kept.clone());
-        self.inner.keeper.orchestrated(id, kept).await;
-    }
-
     /// Have ptyd type `parts` into session `id`, whole, as delivery `delivery`
     /// ([`slopty_pty::protocol::PtydRequest::Deliver`]): once ptyd has it, it is typed whatever
-    /// becomes of this worker, and the brief owed under that name is owed no more.
+    /// becomes of this worker.
     ///
     /// # Errors
     ///
-    /// The link to ptyd failing; the brief is still owed then.
+    /// The link to ptyd failing, with nothing typed.
     pub async fn deliver(
         &self,
         id: SessionId,
@@ -776,19 +716,7 @@ impl Worker {
         parts: Vec<Part>,
     ) -> Result<(), WorkerError> {
         self.inner.ptyd.lock().await.deliver(id, delivery, parts).await?;
-        self.brief_settled(id, delivery);
         Ok(())
-    }
-
-    /// The brief owed in session `id` under `delivery` is owed no more: ptyd took it, or it was
-    /// given up.
-    pub fn brief_settled(&self, id: SessionId, delivery: u64) {
-        if let Some(kept) = self.inner.orchestrated.lock().get_mut(&id)
-            && kept.brief.as_ref().is_some_and(|brief| brief.delivery == delivery)
-        {
-            kept.brief = None;
-        }
-        self.inner.keeper.delivered(id, delivery);
     }
 
     /// Summaries for the session list.
@@ -890,7 +818,6 @@ impl Worker {
     /// Kill the child and drop the session everywhere.
     pub async fn close(&self, id: SessionId) -> Result<(), WorkerError> {
         let entry = self.inner.sessions.lock().remove(&id).ok_or(WorkerError::NoSuchSession)?;
-        self.inner.orchestrated.lock().remove(&id);
         self.inner.changes.forget(id);
         self.inner.repo_ids.forget(id);
         self.inner.keeper.forget(id);
@@ -946,26 +873,6 @@ const TAP_QUEUE: usize = 1024;
 /// in order. A failed send is logged once and the loop goes on: a lost ptyd is dialled again
 /// ([`keep_ptyd`]), which has every session checkpoint, and a rejected frame (too large) must
 /// not stop the other sessions' taps.
-/// What orchestration kept of the agents in the sessions ptyd `held`, by session: a brief ptyd
-/// says it took is owed no more, here and on disk.
-fn taken_up(
-    held: &[(SessionInfo, Option<Recipe>)],
-    keeper: &Keeper,
-) -> HashMap<SessionId, Orchestrated> {
-    let mut taken = HashMap::new();
-    for (info, recipe) in held {
-        let Some(mut kept) = recipe.as_ref().and_then(|r| r.orchestrated.clone()) else {
-            continue;
-        };
-        if let Some(brief) = kept.brief.take_if(|brief| info.delivered.contains(&brief.delivery)) {
-            tracing::info!(session = %info.id, "its brief was typed before the restart");
-            keeper.delivered(info.id, brief.delivery);
-        }
-        taken.insert(info.id, kept);
-    }
-    taken
-}
-
 async fn tap_loop(inner: Weak<Inner>, mut rx: mpsc::Receiver<Tap>) {
     let mut failing = false;
     while let Some(tap) = rx.recv().await {

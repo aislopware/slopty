@@ -27,6 +27,12 @@
 //!   (`STUB_TRANSCRIPT`, a JSONL file) and its `Stop` hooks fire, their outputs kept on the line as
 //!   `turn`. With `STUB_INBOX_HOLD` it holds every message instead, as a session does under
 //!   `crossSessionInbound: "hold"`, and the line says `held`.
+//! - With `STUB_TURNS` (`{"<prompt>": [{"name": …, "arguments": …}, …], …}`), the prompt it was
+//!   started with (after `--`) takes a turn as Claude Code's does once the start's hooks fired:
+//!   `UserPromptSubmit`, the prompt into the transcript, the tool calls the object lists for that
+//!   prompt (none when it lists none) through the `slopty` MCP server as above, its reply (`Done:
+//!   <prompt>`) into the transcript, then `Stop`. In a call's arguments, `{started}` is the agent
+//!   the turn's last `agent_start` answered. A message the inbox takes gets the same reply.
 //! - With `STUB_TITLE`, it paints that terminal title first (OSC 2), as Claude Code paints `✳
 //!   Claude Code` at its prompt: what the worker reads as the agent's title.
 //! - It shows a prompt and takes what is typed at it, a line at a time.
@@ -37,8 +43,11 @@
 //! value), the MCP configs, the hooks it fired, the tool's answer and the lines typed.
 //!
 //! In `STUB_RECORD`, `STUB_MCP_CALLS`, `STUB_MCP_AFTER`, `STUB_INBOX` and `STUB_TRANSCRIPT`,
-//! `{task}` is the task the agent was started for (`SLOPTY_TASK`, `none` for no task's), so one
-//! script serves every task a machine runs, each with its own files and its own report.
+//! `{session}` is the Slopty terminal it runs in (`SLOPTY_SESSION`, `none` outside one), and
+//! `{conversation}` the conversation it was started on (`--session-id` or `--resume`, `none`
+//! otherwise), so one script serves every agent a machine runs, each with its own files and its
+//! own record; a transcript under `~/.claude/projects/` named for its conversation is where
+//! Claude Code keeps it.
 
 #![allow(
     clippy::print_stdout,
@@ -120,13 +129,26 @@ impl Record {
     }
 }
 
-/// Where a knob names the task the agent was started for.
-const TASK_PLACE: &str = concat!("{", "task", "}");
+/// Where a knob names the terminal the agent runs in.
+const SESSION_PLACE: &str = concat!("{", "session", "}");
 
-/// The variable `name`, with [`TASK_PLACE`] the task the agent was started for.
+/// Where a tool call's arguments name the agent the turn last started.
+const STARTED_PLACE: &str = concat!("{", "started", "}");
+
+/// Where a knob names the conversation the agent was started on.
+const CONVERSATION_PLACE: &str = concat!("{", "conversation", "}");
+
+/// The variable `name`, with [`SESSION_PLACE`] the terminal the agent runs in and
+/// [`CONVERSATION_PLACE`] the conversation it was started on.
 fn knob(name: &str) -> Option<String> {
-    let task = std::env::var("SLOPTY_TASK").unwrap_or_else(|_| "none".to_owned());
-    std::env::var(name).ok().map(|value| value.replace(TASK_PLACE, &task))
+    let session = std::env::var("SLOPTY_SESSION").unwrap_or_else(|_| "none".to_owned());
+    let args: Vec<String> = std::env::args().collect();
+    let at = args.iter().position(|a| a == "--session-id" || a == "--resume");
+    let conversation =
+        at.and_then(|at| args.get(at.saturating_add(1))).map_or("none", String::as_str);
+    std::env::var(name).ok().map(|value| {
+        value.replace(SESSION_PLACE, &session).replace(CONVERSATION_PLACE, conversation)
+    })
 }
 
 fn run(args: &[String]) -> Fallible<()> {
@@ -178,6 +200,13 @@ fn run(args: &[String]) -> Fallible<()> {
             record.save()?;
         }
     }
+    if let Ok(turns) = std::env::var("STUB_TURNS") {
+        let turns: Value = serde_json::from_str(&turns)?;
+        if let Some(prompt) = first_prompt(args) {
+            let calls = turns.get(&prompt).and_then(Value::as_array).cloned().unwrap_or_default();
+            take_turn(&settings, &prompt, &calls, &mut record)?;
+        }
+    }
 
     let mut out = std::io::stdout();
     if let Ok(title) = std::env::var("STUB_TITLE") {
@@ -200,6 +229,123 @@ fn run(args: &[String]) -> Fallible<()> {
     Ok(())
 }
 
+/// The prompt Claude Code was started with: the words after `--`.
+fn first_prompt(args: &[String]) -> Option<String> {
+    let at = args.iter().position(|a| a == "--")?;
+    let words = args.get(at.saturating_add(1)..)?;
+    Some(words.join(" ")).filter(|p| !p.trim().is_empty())
+}
+
+/// What the stub answers a prompt with: `Done:` and the prompt's last line of words, so a
+/// message wrapped in tags is answered by what it says.
+fn reply_to(prompt: &str) -> String {
+    let words = prompt.lines().rev().map(str::trim).find(|l| !l.is_empty() && !l.starts_with('<'));
+    format!("Done: {}", words.unwrap_or_else(|| prompt.trim()))
+}
+
+/// Take a turn with `prompt` as Claude Code does ([`STUB_TURNS`](self)): its hooks, its
+/// transcript, and `calls` in order.
+fn take_turn(settings: &Value, prompt: &str, calls: &[Value], record: &mut Record) -> Fallible<()> {
+    let submitted = json!([{ "hook_event_name": "UserPromptSubmit", "prompt": prompt }]);
+    fire_all(settings, &submitted, record)?;
+    let transcript = knob("STUB_TRANSCRIPT").map(PathBuf::from);
+    if let Some(transcript) = &transcript {
+        said(transcript, "user", &json!(prompt))?;
+    }
+    let mut started: Option<String> = None;
+    for call in calls {
+        let call = match &started {
+            Some(agent) => serde_json::from_str(&call.to_string().replace(STARTED_PLACE, agent))?,
+            None => call.clone(),
+        };
+        let answer = match call_tool(&record.mcp_config, &call) {
+            Ok(answer) => answer,
+            Err(e) => json!({ "error": e.to_string() }),
+        };
+        if call.get("name").and_then(Value::as_str) == Some("agent_start") {
+            started = answered_agent(&answer).or(started);
+        }
+        record.mcp.push(answer);
+        record.save()?;
+    }
+    let reply = reply_to(prompt);
+    if let Some(transcript) = &transcript {
+        said(transcript, "assistant", &json!([{ "type": "text", "text": reply }]))?;
+    }
+    let stopped = json!([{
+        "hook_event_name": "Stop",
+        "stop_hook_active": false,
+        "last_assistant_message": reply,
+    }]);
+    fire_all(settings, &stopped, record)
+}
+
+/// The agent an `agent_start`'s result names.
+fn answered_agent(result: &Value) -> Option<String> {
+    let text = result.pointer("/content/0/text")?.as_str()?;
+    let answer: Value = serde_json::from_str(text).ok()?;
+    answer.get("agent")?.as_str().map(str::to_owned)
+}
+
+/// Append one message to the transcript at `at` as Claude Code writes one: `role`'s, with
+/// `content`, chained to the line before it and stamped with the time. An answer ends its turn,
+/// as Claude Code's last message of a turn says and the `turn_duration` record after it marks.
+fn said(at: &Path, role: &str, content: &Value) -> Fallible<()> {
+    let before = std::fs::read_to_string(at).unwrap_or_default();
+    let parent = before
+        .lines()
+        .rev()
+        .find_map(|line| serde_json::from_str::<Value>(line).ok()?.get("uuid").cloned());
+    let n = before.lines().count();
+    let uuid = format!("stub-{}-{n}", std::process::id());
+    let timestamp = stamp(std::time::SystemTime::now());
+    let text = if role == "assistant" {
+        let message = json!({ "role": role, "content": content, "stop_reason": "end_turn" });
+        let line = json!({
+            "type": role, "uuid": uuid, "parentUuid": parent, "timestamp": timestamp,
+            "message": message,
+        });
+        let ended = format!("stub-{}-{}", std::process::id(), n.saturating_add(1));
+        let end = json!({
+            "type": "system", "subtype": "turn_duration", "uuid": ended, "parentUuid": uuid,
+            "timestamp": timestamp, "durationMs": 1,
+        });
+        format!("{line}\n{end}\n")
+    } else {
+        let message = json!({ "role": role, "content": content });
+        let line = json!({
+            "type": role, "uuid": uuid, "parentUuid": parent, "timestamp": timestamp,
+            "message": message,
+        });
+        format!("{line}\n")
+    };
+    let mut out = std::fs::OpenOptions::new().create(true).append(true).open(at)?;
+    // One write, so a reader never sees half of a turn.
+    out.write_all(text.as_bytes())?;
+    Ok(())
+}
+
+/// `at` as Claude Code stamps a record, in UTC to the millisecond (`2026-10-13T05:46:04.748Z`);
+/// `None` before 1970.
+fn stamp(at: std::time::SystemTime) -> Option<String> {
+    let ms = u64::try_from(at.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis()).ok()?;
+    let (days, of_day) = (ms / 86_400_000, ms % 86_400_000);
+    // Days since 1970-01-01 to a civil date (Howard Hinnant's `civil_from_days`).
+    let z = days.checked_add(719_468)?;
+    let (era, doe) = (z / 146_097, z % 146_097);
+    let yoe =
+        doe.checked_sub(doe / 1460)?.checked_add(doe / 36_524)?.checked_sub(doe / 146_096)? / 365;
+    let doy =
+        doe.checked_sub(yoe.checked_mul(365)?.checked_add(yoe / 4)?.checked_sub(yoe / 100)?)?;
+    let mp = doy.checked_mul(5)?.checked_add(2)? / 153;
+    let day = doy.checked_sub(mp.checked_mul(153)?.checked_add(2)? / 5)?.checked_add(1)?;
+    let month = if mp < 10 { mp.checked_add(3)? } else { mp.checked_sub(9)? };
+    let year = era.checked_mul(400)?.checked_add(yoe)?.checked_add(u64::from(month <= 2))?;
+    let (hour, minute) = (of_day / 3_600_000, of_day / 60_000 % 60);
+    let (second, milli) = (of_day / 1000 % 60, of_day % 1000);
+    Some(format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{milli:03}Z"))
+}
+
 /// What an inbox does with the messages posted to it.
 struct Inbox {
     /// Where each message is noted.
@@ -208,6 +354,8 @@ struct Inbox {
     token: String,
     /// Hold every message rather than take a turn with it.
     hold: bool,
+    /// Answer a message taken, as a turn under `STUB_TURNS` does.
+    replies: bool,
     /// The transcript a message goes into when it is taken.
     transcript: Option<PathBuf>,
     /// The settings whose `Stop` hooks a turn fires, and the variables they are given.
@@ -233,6 +381,7 @@ fn inbox(file: PathBuf, settings: Value) -> Fallible<Vec<(String, String)>> {
         file,
         token,
         hold: std::env::var_os("STUB_INBOX_HOLD").is_some(),
+        replies: std::env::var_os("STUB_TURNS").is_some(),
         transcript: knob("STUB_TRANSCRIPT").map(PathBuf::from),
         settings,
         hook_env: hook_env.clone(),
@@ -288,13 +437,22 @@ fn turn(inbox: &Inbox, content: &str) -> Fallible<Vec<Value>> {
     payload.insert("hook_event_name".to_owned(), json!("Stop"));
     payload.insert("stop_hook_active".to_owned(), json!(false));
     if let Some(transcript) = &inbox.transcript {
-        let entry = json!({
-            "type": "user",
-            "message": { "role": "user", "content": content },
-            "origin": { "kind": "peer" },
-        });
-        let mut out = std::fs::OpenOptions::new().create(true).append(true).open(transcript)?;
-        out.write_all(format!("{entry}\n").as_bytes())?;
+        if inbox.replies {
+            said(transcript, "user", &json!(content))?;
+        } else {
+            let entry = json!({
+                "type": "user",
+                "message": { "role": "user", "content": content },
+                "origin": { "kind": "peer" },
+            });
+            let mut out = std::fs::OpenOptions::new().create(true).append(true).open(transcript)?;
+            out.write_all(format!("{entry}\n").as_bytes())?;
+        }
+        if inbox.replies {
+            let reply = reply_to(content);
+            said(transcript, "assistant", &json!([{ "type": "text", "text": reply }]))?;
+            payload.insert("last_assistant_message".to_owned(), Value::String(reply));
+        }
         let path = transcript.to_string_lossy().into_owned();
         payload.insert("transcript_path".to_owned(), Value::String(path));
     }

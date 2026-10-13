@@ -14,7 +14,6 @@ mod tests {
     use slopty_proto::orchestration::{
         ErrorCode, Happening, HubEvent, Input, Outcome, TermAgent, TermRef, Verb,
     };
-    use slopty_proto::project::TaskId;
     use slopty_proto::server::{FromServer, Liveness, Os, Role, ToServer, WorkerCaps, WorkerInfo};
     use slopty_proto::terminal::{SessionState, SessionSummary};
     use slopty_proto::thread::attention::Rung;
@@ -103,13 +102,19 @@ mod tests {
         }
     }
 
+    /// The one agent the fake knows to tell.
+    fn child() -> ThreadId {
+        "0199a000-0000-7000-8000-0000000000c1".parse().unwrap()
+    }
+
     /// A Claude Code waiting on a permission.
     fn blocked() -> TermAgent {
         asking("Run Bash?")
     }
 
     /// What the fake answers: one online worker with a shell and a Claude Code waiting on a
-    /// permission; closing anything else is an unknown terminal, and any task but #7 is unknown.
+    /// permission; closing anything else is an unknown terminal, and any agent but [`child`] is
+    /// unknown.
     fn answer(verb: &Verb) -> Outcome {
         match verb {
             Verb::ListWorkers => Outcome::Workers(directory()),
@@ -128,9 +133,10 @@ mod tests {
                 code: ErrorCode::UnknownTerminal,
                 message: format!("no terminal {}", term.session),
             },
-            Verb::TaskTell { task: Some(task), .. } if *task != TaskId(7) => {
-                Outcome::Error { code: ErrorCode::UnknownTask, message: format!("no task #{task}") }
-            }
+            Verb::AgentTell { agent, .. } if *agent != child() => Outcome::Error {
+                code: ErrorCode::UnknownAgent,
+                message: format!("no agent {agent}"),
+            },
             _ => Outcome::Done,
         }
     }
@@ -426,12 +432,12 @@ mod tests {
         let list = mcp.reply(1).await;
         let tools = list["result"]["tools"].as_array().unwrap();
         assert_eq!(tools.len(), slopty_tools::tools::list().len(), "{list}");
-        assert_eq!(tools[0]["name"], "project_status");
-        let wait = tools.iter().find(|t| t["name"] == "task_wait").unwrap();
-        assert!(wait["description"].as_str().unwrap().contains("`next`"), "{wait}");
+        assert_eq!(tools[0]["name"], "machines");
+        let wait = tools.iter().find(|t| t["name"] == "agent_wait").unwrap();
+        assert!(wait["description"].as_str().unwrap().contains("`timed_out`"), "{wait}");
 
-        let tell = json!({ "project": "slopty", "task": 7, "text": "Cover the iPad." });
-        mcp.request(2, "tools/call", json!({ "name": "task_tell", "arguments": tell })).await;
+        let tell = json!({ "agent": child().to_string(), "text": "Cover the iPad." });
+        mcp.request(2, "tools/call", json!({ "name": "agent_tell", "arguments": tell })).await;
         assert_eq!(tool_json(&mcp.reply(2).await), json!({ "ok": true }));
         let Role::Agent { name, .. } = fake.next_role().await else { panic!("an agent") };
         assert!(name.starts_with("slopty mcp @ "), "{name}");
@@ -458,19 +464,20 @@ mod tests {
         );
 
         // A tool error is the model's to read, not a protocol error.
-        let tell = json!({ "project": "slopty", "task": 9, "text": "Hello." });
-        let args = json!({ "name": "task_tell", "arguments": tell });
+        let stranger = ThreadId::new();
+        let tell = json!({ "agent": stranger.to_string(), "text": "Hello." });
+        let args = json!({ "name": "agent_tell", "arguments": tell });
         mcp.request(3, "tools/call", args).await;
         let failed = mcp.reply(3).await;
         assert_eq!(failed["result"]["isError"], true, "{failed}");
         let text = failed["result"]["content"][0]["text"].as_str().unwrap();
-        assert!(text.contains("no task #9"), "{text}");
+        assert!(text.contains(&format!("no agent {stranger}")), "{text}");
 
         // The server restarts: the shim redials and the next call goes through.
         fake.push.send(None).unwrap();
         let Role::Agent { .. } = fake.next_role().await else { panic!("the agent again") };
-        let tell = json!({ "project": "slopty", "task": "#7", "text": "Again." });
-        mcp.request(4, "tools/call", json!({ "name": "task_tell", "arguments": tell })).await;
+        let tell = json!({ "agent": child().to_string(), "text": "Again." });
+        mcp.request(4, "tools/call", json!({ "name": "agent_tell", "arguments": tell })).await;
         assert_eq!(tool_json(&mcp.reply(4).await), json!({ "ok": true }));
     }
 
@@ -496,8 +503,8 @@ mod tests {
             out.unwrap()
         };
 
-        let tell = json!({ "project": "slopty", "task": 7, "text": "Cover the iPad." });
-        let out = call("task_tell", tell).await;
+        let tell = json!({ "agent": child().to_string(), "text": "Cover the iPad." });
+        let out = call("agent_tell", tell).await;
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
         let result: Value = serde_json::from_slice(&out.stdout).unwrap();
         assert_eq!(result["isError"], false, "{result}");
@@ -507,8 +514,8 @@ mod tests {
         let Role::Agent { name, .. } = fake.next_role().await else { panic!("an agent") };
         assert!(name.contains("for an older build"), "{name}");
 
-        let tell = json!({ "project": "slopty", "task": 9, "text": "Hello." });
-        let out = call("task_tell", tell).await;
+        let tell = json!({ "agent": ThreadId::new().to_string(), "text": "Hello." });
+        let out = call("agent_tell", tell).await;
         let result: Value = serde_json::from_slice(&out.stdout).unwrap();
         assert_eq!(result["isError"], true, "the model's to read: {result}");
 

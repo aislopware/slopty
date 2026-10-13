@@ -674,7 +674,7 @@ pub struct Dump {
     pub focus: Option<String>,
     /// Who has the keyboard: `workspace`, `terminal:<session>`, `thread:<session>` (its
     /// agent's thread, shown in place of the TUI), `screen:<stream>`, `file:<item>` (its
-    /// editor), `browser:<item>` (the page itself), `project:<name>` (a board), `other`, or
+    /// editor), `browser:<item>` (the page itself), `other`, or
     /// `none`.
     pub focused: String,
     /// The name of the project on show.
@@ -703,9 +703,6 @@ pub struct Dump {
     /// This app's client id on the wire (what the worker's `screens` listing names).
     #[serde(default)]
     pub client: String,
-    /// The server's projects as the app mirrors them, by name.
-    #[serde(default)]
-    pub projects: Vec<ProjectInfo>,
     /// How an iPad's trackpad pointer looks over the window, as the last cursor style set it:
     /// `system`, `beam`, `beam-lying`, `hidden`, or `outline-<shape>`. `None` off iOS.
     #[serde(default)]
@@ -842,27 +839,6 @@ pub struct WorkerInfo {
     /// How many links have come up to it since the app started: a relink shows here.
     #[serde(default)]
     pub links: u64,
-}
-
-/// One project as the app mirrors it, and its board.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
-pub struct ProjectInfo {
-    /// Its name.
-    pub id: String,
-    /// Its title.
-    pub title: String,
-    /// Its orchestrator's session, when it has one.
-    pub orchestrator: Option<String>,
-    /// Each lane that holds a task, left to right, with the tasks' numbers.
-    pub lanes: Vec<(String, Vec<u32>)>,
-    /// Each task's number and state, as the server said.
-    pub tasks: Vec<(u32, String)>,
-    /// How many timeline entries the app holds.
-    pub timeline: usize,
-    /// Its orchestrator's tile shows the board.
-    pub shown: bool,
-    /// The node the board's keyboard stands on: a task's number, or `orchestrator`.
-    pub picked: Option<String>,
 }
 
 /// One tile.

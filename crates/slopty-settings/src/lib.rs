@@ -539,8 +539,6 @@ impl Default for WorkerSettings {
 #[serde(default)]
 #[schemars(title = "This Mac as a server")]
 pub struct ServerSettings {
-    /// What every project's own limits stay under.
-    pub projects: ProjectBounds,
     /// How notes reach a pocketed phone.
     pub push: PushSettings,
 }
@@ -571,23 +569,34 @@ pub struct PushSettings {
     pub team_id: String,
 }
 
-/// `[server.projects]`: what the person allows projects across the fleet
-/// (`docs/decisions/projects.md`). No agent raises them.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, JsonSchema)]
+/// `[agents]`: how the agents Slopty starts work, whoever asks for them.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
-#[schemars(title = "Projects")]
-pub struct ProjectBounds {
-    /// Agents running at once across the fleet, in a project or not.
+#[schemars(title = "Agents")]
+pub struct AgentSettings {
+    /// How freely an agent another agent starts acts before it asks you.
     ///
-    /// The most live agents the server lets run across every worker at once.
-    #[schemars(title = "Live agents", example = 24)]
-    pub live_agents: u16,
+    /// Applied by each agent's own harness: Claude Code's permission mode, Codex's approval
+    /// policy, pi's gate; an ACP agent starts in its own default. Questions an agent asks you
+    /// reach you whatever it is. The server reads it for each start.
+    #[schemars(title = "Autonomy")]
+    pub autonomy: Autonomy,
 }
 
-impl Default for ProjectBounds {
-    fn default() -> Self {
-        Self { live_agents: 24 }
-    }
+/// `[agents] autonomy`: how freely a started agent acts before it asks the person.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum Autonomy {
+    /// The harness's own judgement: Claude Code's auto mode, where its classifier decides.
+    #[default]
+    #[schemars(title = "Auto")]
+    Auto,
+    /// Nothing asks: every permission prompt is skipped.
+    #[schemars(title = "Full")]
+    Full,
+    /// The harness's default prompts.
+    #[schemars(title = "Ask")]
+    Ask,
 }
 
 /// `[network]`: the server this Mac belongs to and who may connect to it, for the app, the
@@ -764,6 +773,8 @@ pub struct Settings {
     pub worker: WorkerSettings,
     /// The server daemon's own choices.
     pub server: ServerSettings,
+    /// How the agents Slopty starts work.
+    pub agents: AgentSettings,
     /// The app's and the CLI's own choices.
     pub client: ClientSettings,
 }
@@ -1535,22 +1546,21 @@ mod tests {
         assert_eq!(Settings::parse(&back).settings.worker.acp, *acp, "written back:\n{back}");
     }
 
-    /// The fleet's bounds on projects, each key with its default when the file leaves it out.
+    /// The person's one autonomy setting, `auto` when the file leaves it out; the old
+    /// project bounds are no key any more.
     #[test]
-    fn server_project_bounds() {
-        let d = Settings::default().server.projects;
-        assert_eq!(d.live_agents, 24);
-        let loaded = Settings::parse("[server.projects]\nlive_agents = 40\n");
-        assert!(loaded.error.is_none() && loaded.warnings.is_empty(), "{loaded:?}");
-        assert_eq!(loaded.settings.server.projects, ProjectBounds { live_agents: 40 });
-        // How far a project's agents go is its autonomy, set per project: no fleet-wide key.
-        let gone = Settings::parse("[server.projects]\npermission_flags = [\"nightly\"]\n");
-        assert_eq!(gone.warnings, ["unknown key `server.projects.permission_flags`"]);
-        let gone = Settings::parse("[server.projects]\ntimeline_kept = 4096\n");
-        assert_eq!(gone.warnings, ["unknown key `server.projects.timeline_kept`"]);
-        let typo = Settings::parse("[server.projects]\nlive_agent = 40\n");
-        assert_eq!(typo.warnings, ["unknown key `server.projects.live_agent`"]);
-        assert!(Settings::parse("[server.projects]\nlive_agents = -1\n").error.is_some());
+    fn agents_autonomy() {
+        assert_eq!(Settings::default().agents.autonomy, Autonomy::Auto);
+        for (text, autonomy) in
+            [("full", Autonomy::Full), ("ask", Autonomy::Ask), ("auto", Autonomy::Auto)]
+        {
+            let loaded = Settings::parse(&format!("[agents]\nautonomy = \"{text}\"\n"));
+            assert!(loaded.error.is_none() && loaded.warnings.is_empty(), "{loaded:?}");
+            assert_eq!(loaded.settings.agents.autonomy, autonomy);
+        }
+        assert!(Settings::parse("[agents]\nautonomy = \"yolo\"\n").error.is_some());
+        let gone = Settings::parse("[server.projects]\nlive_agents = 40\n");
+        assert_eq!(gone.warnings, ["unknown key `server.projects`"]);
     }
 
     #[test]

@@ -274,8 +274,8 @@ pub struct NewWorktree {
     /// is current without losing work not yet pushed.
     pub base: Option<String>,
     /// The branch its pull request merges back into, which gh reads for a `gh pr create` with
-    /// no `--base`: a project's target for a task's worktree, whose `base` may be another
-    /// task's work. The branch it starts from when `None`.
+    /// no `--base`, when that differs from the branch it starts from. The branch it starts
+    /// from when `None`.
     pub merge_base: Option<String>,
     /// The pull request of `origin` whose head it checks out, in place of `base`, which is then
     /// not read. Its branch tracks the pull request, so gh finds it from the worktree: a pull
@@ -608,7 +608,7 @@ pub enum Against {
     /// Where the branch left its base branch: the merge base of `HEAD` and `origin`'s default
     /// branch, else of the local `main` or `master`. All the branch's work, committed or not.
     Base,
-    /// Where the branch left the branch named, a project's target: the merge base of `HEAD` and
+    /// Where the branch left the branch named: the merge base of `HEAD` and
     /// `origin`'s copy of it when that holds every commit of the local one, else the local one.
     /// What merging the branch into it would bring, committed or not.
     Branch(String),

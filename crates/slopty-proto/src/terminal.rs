@@ -155,8 +155,8 @@ pub struct SessionSummary {
 ///
 /// Two ways to know, since neither always answers: the address it was cloned from, as a forge
 /// names it, and its first commit, which every clone, mirror and worktree of it shares whatever
-/// its remotes. A client merges two checkouts when either matches; placement matches workers
-/// on the same ([`crate::project`]'s `repos` fact).
+/// its remotes. A client merges two checkouts when either matches; the server's `repos` fact
+/// of each worker names its clones by it ([`crate::server::Facts`]).
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Default, Serialize, Deserialize)]
 pub struct RepoId {
     /// Its `origin` remote (else its first), normalized to `host/path`: the host lowercased,

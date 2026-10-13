@@ -2,9 +2,9 @@
 //! gate lets through what its mode allows").
 //!
 //! pi has no permission system, so Slopty's gate is the one it runs under, and its mode is the
-//! level the person set: for a project's task, the project's autonomy; for their own thread, the
-//! thread's mode, which they switch. The gate lets a call through by these rules alone, and asks
-//! the person about every other:
+//! level the person set: for an agent another started, their autonomy setting; for their own
+//! thread, the thread's mode, which they switch. The gate lets a call through by these rules alone,
+//! and asks the person about every other:
 //! - [`ASK`]: reads inside the thread's folder, and Slopty's own tools;
 //! - [`EDITS`]: those, and edits and writes inside the folder;
 //! - [`OWN`]: every call.

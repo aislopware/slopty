@@ -1,4 +1,4 @@
-//! `slopty mcp`: a project's tools as an MCP server on stdio, for an AI agent such as Claude Code.
+//! `slopty mcp`: the agents' tools as an MCP server on stdio, for an AI agent such as Claude Code.
 //!
 //! The tools are [`slopty_tools::tools`], the ones the server's own endpoint serves. Each call
 //! becomes one verb (after any name lookups) on a link to the server held for the process
@@ -317,16 +317,16 @@ mod tests {
         let flags =
             ["--data-dir".to_owned(), "/d".to_owned(), "--server".to_owned(), "s".to_owned()];
         let mut arguments = serde_json::Map::new();
-        arguments.insert("task".to_owned(), json!(7));
-        let result = bridge(&program, &flags, "task_tell", &arguments).await;
+        arguments.insert("agent".to_owned(), json!(7));
+        let result = bridge(&program, &flags, "agent_tell", &arguments).await;
         assert_eq!(result.is_error, Some(false), "{result:?}");
         let args = std::fs::read_to_string(dir.path().join("slopty.args")).unwrap();
-        assert_eq!(args.trim(), "--data-dir /d --server s mcp --call task_tell");
+        assert_eq!(args.trim(), "--data-dir /d --server s mcp --call agent_tell");
         let given = std::fs::read_to_string(dir.path().join("slopty.in")).unwrap();
-        assert_eq!(serde_json::from_str::<Value>(&given).unwrap(), json!({ "task": 7 }));
+        assert_eq!(serde_json::from_str::<Value>(&given).unwrap(), json!({ "agent": 7 }));
 
         let failing = installed(dir.path(), "", 1);
-        let result = bridge(&failing, &flags, "task_tell", &arguments).await;
+        let result = bridge(&failing, &flags, "agent_tell", &arguments).await;
         assert_eq!(result.is_error, Some(true));
         let said = serde_json::to_string(&result.content).unwrap();
         assert!(said.contains("could not carry the call"), "{said}");

@@ -185,7 +185,6 @@ impl Directory {
             | FromServer::Refused(_)
             | FromServer::Request { .. }
             | FromServer::Reply { .. }
-            | FromServer::Projects { .. }
             | FromServer::Deliver { .. }
             | FromServer::Pushes(_) => Vec::new(),
             FromServer::Pushable(now) => vec![Change::Pushable(now)],

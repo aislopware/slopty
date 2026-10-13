@@ -51,11 +51,8 @@ use slopty_proto::orchestration::{
     BUNDLES, BranchBundle, Command, DirEntry, ErrorCode, FileStat, IdempotencyKey, Input, ItemRef,
     Line, Outcome, Screen, Size, TermAgent, TermRef, ThreadOf, Verb, WaitUntil,
 };
-use slopty_proto::project::VERIFY_PLACES;
 use slopty_proto::screen::ScreenEvent;
-use slopty_proto::terminal::{
-    CloseReason, OpenSession, SessionState, SessionSummary, TermRequest, TermSize,
-};
+use slopty_proto::terminal::{CloseReason, OpenSession, SessionSummary, TermRequest, TermSize};
 use slopty_proto::thread::wire::{self, Intent, ThreadRow};
 use slopty_proto::thread::{Delivery, IntentId, ThreadId, ThreadState};
 /// One part of a delivery ptyd types ([`Deliver`]).
@@ -63,7 +60,6 @@ pub use slopty_pty::protocol::Part;
 use tokio::sync::broadcast;
 pub use wait::{AgentFeed, wait_for};
 
-use crate::restore::{Brief, Orchestrated};
 use crate::session::{Read, SessionHandle, Text};
 use crate::{ItemStore, Worker, WorkerError, listing};
 
@@ -103,13 +99,6 @@ pub const MAX_DIR_ENTRIES: u32 = 10_000;
 const MIN_SIZE: Size = Size { cols: 10, rows: 2 };
 const MAX_SIZE: Size = Size { cols: 1000, rows: 500 };
 
-/// How long a spawned agent's first prompt waits for the agent's hooks to say it is at its
-/// prompt.
-///
-/// A person may be answering a dialog of its own first (trusting a folder, an MCP server), so
-/// this is long; past it the prompt is left unsent, never typed blind.
-pub const PROMPT_READY_WITHIN: Duration = Duration::from_mins(10);
-
 /// Between typed or pasted words and the Enter that submits them. Ink-based TUIs (Claude
 /// Code) read a paste and an Enter that arrive in one read as one paste, and the Enter is
 /// swallowed.
@@ -117,10 +106,6 @@ pub const PROMPT_READY_WITHIN: Duration = Duration::from_mins(10);
 /// ptyd keeps the pause, not this worker: the words and their Enter are one delivery
 /// ([`deliver_entry`]), so a worker that goes in between loses neither.
 pub const SUBMIT_PAUSE: Duration = Duration::from_millis(200);
-
-/// How long a worker that started again waits for a session an older worker still lets go of
-/// before it takes up the agent in it ([`Orchestrator::take_up`]).
-const TAKE_UP_WITHIN: Duration = Duration::from_secs(30);
 
 /// How long after answering [`Verb::RestartWorker`] the daemon exits: time for the answer to
 /// leave on the server's link, which goes with the process.
@@ -151,42 +136,35 @@ pub trait Agents: Send + Sync {
     }
 }
 
-/// A task's thread to start ([`TaskThreads::start`]).
+/// A seated thread to start ([`SeatedThreads::start`]): an agent another agent started.
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub struct TaskThread {
+pub struct SeatedThread {
     /// What to start, in the folder it works in.
     pub start: wire::Start,
-    /// The id it is known by: its row's [`slopty_proto::project::SEAT_FACT`], the session its
+    /// The id it is known by: its row's [`slopty_proto::agent::SEAT_FACT`], the session its
     /// Slopty tools speak as, and the terminal it runs in when its agent runs in one.
     pub seat: SessionId,
-    /// Variables for the agent and its Slopty tools, from the server (its project and task).
-    pub env: Vec<(String, String)>,
-    /// What the agent is told it is for.
-    pub role: Option<String>,
+    /// Open facts its row carries from the start (its parent).
+    pub facts: Vec<(String, String)>,
+    /// Extra system text, where its agent takes some.
+    pub system: Option<String>,
 }
 
-/// The worker's thread host, as the server's tasks start threads in it
-/// ([`Verb::StartThread`]). The daemon gives it ([`Orchestrator::set_task_threads`]).
-pub trait TaskThreads: Send + Sync {
+/// The worker's thread host, as the server starts seated threads in it ([`Verb::StartThread`]).
+/// The daemon gives it ([`Orchestrator::set_seated_threads`]).
+pub trait SeatedThreads: Send + Sync {
     /// Start `thread`, answering its id once its row is in the table.
     ///
-    /// Its row carries [`slopty_proto::project::SEAT_FACT`] naming the seat. Its Slopty tools
-    /// get `env` with what every terminal of the worker gets for that seat (the server, the
-    /// seat as its session, the token for it), through its agent's own door. The role goes
-    /// through that door too: a system prompt where the agent takes one, else ahead of its
-    /// first prompt. An agent that runs in a terminal runs in one opened under the seat. A
-    /// seat started already answers its thread, starting nothing.
+    /// Its row carries [`slopty_proto::agent::SEAT_FACT`] naming the seat, and its `facts`.
+    /// Its Slopty tools get what every terminal of the worker gets for that seat (the server,
+    /// the seat as its session, the token for it), through its agent's own door. The system
+    /// text goes through that door too: a system prompt where the agent takes one, else ahead
+    /// of its first prompt. An agent that runs in a terminal runs in one opened under the
+    /// seat. A seat started already answers its thread, starting nothing.
     ///
     /// # Errors
     /// [`ErrorCode::Unsupported`] for an agent it cannot start; any other failure as it is.
-    fn start(&self, thread: TaskThread) -> BoxFuture<'_, Result<ThreadId, Failure>>;
-
-    /// Take a thread whose agent exited up again as `start` says, by its agent's own door (a
-    /// start of its session), as a client's Resume would: answers the thread, the same one.
-    ///
-    /// # Errors
-    /// As [`Self::start`].
-    fn resume(&self, start: wire::Start) -> BoxFuture<'_, Result<ThreadId, Failure>>;
+    fn start(&self, thread: SeatedThread) -> BoxFuture<'_, Result<ThreadId, Failure>>;
 
     /// End the agent of the thread seated at `seat`, its session kept to take up again.
     /// `Ok(false)` when no thread is seated there.
@@ -211,46 +189,7 @@ pub trait ThreadReads: Send + Sync {
     fn at_terminal(&self, session: SessionId) -> Option<ThreadRow>;
 }
 
-/// How the exited agent of `state`'s thread takes its own session up again, as a client's
-/// Resume does: Claude Code by `--resume <session>` with the model it ran last, Codex's shared
-/// thread by `resume <thread>`. One still running, one whose agent cannot go on, and any other
-/// agent (whose next message starts it) are refused in words.
-///
-/// # Errors
-/// [`ErrorCode::Invalid`] for a thread that is not to be resumed this way.
-fn resume_start(state: &ThreadState) -> Result<wire::Start, Failure> {
-    use slopty_proto::thread::{AgentId, Drive, Liveness};
-    let refuse = |why: &str| Err(Failure::new(ErrorCode::Invalid, why));
-    let Liveness::Exited { resumable } = state.status.liveness else {
-        return refuse("its agent still runs");
-    };
-    let meta = &state.meta;
-    if !resumable || meta.native.trim().is_empty() {
-        return refuse("its agent cannot take this session up again");
-    }
-    let (model, args) = if meta.agent.is(AgentId::CLAUDE_CODE) && meta.drive.is(Drive::OBSERVED) {
-        let model = state.meters.model_id.clone().filter(|m| !m.trim().is_empty());
-        (model, vec![slopty_agent::resume::RESUME_FLAG.to_owned(), meta.native.clone()])
-    } else if meta.agent.is(AgentId::CODEX) && meta.drive.is(Drive::SHARED) {
-        (None, slopty_agent::codex::shared::resume_args(&meta.native))
-    } else {
-        return refuse("its agent goes on with the next message sent to it");
-    };
-    Ok(wire::Start {
-        agent: meta.agent.clone(),
-        cwd: meta.cwd.clone(),
-        drive: Some(meta.drive.clone()),
-        prompt: None,
-        model,
-        mode: None,
-        effort: None,
-        attachments: Vec::new(),
-        args,
-        worktree: None,
-    })
-}
-
-/// A boxed future a [`TaskThreads`] answers with.
+/// A boxed future a [`SeatedThreads`] answers with.
 pub type BoxFuture<'a, T> = std::pin::Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// A verb that failed: the code and the words for whoever asked.
@@ -281,18 +220,6 @@ impl From<WorkerError> for Failure {
         };
         Self::new(code, e.to_string())
     }
-}
-
-/// The queue's git work that failed, as the server is told: a conflict, or a target that
-/// moved, is the work's to settle; anything else is not.
-fn verify_failure(failed: &crate::repo::verify::Failed) -> Failure {
-    use crate::repo::verify::Failed;
-    let code = match failed {
-        Failed::Conflict(_) | Failed::Moved(_) | Failed::Diverged(_) => ErrorCode::Conflict,
-        Failed::Protected(_) => ErrorCode::Protected,
-        Failed::Other(_) => ErrorCode::Failed,
-    };
-    Failure::new(code, failed.to_string())
 }
 
 /// A bundle that could not be made or fetched, as the server is told: a receiver that lacks
@@ -350,7 +277,6 @@ struct Inner {
     events: broadcast::Sender<WorkerMsg>,
     /// What the agents' hooks and the daemon's poll report, as the daemon's agent table took it.
     heard: broadcast::Sender<AgentEvent>,
-    launch: Launch,
     conversations: Arc<dyn Conversations>,
     once: idempotency::Ledger,
     /// Terminals orchestration started as an agent's: an agent's before it is first seen, and
@@ -364,7 +290,7 @@ struct Inner {
     /// How they go ([`Orchestrator::clone_progress`]).
     clone_progress: broadcast::Sender<(u64, crate::repo::cloning::Progress)>,
     /// The thread host the server's tasks start threads in, once the daemon gave it.
-    task_threads: std::sync::OnceLock<Arc<dyn TaskThreads>>,
+    seated_threads: std::sync::OnceLock<Arc<dyn SeatedThreads>>,
     /// The threads orchestration reads and answers, once the daemon gave them.
     thread_reads: std::sync::OnceLock<Arc<dyn ThreadReads>>,
     /// The `settings.toml` the daemon follows, whose `[worker]` another device reads and edits
@@ -379,17 +305,6 @@ struct Inner {
     restart: std::sync::OnceLock<Arc<tokio::sync::Notify>>,
 }
 
-/// What an agent the orchestrator starts is given.
-#[derive(Clone, Debug, Default)]
-pub struct Launch {
-    /// The `slopty` binary beside the worker: the `slopty hook` relay it reports through,
-    /// registered on its `--settings`, and `slopty mcp`, which serves it Slopty's tools on its
-    /// `--mcp-config` (`docs/decisions/projects.md`).
-    pub relay: Option<PathBuf>,
-    /// Slopty's Claude Code mod, loaded with its flag and environment.
-    pub claude_mod: Option<slopty_agent::claude_mod::Installed>,
-}
-
 impl std::fmt::Debug for Orchestrator {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Orchestrator").field("worker", &self.inner.id).finish_non_exhaustive()
@@ -398,15 +313,14 @@ impl std::fmt::Debug for Orchestrator {
 
 impl Orchestrator {
     /// An orchestrator for worker `id`, acting on its sessions, agent table, item registry,
-    /// client broadcast, agent reports and followed conversations. The agents it starts get
-    /// what `launch` says; the clones the server asks for share `cloner` with the person's own.
+    /// client broadcast, agent reports and followed conversations; the clones the server asks
+    /// for share `cloner` with the person's own.
     #[must_use]
     pub fn new(
         id: WorkerId,
         worker: Worker,
         items: ItemStore,
         (events, heard): (broadcast::Sender<WorkerMsg>, broadcast::Sender<AgentEvent>),
-        launch: Launch,
         (conversations, cloner): (Arc<dyn Conversations>, crate::repo::cloning::Cloner),
     ) -> Self {
         let inner = Inner {
@@ -415,14 +329,13 @@ impl Orchestrator {
             items,
             events,
             heard,
-            launch,
             conversations,
             once: idempotency::Ledger::default(),
             agent_terms: parking_lot::Mutex::default(),
             choosing: tokio::sync::Mutex::default(),
             cloner,
             clone_progress: broadcast::channel(CLONE_PROGRESS).0,
-            task_threads: std::sync::OnceLock::new(),
+            seated_threads: std::sync::OnceLock::new(),
             thread_reads: std::sync::OnceLock::new(),
             settings_file: std::sync::OnceLock::new(),
             facts: std::sync::OnceLock::new(),
@@ -431,39 +344,10 @@ impl Orchestrator {
         Self { inner: Arc::new(inner) }
     }
 
-    /// Take up the agents orchestration started before this worker did, which live on in ptyd
-    /// ([`Worker::orchestrated`]): each is followed again, so its prompts wait on the board as
-    /// they did, is guarded as an agent's terminal, and gets a brief still owed once it is at
-    /// its prompt, under the delivery's own name, so ptyd types it no second time. Must be
-    /// called on a tokio runtime.
-    pub fn take_up(&self) {
-        let inner = &self.inner;
-        for (session, kept) in inner.worker.orchestrated() {
-            tracing::info!(%session, owed = kept.brief.is_some(), "taking up an agent started before");
-            inner.agent_terms.lock().insert(session);
-            inner.conversations.follow(session);
-            let Some(brief) = kept.brief else { continue };
-            let heard = inner.heard.subscribe();
-            let worker = inner.worker.clone();
-            tokio::spawn(async move {
-                match worker.get_adopted(session, TAKE_UP_WITHIN).await {
-                    Ok(handle) => {
-                        let agents = worker.shared_agents();
-                        type_when_ready(handle, brief, AgentFeed { heard, agents }, worker).await;
-                    }
-                    Err(e) => {
-                        tracing::warn!(%session, error = %e, "brief owed to a session not taken up");
-                    }
-                }
-            });
-        }
-    }
-
-    /// Start the server's tasks' threads in `threads` from now on. The first one given
-    /// stays.
-    pub fn set_task_threads(&self, threads: Arc<dyn TaskThreads>) {
-        if self.inner.task_threads.set(threads).is_err() {
-            tracing::warn!("the task threads were given twice; the first stay");
+    /// Start the server's seated threads in `threads` from now on. The first one given stays.
+    pub fn set_seated_threads(&self, threads: Arc<dyn SeatedThreads>) {
+        if self.inner.seated_threads.set(threads).is_err() {
+            tracing::warn!("the seated threads were given twice; the first stay");
         }
     }
 
@@ -564,24 +448,12 @@ impl Orchestrator {
             | Verb::Events { .. }
             | Verb::ForgetWorker { .. }
             | Verb::Wake { .. }
-            | Verb::ProjectCreate { .. }
-            | Verb::ProjectSet { .. }
-            | Verb::ProjectProgress { .. }
-            | Verb::TaskMerge { .. }
-            | Verb::TaskPush { .. }
-            | Verb::ProjectLand { .. }
-            | Verb::ProjectResume { .. }
-            | Verb::ProjectDelete { .. }
-            | Verb::TaskTell { .. }
-            | Verb::ProjectList
-            | Verb::ProjectStatus { .. }
-            | Verb::TaskCreate { .. }
-            | Verb::TaskUpdate { .. }
-            | Verb::TaskSpawn { .. }
-            | Verb::TaskRestart { .. }
-            | Verb::TaskGet { .. }
-            | Verb::TaskReport { .. }
-            | Verb::WorkingOn { .. } => {
+            | Verb::AgentStart(..)
+            | Verb::AgentTell { .. }
+            | Verb::AgentWait { .. }
+            | Verb::AgentStop { .. }
+            | Verb::Agents
+            | Verb::BranchBring { .. } => {
                 Err(Failure::new(ErrorCode::Invalid, "the server answers this, not a worker"))
             }
             Verb::WorkerFacts { worker } => {
@@ -590,9 +462,9 @@ impl Orchestrator {
                 }
                 let facts = match self.inner.facts.get() {
                     Some(kept) => kept.asked(crate::facts::ASKED_WAIT).await,
-                    None => slopty_proto::project::Facts::new(),
+                    None => slopty_proto::server::Facts::new(),
                 };
-                Ok(Outcome::Facts(vec![slopty_proto::project::WorkerFacts {
+                Ok(Outcome::Facts(vec![slopty_proto::server::WorkerFacts {
                     worker: inner.id,
                     facts,
                 }]))
@@ -628,55 +500,13 @@ impl Orchestrator {
                     attach: false,
                 };
                 let handle = self.open_as(session, &req, ORCHESTRATOR).await?;
-                // A command that runs Claude Code is guarded as a spawned agent is from the
+                // A command that runs Claude Code is guarded as an agent from the
                 // start: until its first hook a dialog of its own may be up, and typing would
                 // answer it.
                 if slopty_agent::detect::is_claude("", &req.command) {
                     inner.agent_terms.lock().insert(handle.id());
                 }
                 Ok(opened(TermRef { worker, session: handle.id() }, made))
-            }
-            Verb::SpawnAgent {
-                worker,
-                cwd,
-                prompt,
-                args,
-                env,
-                size,
-                session,
-                autonomy,
-                worktree,
-            } => {
-                self.mine(worker)?;
-                let spawn = Spawn { cwd, args, env, size: term_size(size)?, autonomy };
-                let _choosing = self.choosing(session).await;
-                if let Some(running) = self.running(session) {
-                    return Ok(Outcome::Opened(TermRef { worker, session: running }));
-                }
-                // Made, or reopened as it is, for the agent's own `--worktree <name>` to open.
-                let made = match worktree {
-                    Some(asked) => Some(
-                        crate::repo::worktrees::open(&spawn.cwd, asked, &|_| {})
-                            .await
-                            .map_err(|failed| worktree_failed(&failed))?
-                            .1,
-                    ),
-                    None => None,
-                };
-                // Orchestration follows what it starts, so its prompts wait for an answer on
-                // the board rather than only in its terminal; followed before it starts, since
-                // an agent may ask before its spawn has returned here, and a prompt nobody
-                // follows goes back to the TUI at once.
-                let session = session.unwrap_or_else(SessionId::new);
-                inner.conversations.follow(session);
-                match self.spawn_agent(spawn, prompt, Some(session)).await {
-                    Ok(Outcome::Opened(term)) => Ok(opened(term, made)),
-                    Ok(other) => Ok(other),
-                    Err(failed) => {
-                        inner.conversations.forget(session);
-                        Err(failed)
-                    }
-                }
             }
             Verb::SendInput { term, input } => {
                 let handle = self.session(term)?;
@@ -713,9 +543,9 @@ impl Orchestrator {
             }
             Verb::Close { term } => {
                 self.mine(term.worker)?;
-                // A task's thread with no terminal of its own is closed by its seat.
+                // A seated thread with no terminal of its own is closed by its seat.
                 if inner.worker.get(term.session).is_err()
-                    && let Some(threads) = inner.task_threads.get()
+                    && let Some(threads) = inner.seated_threads.get()
                     && threads.close(term.session).await?
                 {
                     return Ok(Outcome::Done);
@@ -731,23 +561,11 @@ impl Orchestrator {
             }
             verb @ (Verb::CloneRepo { .. }
             | Verb::BundleBranch { .. }
-            | Verb::FetchBundle { .. }
-            | Verb::Verify { .. }
-            | Verb::Rebase { .. }
-            | Verb::TestDiff { .. }
-            | Verb::FastForward { .. }
-            | Verb::CatchUp { .. }
-            | Verb::LandPull { .. }
-            | Verb::RemoveWorktree { .. }
-            | Verb::DropBranches { .. }
-            | Verb::BranchOff { .. }
-            | Verb::PullOf { .. }
-            | Verb::GoalCheck { .. }
-            | Verb::OnOrigin { .. }) => Box::pin(self.repository(verb)).await,
-            Verb::StartThread { worker, start, seat, env, role } => {
+            | Verb::FetchBundle { .. }) => Box::pin(self.repository(verb)).await,
+            Verb::StartThread { worker, start, seat, facts, system } => {
                 self.mine(worker)?;
-                let threads = inner.task_threads.get().cloned().ok_or_else(|| {
-                    Failure::new(ErrorCode::Unsupported, "this worker starts no task's thread")
+                let threads = inner.seated_threads.get().cloned().ok_or_else(|| {
+                    Failure::new(ErrorCode::Unsupported, "this worker starts no seated thread")
                 })?;
                 let mut start = *start;
                 // The server names a folder as the person does, `~` and all; an agent's thread
@@ -757,7 +575,7 @@ impl Orchestrator {
                 let made = crate::repo::worktrees::enter(&mut start, &|_| {})
                     .await
                     .map_err(|failed| worktree_failed(&failed))?;
-                let thread = threads.start(TaskThread { start, seat, env, role }).await?;
+                let thread = threads.start(SeatedThread { start, seat, facts, system }).await?;
                 Ok(Outcome::ThreadStarted { thread, worktree: made.map(Box::new) })
             }
             Verb::ListPorts { worker } => {
@@ -852,16 +670,6 @@ impl Orchestrator {
                 }
                 let read = thread_read::read(&state, inner.id, view, after);
                 Ok(Outcome::Thread(Box::new(read)))
-            }
-            Verb::ResumeThread { of } => {
-                let (thread, reads) = self.thread_of(&of)?;
-                let state = reads.state(thread).ok_or_else(|| no_thread(thread))?;
-                let start = resume_start(&state)?;
-                let threads = inner.task_threads.get().cloned().ok_or_else(|| {
-                    Failure::new(ErrorCode::Unsupported, "this worker starts no thread")
-                })?;
-                let resumed = threads.resume(start).await?;
-                Ok(Outcome::ThreadStarted { thread: resumed, worktree: None })
             }
             Verb::SendMessage { of, text } => {
                 let (thread, reads) = self.thread_of(&of)?;
@@ -1019,79 +827,9 @@ impl Orchestrator {
         Ok(())
     }
 
-    /// Start the agent's TUI, under `chosen` when the caller chose the id; with a prompt, type
-    /// it once the agent's hooks say it is at its prompt ([`type_when_ready`]). It gets the
-    /// hook relay, Slopty's tools and the mod ([`Launch`]), a conversation id of its own
-    /// (`--session-id`, [`slopty_agent::resume::with_session_id`]), and, held to a
-    /// project's autonomy, a lock at that level ([`slopty_agent::hooks::held_to`]); the
-    /// person's own start is held to nothing. The caller's own settings, MCP servers,
-    /// arguments and variables are kept, and its variables win. The server it asks for tools
-    /// is the session's own `SLOPTY_SERVER`.
-    async fn spawn_agent(
-        &self,
-        spawn: Spawn,
-        prompt: Option<String>,
-        chosen: Option<SessionId>,
-    ) -> Result<Outcome, Failure> {
-        // Subscribed before the spawn: the agent may report itself ready before the open
-        // returns.
-        let heard = self.inner.heard.subscribe();
-        let Spawn { cwd, args, env, size, autonomy } = spawn;
-        let launch = &self.inner.launch;
-        let (args, conversation) = slopty_agent::resume::with_session_id(args);
-        let relay = launch.relay.as_deref().map(|relay| relay.to_string_lossy().into_owned());
-        let dir = crate::file::expand_home(Path::new(&cwd));
-        let args = blocking({
-            let relay = relay.clone();
-            move || {
-                let args = match &relay {
-                    Some(relay) => slopty_agent::hooks::with_relay(args, relay, &dir),
-                    None => args,
-                };
-                Ok(match autonomy {
-                    None => args,
-                    Some(level) => slopty_agent::hooks::held_to(args, &dir, level.opens_auto()),
-                })
-            }
-        })
-        .await?;
-        let args = match &relay {
-            Some(relay) => slopty_agent::hooks::with_mcp(args, relay),
-            None => args,
-        };
-        // The mod's variables go last, so a request's cannot silence or redirect it.
-        let (args, env) = match &launch.claude_mod {
-            Some(installed) => {
-                (installed.args(args), env.into_iter().chain(installed.agent_env()).collect())
-            }
-            None => (args, env),
-        };
-        let req = OpenSession {
-            size,
-            cwd: Some(cwd),
-            command: std::iter::once("claude".to_owned()).chain(args).collect(),
-            env,
-            title: None,
-            attach: false,
-        };
-        let handle = self.open_as(chosen, &req, ORCHESTRATOR).await?;
-        let session = handle.id();
-        self.inner.agent_terms.lock().insert(session);
-        tracing::info!(%session, conversation = ?conversation, "agent started");
-        // Kept before any of the brief is typed: a worker that starts again in between takes
-        // the agent up, and types the brief once, whichever side of the restart ptyd took it.
-        let brief = prompt.map(|text| Brief { delivery: delivery_name(), text });
-        let worker = self.inner.worker.clone();
-        worker.keep_orchestrated(session, Orchestrated { brief: brief.clone() }).await;
-        if let Some(brief) = brief {
-            let agents = worker.shared_agents();
-            tokio::spawn(type_when_ready(handle, brief, AgentFeed { heard, agents }, worker));
-        }
-        Ok(Outcome::Opened(TermRef { worker: self.inner.id, session }))
-    }
-
-    /// The verbs on a repository the server asks for around a task: a clone, a branch
-    /// bundled, a bundle fetched. Apart, and boxed, since their futures are large and rare.
+    /// The verbs on a repository the server asks for to start an agent or bring a branch across:
+    /// a clone, a branch bundled, a bundle fetched. Apart, and boxed, since their futures are large
+    /// and rare.
     async fn repository(&self, verb: Verb) -> Result<Outcome, Failure> {
         match verb {
             Verb::CloneRepo { worker, url, clone } => {
@@ -1164,202 +902,6 @@ impl Orchestrator {
                     .map_err(bundle_failure)?;
                 Ok(Outcome::Fetched { branch: into, head })
             }
-            Verb::Verify { worker, repo, worktree, head, target, command, session, title } => {
-                self.mine(worker)?;
-                let git = crate::changes::git().ok_or_else(|| {
-                    Failure::new(ErrorCode::Unsupported, "this worker has no git")
-                })?;
-                let repo = crate::file::expand_home(Path::new(&repo));
-                let places = crate::file::expand_home(Path::new(VERIFY_PLACES));
-                let place = crate::repo::verify::place(&places, &worktree)
-                    .map_err(|f| verify_failure(&f))?;
-                let _choosing = self.choosing(Some(session)).await;
-                let made = crate::repo::verify::checkout(git, &repo, &place, &head, &target)
-                    .await
-                    .map_err(|f| verify_failure(&f))?;
-                let req = OpenSession {
-                    size: ORCHESTRATED_SIZE,
-                    cwd: Some(made.path.to_string_lossy().into_owned()),
-                    command: crate::repo::verify::command_line(&command),
-                    env: vec![
-                        ("SLOPTY_VERIFY_HEAD".to_owned(), made.head.clone()),
-                        ("SLOPTY_VERIFY_BASE".to_owned(), made.base.clone()),
-                    ],
-                    title: Some(title),
-                    attach: false,
-                };
-                let handle = self.open_as(Some(session), &req, ORCHESTRATOR).await?;
-                let term = TermRef { worker: self.inner.id, session: handle.id() };
-                Ok(Outcome::Verifying { term, head: made.head, base: made.base })
-            }
-            Verb::Rebase { worker, repo, worktree, head, onto, after, trailers, verified } => {
-                self.mine(worker)?;
-                let git = crate::changes::git().ok_or_else(|| {
-                    Failure::new(ErrorCode::Unsupported, "this worker has no git")
-                })?;
-                let repo = crate::file::expand_home(Path::new(&repo));
-                let places = crate::file::expand_home(Path::new(VERIFY_PLACES));
-                let place = crate::repo::verify::place(&places, &worktree)
-                    .map_err(|f| verify_failure(&f))?;
-                let commits = (head.as_str(), onto.as_str(), after.as_deref());
-                let made = crate::repo::verify::rebase(
-                    git,
-                    &repo,
-                    &place,
-                    commits,
-                    &trailers,
-                    verified.as_deref(),
-                )
-                .await
-                .map_err(|f| verify_failure(&f))?;
-                let crate::repo::verify::Rebased { head, from, onto, verified } = made;
-                Ok(Outcome::Rebased { head, from, onto, verified })
-            }
-            Verb::TestDiff { worker, repo, head, target, test_paths } => {
-                self.mine(worker)?;
-                let git = crate::changes::git().ok_or_else(|| {
-                    Failure::new(ErrorCode::Unsupported, "this worker has no git")
-                })?;
-                let repo = crate::file::expand_home(Path::new(&repo));
-                let tests = crate::repo::verify::test_diff(git, &repo, &head, &target, &test_paths)
-                    .await
-                    .map_err(|f| verify_failure(&f))?;
-                Ok(Outcome::TestDiff(tests))
-            }
-            Verb::FastForward { worker, repo, target, from, to, push } => {
-                self.mine(worker)?;
-                let git = crate::changes::git().ok_or_else(|| {
-                    Failure::new(ErrorCode::Unsupported, "this worker has no git")
-                })?;
-                let repo = crate::file::expand_home(Path::new(&repo));
-                let moved =
-                    crate::repo::verify::fast_forward(git, &repo, &target, &from, &to, push)
-                        .await
-                        .map_err(|f| verify_failure(&f))?;
-                let crate::repo::verify::Moved { head, pushed, push_failed } = moved;
-                Ok(Outcome::FastForwarded { head, pushed, push_failed })
-            }
-            Verb::CatchUp { worker, repo, target } => {
-                self.mine(worker)?;
-                let git = crate::changes::git().ok_or_else(|| {
-                    Failure::new(ErrorCode::Unsupported, "this worker has no git")
-                })?;
-                let repo = crate::file::expand_home(Path::new(&repo));
-                let moved = crate::repo::verify::catch_up(git, &repo, &target)
-                    .await
-                    .map_err(|f| verify_failure(&f))?;
-                let crate::repo::verify::Moved { head, pushed, push_failed } = moved;
-                Ok(Outcome::FastForwarded { head, pushed, push_failed })
-            }
-            Verb::LandPull { worker, repo, head, branch, target, title, body } => {
-                self.mine(worker)?;
-                let programs = crate::repo::commit::Programs::here().await;
-                let repo = crate::file::expand_home(Path::new(&repo));
-                let landing =
-                    crate::repo::pull::Landing { head: &head, branch: &branch, target: &target };
-                let landed = crate::repo::pull::land(&programs, &repo, landing, (&title, &body));
-                let (number, url) = programs
-                    .scope(landed)
-                    .await
-                    .map_err(|why| Failure::new(ErrorCode::Failed, why))?;
-                Ok(Outcome::PullOpened { number, url })
-            }
-            Verb::RemoveWorktree { worker, worktree, landed } => {
-                self.mine(worker)?;
-                let git = crate::changes::git().ok_or_else(|| {
-                    Failure::new(ErrorCode::Unsupported, "this worker has no git")
-                })?;
-                let worktree = crate::file::expand_home(Path::new(&worktree));
-                let places = crate::file::expand_home(Path::new(VERIFY_PLACES));
-                // A project's verify checkout, the server's own: it goes by force.
-                if let Some(name) = worktree
-                    .strip_prefix(&places)
-                    .ok()
-                    .and_then(|rest| rest.to_str())
-                    .filter(|name| crate::repo::verify::place(&places, name).is_ok())
-                {
-                    let place = places.join(name);
-                    crate::repo::verify::drop_checkout(git, &place)
-                        .await
-                        .map_err(|failed| verify_failure(&failed))?;
-                    return Ok(Outcome::WorktreeRemoved { branch: None, branch_removed: false });
-                }
-                let cwds: Vec<PathBuf> = self
-                    .inner
-                    .worker
-                    .summaries()
-                    .await
-                    .into_iter()
-                    .filter(|s| matches!(s.state, SessionState::Running))
-                    .filter_map(|s| s.cwd)
-                    .map(|cwd| crate::file::expand_home(Path::new(&cwd)))
-                    .collect();
-                let removed = crate::repo::worktrees::remove(git, &worktree, &landed, &cwds)
-                    .await
-                    .map_err(|failed| worktree_failed(&failed))?;
-                let crate::repo::worktrees::Removed { branch, branch_removed } = removed;
-                Ok(Outcome::WorktreeRemoved { branch, branch_removed })
-            }
-            Verb::DropBranches { worker, repo, branches } => {
-                self.mine(worker)?;
-                let git = crate::changes::git().ok_or_else(|| {
-                    Failure::new(ErrorCode::Unsupported, "this worker has no git")
-                })?;
-                let repo = crate::file::expand_home(Path::new(&repo));
-                crate::repo::worktrees::drop_branches(git, &repo, &branches)
-                    .await
-                    .map_err(|failed| worktree_failed(&failed))?;
-                Ok(Outcome::Done)
-            }
-            Verb::BranchOff { worker, repo, branch } => {
-                self.mine(worker)?;
-                let git = crate::changes::git().ok_or_else(|| {
-                    Failure::new(ErrorCode::Unsupported, "this worker has no git")
-                })?;
-                let repo = crate::file::expand_home(Path::new(&repo));
-                crate::repo::worktrees::branch_off(git, &repo, &branch)
-                    .await
-                    .map_err(|failed| worktree_failed(&failed))?;
-                Ok(Outcome::Done)
-            }
-            Verb::GoalCheck { worker, repo, target } => {
-                self.mine(worker)?;
-                let git = crate::changes::git().ok_or_else(|| {
-                    Failure::new(ErrorCode::Unsupported, "this worker has no git")
-                })?;
-                let repo = crate::file::expand_home(Path::new(&repo));
-                crate::repo::worktrees::goal_place(git, &repo, &target)
-                    .await
-                    .map_err(|failed| worktree_failed(&failed))?;
-                Ok(Outcome::Done)
-            }
-            Verb::PullOf { worker, repo, branch } => {
-                self.mine(worker)?;
-                let programs = crate::repo::commit::Programs::here().await;
-                let root = crate::file::expand_home(Path::new(&repo));
-                let read = crate::repo::pull::status_of(&programs, &root, Some(&branch));
-                let pull = programs.scope(read).await.map_err(|outcome| {
-                    use slopty_proto::git::GitOutcome;
-                    let why = match outcome {
-                        GitOutcome::Refused { why } | GitOutcome::Unavailable { why, .. } => why,
-                        GitOutcome::Failed { said } => said,
-                        other @ GitOutcome::Done(_) => format!("{other:?}"),
-                    };
-                    Failure::new(ErrorCode::Failed, why)
-                })?;
-                Ok(Outcome::PullOf { pull: pull.as_ref().map(crate::thread::pulls::seen) })
-            }
-            Verb::OnOrigin { worker, repo, target, heads } => {
-                self.mine(worker)?;
-                let git = crate::changes::git().ok_or_else(|| {
-                    Failure::new(ErrorCode::Unsupported, "this worker has no git")
-                })?;
-                let repo = crate::file::expand_home(Path::new(&repo));
-                let heads = crate::repo::verify::on_origin(git, &repo, &target, heads)
-                    .await
-                    .map_err(|f| verify_failure(&f))?;
-                Ok(Outcome::OnOrigin { heads })
-            }
             _ => Err(Failure::new(ErrorCode::Unsupported, "not a repository verb")),
         }
     }
@@ -1407,16 +949,6 @@ impl Orchestrator {
             )
         })
     }
-}
-
-/// Where and how an agent starts.
-struct Spawn {
-    cwd: String,
-    args: Vec<String>,
-    env: Vec<(String, String)>,
-    size: TermSize,
-    /// How far it may go before it asks, held by its settings; `None` for the person's own.
-    autonomy: Option<slopty_proto::project::Autonomy>,
 }
 
 /// A terminal opened, in the worktree `made` when it was asked one.
@@ -1582,109 +1114,6 @@ pub fn may_deliver(handle: &SessionHandle, agents: &dyn Agents) -> Result<(), Fa
         ));
     }
     Ok(())
-}
-
-/// Whether an agent is at its prompt, by its hooks' word: at rest after its `SessionStart` or
-/// a turn. A weaker signal (its process, its title, its transcript) may come before its TUI
-/// takes input, or while a dialog of its own is up.
-fn at_its_prompt(agent: &SessionAgent) -> bool {
-    agent.source == AgentSource::Hook
-        && matches!(
-            agent.status,
-            AgentStatus::Idle
-                | AgentStatus::Done
-                | AgentStatus::Failed { .. }
-                | AgentStatus::Waiting { .. }
-                | AgentStatus::Blocked(BlockReason::IdlePrompt)
-        )
-}
-
-/// Type a spawned agent's first prompt once its hooks say it is at its prompt and nothing
-/// stands in the way ([`may_type`]), trying again at each report of the agent until
-/// [`PROMPT_READY_WITHIN`] has passed. Never typed blind: when the agent never gets there, or
-/// has ended, the prompt is left unsent, owed no more, and the log says why.
-///
-/// The paste and the Enter that submits it go to ptyd as one delivery ([`deliver_entry`]),
-/// judged once, as it starts: an agent asks the person something only inside a turn, and its turn
-/// starts with this Enter.
-async fn type_when_ready(handle: SessionHandle, brief: Brief, mut feed: AgentFeed, worker: Worker) {
-    let session = handle.id();
-    let Some(deadline) = tokio::time::Instant::now().checked_add(PROMPT_READY_WITHIN) else {
-        return;
-    };
-    let mut activity = handle.activity();
-    let mut held = not_ready();
-    let left = loop {
-        if feed.agents.status(session).is_some_and(|a| at_its_prompt(&a)) {
-            let guard = || may_type(&handle, &*feed.agents, true);
-            let words = crate::Words::Paste(brief.text.clone());
-            match deliver_entry(&handle, &worker, brief.delivery, words, guard).await {
-                Ok(()) => {
-                    tracing::info!(%session, "typed the agent's first prompt");
-                    return;
-                }
-                Err(refused) if refused.code == ErrorCode::AgentExited => {
-                    break Some(refused.message);
-                }
-                Err(refused)
-                    if matches!(
-                        refused.code,
-                        ErrorCode::AwaitsPerson | ErrorCode::AgentNotReady
-                    ) =>
-                {
-                    tracing::debug!(%session, why = %refused.message, "first prompt waits");
-                    held = refused;
-                }
-                Err(failed) => {
-                    tracing::warn!(%session, error = %failed.message, "first prompt not typed; owed until the worker starts again");
-                    return;
-                }
-            }
-        }
-        let reported = async {
-            loop {
-                match feed.heard.recv().await {
-                    Ok(ev) if ev.session == session => return Some(true),
-                    Ok(_) => {}
-                    Err(broadcast::error::RecvError::Lagged(_)) => return Some(true),
-                    Err(broadcast::error::RecvError::Closed) => return None,
-                }
-            }
-        };
-        // `Some(false)` once the agent's terminal ended; `None` when its actor is gone, the
-        // worker going down.
-        let exited = async {
-            while !activity.borrow_and_update().exited {
-                if activity.changed().await.is_err() {
-                    return None;
-                }
-            }
-            Some(false)
-        };
-        let woke = tokio::select! {
-            reported = tokio::time::timeout_at(deadline, reported) => reported,
-            ended = exited => Ok(ended),
-        };
-        match woke {
-            Ok(Some(true)) => {}
-            Ok(Some(false)) => break Some("the agent's terminal ended".to_owned()),
-            Ok(None) => {
-                // The next worker takes the agent up, and the brief with it.
-                tracing::info!(%session, "the worker goes down; the first prompt stays owed");
-                return;
-            }
-            Err(_elapsed) => {
-                break Some(format!(
-                    "the agent never became ready for it within {PROMPT_READY_WITHIN:?}: {}",
-                    held.message
-                ));
-            }
-        }
-    };
-    if let Some(why) = left {
-        tracing::warn!(%session, %why, "first prompt left unsent");
-        worker.brief_settled(session, brief.delivery);
-    }
 }
 
 /// What hands ptyd the parts of an entry to type whole ([`Worker::deliver`]).

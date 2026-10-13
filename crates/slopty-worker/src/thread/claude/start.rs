@@ -121,10 +121,10 @@ impl Starter {
         outcome.await.unwrap_or_else(|_| refused("the Claude Code starts stopped"))
     }
 
-    /// Start a server task's thread as `start` says, once per seat: Claude Code runs in a
-    /// terminal opened under the seat, so the worker gives it the seat's hooks, tools and
-    /// variables as it does any terminal's, and the role as its system prompt's addition
-    /// (`--append-system-prompt`).
+    /// Start a seated thread (an agent another started) as `start` says, once per seat: Claude Code
+    /// runs in a terminal opened under the seat, so the worker gives it the seat's hooks, tools
+    /// and variables as it does any terminal's, and the system text as its system prompt's
+    /// addition (`--append-system-prompt`).
     pub async fn start_seated(&self, start: Start, seated: Seated) -> Outcome {
         self.start_at(seated.intent(), start, seated).await
     }
@@ -360,8 +360,9 @@ async fn begin_as(
     if !Path::new(&start.cwd).is_dir() {
         return refused(&format!("There is no folder {} here", start.cwd));
     }
-    if let Some(role) = seated.and_then(|s| s.role.as_deref()).filter(|r| !r.trim().is_empty()) {
-        args.insert(0, format!("--append-system-prompt={role}"));
+    if let Some(system) = seated.and_then(|s| s.system.as_deref()).filter(|r| !r.trim().is_empty())
+    {
+        args.insert(0, format!("--append-system-prompt={system}"));
     }
     let at = seated.map(|seated| (seated.seat, host.env_of(seated)));
     let trust = untrusted(claude.trust, &start.cwd).await;

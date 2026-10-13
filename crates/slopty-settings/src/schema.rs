@@ -348,9 +348,10 @@ mod tests {
                 unit: "pt".to_owned()
             })
         );
-        let live = field("server.projects", "live_agents");
-        assert!(matches!(&live.kind, Kind::Number(n) if n.integer));
-        assert_eq!(live.default, Value::Number(24.0));
+        let Kind::Choice(autonomy) = &field("agents", "autonomy").kind else { panic!("a choice") };
+        let autonomy: Vec<_> = autonomy.iter().map(|c| c.value.as_str()).collect();
+        assert_eq!(autonomy, ["auto", "full", "ask"]);
+        assert_eq!(field("agents", "autonomy").default, Value::Str("auto".to_owned()));
         let Kind::Choice(options) = &field("terminal", "option_as_alt").kind else {
             panic!("a choice")
         };

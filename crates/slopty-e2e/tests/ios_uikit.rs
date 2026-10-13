@@ -450,7 +450,6 @@ mod tests {
             ask: None,
             picks: Vec::new(),
             quiet: false,
-            merges: None,
         })
         .unwrap();
         let sealed = slopty_push::seal::seal(&key, &hex, &body).unwrap();

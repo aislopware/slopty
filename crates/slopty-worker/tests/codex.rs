@@ -213,14 +213,12 @@ mod codex {
     }
 
     /// What a thread Slopty starts, takes up again or forks is given, so its commands never
-    /// claim the Slopty terminal, its proof or the project task of whoever started Codex's
+    /// claim the Slopty terminal or its proof of whoever started Codex's
     /// daemon: each set empty, which names no terminal.
     fn unclaimed() -> Value {
         json!({
             "shell_environment_policy.set.SLOPTY_SESSION": "",
             "shell_environment_policy.set.SLOPTY_SESSION_TOKEN": "",
-            "shell_environment_policy.set.SLOPTY_PROJECT": "",
-            "shell_environment_policy.set.SLOPTY_TASK": "",
         })
     }
 
@@ -314,16 +312,15 @@ mod codex {
         );
     }
 
-    /// A server task's thread is asked of Codex with the seat's variables set in the commands it
-    /// runs, Slopty's tools among its MCP servers given those variables' values (the daemon's
-    /// environment is nobody's seat, so no `env_vars`), the role as its developer instructions,
-    /// the approval policy its level names and a sandbox that writes only in its workspace; the
-    /// first message goes as written. Its row names the seat, kept whatever Codex says of the
-    /// thread, and the policy and sandbox Codex says it runs with, which is what the server
-    /// holds a task's Codex to; a start repeated at the seat answers with the thread the first
-    /// one started.
+    /// A seated thread (an agent another started) is asked of Codex with the seat's variables
+    /// set in the commands it runs, Slopty's tools among its MCP servers given those variables'
+    /// values (the daemon's environment is nobody's seat, so no `env_vars`), the system text as
+    /// its developer instructions, the approval policy its start names and a sandbox that writes
+    /// only in its workspace; the first message goes as written. Its row names the seat, kept
+    /// whatever Codex says of the thread, and the policy and sandbox Codex says it runs with; a
+    /// start repeated at the seat answers with the thread the first one started.
     #[tokio::test]
-    async fn a_seated_start_gives_codex_the_seat_its_tools_and_its_role() {
+    async fn a_seated_start_gives_codex_the_seat_its_tools_and_its_system_text() {
         let dir = tempfile::tempdir().unwrap();
         let work = dir.path().join("work");
         std::fs::create_dir_all(&work).unwrap();
@@ -339,16 +336,16 @@ mod codex {
         let seat = SessionId::new();
         let env = vec![
             ("SLOPTY_SERVER".to_owned(), "studio:7171".to_owned()),
-            ("SLOPTY_PROJECT".to_owned(), "atlas".to_owned()),
-            ("SLOPTY_TASK".to_owned(), "task-1".to_owned()),
             ("SLOPTY_SESSION".to_owned(), seat.to_string()),
             ("SLOPTY_SESSION_TOKEN".to_owned(), "proof".to_owned()),
         ];
+        let given = env.clone();
+        host.set_seat_env(std::sync::Arc::new(move |_| given.clone()));
         let relay = "/opt/slopty/bin/slopty";
         let seated = Seated {
             seat,
-            env: env.clone(),
-            role: Some("You review.".to_owned()),
+            facts: Vec::new(),
+            system: Some("You review.".to_owned()),
             relay: Some(relay.to_owned()),
         };
         let held = Start { mode: Some("on-request".to_owned()), ..start(&work, "Say hello.") };
@@ -361,7 +358,7 @@ mod codex {
             s.turns.first().is_some_and(|t| t.state == TurnState::Complete)
         })
         .await;
-        let fact = state.meta.facts.get(slopty_proto::project::SEAT_FACT);
+        let fact = state.meta.facts.get(slopty_proto::agent::SEAT_FACT);
         assert_eq!(fact, Some(&seat.to_string()), "kept over what Codex says of the thread");
         assert_eq!(state.meters.mode.as_deref(), Some("on-request"), "the policy Codex said");
         let sandbox = state.meta.facts.get("sandbox").map(String::as_str);
@@ -376,11 +373,9 @@ mod codex {
         let starts: Vec<&Value> = sent.iter().filter(|m| m["method"] == "thread/start").collect();
         assert_eq!(starts.len(), 1, "one thread asked for: {sent:?}");
         let config = shared::seated(&env, Some(relay));
-        assert_eq!(config["shell_environment_policy.set.SLOPTY_TASK"], "task-1");
+        assert_eq!(config["shell_environment_policy.set.SLOPTY_SESSION"], seat.to_string());
         let tools = json!({
             "SLOPTY_SERVER": "studio:7171",
-            "SLOPTY_PROJECT": "atlas",
-            "SLOPTY_TASK": "task-1",
             "SLOPTY_SESSION": seat.to_string(),
             "SLOPTY_SESSION_TOKEN": "proof",
         });
@@ -395,7 +390,10 @@ mod codex {
         });
         assert_eq!(starts[0]["params"], want);
         let turns: Vec<&Value> = sent.iter().filter(|m| m["method"] == "turn/start").collect();
-        assert_eq!(turns[0]["params"]["input"][0]["text"], "Say hello.", "the role went apart");
+        assert_eq!(
+            turns[0]["params"]["input"][0]["text"], "Say hello.",
+            "the system text went apart"
+        );
     }
 
     /// With no Codex daemon running, a start is refused in words, and Slopty starts none.

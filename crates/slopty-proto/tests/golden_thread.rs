@@ -1042,10 +1042,9 @@ mod golden_thread {
     fn attention() {
         use slopty_core::WorkerId;
         use slopty_proto::orchestration::TermRef;
-        use slopty_proto::project::{ProjectId, TaskId};
         use slopty_proto::server::{FromServer, ToServer};
         use slopty_proto::thread::attention::{
-            Counts, Ladder, NodeAt, Notice, NoticeKind, Presence, Present, Ranked, Rung, Seat,
+            Counts, Ladder, Notice, NoticeKind, Presence, Present, Ranked, Rung, Seat, SpaceAt,
             Standing, Subject, ThreadAt, Via,
         };
         let worker = WorkerId::from_uuid(Uuid::from_u128(0x3011));
@@ -1067,16 +1066,13 @@ mod golden_thread {
             top: Some(at),
             since_ms: ms(1_500),
         };
-        let project = ProjectId::new("slopty").expect("a project id");
+        let space = SpaceAt { worker, folder: "/Users/c/src/slopty".to_owned() };
         let ladder = Ladder {
             threads: vec![ranked],
             tiles: vec![(tile, standing)],
             workers: vec![(worker, standing)],
-            nodes: vec![
-                (NodeAt { project: project.clone(), task: None }, Standing::default()),
-                (NodeAt { project: project.clone(), task: Some(TaskId(2)) }, standing),
-            ],
-            projects: vec![(project, standing)],
+            trees: vec![(at, standing)],
+            spaces: vec![(space, standing)],
             fleet: standing,
         };
         snap("attention_ladder", &FromServer::Ladder(Box::new(ladder)));
@@ -1125,19 +1121,6 @@ mod golden_thread {
             };
             snap(name, &FromServer::Notice(Box::new(notice)));
         }
-        let held = Notice {
-            kind: NoticeKind::Project,
-            about: Subject::Project {
-                project: ProjectId::new("slopty").expect("an id"),
-                entry: 41,
-            },
-            tile: Some(tile),
-            title: "slopty".to_owned(),
-            text: "#2 Fix the ladder: its pull request's checks fail (test)".to_owned(),
-            worked_ms: None,
-            via: None,
-        };
-        snap("attention_notice_project", &FromServer::Notice(Box::new(held)));
         let rows = vec![state().row(ms(2_500))];
         snap(
             "attention_threads",
@@ -1176,13 +1159,7 @@ mod golden_thread {
             via: None,
         };
         let ask = Some(AskId("toolu_01".to_owned()));
-        let body = |ask, picks, quiet| PushBody {
-            notice: notice.clone(),
-            ask,
-            picks,
-            quiet,
-            merges: None,
-        };
+        let body = |ask, picks, quiet| PushBody { notice: notice.clone(), ask, picks, quiet };
         snap("push_body", &body(ask.clone(), Vec::new(), false));
         snap("push_body_quiet", &body(ask.clone(), Vec::new(), true));
         let picks = ["Postgres", "SQLite"].map(str::to_owned).to_vec();
@@ -1198,26 +1175,7 @@ mod golden_thread {
         };
         snap(
             "push_body_program",
-            &PushBody { notice: program, ask: None, picks: Vec::new(), quiet: false, merges: None },
-        );
-        let ready = Notice {
-            kind: NoticeKind::ReadyToMerge,
-            about: Subject::Thread(ThreadAt { worker, thread: thread() }),
-            tile: None,
-            title: "Fix the ladder".to_owned(),
-            text: "Checks pass; ready to merge".to_owned(),
-            worked_ms: Some(1_200_000),
-            via: None,
-        };
-        snap(
-            "push_body_ready_to_merge",
-            &PushBody {
-                notice: ready,
-                ask: None,
-                picks: Vec::new(),
-                quiet: false,
-                merges: Some(slopty_proto::project::TaskId(4)),
-            },
+            &PushBody { notice: program, ask: None, picks: Vec::new(), quiet: false },
         );
         snap("push_answerable", &slopty_proto::server::FromServer::Pushes(true));
         snap("push_pushable", &slopty_proto::server::FromServer::Pushable(false));

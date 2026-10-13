@@ -159,21 +159,17 @@ pub fn resumed(args: &[String]) -> Option<&str> {
     }
 }
 
-/// What a Slopty terminal tells the programs in it of itself: which terminal it is, its proof,
-/// and the project task it runs.
-pub const TERMINAL_ENV: [&str; 4] = [
-    slopty_proto::ctl::SESSION_ENV,
-    slopty_proto::ctl::SESSION_TOKEN_ENV,
-    slopty_proto::project::PROJECT_ENV,
-    slopty_proto::project::TASK_ENV,
-];
+/// What a Slopty terminal tells the programs in it of itself: which terminal it is, and its
+/// proof.
+pub const TERMINAL_ENV: [&str; 2] =
+    [slopty_proto::ctl::SESSION_ENV, slopty_proto::ctl::SESSION_TOKEN_ENV];
 
 /// The configuration every thread Slopty starts, takes up again or forks is loaded with: each of
 /// [`TERMINAL_ENV`] set empty in the commands it runs (`shell_environment_policy.set`).
 ///
 /// Codex's daemon runs every thread's commands with its own environment, which is that of
 /// whatever started it, a Codex TUI in a Slopty terminal among them. Without this, every thread's
-/// tools would claim that terminal and its project task. Set empty, the variables name no
+/// tools would claim that terminal. Set empty, the variables name no
 /// terminal, so Slopty's CLI in such a command speaks as an agent, never for the person. Each is
 /// its own key, so it adds to the person's own policy and replaces none of it.
 #[must_use]
@@ -187,7 +183,8 @@ pub fn unclaimed() -> BTreeMap<String, Value> {
 /// The name Slopty's tools go by among a thread's MCP servers.
 pub const TOOLS: &str = "slopty";
 
-/// The configuration a server task's thread is loaded with, in place of [`unclaimed`].
+/// The configuration a seated thread (one another agent started) is loaded with, in place of
+/// [`unclaimed`].
 ///
 /// Each of [`TERMINAL_ENV`] is set in the commands it runs to the seat's value, so Slopty's CLI
 /// there speaks as the seat as it would in the seat's terminal; and, with `relay`, Slopty's tools
@@ -2126,17 +2123,15 @@ mod tests {
     /// variables as their own; without Slopty's CLI it gets the variables alone.
     #[test]
     fn a_seats_thread_is_loaded_with_its_variables_and_slopty_tools() {
-        let env = [("SLOPTY_SESSION", "seat-1"), ("SLOPTY_TASK", "t-1"), ("SLOPTY_SERVER", "s:1")]
+        let env = [("SLOPTY_SESSION", "seat-1"), ("SLOPTY_SERVER", "s:1")]
             .map(|(n, v)| (n.to_owned(), v.to_owned()));
         let config = seated(&env, Some("/bin/slopty"));
         let set = |var: &str| config[&format!("shell_environment_policy.set.{var}")].clone();
         assert_eq!(set("SLOPTY_SESSION"), "seat-1");
-        assert_eq!(set("SLOPTY_TASK"), "t-1");
-        assert_eq!(set("SLOPTY_PROJECT"), "", "a variable the seat lacks names nothing");
+        assert_eq!(set("SLOPTY_SESSION_TOKEN"), "", "a variable the seat lacks names nothing");
         assert_eq!(config["mcp_servers.slopty.command"], "/bin/slopty");
         assert_eq!(config["mcp_servers.slopty.args"], serde_json::json!(["mcp"]));
-        let vars = serde_json::json!({"SLOPTY_SESSION": "seat-1", "SLOPTY_TASK": "t-1",
-            "SLOPTY_SERVER": "s:1"});
+        let vars = serde_json::json!({"SLOPTY_SESSION": "seat-1", "SLOPTY_SERVER": "s:1"});
         assert_eq!(config["mcp_servers.slopty.env"], vars);
         let bare = seated(&env, None);
         assert!(bare.keys().all(|k| k.starts_with("shell_environment_policy.")), "{bare:?}");

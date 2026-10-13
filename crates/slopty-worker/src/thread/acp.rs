@@ -164,10 +164,10 @@ impl Acp {
         }
     }
 
-    /// Start a server task's thread as `start` says, once per seat: every session the agent
-    /// opens for it is given Slopty's tools with the seat's variables (`session/new`
-    /// `mcpServers`), the agent runs with them too, and the role goes ahead of its first prompt,
-    /// since ACP has no system prompt of the client's.
+    /// Start a seated thread (an agent another started) as `start` says, once per seat: every
+    /// session the agent opens for it is given Slopty's tools with the seat's variables
+    /// (`session/new` `mcpServers`), the agent runs with them too, and the system text goes
+    /// ahead of its first prompt, since ACP has no system prompt of the client's.
     pub async fn start_seated(&self, start: Box<Start>, seated: Seated) -> Outcome {
         let (reply, outcome) = oneshot::channel();
         let (id, seated) = (seated.intent(), Some(Box::new(seated)));

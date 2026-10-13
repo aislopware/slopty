@@ -16,10 +16,9 @@ use slopty_proto::orchestration::{
     Command, DirEntry, FileKind, FileStat, Happening, HubEvent, ItemRef, Line, Port, Screen,
     TermAgent, TermRef, Waited,
 };
-use slopty_proto::project::WorkerFacts;
 use slopty_proto::screen::{DisplayInfo, WindowInfo};
 use slopty_proto::search::{FileHits, SearchSummary};
-use slopty_proto::server::{Liveness, Os, WorkerInfo};
+use slopty_proto::server::{Fact, Facts, Liveness, Os, WorkerFacts, WorkerInfo};
 use slopty_proto::terminal::{SessionState, SessionSummary};
 use slopty_proto::thread::attention::Rung;
 use slopty_proto::thread::{AgentId, ThreadId};
@@ -27,7 +26,7 @@ use slopty_proto::thread::{AgentId, ThreadId};
 use crate::ops::{Chunk, EventPage};
 
 mod agents;
-pub mod projects;
+pub mod agents_tree;
 
 pub use agents::{
     ChoiceView, MovedView, ReadEntryView, RequestView, StillView, ThreadReadView, TurnView, moved,
@@ -314,15 +313,6 @@ pub struct EventView<'a> {
     /// A program's exit status, or its signal number negated.
     #[serde(skip_serializing_if = "Option::is_none")]
     exit_status: Option<i32>,
-    /// A project's change: its name.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    project: Option<&'a str>,
-    /// A project's change: the task it concerns.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    task: Option<u32>,
-    /// A project's change: the task's state now.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    state: Option<&'static str>,
 }
 
 /// A new terminal, for JSON.
@@ -471,7 +461,7 @@ impl Overview {
                     .facts
                     .iter()
                     .find(|f| f.worker == w.worker)
-                    .map(|f| projects::facts(&f.facts))
+                    .map(|f| facts(&f.facts))
                     .unwrap_or_default(),
                 waiting: self
                     .waiting(w.worker)
@@ -889,9 +879,6 @@ pub fn event(e: &HubEvent) -> EventView<'_> {
         agent: None,
         detail: None,
         exit_status: None,
-        project: None,
-        task: None,
-        state: None,
     };
     match &e.what {
         Happening::Worker { worker, name, liveness: l } => {
@@ -931,27 +918,6 @@ pub fn event(e: &HubEvent) -> EventView<'_> {
             view.agent = Some(agent(Some(a)));
             view.title = Some(&a.title);
         }
-        Happening::Project(update) => {
-            view.kind = "project";
-            view.project = Some(update.project.as_str());
-            let task = update.task.as_ref();
-            view.task = update
-                .entry
-                .as_ref()
-                .and_then(|e| e.task)
-                .or_else(|| task.map(|t| t.id))
-                .or_else(|| update.native.as_ref().and_then(|n| n.task))
-                .map(|t| t.0);
-            view.state = task.map(|t| projects::state_word(t.state));
-            let term = task.and_then(|t| t.assignment.as_ref()).map(|a| a.term);
-            let term = term.or_else(|| update.record.as_ref().and_then(|p| p.orchestrator));
-            if let Some(term) = term {
-                view.worker = term.worker;
-                view.term = Some(term_string(term));
-            }
-            view.title = task.map(|t| t.title.as_str());
-            view.detail = update.entry.as_ref().map(|e| Cow::Owned(projects::moment(&e.what).1));
-        }
     }
     view
 }
@@ -982,28 +948,30 @@ pub fn event_text<S: std::hash::BuildHasher>(
             );
             format!("agent   {at}  {}", agent_text(Some(a)))
         }
-        Happening::Project(update) => {
-            let task = update
-                .entry
-                .as_ref()
-                .and_then(|e| e.task)
-                .or_else(|| update.task.as_ref().map(|t| t.id))
-                .or_else(|| update.native.as_ref().and_then(|n| n.task));
-            let task = task.map_or_else(String::new, |t| format!(" #{t}"));
-            let what = update.entry.as_ref().map_or_else(
-                || {
-                    update
-                        .task
-                        .as_ref()
-                        .map_or("changed", |t| projects::state_word(t.state))
-                        .to_owned()
-                },
-                |e| projects::moment(&e.what).1,
-            );
-            format!("project {}{task}  {what}", update.project)
-        }
     };
     format!("{:>6}  {what}", e.seq)
+}
+
+/// A fact as plain JSON: a flag, a number, a text, a list or an object.
+#[must_use]
+pub fn fact(f: &Fact) -> serde_json::Value {
+    use serde_json::Value;
+    match f {
+        Fact::Bool(b) => Value::Bool(*b),
+        Fact::Int(n) => Value::from(*n),
+        Fact::Float(x) => serde_json::Number::from_f64(*x).map_or(Value::Null, Value::Number),
+        Fact::Text(t) => Value::String(t.clone()),
+        Fact::List(items) => Value::Array(items.iter().map(fact).collect()),
+        Fact::Map(parts) => {
+            Value::Object(parts.iter().map(|(k, v)| (k.clone(), fact(v))).collect())
+        }
+    }
+}
+
+/// A worker's facts as a plain JSON object.
+#[must_use]
+pub fn facts(f: &Facts) -> BTreeMap<&str, serde_json::Value> {
+    f.iter().map(|(k, v)| (k.as_str(), fact(v))).collect()
 }
 
 /// A new terminal, for JSON.

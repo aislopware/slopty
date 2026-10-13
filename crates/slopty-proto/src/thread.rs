@@ -312,7 +312,7 @@ pub struct ThreadMeta {
     /// the levels for the model it runs now (Codex's reasoning efforts, pi's thinking levels, an
     /// ACP agent's thought levels); empty where it offers none.
     pub efforts: Vec<Effort>,
-    /// Open facts about it: its project, task, branch, pull request, model.
+    /// Open facts about it: its seat, its parent, branch, pull request, model.
     pub facts: BTreeMap<String, String>,
     /// When it began.
     pub created_ms: WallMs,
@@ -326,7 +326,7 @@ impl ThreadMeta {
     pub const AUTOMATION: &'static str = "automation";
     /// Branched from another thread.
     pub const FORK: &'static str = "fork";
-    /// Started by a project's orchestrator.
+    /// Started by another agent ([`crate::orchestration::Verb::AgentStart`]).
     pub const ORCHESTRATED: &'static str = "orchestrated";
     /// Started by the person.
     pub const PERSON: &'static str = "person";
@@ -354,7 +354,7 @@ impl ThreadMeta {
 
     /// How a message meant for when the agent rests goes: queued where the agent queues
     /// ([`Cap::QUEUE`]), so it never cuts into a turn under way; else as a steer. A scheduled
-    /// message, the agent's own review and a project seat's message go this way.
+    /// message, the agent's own review and words for a seated agent go this way.
     #[must_use]
     pub fn delivery_after_turn(&self) -> Delivery {
         if self.can(Cap::QUEUE) { Delivery::Queue } else { Delivery::Steer }

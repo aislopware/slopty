@@ -19,10 +19,7 @@
 //! A note may carry buttons ([`Category`]): the approval note's "Allow" and "Deny" answer a
 //! held permission prompt where the note is, without bringing the app forward, and "Show" opens
 //! the tile. An agent's other notes ([`REPLYING`]) take a reply typed where the note is, sent to
-//! the agent as a message ([`Tap::text`]). A note of work ready to merge ([`MERGING`]) carries
-//! "Merge", which puts the task it names in its project's merge queue ([`merge_of`]). A goal met
-//! ([`LANDING`]) carries "Open pull request", which lands the project's goal ([`land_of`]). A small
-//! question's options are its note's buttons
+//! the agent as a message ([`Tap::text`]). A small question's options are its note's buttons
 //! instead ([`Note::picking`]): their category is made for their labels and registered as the
 //! note goes out, beside the ones already registered ([`register_then`] for a pushed note), and
 //! a press answers with the option at its place among the request's ([`Pressed::Pick`]). A
@@ -67,11 +64,6 @@ pub mod info {
     /// The note's own identifier ([`super::Note::id`]). A pushed note is shown under the
     /// opaque collapse id it was pushed with, so this is how the app knows it as its own.
     pub const NOTE: &str = "note";
-    /// The project a ready-to-merge note's "Merge" merges in ([`super::MERGING`]), or whose
-    /// goal a goal-met note's "Open pull request" lands ([`super::LANDING`]).
-    pub const PROJECT: &str = "project";
-    /// The task it merges, by its number.
-    pub const TASK: &str = "task";
 }
 
 /// One notification.
@@ -280,13 +272,8 @@ impl Category {
 pub const ALLOW: &str = "allow";
 /// [`APPROVAL`]'s button that refuses it.
 pub const DENY: &str = "deny";
-/// [`APPROVAL`]'s, [`REPLYING`]'s, [`MERGING`]'s and [`LANDING`]'s button that opens the app
-/// where the note points.
+/// [`APPROVAL`]'s and [`REPLYING`]'s button that opens the app where the note points.
 pub const SHOW: &str = "show";
-/// [`MERGING`]'s button that puts the task the note names in its project's merge queue.
-pub const MERGE: &str = "merge";
-/// [`LANDING`]'s button that opens the pull request of the goal the note names.
-pub const LAND: &str = "land";
 /// [`REPLYING`]'s button that takes a reply to the agent.
 pub const REPLY: &str = "reply";
 /// The start of a pick's button identifier ([`Note::picking`]): `pick.0`, `pick.1`…
@@ -323,52 +310,8 @@ pub const REPLYING: Category = Category {
     ],
 };
 
-/// Work ready to merge: "Merge" puts the task the note names in its project's merge queue,
-/// the person's word, where the note is.
-pub const MERGING: Category = Category {
-    id: "slopty.merge",
-    actions: &[
-        Action { id: MERGE, title: "Merge", kind: ActionKind::Unlocked },
-        Action { id: SHOW, title: "Show", kind: ActionKind::Foreground },
-    ],
-};
-
-/// A goal met: "Open pull request" lands the goal of the project the note names, its branch
-/// into a pull request, the person's word, where the note is.
-pub const LANDING: Category = Category {
-    id: "slopty.land",
-    actions: &[
-        Action { id: LAND, title: "Open pull request", kind: ActionKind::Unlocked },
-        Action { id: SHOW, title: "Show", kind: ActionKind::Foreground },
-    ],
-};
-
 /// Every category a note may name: what [`System`] registers.
-pub const CATEGORIES: [Category; 4] = [APPROVAL, REPLYING, MERGING, LANDING];
-
-/// The project whose goal a press of "Open pull request" lands, as the note carries it
-/// ([`info::PROJECT`]). None for any other tap, or a note that names none.
-#[must_use]
-pub fn land_of(tap: &Tap) -> Option<slopty_proto::project::ProjectId> {
-    if tap.action.as_deref() != Some(LAND) {
-        return None;
-    }
-    tap.info.get(info::PROJECT)?.parse().ok()
-}
-
-/// The task a press of "Merge" merges: its project and its number, as the note carries them
-/// ([`info::PROJECT`], [`info::TASK`]). None for any other tap, or a note that names neither.
-#[must_use]
-pub fn merge_of(
-    tap: &Tap,
-) -> Option<(slopty_proto::project::ProjectId, slopty_proto::project::TaskId)> {
-    if tap.action.as_deref() != Some(MERGE) {
-        return None;
-    }
-    let project = tap.info.get(info::PROJECT)?.parse().ok()?;
-    let task = tap.info.get(info::TASK)?.parse().ok()?;
-    Some((project, slopty_proto::project::TaskId(task)))
-}
+pub const CATEGORIES: [Category; 2] = [APPROVAL, REPLYING];
 
 /// The tap a response to note `id` makes, as the delegate hands it on.
 ///

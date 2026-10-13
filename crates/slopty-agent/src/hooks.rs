@@ -49,7 +49,7 @@ pub const MCP_SERVER_NAME: &str = "slopty";
 /// The `--mcp-config` document that serves Slopty's tools through `<command> mcp` on stdio.
 ///
 /// It names no server: `slopty mcp` finds it from the session's
-/// [`slopty_proto::project::SERVER_ENV`], which the agent passes on to its MCP servers.
+/// [`slopty_proto::ctl::SERVER_ENV`], which the agent passes on to its MCP servers.
 #[must_use]
 pub fn mcp_config(command: &str) -> Value {
     json!({
@@ -114,30 +114,30 @@ fn with_relay_for(args: Vec<String>, command: &str, cwd: &Path, user: &Path) -> 
 /// `claude` arguments that start a person's own Claude Code wired as an agent the worker starts.
 ///
 /// That is a conversation pinned to a fresh id ([`crate::resume::with_session_id`]), the relay
-/// at `relay` ([`with_relay`]), and for a project's agent (`project`, its session names a
-/// project) Slopty's tools ([`with_mcp`]); any other gets only the paragraph that points it at
-/// Slopty's CLI ([`with_pointer`]). The person's own flags and prompt are kept. `None` for a
-/// run that is wired already, or that prints and exits (`--print`): it stays as it was given.
+/// at `relay` ([`with_relay`]), and Slopty's tools ([`with_mcp`]) with the one line that says
+/// what they reach ([`TOOLS_LINE`]); where this machine's managed settings keep the tools out,
+/// the paragraph that points it at Slopty's CLI ([`POINTER`]) instead. The person's own flags
+/// and prompt are kept. `None` for a run that is wired already, or that prints and exits
+/// (`--print`): it stays as it was given.
 ///
-/// One rule for every door: a tile opened on `claude`, ⌘⇧T, a project task's thread, and a
-/// `claude` typed in a Slopty shell (`slopty hook wire`). This machine's managed settings are
+/// One rule for every door: a tile opened on `claude`, ⌘⇧T, an agent another agent started, and
+/// a `claude` typed in a Slopty shell (`slopty hook wire`). This machine's managed settings are
 /// read for each ([`wired_under`]).
 #[must_use]
-pub fn wired(args: Vec<String>, relay: &str, cwd: &Path, project: bool) -> Option<Vec<String>> {
-    wired_under(args, relay, cwd, project, &ManagedSettings::current())
+pub fn wired(args: Vec<String>, relay: &str, cwd: &Path) -> Option<Vec<String>> {
+    wired_under(args, relay, cwd, &ManagedSettings::current())
 }
 
 /// [`wired`] under `managed`.
 ///
-/// A project's agent whose tools the managed settings keep out (or whose run they would refuse
-/// for the flag) gets the pointer to Slopty's CLI instead. The relay's `--settings` stays
-/// whatever they say: it is no sideload flag, and its status line runs where its hooks may not.
+/// An agent whose tools the managed settings keep out (or whose run they would refuse for the
+/// flag) gets the pointer to Slopty's CLI instead. The relay's `--settings` stays whatever they
+/// say: it is no sideload flag, and its status line runs where its hooks may not.
 #[must_use]
 pub fn wired_under(
     args: Vec<String>,
     relay: &str,
     cwd: &Path,
-    project: bool,
     managed: &ManagedSettings,
 ) -> Option<Vec<String>> {
     let given = crate::resume::invocation(&args);
@@ -146,15 +146,20 @@ pub fn wired_under(
     }
     let (args, _conversation) = crate::resume::with_session_id(args);
     let args = with_relay(args, relay, cwd);
-    Some(if project && admits_tools(relay, managed) {
-        with_mcp_under(args, relay, managed)
+    Some(if admits_tools(relay, managed) {
+        with_line(with_mcp_under(args, relay, managed), TOOLS_LINE)
     } else {
-        with_pointer(args)
+        with_line(args, POINTER)
     })
 }
 
-/// What an agent Slopty starts outside a project is told of Slopty, in place of its tools: one
-/// paragraph that points at the CLI, whose help it reads when the work calls for it.
+/// What an agent with Slopty's tools is told of them where its harness takes extra system text:
+/// what they reach, and nothing of how to work.
+pub const TOOLS_LINE: &str =
+    "The slopty tools reach the person's machines and the coding agents running on them.";
+
+/// What an agent Slopty starts without its tools is told of Slopty: one paragraph that points
+/// at the CLI, whose help it reads when the work calls for it.
 pub const POINTER: &str = "This session runs inside Slopty, which reaches the person's other \
     machines: their terminals, files, windows, clipboard and coding agents. When the work \
     needs one of those, run `slopty --help` (and `slopty <command> --help`) to see how.";
@@ -162,12 +167,12 @@ pub const POINTER: &str = "This session runs inside Slopty, which reaches the pe
 /// The flag Claude Code appends to its system prompt with.
 const APPEND_SYSTEM_PROMPT: &str = "--append-system-prompt";
 
-/// `claude` arguments that also append [`POINTER`] to its system prompt.
+/// `claude` arguments that also append `line` to its system prompt.
 ///
-/// Claude Code keeps one such flag, so a prompt the caller appends already gets the pointer
-/// after it, and otherwise the flag goes first, in its `=` form.
+/// Claude Code keeps one such flag, so a prompt the caller appends already gets the line after
+/// it (unless it holds the line already), and otherwise the flag goes first, in its `=` form.
 #[must_use]
-pub fn with_pointer(args: Vec<String>) -> Vec<String> {
+pub fn with_line(args: Vec<String>, line: &str) -> Vec<String> {
     let mut out = Vec::with_capacity(args.len().saturating_add(1));
     let mut words = args.into_iter();
     let mut joined = false;
@@ -179,7 +184,8 @@ pub fn with_pointer(args: Vec<String>) -> Vec<String> {
         }
         let inline = word.strip_prefix(APPEND_SYSTEM_PROMPT).and_then(|r| r.strip_prefix('='));
         if let Some(theirs) = inline.filter(|_| !joined) {
-            out.push(format!("{APPEND_SYSTEM_PROMPT}={theirs}\n\n{POINTER}"));
+            let theirs = joined_with(theirs, line);
+            out.push(format!("{APPEND_SYSTEM_PROMPT}={theirs}"));
             joined = true;
             continue;
         }
@@ -187,92 +193,21 @@ pub fn with_pointer(args: Vec<String>) -> Vec<String> {
             && !joined
             && let Some(theirs) = words.next()
         {
-            out.extend([word, format!("{theirs}\n\n{POINTER}")]);
+            out.extend([word, joined_with(&theirs, line)]);
             joined = true;
             continue;
         }
         out.push(word);
     }
     if !joined {
-        out.insert(0, format!("{APPEND_SYSTEM_PROMPT}={POINTER}"));
+        out.insert(0, format!("{APPEND_SYSTEM_PROMPT}={line}"));
     }
     out
 }
 
-/// The setting that keeps a session out of the mode that asks no permission at all, whatever
-/// its flags or the person's settings say
-/// (<https://code.claude.com/docs/en/settings-reference>, `permissions`).
-const DISABLE_BYPASS: &str = "disableBypassPermissionsMode";
-
-/// The setting that takes auto mode away: a session it would start in auto starts in
-/// `default`, and `auto` leaves the mode cycle (<https://code.claude.com/docs/en/permission-modes>,
-/// "Which mode a session starts in": any settings file that sets it starts the session in
-/// `default`). With auto mode unavailable, plan mode's classifier approves nothing either.
-const DISABLE_AUTO: &str = "disableAutoMode";
-
-/// `claude` arguments whose run asks the person no less than `default` does: it may neither
-/// skip its permission prompts nor hand them to auto mode's classifier.
-///
-/// They carry `permissions.disableBypassPermissionsMode` and `permissions.disableAutoMode`,
-/// each set to `"disable"`, on the one `--settings`, the caller's own merged in as
-/// [`with_relay`] merges them.
-///
-/// A permission setting takes the strictest value any source gives, and `--settings` ranks
-/// above the user's, the project's and the local settings (only managed settings rank above
-/// it). So neither `--dangerously-skip-permissions`, `--permission-mode bypassPermissions` nor
-/// `--permission-mode auto`, nor a settings file the agent may edit, nor keys typed into its
-/// TUI (`Shift+Tab`) opens either mode again. Claude Code 2.1.283 and later start a session in
-/// auto when nothing names a mode, so this is also what starts it in `default`.
-#[must_use]
-pub fn held_to_asking(args: Vec<String>, cwd: &Path) -> Vec<String> {
-    held_to(args, cwd, false)
-}
-
-/// `claude` arguments held as [`held_to_asking`] holds them, with auto mode open when `auto`.
-///
-/// With `auto` (a project whose agents go on their own) bypass mode stays locked off, and Claude
-/// Code's own auto mode decides. Either way Slopty's own tools (`mcp__slopty`) join the
-/// settings' allow list, so the agent's work with its project never waits on the person.
-#[must_use]
-pub fn held_to(args: Vec<String>, cwd: &Path, auto: bool) -> Vec<String> {
-    with_settings(args, cwd, |doc| {
-        let Some(root) = doc.as_object_mut() else { return };
-        let permissions = root.entry("permissions").or_insert_with(|| json!({}));
-        if !permissions.is_object() {
-            *permissions = json!({});
-        }
-        let Some(permissions) = permissions.as_object_mut() else { return };
-        permissions.insert(DISABLE_BYPASS.to_owned(), json!("disable"));
-        if auto {
-            permissions.remove(DISABLE_AUTO);
-        } else {
-            permissions.insert(DISABLE_AUTO.to_owned(), json!("disable"));
-        }
-        let allow = permissions.entry("allow").or_insert_with(|| json!([]));
-        if !allow.is_array() {
-            *allow = json!([]);
-        }
-        if let Some(allow) = allow.as_array_mut()
-            && !allow.iter().any(|rule| rule == SLOPTY_TOOLS)
-        {
-            allow.push(json!(SLOPTY_TOOLS));
-        }
-    })
-}
-
-/// The permission rule that allows every tool of Slopty's MCP server ([`MCP_SERVER_NAME`]).
-pub const SLOPTY_TOOLS: &str = "mcp__slopty";
-
-/// Whether a settings document holds the lock [`held_to_asking`] puts on.
-#[must_use]
-pub fn locks_bypass(doc: &Value) -> bool {
-    doc.pointer(&format!("/permissions/{DISABLE_BYPASS}")).is_some_and(|v| v == "disable")
-}
-
-/// Whether a settings document locks bypass mode off but leaves auto mode open ([`held_to`]).
-#[must_use]
-pub fn leaves_auto(doc: &Value) -> bool {
-    locks_bypass(doc) && doc.pointer(&format!("/permissions/{DISABLE_AUTO}")).is_none()
+/// `theirs` with `line` after it, unless it holds `line` already.
+fn joined_with(theirs: &str, line: &str) -> String {
+    if theirs.contains(line) { theirs.to_owned() } else { format!("{theirs}\n\n{line}") }
 }
 
 /// `args` with their one `--settings` (the caller's last one, read as Claude Code reads it,
@@ -476,10 +411,9 @@ mod tests {
         assert!(server.get("env").is_none(), "the session's own environment names the server");
     }
 
-    /// A person's `claude` gets a pinned conversation, the relay and the pointer to Slopty's
-    /// CLI, its own words last, and a project's agent Slopty's tools instead of the pointer; a
-    /// run wired already, or one that prints and exits, is left as it was given, and one that
-    /// picks its conversation keeps it.
+    /// A person's `claude` gets a pinned conversation, the relay, Slopty's tools and the line
+    /// that says what they reach, its own words last; a run wired already, or one that prints
+    /// and exits, is left as it was given, and one that picks its conversation keeps it.
     #[test]
     fn a_persons_claude_is_wired_once() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -487,31 +421,27 @@ mod tests {
         let relay = "/opt/Slopty/slopty";
         let none = ManagedSettings::default();
         let given = || words(&["--model", "opus", "fix it"]);
-        let out = wired_under(given(), relay, dir.path(), false, &none).expect("wired");
+        let out = wired_under(given(), relay, dir.path(), &none).expect("wired");
         assert!(out.ends_with(&words(&["--model", "opus", "fix it"])), "{out:?}");
-        assert!(!out.iter().any(|a| a.starts_with("--mcp-config")), "no tools: {out:?}");
-        assert_eq!(out.first(), Some(&format!("--append-system-prompt={POINTER}")));
+        assert!(out.iter().any(|a| a.starts_with("--mcp-config")), "the tools: {out:?}");
+        assert_eq!(out.first(), Some(&format!("--append-system-prompt={TOOLS_LINE}")));
         assert_eq!(out.iter().filter(|a| *a == "--session-id").count(), 1);
         let started = crate::resume::invocation(&out);
-        assert!(started.relay && !started.mcp, "{out:?}");
-        assert_eq!(started.role.as_deref(), Some(POINTER), "a restart keeps the pointer");
-        assert_eq!(wired_under(out, relay, dir.path(), false, &none), None, "wired once");
-        let task = wired_under(given(), relay, dir.path(), true, &none).expect("wired");
-        let started = crate::resume::invocation(&task);
-        assert!(started.relay && started.mcp && started.role.is_none(), "{task:?}");
-        let alone = wired_under(words(&["--resume", "abc"]), relay, dir.path(), false, &none)
-            .expect("wired");
+        assert!(started.relay && started.mcp, "{out:?}");
+        assert_eq!(wired_under(out, relay, dir.path(), &none), None, "wired once");
+        let alone =
+            wired_under(words(&["--resume", "abc"]), relay, dir.path(), &none).expect("wired");
         assert!(!alone.iter().any(|a| a == "--session-id"));
         assert!(alone.ends_with(&words(&["--resume", "abc"])), "{alone:?}");
         assert_eq!(
-            wired_under(words(&["-p", "hi"]), relay, dir.path(), true, &none),
+            wired_under(words(&["-p", "hi"]), relay, dir.path(), &none),
             None,
             "a print run"
         );
     }
 
     /// Under managed settings that refuse a run with `--mcp-config` (sideloading off) or keep
-    /// Slopty's server out, a project's agent gets the pointer in place of the tools, and the
+    /// Slopty's server out, an agent gets the pointer in place of the tools, and the
     /// relay's `--settings` all the same.
     #[test]
     fn managed_settings_keep_the_tools_out_and_the_relay_in() {
@@ -526,33 +456,35 @@ mod tests {
         ] {
             let mut managed = ManagedSettings::default();
             managed.add(&policy);
-            let task = wired_under(words(&["fix it"]), relay, dir.path(), true, &managed);
+            let task = wired_under(words(&["fix it"]), relay, dir.path(), &managed);
             let task = task.expect("wired");
             let started = crate::resume::invocation(&task);
             assert!(started.relay && !started.mcp, "{policy}: {task:?}");
-            assert_eq!(started.role.as_deref(), Some(POINTER), "{policy}");
+            assert!(task.contains(&format!("--append-system-prompt={POINTER}")), "{policy}");
             let plain = with_mcp_under(words(&["x"]), relay, &managed);
             assert_eq!(plain, words(&["x"]), "{policy}");
         }
     }
 
-    /// A system prompt the person appends keeps its place and gets the pointer after it, in
+    /// A system prompt the person appends keeps its place and gets the line after it, in
     /// either form, once; words after `--` are the prompt's.
     #[test]
-    fn the_pointer_joins_the_persons_own_appended_prompt() {
+    fn the_line_joins_the_persons_own_appended_prompt() {
         let words = |args: &[&str]| args.iter().map(|&a| a.to_owned()).collect::<Vec<_>>();
         let joined = format!("Be brief.\n\n{POINTER}");
         assert_eq!(
-            with_pointer(words(&["--append-system-prompt", "Be brief.", "fix it"])),
+            with_line(words(&["--append-system-prompt", "Be brief.", "fix it"]), POINTER),
             words(&["--append-system-prompt", &joined, "fix it"])
         );
         assert_eq!(
-            with_pointer(words(&["--model", "opus", "--append-system-prompt=Be brief."])),
+            with_line(words(&["--model", "opus", "--append-system-prompt=Be brief."]), POINTER),
             words(&["--model", "opus", &format!("--append-system-prompt={joined}")])
         );
+        let once = words(&["--append-system-prompt", &joined]);
+        assert_eq!(with_line(once.clone(), POINTER), once, "held already, it is not added again");
         let first = format!("--append-system-prompt={POINTER}");
         assert_eq!(
-            with_pointer(words(&["--", "--append-system-prompt", "x"])),
+            with_line(words(&["--", "--append-system-prompt", "x"]), POINTER),
             words(&[&first, "--", "--append-system-prompt", "x"])
         );
     }
@@ -645,58 +577,6 @@ mod tests {
         {
             assert_eq!(with_relay(words(unreadable), relay, dir.path()), words(unreadable));
         }
-    }
-
-    /// A run held to asking carries the locks on bypass and auto mode on its one `--settings`,
-    /// beside the relay and the caller's own permissions; nothing else is added.
-    #[test]
-    fn a_held_run_locks_bypass_and_auto_mode_off_and_allows_slopty_s_tools() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let user = dir.path().join("user-settings.json");
-        let settings = |out: &[String]| -> Value {
-            assert_eq!(out.iter().filter(|a| a.starts_with(SETTINGS_FLAG)).count(), 1, "{out:?}");
-            serde_json::from_str(out.get(1).expect("value")).expect("json")
-        };
-        let mine = r#"{"permissions":{"allow":["Bash(git *)"],"defaultMode":"plan"}}"#;
-        let args = ["--settings", mine, "--dangerously-skip-permissions"].map(str::to_owned);
-        let relayed = with_relay_for(args.to_vec(), "/opt/slopty", dir.path(), &user);
-        let locked = held_to_asking(relayed.clone(), dir.path());
-        let doc = settings(&locked);
-        assert_eq!(
-            doc["permissions"],
-            json!({
-                "allow": ["Bash(git *)", SLOPTY_TOOLS],
-                "defaultMode": "plan",
-                DISABLE_BYPASS: "disable",
-                DISABLE_AUTO: "disable",
-            })
-        );
-        assert!(has_relay(&doc, HookEvent::SessionStart), "the relay stays");
-        assert_eq!(locked.get(2..), Some(&["--dangerously-skip-permissions".to_owned()][..]));
-        assert!(
-            settings(&relayed).pointer("/permissions/disableBypassPermissionsMode").is_none(),
-            "only a locked run carries it"
-        );
-        let bare = held_to_asking(Vec::new(), dir.path());
-        let both =
-            json!({ DISABLE_BYPASS: "disable", DISABLE_AUTO: "disable", "allow": [SLOPTY_TOOLS] });
-        assert_eq!(settings(&bare), json!({ "permissions": both }));
-        assert!(!leaves_auto(&settings(&bare)), "auto locked off too");
-        // A project whose agents go on their own: bypass stays locked, auto mode is open, even
-        // where the caller's settings had locked it.
-        let given = r#"{"permissions":{"disableAutoMode":"disable","allow":["mcp__slopty"]}}"#;
-        let own = held_to(["--settings", given].map(str::to_owned).to_vec(), dir.path(), true);
-        let own = settings(&own);
-        assert_eq!(
-            own["permissions"],
-            json!({ DISABLE_BYPASS: "disable", "allow": [SLOPTY_TOOLS] })
-        );
-        assert!(leaves_auto(&own) && locks_bypass(&own));
-        let odd = held_to_asking(
-            ["--settings", r#"{"permissions":true}"#].map(str::to_owned).to_vec(),
-            dir.path(),
-        );
-        assert_eq!(settings(&odd)["permissions"], both);
     }
 
     /// The run's status line is the wrapper, in front of the person's own: theirs from the

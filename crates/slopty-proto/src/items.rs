@@ -68,12 +68,11 @@ pub enum ItemKind {
         /// A folder in the repository: absolute, or `~/…`.
         path: String,
         /// The branch its whole branch is compared with
-        /// ([`crate::thread::wire::Against::Branch`]), a project's target; `None` for its
+        /// ([`crate::thread::wire::Against::Branch`]); `None` for its
         /// base branch, or what is not committed.
         against: Option<String>,
         /// A branch reviewed as committed against `against` (else the base branch), with no
-        /// checkout (`crate::git::GitOp::Range`): a project's finished goal in the
-        /// orchestrator's clone. `None` reviews the folder's working tree.
+        /// checkout (`crate::git::GitOp::Range`). `None` reviews the folder's working tree.
         head: Option<String>,
     },
 }

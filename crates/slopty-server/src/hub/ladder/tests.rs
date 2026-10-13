@@ -3,16 +3,14 @@
 use std::collections::BTreeMap;
 
 use slopty_core::SessionId;
-use slopty_proto::orchestration::{Outcome, Verb};
-use slopty_proto::project::{TaskId, TaskSpec};
 use slopty_proto::server::ToServer;
 use slopty_proto::thread::attention::Counts;
 use slopty_proto::thread::wire::{NoteChoice, PullSeen, PullStands, RequestCard};
 use slopty_proto::thread::{
-    AgentId, AskId, Changed, Cursor, Drive, ItemId, Link, Liveness, Meters, Phase, Status, TurnId,
+    AgentId, AskId, Changed, Cursor, Drive, ItemId, Link, Liveness, Meters, Phase, Request, Status,
+    TurnId,
 };
 
-use super::super::project_tests::{create, project};
 use super::super::tests::{registration, summary};
 use super::*;
 
@@ -88,6 +86,12 @@ pub(in crate::hub) fn under(mut child: ThreadRow, parent: &ThreadRow) -> ThreadR
     child
 }
 
+/// `child` as an agent `parent` started.
+pub(in crate::hub) fn started_by(mut child: ThreadRow, parent: &ThreadRow) -> ThreadRow {
+    child.facts.insert(PARENT_FACT.to_owned(), parent.id.to_string());
+    child
+}
+
 pub(in crate::hub) fn snapshot(rows: Vec<ThreadRow>) -> ToServer {
     ToServer::Threads(TableFrame::Snapshot { cursor: Cursor::default(), rows })
 }
@@ -100,85 +104,66 @@ fn standing<'a, K: PartialEq>(list: &'a [(K, Standing)], key: &K) -> &'a Standin
     &list.iter().find(|(k, _)| k == key).unwrap().1
 }
 
-async fn task(hub: &Hub) -> TaskId {
-    let spec = TaskSpec {
-        title: "Ladder".to_owned(),
-        brief: "Rank it.".to_owned(),
-        ..TaskSpec::default()
-    };
-    match hub.dispatch(Verb::TaskCreate { project: project(), spec: Box::new(spec) }).await {
-        Outcome::Task(task) => task.id,
-        other => panic!("{other:?}"),
-    }
-}
-
 /// A subagent stands with the thread it hangs from, so the one the person sees needs them;
-/// the rest roll up by tile, worker, project node, project and fleet, each counting a thread once
-/// and naming the one to go to first. A thread at rest with changes not kept is to review, above
-/// working.
+/// the rest roll up by tile, worker, agent tree (across workers), space and fleet, each
+/// counting a thread once and naming the one to go to first. A thread at rest with changes not
+/// kept is to review, above working.
 #[tokio::test]
 async fn subagents_fold_into_their_parents_and_every_node_rolls_up() {
     let hub = Hub::new("server".to_owned(), Vec::new());
     let (orchestrating, building, testing) = (SessionId::new(), SessionId::new(), SessionId::new());
-    let worker = WorkerId::new();
-    let sessions = vec![summary(orchestrating), summary(building), summary(testing)];
+    let (worker, other) = (WorkerId::new(), WorkerId::new());
+    let sessions = vec![summary(orchestrating), summary(building)];
     let (tx, _rx) = mpsc::channel(8);
     let lease = hub.register(registration(worker, sessions), [100, 64, 0, 7].into(), tx).unwrap();
+    let (tx, _rx2) = mpsc::channel(8);
+    let mut there = registration(other, vec![summary(testing)]);
+    there.name = "linux".to_owned();
+    let away = hub.register(there, [100, 64, 0, 8].into(), tx).unwrap();
     let term = |session| TermRef { worker, session };
-    create(&hub, Some(term(orchestrating))).await;
-    let (build, test) = (task(&hub).await, task(&hub).await);
-    for (task, session) in [(build, building), (test, testing)] {
-        assert!(matches!(hub.assign_for_test(&project(), task, term(session)), Outcome::Task(_)));
-    }
 
-    let orchestrator = row(Phase::Idle, 10, Some(orchestrating));
-    let builder = row(Phase::Working, 20, Some(building));
-    let tester = row(Phase::Working, 30, Some(testing));
+    let in_space = |row: ThreadRow, folder: &str| ThreadRow { cwd: Some(folder.to_owned()), ..row };
+    let orchestrator = in_space(row(Phase::Idle, 10, Some(orchestrating)), "/src/app");
+    let builder =
+        started_by(in_space(row(Phase::Working, 20, Some(building)), "/src/app"), &orchestrator);
+    let tester = started_by(row(Phase::Working, 30, Some(testing)), &builder);
     let subagent = under(asking(row(Phase::NeedsYou, 40, None), "Run cargo test?"), &tester);
     let reviewed = ThreadRow { to_review: true, ..row(Phase::Done, 50, None) };
-    lease.handle(snapshot(vec![
-        orchestrator,
-        builder,
-        tester.clone(),
-        subagent.clone(),
-        reviewed.clone(),
-    ]));
+    lease.handle(snapshot(vec![orchestrator.clone(), builder.clone(), reviewed.clone()]));
+    away.handle(snapshot(vec![tester.clone(), subagent.clone()]));
     hub.rank_ladder();
     let ladder = hub.ladder();
 
-    let at = |row: &ThreadRow| ThreadAt { worker, thread: row.id };
+    let at = |worker, row: &ThreadRow| ThreadAt { worker, thread: row.id };
     assert_eq!(ladder.threads.len(), 4, "the subagent stands with its parent");
-    assert_eq!(ladder.rung(at(&tester)), Some(Rung::NeedsYou));
-    assert_eq!(ladder.rung(at(&subagent)), None);
-    assert_eq!(ladder.rung(at(&reviewed)), Some(Rung::ToReview));
-    assert_eq!(ladder.tile(term(testing)).map(|(_, s)| s.rung), Some(Rung::NeedsYou));
+    assert_eq!(ladder.rung(at(other, &tester)), Some(Rung::NeedsYou));
+    assert_eq!(ladder.rung(at(other, &subagent)), None);
+    assert_eq!(ladder.rung(at(worker, &reviewed)), Some(Rung::ToReview));
     assert_eq!(ladder.tile(term(orchestrating)).map(|(_, s)| s.rung), Some(Rung::Idle));
 
-    let node = |task| NodeAt { project: project(), task };
-    let test_node = standing(&ladder.nodes, &node(Some(test)));
-    assert_eq!(test_node.rung, Rung::NeedsYou);
-    assert_eq!(test_node.top, Some(at(&tester)));
-    assert_eq!(test_node.counts, Counts { needs_you: 1, ..Counts::default() });
-    let build_node = standing(&ladder.nodes, &node(Some(build)));
-    assert_eq!(build_node.counts, Counts { working: 1, ..Counts::default() }, "tasks stand apart");
-    assert_eq!(standing(&ladder.nodes, &node(None)).rung, Rung::Idle);
-    let whole = standing(&ladder.projects, &project());
-    assert_eq!((whole.rung, whole.counts.total()), (Rung::NeedsYou, 3));
+    let tree = standing(&ladder.trees, &at(worker, &orchestrator));
+    assert_eq!((tree.rung, tree.counts.total()), (Rung::NeedsYou, 3), "every depth, every worker");
+    assert_eq!(tree.top, Some(at(other, &tester)));
+    let below = standing(&ladder.trees, &at(worker, &builder));
+    assert_eq!(below.counts, Counts { needs_you: 1, working: 1, ..Counts::default() });
+    assert!(ladder.trees.iter().all(|(t, _)| t.thread != tester.id), "one that started none");
+    let space = SpaceAt { worker, folder: "/src/app".to_owned() };
+    let space = standing(&ladder.spaces, &space);
+    assert_eq!(space.counts, Counts { working: 1, idle: 1, ..Counts::default() });
 
     let expected = Counts { needs_you: 1, to_review: 1, working: 1, idle: 1, ..Counts::default() };
     assert_eq!(ladder.fleet.counts, expected);
-    assert_eq!(standing(&ladder.workers, &worker).counts, expected);
-    let workspace = ladder.over([term(building), term(testing), term(building)]);
-    assert_eq!((workspace.rung, workspace.counts.total()), (Rung::NeedsYou, 2));
-    assert_eq!(workspace.top, Some(at(&tester)));
+    let workspace = ladder.over([term(building), term(orchestrating), term(building)]);
+    assert_eq!((workspace.rung, workspace.counts.total()), (Rung::Working, 2));
 
     // The subagent's request answered, the to-review thread kept: the ladder moves down.
     let kept = ThreadRow { to_review: false, ..reviewed.clone() };
-    lease.handle(delta(vec![moved(&subagent, Phase::Working, 60), kept]));
+    away.handle(delta(vec![moved(&subagent, Phase::Working, 60)]));
+    lease.handle(delta(vec![kept]));
     hub.rank_ladder();
     let ladder = hub.ladder();
-    assert_eq!(ladder.rung(at(&tester)), Some(Rung::Working));
-    assert_eq!(ladder.rung(at(&reviewed)), Some(Rung::Idle));
+    assert_eq!(ladder.rung(at(other, &tester)), Some(Rung::Working));
+    assert_eq!(ladder.rung(at(worker, &reviewed)), Some(Rung::Idle));
     assert_eq!(ladder.fleet.counts, Counts { working: 2, idle: 2, ..Counts::default() });
 }
 
@@ -317,25 +302,20 @@ async fn a_failed_subagent_waits_for_its_family_to_rest() {
     assert_eq!(heard.iter().map(|n| n.kind).collect::<Vec<_>>(), [NoticeKind::NeedsYou]);
 }
 
-/// A project task's agent that comes to rest says nothing to the person: its work reaches them
-/// when it is ready to merge, and the orchestrator hears of the rest. Its need and its failure
-/// still come as notices, and the orchestrator's own rest does too.
+/// An agent another started that comes to rest says nothing to the person: its parent hears
+/// of it. Its need and its failure still come as notices, and the parent's own rest does too.
 #[tokio::test]
-async fn a_task_s_agent_that_finishes_sends_the_person_no_notice() {
+async fn an_agent_another_started_that_finishes_sends_the_person_no_notice() {
     let hub = Hub::new("server".to_owned(), Vec::new());
     let (orchestrating, building) = (SessionId::new(), SessionId::new());
     let worker = WorkerId::new();
     let sessions = vec![summary(orchestrating), summary(building)];
     let (tx, _rx) = mpsc::channel(8);
     let lease = hub.register(registration(worker, sessions), [100, 64, 0, 7].into(), tx).unwrap();
-    let term = |session| TermRef { worker, session };
-    create(&hub, Some(term(orchestrating))).await;
-    let build = task(&hub).await;
-    assert!(matches!(hub.assign_for_test(&project(), build, term(building)), Outcome::Task(_)));
     let mut desk = Client::sit(&hub, "mac");
     desk.at(&hub, Seat::Desk, true, Vec::new());
     let orchestrator = row(Phase::Working, 1_000, Some(orchestrating));
-    let builder = row(Phase::Working, 1_000, Some(building));
+    let builder = started_by(row(Phase::Working, 1_000, Some(building)), &orchestrator);
     lease.handle(snapshot(vec![orchestrator.clone(), builder.clone()]));
     hub.rank_ladder();
     let rank = |rows: Vec<ThreadRow>| {
@@ -343,37 +323,32 @@ async fn a_task_s_agent_that_finishes_sends_the_person_no_notice() {
         hub.rank_ladder();
     };
     rank(vec![moved(&builder, Phase::Done, 2_000)]);
-    assert!(desk.notices().is_empty(), "a task's agent at rest is no notice");
+    assert!(desk.notices().is_empty(), "a child at rest is no notice");
     rank(vec![asking(moved(&builder, Phase::NeedsYou, 3_000), "May I?")]);
     rank(vec![moved(&builder, Phase::Failed, 4_000)]);
     let kinds: Vec<NoticeKind> = desk.notices().iter().map(|n| n.kind).collect();
     assert_eq!(kinds, [NoticeKind::NeedsYou, NoticeKind::Failed]);
     rank(vec![moved(&orchestrator, Phase::Done, 5_000)]);
     let kinds: Vec<NoticeKind> = desk.notices().iter().map(|n| n.kind).collect();
-    assert_eq!(kinds, [NoticeKind::Finished], "the orchestrator's own still says so");
+    assert_eq!(kinds, [NoticeKind::Finished], "the parent's own still says so");
 }
 
 /// A thread's pull request lifts it while it rests: a failed check needs the person, said in
 /// the pull request's words, and one ready to merge is to review. While the agent works it
-/// stays working. A task's agent's pull request is the project's to tell of, from its card.
+/// stays working.
 #[tokio::test]
 async fn a_resting_thread_s_pull_request_lifts_it() {
     let hub = Hub::new("server".to_owned(), Vec::new());
-    let (shell, building, orchestrating) = (SessionId::new(), SessionId::new(), SessionId::new());
-    let worker = WorkerId::new();
-    let sessions = vec![summary(shell), summary(building), summary(orchestrating)];
+    let (shell, worker) = (SessionId::new(), WorkerId::new());
     let (tx, _rx) = mpsc::channel(8);
-    let lease = hub.register(registration(worker, sessions), [100, 64, 0, 7].into(), tx).unwrap();
-    let term = |session| TermRef { worker, session };
-    create(&hub, Some(term(orchestrating))).await;
-    let build = task(&hub).await;
-    assert!(matches!(hub.assign_for_test(&project(), build, term(building)), Outcome::Task(_)));
+    let lease = hub
+        .register(registration(worker, vec![summary(shell)]), [100, 64, 0, 7].into(), tx)
+        .unwrap();
     let mut desk = Client::sit(&hub, "mac");
     desk.at(&hub, Seat::Desk, true, Vec::new());
     let pull = pull_seen;
     let mine = row(Phase::Done, 1_000, Some(shell));
-    let builder = row(Phase::Done, 1_000, Some(building));
-    lease.handle(snapshot(vec![mine.clone(), builder.clone()]));
+    lease.handle(snapshot(vec![mine.clone()]));
     hub.rank_ladder();
     let rank = |rows: Vec<ThreadRow>| {
         lease.handle(delta(rows));
@@ -401,121 +376,6 @@ async fn a_resting_thread_s_pull_request_lifts_it() {
     assert_eq!(ladder.rung(at(&mine)), Some(Rung::ToReview), "ready to merge");
     let ladder = rank(vec![with(&mine, Phase::Done, PullStands::Waiting)]);
     assert_eq!(ladder.rung(at(&mine)), Some(Rung::Idle));
-
-    let ladder = rank(vec![with(&builder, Phase::Done, PullStands::ChecksFailed)]);
-    assert_eq!(ladder.rung(at(&builder)), Some(Rung::NeedsYou));
-    let heard = desk.notices();
-    let said: Vec<(NoticeKind, &str)> = heard.iter().map(|n| (n.kind, n.text.as_str())).collect();
-    let [(NoticeKind::Project, text)] = said[..] else { panic!("the project tells: {said:?}") };
-    assert!(text.ends_with(": its pull request #42: lint failed"), "{text}");
-}
-
-/// A project's held-up work is a notice about the project, one per timeline entry, routed by the
-/// orchestrator's terminal: a failed verifier says so, a pass says nothing, nothing goes while
-/// the orchestrator is on screen, and a conflict past the task's give-backs waits on the person.
-#[tokio::test]
-async fn a_project_s_held_up_work_is_a_notice_about_the_project() {
-    use slopty_proto::project::{StepKind, TaskChange, VerifierRun};
-    let hub = Hub::new("server".to_owned(), Vec::new());
-    let (orchestrating, worker) = (SessionId::new(), WorkerId::new());
-    let (tx, _rx) = mpsc::channel(8);
-    let _lease = hub
-        .register(registration(worker, vec![summary(orchestrating)]), [100, 64, 0, 7].into(), tx)
-        .unwrap();
-    let orchestrator = TermRef { worker, session: orchestrating };
-    create(&hub, Some(orchestrator)).await;
-    let build = task(&hub).await;
-    let mut desk = Client::sit(&hub, "mac");
-    desk.at(&hub, Seat::Desk, true, Vec::new());
-    let verified = |passed: bool| Verb::TaskUpdate {
-        project: project(),
-        task: build,
-        change: Box::new(TaskChange {
-            verified: Some(VerifierRun {
-                passed,
-                summary: "1 failed".to_owned(),
-                head: "a".repeat(40),
-                base: "b".repeat(40),
-                exit: Some(u8::from(!passed).into()),
-                took_ms: 0,
-            }),
-            ..TaskChange::default()
-        }),
-    };
-    assert!(matches!(hub.dispatch(verified(true)).await, Outcome::Task(_)));
-    assert!(desk.notices().is_empty(), "a pass is the board's to show");
-    assert!(matches!(hub.dispatch(verified(false)).await, Outcome::Task(_)));
-    let heard = desk.notices();
-    let [notice] = heard.as_slice() else { panic!("one notice: {heard:?}") };
-    assert_eq!(notice.kind, NoticeKind::Project);
-    assert!(
-        matches!(&notice.about, Subject::Project { project: p, .. } if *p == project()),
-        "{notice:?}"
-    );
-    assert_eq!(notice.tile, Some(orchestrator), "it opens the orchestrator");
-    assert_eq!(notice.text, format!("#{build} Ladder: its verifier failed"));
-
-    desk.at(&hub, Seat::Desk, true, vec![orchestrator]);
-    assert!(matches!(hub.dispatch(verified(false)).await, Outcome::Task(_)));
-    assert!(desk.notices().is_empty(), "the orchestrator on screen says it already");
-
-    desk.at(&hub, Seat::Desk, true, Vec::new());
-    let conflict = "CONFLICT (content): Merge conflict in src/lib.rs";
-    for _ in 0..=slopty_proto::project::GIVE_BACKS_MAX {
-        hub.give_back((&project(), build), StepKind::Rebase, Some(worker), conflict, None);
-    }
-    let said: Vec<String> = desk.notices().into_iter().map(|n| n.text).collect();
-    let back = format!("#{build} Ladder: its work conflicts with main: {conflict}");
-    let mut expected = vec![back.clone(); usize::from(slopty_proto::project::GIVE_BACKS_MAX)];
-    expected.push(format!("{back}. It waits on you"));
-    assert_eq!(said, expected, "each give-back, then the one held for the person");
-}
-
-/// What holds a task's work up, in words: failing checks name the failing ones, a failed step
-/// its first line, and a merge only when its push did not go. The rest is the board's.
-#[tokio::test]
-async fn held_up_work_is_said_by_what_held_it() {
-    use slopty_proto::project::{StepState, TaskStep, TimelineEntry};
-    let hub = Hub::new("server".to_owned(), Vec::new());
-    create(&hub, None).await;
-    let id = task(&hub).await;
-    let mut card = hub.inner.state.lock().projects.task(&project(), id).cloned().unwrap();
-    let entry = |what| TimelineEntry { seq: 7, at_ms: WallMs::ZERO, task: Some(id), what };
-    let step = |kind, state| {
-        Moment::Step(TaskStep {
-            kind,
-            worker: WorkerId::new(),
-            state,
-            since_ms: WallMs::ZERO,
-            term: None,
-            commits: None,
-        })
-    };
-    let say = |what, card: &Task| held_up(&entry(what), Some(card), "main");
-    assert_eq!(
-        say(Moment::Pull(pull_seen(PullStands::ChecksFailed)), &card).as_deref(),
-        Some("its pull request #42: lint failed")
-    );
-    assert_eq!(say(Moment::Pull(pull_seen(PullStands::Running)), &card), None);
-    let failed = StepState::Failed { why: "no space left\nmore".to_owned() };
-    assert_eq!(
-        say(step(StepKind::Clone, failed), &card).as_deref(),
-        Some("the clone it needs failed: no space left")
-    );
-    let merged = || step(StepKind::Merge, StepState::Done { detail: "main at abc".to_owned() });
-    assert_eq!(say(merged(), &card), None, "a merge that pushed is no news");
-    card.merge = Some(Merge::Merged {
-        target: "main".to_owned(),
-        head: "abc".to_owned(),
-        from: "def".to_owned(),
-        at_ms: WallMs::ZERO,
-        pushed: false,
-        push_failed: Some("rejected (non-fast-forward)".to_owned()),
-    });
-    assert_eq!(
-        say(merged(), &card).as_deref(),
-        Some("merged into main, but the push to origin failed: rejected (non-fast-forward)")
-    );
 }
 
 /// A pusher that answers every push with what it was given, and counts them.
@@ -1176,114 +1036,6 @@ async fn a_need_told_at_the_desk_is_pushed_once_the_person_leaves_it() {
     lease.handle(delta(vec![ask(&two, 5_000)]));
     hub.rank_ladder();
     assert_eq!(pushes().len(), 1, "a need that finds the person away");
-}
-
-/// The orchestrator saying its goal is met is the person's news once, where they are, in the
-/// summary's first line, and it opens the orchestrator; progress short of it, and the goal
-/// said met again, tell nothing.
-#[tokio::test]
-async fn a_goal_met_is_told_once() {
-    let hub = Hub::new("server".to_owned(), Vec::new());
-    let (orchestrating, worker) = (SessionId::new(), WorkerId::new());
-    let (tx, _rx) = mpsc::channel(8);
-    let _lease = hub
-        .register(registration(worker, vec![summary(orchestrating)]), [100, 64, 0, 7].into(), tx)
-        .unwrap();
-    let orchestrator = TermRef { worker, session: orchestrating };
-    create(&hub, Some(orchestrator)).await;
-    let mut desk = Client::sit(&hub, "mac");
-    desk.at(&hub, Seat::Desk, true, Vec::new());
-    let say = |summary: &str, done| Verb::ProjectProgress {
-        project: project(),
-        summary: summary.to_owned(),
-        next: None,
-        done,
-    };
-    assert!(matches!(hub.dispatch(say("Two of three merged.", false)).await, Outcome::Project(_)));
-    assert!(desk.notices().is_empty(), "progress is the board's to show");
-    let met = say("All three merged.\nThe iPad layout is left.", true);
-    assert!(matches!(hub.dispatch(met).await, Outcome::Project(_)));
-    let heard = desk.notices();
-    let [notice] = heard.as_slice() else { panic!("one notice: {heard:?}") };
-    assert_eq!(notice.kind, NoticeKind::GoalDone);
-    assert_eq!(notice.text, "Goal met: All three merged.");
-    assert_eq!(notice.tile, Some(orchestrator), "it opens the orchestrator");
-    assert!(matches!(&notice.about, Subject::Project { project: p, .. } if *p == project()));
-    let again = say("All three merged, and pushed.", true);
-    assert!(matches!(hub.dispatch(again).await, Outcome::Project(_)));
-    assert!(desk.notices().is_empty(), "once");
-}
-
-/// Work turning ready to merge while the person is away is pushed once for the project, after
-/// it settles: one note saying how many wait, its Merge merging the one ready longest.
-#[tokio::test(start_paused = true)]
-async fn work_turning_ready_is_pushed_once_with_the_oldest_to_merge() {
-    use slopty_proto::project::{TaskChange, TaskState};
-    use slopty_proto::push::PushDevice;
-
-    let hub = Hub::new("server".to_owned(), Vec::new());
-    let (out, mut pushed) = mpsc::channel(8);
-    hub.push_to(Some(out));
-    let (orchestrating, worker) = (SessionId::new(), WorkerId::new());
-    let (tx, _rx) = mpsc::channel(8);
-    let _lease = hub
-        .register(registration(worker, vec![summary(orchestrating)]), [100, 64, 0, 7].into(), tx)
-        .unwrap();
-    let orchestrator = TermRef { worker, session: orchestrating };
-    create(&hub, Some(orchestrator)).await;
-    let (phone, client) = (Client::sit(&hub, "phone"), ClientId::new());
-    let device = PushDevice {
-        token: "0f".repeat(32),
-        key: [7; 32],
-        sandbox: true,
-        topic: "dev.aislopware.slopty".to_owned(),
-        quiet_ms: 60_000,
-    };
-    hub.push_device(phone.seated.link(), client, Some(device));
-    let away = Presence {
-        seat: Seat::Handheld,
-        active: false,
-        showing: Vec::new(),
-        focus: None,
-        listening: false,
-    };
-    hub.presence(phone.seated.link(), away);
-    let mut pushes = || {
-        let mut out = Vec::new();
-        while let Ok(push) = pushed.try_recv() {
-            out.push(push);
-        }
-        out
-    };
-    let done = |task| Verb::TaskUpdate {
-        project: project(),
-        task,
-        change: Box::new(TaskChange { state: Some(TaskState::Done), ..TaskChange::default() }),
-    };
-
-    let tasks = [task(&hub).await, task(&hub).await, task(&hub).await];
-    for t in tasks {
-        assert!(matches!(hub.dispatch(done(t)).await, Outcome::Task(_)));
-        tokio::time::sleep(Duration::from_secs(2)).await;
-    }
-    assert!(pushes().is_empty(), "it settles first");
-    tokio::time::sleep(READY_SETTLE).await;
-    let heard = pushes();
-    let [push] = heard.as_slice() else { panic!("one note: {heard:?}") };
-    let note = body(push);
-    assert_eq!(note.notice.kind, NoticeKind::ReadyToMerge);
-    assert_eq!(note.notice.text, "3 ready to merge");
-    assert_eq!(note.notice.tile, Some(orchestrator), "it opens the orchestrator");
-    assert_eq!(note.merges, Some(tasks[0]), "its Merge merges the one ready longest");
-    tokio::time::sleep(READY_SETTLE * 2).await;
-    assert!(pushes().is_empty(), "once");
-
-    let fourth = task(&hub).await;
-    assert!(matches!(hub.dispatch(done(fourth)).await, Outcome::Task(_)));
-    tokio::time::sleep(READY_SETTLE + Duration::from_secs(1)).await;
-    let heard = pushes();
-    let [push] = heard.as_slice() else { panic!("one note: {heard:?}") };
-    assert_eq!(body(push).notice.text, "4 ready to merge", "the count as it stands");
 }
 
 /// A note that a thread needs the person follows what its buttons answer: a request that

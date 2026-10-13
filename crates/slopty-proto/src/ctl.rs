@@ -21,6 +21,10 @@ use crate::server::WorkerCaps;
 use crate::tailnet::BackendState;
 use crate::terminal::SessionSummary;
 
+/// The variable naming the server, `host[:port]`, in every session a worker runs: `slopty mcp`
+/// and the CLI inside it find the server with no flag.
+pub const SERVER_ENV: &str = "SLOPTY_SERVER";
+
 /// Environment variable naming the session a process runs in (its [`SessionId`]).
 ///
 /// The worker sets it in every shell it spawns, and the `slopty hook` relay reads it to say

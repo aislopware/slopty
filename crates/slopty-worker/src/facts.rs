@@ -29,7 +29,7 @@ use parking_lot::Mutex;
 use slopty_agent::acp::registry;
 use slopty_agent::managed::{self, Launcher};
 use slopty_core::WallMs;
-use slopty_proto::project::{Fact, Facts};
+use slopty_proto::server::{Fact, Facts};
 use tokio::io::AsyncReadExt as _;
 use tokio::sync::watch;
 use tokio::task::JoinSet;

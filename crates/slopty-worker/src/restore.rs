@@ -24,11 +24,6 @@
 //! person's daemon, as every Codex Slopty lets an agent open is, its thread is found as a typed
 //! one's is.
 //!
-//! A session whose agent orchestration started says so in its recipe ([`Orchestrated`]), with
-//! the brief still owed to the agent's first prompt: a worker that starts again while ptyd holds
-//! the session follows the agent again and types the brief once
-//! (`crate::orchestrate::Orchestrator::take_up`).
-//!
 //! The checkpoints reach the keeper as ptyd gets them, and each session's is written off the
 //! session's thread, paced by its size (`pace`): a small screen is on disk within
 //! [`KEEP_SOON`] of the last, and a full scrollback, megabytes, no more often than
@@ -96,27 +91,6 @@ pub struct Recipe {
     pub agent: Option<Resume>,
     /// The Codex or pi session running in it, typed there by the person, to take up again.
     pub typed: Option<Typed>,
-    /// Orchestration started the agent in it: followed again, and its brief typed if still
-    /// owed, by the worker that holds it next.
-    pub orchestrated: Option<Orchestrated>,
-}
-
-/// What orchestration keeps of an agent it started ([`Recipe::orchestrated`]), so a worker that
-/// starts again while the agent lives on in ptyd takes it up where the last one was.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct Orchestrated {
-    /// The brief owed to the agent's first prompt, until ptyd took it whole.
-    pub brief: Option<Brief>,
-}
-
-/// A brief owed to an agent's first prompt ([`Orchestrated::brief`]).
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct Brief {
-    /// The delivery that types it (`slopty_pty::protocol::PtydRequest::Deliver`): sent again
-    /// under the same name, ptyd types it no second time.
-    pub delivery: u64,
-    /// The brief.
-    pub text: String,
 }
 
 /// What an agent the worker resumes is given besides its own flags.
@@ -163,7 +137,6 @@ impl Recipe {
             restored: None,
             agent: None,
             typed: None,
-            orchestrated: None,
         }
     }
 
@@ -204,25 +177,28 @@ impl Recipe {
                 restored: self.restored(again),
             };
         };
-        // What Slopty gave it is given again: the relay, the lock, its tools, and its role,
-        // which a line typed at a prompt cannot carry when it spans lines.
+        // What Slopty gave it is given again: the relay and its tools, with the line that says
+        // what they reach, or the pointer to the CLI, which a line typed at a prompt cannot
+        // carry when it spans lines.
         let args = |in_shell: bool| {
             let mut args = agent.args();
-            if let Some(role) = agent.role.as_ref().filter(|_| !in_shell) {
-                args.push(format!("--append-system-prompt={role}"));
-            }
             if agent.relay
                 && let Some(relay) = &launch.relay
             {
                 args = slopty_agent::hooks::with_relay(args, relay, &cwd);
             }
-            if agent.locked {
-                args = slopty_agent::hooks::held_to(args, &cwd, agent.auto);
-            }
             if agent.mcp
                 && let Some(relay) = &launch.relay
             {
                 args = slopty_agent::hooks::with_mcp(args, relay);
+            }
+            if !in_shell && (agent.mcp || agent.relay) {
+                let line = if agent.mcp {
+                    slopty_agent::hooks::TOOLS_LINE
+                } else {
+                    slopty_agent::hooks::POINTER
+                };
+                args = slopty_agent::hooks::with_line(args, line);
             }
             if let Some(installed) = launch.claude_mod.as_ref().filter(|_mod| !in_shell) {
                 installed.args(args)
@@ -361,8 +337,6 @@ enum Job {
     Checkpoint(SessionId, Vec<u8>, Place),
     Agent(SessionId, Option<Resume>),
     Typed(SessionId, Option<Typed>),
-    Orchestrated(SessionId, Orchestrated, oneshot::Sender<()>),
-    Delivered(SessionId, u64),
     Forget(SessionId),
     Flush(oneshot::Sender<()>),
 }
@@ -435,21 +409,6 @@ impl Keeper {
     /// at once when it differs from the one kept.
     pub fn typed(&self, id: SessionId, typed: Option<Typed>) {
         let _sent = self.jobs.send(Job::Typed(id, typed));
-    }
-
-    /// Orchestration started the agent in session `id`, as `orchestrated` says: returns once
-    /// that is on disk, so a brief is owed there before any of it is typed.
-    pub async fn orchestrated(&self, id: SessionId, orchestrated: Orchestrated) {
-        let (reply, done) = oneshot::channel();
-        if self.jobs.send(Job::Orchestrated(id, orchestrated, reply)).is_ok() {
-            let _written = done.await;
-        }
-    }
-
-    /// The brief owed in session `id` under `delivery` is owed no more: ptyd took it, or it
-    /// was given up.
-    pub fn delivered(&self, id: SessionId, delivery: u64) {
-        let _sent = self.jobs.send(Job::Delivered(id, delivery));
     }
 
     /// Session `id` was closed: nothing of it is kept.
@@ -555,24 +514,6 @@ async fn write_loop(
                     && recipe.typed != typed
                 {
                     recipe.typed = typed;
-                    let recipe = recipe.clone();
-                    write_recipe(&dir, id, &recipe).await;
-                }
-            }
-            Some(Job::Orchestrated(id, orchestrated, written)) => {
-                if let Some(recipe) = recipes.get_mut(&id) {
-                    recipe.orchestrated = Some(orchestrated);
-                    let recipe = recipe.clone();
-                    write_recipe(&dir, id, &recipe).await;
-                }
-                let _told = written.send(());
-            }
-            Some(Job::Delivered(id, delivery)) => {
-                if let Some(recipe) = recipes.get_mut(&id)
-                    && let Some(kept) = &mut recipe.orchestrated
-                    && kept.brief.as_ref().is_some_and(|brief| brief.delivery == delivery)
-                {
-                    kept.brief = None;
                     let recipe = recipe.clone();
                     write_recipe(&dir, id, &recipe).await;
                 }
@@ -737,9 +678,6 @@ mod tests {
             args: vec!["--model".to_owned(), "opus 5".to_owned()],
             relay: false,
             mcp: false,
-            locked: false,
-            auto: false,
-            role: None,
         };
         let open = |command: &[&str]| Recipe {
             agent: Some(agent.clone()),
@@ -804,7 +742,7 @@ mod tests {
         let cwd = project.path().to_string_lossy().into_owned();
         let id = "01a120d0-87f0-7cc3-b4dc-052b22902bc5";
         let opened = Recipe {
-            env: vec![(slopty_proto::project::PROJECT_ENV.to_owned(), "p1".to_owned())],
+            env: vec![("LANG".to_owned(), "C".to_owned())],
             cwd: Some(cwd.clone()),
             ..recipe(&["codex", "-m", "gpt-5", "Fix the build."])
         };
@@ -833,9 +771,6 @@ mod tests {
             args: vec!["--model".to_owned(), "opus".to_owned()],
             relay: true,
             mcp: false,
-            locked: false,
-            auto: false,
-            role: None,
         };
         let open = |command: &[&str]| Recipe { agent: Some(agent.clone()), ..recipe(command) };
         let launch = AgentLaunch {
@@ -907,9 +842,6 @@ mod tests {
                 args: Vec::new(),
                 relay: false,
                 mcp: false,
-                locked: false,
-                auto: false,
-                role: None,
             }),
             ..recipe(&["/bin/zsh"])
         };
@@ -921,11 +853,11 @@ mod tests {
         assert_eq!(background(none, [&held]).await, Vec::<String>::new());
     }
 
-    /// A project's agent comes back wired as Slopty started it: its relay, its tools, the lock
-    /// on the mode that asks nothing, and its role. A shell the person ran it in gets all but
-    /// the role, which spans lines a prompt cannot take.
+    /// An agent Slopty wired comes back wired as it was: its relay, its tools and the line that
+    /// says what they reach. A shell the person ran it in gets all but the line, which a prompt
+    /// cannot take.
     #[test]
-    fn a_project_s_agent_comes_back_with_its_tools_role_and_lock() {
+    fn a_wired_agent_comes_back_with_its_tools() {
         let home = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
         let transcript = home.path().join("abc.jsonl");
@@ -937,22 +869,20 @@ mod tests {
             args: Vec::new(),
             relay: true,
             mcp: true,
-            locked: true,
-            auto: false,
-            role: Some("You work on task 3.\nReport with task_report.".to_owned()),
         };
         let launch =
             AgentLaunch { relay: Some("/opt/slopty".to_owned()), ..AgentLaunch::default() };
         let recipe = |command: &[&str]| Recipe { agent: Some(agent.clone()), ..recipe(command) };
         let tile = recipe(&["claude"]).reopen(SessionId::new(), SHELLS, home.path(), &launch);
         let kept = slopty_agent::resume::invocation(&tile.command[1..]);
-        assert!(kept.relay && kept.mcp && kept.locked, "{:?}", tile.command);
-        assert_eq!(kept.role, agent.role, "its role");
+        assert!(kept.relay && kept.mcp, "{:?}", tile.command);
+        let line = format!("--append-system-prompt={}", slopty_agent::hooks::TOOLS_LINE);
+        assert!(tile.command.contains(&line), "{:?}", tile.command);
         assert!(tile.command.windows(2).any(|w| w == ["--resume", "abc"]), "{:?}", tile.command);
 
         let shell = recipe(&["/bin/zsh"]).reopen(SessionId::new(), SHELLS, home.path(), &launch);
         let line = shell.launch.expect("typed at its prompt");
-        assert!(line.contains("--mcp-config") && line.contains("disableBypassPermissionsMode"));
+        assert!(line.contains("--mcp-config"), "{line}");
         assert!(!line.contains("--append-system-prompt"), "{line}");
     }
 
@@ -1015,9 +945,6 @@ mod tests {
             args: Vec::new(),
             relay: false,
             mcp: false,
-            locked: false,
-            auto: false,
-            role: None,
         };
         keeper.agent(a, Some(conversation("first")));
         keeper.agent(b, Some(conversation("other")));
@@ -1033,30 +960,6 @@ mod tests {
         let (_again, found) = Keeper::open(dir.path()).unwrap();
         assert!(found[&b].agent.is_none());
         assert!(found[&a].agent.is_some());
-    }
-
-    /// A brief owed is on disk by the time the keeper says it is kept, and is owed no more once
-    /// its own delivery is settled; another delivery's word leaves it owed.
-    #[tokio::test]
-    async fn a_brief_is_owed_until_its_own_delivery() {
-        let dir = tempfile::tempdir().unwrap();
-        let (keeper, _found) = Keeper::open(dir.path()).unwrap();
-        let a = SessionId::new();
-        keeper.opened(a, recipe(&["claude"]));
-        let brief = Brief { delivery: 7, text: "Write a.txt.".to_owned() };
-        keeper.orchestrated(a, Orchestrated { brief: Some(brief.clone()) }).await;
-        let (_again, found) = Keeper::open(dir.path()).unwrap();
-        assert_eq!(found[&a].orchestrated, Some(Orchestrated { brief: Some(brief.clone()) }));
-
-        keeper.delivered(a, 8);
-        keeper.flush().await;
-        let (_again, found) = Keeper::open(dir.path()).unwrap();
-        assert_eq!(found[&a].orchestrated, Some(Orchestrated { brief: Some(brief) }), "not its");
-
-        keeper.delivered(a, 7);
-        keeper.flush().await;
-        let (_again, found) = Keeper::open(dir.path()).unwrap();
-        assert_eq!(found[&a].orchestrated, Some(Orchestrated { brief: None }), "still followed");
     }
 
     /// A burst of checkpoints is one write now and one of the newest once the first one's pace

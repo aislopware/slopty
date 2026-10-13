@@ -185,6 +185,29 @@ mod tests {
         rows.iter().any(|r| r.terminal == Some(session) && pred(r))
     }
 
+    /// `claude` and `args` in `cwd`, as terminal `session`, with `env`: an agent's terminal.
+    fn claude(
+        worker: WorkerId,
+        cwd: &Path,
+        session: SessionId,
+        args: &[&str],
+        env: Vec<(String, String)>,
+    ) -> Verb {
+        Verb::OpenTerminal {
+            worker,
+            cwd: Some(cwd.to_string_lossy().into_owned()),
+            command: std::iter::once("claude")
+                .chain(args.iter().copied())
+                .map(String::from)
+                .collect(),
+            env,
+            name: None,
+            size: None,
+            session: Some(session),
+            worktree: None,
+        }
+    }
+
     /// A quiet interactive bash in `cwd`.
     fn open(worker: WorkerId, cwd: &Path) -> Verb {
         Verb::OpenTerminal {
@@ -319,8 +342,8 @@ mod tests {
         let file = dir.path().join("data").join("settings.toml");
 
         let outside = SettingEdit {
-            table: "server.projects".to_owned(),
-            key: "live_agents".to_owned(),
+            table: "server".to_owned(),
+            key: "listen".to_owned(),
             entry: None,
             literal: Some("4".to_owned()),
         };
@@ -665,7 +688,7 @@ mod tests {
     /// fills in itself from the registration is left to it.
     #[tokio::test]
     async fn the_worker_gathers_its_facts_once_the_server_asks() {
-        use slopty_proto::project::Fact;
+        use slopty_proto::server::Fact;
 
         let dir = tempfile::tempdir().unwrap();
         let data = dir.path().join("data");
@@ -809,13 +832,13 @@ mod tests {
         endpoint.close(0_u32.into(), b"done");
     }
 
-    /// An agent the server starts reports its status with no hooks in anyone's settings: the
-    /// worker hands `claude` the relay beside it on `--settings`, merged into the caller's own.
-    /// A stand-in `claude` records what it was given in a session (and answers the worker's
-    /// `--version` probe outside one), and the relay runs as Claude Code would run it from those
-    /// settings.
+    /// A `claude` opened in a terminal reports its status with no hooks in anyone's settings:
+    /// the worker hands it the relay beside it on `--settings`, merged into the caller's own,
+    /// and Slopty's tools. A stand-in `claude` records what it was given in a session (and
+    /// answers the worker's `--version` probe outside one), and the relay runs as Claude Code
+    /// would run it from those settings.
     #[tokio::test]
-    async fn a_spawned_agent_reports_through_the_relay_it_was_handed() {
+    async fn a_claude_terminal_reports_through_the_relay_it_was_handed() {
         use slopty_proto::thread::{AgentId, Cap};
 
         let dir = tempfile::tempdir().unwrap();
@@ -834,9 +857,9 @@ mod tests {
             env = env.display(),
             argv = argv.display(),
         );
-        let claude = programs.join("claude");
-        std::fs::write(&claude, script).unwrap();
-        std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+        let stand_in = programs.join("claude");
+        std::fs::write(&stand_in, script).unwrap();
+        std::fs::set_permissions(&stand_in, std::os::unix::fs::PermissionsExt::from_mode(0o755))
             .unwrap();
         let relay = bin("slopty");
         let server =
@@ -847,17 +870,8 @@ mod tests {
         let link = tokio::time::timeout(STEP, server.accept()).await.unwrap().unwrap();
         let (mut peer, reg) = Peer::welcome(link).await;
 
-        let spawn = Verb::SpawnAgent {
-            worker: reg.worker,
-            cwd: dir.path().to_string_lossy().into_owned(),
-            prompt: None,
-            args: ["--settings", r#"{"model":"haiku"}"#, "--verbose"].map(String::from).to_vec(),
-            env: Vec::new(),
-            size: None,
-            session: None,
-            autonomy: None,
-            worktree: None,
-        };
+        let args = ["--settings", r#"{"model":"haiku"}"#, "--verbose"];
+        let spawn = claude(reg.worker, dir.path(), SessionId::new(), &args, Vec::new());
         let Outcome::Opened(term) = peer.ask(spawn).await else { panic!("the agent starts") };
         let recorded = async {
             loop {
@@ -873,26 +887,33 @@ mod tests {
             .filter(|word| !word.is_empty())
             .map(|word| String::from_utf8(word.to_vec()).unwrap())
             .collect();
-        let [plugin, mcp, flag, settings, pin, conversation, rest @ ..] = args.as_slice() else {
-            panic!("{args:?}")
+        let after = |flag: &str| {
+            let at = args.iter().position(|a| a == flag).unwrap_or_else(|| panic!("{args:?}"));
+            args[at + 1].clone()
         };
-        assert_eq!((flag.as_str(), rest), ("--settings", &["--verbose".to_owned()][..]));
-        assert_eq!(pin, "--session-id", "the conversation's id is chosen before it starts");
-        // Any UUID parses as a session id.
+        let inline = |flag: &str| {
+            let value = args.iter().find_map(|a| a.strip_prefix(flag));
+            value.unwrap_or_else(|| panic!("{flag} in {args:?}")).to_owned()
+        };
+        let (settings, conversation) = (after("--settings"), after("--session-id"));
+        assert_eq!(args.last().map(String::as_str), Some("--verbose"), "its own flags kept");
+        // The conversation's id is chosen before it starts; any UUID parses as a session id.
         assert!(conversation.parse::<SessionId>().is_ok(), "{conversation}");
-        // Slopty's tools, through the same `slopty` beside the worker.
-        let mcp: serde_json::Value =
-            serde_json::from_str(mcp.strip_prefix("--mcp-config=").expect(mcp)).unwrap();
+        // Slopty's tools, through the same `slopty` beside the worker, and the line that says
+        // what they reach.
+        let line = inline("--append-system-prompt=");
+        assert_eq!(line, slopty_agent::hooks::TOOLS_LINE);
+        let mcp: serde_json::Value = serde_json::from_str(&inline("--mcp-config=")).unwrap();
         let tools = &mcp["mcpServers"]["slopty"];
         assert_eq!(tools["command"].as_str().map(PathBuf::from), Some(relay.clone()));
         assert_eq!(tools["args"], serde_json::json!(["mcp"]));
         // The mod, as the worker wrote it under its data dir, in the flag's `=` form.
-        let module = plugin.strip_prefix("--plugin-dir=").map(PathBuf::from).expect(plugin);
+        let module = PathBuf::from(inline("--plugin-dir="));
         assert!(module.starts_with(dir.path().join("data/claude-mod")), "{module:?}");
         for (path, content) in slopty_agent::claude_mod::FILES {
             assert_eq!(std::fs::read_to_string(module.join(path)).unwrap(), content, "{path}");
         }
-        let settings: serde_json::Value = serde_json::from_str(settings).unwrap();
+        let settings: serde_json::Value = serde_json::from_str(&settings).unwrap();
         assert_eq!(settings["model"], "haiku", "the caller's settings are kept");
         assert!(settings.get("permissions").is_none(), "the person allowed its flags");
         for event in slopty_agent::HOOK_EVENTS {
@@ -931,15 +952,13 @@ mod tests {
         .await;
     }
 
-    /// An agent the server starts under an id it chose starts once, with its conversation's
-    /// id pinned and bypass mode locked off. Nothing is typed into it while it cannot take it:
-    /// its first prompt waits for its first hook (a title that looks idle is not enough),
-    /// input waits out a permission prompt, and once it has exited, input is refused. Each
-    /// change of its permission mode reaches the server once.
+    /// A `claude` opened under an id the caller chose starts once, with its conversation's id
+    /// pinned. Nothing is typed into it while it cannot take it: a title that looks idle is not
+    /// enough before its first hook, input waits out a permission prompt (the person's to
+    /// answer, never an agent's), and once it has exited, input is refused.
     #[tokio::test]
-    async fn a_spawned_agent_is_typed_into_only_when_it_can_take_it() {
+    async fn an_agent_s_terminal_is_typed_into_only_when_it_can_take_it() {
         use serde_json::json;
-        use slopty_proto::project::AgentReport;
 
         let dir = tempfile::tempdir().unwrap();
         let programs = dir.path().join("programs");
@@ -961,17 +980,8 @@ mod tests {
             ("STUB_HOOKS", "[]".to_owned()),
             ("STUB_TITLE", "\u{2733} Claude Code".to_owned()),
         ];
-        let spawn = Verb::SpawnAgent {
-            worker: reg.worker,
-            cwd: dir.path().to_string_lossy().into_owned(),
-            prompt: Some("write the brief".to_owned()),
-            args: Vec::new(),
-            env: env.map(|(k, v)| (k.to_owned(), v)).to_vec(),
-            size: None,
-            session: Some(chosen),
-            autonomy: Some(slopty_proto::project::Autonomy::Ask),
-            worktree: None,
-        };
+        let env = env.map(|(k, v)| (k.to_owned(), v)).to_vec();
+        let spawn = claude(reg.worker, dir.path(), chosen, &[], env);
         let term = TermRef { worker: reg.worker, session: chosen };
         assert_eq!(peer.ask(spawn.clone()).await, Outcome::Opened(term));
         assert_eq!(peer.ask(spawn).await, Outcome::Opened(term), "the same start again");
@@ -985,9 +995,6 @@ mod tests {
         let after = |flag: &str| argv.iter().position(|a| *a == flag).map(|at| argv[at + 1]);
         let conversation = after("--session-id").expect("pinned");
         assert!(conversation.parse::<SessionId>().is_ok(), "{conversation}");
-        let settings: serde_json::Value =
-            serde_json::from_str(after("--settings").expect("settings")).unwrap();
-        assert_eq!(settings["permissions"]["disableBypassPermissionsMode"], "disable");
 
         // Its title says it is at its prompt before any hook has spoken: a dialog of its own
         // may be up, so nothing goes in.
@@ -999,11 +1006,12 @@ mod tests {
         );
         tokio::time::sleep(Duration::from_millis(500)).await;
         let quiet = recorded(&record, |_| true).await;
-        assert_eq!(quiet["typed"], json!([]), "the prompt waits for a hook");
+        assert_eq!(quiet["typed"], json!([]), "nothing goes in before a hook");
 
         let said = |event: &str, mode: &str| json!({ "hook_event_name": event, "session_id": conversation, "permission_mode": mode });
         hook(dir.path(), chosen, said("SessionStart", "default")).await;
-        recorded(&record, |r| r["typed"] == json!(["write the brief"])).await;
+        assert_eq!(peer.ask(Verb::SendInput { term, input: text("hello\n") }).await, Outcome::Done);
+        recorded(&record, |r| r["typed"] == json!(["hello"])).await;
 
         let mut asking = said("PermissionRequest", "default");
         asking["tool_name"] = json!("Bash");
@@ -1013,27 +1021,11 @@ mod tests {
             panic!("{held:?}")
         };
         assert!(message.contains("the person's to answer"), "{message}");
-        let mut ran = said("PostToolUse", "plan");
+        let mut ran = said("PostToolUse", "default");
         ran["tool_name"] = json!("Bash");
         hook(dir.path(), chosen, ran).await;
         assert_eq!(peer.ask(Verb::SendInput { term, input: text("more\n") }).await, Outcome::Done);
-        recorded(&record, |r| r["typed"] == json!(["write the brief", "more"])).await;
-
-        let modes = |heard: &[ToServer]| -> Vec<String> {
-            heard
-                .iter()
-                .filter_map(|m| match m {
-                    ToServer::Report(AgentReport::PermissionMode { session, mode })
-                        if *session == chosen =>
-                    {
-                        Some(mode.clone())
-                    }
-                    _ => None,
-                })
-                .collect()
-        };
-        peer.heard(|m| matches!(m, ToServer::Report(AgentReport::PermissionMode { mode, .. }) if mode == "plan")).await;
-        assert_eq!(modes(&peer.heard), ["default", "plan"], "each change once");
+        recorded(&record, |r| r["typed"] == json!(["hello", "more"])).await;
 
         let eof = Input::Keys(vec!["ctrl+d".to_owned()]);
         assert_eq!(peer.ask(Verb::SendInput { term, input: eof }).await, Outcome::Done);
@@ -1046,13 +1038,9 @@ mod tests {
     }
 
     /// A terminal whose command starts Claude Code, however wrapped, is an agent's from the
-    /// start: nothing is typed into it before its first hook, and what its command line gives
-    /// it beyond what asks the person is reported, for the server to judge, and told again to
-    /// the next link after the server restarts.
+    /// start: nothing is typed into it before its first hook.
     #[tokio::test]
-    async fn claude_in_a_shell_line_is_guarded_and_judged_as_a_spawned_one() {
-        use slopty_proto::project::AgentReport;
-
+    async fn claude_in_a_shell_line_is_guarded_as_an_agent() {
         let dir = tempfile::tempdir().unwrap();
         let programs = dir.path().join("programs");
         std::fs::create_dir_all(&programs).unwrap();
@@ -1087,25 +1075,9 @@ mod tests {
             matches!(early, Outcome::Error { code: ErrorCode::AgentNotReady, .. }),
             "{early:?}"
         );
-        peer.heard(|m| {
-            matches!(m, ToServer::Report(AgentReport::Loosened { session, found })
-                if *session == term.session && found.iter().any(|f| f == "--allowedTools"))
-        })
-        .await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
         let quiet = recorded(&record, |_| true).await;
         assert_eq!(quiet["typed"], serde_json::json!([]), "nothing reached its TUI");
-
-        // The server restarts: the next link hears it again, though nothing changed, so the
-        // guard judges an agent that loosened itself while the server could not hear.
-        peer.conn.close(0_u32.into(), b"server restarting");
-        let link = tokio::time::timeout(STEP, server.accept()).await.unwrap().unwrap();
-        let (mut again, _) = Peer::welcome(link).await;
-        again
-            .heard(|m| {
-                matches!(m, ToServer::Report(AgentReport::Loosened { session, found })
-                    if *session == term.session && found.iter().any(|f| f == "--allowedTools"))
-            })
-            .await;
     }
 
     /// Reports the server sends an agent reach it through its own hooks, never its terminal:
@@ -1114,7 +1086,7 @@ mod tests {
     #[tokio::test]
     async fn reports_reach_an_agent_through_its_next_prompt_s_hook() {
         use serde_json::json;
-        use slopty_proto::project::AgentReport;
+        use slopty_proto::server::AgentReport;
 
         let dir = tempfile::tempdir().unwrap();
         let programs = dir.path().join("programs");
@@ -1137,17 +1109,8 @@ mod tests {
             ("STUB_LATER", prompt.to_string()),
             ("STUB_LATER_AFTER", gate.to_string_lossy().into_owned()),
         ];
-        let spawn = Verb::SpawnAgent {
-            worker: reg.worker,
-            cwd: dir.path().to_string_lossy().into_owned(),
-            prompt: None,
-            args: Vec::new(),
-            env: env.map(|(k, v)| (k.to_owned(), v)).to_vec(),
-            size: None,
-            session: Some(session),
-            autonomy: Some(slopty_proto::project::Autonomy::Ask),
-            worktree: None,
-        };
+        let env = env.map(|(k, v)| (k.to_owned(), v)).to_vec();
+        let spawn = claude(reg.worker, dir.path(), session, &[], env);
         let term = TermRef { worker: reg.worker, session };
         assert_eq!(peer.ask(spawn).await, Outcome::Opened(term));
         let started =
@@ -1155,7 +1118,7 @@ mod tests {
         assert_eq!(started["hooks"][0]["event"], "SessionStart");
         assert_eq!(started["hooks"][0]["outputs"], json!([]), "nothing waits yet");
 
-        let context = "<slopty-reports project=\"demo\">\ntask 2: needs input\n  Which crate owns the store?\n</slopty-reports>";
+        let context = "<slopty-reports>\nagent 2: needs input\n  Which crate owns the store?\n</slopty-reports>";
         let deliver = deliver(session, 7, context);
         peer.tx.send(&deliver).await.unwrap();
         let kept = slopty_agent::reports::dir(&dir.path().join("worker.sock"));
@@ -1196,10 +1159,10 @@ mod tests {
         assert!(!kept.join(format!("{session}.json")).exists(), "not kept to be read twice");
 
         // Folded into the next batch with a new report, it is left out: only the new one waits.
-        let read = ReportBlock { id: 7, text: "task 2: needs input".to_owned() };
-        let new = ReportBlock { id: 8, text: "task 3: done".to_owned() };
+        let read = ReportBlock { id: 7, text: "agent 2: needs input".to_owned() };
+        let new = ReportBlock { id: 8, text: "agent 3: done".to_owned() };
         let folded = Reports {
-            open: "<slopty-reports project=\"demo\">".to_owned(),
+            open: "<slopty-reports>".to_owned(),
             blocks: vec![read, new],
             close: "</slopty-reports>".to_owned(),
         };
@@ -1215,8 +1178,7 @@ mod tests {
         let waiting: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
         assert_eq!(
-            waiting["context"],
-            "<slopty-reports project=\"demo\">\ntask 3: done\n</slopty-reports>",
+            waiting["context"], "<slopty-reports>\nagent 3: done\n</slopty-reports>",
             "without the report read already"
         );
     }
@@ -1247,17 +1209,7 @@ mod tests {
             ("STUB_TRANSCRIPT".to_owned(), transcript.to_string_lossy().into_owned()),
         ];
         env.extend(more.iter().map(|(k, v)| ((*k).to_owned(), v.clone())));
-        let spawn = Verb::SpawnAgent {
-            worker: reg.worker,
-            cwd: dir.to_string_lossy().into_owned(),
-            prompt: None,
-            args: Vec::new(),
-            env,
-            size: None,
-            session: Some(session),
-            autonomy: Some(slopty_proto::project::Autonomy::Ask),
-            worktree: None,
-        };
+        let spawn = claude(reg.worker, dir, session, &[], env);
         let term = TermRef { worker: reg.worker, session };
         assert_eq!(peer.ask(spawn).await, Outcome::Opened(term));
         let started =
@@ -1291,14 +1243,13 @@ mod tests {
     #[tokio::test]
     async fn reports_wake_an_agent_at_rest_through_its_inbox() {
         use serde_json::json;
-        use slopty_proto::project::AgentReport;
+        use slopty_proto::server::AgentReport;
 
         let dir = tempfile::tempdir().unwrap();
         let (mut peer, session, record, posted, kept, _daemons) =
             resting_agent_with_an_inbox(dir.path(), &[]).await;
 
-        let context =
-            "<slopty-reports project=\"demo\">\ntask 2: done\n  Merged.\n</slopty-reports>";
+        let context = "<slopty-reports>\nagent 2: done\n  Merged.\n</slopty-reports>";
         let deliver = deliver(session, 9, context);
         peer.tx.send(&deliver).await.unwrap();
         peer.heard(|m| {
@@ -1310,8 +1261,7 @@ mod tests {
         let content = note["content"].as_str().unwrap();
         assert!(
             content.starts_with("<slopty-reports delivery=\"")
-                && content
-                    .ends_with(" project=\"demo\">\ntask 2: done\n  Merged.\n</slopty-reports>"),
+                && content.ends_with("\">\nagent 2: done\n  Merged.\n</slopty-reports>"),
             "the batch, marked: {content}"
         );
         assert_eq!(
@@ -1330,7 +1280,7 @@ mod tests {
     #[tokio::test]
     async fn reports_an_inbox_held_wait_for_the_next_hook() {
         use serde_json::json;
-        use slopty_proto::project::AgentReport;
+        use slopty_proto::server::AgentReport;
 
         let dir = tempfile::tempdir().unwrap();
         let gate = dir.path().join("prompted");
@@ -1348,7 +1298,7 @@ mod tests {
         let (mut peer, session, record, posted, kept, _daemons) =
             resting_agent_with_an_inbox(dir.path(), &more).await;
 
-        let context = "<slopty-reports project=\"demo\">\ntask 2: stuck\n</slopty-reports>";
+        let context = "<slopty-reports>\nagent 2: stuck\n</slopty-reports>";
         let deliver = deliver(session, 4, context);
         peer.tx.send(&deliver).await.unwrap();
         let got = inbox_notes(&posted, 1).await;
@@ -1410,9 +1360,7 @@ mod tests {
             resting_agent_with_an_inbox(dir.path(), &[]).await;
         let asking = json!({ "hook_event_name": "PermissionRequest", "tool_name": "Bash" });
         hook(dir.path(), session, asking).await;
-        let context = |n: u64| {
-            format!("<slopty-reports project=\"demo\">\ntask {n}: done\n</slopty-reports>")
-        };
+        let context = |n: u64| format!("<slopty-reports>\nagent {n}: done\n</slopty-reports>");
         // The link takes one message at a time, so the batch after one is kept only once the
         // one before was judged.
         for batch in [5, 6] {
@@ -1427,7 +1375,7 @@ mod tests {
         let got = inbox_notes(&posted, 1).await;
         let [note] = got.as_slice() else { panic!("one message: {got:?}") };
         let content = note["content"].as_str().unwrap();
-        assert!(content.contains("task 7: done"), "only the batch after the answer: {content}");
+        assert!(content.contains("agent 7: done"), "only the batch after the answer: {content}");
     }
 
     /// Reports do not start an agent the person just stopped: after their Esc (the transcript's
@@ -1468,9 +1416,7 @@ mod tests {
         });
         hook(dir.path(), session, waiting).await;
 
-        let context = |n: u64| {
-            format!("<slopty-reports project=\"demo\">\ntask {n}: done\n</slopty-reports>")
-        };
+        let context = |n: u64| format!("<slopty-reports>\nagent {n}: done\n</slopty-reports>");
         // The link takes one message at a time, so the batch after one is kept only once the
         // one before was judged.
         for batch in [5, 6] {
@@ -1484,7 +1430,7 @@ mod tests {
         let got = inbox_notes(&posted, 1).await;
         let [note] = got.as_slice() else { panic!("one message: {got:?}") };
         let content = note["content"].as_str().unwrap();
-        assert!(content.contains("task 7: done"), "only the batch after the prompt: {content}");
+        assert!(content.contains("agent 7: done"), "only the batch after the prompt: {content}");
     }
 
     /// `git -C dir args…` with nobody's config: what it printed.
@@ -1504,7 +1450,7 @@ mod tests {
 
     /// A terminal asked to open in a worktree opens in one the worker made from the clone its
     /// cwd names, at the base asked for and not at the branch the clone has checked out, as a
-    /// Codex task's does. Asked again under the same name it reopens that one as it is; with no
+    /// Codex agent's does. Asked again under the same name it reopens that one as it is; with no
     /// cwd there is no clone to make it from, and it is refused.
     #[tokio::test]
     async fn a_terminal_opens_in_a_worktree_made_from_its_base() {
@@ -1589,13 +1535,13 @@ mod tests {
     async fn reports_are_handed_only_to_their_own_session_by_its_token() {
         use serde_json::json;
         use slopty_proto::ctl::{CtlReply, CtlRequest, ReportsAsk};
-        use slopty_proto::project::AgentReport;
+        use slopty_proto::server::AgentReport;
 
         let dir = tempfile::tempdir().unwrap();
         let more = [("STUB_INBOX_HOLD", "1".to_owned())];
         let (mut peer, session, _record, _posted, kept, _daemons) =
             resting_agent_with_an_inbox(dir.path(), &more).await;
-        let context = "<slopty-reports project=\"demo\">\ntask 3: done\n</slopty-reports>";
+        let context = "<slopty-reports>\nagent 3: done\n</slopty-reports>";
         let deliver = deliver(session, 3, context);
         peer.tx.send(&deliver).await.unwrap();
         kept_batch(&kept, session, 3).await;
@@ -1662,7 +1608,7 @@ mod tests {
         };
         assert_eq!(term.worker, worker);
         // The server hears of the terminal before the answer, so a caller naming it next (a
-        // project's orchestrator) finds it.
+        // agent that asked for it) finds it.
         let announced =
             |m: &ToServer| matches!(m, ToServer::SessionChanged(s) if s.id == term.session);
         assert!(peer.heard.iter().any(announced), "before the answer: {:?}", peer.heard);

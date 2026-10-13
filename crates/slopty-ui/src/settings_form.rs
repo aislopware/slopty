@@ -2955,11 +2955,10 @@ mod map_tests {
         assert!((f32::from(colour.size.width) - FIELD_WIDTH).abs() < 0.5, "{colour:?}");
     }
 
-    /// The Agents page writes its keys to their own tables: a step of the live agents to
-    /// `[server.projects]`, an APNs key's path typed to `[server.push]`, in a field wide enough to
-    /// read it.
+    /// The Agents page writes its keys to their own tables: the autonomy picked to `[agents]`,
+    /// an APNs key's path typed to `[server.push]`, in a field wide enough to read it.
     #[gpui::test]
-    fn the_agents_page_writes_the_projects_and_the_notes_tables(cx: &mut TestAppContext) {
+    fn the_agents_page_writes_the_agents_and_the_notes_tables(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         let (form, cx): (_, &mut VisualTestContext) =
             cx.add_window_view(|window, cx| SettingsForm::new("", Theme::default(), window, cx));
@@ -2972,16 +2971,16 @@ mod map_tests {
                 .unwrap_or_else(|| panic!("{table}.{key}"))
         };
         click(cx, leak(format!("settings-section-{}", Section::Agents.index())));
-        let live = ix("server.projects", "live_agents");
+        let autonomy = ix("agents", "autonomy");
         let key = ix("server.push", "apns_key");
-        for row in [ix("worker", "acp"), live, key] {
+        for row in [ix("worker", "acp"), autonomy, key] {
             assert!(cx.debug_bounds(leak(format!("settings-row-{row}"))).is_some(), "row {row}");
         }
-        click(cx, leak(format!("settings-increase-{live}")));
+        click(cx, leak(format!("settings-option-{autonomy}-1")));
         cx.executor().advance_clock(SETTLE);
         cx.run_until_parked();
         let text = |cx: &mut VisualTestContext| form.read_with(cx, |f, _| f.text().to_owned());
-        assert_eq!(text(cx), "[server.projects]\nlive_agents = 25\n");
+        assert_eq!(text(cx), "[agents]\nautonomy = \"full\"\n");
 
         // A path's field is wide enough to read one whole, wider than a colour's, its share
         // the row's and not its own (which cut every field to that share of itself).
@@ -2993,7 +2992,7 @@ mod map_tests {
         cx.run_until_parked();
         assert_eq!(
             text(cx),
-            "[server.projects]\nlive_agents = 25\n\n[server.push]\napns_key = \"/Users/me/keys/AuthKey.p8\"\n"
+            "[agents]\nautonomy = \"full\"\n\n[server.push]\napns_key = \"/Users/me/keys/AuthKey.p8\"\n"
         );
     }
 
@@ -3021,7 +3020,7 @@ mod map_tests {
                 .position(|r| r.table() == table && r.key() == key)
                 .unwrap_or_else(|| panic!("{table}.{key}"))
         };
-        let (acp, live) = (ix("worker", "acp"), ix("server.projects", "live_agents"));
+        let (acp, live) = (ix("worker", "acp"), ix("agents", "autonomy"));
         let (caller, mut queue) = slopty_client::server::ServerCaller::queued();
         let mini = slopty_core::WorkerId::new();
         let machines = vec![

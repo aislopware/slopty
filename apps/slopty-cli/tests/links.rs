@@ -6,16 +6,15 @@
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::HashSet;
+    use std::net::SocketAddr;
     use std::time::{Duration, Instant};
 
     use slopty_client::server::{ServerEvent, spawn};
+    use slopty_core::WorkerId;
     use slopty_net::HostAddr;
-    use slopty_proto::orchestration::{ErrorCode, Happening, HubEvent, Outcome, Verb};
-    use slopty_proto::project::{
-        Autonomy, LimitsChange, ProjectId, TaskChange, TaskId, TaskSpec, TaskState,
-    };
-    use slopty_proto::server::{FromServer, Role};
+    use slopty_proto::orchestration::{ErrorCode, Outcome, Verb};
+    use slopty_proto::server::{FromServer, Os, Registration, Role, WorkerCaps};
     use slopty_server::{Config, Server};
     use slopty_testkit::relay::Relay;
     use tokio::sync::mpsc;
@@ -38,12 +37,49 @@ mod tests {
         .unwrap()
     }
 
-    /// The board as the app keeps it: each task's state, from the last snapshot and every
+    /// A machine that once registered and is off now: what the person forgets.
+    fn machine(server: &Server, name: &str) -> WorkerId {
+        let worker = WorkerId::new();
+        let caps = WorkerCaps {
+            os: Os::Linux,
+            os_version: "6.15".to_owned(),
+            arch: "x86_64".to_owned(),
+            form: slopty_proto::server::Form::Desktop,
+            cpus: 8,
+            memory: 16 << 30,
+            encoders: Vec::new(),
+            displays: Vec::new(),
+            agents: Vec::new(),
+            can_capture: false,
+            can_inject: false,
+            virtual_displays: false,
+            curtain: false,
+            build: "0".to_owned(),
+            lan: Vec::new(),
+            wake_on_lan: None,
+            writes_failing: None,
+            stops_at_logout: None,
+        };
+        let registration = Registration {
+            worker,
+            name: name.to_owned(),
+            listen: SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, 45550)),
+            caps,
+            sessions: Vec::new(),
+            session_key: [7; 32],
+        };
+        let (tx, _rx) = mpsc::channel(8);
+        let lease = server.hub().register(registration, [127, 0, 0, 1].into(), tx).unwrap();
+        drop(lease);
+        worker
+    }
+
+    /// The board as the app keeps it: the machines it knows, from the last directory and every
     /// change since, and whether the link is up.
     #[derive(Debug, Default)]
     struct Board {
         linked: bool,
-        tasks: HashMap<(ProjectId, TaskId), TaskState>,
+        machines: HashSet<WorkerId>,
     }
 
     impl Board {
@@ -52,21 +88,11 @@ mod tests {
                 ServerEvent::Linked { .. } => self.linked = true,
                 ServerEvent::Unlinked { .. } => self.linked = false,
                 ServerEvent::Message(msg) => match *msg {
-                    FromServer::Projects(part) => {
-                        if part.first {
-                            self.tasks.clear();
-                        }
-                        for status in part.projects {
-                            let id = status.project.id.clone();
-                            for card in status.tasks {
-                                self.tasks.insert((id.clone(), card.id), card.state);
-                            }
-                        }
+                    FromServer::Directory(all) => {
+                        self.machines = all.iter().map(|w| w.worker).collect();
                     }
-                    FromServer::Event(HubEvent { what: Happening::Project(update), .. }) => {
-                        if let Some(card) = update.task {
-                            self.tasks.insert((update.project.clone(), card.id), card.state);
-                        }
+                    FromServer::Worker(info) => {
+                        self.machines.insert(info.worker);
                     }
                     _ => {}
                 },
@@ -93,39 +119,17 @@ mod tests {
         }
     }
 
-    fn task(title: &str) -> Verb {
-        let spec = TaskSpec { title: title.to_owned(), ..TaskSpec::default() };
-        Verb::TaskCreate { project: ProjectId::new("trip").unwrap(), spec: Box::new(spec) }
-    }
-
-    /// The app off the network for 30 s while the agents go on. The server's link is said lost
+    /// The app off the network for 30 s while the fleet changes. The server's link is said lost
     /// within its lease (5 s), and the board keeps showing what it last knew. A verb made as the
     /// network went goes again under its key on the next link, and is done once; one asked once
     /// the link is known lost is refused at once, rather than left waiting. Back on the network,
-    /// the link comes back by itself and the board is current with the agents' work at once.
+    /// the link comes back by itself and the board is current at once.
     #[tokio::test(flavor = "multi_thread")]
     async fn the_app_off_the_network_keeps_its_board_and_catches_up_once_back() {
         let dir = tempfile::tempdir().unwrap();
         let server = server(dir.path()).await;
         let hub = server.hub().clone();
-        let project = ProjectId::new("trip").unwrap();
-        let made = hub
-            .dispatch(Verb::ProjectCreate {
-                project: project.clone(),
-                title: "Trip".to_owned(),
-                goal: None,
-                autonomy: Autonomy::Ask,
-                repo: dir.path().to_string_lossy().into_owned(),
-                target: "main".to_owned(),
-                verifier: None,
-                push: false,
-                orchestrator: None,
-                limits: LimitsChange::default(),
-                metadata: None,
-            })
-            .await;
-        assert!(matches!(made, Outcome::Project(_)), "{made:?}");
-        let Outcome::Task(working) = hub.dispatch(task("Work on")).await else { panic!("a task") };
+        let [went, away, elsewhere] = ["went", "away", "elsewhere"].map(|n| machine(&server, n));
 
         let relay = Relay::start(server.quic_addr()).await.unwrap();
         let endpoint = slopty_net::client::bind_client().unwrap();
@@ -135,38 +139,30 @@ mod tests {
         let (link, mut events) = spawn(&runtime, endpoint, addr, role, None);
         let caller = link.caller();
         let mut board = Board::default();
-        let key = (project.clone(), working.id);
-        board.until(&mut events, "the board", |b| b.linked && b.tasks.contains_key(&key)).await;
+        board.until(&mut events, "the board", |b| b.linked && b.machines.len() == 3).await;
 
         // Off the network. A verb made just then is on its way when the link goes.
         relay.cut();
         let cut = Instant::now();
         let in_flight = tokio::spawn({
             let caller = caller.clone();
-            async move { caller.call(task("Made as the network went")).await }
+            async move { caller.call(Verb::ForgetWorker { worker: went }).await }
         });
         let said = board.until(&mut events, "the link said lost", |b| !b.linked).await;
         let lost_after = said.duration_since(cut);
 
         // Known lost: a verb is refused at once, saying so.
         let asked = Instant::now();
-        let refused = caller.call(task("Made while away")).await;
+        let refused = caller.call(Verb::ForgetWorker { worker: away }).await;
         let refused_in = asked.elapsed();
         assert!(
             matches!(&refused, Outcome::Error { code: ErrorCode::ServerUnreachable, .. }),
             "{refused:?}"
         );
 
-        // The agents go on meanwhile: the work they report reaches the server.
-        let change = TaskChange { state: Some(TaskState::Done), ..TaskChange::default() };
-        let verb =
-            Verb::TaskUpdate { project: project.clone(), task: working.id, change: change.into() };
-        assert!(matches!(hub.dispatch(verb).await, Outcome::Task(_)));
-        assert_eq!(
-            board.tasks.get(&key),
-            Some(&TaskState::Planned),
-            "the board shows what it knew"
-        );
+        // The fleet changes meanwhile, from another device.
+        assert_eq!(hub.dispatch(Verb::ForgetWorker { worker: elsewhere }).await, Outcome::Done);
+        assert!(board.machines.contains(&elsewhere), "the board shows what it knew");
 
         let back = cut.checked_add(AWAY).unwrap();
         tokio::time::sleep_until(back.into()).await;
@@ -174,19 +170,16 @@ mod tests {
         let restored = Instant::now();
         let linked = board.until(&mut events, "linked again", |b| b.linked).await;
         let current = board
-            .until(&mut events, "the board current", |b| {
-                b.tasks.get(&key) == Some(&TaskState::Done)
-            })
+            .until(&mut events, "the board current", |b| b.machines == HashSet::from([away]))
             .await;
 
-        // The verb that was on its way is done, once.
+        // The verb that was on its way is done, once: its repeat answers as the first did.
         let outcome = tokio::time::timeout(STEP, in_flight).await.unwrap().unwrap();
-        assert!(matches!(outcome, Outcome::Task(_)), "{outcome:?}");
-        let verb = Verb::ProjectStatus { project: project.clone(), since: None, timeout_ms: 0 };
-        let Outcome::Project(status) = hub.dispatch(verb).await else { panic!("the project") };
-        let made = status.tasks.iter().filter(|t| t.title == "Made as the network went").count();
-        assert_eq!(made, 1, "done once: {:?}", status.tasks);
-        assert!(status.tasks.iter().all(|t| t.title != "Made while away"));
+        assert_eq!(outcome, Outcome::Done);
+        let Outcome::Workers(left) = hub.dispatch(Verb::ListWorkers).await else {
+            panic!("the machines")
+        };
+        assert_eq!(left.iter().map(|w| w.worker).collect::<Vec<_>>(), [away], "{left:?}");
 
         println!(
             "off the network {AWAY:?}: said lost after {lost_after:?}; refused in {refused_in:?}; \

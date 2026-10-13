@@ -1,5 +1,5 @@
 //! Reports on their way into an agent through its hooks (`docs/decisions/projects.md`,
-//! "Reports go up through hooks").
+//! "A parent hears through its hooks").
 //!
 //! The server sends a batch of reports for an agent's terminal to its worker, which keeps it in
 //! a file per session beside its control socket ([`put`]). When the agent next starts, is

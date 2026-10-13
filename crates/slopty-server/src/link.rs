@@ -2,8 +2,8 @@
 //!
 //! A worker link holds a [`Lease`] for as long as it both reads and writes; what the server sends
 //! it (requests) goes through a queue to its writer. A client or agent link gets the fleet's
-//! state (the directory, every terminal and the agent in it, every project), then every change, and
-//! the answers to its requests, each request dispatched on a task of its own so a long `WaitFor`
+//! state (the directory, every terminal and the agent in it), then every change, and the
+//! answers to its requests, each request dispatched on a task of its own so a long `WaitFor`
 //! holds up nothing behind it. A link that falls behind the changes gets the state again, which
 //! replaces everything it was told before.
 
@@ -405,13 +405,11 @@ async fn tell(tx: &mut FramedSend<FromServer>, msgs: Vec<FromServer>) -> Result<
     Ok(())
 }
 
-/// The fleet's state: the directory, then every project, the attention ladder, which says
-/// where every agent's thread stands, and where the person is.
+/// The fleet's state: the directory, the attention ladder, which says where every agent's
+/// thread stands, and where the person is.
 fn state(hub: &Hub) -> Vec<FromServer> {
-    let mut snapshot = hub.state();
-    let parts = Hub::project_parts(&mut snapshot);
+    let snapshot = hub.state();
     let mut msgs = vec![FromServer::Directory(snapshot.directory)];
-    msgs.extend(parts.into_iter().map(|part| FromServer::Projects(Box::new(part))));
     msgs.push(FromServer::Ladder(Box::new(hub.ladder())));
     msgs.push(FromServer::Present(hub.present()));
     msgs

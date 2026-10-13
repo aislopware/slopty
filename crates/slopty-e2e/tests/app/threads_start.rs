@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use slopty_e2e::harness::ProjectStack;
+use slopty_e2e::harness::ServedApp;
 use slopty_e2e::{Driver, Dump};
 
 /// A server round trip, the agent's terminal opening, the app hearing of it.
@@ -19,7 +19,7 @@ const FIELD: &str = "What should Claude Code do";
 
 /// Wait until the server says the worker has Claude Code: the palette offers what the
 /// worker's facts list, and a worker lists it once its facts are gathered.
-async fn claude_installed(stack: &ProjectStack) {
+async fn claude_installed(stack: &ServedApp) {
     let started = tokio::time::Instant::now();
     loop {
         let workers = stack.slopty(&["workers"]).await.unwrap();
@@ -78,7 +78,7 @@ async fn palette_offering(drv: &mut Driver) {
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
 async fn a_palette_start_opens_the_agents_terminal_on_its_thread() {
-    let mut stack = ProjectStack::launch("studio").await.unwrap();
+    let mut stack = ServedApp::launch("studio").await.unwrap();
     claude_installed(&stack).await;
     let drv = &mut stack.driver;
     palette_offering(drv).await;

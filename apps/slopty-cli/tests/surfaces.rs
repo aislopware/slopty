@@ -156,30 +156,14 @@ mod tests {
         let mut stdin = child.stdin.take().unwrap();
         let mut stdout = BufReader::new(child.stdout.take().unwrap()).lines();
 
-        let made = scrubbed(data.path())
-            .arg("--server")
-            .arg(server.quic_addr().to_string())
-            .arg("--data-dir")
-            .arg(data.path())
-            .args([
-                "project", "create", "demo", "--title", "Demo", "--repo", "demo", "--target",
-                "main",
-            ])
-            .env("RUST_LOG", "warn")
-            .kill_on_drop(true)
-            .output();
-        let made = tokio::time::timeout(PATIENCE, made).await.expect("made in time").unwrap();
-        assert!(made.status.success(), "{}", String::from_utf8_lossy(&made.stderr));
-
-        let prefix = shell().to_string();
-        let by_name = format!("fake-worker/{}", prefix.get(..8).unwrap());
+        let nobody = "0199a1b1-c3d4-7000-8000-00000000beef";
         let calls = [
-            ("project_status", json!({ "project": "demo" })),
-            ("project_status", json!({ "project": "nope" })),
-            ("task_get", json!({ "project": "demo", "task": 1 })),
-            ("task_wait", json!({ "project": "demo", "tasks": [1], "timeout_ms": 0 })),
-            ("read_thread", json!({ "term": by_name })),
-            ("read_thread", json!({ "term": "no-such-worker/0199" })),
+            ("machines", json!({})),
+            ("agents", json!({})),
+            ("agent_read", json!({ "agent": "nope" })),
+            ("agent_read", json!({ "agent": nobody })),
+            ("agent_tell", json!({ "agent": nobody, "text": "hi" })),
+            ("agent_start", json!({ "machine": "no-such-machine", "prompt": "Fix it" })),
         ];
         let mut answers = Vec::new();
         for (id, (name, arguments)) in (1_u64..).zip(&calls) {
@@ -202,18 +186,18 @@ mod tests {
         }
 
         // The answers are the tools' views, not the wire's; a tool's error is a result.
-        let [status, unknown, task, waited, thread, nowhere] = answers.as_slice() else {
+        let [machines, agents, garbled, read, told, started] = answers.as_slice() else {
             panic!("{answers:?}")
         };
-        assert_ne!(status.0, json!(true), "{status:?}");
-        assert_eq!(status.1["project"]["title"], json!("Demo"), "{status:?}");
-        assert_eq!(unknown.0, json!(true), "{unknown:?}");
-        assert!(unknown.1.as_str().unwrap().ends_with("(UnknownProject)"), "{unknown:?}");
+        assert_ne!(machines.0, json!(true), "{machines:?}");
+        assert!(machines.1.to_string().contains("fake-worker"), "{machines:?}");
+        assert_ne!(agents.0, json!(true), "{agents:?}");
+        assert_eq!(agents.1["agents"], json!([]), "{agents:?}");
         for (answered, code) in [
-            (task, "(UnknownTask)"),
-            (waited, "(UnknownTask)"),
-            (thread, "(Invalid)"),
-            (nowhere, "(UnknownWorker)"),
+            (garbled, "(Invalid)"),
+            (read, "(UnknownAgent)"),
+            (told, "(UnknownAgent)"),
+            (started, "(UnknownWorker)"),
         ] {
             assert_eq!(answered.0, json!(true), "{answered:?}");
             assert!(answered.1.as_str().unwrap().ends_with(code), "{answered:?}");

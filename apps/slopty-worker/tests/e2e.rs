@@ -1391,13 +1391,17 @@ mod tests {
         })
         .await
         .expect("the agent is resumed");
-        // The shell's `claude` adds Slopty's mod and the relay's settings; the rest is the resume.
+        // The shell's `claude` adds Slopty's mod, the relay's settings and Slopty's tools; the
+        // rest is the resume.
         let mut words = runs.split(RUN).nth(1).unwrap().split(WORD).filter(|w| !w.is_empty());
         let mut resumed = Vec::new();
         while let Some(word) = words.next() {
             if word == "--settings" {
                 let _relay = words.next();
-            } else if !word.starts_with("--plugin-dir=") {
+            } else if !["--plugin-dir=", "--mcp-config=", "--append-system-prompt="]
+                .iter()
+                .any(|added| word.starts_with(added))
+            {
                 resumed.push(word);
             }
         }

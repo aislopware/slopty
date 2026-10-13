@@ -1,13 +1,11 @@
-//! A task's worktree made, and freed once the task is merged (`docs/decisions/projects.md`, "A
-//! merged task frees its worktree", "Any agent runs a task").
+//! An agent's worktree made, and freed once its work landed (`docs/decisions/projects.md`).
 //!
 //! An agent that writes works in a git worktree of its own under its clone's
 //! `.claude/worktrees/`. Claude Code makes its own; for any other agent the worker makes it as
-//! the task's thread starts ([`make`]), the way Claude Code would, but never moving a branch
-//! that is there already. It outlives its task: a long project fills the disk with them. Once
-//! the task settles, the server asks for it to go ([`remove`]). Nothing that is not saved
-//! elsewhere is lost: a worktree with anything not committed, or with a terminal still working
-//! in it, is kept and said, and its branch goes only when every commit on it landed.
+//! the thread starts ([`make`]), the way Claude Code would, but never moving a branch that is
+//! there already. Freeing one ([`remove`]) loses nothing that is not saved elsewhere: a worktree
+//! with anything not committed, or with a terminal still working in it, is kept and said, and
+//! its branch goes only when every commit on it landed.
 //!
 //! A new worktree starts current: from its base branch as `origin` has it, fetched for a moment
 //! first, unless the clone holds commits `origin` lacks (`base_of`). The files the clone's
@@ -113,7 +111,7 @@ const WORKTREE_INCLUDE: &str = ".worktreeinclude";
 /// from the head of `origin`'s pull request `pull` in its place, tracking it (`pull_head`),
 /// with the ignored files `.worktreeinclude` names copied in (`carry_ignored`). One there
 /// already is reopened as it is. Unlike Claude Code's, a branch of that name there already is
-/// checked out where it is, never reset to the base, so the work of a task tried again is kept.
+/// checked out where it is, never reset to the base, so the work of an agent started again is kept.
 ///
 /// # Errors
 /// [`Failed::NotOne`] for a `clone` that is no clone's root, a `name` that is no single plain
@@ -720,112 +718,7 @@ async fn take_out(
     Ok(Removed { branch, branch_removed })
 }
 
-/// Delete `branches` of the clone at `clone`, names the server set under `slopty/`.
-///
-/// It answers [`slopty_proto::orchestration::Verb::DropBranches`]: a merged task's home branch,
-/// a gone project's target. One the clone lacks is passed over; one a worktree has checked out
-/// stays, as git keeps it. Returns the ones deleted.
-///
-/// # Errors
-/// [`Failed::NotOne`] for a name not under `slopty/` (nothing is deleted then), and
-/// [`Failed::Other`] for a git that failed.
-pub async fn drop_branches(
-    git: &Path,
-    clone: &Path,
-    branches: &[String],
-) -> Result<Vec<String>, Failed> {
-    if let Some(stray) = branches.iter().find(|b| !server_named(b)) {
-        return Err(Failed::NotOne(format!("{stray} is no branch Slopty named")));
-    }
-    let mut dropped = Vec::new();
-    for branch in branches {
-        let reference = format!("refs/heads/{branch}");
-        let verify = ["rev-parse", "-q", "--verify", "--end-of-options", reference.as_str()];
-        if bundle::run(git, clone, &verify).await.is_err() {
-            continue;
-        }
-        let args = ["branch", "-D", "--end-of-options", branch.as_str()];
-        match bundle::run(git, clone, &args).await {
-            Ok(_) => dropped.push(branch.clone()),
-            Err(e) => tracing::info!(%branch, error = %e, "a server's branch kept"),
-        }
-    }
-    Ok(dropped)
-}
-
-/// Make `branch`, a name the server gives, in the clone at `clone` at what is checked out there.
-///
-/// That is the tip of its branch, or its commit when detached: what a project made with no
-/// target lands on (`Verb::BranchOff`). One there already is left as it is, wherever it has
-/// moved since.
-pub async fn branch_off(git: &Path, clone: &Path, branch: &str) -> Result<(), Failed> {
-    if !server_named(branch) {
-        return Err(Failed::NotOne(format!("{branch} is no branch Slopty names")));
-    }
-    goal_place(git, clone, "").await?;
-    let reference = format!("refs/heads/{branch}");
-    let verify = ["rev-parse", "-q", "--verify", "--end-of-options", reference.as_str()];
-    if bundle::run(git, clone, &verify).await.is_ok() {
-        return Ok(());
-    }
-    bundle::run(git, clone, &["branch", "--no-track", "--end-of-options", branch, "HEAD"]).await?;
-    Ok(())
-}
-
-/// Whether a goal can start from `folder` (`Verb::GoalCheck`).
-///
-/// It can from a folder in a git repository with a checkout and a commit checked out, that has
-/// the branch `target` (its own or `origin`'s) when one is named. A blank `target` asks for
-/// none: the goal gets a branch of its own off what is checked out ([`branch_off`]). Why not
-/// is [`Failed::NotOne`], in a sentence a person reads rather than git's words.
-pub async fn goal_place(git: &Path, folder: &Path, target: &str) -> Result<(), Failed> {
-    let shown = folder.display();
-    let not = |why: String| Err(Failed::NotOne(why));
-    match tokio::fs::metadata(folder).await {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return not(format!("there is no folder {shown} on this machine"));
-        }
-        Err(e) => return not(format!("{shown} cannot be read here: {e}")),
-        Ok(meta) if !meta.is_dir() => return not(format!("{shown} is a file, not a folder")),
-        Ok(_) => {}
-    }
-    let Ok(bare) = bundle::run(git, folder, &["rev-parse", "--is-bare-repository"]).await else {
-        return not(format!(
-            "{shown} is not in a git repository, and a goal's work lands on a branch of one"
-        ));
-    };
-    if bare.trim() == "true" {
-        return not(format!("{shown} is a bare repository, with no checkout to work in"));
-    }
-    let head = ["rev-parse", "-q", "--verify", "HEAD^{commit}"];
-    if bundle::run(git, folder, &head).await.is_err() {
-        return not(format!("{shown} has no commit yet, so a goal has nothing to start from"));
-    }
-    let target = target.trim();
-    if target.is_empty() {
-        return Ok(());
-    }
-    for reference in [format!("refs/heads/{target}"), format!("refs/remotes/origin/{target}")] {
-        let verify = ["rev-parse", "-q", "--verify", "--end-of-options", reference.as_str()];
-        if bundle::run(git, folder, &verify).await.is_ok() {
-            return Ok(());
-        }
-    }
-    not(format!("{shown} has no branch {target} for the goal's work to land on"))
-}
-
-/// Whether `branch` is one the server names: under `slopty/`, with no part git would read as
-/// something else.
-fn server_named(branch: &str) -> bool {
-    branch.strip_prefix("slopty/").is_some_and(|rest| {
-        !rest.is_empty()
-            && rest.split('/').all(|part| !part.is_empty() && !part.starts_with('.'))
-            && !branch.contains("..")
-            && branch.bytes().all(|b| b.is_ascii_alphanumeric() || b"/-_.".contains(&b))
-    })
-}
-
-/// Free the worktree at `worktree` for the person, as [`remove`] does for a task.
+/// Free the worktree at `worktree` for the person, as [`remove`] does for an agent.
 ///
 /// What counts as landed is read from its clone: `origin`'s default branch and the branch the
 /// clone has checked out. A squash or a rebase merge leaves no commit `git cherry` matches, so a
@@ -990,119 +883,6 @@ mod tests {
         assert_eq!(kept, Removed { branch: Some(open_branch.clone()), branch_removed: false });
         assert!(!open.exists());
         assert!(has_branch(&clone, &open_branch), "its work is on its branch alone");
-    }
-
-    /// A project made with no target gets its own branch at what the checkout has out, the
-    /// branch's tip or a detached commit, and the person's branch does not move. One there
-    /// already is left where it went, and a name the server never sets is not made.
-    #[tokio::test]
-    async fn a_project_s_own_branch_starts_at_the_checkout_s_and_stays_where_it_went() {
-        let Some(git) = crate::changes::git() else { return };
-        let tmp = tempfile::tempdir().expect("temp");
-        let clone = tmp.path().join("clone");
-        std::fs::create_dir_all(&clone).expect("mkdir");
-        git_in(&clone, &["init", "-q", "-b", "main"]);
-        git_in(&clone, &["commit", "-q", "--allow-empty", "-m", "c0"]);
-        git_in(&clone, &["switch", "-q", "-c", "feature"]);
-        git_in(&clone, &["commit", "-q", "--allow-empty", "-m", "c1"]);
-        let feature = git_in(&clone, &["rev-parse", "feature"]);
-
-        branch_off(git, &clone, "slopty/p/goal").await.expect("made");
-        assert_eq!(git_in(&clone, &["rev-parse", "slopty/p/goal"]), feature, "at the tip out");
-        assert_eq!(git_in(&clone, &["branch", "--show-current"]), "feature", "still on its own");
-
-        git_in(&clone, &["commit", "-q", "--allow-empty", "-m", "c2"]);
-        branch_off(git, &clone, "slopty/p/goal").await.expect("there already");
-        assert_eq!(git_in(&clone, &["rev-parse", "slopty/p/goal"]), feature, "left as it was");
-
-        let main = git_in(&clone, &["rev-parse", "main"]);
-        git_in(&clone, &["switch", "-q", "--detach", "main"]);
-        branch_off(git, &clone, "slopty/q/goal").await.expect("made detached");
-        assert_eq!(git_in(&clone, &["rev-parse", "slopty/q/goal"]), main, "at the commit out");
-
-        let stray = branch_off(git, &clone, "main-copy").await;
-        assert!(matches!(stray, Err(Failed::NotOne(_))), "{stray:?}");
-        assert!(!has_branch(&clone, "main-copy"));
-    }
-
-    /// A goal starts only from a folder in a git repository with a commit checked out, that
-    /// has the branch named for its work; each place it cannot start from says why in plain
-    /// words, never git's, and a project's own branch is not made there either.
-    #[tokio::test]
-    async fn a_goal_starts_only_where_its_work_can_land() {
-        let Some(git) = crate::changes::git() else { return };
-        let tmp = tempfile::tempdir().expect("temp");
-        let why = |placed: Result<(), Failed>| match placed {
-            Err(Failed::NotOne(why)) => why,
-            other => panic!("{other:?}"),
-        };
-        let nowhere = tmp.path().join("nowhere");
-        let said = why(goal_place(git, &nowhere, "").await);
-        assert!(said.starts_with("there is no folder"), "{said}");
-
-        let file = tmp.path().join("notes.txt");
-        std::fs::write(&file, "x").expect("write");
-        assert!(why(goal_place(git, &file, "").await).ends_with("is a file, not a folder"));
-
-        let plain = tmp.path().join("plain");
-        std::fs::create_dir_all(&plain).expect("mkdir");
-        let said = why(goal_place(git, &plain, "").await);
-        assert!(said.contains("is not in a git repository"), "{said}");
-        assert!(!said.contains("fatal"), "not git's words: {said}");
-        let made = branch_off(git, &plain, "slopty/p/goal").await;
-        assert!(matches!(made, Err(Failed::NotOne(_))), "{made:?}");
-
-        let empty = tmp.path().join("empty");
-        std::fs::create_dir_all(&empty).expect("mkdir");
-        git_in(&empty, &["init", "-q", "-b", "main"]);
-        assert!(why(goal_place(git, &empty, "").await).contains("has no commit yet"));
-
-        let bare = tmp.path().join("bare.git");
-        git_in(tmp.path(), &["init", "-q", "--bare", &bare.to_string_lossy()]);
-        assert!(why(goal_place(git, &bare, "").await).contains("is a bare repository"));
-
-        git_in(&empty, &["commit", "-q", "--allow-empty", "-m", "c0"]);
-        let inside = empty.join("src");
-        std::fs::create_dir_all(&inside).expect("mkdir");
-        goal_place(git, &empty, "").await.expect("a branch of its own");
-        goal_place(git, &inside, "main").await.expect("a folder inside, onto main");
-        let said = why(goal_place(git, &empty, "release").await);
-        assert!(said.ends_with("has no branch release for the goal's work to land on"), "{said}");
-    }
-
-    /// The server's branches go when it drops them: one absent is passed over, one a worktree
-    /// has checked out stays, and a name the server never sets deletes nothing at all.
-    #[tokio::test]
-    async fn the_server_s_branches_go_and_no_other() {
-        let Some(git) = crate::changes::git() else { return };
-        let tmp = tempfile::tempdir().expect("temp");
-        let clone = tmp.path().join("clone");
-        std::fs::create_dir_all(&clone).expect("mkdir");
-        git_in(&clone, &["init", "-q", "-b", "main"]);
-        git_in(&clone, &["commit", "-q", "--allow-empty", "-m", "c0"]);
-        for branch in ["slopty/p/3", "slopty/p/target", "slopty/p/4", "feature"] {
-            git_in(&clone, &["branch", branch]);
-        }
-        let held = tmp.path().join("held");
-        git_in(&clone, &["worktree", "add", "-q", &held.to_string_lossy(), "slopty/p/4"]);
-
-        let stray = ["slopty/p/3".to_owned(), "feature".to_owned()];
-        let refused = drop_branches(git, &clone, &stray).await;
-        assert!(matches!(refused, Err(Failed::NotOne(_))), "{refused:?}");
-        assert!(has_branch(&clone, "slopty/p/3") && has_branch(&clone, "feature"));
-        for name in ["slopty/", "slopty/../main", "slopty/p/-x y"] {
-            let refused = drop_branches(git, &clone, &[name.to_owned()]).await;
-            assert!(matches!(refused, Err(Failed::NotOne(_))), "{name}: {refused:?}");
-        }
-
-        let asked: Vec<String> = ["slopty/p/3", "slopty/p/target", "slopty/p/4", "slopty/p/9"]
-            .map(str::to_owned)
-            .to_vec();
-        let dropped = drop_branches(git, &clone, &asked).await.expect("dropped");
-        assert_eq!(dropped, ["slopty/p/3", "slopty/p/target"]);
-        assert!(!has_branch(&clone, "slopty/p/3") && !has_branch(&clone, "slopty/p/target"));
-        assert!(has_branch(&clone, "slopty/p/4"), "checked out in a worktree, so kept");
-        assert!(has_branch(&clone, "feature"));
     }
 
     /// A worktree is made where Claude Code's `--worktree` makes one, on its branch from
@@ -1279,7 +1059,7 @@ mod tests {
         let feature = feature.expect("made");
         assert_eq!(git_in(&feature.path, &["rev-parse", "HEAD"]), c1, "a branch origin alone has");
         assert_eq!(merge_base("feature"), "feature");
-        // A task started on another task's work merges back into the project's target.
+        // A worktree started on another's work merges back into its target.
         let on_work = make(git, &clone, "on-work", (Some("feature"), Some("main")), None).await;
         let on_work = on_work.expect("made");
         assert_eq!(git_in(&on_work.path, &["rev-parse", "HEAD"]), c1, "from the work");

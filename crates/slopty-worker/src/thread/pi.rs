@@ -155,10 +155,11 @@ impl Pi {
         }
     }
 
-    /// Start a server task's thread as `start` says, once per seat: pi runs with the seat's
-    /// variables, Slopty's gate registers Slopty's tools among its MCP servers
-    /// ([`slopty_agent::pi::TOOLS_ENV`]), and the role goes as pi's own addition to its system
-    /// prompt (`--append-system-prompt`), kept with the thread's flags for every later run.
+    /// Start a seated thread (an agent another started) as `start` says, once per seat: pi runs
+    /// with the seat's variables, Slopty's gate registers Slopty's tools among its MCP servers
+    /// ([`slopty_agent::pi::TOOLS_ENV`]), and the system text goes as pi's own addition to its
+    /// system prompt (`--append-system-prompt`), kept with the thread's flags for every later
+    /// run.
     pub async fn start_seated(&self, start: Box<Start>, seated: Seated) -> Outcome {
         let (reply, outcome) = oneshot::channel();
         let (id, seated) = (seated.intent(), Some(Box::new(seated)));
@@ -394,7 +395,8 @@ impl Served {
         if let Some(outcome) = self.host.started(id) {
             return outcome;
         }
-        let role = seated.as_ref().and_then(|s| s.role.clone()).filter(|r| !r.trim().is_empty());
+        let system =
+            seated.as_ref().and_then(|s| s.system.clone()).filter(|r| !r.trim().is_empty());
         if let Some(mode) = start.mode.as_deref().filter(|m| !slopty_agent::pi::modes::known(m)) {
             return self.host.record_start(id, refused(&format!("pi's gate has no mode {mode}")));
         }
@@ -438,8 +440,10 @@ impl Served {
                 return Err("pi is only driven over RPC".to_owned());
             }
             let mut args = slopty_agent::pi::checked(own)?.to_vec();
-            // The role is the thread's own flag, kept with the others for every later run.
-            args.extend(role.iter().flat_map(|r| ["--append-system-prompt".to_owned(), r.clone()]));
+            // The system text is the thread's own flag, kept with the others for every later run.
+            args.extend(
+                system.iter().flat_map(|r| ["--append-system-prompt".to_owned(), r.clone()]),
+            );
             if !Path::new(&start.cwd).is_dir() {
                 return Err(format!("There is no folder {} here", start.cwd));
             }

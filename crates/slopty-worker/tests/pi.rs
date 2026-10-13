@@ -422,19 +422,19 @@ mod pi {
         assert_eq!(rig.record()["unexpected"], serde_json::json!([]));
     }
 
-    /// A server task's thread runs pi with its role added to the system prompt, kept with the
-    /// thread's own flags so a pi started again for it has it too; the first message goes as
-    /// written. Its row names the seat, kept whatever pi says of the thread, and a start repeated
-    /// at the seat answers with the thread the first one started.
+    /// A seated thread (an agent another started) runs pi with its system text added to the
+    /// system prompt, kept with the thread's own flags so a pi started again for it has it too;
+    /// the first message goes as written. Its row names the seat, kept whatever pi says of the
+    /// thread, and a start repeated at the seat answers with the thread the first one started.
     #[tokio::test]
-    async fn a_seated_pi_thread_gets_the_seat_and_its_role() {
+    async fn a_seated_pi_thread_gets_the_seat_and_its_system_text() {
         let rig = Rig::new();
         let (pi, _served) = rig.serve();
         let seat = SessionId::new();
         let seated = Seated {
             seat,
-            env: vec![("SLOPTY_SESSION".to_owned(), seat.to_string())],
-            role: Some("You review.".to_owned()),
+            facts: Vec::new(),
+            system: Some("You review.".to_owned()),
             relay: Some("/opt/slopty/bin/slopty".to_owned()),
         };
         let outcome = pi.start_seated(rig.start("Say hello."), seated.clone()).await;
@@ -444,9 +444,9 @@ mod pi {
         assert_eq!(rig.host.seated_at(seat), Some(thread));
 
         let state = rig.until(thread, "the first turn", turn_ended(1, TurnState::Complete)).await;
-        let fact = state.meta.facts.get(slopty_proto::project::SEAT_FACT);
+        let fact = state.meta.facts.get(slopty_proto::agent::SEAT_FACT);
         assert_eq!(fact, Some(&seat.to_string()), "kept over what pi says of the thread");
-        assert_eq!(users(&state)[0].0, "Say hello.", "the role went apart");
+        assert_eq!(users(&state)[0].0, "Say hello.", "the system text went apart");
         let record = rig.record();
         let argv: Vec<&str> =
             record["argv"].as_array().unwrap().iter().filter_map(Value::as_str).collect();

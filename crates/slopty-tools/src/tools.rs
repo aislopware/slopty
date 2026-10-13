@@ -1,11 +1,14 @@
-//! A project's verbs as MCP tools: names, descriptions, hints, argument schemas, and a call run
-//! end to end (arguments parsed, names resolved, the verb sent, the answer rendered as its view).
+//! The agents' verbs as MCP tools: names, descriptions, hints, argument schemas, and a call
+//! run end to end (arguments parsed, names resolved, the verb sent, the answer rendered as its
+//! view).
 //!
 //! Every MCP surface serves exactly this list and this [`call`], so a model sees the same tools
 //! and gets the same JSON whether it reaches the server's endpoint or `slopty mcp`. They are
-//! only what a project's orchestrator and its tasks' agents need; every other verb is the
-//! `slopty` command, which an agent runs through its shell like any other.
+//! the primitives an agent at any depth uses to start, reach and read other agents across the
+//! fleet; every other verb is the `slopty` command, which an agent runs through its shell like
+//! any other.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use rmcp::ErrorData;
@@ -14,28 +17,24 @@ use rmcp::model::{CallToolResult, ContentBlock, Tool, ToolAnnotations};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
-use serde_json::{Map, Value};
-use slopty_proto::orchestration::{ErrorCode, IdempotencyKey, ThreadView};
-use slopty_proto::project::{Report, TaskChange};
+use serde_json::{Map, Value, json};
+use slopty_core::WorkerId;
+use slopty_proto::orchestration::{ErrorCode, IdempotencyKey, Outcome, ThreadView, Verb};
 
-use crate::ops::{self, NewTask, Which};
+use crate::ops::{self, AgentWanted};
 use crate::resolve::Resolver;
 use crate::{Dispatch, ToolError, view};
 
 /// What the model reads before any tool description.
 pub const INSTRUCTIONS: &str = "\
-These tools are a Slopty project's: one goal that agents work on side by side across a fleet \
-of machines (workers). project_status shows the whole project, its tasks and its timeline; \
-task_get shows one task in full; project_update is the orchestrator saying where the goal stands. The orchestrator starts work with task_start: each task is \
-one agent (Claude Code, Codex, pi or an ACP agent), working from its brief in a worktree of \
-its own on the worker named or one with room. Tasks sit side by side under the project and do not nest. task_tell says \
-more to a task's agent, task_restart starts its work again with a fresh or another agent, \
-task_wait waits for tasks' news, and task_update says what you are doing. A \
-task's agent says what it is doing with task_update and reports with task_report; its project \
-and task are the defaults. read_thread reads another agent's thread; the requests on it are \
-the person's to answer, never an agent's. Everything else, the workers and their facts, \
-terminals, files and the workspace, is the `slopty` command in your shell: `slopty --help` \
-lists it, and `slopty --json …` prints what a script reads.";
+Slopty runs agents (Claude Code, Codex, pi, ACP agents) on a fleet of machines. machines lists \
+the machines and their facts. agent_start starts an agent on one, which records you as its \
+parent; when it comes to rest or needs the person, you hear it through your hooks. agent_tell \
+sends an agent words, agent_read reads its thread, agent_wait waits for agents to come to \
+rest, agent_stop ends one with the agents under it, and agents lists every agent with its \
+parent. branch_bring copies a branch from a clone on one machine to a clone on another. \
+Requests an agent asks are the person's to answer. Everything else is the `slopty` command: \
+`slopty --help` lists it.";
 
 /// How often a long wait with a progress sink reports that it is still waiting.
 pub const PROGRESS_EVERY: Duration = Duration::from_secs(10);
@@ -43,257 +42,50 @@ pub const PROGRESS_EVERY: Duration = Duration::from_secs(10);
 /// Told how long a long wait has waited so far, every [`PROGRESS_EVERY`].
 pub type Progress<'a> = &'a (dyn Fn(Duration) + Send + Sync);
 
-/// A task by its number, `3` or `"#3"`.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(untagged)]
-enum TaskArg {
-    /// Its number.
-    Number(u32),
-    /// Its number as text.
-    Text(String),
-}
-
-impl TaskArg {
-    fn text(&self) -> String {
-        match self {
-            Self::Number(n) => n.to_string(),
-            Self::Text(t) => t.clone(),
-        }
-    }
-}
-
-fn task_text(task: Option<&TaskArg>) -> Option<String> {
-    task.map(TaskArg::text)
-}
-
-/// `project_status`.
+/// `agent_start`.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct ProjectStatusArgs {
-    /// The project; yours when omitted.
-    project: Option<String>,
-    /// Timeline cursor: the `next` of the previous call. The latest entries when omitted; 0
-    /// for all the server keeps.
-    since: Option<u64>,
-}
-
-/// `project_update`.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct ProjectUpdateArgs {
-    /// Where the goal stands: what is done and what runs, in a few lines.
-    summary: String,
-    /// What comes next.
-    next: Option<String>,
-    /// The goal is met: the person hears it once.
-    #[serde(default)]
-    done: bool,
-    /// A name for this call's effect, such as a fresh UUID; a repeat answers as the first did.
-    idempotency_key: Option<String>,
-}
-
-/// `task_get`.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct TaskGetArgs {
-    /// The project; yours when omitted.
-    project: Option<String>,
-    /// The task; yours when omitted. `orchestrator` for the orchestrator's own node.
-    task: Option<TaskArg>,
-}
-
-/// `task_start`.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct TaskStartArgs {
-    /// A task the project has, to start: one made before and refused its start, one stopped or
-    /// given back. A new task is made from `title` and the fields after it when omitted.
-    task: Option<TaskArg>,
-    /// A new task: what it is, in a line.
-    title: Option<String>,
-    /// A new task: what its agent is told to do (the goal, the constraints, how to know it is
-    /// done). Its first prompt.
-    #[serde(default)]
-    brief: String,
-    /// A new task: tasks whose work it needs first; it starts once they are merged. A
-    /// dependency never leads back to it.
-    #[serde(default)]
-    depends_on: Vec<TaskArg>,
-    /// A new task: the one of `depends_on` whose work it starts from once that is done and its
-    /// verifier passed, before it merges: it works on top of that branch, and merges after it.
-    start_from: Option<TaskArg>,
-    /// A new task: it only reads.
-    #[serde(default)]
-    read_only: bool,
-    /// This worker (name or id); one with room when omitted. `slopty --json workers`
-    /// shows each worker's facts, and work that needs no Apple platform belongs on Linux.
-    worker: Option<String>,
-    /// Which agent: `claude` (the default), `codex`, `pi`, or an ACP agent by the registry's
-    /// name (`gemini`, `acp:gemini`). Each gets Slopty's tools and its role, and goes only to
-    /// a worker with it installed.
+struct AgentStartArgs {
+    /// The machine, by name or id.
+    machine: String,
+    /// What the agent is told first.
+    prompt: String,
+    /// The folder it works in, absolute or `~/…`.
+    folder: Option<String>,
+    /// A remote repository's address: the machine's clone of it is the folder, made first
+    /// when there is none.
+    repo: Option<String>,
+    /// A fresh git worktree of the folder's clone, by this name, on the branch
+    /// `worktree-<name>`.
+    worktree: Option<String>,
+    /// `claude` (the default), `codex`, `pi`, or an ACP agent by its registry name.
     agent: Option<String>,
-}
-
-/// What [`TaskStartArgs::start`] asks: the task, and the worker and agent.
-type Start = (Which, (Option<String>, Option<String>));
-
-impl TaskStartArgs {
-    /// Which task it starts, and on what.
-    fn start(self) -> Result<Start, ToolError> {
-        let new_fields = self.title.is_some()
-            || !self.brief.is_empty()
-            || !self.depends_on.is_empty()
-            || self.start_from.is_some()
-            || self.read_only;
-        let which = match (self.task, self.title) {
-            (Some(task), None) if !new_fields => Which::Made(task.text()),
-            (Some(_), _) => {
-                return Err(ToolError::invalid(
-                    "`task` starts one the project has; a new task's fields (title, brief, \
-                     depends_on, start_from, read_only) go without it",
-                ));
-            }
-            (None, Some(title)) => Which::New(Box::new(NewTask {
-                depends_on: self.depends_on.iter().map(TaskArg::text).collect(),
-                start_from: self.start_from.as_ref().map(TaskArg::text),
-                kind: String::new(),
-                title,
-                brief: self.brief,
-                read_only: self.read_only,
-                verifier: None,
-                metadata: None,
-            })),
-            (None, None) => {
-                return Err(ToolError::invalid(
-                    "give a new task's `title`, or the `task` to start",
-                ));
-            }
-        };
-        Ok((which, (self.worker, self.agent)))
-    }
-}
-
-/// `task_update`.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct TaskUpdateArgs {
-    /// The task; yours when omitted.
-    task: Option<TaskArg>,
-    /// What you are doing, in your own words, for the tree; empty clears it.
-    status: Option<String>,
-    /// Words for the project's timeline.
-    note: Option<String>,
-}
-
-/// `task_report`.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct TaskReportArgs {
-    /// The project; yours when omitted.
-    project: Option<String>,
-    /// The task; yours when omitted.
-    task: Option<TaskArg>,
-    /// What you have to say, in a few lines.
-    #[serde(default)]
-    note: String,
-    /// What you made: paths, commits, links.
-    #[serde(default)]
-    artifacts: Vec<String>,
-    /// The branch your work is on.
-    branch: Option<String>,
-    /// The pull request you opened, by number.
-    pr: Option<u32>,
+    /// The model, by the agent's own id.
+    model: Option<String>,
+    /// How hard it thinks, by the agent's own name.
+    effort: Option<String>,
     /// A name for this call's effect, such as a fresh UUID; a repeat answers as the first did.
     idempotency_key: Option<String>,
 }
 
-/// `task_tell`.
+/// `agent_tell`.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct TaskTellArgs {
-    /// The project; yours when omitted.
-    project: Option<String>,
-    /// The task to tell: any of the project you orchestrate.
-    task: TaskArg,
-    /// What to say, in a few lines.
+struct AgentTellArgs {
+    /// The agent's id.
+    agent: String,
+    /// The words.
     text: String,
     /// A name for this call's effect, such as a fresh UUID; a repeat answers as the first did.
     idempotency_key: Option<String>,
 }
 
-/// `task_restart`.
+/// `agent_read`.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct TaskRestartArgs {
-    /// The project; yours when omitted.
-    project: Option<String>,
-    /// The task to start again: any of the project you orchestrate but your own.
-    task: TaskArg,
-    /// The agent to hand it to: `claude`, `codex`, `pi`, or an ACP agent by the registry's
-    /// name. The one it ran last when omitted.
-    agent: Option<String>,
-    /// A name for this call's effect, such as a fresh UUID; a repeat answers as the first did.
-    idempotency_key: Option<String>,
-}
-
-/// `task_wait`.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct TaskWaitArgs {
-    /// The project; yours when omitted.
-    project: Option<String>,
-    /// The tasks to wait for, at most 64.
-    tasks: Vec<TaskArg>,
-    /// `any` (the default): answer at the first news of any of them; `all`: once each has
-    /// news.
-    until: Option<UntilArg>,
-    /// Timeline cursor: the `next` of the previous `task_wait` or `project_status`, so nothing in
-    /// between is missed. From now when omitted.
-    since: Option<u64>,
-    /// How long to wait, at most 1800000; 50000 when omitted. Running out cancels nothing.
-    timeout_ms: Option<u32>,
-}
-
-/// What `task_wait` waits for.
-#[derive(Clone, Copy, Debug, Default, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-enum UntilArg {
-    /// The first news of any task named.
-    #[default]
-    Any,
-    /// News of every task named.
-    All,
-}
-
-impl TaskReportArgs {
-    fn report(&self) -> Report {
-        Report {
-            note: self.note.clone(),
-            artifacts: self.artifacts.clone(),
-            branch: self.branch.clone(),
-            pr: self.pr,
-        }
-    }
-}
-
-impl TaskUpdateArgs {
-    fn change(&self) -> TaskChange {
-        TaskChange { status: self.status.clone(), note: self.note.clone(), ..TaskChange::default() }
-    }
-}
-
-/// `read_thread`.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct ReadThreadArgs {
-    /// The task whose agent's thread to read; with `project`, yours when omitted.
-    task: Option<TaskArg>,
-    /// The task's project; yours when omitted.
-    project: Option<String>,
-    /// A thread's id instead: a subagent's `child` from an earlier read, say.
-    thread: Option<String>,
-    /// The terminal an agent runs in instead, as the lists print it (`worker/session`).
-    term: Option<String>,
+struct AgentReadArgs {
+    /// The agent's id, or a subagent's thread id.
+    agent: String,
     /// `messages` (the default) for what was said, `activity` for that and every tool call
     /// with the end of its output.
     #[serde(default)]
@@ -301,6 +93,49 @@ struct ReadThreadArgs {
     /// The last turn already read: the `next` of the previous read. From the first turn held
     /// when omitted.
     after: Option<u32>,
+}
+
+/// `agent_wait`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct AgentWaitArgs {
+    /// The agents' ids, at most 64.
+    agents: Vec<String>,
+    /// Wait for every one; the first one when false (the default).
+    #[serde(default)]
+    all: bool,
+    /// How long to wait, in milliseconds, at most 240000; 60000 when omitted.
+    timeout_ms: Option<u32>,
+}
+
+/// `agent_stop`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct AgentStopArgs {
+    /// The agent's id.
+    agent: String,
+    /// A name for this call's effect, such as a fresh UUID; a repeat answers as the first did.
+    idempotency_key: Option<String>,
+}
+
+/// `branch_bring`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct BranchBringArgs {
+    /// The machine the branch is on, by name or id.
+    from: String,
+    /// The clone or worktree it is in there.
+    repo: String,
+    /// The branch.
+    branch: String,
+    /// The machine it goes to, by name or id.
+    to: String,
+    /// The clone it lands in there; that machine's clone of the same repository when omitted.
+    into: Option<String>,
+    /// The name it lands as; its own when omitted.
+    name: Option<String>,
+    /// A name for this call's effect, such as a fresh UUID; a repeat answers as the first did.
+    idempotency_key: Option<String>,
 }
 
 /// How much of a thread a read gives.
@@ -335,6 +170,8 @@ enum Kind {
     Read,
     /// Changes something, nothing lost.
     Write,
+    /// Ends something.
+    Ends,
 }
 
 fn tool<T: JsonSchema + 'static>(
@@ -342,119 +179,95 @@ fn tool<T: JsonSchema + 'static>(
     description: &'static str,
     kind: Kind,
 ) -> Tool {
+    annotated(Tool::new(name, description, schema_for_type::<T>()), kind)
+}
+
+/// A tool that takes no arguments: an object with none.
+fn bare(name: &'static str, description: &'static str, kind: Kind) -> Tool {
+    let mut schema = Map::new();
+    schema.insert("type".to_owned(), json!("object"));
+    schema.insert("properties".to_owned(), json!({}));
+    schema.insert("additionalProperties".to_owned(), json!(false));
+    annotated(Tool::new(name, description, std::sync::Arc::new(schema)), kind)
+}
+
+fn annotated(tool: Tool, kind: Kind) -> Tool {
     let hints = ToolAnnotations::new().open_world(false);
     let hints = match kind {
         Kind::Read => hints.read_only(true),
         Kind::Write => hints.read_only(false).destructive(false),
+        Kind::Ends => hints.read_only(false).destructive(true),
     };
-    Tool::new(name, description, schema_for_type::<T>()).annotate(hints)
+    tool.annotate(hints)
+}
+
+/// No arguments, as a tool that takes none was called.
+fn none(arguments: &Map<String, Value>) -> Result<(), ToolError> {
+    match arguments.keys().next() {
+        Some(key) => Err(ToolError::invalid(format!("bad arguments: unknown field `{key}`"))),
+        None => Ok(()),
+    }
 }
 
 /// Every tool, in the order a model meets them.
 #[must_use]
 pub fn list() -> Vec<Tool> {
     vec![
-        tool::<ProjectStatusArgs>(
-            "project_status",
-            "A project whole: its `tasks` (each with `state`, its agent's own `status`, \
-             `depends_on`, `kind`, its terminal's `term`, \
-             `branch`, `pr`, `verified`), `natives` (Claude Code's own subagents and to-dos in \
-             each node's session), `bounds` and `limits` with what runs now (`live`), and its \
-             `timeline` from `since`, with `next` to read on from. It answers at once; \
-             task_wait waits for tasks' news.",
+        bare(
+            "machines",
+            "Every machine on the fleet: its `name`, `liveness`, `os`, and its `facts` (the \
+             agents installed, the repositories it has clones of under `repos`, cpus, memory, \
+             load, the agents live there).",
             Kind::Read,
         ),
-        tool::<ProjectUpdateArgs>(
-            "project_update",
-            "As the orchestrator, say where your project's goal stands: a `summary` of what is \
-             done and what runs, and what comes `next`. The latest is the first line the person \
-             reads on the board, so say it as tasks land. When the goal is met, say so with \
-             `done` and a summary of what was done, what was merged and what is left: the person \
-             hears it once.",
+        tool::<AgentStartArgs>(
+            "agent_start",
+            "Start an agent on a machine, in a `folder` or the machine's clone of a `repo`, \
+             optionally in a fresh `worktree`, told `prompt` first. It acts as freely as the \
+             person's autonomy setting allows, and has these tools too. You are recorded as its \
+             parent: its rest, or its need of the person, reaches you through your hooks. \
+             Returns its `agent` id and the `worktree` it works in.",
             Kind::Write,
         ),
-        tool::<TaskGetArgs>(
-            "task_get",
-            "One node of a project's tree in full: the task's brief, verifier, base \
-             commit and metadata, and the subagents and to-dos Claude Code keeps \
-             in it. project_status shows the tree; this shows a node.",
+        tool::<AgentTellArgs>(
+            "agent_tell",
+            "Send an agent of your own tree words, marked as yours and not the person's. They \
+             reach it through its hooks, waking it when it is idle. Returns once they are queued.",
+            Kind::Write,
+        ),
+        tool::<AgentReadArgs>(
+            "agent_read",
+            "An agent's thread: whole `turns` after `after`, each with its `entries` (`user` and \
+             `agent` messages; with view `activity` also each `tool` call with its `state`, the \
+             end of its `output` and the `child` thread it started), its `phase`, what it \
+             `wait`s on, and the `requests` open on it. `truncated` says something was cut; \
+             `next` is the `after` to read on from.",
             Kind::Read,
         ),
-        tool::<TaskStartArgs>(
-            "task_start",
-            "Start a task, the one way work starts: a new one made from a `title`, a `brief` \
-             its agent works from (its first prompt), `depends_on` or `read_only`; or a `task` \
-             the project has. It runs Claude Code or another `agent` on the `worker` you name \
-             (`slopty --json workers` shows each one's facts; work that needs no Apple \
-             platform belongs on Linux) or one with room, beside a clone of the project's \
-             repository in a worktree of its own. Start \
-             work that runs side by side with the rest and needs no context only you hold. A start is refused while as many tasks wait on \
-             the person as the project's review limit, saying how many and where. A new task \
-             refused its start is kept: start it later by its number. Returns the task with its \
-             terminal's `term`; one whose clone is made or readied first returns at once with \
-             that step under way, its agent starts after, and a start that fails then reaches \
-             you as a report.",
-            Kind::Write,
-        ),
-        tool::<TaskUpdateArgs>(
-            "task_update",
-            "Say what you are doing on a task, in your own `status` words for the tree, or put a \
-             `note` on the project's timeline. Its state moves by itself: its agent's own \
-             status moves it among running, waiting and blocked, task_report moves it to done, \
-             and merging is the person's.",
-            Kind::Write,
-        ),
-        tool::<TaskReportArgs>(
-            "task_report",
-            "Report to the project's orchestrator: your task done, with a `note`, what you made \
-             (`artifacts`), your `branch` and `pr`; or, in the `note`, a scope or design \
-             question the brief does not settle, after which you end your turn. It reaches the \
-             orchestrator through its own hooks at once, never typed into its terminal, and \
-             stays on the timeline. Done work is checked, then waits for the person to merge \
-             it.",
-            Kind::Write,
-        ),
-        tool::<TaskTellArgs>(
-            "task_tell",
-            "As the orchestrator, tell a task's agent something. It reaches that agent through \
-             its hooks at once, after anything the person said and never in its place, marked \
-             as your words, not the person's; your latest replaces one still unread. It never \
-             answers a permission or a question the person was asked: a task waiting on the \
-             person is refused until it moves on. A task's agent reports with task_report.",
-            Kind::Write,
-        ),
-        tool::<TaskRestartArgs>(
-            "task_restart",
-            "Start a task's work again with a new agent, on the machine it ran on and in its \
-             worktree there, the work so far kept: for an agent that is stuck, lost its way or \
-             filled its context, or to hand the task to another `agent`. The agent on it now is \
-             closed. The new one is told the task's brief and where the earlier agent's thread \
-             is (read_thread). To move a task to another machine, task_start it there instead. \
-             Returns the task with its new terminal's `term`.",
-            Kind::Write,
-        ),
-        tool::<TaskWaitArgs>(
-            "task_wait",
-            "Wait for news of tasks: a report, a move of state (its agent ending a turn without \
-             a report is one, waiting on the person another), its terminal gone, its verifier \
-             or checks, a step that ended. `until` any (default) or all. A task merged or \
-             failed is ready at once. Returns each task's card with its `news` and \
-             `last_report`, `ready`, `timed_out`, and `next` to wait on from. Running out of time \
-             cancels nothing. For agents without hooks; hooks bring the same news unasked.",
+        tool::<AgentWaitArgs>(
+            "agent_wait",
+            "Wait until one of `agents` (or each, with `all`) has come to rest, needs the \
+             person or ended. Returns each as it stands (`phase`, `asks`, `last` words, \
+             `rests`) and `timed_out` when time ran out first.",
             Kind::Read,
         ),
-        tool::<ReadThreadArgs>(
-            "read_thread",
-            "What another agent's thread did, whatever its agent (Claude Code, Codex, pi, ACP): \
-             a task's (by `task`), a subagent's (by `thread`) or a terminal's (by `term`). \
-             Returns whole `turns` after `after`, each with its `entries` (`user` and `agent` \
-             messages; with view `activity` also each `tool` call with its `state`, the end of \
-             its `output` and the `child` thread it started, and the agent's `notice`s), its \
-             `phase` and what it `wait`s on, and the `requests` open on it, which are the \
-             person's to answer. Bounded: `truncated` says a text was cut or turns were left \
-             out. Pass `next` back as `after` to read on; a turn under way is read again until \
-             it ends. Reading changes nothing.",
+        tool::<AgentStopArgs>(
+            "agent_stop",
+            "End an agent and every agent under it, their conversations kept.",
+            Kind::Ends,
+        ),
+        bare(
+            "agents",
+            "Every agent on the fleet that runs or was started by another: its `id`, `parent`, \
+             `worker`, `agent`, `title`, `folder`, `branch`, `phase`, what it `asks`, its \
+             `last` words.",
             Kind::Read,
+        ),
+        tool::<BranchBringArgs>(
+            "branch_bring",
+            "Copy `branch` from the clone `repo` on machine `from` into a clone on machine \
+             `to`, as `name`. Returns the `branch` it landed as and its `head` commit.",
+            Kind::Write,
         ),
     ]
 }
@@ -499,8 +312,16 @@ fn args<T: DeserializeOwned>(arguments: Map<String, Value>) -> Result<T, ToolErr
         .map_err(|e| ToolError::invalid(format!("bad arguments: {e}")))
 }
 
-fn json(value: &impl serde::Serialize) -> Result<Value, ToolError> {
+fn to_json(value: &impl serde::Serialize) -> Result<Value, ToolError> {
     serde_json::to_value(value).map_err(|e| ToolError::new(ErrorCode::Failed, e.to_string()))
+}
+
+/// Every machine's name, by its id; none when the server cannot say.
+async fn names<D: Dispatch>(dispatch: &D) -> HashMap<WorkerId, String> {
+    match dispatch.call(Verb::ListWorkers).await {
+        Outcome::Workers(list) => list.into_iter().map(|w| (w.worker, w.name)).collect(),
+        _ => HashMap::new(),
+    }
 }
 
 async fn run<D: Dispatch>(
@@ -511,79 +332,67 @@ async fn run<D: Dispatch>(
 ) -> Result<Value, ToolError> {
     let mut res = Resolver::new(dispatch);
     match name {
-        "project_status" => {
-            let a: ProjectStatusArgs = args(arguments)?;
-            let status = ops::project_status(dispatch, a.project.as_deref(), a.since).await?;
-            json(&view::projects::status(&status))
+        "machines" => {
+            none(&arguments)?;
+            let overview = ops::overview(dispatch).await?;
+            to_json(&overview.json())
         }
-        "project_update" => {
-            let a: ProjectUpdateArgs = args(arguments)?;
+        "agent_start" => {
+            let a: AgentStartArgs = args(arguments)?;
             let key = checked_key(a.idempotency_key)?;
-            ops::project_update(dispatch, a.summary, a.next, a.done, key).await?;
-            json(&view::DONE)
-        }
-        "task_get" => {
-            let a: TaskGetArgs = args(arguments)?;
-            let task = task_text(a.task.as_ref());
-            let node = ops::task_get(dispatch, a.project.as_deref(), task.as_deref()).await?;
-            json(&view::projects::node(&node))
-        }
-        "task_start" => {
-            let a: TaskStartArgs = args(arguments)?;
-            let (which, (worker, agent)) = a.start()?;
-            let on = (worker.as_deref(), agent.as_deref());
-            let started = ops::task_start(&mut res, None, which, on, None);
-            json(&view::projects::task(&started.await?))
-        }
-        "task_update" => {
-            let a: TaskUpdateArgs = args(arguments)?;
-            let task = task_text(a.task.as_ref());
-            let updated = ops::task_update(&res, None, task.as_deref(), a.change(), None);
-            json(&view::projects::task(&updated.await?))
-        }
-        "task_report" => {
-            let a: TaskReportArgs = args(arguments)?;
-            let key = checked_key(a.idempotency_key.clone())?;
-            let task = task_text(a.task.as_ref());
-            let reported =
-                ops::task_report(dispatch, a.project.as_deref(), task.as_deref(), a.report(), key);
-            json(&view::projects::task(&reported.await?))
-        }
-        "task_tell" => {
-            let a: TaskTellArgs = args(arguments)?;
-            let key = checked_key(a.idempotency_key)?;
-            let task = a.task.text();
-            ops::task_tell(dispatch, a.project.as_deref(), Some(&task), a.text, key).await?;
-            json(&view::DONE)
-        }
-        "task_restart" => {
-            let a: TaskRestartArgs = args(arguments)?;
-            let key = checked_key(a.idempotency_key)?;
-            let task = a.task.text();
-            let (project, agent) = (a.project.as_deref(), a.agent.as_deref());
-            let restarted = ops::task_restart(dispatch, project, Some(&task), agent, key);
-            json(&view::projects::task(&restarted.await?))
-        }
-        "task_wait" => {
-            let a: TaskWaitArgs = args(arguments)?;
-            let tasks: Vec<String> = a.tasks.iter().map(TaskArg::text).collect();
-            let all = matches!(a.until.unwrap_or_default(), UntilArg::All);
-            let timeout = a.timeout_ms.unwrap_or(ops::DEFAULT_TASK_WAIT_MS);
-            let waited =
-                ops::task_wait(dispatch, a.project.as_deref(), (&tasks, all), a.since, timeout);
-            json(&view::projects::task_wait(&with_progress(waited, progress).await?))
-        }
-        "read_thread" => {
-            let a: ReadThreadArgs = args(arguments)?;
-            let task = task_text(a.task.as_ref());
-            let of = ops::ThreadArg {
-                thread: a.thread.as_deref(),
-                term: a.term.as_deref(),
-                project: a.project.as_deref(),
-                task: task.as_deref(),
+            let wanted = AgentWanted {
+                worker: a.machine,
+                folder: a.folder,
+                prompt: a.prompt,
+                agent: a.agent,
+                model: a.model,
+                effort: a.effort,
+                worktree: a.worktree,
+                repo: a.repo,
             };
+            let (agent, worktree) = ops::agent_start(&mut res, wanted, key).await?;
+            Ok(json!({ "agent": agent.to_string(), "worktree": worktree }))
+        }
+        "agent_tell" => {
+            let a: AgentTellArgs = args(arguments)?;
+            let key = checked_key(a.idempotency_key)?;
+            ops::agent_tell(dispatch, ops::agent_named(&a.agent)?, a.text, key).await?;
+            to_json(&view::DONE)
+        }
+        "agent_read" => {
+            let a: AgentReadArgs = args(arguments)?;
+            let id = ops::agent_named(&a.agent)?.to_string();
+            let of = ops::ThreadArg { thread: Some(&id), term: None };
             let read = ops::read_thread(&mut res, of, a.view.view(), a.after).await?;
-            json(&view::thread_read(&read))
+            to_json(&view::thread_read(&read))
+        }
+        "agent_wait" => {
+            let a: AgentWaitArgs = args(arguments)?;
+            let agents =
+                a.agents.iter().map(|a| ops::agent_named(a)).collect::<Result<Vec<_>, _>>()?;
+            let timeout = a.timeout_ms.unwrap_or(ops::DEFAULT_WAIT_MS);
+            let waited = ops::agent_wait(dispatch, agents, a.all, timeout);
+            let (agents, timed_out) = with_progress(waited, progress).await?;
+            to_json(&view::agents_tree::agents(&agents, timed_out, &names(dispatch).await))
+        }
+        "agent_stop" => {
+            let a: AgentStopArgs = args(arguments)?;
+            let key = checked_key(a.idempotency_key)?;
+            ops::agent_stop(dispatch, ops::agent_named(&a.agent)?, key).await?;
+            to_json(&view::DONE)
+        }
+        "agents" => {
+            none(&arguments)?;
+            let agents = ops::agents(dispatch).await?;
+            to_json(&view::agents_tree::agents(&agents, false, &names(dispatch).await))
+        }
+        "branch_bring" => {
+            let a: BranchBringArgs = args(arguments)?;
+            let key = checked_key(a.idempotency_key)?;
+            let from = (a.from.as_str(), a.repo, a.branch);
+            let to = (a.to.as_str(), a.into, a.name);
+            let (branch, head) = ops::branch_bring(&mut res, from, to, key).await?;
+            Ok(json!({ "branch": branch, "head": head }))
         }
         other => Err(ToolError::invalid(format!("no tool is called {other}"))),
     }
@@ -608,16 +417,11 @@ async fn with_progress<T>(wait: impl Future<Output = T>, progress: Option<Progre
 #[cfg(test)]
 mod tests {
     use parking_lot::Mutex;
-    use serde_json::json;
-    use slopty_core::{SessionId, WallMs, WorkerId};
-    use slopty_proto::orchestration::{Outcome, TermRef, ThreadOf, ThreadRead, Verb};
-    use slopty_proto::project::{
-        Assignment, Bounds, Limits, Live, NativeCounts, Natives, Project, ProjectId, ProjectStatus,
-        Task, TaskId, TaskLaunch, TaskState, TimelineEntry,
-    };
+    use slopty_core::WallMs;
+    use slopty_proto::agent::AgentEntry;
+    use slopty_proto::orchestration::{ThreadOf, ThreadRead};
     use slopty_proto::server::{Liveness, Os, WorkerCaps, WorkerInfo};
-    use slopty_proto::terminal::{SessionState, SessionSummary};
-    use slopty_proto::thread::AgentId;
+    use slopty_proto::thread::{AgentId, Phase, ThreadId, TurnId};
 
     use super::*;
 
@@ -625,96 +429,40 @@ mod tests {
         "0199a000-0000-7000-8000-000000000001".parse().unwrap()
     }
 
-    fn shell() -> SessionId {
-        "0199a1b1-c3d4-7000-8000-00000000abcd".parse().unwrap()
+    fn child() -> ThreadId {
+        ThreadId::derived(&["child"])
     }
 
-    /// One online worker with one shell; records every verb and the keys that came with them;
-    /// a project read that may wait takes 25 s.
+    /// One online worker, `mac-studio`; records every verb and the key that came with it. A
+    /// wait takes 25 s.
     #[derive(Default)]
     struct Fake {
         verbs: Mutex<Vec<Verb>>,
         keys: Mutex<Vec<Option<IdempotencyKey>>>,
-        /// The caller's own project and task.
-        scope: crate::Scope,
-    }
-
-    /// Task `id` as the fake's server makes it, its agent in the fake's shell once started.
-    fn made_task(id: u32, title: &str, started: bool) -> Task {
-        Task {
-            spent: slopty_proto::project::Spent::default(),
-            id: TaskId(id),
-            depends_on: Vec::new(),
-            start_from: None,
-            started_on: None,
-            kind: String::new(),
-            title: title.to_owned(),
-            brief: String::new(),
-            read_only: false,
-            verifier: None,
-            metadata: None,
-            state: if started { TaskState::Running } else { TaskState::Planned },
-            status: None,
-            assignment: started.then(|| Assignment {
-                term: TermRef { worker: studio(), session: shell() },
-                thread: None,
-                since_ms: WallMs::ZERO,
-                ended_ms: None,
-                conversation: None,
-                spawned: true,
-            }),
-            branch: None,
-            worktree: None,
-            base: None,
-            pull: None,
-            verified: None,
-            merge: None,
-            created_ms: WallMs::ZERO,
-            updated_ms: WallMs::ZERO,
-            step: None,
-            give_backs: slopty_proto::project::GiveBacks::default(),
-            tests: None,
-        }
-    }
-
-    /// The fake's project: task 3 planned, task 5 with its agent in the fake's shell.
-    fn project_status(id: ProjectId) -> ProjectStatus {
-        ProjectStatus {
-            project: Project {
-                orchestrator_spent: slopty_proto::project::Spent::default(),
-                id,
-                title: "Slopty".to_owned(),
-                repo: "~/slopty".to_owned(),
-                repo_id: None,
-                target: "main".to_owned(),
-                base: None,
-                verifier: None,
-                push: false,
-                orchestrator: None,
-                orchestrator_thread: None,
-                landed: None,
-                limits: Limits::default(),
-                metadata: None,
-                created_ms: WallMs::ZERO,
-                goal: None,
-                autonomy: slopty_proto::project::Autonomy::default(),
-                progress: None,
-            },
-            tasks: [made_task(3, "Plan", false), made_task(5, "Review", true)]
-                .iter()
-                .map(|t| t.card(&Natives::default()))
-                .collect(),
-            orchestrator_natives: NativeCounts::default(),
-            timeline: Vec::new(),
-            next: 0,
-            bounds: Bounds::default(),
-            live: Live::default(),
-        }
     }
 
     impl Fake {
-        fn verbs(&self) -> Vec<Verb> {
-            self.verbs.lock().clone()
+        fn last(&self) -> Option<Verb> {
+            self.verbs.lock().iter().rev().find(|v| !matches!(v, Verb::ListWorkers)).cloned()
+        }
+    }
+
+    fn entry(id: ThreadId) -> AgentEntry {
+        AgentEntry {
+            id,
+            parent: Some(ThreadId::derived(&["parent"])),
+            worker: studio(),
+            agent: AgentId::named(AgentId::CLAUDE_CODE),
+            title: "Fix the login".to_owned(),
+            folder: Some("/src/app".to_owned()),
+            branch: Some("worktree-login".to_owned()),
+            phase: Phase::Idle,
+            wait: None,
+            ended: false,
+            asks: None,
+            last: Some("Done.".to_owned()),
+            since_ms: WallMs::ZERO,
+            rests: true,
         }
     }
 
@@ -751,203 +499,45 @@ mod tests {
                     load: 0.0,
                     last_seen_ms: WallMs::ZERO,
                 }]),
-                Verb::ListTerminals { .. } => Outcome::Terminals {
-                    agents: Vec::new(),
-                    terminals: vec![(
-                        studio(),
-                        SessionSummary {
-                            id: shell(),
-                            title: "zsh".to_owned(),
-                            cwd: None,
-                            repo: None,
-                            branch: None,
-                            changes: None,
-                            started_ms: WallMs::ZERO,
-                            cols: 80,
-                            rows: 24,
-                            state: SessionState::Running,
-                            viewers: 0,
-                            command: Vec::new(),
-                            progress: None,
-                            restored: None,
-                            program: Vec::new(),
-                            repo_id: None,
-                        },
-                    )],
-                },
+                Verb::ListTerminals { .. } => {
+                    Outcome::Terminals { agents: Vec::new(), terminals: Vec::new() }
+                }
+                Verb::WorkerFacts { .. } => Outcome::Facts(Vec::new()),
+                Verb::AgentStart(_) => Outcome::ThreadStarted { thread: child(), worktree: None },
+                Verb::AgentWait { agents, .. } => {
+                    tokio::time::sleep(Duration::from_secs(25)).await;
+                    let agents = agents.into_iter().map(entry).collect();
+                    Outcome::Agents { agents, timed_out: false }
+                }
+                Verb::Agents => Outcome::Agents { agents: vec![entry(child())], timed_out: false },
+                Verb::AgentTell { agent, .. } if agent == ThreadId::derived(&["stranger"]) => {
+                    Outcome::Error {
+                        code: ErrorCode::Forbidden,
+                        message: "not of this tree".to_owned(),
+                    }
+                }
                 Verb::ReadThread { of, after, .. } => {
-                    let thread = match of {
-                        ThreadOf::Thread(thread) => thread,
-                        _ => slopty_proto::thread::ThreadId::derived(&["task"]),
-                    };
+                    let ThreadOf::Thread(thread) = of else { panic!("{of:?}") };
                     Outcome::Thread(Box::new(ThreadRead {
                         worker: studio(),
                         thread,
                         agent: AgentId::named(AgentId::PI),
                         title: "Fix the build".to_owned(),
                         parent: None,
-                        phase: slopty_proto::thread::Phase::Working,
+                        phase: Phase::Working,
                         wait: None,
                         turns: Vec::new(),
                         requests: Vec::new(),
-                        next: after.unwrap_or(slopty_proto::thread::TurnId(0)),
+                        next: after.unwrap_or(TurnId(0)),
                         truncated: false,
                         skipped: false,
                     }))
                 }
-                Verb::TaskCreate { spec, .. } => {
-                    Outcome::Task(Box::new(made_task(7, &spec.title, false)))
-                }
-                Verb::TaskUpdate { task, .. } => {
-                    Outcome::Task(Box::new(made_task(task.0, "Review", true)))
-                }
-                Verb::ProjectStatus { project, timeout_ms, .. } => {
-                    if timeout_ms > 0 {
-                        tokio::time::sleep(Duration::from_secs(25)).await;
-                    }
-                    Outcome::Project(Box::new(project_status(project)))
-                }
-                Verb::ProjectProgress { project, .. } => {
-                    Outcome::Project(Box::new(project_status(project)))
-                }
-                Verb::TaskTell { task: Some(TaskId(9)), .. } => Outcome::Error {
-                    code: ErrorCode::UnknownTask,
-                    message: "no task #9".to_owned(),
-                },
-                Verb::TaskSpawn { task, .. } | Verb::TaskRestart { task, .. } => {
-                    Outcome::Task(Box::new(made_task(task.0, "Fix the hub", true)))
-                }
-                // The server's record of the terminal, over what its environment says.
-                Verb::WorkingOn { .. } => {
-                    Outcome::WorkingOn(Some(("slopty".parse().expect("a name"), Some(TaskId(5)))))
+                Verb::BranchBring { branch, .. } => {
+                    Outcome::Fetched { branch, head: "abc1234".to_owned() }
                 }
                 _ => Outcome::Done,
             }
-        }
-
-        fn scope(&self) -> crate::Scope {
-            self.scope.clone()
-        }
-    }
-
-    /// The orchestrator's own project is what the project tools default to: `task_start` makes a
-    /// task with the dependencies it gave, and the one it starts from, and starts it in one call on
-    /// the worker named, Claude Code when it names no agent; and it starts a task made before
-    /// with any agent. What the server decides (the folder, the prompt, the agent's arguments)
-    /// is no argument. A caller that runs for no project is told to name one.
-    #[tokio::test]
-    async fn task_start_makes_and_starts_a_task_in_the_caller_s_own_project() {
-        let scope =
-            crate::Scope { session: None, project: Some("slopty".parse().unwrap()), task: None };
-        let fake = Fake { scope, ..Fake::default() };
-        let made = json!({
-            "title": "Hub",
-            "brief": "Fix the hub\nThen test it",
-            "depends_on": [2],
-            "start_from": 2,
-            "read_only": true,
-            "worker": studio().to_string(),
-        });
-        let (failed, text) = call_json(&fake, "task_start", made).await;
-        assert!(!failed, "{text}");
-        let verbs = fake.verbs();
-        let [Verb::TaskCreate { project, spec }, Verb::TaskSpawn { task, launch, .. }] =
-            verbs.as_slice()
-        else {
-            panic!("{verbs:?}")
-        };
-        assert_eq!(project.as_str(), "slopty");
-        assert_eq!(spec.depends_on.as_slice(), &[TaskId(2)][..]);
-        assert_eq!(spec.start_from, Some(TaskId(2)), "on that task's work");
-        assert_eq!((spec.brief.as_str(), spec.read_only), ("Fix the hub\nThen test it", true));
-        let claude =
-            TaskLaunch { pin: Some(studio()), agent: AgentId::named(AgentId::CLAUDE_CODE) };
-        assert_eq!((*task, launch), (TaskId(7), &claude));
-
-        for (named, agent) in [
-            ("codex", AgentId::named(AgentId::CODEX)),
-            ("pi", AgentId::named(AgentId::PI)),
-            ("acp:gemini", AgentId::acp("gemini")),
-            ("gemini", AgentId::acp("gemini")),
-        ] {
-            let thread = json!({"task": 7, "agent": named});
-            let (failed, text) = call_json(&fake, "task_start", thread).await;
-            assert!(!failed, "{text}");
-            let Some(Verb::TaskSpawn { launch, .. }) = fake.verbs().pop() else { panic!() };
-            assert_eq!(launch, TaskLaunch { pin: None, agent }, "{named}");
-        }
-        let gone = ["cwd", "command", "prompt", "model", "args", "env", "kind", "metadata"];
-        for gone in gone.into_iter().chain(["project", "idempotency_key"]) {
-            let (failed, text) = call_json(&fake, "task_start", json!({"task": 7, gone: 1})).await;
-            assert!(failed && text.contains("unknown field"), "{gone}: {text}");
-        }
-
-        let both = json!({"task": 7, "title": "Again"});
-        let (failed, text) = call_json(&fake, "task_start", both).await;
-        assert!(failed, "a task or a new one, not both: {text}");
-        let (failed, text) = call_json(&fake, "task_start", json!({})).await;
-        assert!(failed, "a task or a new one: {text}");
-
-        let (failed, text) = call_json(&Fake::default(), "task_start", json!({"title": "x"})).await;
-        assert!(failed && text.contains("name the project"), "{text}");
-    }
-
-    /// `task_restart` starts a task of the caller's project again, handing it to the agent
-    /// named, or to the one it ran last when it names none.
-    #[tokio::test]
-    async fn task_restart_hands_a_task_to_a_new_agent() {
-        use slopty_proto::thread::AgentId;
-        let fake = Fake::default();
-        let restart = json!({"project": "slopty", "task": 4, "agent": "codex"});
-        let (failed, text) = call_json(&fake, "task_restart", restart).await;
-        assert!(!failed, "{text}");
-        let again = json!({"project": "slopty", "task": 4, "idempotency_key": "again-1"});
-        let (failed, text) = call_json(&fake, "task_restart", again).await;
-        assert!(!failed, "{text}");
-        let restarts: Vec<_> = fake
-            .verbs()
-            .into_iter()
-            .filter_map(|v| match v {
-                Verb::TaskRestart { project, task, agent, .. } => Some((project, task, agent)),
-                _ => None,
-            })
-            .collect();
-        let slopty: ProjectId = "slopty".parse().unwrap();
-        assert_eq!(
-            restarts,
-            [
-                (slopty.clone(), TaskId(4), Some(AgentId::named(AgentId::CODEX))),
-                (slopty, TaskId(4), None),
-            ]
-        );
-        let (failed, text) = call_json(&fake, "task_restart", json!({"project": "slopty"})).await;
-        assert!(failed && text.contains("missing field `task`"), "{text}");
-    }
-
-    /// The server's record of the caller's terminal says which task is its own, over the
-    /// `SLOPTY_TASK` it was started with: an agent put on another task acts on that one.
-    #[tokio::test]
-    async fn the_server_s_record_of_the_caller_s_terminal_names_its_task() {
-        let scope = crate::Scope {
-            session: Some(shell()),
-            project: Some("slopty".parse().unwrap()),
-            task: Some(TaskId(3)),
-        };
-        let fake = Fake { scope, ..Fake::default() };
-        let (failed, text) = call_json(&fake, "task_update", json!({"status": "reading"})).await;
-        assert!(!failed, "{text}");
-        let Some(Verb::TaskUpdate { task, change, .. }) = fake.verbs().pop() else {
-            panic!("{:?}", fake.verbs())
-        };
-        assert_eq!((task, change.status.as_deref()), (TaskId(5), Some("reading")));
-
-        let trimmed = ["state", "branch", "base", "depends_on", "verifier", "metadata"];
-        for gone in trimmed.into_iter().chain(["project", "idempotency_key"]) {
-            let (failed, text) = call_json(&fake, "task_update", json!({ gone: "x" })).await;
-            assert!(
-                failed && text.contains("unknown field"),
-                "only status and note: {gone}: {text}"
-            );
         }
     }
 
@@ -958,7 +548,7 @@ mod tests {
         (result.is_error == Some(true), text)
     }
 
-    /// The tools are the project's ten and nothing else: the rest is the `slopty` command.
+    /// The tools are the eight primitives and nothing else: the rest is the `slopty` command.
     #[test]
     fn every_tool_has_a_schema_a_description_and_a_hint() {
         let tools = list();
@@ -966,16 +556,14 @@ mod tests {
         assert_eq!(
             names,
             [
-                "project_status",
-                "project_update",
-                "task_get",
-                "task_start",
-                "task_update",
-                "task_report",
-                "task_tell",
-                "task_restart",
-                "task_wait",
-                "read_thread",
+                "machines",
+                "agent_start",
+                "agent_tell",
+                "agent_read",
+                "agent_wait",
+                "agent_stop",
+                "agents",
+                "branch_bring",
             ]
         );
         for t in &tools {
@@ -983,8 +571,8 @@ mod tests {
             assert!(t.description.as_ref().is_some_and(|d| d.len() > 40), "{}", t.name);
             assert!(t.annotations.as_ref().is_some_and(|a| a.read_only_hint.is_some()));
         }
-        let tell = get("task_tell").unwrap();
-        assert_eq!(tell.input_schema["required"], json!(["task", "text"]));
+        let start = get("agent_start").unwrap();
+        assert_eq!(start.input_schema["required"], json!(["machine", "prompt"]));
         for name in names {
             assert!(INSTRUCTIONS.contains(name), "the instructions name {name}");
         }
@@ -1005,257 +593,101 @@ mod tests {
         });
     }
 
+    /// An agent's start names its machine by name and carries no harness arguments; its key
+    /// goes with it, and the answer is the agent's id.
     #[tokio::test]
-    async fn an_unknown_tool_is_invalid_params_and_a_failure_is_the_models_to_read() {
-        let scope =
-            crate::Scope { project: Some("slopty".parse().unwrap()), ..crate::Scope::default() };
-        let fake = Fake { scope, ..Fake::default() };
-        let err = call(&fake, "list_workers", Map::new(), None).await.unwrap_err();
-        assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS, "the CLI's now");
-
-        let told = json!({ "task": 9, "text": "Hello." });
-        let (failed, text) = call_json(&fake, "task_tell", told).await;
-        assert!(failed);
-        assert_eq!(text, "no task #9 (UnknownTask)");
-
-        let (failed, text) = call_json(&fake, "task_get", json!({ "task": 3, "y": 1 })).await;
-        assert!(failed);
-        assert!(text.starts_with("bad arguments: unknown field `y`"), "{text}");
-    }
-
-    /// A key goes with the verb it names, so a retried call is done once; a key that is no key
-    /// is the model's to fix.
-    #[tokio::test]
-    async fn an_idempotency_key_goes_with_its_verb() {
-        let scope = crate::Scope {
-            project: Some("slopty".parse().unwrap()),
-            task: Some(TaskId(5)),
-            ..crate::Scope::default()
-        };
-        let fake = Fake { scope, ..Fake::default() };
-        let args = json!({ "task": 3, "text": "Go on.", "idempotency_key": "step-3" });
-        let (failed, text) = call_json(&fake, "task_tell", args).await;
+    async fn agent_start_resolves_the_machine_and_carries_its_key() {
+        let fake = Fake::default();
+        let start = json!({
+            "machine": "mac-studio",
+            "prompt": "Fix the login",
+            "folder": "~/src/app",
+            "worktree": "login",
+            "agent": "codex",
+            "idempotency_key": "start-1",
+        });
+        let (failed, text) = call_json(&fake, "agent_start", start).await;
         assert!(!failed, "{text}");
-        let sent = fake.keys.lock().last().cloned().flatten();
-        assert_eq!(sent, Some(IdempotencyKey::new("step-3").unwrap()));
-        let args = json!({ "note": "x", "idempotency_key": "two words" });
-        let (failed, text) = call_json(&fake, "task_report", args).await;
-        assert!(failed && text.contains("idempotency key"), "{text}");
+        let answer: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(answer["agent"], json!(child().to_string()));
+        let Some(Verb::AgentStart(start)) = fake.last() else { panic!() };
+        assert_eq!(start.worker, studio());
+        assert_eq!(start.agent, Some(AgentId::named(AgentId::CODEX)));
+        assert_eq!(start.worktree.as_deref(), Some("login"));
+        let key = fake.keys.lock().last().cloned().flatten();
+        assert_eq!(key, Some(IdempotencyKey::new("start-1").unwrap()));
+
+        let args = json!({ "machine": "mac-studio", "prompt": "x", "args": ["--yolo"] });
+        let (failed, text) = call_json(&fake, "agent_start", args).await;
+        assert!(failed && text.contains("unknown field `args`"), "no harness arguments: {text}");
+        let nowhere = json!({ "machine": "nowhere", "prompt": "x" });
+        let (failed, _) = call_json(&fake, "agent_start", nowhere).await;
+        assert!(failed, "a machine that does not resolve");
     }
 
+    /// An agent is read by its id, in the view asked and from the turn asked; a refusal is the
+    /// model's to read; an unknown tool is invalid params.
+    #[tokio::test]
+    async fn an_agent_is_read_by_its_id_and_a_refusal_is_the_model_s_to_read() {
+        let fake = Fake::default();
+        let read = json!({ "agent": child().to_string(), "view": "activity", "after": 4 });
+        let (failed, text) = call_json(&fake, "agent_read", read).await;
+        assert!(!failed, "{text}");
+        let asked = Verb::ReadThread {
+            of: ThreadOf::Thread(child()),
+            view: ThreadView::Activity,
+            after: Some(TurnId(4)),
+            hold: false,
+        };
+        assert_eq!(fake.last(), Some(asked));
+        let (failed, text) = call_json(&fake, "agent_read", json!({ "agent": "t1" })).await;
+        assert!(failed && text.contains("not an agent's id"), "{text}");
+
+        let stranger = ThreadId::derived(&["stranger"]).to_string();
+        let told = json!({ "agent": stranger, "text": "Hello." });
+        let (failed, text) = call_json(&fake, "agent_tell", told).await;
+        assert!(failed);
+        assert_eq!(text, "not of this tree (Forbidden)");
+
+        let err = call(&fake, "task_start", Map::new(), None).await.unwrap_err();
+        assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    }
+
+    /// A long wait reports progress every ten seconds, and answers with each agent by its
+    /// machine's name.
     #[tokio::test(start_paused = true)]
-    async fn a_long_wait_reports_progress_every_ten_seconds() {
+    async fn a_long_wait_reports_progress_and_names_the_machine() {
         let fake = Fake::default();
         let reported = Mutex::new(Vec::new());
         let report = |waited: Duration| reported.lock().push(waited);
-        let wait = json!({ "project": "slopty", "tasks": [5], "timeout_ms": 25_000 });
+        let wait = json!({ "agents": [child().to_string()], "all": true, "timeout_ms": 30_000 });
         let Value::Object(args) = wait else { panic!() };
-        let result = call(&fake, "task_wait", args, Some(&report)).await.unwrap();
+        let result = call(&fake, "agent_wait", args, Some(&report)).await.unwrap();
         assert_ne!(result.is_error, Some(true), "{result:?}");
         let every = PROGRESS_EVERY;
         assert_eq!(*reported.lock(), [every, every.saturating_mul(2)], "at 10 s and 20 s of 25");
-        let Some(Verb::ProjectStatus { timeout_ms, .. }) = fake.verbs().pop() else { panic!() };
-        assert_eq!(timeout_ms, 25_000, "passed through; the server caps it");
-
-        let read = json!({ "project": "slopty", "timeout_ms": 30_000 });
-        let (failed, text) = call_json(&fake, "project_status", read).await;
-        assert!(failed && text.contains("unknown field `timeout_ms`"), "{text}");
+        let text = result.content[0].as_text().unwrap().text.clone();
+        let answer: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(answer["agents"][0]["worker"], json!("mac-studio"));
+        assert_eq!(answer["agents"][0]["rests"], json!(true));
+        let Some(Verb::AgentWait { all, timeout_ms, .. }) = fake.last() else { panic!() };
+        assert_eq!((all, timeout_ms), (true, 30_000), "passed through; the server caps it");
     }
 
-    /// A thread is read by a task, a thread's id or a terminal, in the view asked and from
-    /// the turn asked, and the server finds where it is; nothing names none. Answering a
-    /// request is the person's, so no tool does it.
+    /// A branch goes from one machine to another by their names.
     #[tokio::test]
-    async fn a_thread_is_read_by_task_thread_or_term_and_answering_is_no_tool() {
+    async fn a_branch_is_brought_between_machines() {
         let fake = Fake::default();
-        let child = slopty_proto::thread::ThreadId::derived(&["child"]);
-        let read = json!({ "thread": child.to_string(), "view": "activity", "after": 4 });
-        let (failed, text) = call_json(&fake, "read_thread", read).await;
+        let bring = json!({
+            "from": "mac-studio", "repo": "~/src/app", "branch": "worktree-login",
+            "to": studio().to_string(),
+        });
+        let (failed, text) = call_json(&fake, "branch_bring", bring).await;
         assert!(!failed, "{text}");
-        let page: Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(
-            (page["thread"].clone(), page["next"].clone()),
-            (json!(child.to_string()), json!(4))
-        );
-        let asked = Verb::ReadThread {
-            of: ThreadOf::Thread(child),
-            view: ThreadView::Activity,
-            after: Some(slopty_proto::thread::TurnId(4)),
-            hold: false,
-        };
-        assert_eq!(fake.verbs().pop(), Some(asked));
-
-        let term = format!("{}/{}", studio(), shell());
-        call_json(&fake, "read_thread", json!({ "term": term })).await;
-        let t = TermRef { worker: studio(), session: shell() };
-        let Some(Verb::ReadThread { of, view, after: None, .. }) = fake.verbs().pop() else {
-            panic!()
-        };
-        assert_eq!((of, view), (ThreadOf::Term(t), ThreadView::Messages));
-        call_json(&fake, "read_thread", json!({ "project": "slopty", "task": 3 })).await;
-        let Some(Verb::ReadThread { of: ThreadOf::Task { task, .. }, .. }) = fake.verbs().pop()
-        else {
-            panic!()
-        };
-        assert_eq!(task, TaskId(3));
-        let (failed, text) = call_json(&fake, "read_thread", json!({})).await;
-        assert!(failed && text.contains("name a task, a thread or a terminal"), "{text}");
-        let (failed, text) = call_json(&fake, "read_thread", json!({ "thread": "t1" })).await;
-        assert!(failed && text.contains("not a thread id"), "{text}");
-
-        let Value::Object(args) = json!({ "thread": child.to_string() }) else { panic!() };
-        let unknown = call(&fake, "answer_request", args, None).await;
-        assert!(unknown.is_err(), "the person answers requests, never an agent");
-    }
-
-    /// An agent tells a task by its number, its words going as they are; a task must be named,
-    /// since an agent never tells itself.
-    #[tokio::test]
-    async fn task_tell_names_its_task_and_carries_the_words() {
-        let scope =
-            crate::Scope { project: Some("slopty".parse().unwrap()), ..crate::Scope::default() };
-        let fake = Fake { scope, ..Fake::default() };
-        let (failed, text) =
-            call_json(&fake, "task_tell", json!({"task": "#7", "text": "Cover the iPad."})).await;
-        assert!(!failed, "{text}");
-        let told = Verb::TaskTell {
-            project: "slopty".parse().unwrap(),
-            task: Some(TaskId(7)),
-            text: "Cover the iPad.".to_owned(),
-        };
-        assert_eq!(fake.verbs().pop(), Some(told));
-        let (failed, text) = call_json(&fake, "task_tell", json!({"text": "Hello."})).await;
-        assert!(failed && text.contains("task"), "a task is named: {text}");
-    }
-
-    /// The orchestrator says where its own project's goal stands, and that it is met; a
-    /// summary is what it must say.
-    #[tokio::test]
-    async fn project_update_says_where_the_goal_stands_in_the_caller_s_project() {
-        let scope =
-            crate::Scope { project: Some("slopty".parse().unwrap()), ..crate::Scope::default() };
-        let fake = Fake { scope, ..Fake::default() };
-        let said = json!({ "summary": "Two of three merged.", "next": "The iPad.", "done": true });
-        let (failed, text) = call_json(&fake, "project_update", said).await;
-        assert!(!failed, "{text}");
-        let progress = Verb::ProjectProgress {
-            project: "slopty".parse().unwrap(),
-            summary: "Two of three merged.".to_owned(),
-            next: Some("The iPad.".to_owned()),
-            done: true,
-        };
-        assert_eq!(fake.verbs().pop(), Some(progress));
-        let (failed, text) = call_json(&fake, "project_update", json!({ "next": "x" })).await;
-        assert!(failed && text.contains("summary"), "{text}");
-    }
-
-    /// A project's timeline as a server answers it, read after read; with nothing left it
-    /// waits out the read's time and answers nothing new, as the server does.
-    struct Timeline {
-        reads: Mutex<std::collections::VecDeque<ProjectStatus>>,
-        last: Mutex<Option<ProjectStatus>>,
-        asked: Mutex<Vec<Verb>>,
-    }
-
-    impl Timeline {
-        fn new(reads: Vec<ProjectStatus>) -> Self {
-            Self {
-                reads: Mutex::new(reads.into()),
-                last: Mutex::new(None),
-                asked: Mutex::default(),
-            }
-        }
-    }
-
-    impl Dispatch for Timeline {
-        async fn send(&self, _key: Option<IdempotencyKey>, verb: Verb) -> Outcome {
-            self.asked.lock().push(verb.clone());
-            let Verb::ProjectStatus { timeout_ms, .. } = verb else { return Outcome::Done };
-            let next = self.reads.lock().pop_front();
-            let status = if let Some(status) = next {
-                status
-            } else {
-                tokio::time::sleep(Duration::from_millis(u64::from(timeout_ms))).await;
-                let last = self.last.lock().clone().expect("read once");
-                ProjectStatus { timeline: Vec::new(), ..last }
-            };
-            *self.last.lock() = Some(status.clone());
-            Outcome::Project(Box::new(status))
-        }
-
-        fn scope(&self) -> crate::Scope {
-            crate::Scope { project: Some("slopty".parse().unwrap()), ..crate::Scope::default() }
-        }
-    }
-
-    fn at(seq: u64, task: u32, what: slopty_proto::project::Moment) -> TimelineEntry {
-        TimelineEntry { seq, at_ms: WallMs::ZERO, task: Some(TaskId(task)), what }
-    }
-
-    fn read(next: u64, timeline: Vec<TimelineEntry>) -> ProjectStatus {
-        ProjectStatus { timeline, next, ..project_status("slopty".parse().unwrap()) }
-    }
-
-    /// `task_wait` follows the timeline from now with the server's own long wait: what came
-    /// before is the past (only its latest report is kept), a delivery or a note is no news, and
-    /// a turn ended or a report is. With `all` it waits for each; out of time it says so, asks
-    /// nothing to stop, and gives the cursor to go on from. A task merged is ready at once.
-    #[tokio::test(start_paused = true)]
-    async fn task_wait_waits_for_news_and_cancels_nothing() {
-        use slopty_proto::project::{Moment, Report};
-        let report = |note: &str| Moment::Reported {
-            report: Report { note: note.to_owned(), artifacts: Vec::new(), branch: None, pr: None },
-        };
-        let rested = Moment::State { from: TaskState::Running, to: TaskState::Waiting };
-        let quiet = Moment::Note { text: "noted".to_owned() };
-        let timeline = Timeline::new(vec![
-            read(10, vec![at(9, 5, report("half way"))]),
-            read(12, vec![at(10, 5, quiet.clone()), at(11, 3, quiet)]),
-            read(13, vec![at(12, 5, rested.clone())]),
-        ]);
-        let tasks = ["5".to_owned(), "#3".to_owned()];
-        let waited = ops::task_wait(&timeline, None, (&tasks, false), None, 60_000).await.unwrap();
-        assert_eq!(
-            (waited.ready.as_slice(), waited.timed_out, waited.next),
-            (&[TaskId(5)][..], false, 13)
-        );
-        assert_eq!(waited.news, [at(12, 5, rested)]);
-        let view = serde_json::to_value(view::projects::task_wait(&waited)).unwrap();
-        assert_eq!(view["tasks"][0]["last_report"]["text"], json!("done: half way"), "{view}");
-        let sinces: Vec<Option<u64>> = timeline
-            .asked
-            .lock()
-            .iter()
-            .map(|v| match v {
-                Verb::ProjectStatus { since, .. } => *since,
-                other => panic!("only reads: {other:?}"),
-            })
-            .collect();
-        assert_eq!(sinces, [None, Some(10), Some(12)]);
-
-        let timeline = Timeline::new(vec![read(13, Vec::new())]);
-        let started = tokio::time::Instant::now();
-        let waited =
-            ops::task_wait(&timeline, None, (&tasks, true), Some(13), 90_000).await.unwrap();
-        assert!(waited.timed_out && waited.ready.is_empty() && waited.next == 13);
-        assert_eq!(started.elapsed(), Duration::from_secs(90), "the whole wait, no more");
-        assert!(
-            timeline.asked.lock().iter().all(|v| matches!(v, Verb::ProjectStatus { .. })),
-            "nothing is stopped or cancelled"
-        );
-
-        let mut merged = read(20, Vec::new());
-        if let Some(card) = merged.tasks.iter_mut().find(|c| c.id == TaskId(5)) {
-            card.state = TaskState::Merged;
-        }
-        let timeline = Timeline::new(vec![merged]);
-        let waited =
-            ops::task_wait(&timeline, None, (&tasks[..1], true), None, 60_000).await.unwrap();
-        assert_eq!((waited.ready.as_slice(), waited.timed_out), (&[TaskId(5)][..], false));
-        let unknown = ["9".to_owned()];
-        let timeline = Timeline::new(vec![read(20, Vec::new())]);
-        let refused =
-            ops::task_wait(&timeline, None, (&unknown, false), None, 0).await.unwrap_err();
-        assert_eq!(refused.code, ErrorCode::UnknownTask);
+        assert_eq!(text, r#"{"branch":"worktree-login","head":"abc1234"}"#);
+        let Some(Verb::BranchBring { from, to, into, name, .. }) = fake.last() else { panic!() };
+        assert_eq!((from, to, into, name), (studio(), studio(), None, None));
+        let (failed, text) = call_json(&fake, "agents", json!({})).await;
+        assert!(!failed && text.contains("worktree-login"), "{text}");
     }
 }

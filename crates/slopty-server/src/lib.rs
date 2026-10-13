@@ -7,8 +7,8 @@
 //! client ↔ worker directly.
 //!
 //! * [`hub`] — the registry, the leases and the one verb dispatch.
-//! * [`project`] — projects: their records, path claims, placement, and how agents move tasks.
-//! * [`store`] — the state files: known workers, every project and the phones, across restarts.
+//! * [`store`] — the state files: known workers, words on their way to agents and the phones,
+//!   across restarts.
 //! * [`push`] — notices pushed to pocketed phones, straight to APNs.
 //! * [`link`] — the QUIC front end, the only one.
 
@@ -22,8 +22,6 @@
 mod deliver;
 pub mod hub;
 pub mod link;
-mod placement;
-pub mod project;
 pub mod push;
 pub mod store;
 
@@ -35,7 +33,7 @@ pub use push::PushConfig;
 use slopty_net::admission::Admission;
 use slopty_net::server::ServerListener;
 use store::DeliveryStore;
-pub use store::{ProjectStore, PushStore, Store};
+pub use store::{PushStore, Store};
 use tokio::task::JoinHandle;
 
 /// Log whether this machine serves as a Tailscale peer relay: the server's machine is always
@@ -115,26 +113,20 @@ pub struct Server {
     listener: ServerListener,
     quic: SocketAddr,
     store: Store,
-    /// Keeps the reports on their way to the agents, written once more at shutdown.
+    /// Keeps the words on their way to the agents, written once more at shutdown.
     deliveries: DeliveryStore,
     tasks: Vec<JoinHandle<()>>,
-    /// Keeps the projects; finishes, writing them, once the hub stops sending it changes.
-    keeper: JoinHandle<()>,
 }
 
 impl Server {
     /// Load the state file, bind the listener and start serving.
     pub async fn start(config: Config) -> Result<Self, ServerError> {
         let store = Store::in_dir(&config.data_dir);
-        let projects = ProjectStore::in_dir(&config.data_dir);
         let unreadable = |path: &std::path::Path| {
             let path = path.to_owned();
             move |source| ServerError::State { path, source }
         };
         let hub = Hub::new(config.name, store.load().await.map_err(unreadable(store.path()))?);
-        let kept = projects.load().await.map_err(unreadable(projects.path()))?;
-        hub.adopt_projects(kept.clone());
-        let keeper = tokio::spawn(projects.keep(kept, hub.keep_projects()));
         let deliveries = DeliveryStore::in_dir(&config.data_dir);
         hub.adopt_deliveries(deliveries.load().await.map_err(unreadable(deliveries.path()))?);
         let phones = PushStore::in_dir(&config.data_dir);
@@ -153,12 +145,10 @@ impl Server {
             tokio::spawn(hub.keep_deliveries(deliveries.clone())),
             tokio::spawn(Hub::publish_ladder(hub.downgrade())),
             tokio::spawn(link::serve(listener.clone(), hub.clone())),
-            tokio::spawn(Hub::settle_finished(hub.downgrade())),
-            tokio::spawn(Hub::watch_landings(hub.downgrade())),
         ];
 
         tracing::info!(name = %hub.name(), %quic, state = %store.path().display(), "serving");
-        Ok(Self { hub, listener, quic, store, deliveries, tasks, keeper })
+        Ok(Self { hub, listener, quic, store, deliveries, tasks })
     }
 
     /// The registry.
@@ -194,11 +184,7 @@ impl Server {
             tracing::warn!(error = %e, "state not saved at shutdown");
         }
         if let Err(e) = self.deliveries.save(&self.hub.deliveries_file()).await {
-            tracing::warn!(error = %e, "reports on their way not saved at shutdown");
-        }
-        self.hub.stop_keeping();
-        if let Err(e) = self.keeper.await {
-            tracing::warn!(error = %e, "projects not saved at shutdown");
+            tracing::warn!(error = %e, "words on their way not saved at shutdown");
         }
     }
 }

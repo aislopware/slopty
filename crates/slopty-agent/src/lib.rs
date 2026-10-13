@@ -53,7 +53,6 @@ pub mod driven;
 pub mod history;
 pub mod hooks;
 pub mod live;
-pub mod loosening;
 pub mod managed;
 pub mod observed;
 pub mod permission;
@@ -70,14 +69,13 @@ pub mod trust;
 pub mod typed;
 pub mod vouch;
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 use slopty_core::{SessionId, WallMs};
 use slopty_proto::agent::{AgentBranch, Worktree};
-use slopty_proto::project::{AgentReport, NativeTask};
 
 use crate::detect::Program;
 use crate::status::{AgentEvent, AgentSource, AgentStatus, BlockReason, HeardMode};
@@ -432,38 +430,6 @@ impl Hook {
             && self.agent_type.as_deref().is_some_and(str::is_empty)
     }
 
-    /// What the server's project tree takes from this hook in `session`: one of the model's
-    /// own subagents starting or stopping, or an item of Claude Code's task list made or
-    /// completed. Claude Code's internal subagents (compaction, suggestions) are no node.
-    #[must_use]
-    pub fn report(&self, session: SessionId) -> Option<AgentReport> {
-        if self.is_internal_subagent() {
-            return None;
-        }
-        match self.event {
-            HookEvent::SubagentStart => Some(AgentReport::SubagentStarted {
-                session,
-                agent: self.agent_id.clone()?,
-                kind: self.agent_type.clone().unwrap_or_default(),
-            }),
-            HookEvent::SubagentStop => Some(AgentReport::SubagentStopped {
-                session,
-                agent: self.agent_id.clone()?,
-                transcript: self.agent_transcript_path.clone(),
-                last: first_words(self.last_assistant_message.as_deref()),
-            }),
-            HookEvent::TaskCreated | HookEvent::TaskCompleted => {
-                let task = NativeTask {
-                    id: self.task_id.clone()?,
-                    subject: first_words(self.task_subject.as_deref()).unwrap_or_default(),
-                    done: self.event == HookEvent::TaskCompleted,
-                };
-                Some(AgentReport::NativeTask { session, task })
-            }
-            _ => None,
-        }
-    }
-
     /// The badge's line for a prompt: its first line, or for the turn a finished background
     /// task starts (its prompt a `<task-notification>`), the notification's summary.
     fn prompt_detail(&self) -> Option<String> {
@@ -536,11 +502,6 @@ pub const fn wants_transcript(event: &AgentEvent) -> bool {
 
 fn first_line(s: &str) -> &str {
     s.lines().next().unwrap_or("").trim()
-}
-
-/// A text's first line, cut for a badge; `None` for no text or a blank first line.
-fn first_words(text: Option<&str>) -> Option<String> {
-    text.map(first_line).filter(|line| !line.is_empty()).map(truncate)
 }
 
 /// Last two path components.
@@ -694,8 +655,6 @@ pub struct Tracker {
     permission_mode: Option<String>,
     /// When [`Self::permission_mode`] was last heard to change, by the worker's clock.
     mode_ms: WallMs,
-    /// What in `argv` loosens the agent's permissions ([`loosening::loosening`]), once judged.
-    loosened: Option<Vec<String>>,
     /// After a prompt (`UserPromptSubmit`) the transcript has not taken yet: how many probes in a
     /// row the title has said idle since.
     unwritten: Option<u8>,
@@ -704,19 +663,6 @@ pub struct Tracker {
     limit_resets: Option<WallMs>,
     /// The person stopped the last turn (Esc) and has not prompted since.
     interrupted: bool,
-}
-
-/// `found` cut to what one [`AgentReport::Loosened`] carries.
-fn bounded_loosening(mut found: Vec<String>) -> Vec<String> {
-    use slopty_proto::project::{LOOSENED_ITEM_MAX, LOOSENED_MAX};
-    found.truncate(LOOSENED_MAX);
-    for item in &mut found {
-        if item.len() > LOOSENED_ITEM_MAX {
-            let cut = (0..=LOOSENED_ITEM_MAX).rev().find(|&i| item.is_char_boundary(i));
-            item.truncate(cut.unwrap_or(0));
-        }
-    }
-    found
 }
 
 /// The part of a status an elapsed time runs across: a tool call inside a turn is still the
@@ -750,7 +696,6 @@ impl Default for Tracker {
             argv: Vec::new(),
             permission_mode: None,
             mode_ms: WallMs::ZERO,
-            loosened: None,
             unwritten: None,
             limit_resets: None,
             interrupted: false,
@@ -915,7 +860,6 @@ impl Tracker {
         }
         if !program.argv.is_empty() && program.argv != self.argv {
             self.argv.clone_from(&program.argv);
-            self.loosened = None;
         }
         self.absent = 0;
         if self.first_seen.is_none() {
@@ -1066,9 +1010,6 @@ impl Tracker {
             args: resume::with_mode(invocation.args, self.permission_mode.as_deref()),
             relay: invocation.relay,
             mcp: invocation.mcp,
-            locked: invocation.locked,
-            auto: invocation.auto,
-            role: invocation.role,
         })
     }
 
@@ -1258,45 +1199,6 @@ impl Tracker {
     }
 }
 
-/// The most subagents, and the most task-list items, a session keeps to tell a server link
-/// again; past it, the oldest finished go first.
-pub const NATIVES_KEPT: usize = 64;
-
-/// One session agent's own subagents and task-list items, each as it was last reported, by id.
-#[derive(Debug, Default)]
-struct Natives {
-    subagents: BTreeMap<String, (u64, AgentReport)>,
-    tasks: BTreeMap<String, (u64, AgentReport)>,
-    next: u64,
-}
-
-impl Natives {
-    /// Keep `report` in place of what its id last said, in `kept`, dropping the oldest
-    /// finished (then the oldest) past [`NATIVES_KEPT`].
-    fn keep(
-        kept: &mut BTreeMap<String, (u64, AgentReport)>,
-        next: &mut u64,
-        id: &str,
-        report: &AgentReport,
-    ) {
-        *next = next.saturating_add(1);
-        kept.insert(id.to_owned(), (*next, report.clone()));
-        while kept.len() > NATIVES_KEPT {
-            let finished = |r: &AgentReport| match r {
-                AgentReport::SubagentStopped { .. } => true,
-                AgentReport::NativeTask { task, .. } => task.done,
-                _ => false,
-            };
-            let oldest = kept
-                .iter()
-                .min_by_key(|(_, (at, r))| (!finished(r), *at))
-                .map(|(id, _)| id.clone());
-            let Some(oldest) = oldest else { break };
-            kept.remove(&oldest);
-        }
-    }
-}
-
 /// All sessions' agents.
 #[derive(Debug, Default)]
 pub struct AgentTable {
@@ -1309,16 +1211,6 @@ pub struct AgentTable {
     branches: HashMap<SessionId, AgentBranch>,
     /// Sessions whose agent ended and where none has started since ([`Self::ended`]).
     ended: HashSet<SessionId>,
-    /// The permission mode last reported for each session ([`Self::permission_mode_report`]).
-    reported_modes: HashMap<SessionId, String>,
-    /// What loosens each session's agent, as last reported ([`Self::loosening_report`]).
-    reported_loosened: HashMap<SessionId, Vec<String>>,
-    /// Each session agent's own subagents and task list, as last reported
-    /// ([`Self::native_report`]).
-    natives: HashMap<SessionId, Natives>,
-    /// What the worker adds to the agents it starts, which loosens nothing
-    /// ([`Self::set_own`]).
-    own: loosening::Own,
 }
 
 impl AgentTable {
@@ -1334,7 +1226,6 @@ impl AgentTable {
         if !has_agent {
             self.sessions.remove(&session);
             self.branches.remove(&session);
-            self.natives.remove(&session);
             if hook.event == HookEvent::SessionEnd
                 && !resume::ended_by_the_person(hook.reason.as_deref())
                 && let resume::Resumable::Yes(conversation) = before
@@ -1393,7 +1284,6 @@ impl AgentTable {
         if !has_agent {
             self.sessions.remove(&session);
             self.branches.remove(&session);
-            self.natives.remove(&session);
         }
         event
     }
@@ -1415,7 +1305,6 @@ impl AgentTable {
     pub fn exited(&mut self, session: SessionId) -> Option<AgentEvent> {
         let tracker = self.sessions.remove(&session)?;
         self.branches.remove(&session);
-        self.natives.remove(&session);
         if tracker.status() == &AgentStatus::None {
             return None;
         }
@@ -1437,63 +1326,6 @@ impl AgentTable {
         self.sessions.get(&session).is_some_and(Tracker::interrupted)
     }
 
-    /// The permission mode `session`'s agent is in, as the server's tree takes it, when it is
-    /// not the one last reported for the session. Call it after [`Self::apply`]: only a hook
-    /// the session's own agent sent moves the mode (a nested `claude -p` does not).
-    pub fn permission_mode_report(&mut self, session: SessionId) -> Option<AgentReport> {
-        let mode = self.sessions.get(&session)?.permission_mode.as_ref()?;
-        if self.reported_modes.get(&session) == Some(mode) {
-            return None;
-        }
-        self.reported_modes.insert(session, mode.clone());
-        Some(AgentReport::PermissionMode { session, mode: mode.clone() })
-    }
-
-    /// What was last reported of each live session's permissions: its mode, and what loosens
-    /// them when anything does. A server link that was down, or fell behind, when they were
-    /// reported missed them, so every new link is told them again: the server's guard closes
-    /// a terminal held to asking whose agent went looser while it could not hear.
-    #[must_use]
-    pub fn permission_reports(&self) -> Vec<AgentReport> {
-        let modes = self.reported_modes.iter().map(|(session, mode)| AgentReport::PermissionMode {
-            session: *session,
-            mode: mode.clone(),
-        });
-        let loosened = self.reported_loosened.iter().filter(|(_, found)| !found.is_empty()).map(
-            |(session, found)| AgentReport::Loosened { session: *session, found: found.clone() },
-        );
-        modes.chain(loosened).collect()
-    }
-
-    /// Name what the worker adds to the agents it starts (its `slopty` for the hooks, the status
-    /// line and the tools, its mod's plugin directory), so [`Self::loosening_report`] tells them
-    /// from the same flags an agent passed itself.
-    pub fn set_own(&mut self, own: loosening::Own) {
-        self.own = own;
-    }
-
-    /// What loosens the permissions of the agent the worker sees in `session`'s foreground,
-    /// when it is not what was last reported for the session. Call it after [`Self::observe`].
-    /// A session whose agent is gone reports nothing more; one whose next agent loosens nothing
-    /// reports that once.
-    pub fn loosening_report(&mut self, session: SessionId) -> Option<AgentReport> {
-        let own = &self.own;
-        let tracker = self.sessions.get_mut(&session)?;
-        if tracker.loosened.is_none() {
-            // Judged once per command line: a `--settings` file is read only then.
-            let cwd = tracker.cwd.as_deref().unwrap_or_else(|| Path::new("/"));
-            let found = loosening::loosening(&tracker.argv, cwd, own);
-            tracker.loosened = Some(bounded_loosening(found));
-        }
-        let found = tracker.loosened.clone().unwrap_or_default();
-        let before = self.reported_loosened.get(&session);
-        if before.map_or(found.is_empty(), |before| *before == found) {
-            return None;
-        }
-        self.reported_loosened.insert(session, found.clone());
-        Some(AgentReport::Loosened { session, found })
-    }
-
     /// Take the worktree a status line named in `session`; what every client is told when it
     /// changed. Anything but a `Statusline` hook is passed over, and so is
     /// a session with no agent: the branch lives and goes with its agent, so apply the hook
@@ -1513,40 +1345,6 @@ impl AgentTable {
             self.branches.insert(session, now.clone());
         }
         Some(now)
-    }
-
-    /// Keep what `report` says of a session agent's own subagents or task list, for
-    /// [`Self::native_reports`]; any other report is passed over, and so is one about a session
-    /// with no agent.
-    pub fn native_report(&mut self, report: &AgentReport) {
-        let (session, id, subagent) = match report {
-            AgentReport::SubagentStarted { session, agent, .. }
-            | AgentReport::SubagentStopped { session, agent, .. } => (*session, agent, true),
-            AgentReport::NativeTask { session, task } => (*session, &task.id, false),
-            _ => return,
-        };
-        if !self.sessions.contains_key(&session) {
-            return;
-        }
-        let natives = self.natives.entry(session).or_default();
-        let kept = if subagent { &mut natives.subagents } else { &mut natives.tasks };
-        Natives::keep(kept, &mut natives.next, id, report);
-    }
-
-    /// What was last reported of each live agent's own subagents and task list, oldest first
-    /// in each session. A server link that was down, or fell behind, when they were reported
-    /// missed them, so every new link is told them again: a subagent whose stop was missed
-    /// would show running for good.
-    #[must_use]
-    pub fn native_reports(&self) -> Vec<AgentReport> {
-        let mut all: Vec<&(u64, AgentReport)> = Vec::new();
-        for natives in self.natives.values() {
-            let mut session: Vec<_> =
-                natives.subagents.values().chain(natives.tasks.values()).collect();
-            session.sort_by_key(|(at, _)| *at);
-            all.extend(session);
-        }
-        all.into_iter().map(|(_, report)| report.clone()).collect()
     }
 
     /// Every session's pull request and worktree, for a joining client.
@@ -1615,9 +1413,6 @@ impl AgentTable {
         self.parked.retain(|session, _conversation| live.contains(session));
         self.branches.retain(|session, _branch| live.contains(session));
         self.ended.retain(|session| live.contains(session));
-        self.reported_modes.retain(|session, _mode| live.contains(session));
-        self.reported_loosened.retain(|session, _found| live.contains(session));
-        self.natives.retain(|session, _natives| live.contains(session));
         self.sessions.retain(|session, _tracker| {
             if live.contains(session) {
                 return true;
@@ -1671,9 +1466,6 @@ impl AgentTable {
         self.parked.remove(&session);
         self.branches.remove(&session);
         self.ended.remove(&session);
-        self.reported_modes.remove(&session);
-        self.reported_loosened.remove(&session);
-        self.natives.remove(&session);
     }
 
     /// The agent's process in `session`, once the worker has seen it in the foreground.
@@ -2916,47 +2708,6 @@ mod tests {
         assert!(!hook(r#"{"hook_event_name":"Stop","agent_type":""}"#).is_internal_subagent());
     }
 
-    /// The model's subagents and task list become the project tree's leaves; Claude Code's
-    /// own subagents, and hooks that say nothing of either, do not.
-    #[test]
-    fn subagent_and_task_hooks_report_the_tree_s_leaves() {
-        let session = SessionId::new();
-        let started =
-            hook(r#"{"hook_event_name":"SubagentStart","agent_id":"ag1","agent_type":"Explore"}"#);
-        assert_eq!(
-            started.report(session),
-            Some(AgentReport::SubagentStarted {
-                session,
-                agent: "ag1".to_owned(),
-                kind: "Explore".to_owned()
-            })
-        );
-        let stopped = hook(
-            r#"{"hook_event_name":"SubagentStop","agent_id":"ag1","agent_type":"Explore",
-            "agent_transcript_path":"/t/ag1.jsonl","last_assistant_message":"Found it.\nMore"}"#,
-        );
-        assert_eq!(
-            stopped.report(session),
-            Some(AgentReport::SubagentStopped {
-                session,
-                agent: "ag1".to_owned(),
-                transcript: Some("/t/ag1.jsonl".to_owned()),
-                last: Some("Found it.".to_owned()),
-            })
-        );
-        let done = hook(
-            r#"{"hook_event_name":"TaskCompleted","task_id":"3","task_subject":"Read the code"}"#,
-        );
-        let task =
-            NativeTask { id: "3".to_owned(), subject: "Read the code".to_owned(), done: true };
-        assert_eq!(done.report(session), Some(AgentReport::NativeTask { session, task }));
-        let internal =
-            hook(r#"{"hook_event_name":"SubagentStart","agent_id":"c","agent_type":""}"#);
-        assert_eq!(internal.report(session), None, "compaction is no node");
-        assert_eq!(hook(r#"{"hook_event_name":"SubagentStart"}"#).report(session), None);
-        assert_eq!(hook(r#"{"hook_event_name":"Stop"}"#).report(session), None);
-    }
-
     /// The relay keeps the count of work out, whatever it cuts of each entry's text.
     #[test]
     fn a_forwarded_stop_keeps_its_work_and_cuts_its_text() {
@@ -3095,29 +2846,6 @@ mod tests {
         assert!(!table.ended(sid));
     }
 
-    /// The mode is reported when a hook of the session's agent first names it and each time it
-    /// changes, never twice in a row; a nested `claude -p` in the terminal does not move it.
-    #[test]
-    fn a_permission_mode_is_reported_when_it_changes() {
-        let (sid, mut table) = (SessionId::new(), AgentTable::default());
-        let mut heard = |json: &str| {
-            table.apply(sid, &hook(json));
-            table.permission_mode_report(sid)
-        };
-        let mode =
-            |mode: &str| Some(AgentReport::PermissionMode { session: sid, mode: mode.into() });
-        assert_eq!(heard(r#"{"session_id":"a","hook_event_name":"SessionStart"}"#), None);
-        let plan =
-            r#"{"session_id":"a","hook_event_name":"UserPromptSubmit","permission_mode":"plan"}"#;
-        assert_eq!(heard(plan), mode("plan"));
-        assert_eq!(heard(plan), None, "the same mode again");
-        let nested = r#"{"session_id":"b","hook_event_name":"PreToolUse","tool_name":"Bash","permission_mode":"bypassPermissions"}"#;
-        assert_eq!(heard(nested), None, "another agent's hook, while this one works");
-        let edits =
-            r#"{"session_id":"a","hook_event_name":"Stop","permission_mode":"acceptEdits"}"#;
-        assert_eq!(heard(edits), mode("acceptEdits"));
-    }
-
     /// Shift-Tab in the TUI changes the mode without changing the turn: the next hook that
     /// names another mode is an event of its own, carrying the mode and when it was heard, and
     /// the same mode again is not.
@@ -3160,101 +2888,5 @@ mod tests {
             &hook(r#"{"session_id":"a","hook_event_name":"Stop","permission_mode":"plan"}"#),
         );
         assert_eq!(table.hear_mode(sid, "default"), None, "the hooks speak for it now");
-    }
-
-    /// What loosens the agent in the foreground is reported when its command line first says
-    /// so, however `claude` was wrapped, and again only when that changes: a later agent in
-    /// the same terminal that loosens nothing clears it once.
-    #[test]
-    fn what_loosens_the_agent_in_the_foreground_is_reported_when_it_changes() {
-        let (sid, mut table) = (SessionId::new(), AgentTable::default());
-        let loosened = |found: &[&str]| {
-            let found = found.iter().map(|f| (*f).to_owned()).collect();
-            Some(AgentReport::Loosened { session: sid, found })
-        };
-        table.observe(sid, &claude("--model opus"));
-        assert_eq!(table.loosening_report(sid), None, "nothing loosens, nothing to say");
-
-        let wrapped = Observation {
-            program: Some(Program {
-                name: "bash".into(),
-                argv: ["/bin/sh", "-c", "cd ~/w && claude --allowedTools Bash"]
-                    .map(str::to_owned)
-                    .to_vec(),
-            }),
-            ..process("bash", None, 99)
-        };
-        table.observe(sid, &wrapped);
-        assert_eq!(table.loosening_report(sid), loosened(&["--allowedTools"]));
-        table.observe(sid, &wrapped);
-        assert_eq!(table.loosening_report(sid), None, "said once");
-
-        table.observe(sid, &Observation { pid: Some(100), ..claude("-c") });
-        assert_eq!(table.loosening_report(sid), loosened(&[]), "the next agent loosens nothing");
-        assert_eq!(table.loosening_report(sid), None);
-        let many = "--allowedTools ".repeat(40);
-        table.observe(sid, &Observation { pid: Some(101), ..claude(&many) });
-        let Some(AgentReport::Loosened { found, .. }) = table.loosening_report(sid) else {
-            panic!("reported")
-        };
-        assert_eq!(found.len(), slopty_proto::project::LOOSENED_MAX, "bounded for the wire");
-    }
-
-    /// What was reported of each live session's permissions stands to be told again to a new
-    /// server link: its mode, and what loosens it when anything does. A session forgotten
-    /// takes them with it.
-    #[test]
-    fn the_permissions_reported_stand_for_the_next_link() {
-        let (sid, mut table) = (SessionId::new(), AgentTable::default());
-        assert_eq!(table.permission_reports(), []);
-        table.observe(sid, &claude("--allowedTools Bash"));
-        table.apply(
-            sid,
-            &hook(r#"{"session_id":"a","hook_event_name":"Stop","permission_mode":"acceptEdits"}"#),
-        );
-        let reported = [table.permission_mode_report(sid), table.loosening_report(sid)];
-        let mut standing = table.permission_reports();
-        standing.sort_by_key(|r| matches!(r, AgentReport::Loosened { .. }));
-        assert_eq!(
-            standing.into_iter().map(Some).collect::<Vec<_>>(),
-            reported,
-            "told again whole"
-        );
-        table.forget(sid);
-        assert_eq!(table.permission_reports(), [], "gone with its session");
-    }
-
-    /// Each live agent's own subagents and task list stand to be told again to a new server
-    /// link, each as last reported: a subagent's stop missed while the link was down comes
-    /// with the next link, so it does not show running for good. The agent's end takes them.
-    #[test]
-    fn the_natives_reported_stand_for_the_next_link() {
-        let (sid, mut table) = (SessionId::new(), AgentTable::default());
-        table.observe(sid, &claude(""));
-        let said = |table: &mut AgentTable, json: &str| {
-            let hook = hook(json);
-            let report = hook.report(sid).expect("a native's report");
-            table.apply(sid, &hook);
-            table.native_report(&report);
-            report
-        };
-        let started = said(
-            &mut table,
-            r#"{"session_id":"a","hook_event_name":"SubagentStart","agent_id":"s1","agent_type":"Explore"}"#,
-        );
-        let task = said(
-            &mut table,
-            r#"{"session_id":"a","hook_event_name":"TaskCreated","task_id":"t1","task_subject":"Read"}"#,
-        );
-        assert_eq!(table.native_reports(), [started, task.clone()]);
-        let stopped = said(
-            &mut table,
-            r#"{"session_id":"a","hook_event_name":"SubagentStop","agent_id":"s1","last_assistant_message":"Found it."}"#,
-        );
-        assert_eq!(table.native_reports(), [task, stopped], "the stop stands in for the start");
-        table.native_report(&AgentReport::Delivered { session: sid, batch: 1 });
-        assert_eq!(table.native_reports().len(), 2, "only natives are kept");
-        table.forget(sid);
-        assert_eq!(table.native_reports(), [], "gone with its session");
     }
 }

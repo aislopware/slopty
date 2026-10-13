@@ -653,29 +653,32 @@ mod threads {
         kept(&host);
     }
 
-    /// The seat a server's task started a thread at outlives the agent's own account of the
-    /// thread, a read again and a restart: the row keeps naming it, and the whole seat comes
-    /// back from the thread's directory. What the worker adds for the seat (its token among it)
-    /// is never kept, only given where the agent runs.
+    /// The seat an agent's thread was started at outlives the agent's own account of the
+    /// thread, a read again and a restart: the row keeps naming it and its parent, and the whole
+    /// seat comes back from the thread's directory. What the worker adds for the seat (its token
+    /// among it) is never kept, only given where the agent runs.
     #[tokio::test]
     async fn a_seat_outlives_a_read_again_and_a_restart() {
+        use slopty_proto::agent::PARENT_FACT;
         let dir = tempfile::tempdir().unwrap();
         let host = open(dir.path());
         let started = meta();
         let thread = started.id;
         host.create(started.clone()).unwrap();
         let seat = slopty_core::SessionId::new();
+        let parent = ThreadId::new();
         let seated = Seated {
             seat,
-            env: vec![("SLOPTY_TASK".to_owned(), "task-1".to_owned())],
-            role: Some("You review.".to_owned()),
+            facts: vec![(PARENT_FACT.to_owned(), parent.to_string())],
+            system: Some("You review.".to_owned()),
             relay: Some("/opt/slopty/bin/slopty".to_owned()),
         };
         host.seated(thread, &seated);
         let kept = |host: &Host| {
             let (state, _) = state(host, thread);
-            let fact = state.meta.facts.get(slopty_proto::project::SEAT_FACT);
+            let fact = state.meta.facts.get(slopty_proto::agent::SEAT_FACT);
             assert_eq!(fact, Some(&seat.to_string()));
+            assert_eq!(state.meta.facts.get(PARENT_FACT), Some(&parent.to_string()));
             assert_eq!(host.seated_of(thread).as_ref(), Some(&seated));
             assert_eq!(host.seated_at(seat), Some(thread));
         };
@@ -688,15 +691,12 @@ mod threads {
 
         let host = open(dir.path());
         kept(&host);
-        assert_eq!(host.env_of(&seated), seated.env, "the server's alone, until the daemon says");
-        host.set_seat_env(std::sync::Arc::new(|seat, extra| {
-            let mut env = extra.to_vec();
-            env.push(("SLOPTY_SESSION_TOKEN".to_owned(), format!("token-for-{seat}")));
-            env
+        assert!(host.env_of(&seated).is_empty(), "nothing until the daemon says");
+        host.set_seat_env(std::sync::Arc::new(|seat| {
+            vec![("SLOPTY_SESSION_TOKEN".to_owned(), format!("token-for-{seat}"))]
         }));
         let env = host.env_of(&seated);
-        assert_eq!(env[..1], seated.env);
-        assert_eq!(env[1], ("SLOPTY_SESSION_TOKEN".to_owned(), format!("token-for-{seat}")));
+        assert_eq!(env, [("SLOPTY_SESSION_TOKEN".to_owned(), format!("token-for-{seat}"))]);
         let file =
             std::fs::read_to_string(dir.path().join(thread.to_string()).join("seat.json")).unwrap();
         assert!(!file.contains("token"), "no token is kept: {file}");

@@ -22,9 +22,9 @@
 //! would be ([`Verb::AnswerRequest`]). A file too large for one frame goes up in parts
 //! ([`Verb::Upload`]) and comes down in [`Verb::ReadFile`] ranges.
 //!
-//! Projects ([`crate::project`]) are the server's own: it answers the project and task verbs
-//! from its store, starts what runs for a task on the worker its orchestrator names or one with
-//! room ([`Verb::TaskSpawn`]), and logs every change as a [`Happening::Project`].
+//! Agents start agents ([`Verb::AgentStart`]) on the machine they name, tell them things, wait
+//! for them and read them, at any depth: the server records who started whom, and a child coming
+//! to rest is news to its parent through the parent's hooks (`docs/decisions/projects.md`).
 
 use std::time::Duration;
 
@@ -33,13 +33,9 @@ use slopty_core::{ItemId, SessionId, WallMs, WorkerId, XferId};
 
 use crate::folder::FsOp;
 use crate::items::{Item, ItemKind};
-use crate::project::{
-    LimitsChange, Project, ProjectId, ProjectStatus, ProjectUpdate, Report, TaskChange, TaskId,
-    TaskLaunch, TaskSpec, WorkerFacts,
-};
 use crate::screen::{CaptureTarget, DisplayInfo, WindowInfo};
 use crate::search::{FileHits, SearchQuery, SearchSummary};
-use crate::server::{Liveness, WorkerInfo};
+use crate::server::{Liveness, WorkerFacts, WorkerInfo};
 use crate::terminal::SessionSummary;
 use crate::thread::attention::Rung;
 use crate::thread::wire::ThreadRow;
@@ -94,8 +90,8 @@ impl IdempotencyKey {
     }
 
     /// The key of the step `name` of a call made under this key: the same for every retry of
-    /// the call, and another for each step, so a call that makes a task and then starts it
-    /// makes one task however often it is sent.
+    /// the call, and another for each step, so a call that clones and then starts an agent
+    /// starts one however often it is sent.
     #[must_use]
     pub fn part(&self, name: &str) -> Self {
         let whole = format!("{name}.{}", self.0);
@@ -295,33 +291,6 @@ pub enum Verb {
         /// A git worktree the worker makes, or reopens as it is, from the clone `cwd` is in at
         /// its base fetched current ([`crate::thread::wire::NewWorktree`]); the terminal opens
         /// in it, where `cwd` stood in the clone.
-        worktree: Option<crate::thread::wire::NewWorktree>,
-    },
-    /// Start Claude Code's TUI in a new terminal, optionally with a first prompt.
-    SpawnAgent {
-        /// Where.
-        worker: WorkerId,
-        /// Working directory (usually a repository).
-        cwd: String,
-        /// The first prompt, typed once the agent is ready.
-        prompt: Option<String>,
-        /// Arguments after the agent's program.
-        args: Vec<String>,
-        /// Extra environment.
-        env: Vec<(String, String)>,
-        /// The grid, as for [`Verb::OpenTerminal`].
-        size: Option<Size>,
-        /// The id the terminal takes, as for [`Verb::OpenTerminal`].
-        session: Option<SessionId>,
-        /// How far the agent may go before it asks, held by its settings: bypass mode locked
-        /// off, and auto mode too below [`crate::project::Autonomy::Own`]. `None` for the
-        /// person's own start, which their settings decide. The server sets it on every start
-        /// it forwards: an agent's start is held to asking, a task's to its project's level.
-        autonomy: Option<crate::project::Autonomy>,
-        /// A worktree made first by the worker when it is not there, from the clone `cwd` is in
-        /// at its base fetched current ([`crate::thread::wire::NewWorktree`]), for the agent's
-        /// own `--worktree <name>` in `args` to open. Without it Claude Code makes that one
-        /// itself, from `origin`'s default branch.
         worktree: Option<crate::thread::wire::NewWorktree>,
     },
     /// Type into a terminal.
@@ -541,113 +510,6 @@ pub enum Verb {
         /// [`crate::search::MAX_LINES`].
         max_lines: u32,
     },
-    /// Make a project; answered by the server with [`Outcome::Project`].
-    ProjectCreate {
-        /// Its name, unique on the server.
-        project: ProjectId,
-        /// What it is for, in a line.
-        title: String,
-        /// The goal the person hands over, which its orchestrator is started on
-        /// ([`crate::project::Project::goal`]).
-        goal: Option<String>,
-        /// How far its agents go before they ask the person; only the person sets it.
-        autonomy: crate::project::Autonomy,
-        /// The repository its tasks work in.
-        repo: String,
-        /// The branch finished work lands on. Empty asks for a branch of the project's own
-        /// ([`crate::project::Task::goal_branch`]), made in `repo` on the orchestrator's
-        /// worker at the tip of the branch checked out there ([`Verb::BranchOff`]), so a goal
-        /// never lands on the person's branch unasked; that needs an `orchestrator`.
-        target: String,
-        /// The command that says a task's work is right.
-        verifier: Option<String>,
-        /// Push the target to its clone's `origin` after each merge ([`Project::push`]); only
-        /// the person turns it on.
-        push: bool,
-        /// The orchestrator's terminal.
-        orchestrator: Option<TermRef>,
-        /// Its limits over [`crate::project::Limits::default`]; only the person sets them.
-        limits: LimitsChange,
-        /// Anything its agents keep with it: the text of a JSON object.
-        metadata: Option<String>,
-    },
-    /// Change a project's orchestrator, verifier, pushing, autonomy, limits or metadata; what
-    /// is absent stays. Answered with [`Outcome::Project`].
-    ProjectSet {
-        /// Which.
-        project: ProjectId,
-        /// How far its agents go before they ask the person; only the person sets it.
-        autonomy: Option<crate::project::Autonomy>,
-        /// The orchestrator's terminal.
-        orchestrator: Option<TermRef>,
-        /// The verifier command; empty for none.
-        verifier: Option<String>,
-        /// Whether to push the target after each merge ([`Project::push`]); only the person
-        /// sets it.
-        push: Option<bool>,
-        /// Its limits; only the person sets them.
-        limits: LimitsChange,
-        /// New metadata, in place of the old.
-        metadata: Option<String>,
-    },
-    /// The orchestrator says where the project's goal stands: a summary, what comes next, and
-    /// whether the goal is met, which tells the person once. Each text is at most
-    /// [`crate::project::Progress::TEXT_MAX`] bytes. Answered with [`Outcome::Project`].
-    ProjectProgress {
-        /// Which.
-        project: ProjectId,
-        /// What is done and what runs.
-        summary: String,
-        /// What comes next.
-        next: Option<String>,
-        /// The goal is met.
-        done: bool,
-    },
-    /// Every project; answered with [`Outcome::Projects`].
-    ProjectList,
-    /// A project whole, its timeline from `since`, waiting up to `timeout_ms` for an entry
-    /// past it when there is none yet; answered with [`Outcome::Project`]. Only `task_wait`
-    /// waits on it: the `project_status` tool reads it at once.
-    ProjectStatus {
-        /// Which.
-        project: ProjectId,
-        /// The first timeline entry wanted: the `next` of the previous answer. The last few
-        /// when absent.
-        since: Option<u64>,
-        /// Wait this long for an entry past `since`; capped as [`Verb::WaitFor`] is.
-        timeout_ms: u32,
-    },
-    /// Make a task under the project's orchestrator; answered with [`Outcome::Task`]. A
-    /// dependency that leads back to it is refused.
-    TaskCreate {
-        /// In which project.
-        project: ProjectId,
-        /// What it is.
-        spec: Box<TaskSpec>,
-    },
-    /// Move a task, record its branch or its verifier's word, or note something on its
-    /// timeline; answered with [`Outcome::Task`].
-    TaskUpdate {
-        /// In which project.
-        project: ProjectId,
-        /// Which.
-        task: TaskId,
-        /// What changes.
-        change: Box<TaskChange>,
-    },
-    /// Start what runs for a task on the worker it is pinned to, else one with room, with the
-    /// project and the task in its environment; answered with [`Outcome::Task`] once it runs,
-    /// or [`ErrorCode::Unplaced`] saying why each worker was passed over, or
-    /// [`ErrorCode::Limit`] naming the limit reached: for an agent's start, among them, as
-    /// many of the project's tasks waiting on the person as its [`crate::project::Limits::review`].
-    TaskSpawn {
-        /// In which project.
-        project: ProjectId,
-        /// Which.
-        task: TaskId,
-        /// How to start it.
-        launch: TaskLaunch,
-    },
     /// What the workers are and have; answered with [`Outcome::Facts`].
     ///
     /// The server forwards it to each worker it has not asked yet on its registration, naming
@@ -655,32 +517,6 @@ pub enum Verb {
     WorkerFacts {
         /// This worker only; every one when absent.
         worker: Option<WorkerId>,
-    },
-    /// One node of a project's tree in full: a task with its brief and metadata, or the
-    /// orchestrator's node, each with the natives Claude Code keeps in it. Answered with
-    /// [`Outcome::Node`].
-    TaskGet {
-        /// In which project.
-        project: ProjectId,
-        /// Which task; the orchestrator's node when absent.
-        task: Option<TaskId>,
-    },
-    /// A task's agent reports on its work to the project's orchestrator, delivered through
-    /// its hooks when the report's kind says; answered with [`Outcome::Task`].
-    TaskReport {
-        /// In which project.
-        project: ProjectId,
-        /// Which.
-        task: TaskId,
-        /// What it says.
-        report: Report,
-    },
-    /// What a terminal works on by the server's record, in any project: answered with
-    /// [`Outcome::WorkingOn`]. How a tool finds its caller's own project and task before the
-    /// caller's environment, which may be stale or inherited.
-    WorkingOn {
-        /// The terminal, by its session.
-        session: SessionId,
     },
     /// Clone a repository onto a worker from `url`, with the worker's own git credentials,
     /// into the place it keeps its clones; one there already is answered as it is. How it goes
@@ -724,179 +560,26 @@ pub enum Verb {
         /// The commit the branch is at, which the bundle must hold.
         head: String,
     },
-    /// Check out `head` in the project's verify checkout of the clone at `repo`
-    /// ([`crate::project::VERIFY_PLACES`]), made on first use and reused, and run `command`
-    /// there through the person's login shell in a new terminal under the id `session`, which
-    /// every client shows. Answered with [`Outcome::Verifying`] once it runs; its end is the
-    /// terminal's own.
-    Verify {
-        /// Where.
-        worker: WorkerId,
-        /// The clone the commit is in.
-        repo: String,
-        /// The checkout's name in [`crate::project::VERIFY_PLACES`]: the project's.
-        worktree: String,
-        /// The commit or branch to verify.
-        head: String,
-        /// The branch work lands on, whose fork point from `head` is the run's base.
-        target: String,
-        /// The verifier, a shell command line.
-        command: String,
-        /// The terminal's id, which the server chooses.
-        session: SessionId,
-        /// A name for its tile.
-        title: String,
-    },
-    /// Rebase `head` onto the branch `onto` in the project's verify checkout of the clone at
-    /// `repo`, as the merge queue does before it verifies again, with `trailers` added to each
-    /// commit's message as `git interpret-trailers` adds them (a trailer already there is not
-    /// added twice). A head that already holds `onto` and every trailer is answered as it is.
-    /// Answered with [`Outcome::Rebased`], or [`ErrorCode::Conflict`] naming the paths that
-    /// conflict.
-    Rebase {
-        /// Where.
-        worker: WorkerId,
-        /// The clone.
-        repo: String,
-        /// The checkout's name in [`crate::project::VERIFY_PLACES`].
-        worktree: String,
-        /// The commit to rebase.
-        head: String,
-        /// The branch it goes on top of.
-        onto: String,
-        /// The commit of another task's work `head` started on, which merged since as other
-        /// commits ([`crate::project::Task::started_on`]): when `head` holds it and `onto` does
-        /// not, only the commits after it are picked, so that work is not picked twice.
-        /// Otherwise the rebase is the plain one.
-        after: Option<String>,
-        /// Each `(token, value)` to add to every commit rebased: the task and the thread its
-        /// work came from. A token is letters, digits and `-`; a value has no line break.
-        trailers: Vec<(String, String)>,
-        /// The commit last verified, whose tree the rebased one is compared with
-        /// ([`Outcome::Rebased::verified`]).
-        verified: Option<String>,
-    },
-    /// What `head` did to the tests since it left the branch `target`, in the clone at `repo`
-    /// ([`crate::project::TestDiff`]): every test file it deleted, changed or added, by
-    /// [`crate::project::is_test_path`] with `test_paths`. Answered with [`Outcome::TestDiff`].
-    TestDiff {
-        /// Where.
-        worker: WorkerId,
-        /// The clone.
-        repo: String,
-        /// The commit or branch the work is at.
-        head: String,
-        /// The branch it left.
-        target: String,
-        /// The project's own test paths, beside the usual ones.
-        test_paths: Vec<String>,
-    },
-    /// Move the branch `target` of the clone at `repo` from `from` to `to`, a commit that
-    /// descends from it, and nothing else: in the checkout that has it checked out, as `git
-    /// merge --ff-only` does, so nothing of the person's there is overwritten. With `push`, it
-    /// goes to `origin` first: a push the forge refuses because the branch is protected moves
-    /// nothing and is answered [`ErrorCode::Protected`], so the work lands through a pull
-    /// request ([`Verb::LandPull`]); a push that fails otherwise leaves the branch moved and
-    /// says why. Answered with [`Outcome::FastForwarded`], or [`ErrorCode::Conflict`] when the
-    /// branch is no longer at `from`.
-    FastForward {
-        /// Where.
-        worker: WorkerId,
-        /// The clone.
-        repo: String,
-        /// The branch.
-        target: String,
-        /// The commit it must be at now.
-        from: String,
-        /// The commit it moves to.
-        to: String,
-        /// Push it to `origin` after.
-        push: bool,
-    },
-    /// Tell a task's agent, or the project's orchestrator, something: the person's own words,
-    /// or the orchestrator's to one of its tasks, marked as the orchestrator's. They reach the
-    /// agent through its hooks as reports do (its inbox wakes it when idle), never typed into
-    /// its terminal. The board's next steps (fix CI, address the review's comments, resolve
-    /// conflicts) and its line to the orchestrator are said this way. Answered with
-    /// [`Outcome::Done`]; a node with no agent running is [`ErrorCode::Invalid`]. Any agent but
-    /// the orchestrator is [`ErrorCode::Forbidden`], and the orchestrator telling a task that
-    /// waits on the person is [`ErrorCode::Conflict`].
-    TaskTell {
-        /// In which project.
-        project: ProjectId,
-        /// Which task's agent; the orchestrator when absent.
-        task: Option<TaskId>,
-        /// What the person says, at most [`crate::project::NOTE_MAX`] bytes.
-        text: String,
-    },
-    /// Put a task in its project's merge queue, the person's word, and the only way work
-    /// merges: a task its checks passed waits in Ready to merge until then. Work not checked
-    /// yet (one given back, or done without a report) is verified first when the project or the
-    /// task has a verifier. Answered with [`Outcome::Task`]; an agent is
-    /// [`ErrorCode::Forbidden`].
-    TaskMerge {
-        /// In which project.
-        project: ProjectId,
-        /// Which.
-        task: TaskId,
-    },
-    /// The person lets a project go: its board, its tasks and its queue. The agents the server
-    /// started for its tasks stop, in terminals or as threads, on a worker away once it is
-    /// back; the orchestrator and every other terminal stay. Answered with [`Outcome::Done`].
-    ProjectDelete {
-        /// Which.
-        project: ProjectId,
-    },
-    /// Push a merged task's target to its clone's `origin`, the person's word: a merge the
-    /// project did not push (pushing is off unless the person turns it on), or one whose push
-    /// failed. The target goes as it is now, with what the queue merged since, so every merged
-    /// task's card not pushed yet says it was. Answered with [`Outcome::Task`], the card saying
-    /// how the push went; a task whose merge was pushed is answered as it is, one not merged is
-    /// [`ErrorCode::Invalid`], and an agent is [`ErrorCode::Forbidden`].
-    TaskPush {
-        /// In which project.
-        project: ProjectId,
-        /// Which.
-        task: TaskId,
-    },
-    /// Remove a finished task's worktree from its worker: one an agent made under its clone's
-    /// `.claude/worktrees/`, with nothing uncommitted in it and no terminal on the worker
-    /// working in it. The branch it had checked out goes too only when every commit on it is
-    /// in one of `landed` by patch (`git cherry`), so work the merge queue rebased counts as
-    /// landed; otherwise the branch is kept. Answered with [`Outcome::WorktreeRemoved`];
-    /// [`ErrorCode::Conflict`] while a terminal works in it or something in it is not
-    /// committed, [`ErrorCode::Invalid`] for a path that is no such worktree. A project's
-    /// verify checkout (`<VERIFY_PLACES>/<project>`, [`crate::project::VERIFY_PLACES`]) is the
-    /// server's own: it goes by force, and one already gone answers as removed.
-    RemoveWorktree {
-        /// Where.
-        worker: WorkerId,
-        /// The worktree, as its agent reported it.
-        worktree: String,
-        /// Where the task's work landed, as commits or branches of the clone (the merge's
-        /// head, the target, the target on `origin`); none keeps the branch.
-        landed: Vec<String>,
-    },
-    /// Start a task's agent as a thread of the worker's thread host, seated at `seat`: its
-    /// row carries [`crate::project::SEAT_FACT`], its Slopty tools speak as `seat` with the
-    /// worker's token for it and `env`, and `role` reaches it through its agent's own door (a
+    /// Start an agent as a thread of the worker's thread host, seated at `seat`: its row
+    /// carries [`crate::agent::SEAT_FACT`] and `facts`, its Slopty tools speak as `seat` with
+    /// the worker's token for it, and `system` reaches it through its agent's own door (a
     /// system prompt where it takes one, else ahead of its first prompt). An agent whose
     /// thread runs in a terminal runs in one opened under `seat`. A start that names a
     /// worktree ([`crate::thread::wire::Start::worktree`]) works in it, made or reopened, and
-    /// the answer says where. A repeat with a `seat` already started answers that thread. Answered
-    /// with [`Outcome::ThreadStarted`]; [`ErrorCode::Unsupported`] for an agent the worker
-    /// cannot start.
+    /// the answer says where. A repeat with a `seat` already started answers that thread.
+    /// Answered with [`Outcome::ThreadStarted`]; [`ErrorCode::Unsupported`] for an agent the
+    /// worker cannot start. The server sends it for [`Verb::AgentStart`].
     StartThread {
         /// Where.
         worker: WorkerId,
         /// What to start.
         start: Box<crate::thread::wire::Start>,
-        /// The id it is known by: the task's [`crate::project::Assignment::term`].
+        /// The id it is known by.
         seat: SessionId,
-        /// Variables for the agent and its Slopty tools (the server, project and task).
-        env: Vec<(String, String)>,
-        /// What the agent is told it is for.
-        role: Option<String>,
+        /// Open facts its row carries from the start ([`crate::agent::PARENT_FACT`]).
+        facts: Vec<(String, String)>,
+        /// Extra system text, where its agent takes some.
+        system: Option<String>,
     },
     /// Make a folder, move or rename an entry, or put one in the OS's trash, as a folder tile
     /// does ([`FsOp`]): nothing is replaced and nothing unlinked. Answered with
@@ -906,73 +589,6 @@ pub enum Verb {
         worker: WorkerId,
         /// What to do.
         op: FsOp,
-    },
-    /// Start a task's work again with a new agent: the one on it now, if one runs, is closed,
-    /// and a new one starts on the worker it ran on, in the task's worktree there, the work so
-    /// far kept. Its first prompt is the task's brief, and a pointer to the earlier agent's
-    /// thread. The agent is `agent` (handing the task to another agent), else the one it ran
-    /// last (a fresh start of the same agent). Answered with [`Outcome::Task`]. An agent may
-    /// restart only its project's tasks, as their orchestrator, never its own task.
-    ///
-    /// It starts elsewhere when `worker` names another machine, or names none while the one
-    /// it ran on is away: there from its branch as `origin` has it, else from the target, and
-    /// the seat it had is let go.
-    TaskRestart {
-        /// In which project.
-        project: ProjectId,
-        /// Which.
-        task: TaskId,
-        /// The agent that takes it; the one it ran last when absent.
-        agent: Option<AgentId>,
-        /// The machine it starts on; where it ran when absent and that one is there.
-        worker: Option<WorkerId>,
-    },
-    /// Server → worker: land `head` on the protected `target` through the forge. It is pushed
-    /// to `origin` as `branch` (forced: it is the task's work rebased by the merge queue), and
-    /// the open pull request of `branch` into `target` is found, or opened with `title` and
-    /// `body`, by the person's own `gh` or `glab`. Answered with [`Outcome::PullOpened`].
-    LandPull {
-        /// Where.
-        worker: WorkerId,
-        /// The clone.
-        repo: String,
-        /// The commit that lands.
-        head: String,
-        /// The branch it goes up as.
-        branch: String,
-        /// The branch it lands on.
-        target: String,
-        /// A new pull request's title.
-        title: String,
-        /// A new pull request's description.
-        body: String,
-    },
-    /// Server → worker, once a task's pull request merged on the forge: bring the branch
-    /// `target` of the clone at `repo` up to `origin`'s, fetched now, as a fast-forward only,
-    /// as [`Verb::FastForward`] moves it, so the next task is rebased onto what the forge holds.
-    /// A branch already there or ahead stays. Answered with [`Outcome::FastForwarded`], never
-    /// pushed, or [`ErrorCode::Conflict`] when the clone's branch has commits `origin`'s lacks.
-    CatchUp {
-        /// Where.
-        worker: WorkerId,
-        /// The clone.
-        repo: String,
-        /// The branch.
-        target: String,
-    },
-    /// Server → worker: delete branches the server named in the clone at `repo`, once what
-    /// they carried has landed or their project is gone: a merged task's
-    /// [`crate::project::Task::home_branch`], a project's
-    /// [`crate::project::Task::target_branch`]. Only names under `slopty/` are taken; one
-    /// absent is passed over, and one a worktree has checked out stays. Answered with
-    /// [`Outcome::Done`].
-    DropBranches {
-        /// Where.
-        worker: WorkerId,
-        /// The clone.
-        repo: String,
-        /// The branches, by name.
-        branches: Vec<String>,
     },
     /// Read a daemon's settings file, after making `edits` to it: the keys a worker or the
     /// server reads itself (`[worker]`, `[server]`), which a settings page on another device
@@ -989,8 +605,8 @@ pub enum Verb {
     },
     /// Send a thread a message as its composer would, to go when the agent next takes one
     /// (what a phone's note replies with, with no window open). The person's alone; an agent
-    /// is [`ErrorCode::Forbidden`] (an orchestrator speaks to its tasks with
-    /// [`Verb::TaskTell`]). Answered with [`Outcome::Done`] once the thread took it.
+    /// is [`ErrorCode::Forbidden`] (an agent speaks to another with [`Verb::AgentTell`]).
+    /// Answered with [`Outcome::Done`] once the thread took it.
     SendMessage {
         /// Which thread; the server finds where it is and sends [`ThreadOf::On`].
         of: ThreadOf,
@@ -1006,86 +622,53 @@ pub enum Verb {
         /// Which.
         worker: WorkerId,
     },
-    /// Server → worker: make the branch `branch` in the clone at `repo` at the tip of the
-    /// branch checked out there (its commit when detached), for a project made with no target
-    /// ([`Verb::ProjectCreate`]). Only names under `slopty/` are made; one there already is
-    /// left as it is. Answered with [`Outcome::Done`].
-    BranchOff {
-        /// Where.
-        worker: WorkerId,
-        /// The clone, or a worktree of it.
+    /// Start an agent on a machine (`docs/decisions/projects.md`). The server builds what
+    /// its harness is started with from the person's autonomy setting, gives it Slopty's
+    /// tools, and records the caller's agent as its parent. Answered with
+    /// [`Outcome::ThreadStarted`] once it runs.
+    AgentStart(Box<crate::agent::AgentStart>),
+    /// Words for an agent, marked as the caller's: they reach it through its hooks (its inbox
+    /// wakes it when idle), never typed into its terminal. Answered with [`Outcome::Done`].
+    AgentTell {
+        /// Which agent.
+        agent: ThreadId,
+        /// What to say, at most [`crate::agent::TELL_MAX`] bytes.
+        text: String,
+    },
+    /// Wait until one, or each, of `agents` needs someone or comes to rest, for at most
+    /// `timeout_ms` (capped as [`Verb::WaitFor`] is). Answered with [`Outcome::Agents`], every
+    /// agent named as it stands then.
+    AgentWait {
+        /// Which, at most [`crate::agent::WAIT_MAX`].
+        agents: Vec<ThreadId>,
+        /// Wait for every one; the first one when `false`.
+        all: bool,
+        /// How long, in milliseconds.
+        timeout_ms: u32,
+    },
+    /// End an agent, its conversation kept. Answered with [`Outcome::Done`].
+    AgentStop {
+        /// Which agent.
+        agent: ThreadId,
+    },
+    /// Every agent on the fleet, each with its parent, so they read as a tree. Answered with
+    /// [`Outcome::Agents`].
+    Agents,
+    /// Bring a branch from a clone on one machine into a clone on another, as a git bundle
+    /// through the server. Answered with [`Outcome::Fetched`].
+    BranchBring {
+        /// The machine the branch is on.
+        from: WorkerId,
+        /// The clone or worktree it is in there.
         repo: String,
-        /// The branch, by name.
+        /// The branch.
         branch: String,
-    },
-    /// Server → worker: which of `heads` the forge's `target` holds, after one fetch of it
-    /// from `origin` in the clone at `repo`: merged work a push made outside Slopty took there
-    /// ([`crate::project::Merge::Merged`]'s `pushed`). A head the clone does not have is not
-    /// held. Answered with [`Outcome::OnOrigin`]; a fetch that fails is
-    /// [`ErrorCode::Failed`], saying why.
-    OnOrigin {
-        /// Where.
-        worker: WorkerId,
-        /// The clone.
-        repo: String,
-        /// The branch on `origin`.
-        target: String,
-        /// The commits asked about, in hex.
-        heads: Vec<String>,
-    },
-    /// Land a project's finished goal, the person's word: its target (the project's own
-    /// branch, [`crate::project::Task::goal_branch`]) goes to `origin` from the orchestrator's
-    /// clone, into a pull request found or opened there into `into`, else the branch it was
-    /// made from ([`crate::project::Project::base`]). Every merged task's card says it was
-    /// pushed. Answered with [`Outcome::PullOpened`]; a repeat finds the same pull request. A
-    /// project with no branch to land into is [`ErrorCode::Invalid`], saying to name one, and
-    /// an agent is [`ErrorCode::Forbidden`].
-    ProjectLand {
-        /// Which.
-        project: ProjectId,
-        /// The branch to land into, over the one the target was made from.
+        /// The machine it goes to.
+        to: WorkerId,
+        /// The clone it lands in there; the clone of the same repository there when absent.
         into: Option<String>,
-    },
-    /// Resume a project's orchestrator whose agent has ended, the person's word: its thread
-    /// ([`crate::project::Project::orchestrator_thread`]) is taken up again on its machine, as
-    /// the thread's own Resume would, and the project follows it to its new terminal. Answered
-    /// with [`Outcome::ThreadStarted`]; one still running is [`ErrorCode::Invalid`], and an
-    /// agent is [`ErrorCode::Forbidden`].
-    ProjectResume {
-        /// Which.
-        project: ProjectId,
-    },
-    /// Server → worker: take thread `of` up again in its agent's own session, as a client's
-    /// Resume on a thread whose agent exited does. Answered with [`Outcome::ThreadStarted`];
-    /// [`ErrorCode::Invalid`] for a thread whose agent runs or that cannot be resumed.
-    ResumeThread {
-        /// Which thread; the server finds where it is and sends [`ThreadOf::On`].
-        of: ThreadOf,
-    },
-    /// Server → worker: the pull request of `branch` in the clone `repo`, checked out there or
-    /// not, as the person's own `gh` or `glab` reads it. Answered with [`Outcome::PullOf`].
-    PullOf {
-        /// Where.
-        worker: WorkerId,
-        /// A folder in the clone.
-        repo: String,
-        /// The branch whose pull request it is.
-        branch: String,
-    },
-    /// Whether a goal can start from the folder `repo` on `worker`, asked before anything is
-    /// started for it: a folder there, in a git repository with a commit checked out, that has
-    /// the branch `target` when one is named (blank: the goal gets a branch of its own off what
-    /// is checked out, [`Verb::BranchOff`], which checks the place the same way). A client asks
-    /// it before it starts a goal's orchestrator, so nothing is started for a goal refused.
-    /// Answered with [`Outcome::Done`]; a place a goal cannot start from is
-    /// [`ErrorCode::Invalid`], saying why in a sentence a person reads. Changes nothing.
-    GoalCheck {
-        /// Where.
-        worker: WorkerId,
-        /// The folder the orchestrator would work in.
-        repo: String,
-        /// The branch its work would land on; blank for one of the goal's own.
-        target: String,
+        /// The name it lands as; its own when absent.
+        name: Option<String>,
     },
 }
 
@@ -1144,7 +727,6 @@ impl Verb {
     pub const fn changes(&self) -> bool {
         match self {
             Self::OpenTerminal { .. }
-            | Self::SpawnAgent { .. }
             | Self::SendInput { .. }
             | Self::WaitFor { .. }
             | Self::Close { .. }
@@ -1156,32 +738,13 @@ impl Verb {
             | Self::AnswerRequest { .. }
             | Self::SendMessage { .. }
             | Self::RestartWorker { .. }
-            | Self::BranchOff { .. }
-            | Self::ProjectCreate { .. }
-            | Self::ProjectSet { .. }
-            | Self::ProjectProgress { .. }
-            | Self::TaskCreate { .. }
-            | Self::TaskUpdate { .. }
-            | Self::TaskSpawn { .. }
-            | Self::TaskRestart { .. }
-            | Self::LandPull { .. }
-            | Self::TaskTell { .. }
-            | Self::TaskReport { .. }
             | Self::BundleBranch { .. }
             | Self::FetchBundle { .. }
-            | Self::TaskMerge { .. }
-            | Self::TaskPush { .. }
-            | Self::ProjectLand { .. }
-            | Self::ProjectResume { .. }
-            | Self::ResumeThread { .. }
-            | Self::ProjectDelete { .. }
-            | Self::Verify { .. }
-            | Self::Rebase { .. }
-            | Self::FastForward { .. }
-            | Self::CatchUp { .. }
-            | Self::RemoveWorktree { .. }
-            | Self::DropBranches { .. }
             | Self::StartThread { .. }
+            | Self::AgentStart(..)
+            | Self::AgentTell { .. }
+            | Self::AgentStop { .. }
+            | Self::BranchBring { .. }
             | Self::FsChange { .. } => true,
             // Reading the file again is the same; an edit writes it.
             Self::Settings { edits, .. } => !edits.is_empty(),
@@ -1190,7 +753,6 @@ impl Verb {
             Self::Upload { part, .. } => matches!(part, UploadPart::Finish { .. }),
             // A clone there already is answered as it is.
             Self::CloneRepo { .. }
-            | Self::TestDiff { .. }
             | Self::ListWorkers
             | Self::ListTerminals { .. }
             | Self::ReadScreen { .. }
@@ -1206,19 +768,13 @@ impl Verb {
             | Self::ListItems { .. }
             | Self::ListWindows { .. }
             | Self::ReadThread { .. }
-            | Self::PullOf { .. }
-            | Self::GoalCheck { .. }
             | Self::CaptureStill { .. }
-            | Self::ProjectList
-            | Self::ProjectStatus { .. }
             | Self::WorkerFacts { .. }
-            | Self::TaskGet { .. }
-            | Self::WorkingOn { .. }
+            | Self::AgentWait { .. }
+            | Self::Agents
             // A second magic packet wakes nothing that the first did not.
             | Self::Wake { .. }
-            | Self::WakePeer { .. }
-            // A fetch and a read: asked again, it says what holds then.
-            | Self::OnOrigin { .. } => false,
+            | Self::WakePeer { .. } => false,
         }
     }
 }
@@ -1283,7 +839,7 @@ pub enum Happening {
     SessionOpened {
         /// Where.
         worker: WorkerId,
-        /// What; boxed, being the largest but for a project's.
+        /// What; boxed, being the largest.
         summary: Box<SessionSummary>,
     },
     /// A terminal ended.
@@ -1309,8 +865,6 @@ pub enum Happening {
         /// Exit status, or the signal number negated; none when its worker did not see it end.
         status: Option<i32>,
     },
-    /// A project or one of its tasks changed; boxed, being the largest by far.
-    Project(Box<ProjectUpdate>),
 }
 
 /// What kind of thing is at a path.
@@ -1427,6 +981,8 @@ pub enum ErrorCode {
     UnknownTerminal,
     /// No such item.
     UnknownItem,
+    /// No such agent.
+    UnknownAgent,
     /// A malformed argument (a bad key name, a bad pattern).
     Invalid,
     /// The worker could not do it (a file error, a spawn failure).
@@ -1438,19 +994,8 @@ pub enum ErrorCode {
     Interrupted,
     /// The worker cannot do this at all: it may not capture its screen, or has none.
     Unsupported,
-    /// No such project.
-    UnknownProject,
-    /// No such task in the project.
-    UnknownTask,
-    /// It would take what another holds: a task another agent works on, a branch moved on.
+    /// It would take what another holds: a branch moved on, a session another writes.
     Conflict,
-    /// No worker may run the task now; the message says why each was passed over.
-    Unplaced,
-    /// A limit the project or the person set is reached, or would be passed; the message
-    /// names it and who may raise it.
-    Limit,
-    /// A metadata document does not parse or check.
-    BadExpression,
     /// Nothing may type into the agent now: it waits on a person (a permission, a question),
     /// or a person has typed into its composer and not sent it. The message says which.
     AwaitsPerson,
@@ -1459,15 +1004,12 @@ pub enum ErrorCode {
     AgentNotReady,
     /// The agent's program has ended; what is typed would reach the shell below it.
     AgentExited,
-    /// The caller may not do this: an agent answering a permission, or moving a task where
-    /// only the person or the merge queue may.
+    /// The caller may not do this: an agent answering a permission, or changing what only the
+    /// person changes.
     Forbidden,
     /// There is nothing new to carry: the branch has no commit beyond the one it would start
     /// after, so the other side has it from the same forge.
     NothingNew,
-    /// The forge refused a push to the branch because it is protected: work lands on it
-    /// through a pull request.
-    Protected,
     /// The server runs another build than the caller, which this build cannot talk to: one of
     /// them is to be updated. A caller's own answer, never the server's.
     OtherBuild,
@@ -1485,9 +1027,9 @@ pub enum Outcome {
         /// The agent in each terminal that has one, as its thread's row says.
         agents: Vec<(TermRef, TermAgent)>,
     },
-    /// For [`Verb::OpenTerminal`] and [`Verb::SpawnAgent`].
+    /// For [`Verb::OpenTerminal`].
     Opened(TermRef),
-    /// For [`Verb::OpenTerminal`] and [`Verb::SpawnAgent`] that named a worktree: the terminal,
+    /// For [`Verb::OpenTerminal`] that named a worktree: the terminal,
     /// and the worktree it opened in, made or reopened, so whoever started it can free it.
     OpenedIn {
         /// The terminal.
@@ -1525,7 +1067,8 @@ pub enum Outcome {
     Ports(Vec<Port>),
     /// Done, nothing to report ([`Verb::SendInput`], [`Verb::Close`],
     /// [`Verb::ResizeTerminal`], [`Verb::ForgetWorker`], [`Verb::RenameItem`],
-    /// [`Verb::RemoveItem`], [`Verb::AnswerRequest`], [`Verb::Upload`], [`Verb::DropBranches`]).
+    /// [`Verb::RemoveItem`], [`Verb::AnswerRequest`], [`Verb::Upload`], [`Verb::AgentTell`],
+    /// [`Verb::AgentStop`]).
     Done,
     /// It failed.
     Error {
@@ -1591,19 +1134,8 @@ pub enum Outcome {
         /// What it found; `capped` when there were more lines than it returned.
         summary: SearchSummary,
     },
-    /// For [`Verb::ProjectCreate`], [`Verb::ProjectSet`] and [`Verb::ProjectStatus`].
-    Project(Box<ProjectStatus>),
-    /// For [`Verb::ProjectList`]: every project, by name.
-    Projects(Vec<Project>),
-    /// For the task verbs: the task as it is now.
-    Task(Box<crate::project::Task>),
     /// For [`Verb::WorkerFacts`].
     Facts(Vec<WorkerFacts>),
-    /// For [`Verb::TaskGet`].
-    Node(Box<crate::project::NodeDetail>),
-    /// For [`Verb::WorkingOn`]: the project and the task, none for its orchestrator; none when
-    /// the terminal is on nothing.
-    WorkingOn(Option<(ProjectId, Option<TaskId>)>),
     /// For [`Verb::CloneRepo`]: where the clone is, and which repository it is.
     Cloned {
         /// Its root on the worker.
@@ -1621,47 +1153,7 @@ pub enum Outcome {
         /// Its commit.
         head: String,
     },
-    /// For [`Verb::Verify`]: the verifier runs in `term`, on these commits.
-    Verifying {
-        /// Its terminal.
-        term: TermRef,
-        /// The commit checked out, in hex.
-        head: String,
-        /// Where it left the target branch, in hex.
-        base: String,
-    },
-    /// For [`Verb::Rebase`]: what the rebase made, on top of the target at `onto`.
-    Rebased {
-        /// The rebased commit, in hex; the head given when it already held `onto` and every
-        /// trailer.
-        head: String,
-        /// The commit given to rebase, in hex.
-        from: String,
-        /// The target's commit it is on top of, in hex.
-        onto: String,
-        /// Its tree is the very tree of the commit last verified: only messages changed, so
-        /// what was verified holds for it.
-        verified: bool,
-    },
-    /// For [`Verb::TestDiff`].
-    TestDiff(crate::project::TestDiff),
-    /// For [`Verb::FastForward`]: the branch is at `head`.
-    FastForwarded {
-        /// Its commit now, in hex.
-        head: String,
-        /// It was pushed to `origin`.
-        pushed: bool,
-        /// Why a push asked for did not happen; the branch moved all the same.
-        push_failed: Option<String>,
-    },
-    /// For [`Verb::RemoveWorktree`]: the worktree is gone.
-    WorktreeRemoved {
-        /// The branch it had checked out, if one.
-        branch: Option<String>,
-        /// Whether that branch went too, its work all landed.
-        branch_removed: bool,
-    },
-    /// For [`Verb::StartThread`]: the thread runs.
+    /// For [`Verb::StartThread`] and [`Verb::AgentStart`]: the thread runs.
     ThreadStarted {
         /// The thread.
         thread: ThreadId,
@@ -1674,40 +1166,22 @@ pub enum Outcome {
         /// The path.
         path: String,
     },
-    /// For [`Verb::LandPull`] and [`Verb::ProjectLand`]: the pull request the work waits in.
-    PullOpened {
-        /// Its number.
-        number: u32,
-        /// Its page.
-        url: String,
-    },
-    /// For [`Verb::PullOf`]: the branch's pull request, none when it has none.
-    PullOf {
-        /// It, as the forge says it stands.
-        pull: Option<crate::thread::wire::PullSeen>,
-    },
     /// For [`Verb::Settings`]: the daemon's settings file as it stands.
     Settings(Box<crate::settings::DaemonSettings>),
-    /// For [`Verb::OnOrigin`]: those of the heads asked about that the forge's branch holds, in
-    /// the order asked.
-    OnOrigin {
-        /// The commits, in hex.
-        heads: Vec<String>,
+    /// For [`Verb::Agents`] and [`Verb::AgentWait`]: each agent as it stands.
+    Agents {
+        /// The agents.
+        agents: Vec<crate::agent::AgentEntry>,
+        /// A wait ran out before what it waited for came.
+        timed_out: bool,
     },
 }
 
-/// Which thread a [`Verb::ReadThread`], a [`Verb::AnswerRequest`], a [`Verb::SendMessage`] or a
-/// [`Verb::ResumeThread`] is about.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+/// Which thread a [`Verb::ReadThread`], a [`Verb::AnswerRequest`] or a [`Verb::SendMessage`] is
+/// about.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum ThreadOf {
-    /// The thread working on a task now: its assignment's.
-    Task {
-        /// The project.
-        project: ProjectId,
-        /// The task.
-        task: TaskId,
-    },
-    /// The thread of the agent in a terminal, or of a task's thread seated there.
+    /// The thread of the agent in a terminal, or of a thread seated there.
     Term(TermRef),
     /// A thread by its id, a subagent's too, on whichever worker holds it.
     Thread(ThreadId),

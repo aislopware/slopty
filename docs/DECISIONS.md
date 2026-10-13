@@ -28,5 +28,5 @@ One file per topic under `docs/decisions/`; an entry is cited by its bold title 
 - [Prediction while editing](decisions/prediction-editing.md)
 - [Crash reports](decisions/crashes.md)
 - [Brand](decisions/brand.md)
-- [Projects](decisions/projects.md)
+- [Spaces and agents](decisions/projects.md)
 - [Agents](decisions/agents.md)

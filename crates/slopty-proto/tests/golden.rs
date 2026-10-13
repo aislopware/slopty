@@ -2048,21 +2048,6 @@ mod orchestration {
     #[test]
     fn sizes_ranges_and_directories() {
         let worker = term().worker;
-        let size = Some(Size { cols: 200, rows: 50 });
-        snap(
-            "server_request_spawn",
-            &request(Verb::SpawnAgent {
-                worker,
-                cwd: "~/src/app".to_owned(),
-                prompt: Some("fix it".to_owned()),
-                args: vec!["--model".to_owned(), "opus".to_owned()],
-                env: vec![("A".to_owned(), "1".to_owned())],
-                size,
-                session: Some(term().session),
-                autonomy: Some(slopty_proto::project::Autonomy::Ask),
-                worktree: None,
-            }),
-        );
         let resize = Verb::ResizeTerminal { term: term(), size: Size { cols: 100, rows: 30 } };
         snap("server_request_resize", &request(resize));
         let read =
@@ -2217,7 +2202,7 @@ mod orchestration {
 
     /// The verbs an orchestrating agent reaches the screen and files with: a still picture or
     /// the refusal of one, and a file sent up in parts. Reading and answering another agent's
-    /// thread is in `golden_project`'s `thread_reads`.
+    /// thread is in `golden_agent`'s `thread_reads`.
     #[test]
     fn agent_verbs() {
         use slopty_core::XferId;

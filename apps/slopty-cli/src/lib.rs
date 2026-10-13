@@ -3,8 +3,8 @@
 //! * `slopty workers|terminals|open|send|wait|…` drive workers through the server, one verb each
 //!   (`slopty_proto::orchestration`), as text or `--json`.
 //! * `slopty mcp` is the same verbs as an MCP server on stdio, for an AI agent.
-//! * `slopty project …` and `slopty task …` make and follow projects: a goal split into tasks whose
-//!   agents the server places across the workers.
+//! * `slopty agent …`, `slopty agents` and `slopty branch-bring` start agents on any worker, reach
+//!   and read them, and carry branches between machines, as the agents' tools do.
 //! * `slopty server …` runs `slopty-server` as a `LaunchAgent` or a systemd user unit, and `slopty
 //!   server relay` says whether its machine is a Tailscale peer relay.
 //! * `slopty wake <worker>` wakes a sleeping worker from its own LAN.
@@ -33,7 +33,6 @@ mod hook;
 mod link;
 mod mcp;
 mod probe;
-mod projects;
 mod relay;
 mod service;
 mod statusline;

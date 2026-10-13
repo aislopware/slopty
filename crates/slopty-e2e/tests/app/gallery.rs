@@ -11,7 +11,7 @@
 
 use std::time::Duration;
 
-use slopty_e2e::harness::{ProjectStack, artifacts_dir};
+use slopty_e2e::harness::{ServedApp, artifacts_dir};
 use slopty_e2e::snapshot::{
     MAC_TOLERANCE as TOLERANCE, PixelRect, assert_matches, assert_matches_masked,
 };
@@ -739,7 +739,7 @@ async fn a_tile_kept_nowhere_says_its_worker_is_away() {
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
 async fn the_empty_workspace_asks_what_to_work_on() {
-    let mut stack = ProjectStack::launch("studio").await.unwrap();
+    let mut stack = ServedApp::launch("studio").await.unwrap();
     let dir = stack.dir.path().to_path_buf();
     let drv = &mut stack.driver;
     drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();

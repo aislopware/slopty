@@ -4,22 +4,19 @@
 //! A verb that changes something takes the caller's [`IdempotencyKey`], if it gave one.
 
 use slopty_core::WorkerId;
+use slopty_proto::agent::{AgentEntry, AgentStart, Worktree};
 use slopty_proto::folder::FsOp;
 use slopty_proto::items::{Item, ItemKind};
 use slopty_proto::orchestration::{
-    Command, DirEntry, ErrorCode, EventFilter, FileStat, HubEvent, IdempotencyKey, Input, ItemRef,
-    Line, Outcome, Port, Screen, Size, TermAgent, TermRef, ThreadOf, ThreadRead, ThreadView, Verb,
+    Command, DirEntry, EventFilter, FileStat, HubEvent, IdempotencyKey, Input, ItemRef, Line,
+    Outcome, Port, Screen, Size, TermAgent, TermRef, ThreadOf, ThreadRead, ThreadView, Verb,
     WaitUntil, Waited,
-};
-use slopty_proto::project::{
-    Autonomy, BadProjectId, LimitsChange, Moment, NodeDetail, Project, ProjectId, ProjectStatus,
-    Report, StepState, Task, TaskChange, TaskId, TaskLaunch, TaskSpec, TimelineEntry,
 };
 use slopty_proto::screen::{CaptureTarget, DisplayInfo, WindowInfo};
 use slopty_proto::search::{FileHits, SearchQuery, SearchSummary};
 use slopty_proto::server::WorkerInfo;
 use slopty_proto::terminal::SessionSummary;
-use slopty_proto::thread::{AgentId, AskId, TurnId};
+use slopty_proto::thread::{AgentId, AskId, ThreadId, TurnId};
 
 use crate::resolve::Resolver;
 use crate::view::Overview;
@@ -135,45 +132,6 @@ pub async fn open<D: Dispatch>(
     let Spec { cwd, command, env, name, size } = spec;
     let verb =
         Verb::OpenTerminal { worker, cwd, command, env, name, size, session: None, worktree: None };
-    opened(res.dispatch(), key, verb).await
-}
-
-/// How to start an agent.
-#[derive(Debug, Default)]
-pub struct AgentSpec {
-    /// Working directory, usually a repository.
-    pub cwd: String,
-    /// The first prompt, typed once the agent is ready.
-    pub prompt: Option<String>,
-    /// Arguments after the agent's program.
-    pub args: Vec<String>,
-    /// Extra environment.
-    pub env: Vec<(String, String)>,
-    /// Its grid until a client shows it.
-    pub size: Option<Size>,
-}
-
-/// Start Claude Code in a new terminal.
-pub async fn spawn_agent<D: Dispatch>(
-    res: &mut Resolver<'_, D>,
-    worker: Option<&str>,
-    spec: AgentSpec,
-    key: Option<IdempotencyKey>,
-) -> Result<TermRef, ToolError> {
-    let worker = res.worker(worker).await?;
-    let AgentSpec { cwd, prompt, args, env, size } = spec;
-    // The server sets `autonomy` from who asks, whatever is asked here.
-    let verb = Verb::SpawnAgent {
-        worker,
-        cwd,
-        prompt,
-        args,
-        env,
-        size,
-        session: None,
-        autonomy: None,
-        worktree: None,
-    };
     opened(res.dispatch(), key, verb).await
 }
 
@@ -515,18 +473,14 @@ pub async fn windows<D: Dispatch>(
 
 /// Which thread a read or an answer is about, as its caller names it.
 ///
-/// A thread's id (a subagent's too), the terminal an agent runs in, or a task (the caller's own
-/// project's when none is named). A thread wins over a terminal, a terminal over a task.
+/// A thread's id (an agent's or a subagent's), or the terminal an agent runs in. A thread
+/// wins over a terminal.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ThreadArg<'a> {
     /// A thread's id.
     pub thread: Option<&'a str>,
     /// A terminal, as the lists print it.
     pub term: Option<&'a str>,
-    /// The task's project.
-    pub project: Option<&'a str>,
-    /// A task.
-    pub task: Option<&'a str>,
 }
 
 /// The thread `arg` names, for the server to find.
@@ -542,14 +496,10 @@ async fn thread_of<D: Dispatch>(
         })?;
         return Ok(ThreadOf::Thread(id));
     }
-    if let Some(term) = arg.term {
-        return Ok(ThreadOf::Term(res.term(term).await?));
+    match arg.term {
+        Some(term) => Ok(ThreadOf::Term(res.term(term).await?)),
+        None => Err(ToolError::invalid("name a thread or a terminal")),
     }
-    if arg.task.is_none() {
-        return Err(ToolError::invalid("name a task, a thread or a terminal"));
-    }
-    let (project, task) = project_task(res.dispatch(), arg.project, arg.task).await?;
-    Ok(ThreadOf::Task { project, task })
 }
 
 /// What a thread did after turn `after`, whatever its agent: whole turns, bounded.
@@ -608,407 +558,6 @@ pub async fn capture_still<D: Dispatch>(
     }
 }
 
-/// The project `given` names, else the caller's own ([`Own::project`]).
-///
-/// # Errors
-/// Neither names one, or the name is not a project name.
-pub fn project_named(given: Option<&str>, own: &Own) -> Result<ProjectId, ToolError> {
-    match given.map(str::trim).filter(|g| !g.is_empty()) {
-        Some(name) => name.parse().map_err(|e: BadProjectId| ToolError::invalid(e.to_string())),
-        None => own
-            .project
-            .clone()
-            .ok_or_else(|| ToolError::invalid("name the project: this caller works for none")),
-    }
-}
-
-/// What the caller works on.
-#[derive(Clone, Debug, Default)]
-pub struct Own {
-    /// Its project.
-    pub project: Option<ProjectId>,
-    /// Its task in that project; none for the project's orchestrator.
-    pub task: Option<TaskId>,
-}
-
-/// What the caller works on: the server's record of its own terminal first.
-///
-/// That is in any project; its environment ([`crate::Scope`]) counts only when the server has
-/// it on nothing. An environment can be stale or inherited from another agent; the server's
-/// record cannot.
-///
-/// # Errors
-/// The server could not be asked.
-pub async fn own<D: Dispatch>(dispatch: &D) -> Result<Own, ToolError> {
-    let scope = dispatch.scope();
-    if let Some(session) = scope.session {
-        match dispatch.call(Verb::WorkingOn { session }).await {
-            Outcome::WorkingOn(Some((project, task))) => {
-                return Ok(Own { project: Some(project), task });
-            }
-            Outcome::WorkingOn(None) => {}
-            other => return Err(ToolError::unexpected(other)),
-        }
-    }
-    Ok(Own { project: scope.project, task: scope.task })
-}
-
-/// A task's number, `3` or `#3`.
-///
-/// # Errors
-/// It is not one.
-pub fn task_number(given: &str) -> Result<TaskId, ToolError> {
-    let given = given.trim();
-    given.parse().map_err(|e| ToolError::invalid(format!("{given:?} is not a task number: {e}")))
-}
-
-/// The project and the task named, the caller's own filling in what is not.
-///
-/// # Errors
-/// No task is named and the caller has none in that project.
-pub async fn project_task<D: Dispatch>(
-    dispatch: &D,
-    project: Option<&str>,
-    task: Option<&str>,
-) -> Result<(ProjectId, TaskId), ToolError> {
-    let own = own(dispatch).await?;
-    let project = project_named(project, &own)?;
-    if let Some(task) = task.map(str::trim).filter(|t| !t.is_empty()) {
-        return Ok((project, task_number(task)?));
-    }
-    match own.task.filter(|_| own.project.as_ref() == Some(&project)) {
-        Some(task) => Ok((project, task)),
-        None => Err(ToolError::invalid(format!(
-            "name the task: this caller works on none in project {project}"
-        ))),
-    }
-}
-
-/// The terminal `given` names, else the caller's own ([`crate::Scope::session`]); none when
-/// neither does and `required` is false.
-async fn term_or_own<D: Dispatch>(
-    res: &mut Resolver<'_, D>,
-    given: Option<&str>,
-    required: bool,
-) -> Result<Option<TermRef>, ToolError> {
-    if let Some(term) = given.map(str::trim).filter(|g| !g.is_empty()) {
-        return res.term(term).await.map(Some);
-    }
-    match res.dispatch().scope().session {
-        Some(session) => res.term(&session.to_string()).await.map(Some),
-        None if required => Err(ToolError::invalid(
-            "name the terminal: this caller runs in no Slopty terminal (no SLOPTY_SESSION)",
-        )),
-        None => Ok(None),
-    }
-}
-
-async fn project_answer<D: Dispatch>(
-    dispatch: &D,
-    key: Option<IdempotencyKey>,
-    verb: Verb,
-) -> Result<ProjectStatus, ToolError> {
-    match dispatch.send(key, verb).await {
-        Outcome::Project(status) => Ok(*status),
-        other => Err(ToolError::unexpected(other)),
-    }
-}
-
-async fn task_answer<D: Dispatch>(
-    dispatch: &D,
-    key: Option<IdempotencyKey>,
-    verb: Verb,
-) -> Result<Task, ToolError> {
-    match dispatch.send(key, verb).await {
-        Outcome::Task(task) => Ok(*task),
-        other => Err(ToolError::unexpected(other)),
-    }
-}
-
-/// A new project's fields, names unresolved.
-#[derive(Debug, Default)]
-pub struct ProjectSpec {
-    /// Its name.
-    pub project: String,
-    /// What it is for.
-    pub title: String,
-    /// Its repository.
-    pub repo: String,
-    /// The branch work lands on; a branch of the project's own when absent
-    /// ([`slopty_proto::project::Task::goal_branch`]).
-    pub target: Option<String>,
-    /// The verifier command.
-    pub verifier: Option<String>,
-    /// Push the target to `origin` after each merge; the person's to turn on.
-    pub push: bool,
-    /// The orchestrator's terminal; the caller's own when absent and it runs in one.
-    pub orchestrator: Option<String>,
-    /// Its limits over the defaults.
-    pub limits: LimitsChange,
-    /// Anything kept with it: the text of a JSON object.
-    pub metadata: Option<String>,
-    /// The goal its orchestrator is started on.
-    pub goal: Option<String>,
-    /// How far its agents go before they ask the person.
-    pub autonomy: Autonomy,
-}
-
-/// Make a project.
-pub async fn project_create<D: Dispatch>(
-    res: &mut Resolver<'_, D>,
-    spec: ProjectSpec,
-    key: Option<IdempotencyKey>,
-) -> Result<ProjectStatus, ToolError> {
-    let project = project_named(Some(&spec.project), &Own::default())?;
-    let orchestrator = term_or_own(res, spec.orchestrator.as_deref(), false).await?;
-    let verb = Verb::ProjectCreate {
-        project,
-        title: spec.title,
-        repo: spec.repo,
-        target: spec.target.unwrap_or_default(),
-        verifier: spec.verifier,
-        push: spec.push,
-        orchestrator,
-        limits: spec.limits,
-        metadata: spec.metadata,
-        goal: spec.goal,
-        autonomy: spec.autonomy,
-    };
-    project_answer(res.dispatch(), key, verb).await
-}
-
-/// A change to a project, names unresolved.
-#[derive(Debug, Default)]
-pub struct ProjectEdit {
-    /// A new orchestrator terminal.
-    pub orchestrator: Option<String>,
-    /// A new verifier; empty for none.
-    pub verifier: Option<String>,
-    /// Push the target after each merge, or stop.
-    pub push: Option<bool>,
-    /// New limits.
-    pub limits: LimitsChange,
-    /// New metadata.
-    pub metadata: Option<String>,
-    /// How far its agents go before they ask the person.
-    pub autonomy: Option<Autonomy>,
-}
-
-/// Change a project's orchestrator, verifier, autonomy, limits or metadata.
-pub async fn project_set<D: Dispatch>(
-    res: &mut Resolver<'_, D>,
-    project: Option<&str>,
-    edit: ProjectEdit,
-    key: Option<IdempotencyKey>,
-) -> Result<ProjectStatus, ToolError> {
-    let project = project_named(project, &own(res.dispatch()).await?)?;
-    let orchestrator = match edit.orchestrator.as_deref() {
-        Some(term) => Some(res.term(term).await?),
-        None => None,
-    };
-    let ProjectEdit { verifier, push, limits, metadata, autonomy, .. } = edit;
-    let verb =
-        Verb::ProjectSet { project, orchestrator, verifier, push, limits, metadata, autonomy };
-    project_answer(res.dispatch(), key, verb).await
-}
-
-/// Every project.
-pub async fn projects<D: Dispatch>(dispatch: &D) -> Result<Vec<Project>, ToolError> {
-    match dispatch.call(Verb::ProjectList).await {
-        Outcome::Projects(list) => Ok(list),
-        other => Err(ToolError::unexpected(other)),
-    }
-}
-
-/// A project whole, and its timeline from `since`, read at once: [`task_wait`] is the one wait.
-pub async fn project_status<D: Dispatch>(
-    dispatch: &D,
-    project: Option<&str>,
-    since: Option<u64>,
-) -> Result<ProjectStatus, ToolError> {
-    let project = project_named(project, &own(dispatch).await?)?;
-    project_answer(dispatch, None, Verb::ProjectStatus { project, since, timeout_ms: 0 }).await
-}
-
-/// Say where the caller's own project's goal stands, as its orchestrator: `summary`, what
-/// comes `next`, and whether it is `done`, which tells the person once.
-///
-/// # Errors
-/// The caller works for no project, is not its orchestrator, or the summary is empty or long.
-pub async fn project_update<D: Dispatch>(
-    dispatch: &D,
-    summary: String,
-    next: Option<String>,
-    done: bool,
-    key: Option<IdempotencyKey>,
-) -> Result<(), ToolError> {
-    let project = project_named(None, &own(dispatch).await?)?;
-    match dispatch.send(key, Verb::ProjectProgress { project, summary, next, done }).await {
-        Outcome::Project(_) => Ok(()),
-        other => Err(ToolError::unexpected(other)),
-    }
-}
-
-/// Let a project go, as the person: its tasks, queue and timeline. Its terminals run on.
-///
-/// # Errors
-/// The project is not named or not known, or the caller is an agent.
-pub async fn project_delete<D: Dispatch>(
-    dispatch: &D,
-    project: &str,
-    key: Option<IdempotencyKey>,
-) -> Result<(), ToolError> {
-    let project = project_named(Some(project), &Own::default())?;
-    match dispatch.send(key, Verb::ProjectDelete { project }).await {
-        Outcome::Done => Ok(()),
-        other => Err(ToolError::unexpected(other)),
-    }
-}
-
-/// A new task's fields, names unresolved.
-#[derive(Debug, Default)]
-pub struct NewTask {
-    /// Tasks it needs first.
-    pub depends_on: Vec<String>,
-    /// The one of them whose done work it starts from before that merges.
-    pub start_from: Option<String>,
-    /// What sort of work it is.
-    pub kind: String,
-    /// What it is.
-    pub title: String,
-    /// What its agent is told.
-    pub brief: String,
-    /// It only reads.
-    pub read_only: bool,
-    /// Its own verifier.
-    pub verifier: Option<String>,
-    /// Anything kept with it: the text of a JSON object.
-    pub metadata: Option<String>,
-}
-
-/// Make a task in `project`, not started.
-async fn task_create<D: Dispatch>(
-    res: &Resolver<'_, D>,
-    project: &ProjectId,
-    new: NewTask,
-    key: Option<IdempotencyKey>,
-) -> Result<Task, ToolError> {
-    let depends_on = new.depends_on.iter().map(|d| task_number(d)).collect::<Result<_, _>>()?;
-    let start_from = new.start_from.as_deref().map(task_number).transpose()?;
-    let spec = TaskSpec {
-        depends_on,
-        start_from,
-        kind: new.kind,
-        title: new.title,
-        brief: new.brief,
-        read_only: new.read_only,
-        verifier: new.verifier,
-        metadata: new.metadata,
-    };
-    let verb = Verb::TaskCreate { project: project.clone(), spec: Box::new(spec) };
-    task_answer(res.dispatch(), key, verb).await
-}
-
-/// Change a task.
-///
-/// Move it, set its status, dependencies, verifier or metadata, record its branch or
-/// verifier's word, note something.
-pub async fn task_update<D: Dispatch>(
-    res: &Resolver<'_, D>,
-    project: Option<&str>,
-    task: Option<&str>,
-    change: TaskChange,
-    key: Option<IdempotencyKey>,
-) -> Result<Task, ToolError> {
-    let (project, task) = project_task(res.dispatch(), project, task).await?;
-    task_answer(res.dispatch(), key, Verb::TaskUpdate { project, task, change: Box::new(change) })
-        .await
-}
-
-/// Report on a task's work (the caller's own when none is named) to the project's
-/// orchestrator.
-pub async fn task_report<D: Dispatch>(
-    dispatch: &D,
-    project: Option<&str>,
-    task: Option<&str>,
-    report: Report,
-    key: Option<IdempotencyKey>,
-) -> Result<Task, ToolError> {
-    let (project, task) = project_task(dispatch, project, task).await?;
-    task_answer(dispatch, key, Verb::TaskReport { project, task, report }).await
-}
-
-/// Which task [`task_start`] starts.
-#[derive(Debug)]
-pub enum Which {
-    /// One the project has: made before and not started, stopped or given back.
-    Made(String),
-    /// A new one, made first.
-    New(Box<NewTask>),
-}
-
-/// Start a task: one the project has, or a new one made first. The one tool and command that
-/// starts work, so a start means one thing wherever it is asked.
-///
-/// Its `agent` (by [`agent_id`]'s names; Claude Code when absent) starts on `worker` (by name or
-/// id; one with room when absent), told the task's brief
-/// ([`Verb::TaskSpawn`]). A new task that is made but refused its start is kept, and the refusal
-/// says its number, so a later start names it rather than making it again.
-///
-/// # Errors
-/// The project or task is not named or known, the new task is refused, or its start is: no
-/// worker may run it, or a limit is reached (the project's review limit among them).
-pub async fn task_start<D: Dispatch>(
-    res: &mut Resolver<'_, D>,
-    project: Option<&str>,
-    which: Which,
-    (worker, agent): (Option<&str>, Option<&str>),
-    key: Option<IdempotencyKey>,
-) -> Result<Task, ToolError> {
-    let (project, task, made) = match which {
-        Which::Made(task) => {
-            let (project, task) = project_task(res.dispatch(), project, Some(&task)).await?;
-            (project, task, None)
-        }
-        Which::New(new) => {
-            let project = project_named(project, &own(res.dispatch()).await?)?;
-            let made_key = key.as_ref().map(|k| k.part("task_create"));
-            let made = task_create(res, &project, *new, made_key).await?;
-            (project, made.id, Some(made))
-        }
-    };
-    let pin = res.some_worker(worker).await?;
-    let agent = agent.map(str::trim).filter(|a| !a.is_empty()).unwrap_or(AgentId::CLAUDE_CODE);
-    let launch = TaskLaunch { pin, agent: agent_id(agent) };
-    let started = task_answer(res.dispatch(), key, Verb::TaskSpawn { project, task, launch }).await;
-    match (started, made) {
-        (Err(refused), Some(made)) => Err(ToolError::new(
-            refused.code,
-            format!(
-                "made task {} ({}), which did not start: {}. It is kept: start it with task {} \
-                 once that changes, rather than making it again",
-                made.id, made.title, refused.message, made.id
-            ),
-        )),
-        (started, _) => started,
-    }
-}
-
-/// Merge a task, as the person: work ready to merge joins the merge queue, and work not checked
-/// yet is verified first when the project has a verifier.
-///
-/// # Errors
-/// As [`task_report`]; an agent is refused.
-pub async fn task_merge<D: Dispatch>(
-    dispatch: &D,
-    project: Option<&str>,
-    task: Option<&str>,
-    key: Option<IdempotencyKey>,
-) -> Result<Task, ToolError> {
-    let (project, task) = project_task(dispatch, project, task).await?;
-    task_answer(dispatch, key, Verb::TaskMerge { project, task }).await
-}
-
 /// The agent a name means: `claude` or Claude Code's id, `codex`, `pi`, an ACP agent by the
 /// registry's name or `acp:<name>`.
 #[must_use]
@@ -1021,252 +570,136 @@ pub fn agent_id(name: &str) -> AgentId {
     }
 }
 
-/// Start a task's work again with a new agent ([`Verb::TaskRestart`]).
-///
-/// The one on it now is closed, and `agent` (else the one it ran last) starts where it ran, in
-/// its worktree, told its brief and where the earlier agent's thread is. When that machine is
-/// away, the server starts it on another one.
+/// An agent by its id, as `agents` prints it.
 ///
 /// # Errors
-/// As [`task_report`]; a merged task, an agent's own task, and another project's are refused.
-pub async fn task_restart<D: Dispatch>(
-    dispatch: &D,
-    project: Option<&str>,
-    task: Option<&str>,
-    agent: Option<&str>,
-    key: Option<IdempotencyKey>,
-) -> Result<Task, ToolError> {
-    let (project, task) = project_task(dispatch, project, task).await?;
-    let agent = agent.map(str::trim).filter(|a| !a.is_empty()).map(agent_id);
-    task_answer(dispatch, key, Verb::TaskRestart { project, task, agent, worker: None }).await
-}
-
-/// Push a merged task's work to the forge again, as the person ([`Verb::TaskPush`]): after a
-/// push that failed.
-///
-/// # Errors
-/// As [`task_report`]; an agent is refused, and so is a task not merged.
-pub async fn task_push<D: Dispatch>(
-    dispatch: &D,
-    project: Option<&str>,
-    task: Option<&str>,
-    key: Option<IdempotencyKey>,
-) -> Result<Task, ToolError> {
-    let (project, task) = project_task(dispatch, project, task).await?;
-    task_answer(dispatch, key, Verb::TaskPush { project, task }).await
-}
-
-/// Tell a task's agent something, through its hooks as a report goes.
-///
-/// The words are the person's, or the orchestrator's, marked as the orchestrator's. Nothing is
-/// typed into its terminal.
-///
-/// # Errors
-/// As [`task_report`]; a task with no agent running is refused, and so is any other agent's
-/// word, and the orchestrator's to a task that waits on the person.
-pub async fn task_tell<D: Dispatch>(
-    dispatch: &D,
-    project: Option<&str>,
-    task: Option<&str>,
-    text: String,
-    key: Option<IdempotencyKey>,
-) -> Result<(), ToolError> {
-    let (project, task) = project_task(dispatch, project, task).await?;
-    match dispatch.send(key, Verb::TaskTell { project, task: Some(task), text }).await {
-        Outcome::Done => Ok(()),
-        other => Err(ToolError::unexpected(other)),
-    }
-}
-
-/// Tell a project's orchestrator something, as the person: their words reach it through its
-/// hooks, and its inbox wakes it when it is idle.
-///
-/// # Errors
-/// The project is not named or not known, it has no orchestrator running, or the caller is an
-/// agent.
-pub async fn orchestrator_tell<D: Dispatch>(
-    dispatch: &D,
-    project: &str,
-    text: String,
-    key: Option<IdempotencyKey>,
-) -> Result<(), ToolError> {
-    let project = project_named(Some(project), &Own::default())?;
-    match dispatch.send(key, Verb::TaskTell { project, task: None, text }).await {
-        Outcome::Done => Ok(()),
-        other => Err(ToolError::unexpected(other)),
-    }
-}
-
-/// How long [`task_wait`] waits when the caller names no timeout: under the minute many MCP
-/// clients give a tool call.
-pub const DEFAULT_TASK_WAIT_MS: u32 = 50_000;
-/// The longest [`task_wait`] waits.
-pub const TASK_WAIT_MAX_MS: u32 = 30 * 60_000;
-/// The most tasks one [`task_wait`] follows.
-pub const TASK_WAIT_MOST: usize = 64;
-/// The longest one read of the project waits; the server caps it there too.
-const READ_WAIT_MS: u32 = 240_000;
-
-/// What [`task_wait`] saw.
-#[derive(Clone, Debug)]
-pub struct TaskWait {
-    /// The project as last read.
-    pub status: ProjectStatus,
-    /// The tasks followed, in the order named.
-    pub tasks: Vec<TaskId>,
-    /// What each of them did since the wait began, oldest first.
-    pub news: Vec<TimelineEntry>,
-    /// The latest report of each, from the news or what the project's timeline still held.
-    pub reports: Vec<TimelineEntry>,
-    /// Those with news, or merged or given up when the wait began.
-    pub ready: Vec<TaskId>,
-    /// The time ran out first. Nothing was stopped or cancelled for it.
-    pub timed_out: bool,
-    /// The cursor to wait on from, as `since`, so nothing between two waits is missed.
-    pub next: u64,
-}
-
-/// Whether a timeline entry is news of its task for [`task_wait`].
-///
-/// News is a report, a move of its state (its agent ending a turn without a report is one),
-/// its terminal gone, its verifier's word, its pull request standing otherwise, or a step that
-/// ended.
-#[must_use]
-pub const fn news(what: &Moment) -> bool {
-    match what {
-        Moment::Reported { .. }
-        | Moment::State { .. }
-        | Moment::AgentGone { .. }
-        | Moment::Verified(_)
-        | Moment::Pull(_) => true,
-        Moment::Step(step) => !matches!(step.state, StepState::Running { .. }),
-        _ => false,
-    }
-}
-
-/// Wait for the next news of `tasks` in a project, any of them or `all` of them.
-///
-/// It waits from `since`, or from now, for up to `timeout_ms`. A task merged or given up when
-/// the wait begins is ready at once, since no news may come of it. Running out of time cancels
-/// nothing: the answer says so, and `next` picks the wait up where it stopped.
-///
-/// It follows the project's timeline with the server's own long wait, so it costs a read per
-/// change of the project, not a poll.
-///
-/// # Errors
-/// No task, too many, a number that is not one, a task not in the project, or the server
-/// could not be asked.
-pub async fn task_wait<D: Dispatch>(
-    dispatch: &D,
-    project: Option<&str>,
-    (tasks, all): (&[String], bool),
-    since: Option<u64>,
-    timeout_ms: u32,
-) -> Result<TaskWait, ToolError> {
-    let project = project_named(project, &own(dispatch).await?)?;
-    let mut followed: Vec<TaskId> = Vec::new();
-    for given in tasks {
-        let task = task_number(given)?;
-        if !followed.contains(&task) {
-            followed.push(task);
-        }
-    }
-    if followed.is_empty() || followed.len() > TASK_WAIT_MOST {
-        return Err(ToolError::invalid(format!(
-            "name between 1 and {TASK_WAIT_MOST} tasks to wait for"
-        )));
-    }
-    let wait = std::time::Duration::from_millis(u64::from(timeout_ms.min(TASK_WAIT_MAX_MS)));
-    let started = tokio::time::Instant::now();
-    let read =
-        |since, timeout_ms| Verb::ProjectStatus { project: project.clone(), since, timeout_ms };
-    let mut status = project_answer(dispatch, None, read(since, 0)).await?;
-    if let Some(missing) = followed.iter().find(|t| !status.tasks.iter().any(|card| card.id == **t))
-    {
-        return Err(ToolError::new(
-            ErrorCode::UnknownTask,
-            format!("no task {missing} in project {project}"),
-        ));
-    }
-    let mut reports: Vec<TimelineEntry> = Vec::new();
-    let mut news_of = Vec::new();
-    let take = |status: &ProjectStatus, reports: &mut Vec<TimelineEntry>, news_of: &mut Vec<_>| {
-        for e in status.timeline.iter().filter(|e| e.task.is_some_and(|t| followed.contains(&t))) {
-            if matches!(e.what, Moment::Reported { .. }) {
-                reports.retain(|r: &TimelineEntry| r.task != e.task);
-                reports.push(e.clone());
-            }
-        }
-        news_of.extend(
-            status
-                .timeline
-                .iter()
-                .filter(|e| e.task.is_some_and(|t| followed.contains(&t)) && news(&e.what))
-                .cloned(),
-        );
-    };
-    let mut discard = Vec::new();
-    // With no cursor, what the timeline holds is the past: its reports only.
-    take(&status, &mut reports, if since.is_some() { &mut news_of } else { &mut discard });
-    let final_at_start: Vec<TaskId> = status
-        .tasks
-        .iter()
-        .filter(|c| followed.contains(&c.id) && !c.state.holds_paths())
-        .map(|c| c.id)
-        .collect();
-    let ready_of = |news_of: &[TimelineEntry]| -> Vec<TaskId> {
-        followed
-            .iter()
-            .copied()
-            .filter(|t| final_at_start.contains(t) || news_of.iter().any(|e| e.task == Some(*t)))
-            .collect()
-    };
-    let mut cursor = status.next;
-    let timed_out = loop {
-        let ready = ready_of(&news_of);
-        if if all { ready.len() == followed.len() } else { !ready.is_empty() } {
-            break false;
-        }
-        let left = wait.saturating_sub(started.elapsed());
-        if left.is_zero() {
-            break true;
-        }
-        let left_ms = u32::try_from(left.as_millis()).unwrap_or(u32::MAX).clamp(1, READ_WAIT_MS);
-        status = project_answer(dispatch, None, read(Some(cursor), left_ms)).await?;
-        let left = wait.saturating_sub(started.elapsed());
-        if status.next == cursor && !left.is_zero() {
-            // Answered with nothing new before its time was up: never spin on such a server.
-            tokio::time::sleep(std::time::Duration::from_millis(250).min(left)).await;
-        }
-        take(&status, &mut reports, &mut news_of);
-        cursor = status.next;
-    };
-    Ok(TaskWait {
-        ready: ready_of(&news_of),
-        status,
-        tasks: followed,
-        news: news_of,
-        reports,
-        timed_out,
-        next: cursor,
+/// It is not one.
+pub fn agent_named(given: &str) -> Result<ThreadId, ToolError> {
+    given.trim().parse().map_err(|e| {
+        ToolError::invalid(format!(
+            "{given:?} is not an agent's id ({e}): a uuid, as agents prints it"
+        ))
     })
 }
 
-/// One node of a project's tree in full: the task named (the caller's own when none is), or
-/// the orchestrator's node for `orchestrator`.
-pub async fn task_get<D: Dispatch>(
-    dispatch: &D,
-    project: Option<&str>,
-    task: Option<&str>,
-) -> Result<NodeDetail, ToolError> {
-    let (project, task) = if task.map(str::trim) == Some("orchestrator") {
-        (project_named(project, &own(dispatch).await?)?, None)
-    } else {
-        let (project, task) = project_task(dispatch, project, task).await?;
-        (project, Some(task))
+/// What [`agent_start`] asks, with the machine by name.
+#[derive(Clone, Debug, Default)]
+pub struct AgentWanted {
+    /// The machine, by name or id.
+    pub worker: String,
+    /// The folder it works in.
+    pub folder: Option<String>,
+    /// What it is told first.
+    pub prompt: String,
+    /// Which agent, by [`agent_id`]'s names.
+    pub agent: Option<String>,
+    /// The model, by the agent's own id.
+    pub model: Option<String>,
+    /// How hard it thinks.
+    pub effort: Option<String>,
+    /// A fresh worktree, by name.
+    pub worktree: Option<String>,
+    /// A repository to clone first when the machine has none.
+    pub repo: Option<String>,
+}
+
+/// Start an agent ([`Verb::AgentStart`]): the thread it runs as, and the worktree it works in
+/// when it was given one.
+///
+/// # Errors
+/// The machine does not resolve, or the server refused the start.
+pub async fn agent_start<D: Dispatch>(
+    res: &mut Resolver<'_, D>,
+    wanted: AgentWanted,
+    key: Option<IdempotencyKey>,
+) -> Result<(ThreadId, Option<Worktree>), ToolError> {
+    let AgentWanted { worker, folder, prompt, agent, model, effort, worktree, repo } = wanted;
+    let worker = res.worker(Some(&worker)).await?;
+    let start = AgentStart {
+        worker,
+        folder,
+        prompt,
+        agent: agent.as_deref().map(agent_id),
+        model,
+        effort,
+        worktree,
+        repo,
     };
-    match dispatch.call(Verb::TaskGet { project, task }).await {
-        Outcome::Node(node) => Ok(*node),
+    match res.dispatch().send(key, Verb::AgentStart(Box::new(start))).await {
+        Outcome::ThreadStarted { thread, worktree } => Ok((thread, worktree.map(|w| *w))),
+        other => Err(ToolError::unexpected(other)),
+    }
+}
+
+/// Words for an agent ([`Verb::AgentTell`]).
+///
+/// # Errors
+/// The server refused them.
+pub async fn agent_tell<D: Dispatch>(
+    dispatch: &D,
+    agent: ThreadId,
+    text: String,
+    key: Option<IdempotencyKey>,
+) -> Result<(), ToolError> {
+    done(dispatch, key, Verb::AgentTell { agent, text }).await
+}
+
+/// Wait for agents to need someone or come to rest ([`Verb::AgentWait`]): each as it stands,
+/// and whether the wait ran out first.
+///
+/// # Errors
+/// An agent the server does not know, or a failure.
+pub async fn agent_wait<D: Dispatch>(
+    dispatch: &D,
+    agents: Vec<ThreadId>,
+    all: bool,
+    timeout_ms: u32,
+) -> Result<(Vec<AgentEntry>, bool), ToolError> {
+    match dispatch.call(Verb::AgentWait { agents, all, timeout_ms }).await {
+        Outcome::Agents { agents, timed_out } => Ok((agents, timed_out)),
+        other => Err(ToolError::unexpected(other)),
+    }
+}
+
+/// End an agent and every agent under it ([`Verb::AgentStop`]).
+///
+/// # Errors
+/// The server refused it.
+pub async fn agent_stop<D: Dispatch>(
+    dispatch: &D,
+    agent: ThreadId,
+    key: Option<IdempotencyKey>,
+) -> Result<(), ToolError> {
+    done(dispatch, key, Verb::AgentStop { agent }).await
+}
+
+/// Every agent on the fleet, each with its parent ([`Verb::Agents`]).
+///
+/// # Errors
+/// A failure.
+pub async fn agents<D: Dispatch>(dispatch: &D) -> Result<Vec<AgentEntry>, ToolError> {
+    match dispatch.call(Verb::Agents).await {
+        Outcome::Agents { agents, .. } => Ok(agents),
+        other => Err(ToolError::unexpected(other)),
+    }
+}
+
+/// Bring a branch from a clone on one machine into a clone on another
+/// ([`Verb::BranchBring`]): the branch it landed as, and its commit.
+///
+/// # Errors
+/// A machine does not resolve, or the server could not carry it.
+pub async fn branch_bring<D: Dispatch>(
+    res: &mut Resolver<'_, D>,
+    (from, repo, branch): (&str, String, String),
+    (to, into, name): (&str, Option<String>, Option<String>),
+    key: Option<IdempotencyKey>,
+) -> Result<(String, String), ToolError> {
+    let from = res.worker(Some(from)).await?;
+    let to = res.worker(Some(to)).await?;
+    let verb = Verb::BranchBring { from, repo, branch, to, into, name };
+    match res.dispatch().send(key, verb).await {
+        Outcome::Fetched { branch, head } => Ok((branch, head)),
         other => Err(ToolError::unexpected(other)),
     }
 }

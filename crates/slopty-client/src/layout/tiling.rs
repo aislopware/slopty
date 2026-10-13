@@ -1,6 +1,6 @@
 //! Projects, their tabs, and where new work opens: the whole workspace as a pure model.
 //!
-//! A project ([`crate::groups`]' [`GroupKey`]: a declared project, else a repository, else a
+//! A project ([`crate::groups`]' [`GroupKey`]: the person's pin, else a repository, else a
 //! folder, else a machine) owns its tabs, and each tab holds a tiling layout ([`Tab`]). One
 //! project is on show; its tabs are the title bar's, and it comes back on the tab it was left
 //! on (`MonoCode`'s `projectReturn.ts`). Tabs visited are kept in order for back and forward.

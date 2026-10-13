@@ -170,7 +170,7 @@ pub struct UnderWay {
 /// "Trust this folder" still opens it again after the worker restarts ([`Host::hold_start`]).
 ///
 /// It holds nothing secret: what the start gave `claude` (the session, the model, the mode, the
-/// first message, a seat's role), never the relay, a token or a seat's variables, which are
+/// first message, a seat's system text), never the relay, a token or a seat's variables, which are
 /// given afresh where it opens again.
 #[derive(Clone, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub struct HeldStart {
@@ -255,7 +255,7 @@ struct Own {
     /// Where the thread branched, when the worker forked it: an agent that records a fork names
     /// only the thread it came from, or nothing.
     fork: Option<Fork>,
-    /// The seat a server's task started it at ([`slopty_proto::project::SEAT_FACT`]): an adapter
+    /// The seat the server started it at ([`slopty_proto::agent::SEAT_FACT`]): an adapter
     /// that tells the thread's metadata again knows nothing of it.
     seat: Option<String>,
     /// The seat it was started at, all of it, kept in its directory ([`SEAT_FILE`]).
@@ -290,7 +290,7 @@ impl Own {
             .map(|t| (t.id, (t.before.clone(), t.after.clone())))
             .collect();
         let fork = state.meta.forked_from;
-        let seat = state.meta.facts.get(slopty_proto::project::SEAT_FACT).cloned();
+        let seat = state.meta.facts.get(slopty_proto::agent::SEAT_FACT).cloned();
         let aside = state.meta.aside_of();
         // One going as the worker stopped is never sent again.
         let scheduled = state
@@ -343,7 +343,10 @@ impl Own {
     fn meta(&self, meta: &mut ThreadMeta) {
         self.branched(meta);
         if let Some(seat) = &self.seat {
-            meta.facts.insert(slopty_proto::project::SEAT_FACT.to_owned(), seat.clone());
+            meta.facts.insert(slopty_proto::agent::SEAT_FACT.to_owned(), seat.clone());
+        }
+        for (name, value) in self.seated.iter().flat_map(|seated| &seated.facts) {
+            meta.facts.insert(name.clone(), value.clone());
         }
         match self.aside {
             Some(of) => meta.facts.insert(ThreadMeta::ASIDE_FACT.to_owned(), of.to_string()),
@@ -733,8 +736,9 @@ impl Host {
         self.apply(thread, vec![Action::Meta(Box::new(meta))]);
     }
 
-    /// `thread` was started at `seated`'s seat for a server's task: its row says so
-    /// ([`slopty_proto::project::SEAT_FACT`]) from now on, whatever its adapter tells of it,
+    /// `thread` was started at `seated`'s seat: its row says so
+    /// ([`slopty_proto::agent::SEAT_FACT`], and its facts) from now on, whatever its adapter
+    /// tells of it,
     /// and the seat is kept in its directory, so the thread taken up again after a restart is
     /// given the same ([`Self::seated_of`]). A seat that cannot be written is warned of.
     pub fn seated(&self, thread: ThreadId, seated: &Seated) {
@@ -829,12 +833,12 @@ impl Host {
         self.inner.lock().seat_env = Some(EnvOf(env));
     }
 
-    /// Every variable `seated`'s agent and its Slopty tools run with: the server's, with the
-    /// worker's own for the seat ([`Self::set_seat_env`]) where the daemon gave them.
+    /// Every variable `seated`'s agent and its Slopty tools run with: the worker's own for the
+    /// seat ([`Self::set_seat_env`]), once the daemon gave them.
     #[must_use]
     pub fn env_of(&self, seated: &Seated) -> Vec<(String, String)> {
         let env = self.inner.lock().seat_env.as_ref().map(|EnvOf(env)| Arc::clone(env));
-        env.map_or_else(|| seated.env.clone(), |env| env(seated.seat, &seated.env))
+        env.map_or_else(Vec::new, |env| env(seated.seat))
     }
 
     /// The thread started at `seat`, if one is.
@@ -845,7 +849,7 @@ impl Host {
         let open = inner.threads.iter().find(|(_, h)| h.own.seat.as_deref() == Some(seat.as_str()));
         let cold = || {
             inner.cold.iter().find(|(_, head)| {
-                head.state.meta.facts.get(slopty_proto::project::SEAT_FACT) == Some(&seat)
+                head.state.meta.facts.get(slopty_proto::agent::SEAT_FACT) == Some(&seat)
             })
         };
         open.map(|(thread, _)| *thread).or_else(|| cold().map(|(thread, _)| *thread))

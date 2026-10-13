@@ -97,7 +97,7 @@ pub enum GitOp {
     },
     /// The commits of `head` since it left `base`, as committed, with no checkout and no
     /// working tree ([`GitDone::Changes`], scoped [`crate::thread::wire::ReviewScope::Range`]):
-    /// a review of a branch checked out nowhere, a project's finished goal. Nothing in the
+    /// a review of a branch checked out nowhere, an agent's finished work. Nothing in the
     /// repository moves.
     Range {
         /// The branch it left: the old side is where `head` forked from it.

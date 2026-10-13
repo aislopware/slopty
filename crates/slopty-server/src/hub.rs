@@ -28,13 +28,9 @@
 //! it and a [`Verb::Events`] reading from a cursor see one vocabulary in one order, and one call
 //! watches the whole fleet.
 //!
-//! Projects are the hub's own too ([`crate::project`], `projects`): their verbs are answered
-//! here from the store's records, what runs for a task goes to the worker its start names or
-//! one with room and is started with the project and task in its environment
-//! ([`Verb::TaskSpawn`]), every agent's start is counted against the person's bounds, and what
-//! the workers report of their agents (status, branches, Claude Code's own subagents) moves the
-//! tasks they work on. Every change is a [`Happening::Project`] in the one log, and the projects
-//! file is written after it.
+//! The agents' verbs are the hub's own too (`agents`): an agent starts another on any worker
+//! ([`Verb::AgentStart`]), which records it as the child's parent, and the parent hears of its
+//! children through its own hooks (`crate::deliver`).
 
 use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, SocketAddr};
@@ -52,27 +48,17 @@ use slopty_proto::orchestration::{
     ErrorCode, EventFilter, Happening, HubEvent, IdempotencyKey, KEY_LIFETIME, Outcome, TermRef,
     ThreadOf, Verb,
 };
-use slopty_proto::project::{AgentReport, Facts, ProjectId, ProjectStatus, ProjectsPart, TaskId};
-use slopty_proto::server::{FromServer, Liveness, Refusal, Registration, ToServer, WorkerInfo};
+use slopty_proto::server::{
+    AgentReport, Facts, FromServer, Liveness, Refusal, Registration, ToServer, WorkerInfo,
+};
 use slopty_proto::terminal::{SessionState, SessionSummary};
 use tokio::sync::{Notify, broadcast, mpsc, oneshot, watch};
 
 use crate::deliver::Deliveries;
-use crate::project::{
-    Caller, Change, Drove, First, KEYS_REMEMBERED, Keep, KeptKey, Projects, ProjectsFile,
-    Remembered, Seen, StartKept, Starting, Watched,
-};
 
+mod agents;
 mod awake;
-mod cleanup;
-mod codex;
 mod ladder;
-mod landing;
-mod outcomes;
-mod projects;
-mod queue;
-mod settle;
-mod steps;
 
 pub use awake::{Hold, Policy as KeepAwake};
 pub use ladder::{Devices, PushKept, Seated};
@@ -93,9 +79,6 @@ const FORWARD_TIMEOUT: Duration = Duration::from_secs(60);
 const CLONE_TIMEOUT: Duration = Duration::from_mins(31);
 /// How long making or fetching a bundle may take: the worker's own limit, and a minute.
 const BUNDLE_TIMEOUT: Duration = Duration::from_mins(11);
-/// How long a look at the forge for merged work pushed outside Slopty may take: the
-/// worker's own 20 s bound on its fetch, and ten seconds. A courtesy, so it gives up soon.
-const ORIGIN_TIMEOUT: Duration = Duration::from_secs(30);
 /// Directory changes buffered per client link before it lags and gets the whole directory again.
 const EVENT_BUFFER: usize = 1024;
 /// Events the log holds for [`Verb::Events`]; a cursor older than the oldest reads on from it
@@ -106,8 +89,8 @@ pub const EVENTS_PER_ANSWER: usize = 500;
 /// Keyed [`Verb::ForgetWorker`]s remembered, the oldest dropped first. People forget a worker
 /// now and then; this holds far more than [`KEY_LIFETIME`] brings.
 const FORGETS_KEPT: usize = 256;
-/// The most bytes of events one [`Verb::Events`] answer carries, by their estimate: a
-/// project's change can be tens of kilobytes, and an answer is one frame.
+/// The most bytes of events one [`Verb::Events`] answer carries, by their estimate: an answer
+/// is one frame.
 const EVENTS_BYTES: usize = 8 << 20;
 
 /// The registry and the router, shared by every link and the MCP endpoint.
@@ -164,7 +147,7 @@ struct Inner {
     log: Mutex<Log>,
     /// The log's next sequence number, for [`Verb::Events`] to wait on.
     head: watch::Sender<u64>,
-    /// Wakes the loop that delivers reports ([`Hub::deliver_reports`]).
+    /// Wakes the loop that delivers words to the agents ([`Hub::deliver_reports`]).
     deliver: Arc<Notify>,
     /// The `settings.toml` the server follows, whose `[server]` another device reads and edits
     /// ([`Verb::Settings`]), once the daemon gave it.
@@ -195,73 +178,17 @@ struct State {
     next_generation: u64,
     /// Workers forgotten under a key, oldest first.
     forgets: VecDeque<Forget>,
-    /// Every project.
-    projects: Projects,
-    /// Project changes made under a key, oldest first.
-    project_keys: VecDeque<Keyed>,
-    /// Starts made under a key, oldest first, with what the hub forwarded for them.
-    start_keys: VecDeque<KeyedStart>,
-    /// Starts of agents and tasks' terminals placed and not live yet.
-    starting: Vec<Starting>,
-    next_start: u64,
-    /// The task starts the store was last told of ([`projects::keep_starts`]).
-    kept_starts: Vec<crate::project::KeptStart>,
-    /// Reports on their way to the agents they are for.
-    deliveries: Deliveries,
-    /// Terminals the server watches for as long as they live ([`Watched`]), with when each
-    /// was first watched: agents it started in `default` mode, and terminals an agent opened or
-    /// typed into, whose CLI speaks for an agent. The store keeps them, so a restart does too.
-    watched: HashMap<SessionId, (Watched, tokio::time::Instant)>,
-    /// Where every change to the projects goes to be kept ([`crate::store::ProjectStore`]).
-    keeper: Option<mpsc::UnboundedSender<Keep>>,
-    /// What the server does for tasks around their agents: clones, branches brought home.
-    steps: steps::Steps,
-    /// What projects let go left on workers, until each answers.
-    cleanups: cleanup::Cleanups,
-    /// The projects' lanes running: their verifiers and merge queues.
-    lanes: queue::Lanes,
     /// Every worker's thread rows, the ladder made of them, and where the person is.
     board: ladder::Board,
-}
-
-/// A project change made under a key, so a repeat of the verb answers as the first did.
-///
-/// The verb is kept as a digest of its encoding, and the answer as what it names (a task, a
-/// project), read again for a repeat: a whole project's status or a task's brief held for
-/// each of a thousand keys would be gigabytes.
-#[derive(Debug)]
-struct Keyed {
-    key: IdempotencyKey,
-    digest: blake3::Hash,
-    answer: Remembered,
-    at: tokio::time::Instant,
-    wall: WallMs,
-}
-
-/// A start made under a key: what its caller sent, as a digest, and the start the hub
-/// forwarded for it with the terminal id it chose, until its worker answered. A repeat before
-/// the answer forwards that start again, so the worker's own ledger answers it as it answers
-/// the first; a repeat after it is given that answer. Either way no second start is placed, and
-/// a terminal closed since is never opened again uncounted.
-#[derive(Debug)]
-struct KeyedStart {
-    key: IdempotencyKey,
-    digest: blake3::Hash,
-    first: StartKept,
-    at: tokio::time::Instant,
-    wall: WallMs,
-}
-
-/// What a repeat of a keyed start does.
-enum Again {
-    /// Forward the first start again.
-    Forward(Verb),
-    /// Answer as the first was answered.
-    Answer(Outcome),
+    /// Words on their way to the agents.
+    deliveries: Deliveries,
+    /// What the agents' verbs keep: the person's autonomy setting, the terminals agents
+    /// drove, the clones under way.
+    agents: agents::Agents,
 }
 
 /// Who sends a verb, as the link it came on says: the server tells an agent from the person
-/// by it, since only the person may answer a permission or merge.
+/// by it, since only the person may answer a permission.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Speaker {
     /// A client app, or the CLI outside any Slopty terminal.
@@ -269,7 +196,7 @@ pub enum Speaker {
     /// An agent: an MCP surface.
     Agent,
     /// The CLI inside the Slopty terminal `session`, by its word alone: an agent's when an
-    /// agent runs there, it works on a project or an agent drove it, the person's otherwise.
+    /// agent runs there or an agent drove it, the person's otherwise.
     Shell(SessionId),
     /// The CLI inside the terminal `session`, proven by the token its worker gave it
     /// ([`slopty_agent::vouch`]): the person's or an agent's as [`Self::Shell`] is.
@@ -289,15 +216,22 @@ impl Speaker {
     }
 }
 
-/// What a client or an agent link is told first: the fleet and its projects, read together.
+/// What a client or an agent link is told first: the fleet.
 #[derive(Debug)]
 pub struct Snapshot {
     /// The last event logged before it was read: an event at or below it is in it already.
     pub seq: u64,
     /// Every worker, by name.
     pub directory: Vec<WorkerInfo>,
-    /// Every project whole, with its timeline's latest entries.
-    pub projects: Vec<ProjectStatus>,
+}
+
+/// Who a verb comes from, as the server judges it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Caller {
+    /// The person.
+    Person,
+    /// An agent.
+    Agent,
 }
 
 /// A worker forgotten under a key, so a repeat of the verb answers as the first did.
@@ -316,8 +250,8 @@ struct Entry {
     /// Which registration the entry reflects; a lease of another generation is stale.
     generation: u64,
     link: Option<Link>,
-    /// What each session's status line said of its worktree and pull request, for a task its
-    /// agent is put on later.
+    /// What each session's status line said of its worktree and pull request: the branch an
+    /// agent's entry names.
     branches: HashMap<SessionId, AgentBranch>,
     /// What the worker reported it is and has.
     facts: Facts,
@@ -443,82 +377,7 @@ impl Hub {
         WeakHub(Arc::downgrade(&self.inner))
     }
 
-    /// Take up the projects and the watched terminals a store kept, before any link is served.
-    pub fn adopt_projects(&self, mut file: ProjectsFile) {
-        let mut state = self.inner.state.lock();
-        let now = tokio::time::Instant::now();
-        state.watched = file.watched.drain(..).map(|w| (w.term.session, (w, now))).collect();
-        let wall = WallMs::now().as_millis();
-        for kept in file.keys.drain(..) {
-            // How long ago it was used, by the wall clock, is how long before now it was.
-            let age = Duration::from_millis(wall.saturating_sub(kept.at.as_millis()));
-            let Some(at) = now.checked_sub(age).filter(|_| age < KEY_LIFETIME) else { continue };
-            let KeptKey { key, digest, first, at: wall } = kept;
-            let digest = blake3::Hash::from_bytes(digest);
-            match first {
-                First::Change(answer) => {
-                    state.project_keys.push_back(Keyed { key, digest, answer, at, wall });
-                }
-                First::Start(first) => {
-                    state.start_keys.push_back(KeyedStart { key, digest, first, at, wall });
-                }
-            }
-        }
-        state.steps.adopt_merges(file.merges.drain(..));
-        state.cleanups.adopt(file.cleanups.drain(..));
-        // A start a restart cut off is put on its task once its worker shows the terminal.
-        for kept in file.starts.drain(..) {
-            state.next_start = state.next_start.wrapping_add(1);
-            let id = state.next_start;
-            state.starting.push(Starting {
-                id,
-                term: kept.term,
-                task: Some(kept.task),
-                agent: true,
-                since: now,
-                answered: true,
-                conversation: kept.conversation,
-            });
-        }
-        state.kept_starts = projects::starts_kept(&state);
-        state.projects = Projects::restore(file);
-    }
-
-    /// Every project and watched terminal as it is now, as the store writes it after `through`
-    /// changes.
-    #[must_use]
-    pub fn projects_file(&self, through: u64) -> ProjectsFile {
-        let state = self.inner.state.lock();
-        let watched = state.watched.values().map(|(w, _)| *w).collect();
-        let mut file = state.projects.file(watched, through);
-        let changes = state.project_keys.iter().map(|k| KeptKey {
-            key: k.key.clone(),
-            digest: *k.digest.as_bytes(),
-            first: First::Change(k.answer.clone()),
-            at: k.wall,
-        });
-        let starts =
-            state.start_keys.iter().map(|k| start_kept(&k.key, k.digest, &k.first, k.wall));
-        file.keys = changes.chain(starts).collect();
-        file.keys.sort_by_key(|k| k.at);
-        file.merges = state.steps.merges();
-        file.cleanups = state.cleanups.kept();
-        file.starts = projects::starts_kept(&state);
-        drop(state);
-        file
-    }
-
-    /// Every change to the projects from now on, in order, for the store to keep: what a
-    /// change carries is sent under the hub's lock, never the whole state. A second call
-    /// takes the changes from the first.
-    #[must_use]
-    pub fn keep_projects(&self) -> mpsc::UnboundedReceiver<Keep> {
-        let (tx, rx) = mpsc::unbounded_channel();
-        self.inner.state.lock().keeper = Some(tx);
-        rx
-    }
-
-    /// Take up the reports the store kept on their way to the agents, before any link is
+    /// Take up the words the store kept on their way to the agents, before any link is
     /// served: what was outstanding goes again as each worker registers.
     pub(crate) fn adopt_deliveries(&self, kept: crate::deliver::Kept) {
         let mut state = self.inner.state.lock();
@@ -545,7 +404,7 @@ impl Hub {
         let hub = self.downgrade();
         async move {
             while changes.changed().await.is_ok() {
-                tokio::time::sleep(crate::store::PROJECTS_SETTLE).await;
+                tokio::time::sleep(crate::store::SETTLE).await;
                 changes.mark_unchanged();
                 let Some(kept) = hub.upgrade().map(|h| h.deliveries_file()) else { return };
                 if let Err(e) = store.save(&kept).await {
@@ -553,11 +412,6 @@ impl Hub {
                 }
             }
         }
-    }
-
-    /// Stop sending the store changes: it writes what it has and finishes.
-    pub fn stop_keeping(&self) {
-        self.inner.state.lock().keeper = None;
     }
 
     /// Deliver reports to the agents they are for, when each falls due, until the hub is gone.
@@ -590,23 +444,15 @@ impl Hub {
         listing(&self.inner.state.lock())
     }
 
-    /// The projects of `snapshot` in parts that each fit a link frame.
-    #[must_use]
-    pub fn project_parts(snapshot: &mut Snapshot) -> Vec<ProjectsPart> {
-        projects::parts(snapshot.seq, std::mem::take(&mut snapshot.projects))
-    }
-
-    /// The directory and every project, read together.
+    /// The directory, read with the event it is current to.
     #[must_use]
     pub fn state(&self) -> Snapshot {
-        let mut guard = self.inner.state.lock();
-        let state = &mut *guard;
-        let directory = listing(state);
-        let projects = Self::projects_snapshot(state);
+        let state = self.inner.state.lock();
+        let directory = listing(&state);
         // Events are logged under the state lock, so none falls between this and the read.
         let seq = self.inner.log.lock().next.saturating_sub(1);
-        drop(guard);
-        Snapshot { seq, directory, projects }
+        drop(state);
+        Snapshot { seq, directory }
     }
 
     /// How many [`Verb::Events`] are waiting.
@@ -683,7 +529,6 @@ impl Hub {
             .collect();
         for old in &replaced {
             tracing::info!(worker = %old, name = %info.name, by = %worker, "worker replaced");
-            Self::cleanups_moved(&mut state, *old, worker);
             if let Some(gone) = state.workers.remove(old) {
                 self.close_all(&mut state, *old, &gone.sessions);
                 self.happen(Happening::WorkerRemoved { worker: *old, name: gone.info.name });
@@ -726,16 +571,10 @@ impl Hub {
             state.workers.insert(worker, entry);
             (true, Vec::new(), opened)
         };
-        // A start whose worker was away, one a restart cut off among them, counts its grace
-        // from the worker's return.
-        let back = tokio::time::Instant::now();
-        for start in state.starting.iter_mut().filter(|s| s.term.worker == worker && s.answered) {
-            start.since = back;
-        }
         let (name, liveness) = (info.name.clone(), info.liveness);
         self.happen(Happening::Worker { worker, name: name.clone(), liveness });
         self.announce(FromServer::Worker(info));
-        self.machine_seen(&mut state, worker, &name, Seen::Back);
+        self.machine_seen(&mut state, worker, &name, true);
         if !replaced.is_empty() {
             self.announce(FromServer::Directory(listing(&state)));
         }
@@ -751,26 +590,19 @@ impl Hub {
                 .collect();
             ladder::programs_back(&mut state.board, worker, &waiting);
         }
-        // After a restart the server knew none of the worker's sessions: what its tasks worked
-        // in and it no longer has ended while the server was away.
-        let open: Vec<SessionId> = state
+        let mut open: Vec<SessionId> = state
             .workers
             .get(&worker)
             .map(|e| e.sessions.iter().map(|s| s.id).collect())
             .unwrap_or_default();
-        let ended = state.projects.reconcile(worker, &open, WallMs::now());
-        self.projects_moved(&mut state, ended);
-        self.free_closed(&mut state, worker);
-        self.clean_up_on(&mut state, worker);
-        self.origin_on(&state, worker);
+        open.extend(
+            state.board.live_seats().into_iter().filter(|t| t.worker == worker).map(|t| t.session),
+        );
         for summary in opened {
-            let term = TermRef { worker, session: summary.id };
             self.happen(Happening::SessionOpened { worker, summary: Box::new(summary) });
-            self.adopt(&mut state, term);
-            self.repo_seen(&mut state, term);
         }
-        // What was sent to a terminal that closed while the server was away waits for its
-        // node's next; what was sent to its agents and never handed over goes again.
+        // What was sent to a seat that closed while the server was away waits for its agent's
+        // next; what was sent and never handed over goes again.
         for term in state.deliveries.gone_on(worker, &open) {
             state.deliveries.closed(term);
         }
@@ -783,10 +615,6 @@ impl Hub {
             self.inner.deliver.notify_one();
         }
         self.unpark_deliveries(&mut state);
-        // What a restart of the server left under way on it is taken up.
-        self.resume_steps(&mut state, worker);
-        // A lane that stopped for want of a worker, or one a restart left, goes on.
-        self.kick_all(&mut state);
         if reshaped || !replaced.is_empty() {
             self.persist(&state);
         }
@@ -804,45 +632,6 @@ impl Hub {
         self.dispatch_as(Speaker::Person, key, verb).await
     }
 
-    /// Whether an agent's `speaker` may report on `task` of `project`: only from that task's
-    /// own terminal, proven by its token, so no agent speaks for another's task.
-    fn reports_own(
-        &self,
-        speaker: Speaker,
-        project: &ProjectId,
-        task: TaskId,
-    ) -> Result<(), Outcome> {
-        let Some(session) = speaker.proven() else {
-            return Err(error(
-                ErrorCode::Forbidden,
-                &format!(
-                    "an agent reports only on its own task, from the terminal the server started \
-                     for it; this caller shows no {} for its terminal",
-                    slopty_proto::ctl::SESSION_TOKEN_ENV
-                ),
-            ));
-        };
-        let on = {
-            let state = self.inner.state.lock();
-            term_of(&state, session).and_then(|term| state.projects.working_on(term))
-        };
-        match on {
-            Some((p, Some(t))) if p == *project && t == task => Ok(()),
-            Some((p, Some(t))) => Err(error(
-                ErrorCode::Forbidden,
-                &format!("this terminal works on task {t} of {p}, not task {task} of {project}"),
-            )),
-            Some((p, None)) => Err(error(
-                ErrorCode::Forbidden,
-                &format!("this terminal is the orchestrator of {p}, which reports to no one"),
-            )),
-            None => Err(error(
-                ErrorCode::Forbidden,
-                "this terminal works on no task now, so it reports on none",
-            )),
-        }
-    }
-
     /// Whether an agent may type into `term`: a shell or a program, not another agent's TUI.
     ///
     /// Keys typed into Claude Code reach more than its prompt: `!` runs a command unasked,
@@ -857,27 +646,7 @@ impl Hub {
         Err(error(
             ErrorCode::Forbidden,
             "an agent's TUI takes keys from the person only: an agent reaches another with \
-             task_report or Claude Code's own messages to its session",
-        ))
-    }
-
-    /// Whether an agent may start what `verb` starts with the environment it names. A variable
-    /// that moves what runs or what it may do (where programs and settings are found, what a
-    /// runtime loads, which worker socket answers its hooks, which server or task it speaks
-    /// for) would give the started program more than its starter has, so an agent names none.
-    fn env_of_agent(verb: &Verb) -> Result<(), Outcome> {
-        let (Verb::SpawnAgent { env, .. } | Verb::OpenTerminal { env, .. }) = verb else {
-            return Ok(());
-        };
-        let Some(name) = env.iter().map(|(name, _)| name.as_str()).find(|n| steers(n)) else {
-            return Ok(());
-        };
-        Err(error(
-            ErrorCode::Limit,
-            &format!(
-                "{name} in an agent's start may give what it starts more than the agent has, so \
-                 an agent's start names none"
-            ),
+             agent_tell",
         ))
     }
 
@@ -888,21 +657,19 @@ impl Hub {
             Speaker::Agent | Speaker::Proven(_) => Caller::Agent,
             Speaker::Shell(session) | Speaker::ProvenShell(session) => {
                 let state = self.inner.state.lock();
-                let agent_here = term_of(&state, session)
-                    .is_some_and(|term| state.board.agent_at(term).is_some());
-                let working = term_of(&state, session)
-                    .is_none_or(|term| state.projects.working_on(term).is_some());
-                let driven = projects::driven(&state, session);
-                drop(state);
+                let term = term_of(&state, session);
+                let agent_here = term.is_some_and(|term| state.board.agent_at(term).is_some());
                 // A terminal the server does not know is nobody's to vouch for.
-                if agent_here || working || driven { Caller::Agent } else { Caller::Person }
+                let agent = term.is_none() || agent_here || state.agents.driven(session);
+                drop(state);
+                if agent { Caller::Agent } else { Caller::Person }
             }
         }
     }
 
-    /// Answer a verb from `speaker`: the directory verbs from the registry, the projects from
-    /// the store, the rest forwarded to the owning worker with `key` and its reply returned.
-    /// Never fails; a failure is an [`Outcome::Error`].
+    /// Answer a verb from `speaker`: the directory and the agents' verbs here, the rest
+    /// forwarded to the owning worker with `key` and its reply returned. Never fails; a
+    /// failure is an [`Outcome::Error`].
     pub async fn dispatch_as(
         &self,
         speaker: Speaker,
@@ -910,16 +677,9 @@ impl Hub {
         verb: Verb,
     ) -> Outcome {
         let caller = self.caller(speaker);
-        let from = speaker.proven();
-        let verb = match caller {
-            Caller::Agent => {
-                let scoped = projects::agent_scope(&self.inner.state.lock(), from, verb);
-                match scoped {
-                    Ok(verb) => verb,
-                    Err(refused) => return refused,
-                }
-            }
-            Caller::Person => verb,
+        let from = match caller {
+            Caller::Agent => self.thread_of(speaker),
+            Caller::Person => None,
         };
         if caller == Caller::Agent
             && let Verb::SendInput { term, .. } = &verb
@@ -927,21 +687,11 @@ impl Hub {
             if let Err(refused) = self.types_into_shell(*term) {
                 return refused;
             }
-            projects::watch(&mut self.inner.state.lock(), *term, |w| {
-                w.drove.get_or_insert(Drove::Typed);
-            });
+            self.inner.state.lock().agents.drove(term.session);
         }
-        if caller == Caller::Agent
-            && let Verb::TaskReport { project, task, .. } = &verb
-            && let Err(refused) = self.reports_own(speaker, project, *task)
-        {
-            return refused;
-        }
-        if caller == Caller::Agent
-            && let Err(refused) = Self::env_of_agent(&verb)
-        {
-            return refused;
-        }
+        let person_only = |what: &str| {
+            error(ErrorCode::Forbidden, &format!("{what} is the person's, never an agent's"))
+        };
         match verb {
             Verb::ListWorkers => Outcome::Workers(self.directory()),
             Verb::ListTerminals { worker } => self.terminals(worker),
@@ -950,149 +700,85 @@ impl Hub {
             }
             Verb::ForgetWorker { worker } => self.forget_worker(key, worker),
             Verb::Wake { worker } => self.wake(worker).await,
-            Verb::ProjectList => Outcome::Projects(self.inner.state.lock().projects.list()),
-            Verb::ProjectStatus { project, since, timeout_ms } => {
-                self.project_status(&project, since, timeout_ms).await
-            }
-            Verb::TaskSpawn { project, task, launch } => {
-                let launch = self.launch_for(&project, task, launch);
-                self.task_spawn(caller, key, project, task, launch).await
-            }
-            Verb::TaskRestart { project, task, agent, worker } => {
-                self.task_restart(caller, key, project, task, (agent, worker)).await
-            }
             Verb::WorkerFacts { worker } => self.worker_facts(worker).await,
-            Verb::TaskGet { project, task } => self.task_get(&project, task),
-            Verb::WorkingOn { session } => self.working_on(session),
-            verb @ Verb::SpawnAgent { .. } => self.spawn_agent(caller, from, key, verb).await,
-            verb @ Verb::OpenTerminal { .. } => self.open_terminal(caller, from, key, verb).await,
+            Verb::AgentStart(start) => self.agent_start(from, key, *start).await,
+            Verb::AgentTell { agent, text } => self.agent_tell(caller, from, agent, &text),
+            Verb::AgentWait { agents, all, timeout_ms } => {
+                self.agent_wait(from, &agents, all, timeout_ms).await
+            }
+            Verb::AgentStop { agent } => self.agent_stop(caller, from, agent).await,
+            Verb::Agents => self.agents(),
+            Verb::BranchBring { from: on, repo, branch, to, into, name } => {
+                self.branch_bring((on, repo, branch), (to, into, name)).await
+            }
+            verb @ Verb::OpenTerminal { .. } => {
+                let opened = self.forward(key, verb).await;
+                if caller == Caller::Agent
+                    && let Outcome::Opened(term) | Outcome::OpenedIn { term, .. } = &opened
+                {
+                    self.inner.state.lock().agents.drove(term.session);
+                }
+                opened
+            }
             // Only the person answers a permission, so only the person's read holds prompts.
             Verb::ReadThread { of, view, after, .. } => match self.thread_on(of) {
                 Ok(of) => {
                     let hold = caller == Caller::Person;
-                    self.forward(key, Verb::ReadThread { of, view, after, hold }).await
+                    let read = self.forward(key, Verb::ReadThread { of, view, after, hold }).await;
+                    if let (Some(reader), ThreadOf::On { thread, .. }) = (from, of) {
+                        self.inner.state.lock().deliveries.seen(reader, thread);
+                    }
+                    read
                 }
                 Err(refused) => refused,
             },
-            Verb::AnswerRequest { .. } if caller == Caller::Agent => Outcome::Error {
-                code: ErrorCode::Forbidden,
-                message: "a request is the person's to answer, never an agent's; it waits in \
-                          the agent's thread and on the person's devices"
-                    .to_owned(),
-            },
+            Verb::AnswerRequest { .. } if caller == Caller::Agent => error(
+                ErrorCode::Forbidden,
+                "a request is the person's to answer, never an agent's; it waits in the \
+                 agent's thread and on the person's devices",
+            ),
             Verb::AnswerRequest { of, ask, choice, message } => match self.thread_on(of) {
                 Ok(of) => self.forward(key, Verb::AnswerRequest { of, ask, choice, message }).await,
                 Err(refused) => refused,
             },
             Verb::SendMessage { .. } if caller == Caller::Agent => error(
                 ErrorCode::Forbidden,
-                "only the person sends a thread a message this way; an orchestrator tells its \
-                 tasks with task_tell",
+                "only the person sends a thread a message this way; an agent tells another \
+                 with agent_tell",
             ),
             Verb::SendMessage { of, text } => match self.thread_on(of) {
                 Ok(of) => self.forward(key, Verb::SendMessage { of, text }).await,
                 Err(refused) => refused,
             },
-            Verb::ResumeThread { .. } if caller == Caller::Agent => error(
-                ErrorCode::Forbidden,
-                "an ended agent is the person's to resume, never an agent's",
-            ),
-            Verb::ResumeThread { of } => match self.thread_on(of) {
-                Ok(of) => self.forward(key, Verb::ResumeThread { of }).await,
-                Err(refused) => refused,
-            },
-            Verb::RestartWorker { .. } if caller == Caller::Agent => error(
-                ErrorCode::Forbidden,
-                "a machine's worker is the person's to restart, never an agent's",
-            ),
-            Verb::CloneRepo { .. } | Verb::BundleBranch { .. } | Verb::FetchBundle { .. } => error(
-                ErrorCode::Forbidden,
-                "the server clones and carries branches for tasks itself; task_start and \
-                     task_report do it",
-            ),
-            Verb::ProjectDelete { .. } if caller == Caller::Agent => {
-                error(ErrorCode::Forbidden, "a project is the person's to let go, never an agent's")
+            Verb::RestartWorker { .. } if caller == Caller::Agent => {
+                person_only("restarting a machine's worker")
             }
-            verb @ (Verb::TaskPush { .. }
-            | Verb::ProjectLand { .. }
-            | Verb::ProjectResume { .. }
-            | Verb::ProjectDelete { .. }) => self.once(caller, key, verb).await,
-            Verb::Verify { .. }
-            | Verb::Rebase { .. }
-            | Verb::FastForward { .. }
-            | Verb::CatchUp { .. }
-            | Verb::LandPull { .. }
-            | Verb::TestDiff { .. } => error(
-                ErrorCode::Forbidden,
-                "the server checks and merges tasks itself, one at a time; a task's done report \
-                 starts its checks, and the person's task merge lands it",
-            ),
-            Verb::RemoveWorktree { .. } => error(
-                ErrorCode::Forbidden,
-                "the server frees a finished task's worktree itself, once its agent is closed",
-            ),
-            Verb::DropBranches { .. } => error(
-                ErrorCode::Forbidden,
-                "the server drops the branches it named itself, once their work has landed",
-            ),
-            Verb::BranchOff { .. } => error(
-                ErrorCode::Forbidden,
-                "the server makes a project's own branch itself, when it is made with no target",
-            ),
-            Verb::OnOrigin { .. } => error(
-                ErrorCode::Forbidden,
-                "the server asks what the forge holds itself, when it looks for merged work \
-                 pushed outside Slopty",
-            ),
-            Verb::Settings { .. } if caller == Caller::Agent => error(
-                ErrorCode::Forbidden,
-                "a machine's settings are the person's to read and change, never an agent's",
-            ),
+            Verb::Settings { .. } if caller == Caller::Agent => {
+                person_only("reading and changing a machine's settings")
+            }
             Verb::Settings { of: None, edits } => self.own_settings(edits).await,
-            Verb::StartThread { .. } => error(
+            Verb::CloneRepo { .. }
+            | Verb::BundleBranch { .. }
+            | Verb::FetchBundle { .. }
+            | Verb::StartThread { .. } => error(
                 ErrorCode::Forbidden,
-                "the server starts a task's thread itself; task_start with an agent asks for it",
+                "the server sends this itself: agent_start clones and starts, branch_bring \
+                 carries a branch",
             ),
-            verb @ Verb::ProjectCreate { .. } => match self.goal_target(verb).await {
-                Ok(verb) => self.project_change(caller, key, &verb),
-                Err(refused) => refused,
-            },
-            verb @ (Verb::ProjectSet { .. }
-            | Verb::ProjectProgress { .. }
-            | Verb::TaskCreate { .. }
-            | Verb::TaskUpdate { .. }
-            | Verb::TaskReport { .. }
-            | Verb::TaskTell { .. }
-            | Verb::TaskMerge { .. }) => self.project_change(caller, key, &verb),
             other => self.forward(key, other).await,
         }
     }
 
-    /// A push, a goal landed or a project let go, made once under `key`: a repeat answers as the
-    /// first did.
-    async fn once(&self, caller: Caller, key: Option<IdempotencyKey>, verb: Verb) -> Outcome {
-        if let Some(key) = &key {
-            let mut state = self.inner.state.lock();
-            if let Some(answer) = keyed(&mut state, caller, key, &verb) {
-                return answer;
-            }
-        }
-        let outcome = match &verb {
-            Verb::TaskPush { project, task } => self.task_push(caller, (project, *task)).await,
-            Verb::ProjectLand { project, into } => {
-                self.project_land(caller, project, into.clone()).await
-            }
-            Verb::ProjectResume { project } => self.project_resume(caller, project).await,
-            Verb::ProjectDelete { project } => self.project_delete(project),
-            _ => error(
-                ErrorCode::Invalid,
-                "only a push, a landing, a resume or a project let go is made once here",
-            ),
+    /// The thread of the agent `speaker` speaks for, when the server knows it: the one whose
+    /// agent runs or is seated at the terminal it proved or named.
+    fn thread_of(&self, speaker: Speaker) -> Option<slopty_proto::thread::ThreadId> {
+        let session = match speaker {
+            Speaker::Proven(s) | Speaker::ProvenShell(s) | Speaker::Shell(s) => s,
+            Speaker::Person | Speaker::Agent => return None,
         };
-        if let Some(key) = key {
-            remember(&mut self.inner.state.lock(), caller, key, &verb, &outcome);
-        }
-        outcome
+        let state = self.inner.state.lock();
+        let term = term_of(&state, session)?;
+        state.board.thread_at(term)
     }
 
     /// The events from `since` (from now when absent) that pass `filter`, waiting up to
@@ -1142,10 +828,7 @@ impl Hub {
                 break;
             }
             if filter.admits(&event.what) {
-                bytes = bytes.saturating_add(match &event.what {
-                    Happening::Project(update) => update.approx_bytes(),
-                    _ => 1024,
-                });
+                bytes = bytes.saturating_add(1024);
                 page.events.push(event.clone());
             }
         }
@@ -1299,7 +982,6 @@ impl Hub {
             }
             Verb::CloneRepo { .. } => CLONE_TIMEOUT,
             Verb::BundleBranch { .. } | Verb::FetchBundle { .. } => BUNDLE_TIMEOUT,
-            Verb::OnOrigin { .. } => ORIGIN_TIMEOUT,
             _ => FORWARD_TIMEOUT,
         };
         let Some(worker) = target(&verb) else {
@@ -1391,85 +1073,18 @@ impl Hub {
         }
     }
 
-    /// A terminal ended: logged, and an agent working in it is gone from its task; what was
-    /// sent to it and never handed over waits for its node's next terminal.
+    /// A terminal ended: logged; what was sent to it and never handed over waits for its
+    /// agent's next seat.
     fn session_closed(&self, state: &mut State, term: TermRef) {
         self.happen(Happening::SessionClosed { term });
         if let Some(entry) = state.workers.get_mut(&term.worker) {
             entry.branches.remove(&term.session);
         }
         state.deliveries.closed(term);
-        projects::unwatch(state, term.session);
-        let updates = state.projects.session_ended(term, WallMs::now());
-        self.projects_moved(state, updates);
-        self.free_closed(state, term.worker);
+        state.agents.closed(term.session);
     }
 
-    /// Log and push each project change, and send the store what it keeps. Called under the
-    /// state lock, as [`Self::happen`] is, so the store and every link see the changes in the
-    /// order they were made. A merged task with a worktree whose agent's terminal is closed
-    /// already, however it merged (the queue, its pull request, the person), frees it now
-    /// ([`Self::free_closed`]).
-    fn projects_moved(&self, state: &mut State, mut changes: Vec<Change>) {
-        changes.extend(self.hear(state));
-        if changes.is_empty() {
-            return;
-        }
-        let mut freeing: Vec<WorkerId> = Vec::new();
-        for task in changes.iter().filter_map(|c| c.kept.task.as_ref()) {
-            if let (slopty_proto::project::TaskState::Merged, Some(_), Some(a)) =
-                (task.state, &task.worktree, &task.assignment)
-                && !freeing.contains(&a.term.worker)
-            {
-                freeing.push(a.term.worker);
-            }
-        }
-        for change in changes {
-            ladder::tell_project(state, &change.kept);
-            if let (Some(task), Some(entry)) = (&change.kept.task, &change.kept.entry)
-                && ladder::ready_to_merge(task)
-                && matches!(
-                    entry.what,
-                    slopty_proto::project::Moment::State {
-                        to: slopty_proto::project::TaskState::Done,
-                        ..
-                    }
-                )
-            {
-                self.ready_soon(state, &change.kept.project, entry.seq);
-            }
-            self.happen(Happening::Project(Box::new(state.projects.pushed(&change.kept))));
-            if change.durable {
-                projects::keep(state, Keep::Project(Box::new(change.kept)));
-            }
-        }
-        for worker in freeing {
-            self.free_closed(state, worker);
-        }
-        self.unpark_deliveries(state);
-    }
-
-    /// A task of `project` turned ready to merge at the timeline's `entry`: the person hears how
-    /// many wait once [`ladder::READY_SETTLE`] has passed, in one notice for every task that
-    /// turned ready meanwhile.
-    fn ready_soon(&self, state: &mut State, project: &ProjectId, entry: u64) {
-        if !state.board.ready_due(project, entry) {
-            return;
-        }
-        let (hub, project) = (self.downgrade(), project.clone());
-        tokio::spawn(async move {
-            tokio::time::sleep(ladder::READY_SETTLE).await;
-            let Some(hub) = hub.upgrade() else { return };
-            let mut guard = hub.inner.state.lock();
-            let state = &mut *guard;
-            if let Some(entry) = state.board.ready_now(&project) {
-                ladder::tell_ready(state, &project, entry);
-            }
-            drop(guard);
-        });
-    }
-
-    /// A node may have a terminal now for reports that waited for one.
+    /// An agent may have a seat now for words that waited for one.
     fn unpark_deliveries(&self, state: &mut State) {
         if state.deliveries.unpark() {
             self.inner.deliver.notify_one();
@@ -1522,10 +1137,10 @@ impl Hub {
         self.announce(FromServer::Worker(info));
         self.persist(&state);
         drop(state);
-        // Its tasks hear it went away only once it stays away ([`Self::expire`]): a worker that
-        // restarts, as every update does, is back well within that, and nothing needs saying.
-        // A lease dropped as the runtime shuts down has no timer to run; the next start lists
-        // the worker as gone anyway.
+        // Its agents' parents hear it went away only once it stays away ([`Self::expire`]): a
+        // worker that restarts, as every update does, is back well within that, and nothing
+        // needs saying. A lease dropped as the runtime shuts down has no timer to run; the
+        // next start lists the worker as gone anyway.
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             let hub = Arc::downgrade(&self.inner);
             runtime.spawn(async move {
@@ -1535,35 +1150,6 @@ impl Hub {
                 }
             });
         }
-    }
-
-    /// The machine of `worker` went away (it stayed away [`GONE_AFTER`]) or came back: its
-    /// tasks' timelines say so, and each task's orchestrator hears of it, at once.
-    fn machine_seen(&self, state: &mut State, worker: WorkerId, name: &str, seen: Seen) {
-        let (changes, told) = state.projects.machine_seen(worker, name, seen, WallMs::now());
-        self.projects_moved(state, changes);
-        if told.is_empty() {
-            return;
-        }
-        let at = tokio::time::Instant::now();
-        for (project, task) in told {
-            let (kind, words) = match seen {
-                Seen::Away => (
-                    crate::deliver::Kind::Stuck,
-                    format!(
-                        "task {task}'s machine {name} stopped answering, with its agent at work \
-                         there. Its work waits for the machine to come back; to go on without \
-                         it, start the task again on another machine (task_start)."
-                    ),
-                ),
-                Seen::Back => (
-                    crate::deliver::Kind::NeedsInput,
-                    format!("task {task}'s machine {name} answers again; its agent goes on."),
-                ),
-            };
-            state.deliveries.notice((project, None), task, kind, &words, at);
-        }
-        self.inner.deliver.notify_one();
     }
 
     fn expire(&self, worker: WorkerId, generation: u64) {
@@ -1577,7 +1163,7 @@ impl Hub {
         let info = entry.info.clone();
         let name = info.name.clone();
         self.happen(Happening::Worker { worker, name: name.clone(), liveness: Liveness::Gone });
-        self.machine_seen(&mut state, worker, &name, Seen::Away);
+        self.machine_seen(&mut state, worker, &name, false);
         drop(state);
         self.announce(FromServer::Worker(info));
     }
@@ -1692,90 +1278,38 @@ impl Lease {
                         (was, summary.state)
                     {
                         hub.happen(Happening::SessionExited { term, status });
-                        // The program in a task's terminal ended: the node above hears. An
-                        // orchestrator's ending is on its project's timeline.
-                        state.projects.exited(term);
-                        let said = state.projects.orchestrator_exited(term, WallMs::now());
-                        hub.projects_moved(&mut state, said);
                     }
                 } else {
                     entry.sessions.push(summary.clone());
-                    let term = TermRef { worker, session: summary.id };
                     hub.happen(Happening::SessionOpened { worker, summary: Box::new(summary) });
-                    hub.adopt(&mut state, term);
                     hub.unpark_deliveries(&mut state);
                 }
-                hub.repo_seen(&mut state, term);
             }
             ToServer::SessionClosed { session, .. } => {
                 entry.sessions.retain(|s| s.id != session);
                 ladder::program_moved(&mut state.board, TermRef { worker, session }, false, None);
                 hub.session_closed(&mut state, TermRef { worker, session });
             }
-            ToServer::Facts(facts) => entry.facts = crate::placement::bounded(facts),
+            ToServer::Facts(facts) => entry.facts = agents::bounded(facts),
             ToServer::Cloning { clone, phase, percent } => {
-                hub.clone_moved(&mut state, clone, phase, percent);
+                tracing::debug!(%worker, clone, phase, ?percent, "a clone moves");
             }
-            ToServer::Report(report) => {
-                let term = TermRef { worker, session: report.session() };
-                match &report {
-                    AgentReport::Branch(branch) => {
-                        if branch.worktree.is_none() {
-                            entry.branches.remove(&branch.session);
-                        } else {
-                            entry.branches.insert(branch.session, branch.clone());
-                        }
-                    }
-                    AgentReport::Delivered { batch, .. } => {
-                        hub.delivered(&mut state, term, *batch);
-                        return;
-                    }
-                    AgentReport::PermissionMode { mode, .. } => {
-                        hub.permission_mode(&mut state, term, mode);
-                    }
-                    AgentReport::Loosened { found, .. } => {
-                        hub.loosened(&mut state, term, found);
-                        return;
-                    }
-                    AgentReport::Resumed { .. } => {
-                        hub.resumed(&mut state, term);
-                        return;
-                    }
-                    AgentReport::SubagentStarted { .. }
-                    | AgentReport::SubagentStopped { .. }
-                    | AgentReport::NativeTask { .. } => {}
+            ToServer::Report(AgentReport::Branch(branch)) => {
+                if branch.worktree.is_none() {
+                    entry.branches.remove(&branch.session);
+                } else {
+                    entry.branches.insert(branch.session, branch);
                 }
-                let moved = state.projects.report(worker, &report, WallMs::now());
-                hub.projects_moved(&mut state, moved);
+            }
+            ToServer::Report(AgentReport::Delivered { session, batch }) => {
+                hub.delivered(&mut state, TermRef { worker, session }, batch);
             }
             ToServer::Threads(frame) => {
-                let now = WallMs::now();
-                let mut moved = Vec::new();
                 state.board.take(worker, frame);
-                hub.follow_orchestrators(&mut state, worker);
-                for (seat, agent, settings) in state.board.settings_moves(worker) {
-                    let term = TermRef { worker, session: seat };
-                    hub.held_settings(&mut state, term, &agent, &settings);
-                }
-                for (term, status) in state.board.seat_moves(worker) {
-                    hub.adopt(&mut state, term);
-                    moved.extend(state.projects.agent_status(term, &status, now));
-                }
                 for (terminal, agent) in state.board.rung_moves(worker) {
                     hub.happen(Happening::Rung { worker, terminal, agent });
                 }
-                // A subagent of an agent with no hooks is a native as one a hook reports.
-                for report in state.board.native_moves(worker) {
-                    moved.extend(state.projects.report(worker, &report, now));
-                }
-                let pulls = state.board.pulls(worker);
-                let (seen, merged) = state.projects.pulls_seen(worker, &pulls, now);
-                moved.extend(seen);
-                hub.projects_moved(&mut state, moved);
-                for (project, task) in merged {
-                    hub.catch_up(project, task);
-                }
-                hub.threads_ended(&mut state, worker, now);
+                hub.rows_moved(&mut state);
             }
             ToServer::Hello { .. }
             | ToServer::Request { .. }
@@ -1789,152 +1323,6 @@ impl Lease {
     }
 }
 
-/// Whether the environment variable `name` moves what a started program runs or may do:
-/// where programs, shells' startup files and settings are found, what a runtime or the
-/// dynamic loader loads, and Slopty's, Claude Code's and Anthropic's own variables.
-fn steers(name: &str) -> bool {
-    const NAMES: [&str; 7] =
-        ["PATH", "HOME", "ZDOTDIR", "BASH_ENV", "ENV", "SHELL", "XDG_CONFIG_HOME"];
-    const PREFIXES: [&str; 8] =
-        ["SLOPTY_", "CLAUDE", "ANTHROPIC_", "NODE_", "BUN_", "DYLD_", "LD_", "GIT_CONFIG"];
-    let upper = name.to_ascii_uppercase();
-    NAMES.contains(&upper.as_str()) || PREFIXES.iter().any(|p| upper.starts_with(p))
-}
-
-/// A verb's digest as `caller` sent it: equal verbs from the same side, equal digests. A key is
-/// its caller's: an agent repeating the person's key is refused as a key used with other
-/// arguments, never given the person's answer or start.
-fn digest(caller: Caller, verb: &Verb) -> blake3::Hash {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(&[u8::from(caller == Caller::Agent)]);
-    hasher.update(&slopty_proto::codec::encode_body(verb).unwrap_or_default());
-    hasher.finalize()
-}
-
-/// The answer to a repeat of a keyed project change: the first one's (what it named, read
-/// again), or a refusal of the key used with other arguments; `None` for a key not used yet.
-fn keyed(state: &mut State, caller: Caller, key: &IdempotencyKey, verb: &Verb) -> Option<Outcome> {
-    let now = tokio::time::Instant::now();
-    state.project_keys.retain(|k| now.duration_since(k.at) < KEY_LIFETIME);
-    let first = state.project_keys.iter().find(|k| k.key == *key)?;
-    if first.digest != digest(caller, verb) {
-        return Some(key.reused());
-    }
-    Some(match &first.answer {
-        Remembered::Outcome(outcome) => outcome.clone(),
-        Remembered::Task(project, task) => match state.projects.task(project, *task) {
-            Ok(task) => Outcome::Task(Box::new(task.clone())),
-            Err(refused) => refused,
-        },
-        Remembered::Status(project) => {
-            let project = project.clone();
-            match Hub::status_of(state, &project, None) {
-                Ok(status) => Outcome::Project(Box::new(status)),
-                Err(refused) => refused,
-            }
-        }
-    })
-}
-
-/// Keep what a keyed project change answered, for a repeat of it.
-fn remember(
-    state: &mut State,
-    caller: Caller,
-    key: IdempotencyKey,
-    verb: &Verb,
-    outcome: &Outcome,
-) {
-    if state.project_keys.len() >= KEYS_REMEMBERED {
-        state.project_keys.pop_front();
-    }
-    let project = match verb {
-        Verb::TaskCreate { project, .. }
-        | Verb::TaskUpdate { project, .. }
-        | Verb::TaskSpawn { project, .. }
-        | Verb::TaskRestart { project, .. }
-        | Verb::TaskTell { project, .. }
-        | Verb::TaskReport { project, .. }
-        | Verb::TaskMerge { project, .. }
-        | Verb::TaskPush { project, .. }
-        | Verb::ProjectLand { project, .. }
-        | Verb::ProjectResume { project } => Some(project),
-        _ => None,
-    };
-    let answer = match (outcome, project) {
-        (Outcome::Task(task), Some(project)) => Remembered::Task(project.clone(), task.id),
-        (Outcome::Project(status), _) => Remembered::Status(status.project.id.clone()),
-        (other, _) => Remembered::Outcome(other.clone()),
-    };
-    let (at, wall, digest) = (tokio::time::Instant::now(), WallMs::now(), digest(caller, verb));
-    let kept = KeptKey {
-        key: key.clone(),
-        digest: *digest.as_bytes(),
-        first: First::Change(answer.clone()),
-        at: wall,
-    };
-    state.project_keys.push_back(Keyed { key, digest, answer, at, wall });
-    projects::keep(state, Keep::Key(Box::new(kept)));
-}
-
-/// A repeat of a keyed start: what the first start was answered, or the start it forwarded
-/// while its answer is not sure, or a refusal of the key used with other arguments; `None` for
-/// a key not used yet. `sent` is the digest of what the caller sent, before the hub chose
-/// anything.
-fn start_again(
-    state: &mut State,
-    key: &IdempotencyKey,
-    sent: blake3::Hash,
-) -> Option<Result<Again, Outcome>> {
-    let now = tokio::time::Instant::now();
-    state.start_keys.retain(|k| now.duration_since(k.at) < KEY_LIFETIME);
-    let first = state.start_keys.iter().find(|k| k.key == *key)?;
-    if first.digest != sent {
-        return Some(Err(key.reused()));
-    }
-    Some(Ok(match &first.first {
-        StartKept::Forwarded(verb) => Again::Forward((**verb).clone()),
-        StartKept::Answered(outcome) => Again::Answer(outcome.clone()),
-    }))
-}
-
-/// Keep what a keyed start forwarded for `sent`, for a repeat of it.
-fn keep_start(state: &mut State, key: IdempotencyKey, sent: blake3::Hash, forwarded: &Verb) {
-    if state.start_keys.len() >= KEYS_REMEMBERED {
-        state.start_keys.pop_front();
-    }
-    let (at, wall) = (tokio::time::Instant::now(), WallMs::now());
-    let first = StartKept::Forwarded(Box::new(forwarded.clone()));
-    let kept = start_kept(&key, sent, &first, wall);
-    state.start_keys.push_back(KeyedStart { key, digest: sent, first, at, wall });
-    projects::keep(state, Keep::Key(Box::new(kept)));
-}
-
-/// A keyed start as the store keeps it.
-fn start_kept(key: &IdempotencyKey, sent: blake3::Hash, first: &StartKept, at: WallMs) -> KeptKey {
-    KeptKey { key: key.clone(), digest: *sent.as_bytes(), first: First::Start(first.clone()), at }
-}
-
-/// Keep the answer a keyed start was given, in place of the start, when it is sure: an
-/// answer that may have been lost on the way leaves the start to forward again.
-fn start_answered(state: &mut State, key: &IdempotencyKey, outcome: &Outcome) {
-    if maybe_lost(outcome) {
-        return;
-    }
-    if let Some(held) = state.start_keys.iter_mut().find(|k| k.key == *key) {
-        held.first = StartKept::Answered(outcome.clone());
-        let kept = start_kept(key, held.digest, &held.first, held.wall);
-        projects::keep(state, Keep::Key(Box::new(kept)));
-    }
-}
-
-/// An answer that says only that the verb may or may not have been done.
-const fn maybe_lost(outcome: &Outcome) -> bool {
-    matches!(
-        outcome,
-        Outcome::Error { code: ErrorCode::Interrupted | ErrorCode::WorkerUnreachable, .. }
-    )
-}
-
 /// The terminal `session` names, on whichever worker runs it.
 fn term_of(state: &State, session: SessionId) -> Option<TermRef> {
     state
@@ -1942,30 +1330,8 @@ fn term_of(state: &State, session: SessionId) -> Option<TermRef> {
         .values()
         .find(|e| e.sessions.iter().any(|s| s.id == session))
         .map(|e| TermRef { worker: e.info.worker, session })
-        // A task's thread with no terminal of its own, by the seat it was started at.
+        // A thread with no terminal of its own, by the seat it was started at.
         .or_else(|| state.board.seat(session))
-        .or_else(|| state.projects.thread_seat(session))
-}
-
-/// `term`, if given, is a terminal the server knows.
-fn known_term(state: &State, term: Option<TermRef>) -> Result<(), Outcome> {
-    let Some(term) = term else { return Ok(()) };
-    let Some(entry) = state.workers.get(&term.worker) else {
-        return Err(unknown_worker(term.worker));
-    };
-    if entry.sessions.iter().any(|s| s.id == term.session) {
-        Ok(())
-    } else {
-        Err(Outcome::Error {
-            code: ErrorCode::UnknownTerminal,
-            message: format!("no terminal {} on worker {}", term.session, entry.info.name),
-        })
-    }
-}
-
-/// What the status line of the agent in `term` said of its branch.
-fn branch_of(state: &State, term: TermRef) -> Option<AgentBranch> {
-    state.workers.get(&term.worker)?.branches.get(&term.session).cloned()
 }
 
 /// A forwarded request's place on its link, given up when the forward ends.
@@ -1996,26 +1362,13 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::Events { .. }
         | Verb::ForgetWorker { .. }
         | Verb::Wake { .. }
-        | Verb::ProjectCreate { .. }
-        | Verb::ProjectSet { .. }
-        | Verb::ProjectProgress { .. }
-        | Verb::ProjectList
-        | Verb::ProjectStatus { .. }
-        | Verb::TaskCreate { .. }
-        | Verb::TaskUpdate { .. }
-        | Verb::TaskSpawn { .. }
-        | Verb::TaskRestart { .. }
-        | Verb::TaskTell { .. }
-        | Verb::TaskGet { .. }
-        | Verb::WorkingOn { .. }
-        | Verb::TaskReport { .. }
-        | Verb::TaskMerge { .. }
-        | Verb::TaskPush { .. }
-        | Verb::ProjectLand { .. }
-        | Verb::ProjectResume { .. }
-        | Verb::ProjectDelete { .. } => None,
+        | Verb::AgentStart(_)
+        | Verb::AgentTell { .. }
+        | Verb::AgentWait { .. }
+        | Verb::AgentStop { .. }
+        | Verb::Agents
+        | Verb::BranchBring { .. } => None,
         Verb::OpenTerminal { worker, .. }
-        | Verb::SpawnAgent { worker, .. }
         | Verb::ReadFile { worker, .. }
         | Verb::ListDir { worker, .. }
         | Verb::Stat { worker, .. }
@@ -2031,19 +1384,7 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::CloneRepo { worker, .. }
         | Verb::BundleBranch { worker, .. }
         | Verb::FetchBundle { worker, .. }
-        | Verb::Verify { worker, .. }
-        | Verb::Rebase { worker, .. }
-        | Verb::TestDiff { worker, .. }
-        | Verb::FastForward { worker, .. }
-        | Verb::CatchUp { worker, .. }
-        | Verb::OnOrigin { worker, .. }
-        | Verb::LandPull { worker, .. }
-        | Verb::RemoveWorktree { worker, .. }
-        | Verb::DropBranches { worker, .. }
-        | Verb::BranchOff { worker, .. }
         | Verb::RestartWorker { worker }
-        | Verb::PullOf { worker, .. }
-        | Verb::GoalCheck { worker, .. }
         | Verb::StartThread { worker, .. } => Some(*worker),
         // Asked of one worker by the server alone ([`Hub::ask_facts`]).
         Verb::Settings { of, .. } | Verb::WorkerFacts { worker: of } => *of,
@@ -2058,12 +1399,13 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::Close { term } => Some(term.worker),
         Verb::ReadThread { of, .. }
         | Verb::AnswerRequest { of, .. }
-        | Verb::SendMessage { of, .. }
-        | Verb::ResumeThread { of } => match of {
-            ThreadOf::On { worker, .. } => Some(*worker),
-            // The server finds the worker first ([`Hub::thread_on`]).
-            ThreadOf::Task { .. } | ThreadOf::Term(_) | ThreadOf::Thread(_) => None,
-        },
+        | Verb::SendMessage { of, .. } => {
+            match of {
+                ThreadOf::On { worker, .. } => Some(*worker),
+                // The server finds the worker first ([`Hub::thread_on`]).
+                ThreadOf::Term(_) | ThreadOf::Thread(_) => None,
+            }
+        }
     }
 }
 
@@ -2107,13 +1449,7 @@ fn run_seed() -> u64 {
 }
 
 #[cfg(test)]
-mod project_tests;
-
-#[cfg(test)]
-mod outcome_tests;
-
-#[cfg(test)]
-mod thread_tests;
+mod agent_tests;
 
 #[cfg(test)]
 pub(crate) mod tests {

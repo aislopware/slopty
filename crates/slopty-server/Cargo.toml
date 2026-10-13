@@ -5,18 +5,17 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "Slopty server: the control plane — worker registry and leases, the directory for clients, orchestration verbs over QUIC and MCP"
+description = "Slopty server: the control plane — worker registry and leases, the directory for clients, the agents' verbs over QUIC and MCP"
 
 [lints]
 workspace = true
 
 [dependencies]
-# Digests of keyed verbs (`hub`).
+# Digests of a pushed note's subjects (`push`).
 blake3.workspace = true
 # The HTTP/2 client pushes go out on (`push`).
 bytes.workspace = true
 http-body-util.workspace = true
-# Placement rules over the workers' facts (`placement`).
 hyper = { workspace = true, features = [ "client", "http2" ] }
 hyper-rustls.workspace = true
 hyper-util = { workspace = true, features = [ "client-legacy", "http2" ] }
@@ -24,10 +23,10 @@ parking_lot.workspace = true
 # TLS for pushes: ring builds for the musl server with no C toolchain; the system's checks.
 rustls.workspace = true
 rustls-platform-verifier.workspace = true
-# The projects file's records (`project`).
+# The state files' records (`store`).
 serde.workspace = true
 serde_json.workspace = true
-# What a `claude` command line gives the agent, however it is wrapped (`hub::projects`).
+# pi's gate modes, which the person's autonomy setting maps to (`hub::agents`).
 slopty-agent.workspace = true
 slopty-core.workspace = true
 slopty-net.workspace = true

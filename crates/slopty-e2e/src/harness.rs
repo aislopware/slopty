@@ -2634,7 +2634,7 @@ pub async fn stub_claude() -> Result<PathBuf> {
     Ok(path)
 }
 
-/// The app with a server and one registered worker behind it, as projects need.
+/// The app with a server and one registered worker behind it, as agents across machines need.
 ///
 /// The worker runs with `slopty-stub-claude` first on its `PATH` as `claude` and a `HOME` of its
 /// own; the app starts at its first run, pointed at the server by its settings. Everything is
@@ -2643,7 +2643,7 @@ pub async fn stub_claude() -> Result<PathBuf> {
 /// `root/server` is the server's data directory, `root/worker` the worker's, `root/cli` the
 /// CLI's and `root/app` the app's; `root/repo` is an empty directory for agents to work in.
 #[derive(Debug)]
-pub struct ProjectStack {
+pub struct ServedApp {
     /// Connected to the app's test socket.
     pub driver: Driver,
     /// The app process.
@@ -2656,7 +2656,7 @@ pub struct ProjectStack {
     pub dir: StackDir,
 }
 
-impl ProjectStack {
+impl ServedApp {
     /// Start everything, and return once the app has dialled the worker the server lists.
     ///
     /// # Errors
@@ -2694,7 +2694,7 @@ impl ProjectStack {
         more_programs: &[(&str, &Path)],
         more_env: impl FnOnce(&Path) -> Vec<(String, String)>,
     ) -> Result<Self> {
-        let dir = StackDir::new("slopty-e2e-projects-")?;
+        let dir = StackDir::new("slopty-e2e-served-")?;
         let root = dir.path();
         let more_env = more_env(root);
         let log = log_level();

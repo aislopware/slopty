@@ -2,14 +2,14 @@
 //! breadcrumb and the palette read, and the home a tile arriving from elsewhere is placed by.
 //!
 //! Pure. The caller says what it knows of each tile as open [`Facts`] (a fact key and the
-//! values it is known by), a chain of fact keys to group by, and the declared projects'
-//! [`Claim`]s; [`group`] answers which group each tile is in. Nothing here is a closed list:
+//! values it is known by) and a chain of fact keys to group by; [`group`] answers which group
+//! each tile is in. Nothing here is a closed list:
 //! "by machine", "by agent" or "by branch" is a chain, and a key a worker or an agent reports
 //! groups as well as the ones named in [`fact`].
 //!
 //! - A tile joins the group of the **first fact on the chain it has**, so the default chain
-//!   ([`DEFAULT_CHAIN`]) gives a tile its declared project, else its repository, else its folder,
-//!   else its machine. The machine is last, so nothing is homeless.
+//!   ([`DEFAULT_CHAIN`]) gives a tile the project the person pinned it to, else its repository,
+//!   else its folder, else its machine. The machine is last, so nothing is homeless.
 //! - **A fact's values are names of one thing.** Two tiles that share any value of the fact they
 //!   group by are in one group, transitively: a repository known by its origin, its first commit
 //!   and the places it is cloned joins every clone that shares one of them.
@@ -18,9 +18,6 @@
 //!   one machine (`at:<machine>:<path>`), which names nothing elsewhere. A group is keyed by its
 //!   strongest least value, so its key holds as clones come and go, and does not depend on the
 //!   order the tiles come in.
-//! - **A declared project claims by matchers** ([`Matcher`]): an open map of fact key to a value,
-//!   or for a path a directory the value is in. A tile with no `project` fact of its own that
-//!   matches one takes the claim's project.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
@@ -32,13 +29,9 @@ use crate::layout::WorkerKey;
 /// What is known of one tile: each fact key with the values it is known by, strongest first.
 pub type Facts = BTreeMap<String, Vec<String>>;
 
-/// One way a declared project claims tiles: every key must match ([`matches()`]).
-pub type Matcher = BTreeMap<String, String>;
-
 /// The fact keys the client fills in. Any other key a caller reports groups the same way.
 pub mod fact {
-    /// The project a tile belongs to: a person's pin, a declared project's claim, or the
-    /// project its agent's thread says it works for.
+    /// The project a tile belongs to: a person's pin, or the one its thread's facts name.
     pub const PROJECT: &str = "project";
     /// The repository a tile is in: its origin, its first commit and where it is cloned.
     pub const REPO: &str = "repo";
@@ -159,36 +152,6 @@ impl fmt::Debug for GroupKey {
     }
 }
 
-/// A declared project's claim on tiles: its id, and the matchers any of which claims a tile.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct Claim {
-    /// The project, as its `project` fact names it.
-    pub project: String,
-    /// Any of these claims a tile.
-    pub matchers: Vec<Matcher>,
-}
-
-/// Whether `facts` match `matcher`.
-///
-/// For every key, one of the tile's values is the matcher's, or, for a path (one starting with
-/// `/` or `~`), is in the matcher's directory. An empty matcher matches nothing, so a claim
-/// never takes every tile by mistake.
-#[must_use]
-pub fn matches(facts: &Facts, matcher: &Matcher) -> bool {
-    !matcher.is_empty()
-        && matcher.iter().all(|(key, want)| {
-            facts.get(key).is_some_and(|values| values.iter().any(|v| value_matches(v, want)))
-        })
-}
-
-fn value_matches(value: &str, want: &str) -> bool {
-    if value == want {
-        return true;
-    }
-    let path = want.starts_with('/') || want.starts_with('~');
-    path && within(trim_dir(want), value)
-}
-
 /// Whether `path` is `dir` or below it, on a directory boundary.
 #[must_use]
 pub fn within(dir: &str, path: &str) -> bool {
@@ -212,7 +175,7 @@ pub struct Group {
 impl Group {
     /// What a person would call it: a repository by its origin's last part, else its
     /// directory's name; a folder by its name; anything else by its value. The caller names
-    /// a machine and a declared project, which it knows by more than their keys.
+    /// a machine and a pinned project, which it knows by more than their keys.
     #[must_use]
     pub fn name(&self) -> String {
         let origin = self.values.iter().filter(|v| strength(v) == 0).min();
@@ -252,30 +215,12 @@ pub struct Grouped {
     pub of: Vec<Option<usize>>,
 }
 
-/// Group `tiles` by the first fact of `chain` each has, a declared project's `claims` lending
-/// a `project` to the tiles it matches ([module docs](self)).
+/// Group `tiles` by the first fact of `chain` each has ([module docs](self)).
 #[must_use]
-pub fn group(tiles: &[&Facts], chain: &[impl AsRef<str>], claims: &[Claim]) -> Grouped {
-    // A claim lends its project to a tile that has none of its own.
-    let claimed: Vec<Option<&str>> = tiles
-        .iter()
-        .map(|facts| {
-            if facts.get(fact::PROJECT).is_some_and(|v| !v.is_empty()) {
-                return None;
-            }
-            claims
-                .iter()
-                .find(|claim| claim.matchers.iter().any(|m| matches(facts, m)))
-                .map(|claim| claim.project.as_str())
-        })
-        .collect();
+pub fn group(tiles: &[&Facts], chain: &[impl AsRef<str>]) -> Grouped {
     let values_of = |i: usize, key: &str| -> Vec<&str> {
         let own = tiles.get(i).and_then(|facts| facts.get(key));
-        match own.filter(|v| !v.is_empty()) {
-            Some(values) => values.iter().map(String::as_str).collect(),
-            None if key == fact::PROJECT => claimed.get(i).copied().flatten().into_iter().collect(),
-            None => Vec::new(),
-        }
+        own.map(|values| values.iter().map(String::as_str).collect()).unwrap_or_default()
     };
     // Each tile's link on the chain, and the values it is known by there.
     let mut linked: Vec<Option<(usize, Vec<&str>)>> = Vec::with_capacity(tiles.len());
@@ -475,7 +420,7 @@ mod tests {
 
     fn by_default(tiles: &[Facts]) -> Grouped {
         let refs: Vec<&Facts> = tiles.iter().collect();
-        group(&refs, &DEFAULT_CHAIN, &[])
+        group(&refs, &DEFAULT_CHAIN)
     }
 
     fn keys(grouped: &Grouped) -> Vec<&str> {
@@ -536,10 +481,10 @@ mod tests {
         assert!(places.contains(&(STUDIO, "/w/slopty")), "{places:?}");
     }
 
-    /// A folder of one name on two machines is two groups until the person says they are one
-    /// (a claim naming each); the same name is not the same thing.
+    /// A folder of one name on two machines is two groups: the same name is not the same
+    /// thing.
     #[test]
-    fn two_folders_of_one_name_on_two_machines_stay_two_until_named() {
+    fn two_folders_of_one_name_on_two_machines_stay_two() {
         let notes = |worker: WorkerKey| {
             let mut f =
                 facts(&[(fact::MACHINE, &[&machine(worker)]), (fact::CWD, &["/Users/c/notes"])]);
@@ -550,19 +495,6 @@ mod tests {
         let grouped = by_default(&tiles);
         assert_eq!(grouped.groups.len(), 2, "{grouped:?}");
         assert!(grouped.groups.iter().all(|g| g.name() == "notes"));
-
-        let refs: Vec<&Facts> = tiles.iter().collect();
-        let matcher = |worker: WorkerKey| -> Matcher {
-            [(fact::MACHINE, machine(worker)), (fact::CWD, "/Users/c/notes".to_owned())]
-                .into_iter()
-                .map(|(k, v)| (k.to_owned(), v))
-                .collect()
-        };
-        let claim =
-            Claim { project: "notes".to_owned(), matchers: vec![matcher(STUDIO), matcher(DEVBOX)] };
-        let named = group(&refs, &DEFAULT_CHAIN, &[claim]);
-        assert_eq!(keys(&named), ["project:notes"]);
-        assert_eq!(named.of, [Some(0), Some(0)]);
     }
 
     /// A window with no place of its own joins its project once pinned there.
@@ -594,53 +526,22 @@ mod tests {
         assert_eq!(GroupKey::machine(STUDIO), *key);
     }
 
-    /// A thread whose orchestrator said its project joins that project, wherever it runs.
+    /// A thread whose facts name a project joins that project, wherever it runs.
     #[test]
     fn a_thread_with_a_project_fact_joins_that_project() {
         let thread = facts(&[
             (fact::MACHINE, &[&machine(DEVBOX)]),
             (fact::KIND, &["thread"]),
             (fact::PROJECT, &["parser"]),
-            ("facts.task", &["3"]),
         ]);
-        let orchestrator = {
+        let pinned = {
             let mut f = clone(STUDIO, "/w/parser", Some("github.com/o/parser"), None);
             f.insert(fact::PROJECT.to_owned(), vec!["parser".to_owned()]);
             f
         };
-        let grouped = by_default(&[thread, orchestrator]);
+        let grouped = by_default(&[thread, pinned]);
         assert_eq!(keys(&grouped), ["project:parser"]);
         assert_eq!(grouped.groups.first().map(|g| g.members.len()), Some(2));
-    }
-
-    /// A declared project of an app and its API claims both repositories, by origin and by a
-    /// directory one is cloned in; a tile already pinned elsewhere keeps its pin.
-    #[test]
-    fn a_declared_project_claims_two_repositories() {
-        let app = clone(STUDIO, "/w/app", Some("github.com/o/app"), None);
-        let api = {
-            let mut f = clone(DEVBOX, "/srv/api", None, Some(ROOT));
-            f.insert(fact::CWD.to_owned(), vec!["/srv/api/src".to_owned()]);
-            f
-        };
-        let pinned = {
-            let mut f = clone(STUDIO, "/w/app", Some("github.com/o/app"), None);
-            f.insert(fact::PROJECT.to_owned(), vec!["other".to_owned()]);
-            f
-        };
-        let unrelated = clone(STUDIO, "/w/site", Some("github.com/o/site"), None);
-        let matcher = |k: &str, v: &str| -> Matcher { [(k.to_owned(), v.to_owned())].into() };
-        let claim = Claim {
-            project: "shop".to_owned(),
-            matchers: vec![matcher(fact::REPO, "github.com/o/app"), matcher(fact::CWD, "/srv/api")],
-        };
-        let tiles = [app, api, pinned, unrelated];
-        let refs: Vec<&Facts> = tiles.iter().collect();
-        let grouped = group(&refs, &DEFAULT_CHAIN, &[claim]);
-        assert_eq!(keys(&grouped), ["project:other", "project:shop", "repo:github.com/o/site"]);
-        assert_eq!(grouped.of, [Some(1), Some(1), Some(0), Some(2)]);
-        assert!(!matches(&tiles[3], &Matcher::new()), "an empty matcher claims nothing");
-        assert!(!matches(&tiles[1], &matcher(fact::CWD, "/srv/ap")), "on a directory boundary");
     }
 
     /// Any fact groups: by agent, the tiles with none fall to their machine; with nothing on
@@ -652,14 +553,14 @@ mod tests {
             facts(&[(fact::MACHINE, &[&machine(DEVBOX)]), (fact::AGENT, &["claude-code"])]);
         let shell = facts(&[(fact::MACHINE, &[&machine(DEVBOX)])]);
         let tiles = [&codex, &claude, &shell];
-        let grouped = group(&tiles, &[fact::AGENT, fact::MACHINE], &[]);
+        let grouped = group(&tiles, &[fact::AGENT, fact::MACHINE]);
         assert_eq!(
             keys(&grouped),
             ["agent:claude-code", "agent:codex", &*format!("machine:{DEVBOX}")]
         );
-        let alone = group(&tiles, &["labels.team"], &[]);
+        let alone = group(&tiles, &["labels.team"]);
         assert_eq!(alone, Grouped { groups: Vec::new(), of: vec![None, None, None] });
-        assert_eq!(group(&[], &DEFAULT_CHAIN, &[]), Grouped::default());
+        assert_eq!(group(&[], &DEFAULT_CHAIN), Grouped::default());
     }
 
     /// Whatever order the tiles come in, each lands in a group of the same key with the same
@@ -694,7 +595,7 @@ mod tests {
         let mut seen = 0_usize;
         permute(&mut order, 0, &mut |order| {
             let shuffled: Vec<&Facts> = order.iter().map(|&i| &tiles[i]).collect();
-            let grouped = group(&shuffled, &DEFAULT_CHAIN, &[]);
+            let grouped = group(&shuffled, &DEFAULT_CHAIN);
             for (at, &i) in order.iter().enumerate() {
                 assert_eq!(key_of(&grouped, at), want[i], "{order:?}");
             }

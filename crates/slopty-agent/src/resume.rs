@@ -9,9 +9,7 @@
 //! worktree a session runs in and enters it again on a resume, where the flag would make another.
 //!
 //! What Slopty itself put on the command line is noted instead, to be given afresh: its hook
-//! relay, its tools, and the lock on the mode that asks no permission. One system prompt is
-//! kept, the one appended to an agent started with Slopty's tools: that is the role the server
-//! wrote for a project's agent, and a resumed one without it would not know its task.
+//! relay and its tools, with the line that tells the agent of them. No system prompt is kept.
 
 use std::path::{Path, PathBuf};
 
@@ -37,15 +35,6 @@ pub struct Resume {
     pub relay: bool,
     /// It was started with Slopty's tools on its `--mcp-config`, given afresh.
     pub mcp: bool,
-    /// Its `--settings` locked it out of the mode that asks no permission, locked afresh.
-    pub locked: bool,
-    /// That lock left auto mode open (an agent of a project that goes on its own), so it is
-    /// left open afresh.
-    pub auto: bool,
-    /// The system prompt appended to it, kept when it was started with Slopty's tools (the
-    /// server's role for a project's agent). One that carries the pointer to Slopty's CLI keeps
-    /// the pointer alone ([`crate::hooks::POINTER`]): a prompt the person appended is never kept.
-    pub role: Option<String>,
 }
 
 impl Resume {
@@ -92,12 +81,6 @@ pub struct Invocation {
     pub relay: bool,
     /// Its `--mcp-config` served Slopty's tools.
     pub mcp: bool,
-    /// Its `--settings` locked out the mode that asks no permission.
-    pub locked: bool,
-    /// That lock left auto mode open ([`crate::hooks::leaves_auto`]).
-    pub auto: bool,
-    /// Its appended system prompt, when [`Resume::role`] keeps it.
-    pub role: Option<String>,
     /// It is a `--print` run, not a conversation in the terminal.
     pub print: bool,
 }
@@ -151,11 +134,13 @@ pub const PERMISSION_MODE: &str = "--permission-mode";
 const PERMISSION_MODES: [&str; 6] =
     ["acceptEdits", "auto", "bypassPermissions", "manual", "dontAsk", "plan"];
 
-/// Whether a start may ask for permission mode `mode`: one `--permission-mode` takes, short of
-/// skipping every permission, which only the person's own `claude` flags give.
+/// Whether a start may ask for permission mode `mode`: one `--permission-mode` takes.
+///
+/// Skipping every permission is among them: how freely an agent acts is the person's setting
+/// (`docs/decisions/agents.md`, "How freely an agent acts").
 #[must_use]
 pub fn startable_mode(mode: &str) -> bool {
-    mode != "bypassPermissions" && PERMISSION_MODES.contains(&mode)
+    PERMISSION_MODES.contains(&mode)
 }
 
 /// The flag the effort is given with.
@@ -189,6 +174,7 @@ pub fn offers() -> Offers {
             "dontAsk" => ("Don't ask", Some("Denies what is not allowed beforehand")),
             "plan" => ("Plan", Some("Plans first and changes nothing")),
             "manual" => ("Manual", Some("Asks before edits, commands and the network")),
+            "bypassPermissions" => ("Bypass permissions", Some("Asks nothing")),
             other => (other, None),
         };
         Mode {
@@ -274,7 +260,6 @@ fn starting_mode_of(
 /// typed at a prompt, where it would drive the line editor.
 pub fn invocation(args: &[String]) -> Invocation {
     let mut out = Invocation::default();
-    let mut role = None;
     let mut words = args.iter().peekable();
     while let Some(word) = words.next() {
         if word == "--" {
@@ -291,8 +276,6 @@ pub fn invocation(args: &[String]) -> Invocation {
             let doc = value.and_then(|v| serde_json::from_str::<Value>(v).ok());
             out.relay |=
                 doc.as_ref().is_some_and(|d| crate::hooks::has_relay(d, HookEvent::SessionStart));
-            out.locked |= doc.as_ref().is_some_and(crate::hooks::locks_bypass);
-            out.auto |= doc.as_ref().is_some_and(crate::hooks::leaves_auto);
         } else if flag == crate::hooks::MCP_CONFIG_FLAG {
             let mut configs: Vec<&str> = inline.into_iter().collect();
             if inline.is_none() {
@@ -302,7 +285,9 @@ pub fn invocation(args: &[String]) -> Invocation {
             }
             out.mcp |= configs.iter().any(|c| serves_slopty(c));
         } else if flag == APPEND_SYSTEM_PROMPT {
-            role = inline.map(str::to_owned).or_else(|| words.next().cloned());
+            if inline.is_none() {
+                words.next();
+            }
         } else if SWITCHES.contains(&flag) {
             if inline.is_none() {
                 out.args.push(word.clone());
@@ -330,12 +315,6 @@ pub fn invocation(args: &[String]) -> Invocation {
             }
         }
     }
-    out.role = if out.mcp {
-        role
-    } else {
-        role.filter(|role| role.contains(crate::hooks::POINTER))
-            .map(|_| crate::hooks::POINTER.to_owned())
-    };
     out
 }
 
@@ -613,34 +592,23 @@ mod tests {
         assert!(!invocation(&words("--settings={}")).relay);
     }
 
-    /// What Slopty put on a command line is noted, never kept: its tools, the lock on the mode
-    /// that asks nothing. The role appended to an agent with Slopty's tools is kept; a system
-    /// prompt on any other is not, as it may carry anything, and one joined with the pointer to
-    /// Slopty's CLI keeps the pointer alone.
+    /// What Slopty put on a command line is noted, never kept: its tools. No appended system
+    /// prompt is kept, as it may carry anything.
     #[test]
-    fn slopty_s_own_wiring_is_noted_and_its_role_kept() {
-        let dir = Path::new("/nowhere");
+    fn slopty_s_own_wiring_is_noted_and_no_prompt_kept() {
         let none = crate::managed::ManagedSettings::default();
         let ours = crate::hooks::with_mcp_under(words("--model x"), "/bin/slopty", &none);
-        let ours = crate::hooks::held_to_asking(ours, dir);
         let mut args = ours;
-        args.push("--append-system-prompt=You work on task 3.\nReport with task_report.".into());
+        args.push("--append-system-prompt=The slopty tools reach other agents.".into());
         let kept = invocation(&args);
-        assert!(kept.mcp && kept.locked && !kept.auto && !kept.relay, "{kept:?}");
-        assert_eq!(kept.role.as_deref(), Some("You work on task 3.\nReport with task_report."));
-        assert_eq!(kept.args, words("--model x"), "no document is kept");
-        let own = invocation(&crate::hooks::held_to(words("--model x"), dir, true));
-        assert!(own.locked && own.auto, "a lock that leaves auto open is noted so: {own:?}");
+        assert!(kept.mcp && !kept.relay, "{kept:?}");
+        assert_eq!(kept.args, words("--model x"), "no document nor prompt is kept");
 
         let theirs = words("--mcp-config {\"mcpServers\":{\"db\":{\"command\":\"pg\"}}}");
         let mut theirs = theirs;
         theirs.extend(["--append-system-prompt".to_owned(), "token=hush".to_owned()]);
         let kept = invocation(&theirs);
-        assert!(!kept.mcp && !kept.locked && kept.role.is_none(), "{kept:?}");
-
-        let pointed = format!("token=hush\n\n{}", crate::hooks::POINTER);
-        let kept = invocation(&["--append-system-prompt".to_owned(), pointed]);
-        assert_eq!(kept.role.as_deref(), Some(crate::hooks::POINTER), "the person's words go");
+        assert!(!kept.mcp && kept.args.is_empty(), "{kept:?}");
     }
 
     /// Manual has its words, as every other mode a start offers.
@@ -737,9 +705,6 @@ mod tests {
             args: kept.args,
             relay: false,
             mcp: false,
-            locked: false,
-            auto: false,
-            role: None,
         };
         let args = resume.args();
         assert_eq!(args.iter().filter(|a| a.starts_with("--resume")).count(), 1);
@@ -769,9 +734,6 @@ mod tests {
             args: words("--model x"),
             relay: false,
             mcp: false,
-            locked: false,
-            auto: false,
-            role: None,
         };
         assert_eq!(
             resume.transcript(Path::new("/h")),

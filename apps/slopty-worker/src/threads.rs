@@ -147,7 +147,7 @@ pub fn open(
     match Host::open(dir, slopty_worker::thread::log::Limits::default()) {
         Ok(host) => {
             let seats = worker.clone();
-            host.set_seat_env(Arc::new(move |seat, extra| seats.seat_env(seat, extra)));
+            host.set_seat_env(Arc::new(move |seat| seats.seat_env(seat)));
             let (claude, asks) = Driver::channel();
             let (claude_start, claude_start_asks) = claude::start::Starter::channel();
             let (codex, codex_asks) = Codex::channel();
@@ -355,12 +355,6 @@ pub fn start(daemon: &Daemon, asks: Observing) {
     let settings = slopty_settings::path_in(&asks.data);
     let own: acp::Own =
         Arc::new(move || slopty_settings::Settings::load(&settings).settings.worker.acp);
-    // The tasks' agents pi and ACP ran as the last worker's children ended with it, before
-    // their adapters here mark them gone: the server is told, so each is sent word to carry on,
-    // which starts it again in its own session.
-    for seat in cut_off(&threads.host) {
-        daemon.worker.cut_off(seat);
-    }
     drop(tokio::spawn(rest(threads.host.clone())));
     drop(pi::spawn(threads.host.clone(), asks.data, None, asks.pi));
     drop(acp::spawn(threads.host.clone(), None, own, asks.acp));
@@ -805,8 +799,8 @@ async fn aside(threads: &Threads, thread: ThreadId, id: IntentId) -> Outcome {
 }
 
 /// Close `thread` for good for intent `id`, once: an aside put away, or a run of a message the
-/// person did not keep. Its agent ends as a settled task's does, its session kept where the
-/// agent keeps it, and the worker forgets the thread. Then the agent's worktree it worked in
+/// person did not keep. Its agent ends, its session kept where the agent keeps it, and the
+/// worker forgets the thread. Then the agent's worktree it worked in
 /// goes ([`worktrees::discard`]) unless another thread or a live terminal works in it: an
 /// aside shares its thread's folder, so it never takes it.
 async fn discard(threads: &Threads, thread: ThreadId, id: IntentId) -> Outcome {
@@ -1516,20 +1510,20 @@ fn opening(
     }
 }
 
-/// A server's tasks start their threads here ([`slopty_proto::orchestration::Verb::StartThread`]),
+/// The server starts seated threads here ([`slopty_proto::orchestration::Verb::StartThread`]),
 /// each through its agent's own adapter, at the seat the server chose.
-impl orchestrate::TaskThreads for Threads {
+impl orchestrate::SeatedThreads for Threads {
     fn start(
         &self,
-        thread: orchestrate::TaskThread,
+        thread: orchestrate::SeatedThread,
     ) -> orchestrate::BoxFuture<'_, Result<ThreadId, Failure>> {
         Box::pin(async move {
-            let orchestrate::TaskThread { start, seat, env, role } = thread;
+            let orchestrate::SeatedThread { start, seat, facts, system } = thread;
             let relay = slopty_agent::hooks::relay_beside_this_binary()
                 .map(|relay| relay.to_string_lossy().into_owned());
-            let seated = Seated { seat, env, role, relay };
+            let seated = Seated { seat, facts, system, relay };
             let agent = start.agent.clone();
-            tracing::info!(%seat, agent = %agent.0, cwd = start.cwd, "start a task's thread");
+            tracing::info!(%seat, agent = %agent.0, cwd = start.cwd, "start a seated thread");
             let outcome = if agent.is(AgentId::PI) {
                 self.pi.start_seated(Box::new(start), seated).await
             } else if agent.is(AgentId::CLAUDE_CODE) {
@@ -1546,20 +1540,11 @@ impl orchestrate::TaskThreads for Threads {
         })
     }
 
-    fn resume(&self, start: Start) -> orchestrate::BoxFuture<'_, Result<ThreadId, Failure>> {
-        Box::pin(async move {
-            let agent = start.agent.clone();
-            tracing::info!(agent = %agent.0, cwd = start.cwd, "resume a thread at the server's word");
-            let outcome = begin(self, IntentId::new(), Box::new(start)).await;
-            started(&agent, outcome)
-        })
-    }
-
     fn close(&self, seat: SessionId) -> orchestrate::BoxFuture<'_, Result<bool, Failure>> {
         Box::pin(async move {
             let Some(thread) = self.host.seated_at(seat) else { return Ok(false) };
             let Some((state, _)) = self.host.state(thread) else { return Ok(false) };
-            tracing::info!(%seat, %thread, "end a task's thread");
+            tracing::info!(%seat, %thread, "end a seated thread");
             self.end(&state).await.map_err(|e| Failure::new(ErrorCode::Failed, e))?;
             Ok(true)
         })
@@ -1599,7 +1584,7 @@ impl Threads {
         Ok(())
     }
 
-    /// The thread a server task started at `seat`, when one runs in no terminal of its own:
+    /// The thread the server started at `seat`, when one runs in no terminal of its own:
     /// what the server delivers to the seat goes to it as a message.
     #[must_use]
     pub fn seated_without_terminal(&self, seat: SessionId) -> Option<ThreadId> {
@@ -1650,16 +1635,6 @@ fn ends_with_daemon(drive: &Drive, nested: bool, liveness: Liveness) -> bool {
     drive.is(Drive::DRIVEN) && !nested && matches!(liveness, Liveness::Live)
 }
 
-/// The seats of the server's tasks whose agent ran as this daemon's child and was live when the
-/// worker before this one stopped, so ended with it ([`ends_with_daemon`]).
-fn cut_off(host: &Host) -> Vec<SessionId> {
-    host.visit(|state| {
-        let meta = &state.meta;
-        let ended = ends_with_daemon(&meta.drive, meta.parent.is_some(), state.status.liveness);
-        meta.facts.get(slopty_proto::project::SEAT_FACT).filter(|_| ended)?.parse().ok()
-    })
-}
-
 /// Whether a thread at `phase` is in the middle of a turn: working, waiting on its own work, or
 /// asking the person.
 const fn mid_turn(phase: Phase) -> bool {
@@ -1687,58 +1662,6 @@ mod tests {
         assert!(mid.into_iter().all(mid_turn));
         let resting = [Phase::Idle, Phase::Done, Phase::Failed, Phase::Stopped];
         assert!(!resting.into_iter().any(mid_turn));
-    }
-
-    /// After a worker restart, the server hears of each task whose agent the last worker drove
-    /// and that was live: not a thread of nobody's task, one whose agent goes on elsewhere (a
-    /// terminal's, Codex's), a subagent, or one that had exited already.
-    #[test]
-    fn the_tasks_agents_cut_off_by_a_restart_are_their_driven_live_seats() {
-        let dir = tempfile::tempdir().unwrap();
-        let host = Host::open(dir.path(), slopty_worker::thread::log::Limits::default()).unwrap();
-        let thread = |drive: &str, seat: Option<SessionId>, nested: bool| {
-            let mut facts = std::collections::BTreeMap::new();
-            if let Some(seat) = seat {
-                facts.insert(slopty_proto::project::SEAT_FACT.to_owned(), seat.to_string());
-            }
-            let parent = nested.then(|| slopty_proto::thread::Link {
-                thread: ThreadId::new(),
-                item: slopty_proto::thread::ItemId("call".to_owned()),
-            });
-            let meta = slopty_proto::thread::ThreadMeta {
-                id: ThreadId::new(),
-                agent: AgentId::named(AgentId::PI),
-                agent_version: String::new(),
-                native: "n".to_owned(),
-                cwd: "/w".to_owned(),
-                title: String::new(),
-                terminal: None,
-                parent,
-                origin: slopty_proto::thread::ThreadMeta::PERSON.to_owned(),
-                forked_from: None,
-                drive: Drive::named(drive),
-                caps: Vec::new(),
-                models: Vec::new(),
-                modes: Vec::new(),
-                efforts: Vec::new(),
-                facts,
-                created_ms: slopty_core::WallMs::ZERO,
-            };
-            let id = meta.id;
-            host.create(meta).unwrap();
-            id
-        };
-        let cut = SessionId::new();
-        thread(Drive::DRIVEN, Some(cut), false);
-        thread(Drive::DRIVEN, None, false);
-        thread(Drive::OBSERVED, Some(SessionId::new()), false);
-        thread(Drive::SHARED, Some(SessionId::new()), false);
-        thread(Drive::DRIVEN, Some(SessionId::new()), true);
-        let exited = thread(Drive::DRIVEN, Some(SessionId::new()), false);
-        let liveness = Liveness::Exited { resumable: true };
-        let status = slopty_proto::thread::Status { liveness, ..Default::default() };
-        host.apply(exited, vec![Action::Status(status)]).unwrap();
-        assert_eq!(cut_off(&host), vec![cut]);
     }
 
     /// A review asked for again stops the one still being read, and the stream's end stops the

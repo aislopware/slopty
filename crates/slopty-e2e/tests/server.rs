@@ -1,5 +1,5 @@
 //! The server with a real worker behind it, driven the way people and agents drive it: the
-//! `slopty` binary with `--json`, and a project's tools over MCP's HTTP. `slopty-server`,
+//! `slopty` binary with `--json`, and the agents' tools over MCP. `slopty-server`,
 //! `slopty-ptyd` and `slopty-worker` from this build run in a temporary directory on ports of
 //! their own.
 //!
@@ -320,20 +320,21 @@ mod tests {
         stack.slopty(&["send", &term, "--keys", "ctrl+c"]).await?;
         clock.lap("ports");
 
-        // 7. A project's tools through `slopty mcp`: the nine listed, and a call the hub answers.
+        // 7. The agents' tools through `slopty mcp`: the eight listed, and a call the hub answers.
         //    The screen of a terminal, as an agent reads it with `slopty screen`.
         let listed = stack.mcp(1, "tools/list", json!({})).await?;
         let tools = listed["result"]["tools"].as_array().context("tools")?;
         let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
         ensure!(
-            names.len() == 9 && names.contains(&"task_start") && names.contains(&"task_restart"),
+            names.len() == 8 && names.contains(&"agent_start") && names.contains(&"branch_bring"),
             "{listed}"
         );
-        let params = json!({ "name": "project_status", "arguments": { "project": "nope" } });
+        let nobody = "0199a1b1-c3d4-7000-8000-00000000beef";
+        let params = json!({ "name": "agent_read", "arguments": { "agent": nobody } });
         let called = stack.mcp(2, "tools/call", params).await?;
         let said = str_of(&called["result"]["content"][0], "text")?;
         ensure!(called["result"]["isError"] == json!(true), "{called}");
-        ensure!(said.contains("(UnknownProject)"), "the hub's own words: {said}");
+        ensure!(said.contains("(UnknownAgent)"), "the hub's own words: {said}");
         let shown = until("the marker on the screen", STEP, async || {
             let screen = stack.slopty(&["screen", &term]).await?.to_string();
             Ok(screen.contains(&marker).then_some(screen))

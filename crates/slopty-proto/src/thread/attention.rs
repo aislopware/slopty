@@ -4,7 +4,8 @@
 //! A thread's [`Rung`] comes from its table row alone ([`Rung::of`]), so the server, which
 //! holds every worker's rows, and a client, which holds its own workers', rank it alike. The
 //! server folds each subagent into the thread it hangs from, rolls the rest up per tile,
-//! worker, project node and the whole fleet, and publishes the result as a [`Ladder`]. A
+//! worker, agent tree (an agent with every agent it started, at any depth), space and the whole
+//! fleet, and publishes the result as a [`Ladder`]. A
 //! client's workspaces are its own, so it folds the tiles a workspace holds with
 //! [`Ladder::over`].
 //!
@@ -17,7 +18,6 @@ use slopty_core::{SessionId, WallMs, WorkerId};
 use super::wire::{PullStands, ThreadRow};
 use super::{Phase, ThreadId};
 use crate::orchestration::TermRef;
-use crate::project::{ProjectId, TaskId};
 
 /// A thread's place on the attention ladder, lowest first, so the higher of two is their
 /// [`Ord::max`].
@@ -151,13 +151,13 @@ pub struct ThreadAt {
     pub thread: ThreadId,
 }
 
-/// A node of a project's tree: a task, or the project's orchestrator.
+/// A space: a folder on a machine, where threads live.
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Serialize, Deserialize)]
-pub struct NodeAt {
-    /// The project.
-    pub project: ProjectId,
-    /// The task; the orchestrator when absent.
-    pub task: Option<TaskId>,
+pub struct SpaceAt {
+    /// The machine.
+    pub worker: WorkerId,
+    /// The folder: the root of the repository a thread works in, else the folder it works in.
+    pub folder: String,
 }
 
 /// One thread with the rung it stands on, subagents folded in: what a roll-up is made of.
@@ -173,7 +173,7 @@ pub struct Ranked {
     pub terminal: Option<SessionId>,
 }
 
-/// Where a group of threads stands: a tile's, a worker's, a node's, the fleet's.
+/// Where a group of threads stands: a tile's, a worker's, a tree's, a space's, the fleet's.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub struct Standing {
     /// The highest rung among them.
@@ -236,10 +236,11 @@ pub struct Ladder {
     pub tiles: Vec<(TermRef, Standing)>,
     /// Each worker's threads.
     pub workers: Vec<(WorkerId, Standing)>,
-    /// Each project node's threads, a task's subtasks folded in.
-    pub nodes: Vec<(NodeAt, Standing)>,
-    /// Each project's threads: its orchestrator's and every task's.
-    pub projects: Vec<(ProjectId, Standing)>,
+    /// Each thread that started other agents, with every agent under it at any depth, by
+    /// worker and thread.
+    pub trees: Vec<(ThreadAt, Standing)>,
+    /// Each space's threads, by worker and folder.
+    pub spaces: Vec<(SpaceAt, Standing)>,
     /// Every thread.
     pub fleet: Standing,
 }
@@ -329,29 +330,13 @@ pub enum NoticeKind {
     /// A thread finished working. The client shows it only when it worked as long as its
     /// person's slow-command time.
     Finished,
-    /// A project's work is held up: its pull request's checks fail, its verifier failed, a step
-    /// for it failed (a rebase that conflicts among them), or the push after its merge did not
-    /// go. One notice per timeline entry.
-    Project,
-    /// A project's verified work waits on the person's merge: one notice for all of it, its
-    /// text the count, its note's Merge merging the oldest ([`crate::push::PushBody::merges`]).
-    ReadyToMerge,
-    /// A project's orchestrator said its goal is met, once.
-    GoalDone,
 }
 
 /// What a notice is about.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Subject {
     /// A thread, the one a subagent hangs from.
     Thread(ThreadAt),
-    /// A project, at one entry of its timeline.
-    Project {
-        /// The project.
-        project: ProjectId,
-        /// The entry's sequence number: one notice per entry.
-        entry: u64,
-    },
     /// A terminal whose program, no agent's thread, waits on the person by its own status
     /// record (`OSC 7501`). Only pushed: a linked client posts a program's records itself.
     Terminal(TermRef),
@@ -364,9 +349,9 @@ pub struct Notice {
     pub kind: NoticeKind,
     /// What it is about.
     pub about: Subject,
-    /// The terminal to open for it: the thread's, or the project's orchestrator's.
+    /// The terminal to open for it: the thread's.
     pub tile: Option<TermRef>,
-    /// The thread's title, or the project's.
+    /// The thread's title.
     pub title: String,
     /// What it wants or said, in a line.
     pub text: String,

@@ -231,7 +231,7 @@ async fn handed(daemon: &Daemon, session: SessionId, token: &str, batch: u64) ->
     match dropped {
         Ok(was_kept) => {
             if was_kept {
-                let report = slopty_proto::project::AgentReport::Delivered { session, batch };
+                let report = slopty_proto::server::AgentReport::Delivered { session, batch };
                 let _sent = daemon.reports.send(report);
             }
             CtlReply::Ok { changed: was_kept }
@@ -250,21 +250,13 @@ async fn heard(daemon: &Daemon, session: SessionId, payload: &str) -> Result<(Ho
     }
     tracing::debug!(%session, event = ?hook.event, "hook");
     daemon.follows.lock().board.heard(session, &hook);
-    let native = hook.report(session);
-    let (mut event, branch, mode) = {
+    let (mut event, branch) = {
         let mut agents = daemon.agents.lock();
         let event = agents.apply(session, &hook);
-        // Kept as well as sent: a server link that is down now is told it when it is back.
-        if let Some(native) = &native {
-            agents.native_report(native);
-        }
-        (event, agents.branch(session, &hook), agents.permission_mode_report(session))
+        (event, agents.branch(session, &hook))
     };
     if let Some(branch) = branch {
         let _sent = daemon.events.send(WorkerMsg::AgentBranch(branch));
-    }
-    for report in native.into_iter().chain(mode) {
-        let _sent = daemon.reports.send(report);
     }
     // A question or an elicitation the notification did not spell out (a `Stop` always carries
     // its last message): the transcript tail has the line. Read off the runtime's blocking

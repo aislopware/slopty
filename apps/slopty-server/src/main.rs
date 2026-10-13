@@ -5,7 +5,7 @@
 //! `slopty mcp` among them. It admits loopback, the tailnet and the `[network] allow` ranges of
 //! `settings.toml` (a VPN Tailscale does not vouch for). The worker list survives restarts in
 //! `workers.json` in the data directory. Notes reach a pocketed phone once `[server.push]` names an
-//! APNs key.
+//! APNs key. The agents agents start act as freely as `[agents] autonomy` says.
 
 #![forbid(unsafe_code)]
 
@@ -14,7 +14,6 @@ use std::path::PathBuf;
 use anyhow::{Context as _, Result};
 use clap::Parser;
 use slopty_net::admission::{Admission, parse_allow};
-use slopty_server::project::Bounds;
 use slopty_server::{Config, PushConfig, Server};
 
 /// Command line.
@@ -44,6 +43,8 @@ struct Args {
 struct Read {
     /// `[server]`.
     server: slopty_settings::ServerSettings,
+    /// `[agents]`: how freely a started agent acts.
+    agents: slopty_settings::AgentSettings,
     /// `[network] allow`: the ranges let in besides loopback and the tailnet, the worker's too.
     allow: Vec<String>,
     /// `[worker] keep_awake`: what keeps this machine awake, its worker and its server alike.
@@ -54,6 +55,7 @@ impl Read {
     fn of(settings: slopty_settings::Settings) -> Self {
         Self {
             server: settings.server,
+            agents: settings.agents,
             allow: settings.network.allow,
             keep_awake: settings.worker.keep_awake,
         }
@@ -67,7 +69,7 @@ fn settings(data_dir: &std::path::Path) -> Read {
     let root = data_dir.parent().unwrap_or(data_dir);
     let loaded = slopty_settings::Settings::load(&slopty_settings::path_in(root));
     if let Some(e) = &loaded.error {
-        tracing::warn!(error = %e, "settings.toml ignored; no extra ranges, default project bounds");
+        tracing::warn!(error = %e, "settings.toml ignored; no extra ranges, default autonomy");
     }
     Read::of(loaded.settings)
 }
@@ -81,18 +83,17 @@ fn settings_path(data_dir: &std::path::Path) -> PathBuf {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct Changed {
     allow: bool,
-    projects: bool,
+    agents: bool,
     push: bool,
     keep_awake: bool,
 }
 
 /// What changed from `before` to `now`, named field by field so a new key is decided here.
 fn changed(before: &Read, now: &Read) -> Changed {
-    let Read { server: slopty_settings::ServerSettings { projects, push }, allow, keep_awake } =
-        now;
+    let Read { server: slopty_settings::ServerSettings { push }, agents, allow, keep_awake } = now;
     Changed {
         allow: *allow != before.allow,
-        projects: *projects != before.server.projects,
+        agents: *agents != before.agents,
         push: *push != before.server.push,
         keep_awake: *keep_awake != before.keep_awake,
     }
@@ -174,19 +175,6 @@ fn admission(allow: &[String]) -> Admission {
     Admission::new(parse_allow(allow, "[network]"))
 }
 
-/// The person's bounds on projects and the fleet (`[server.projects]`); bounds past their
-/// ceiling leave the defaults.
-fn bounds(settings: slopty_settings::ProjectBounds) -> Bounds {
-    let bounds = Bounds { live_agents: settings.live_agents };
-    match bounds.check() {
-        Ok(()) => bounds,
-        Err(e) => {
-            tracing::warn!(error = %e, "[server.projects] ignored; the default bounds hold");
-            Bounds::default()
-        }
-    }
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     slopty_crash::install(slopty_crash::Process::Server, &slopty_platform::dirs::data_dir());
@@ -210,7 +198,7 @@ async fn main() -> Result<()> {
         push: push(&settings.server.push),
     };
     let server = Server::start(config).await.context("start (is another server running?)")?;
-    server.hub().set_bounds(bounds(settings.server.projects));
+    server.hub().set_autonomy(settings.agents.autonomy);
     server.hub().set_settings_file(settings_path.clone());
     server.hub().keep_awake(Box::new(Assertion::default()), keep_awake(settings.keep_awake));
     let hub = server.hub().clone();
@@ -220,9 +208,9 @@ async fn main() -> Result<()> {
             tracing::info!(ranges = ?now.allow, "[network] allow changed: applied");
             followed.set_ranges(parse_allow(&now.allow, "[network]"));
         }
-        if changed.projects {
-            tracing::info!("[server.projects] changed: applied");
-            hub.set_bounds(bounds(now.server.projects));
+        if changed.agents {
+            tracing::info!(autonomy = ?now.agents.autonomy, "[agents] changed: applied");
+            hub.set_autonomy(now.agents.autonomy);
         }
         if changed.push {
             tracing::info!("[server.push] changed: applied");
@@ -258,12 +246,10 @@ async fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        Changed, PushConfig, admission, bounds, follow_settings, push, settings, settings_path,
-    };
+    use super::{Changed, PushConfig, admission, follow_settings, push, settings, settings_path};
 
     /// An edit of the file reaches the running server within a poll: the ranges and the
-    /// project bounds it changed, each said by name, and nothing for an edit elsewhere in the
+    /// autonomy it changed, each said by name, and nothing for an edit elsewhere in the
     /// file or one that does not parse.
     #[tokio::test]
     async fn an_edit_of_the_file_is_applied_as_it_is_read() {
@@ -288,11 +274,11 @@ mod tests {
         std::fs::write(&path, "[server\n").unwrap();
         after_a_poll().await;
         assert!(heard.try_recv().is_err(), "a file that does not parse changes nothing");
-        let text = "[network]\nallow = [\"10.8.0.0/24\"]\n[server.projects]\nlive_agents = 3\n";
+        let text = "[network]\nallow = [\"10.8.0.0/24\"]\n[agents]\nautonomy = \"ask\"\n";
         std::fs::write(&path, text).unwrap();
         after_a_poll().await;
-        let projects = Changed { projects: true, ..Changed::default() };
-        assert_eq!(heard.try_recv().ok().map(|(_, what)| what), Some(projects));
+        let agents = Changed { agents: true, ..Changed::default() };
+        assert_eq!(heard.try_recv().ok().map(|(_, what)| what), Some(agents));
         std::fs::write(&path, format!("{text}[worker]\nkeep_awake = \"never\"\n")).unwrap();
         after_a_poll().await;
         let keep = Changed { keep_awake: true, ..Changed::default() };
@@ -342,33 +328,5 @@ mod tests {
             .map(ToString::to_string)
             .collect();
         assert_eq!(ranges, ["10.8.0.0/24"]);
-    }
-
-    /// The bounds on projects and the fleet are the person's, from the same settings; bounds
-    /// past their ceiling leave the defaults, and a key the server no longer reads is no bound.
-    #[test]
-    fn the_project_bounds_come_from_the_shared_settings() {
-        let root = tempfile::tempdir().unwrap();
-        let data_dir = root.path().join("server");
-        let default = bounds(settings(&data_dir).server.projects);
-        assert_eq!(default, super::Bounds::default(), "the file's defaults are the server's");
-        let text = "[server.projects]\nlive_agents = 3\n";
-        std::fs::write(root.path().join("settings.toml"), text).unwrap();
-        let set = bounds(settings(&data_dir).server.projects);
-        assert_eq!(set.live_agents, 3);
-        std::fs::write(
-            root.path().join("settings.toml"),
-            "[server.projects]\nlive_agents = 5000\n",
-        )
-        .unwrap();
-        let over = bounds(settings(&data_dir).server.projects);
-        assert_eq!(over, super::Bounds::default(), "past a ceiling, the defaults hold");
-        std::fs::write(
-            root.path().join("settings.toml"),
-            "[server.projects]\npermission_flags = [\"nightly\"]\n",
-        )
-        .unwrap();
-        let gone = bounds(settings(&data_dir).server.projects);
-        assert_eq!(gone, super::Bounds::default(), "no project may loosen by name");
     }
 }

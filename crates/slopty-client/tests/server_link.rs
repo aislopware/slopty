@@ -176,7 +176,7 @@ mod tests {
         let (mut change, mut read) = (None, None);
         while change.is_none() || read.is_none() {
             match tokio::time::timeout(WAIT, rx.recv()).await.unwrap().unwrap() {
-                ToServer::Request { id, key, verb: Verb::TaskCreate { .. } } => {
+                ToServer::Request { id, key, verb: Verb::AgentTell { .. } } => {
                     change = Some((id, key));
                 }
                 ToServer::Request { id, key, verb: Verb::ListWorkers } => read = Some((id, key)),
@@ -192,7 +192,7 @@ mod tests {
     #[tokio::test]
     async fn a_verb_whose_answer_a_drop_lost_goes_again_under_its_key() {
         use slopty_proto::orchestration::{Outcome, Verb};
-        use slopty_proto::project::{ProjectId, TaskSpec};
+        use slopty_proto::thread::ThreadId;
         let listener =
             ServerListener::bind("127.0.0.1:0".parse().unwrap(), Admission::default()).unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -205,10 +205,7 @@ mod tests {
         let ServerEvent::Message(_) = next(&mut events).await else { panic!("no directory") };
 
         let caller = task.caller();
-        let create = Verb::TaskCreate {
-            project: ProjectId::new("demo").unwrap(),
-            spec: Box::new(TaskSpec { title: "Once".to_owned(), ..TaskSpec::default() }),
-        };
+        let create = Verb::AgentTell { agent: ThreadId::new(), text: "Once".to_owned() };
         let asked = tokio::spawn({
             let caller = caller.clone();
             async move { caller.call(create).await }

@@ -14,10 +14,6 @@ mod clipboard;
 mod conversation;
 
 #[cfg(test)]
-#[path = "app/day.rs"]
-mod day;
-
-#[cfg(test)]
 #[path = "app/dnd.rs"]
 mod dnd;
 
@@ -32,10 +28,6 @@ mod hangs;
 #[cfg(test)]
 #[path = "app/marks.rs"]
 mod marks;
-
-#[cfg(test)]
-#[path = "app/projects.rs"]
-mod projects;
 
 #[cfg(test)]
 #[path = "app/resume.rs"]

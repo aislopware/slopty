@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 /// table, or an entry of a key's inline table set or removed.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct SettingEdit {
-    /// The table, dotted (`worker`, `server.projects`).
+    /// The table, dotted (`worker`, `server.push`).
     pub table: String,
     /// The key in it.
     pub key: String,
