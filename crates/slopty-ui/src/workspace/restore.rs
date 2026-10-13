@@ -101,16 +101,6 @@ impl WorkspaceView {
             })
             .collect();
         saved.frecency.clone_from(&self.frecency);
-        saved.looked = self
-            .projects_looked()
-            .into_iter()
-            .map(|(project, l)| slopty_client::layout::SavedLooked {
-                project,
-                seq: l.seq,
-                at_ms: l.at_ms,
-            })
-            .collect();
-        saved.boards = self.saved_boards();
         saved
     }
 

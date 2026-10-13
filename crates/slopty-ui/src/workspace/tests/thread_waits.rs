@@ -219,7 +219,7 @@ fn a_thread_the_server_ranks_counts_once_however_its_worker_is_reached(cx: &mut 
     use slopty_proto::orchestration::TermRef;
     use slopty_proto::thread::attention::{Ladder, Ranked, Rung, Standing, ThreadAt};
 
-    use super::super::projects::worker_key;
+    use super::super::keys::worker_key;
 
     let (view, cx) = workspace(cx);
     let (studio_id, laptop_id) = (WorkerId::new(), WorkerId::new());
@@ -757,8 +757,7 @@ fn looking_at_a_thread_marks_it_seen_on_its_worker(cx: &mut TestAppContext) {
 }
 
 /// A thread whose worker says its changes wait unkept stays under *To review* after its tile
-/// was looked at, on the bell too, until the worker says they were kept; "Review next" opens
-/// its review.
+/// was looked at, on the bell too, until the worker says they were kept.
 #[gpui::test]
 fn a_thread_with_changes_unkept_stays_to_review(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -781,11 +780,6 @@ fn a_thread_with_changes_unkept_stays_to_review(cx: &mut TestAppContext) {
         );
         assert_eq!(v.bell_count(), 1, "the bell counts it");
     });
-
-    cx.simulate_keystrokes("cmd-shift-r");
-    cx.run_until_parked();
-    let asked = view.read_with(cx, |v, _| v.review_of(thread).is_some());
-    assert!(asked, "Review next opened its review");
 
     row.to_review = false;
     table(&view, cx, key, vec![row]);

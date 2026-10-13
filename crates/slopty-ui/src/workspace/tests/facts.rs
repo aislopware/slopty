@@ -258,7 +258,7 @@ fn a_workers_health_shows_only_when_something_is_wrong(cx: &mut TestAppContext) 
         let _gone = reply.send(slopty_proto::orchestration::Outcome::Done);
         verbs.push(verb);
     }
-    let worker = crate::workspace::projects::worker_id(key).expect("a server id");
+    let worker = keys::worker_id(key).expect("a server id");
     assert_eq!(verbs, [slopty_proto::orchestration::Verb::RestartWorker { worker }]);
     cx.run_until_parked();
     let notices = view.read_with(cx, |v, _| v.toast_texts());

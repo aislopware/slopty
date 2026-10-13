@@ -95,14 +95,12 @@ fn the_filter_waits_hidden_until_search_its_keys_or_typing(cx: &mut TestAppConte
         cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} is drawn"))
     };
     let (nav, header) = (bounds(cx, "navigator"), bounds(cx, "nav-header"));
-    let (search, goal, new) =
-        (bounds(cx, "nav-search"), bounds(cx, "nav-new-goal"), bounds(cx, "nav-new-agent"));
-    for b in [search, goal, new] {
+    let (search, new) = (bounds(cx, "nav-search"), bounds(cx, "nav-new-agent"));
+    for b in [search, new] {
         assert!(header.contains(&b.center()), "in the header row: {b:?}");
         assert!(b.left() > nav.left() && b.right() < nav.right(), "across the panel: {b:?}");
     }
     assert!(search.right() <= new.left(), "in order: {search:?} {new:?}");
-    assert!(new.right() <= goal.left(), "a goal last: {new:?} {goal:?}");
     assert!(!shown(cx, "nav-filter-field"), "hidden at rest");
 
     click(cx, "nav-search");
@@ -164,7 +162,7 @@ fn the_header_is_one_row(cx: &mut TestAppContext) {
     assert_eq!(header.top(), nav.top(), "at the navigator's top");
     assert!((f32::from(header.size.height) - theme.density.title).abs() < 0.5, "one row tall");
     assert!(!shown(cx, "nav-lights-row"), "no row over it");
-    let parts = ["navigator-toggle", "nav-search", "nav-new-agent", "nav-new-goal"];
+    let parts = ["navigator-toggle", "nav-search", "nav-new-agent"];
     let mut last = header.left() + px(titlebar::LEADING_INSET) - px(0.5);
     for part in parts {
         let b = bounds(cx, part);
@@ -181,45 +179,11 @@ fn the_header_is_one_row(cx: &mut TestAppContext) {
             && (search.center().y - new.center().y).abs() < px(0.5),
         "one box and one line: {search:?} {new:?}"
     );
-    let goal = bounds(cx, "nav-new-goal");
-    let end = f32::from(nav.right() - goal.right());
+    let end = f32::from(nav.right() - new.right());
     assert!((end - theme.spacing.inset_trailing()).abs() < 1.5, "6 in from its right: {end}");
     // The first row starts on the header's line, Delta's first head flush under it.
     let first = bounds(cx, "nav-row-0");
     assert!((first.top() - header.bottom()).abs() < px(0.5), "flush: {first:?} {header:?}");
-}
-
-/// A goal is the usual start, so it has a door wherever one starts: ⌘N and the navigator's
-/// "New goal" each open the one sheet, and ⌘N does with the navigator hidden.
-#[gpui::test]
-fn a_goal_starts_from_its_key_and_the_navigator(cx: &mut TestAppContext) {
-    let (view, cx) = workspace(cx);
-    let fake = connect(&view, cx, 1, "studio");
-    view.update_in(cx, |v, _w, cx| v.threads_linked(fake.key, cx));
-    let shell = opens_in(&view, cx, &fake, SessionId::new(), fake.me, 1, Some("/w/oss/slopty"));
-    view.update_in(cx, |v, _w, cx| v.focus_tile(shell, cx));
-    cx.run_until_parked();
-    let sheet = |cx: &mut VisualTestContext| cx.debug_bounds("goal-sheet").is_some();
-    let put_away = |cx: &mut VisualTestContext| {
-        cx.simulate_keystrokes("escape");
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("goal-sheet").is_none(), "Esc lets the sheet go");
-    };
-
-    cx.simulate_keystrokes("cmd-n");
-    cx.run_until_parked();
-    assert!(sheet(cx), "⌘N opens it");
-    put_away(cx);
-
-    click(cx, "nav-new-goal");
-    assert!(sheet(cx), "the navigator's New goal opens it");
-    put_away(cx);
-
-    cx.simulate_keystrokes("cmd-b");
-    cx.run_until_parked();
-    cx.simulate_keystrokes("cmd-n");
-    cx.run_until_parked();
-    assert!(sheet(cx), "⌘N opens it with the navigator hidden");
 }
 
 /// The filter keeps the tiles whose title, second line or project has what was typed, and every
@@ -550,7 +514,6 @@ fn measure_the_navigator_over_many_tiles(cx: &mut TestAppContext) {
     const FRAMES: usize = 400;
     const WARM: usize = 20;
     const THREADS: usize = 40;
-    const BOARDS: usize = 5;
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
     let mut items: Vec<Item> = Vec::new();
@@ -615,8 +578,8 @@ fn measure_the_navigator_over_many_tiles(cx: &mut TestAppContext) {
         docked.0, docked.1, hidden.0, hidden.1
     );
 
-    // Then the declared projects' board rows and the threads with no tile here: half the
-    // threads in a shell's project, half in a folder of their own.
+    // Then the threads with no tile here: half the threads in a shell's project, half in a
+    // folder of their own.
     let rows: Vec<slopty_proto::thread::wire::ThreadRow> = (0..THREADS)
         .map(|n| {
             let mut row = crate::conversation::thread::fixtures::thread("edit").row(WallMs::ZERO);
@@ -631,12 +594,6 @@ fn measure_the_navigator_over_many_tiles(cx: &mut TestAppContext) {
             row
         })
         .collect();
-    let boards = (0..BOARDS)
-        .map(|n| {
-            let board = crate::project::fixtures::project(&format!("board-{n}"), None);
-            crate::project::fixtures::status(board, Vec::new(), Vec::new())
-        })
-        .collect();
     let table = slopty_proto::thread::wire::TableFrame::Snapshot {
         cursor: slopty_proto::thread::Cursor { epoch: 1, seq: 1 },
         rows,
@@ -644,7 +601,6 @@ fn measure_the_navigator_over_many_tiles(cx: &mut TestAppContext) {
     view.update_in(cx, |v, window, cx| {
         v.threads_linked(key, cx);
         v.thread_table(key, &table, cx);
-        v.projects_part(crate::project::fixtures::snapshot(1, boards), cx);
         v.toggle_navigator(&ToggleNavigator, window, cx);
     });
     cx.run_until_parked();
@@ -660,8 +616,8 @@ fn measure_the_navigator_over_many_tiles(cx: &mut TestAppContext) {
     looked.sort_unstable();
     let pct = |p: usize| slopty_client::pacing::percentile(&looked, p).as_secs_f64() * 1e3;
     println!(
-        "MEASURE navigator with {THREADS} threads with no tile + {BOARDS} boards: docked p50 \
-         {:.3} ms p95 {:.3} ms; attention look p50 {:.3} ms p95 {:.3} ms",
+        "MEASURE navigator with {THREADS} threads with no tile: docked p50 {:.3} ms p95 {:.3} \
+         ms; attention look p50 {:.3} ms p95 {:.3} ms",
         busy.0,
         busy.1,
         pct(50),
@@ -845,11 +801,9 @@ fn a_phone_home_is_the_whole_screen_with_what_waits_first(cx: &mut TestAppContex
     let needs = cx.debug_bounds("nav-needs-you").expect("what waits on the person");
     assert!(field.top() < needs.top(), "the field first: {field:?} {needs:?}");
     assert!(shown(cx, leak(format!("nav-waiting-words-{session}"))), "its row");
-    // It starts a goal and an agent as every navigator does, at its field's end; the field is
-    // its search.
-    let goal = cx.debug_bounds("nav-new-goal").expect("New goal on the home");
+    // It starts an agent as every navigator does, at its field's end; the field is its search.
     let start = cx.debug_bounds("nav-new-agent").expect("New agent on the home");
-    assert!(field.right() <= start.left() && start.right() <= goal.left(), "{start:?} {goal:?}");
+    assert!(field.right() <= start.left(), "{field:?} {start:?}");
     assert!(start.bottom() <= needs.top(), "{start:?}");
     assert!(!shown(cx, "nav-search"), "no Search row: the field is always there");
     let worker = cx.debug_bounds(leak(format!("nav-worker-{}", studio.key))).expect("the machine");

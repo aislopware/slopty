@@ -40,8 +40,6 @@ mod outbox;
 pub mod palette;
 pub mod paste_key;
 pub mod picker;
-pub mod project;
-pub mod review;
 #[expect(
     unreachable_pub,
     reason = "the streaming work owns `screen` and the tile code; narrowed once it lands"

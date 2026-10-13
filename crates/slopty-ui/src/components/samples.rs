@@ -1,28 +1,18 @@
-//! What the component preview shows: a thread mid-turn, a board with a task in every lane and
-//! a turn's review, written here as the worker and the server would send them. Nothing here
-//! is asked of a machine; the views draw these as they draw what comes over the wire.
+//! What the component preview shows: a thread mid-turn, written here as the worker would send
+//! it. Nothing here is asked of a machine; the view draws it as it draws what comes over the
+//! wire.
 
-use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
+use std::collections::BTreeMap;
 
-use slopty_core::{SessionId, WallMs, WorkerId};
-use slopty_proto::orchestration::TermRef;
-use slopty_proto::project::{
-    Assignment, Bounds, Limits, Live, Merge, NativeCounts, Project, ProjectId, ProjectStatus,
-    ProjectsPart, TaskCard, TaskId, TaskState, VerifierRun,
-};
+use slopty_core::WallMs;
 use slopty_proto::thread::detail::{
     EditDetail, ExecDetail, ExecStatus, Hunk, Offered, Question, ReadDetail,
 };
-use slopty_proto::thread::wire::{FileDiff, FileKind, Review, ReviewScope};
 use slopty_proto::thread::{
     AgentId, AskId, Cap, Changed, Choice, Clipped, Drive, Effect, Item, ItemBody, ItemId, Notice,
     Patch, Phase, Plan, Request, RequestState, Status, Step, ThreadId, ThreadMeta, ThreadState,
     ToolCall, ToolDetail, ToolState, Turn, TurnId, TurnState, Usage, UserMessage, kind,
 };
-
-use crate::project::model::Projects;
-use crate::project::{AgentSeen, Seen, WorkerSeen};
 
 /// The one clock every sample reads, so ages and times read the same on every run.
 const AT: WallMs = WallMs::from_millis(1_790_000_000_000);
@@ -254,172 +244,4 @@ fn step(text: &str, status: &str) -> Step {
 
 fn offered(label: &str, means: &str) -> Offered {
     Offered { label: label.to_owned(), description: Some(means.to_owned()) }
-}
-
-/// The turn's review: the edited file, and a test added beside it.
-pub(super) fn review() -> Review {
-    let test = Patch {
-        hunks: vec![Hunk {
-            old_start: 0,
-            old_lines: 0,
-            new_start: 1,
-            new_lines: 5,
-            heading: None,
-            lines: vec![
-                "+#[tokio::test]".to_owned(),
-                "+async fn a_raced_refresh_is_a_replay() {".to_owned(),
-                "+    let (a, b) = tokio::join!(refresh(), refresh());".to_owned(),
-                "+    assert!(a.is_ok() != b.is_ok());".to_owned(),
-                "+}".to_owned(),
-            ],
-        }],
-        added: 5,
-        removed: 0,
-        clipped_lines: 0,
-        full: None,
-    };
-    let file = |path: &str, from: Option<&str>, patch: Patch| FileDiff {
-        path: path.to_owned(),
-        old_path: None,
-        from: from.map(str::to_owned),
-        to: Some(format!("{path}@new")),
-        kind: FileKind::Text,
-        modes: None,
-        patch,
-    };
-    Review {
-        scope: ReviewScope::Turn(TurnId(1)),
-        from: None,
-        to: None,
-        files: vec![
-            file(EDITED, Some("session@old"), patch()),
-            file("crates/api/tests/refresh.rs", None, test),
-        ],
-        absent: None,
-    }
-}
-
-/// The project the board shows.
-pub(super) fn project_id() -> Option<ProjectId> {
-    ProjectId::new("atlas").ok()
-}
-
-/// A board with a task in each lane, as the server sends it, and what the workspace hands the
-/// board with it: the machine the tasks run on and the agent that waits on the person.
-pub(super) fn board() -> Option<Seen> {
-    let id = project_id()?;
-    let worker = WorkerId::new();
-    let (blocked, running) = (SessionId::new(), SessionId::new());
-    let on = |mut card: TaskCard, session: SessionId| {
-        card.assignment = Some(Assignment {
-            term: TermRef { worker, session },
-            thread: None,
-            since_ms: AT,
-            ended_ms: None,
-            conversation: None,
-            spawned: true,
-        });
-        card.branch = Some(format!("atlas/task-{}", card.id));
-        card
-    };
-    let run = |passed: bool| VerifierRun {
-        passed,
-        summary: if passed {
-            "test result: ok. 113 passed".to_owned()
-        } else {
-            "error[E0308]: mismatched types\n  --> crates/api/src/session.rs:31:9".to_owned()
-        },
-        head: "9f3c2a1".to_owned(),
-        base: "c08d4c1".to_owned(),
-        exit: (!passed).then_some(101),
-        took_ms: 72_000,
-    };
-    let mut failed = card(2, "Move sessions to the new store", TaskState::Failed);
-    failed.verified = Some(run(false));
-    let mut ready = card(6, "Rotate the signing key", TaskState::Done);
-    ready.verified = Some(run(true));
-    ready.merge = Some(Merge::Queued { since_ms: at(60) });
-    let tasks = vec![
-        on(card(1, "Refuse a replayed refresh token", TaskState::Blocked), blocked),
-        failed,
-        on(card(3, "Rate-limit the sign-in route", TaskState::Running), running),
-        card(4, "Say so in the changelog", TaskState::Planned),
-        card(5, "Expire idle sessions", TaskState::Verifying),
-        ready,
-        card(7, "Hash tokens at rest", TaskState::Merged),
-    ];
-    let project = Project {
-        orchestrator_spent: slopty_proto::project::Spent::default(),
-        id: id.clone(),
-        title: "Harden session refresh".to_owned(),
-        repo: "atlas".to_owned(),
-        repo_id: None,
-        target: "main".to_owned(),
-        base: None,
-        verifier: Some("cargo test".to_owned()),
-        push: false,
-        orchestrator: None,
-        orchestrator_thread: None,
-        landed: None,
-        limits: Limits::default(),
-        metadata: None,
-        created_ms: AT,
-        goal: None,
-        autonomy: slopty_proto::project::Autonomy::default(),
-        progress: None,
-    };
-    let status = ProjectStatus {
-        project,
-        tasks,
-        orchestrator_natives: NativeCounts::default(),
-        timeline: Vec::new(),
-        next: 1,
-        bounds: Bounds::default(),
-        live: Live::default(),
-    };
-    let mut projects = Projects::default();
-    projects.apply_part(ProjectsPart { seq: 1, first: true, last: true, projects: vec![status] });
-    let board = Arc::clone(projects.get(&id)?);
-    let studio =
-        WorkerSeen { name: "studio".to_owned(), os: None, form: None, away: false, gone: false };
-    let asks = AgentSeen {
-        status: slopty_kit::icons::Status::NeedsYou,
-        asks: Some("Allow `cargo test`?".to_owned()),
-        asked: None,
-    };
-    let working = AgentSeen { status: slopty_kit::icons::Status::Working, asks: None, asked: None };
-    Some(Seen {
-        board: Some(board),
-        workers: BTreeMap::from([(worker, studio)]),
-        agents: HashMap::from([(blocked, asks), (running, working)]),
-        now: at(90),
-        recap: None,
-        orchestrator_ended: false,
-    })
-}
-
-/// Task `n`, titled, in `state`.
-fn card(n: u32, title: &str, state: TaskState) -> TaskCard {
-    TaskCard {
-        spent: slopty_proto::project::Spent::default(),
-        id: TaskId(n),
-        depends_on: Vec::new(),
-        kind: "build".to_owned(),
-        title: title.to_owned(),
-        read_only: false,
-        state,
-        status: None,
-        assignment: None,
-        branch: None,
-        worktree: None,
-        pull: None,
-        verified: None,
-        merge: None,
-        step: None,
-        natives: NativeCounts::default(),
-        created_ms: AT,
-        updated_ms: AT,
-        give_backs: slopty_proto::project::GiveBacks::default(),
-        tests: None,
-    }
 }

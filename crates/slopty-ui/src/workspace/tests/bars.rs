@@ -600,7 +600,7 @@ fn the_clipboard_is_stopped_and_shared_with_one_machine_from_the_palette_or_its_
     };
     run(cx, "Stop sharing the clipboard with laptop");
     assert!(!view.read_with(cx, |v, _| v.clipboard_shared(laptop_key)));
-    let laptop_id = crate::workspace::projects::worker_id(laptop_key).expect("an id").to_string();
+    let laptop_id = keys::worker_id(laptop_key).expect("an id").to_string();
     let kept = view.read_with(cx, |v, _| v.clip_sharing.workers.clone());
     assert_eq!(kept, [(laptop_id, false)].into(), "kept by its id, not its name");
     assert!(view.read_with(cx, |v, _| v.clipboard_shared(studio_key)), "the other is kept");

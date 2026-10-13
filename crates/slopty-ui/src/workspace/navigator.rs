@@ -4,11 +4,10 @@
 //! It runs from the window's top edge to its bottom, and its header is one row on the top line
 //! the top tab bars share: the traffic lights sit in it on a Mac, then its toggle, then a field
 //! that filters every row below, then New agent and New goal.
-//! Four sections are the one list of what waits on the person, each shown only while it holds
+//! Three sections are the one list of what waits on the person, each shown only while it holds
 //! something: *Needs you* (an agent or a thread waits on them), *Failed* (a turn stopped on an
-//! error or a usage limit), *Ready to merge* (a project task whose work passed, with "Merge" on
-//! its row) and *To review* (an agent's turn ended unseen, its row saying what it did, else how
-//! long it ran; never a task's agent, whose work arrives as its task). They are what the bell
+//! error or a usage limit) and *To review* (an agent's turn ended unseen, its row saying what it
+//! did, else how long it ran). They are what the bell
 //! counts, and the bell (⌘⇧U) shows the navigator at them. Each lists every one, whether its
 //! tile's row is in view or not, since its row says what it asks, carries "Deny" and "Allow" for
 //! a yes or no held here, and says its project, then its machine where there are several. What
@@ -53,7 +52,7 @@
 //! hidden: no rail stands in its place, and the bell counts what wants the human. On an iPad it
 //! opens over the frame and a scrim, closing once a row
 //! is chosen. On a phone it is the home: the whole screen, which the app opens on, so what waits
-//! on the person, each goal's board and the notes and server lines are what a phone shows first,
+//! on the person and the notes and server lines are what a phone shows first,
 //! never inside a closed drawer. A row goes to its tile; the bar's navigator button comes back.
 //!
 //! It is a view of its own, drawn cached: an echo in a terminal does not draw it again, only a
@@ -87,7 +86,6 @@ use slopty_kit::draw::Draw;
 use slopty_kit::icons::{GitGlyph, Mark, Status, Symbol, icon, status_mark};
 use slopty_kit::kit::{self, meta, tabular};
 use slopty_proto::items::{Item, ItemKind};
-use slopty_proto::project::{ProjectId, TaskId};
 use slopty_proto::server::{Os, WorkerCaps};
 use slopty_proto::tailnet::LinkPath;
 use slopty_proto::terminal::{Progress, ProgressState, RepoChanges};
@@ -129,9 +127,6 @@ pub(super) const NO_TILES: &str = "No tiles";
 /// What a shell reopened after its shell was lost says on its row.
 pub(super) const RESTORED: &str = "Restored";
 
-/// What a declared project's board row is called.
-pub(super) const BOARD: &str = "Board";
-
 /// What a thread's row says of it to assistive technology: it has no tile here yet.
 const NO_TILE_YET: &str = "no tile here";
 
@@ -141,9 +136,6 @@ pub(super) const EARLIER: &str = "Earlier";
 /// The threads at rest the open fold lists before "Show more".
 pub(super) const EARLIER_SHOWN: usize = 8;
 
-/// A board's words while it has no task.
-const NO_TASKS: &str = "No tasks yet";
-
 /// The section of what waits on the person, and what the bell is called.
 pub(super) const NEEDS_YOU: &str = "Needs you";
 
@@ -152,12 +144,6 @@ pub(super) const TO_REVIEW: &str = "To review";
 
 /// The section of agents and threads whose turn stopped on an error or a usage limit.
 pub(super) const FAILED: &str = "Failed";
-
-/// The section of project tasks whose work waits to be merged.
-pub(super) const READY_TO_MERGE: &str = "Ready to merge";
-
-/// A ready task's button that merges it.
-pub(super) const MERGE: &str = "Merge";
 
 /// A round trip the navigator names: above it typing starts to feel remote, below it the
 /// number is noise beside every worker. The hosts popover gives it always.
@@ -888,18 +874,6 @@ struct NavGroup {
     muted: bool,
 }
 
-/// A declared project's board, leading its group: how its tasks stand, and ↩ to the board.
-#[derive(Clone)]
-struct NavBoard {
-    project: ProjectId,
-    /// Its most urgent lane's status.
-    status: Option<Status>,
-    /// How many of its tasks are merged, as quiet words.
-    words: String,
-    /// Where the goal stands, its orchestrator's last summary's first line: the row's hint.
-    summary: Option<String>,
-}
-
 /// A thread at work with no tile here, set back under its project: ↩ opens its tile.
 #[derive(Clone)]
 struct NavThread {
@@ -915,12 +889,11 @@ struct NavThread {
     age: Option<String>,
 }
 
-/// One block of the list: a project's or a worker's header, then its board, its tiles and
-/// its threads with no tile, unless folded.
+/// One block of the list: a project's or a worker's header, then its tiles and its threads
+/// with no tile, unless folded.
 struct NavBlock {
     head: NavRow,
     folded: bool,
-    board: Option<NavBoard>,
     threads: Vec<NavThread>,
     /// The worker whose empty block says so, where its tiles would be.
     vacant: Option<WorkerKey>,
@@ -992,17 +965,6 @@ struct NavAgent {
     answer: Option<Answer>,
 }
 
-/// A project task ready to merge, as its row under *Ready to merge* says it.
-#[derive(Clone)]
-struct NavReady {
-    project: ProjectId,
-    task: TaskId,
-    /// The task's title.
-    title: String,
-    /// Its project, and its place in the merge queue.
-    words: String,
-}
-
 /// A head whose colour runs down the rows under it: a machine's (muted while it is away), or a
 /// project's.
 enum RunHead {
@@ -1018,10 +980,8 @@ enum NavRow {
         text: SharedString,
     },
     Agent(NavAgent),
-    Ready(NavReady),
     Worker(NavHeader),
     Group(NavGroup),
-    Board(NavBoard),
     Tile(NavTile),
     Thread(NavThread),
     /// The fold over the threads at rest with no tile here: how many, and whether it is open.
@@ -1043,9 +1003,7 @@ impl NavRow {
             Self::Group(g) => (false, g.gap),
             Self::Heading { .. }
             | Self::Tile(_)
-            | Self::Board(_)
             | Self::Agent(_)
-            | Self::Ready(_)
             | Self::Thread(_)
             | Self::Earlier(..)
             | Self::EarlierMore(_)
@@ -1056,17 +1014,15 @@ impl NavRow {
     }
 
     /// What the row shows, where that is one thing the list shows once: a tile, a worker, a
-    /// group, a thread, a board. A list scrolled down keeps its place by it across a splice.
+    /// group, a thread. A list scrolled down keeps its place by it across a splice.
     const fn anchor(&self) -> Option<Anchor<'_>> {
         match self {
             Self::Tile(t) => Some(Anchor::Tile(t.tile)),
             Self::Worker(h) => Some(Anchor::Worker(h.key)),
             Self::Group(g) => Some(Anchor::Group(&g.key)),
             Self::Thread(t) => Some(Anchor::Thread(t.thread)),
-            Self::Board(b) => Some(Anchor::Board(&b.project)),
             Self::Heading { .. }
             | Self::Agent(_)
-            | Self::Ready(_)
             | Self::Earlier(..)
             | Self::EarlierMore(_)
             | Self::Vacant(_)
@@ -1082,7 +1038,6 @@ enum Anchor<'a> {
     Worker(WorkerKey),
     Group(&'a GroupKey),
     Thread(ThreadId),
-    Board(&'a ProjectId),
 }
 
 impl WorkspaceView {
@@ -1665,18 +1620,14 @@ impl WorkspaceView {
             tiles.sort_by_key(|(class, _)| *class);
             tiles.into_iter().map(|(_, t)| t).collect()
         };
-        // A declared project leads its group with its board, and is listed with its board
-        // alone where none of its tiles is here.
-        let mut boards: BTreeMap<GroupKey, NavBoard> = self.nav_boards(&query, scope);
         let (mut threads, mut thread_groups, mut loose_threads) =
             self.nav_threads(&query, scope, projects);
         let mut blocks: Vec<(String, NavBlock)> = Vec::new();
         for (((group, tiles), machines), seen) in
             grouping.grouped.groups.iter().zip(by_group).zip(&spans).zip(&checkouts)
         {
-            let board = boards.remove(&group.key);
             let threads = threads.remove(&group.key).unwrap_or_default();
-            let empty = tiles.is_empty() && board.is_none() && threads.is_empty();
+            let empty = tiles.is_empty() && threads.is_empty();
             if group.key.worker().is_some() || empty {
                 continue;
             }
@@ -1705,43 +1656,10 @@ impl WorkspaceView {
                 muted: self.navigator().muted.contains(&group.key),
             };
             let block =
-                NavBlock { head: NavRow::Group(head), folded, board, threads, vacant: None, tiles };
+                NavBlock { head: NavRow::Group(head), folded, threads, vacant: None, tiles };
             blocks.push((name, block));
         }
-        for (key, board) in boards {
-            let threads = threads.remove(&key).unwrap_or_default();
-            let mut rollup = Rollup::default();
-            rollup.add(board.status, false);
-            for t in &threads {
-                rollup.add(t.status, false);
-            }
-            let folded = query.is_empty() && self.nav.folded.contains(&key);
-            let name = self.mirror_title(&board.project);
-            let head = NavGroup {
-                pinned: self.navigator().pinned.contains(&key),
-                muted: self.navigator().muted.contains(&key),
-                key,
-                glyph: group_glyph(fact::PROJECT),
-                name: name.clone(),
-                parent: None,
-                machines: None,
-                new_shell: None,
-                rollup,
-                folded,
-                gap: false,
-                changes: None,
-            };
-            let block = NavBlock {
-                head: NavRow::Group(head),
-                folded,
-                board: Some(board),
-                threads,
-                vacant: None,
-                tiles: Vec::new(),
-            };
-            blocks.push((name, block));
-        }
-        // A thread's own group, where no tile here and no board is in it.
+        // A thread's own group, where no tile here is in it.
         for (key, threads) in threads {
             let Some(group) = thread_groups.remove(&key) else { continue };
             let mut rollup = Rollup::default();
@@ -1767,7 +1685,6 @@ impl WorkspaceView {
             let block = NavBlock {
                 head: NavRow::Group(head),
                 folded,
-                board: None,
                 threads,
                 vacant: None,
                 tiles: Vec::new(),
@@ -1870,55 +1787,10 @@ impl WorkspaceView {
             // are all in projects says nothing more.
             let vacant =
                 (!any && threads.is_empty() && query.is_empty() && scope.is_none()).then_some(key);
-            let block = NavBlock {
-                head: NavRow::Worker(header),
-                folded,
-                board: None,
-                threads,
-                vacant,
-                tiles,
-            };
+            let block = NavBlock { head: NavRow::Worker(header), folded, threads, vacant, tiles };
             listing.workers.push(block);
         }
         listing
-    }
-
-    /// Each declared project the filter and the scope leave, by the key of its group: its
-    /// board's row. A facet narrows by what only a tile is known by, so it leaves none.
-    fn nav_boards(&self, query: &Query, scope: Option<&GroupKey>) -> BTreeMap<GroupKey, NavBoard> {
-        if !query.facets.is_empty() {
-            return BTreeMap::new();
-        }
-        self.projects
-            .mirror
-            .boards()
-            .filter_map(|board| {
-                let project = &board.project;
-                let key = GroupKey::new(fact::PROJECT, project.id.as_str());
-                let listed = scope.is_none_or(|s| *s == key)
-                    && matches(&query.text, &[&project.title, project.id.as_str(), BOARD]);
-                if !listed {
-                    return None;
-                }
-                let lanes = board.lanes();
-                let status = lanes.first().map(|(lane, _)| super::projects::lane_status(*lane));
-                // How far the work is in, alone: what waits on the person is the row's mark and
-                // the Needs you section's, and said again here it pushed the count out of a
-                // navigator of the usual width.
-                let (merged, total) = board.progress();
-                let words = if total == 0 {
-                    NO_TASKS.to_owned()
-                } else {
-                    format!("{merged} of {total} merged")
-                };
-                let summary = project
-                    .progress
-                    .as_ref()
-                    .and_then(|p| p.summary.lines().map(str::trim).find(|l| !l.is_empty()))
-                    .map(str::to_owned);
-                Some((key, NavBoard { project: project.id.clone(), status, words, summary }))
-            })
-            .collect()
     }
 
     /// The threads at work with no tile here, nor their terminal one, that the filter and the
@@ -1963,7 +1835,6 @@ impl WorkspaceView {
             })
             .collect();
         found.sort_by_key(|(thread, stand)| (std::cmp::Reverse(stand.since), *thread));
-        let claims = if found.is_empty() { Vec::new() } else { self.claims() };
         for (thread, stand) in found {
             let title = self.thread_title(thread);
             let word = stand.word();
@@ -1980,7 +1851,7 @@ impl WorkspaceView {
                 age: None,
             };
             let facts = self.thread_listing_facts(stand.worker, thread);
-            match super::grouping::listing_group(projects, &claims, &facts) {
+            match super::grouping::listing_group(projects, &facts) {
                 Some(group) if scope.is_none_or(|s| *s == group.key) => {
                     by_group.entry(group.key.clone()).or_default().push(row);
                     own.entry(group.key.clone()).or_insert(group);
@@ -2019,13 +1890,12 @@ impl WorkspaceView {
             .filter(|(thread, stand)| stand.rung == Rung::Idle && !shown.contains(thread))
             .collect();
         found.sort_by_key(|(thread, stand)| (std::cmp::Reverse(stand.since), *thread));
-        let claims = if found.is_empty() || scope.is_none() { Vec::new() } else { self.claims() };
         found
             .into_iter()
             .filter(|(thread, stand)| {
                 scope.is_none_or(|scope| {
                     let facts = self.thread_listing_facts(stand.worker, *thread);
-                    super::grouping::listing_group(projects, &claims, &facts)
+                    super::grouping::listing_group(projects, &facts)
                         .is_some_and(|g| g.key == *scope)
                 })
             })
@@ -2063,14 +1933,6 @@ impl WorkspaceView {
     /// The mark of `thread`'s agent, the neutral glyph while it is not known.
     pub(super) fn thread_mark(&self, thread: ThreadId) -> Mark {
         self.thread_agent(thread).map_or_else(|| slopty_kit::icons::AGENT.into(), Mark::agent)
-    }
-
-    /// A declared project's title, else its name.
-    fn mirror_title(&self, project: &ProjectId) -> String {
-        self.projects
-            .mirror
-            .get(project)
-            .map_or_else(|| project.as_str().to_owned(), |b| b.project.title.clone())
     }
 
     /// Where "+" on `group`'s header opens a shell: its place on the focused tile's machine
@@ -2461,8 +2323,8 @@ impl WorkspaceView {
                 cx.new(|_| kit::Hint::new(label, keys, Rc::clone(&hint_theme))).into()
             })
         };
-        // An open field takes the row from New agent and New goal (each on its key and in the
-        // palette) where the lights and the toggle leave it too little; a phone's home is wide.
+        // An open field takes the row from New agent (on its key and in the palette) where the
+        // lights and the toggle leave it too little; a phone's home is wide.
         let starts =
             (!listed && !self.workers.is_empty() && (home || filter.is_none())).then(|| {
                 let new_agent = start(
@@ -2477,25 +2339,7 @@ impl WorkspaceView {
                     }
                     this.new_agent(&super::actions::NewAgent, window, cx);
                 }));
-                let new_goal = start(
-                    "nav-new-goal",
-                    Symbol::Flag,
-                    super::titlebar::NEW_GOAL,
-                    &super::actions::NewGoal,
-                )
-                .on_click(cx.listener(move |this, _ev, window, cx| {
-                    if home {
-                        this.navigated();
-                    }
-                    this.new_goal(&super::actions::NewGoal, window, cx);
-                }));
-                div()
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .gap(px(spacing.xxs))
-                    .child(new_agent)
-                    .child(new_goal)
+                div().flex_none().flex().items_center().child(new_agent)
             });
         let (top, lead) = if home { (px(0.0), spacing.sm) } else { (safe.top, leading) };
         div()
@@ -2521,11 +2365,11 @@ impl WorkspaceView {
     }
 
     /// Every row the list holds this frame: *Needs you* while an agent or a thread waits,
-    /// *Failed* while a turn stopped on an error, *Ready to merge* while a task's work waits to
-    /// be merged, *To review* while a turn ended unseen, then the projects, each header with its
-    /// tiles unless it is folded, then the workers, each with what belongs to no project. A
-    /// section's heading shows only under another section. While the filter holds something, a
-    /// fold hides nothing; under a scope, only its project's rows are left.
+    /// *Failed* while a turn stopped on an error, *To review* while a turn ended unseen, then the
+    /// projects, each header with its tiles unless it is folded, then the workers, each with
+    /// what belongs to no project. A section's heading shows only under another section. While
+    /// the filter holds something, a fold hides nothing; under a scope, only its project's rows
+    /// are left.
     ///
     /// The attention sections list every one, its tile's row in view or not: they are what
     /// the bell counts and opens, and a waiting row is where its yes or no is answered.
@@ -2580,11 +2424,6 @@ impl WorkspaceView {
             rows.push(heading("nav-failed", FAILED));
             rows.extend(failed.into_iter().map(NavRow::Agent));
         }
-        let ready = self.nav_ready(scope, &projects, &query);
-        if !ready.is_empty() {
-            rows.push(heading("nav-ready", READY_TO_MERGE));
-            rows.extend(ready.into_iter().map(NavRow::Ready));
-        }
         let review = agents(self.to_review(), Status::Done);
         if !review.is_empty() {
             rows.push(heading("nav-to-review", TO_REVIEW));
@@ -2623,44 +2462,10 @@ impl WorkspaceView {
         rows
     }
 
-    /// The tasks ready to merge, as their rows say them: under a scope only its project's (the
-    /// one its orchestrator's tile is grouped in), and under words only those they match.
-    fn nav_ready(
-        &self,
-        scope: Option<&GroupKey>,
-        projects: &Grouping,
-        query: &str,
-    ) -> Vec<NavReady> {
-        let mirror = self.projects();
-        self.ready_to_merge()
-            .into_iter()
-            .filter_map(|(project, task)| {
-                let board = mirror.get(&project)?;
-                let in_scope = scope.is_none_or(|scope| {
-                    let tile =
-                        board.project.orchestrator.and_then(|t| self.tile_of_session(t.session));
-                    tile.and_then(|t| projects.group_of(t)).is_some_and(|g| g.key == *scope)
-                });
-                let card = board.tasks.get(&task).filter(|_| in_scope)?;
-                let queue = board
-                    .queue_place(task)
-                    .map(|(place, _)| crate::project::model::queue_words(place));
-                let words = [Some(board.project.title.clone()), queue]
-                    .into_iter()
-                    .flatten()
-                    .filter(|w| !w.is_empty())
-                    .collect::<Vec<_>>()
-                    .join(META_SEPARATOR);
-                Some(NavReady { project, task, title: card.title.clone(), words })
-            })
-            .filter(|r| matches(query, &[&r.title, &r.words]))
-            .collect()
-    }
-
     /// `blocks` onto the list: each header, then unless it is folded what it holds.
     #[expect(clippy::unused_self, reason = "a step of nav_rows, beside its siblings")]
     fn push_blocks(&self, rows: &mut Vec<NavRow>, blocks: Vec<NavBlock>) {
-        for NavBlock { mut head, folded, board, threads, vacant, tiles } in blocks {
+        for NavBlock { mut head, folded, threads, vacant, tiles } in blocks {
             // A block after another's rows stands a step off them; under a heading, or first,
             // it needs none.
             let gap = matches!(
@@ -2676,7 +2481,6 @@ impl WorkspaceView {
             if folded {
                 continue;
             }
-            rows.extend(board.map(NavRow::Board));
             rows.extend(vacant.map(NavRow::Vacant));
             rows.extend(tiles.into_iter().map(NavRow::Tile));
             rows.extend(threads.into_iter().map(NavRow::Thread));
@@ -2746,7 +2550,7 @@ impl WorkspaceView {
     }
 
     /// The head whose colour row `ix` carries down, Delta's thread colour run down its
-    /// subthreads: a tile's, the board's or a thread's row under a head that wears its own
+    /// subthreads: a tile's or a thread's row under a head that wears its own
     /// colour, and whether it is the selected tile. Nothing above the first head or past a
     /// section's heading.
     fn run_head(&self, ix: usize) -> Option<(RunHead, Wash)> {
@@ -2754,7 +2558,7 @@ impl WorkspaceView {
         let chosen = self.nav.list.selected.get();
         let selected = match rows.get(ix)? {
             NavRow::Tile(t) => chosen == Some(t.tile),
-            NavRow::Board(_) | NavRow::Thread(_) | NavRow::Vacant(_) => false,
+            NavRow::Thread(_) | NavRow::Vacant(_) => false,
             _ => return None,
         };
         let ends = |row: &NavRow| {
@@ -2794,10 +2598,8 @@ impl WorkspaceView {
                 heading(theme, selector.clone(), text.clone(), ix == 0).into_any_element()
             }
             Some(NavRow::Agent(agent)) => self.agent_row(agent, cx),
-            Some(NavRow::Ready(ready)) => self.ready_row(ready, cx),
             Some(NavRow::Worker(header)) => self.worker_header(header, cx),
             Some(NavRow::Group(group)) => self.group_header(group, cx),
-            Some(NavRow::Board(board)) => self.board_row(board, cx),
             Some(NavRow::Thread(thread)) => self.thread_row(thread, cx),
             Some(NavRow::Earlier(count, open)) => self.earlier_heading(*count, *open, ix == 0, cx),
             Some(NavRow::EarlierMore(more)) => self.earlier_more(*more, cx),
@@ -3085,69 +2887,6 @@ impl WorkspaceView {
                     ))
             });
         with_hint(row, theme, (!hint.is_empty()).then_some(hint)).into_any_element()
-    }
-
-    /// A task ready to merge, one line: the done mark, its title, and at rest its project and
-    /// its place in the queue; under the pointer Merge (`git-merge` in `success`), which sends
-    /// the merge as the person's word. The row opens its board.
-    fn ready_row(&self, ready: &NavReady, cx: &Draw<'_, Self>) -> gpui::AnyElement {
-        let theme = &self.theme;
-        let s = &theme.surfaces;
-        let key = format!("{}-{}", ready.project, ready.task);
-        let label = [ready.title.as_str(), ready.words.as_str(), READY_TO_MERGE]
-            .into_iter()
-            .filter(|part| !part.is_empty())
-            .collect::<Vec<_>>()
-            .join(", ");
-        // The task and its project each keep a slot of their own and are cut in it, the
-        // project's at most half the row, a gap between them.
-        let words = {
-            let key = key.clone();
-            readout(theme, ready.words.clone())
-                .flex_shrink_1()
-                .min_w_0()
-                .overflow_hidden()
-                .text_ellipsis()
-                .debug_selector(move || format!("nav-ready-words-{key}"))
-                .into_any_element()
-        };
-        let merge = {
-            let (project, task) = (ready.project.clone(), ready.task);
-            kit::icon_button_inked(
-                theme,
-                format!("nav-merge-{key}"),
-                Symbol::ArrowTriangleMerge,
-                MERGE,
-                s.success,
-            )
-            .on_click(cx.listener(move |this, _ev, _w, cx| {
-                cx.stop_propagation();
-                this.merge_task(&project, task, cx);
-            }))
-            .into_any_element()
-        };
-        let row_group = SharedString::from(format!("nav-ready-group-{key}"));
-        let end = end_slot(theme, row_group.clone(), Some(words), Some((merge, 1)))
-            .flex_shrink_1()
-            .min_w_0()
-            .max_w(gpui::relative(0.5))
-            .pl(px(theme.spacing.sm));
-        let project = ready.project.clone();
-        let title_key = key.clone();
-        row(theme, kit::Row::One, format!("nav-ready-{key}"), label.into(), false)
-            .group(row_group)
-            .child(lead_slot(theme, {
-                let side = px(theme.icon());
-                let tone = hsla(Status::Done.ink(theme));
-                slopty_kit::icons::status_icon(theme, Status::Done, side, tone).into_any_element()
-            }))
-            .child(
-                title(theme, ready.title.clone(), hsla(s.text_secondary))
-                    .debug_selector(move || format!("nav-ready-title-{title_key}")),
-            )
-            .child(end)
-            .on_click(cx.listener(move |this, _ev, _w, cx| this.open_project(&project, cx)))
-            .into_any_element()
     }
 
     /// A worker's header: the server icon (crossed out, in the warn fill, while it is away),
@@ -3643,57 +3382,6 @@ impl WorkspaceView {
                 this.layout_action(cx, |l| l.show_project(&home));
                 this.start_in(worker, cwd, window, cx);
             }))
-            .into_any_element()
-    }
-
-    /// A declared project's board, first under its header and set in as its tiles are: the
-    /// project's glyph, else its most urgent lane's status, "Board", and how its tasks stand, on
-    /// one line; where the goal stands, as its orchestrator last said, is its hint. ↩ or a click
-    /// shows the board in its orchestrator's tile.
-    fn board_row(&self, board: &NavBoard, cx: &Draw<'_, Self>) -> gpui::AnyElement {
-        let theme = &self.theme;
-        let s = &theme.surfaces;
-        let id = board.project.as_str().to_owned();
-        let label = [Some(BOARD), Some(board.words.as_str()), board.summary.as_deref()]
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>()
-            .join(", ");
-        let state = board.status.filter(|m| *m != Status::Idle);
-        // The board's glyph wears the leads' ink; its project's colour is the head's bar above.
-        let lead = crate::palette::lead_mark(
-            theme,
-            Symbol::RectangleSplit3x1,
-            hsla(s.icon_muted),
-            LEAD_SLOT,
-        );
-        let words_id = id.clone();
-        let project = board.project.clone();
-        let line1 = div()
-            .flex()
-            .items_center()
-            .min_w_0()
-            // "Board" is one short word and stays whole; the words beside it give way instead.
-            .child(div().flex_none().text_color(hsla(s.text_secondary)).child(BOARD))
-            .child(
-                tabular(meta(div(), theme))
-                    .flex_1()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .text_right()
-                    .child(board.words.clone())
-                    .debug_selector(move || format!("nav-board-words-{words_id}")),
-            )
-            .children(state.map(|st| status_mark(theme, Some(st))));
-        // Where the goal stands is the row's hint: the board itself says it in full.
-        let el = row(theme, kit::Row::One, format!("nav-board-{id}"), label.into(), false)
-            .pl(px(theme.spacing.sm + nest_step(theme)))
-            .child(lead)
-            .child(line1.flex_1());
-        let el = with_hint(el, theme, board.summary.clone());
-        el.on_click(cx.listener(move |this, _ev, _w, cx| this.open_project(&project, cx)))
             .into_any_element()
     }
 

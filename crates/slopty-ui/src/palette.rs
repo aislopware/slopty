@@ -530,8 +530,6 @@ pub enum PaletteRun {
     OpenUrl(String),
     /// Open this address in a browser tile.
     OpenInTile(String),
-    /// Show this project's board in its orchestrator's tile.
-    Project(slopty_proto::project::ProjectId),
     /// Go to the workspace that last held this project's tiles, and to its first tile there.
     Group(slopty_client::layout::GroupKey),
     /// Open again the tile closed as this closing (the workspace's count of them).
@@ -567,7 +565,6 @@ impl Clone for PaletteRun {
             Self::OpenAgent { cwd } => Self::OpenAgent { cwd: cwd.clone() },
             Self::OpenUrl(url) => Self::OpenUrl(url.clone()),
             Self::OpenInTile(url) => Self::OpenInTile(url.clone()),
-            Self::Project(project) => Self::Project(project.clone()),
             Self::Group(group) => Self::Group(group.clone()),
             Self::Reopen(closing) => Self::Reopen(*closing),
             Self::Ask { words } => Self::Ask { words: words.clone() },
@@ -595,7 +592,6 @@ impl std::fmt::Debug for PaletteRun {
             Self::OpenAgent { cwd } => f.debug_struct("OpenAgent").field("cwd", cwd).finish(),
             Self::OpenUrl(url) => f.debug_tuple("OpenUrl").field(url).finish(),
             Self::OpenInTile(url) => f.debug_tuple("OpenInTile").field(url).finish(),
-            Self::Project(project) => f.debug_tuple("Project").field(project).finish(),
             Self::Group(group) => f.debug_tuple("Group").field(group).finish(),
             Self::Reopen(closing) => f.debug_tuple("Reopen").field(closing).finish(),
             Self::Ask { words } => f.debug_struct("Ask").field("words", words).finish(),
@@ -813,19 +809,6 @@ impl PaletteItem {
     pub fn wake(name: &str, worker: slopty_client::layout::WorkerKey) -> Self {
         let run = PaletteRun::Wake(worker);
         Self::line(format!("Wake {name}"), String::new(), run, None, Section::Commands)
-    }
-
-    /// A project by its title: ↩ shows its board.
-    #[must_use]
-    pub fn project(title: &str, project: slopty_proto::project::ProjectId) -> Self {
-        let run = PaletteRun::Project(project);
-        Self::line(
-            title.to_owned(),
-            String::new(),
-            run,
-            Some(Mark::Symbol(Symbol::RectangleSplit3x1)),
-            Section::Tiles,
-        )
     }
 
     /// A project by its name, its glyph saying what it was found by: ↩ goes to its workspace.

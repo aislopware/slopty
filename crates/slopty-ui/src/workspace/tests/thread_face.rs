@@ -206,7 +206,7 @@ fn a_thread_tile_says_its_checkout_once_in_the_composers_foot(cx: &mut TestAppCo
     assert!(foot.top() >= header.bottom(), "under the header: {foot:?}");
     let nodes = tree(cx);
     assert!(
-        nodes.iter().any(|n| n.label.as_deref() == Some("Commit on slopty / responsive-headers")),
+        nodes.iter().any(|n| n.label.as_deref() == Some("Works in slopty / responsive-headers")),
         "{nodes:#?}"
     );
 }

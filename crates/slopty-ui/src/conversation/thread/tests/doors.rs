@@ -436,28 +436,23 @@ fn the_screen_the_agent_drives_is_offered_beside_it(cx: &mut TestAppContext) {
 }
 
 /// Each of the thread's buttons is an action too, for the palette and a bound key, answered only
-/// while its button would show: Review over the last turn's edits and Resume once the agent
-/// has exited. The agent's terminal is ⌘J's, on the
-/// tile, so the thread has no action of its own for it.
+/// while its button would show: Resume once the agent has exited. The agent's terminal is ⌘J's, on
+/// the tile, so the thread has no action of its own for it.
 #[gpui::test]
 fn every_button_of_the_thread_is_an_action_while_it_shows(cx: &mut TestAppContext) {
-    use crate::conversation::{ResumeAgent, ReviewChanges};
+    use crate::conversation::ResumeAgent;
 
     let (hub, sent) = hub(cx, None);
     let mut state = fixtures::thread("edit");
     let thread = state.meta.id;
     hub.update(cx, ThreadHub::connected);
-    let (view, cx) = view(cx, &hub, thread);
+    let (_view, cx) = view(cx, &hub, thread);
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state.clone(), 0), cx));
     cx.run_until_parked();
-    let asked = asked(cx, &view);
     let available = |cx: &mut gpui::VisualTestContext, action: &dyn gpui::Action| {
         cx.update(|window, cx| window.is_action_available(action, cx))
     };
     assert!(!available(cx, &ResumeAgent), "it runs");
-
-    cx.dispatch_action(ReviewChanges);
-    assert!(matches!(asked.borrow().as_slice(), [ThreadViewEvent::Review { .. }]));
 
     state.status.liveness = Liveness::Exited { resumable: true };
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 3), cx));

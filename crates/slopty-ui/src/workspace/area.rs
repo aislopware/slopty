@@ -163,8 +163,6 @@ pub(super) type TabSpots = Rc<RefCell<Vec<(ItemId, Bounds<Pixels>)>>>;
 pub(super) enum Handed {
     Shell { covered: bool },
     Face { width: f32 },
-    Board { beside: bool },
-    Review { width: f32, height: f32 },
     Stream { painted: f32 },
     Text { pad: f32, size: f32 },
 }
@@ -612,8 +610,8 @@ impl WorkspaceView {
 
     /// An empty workspace. With a machine to begin on it is the composer page: one question,
     /// "What should we work on?", over the unboxed composer in a narrow column a third of the
-    /// way down, whose ↵ hands the goal to an orchestrator as "New goal…" would
-    /// ([`Self::goal_from_page`]), its foot saying where the goal goes; under it a short list
+    /// way down, whose ↵ starts a thread of the usual agent with the words
+    /// ([`Self::send_page_goal`]), its foot saying where they go; under it a short list
     /// keeps a terminal and a window one press away. With no worker, or the server out of reach,
     /// the page says where machines come from, a fifth of the way down, with its doors.
     fn render_empty(&self, cx: &Draw<'_, Self>) -> gpui::AnyElement {
@@ -698,10 +696,10 @@ impl WorkspaceView {
     }
 
     /// The composer page, a thread with no turns (`.research/design-polish-2026-10-12.md`
-    /// §4.9): the goal's composer at the pane's foot, the thread's, and above it a launcher in
+    /// §4.9): the page's composer at the pane's foot, the thread's, and above it a launcher in
     /// a centred column as wide as it holds (up to 512) whose top stands at 30 % of the pane,
     /// on one edge: the
-    /// question, where a goal goes, a *Start* head over the ways that need no goal, then a
+    /// question, where its words go, a *Start* head over the ways that need no words, then a
     /// *Recent* head over the tabs used last. The doors print no keys: keys are the palette's.
     fn composer_page(&self, cx: &Draw<'_, Self>) -> gpui::AnyElement {
         let theme = &self.theme;
@@ -715,30 +713,22 @@ impl WorkspaceView {
             .aria_label(asked.clone())
             .text_color(hsla(s.text))
             .child(asked.clone());
-        // Where ↵ sends the goal, a muted line under the question: nothing starts somewhere
-        // unseen, and a press opens the sheet that changes it.
+        // Where ↵ sends the words, a muted line under the question: nothing starts somewhere
+        // unseen.
         let place = self.page_goal_place(cx).map(|place| {
-            let el = kit::typed(div(), theme.roles().metadata)
+            kit::typed(div(), theme.roles().metadata)
                 .id("empty-goal-foot")
                 .debug_selector(|| "empty-goal-foot".to_owned())
-                .role(gpui::accesskit::Role::Button)
+                .role(gpui::accesskit::Role::Label)
                 .aria_label(SharedString::from(place.clone()))
-                .aria_description(CHANGE_PLACE)
                 .flex_none()
                 .min_w_0()
                 .pt(px(spacing.sm))
-                .cursor_pointer()
                 .overflow_hidden()
                 .whitespace_nowrap()
                 .text_ellipsis()
                 .text_color(hsla(s.text_muted))
-                .hover(|st| st.text_color(hsla(s.text)))
-                .child(SharedString::from(place));
-            slopty_kit::a11y::tab_stop(el, s.focus).on_click(cx.listener(
-                |this, _ev, window, cx| {
-                    this.goal_sheet_from_page(window, cx);
-                },
-            ))
+                .child(SharedString::from(place))
         });
         let head = |id: &'static str, words: &'static str| {
             kit::typed(div(), theme.roles().section)
@@ -766,17 +756,6 @@ impl WorkspaceView {
                     .on_click(cx.listener(|this, _ev, window, cx| {
                         this.add_window(&super::actions::AddWindow, window, cx);
                     })),
-            )
-            .child(
-                self.door_row(
-                    "empty-new-goal",
-                    Symbol::Flag,
-                    super::titlebar::NEW_GOAL.into(),
-                    false,
-                )
-                .on_click(cx.listener(|this, _ev, window, cx| {
-                    this.new_goal(&super::actions::NewGoal, window, cx);
-                })),
             );
         // The tabs used last, newest first, each a row that goes back to it.
         let recent: Vec<(ItemId, String, slopty_kit::icons::Mark)> = self
@@ -818,7 +797,7 @@ impl WorkspaceView {
             });
             div().flex().flex_col().child(head("empty-recent", RECENT)).children(rows)
         });
-        // The goal's composer is the thread's, so the habit is one place: its field at the
+        // The page's composer is the thread's, so the habit is one place: its field at the
         // prose's size in the reading column with no line over it, and its foot the pane's
         // frame at the bottom, the send at its end (`.research/warp-composition-2026-10-12.md`
         // §2.8.2).
@@ -914,7 +893,7 @@ impl WorkspaceView {
 
     /// The empty workspace's question: in the project on show, by its name, when one is (a
     /// folder's or a repository's), else [`EMPTY_QUESTION`]. A machine's own work is no
-    /// project, and the composer's foot already says which machine a goal goes to.
+    /// project, and the composer's foot already says which machine the words go to.
     pub(super) fn empty_question(&self) -> SharedString {
         let project = self.layout.shown_project().filter(|p| p.home().worker().is_none());
         let name = project.map(|_| self.project_name()).unwrap_or_default();
@@ -1048,10 +1027,7 @@ const SEND: &str = "Send";
 pub(crate) const EMPTY_QUESTION: &str = "What should we work on?";
 
 /// What the empty workspace's composer takes, before anything is written in it.
-pub(crate) const EMPTY_GOAL_HINT: &str = "Describe the goal. An orchestrator plans it";
-
-/// What the composer's foot says it does, to a screen reader, after where the goal goes.
-pub(crate) const CHANGE_PLACE: &str = "Change where it goes";
+pub(crate) const EMPTY_GOAL_HINT: &str = "Describe the goal. The agent takes it from there";
 
 /// A directory work stands or stood in on a worker: where a start's folder step offers to
 /// start one.

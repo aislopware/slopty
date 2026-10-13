@@ -34,9 +34,6 @@ actions!(
         /// "Move to project…": the other projects, as a step; the focused tile goes to a tab of
         /// its own in the one picked.
         MoveToProject,
-        /// "New goal…": the one sheet that hands a goal to a new orchestrator, which starts
-        /// with it as a project.
-        NewGoal,
         /// Put an empty note beside the focused column.
         NewNote,
         /// Put a worker's window or display in the workspace.
@@ -48,14 +45,6 @@ actions!(
         OpenFolder,
         /// Open a web page in a tile (the palette, ready for an address).
         OpenUrl,
-        /// Review the changes of the focused folder's repository, or of the focused shell's,
-        /// with no thread: what is not committed, and the whole branch.
-        ReviewChanges,
-        /// Open the review of what waits first under *To review*, after the one on show.
-        ReviewNext,
-        /// "Review a pull request…": which repository, then which pull request by number; an
-        /// agent starts on it in a new worktree that checks it out, its whole change beside it.
-        ReviewPull,
         /// Free the worktree the focused work is in: a folder's, or a thread's whose agent
         /// has exited.
         RemoveWorktree,
@@ -167,8 +156,6 @@ actions!(
         FontReset,
         /// The focused agent's tile to its other face: its thread or its terminal.
         SwitchFace,
-        /// The focused orchestrator's board, beside its thread or terminal, shown or put away.
-        ToggleBoard,
         /// The focused page's address as a field in its header, all of it selected: ↩ goes
         /// there, Esc leaves it as it was. With no page focused, "Open URL…".
         EditAddress,
@@ -277,21 +264,6 @@ pub struct RunScriptOn {
     pub worker: slopty_client::layout::WorkerKey,
     /// The script, as the machine read it.
     pub script: slopty_proto::git::RunScript,
-}
-
-/// A line of "Review a pull request…": the agent starts on pull request `number` of
-/// `repo` on `worker`, in a new worktree checking it out.
-#[derive(Clone, PartialEq, Eq, Debug, gpui::Action)]
-#[action(namespace = workspace, no_json)]
-pub struct ReviewPullNumber {
-    /// On which machine.
-    pub worker: slopty_client::layout::WorkerKey,
-    /// The repository, as the worker spells it.
-    pub repo: String,
-    /// The pull request's number.
-    pub number: u32,
-    /// The forge the number was typed for, where the text said which (`!12`, a page).
-    pub forge: Option<slopty_proto::git::Forge>,
 }
 
 /// "Remove `<machine>`…": its confirm, then the worker and everything else of Slopty's off it.
@@ -433,14 +405,10 @@ pub fn palette_items_of(keymap: &crate::keymap::Keymap) -> Vec<PaletteItem> {
         w("Split right with a terminal", Box::new(SplitRight)),
         w("Split down with a terminal", Box::new(SplitDown)),
         w("Show or hide the tab's terminal", Box::new(TabTerminal)),
-        w(super::projects::NEW_GOAL, Box::new(NewGoal)),
         w("New note", Box::new(NewNote)),
         w("Add a window or display", Box::new(AddWindow)),
         w("Open file…", Box::new(OpenFile)),
         w("Open folder…", Box::new(OpenFolder)),
-        w(super::reviews::REVIEW_CHANGES, Box::new(ReviewChanges)),
-        w(super::reviews::REVIEW_NEXT, Box::new(ReviewNext)),
-        w(super::pull_review::REVIEW_PULL, Box::new(ReviewPull)),
         w(super::worktrees::REMOVE_WORKTREE, Box::new(RemoveWorktree)),
         w(super::worktrees::REMOVE_MERGED, Box::new(RemoveMerged)),
         w(super::run_scripts::RUN, Box::new(RunHere)),
@@ -491,7 +459,6 @@ pub fn palette_items_of(keymap: &crate::keymap::Keymap) -> Vec<PaletteItem> {
         w(MOVE_TO_PROJECT, Box::new(MoveToProject)),
         w("Next tab in the pane", Box::new(NextPaneTab)),
         w("Switch thread or terminal", Box::new(SwitchFace)),
-        w(super::projects::TOGGLE_BOARD, Box::new(ToggleBoard)),
         w("Thread density", Box::new(CycleDensity)),
         w("Stop the agent", Box::new(Interrupt)),
         w("Queue message", Box::new(QueueMessage)),
@@ -511,8 +478,6 @@ pub fn palette_items_of(keymap: &crate::keymap::Keymap) -> Vec<PaletteItem> {
     items.extend(crate::folder::files_palette_items(crate::folder::FILES_PICKER, &workspace));
     items.extend(crate::folder::folder_palette_items(&workspace));
     items.extend(crate::conversation::palette_items(&workspace));
-    items.extend(crate::project::palette_items(&workspace));
-    items.extend(crate::review::palette_items(&workspace));
     items.extend(crate::file::editor_palette_items(&workspace));
     // Only the Mac has a Web Inspector window of its own; iOS reaches it from Safari on a Mac.
     if cfg!(target_os = "macos") {
@@ -562,8 +527,6 @@ pub(super) struct Applies {
     pub terminal: bool,
     /// A terminal an agent runs in.
     pub agent: bool,
-    /// A terminal whose agent orchestrates a project.
-    pub orchestrator: bool,
     /// A tile that takes files from this device: a shell, a folder or a remote picture.
     pub upload: bool,
     /// A remote tile with a window of its own on this Mac, or one that can have one.
@@ -572,7 +535,7 @@ pub(super) struct Applies {
     pub streams: bool,
     /// A tile closed a moment ago can be taken back.
     pub undo: bool,
-    /// A folder, or a shell in a repository: its changes can be reviewed.
+    /// A folder, or a shell in a repository: its clone's merged worktrees can be swept.
     pub changes: bool,
     /// Work in an agent's worktree, which can be removed.
     pub worktree: bool,
@@ -600,7 +563,6 @@ impl super::WorkspaceView {
             file: matches!(kind, Some(ItemKind::File { .. })),
             terminal: self.active_terminal().is_some(),
             agent: agent.is_some(),
-            orchestrator: session.is_some_and(|s| self.projects().of_orchestrator(s).is_some()),
             upload: matches!(
                 kind,
                 Some(

@@ -103,8 +103,6 @@ pub(in crate::workspace) struct Approvals {
     wake: Option<gpui::Task<()>>,
     /// Verdicts on their way through the server, not answered yet.
     through_server: usize,
-    /// The requests whose card was put away (`approval_cards`): theirs does not come back.
-    put_away: std::collections::HashSet<AskId>,
 }
 
 /// Whether a thread's open request is a yes or no that "Allow" and "Deny" answer whole
@@ -115,16 +113,6 @@ pub(in crate::workspace) fn answerable(card: &RequestCard) -> bool {
 }
 
 impl Approvals {
-    /// Put away the card of request `ask` (`approval_cards`): it does not come back.
-    pub(in crate::workspace) fn put_away(&mut self, ask: AskId) {
-        self.put_away.insert(ask);
-    }
-
-    /// Whether the card of request `ask` was put away.
-    pub(in crate::workspace) fn is_put_away(&self, ask: &AskId) -> bool {
-        self.put_away.contains(ask)
-    }
-
     /// Whether a note's verdict waits for its request.
     pub(in crate::workspace) const fn taps_waiting(&self) -> bool {
         !self.tapped.is_empty() || !self.awaiting.is_empty() || self.through_server > 0
@@ -182,32 +170,6 @@ impl WorkspaceView {
         Some(id)
     }
 
-    /// Answer the request `ask` that the agent in `session` waits on, as `pressed` says: a
-    /// board row's press. Nothing when it no longer waits on that request.
-    pub(in crate::workspace) fn answer_session(
-        &mut self,
-        session: SessionId,
-        ask: &AskId,
-        pressed: &Pressed,
-        cx: &mut Context<Self>,
-    ) {
-        let seat = || {
-            self.projects().boards().find_map(|board| {
-                let card = board.tasks.values().find(|card| {
-                    card.assignment.as_ref().is_some_and(|a| a.term.session == session)
-                })?;
-                card.assignment.as_ref()?.thread
-            })
-        };
-        let thread = self.session_thread(session).or_else(seat);
-        let worker = self
-            .agent_state(session)
-            .or_else(|| thread.and_then(|t| self.thread_stand(t)))
-            .map(|stand| stand.worker);
-        let (Some(worker), Some(thread)) = (worker, thread) else { return };
-        let _sent = self.answer_pressed(worker, thread, ask, pressed, cx);
-    }
-
     /// The request this client answered on `thread` that its worker's table still shows open.
     #[must_use]
     pub(in crate::workspace) fn thread_answered_here(&self, thread: ThreadId) -> Option<&AskId> {
@@ -261,10 +223,10 @@ impl WorkspaceView {
         }
         let of = match (thread, route.about) {
             (Some(thread), _) | (None, About::Thread(thread)) => Some(ThreadOf::Thread(thread)),
-            (None, About::Session(session)) => super::projects::worker_id(route.worker)
+            (None, About::Session(session)) => super::keys::worker_id(route.worker)
                 .map(|worker| ThreadOf::Term(TermRef { worker, session })),
         };
-        let (Some(caller), Some(of)) = (self.projects.caller.clone(), of) else {
+        let (Some(caller), Some(of)) = (self.server.clone(), of) else {
             self.unanswered(route, REPLY_NOT_SENT, cx);
             self.settle_taps(cx);
             return;
@@ -278,68 +240,6 @@ impl WorkspaceView {
                     tracing::info!(message, "a note's reply was refused");
                     this.unanswered(route, REPLY_NOT_SENT, cx);
                 }
-                this.approvals.through_server = this.approvals.through_server.saturating_sub(1);
-                if !this.approvals.taps_waiting() {
-                    cx.emit(WorkspaceEvent::TapsSettled);
-                }
-            });
-        })
-        .detach();
-    }
-
-    /// A ready note's "Merge": task `task` of `project` into its merge queue, the person's word,
-    /// through the server, which refuses a task merged already. What did not go is said in a
-    /// toast, in the server's words; the tap settles once the server has answered.
-    pub(in crate::workspace) fn merge_tapped(
-        &mut self,
-        project: slopty_proto::project::ProjectId,
-        task: slopty_proto::project::TaskId,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(caller) = self.projects.caller.clone() else {
-            self.show_failure(super::projects::NOT_SENT.to_owned(), cx);
-            self.settle_taps(cx);
-            return;
-        };
-        tracing::info!(%project, %task, "a note's Merge sent");
-        self.approvals.through_server = self.approvals.through_server.saturating_add(1);
-        cx.spawn(async move |this, cx| {
-            let merged = caller.call(Verb::TaskMerge { project, task }).await;
-            let _gone = this.update(cx, |this, cx| {
-                if let Outcome::Error { message, .. } = merged {
-                    tracing::info!(message, "a note's Merge was refused");
-                    this.show_failure(message, cx);
-                }
-                this.approvals.through_server = this.approvals.through_server.saturating_sub(1);
-                if !this.approvals.taps_waiting() {
-                    cx.emit(WorkspaceEvent::TapsSettled);
-                }
-            });
-        })
-        .detach();
-    }
-
-    /// A goal-met note's "Open pull request": `project`'s goal into a pull request, the
-    /// person's word, through the server, as its board's button does. The board, where it is
-    /// open, shows the pull request; what did not go is said in a toast, in the server's words.
-    /// The tap settles once the server has answered.
-    pub(in crate::workspace) fn land_tapped(
-        &mut self,
-        project: slopty_proto::project::ProjectId,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(caller) = self.projects.caller.clone() else {
-            self.show_failure(super::projects::NOT_SENT.to_owned(), cx);
-            self.settle_taps(cx);
-            return;
-        };
-        tracing::info!(%project, "a note's Open pull request sent");
-        self.approvals.through_server = self.approvals.through_server.saturating_add(1);
-        cx.spawn(async move |this, cx| {
-            let verb = Verb::ProjectLand { project: project.clone(), into: None };
-            let outcome = caller.call(verb).await;
-            let _gone = this.update(cx, |this, cx| {
-                this.land_answered(&project, outcome, cx);
                 this.approvals.through_server = this.approvals.through_server.saturating_sub(1);
                 if !this.approvals.taps_waiting() {
                     cx.emit(WorkspaceEvent::TapsSettled);
@@ -455,7 +355,7 @@ impl WorkspaceView {
     /// has it waiting on the person, and a server is there to answer it through: `thread` when
     /// the note named it, else the one the ladder seats in its terminal.
     fn on_servers_ladder(&self, route: &Route, thread: Option<ThreadId>) -> Option<ThreadId> {
-        self.projects.caller.as_ref()?;
+        self.server.as_ref()?;
         if self.workers.get(&route.worker).is_some_and(|w| w.link.is_some()) {
             return None;
         }
@@ -478,7 +378,7 @@ impl WorkspaceView {
     /// tap. A request the server no longer finds is one that no longer waits; a call that
     /// fails is an answer not sent, and the request may be answered again.
     fn answer_through_server(&mut self, tap: Tapped, thread: ThreadId, cx: &Context<Self>) {
-        let Some(caller) = self.projects.caller.clone() else { return };
+        let Some(caller) = self.server.clone() else { return };
         if self.approvals.sent.get(&thread) == Some(&tap.ask) {
             return;
         }
@@ -601,7 +501,11 @@ pub(in crate::workspace) struct Answer {
     ask: AskId,
 }
 
-pub(in crate::workspace) use crate::project::{ALLOW, DENY};
+/// The button that allows what an agent asks, wherever it is answered away from its thread.
+pub(crate) const ALLOW: &str = "Allow";
+
+/// The button that refuses it.
+pub(crate) const DENY: &str = "Deny";
 
 impl WorkspaceView {
     /// What "Deny" and "Allow" would answer for `session`'s agent: its thread's open request,

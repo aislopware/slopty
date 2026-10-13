@@ -124,7 +124,7 @@ impl WorkspaceView {
                 .unwrap_or_default()
         });
         let agents = caps.agents.iter().map(|installed| {
-            let name = super::projects::agent_label(&installed.agent);
+            let name = crate::conversation::thread::view::agent_label(&installed.agent);
             // `claude --version` says "2.1.3 (Claude Code)" and `codex --version` "codex-cli
             // 0.48.0": the number is what is news, wherever it stands.
             let mut words = installed.version.split_whitespace();

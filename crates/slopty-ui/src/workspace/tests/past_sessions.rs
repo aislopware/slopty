@@ -7,7 +7,7 @@ use slopty_proto::thread::AgentId;
 use slopty_proto::thread::wire::{PastSession, PastSessions, PromptHit, ThreadRequest};
 
 use super::super::actions::ResumePastSession;
-use super::super::projects::worker_key;
+use super::super::keys::worker_key;
 use super::*;
 use crate::conversation::thread::find::ASK_AFTER;
 

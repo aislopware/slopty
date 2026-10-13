@@ -183,19 +183,6 @@ impl WorkspaceView {
                         }),
                     ));
                 }
-                if self.projects().of_orchestrator(session).is_some() {
-                    let shown = self.board_shown(session);
-                    let label = super::projects::board_word(shown);
-                    rows.push((
-                        MenuGroup::Navigation,
-                        label,
-                        None,
-                        Rc::new(move |this, _w, cx| {
-                            this.focus_tile(tile, cx);
-                            this.show_board(session, !shown, cx);
-                        }),
-                    ));
-                }
             }
             if let ItemKind::Browser { .. } = item.kind {
                 rows.push((

@@ -415,18 +415,8 @@ impl KeyRow {
 }
 
 /// The Keyboard page's groups, in order.
-pub const KEY_GROUPS: [&str; 10] = [
-    "General",
-    "Layout",
-    "Terminal",
-    "Threads",
-    "Reviews",
-    "Files",
-    "Folders",
-    "Project boards",
-    "Search in files",
-    "Pages",
-];
+pub const KEY_GROUPS: [&str; 8] =
+    ["General", "Layout", "Terminal", "Threads", "Files", "Folders", "Search in files", "Pages"];
 
 /// The group a command is listed under: its scope's, the workspace's split into what arranges
 /// the panes and the tabs and the rest.
@@ -469,8 +459,6 @@ fn key_group(command: &Command) -> &'static str {
         Scope::Conversation => "Threads",
         Scope::File => "Files",
         Scope::Folder => "Folders",
-        Scope::Project => "Project boards",
-        Scope::Review => "Reviews",
         Scope::Search => "Search in files",
         Scope::Page => "Pages",
     }

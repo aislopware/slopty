@@ -2,7 +2,7 @@
 //! is narrow.
 //!
 //! The menu, the chips and the field; then Delta's foot row: where the agent works on its left
-//! (the checkout and its branch, which open the commit sheet, and what the thread changed), and
+//! (the checkout and its branch, and what the thread changed), and
 //! at its right how full the context is, the model and how hard it thinks, the mode, the
 //! paperclip, and the one primary: send, or stop while a turn runs and nothing is typed. While
 //! the agent's own TUI holds the session, a strip saying so stands in its place.
@@ -598,8 +598,8 @@ impl ThreadView {
     }
 
     /// Where the agent works, Delta's foot: the repository's glyph, then the checkout by its
-    /// folder's name and its branch, "slopty / main", in the secondary tone; a press opens the
-    /// commit sheet on it. Its pad is an icon button's, as every control of the foot keeps.
+    /// folder's name and its branch, "slopty / main", in the secondary tone. Its pad is an icon
+    /// button's, as every control of the foot keeps.
     fn checkout_chip(&self, cx: &Context<Self>) -> Option<AnyElement> {
         let theme = &self.theme;
         let s = theme.surfaces;
@@ -614,21 +614,12 @@ impl ThreadView {
             None => folder,
         };
         let chip = self
-            .chip("thread-checkout", format!("{COMMIT_ON} {words}"))
+            .chip("thread-checkout", format!("{WORKS_IN} {words}"))
             .flex_shrink_1()
             .min_w_0()
             .child(self.icon(Symbol::GitRepo, s.text_muted))
             .child(kit::fit_label("thread-checkout-words", words, theme));
-        Some(
-            slopty_kit::a11y::tab_stop(
-                squared(chip, theme, false)
-                    .role(Role::Button)
-                    .cursor_pointer()
-                    .on_click(cx.listener(|this, _ev, window, cx| this.open_commit(window, cx))),
-                s.focus,
-            )
-            .into_any_element(),
-        )
+        Some(squared(chip, theme, false).role(Role::Label).into_any_element())
     }
 
     /// Where the agent runs, Delta's runner: the machine's glyph and its name in quiet words.
@@ -829,18 +820,6 @@ impl ThreadView {
             let to = this.clone();
             let thread = self.thread;
             menu.separate();
-            menu.push(kit::MenuItem::new(
-                "runs",
-                format!("Review the {} runs side by side", self.runs),
-                move |_w, cx| {
-                    let _gone = to.update(cx, |this, cx| {
-                        this.add_open = false;
-                        cx.emit(ThreadViewEvent::ReviewRuns { thread });
-                        cx.notify();
-                    });
-                },
-            ));
-            let to = this.clone();
             let others = self.runs.saturating_sub(1);
             let closed =
                 if others == 1 { "the other".to_owned() } else { format!("the other {others}") };
@@ -871,8 +850,7 @@ impl ThreadView {
             }));
         }
         self.left_out(&mut menu, cx);
-        // A row chosen closes it before it runs, so the row may take the keyboard elsewhere
-        // (the commit sheet does).
+        // A row chosen closes it before it runs, so the row may take the keyboard elsewhere.
         let closed = this.clone();
         let panel = kit::MenuPanel::new(
             ADD_MENU,
@@ -948,26 +926,15 @@ impl ThreadView {
         {
             let name =
                 model_said(&st.meters).unwrap_or_else(|| agent_name(&st.meta.agent).to_owned());
-            let to = this.clone();
             rows.push(
                 kit::MenuItem::new("model", MODEL, move |_w, cx| {
-                    let _gone = to.update(cx, |this, cx| {
+                    let _gone = this.update(cx, |this, cx| {
                         this.add_open = false;
                         this.toggle_models(cx);
                     });
                 })
                 .detail(name),
             );
-        }
-        // The way to commit where the thread works, while the foot has no room for the
-        // checkout's button.
-        if dropped.iter().any(|k| k.as_ref() == FOOT_CHECKOUT.0) && self.repo(cx).is_some() {
-            rows.push(kit::MenuItem::new("commit", COMMIT, move |window, cx| {
-                let _gone = this.update(cx, |this, cx| {
-                    this.add_open = false;
-                    this.open_commit(window, cx);
-                });
-            }));
         }
         if rows.is_empty() {
             return;
@@ -981,9 +948,6 @@ impl ThreadView {
 
 /// The "+" menu's row that lists the agent's models, while the foot has no room for the chip.
 const MODEL: &str = "Model";
-
-/// The "+" menu's row that opens the commit sheet on the repository the thread works in.
-const COMMIT: &str = "Commit\u{2026}";
 
 /// The selector of the composer's "+".
 pub(crate) const ADD_BUTTON: &str = "thread-attach";
@@ -1039,8 +1003,8 @@ const RING_FROM: f64 = 10.0;
 /// The thread's fact that names the branch it works on.
 const BRANCH_FACT: &str = "branch";
 
-/// What the checkout's button is, to a screen reader, before where.
-const COMMIT_ON: &str = "Commit on";
+/// What the checkout's chip is, to a screen reader, before where.
+const WORKS_IN: &str = "Works in";
 
 /// Whether `name`, a mode or an effort as the agent says it, is the agent's default, which the
 /// composer leaves unsaid.

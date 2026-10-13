@@ -5,6 +5,9 @@ use gpui::{AppContext as _, Modifiers};
 use slopty_client::layout::Saved;
 use slopty_core::{DisplayId, WindowId};
 use slopty_proto::screen::{DisplayInfo, WindowInfo};
+use slopty_proto::server::InstalledAgent;
+use slopty_proto::thread::AgentId;
+use slopty_proto::thread::wire::ThreadRequest;
 
 use super::super::actions::ScopeTo;
 use super::*;
@@ -197,17 +200,11 @@ fn the_icon_slot_keeps_every_title_on_one_edge(cx: &mut TestAppContext) {
     assert!((command_x - tile_x).abs() < 0.5, "an empty slot keeps a command's title on it");
 }
 
-/// The empty workspace asks what to work on over a composer, which takes the keyboard: what is
-/// written there and sent starts a goal's orchestrator at once, as "New goal…" does, in the
-/// machine's latest repository; with none known, the sheet takes the goal and asks where. A
-/// shell and a window stay one press away under it, with no keys
-/// on them, and each does what its key does. Nothing else stands on the page.
+/// The empty workspace asks what to work on over a composer. A shell and a window stay one
+/// press away under it, with no keys on them, and each does what its key does. Nothing else
+/// stands on the page.
 #[gpui::test]
 fn the_empty_workspace_asks_what_to_work_on(cx: &mut TestAppContext) {
-    use slopty_proto::server::InstalledAgent;
-    use slopty_proto::thread::AgentId;
-    use slopty_proto::thread::wire::ThreadRequest;
-
     let (view, cx) = workspace(cx);
     let mut fake = connect(&view, cx, 1, "studio");
     let key = fake.key;
@@ -241,26 +238,6 @@ fn the_empty_workspace_asks_what_to_work_on(cx: &mut TestAppContext) {
     assert!(page.bottom() - goal.bottom() < px(Theme::default().spacing.md), "at the foot");
 
     fake.drain();
-    cx.simulate_input("Fix the login redirect");
-    cx.simulate_keystrokes("enter");
-    cx.run_until_parked();
-    let started: Vec<_> = fake
-        .drain()
-        .into_iter()
-        .filter_map(|m| match m {
-            ClientMsg::Thread(ThreadRequest::Start { start, .. }) => Some(start),
-            _ => None,
-        })
-        .collect();
-    // No repository known to work in: nothing starts in the home folder, and the sheet,
-    // holding the goal, asks where.
-    assert!(started.is_empty(), "nothing starts: {started:?}");
-    let typed = view.read_with(cx, WorkspaceView::goal_sheet_typed).expect("the sheet");
-    assert_eq!(typed.goal, "Fix the login redirect", "holding the goal");
-    cx.simulate_keystrokes("escape");
-    cx.run_until_parked();
-    assert!(cx.debug_bounds("goal-sheet").is_none(), "put away");
-
     click(cx, "empty-terminal");
     assert!(
         matches!(
@@ -275,6 +252,43 @@ fn the_empty_workspace_asks_what_to_work_on(cx: &mut TestAppContext) {
         "the worker is asked for its windows"
     );
     assert!(cx.debug_bounds("picker-loading").is_some(), "the picker is up, waiting");
+}
+
+/// What is written in the empty workspace's composer, which takes the keyboard, and sent starts
+/// the usual agent with it at once, in the folder work last stood in, else at home.
+#[gpui::test]
+fn the_empty_workspaces_goal_starts_the_usual_agent(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let mut fake = connect(&view, cx, 1, "studio");
+    let key = fake.key;
+    let claude = InstalledAgent {
+        agent: AgentId::named(AgentId::CLAUDE_CODE),
+        version: "1.0".to_owned(),
+        offers: slopty_proto::thread::Offers::default(),
+        managed_hooks_off: false,
+    };
+    let caps = WorkerCaps { agents: vec![claude], ..healthy() };
+    view.update_in(cx, |v, _w, cx| {
+        v.set_worker_caps(key, caps, cx);
+        v.threads_linked(key, cx);
+    });
+    cx.run_until_parked();
+    fake.drain();
+    cx.simulate_input("Fix the login redirect");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    let started: Vec<_> = fake
+        .drain()
+        .into_iter()
+        .filter_map(|m| match m {
+            ClientMsg::Thread(ThreadRequest::Start { start, .. }) => Some(start),
+            _ => None,
+        })
+        .collect();
+    // No folder known to work in: the usual agent starts at home with the words.
+    let [start] = started.as_slice() else { panic!("one start: {started:?}") };
+    assert_eq!(start.prompt.as_deref(), Some("Fix the login redirect"), "the words go first");
+    assert_eq!(start.cwd, "~", "at home");
 }
 
 /// The empty workspace is a thread with no turns (`.research/design-polish-2026-10-12.md`
@@ -298,7 +312,7 @@ fn the_empty_page_has_one_edge(cx: &mut TestAppContext) {
         let b = at(cx, s);
         assert!((b.left() - edge).abs() < px(0.5), "{s} on the edge: {b:?} {question:?}");
     }
-    for door in ["empty-terminal", "empty-window", "empty-new-goal"] {
+    for door in ["empty-terminal", "empty-window"] {
         let glyph = at(cx, door).left() + px(theme.spacing.inset());
         assert!((glyph - edge).abs() < px(0.5), "{door}'s glyph hangs on the edge");
     }
@@ -309,7 +323,7 @@ fn the_empty_page_has_one_edge(cx: &mut TestAppContext) {
     let top = column.top() - page.top();
     assert!((top - launcher * 0.3).abs() < px(1.0), "30 % down: {top:?} of {launcher:?}");
     assert!(page.bottom() - goal.bottom() < px(theme.spacing.md), "the composer at the foot");
-    assert!(goal.top() > at(cx, "empty-new-goal").bottom(), "under the launcher");
+    assert!(goal.top() > at(cx, "empty-window").bottom(), "under the launcher");
     let centre = |b: Bounds<Pixels>| b.left() + b.size.width / 2.0;
     assert!(
         (centre(column) - centre(page)).abs() < px(8.0),
@@ -356,8 +370,8 @@ fn an_empty_project_asks_what_to_work_on_in_it(cx: &mut TestAppContext) {
 }
 
 /// The line under the question says where ↵ sends the goal (the machine, the folder, the
-/// agent), so nothing starts somewhere unseen; pressed, it opens "New goal…"'s sheet holding
-/// what was typed, and the words move there. The doors print no keys: keys are the palette's.
+/// agent), so nothing starts somewhere unseen. The doors print no keys: keys are the
+/// palette's.
 #[gpui::test]
 fn the_empty_workspaces_composer_says_where_the_goal_goes(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -369,7 +383,7 @@ fn the_empty_workspaces_composer_says_where_the_goal_goes(cx: &mut TestAppContex
     // No repository known yet: the machine and the agent, and the sheet asks for the folder.
     let place = "studio · Claude Code";
     let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
-    assert!(tree.iter().any(|n| n.is("Button", Some(place))), "where it goes: {tree:#?}");
+    assert!(tree.iter().any(|n| n.is("Label", Some(place))), "where it goes: {tree:#?}");
     let (foot, goal) = (cx.debug_bounds("empty-goal-foot"), cx.debug_bounds("empty-goal"));
     let (Some(foot), Some(goal)) = (foot, goal) else { panic!("the place and the composer") };
     let question = cx.debug_bounds("empty-question").expect("the question");
@@ -380,16 +394,6 @@ fn the_empty_workspaces_composer_says_where_the_goal_goes(cx: &mut TestAppContex
             "{keys}"
         );
     }
-
-    cx.simulate_input("Fix the login redirect");
-    cx.simulate_click(foot.center(), Modifiers::default());
-    cx.run_until_parked();
-    assert!(cx.debug_bounds("goal-sheet").is_some(), "the sheet, to change it");
-    let typed = view.read_with(cx, WorkspaceView::goal_sheet_typed).expect("the sheet");
-    assert_eq!(typed.goal, "Fix the login redirect", "holding what was typed");
-    let left = view
-        .read_with(cx, |v, cx| v.empty_goal.as_ref().map(|(g, _)| g.read(cx).value().to_string()));
-    assert_eq!(left.as_deref(), Some(""), "the words moved");
 }
 
 fn listing(title: &str) -> ScreenEvent {
@@ -791,7 +795,7 @@ fn a_scope_filters_the_navigator_and_its_attention_sections_alike(cx: &mut TestA
     assert!(cx.debug_bounds("nav-scope").is_some(), "the scope leads the filter");
     let input = cx.debug_bounds("nav-filter").expect("its field");
     assert!(f32::from(input.size.width) >= 24.0, "room to type in: {input:?}");
-    assert!(cx.debug_bounds("nav-new-goal").is_none(), "the open field takes the starts' room");
+    assert!(cx.debug_bounds("nav-new-agent").is_none(), "the open field takes the starts' room");
     let listed = view.read_with(cx, |v, _| v.navigator_tiles());
     assert_eq!(listed, [atlas], "only atlas's rows");
     cx.simulate_keystrokes("cmd-shift-u");

@@ -32,7 +32,7 @@ pub fn menus(app_items: Vec<MenuItem>, ios: bool) -> Vec<Menu> {
     use slopty_ui::workspace::{
         AddWindow, CloseItem, CloseOtherTabs, EqualizePanes, FocusDown, FocusLeft, FocusRight,
         FocusUp, FontLarger, FontReset, FontSmaller, GoBack, GoForward, MoveDown, MoveLeft,
-        MoveRight, MoveToProject, MoveUp, NewAgent, NewGoal, NewNote, NewTerminal, NextAttention,
+        MoveRight, MoveToProject, MoveUp, NewAgent, NewNote, NewTerminal, NextAttention,
         NextProject, NextTab, OpenCommands, OpenFile, OpenFolder, OpenPalette, OpenUrl,
         PreviousProject, PreviousTab, SaveCopy, SplitDown, SplitRight, StartAgent, TabTerminal,
         ToggleMute, ToggleStats, UndoClose, ZoomPane,
@@ -53,7 +53,6 @@ pub fn menus(app_items: Vec<MenuItem>, ios: bool) -> Vec<Menu> {
     let mut menus = vec![
         Menu::new("Slopty").items(app),
         Menu::new("File").items([
-            MenuItem::action("New Goal…", NewGoal),
             MenuItem::action("New Agent", StartAgent),
             MenuItem::action("New Agent…", NewAgent),
             MenuItem::action("New Shell", NewTerminal),
@@ -176,7 +175,7 @@ mod tests {
         assert!(ipad_file.iter().any(|n| n == slopty_ui::folder::SAVE_TO_FILES));
         assert!(file(&mac).unwrap_or_default().iter().any(|n| n == "Download…"));
         let mac_file = file(&mac).unwrap_or_default();
-        assert_eq!(mac_file.first().map(String::as_str), Some("New Goal…"), "a goal leads File");
+        assert_eq!(mac_file.first().map(String::as_str), Some("New Agent"), "an agent leads File");
         let help = ipad.iter().find(|m| m.name == "Help").map(actions).unwrap_or_default();
         assert_eq!(help, ["Slopty Help", "Keyboard Shortcuts"]);
     }

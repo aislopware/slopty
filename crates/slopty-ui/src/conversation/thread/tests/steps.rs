@@ -618,7 +618,7 @@ fn the_latest_turn_ends_in_its_changed_files_which_keep_from_there(cx: &mut Test
     let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
     let card = "Changed 1 file, 2 added, 1 removed";
     assert!(tree.iter().any(|n| n.is("Group", Some(card))), "{tree:#?}");
-    assert!(tree.iter().any(|n| n.is("Button", Some("Review src/a.rs"))), "{tree:#?}");
+    assert!(tree.iter().any(|n| n.is("Label", Some("src/a.rs"))), "{tree:#?}");
     assert!(cx.debug_bounds("changes-keep").is_none(), "no Keep before the turn's review");
     let asked: Vec<ReviewScope> = sent
         .borrow()

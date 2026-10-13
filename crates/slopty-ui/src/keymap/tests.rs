@@ -205,7 +205,6 @@ fn a_chords_words_come_with_the_keymap() {
     let keymap = Keymap::default();
     assert_eq!(keymap.label_of(&ws::NewTerminal), "⇧⌘T");
     assert_eq!(keymap.label_of(&ws::StartAgent), "⌘T");
-    assert_eq!(keymap.label_of(&ws::NewGoal), "⌘N", "a goal, the usual start");
     assert_eq!(keymap.label_of(&ws::OpenFile), "⌘P", "quick open");
     assert_eq!(keymap.label_of(&ws::OpenPalette), "⌘K", "search everything");
     assert_eq!(keymap.label_of(&ws::OpenCommands), "⇧⌘P", "the commands");
@@ -218,7 +217,7 @@ fn a_chords_words_come_with_the_keymap() {
     assert_eq!(keymap.label_of(&ws::NewAgent), "");
 }
 
-/// A key alone is a chord where nothing takes typing: a folder's rows, a board, a PDF's pages
+/// A key alone is a chord where nothing takes typing: a folder's rows, a PDF's pages
 /// in a file tile; not the file tile's editor, whose scope the pages share.
 #[test]
 fn a_bare_key_binds_where_nothing_takes_typing() {
@@ -235,7 +234,7 @@ fn a_bare_key_binds_where_nothing_takes_typing() {
 
 /// The whole default table, one command a line in the table's order: its key, the action it
 /// runs, its chords as GPUI reads them and the contexts it binds in (`*` everywhere). What
-/// another crate declares (the terminal's, a board's, a review's) is held here as the table's
+/// another crate declares (the terminal's) is held here as the table's
 /// own, so moving a command's row between crates cannot rename, rebind or reorder it unseen.
 /// The record is `keymap/defaults.txt`; a change to the table is made there too, on purpose.
 #[test]

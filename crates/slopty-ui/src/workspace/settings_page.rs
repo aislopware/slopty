@@ -57,7 +57,7 @@ impl WorkspaceView {
             form.update(cx, |form, cx| form.set_aside(aside, cx));
         }
         let machines = self.settings_machines();
-        let caller = self.projects.caller.clone();
+        let caller = self.server.clone();
         if form.read(cx).machines_differ(&machines, caller.is_some()) {
             form.update(cx, |form, cx| form.set_machines(machines, caller, cx));
         }
@@ -66,10 +66,9 @@ impl WorkspaceView {
     /// The machines whose daemons' settings the page can edit: the server, while this device
     /// is linked to one, then each worker it lists, by name.
     fn settings_machines(&self) -> Vec<Machine> {
-        let server =
-            self.projects.caller.is_some().then(|| Machine { of: None, name: SERVER.to_owned() });
+        let server = self.server.is_some().then(|| Machine { of: None, name: SERVER.to_owned() });
         let workers = self.workers.iter().filter_map(|(key, w)| {
-            Some(Machine { of: Some(super::projects::worker_id(*key)?), name: w.name.clone() })
+            Some(Machine { of: Some(super::keys::worker_id(*key)?), name: w.name.clone() })
         });
         server.into_iter().chain(workers).collect()
     }

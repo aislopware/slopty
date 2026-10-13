@@ -50,21 +50,15 @@ pub enum Scope {
     Folder,
     /// Search in files.
     Search,
-    /// A project's board.
-    Project,
-    /// A review tile.
-    Review,
 }
 
 impl Scope {
     /// Every scope, in the order the Keyboard page lists them.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 8] = [
         Self::App,
         Self::Workspace,
         Self::Terminal,
         Self::Conversation,
-        Self::Review,
-        Self::Project,
         Self::File,
         Self::Folder,
         Self::Search,
@@ -83,18 +77,15 @@ impl Scope {
             Self::Conversation => "conversation",
             Self::Folder => "folder",
             Self::Search => "search",
-            Self::Project => "project",
-            Self::Review => "review",
         }
     }
 
-    /// Whether a key alone (an arrow, ↩) is a chord here: a folder's rows, a board's and a
-    /// review's hold no text (a review's comment field takes its keys back), so bare keys walk
-    /// them. Elsewhere a key alone is typed into the
-    /// terminal or a field, and a chord carries ⌘ or ⌃ (or is an F key).
+    /// Whether a key alone (an arrow, ↩) is a chord here: a folder's rows hold no text, so
+    /// bare keys walk them. Elsewhere a key alone is typed into the terminal or a field, and a
+    /// chord carries ⌘ or ⌃ (or is an F key).
     #[must_use]
     pub const fn takes_bare_keys(self) -> bool {
-        matches!(self, Self::Folder | Self::Project | Self::Review)
+        matches!(self, Self::Folder)
     }
 
     fn named(name: &str) -> Option<Self> {
@@ -224,7 +215,7 @@ const FILE_GO_TO: Option<&str> = Some(crate::file::GO_TO_CTX);
 /// A file tile showing a PDF's pages: they hold no text to type into, so bare keys scroll them.
 const FILE_PAGES: Option<&str> = Some("FileEditor && FilePages");
 /// Contexts with no text field in them, where a key alone cannot be wanted for typing.
-const TEXTLESS: [Option<&str>; 3] = [FILE_PAGES, FOLDER, BOARD];
+const TEXTLESS: [Option<&str>; 2] = [FILE_PAGES, FOLDER];
 /// A conversation face, and its composer, where the keyboard sits in a face.
 const FACE: Option<&str> = Some(crate::conversation::CTX);
 const FACE_INPUT: Option<&str> = Some("Conversation > Input");
@@ -234,8 +225,6 @@ const THREAD_INPUT: Option<&str> = Some("ThreadComposer > Input");
 /// A request that has the keyboard: its answers in a thread, a *Needs you* row.
 const REQUEST: Option<&str> = Some(crate::conversation::REQUEST_CTX);
 const FOLDER: Option<&str> = Some(crate::folder::CTX);
-/// A project's board: its rows hold no text, so bare keys walk them.
-const BOARD: Option<&str> = Some(crate::project::CTX);
 /// Search in files, its fields holding the keyboard.
 const SEARCH: Option<&str> = Some(crate::search::CTX);
 /// A tile's window of its own: its picture takes every chord but the one that puts it back.
@@ -263,12 +252,12 @@ const APP: &[Option<&str>] = &[None];
 #[must_use]
 #[expect(clippy::too_many_lines, reason = "the one table of every default chord")]
 pub fn defaults() -> Vec<Command> {
-    use Scope::{Conversation, File, Folder, Page, Project, Search, Terminal, Workspace};
+    use Scope::{Conversation, File, Folder, Page, Search, Terminal, Workspace};
     use slopty_terminal as t;
 
     use crate::conversation::{
         AllowRequest, AskAside, CycleDensity, DenyRequest, EditLastQueued, Interrupt, QueueMessage,
-        ResumeAgent, ReviewChanges,
+        ResumeAgent,
     };
 
     fn c(
@@ -281,7 +270,6 @@ pub fn defaults() -> Vec<Command> {
         Command::new(scope, name, action, defaults, contexts)
     }
     let mut out = vec![
-        c(Workspace, "new_goal", ws::NewGoal, &["cmd-n"], W),
         c(Workspace, "start_agent", ws::StartAgent, &["cmd-t"], W),
         c(Workspace, "new_terminal", ws::NewTerminal, &["cmd-shift-t"], W),
         c(Workspace, "new_agent", ws::NewAgent, &[], W),
@@ -293,8 +281,6 @@ pub fn defaults() -> Vec<Command> {
         c(Workspace, "open_file", ws::OpenFile, &["cmd-p"], W),
         c(Workspace, "open_folder", ws::OpenFolder, &[], W),
         c(Workspace, "open_url", ws::OpenUrl, &[], W),
-        c(Workspace, "review_changes", ws::ReviewChanges, &[], W),
-        c(Workspace, "review_next", ws::ReviewNext, &["cmd-shift-r"], W),
         c(Workspace, "remove_worktree", ws::RemoveWorktree, &[], W),
         c(Workspace, "remove_merged_worktrees", ws::RemoveMerged, &[], W),
         c(Workspace, "run_script", ws::RunHere, &[], W),
@@ -372,7 +358,6 @@ pub fn defaults() -> Vec<Command> {
         c(Workspace, "font_smaller", ws::FontSmaller, &["cmd--"], W),
         c(Workspace, "font_reset", ws::FontReset, &["cmd-0"], W),
         c(Workspace, "switch_face", ws::SwitchFace, &["cmd-j"], W),
-        c(Workspace, "toggle_board", ws::ToggleBoard, &["cmd-shift-j"], W),
         c(Workspace, "edit_address", ws::EditAddress, &["cmd-l"], W),
         c(Workspace, "toggle_trackpad", crate::screen::ToggleTrackpad, &[], W),
         c(Workspace, "toggle_remote_gestures", crate::screen::ToggleRemoteGestures, &[], W),
@@ -399,7 +384,6 @@ pub fn defaults() -> Vec<Command> {
         c(Conversation, "queue_message", QueueMessage, &["cmd-enter"], &[THREAD_INPUT]),
         c(Conversation, "edit_last_queued", EditLastQueued, &["alt-up"], &[THREAD_INPUT]),
         c(Conversation, "ask_aside", AskAside, &[], &[FACE]),
-        c(Conversation, "review_changes", ReviewChanges, &[], &[FACE]),
         c(Conversation, "resume_agent", ResumeAgent, &[], &[FACE]),
         c(Conversation, "previous_prompt", t::PrevPrompt, &["cmd-up"], &[FACE, FACE_INPUT]),
         c(Conversation, "next_prompt", t::NextPrompt, &["cmd-down"], &[FACE, FACE_INPUT]),
@@ -469,10 +453,6 @@ pub fn defaults() -> Vec<Command> {
         c(Folder, "new_folder", crate::folder::NewFolder, &["cmd-shift-n"], &[FOLDER]),
         c(Folder, "rename", crate::folder::RenameSelected, &[], &[FOLDER]),
         c(Folder, "move_to_trash", crate::folder::TrashSelected, &["cmd-backspace"], &[FOLDER]),
-        // A board: the arrows walk its cards, ↩ opens one's agent.
-        c(Project, "select_previous", crate::project::SelectPrevious, &["up", "k"], &[BOARD]),
-        c(Project, "select_next", crate::project::SelectNext, &["down", "j"], &[BOARD]),
-        c(Project, "open", crate::project::OpenNode, &["enter"], &[BOARD]),
         // The search surface's toggles, VS Code's keys.
         c(Search, "toggle_match_case", crate::search::ToggleMatchCase, &["cmd-alt-c"], &[SEARCH]),
         c(Search, "toggle_whole_word", crate::search::ToggleWholeWord, &["cmd-alt-w"], &[SEARCH]),
@@ -509,8 +489,6 @@ pub fn defaults() -> Vec<Command> {
             &[Some("Screen")],
         ));
     }
-    out.extend(crate::project::key_bindings());
-    out.extend(crate::review::key_bindings());
     out
 }
 

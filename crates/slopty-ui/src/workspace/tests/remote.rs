@@ -429,7 +429,7 @@ fn a_worker_the_clipboard_is_not_shared_with_neither_hears_nor_gives_it(cx: &mut
     let studio_key = studio.key;
     let share = |cx: &mut VisualTestContext, on: bool| {
         let mut sharing = slopty_settings::ClipboardSettings::default();
-        let id = crate::workspace::projects::worker_id(studio_key).expect("an id");
+        let id = keys::worker_id(studio_key).expect("an id");
         sharing.workers.insert(id.to_string(), on);
         view.update_in(cx, |v, _window, cx| v.set_clipboard_sharing(sharing, cx));
         cx.run_until_parked();

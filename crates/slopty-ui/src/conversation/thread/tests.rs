@@ -159,9 +159,8 @@ fn an_answer_flips_its_card_in_the_frame_it_is_pressed(cx: &mut TestAppContext) 
 
 /// An empty thread is its next turn's slot, Delta's: its field at the top under the header asks
 /// what its agent should do in its folder, with where it works on the field's ledge and no
-/// notice in the rows' place. A thread at work, one with a request on show and one a project
-/// briefed ask nothing; once the thread has rows the field follows them, the keyboard still in
-/// it.
+/// notice in the rows' place. A thread at work and one with a request on show ask nothing; once
+/// the thread has rows the field follows them, the keyboard still in it.
 #[gpui::test]
 fn an_empty_thread_asks_in_its_field_under_the_header(cx: &mut TestAppContext) {
     let (hub, _sent) = hub(cx, None);
@@ -204,12 +203,6 @@ fn an_empty_thread_asks_in_its_field_under_the_header(cx: &mut TestAppContext) {
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 3), cx));
     cx.run_until_parked();
     assert_eq!(says(cx), question, "asked again");
-    view.update(cx, |v, cx| v.set_briefed(true, cx));
-    cx.run_until_parked();
-    assert_ne!(says(cx), question, "a thread a project briefed asks nothing");
-    view.update(cx, |v, cx| v.set_briefed(false, cx));
-    cx.run_until_parked();
-    assert_eq!(says(cx), question, "unbriefed, it asks once more");
     let focus = view.read_with(cx, gpui::Focusable::focus_handle);
     let typing = |cx: &mut VisualTestContext| cx.update(|window, _| focus.is_focused(window));
     assert!(typing(cx), "the field has the keyboard");
@@ -615,7 +608,6 @@ fn timing_of_the_thread_s_frames(cx: &mut TestAppContext) {
 
 mod aside;
 mod carry;
-mod commit;
 mod composing;
 mod doors;
 mod face;

@@ -5,7 +5,7 @@
 //!
 //! The work's surfaces are the views themselves over the samples in `samples`: a thread
 //! mid-turn with its plan, its calls, a diff, a notice and a question, over its composer and
-//! its foot; a board with a task in every lane; a turn's review; and the settings' own form.
+//! its foot; and the settings' own form.
 //! Beside them stand the controls in each state they take: the buttons of every kind, the icon
 //! buttons and toggles, the send at rest and armed, tick boxes, fields, a menu, the state marks,
 //! the lanes' phases and pills, and key caps. The workspace shows it in the panes'
@@ -32,8 +32,6 @@ use slopty_theme::Theme;
 
 use crate::conversation::thread::hub::ThreadHub;
 use crate::conversation::thread::view::ThreadView;
-use crate::project::ProjectView;
-use crate::review::ReviewView;
 use crate::settings_form::SettingsForm;
 
 /// The page's name, in the palette and to a screen reader.
@@ -43,9 +41,6 @@ pub const COMPONENT_PREVIEW: &str = "Component preview";
 const CONTROLS: f32 = 360.0;
 /// A field's width in the controls' column, two to a line.
 const HALF: f32 = 150.0;
-/// The review's cell: a file and the head of the next, so the board over it has room for
-/// every lane.
-const REVIEW_TALL: f32 = 300.0;
 /// The settings' cell: the appearance group's switches, choices and steppers.
 const SETTINGS_TALL: f32 = 300.0;
 
@@ -60,15 +55,13 @@ pub enum ComponentPreviewEvent {
 pub struct ComponentPreview {
     theme: Theme,
     thread: Entity<ThreadView>,
-    review: Entity<ReviewView>,
-    board: Option<Entity<ProjectView>>,
     settings: Entity<SettingsForm>,
     empty: Entity<InputState>,
     filled: Entity<InputState>,
-    /// The sizes last handed to the thread and the review, which lay out for the room a tile
-    /// gives them, as the workspace hands a tile's.
-    handed: Rc<Cell<[(f32, f32); 2]>>,
-    /// The samples' worker, which nothing links: it holds the thread and its review.
+    /// The size last handed to the thread, which lays out for the room a tile gives it, as
+    /// the workspace hands a tile's.
+    handed: Rc<Cell<[(f32, f32); 1]>>,
+    /// The samples' worker, which nothing links: it holds the thread.
     _hub: Entity<ThreadHub>,
 }
 
@@ -88,22 +81,10 @@ impl ComponentPreview {
         let state = samples::thread();
         let id = state.meta.id;
         let thread = cx.new(|cx| ThreadView::new(hub.clone(), id, theme.clone(), window, cx));
-        let review = cx.new(|cx| ReviewView::new(hub.clone(), id, theme.clone(), window, cx));
-        // As the worker answers: the thread, then, once the review has asked for it, the turn's
-        // review.
+        // As the worker answers: the thread.
         hub.update(cx, |hub, cx| {
             let cursor = Cursor { epoch: 1, seq: 1 };
             hub.frame(id, ThreadFrame::Snapshot { cursor, state: Box::new(state) }, cx);
-        });
-        hub.update(cx, |hub, cx| {
-            hub.frame(id, ThreadFrame::Review(Box::new(samples::review())), cx);
-        });
-        let board = samples::project_id().zip(samples::board()).map(|(project, seen)| {
-            cx.new(|cx| {
-                let mut board = ProjectView::new(project, theme.clone(), cx);
-                board.set_seen(seen, cx);
-                board
-            })
         });
         let settings = cx.new(|cx| {
             let mut form = SettingsForm::new("", theme.clone(), window, cx);
@@ -116,17 +97,7 @@ impl ComponentPreview {
             input.set_value("atlas/replayed-refresh", window, cx);
             input
         });
-        Self {
-            theme,
-            thread,
-            review,
-            board,
-            settings,
-            empty,
-            filled,
-            handed: Rc::default(),
-            _hub: hub,
-        }
+        Self { theme, thread, settings, empty, filled, handed: Rc::default(), _hub: hub }
     }
 
     /// Draw in `theme` from now on, the views in it too.
@@ -135,10 +106,6 @@ impl ComponentPreview {
             return;
         }
         self.thread.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
-        self.review.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
-        if let Some(board) = &self.board {
-            board.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
-        }
         self.settings.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
         self.theme = theme;
         cx.notify();
@@ -353,17 +320,9 @@ impl Render for ComponentPreview {
             .gap(px(spacing.sm))
             .child(kit::title(&theme, COMPONENT_PREVIEW))
             .child(close);
-        let board: AnyElement = match &self.board {
-            Some(board) => board.clone().into_any_element(),
-            None => gpui::Empty.into_any_element(),
-        };
         let shown = self.thread.clone();
         let thread = self.sized(0, self.thread.clone(), move |width, _height, cx| {
             shown.update(cx, |v, cx| v.set_layout(width, cx));
-        });
-        let shown = self.review.clone();
-        let review = self.sized(1, self.review.clone(), move |width, height, cx| {
-            shown.update(cx, |v, cx| v.set_layout(width, height, cx));
         });
         let work = div()
             .flex_1()
@@ -372,17 +331,6 @@ impl Render for ComponentPreview {
             .flex()
             .gap(px(spacing.lg))
             .child(self.cell("thread", "Thread", thread).flex_1())
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .min_h_0()
-                    .flex()
-                    .flex_col()
-                    .gap(px(spacing.lg))
-                    .child(self.cell("board", "Board", board).flex_1())
-                    .child(self.cell("review", "Review", review).flex_none().h(px(REVIEW_TALL))),
-            )
             .child(
                 div()
                     .flex_none()

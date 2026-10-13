@@ -8,6 +8,8 @@
 
 use gpui::{Context, Entity};
 use slopty_client::threads::Stamp;
+use slopty_core::SessionId;
+use slopty_proto::thread::ThreadId;
 use slopty_proto::thread::wire::Authors;
 
 use super::WorkspaceView;
@@ -77,17 +79,12 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    /// Each open review names its lines' authors as every surface names a thread.
-    pub(super) fn settle_review_writers(&self, cx: &mut Context<Self>) {
-        let reviews: Vec<_> = self.open_reviews().cloned().collect();
-        for view in reviews {
-            let writers = view
-                .read(cx)
-                .authoring_threads()
-                .into_iter()
-                .filter_map(|t| Some((t, self.writer_of(t)?)))
-                .collect();
-            view.update(cx, |v, cx| v.set_writers(writers, cx));
-        }
+    /// The agent tile whose thread view shows `thread`.
+    fn thread_session(&self, thread: ThreadId, cx: &gpui::App) -> Option<SessionId> {
+        self.workers
+            .values()
+            .flat_map(|w| w.sessions.keys())
+            .copied()
+            .find(|s| self.thread_face(*s).is_some_and(|v| v.read(cx).thread() == thread))
     }
 }

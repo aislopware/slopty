@@ -225,14 +225,9 @@ impl Workspace {
         self.attention.set_present_elsewhere(elsewhere(me, mine.as_ref(), present));
     }
 
-    /// The server picked this client to say `notice`. A project's, with the app in front, is
-    /// said by the navigator's attention rows and the bell's count, never a sentence in the
-    /// window: no note either.
+    /// The server picked this client to say `notice`.
     pub(crate) fn heard_notice(&mut self, notice: &Notice, cx: &Context<Self>) {
         let Some(heard) = self.view.read(cx).heard(notice) else { return };
-        if heard.stack.is_some() && self.attention.active() {
-            return;
-        }
         let in_front = cx.active_window().is_some();
         if heard.kind == NoticeKind::NeedsYou && settings::alerts(&self.settings, in_front) {
             alert();

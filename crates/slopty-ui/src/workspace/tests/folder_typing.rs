@@ -7,7 +7,7 @@ use slopty_proto::thread::AgentId;
 
 use super::super::actions::NewAgent;
 use super::super::agent_start::TYPED_FOLDER;
-use super::super::projects::worker_key;
+use super::super::keys::worker_key;
 use super::*;
 
 fn settle(cx: &mut VisualTestContext) {

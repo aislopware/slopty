@@ -2,13 +2,13 @@
 //! as Zed's agent panel lists a thread's edited files (`docs/decisions/ui.md`, "The thread is
 //! Delta's").
 //!
-//! Its head says how many files and lines, with Undo, Keep and Review. Under it are the files,
-//! the first [`SHOWN`] and a way to the rest, each a row opening the review. Keep takes every
+//! Its head says how many files and lines, with Undo and Keep. Under it are the files, the
+//! first [`SHOWN`] and a way to the rest. Keep takes every
 //! file into what the person has kept (`Intent::Keep`), and Undo puts each back as it was before
 //! the turn (`Intent::Revert`), both by the turn's own review (`ReviewScope::Turn`), asked once
 //! as the list shows. Either done, the list goes; a file the worker would not keep or put back
-//! is said in the tray, as the review tile's are. Without the worker's snapshots there is no
-//! turn review, so the list offers only Review.
+//! is said in the tray. Without the worker's snapshots there is no turn review, so the list
+//! only lists.
 
 use std::sync::Arc;
 
@@ -24,7 +24,7 @@ use slopty_kit::kit::{self, ButtonKind};
 use slopty_proto::thread::wire::{Intent, Pick, Review, ReviewScope};
 use slopty_proto::thread::{Cap, TurnId};
 
-use super::{TOOL_ROW, ThreadView, ThreadViewEvent};
+use super::{TOOL_ROW, ThreadView};
 use crate::conversation::thread::{activity, rows};
 
 /// How many files the card lists before the way to the rest.
@@ -123,7 +123,6 @@ impl ThreadView {
             1 => "Changed 1 file".to_owned(),
             n => format!("Changed {n} files"),
         };
-        let thread = self.thread;
         let acts = self.turn_review(turn, cx).is_some_and(|r| !r.files.is_empty());
         let head = div()
             .w_full()
@@ -161,53 +160,42 @@ impl ThreadView {
                         cx.listener(move |this, _ev, _w, cx| this.settle_changes(turn, true, cx)),
                     ),
                 )
-            })
-            .child(self.button("changes-review", REVIEW, ButtonKind::Ghost).on_click(
-                cx.listener(move |_this, _ev, _w, cx| cx.emit(ThreadViewEvent::Review { thread })),
-            ));
+            });
         let more = files.len().saturating_sub(SHOWN);
         let open = self.changes_open;
         let shown = if open { files.len() } else { SHOWN };
         let rows = files.iter().take(shown).enumerate().map(|(ix, file)| {
             let name = file.path.rsplit('/').next().unwrap_or(&file.path).to_owned();
-            slopty_kit::a11y::tab_stop(
-                div()
-                    .id(("changes-file", ix))
-                    .debug_selector(move || format!("changes-file-{ix}"))
-                    .role(Role::Button)
-                    .aria_label(SharedString::from(format!("Review {}", file.path)))
-                    .w_full()
-                    .flex()
-                    .items_center()
-                    .gap(px(theme.spacing.xs))
-                    .px(px(theme.spacing.sm))
-                    .min_h(px(TOOL_ROW))
-                    .cursor_pointer()
-                    .text_size(px(theme.typography.small()))
-                    .text_color(hsla(s.text_secondary))
-                    .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
-                    .child(Self::slot().child(slopty_kit::icons::symbol(
-                        theme,
-                        slopty_kit::icons::file_mark(&name),
-                        px(theme.icon()),
-                        hsla(s.text_muted),
-                    )))
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex_1()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .whitespace_nowrap()
-                            .font_family(self.mono())
-                            .child(SharedString::from(file.path.clone())),
-                    )
-                    .children(kit::changes(theme, file.added, file.removed))
-                    .on_click(cx.listener(move |_this, _ev, _w, cx| {
-                        cx.emit(ThreadViewEvent::Review { thread });
-                    })),
-                s.focus,
-            )
+            div()
+                .id(("changes-file", ix))
+                .debug_selector(move || format!("changes-file-{ix}"))
+                .role(Role::Label)
+                .aria_label(SharedString::from(file.path.clone()))
+                .w_full()
+                .flex()
+                .items_center()
+                .gap(px(theme.spacing.xs))
+                .px(px(theme.spacing.sm))
+                .min_h(px(TOOL_ROW))
+                .text_size(px(theme.typography.small()))
+                .text_color(hsla(s.text_secondary))
+                .child(Self::slot().child(slopty_kit::icons::symbol(
+                    theme,
+                    slopty_kit::icons::file_mark(&name),
+                    px(theme.icon()),
+                    hsla(s.text_muted),
+                )))
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .font_family(self.mono())
+                        .child(SharedString::from(file.path.clone())),
+                )
+                .children(kit::changes(theme, file.added, file.removed))
         });
         let toggle = (more > 0).then(|| {
             let said = if open {
@@ -277,9 +265,6 @@ pub(super) const UNDO: &str = "Undo";
 
 /// The card's way to keep the turn's files as they are.
 pub(super) const KEEP: &str = "Keep";
-
-/// The card's way to the whole review.
-pub(super) const REVIEW: &str = "Review";
 
 #[cfg(test)]
 mod tests {

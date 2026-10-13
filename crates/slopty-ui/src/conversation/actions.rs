@@ -13,18 +13,10 @@ gpui::actions!(
         QueueMessage,
         /// Take the last waiting message into the thread's composer to change it.
         EditLastQueued,
-        /// Open the commit sheet over the thread's or the review's tile.
-        OpenCommit,
-        /// Ask the branch's pull request again, where a thread's or a review's tile shows it.
-        RefreshPullRequest,
         /// Ask the draft of a fork of the thread, in a sheet over it.
         AskAside,
-        /// Ask the thread's agent for its own review of the changes the review tile shows.
-        ReviewWithAgent,
         /// Open the screen the thread's agent drives beside it.
         WatchAgentScreen,
-        /// Open the review of the files the last turn changed, as the tray's "Review" does.
-        ReviewChanges,
         /// Take the thread's exited agent up again.
         ResumeAgent,
         /// Answer the request that has the keyboard with its plain allow: bound only where the

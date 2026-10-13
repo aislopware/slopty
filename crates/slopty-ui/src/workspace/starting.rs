@@ -35,8 +35,8 @@ use slopty_proto::thread::{AgentId, IntentId, ThreadId};
 use super::WorkspaceView;
 use super::actions::StartThread;
 use super::area::{Handed, Placed};
-use super::projects::agent_label;
 use crate::conversation::attach::Target;
+use crate::conversation::thread::view::agent_label;
 use crate::conversation::thread::{Draft, DraftSent, Place, ThreadView, ThreadViewEvent};
 
 /// How many first messages ↑ can bring back in a new start's composer.
@@ -174,11 +174,6 @@ impl Starts {
         self.tiles.get(&item)
     }
 
-    /// The thread on its way in `item`'s tile, to change before it goes.
-    pub(super) fn get_mut(&mut self, item: ItemId) -> Option<&mut Starting> {
-        self.tiles.get_mut(&item)
-    }
-
     /// `item`'s start went as `start`: kept to send again as it was, and its last setup's
     /// words gone with the start they were for.
     pub(super) fn kept_start(&mut self, item: ItemId, start: Start) {
@@ -256,9 +251,6 @@ pub(super) struct Starting {
     /// The branch that worktree starts from, as its draft chose; the clone's checked-out one
     /// when `None`.
     pub base: Option<String>,
-    /// The pull request that worktree checks out, by number: its review opens beside the
-    /// thread once it lands ([`super::pull_review`]).
-    pub pull: Option<u32>,
     /// What its draft chose, with the first message: the model, the mode and the effort by
     /// the agent's ids (its defaults when `None`), and the files attached.
     pub chosen: Chosen,
@@ -320,7 +312,6 @@ impl Starting {
             args: Vec::new(),
             worktree: false,
             base: None,
-            pull: None,
             chosen: Chosen { model: None, mode: None, effort: None, attachments: Vec::new() },
             draft,
             sent: false,
@@ -386,24 +377,6 @@ impl WorkspaceView {
         self.open_starting(item, starting, cx);
         self.starting.focus = Some(item);
         item
-    }
-
-    /// `item`'s start checks pull request `number` out in its new worktree: its composer says
-    /// so, holding `words` to send as they are or add to.
-    pub(super) fn start_on_pull(
-        &mut self,
-        item: ItemId,
-        number: u32,
-        words: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(starting) = self.starting.get_mut(item) else { return };
-        starting.pull = Some(number);
-        if let Some(drafting) = &starting.draft {
-            drafting.draft.update(cx, |d, cx| d.set_pull(number, cx));
-            drafting.view.update(cx, |v, cx| v.restore_draft(words, window, cx));
-        }
     }
 
     /// What a new thread of `agent` can start with on `worker`, as its link said.
@@ -493,7 +466,7 @@ impl WorkspaceView {
         // Where the draft's place chip left it.
         starting.worktree = worktree;
         starting.base.clone_from(&base);
-        let (cwd, pull) = (starting.cwd.clone(), starting.pull);
+        let cwd = starting.cwd.clone();
         let chips = slopty_client::starts::Chips {
             model: model.clone(),
             mode: mode.clone(),
@@ -518,8 +491,7 @@ impl WorkspaceView {
         self.send_start(item, prompt.clone(), cx);
         // The same message on each other agent chosen, each in a new worktree of its own and a
         // pane of its own, opened beside the one before, at its agent's defaults: the runs
-        // to compare, each on its own checkout of the pull request where the start is one's. The
-        // keyboard stays with the run the person wrote.
+        // to compare. The keyboard stays with the run the person wrote.
         let runs: Vec<AgentId> = also.into_iter().filter(|_| worktree).collect();
         if runs.is_empty() {
             return;
@@ -527,7 +499,6 @@ impl WorkspaceView {
         for agent in runs {
             let run = ItemId::new();
             let mut starting = Starting::new(worker, agent, cwd.clone(), None).in_worktree(true);
-            starting.pull = pull;
             starting.base.clone_from(&base);
             starting.chosen.attachments.clone_from(&attachments);
             self.place_starting(run, starting, true, cx);
@@ -568,12 +539,9 @@ impl WorkspaceView {
             // nor a call naming a file.
             ThreadViewEvent::ShowTerminal
             | ThreadViewEvent::OpenFile { .. }
-            | ThreadViewEvent::Review { .. }
-            | ThreadViewEvent::ReviewRuns { .. }
             | ThreadViewEvent::KeepRun { .. }
             | ThreadViewEvent::Watch { .. }
             | ThreadViewEvent::RemoveWorktree(_)
-            | ThreadViewEvent::EndAndRemove(_)
             | ThreadViewEvent::InlineTerminal { .. }
             | ThreadViewEvent::InlineTerminalDone { .. } => {}
         }
@@ -605,13 +573,10 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         let tile = TileRef { worker: key, item };
-        let Some(starting) = self.starting.tiles.remove(&item) else {
+        if self.starting.tiles.remove(&item).is_none() {
             let text = format!("{} started on {}", agent_label(agent), self.worker_name(key));
             self.show_notice(text, cx);
             return;
-        };
-        if starting.pull.is_some() {
-            self.review_pull_thread(key, thread, cx);
         }
         if self.tile_of_thread(thread).is_some() {
             self.drop_starting_tile(tile, cx);

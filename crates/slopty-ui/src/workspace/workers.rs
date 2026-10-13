@@ -64,7 +64,7 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         let Some(name) = self.workers.get(&share.worker).map(|w| w.name.clone()) else { return };
-        let Some(id) = super::projects::worker_id(share.worker) else { return };
+        let Some(id) = super::keys::worker_id(share.worker) else { return };
         let mut sharing = self.clip_sharing.clone();
         sharing.workers.insert(id.to_string(), share.share);
         self.set_clipboard_sharing(sharing, cx);
@@ -214,8 +214,7 @@ impl WorkspaceView {
     }
 
     /// The clock a worker's time out of reach is told by, with the tick that keeps its tiles'
-    /// "Reconnecting for …" and the boards' "Start elsewhere" current started, once, while any
-    /// worker is away.
+    /// "Reconnecting for …" current started, once, while any worker is away.
     fn away_clock(&mut self, cx: &Context<Self>) -> Duration {
         if !self.away_ticking {
             self.away_ticking = true;
@@ -225,9 +224,6 @@ impl WorkspaceView {
                     let away = this.update(cx, |this, cx| {
                         let away = this.workers.values().any(|w| w.away_since.is_some());
                         if away {
-                            // A board's tasks on a machine gone past its grace are offered
-                            // elsewhere: the boards look again with the clock.
-                            this.projects.dirty = true;
                             cx.notify();
                         } else {
                             this.away_ticking = false;
@@ -294,8 +290,6 @@ impl WorkspaceView {
         // The worker hands pages and files only to a client that said it takes them.
         self.declare_handoffs(key);
         self.curtain_relinked(key);
-        // A board's tasks on it are no longer marked away.
-        self.projects.dirty = true;
         self.focus_link_reset(key);
         let Some(w) = self.workers.get_mut(&key) else { return };
         w.home = (!home.is_empty()).then_some(home);
@@ -379,8 +373,6 @@ impl WorkspaceView {
         let screens = &self.screens;
         w.stale_screens.extend(items.iter().copied().filter(|id| screens.contains_key(id)));
         self.probes.retain(|(k, ..)| *k != key);
-        // A board marks the tasks that run on it as away.
-        self.projects.dirty = true;
         self.reset_remote(key, &sessions, cx);
         // The worker's own word on its agents went with the link; the server's ladder stands
         // in ([`Self::agent_state`]).
@@ -1711,7 +1703,7 @@ impl WorkspaceView {
     /// made at its desk is seen once it is back. Its shells stay with ptyd.
     pub(super) fn restart_worker(&mut self, key: WorkerKey, cx: &mut Context<Self>) {
         let name = self.worker_name(key);
-        let Some(worker) = super::projects::worker_id(key) else {
+        let Some(worker) = super::keys::worker_id(key) else {
             self.show_failure(format!("Couldn\u{2019}t restart Slopty on {name}"), cx);
             return;
         };
@@ -1733,5 +1725,5 @@ pub(super) fn shares_clipboard(
     sharing: &slopty_settings::ClipboardSettings,
     key: WorkerKey,
 ) -> bool {
-    super::projects::worker_id(key).is_none_or(|id| sharing.shared_with(&id.to_string()))
+    super::keys::worker_id(key).is_none_or(|id| sharing.shared_with(&id.to_string()))
 }

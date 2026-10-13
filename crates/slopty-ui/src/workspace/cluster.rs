@@ -148,7 +148,6 @@ impl WorkspaceView {
             .children(notices)
             .children(plans)
             .children(transfer_list)
-            .children(self.render_approval_cards(window, cx))
             .into_any_element()
     }
 

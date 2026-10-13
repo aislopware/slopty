@@ -255,7 +255,6 @@ impl Workspace {
         self.view.update(cx, |v, cx| {
             v.set_server_status(None, cx);
             v.forget_server_agents(None, cx);
-            v.forget_projects(cx);
             v.set_server_caller(None);
         });
         if had_server && address.is_none() {
@@ -381,9 +380,7 @@ impl Workspace {
                 self.server_down(why.text().to_owned(), status, cx);
             }
             ServerEvent::Message(msg) => {
-                // The projects are the workspace's to mirror; the directory has no use for them.
-                if let FromServer::Projects(part) = *msg {
-                    self.view.update(cx, |v, cx| v.projects_part(*part, cx));
+                if let FromServer::Projects(_) = *msg {
                     return;
                 }
                 let listing = matches!(*msg, FromServer::Directory(_) | FromServer::Worker(_));
@@ -533,13 +530,10 @@ impl Workspace {
                 }
             }
             Change::Event(event) => match event.what {
-                Happening::Project(update) => {
-                    let seq = event.seq;
-                    self.view.update(cx, |v, cx| v.project_update(seq, *update, cx));
-                }
                 // The directory carries liveness, a worker's own link its terminals, and the
                 // ladder where every agent's thread stands, its rungs among them.
-                Happening::Worker { .. }
+                Happening::Project(_)
+                | Happening::Worker { .. }
                 | Happening::WorkerRemoved { .. }
                 | Happening::SessionOpened { .. }
                 | Happening::SessionClosed { .. }

@@ -11,7 +11,7 @@ use slopty_proto::orchestration::{Outcome, RequestRead, ThreadOf, ThreadRead, Ve
 use slopty_proto::thread::attention::{Ladder, Ranked, Rung, ThreadAt};
 use slopty_proto::thread::{AgentId, AskId, Choice, Effect, Phase, Request, ThreadId, TurnId};
 
-use super::super::projects::worker_key;
+use super::super::keys::worker_key;
 use super::*;
 use crate::workspace::WorkspaceEvent;
 use crate::workspace::approvals::ANSWER_NOT_SENT;
@@ -311,110 +311,4 @@ fn a_notes_reply_goes_straight_to_a_linked_worker(cx: &mut TestAppContext) {
     assert_eq!(sent, ["also bump the lockfile"], "one message, to its thread");
     assert!(queue.try_next().is_none(), "nothing through the server");
     assert_eq!(events.borrow().as_slice(), [WorkspaceEvent::TapsSettled], "it may sleep");
-}
-
-/// A ready note's "Merge" merges the task it names through the server, the person's word,
-/// leaving the workspace where it is; the tap settles once the server has answered, and a
-/// refusal is said in the server's words.
-#[gpui::test]
-fn a_ready_notes_merge_merges_the_task_it_names(cx: &mut TestAppContext) {
-    use slopty_platform::notify::info::{PROJECT, TASK};
-    use slopty_proto::orchestration::ErrorCode;
-    use slopty_proto::project::{ProjectId, TaskId};
-
-    let (view, cx) = workspace(cx);
-    let studio = connect(&view, cx, 1, "studio");
-    let shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
-    let (caller, mut queue) = slopty_client::server::ServerCaller::queued();
-    view.update_in(cx, |v, _w, _cx| v.set_server_caller(Some(caller)));
-    cx.run_until_parked();
-    let events = Rc::new(RefCell::new(Vec::new()));
-    let heard = Rc::clone(&events);
-    cx.update(|_window, cx| {
-        cx.subscribe(&view, move |_view, event: &WorkspaceEvent, _cx| {
-            heard.borrow_mut().push(*event);
-        })
-        .detach();
-    });
-    let merge = Tap {
-        id: "project-store-7".to_owned(),
-        info: BTreeMap::from([
-            (PROJECT.to_owned(), "store".to_owned()),
-            (TASK.to_owned(), "4".to_owned()),
-        ]),
-        action: Some(notify::MERGE.to_owned()),
-        text: None,
-    };
-    assert!(attention::answers(&merge), "answered where the note is");
-    view.update_in(cx, |v, _w, cx| v.open_notification(&merge, cx));
-    cx.run_until_parked();
-    let (verb, reply) = queue.try_next().expect("the merge went to the server");
-    let store = ProjectId::new("store").expect("a name");
-    assert_eq!(verb, Verb::TaskMerge { project: store, task: TaskId(4) });
-    assert!(events.borrow().is_empty(), "not settled before the server answers");
-    let _gone = reply.send(Outcome::Done);
-    cx.run_until_parked();
-    assert_eq!(events.borrow().as_slice(), [WorkspaceEvent::TapsSettled], "it may sleep");
-    assert_eq!(focused(&view, cx), Some(shell), "the workspace stays where it was");
-
-    view.update_in(cx, |v, _w, cx| v.open_notification(&merge, cx));
-    cx.run_until_parked();
-    let (_, reply) = queue.try_next().expect("asked again");
-    let refused = "task 4 is merged already".to_owned();
-    let _gone = reply.send(Outcome::Error { code: ErrorCode::Invalid, message: refused.clone() });
-    cx.run_until_parked();
-    let said = view.read_with(cx, |v, _| v.toast_texts());
-    assert!(said.contains(&refused), "in the server's words: {said:?}");
-}
-
-/// A goal-met note's "Open pull request" lands the goal of the project it names, through the
-/// server, and leaves the workspace where it is; the tap settles once the server has answered,
-/// and a refusal is said in the server's words.
-#[gpui::test]
-fn a_goal_met_notes_open_pull_request_lands_its_goal(cx: &mut TestAppContext) {
-    use slopty_platform::notify::info::PROJECT;
-    use slopty_proto::orchestration::ErrorCode;
-    use slopty_proto::project::ProjectId;
-
-    let (view, cx) = workspace(cx);
-    let studio = connect(&view, cx, 1, "studio");
-    let shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
-    let (caller, mut queue) = slopty_client::server::ServerCaller::queued();
-    view.update_in(cx, |v, _w, _cx| v.set_server_caller(Some(caller)));
-    cx.run_until_parked();
-    let events = Rc::new(RefCell::new(Vec::new()));
-    let heard = Rc::clone(&events);
-    cx.update(|_window, cx| {
-        cx.subscribe(&view, move |_view, event: &WorkspaceEvent, _cx| {
-            heard.borrow_mut().push(*event);
-        })
-        .detach();
-    });
-    let land = Tap {
-        id: "project-store-9".to_owned(),
-        info: BTreeMap::from([(PROJECT.to_owned(), "store".to_owned())]),
-        action: Some(notify::LAND.to_owned()),
-        text: None,
-    };
-    assert!(attention::answers(&land), "answered where the note is");
-    view.update_in(cx, |v, _w, cx| v.open_notification(&land, cx));
-    cx.run_until_parked();
-    let (verb, reply) = queue.try_next().expect("the landing went to the server");
-    let store = ProjectId::new("store").expect("a name");
-    assert_eq!(verb, Verb::ProjectLand { project: store, into: None });
-    assert!(events.borrow().is_empty(), "not settled before the server answers");
-    let url = "https://github.com/aislopware/slopty/pull/42".to_owned();
-    let _gone = reply.send(Outcome::PullOpened { number: 42, url });
-    cx.run_until_parked();
-    assert_eq!(events.borrow().as_slice(), [WorkspaceEvent::TapsSettled], "it may sleep");
-    assert_eq!(focused(&view, cx), Some(shell), "the workspace stays where it was");
-
-    view.update_in(cx, |v, _w, cx| v.open_notification(&land, cx));
-    cx.run_until_parked();
-    let (_, reply) = queue.try_next().expect("asked again");
-    let refused = "Name a branch".to_owned();
-    let _gone = reply.send(Outcome::Error { code: ErrorCode::Invalid, message: refused.clone() });
-    cx.run_until_parked();
-    let said = view.read_with(cx, |v, _| v.toast_texts());
-    assert!(said.contains(&refused), "in the server's words: {said:?}");
 }

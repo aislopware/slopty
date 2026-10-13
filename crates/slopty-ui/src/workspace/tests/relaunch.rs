@@ -171,32 +171,6 @@ fn a_relaunch_puts_a_popped_out_tile_back_in_its_window(cx: &mut TestAppContext)
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
-/// How far this device read a project's timeline is saved with the layout, so the board's recap
-/// after a relaunch starts where the last run left off rather than from the top.
-#[gpui::test]
-fn a_relaunch_keeps_how_far_each_board_was_read(cx: &mut TestAppContext) {
-    use crate::project::recap::Looked;
-    let (dir, path) = layout_file();
-    let project = slopty_proto::project::ProjectId::new("release").expect("a name");
-    let read = Looked { seq: 42, at_ms: WallMs::from_millis(1_700_000_000_000) };
-    {
-        let (view, vcx) = workspace(cx);
-        view.update(vcx, |v, _| {
-            v.set_layout_path(path.clone());
-            v.restore_projects_looked([(project.clone(), read)]);
-            v.save_layout_now();
-        });
-        vcx.run_until_parked();
-    }
-    let saved = read_layout(&path).ok().flatten().expect("written");
-    assert_eq!(saved.looked.len(), 1, "{:?}", saved.looked);
-
-    let (view, cx) = relaunched(cx, &path);
-    let back = view.read_with(cx, |v, _| v.projects_looked());
-    assert_eq!(back, [(project, read)], "the cursor came back");
-    std::fs::remove_dir_all(&dir).unwrap();
-}
-
 /// A cold launch draws a worker's tiles from its items as this device last saw them, each under
 /// the pill saying the worker is away, rather than holes; its first snapshot then replaces
 /// them, and a tile whose item it no longer has leaves.
@@ -299,44 +273,5 @@ fn a_tile_kept_nowhere_says_where_its_worker_is(cx: &mut TestAppContext) {
     let _studio = back(&view, cx, 1, Vec::new(), Vec::new());
     assert!(view.read_with(cx, |v, _| !v.layout.contains(shell)), "back without it: it leaves");
     assert!(cx.debug_bounds(item).is_none());
-    std::fs::remove_dir_all(&dir).unwrap();
-}
-
-/// A board open in a tile of its own is saved with the layout, and the next run puts it back,
-/// drawing the board once the server's projects arrive.
-#[gpui::test]
-fn a_relaunch_puts_a_board_tile_back(cx: &mut TestAppContext) {
-    use slopty_proto::project::{Moment, TaskState};
-
-    use crate::project::fixtures::{card, entry, project, snapshot, status};
-    let (dir, path) = layout_file();
-    let solo = || {
-        let tasks = vec![card(1, "Wire the board", TaskState::Planned)];
-        snapshot(
-            10,
-            vec![status(project("solo", None), tasks, vec![entry(1, None, Moment::Created)])],
-        )
-    };
-    let tile = {
-        let (view, vcx) = workspace(cx);
-        view.update_in(vcx, |v, _w, cx| {
-            v.set_layout_path(path.clone());
-            v.projects_part(solo(), cx);
-            v.open_project(&crate::project::fixtures::id("solo"), cx);
-        });
-        vcx.run_until_parked();
-        let tile = view.read_with(vcx, |v, _| v.focused()).expect("the board's tile");
-        view.update(vcx, |v, _| v.save_layout_now());
-        vcx.run_until_parked();
-        tile
-    };
-    let saved = read_layout(&path).ok().flatten().expect("written");
-    assert_eq!(saved.boards.len(), 1, "{:?}", saved.boards);
-
-    let (view, cx) = relaunched(cx, &path);
-    assert!(view.read_with(cx, |v, _| v.layout.contains(tile)), "the tile is back");
-    view.update_in(cx, |v, _w, cx| v.projects_part(solo(), cx));
-    cx.run_until_parked();
-    assert!(cx.debug_bounds("project-card-1").is_some(), "and its board in it");
     std::fs::remove_dir_all(&dir).unwrap();
 }

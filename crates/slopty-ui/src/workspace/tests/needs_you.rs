@@ -225,7 +225,7 @@ fn the_actions_show_on_hover_as_buttons(cx: &mut TestAppContext) {
     }
     assert!(deny_at.right() <= allow_at.left(), "the yes last: {deny_at:?} {allow_at:?}");
     let nodes = tree(cx);
-    for name in [crate::project::ALLOW, crate::project::DENY] {
+    for name in [crate::workspace::approvals::ALLOW, crate::workspace::approvals::DENY] {
         assert!(nodes.iter().any(|n| n.is("Button", Some(name))), "{name}: {nodes:#?}");
     }
     studio.drain();

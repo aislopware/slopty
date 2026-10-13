@@ -13,7 +13,7 @@ use slopty_proto::orchestration::TermRef;
 use slopty_proto::thread::attention::{Presence, Seat};
 
 use super::WorkspaceView;
-use super::projects::worker_id;
+use super::keys::worker_id;
 
 impl WorkspaceView {
     /// Where the person is on this client, as the server is to be told.

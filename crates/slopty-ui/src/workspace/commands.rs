@@ -43,9 +43,9 @@ impl WorkspaceView {
 
     /// Focus a tile: the layout moves to it, and its terminal (if it is one) takes the keyboard.
     pub fn focus_tile(&mut self, tile: TileRef, cx: &mut Context<Self>) {
-        // A task's agent is a row until it is looked at: it opens as the helper preview.
+        // An item the tiling does not hold yet opens as a tab of its own.
         if !self.layout.contains(tile) && self.item(tile).is_some() {
-            self.open_helper(tile);
+            self.open_as(tile, Opening::Tab);
         }
         self.layout.focus(tile);
         self.after_focus_moved(cx);
@@ -78,8 +78,6 @@ impl WorkspaceView {
                 self.pending_focus_folder = Some(tile.item);
                 self.refresh_folder(tile.item, cx);
             }
-            // A review walks its files and hunks by key.
-            Some(ItemKind::Review { thread }) => self.pending_focus_review = Some(thread),
             // A thread's keyboard is its composer's.
             Some(ItemKind::Thread { thread }) => {
                 self.finished.remove(&About::Thread(thread));
@@ -88,11 +86,6 @@ impl WorkspaceView {
             }
             // A thread on its way: the composer writing its first message.
             None if self.starting.has(tile.item) => self.focus_start(tile.item),
-            // A board in a tile of its own takes the keyboard in the board.
-            None if let Some(project) = self.board_tile(tile.item).cloned() => {
-                self.projects.focus.insert(project);
-                self.projects.dirty = true;
-            }
             // A remote window takes the keyboard only when clicked: its chords are the
             // worker's, and a key walk through the panes must not land in one by accident.
             Some(_) | None => self.pending_focus_self = true,
@@ -106,12 +99,6 @@ impl WorkspaceView {
     pub fn return_keyboard(&self, window: &mut Window, cx: &mut Context<Self>) {
         let kind = self.focused().and_then(|tile| Some((tile, self.item(tile)?.kind.clone())));
         match kind {
-            Some((_, ItemKind::Terminal { session }))
-                if self.board_covers(session)
-                    && let Some(board) = self.board_view(session).cloned() =>
-            {
-                board.update(cx, |v, cx| v.focus(window, cx));
-            }
             Some((_, ItemKind::Terminal { session }))
                 if let Some(view) = self.terminals.get(&session) =>
             {
@@ -128,9 +115,6 @@ impl WorkspaceView {
             {
                 view.update(cx, |v, cx| v.focus(window, cx));
             }
-            Some((_, ItemKind::Review { thread })) if self.review_of(thread).is_some() => {
-                self.focus_review(thread, window, cx);
-            }
             Some((tile, ItemKind::Thread { .. }))
                 if let Some(view) = self.thread_item(tile.item).cloned() =>
             {
@@ -138,14 +122,6 @@ impl WorkspaceView {
             }
             None if let Some(tile) = self.focused()
                 && let Some(view) = self.starting.draft_view(tile.item) =>
-            {
-                view.update(cx, |v, cx| v.focus(window, cx));
-            }
-            None if let Some(tile) = self.focused()
-                && let Some(view) = self
-                    .board_tile(tile.item)
-                    .and_then(|p| self.projects.views.get(p))
-                    .cloned() =>
             {
                 view.update(cx, |v, cx| v.focus(window, cx));
             }
@@ -904,9 +880,7 @@ impl WorkspaceView {
     pub fn close_item(&mut self, _: &CloseItem, _window: &mut Window, cx: &mut Context<Self>) {
         let Some(tile) = self.focused() else { return };
         let Some(item) = self.item(tile).cloned() else {
-            if !self.close_board_tile(tile, cx) {
-                self.close_starting(tile, cx);
-            }
+            self.close_starting(tile, cx);
             return;
         };
         tracing::debug!(item = %tile.item, kind = ?item.kind, "close tile");

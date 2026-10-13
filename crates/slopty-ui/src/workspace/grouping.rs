@@ -6,21 +6,17 @@
 //! A tile's facts come from what this client has today: its worker (`machine`, `os`), what it
 //! shows (`kind`), the agent at work there (`agent`), its shell's directory, repository,
 //! identity and branch (`cwd`, `repo`, `branch`), else the folder it is in (`folder`, a home
-//! directory or the root naming nothing), the project the server's board puts its session in
-//! or its thread's own facts name (`project`, and every thread fact as `facts.<key>`). A file
+//! directory or the root naming nothing), the project its thread's own facts name (`project`,
+//! and every thread fact as `facts.<key>`). A file
 //! or a folder tile is in the deepest repository, else the deepest folder, of its worker's
 //! shells that holds it, else in its own directory. A window, a display, a note or a page has
 //! no place: it sits under its machine until the person pins it to a project.
-//!
-//! The declared projects claim the clones of the repository they work in, by its identity, so
-//! a shell in a clone of an orchestrated project's repository is in that project on any
-//! worker.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
 
-use slopty_client::groups::{self, Claim, Facts, Group, GroupKey, Grouped, Matcher, fact};
+use slopty_client::groups::{self, Facts, Group, GroupKey, Grouped, fact};
 use slopty_client::layout::{TileRef, WorkerKey};
 use slopty_kit::icons::{GitGlyph, Mark, Symbol};
 use slopty_proto::items::{Item, ItemKind};
@@ -109,25 +105,19 @@ fn repo_values(worker: WorkerKey, root: &str, id: Option<&RepoId>) -> Vec<String
     values
 }
 
-/// The group a thread with no tile here lists under, by its `facts`: the project it names
-/// or a declared one claims it for, else a group of `projects` it shares a value with,
+/// The group a thread with no tile here lists under, by its `facts`: the project it names,
+/// else a group of `projects` it shares a value with,
 /// else one of its own (the first link of the default chain it has, with no tile). None
 /// where it has nothing but its machine.
-pub(super) fn listing_group(projects: &Grouping, claims: &[Claim], facts: &Facts) -> Option<Group> {
+pub(super) fn listing_group(projects: &Grouping, facts: &Facts) -> Option<Group> {
     let own = |fact: &str, value: &str| Group {
         key: GroupKey::new(fact, value),
         fact: fact.to_owned(),
         values: vec![value.to_owned()],
         members: Vec::new(),
     };
-    let named = facts.get(fact::PROJECT).and_then(|v| v.first()).cloned().or_else(|| {
-        claims
-            .iter()
-            .find(|c| c.matchers.iter().any(|m| groups::matches(facts, m)))
-            .map(|c| c.project.clone())
-    });
-    if let Some(project) = named {
-        return Some(own(fact::PROJECT, &project));
+    if let Some(project) = facts.get(fact::PROJECT).and_then(|v| v.first()) {
+        return Some(own(fact::PROJECT, project));
     }
     let shared = projects.grouped.groups.iter().find(|g| {
         g.key.worker().is_none()
@@ -217,24 +207,18 @@ impl WorkspaceView {
         for (key, value) in thread_facts.into_iter().flatten() {
             put(&format!("facts.{key}"), vec![value.clone()]);
         }
-        let mut project = thread_facts.and_then(|f| f.get(fact::PROJECT)).cloned();
-        if let Some(session) = session {
-            let mirror = &self.projects.mirror;
-            let board =
-                mirror.of_orchestrator(session).or_else(|| Some(mirror.of_agent(session)?.0));
-            project = board.map(|b| b.project.id.as_str().to_owned()).or(project);
-            if let Some(summary) = self.summary(session) {
-                put(fact::CWD, summary.cwd.clone().into_iter().collect());
-                put(fact::BRANCH, summary.branch.clone().into_iter().collect());
-                match (summary.repo.as_deref(), summary.cwd.as_deref()) {
-                    (Some(root), _) => {
-                        put(fact::REPO, repo_values(tile.worker, root, summary.repo_id.as_ref()));
-                    }
-                    (None, Some(cwd)) if self.names_a_folder(tile.worker, cwd) => {
-                        put(fact::FOLDER, vec![groups::at(tile.worker, cwd)]);
-                    }
-                    (None, _) => {}
+        let project = thread_facts.and_then(|f| f.get(fact::PROJECT)).cloned();
+        if let Some(summary) = session.and_then(|s| self.summary(s)) {
+            put(fact::CWD, summary.cwd.clone().into_iter().collect());
+            put(fact::BRANCH, summary.branch.clone().into_iter().collect());
+            match (summary.repo.as_deref(), summary.cwd.as_deref()) {
+                (Some(root), _) => {
+                    put(fact::REPO, repo_values(tile.worker, root, summary.repo_id.as_ref()));
                 }
+                (None, Some(cwd)) if self.names_a_folder(tile.worker, cwd) => {
+                    put(fact::FOLDER, vec![groups::at(tile.worker, cwd)]);
+                }
+                (None, _) => {}
             }
         }
         // A thread with no terminal here (a Codex, pi or ACP one) is where its row says.
@@ -357,29 +341,6 @@ impl WorkspaceView {
         }
     }
 
-    /// What the server's declared projects claim: the clones of the repository each works in,
-    /// by its origin and by its first commit.
-    pub(super) fn claims(&self) -> Vec<Claim> {
-        self.projects
-            .mirror
-            .boards()
-            .filter_map(|board| {
-                let repo = |value: String| -> Matcher { [(fact::REPO.to_owned(), value)].into() };
-                let id = board.project.repo_id.as_ref();
-                let clones = id.into_iter().flat_map(|id| {
-                    id.origin
-                        .iter()
-                        .cloned()
-                        .chain(id.root.iter().map(|r| format!("{}{r}", groups::COMMIT)))
-                        .map(repo)
-                });
-                let matchers: Vec<Matcher> = clones.collect();
-                let project = board.project.id.as_str().to_owned();
-                (!matchers.is_empty()).then_some(Claim { project, matchers })
-            })
-            .collect()
-    }
-
     /// `tiles` grouped by `chain`.
     pub(super) fn grouping(&self, tiles: Vec<TileRef>, chain: &[impl AsRef<str>]) -> Grouping {
         let mut kept = Vec::with_capacity(tiles.len());
@@ -391,7 +352,7 @@ impl WorkspaceView {
             }
         }
         let refs: Vec<&Facts> = facts.iter().collect();
-        let grouped = groups::group(&refs, chain, &self.claims());
+        let grouped = groups::group(&refs, chain, &[]);
         let at = kept.iter().enumerate().map(|(i, t)| (*t, i)).collect();
         Grouping { tiles: kept, facts, grouped, at }
     }
@@ -413,18 +374,11 @@ impl WorkspaceView {
         projects
     }
 
-    /// What a person calls `group`: a machine by its worker's name, a declared project by its
-    /// title, anything else as [`Group::name`] says.
+    /// What a person calls `group`: a machine by its worker's name, anything else as
+    /// [`Group::name`] says.
     pub(super) fn group_name(&self, group: &Group) -> String {
         if let Some(worker) = group.key.worker() {
             return self.worker_name(worker);
-        }
-        if group.fact == fact::PROJECT {
-            let board =
-                self.projects.mirror.boards().find(|b| b.project.id.as_str() == group.key.value());
-            if let Some(board) = board {
-                return board.project.title.clone();
-            }
         }
         group.name()
     }
@@ -481,10 +435,9 @@ impl WorkspaceView {
     }
 
     /// Put `arriving` (tiles from elsewhere: another client, an orchestrator, the worker's own
-    /// list) in the tiling: a task's agent nowhere, a row until it is opened
-    /// ([`super::seating`]), any other a background tab in its project
-    /// ([`slopty_client::layout::Tiling::arrive`]), kept in mind in case the project names it a
-    /// task's agent later. The projects are worked out once over the tiling and the arrivals
+    /// list) in the tiling: a background tab in its project
+    /// ([`slopty_client::layout::Tiling::arrive`]). The projects are worked out once over the
+    /// tiling and the arrivals
     /// together, so a snapshot of many lands in one pass, and the tiles already placed say
     /// their project first.
     pub(super) fn place_from_elsewhere(&mut self, arriving: &[TileRef]) {
@@ -492,17 +445,14 @@ impl WorkspaceView {
         tiles
             .extend(arriving.iter().filter(|t| !self.layout.contains(**t) && !self.is_inline(**t)));
         let grouping = self.grouping(tiles, &groups::DEFAULT_CHAIN);
-        let layout = &self.layout;
-        self.projects.arrived.retain(|t| layout.contains(*t));
         for &tile in arriving {
-            if self.layout.contains(tile) || self.is_task_agent(tile) || self.is_inline(tile) {
+            if self.layout.contains(tile) || self.is_inline(tile) {
                 continue;
             }
             let home = grouping
                 .group_of(tile)
                 .map_or_else(|| GroupKey::machine(tile.worker), |g| g.key.clone());
             self.layout.arrive(tile, &home);
-            self.projects.arrived.insert(tile);
         }
     }
 

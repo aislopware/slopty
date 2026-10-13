@@ -77,25 +77,6 @@ fn a_folder_opens_in_the_editor(cx: &mut TestAppContext) {
     assert_eq!(cx.opened_url().as_deref(), Some("zed://ssh/studio/srv/app:1"));
 }
 
-/// A review opens the folder it reviews, on the machine its hub names.
-#[gpui::test]
-fn a_review_opens_its_folder_in_the_editor(cx: &mut TestAppContext) {
-    let hub = cx.update(|cx| {
-        gpui_kit::init(cx);
-        cx.new(|_| crate::conversation::thread::ThreadHub::new("studio".to_owned(), None))
-    });
-    let (view, cx) = cx.add_window_view(move |window, cx| {
-        crate::review::ReviewView::folder(hub, "~/w/repo".to_owned(), Theme::default(), window, cx)
-    });
-    zed_knows_studio(cx);
-    view.update(cx, |_v, cx| cx.notify());
-    cx.run_until_parked();
-    let focus = view.read_with(cx, gpui::Focusable::focus_handle);
-    assert!(offered(&focus, cx));
-    cx.dispatch_action(OpenInEditor);
-    assert_eq!(cx.opened_url().as_deref(), Some("zed://ssh/studio/Users/me/w/repo:1"));
-}
-
 /// With no editor set, a Mac opens a file of this Mac with the system's handler for its type,
 /// as a `file://` link; an iPhone or iPad offers nothing.
 #[gpui::test]

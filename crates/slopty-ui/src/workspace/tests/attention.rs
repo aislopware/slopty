@@ -176,7 +176,6 @@ fn led_by_the_server_only_its_notices_post_for_agents() {
         kind: NoticeKind::NeedsYou,
         title: "Fix the build".into(),
         body: "Run cargo test".into(),
-        stack: None,
     };
     attention.notice(&heard);
     let posted = memory.posted();
@@ -324,40 +323,12 @@ fn only_needs_you_breaks_through_a_focus() {
     let (mut led, memory) = attention();
     led.set_server_led(true);
     led.set_active(false);
-    let stack = |id: &str| Some(Stack { id: id.into(), project: "p".into() });
-    let notices = [
-        (NoticeKind::NeedsYou, None),
-        (NoticeKind::Failed, None),
-        (NoticeKind::Finished, None),
-        (NoticeKind::Project, None),
-        (NoticeKind::NeedsYou, stack("s1")),
-        (NoticeKind::Project, stack("s2")),
-    ];
-    for (kind, stack) in notices {
+    for kind in [NoticeKind::NeedsYou, NoticeKind::Failed, NoticeKind::Finished] {
         let (title, body) = ("t".into(), "b".into());
-        led.notice(&Heard { route: route(5), kind, title, body, stack });
+        led.notice(&Heard { route: route(5), kind, title, body });
     }
     let urgent: Vec<bool> = memory.posted().into_iter().map(|n| n.urgent).collect();
-    assert_eq!(urgent, [true, false, false, false, true, false], "the server's, by their kind");
-}
-
-/// A goal met, the server's to say here, offers to land it where the note is: "Open pull
-/// request", naming its project. The project's other notes carry no button.
-#[test]
-fn a_goal_met_note_offers_its_pull_request() {
-    use slopty_platform::notify::LANDING;
-    use slopty_platform::notify::info::PROJECT;
-    let (mut led, memory) = attention();
-    led.set_server_led(true);
-    led.set_active(false);
-    for (kind, id) in [(NoticeKind::GoalDone, "s1"), (NoticeKind::Project, "s2")] {
-        let stack = Some(Stack { id: id.into(), project: "store".into() });
-        let (title, body) = ("t".into(), "b".into());
-        led.notice(&Heard { route: route(5), kind, title, body, stack });
-    }
-    let buttons: Vec<_> =
-        memory.posted().into_iter().map(|n| (n.category, n.info.get(PROJECT).cloned())).collect();
-    assert_eq!(buttons, [(Some(LANDING), Some("store".to_owned())), (None, None)]);
+    assert_eq!(urgent, [true, false, false], "the server's, by their kind");
 }
 
 /// With notifications off, a note that goes out while the app is away reaches nobody: back in
@@ -541,7 +512,7 @@ fn a_server_notice_leads_to_its_tile_and_names_the_subagent(cx: &mut TestAppCont
     let (view, cx) = workspace(cx);
     let session = SessionId::new();
     let id = slopty_core::WorkerId::new();
-    let key = crate::workspace::projects::worker_key(id);
+    let key = crate::workspace::worker_key(id);
     let (tiles, _link) = worker(&view, cx, key, "mini", &[session]);
     let thread = ThreadId::new();
     let mut notice = Notice {
@@ -597,7 +568,7 @@ fn a_pushed_note_is_the_note_the_app_would_post(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let session = SessionId::new();
     let id = slopty_core::WorkerId::new();
-    let key = crate::workspace::projects::worker_key(id);
+    let key = crate::workspace::worker_key(id);
     let (_tiles, _link) = worker(&view, cx, key, "mini", &[session]);
     let thread = ThreadId::new();
     let notice = |kind, tile: Option<TermRef>, via: Option<Via>| Notice {

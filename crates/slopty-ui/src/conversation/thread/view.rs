@@ -40,15 +40,14 @@ use slopty_proto::thread::{
 use slopty_theme::{Rgb, Theme, alpha};
 
 use self::composing::Composing;
-use super::commit::{CommitEvent, CommitSheet};
 use super::draft::{Draft, Place};
 use super::hub::{HubEvent, ThreadHub};
 use super::rows::{self, Fold, Input, Row};
 use crate::conversation::attach::Attach;
 use crate::conversation::diff::Block;
 use crate::conversation::{
-    AllowRequest, AskAside, CTX, CycleDensity, DenyRequest, EditLastQueued, Interrupt, OpenCommit,
-    QueueMessage, RefreshPullRequest, WatchAgentScreen,
+    AllowRequest, AskAside, CTX, CycleDensity, DenyRequest, EditLastQueued, Interrupt,
+    QueueMessage, WatchAgentScreen,
 };
 
 /// The pointer group a message and its actions answer as one.
@@ -155,11 +154,6 @@ pub enum ThreadViewEvent {
     /// What the composer holds changed: the workspace keeps drafts across a quit
     /// ([`ThreadView::draft`]).
     Drafted,
-    /// Open the review of what the thread changed.
-    Review {
-        /// The thread.
-        thread: ThreadId,
-    },
     /// Upload this for the draft; its chip is attachment `id`, which the workspace reports on
     /// ([`ThreadView::attachment_progress`], [`ThreadView::attachment_landed`],
     /// [`ThreadView::attachment_ended`]).
@@ -174,12 +168,6 @@ pub enum ThreadViewEvent {
         /// The chip.
         id: u64,
     },
-    /// Open the reviews of the thread's runs side by side: every thread the same first message
-    /// started in a worktree of the same clone ([`ThreadView::set_runs`]).
-    ReviewRuns {
-        /// The thread.
-        thread: ThreadId,
-    },
     /// Keep this run of the thread's first message and close the others for good, their agents
     /// and their worktrees with them ([`Intent::Discard`]).
     KeepRun {
@@ -193,9 +181,6 @@ pub enum ThreadViewEvent {
     PickPhotos,
     /// Free the worktree the thread's exited agent worked in, at this root.
     RemoveWorktree(String),
-    /// The commit sheet's "End `<agent>` and remove", its pull request merged: end the agents
-    /// still running in the worktree at this root, then free it.
-    EndAndRemove(String),
     /// Open the screen the agent drives beside the thread, to watch it and take control.
     Watch {
         /// The thread.
@@ -239,17 +224,11 @@ pub struct ThreadView {
     draft: Option<Entity<Draft>>,
     /// The composer's words as its worker holds them for other devices ([`sharing`]).
     sharing: sharing::Sharing,
-    /// Its brief came from elsewhere (a project's orchestrator, or its task): it is never asked
-    /// what to do, even before its first row.
-    briefed: bool,
-    /// Its terminal is a project's orchestrator: a plan it puts to the person is the project's
-    /// plan, and allowing it starts the work ("Confirm & start").
-    orchestrates: bool,
     /// Its "+" menu offers the Photos picker beside the Files one: on iOS, where pictures live
     /// in Photos.
     photos: bool,
     /// How many runs the thread's first message has, itself among them: one, or as many as it
-    /// was started on side by side ([`ThreadViewEvent::ReviewRuns`]).
+    /// was started on side by side.
     runs: usize,
     theme: Theme,
     /// The theme, shared with what outlives a frame (a code block's corner).
@@ -335,8 +314,6 @@ pub struct ThreadView {
     /// The message whose words were just copied, by its item, and the timer that clears it.
     copied: Option<ItemId>,
     copied_clear: Option<Task<()>>,
-    /// The commit sheet over the tile, while it is open.
-    commit: Option<(Entity<CommitSheet>, Subscription)>,
     /// A message's own menu, open where it was pressed.
     message_menu: Option<message_menu::MessageMenu>,
     /// The find bar, while it is open.
@@ -522,8 +499,6 @@ impl ThreadView {
             thread,
             draft,
             sharing: sharing::Sharing::default(),
-            briefed: false,
-            orchestrates: false,
             photos: cfg!(target_os = "ios"),
             runs: 1,
             width: 0.0,
@@ -567,7 +542,6 @@ impl ThreadView {
             marks_moved: Cell::default(),
             copied: None,
             copied_clear: None,
-            commit: None,
             message_menu: None,
             finder: None,
             going: None,
@@ -680,24 +654,6 @@ impl ThreadView {
         self.set_draft(text, text.len(), window, cx);
     }
 
-    /// Whether its brief came from elsewhere: a project's orchestrator or a task's agent, which
-    /// the empty thread's question never asks what to do.
-    pub fn set_briefed(&mut self, briefed: bool, cx: &mut Context<Self>) {
-        if self.briefed != briefed {
-            self.briefed = briefed;
-            cx.notify();
-        }
-    }
-
-    /// Whether its terminal is a project's orchestrator, whose plan's allow reads "Confirm &
-    /// start".
-    pub fn set_orchestrates(&mut self, orchestrates: bool, cx: &mut Context<Self>) {
-        if self.orchestrates != orchestrates {
-            self.orchestrates = orchestrates;
-            self.rebuild(cx);
-        }
-    }
-
     /// Offer the Photos picker in the "+" menu, as on iOS: a test shows it on the Mac.
     #[cfg(test)]
     pub(crate) const fn offer_photos(&mut self) {
@@ -741,9 +697,6 @@ impl ThreadView {
     /// Draw in `theme`.
     pub fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
         self.shared = Arc::new(theme.clone());
-        if let Some((sheet, _)) = &self.commit {
-            sheet.update(cx, |sheet, cx| sheet.set_theme(theme.clone(), cx));
-        }
         if let Some(view) = self.aside.as_ref().and_then(aside::Aside::view) {
             view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
         }
@@ -1239,53 +1192,6 @@ impl ThreadView {
             self.asked_at = at.saturating_add_signed(by).min(waiting.saturating_sub(1));
             // The request on show may be answered on its call or on a card of its own.
             self.rebuild(cx);
-        }
-    }
-
-    /// The folder the thread works in, when the worker said: its repository is what the
-    /// commit sheet works.
-    pub(super) fn repo(&self, cx: &App) -> Option<String> {
-        self.state(cx).map(|st| st.meta.cwd.clone()).filter(|cwd| !cwd.trim().is_empty())
-    }
-
-    /// Open the commit sheet over the tile, on the thread's repository.
-    pub fn open_commit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some((sheet, _)) = &self.commit {
-            sheet.update(cx, |sheet, cx| sheet.refresh(cx));
-            return;
-        }
-        let Some(repo) = self.repo(cx) else { return };
-        let (hub, theme, thread) = (self.hub.clone(), self.theme.clone(), self.thread);
-        let sheet = cx.new(|cx| CommitSheet::new(hub, repo, theme, window, cx).asking(thread, cx));
-        let closing =
-            cx.subscribe_in(&sheet, window, |this, _sheet, event, window, cx| match event {
-                CommitEvent::Close => {
-                    this.commit = None;
-                    this.composer.update(cx, |c, cx| c.focus(window, cx));
-                    cx.notify();
-                }
-                CommitEvent::EndAndRemove(root) => {
-                    cx.emit(ThreadViewEvent::EndAndRemove(root.clone()));
-                }
-            });
-        self.commit = Some((sheet, closing));
-        cx.notify();
-    }
-
-    /// Whether the commit sheet is open.
-    #[must_use]
-    pub const fn commit_open(&self) -> bool {
-        self.commit.is_some()
-    }
-
-    /// Ask the branch's pull request again.
-    fn refresh_pull(&self, cx: &mut Context<Self>) {
-        if let Some((sheet, _)) = &self.commit {
-            sheet.update(cx, |sheet, cx| sheet.refresh(cx));
-            return;
-        }
-        if let Some(repo) = self.repo(cx) {
-            let _asked = self.hub.update(cx, |hub, cx| hub.git_op(&repo, GitOp::PullStatus, cx));
         }
     }
 
@@ -2485,8 +2391,8 @@ impl ThreadView {
                 ),
             )
             .into_any_element(),
-            // A thread with nothing said yet that asks nothing (one a project briefed, an
-            // agent at work on its first turn) says so in its place, not a blank pane: whose it
+            // A thread with nothing said yet that asks nothing (an agent at work on its first
+            // turn) says so in its place, not a blank pane: whose it
             // is, and what it is doing.
             Some(state) if self.hero(cx).is_none() => {
                 let agent = agent_label(&state.meta.agent);
@@ -2538,11 +2444,10 @@ impl ThreadView {
             let agents = std::iter::once(agent).chain(draft.also().iter().map(agent_label));
             return (!draft.sent()).then(|| (agents.collect(), draft.place().clone()));
         }
-        // At rest and unbriefed only: an agent at work on a turn whose rows have not come yet,
-        // one a project briefed, or one with a message on its way (a start's first, while the
-        // agent opens), is not asking the person anything.
-        if self.briefed
-            || !self.rows.is_empty()
+        // At rest only: an agent at work on a turn whose rows have not come yet, or one with a
+        // message on its way (a start's first, while the agent opens), is not asking the person
+        // anything.
+        if !self.rows.is_empty()
             || !state.pending.is_empty()
             || self.in_subagent()
             || state.status.phase != Phase::Idle
@@ -2672,8 +2577,6 @@ impl Render for ThreadView {
             }))
             .on_action(cx.listener(|this, _: &CycleDensity, _w, cx| this.every_step(cx)))
             .on_action(cx.listener(|this, _: &AskAside, window, cx| this.ask_aside(window, cx)))
-            .on_action(cx.listener(|this, _: &OpenCommit, window, cx| this.open_commit(window, cx)))
-            .on_action(cx.listener(|this, _: &RefreshPullRequest, _w, cx| this.refresh_pull(cx)))
             .map(|el| self.keyed(el, cx))
             .when(self.agent_screen(cx).is_some(), |el| {
                 el.on_action(
@@ -2747,7 +2650,6 @@ impl Render for ThreadView {
             .children(composer_foot)
             .children(aside)
             .children(viewer)
-            .children(self.commit.as_ref().map(|(sheet, _)| sheet.clone()))
             .children(self.message_menu_panel(cx))
     }
 }

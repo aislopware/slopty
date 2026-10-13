@@ -42,7 +42,6 @@ use super::{WorkspaceEvent, WorkspaceView};
 use crate::conversation::attach::Target;
 use crate::conversation::thread::{HubEvent, ThreadHub, ThreadView, ThreadViewEvent, find, hub};
 use crate::palette::{CommandPalette, PaletteItem};
-use crate::review::ReviewView;
 
 /// What the workspace keeps about faces.
 #[derive(Default)]
@@ -143,14 +142,6 @@ pub(super) struct ThreadFaces {
     asks: HashMap<SessionId, gpui::Subscription>,
     /// Where each worker's threads are kept: a directory per worker under it.
     cache: Option<PathBuf>,
-    /// The review tile of each thread whose review was asked for, kept while it is open.
-    reviews: HashMap<ThreadId, Entity<ReviewView>>,
-    /// The reviews thread views asked for, in order: made in the next sync, for the workspace to
-    /// open ([`WorkspaceView::take_review`]), each on the scope named where one is. Several at
-    /// once are a message's runs.
-    review_asked: Vec<(WorkerKey, ThreadId, Option<crate::review::Scope>)>,
-    /// The review tiles made and not yet opened, and the worker whose agent runs each thread.
-    review_made: Vec<(WorkerKey, ThreadId)>,
     /// The thread view of each thread tile, kept while its tile is there.
     items: HashMap<ItemId, Entity<ThreadView>>,
     item_asks: HashMap<ItemId, gpui::Subscription>,
@@ -213,8 +204,7 @@ impl ThreadFaces {
 pub(crate) const NO_THREAD_YET: &str = "This agent has no thread yet";
 
 /// What an agent's tile shows: its thread or its agent's own terminal. One button in the
-/// tile's header switches it, and ⌘J. An orchestrator's board is not a face: it stands beside
-/// whichever shows ([`WorkspaceView::toggle_board`]).
+/// tile's header switches it, and ⌘J.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Face {
     /// The agent's thread, in place of its TUI.
@@ -260,7 +250,7 @@ impl WorkspaceView {
         let hub = self.thread_hub(key, cx);
         let rows: Vec<ThreadRow> = hub.read(cx).threads().rows().rows.values().cloned().collect();
         let others: Vec<ThreadId> =
-            super::reviews::runs_of(&rows, thread).into_iter().filter(|t| *t != thread).collect();
+            runs_of(&rows, thread).into_iter().filter(|t| *t != thread).collect();
         tracing::info!(%thread, closed = others.len(), "keep a run");
         hub.update(cx, |hub, cx| {
             for run in others {
@@ -268,6 +258,31 @@ impl WorkspaceView {
             }
         });
         cx.notify();
+    }
+
+    /// Tell each thread view how many runs its first message has ([`ThreadView::set_runs`]),
+    /// as its worker's table says.
+    pub(super) fn count_runs(&self, cx: &mut Context<Self>) {
+        let mut views: Vec<(WorkerKey, Entity<ThreadView>)> = Vec::new();
+        for (session, view) in self.thread_faces() {
+            if let Some(key) = self.worker_of_session(*session) {
+                views.push((key, view.clone()));
+            }
+        }
+        for (item, view) in self.thread_items() {
+            if let Some(tile) = self.tile_of(*item) {
+                views.push((tile.worker, view.clone()));
+            }
+        }
+        let mut tables: HashMap<WorkerKey, Vec<ThreadRow>> = HashMap::new();
+        for (key, view) in views {
+            let Some(hub) = self.held_hub(key) else { continue };
+            let rows = tables
+                .entry(key)
+                .or_insert_with(|| hub.read(cx).threads().rows().rows.values().cloned().collect());
+            let runs = runs_of(rows, view.read(cx).thread()).len();
+            view.update(cx, |v, cx| v.set_runs(runs, cx));
+        }
     }
 
     /// The faces `session`'s tile can show, in the switch's order: the thread while an agent
@@ -288,15 +303,10 @@ impl WorkspaceView {
         if self.face_shown(session) { Face::Thread } else { Face::Terminal }
     }
 
-    /// Turn `session`'s tile to `face`. A board covering a tile too narrow to stand beside it
-    /// is put away, so the face asked for shows.
+    /// Turn `session`'s tile to `face`.
     pub(crate) fn set_face(&mut self, session: SessionId, face: Face, cx: &mut Context<Self>) {
-        let covered = self.board_covers(session);
-        if covered {
-            self.show_board(session, false, cx);
-        }
         let thread = face == Face::Thread;
-        if covered || self.face_shown(session) != thread {
+        if self.face_shown(session) != thread {
             self.show_face(session, thread, cx);
         }
     }
@@ -316,51 +326,6 @@ impl WorkspaceView {
         self.faces.threads.views.get(&session).filter(|_| self.face_shown(session))
     }
 
-    /// The review tile a thread view asked for since this was last asked, with the worker
-    /// whose agent runs its thread, for the workspace to open as a tile there (`Handed::Review`).
-    pub fn take_review(&mut self) -> Option<(WorkerKey, ThreadId, Entity<ReviewView>)> {
-        let made = &mut self.faces.threads.review_made;
-        let (key, thread) = (!made.is_empty()).then(|| made.remove(0))?;
-        self.faces.threads.reviews.get(&thread).map(|view| (key, thread, view.clone()))
-    }
-
-    /// The review tile of `thread` on `key`, made when there is none yet: a review item the
-    /// registry holds with no view, as after a relaunch, gets its view here.
-    pub fn open_review(
-        &mut self,
-        key: WorkerKey,
-        thread: ThreadId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Entity<ReviewView> {
-        if let Some(view) = self.faces.threads.reviews.get(&thread) {
-            return view.clone();
-        }
-        let hub = self.thread_hub(key, cx);
-        let theme = self.theme.clone();
-        let left = self.drafts.review(&super::drafts::review_key(Some(thread), None)).cloned();
-        let view = cx.new(|cx| {
-            let mut view = ReviewView::new(hub, thread, theme, window, cx);
-            if let Some(left) = left {
-                view.take_back(left, cx);
-            }
-            view
-        });
-        self.faces.threads.reviews.insert(thread, view.clone());
-        view
-    }
-
-    /// Ask for `thread`'s review on `key`, after those asked already, showing `scope` where
-    /// one is named: made in the next sync.
-    pub(super) fn ask_review(
-        &mut self,
-        key: WorkerKey,
-        thread: ThreadId,
-        scope: Option<crate::review::Scope>,
-    ) {
-        self.faces.threads.review_asked.push((key, thread, scope));
-    }
-
     /// The thread view of each agent tile turned to its thread, by its session.
     pub(super) fn thread_faces(&self) -> impl Iterator<Item = (&SessionId, &Entity<ThreadView>)> {
         self.faces.threads.views.iter()
@@ -371,28 +336,9 @@ impl WorkspaceView {
         self.faces.threads.items.iter()
     }
 
-    /// Every review tile open.
-    pub(super) fn open_reviews(&self) -> impl Iterator<Item = &Entity<ReviewView>> {
-        self.faces.threads.reviews.values()
-    }
-
-    /// The review tile of `thread`, while one is open.
-    #[must_use]
-    pub fn review_of(&self, thread: ThreadId) -> Option<&Entity<ReviewView>> {
-        self.faces.threads.reviews.get(&thread)
-    }
-
-    /// The workspace closed `thread`'s review tile: the thread is no longer followed for it.
-    pub fn review_closed(&mut self, thread: ThreadId) {
-        self.faces.threads.reviews.remove(&thread);
-    }
-
-    /// Draw every thread view and review tile in `theme`.
+    /// Draw every thread view in `theme`.
     pub(super) fn set_threads_theme(&self, theme: &slopty_theme::Theme, cx: &mut Context<Self>) {
         for view in self.faces.threads.views.values() {
-            view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
-        }
-        for view in self.faces.threads.reviews.values().chain(self.changes_views()) {
             view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
         }
         for view in self.faces.threads.items.values() {
@@ -446,19 +392,13 @@ impl WorkspaceView {
             agent: starting.agent.clone(),
             cwd: starting.cwd.clone(),
             drive: None,
-            worktree: starting.worktree.then(|| match starting.pull {
-                Some(number) => NewWorktree {
-                    pull: Some(number),
-                    ..NewWorktree::named(super::pull_review::worktree_of(number, item))
-                },
-                None => NewWorktree {
-                    base: starting.base.clone(),
-                    ..NewWorktree::named(super::starting::worktree_name(
-                        prompt.as_deref(),
-                        &starting.agent,
-                        item,
-                    ))
-                },
+            worktree: starting.worktree.then(|| NewWorktree {
+                base: starting.base.clone(),
+                ..NewWorktree::named(super::starting::worktree_name(
+                    prompt.as_deref(),
+                    &starting.agent,
+                    item,
+                ))
             }),
             prompt,
             model: starting.chosen.model.clone(),
@@ -512,7 +452,7 @@ impl WorkspaceView {
         tile.or_else(|| self.thread_named(thread))
             .or_else(|| {
                 let agent = AgentId::named(self.thread_agent(thread)?);
-                Some(super::projects::agent_label(&agent))
+                Some(crate::conversation::thread::view::agent_label(&agent))
             })
             .unwrap_or_else(|| THREAD.to_owned())
     }
@@ -705,21 +645,13 @@ impl WorkspaceView {
                 this.worktree_heard(key, repo, cx);
                 this.scripts_heard(key, repo, cx);
             }
-            HubEvent::Drafted => this.drafts_changed(cx),
             HubEvent::Thread(_) => this.answers_heard(cx),
             _ => {}
         });
-        let kept = self.drafts.commits_on(key);
-        hub.update(cx, |hub, _cx| hub.restore_commit_drafts(kept));
         self.faces.threads.hearing.insert(key, hearing);
         self.faces.threads.hubs.insert(key, hub.clone());
         self.hub_agents(key, cx);
         hub
-    }
-
-    /// Every worker's hub made so far.
-    pub(super) fn thread_hubs(&self) -> Vec<(WorkerKey, Entity<ThreadHub>)> {
-        self.faces.threads.hubs.iter().map(|(k, h)| (*k, h.clone())).collect()
     }
 
     /// What `key` found in its threads for the words its hub last asked, or the palette did.
@@ -919,7 +851,7 @@ impl WorkspaceView {
                     let text = format!(
                         "{} can\u{2019}t start {}",
                         self.worker_name(key),
-                        super::projects::agent_label(&agent)
+                        crate::conversation::thread::view::agent_label(&agent)
                     );
                     self.start_failed(key, item, text, cx);
                 }
@@ -1238,7 +1170,6 @@ impl WorkspaceView {
             self.update_awake(cx);
             self.agents_moved(cx);
             self.update_run_targets(cx);
-            self.ended_for_removal(key, cx);
         }
         // A note's verdict that waited for its request answers it as the table brings it.
         if self.approvals.taps_waiting() {
@@ -1307,14 +1238,6 @@ impl WorkspaceView {
             self.faces.threads.asks.insert(session, asks);
             self.faces.threads.views.insert(session, view);
         }
-        for (key, thread, scope) in std::mem::take(&mut self.faces.threads.review_asked) {
-            let view = self.open_review(key, thread, window, cx);
-            if let Some(scope) = scope {
-                view.update(cx, |v, cx| v.set_scope(scope, cx));
-            }
-            self.faces.threads.review_made.push((key, thread));
-            cx.notify();
-        }
         // A view that goes while it holds the keyboard hands it back to its tile, which then
         // shows its TUI or its thread's next view: a thread that moved to another terminal or
         // ended must not leave the keyboard with nothing.
@@ -1340,26 +1263,6 @@ impl WorkspaceView {
         });
         let views = &threads.views;
         threads.asks.retain(|s, _| views.contains_key(s));
-        // A project's orchestrator and its tasks' agents have their brief from the project, so
-        // their threads never ask what to do; the board moving brings this back here.
-        let mirror = self.projects();
-        let briefed: Vec<(Entity<ThreadView>, bool, bool)> = self
-            .faces
-            .threads
-            .views
-            .iter()
-            .map(|(s, view)| {
-                let orchestrates = mirror.of_orchestrator(*s).is_some();
-                let briefed = orchestrates || mirror.of_agent(*s).is_some();
-                (view.clone(), briefed, orchestrates)
-            })
-            .collect();
-        for (view, briefed, orchestrates) in briefed {
-            view.update(cx, |v, cx| {
-                v.set_briefed(briefed, cx);
-                v.set_orchestrates(orchestrates, cx);
-            });
-        }
     }
 
     /// Make the thread view of each thread tile, and let go of those whose tile is gone. A view
@@ -1441,11 +1344,6 @@ impl WorkspaceView {
                 }
                 None => self.show_notice("The agent's terminal has ended".to_owned(), cx),
             },
-            ThreadViewEvent::Review { thread } => {
-                self.ask_review(key, thread, None);
-                cx.notify();
-            }
-            ThreadViewEvent::ReviewRuns { thread } => self.review_runs(key, thread, cx),
             ThreadViewEvent::KeepRun { thread } => self.keep_run(key, thread, cx),
             ThreadViewEvent::Attach { id, what } => {
                 let tile = self.tile_of(item);
@@ -1468,7 +1366,6 @@ impl WorkspaceView {
                 }
             }
             ThreadViewEvent::RemoveWorktree(root) => self.remove_worktree_at(key, &root, cx),
-            ThreadViewEvent::EndAndRemove(root) => self.end_and_remove(key, &root, cx),
             ThreadViewEvent::FindFiles { root, query } => {
                 self.send(key, ClientMsg::FindFiles { root, query });
             }
@@ -1528,17 +1425,6 @@ impl WorkspaceView {
         match event {
             ThreadViewEvent::Drafted => self.drafts_changed(cx),
             ThreadViewEvent::ShowTerminal => self.show_face(session, false, cx),
-            ThreadViewEvent::Review { thread } => {
-                if let Some(key) = self.worker_of_session(session) {
-                    self.ask_review(key, thread, None);
-                    cx.notify();
-                }
-            }
-            ThreadViewEvent::ReviewRuns { thread } => {
-                if let Some(key) = self.worker_of_session(session) {
-                    self.review_runs(key, thread, cx);
-                }
-            }
             ThreadViewEvent::KeepRun { thread } => {
                 if let Some(key) = self.worker_of_session(session) {
                     self.keep_run(key, thread, cx);
@@ -1569,11 +1455,6 @@ impl WorkspaceView {
             ThreadViewEvent::RemoveWorktree(root) => {
                 if let Some(key) = self.worker_of_session(session) {
                     self.remove_worktree_at(key, &root, cx);
-                }
-            }
-            ThreadViewEvent::EndAndRemove(root) => {
-                if let Some(key) = self.worker_of_session(session) {
-                    self.end_and_remove(key, &root, cx);
                 }
             }
             ThreadViewEvent::FindFiles { root, query } => {
@@ -1702,7 +1583,6 @@ impl WorkspaceView {
         self.sync_thread_faces(&wanted, window, cx);
         self.sync_thread_items(window, cx);
         self.count_runs(cx);
-        self.sync_changes(window, cx);
         // Picks of sessions that are gone go with them, and views handed to a tile that went.
         let terminals = &self.terminals;
         self.faces.chosen.retain(|s, _| terminals.contains_key(s));
@@ -1789,7 +1669,7 @@ impl WorkspaceView {
             .iter()
             .map(|r| {
                 let stand = ThreadStand {
-                    worker: super::projects::worker_key(r.at.worker),
+                    worker: super::keys::worker_key(r.at.worker),
                     rung: r.rung,
                     // The server's ladder ranks threads; whether an agent exited is its
                     // worker's word.
@@ -2050,3 +1930,37 @@ fn limit_resets(row: &ThreadRow) -> Option<slopty_core::WallMs> {
 
 /// A rate window used up, in hundredths of a percent.
 const FULL_BP: u32 = 10_000;
+
+/// Where a thread's worktree came from, as its runs share it: the folder its clone keeps
+/// worktrees in and the name's words, without the four hex digits that tell runs apart
+/// (`.claude/worktrees/<words>-<hex>`, [`super::starting::worktree_name`]). `None` for a thread
+/// in no such worktree, or one whose name is only its agent's, which no message named.
+fn run_key(row: &ThreadRow) -> Option<(&str, &str)> {
+    const DIR: &str = "/.claude/worktrees/";
+    let path = row.repo.as_deref().or(row.cwd.as_deref())?;
+    let at = path.find(DIR)?;
+    let (clone, rest) = (path.get(..at)?, path.get(at.saturating_add(DIR.len())..)?);
+    let name = rest.split('/').next()?;
+    let (words, hex) = name.rsplit_once('-')?;
+    let tail = hex.len() == 4 && hex.chars().all(|c| c.is_ascii_hexdigit());
+    let agent: String =
+        row.agent.0.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect();
+    (tail && !words.is_empty() && words != agent).then_some((clone, words))
+}
+
+/// The runs `thread`'s first message has among `rows`, itself among them: the threads in
+/// worktrees of the same clone named by the same words ([`run_key`]), subagents aside. Only
+/// `thread` when it has none.
+fn runs_of(rows: &[ThreadRow], thread: ThreadId) -> Vec<ThreadId> {
+    let Some(mine) = rows.iter().find(|r| r.id == thread) else { return vec![thread] };
+    let Some(key) = run_key(mine) else { return vec![thread] };
+    let mut runs: Vec<ThreadId> = rows
+        .iter()
+        .filter(|r| r.parent.is_none() && run_key(r) == Some(key))
+        .map(|r| r.id)
+        .collect();
+    if !runs.contains(&thread) {
+        runs.push(thread);
+    }
+    runs
+}

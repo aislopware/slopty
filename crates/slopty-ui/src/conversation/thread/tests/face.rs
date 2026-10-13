@@ -1112,8 +1112,8 @@ fn the_meter_says_its_share_from_half_full(cx: &mut TestAppContext) {
 }
 
 /// The foot says where the agent works, Delta's foot row: the checkout by its folder and its
-/// branch, which opens the commit sheet, then what the thread changed in figures, the added in
-/// the success tone and the removed in the error tone.
+/// branch, then what the thread changed in figures, the added in the success tone and the
+/// removed in the error tone.
 #[gpui::test]
 fn the_foot_names_the_checkout(cx: &mut TestAppContext) {
     let (hub, _sent) = hub(cx, None);
@@ -1132,16 +1132,13 @@ fn the_foot_names_the_checkout(cx: &mut TestAppContext) {
     cx.run_until_parked();
     let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
     assert!(
-        tree.iter().any(|n| n.is("Button", Some("Commit on slopty / main"))),
+        tree.iter().any(|n| n.is("Label", Some("Works in slopty / main"))),
         "the checkout and its branch: {tree:#?}"
     );
     assert!(tree.iter().any(|n| n.is("Label", Some("12 added, 3 removed"))), "the diff stat");
     let (checkout, send) = (cx.debug_bounds("thread-checkout"), cx.debug_bounds("thread-send"));
     let (Some(checkout), Some(send)) = (checkout, send) else { panic!("the foot's two ends") };
     assert!(checkout.right() < send.left(), "the checkout leads, the send ends the row");
-    click(cx, "thread-checkout");
-    cx.run_until_parked();
-    assert!(cx.debug_bounds("commit-sheet").is_some(), "a press opens the commit sheet");
 }
 
 /// The context's ring stays away while a thread has used under a tenth of its window: a thread
@@ -1300,40 +1297,4 @@ fn the_composer_runs_the_panes_width_at_its_foot(cx: &mut TestAppContext) {
         });
         assert!(!lined, "{width}: no line over the field or the foot");
     }
-}
-
-/// A plan a project's orchestrator puts to the person starts the project's work when allowed,
-/// so its allow says so: "Confirm & start". Any other agent's plan, and an orchestrator's
-/// approval of a command, keep the agent's own words.
-#[gpui::test]
-fn an_orchestrator_s_plan_is_confirmed_and_started(cx: &mut TestAppContext) {
-    let (hub, _sent) = hub(cx, None);
-    let mut state = fixtures::empty();
-    let thread = state.meta.id;
-    state.status.phase = Phase::NeedsYou;
-    state.turns = vec![live_turn()];
-    let mut plan = approval("p");
-    plan.kind = Request::PLAN.to_owned();
-    plan.text = Some(Clipped::whole("# Split the parser\n\n1. Lex\n2. Parse"));
-    state.requests = vec![plan, approval("c")];
-    hub.update(cx, ThreadHub::connected);
-    let (view, cx) = view(cx, &hub, thread);
-    cx.update(|window, _cx| window.set_a11y_active(true));
-    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
-    cx.run_until_parked();
-    let labelled = |cx: &mut VisualTestContext, label: &str| {
-        cx.update(|window, _cx| window.refresh());
-        cx.run_until_parked();
-        let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
-        tree.iter().any(|n| n.label.as_deref() == Some(label))
-    };
-    assert!(cx.debug_bounds("answer-p-allow").is_some(), "the plan's answers in the tray");
-    assert!(!labelled(cx, "Confirm & start"), "another agent's plan keeps its words");
-
-    view.update(cx, |v, cx| v.set_orchestrates(true, cx));
-    assert!(labelled(cx, "Confirm & start"), "the orchestrator's plan starts the work");
-    let next = cx.debug_bounds("asked-next").expect("two requests").center();
-    cx.simulate_click(next, Modifiers::none());
-    assert!(cx.debug_bounds("answer-c-allow").is_some(), "the command's answers");
-    assert!(!labelled(cx, "Confirm & start"), "a command is allowed in its own words");
 }

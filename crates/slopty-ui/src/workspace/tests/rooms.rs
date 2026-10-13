@@ -196,18 +196,6 @@ fn nothing_escapes_its_tile_at_any_room(app: &mut TestAppContext) {
     contained(&view, cx, &studio, agent, "an agent's thread");
 
     let (view, cx) = still_workspace(app);
-    let (studio, orchestrator, session) = projects::orchestrator(&view, cx);
-    view.update_in(cx, |v, _w, cx| {
-        v.focus_tile(orchestrator, cx);
-        v.show_face(session, false, cx);
-    });
-    cx.run_until_parked();
-    cx.simulate_keystrokes("cmd-shift-j");
-    settle(cx);
-    assert!(view.read_with(cx, |v, _| v.board_shown(session)), "on its board");
-    contained(&view, cx, &studio, orchestrator, "a board");
-
-    let (view, cx) = still_workspace(app);
     let studio = connect(&view, cx, 1, "studio");
     let path = "/w/a-file-whose-name-runs-on-past-any-narrow-pane.md";
     let file = arrives(&view, cx, &studio, ItemKind::File { path: path.to_owned() }, 1);
@@ -248,11 +236,6 @@ fn nothing_escapes_its_tile_at_any_room(app: &mut TestAppContext) {
     view.update_in(cx, |v, _w, cx| v.folder_listed(key, "/w/proj", &listing, cx));
     settle(cx);
     contained(&view, cx, &studio, folder, "a folder");
-
-    let (view, cx) = still_workspace(app);
-    let studio = connect(&view, cx, 1, "studio");
-    let review = changes_in_review(&view, cx, studio);
-    contained(&view, cx, &review.0, review.1, "a folder's changes in review");
 
     let (view, cx) = still_workspace(app);
     let studio = connect(&view, cx, 1, "studio");
@@ -300,62 +283,4 @@ fn nothing_escapes_its_tile_at_any_room(app: &mut TestAppContext) {
     settle(cx);
     let last = *tabs.last().expect("three tabs");
     contained(&view, cx, &studio, last, "a pane of three tabs");
-}
-
-/// A folder's changes opened as a tile of their own, the worker's answer in: a file whose path
-/// runs on past a narrow pane, with the scope bar and the file's head. The worker, then the
-/// tile.
-fn changes_in_review(
-    view: &Entity<WorkspaceView>,
-    cx: &mut VisualTestContext,
-    mut studio: Fake,
-) -> (Fake, TileRef) {
-    use slopty_proto::git::{GitDone, GitOp, GitOutcome};
-    use slopty_proto::thread::Patch;
-    use slopty_proto::thread::wire::{Against, FileDiff, Review, ReviewScope};
-
-    use super::super::actions::ReviewChanges;
-
-    let key = studio.key;
-    view.update_in(cx, |v, _w, cx| v.threads_linked(key, cx));
-    let folder = arrives(view, cx, &studio, ItemKind::Folder { path: "/w/atlas".into() }, 1);
-    view.update_in(cx, |v, _w, cx| v.focus_tile(folder, cx));
-    cx.run_until_parked();
-    studio.drain();
-    cx.dispatch_action(ReviewChanges);
-    settle(cx);
-    let sent = studio.drain();
-    let tile = sent.iter().find_map(|m| match m {
-        ClientMsg::Items(ItemOp::Add(item)) => Some(item.id),
-        _ => None,
-    });
-    let request = sent.iter().find_map(|m| match m {
-        ClientMsg::Git { request, op: GitOp::Changes { .. }, .. } => Some(*request),
-        _ => None,
-    });
-    let (Some(item), Some(request)) = (tile, request) else { panic!("a review asked: {sent:?}") };
-    let file = FileDiff {
-        path: "crates/a-crate-whose-name-runs-on/src/a-file-whose-name-runs-on-past-any-pane.rs"
-            .to_owned(),
-        from: Some("old".to_owned()),
-        to: Some("new".to_owned()),
-        kind: slopty_proto::thread::wire::FileKind::Text,
-        old_path: None,
-        modes: None,
-        patch: Patch { hunks: Vec::new(), added: 12, removed: 3, clipped_lines: 0, full: None },
-    };
-    let review = Review {
-        scope: ReviewScope::WorkingTree(Against::Head),
-        from: None,
-        to: None,
-        files: vec![file],
-        absent: None,
-    };
-    let done = GitOutcome::Done(GitDone::Changes(Box::new(review)));
-    view.update_in(cx, |v, _w, cx| v.git_done(key, request, done, cx));
-    settle(cx);
-    assert!(cx.debug_bounds("review-head-0").is_some(), "the file shows");
-    let tile = TileRef { worker: key, item };
-    assert!(view.read_with(cx, |v, _| v.tile_bounds(tile)).is_some(), "a tile of its own");
-    (studio, tile)
 }

@@ -437,7 +437,7 @@ fn a_window_refused_for_screen_recording_offers_the_restart(cx: &mut TestAppCont
     cx.run_until_parked();
     let (verb, reply) = queue.try_next().expect("the server is asked");
     let _gone = reply.send(Outcome::Done);
-    let worker = crate::workspace::projects::worker_id(key).expect("a server id");
+    let worker = keys::worker_id(key).expect("a server id");
     assert_eq!(verb, Verb::RestartWorker { worker });
 }
 

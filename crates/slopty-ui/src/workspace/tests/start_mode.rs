@@ -7,7 +7,7 @@ use slopty_proto::thread::wire::{Start, ThreadRequest};
 use slopty_proto::thread::{AgentId, Mode, Offers};
 
 use super::super::actions::NewAgent;
-use super::super::projects::worker_key;
+use super::super::keys::worker_key;
 use super::*;
 
 fn settle(cx: &mut VisualTestContext) {

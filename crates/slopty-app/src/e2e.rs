@@ -28,11 +28,10 @@ use gpui::{
 use slopty_core::{ItemId, SessionId, WorkerId};
 use slopty_e2e::{
     BrowserItemInfo, Button, Command, Dump, FaceInfo, FileItemInfo, FrameInfo, ItemInfo,
-    LatencyInfo, ProjectInfo, Reply, ScreenInfo, TerminalInfo, WindowInfo, WorkerInfo,
+    LatencyInfo, Reply, ScreenInfo, TerminalInfo, WindowInfo, WorkerInfo,
 };
 use slopty_kit::icons::Status;
 use slopty_proto::items::ItemKind;
-use slopty_ui::project::ProjectView;
 use slopty_ui::screen::ScreenView;
 use slopty_ui::workspace::{KeyTarget, WorkerStatus};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
@@ -558,7 +557,7 @@ async fn press_note(action: String, info: std::collections::BTreeMap<String, Str
         return error(&e);
     }
     match done_rx.await {
-        Ok(crate::verdict::Answered::Sent | crate::verdict::Answered::Opened { .. }) => Reply::Ok,
+        Ok(crate::verdict::Answered::Sent) => Reply::Ok,
         Ok(other) => Reply::Error { message: format!("{other:?}") },
         Err(e) => error(&e),
     }
@@ -1454,32 +1453,6 @@ impl Workspace {
                     }),
                 });
             }
-        }
-        for board in view.projects().boards() {
-            let orchestrator = board.project.orchestrator.map(|t| t.session);
-            let shown = orchestrator.is_some_and(|s| view.board_shown(s));
-            let board_view = orchestrator.and_then(|s| view.board_view(s)).map(|b| b.read(cx));
-            if board_view.is_some_and(|b| b.focus_handle(cx).is_focused(window)) {
-                focused = format!("project:{}", board.project.id);
-            }
-            dump.projects.push(ProjectInfo {
-                id: board.project.id.to_string(),
-                title: board.project.title.clone(),
-                orchestrator: orchestrator.map(|s| s.to_string()),
-                lanes: board
-                    .lanes()
-                    .into_iter()
-                    .map(|(lane, tasks)| {
-                        (lane.selector().to_owned(), tasks.into_iter().map(|t| t.0).collect())
-                    })
-                    .collect(),
-                tasks: board.tasks.values().map(|c| (c.id.0, format!("{:?}", c.state))).collect(),
-                timeline: board.timeline.len(),
-                shown,
-                picked: board_view.and_then(ProjectView::picked).map(|node| {
-                    node.map_or_else(|| "orchestrator".to_owned(), |t| t.0.to_string())
-                }),
-            });
         }
         dump.focused = focused;
         dump

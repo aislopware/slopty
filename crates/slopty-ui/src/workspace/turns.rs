@@ -41,13 +41,12 @@ pub(super) fn wall_ms() -> u64 {
 
 impl WorkspaceView {
     /// What the bell counts, the navigator's attention sections each once: the agents and
-    /// threads that need the person, those that failed, the project tasks ready to merge, and
-    /// the turns left to review. A shell's finish is its tile's dot alone.
+    /// threads that need the person, those that failed, and the turns left to review. A shell's
+    /// finish is its tile's dot alone.
     #[must_use]
     pub fn bell_count(&self) -> usize {
         self.needs_you_count()
             .saturating_add(self.failed().len())
-            .saturating_add(self.ready_to_merge().len())
             .saturating_add(self.to_review().len())
     }
 

@@ -487,7 +487,7 @@ impl WorkspaceView {
                 let who = format!(
                     "{}{META_SEPARATOR}{}",
                     self.worker_name(worker),
-                    super::projects::agent_label(&agent_id)
+                    crate::conversation::thread::view::agent_label(&agent_id)
                 );
                 let (words, warn) = plan_words(reading, now);
                 let age = crate::palette::age_label(reading.age(now));

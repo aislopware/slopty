@@ -265,8 +265,7 @@ impl WorkspaceView {
     /// worker says their changes wait unkept (their row's [`Rung::ToReview`], the same on every
     /// device, until the person keeps them), then the turns that ended while nobody looked. A
     /// terminal's agent counts while its tile is here; a thread with no terminal (Codex beside
-    /// no TUI, pi, an ACP agent, a message's runs) counts with or without one. A project task's
-    /// agent never does: its work reaches the person as the task ready to merge.
+    /// no TUI, pi, an ACP agent, a message's runs) counts with or without one.
     pub(super) fn to_review(&self) -> Vec<Step> {
         let waiting = self
             .agent_sessions()
@@ -277,7 +276,7 @@ impl WorkspaceView {
         let mut steps: Vec<Step> = Vec::new();
         for step in self.steps_in_reading_order(waiting).into_iter().chain(unread) {
             let about = step_about(step);
-            if !self.task_agent(about) && !steps.iter().any(|s| step_about(*s) == about) {
+            if !steps.iter().any(|s| step_about(*s) == about) {
                 steps.push(step);
             }
         }
@@ -336,11 +335,9 @@ impl WorkspaceView {
         sessions.saturating_add(threads)
     }
 
-    /// What some agent is doing changed: tell the app the count (the Dock badge), hand the
-    /// boards on show their agents' word in the next frame, and take down the corner's word
-    /// about any that was answered.
+    /// What some agent is doing changed: tell the app the count (the Dock badge), and take
+    /// down the corner's word about any that was answered.
     pub(super) fn agents_moved(&mut self, cx: &mut Context<Self>) {
-        self.projects.dirty = true;
         if self.drop_answered_attention() {
             cx.notify();
         }

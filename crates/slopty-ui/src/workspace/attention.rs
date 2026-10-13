@@ -35,11 +35,6 @@
 //! them through a Focus and past the notification summary; a finished turn, a failure, a
 //! shell's command and a program's own note wait there like any other app's.
 //!
-//! A project's held-up work comes only as the server's notice ([`Heard::stack`]): each is a
-//! note of its own, stacked with the project's others, leading to its orchestrator. With the
-//! app in front it is not said at all: the navigator's attention rows and the bell's count say
-//! it, and the window never carries a sentence about it.
-//!
 //! With notifications turned off in the system's settings, a note is dropped where nobody sees
 //! it. So the first time one goes unsaid in a run, coming back to the app says notifications
 //! are off ([`Attention::unsaid_while_off`], [`NOTES_OFF`]), once.
@@ -57,7 +52,6 @@ use slopty_core::{ItemId, SessionId};
 use slopty_platform::notify::info::{ASK, ITEM, SESSION, THREAD, WORKER};
 use slopty_platform::notify::{self, APPROVAL, Alerts, Note, Notifier, REPLYING, Tap};
 use slopty_proto::items::ItemKind;
-use slopty_proto::project::ProjectId;
 use slopty_proto::thread::attention::{Notice, NoticeKind, Subject};
 use slopty_proto::thread::wire::{NoteChoice, RequestCard};
 use slopty_proto::thread::{AskId, ThreadId};
@@ -77,14 +71,11 @@ pub(super) const NO_LONGER_WAITING: &str = "That prompt is no longer waiting";
 /// sound with each flip.
 pub const PROGRAM_QUIET: Duration = Duration::from_secs(10);
 
-/// Whether `tap` is a note's "Allow", "Deny", pick, reply, "Merge" or "Open pull request",
-/// which answers where the note is and may have woken the app in the background to do it.
+/// Whether `tap` is a note's "Allow", "Deny", pick or reply, which answers where the note is
+/// and may have woken the app in the background to do it.
 #[must_use]
 pub fn answers(tap: &Tap) -> bool {
-    tap.action.as_deref() == Some(notify::REPLY)
-        || notify::Pressed::of(tap).is_some()
-        || notify::merge_of(tap).is_some()
-        || notify::land_of(tap).is_some()
+    tap.action.as_deref() == Some(notify::REPLY) || notify::Pressed::of(tap).is_some()
 }
 
 /// What a note's buttons answer of `card`, an open request: a yes or no's id, with no picks,
@@ -261,17 +252,6 @@ pub struct Heard {
     pub title: String,
     /// What it wants or said, named by the subagent it came from.
     pub body: String,
-    /// A project's notice: a note of its own, stacked with the project's others.
-    pub stack: Option<Stack>,
-}
-
-/// Where a project's note sits: its own identifier, and the project its notes stack under.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct Stack {
-    /// The note's identifier, one per timeline entry.
-    pub id: String,
-    /// The project.
-    pub project: String,
 }
 
 /// Why a note is up.
@@ -324,8 +304,6 @@ pub struct Attention {
     projects: HashMap<About, String>,
     /// The projects muted at the last look, by their group's key.
     muted: HashSet<String>,
-    /// The projects' notes up, by identifier.
-    project_notes: HashSet<String>,
     /// A note went out while notifications were off, since the app last came back.
     unsaid: bool,
     /// The app has said this run that notifications are off.
@@ -364,7 +342,6 @@ impl Attention {
             badge: None,
             projects: HashMap::new(),
             muted: HashSet::new(),
-            project_notes: HashSet::new(),
             unsaid: false,
             said_off: false,
             listening: true,
@@ -408,9 +385,6 @@ impl Attention {
                 .partition(|(about, why)| *why == Why::Asks && asking.contains(about));
             for (about, _) in stale {
                 self.notifier.withdraw(&about.note_id());
-            }
-            for id in self.project_notes.drain() {
-                self.notifier.withdraw(&id);
             }
             self.answers.retain(|about, _| kept.iter().any(|(k, _)| k == about));
             self.posted.extend(kept);
@@ -470,34 +444,6 @@ impl Attention {
         if self.active || !self.listening {
             return;
         }
-        if let Some(stack) = &heard.stack {
-            let key = slopty_client::groups::GroupKey::new(
-                slopty_client::groups::fact::PROJECT,
-                &stack.project,
-            );
-            if self.muted.contains(key.as_str()) {
-                return;
-            }
-            tracing::debug!(id = stack.id, "project note");
-            self.project_notes.insert(stack.id.clone());
-            // A goal met offers to land it, as its board does.
-            let lands = heard.kind == NoticeKind::GoalDone;
-            let mut info = heard.route.info();
-            if lands {
-                info.insert(notify::info::PROJECT.to_owned(), stack.project.clone());
-            }
-            self.send(Note {
-                id: stack.id.clone(),
-                title: heard.title.clone(),
-                body: heard.body.clone(),
-                info,
-                thread: Some(stack.project.clone()),
-                category: lands.then_some(notify::LANDING),
-                urgent: heard.kind == NoticeKind::NeedsYou,
-                ..Note::default()
-            });
-            return;
-        }
         let session = heard.route.about;
         let note = Note {
             id: session.note_id(),
@@ -507,15 +453,8 @@ impl Attention {
             category: Some(REPLYING),
             ..Note::default()
         };
-        let why = match heard.kind {
-            NoticeKind::NeedsYou => Why::Asks,
-            // Work ready to merge and a goal met are the person's to look at, not to answer.
-            NoticeKind::Failed
-            | NoticeKind::Finished
-            | NoticeKind::Project
-            | NoticeKind::ReadyToMerge
-            | NoticeKind::GoalDone => Why::Finished,
-        };
+        // Only what waits on the person is theirs to answer; the rest is to look at.
+        let why = if heard.kind == NoticeKind::NeedsYou { Why::Asks } else { Why::Finished };
         self.post(session, why, note);
         if why == Why::Asks {
             self.answers.insert(session, None);
@@ -546,9 +485,6 @@ impl Attention {
     fn withdraw_all(&mut self) {
         for (about, _) in self.posted.drain() {
             self.notifier.withdraw(&about.note_id());
-        }
-        for id in self.project_notes.drain() {
-            self.notifier.withdraw(&id);
         }
         self.answers.clear();
     }
@@ -782,13 +718,12 @@ impl WorkspaceView {
             };
             out.insert(about, group.key.as_str().to_owned());
         }
-        let claims = self.claims();
         for (thread, stand) in self.thread_stands() {
             if out.contains_key(&About::Thread(thread)) {
                 continue;
             }
             let facts = self.thread_listing_facts(stand.worker, thread);
-            let key = super::grouping::listing_group(&projects, &claims, &facts)
+            let key = super::grouping::listing_group(&projects, &facts)
                 .map_or_else(|| slopty_client::groups::GroupKey::machine(stand.worker), |g| g.key);
             out.insert(About::Thread(thread), key.as_str().to_owned());
         }
@@ -804,15 +739,9 @@ impl WorkspaceView {
         {
             return None;
         }
-        let at = match &notice.about {
-            Subject::Thread(at) => at,
-            Subject::Project { project, entry } => {
-                return self.heard_project(notice, project, *entry);
-            }
-            // A program's records are posted here as they come; the server only pushes them.
-            Subject::Terminal(_) => return None,
-        };
-        let worker = super::projects::worker_key(at.worker);
+        // A program's records are posted here as they come; the server only pushes them.
+        let Subject::Thread(at) = &notice.about else { return None };
+        let worker = super::keys::worker_key(at.worker);
         let (about, item) = if let Some(tile) = notice.tile {
             (About::Session(tile.session), self.tile_of_session(tile.session).map(|t| t.item))
         } else {
@@ -823,32 +752,7 @@ impl WorkspaceView {
             .filter(|t| !t.is_empty())
             .map_or_else(|| self.route_title(route), str::to_owned);
         let body = notify::pushed::notice_body(notice);
-        Some(Heard { route, kind: notice.kind, title, body, stack: None })
-    }
-
-    /// A project's notice, at `entry` of `project`'s timeline: a note that leads to its
-    /// orchestrator's terminal, stacked with the project's others. `None` for a project with no
-    /// orchestrator to lead to.
-    fn heard_project(&self, notice: &Notice, project: &ProjectId, entry: u64) -> Option<Heard> {
-        let tile = notice.tile?;
-        let route = self.attention_route(tile.session).map_or_else(
-            || Route {
-                worker: super::projects::worker_key(tile.worker),
-                item: None,
-                about: About::Session(tile.session),
-            },
-            |(route, _)| route,
-        );
-        Some(Heard {
-            route,
-            kind: notice.kind,
-            title: notice.title.clone(),
-            body: notice.text.clone(),
-            stack: Some(Stack {
-                id: format!("project-{project}-{entry}"),
-                project: project.as_str().to_owned(),
-            }),
-        })
+        Some(Heard { route, kind: notice.kind, title, body })
     }
 
     /// Where a note about `session` leads, and the name its title says; `None` for a session
@@ -876,20 +780,11 @@ impl WorkspaceView {
     /// The human tapped a note: focus the tile it names and give it the keyboard. A note without
     /// a route (one another part of the app posted, tagged by its session) reveals that session.
     /// An agent with no tile here gets one. An approval note's "Allow" or "Deny" answers its
-    /// prompt, a reply goes to its agent, a ready note's "Merge" merges the task it names and a
-    /// goal-met note's "Open pull request" lands its goal, each leaving the workspace where it
-    /// is; "Show" is a tap.
+    /// prompt and a reply goes to its agent, each leaving the workspace where it is; "Show" is a
+    /// tap.
     pub fn open_notification(&mut self, tap: &Tap, cx: &mut Context<Self>) {
         let route = Route::of_tap(tap);
         tracing::debug!(id = tap.id, ?route, action = ?tap.action, "note opened");
-        if let Some((project, task)) = notify::merge_of(tap) {
-            self.merge_tapped(project, task, cx);
-            return;
-        }
-        if let Some(project) = notify::land_of(tap) {
-            self.land_tapped(project, cx);
-            return;
-        }
         if tap.action.as_deref() == Some(notify::REPLY) {
             match (route, tap.text.as_deref().map(str::trim).filter(|t| !t.is_empty())) {
                 (Some(route), Some(text)) => self.reply_tapped(route, text.to_owned(), cx),

@@ -59,9 +59,6 @@ pub(super) const LEADING_INSET: f32 = 12.0;
 /// What the navigator's filter is called while it waits hidden.
 pub(super) const SEARCH: &str = "Search";
 
-/// What the navigator header's goal button is called: it opens "New goal…", the usual start.
-pub(super) const NEW_GOAL: &str = "New goal";
-
 /// What the navigator header's pencil is called: it starts "New agent…".
 pub(super) const NEW_AGENT: &str = "New agent";
 
@@ -200,16 +197,12 @@ impl WorkspaceView {
         if let Some(item) = self.item(tile) {
             return self.tile_title(item);
         }
-        if let Some(project) = self.board_tile(tile.item) {
-            return self
-                .projects
-                .mirror
-                .get(project)
-                .map_or_else(|| project.to_string(), |b| b.project.title.clone());
-        }
         match self.starting.get(tile.item) {
             Some(starting) => {
-                format!("New {} thread", super::projects::agent_label(&starting.agent))
+                format!(
+                    "New {} thread",
+                    crate::conversation::thread::view::agent_label(&starting.agent)
+                )
             }
             None => self.worker_name(tile.worker),
         }
@@ -445,7 +438,6 @@ impl WorkspaceView {
                     .child(more),
             )
             .children(notices)
-            .children(self.render_approval_cards(window, cx))
             .into_any_element()
     }
 

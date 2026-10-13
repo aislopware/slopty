@@ -26,7 +26,6 @@
 //! * `readouts` — what the app says of itself in the cluster, while it has something.
 //! * `approvals` — "Allow" and "Deny" for an agent that waits, from its row or its note.
 //! * `turns` — agents' turns that ended unread, which the bell counts.
-//! * `projects` — the server's projects, each board shown in its orchestrator's tile.
 //!
 //! The navigator, the lead, the cluster and the window's own top line are views of their own
 //! (`ChromeView`),
@@ -37,12 +36,10 @@ pub mod actions;
 mod agent_screens;
 mod agent_start;
 mod agents;
-mod approval_cards;
 mod approvals;
 mod area;
 pub mod attention;
 mod authors;
-mod board_tiles;
 mod breadcrumb;
 mod browsers;
 mod clone_here;
@@ -60,10 +57,13 @@ mod grouping;
 mod handoffs;
 mod inline_shells;
 mod kept_items;
+mod keys;
+mod lineage;
 mod machine_remove;
 mod machines;
 mod navigator;
 mod overlays;
+mod page_goal;
 mod panes;
 mod popout;
 mod presence;
@@ -71,16 +71,13 @@ mod preview;
 mod program_status;
 mod project_lines;
 mod project_search;
-mod projects;
-mod pull_review;
 mod readouts;
 pub mod remote;
 mod restore;
-mod reviews;
 mod rollup;
 mod run_scripts;
-mod seating;
 mod secure;
+mod server_calls;
 mod settings_page;
 mod starting;
 mod tab_look;
@@ -100,14 +97,13 @@ pub use actions::*;
 pub use agents::{banner_title, program_banner};
 #[cfg(test)]
 pub(crate) use area::{ADD_WORKER, EMPTY_QUESTION, NO_WORKERS, NO_WORKERS_NEXT};
-pub use drafts::ReviewDraft;
 use gpui::{
     App, Bounds, Context, Entity, EventEmitter, FocusHandle, Focusable, Pixels, SharedString,
     Subscription, Task, WeakEntity, Window,
 };
+pub use keys::worker_key;
 pub use machines::HostActions;
 pub use navigator::NAVIGATOR_CTX;
-pub use projects::worker_key;
 pub(crate) use rollup::META_SEPARATOR;
 use slopty_client::ItemDoc;
 use slopty_client::layout::{Navigator, Saved, TileRef, Tiling, TilingConfig, WorkerKey};
@@ -988,18 +984,14 @@ pub struct WorkspaceView {
     faces: faces::Faces,
     /// The shells behind threads' inline terminals.
     inline: inline_shells::InlineShells,
-    /// The server's projects and their boards.
-    projects: projects::ProjectsState,
+    /// The way to the server, while the app is linked to one.
+    server: Option<slopty_client::server::ServerCaller>,
     /// The number the next `OpenSession` goes under, for its answer to name.
     next_open: std::cell::Cell<slopty_proto::RequestId>,
     /// A file tile whose editor takes the keyboard on the next frame.
     pending_focus_file: Option<ItemId>,
     /// A folder tile that takes the keyboard on the next frame.
     pending_focus_folder: Option<ItemId>,
-    /// A review tile, by its thread, that takes the keyboard on the next frame.
-    pending_focus_review: Option<slopty_proto::thread::ThreadId>,
-    /// The review tiles: which are open, which this client asked for.
-    reviews: reviews::Reviews,
     /// The worktrees asked to go and not yet answered.
     worktrees: worktrees::Asked,
     /// Text on its way to a composer not made yet.
@@ -1055,7 +1047,7 @@ pub struct WorkspaceView {
     /// What the person wrote and has not sent, kept on this device.
     drafts: drafts::Drafts,
     /// The empty workspace's composer, made the first time the page shows with a machine to
-    /// begin on: the goal written there starts a project ([`Self::goal_from_page`]).
+    /// begin on: the words written there start a thread ([`Self::send_page_goal`]).
     empty_goal: Option<(Entity<gpui_kit::component::input::TextareaState>, Subscription)>,
     /// Uploads in flight.
     uploads: HashMap<slopty_core::XferId, remote::Upload>,
@@ -1249,23 +1241,10 @@ impl WorkspaceView {
             zoom_hold: None,
             faces: faces::Faces::default(),
             inline: inline_shells::InlineShells::default(),
-            projects: projects::ProjectsState {
-                looked: saved
-                    .iter()
-                    .flat_map(|s| &s.looked)
-                    .map(|l| {
-                        let looked = crate::project::recap::Looked { seq: l.seq, at_ms: l.at_ms };
-                        (l.project.clone(), looked)
-                    })
-                    .collect(),
-                tiles: board_tiles::saved(saved.as_ref()),
-                ..projects::ProjectsState::default()
-            },
+            server: None,
             next_open: std::cell::Cell::new(1),
             pending_focus_file: None,
             pending_focus_folder: None,
-            pending_focus_review: None,
-            reviews: reviews::Reviews::default(),
             worktrees: worktrees::Asked::default(),
             quotes: workers::Quotes::default(),
             pending_focus_picker: false,
@@ -1659,9 +1638,6 @@ impl WorkspaceView {
         if let Some(page) = &self.components {
             page.update(cx, |p, cx| p.set_theme(theme.clone(), cx));
         }
-        for view in self.projects.views.values() {
-            view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
-        }
         if let Some((_, picker)) = &self.picker {
             picker.update(cx, |p, cx| p.set_theme(theme.clone(), cx));
         }
@@ -1726,7 +1702,6 @@ impl WorkspaceView {
         }
         self.titles_dirty = true;
         self.faces_dirty = true;
-        self.projects.dirty = true;
         self.prune_facts();
         self.drawn_waiting = self.needs_you();
         self.drawn_thread_waits = self.threads_waiting();
@@ -1801,7 +1776,6 @@ impl WorkspaceView {
             ("faces.focus", self.faces.focus.len()),
         ]
         .into_iter()
-        .chain(self.project_sizes())
         .chain(self.facts.lens())
         .chain(self.handoff.sizes())
         .collect()
@@ -1911,12 +1885,8 @@ impl WorkspaceView {
     /// here, so the views drawn after this one show it in this frame.
     fn give_pending_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(session) = self.pending_focus.take() {
-            // A tile its board covers takes the keyboard in the board, one showing its thread
-            // in its composer. A board beside its tile takes it only when asked
-            // ([`WorkspaceView::show_board`]) or pressed.
-            if let Some(board) = self.board_view(session).filter(|_| self.board_covers(session)) {
-                board.clone().update(cx, |v, cx| v.focus(window, cx));
-            } else if let Some(thread) = self.thread_face(session).cloned() {
+            // A tile showing its thread takes the keyboard in its composer.
+            if let Some(thread) = self.thread_face(session).cloned() {
                 thread.update(cx, |v, cx| v.focus(window, cx));
             } else if let Some(view) = self.terminals.get(&session) {
                 let handle = view.read(cx).focus_handle(cx);
@@ -2010,9 +1980,6 @@ impl WorkspaceView {
         {
             view.update(cx, |v, cx| v.focus(window, cx));
         }
-        if let Some(thread) = self.pending_focus_review.take() {
-            self.focus_review(thread, window, cx);
-        }
         self.settle_starting_focus(window, cx);
     }
 }
@@ -2067,17 +2034,13 @@ impl gpui::Render for WorkspaceView {
         if std::mem::take(&mut self.items_dirty) {
             self.reconcile_files(window, cx);
             self.reconcile_browsers(cx);
-            self.reconcile_reviews();
         }
         if std::mem::take(&mut self.faces_dirty) {
             self.sync_faces(window, cx);
         }
-        self.settle_reviews(cx);
         self.settle_quotes(window, cx);
         self.settle_agent_screens(cx);
         self.settle_going(cx);
-        self.settle_review_writers(cx);
-        self.sync_projects(window, cx);
         self.sync_empty_goal(window, cx);
         self.keep_zoom(cx);
         self.give_pending_focus(window, cx);
@@ -2158,14 +2121,10 @@ impl gpui::Render for WorkspaceView {
             .on_action(cx.listener(Self::start_thread_action))
             .on_action(cx.listener(Self::new_agent_of))
             .on_action(cx.listener(Self::new_agent_on))
-            .on_action(cx.listener(Self::new_goal))
             .on_action(cx.listener(Self::resume_past_session))
             .on_action(cx.listener(Self::clone_to_start))
             .on_action(cx.listener(Self::run_script_on))
             .on_action(cx.listener(Self::resume_session))
-            .on_action(cx.listener(Self::review_pull))
-            .when(!self.to_review().is_empty(), |el| el.on_action(cx.listener(Self::review_next)))
-            .on_action(cx.listener(Self::review_pull_number))
             .on_action(cx.listener(Self::remove_machine))
             .on_action(cx.listener(Self::scope_to))
             .on_action(cx.listener(Self::pin_to_project))
@@ -2178,7 +2137,6 @@ impl gpui::Render for WorkspaceView {
                     .on_action(cx.listener(Self::rename_item))
             })
             .when(applies.agent, |el| el.on_action(cx.listener(Self::switch_face)))
-            .when(applies.orchestrator, |el| el.on_action(cx.listener(Self::toggle_board)))
             .when(applies.undo, |el| el.on_action(cx.listener(Self::undo_close)))
             .when(applies.tabs, |el| {
                 el.on_action(cx.listener(Self::other_tabs))
@@ -2188,10 +2146,7 @@ impl gpui::Render for WorkspaceView {
                 el.on_action(cx.listener(Self::move_to_project))
                     .on_action(cx.listener(Self::move_to_project_of))
             })
-            .when(applies.changes, |el| {
-                el.on_action(cx.listener(Self::review_changes))
-                    .on_action(cx.listener(Self::remove_merged))
-            })
+            .when(applies.changes, |el| el.on_action(cx.listener(Self::remove_merged)))
             .when(applies.worktree, |el| el.on_action(cx.listener(Self::remove_worktree)))
             .when(applies.run, |el| el.on_action(cx.listener(Self::run_here_action)))
             .when(applies.streams, |el| el.on_action(cx.listener(Self::toggle_stats)))
@@ -2245,7 +2200,6 @@ impl gpui::Render for WorkspaceView {
             .when_some(picker, gpui::ParentElement::child)
             .when_some(palette, gpui::ParentElement::child)
             .children(self.search_drawn())
-            .children(self.render_project_sheet(window, cx))
             .children(self.render_remove_machine(window, cx))
     }
 }

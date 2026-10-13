@@ -39,8 +39,6 @@ use crate::add_worker;
 use crate::browser::BrowserView;
 use crate::folder::FolderView;
 
-/// An orchestrator's header toggle for its board, said as on or off.
-pub(super) const BOARD: &str = "Board";
 /// A page's way back or forward.
 type Go = fn(&mut BrowserView, &mut Context<BrowserView>);
 
@@ -671,7 +669,7 @@ impl WorkspaceView {
             .filter(|agent| {
                 slopty_kit::icons::AgentMark::of(agent) == slopty_kit::icons::AgentMark::Neutral
             })
-            .map(|agent| super::projects::agent_label(&AgentId::named(agent)))
+            .map(|agent| crate::conversation::thread::view::agent_label(&AgentId::named(agent)))
             .filter(|name| name != title);
         let place = self.derived_where(item, title);
         match (unmarked, place) {
@@ -846,17 +844,15 @@ impl WorkspaceView {
             .or_else(|| summary.map(|(_, s)| s.title.as_str()))
             .map(str::trim)
             .filter(|t| own_title(t, program));
-        // An agent on a project is named by what it is there: the orchestrator, or its task.
-        // Any other that has not titled itself is named by what its thread is about, once its
+        // An agent that has not titled itself is named by what its thread is about, once its
         // worker's table says: the kind's glyph already says "Claude".
         if self.agent_state(session).is_some() {
-            let named = self
-                .project_role(session)
-                .or_else(|| set.map(str::to_owned))
+            let named = set
+                .map(str::to_owned)
                 .or_else(|| self.session_thread(session).and_then(|t| self.thread_named(t)))
                 .or_else(|| {
                     let agent = AgentId::named(self.session_agent(session)?);
-                    Some(super::projects::agent_label(&agent))
+                    Some(crate::conversation::thread::view::agent_label(&agent))
                 });
             if let Some(named) = named {
                 return named;
@@ -924,10 +920,7 @@ impl WorkspaceView {
     ) -> Option<gpui::AnyElement> {
         let tile = placed.tile;
         let Some(item) = self.item(tile) else {
-            return self
-                .render_starting(placed, cx)
-                .or_else(|| self.render_board_tile(placed, cx))
-                .or_else(|| self.render_missing(placed, cx));
+            return self.render_starting(placed, cx).or_else(|| self.render_missing(placed, cx));
         };
         let id = item.id;
         let worker_up = self.workers.get(&tile.worker).is_some_and(|w| w.link.is_some());
@@ -1245,21 +1238,7 @@ impl WorkspaceView {
         let (kind_states, kind_actions) = self.header_actions(tile, item, cx);
         let silenced = self.silenced(tile, item, cx);
         let face = match agent {
-            Some((session, _)) => {
-                let face = self.face_toggle(tile, session, cx);
-                match self.board_toggle(tile, session, cx) {
-                    Some(board) => Some(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(theme.spacing.xs))
-                            .children(face)
-                            .child(board)
-                            .into_any_element(),
-                    ),
-                    None => face,
-                }
-            }
+            Some((session, _)) => self.face_toggle(tile, session, cx),
             None => self.preview_toggle(tile, cx),
         };
 
@@ -1456,7 +1435,7 @@ impl WorkspaceView {
         placed.top_right.then(|| self.chrome.cluster.clone().into_any_element())
     }
 
-    /// The tab bar of a pane whose tile has no item of its own yet (a board, a start, a machine
+    /// The tab bar of a pane whose tile has no item of its own yet (a start, a machine
     /// away): one cell on show, `mark` and `title`, then `end` (how it stands), in the top line
     /// with the window's lead and cluster as every pane's.
     pub(super) fn one_tab_bar(
@@ -2245,68 +2224,6 @@ impl WorkspaceView {
                 .on_click(cx.listener(move |this, _ev, _w, cx| {
                     this.focus_tile(tile, cx);
                     this.set_face(session, next, cx);
-                }))
-                .into_any_element(),
-        )
-    }
-
-    /// An orchestrator's tile with its board beside it: the thread or the terminal the narrow
-    /// column `main_w` wide, then the board the wide pane, `panel_w`, behind a hairline, on the
-    /// tile's own ground. A press on the board gives it the keyboard.
-    fn board_beside(
-        &self,
-        (session, board): (SessionId, &Entity<crate::project::ProjectView>),
-        main: gpui::AnyElement,
-        (main_w, panel_w): (f32, f32),
-        placed: &Placed,
-        cx: &Draw<'_, Self>,
-    ) -> gpui::AnyElement {
-        let s = &self.theme.surfaces;
-        let panel = div()
-            .id("board-panel")
-            .debug_selector(move || format!("board-panel-{session}"))
-            .flex_none()
-            .w(px(panel_w))
-            .h_full()
-            .flex()
-            .flex_col()
-            .overflow_hidden()
-            .border_l(kit::HAIR)
-            .border_color(hsla(s.stroke))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _ev, _w, cx| this.board_pressed(session, cx)),
-            )
-            .child(self.body_view(board, placed, cx));
-        div()
-            .flex_1()
-            .w_full()
-            .min_h_0()
-            .flex()
-            .overflow_hidden()
-            .child(div().flex_none().w(px(main_w)).h_full().flex().flex_col().child(main))
-            .child(panel)
-            .into_any_element()
-    }
-
-    /// A project's orchestrator's toggle that shows its board beside it or puts it away
-    /// (⌘⇧J), on while it shows. `None` for any other agent's tile.
-    fn board_toggle(
-        &self,
-        tile: TileRef,
-        session: SessionId,
-        cx: &Draw<'_, Self>,
-    ) -> Option<gpui::AnyElement> {
-        self.projects().of_orchestrator(session)?;
-        let shown = self.board_shown(session);
-        let id = format!("board-toggle-{}", tile.item.as_uuid());
-        let selector = id.clone();
-        Some(
-            kit::icon_toggle(&self.theme, id, Symbol::RectangleSplit3x1, BOARD, shown)
-                .debug_selector(move || selector)
-                .on_click(cx.listener(move |this, _ev, _w, cx| {
-                    this.focus_tile(tile, cx);
-                    this.show_board(session, !shown, cx);
                 }))
                 .into_any_element(),
         )
@@ -3211,64 +3128,40 @@ impl WorkspaceView {
             div().flex_1().w_full().into_any_element()
         };
         match &item.kind {
-            ItemKind::Terminal { session } => {
-                // An orchestrator's board: beside the thread or the terminal where the tile
-                // has room for both, over them where it has not.
-                let board = self.board_view(*session).filter(|_| self.board_shown(*session));
-                let beside = board.is_some() && rest_w >= super::projects::BOARD_BESIDE_MIN;
-                let main_w = if beside { super::projects::orchestrator_w(rest_w) } else { rest_w };
-                let panel_w = rest_w - main_w;
-                let main = match self.terminals.get(session) {
-                    _ if !beside && let Some(board) = board => {
-                        self.hand_over(cx, board, Handed::Board { beside: false }, |v, cx| {
-                            v.set_beside(false, cx);
-                        });
-                        fixed(self.body_view(board, placed, cx))
-                    }
-                    _ if self.terminals.contains_key(session)
-                        && self.face_shown(*session)
-                        && self.body_state(placed.tile, item).is_none() =>
-                    {
-                        let width = main_w;
-                        let handed = Handed::Face { width };
-                        // The tile's header already says the title, the agent and its state, so
-                        // the thread view draws none. Its view is made in the frame after it is
-                        // wanted.
-                        match self.thread_face(*session) {
-                            Some(thread) => {
-                                self.hand_over(cx, thread, handed, move |v, cx| {
-                                    v.set_layout(width, cx);
-                                    v.set_header(false, cx);
-                                });
-                                fixed_at(self.body_view(thread, placed, cx), main_w)
-                            }
-                            None => well(),
+            ItemKind::Terminal { session } => match self.terminals.get(session) {
+                _ if self.terminals.contains_key(session)
+                    && self.face_shown(*session)
+                    && self.body_state(placed.tile, item).is_none() =>
+                {
+                    let width = rest_w;
+                    let handed = Handed::Face { width };
+                    // The tile's header already says the title, the agent and its state, so the
+                    // thread view draws none. Its view is made in the frame after it is wanted.
+                    match self.thread_face(*session) {
+                        Some(thread) => {
+                            self.hand_over(cx, thread, handed, move |v, cx| {
+                                v.set_layout(width, cx);
+                                v.set_header(false, cx);
+                            });
+                            fixed(self.body_view(thread, placed, cx))
                         }
+                        None => well(),
                     }
-                    Some(view) => {
-                        let covered = self.body_state(placed.tile, item).is_some();
-                        let handed = Handed::Shell { covered };
-                        self.hand_over(cx, view, handed, move |v, _| {
-                            v.set_covered(covered);
-                        });
-                        fixed_at(self.body_view(view, placed, cx), main_w)
-                    }
-                    None if !worker_up => well(),
-                    None if self.summary(*session).is_some() => {
-                        self.waiting_body(item, Wait::Loading(ATTACHING.into()))
-                    }
-                    None => well(),
-                };
-                match board.filter(|_| beside) {
-                    Some(board) => {
-                        self.hand_over(cx, board, Handed::Board { beside: true }, |v, cx| {
-                            v.set_beside(true, cx);
-                        });
-                        self.board_beside((*session, board), main, (main_w, panel_w), placed, cx)
-                    }
-                    None => main,
                 }
-            }
+                Some(view) => {
+                    let covered = self.body_state(placed.tile, item).is_some();
+                    let handed = Handed::Shell { covered };
+                    self.hand_over(cx, view, handed, move |v, _| {
+                        v.set_covered(covered);
+                    });
+                    fixed(self.body_view(view, placed, cx))
+                }
+                None if !worker_up => well(),
+                None if self.summary(*session).is_some() => {
+                    self.waiting_body(item, Wait::Loading(ATTACHING.into()))
+                }
+                None => well(),
+            },
             ItemKind::Window { .. } | ItemKind::Display { .. } => {
                 match self.screens.get(&item.id) {
                     Some(_) if self.popouts.holds(item.id) => {
@@ -3356,30 +3249,8 @@ impl WorkspaceView {
                 None if !worker_up => well(),
                 None => self.waiting_body(item, Wait::Loading(READING.into())),
             },
-            ItemKind::Review { thread } => match self.review_of(*thread).cloned() {
-                Some(view) => {
-                    let (width, height) = (placed.rect.w, placed.rect.h - self.header_h());
-                    let handed = Handed::Review { width, height };
-                    self.hand_over(cx, &view, handed, move |v, cx| {
-                        v.set_layout(width, height, cx);
-                    });
-                    fixed(self.body_view(&view, placed, cx))
-                }
-                None if !worker_up => well(),
-                None => self.waiting_body(item, Wait::Loading(REVIEW.into())),
-            },
-            ItemKind::Changes { .. } => match self.changes_view(item.id).cloned() {
-                Some(view) => {
-                    let (width, height) = (placed.rect.w, placed.rect.h - self.header_h());
-                    let handed = Handed::Review { width, height };
-                    self.hand_over(cx, &view, handed, move |v, cx| {
-                        v.set_layout(width, height, cx);
-                    });
-                    fixed(self.body_view(&view, placed, cx))
-                }
-                None if !worker_up => well(),
-                None => self.waiting_body(item, Wait::Loading(CHANGES.into())),
-            },
+            // A review's or a folder's changes: no view shows them.
+            ItemKind::Review { .. } | ItemKind::Changes { .. } => well(),
             // The thread view, under the tile's header, which says its title already.
             ItemKind::Thread { .. } => match self.thread_item(item.id).cloned() {
                 Some(view) => {

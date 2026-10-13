@@ -103,6 +103,11 @@ fn chrome_lines(dir: &str) -> Vec<(String, usize, String)> {
                 walk(&path, out);
             } else if path.extension().is_some_and(|e| e == "rs") {
                 let text = std::fs::read_to_string(&path).expect("a source file reads");
+                // Zeron's design system, landing beside the old chrome: judged by zeron's rules
+                // once the old views are gone, never by these.
+                if text.starts_with("// Derived from zeron") {
+                    continue;
+                }
                 let name = path.display().to_string();
                 let lines: Vec<&str> = text.lines().collect();
                 for (ix, line) in lines.iter().enumerate() {
@@ -760,21 +765,14 @@ fn the_row_action_check_knows_a_link_from_an_icon_button() {
     assert!(row_action_wrong("// a kit::button( in a comment").is_none());
 }
 
-/// The navigator's rows, its attention sections and the rows the machines' and boards' lists
-/// draw are one line and act through icon buttons in their end slot, shown under the pointer
-/// (`.research/design-polish-2026-10-12.md` §4.5): an inline "Deny", "Allow" or "Merge" link
+/// The navigator's rows, its attention sections and the rows the machines' list draws are one
+/// line and act through icon buttons in their end slot, shown under the pointer
+/// (`.research/design-polish-2026-10-12.md` §4.5): an inline "Deny" or "Allow" link
 /// was the weakest affordance in the app, and a second line doubled the list for facts the
 /// row's hint holds.
 #[test]
 fn a_row_acts_through_icon_buttons() {
-    let files = [
-        "navigator.rs",
-        "attention.rs",
-        "projects.rs",
-        "machines.rs",
-        "board_tiles.rs",
-        "approvals.rs",
-    ];
+    let files = ["navigator.rs", "attention.rs", "machines.rs", "approvals.rs"];
     let mut wrong = Vec::new();
     for (file, lines) in chrome_files() {
         if !files.iter().any(|f| file.ends_with(&format!("slopty-ui/src/workspace/{f}"))) {
@@ -964,8 +962,6 @@ fn a_command_is_its_words() {
     let lines = crate::workspace::palette_items_of(&crate::keymap::Keymap::default())
         .into_iter()
         .chain(crate::conversation::palette_items(&bindings))
-        .chain(crate::project::palette_items(&bindings))
-        .chain(crate::review::palette_items(&bindings))
         .chain(crate::folder::folder_palette_items(&bindings))
         .chain(crate::file::editor_palette_items(&bindings));
     let marked: Vec<String> =

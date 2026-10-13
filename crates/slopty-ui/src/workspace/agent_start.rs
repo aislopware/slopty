@@ -21,8 +21,6 @@
 //! the agent recorded there, so a session older than the list is found by what was asked in it,
 //! wherever it ran. A session picked opens the thread kept of it, its agent taken up again if it
 //! exited, or starts the agent on it, on its machine, in its own words.
-//!
-//! A project's orchestrator starts from "New goal…" instead, one sheet ([`super::projects`]).
 
 use std::time::Duration;
 
@@ -38,8 +36,8 @@ use super::WorkspaceView;
 use super::actions::{
     NewAgent, NewAgentOf, NewAgentOn, ResumePastSession, ResumeSession, StartThread,
 };
-use super::projects::agent_label;
 use crate::conversation::thread::find;
+use crate::conversation::thread::view::agent_label;
 use crate::palette::{CommandPalette, PaletteItem};
 
 /// What is said when no machine can start an agent.
@@ -47,13 +45,6 @@ pub(super) const NO_AGENT: &str = "No machine has an agent to start";
 
 /// What the agent step's field says.
 const PICK_AGENT: &str = "Which agent";
-
-/// Whether a start of `agent` opens a terminal, so it can orchestrate a project: Claude Code,
-/// whose TUI Slopty observes, and Codex, beside whose TUI Slopty is a second client. pi and
-/// ACP agents are driven over their protocols and have no terminal until a handoff.
-pub(super) fn runs_in_terminal(agent: &AgentId) -> bool {
-    agent.is(AgentId::CLAUDE_CODE) || agent.is(AgentId::CODEX)
-}
 
 /// What the machine step's field says.
 const PICK_MACHINE: &str = "On which machine";

@@ -118,7 +118,6 @@ impl WorkspaceView {
             items.push(line.on_worker(self.worker_label(tile.worker)));
         }
         items.extend(self.project_rows());
-        items.extend(self.project_lines());
         items.extend(self.worker_lines());
         items.extend(self.wake_lines());
         items.extend(self.closed_lines());
@@ -238,7 +237,10 @@ impl WorkspaceView {
         // Tab asks the agent a new tab would start, by its name (Delta's "Ask Delta").
         let ask =
             self.new_tile_target().and_then(|(worker, _)| self.agent_for(worker)).map(|agent| {
-                SharedString::from(format!("Ask {}", super::projects::agent_label(&agent)))
+                SharedString::from(format!(
+                    "Ask {}",
+                    crate::conversation::thread::view::agent_label(&agent)
+                ))
             });
         let bindings = super::key_bindings(cx);
         let palette = cx.new(|cx| {
@@ -526,10 +528,6 @@ impl WorkspaceView {
                 PaletteEvent::Run(PaletteRun::Reopen(closing)) => {
                     this.palette_return = None;
                     this.take_back(Some(*closing), cx);
-                }
-                PaletteEvent::Run(PaletteRun::Project(project)) => {
-                    this.palette_return = None;
-                    this.open_project(project, cx);
                 }
                 PaletteEvent::Run(PaletteRun::Group(group)) => {
                     this.palette_return = None;
