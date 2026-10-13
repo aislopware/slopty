@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet};
 
 use gpui::{App, Context, Focusable as _, Hsla, SharedString, Subscription, Task};
-use slopty_client::layout::WorkerKey;
+use slopty_client::WorkerKey;
 use slopty_core::SessionId;
 use slopty_proto::items::{ItemKind, ItemOp};
 use slopty_proto::terminal::{OpenSession, SessionState, TermSize};

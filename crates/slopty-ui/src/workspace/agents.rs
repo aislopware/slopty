@@ -3,7 +3,7 @@
 //! waiting on the human.
 
 use gpui::Context;
-use slopty_client::layout::WorkerKey;
+use slopty_client::WorkerKey;
 use slopty_core::SessionId;
 use slopty_kit::icons::Status;
 use slopty_proto::thread::attention::Rung;
@@ -244,7 +244,7 @@ impl WorkspaceView {
 
 #[cfg(test)]
 mod tests {
-    use slopty_client::layout::WorkerKey;
+    use slopty_client::WorkerKey;
     use slopty_core::WallMs;
     use slopty_proto::thread::wire::RequestCard;
     use slopty_proto::thread::{AskId, Liveness, Status as RowStatus};

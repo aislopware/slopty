@@ -10,8 +10,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::Context;
+use slopty_client::WorkerKey;
 use slopty_client::directory::{self, Change, Dial, Directory, ServerState};
-use slopty_client::layout::WorkerKey;
 use slopty_client::server::{ServerCaller, ServerEvent, ServerTask};
 use slopty_client::update::{Newer, Of, UpdateNotice};
 use slopty_core::WorkerId;

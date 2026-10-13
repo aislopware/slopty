@@ -1,7 +1,7 @@
 //! What is asked of a worker on the shell's behalf: whether the worker can hear it now.
 
 use gpui::Context;
-use slopty_client::layout::WorkerKey;
+use slopty_client::WorkerKey;
 
 use super::WorkspaceView;
 

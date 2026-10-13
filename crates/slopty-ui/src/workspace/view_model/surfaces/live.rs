@@ -12,7 +12,7 @@ mod screens;
 mod terminals;
 
 use gpui::{App, AppContext as _, Context, Global, Subscription, Task};
-use slopty_client::layout::WorkerKey;
+use slopty_client::WorkerKey;
 use slopty_view_rpc::{RpcError, RpcReply, methods};
 
 use super::super::param;

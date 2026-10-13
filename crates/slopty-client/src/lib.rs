@@ -8,11 +8,7 @@
 //!   (cached for degraded mode), and whether to dial each worker.
 //! * [`server`] — [`server::spawn`]: the one link to the server, redialled after every drop.
 //! * [`items`] — [`items::ItemDoc`]: one worker's item registry, worker-authoritative, applied
-//!   optimistically.
-//! * [`layout`] — [`layout::Tiling`]: this device's projects, their tabs and the panes that tile
-//!   every worker's items; pure, with no clock and no toolkit.
-//! * [`groups`] — [`groups::group`]: which tiles are one body of work (a project, a repository, a
-//!   folder, a machine, or any fact the caller names), and the frecency the palette ranks them by.
+//!   optimistically; [`WorkerKey`] and [`ItemRef`] name a worker and an item on one.
 //! * [`meters`] — [`meters::PlanMeters`]: each machine's plan windows as its agents publish them,
 //!   the freshest per agent, for the status bar.
 //! * [`folders`] — [`folders::FolderPages`]: a folder's listing joined across its pages, asked for
@@ -38,10 +34,6 @@
 //!   numbers the overlay and the tests read.
 //! * [`update`] — [`update::UpdateNotice`]: what to say of a worker or server on a different build,
 //!   and the command that updates it.
-//! * [`search`] — [`search::SearchResults`]: a text search on a worker as its pages come in, in
-//!   path order, and the rows a results list draws.
-//! * [`unsaved`] — [`unsaved::Store`]: file tiles' edits not yet saved, kept on this device so a
-//!   quit or a crash loses none of them.
 //! * [`threads`] — [`threads::Threads`]: one worker's agent threads as this client holds them (the
 //!   table, a mirror per open thread, the intents on their way), kept in step through link drops,
 //!   with their [`threads::Cache`] on this device.
@@ -58,10 +50,9 @@ pub mod directory;
 #[cfg(target_vendor = "apple")]
 pub mod dnd;
 pub mod folders;
-pub mod groups;
 pub mod handoff;
+mod ids;
 pub mod items;
-pub mod layout;
 pub mod link;
 pub mod meters;
 pub mod pacing;
@@ -69,16 +60,14 @@ pub mod relay;
 pub mod remote;
 #[cfg(target_vendor = "apple")]
 pub mod screen;
-pub mod search;
 pub mod server;
-pub mod starts;
 pub mod term;
 pub mod threads;
 pub mod tunnel;
-pub mod unsaved;
 pub mod update;
 pub mod xfer;
 
+pub use ids::{ItemRef, WorkerKey};
 pub use items::{ItemChange, ItemDoc};
 #[cfg(target_vendor = "apple")]
 pub use link::warm_up_decoder;

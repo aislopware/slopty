@@ -42,8 +42,7 @@ use std::rc::Rc;
 
 use gpui::{App, AppContext as _, Context, Entity, WeakEntity};
 pub use invite::open_link;
-use slopty_client::LinkEvent;
-use slopty_client::layout::WorkerKey;
+use slopty_client::{LinkEvent, WorkerKey};
 use slopty_core::{SessionId, WorkerId};
 use slopty_platform::notify::{Notifier, Tap};
 use slopty_proto::WorkerMsg;

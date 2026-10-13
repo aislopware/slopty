@@ -2,7 +2,7 @@
 source: crates/slopty-proto/tests/golden_agent.rs
 expression: hex(&bytes)
 ---
-ae 00 00 00 03 15 1d 3a 2f 55 73 65 72 73 2f 6d
+ae 00 00 00 03 15 1b 3a 2f 55 73 65 72 73 2f 6d
 65 2f 4c 69 62 72 61 72 79 2f 41 70 70 6c 69 63
 61 74 69 6f 6e 20 53 75 70 70 6f 72 74 2f 53 6c
 6f 70 74 79 2f 73 65 74 74 69 6e 67 73 2e 74 6f

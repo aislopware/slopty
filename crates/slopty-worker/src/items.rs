@@ -19,11 +19,6 @@ use slopty_proto::items::{FACTS_MAX, Item, ItemKind, ItemOp, ItemSync, NAME_MAX,
 
 use crate::WorkerError;
 
-/// The longest file path accepted, in bytes.
-pub const PATH_MAX: usize = 4096;
-/// The longest browser address accepted, in bytes.
-pub const URL_MAX: usize = 2048;
-
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct Registry {
     version: u64,
@@ -276,7 +271,6 @@ fn read_registry(path: &Path, bytes: &[u8]) -> Registry {
 fn sanitize(op: ItemOp) -> Result<ItemOp, WorkerError> {
     Ok(match op {
         ItemOp::Add(mut item) => {
-            check_kind(&item.kind)?;
             item.name = clean_name(item.name)?;
             item.facts = clean_facts(item.facts)?;
             ItemOp::Add(item)
@@ -290,52 +284,8 @@ fn sanitize(op: ItemOp) -> Result<ItemOp, WorkerError> {
             ItemOp::SetFact { id, key, value }
         }
         ItemOp::Rename { id, name } => ItemOp::Rename { id, name: clean_name(name)? },
-        ItemOp::SetUrl { url, .. } if !web_address(&url) => {
-            return Err(WorkerError::Items("bad url".to_owned()));
-        }
-        ItemOp::SetFolder { path, .. } if !good_path(&path) => {
-            return Err(WorkerError::Items("bad folder path".to_owned()));
-        }
-        other @ (ItemOp::Remove(_) | ItemOp::SetUrl { .. } | ItemOp::SetFolder { .. }) => other,
+        ItemOp::Remove(id) => ItemOp::Remove(id),
     })
-}
-
-fn check_kind(kind: &ItemKind) -> Result<(), WorkerError> {
-    match kind {
-        ItemKind::File { path } if !good_path(path) => {
-            Err(WorkerError::Items("bad file path".to_owned()))
-        }
-        ItemKind::Folder { path } | ItemKind::Changes { path, .. } if !good_path(path) => {
-            Err(WorkerError::Items("bad folder path".to_owned()))
-        }
-        ItemKind::Changes { against, head, .. }
-            if against.iter().chain(head.iter()).any(|branch| !good_branch(branch)) =>
-        {
-            Err(WorkerError::Items("bad branch".to_owned()))
-        }
-        ItemKind::Browser { url } if !web_address(url) => {
-            Err(WorkerError::Items("bad url".to_owned()))
-        }
-        ItemKind::Terminal { .. }
-        | ItemKind::Window { .. }
-        | ItemKind::Display { .. }
-        | ItemKind::File { .. }
-        | ItemKind::Folder { .. }
-        | ItemKind::Browser { .. }
-        | ItemKind::Review { .. }
-        | ItemKind::Thread { .. }
-        | ItemKind::Changes { .. } => Ok(()),
-    }
-}
-
-/// A branch a changes item may compare with: something, no longer than a path, and no option.
-fn good_branch(branch: &str) -> bool {
-    good_path(branch) && !branch.starts_with('-')
-}
-
-/// A path a file or folder item may name: something, [`PATH_MAX`] bytes at most.
-const fn good_path(path: &str) -> bool {
-    !path.is_empty() && path.len() <= PATH_MAX
 }
 
 /// A name is what the human typed, trimmed; blank is no name at all.
@@ -361,18 +311,6 @@ fn clean_facts(facts: BTreeMap<String, String>) -> Result<BTreeMap<String, Strin
     Ok(facts)
 }
 
-/// An `http` or `https` address with a host, [`URL_MAX`] bytes at most, and nothing a URL
-/// leaves out (whitespace, control characters): a tile never opens `file:` or `javascript:`.
-fn web_address(url: &str) -> bool {
-    if url.len() > URL_MAX || url.chars().any(|c| c.is_whitespace() || c.is_control()) {
-        return false;
-    }
-    let Some((scheme, rest)) = url.split_once("://") else { return false };
-    let host = rest.split(['/', '?', '#']).next().unwrap_or_default();
-    (scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https"))
-        && !host.is_empty()
-}
-
 fn apply_in(registry: &mut Registry, op: &ItemOp) -> Result<(), WorkerError> {
     match op {
         ItemOp::Add(item) => match registry.items.entry(item.id) {
@@ -386,10 +324,7 @@ fn apply_in(registry: &mut Registry, op: &ItemOp) -> Result<(), WorkerError> {
         }
         // An edit that changes nothing is still taken and broadcast: the delta is how the
         // proposer hears its op went through.
-        ItemOp::Rename { id, .. }
-        | ItemOp::SetUrl { id, .. }
-        | ItemOp::SetFolder { id, .. }
-        | ItemOp::SetFact { id, .. } => {
+        ItemOp::Rename { id, .. } | ItemOp::SetFact { id, .. } => {
             let item = registry.items.get_mut(id).ok_or(WorkerError::NoSuchItem)?;
             item.apply(op).map_err(|e| WorkerError::Items(e.to_string()))?;
         }
@@ -465,41 +400,16 @@ mod tests {
         assert!(matches!(err, WorkerError::Items(_)), "{err:?}");
         assert_eq!(store.get(id).unwrap().name.as_deref(), Some(long.as_str()), "kept");
 
-        let file = |name: &str| Item {
+        let window = |name: &str| Item {
             id: ItemId::new(),
-            kind: ItemKind::File { path: "/w/PLAN.md".to_owned() },
+            kind: ItemKind::Window { window: slopty_core::WindowId(4) },
             name: Some(name.to_owned()),
             facts: BTreeMap::new(),
         };
-        let fresh = added(store.apply(ItemOp::Add(file(" plan ")), by).unwrap());
+        let fresh = added(store.apply(ItemOp::Add(window(" plan ")), by).unwrap());
         assert_eq!(fresh.name.as_deref(), Some("plan"));
-        let err = store.apply(ItemOp::Add(file(&"n".repeat(NAME_MAX + 1))), by).unwrap_err();
+        let err = store.apply(ItemOp::Add(window(&"n".repeat(NAME_MAX + 1))), by).unwrap_err();
         assert!(matches!(err, WorkerError::Items(_)), "{err:?}");
-    }
-
-    /// Two clients each holding the same stale copy of a page, one renaming it and the other
-    /// pointing it elsewhere, both land: each op carries only its own field.
-    #[test]
-    fn a_rename_and_an_address_from_two_clients_both_survive() {
-        let (_dir, store) = store();
-        let (mac, ipad) = (ClientId::new(), ClientId::new());
-        let page = Item {
-            id: ItemId::new(),
-            kind: ItemKind::Browser { url: "http://localhost:3000/".to_owned() },
-            name: None,
-            facts: BTreeMap::new(),
-        };
-        let _added = store.apply(ItemOp::Add(page.clone()), mac).unwrap();
-        let stale = page;
-        let rename = ItemOp::Rename { id: stale.id, name: Some("plan".to_owned()) };
-        let renamed = store.apply(rename, ipad).unwrap();
-        assert!(matches!(renamed, ItemSync::Delta { by, .. } if by == ipad));
-        let edit = ItemOp::SetUrl { id: stale.id, url: "http://localhost:3000/docs".to_owned() };
-        let edited = store.apply(edit, mac).unwrap();
-        assert!(matches!(edited, ItemSync::Delta { version: 3, by, .. } if by == mac));
-        let now = store.get(stale.id).unwrap();
-        assert_eq!(now.name.as_deref(), Some("plan"));
-        assert_eq!(now.kind, ItemKind::Browser { url: "http://localhost:3000/docs".to_owned() });
     }
 
     /// An id the registry holds cannot be added again, so a stale copy put back never
@@ -520,81 +430,6 @@ mod tests {
         let back = added(store.apply(ItemOp::Add(item.clone()), by).unwrap());
         assert_eq!(back, item);
         assert_eq!(store.get(item.id), Some(item));
-    }
-
-    /// An address is set only on a browser, and only an `http` or `https` one.
-    #[test]
-    fn an_address_takes_only_a_browser_and_a_web_address() {
-        let (_dir, store) = store();
-        let by = ClientId::new();
-        let shell = added(store.ensure_terminal(SessionId::new(), by).unwrap());
-        let set = |id, url: &str| ItemOp::SetUrl { id, url: url.to_owned() };
-        let err = store.apply(set(shell.id, "http://a.test/"), by).unwrap_err();
-        assert!(matches!(&err, WorkerError::Items(m) if m == "not a browser"), "{err:?}");
-        let page = Item {
-            id: ItemId::new(),
-            kind: ItemKind::Browser { url: "http://localhost:5173/".to_owned() },
-            name: None,
-            facts: BTreeMap::new(),
-        };
-        let _added = store.apply(ItemOp::Add(page.clone()), by).unwrap();
-        for bad in ["javascript:alert(1)", "file:///etc/passwd", "http://", "http://a b/"] {
-            let err = store.apply(set(page.id, bad), by).unwrap_err();
-            assert!(matches!(&err, WorkerError::Items(m) if m == "bad url"), "{bad}: {err:?}");
-        }
-        store.apply(set(page.id, "http://localhost:3000/docs"), by).unwrap();
-        let url = "http://localhost:3000/docs".to_owned();
-        assert_eq!(store.get(page.id).map(|i| i.kind), Some(ItemKind::Browser { url }));
-    }
-
-    /// A folder moves only as a folder, to a path that is something and not too long, and
-    /// where it went is what the registry reopens with.
-    #[test]
-    fn a_folder_moves_and_is_reopened_where_it_went() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("items.json");
-        let store = ItemStore::open(&file).unwrap();
-        let by = ClientId::new();
-        let shell = added(store.ensure_terminal(SessionId::new(), by).unwrap());
-        let folder = Item {
-            id: ItemId::new(),
-            kind: ItemKind::Folder { path: "/w".to_owned() },
-            name: None,
-            facts: BTreeMap::new(),
-        };
-        let _added = store.apply(ItemOp::Add(folder.clone()), by).unwrap();
-        let set = |id, path: &str| ItemOp::SetFolder { id, path: path.to_owned() };
-        let err = store.apply(set(shell.id, "/w/src"), by).unwrap_err();
-        assert!(matches!(&err, WorkerError::Items(m) if m == "not a folder"), "{err:?}");
-        for bad in [String::new(), "a".repeat(PATH_MAX + 1)] {
-            let err = store.apply(set(folder.id, &bad), by).unwrap_err();
-            assert!(matches!(&err, WorkerError::Items(m) if m == "bad folder path"), "{err:?}");
-        }
-        store.apply(set(folder.id, "/w/src"), by).unwrap();
-        drop(store);
-        let reopened = ItemStore::open(&file).unwrap();
-        let path = "/w/src".to_owned();
-        assert_eq!(reopened.get(folder.id).map(|i| i.kind), Some(ItemKind::Folder { path }));
-    }
-
-    /// A thread's review, and a thread itself, are items like any other: added, and reopened
-    /// as they were.
-    #[test]
-    fn a_review_and_a_thread_are_kept_and_reopened() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("items.json");
-        let store = ItemStore::open(&file).unwrap();
-        let thread = slopty_proto::thread::ThreadId::new();
-        let item = |kind| Item { id: ItemId::new(), kind, name: None, facts: BTreeMap::new() };
-        let review = item(ItemKind::Review { thread });
-        let shown = item(ItemKind::Thread { thread });
-        for added in [&review, &shown] {
-            let _added = store.apply(ItemOp::Add(added.clone()), ClientId::new()).unwrap();
-        }
-        drop(store);
-        let reopened = ItemStore::open(&file).unwrap();
-        assert_eq!(reopened.get(review.id), Some(review));
-        assert_eq!(reopened.get(shown.id), Some(shown));
     }
 
     #[test]
@@ -654,7 +489,7 @@ mod tests {
         let shell = added(store.ensure_terminal(SessionId::new(), by).unwrap());
         let page = Item {
             id: ItemId::new(),
-            kind: ItemKind::Browser { url: "http://localhost:3000/".to_owned() },
+            kind: ItemKind::Window { window: slopty_core::WindowId(9) },
             name: Some("docs".to_owned()),
             facts: BTreeMap::new(),
         };
@@ -730,52 +565,6 @@ mod tests {
         assert_eq!((version, items.len()), (50, 50));
         store.flush();
         assert_eq!(store.inner.writes.load(Ordering::SeqCst), 1, "nothing left to flush");
-    }
-
-    /// A file path has its byte limit.
-    #[test]
-    fn paths_are_bounded() {
-        let (_dir, store) = store();
-        let by = ClientId::new();
-        let item =
-            |kind: ItemKind| Item { id: ItemId::new(), kind, name: None, facts: BTreeMap::new() };
-        let file = |path: String| item(ItemKind::File { path });
-        store.apply(ItemOp::Add(file("/".repeat(PATH_MAX))), by).unwrap();
-        for path in [String::new(), "/".repeat(PATH_MAX + 1)] {
-            let err = store.apply(ItemOp::Add(file(path)), by).unwrap_err();
-            assert!(matches!(&err, WorkerError::Items(m) if m == "bad file path"), "{err:?}");
-        }
-    }
-
-    /// A browser tile takes an http or https address with a host, 2 KiB at most.
-    #[test]
-    fn browser_addresses_are_web_ones() {
-        let (_dir, store) = store();
-        let by = ClientId::new();
-        let page = |url: &str| Item {
-            id: ItemId::new(),
-            kind: ItemKind::Browser { url: url.to_owned() },
-            name: None,
-            facts: BTreeMap::new(),
-        };
-        let long = format!("http://localhost/{}", "a".repeat(URL_MAX - 17));
-        for url in ["http://localhost:5173/", "HTTPS://example.test/a?b#c", &long] {
-            store.apply(ItemOp::Add(page(url)), by).unwrap();
-        }
-        let too_long = format!("{long}a");
-        for url in [
-            "file:///etc/passwd",
-            "javascript:alert(1)",
-            "http://",
-            "http:///path",
-            "localhost:5173",
-            "http://local host/",
-            "",
-            &too_long,
-        ] {
-            let err = store.apply(ItemOp::Add(page(url)), by).unwrap_err();
-            assert!(matches!(&err, WorkerError::Items(m) if m == "bad url"), "{url}: {err:?}");
-        }
     }
 
     /// A fact is kept, trimmed, through a reload, and broadcast as the worker took it; a blank

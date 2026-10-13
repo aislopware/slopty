@@ -34,9 +34,8 @@ use std::time::{Duration, Instant};
 pub use agents::{banner_title, program_banner};
 use gpui::{Context, Entity, EventEmitter, Task};
 pub use keys::worker_key;
-use slopty_client::ItemDoc;
-use slopty_client::layout::{TileRef, WorkerKey};
 use slopty_client::relay::RelayWatch;
+use slopty_client::{ItemDoc, ItemRef, WorkerKey};
 use slopty_core::{ClientId, ItemId, SessionId};
 use slopty_proto::ClientMsg;
 use slopty_proto::items::{Item, ItemOp};
@@ -490,7 +489,7 @@ impl WorkspaceView {
 
     /// An item, whichever worker holds it.
     #[must_use]
-    pub fn item(&self, tile: TileRef) -> Option<&Item> {
+    pub fn item(&self, tile: ItemRef) -> Option<&Item> {
         self.workers.get(&tile.worker)?.doc.get(tile.item)
     }
 
@@ -501,18 +500,18 @@ impl WorkspaceView {
 
     /// The tile showing `item`, whichever worker holds it.
     #[must_use]
-    pub fn tile_of(&self, item: ItemId) -> Option<TileRef> {
+    pub fn tile_of(&self, item: ItemId) -> Option<ItemRef> {
         self.workers
             .iter()
             .find(|(_, w)| w.doc.get(item).is_some())
-            .map(|(key, _)| TileRef { worker: *key, item })
+            .map(|(key, _)| ItemRef { worker: *key, item })
     }
 
     /// The tile showing `session`.
     #[must_use]
-    pub fn tile_of_session(&self, session: SessionId) -> Option<TileRef> {
+    pub fn tile_of_session(&self, session: SessionId) -> Option<ItemRef> {
         self.workers.iter().find_map(|(key, w)| {
-            w.doc.item_for_session(session).map(|i| TileRef { worker: *key, item: i.id })
+            w.doc.item_for_session(session).map(|i| ItemRef { worker: *key, item: i.id })
         })
     }
 

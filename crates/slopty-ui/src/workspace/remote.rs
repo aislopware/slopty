@@ -11,11 +11,11 @@ use gpui::{
     AnyWindowHandle, App, Context, Entity, FocusHandle, Focusable as _, WeakEntity, Window,
 };
 use slopty_client::clip::{Answer, Fetched, Place, relay};
-use slopty_client::layout::{TileRef, WorkerKey};
 use slopty_client::remote::Remote;
 use slopty_client::tunnel::Forward;
 use slopty_client::xfer::ledger::{Kept, Way};
 use slopty_client::xfer::{Download, RELINK_WAIT, XferError, paste_paths};
+use slopty_client::{ItemRef, WorkerKey};
 use slopty_core::{SessionId, XferId};
 use slopty_platform::pasteboard::Pasteboard;
 use slopty_proto::ClientMsg;
@@ -42,7 +42,7 @@ pub(super) const CLIP_TICK: Duration = Duration::from_millis(250);
 #[derive(Clone, Debug)]
 pub struct Upload {
     /// The tile it was dropped on.
-    pub tile: TileRef,
+    pub tile: ItemRef,
     /// The shell its paths are typed into when it is done, for a drop on a terminal.
     pub session: Option<SessionId>,
     /// The directory it goes into, for a drop on a folder tile, which lists it again when done.
@@ -78,7 +78,7 @@ pub struct Upload {
 impl Upload {
     /// Nothing sent yet, to `session`'s directory, its paths typed there once done.
     #[must_use]
-    pub const fn to_shell(tile: TileRef, session: SessionId) -> Self {
+    pub const fn to_shell(tile: ItemRef, session: SessionId) -> Self {
         Self {
             tile,
             session: Some(session),
@@ -99,7 +99,7 @@ impl Upload {
 
     /// Nothing sent yet, to the worker's staging and its pasteboard.
     #[must_use]
-    pub const fn to_staging(tile: TileRef) -> Self {
+    pub const fn to_staging(tile: ItemRef) -> Self {
         Self {
             tile,
             session: None,
@@ -121,7 +121,7 @@ impl Upload {
     /// An earlier run's upload to `dest`, dropped on `tile`, taken up again: a folder's lists
     /// it again once done; a shell's types nothing, its prompt having moved on since.
     #[must_use]
-    pub fn taken_up(tile: TileRef, dest: &Dest) -> Self {
+    pub fn taken_up(tile: ItemRef, dest: &Dest) -> Self {
         let dir = match dest {
             Dest::Path(dir) => Some(dir.clone()),
             Dest::SessionCwd(_) | Dest::Staging | Dest::Attachment | Dest::Drag(_) => None,
@@ -394,7 +394,7 @@ impl WorkspaceView {
     /// worker are there already.
     pub(super) fn paste_files_in_window(
         &mut self,
-        tile: TileRef,
+        tile: ItemRef,
         view: &WeakEntity<ScreenView>,
         files: ClipFiles,
         cx: &mut Context<Self>,
@@ -597,7 +597,7 @@ impl WorkspaceView {
     /// a shell, else to staging. Whether it started; when it did not, it has ended.
     pub(super) fn upload(
         &mut self,
-        tile: TileRef,
+        tile: ItemRef,
         paths: &[PathBuf],
         mut upload: Upload,
         cx: &mut Context<Self>,

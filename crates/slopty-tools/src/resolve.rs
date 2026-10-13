@@ -7,9 +7,8 @@
 //! Full ids cost no round trip; anything else asks for the directory or the terminal list, the
 //! directory at most once per resolver.
 
-use slopty_core::{ItemId, SessionId, WorkerId};
-use slopty_proto::items::Item;
-use slopty_proto::orchestration::{ErrorCode, ItemRef, Outcome, TermRef, Verb};
+use slopty_core::{SessionId, WorkerId};
+use slopty_proto::orchestration::{ErrorCode, Outcome, TermRef, Verb};
 use slopty_proto::server::{Liveness, WorkerInfo};
 use slopty_proto::terminal::SessionSummary;
 
@@ -72,20 +71,6 @@ impl<'a, D: Dispatch> Resolver<'a, D> {
         match needle {
             Some(w) => self.worker(Some(w)).await.map(Some),
             None => Ok(None),
-        }
-    }
-
-    /// An item from `worker/item` or a bare item on the only worker online, the item part an
-    /// id or a prefix of one and the worker part as [`Self::worker`] takes it.
-    pub async fn item(&mut self, needle: &str) -> Result<ItemRef, ToolError> {
-        let (worker, item) = split_handle(needle, "an item; write it as worker/item")?;
-        let worker = self.worker(worker).await?;
-        if let Ok(item) = item.parse::<ItemId>() {
-            return Ok(ItemRef { worker, item });
-        }
-        match self.dispatch.call(Verb::ListItems { worker }).await {
-            Outcome::Items(items) => pick_item(worker, &items, item),
-            other => Err(ToolError::unexpected(other)),
         }
     }
 
@@ -194,25 +179,9 @@ fn pick_session(
     }
 }
 
-/// The one item on `worker` whose id starts with `prefix`.
-fn pick_item(worker: WorkerId, items: &[Item], prefix: &str) -> Result<ItemRef, ToolError> {
-    let prefix = prefix.to_lowercase();
-    let hits: Vec<_> = items.iter().filter(|i| i.id.to_string().starts_with(&prefix)).collect();
-    match hits.as_slice() {
-        [one] => Ok(ItemRef { worker, item: one.id }),
-        [] => Err(ToolError::new(ErrorCode::UnknownItem, format!("no item matches {prefix:?}"))),
-        many => Err(ToolError::invalid(format!(
-            "{prefix:?} matches {} items; give more of the id: {}",
-            many.len(),
-            many.iter().map(|i| i.id.to_string()).collect::<Vec<_>>().join(", ")
-        ))),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use slopty_core::WallMs;
-    use slopty_proto::items::ItemKind;
     use slopty_proto::server::{Os, WorkerCaps};
     use slopty_proto::terminal::SessionState;
 
@@ -357,27 +326,5 @@ mod tests {
         let err = pick_session(&list, "ffff").unwrap_err();
         assert!(err.message.contains("no terminal matches"), "{err}");
         assert_eq!(err.code, ErrorCode::UnknownTerminal);
-    }
-
-    /// An item answers to a unique id prefix, as a terminal does.
-    #[test]
-    fn an_item_prefix_must_be_unique() {
-        let item = |id: &str| Item {
-            id: id.parse().unwrap(),
-            kind: ItemKind::File { path: "/w/PLAN.md".to_owned() },
-            name: None,
-            facts: std::collections::BTreeMap::new(),
-        };
-        let worker: WorkerId = STUDIO.parse().unwrap();
-        let items = [
-            item("0199a1b1-0000-7000-8000-00000000aaaa"),
-            item("0199a1b2-0000-7000-8000-00000000bbbb"),
-        ];
-        let hit = pick_item(worker, &items, "0199A1B1").unwrap();
-        assert_eq!(hit, ItemRef { worker, item: items[0].id });
-        let err = pick_item(worker, &items, "0199a1b").unwrap_err();
-        assert!(err.message.contains("matches 2 items"), "{err}");
-        let err = pick_item(worker, &items, "ffff").unwrap_err();
-        assert_eq!(err.code, ErrorCode::UnknownItem);
     }
 }

@@ -29,10 +29,9 @@
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use slopty_core::{ItemId, SessionId, WallMs, WorkerId, XferId};
+use slopty_core::{SessionId, WallMs, WorkerId, XferId};
 
 use crate::folder::FsOp;
-use crate::items::{Item, ItemKind};
 use crate::screen::{CaptureTarget, DisplayInfo, WindowInfo};
 use crate::search::{FileHits, SearchQuery, SearchSummary};
 use crate::server::{Liveness, WorkerFacts, WorkerInfo};
@@ -203,15 +202,6 @@ pub struct TermRef {
     pub worker: WorkerId,
     /// The session on that worker.
     pub session: SessionId,
-}
-
-/// An item on a worker's workspace.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
-pub struct ItemRef {
-    /// The worker whose registry holds it.
-    pub worker: WorkerId,
-    /// The item.
-    pub item: ItemId,
 }
 
 /// A terminal's grid in character cells.
@@ -396,33 +386,6 @@ pub enum Verb {
     ForgetWorker {
         /// Which.
         worker: WorkerId,
-    },
-    /// The items on a worker's workspace; answered with [`Outcome::Items`].
-    ListItems {
-        /// Where.
-        worker: WorkerId,
-    },
-    /// Put an item on a worker's workspace, where every client shows it; answered with
-    /// [`Outcome::Item`]. A terminal comes with [`Verb::OpenTerminal`] instead.
-    OpenItem {
-        /// Where.
-        worker: WorkerId,
-        /// What it shows.
-        kind: ItemKind,
-        /// A name for its tile.
-        name: Option<String>,
-    },
-    /// Name an item, or take its name away.
-    RenameItem {
-        /// Which.
-        item: ItemRef,
-        /// The new name; none shows what the item's content says.
-        name: Option<String>,
-    },
-    /// Take an item off the workspace; a terminal goes with [`Verb::Close`] instead.
-    RemoveItem {
-        /// Which.
-        item: ItemRef,
     },
     /// The windows and displays a worker can stream; answered with [`Outcome::Screens`].
     ListWindows {
@@ -732,9 +695,6 @@ impl Verb {
             | Self::Close { .. }
             | Self::ResizeTerminal { .. }
             | Self::ForgetWorker { .. }
-            | Self::OpenItem { .. }
-            | Self::RenameItem { .. }
-            | Self::RemoveItem { .. }
             | Self::AnswerRequest { .. }
             | Self::SendMessage { .. }
             | Self::RestartWorker { .. }
@@ -765,7 +725,6 @@ impl Verb {
             | Self::Stat { .. }
             | Self::Search { .. }
             | Self::Events { .. }
-            | Self::ListItems { .. }
             | Self::ListWindows { .. }
             | Self::ReadThread { .. }
             | Self::CaptureStill { .. }
@@ -979,8 +938,6 @@ pub enum ErrorCode {
     WorkerUnreachable,
     /// No such terminal.
     UnknownTerminal,
-    /// No such item.
-    UnknownItem,
     /// No such agent.
     UnknownAgent,
     /// A malformed argument (a bad key name, a bad pattern).
@@ -1066,9 +1023,8 @@ pub enum Outcome {
     /// For [`Verb::ListPorts`].
     Ports(Vec<Port>),
     /// Done, nothing to report ([`Verb::SendInput`], [`Verb::Close`],
-    /// [`Verb::ResizeTerminal`], [`Verb::ForgetWorker`], [`Verb::RenameItem`],
-    /// [`Verb::RemoveItem`], [`Verb::AnswerRequest`], [`Verb::Upload`], [`Verb::AgentTell`],
-    /// [`Verb::AgentStop`]).
+    /// [`Verb::ResizeTerminal`], [`Verb::ForgetWorker`], [`Verb::AnswerRequest`],
+    /// [`Verb::Upload`], [`Verb::AgentTell`], [`Verb::AgentStop`]).
     Done,
     /// It failed.
     Error {
@@ -1095,10 +1051,6 @@ pub enum Outcome {
         /// Events after `since` the server no longer holds.
         missed: u64,
     },
-    /// For [`Verb::ListItems`].
-    Items(Vec<Item>),
-    /// For [`Verb::OpenItem`].
-    Item(ItemRef),
     /// For [`Verb::ListWindows`].
     Screens {
         /// Windows, front to back.

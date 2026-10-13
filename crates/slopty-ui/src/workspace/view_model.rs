@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use gpui::{Context, Subscription, Task};
-use slopty_client::layout::WorkerKey;
+use slopty_client::WorkerKey;
 use slopty_proto::ClientMsg;
 use slopty_proto::thread::wire::{Intent, IntentDone, Outcome, Start, ThreadRequest, ThreadRow};
 use slopty_proto::thread::{AgentId, Delivery, IntentId, ThreadId};

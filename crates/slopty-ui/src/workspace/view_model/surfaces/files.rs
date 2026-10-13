@@ -13,7 +13,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use futures::StreamExt as _;
 use gpui::{Context, Task};
-use slopty_client::layout::WorkerKey;
+use slopty_client::WorkerKey;
 use slopty_core::WallMs;
 use slopty_proto::file::{FileRead, WriteResult};
 use slopty_proto::folder::{FsOp, FsOutcome, FsRefusal, Listing};

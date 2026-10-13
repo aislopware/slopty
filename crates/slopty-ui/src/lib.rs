@@ -17,7 +17,6 @@
 
 pub mod clipboard;
 pub mod conversation;
-pub mod identity;
 pub mod key_takers;
 mod outbox;
 #[expect(
@@ -26,7 +25,6 @@ mod outbox;
 )]
 pub mod screen;
 pub mod view_model;
-pub mod window_frame;
 #[expect(
     unreachable_pub,
     reason = "the streaming work owns `screen` and the tile code; narrowed once it lands"

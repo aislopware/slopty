@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use gpui::Context;
-use slopty_client::layout::WorkerKey;
+use slopty_client::WorkerKey;
 use slopty_core::SessionId;
 use slopty_proto::thread::wire::{Intent, TurnEnded};
 use slopty_proto::thread::{ThreadId, TurnId};

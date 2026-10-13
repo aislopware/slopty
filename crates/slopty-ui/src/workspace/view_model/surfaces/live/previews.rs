@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use futures::StreamExt as _;
 use gpui::{Context, Task};
-use slopty_client::layout::WorkerKey;
+use slopty_client::WorkerKey;
 use slopty_view_proto::{PreviewService, PreviewSnapshot};
 use slopty_view_rpc::{RpcError, RpcReply};
 use tokio::sync::watch;

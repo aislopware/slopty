@@ -1,4 +1,4 @@
-use slopty_client::layout::WorkerKey;
+use slopty_client::WorkerKey;
 use slopty_proto::thread::detail::{Hunk, Patch};
 use slopty_proto::thread::wire::{Against, FileDiff, FileKind, Review, ReviewScope};
 

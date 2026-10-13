@@ -1059,12 +1059,6 @@ impl Workspace {
                 ItemKind::Terminal { session } => ("terminal", Some(session.to_string())),
                 ItemKind::Window { .. } => ("window", None),
                 ItemKind::Display { .. } => ("display", None),
-                ItemKind::File { .. } => ("file", None),
-                ItemKind::Folder { .. } => ("folder", None),
-                ItemKind::Browser { .. } => ("browser", None),
-                ItemKind::Review { .. } => ("review", None),
-                ItemKind::Thread { .. } => ("thread", None),
-                ItemKind::Changes { .. } => ("changes", None),
             };
             dump.items.push(ItemInfo {
                 id: item.id.to_string(),

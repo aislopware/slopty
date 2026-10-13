@@ -1,10 +1,9 @@
-//! The worker's item registry: what exists on a worker for its clients to show (terminals, streamed
-//! windows and displays, files, folders, pages and reviews). Worker-authoritative, snapshot
-//! + deltas.
+//! The worker's item registry: what exists on a worker for its clients to show (terminals and
+//! streamed windows and displays). Worker-authoritative, snapshot + deltas.
 //!
-//! Where an item is shown is not here: each client arranges the items of every worker it reaches
-//! in a layout of its own (`slopty_client::layout`), so a phone and a Mac share the set and not
-//! the arrangement.
+//! Where an item is shown is not here: each client shows it where its interface puts it (a
+//! terminal in its chat's terminal panel, a window in a right-pane surface), so a phone and a
+//! Mac share the set and not the arrangement.
 
 use std::collections::BTreeMap;
 
@@ -12,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use slopty_core::{ClientId, DisplayId, ItemId, SessionId, WindowId};
 
 /// What an item shows.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum ItemKind {
     /// A terminal session.
     Terminal {
@@ -29,52 +28,6 @@ pub enum ItemKind {
         /// Display.
         display: DisplayId,
     },
-    /// A text file on the worker, open to edit: the text comes over `WorkerMsg::File`, not the
-    /// registry, and goes back as `ClientMsg::WriteFile`.
-    File {
-        /// Absolute path on the worker.
-        path: String,
-    },
-    /// A web page, usually a server running on the worker reached through a forwarded port.
-    Browser {
-        /// The address as the worker sees it (`http://localhost:5173/`). A loopback address is
-        /// the worker's own: each client opens it through its forward of that port, whatever
-        /// local port the forward took.
-        url: String,
-    },
-    /// A directory on the worker, browsed in place: what is in it comes over
-    /// `WorkerMsg::Folder`, not the registry, and browsing moves the item
-    /// ([`ItemOp::SetFolder`]).
-    Folder {
-        /// Absolute path on the worker, or `~/…` in its home.
-        path: String,
-    },
-    /// The review of a thread's changes: what is in it comes from the thread's review frames
-    /// (`crate::thread::wire::ThreadRequest::Review`), not the registry.
-    Review {
-        /// The thread.
-        thread: crate::thread::ThreadId,
-    },
-    /// An agent's thread, shown as the thread view: what is in it comes from the thread's own
-    /// frames (`crate::thread::wire::ThreadRequest::Follow`), not the registry. A thread whose
-    /// agent runs in a terminal names it, and the terminal's tile is one action away.
-    Thread {
-        /// The thread.
-        thread: crate::thread::ThreadId,
-    },
-    /// A folder's changes in its repository, reviewed with no thread: what is in it comes from
-    /// its repository (`crate::git::GitOp::Changes`), not the registry.
-    Changes {
-        /// A folder in the repository: absolute, or `~/…`.
-        path: String,
-        /// The branch its whole branch is compared with
-        /// ([`crate::thread::wire::Against::Branch`]); `None` for its
-        /// base branch, or what is not committed.
-        against: Option<String>,
-        /// A branch reviewed as committed against `against` (else the base branch), with no
-        /// checkout (`crate::git::GitOp::Range`). `None` reviews the folder's working tree.
-        head: Option<String>,
-    },
 }
 
 /// One item on a worker.
@@ -84,13 +37,12 @@ pub struct Item {
     pub id: ItemId,
     /// Content.
     pub kind: ItemKind,
-    /// The name the human gave the item, shown as its title over whatever its content would
-    /// say (a shell's title, a window's, a file's name); trimmed and at
+    /// The name given to the item, shown as its title over whatever its content would say (a
+    /// shell's title, a window's); trimmed and at
     /// most [`NAME_MAX`] characters, or none.
     pub name: Option<String>,
-    /// What the person said of the item, as open key and value: `project` pins it to a
-    /// project, so every client groups it there. At most [`FACTS_MAX`], each within
-    /// [`fact_fits`].
+    /// What is said of the item, as open key and value: `chat` names the chat a shell was opened
+    /// for, so every client finds it there. At most [`FACTS_MAX`], each within [`fact_fits`].
     pub facts: BTreeMap<String, String>,
 }
 
@@ -100,7 +52,7 @@ pub const NAME_MAX: usize = 128;
 /// The longest key of an item's fact, in characters.
 pub const FACT_KEY_MAX: usize = 64;
 
-/// The longest value of an item's fact, in bytes: a project's key holds a path.
+/// The longest value of an item's fact, in bytes: a value may hold a path.
 pub const FACT_VALUE_MAX: usize = 1024;
 
 /// The most facts one item keeps.
@@ -137,23 +89,7 @@ pub enum ItemOp {
         /// The name as typed; the worker trims it, and a blank one is none.
         name: Option<String>,
     },
-    /// Point a browser item at another address, as typed in its header. Refused for any
-    /// other kind of item and for anything but an `http` or `https` address.
-    SetUrl {
-        /// Item.
-        id: ItemId,
-        /// The address as the worker sees it (`http://localhost:5173/`).
-        url: String,
-    },
-    /// Point a folder item at another directory, as browsing into one does. Refused for any
-    /// other kind of item.
-    SetFolder {
-        /// Item.
-        id: ItemId,
-        /// Absolute path on the worker.
-        path: String,
-    },
-    /// Say a fact of the item (`project` = `atlas` pins it to a project), or take it back
+    /// Say a fact of the item (`chat` = the chat's id), or take it back
     /// with `None`. The worker trims both; a blank value is none, and a fact past
     /// [`fact_fits`] or a new one past [`FACTS_MAX`] is refused.
     SetFact {
@@ -172,11 +108,7 @@ impl ItemOp {
     pub const fn id(&self) -> ItemId {
         match self {
             Self::Add(item) => item.id,
-            Self::Remove(id)
-            | Self::Rename { id, .. }
-            | Self::SetUrl { id, .. }
-            | Self::SetFolder { id, .. }
-            | Self::SetFact { id, .. } => *id,
+            Self::Remove(id) | Self::Rename { id, .. } | Self::SetFact { id, .. } => *id,
         }
     }
 }
@@ -184,9 +116,6 @@ impl ItemOp {
 /// Why an [`ItemOp`] does not apply to an item.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, thiserror::Error)]
 pub enum Refused {
-    /// The op edits a field this kind of item does not have (an address on a terminal).
-    #[error("not a {0}")]
-    WrongKind(&'static str),
     /// [`ItemOp::Add`] and [`ItemOp::Remove`] act on the registry, not on an item.
     #[error("adds and removes act on the registry, not on an item")]
     NotAnEdit,
@@ -204,9 +133,8 @@ impl Item {
     /// still broadcasts such an op, since the echo is how the proposer hears it was taken.
     ///
     /// # Errors
-    /// [`Refused::WrongKind`] for an address or a folder on another kind of
-    /// item, [`Refused::NotAnEdit`] for an add or a remove, and [`Refused::FactBounds`] for a
-    /// fact out of bounds.
+    /// [`Refused::NotAnEdit`] for an add or a remove, and [`Refused::FactBounds`] for a fact out
+    /// of bounds.
     pub fn apply(&mut self, op: &ItemOp) -> Result<bool, Refused> {
         fn set<T: PartialEq + Clone>(field: &mut T, value: &T) -> bool {
             let changed = field != value;
@@ -215,21 +143,17 @@ impl Item {
             }
             changed
         }
-        Ok(match (op, &mut self.kind) {
-            (ItemOp::Add(_) | ItemOp::Remove(_), _) => return Err(Refused::NotAnEdit),
-            (ItemOp::Rename { name, .. }, _) => set(&mut self.name, name),
-            (ItemOp::SetUrl { url, .. }, ItemKind::Browser { url: at }) => set(at, url),
-            (ItemOp::SetFolder { path, .. }, ItemKind::Folder { path: at }) => set(at, path),
-            (ItemOp::SetFact { key, value: None, .. }, _) => self.facts.remove(key).is_some(),
-            (ItemOp::SetFact { key, value: Some(value), .. }, _) => {
+        Ok(match op {
+            ItemOp::Add(_) | ItemOp::Remove(_) => return Err(Refused::NotAnEdit),
+            ItemOp::Rename { name, .. } => set(&mut self.name, name),
+            ItemOp::SetFact { key, value: None, .. } => self.facts.remove(key).is_some(),
+            ItemOp::SetFact { key, value: Some(value), .. } => {
                 let room = self.facts.contains_key(key) || self.facts.len() < FACTS_MAX;
                 if !fact_fits(key, value) || !room {
                     return Err(Refused::FactBounds);
                 }
                 self.facts.insert(key.clone(), value.clone()).as_ref() != Some(value)
             }
-            (ItemOp::SetUrl { .. }, _) => return Err(Refused::WrongKind("browser")),
-            (ItemOp::SetFolder { .. }, _) => return Err(Refused::WrongKind("folder")),
         })
     }
 }
@@ -263,33 +187,19 @@ mod tests {
         Item { id: ItemId::nil(), kind, name: None, facts: BTreeMap::new() }
     }
 
-    /// An edit reports a change only when the value moved, whatever the field; an edit of a
-    /// field the kind lacks is refused and leaves the item alone, as are adds and removes.
+    /// A rename reports a change only when the name moved; adds and removes are refused and
+    /// leave the item alone.
     #[test]
-    fn an_edit_changes_only_what_moves_and_only_where_it_fits() {
+    fn an_edit_changes_only_what_moves() {
         let id = ItemId::nil();
-        let mut page = item(ItemKind::Browser { url: "http://localhost:5173/".to_owned() });
-        let same = ItemOp::SetUrl { id, url: "http://localhost:5173/".to_owned() };
-        let moved = ItemOp::SetUrl { id, url: "http://localhost:8080/".to_owned() };
-        assert_eq!(page.apply(&same), Ok(false), "already there");
-        assert_eq!(page.apply(&moved), Ok(true));
-        assert_eq!(page.apply(&moved), Ok(false), "once");
-        assert_eq!(page.kind, ItemKind::Browser { url: "http://localhost:8080/".to_owned() });
-
+        let mut shell = item(ItemKind::Terminal { session: SessionId::nil() });
         let rename = ItemOp::Rename { id, name: Some("dev".to_owned()) };
-        assert_eq!((page.apply(&rename), page.apply(&rename)), (Ok(true), Ok(false)));
+        assert_eq!((shell.apply(&rename), shell.apply(&rename)), (Ok(true), Ok(false)));
 
-        let mut folder = item(ItemKind::Folder { path: "~/".to_owned() });
-        let into = ItemOp::SetFolder { id, path: "~/src".to_owned() };
-        assert_eq!((folder.apply(&into), folder.apply(&into)), (Ok(true), Ok(false)));
-
-        let before = page.clone();
-        assert_eq!(page.apply(&into), Err(Refused::WrongKind("folder")));
-        assert_eq!(folder.apply(&moved), Err(Refused::WrongKind("browser")));
-        assert_eq!(page.apply(&ItemOp::Remove(id)), Err(Refused::NotAnEdit));
-        assert_eq!(page.apply(&ItemOp::Add(before.clone())), Err(Refused::NotAnEdit));
-        assert_eq!(page, before, "a refused op leaves the item as it was");
-        assert_eq!(Refused::WrongKind("folder").to_string(), "not a folder");
+        let before = shell.clone();
+        assert_eq!(shell.apply(&ItemOp::Remove(id)), Err(Refused::NotAnEdit));
+        assert_eq!(shell.apply(&ItemOp::Add(before.clone())), Err(Refused::NotAnEdit));
+        assert_eq!(shell, before, "a refused op leaves the item as it was");
     }
 
     /// A fact is said, said again to no change, and taken back; one out of bounds, or a new
@@ -300,12 +210,12 @@ mod tests {
         let mut window = item(ItemKind::Window { window: WindowId(7) });
         let pin = |value: Option<&str>| ItemOp::SetFact {
             id,
-            key: "project".to_owned(),
+            key: "chat".to_owned(),
             value: value.map(str::to_owned),
         };
         assert_eq!(window.apply(&pin(Some("atlas"))), Ok(true));
         assert_eq!(window.apply(&pin(Some("atlas"))), Ok(false), "once");
-        assert_eq!(window.facts.get("project").map(String::as_str), Some("atlas"));
+        assert_eq!(window.facts.get("chat").map(String::as_str), Some("atlas"));
         assert_eq!(window.apply(&pin(None)), Ok(true));
         assert_eq!(window.apply(&pin(None)), Ok(false), "already gone");
 

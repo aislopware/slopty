@@ -11,7 +11,7 @@ use std::time::Duration;
 use chrono::Utc;
 use futures::StreamExt as _;
 use gpui::{AsyncApp, Context, Task, WeakEntity};
-use slopty_client::layout::WorkerKey;
+use slopty_client::WorkerKey;
 use slopty_proto::git::{GitDone, GitOp, GitOutcome};
 use slopty_proto::thread::ThreadId;
 use slopty_proto::thread::wire::{Against, FileDiff, FileKind, Review, ReviewScope};

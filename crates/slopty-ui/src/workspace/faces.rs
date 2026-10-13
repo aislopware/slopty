@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use gpui::{App, AppContext as _, Context, Entity};
-use slopty_client::layout::WorkerKey;
+use slopty_client::WorkerKey;
 use slopty_core::SessionId;
 use slopty_proto::RequestId;
 use slopty_proto::git::GitOutcome;

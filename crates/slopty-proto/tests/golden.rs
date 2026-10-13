@@ -699,36 +699,6 @@ mod golden {
             },
         );
         snap(
-            "worker_item_browser",
-            &WorkerMsg::Items(slopty_proto::items::ItemSync::Delta {
-                version: 10,
-                by: ClientId::from_uuid(Uuid::from_u128(0x42)),
-                op: slopty_proto::items::ItemOp::Add(slopty_proto::items::Item {
-                    id: slopty_core::ItemId::from_uuid(Uuid::from_u128(0x77)),
-                    kind: slopty_proto::items::ItemKind::Browser {
-                        url: "http://localhost:5173/".to_owned(),
-                    },
-                    name: None,
-                    facts: std::collections::BTreeMap::new(),
-                }),
-            }),
-        );
-        snap(
-            "worker_item_file",
-            &WorkerMsg::Items(slopty_proto::items::ItemSync::Delta {
-                version: 9,
-                by: ClientId::from_uuid(Uuid::from_u128(0x42)),
-                op: slopty_proto::items::ItemOp::Add(slopty_proto::items::Item {
-                    id: slopty_core::ItemId::from_uuid(Uuid::from_u128(0x77)),
-                    kind: slopty_proto::items::ItemKind::File {
-                        path: "/w/slopty/src/main.rs".to_owned(),
-                    },
-                    name: None,
-                    facts: std::collections::BTreeMap::new(),
-                }),
-            }),
-        );
-        snap(
             "worker_item_named",
             &WorkerMsg::Items(slopty_proto::items::ItemSync::Delta {
                 version: 10,
@@ -752,13 +722,6 @@ mod golden {
                     id: slopty_core::ItemId::from_uuid(Uuid::from_u128(0x78)),
                     name: Some("api".to_owned()),
                 },
-            }),
-        );
-        snap(
-            "client_item_set_url",
-            &ClientMsg::Items(slopty_proto::items::ItemOp::SetUrl {
-                id: slopty_core::ItemId::from_uuid(Uuid::from_u128(0x7b)),
-                url: "http://localhost:3000/docs".to_owned(),
             }),
         );
         snap(
@@ -786,81 +749,13 @@ mod golden {
         );
     }
 
-    /// Folder tiles: the item, a move to another directory, the listing asked for and its
-    /// three answers.
+    /// A folder's listing asked for and its three answers.
     #[test]
     fn folders() {
         use slopty_proto::folder::{FolderEntry, Listing};
-        use slopty_proto::items::{Item, ItemKind, ItemOp, ItemSync};
         use slopty_proto::orchestration::FileKind;
 
-        let id = slopty_core::ItemId::from_uuid(Uuid::from_u128(0x7c));
-        snap(
-            "worker_item_folder",
-            &WorkerMsg::Items(ItemSync::Delta {
-                version: 12,
-                by: ClientId::from_uuid(Uuid::from_u128(0x42)),
-                op: ItemOp::Add(Item {
-                    id,
-                    kind: ItemKind::Folder { path: "/w/slopty".to_owned() },
-                    name: None,
-                    facts: std::collections::BTreeMap::new(),
-                }),
-            }),
-        );
-        snap(
-            "client_item_set_folder",
-            &ClientMsg::Items(ItemOp::SetFolder { id, path: "/w/slopty/src".to_owned() }),
-        );
         snap("client_list_folder", &ClientMsg::ListFolder { path: "~/src".to_owned() });
-        snap(
-            "worker_item_review",
-            &WorkerMsg::Items(ItemSync::Delta {
-                version: 13,
-                by: ClientId::from_uuid(Uuid::from_u128(0x42)),
-                op: ItemOp::Add(Item {
-                    id: slopty_core::ItemId::from_uuid(Uuid::from_u128(0x7d)),
-                    kind: ItemKind::Review {
-                        thread: slopty_proto::thread::ThreadId::from_uuid(Uuid::from_u128(0x7417)),
-                    },
-                    name: None,
-                    facts: std::collections::BTreeMap::new(),
-                }),
-            }),
-        );
-        snap(
-            "worker_item_thread",
-            &WorkerMsg::Items(ItemSync::Delta {
-                version: 14,
-                by: ClientId::from_uuid(Uuid::from_u128(0x42)),
-                op: ItemOp::Add(Item {
-                    id: slopty_core::ItemId::from_uuid(Uuid::from_u128(0x7e)),
-                    kind: ItemKind::Thread {
-                        thread: slopty_proto::thread::ThreadId::from_uuid(Uuid::from_u128(0x7418)),
-                    },
-                    name: None,
-                    facts: std::collections::BTreeMap::new(),
-                }),
-            }),
-        );
-        // A folder's changes, reviewed with no thread.
-        snap(
-            "worker_item_changes",
-            &WorkerMsg::Items(ItemSync::Delta {
-                version: 15,
-                by: ClientId::from_uuid(Uuid::from_u128(0x42)),
-                op: ItemOp::Add(Item {
-                    id: slopty_core::ItemId::from_uuid(Uuid::from_u128(0x7f)),
-                    kind: ItemKind::Changes {
-                        path: "/w/slopty".to_owned(),
-                        against: Some("develop".to_owned()),
-                        head: Some("slopty/slopty/goal".to_owned()),
-                    },
-                    name: None,
-                    facts: std::collections::BTreeMap::new(),
-                }),
-            }),
-        );
         snap(
             "worker_folder_listed",
             &WorkerMsg::Folder {
@@ -1975,12 +1870,11 @@ mod golden {
 
 #[cfg(test)]
 mod orchestration {
-    use slopty_core::{DisplayId, ItemId, SessionId, WallMs, WindowId, WorkerId};
+    use slopty_core::{DisplayId, SessionId, WallMs, WindowId, WorkerId};
     use slopty_proto::codec;
-    use slopty_proto::items::{Item, ItemKind};
     use slopty_proto::orchestration::{
         DirEntry, ErrorCode, EventFilter, FileKind, FileStat, Happening, HubEvent, IdempotencyKey,
-        Input, ItemRef, Outcome, Size, TermAgent, TermRef, Verb,
+        Input, Outcome, Size, TermAgent, TermRef, Verb,
     };
     use slopty_proto::screen::{DisplayInfo, WindowInfo};
     use slopty_proto::server::{FromServer, ToServer};
@@ -2169,19 +2063,8 @@ mod orchestration {
     }
 
     #[test]
-    fn workspace_items() {
+    fn screens() {
         let worker = term().worker;
-        let item = ItemRef { worker, item: ItemId::from_uuid(Uuid::from_u128(0x1_7e5)) };
-        let kind = ItemKind::Browser { url: "http://localhost:5173/".to_owned() };
-        let open = Verb::OpenItem { worker, kind: kind.clone(), name: Some("app".to_owned()) };
-        snap("server_request_open_item", &request(open));
-        snap("server_reply_item", &reply(Outcome::Item(item)));
-        let listed =
-            Item { id: item.item, kind, name: None, facts: std::collections::BTreeMap::new() };
-        snap("server_reply_items", &reply(Outcome::Items(vec![listed])));
-        let rename = Verb::RenameItem { item, name: Some("docs".to_owned()) };
-        snap("server_request_rename_item", &request(rename));
-        snap("server_request_remove_item", &request(Verb::RemoveItem { item }));
         snap("server_request_list_windows", &request(Verb::ListWindows { worker }));
         let window = WindowInfo {
             id: WindowId(4242),

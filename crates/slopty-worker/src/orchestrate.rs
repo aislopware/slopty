@@ -42,14 +42,13 @@ use std::time::Duration;
 
 pub use conversation::{Conversations, Sources};
 use slopty_agent::status::{AgentEvent, AgentSource, AgentStatus, BlockReason, SessionAgent};
-use slopty_core::{ClientId, ItemId, SessionId, WorkerId};
+use slopty_core::{ClientId, SessionId, WorkerId};
 use slopty_engine::ghostty::Position;
 use slopty_proto::WorkerMsg;
 use slopty_proto::folder::{FsOutcome, FsRefusal};
-use slopty_proto::items::{Item, ItemKind, ItemOp};
 use slopty_proto::orchestration::{
-    BUNDLES, BranchBundle, Command, DirEntry, ErrorCode, FileStat, IdempotencyKey, Input, ItemRef,
-    Line, Outcome, Screen, Size, TermAgent, TermRef, ThreadOf, Verb, WaitUntil,
+    BUNDLES, BranchBundle, Command, DirEntry, ErrorCode, FileStat, IdempotencyKey, Input, Line,
+    Outcome, Screen, Size, TermAgent, TermRef, ThreadOf, Verb, WaitUntil,
 };
 use slopty_proto::screen::ScreenEvent;
 use slopty_proto::terminal::{CloseReason, OpenSession, SessionSummary, TermRequest, TermSize};
@@ -614,43 +613,6 @@ impl Orchestrator {
                 let (files, summary) = search(root, query, max_lines, SEARCH_WITHIN).await?;
                 Ok(Outcome::Search { files, summary })
             }
-            Verb::ListItems { worker } => {
-                self.mine(worker)?;
-                Ok(Outcome::Items(inner.items.items()))
-            }
-            Verb::OpenItem { worker, kind, name } => {
-                self.mine(worker)?;
-                if matches!(kind, ItemKind::Terminal { .. }) {
-                    return Err(Failure::new(
-                        ErrorCode::Invalid,
-                        "a terminal comes with OpenTerminal, which starts its session",
-                    ));
-                }
-                let item = Item {
-                    id: ItemId::new(),
-                    kind,
-                    name,
-                    facts: std::collections::BTreeMap::new(),
-                };
-                let id = item.id;
-                self.change(ItemOp::Add(item))?;
-                Ok(Outcome::Item(ItemRef { worker, item: id }))
-            }
-            Verb::RenameItem { item, name } => {
-                self.item(item)?;
-                self.change(ItemOp::Rename { id: item.item, name })?;
-                Ok(Outcome::Done)
-            }
-            Verb::RemoveItem { item } => {
-                if matches!(self.item(item)?.kind, ItemKind::Terminal { .. }) {
-                    return Err(Failure::new(
-                        ErrorCode::Invalid,
-                        "a terminal's item goes when the terminal closes; use Close",
-                    ));
-                }
-                self.change(ItemOp::Remove(item.item))?;
-                Ok(Outcome::Done)
-            }
             Verb::ListWindows { worker } => {
                 self.mine(worker)?;
                 match crate::screen::listing().await {
@@ -751,21 +713,6 @@ impl Orchestrator {
                 }
             }
         }
-    }
-
-    /// Apply an item change as orchestration's and announce it to every client.
-    fn change(&self, op: ItemOp) -> Result<(), Failure> {
-        let delta = self.inner.items.apply(op, ORCHESTRATOR).map_err(item_failure)?;
-        let _sent = self.inner.events.send(WorkerMsg::Items(delta));
-        Ok(())
-    }
-
-    /// The item `item` names, on this worker.
-    fn item(&self, item: ItemRef) -> Result<Item, Failure> {
-        self.mine(item.worker)?;
-        self.inner.items.get(item.item).ok_or_else(|| {
-            Failure::new(ErrorCode::UnknownItem, format!("no item {} on this worker", item.item))
-        })
     }
 
     /// The session's summary as a client's list shows it, if the session runs.
@@ -1329,14 +1276,6 @@ pub async fn list_commands(
             exit: b.exit.filter(|_| b.finished).map(i32::from),
         })
         .collect())
-}
-
-/// An item change the registry refused: a missing item, or a bad name, path, address or note.
-fn item_failure(e: WorkerError) -> Failure {
-    match e {
-        WorkerError::NoSuchItem => Failure::new(ErrorCode::UnknownItem, e.to_string()),
-        other => Failure::new(ErrorCode::Invalid, other.to_string()),
-    }
 }
 
 fn unexpected() -> Failure {

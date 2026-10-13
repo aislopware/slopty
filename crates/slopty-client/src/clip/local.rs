@@ -45,7 +45,7 @@ use slopty_proto::transfer::{
 use tokio::sync::watch;
 
 use super::{Fetched, MAX_CLIP_BYTES, digest};
-use crate::layout::WorkerKey;
+use crate::WorkerKey;
 use crate::remote::Remote;
 
 /// Files on the clipboard, for a paste that moves them.

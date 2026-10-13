@@ -11,7 +11,6 @@ use serde::Serialize;
 use slopty_core::{DisplayId, SessionId, WindowId};
 use slopty_net::client::bind_client;
 use slopty_proto::folder::FsOp;
-use slopty_proto::items::ItemKind;
 use slopty_proto::orchestration::{
     EventFilter, Happening, IdempotencyKey, Input, Outcome, Size, ThreadView, Verb, WaitUntil,
     Waited,
@@ -261,12 +260,7 @@ pub enum VerbCmd {
         #[arg(long)]
         worker: Option<String>,
     },
-    /// Items on a worker's workspace: the tiles every client shows.
-    Item {
-        #[command(subcommand)]
-        cmd: ItemCmd,
-    },
-    /// The windows and displays a worker can stream, for `slopty item open --window`.
+    /// The windows and displays a worker can stream, for `slopty capture`.
     Windows {
         /// Worker id or name (the only worker online when omitted).
         #[arg(long)]
@@ -352,79 +346,6 @@ pub struct ThreadWhich {
 impl ThreadWhich {
     fn arg(&self) -> ops::ThreadArg<'_> {
         ops::ThreadArg { thread: self.agent.as_deref(), term: self.term.as_deref() }
-    }
-}
-
-/// An item: `worker/item`, the worker by id or name and the item by id or a unique prefix, or
-/// an item alone on the only worker online.
-const ITEM_HELP: &str = "Item: worker/item (worker id or name; item id or a unique prefix), or \
-                         an item alone";
-
-/// `slopty item …`.
-#[derive(Subcommand, Debug)]
-pub enum ItemCmd {
-    /// The items on a worker's workspace.
-    List {
-        /// Worker id or name (the only worker online when omitted).
-        #[arg(long)]
-        worker: Option<String>,
-    },
-    /// Put a tile on a worker's workspace and print its ITEM.
-    Open {
-        /// Worker id or name (the only worker online when omitted).
-        #[arg(long)]
-        worker: Option<String>,
-        /// A name for the tile.
-        #[arg(long)]
-        name: Option<String>,
-        #[command(flatten)]
-        kind: KindArgs,
-    },
-    /// Name an item's tile, or take its name away with no `--name`.
-    Rename {
-        #[arg(help = ITEM_HELP)]
-        item: String,
-        /// The new name.
-        #[arg(long)]
-        name: Option<String>,
-    },
-    /// Take an item off its workspace (a terminal goes with `slopty close`).
-    Remove {
-        #[arg(help = ITEM_HELP)]
-        item: String,
-    },
-}
-
-/// What a new item shows: exactly one.
-#[derive(Args, Debug)]
-#[group(required = true, multiple = false)]
-pub struct KindArgs {
-    /// A web page; a localhost address is the worker's own.
-    #[arg(long)]
-    url: Option<String>,
-    /// A text file on the worker to edit, absolute.
-    #[arg(long)]
-    file: Option<String>,
-    /// A window to stream, by its id from `slopty windows`.
-    #[arg(long)]
-    window: Option<u32>,
-    /// A display to stream, by its id from `slopty windows`.
-    #[arg(long)]
-    display: Option<u32>,
-}
-
-impl KindArgs {
-    fn kind(self) -> Result<ItemKind> {
-        let Self { url, file, window, display } = self;
-        match (url, file, window, display) {
-            (Some(url), None, None, None) => Ok(ItemKind::Browser { url }),
-            (None, Some(path), None, None) => Ok(ItemKind::File { path }),
-            (None, None, Some(id), None) => Ok(ItemKind::Window { window: WindowId(id) }),
-            (None, None, None, Some(display)) => {
-                Ok(ItemKind::Display { display: DisplayId(display) })
-            }
-            _ => bail!("give one of --url, --file, --window, --display"),
-        }
     }
 }
 
@@ -830,30 +751,6 @@ async fn execute(cmd: VerbCmd, link: &Link, json: bool, key: Option<IdempotencyK
             } else {
                 print!("{}", view::ports_text(worker, &ports));
             }
-        }
-        VerbCmd::Item { cmd: ItemCmd::List { worker } } => {
-            let (worker, items) = ops::items(&mut res, worker.as_deref()).await?;
-            if json {
-                print_json(&view::items(worker, &items))?;
-            } else {
-                print!("{}", view::items_text(worker, &items));
-            }
-        }
-        VerbCmd::Item { cmd: ItemCmd::Open { worker, name, kind } } => {
-            let item = ops::open_item(&mut res, worker.as_deref(), kind.kind()?, name, key).await?;
-            if json {
-                print_json(&view::opened_item(item))?;
-            } else {
-                println!("{}", view::item_string(item));
-            }
-        }
-        VerbCmd::Item { cmd: ItemCmd::Rename { item, name } } => {
-            ops::rename_item(&mut res, &item, name, key).await?;
-            print_done(json)?;
-        }
-        VerbCmd::Item { cmd: ItemCmd::Remove { item } } => {
-            ops::remove_item(&mut res, &item, key).await?;
-            print_done(json)?;
         }
         VerbCmd::Windows { worker } => {
             let (_worker, windows, displays) = ops::windows(&mut res, worker.as_deref()).await?;

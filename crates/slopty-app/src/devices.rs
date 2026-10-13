@@ -9,7 +9,7 @@
 //! this device away.
 
 use gpui::{App, Context};
-use slopty_client::layout::WorkerKey;
+use slopty_client::WorkerKey;
 use slopty_proto::server::Liveness;
 use slopty_view_proto::DeviceAction;
 

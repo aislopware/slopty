@@ -1,7 +1,7 @@
 //! What a machine can start: the agents its own link says are installed there, Claude Code,
 //! Codex, pi and every ACP agent alike, so a machine reached with no server offers all it has.
 
-use slopty_client::layout::WorkerKey;
+use slopty_client::WorkerKey;
 use slopty_proto::thread::AgentId;
 
 use super::WorkspaceView;

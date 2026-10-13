@@ -13,7 +13,7 @@ use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 use gpui::{AppContext as _, Context};
-use slopty_client::layout::WorkerKey;
+use slopty_client::WorkerKey;
 use slopty_proto::server::Os;
 use slopty_view_proto::Device;
 use slopty_view_rpc::RpcError;

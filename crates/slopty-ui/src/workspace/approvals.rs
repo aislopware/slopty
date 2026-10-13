@@ -30,7 +30,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use gpui::Context;
-use slopty_client::layout::WorkerKey;
+use slopty_client::WorkerKey;
 use slopty_core::ClientId;
 use slopty_platform::notify::Pressed;
 use slopty_proto::orchestration::{ErrorCode, Outcome, TermRef, ThreadOf, ThreadView, Verb};

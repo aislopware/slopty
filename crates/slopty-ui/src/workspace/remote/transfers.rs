@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{AppContext as _, Context};
-use slopty_client::layout::WorkerKey;
+use slopty_client::WorkerKey;
 use slopty_client::remote::Remote;
 use slopty_client::xfer::ledger::{Kept, Ledger, Way};
 use slopty_client::xfer::{Brought, Versions};

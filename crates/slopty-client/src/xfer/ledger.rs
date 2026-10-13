@@ -15,7 +15,7 @@ use slopty_core::XferId;
 use slopty_proto::transfer::Dest;
 
 use super::Versions;
-use crate::layout::{TileRef, WorkerKey};
+use crate::{ItemRef, WorkerKey};
 
 /// The ledger's file in the client's data directory.
 pub const FILE: &str = "transfers.json";
@@ -37,7 +37,7 @@ pub enum Way {
     /// Files from here to the worker.
     Up {
         /// The tile they were dropped on.
-        tile: TileRef,
+        tile: ItemRef,
         /// The files and folders here.
         files: Vec<PathBuf>,
         /// Where they go there.
@@ -130,7 +130,7 @@ mod tests {
             xfer,
             worker,
             way: Way::Up {
-                tile: TileRef { worker, item: ItemId::new() },
+                tile: ItemRef { worker, item: ItemId::new() },
                 files: vec![PathBuf::from("/Users/me/report.pdf")],
                 dest: Dest::SessionCwd(SessionId::new()),
                 total: 1_200,

@@ -29,7 +29,7 @@ use std::time::Duration;
 
 use futures::FutureExt as _;
 use gpui::{AsyncApp, Context, Task, WeakEntity};
-use slopty_client::layout::WorkerKey;
+use slopty_client::WorkerKey;
 use slopty_proto::file::{FileRead, WriteResult};
 use slopty_proto::folder::{FsOp, FsOutcome, Listing};
 use slopty_proto::git::{GitOp, GitOutcome};

@@ -47,7 +47,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui::{Context, Entity};
-use slopty_client::layout::WorkerKey;
+use slopty_client::WorkerKey;
 use slopty_core::{ItemId, SessionId};
 use slopty_platform::notify::info::{ASK, ITEM, SESSION, THREAD, WORKER};
 use slopty_platform::notify::{self, APPROVAL, Alerts, Note, Notifier, REPLYING, Tap};

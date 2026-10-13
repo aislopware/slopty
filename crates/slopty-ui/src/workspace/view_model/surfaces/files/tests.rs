@@ -1,4 +1,4 @@
-use slopty_client::layout::WorkerKey;
+use slopty_client::WorkerKey;
 use slopty_proto::git::{GitDone, GitFile, GitOutcome, GitStatus};
 use slopty_view_proto::{GitFileState, WorkspaceFileChangeKind, WorkspaceLineEnding};
 

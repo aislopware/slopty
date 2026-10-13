@@ -1375,8 +1375,6 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::FsChange { worker, .. }
         | Verb::Search { worker, .. }
         | Verb::ListPorts { worker }
-        | Verb::ListItems { worker }
-        | Verb::OpenItem { worker, .. }
         | Verb::ListWindows { worker }
         | Verb::CaptureStill { worker, .. }
         | Verb::Upload { worker, .. }
@@ -1388,7 +1386,6 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::StartThread { worker, .. } => Some(*worker),
         // Asked of one worker by the server alone ([`Hub::ask_facts`]).
         Verb::Settings { of, .. } | Verb::WorkerFacts { worker: of } => *of,
-        Verb::RenameItem { item, .. } | Verb::RemoveItem { item } => Some(item.worker),
         Verb::SendInput { term, .. }
         | Verb::ReadScreen { term }
         | Verb::ReadOutput { term, .. }

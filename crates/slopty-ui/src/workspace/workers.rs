@@ -4,8 +4,7 @@
 use std::time::Duration;
 
 use gpui::{AppContext as _, Context, Entity};
-use slopty_client::ItemChange;
-use slopty_client::layout::{TileRef, WorkerKey};
+use slopty_client::{ItemChange, ItemRef, WorkerKey};
 use slopty_core::{ItemId, SessionId, StreamId};
 use slopty_proto::ClientMsg;
 use slopty_proto::handshake::HelloAck;
@@ -612,13 +611,7 @@ impl WorkspaceView {
                 .filter_map(|i| match i.kind {
                     ItemKind::Window { window } => Some((i.id, CaptureTarget::Window(window))),
                     ItemKind::Display { display } => Some((i.id, CaptureTarget::Display(display))),
-                    ItemKind::Terminal { .. }
-                    | ItemKind::File { .. }
-                    | ItemKind::Folder { .. }
-                    | ItemKind::Browser { .. }
-                    | ItemKind::Review { .. }
-                    | ItemKind::Changes { .. }
-                    | ItemKind::Thread { .. } => None,
+                    ItemKind::Terminal { .. } => None,
                 })
                 .collect();
             for &(id, target) in &wanted {
@@ -686,7 +679,7 @@ impl WorkspaceView {
                     view
                 });
                 view.update(cx, |v, cx| v.set_rtt(rtt, shown, cx));
-                let tile = TileRef { worker: key, item: id };
+                let tile = ItemRef { worker: key, item: id };
                 let behind_stale = self.screens.contains_key(&id)
                     && self.workers.get(&key).is_some_and(|w| w.stale_screens.contains(&id));
                 cx.subscribe(&view, move |this, view, event, cx| match event {

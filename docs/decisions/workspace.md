@@ -2376,3 +2376,18 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
     `workspace::tests::outbox::a_full_control_stream_holds_what_must_arrive_in_order` (a stream
     filled to its depth, then an attach, a save, two watch sets and a close: all arrive in
     order after the fill, the first watch set outdated; a worker down reports nothing sent).
+
+- ✅ **The registry holds what runs and what streams; what only a tile showed is gone**
+  (2026-10-13). With the tiles deleted, nothing in the app made or showed a file, folder,
+  browser, review, thread or changes item, so the item kinds are a terminal, a window and a
+  display, and the ops that only moved a page or a folder (`SetUrl`, `SetFolder`) went with
+  them. The orchestration verbs that put an item in front of the person (`ListItems`,
+  `OpenItem`, `RenameItem`, `RemoveItem`, the CLI's `slopty item`) went too: an item they opened
+  showed nowhere, so the tool told an agent something false. Showing the person a window or a
+  page from an agent is the shell's to offer when it is wanted, as a surface of the chat. The
+  client's tiling model, its saved layout and frecency, its project grouping, its search pages,
+  its pending starts, its unsaved-edit backups and its item cache, which only the tiles read,
+  went with the view's identity hues and window frame; `WorkerKey` and `ItemRef` (an item on a
+  worker) are what remain of `slopty_client::layout`. Tests: `slopty-proto`
+  `items::tests::an_edit_changes_only_what_moves`, `slopty-client`
+  `items::tests::snapshot_then_deltas_and_echoes`.

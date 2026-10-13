@@ -868,268 +868,83 @@ advertise `WorkerCaps::virtual_displays`; Linux says no.
 
 ## 4. Workspace
 
-Every worker's items in one tiled workspace: projects, each holding tabs, each tab a split layout
-of panes, after Zed's `PaneGroup` and MonoCode's layout (`docs/decisions/workspace.md`, "Tiling
-replaces the scrolling strip", and the steps after it). Items: terminal, remote window, remote display, file, folder, browser,
-thread, review, changes (`ItemKind` in `crates/slopty-proto/src/items.rs`). An agent in a live
-terminal is shown in that terminal's tile, its thread as the tile's face; a thread tile is for a
-thread with no live terminal, and turns into its terminal's tile in place once it has one
-(`slopty-ui::workspace::faces`). The worker keeps only the registry
-(`slopty-worker::items::ItemStore`: the items, their names and sleep; `Add`/`Rename`/
-`Sleep`/`Remove`, each op carrying only the field it changes, a refused one answered with a snapshot,
-a session's item made and removed with it); `slopty-client::items::ItemDoc` mirrors it with
-optimistic local ops and recognises its own echo by `by == me`. Where each item sits is this device's alone.
-`slopty-client::layout::tiling::Tiling` is a pure model of the projects, each keyed by a
-`GroupKey` home (a project, else a repository, a folder or a machine), their tabs, and each tab's
-n-ary split tree (`layout::tree`: splits by row or column with shares, and panes holding tiles as
-their tabs, one shown). Ids are stable across edits, and the tree is normalised after each one.
-It is saved as `layout.json` in the client's data directory, and an old file it cannot read is
-set aside unread. Given the area, the tiling gives back the tab's frame of pane rectangles
-(`TabFrame`), built again only when the tree, the area or the zoom changes. A tile is
-`(WorkerKey, ItemId)`, so one `slopty-ui::workspace::WorkspaceView` shows every worker at once.
+The window is zeron's interface, copied as `slopty-shell` (`docs/decisions/ui.md`, "The
+interface is zeron's UI and UX, copied as Slopty's own"), and nothing else draws in it. The
+shell knows nothing of workers: it asks one RPC service, Slopty's view model
+(`slopty_ui::view_model::ViewModel`), in process through `slopty_view_rpc::memory_client`, and
+that service is fed by `slopty_ui::workspace::WorkspaceView`, which keeps every worker this
+client reaches and draws nothing (`docs/decisions/ui.md`, "The tiling workspace is deleted; the
+shell is the only interface").
 
-Where new work goes:
+**The model in the shell's words** (`view_model::rows`, `view_model::transcript`):
 
-- **Beside its source.** This client's own echo opens there by the room rule
-  (`Tiling::open_beside`). It goes right while each pane of the row keeps its least width
-  (`Room`: 520 pt with a pointer, 480 pt on touch), else below while both halves keep 300 pt,
-  else it becomes a tab of the source's pane.
-- **Tabs and splits by key.**
-  - ⌘T opens an agent's composer and ⌘⇧T a terminal, each in a tab of its own.
-  - ⌘D and ⌘⇧D split a terminal off right or down.
-  - ⌘⌥T shows or hides the tab's terminal: a pane below the whole tab, a third of its height.
-  - The worker makes a shell, so its place is decided when its item comes, by the ask queued
-    for it on its worker (`workspace::tabs::Opening`).
-- **From elsewhere** (another device, the worker's own list): it arrives as a background tab of
-  its project (`Tiling::arrive`) and moves no focus.
-- **Never moved for it.** A placed tile never moves when its facts change. Only the person moves
-  it: the move keys, a drag, or "Move to project…".
+- a **device** is a worker, its row in Settings → Devices carrying the actions the app answers
+  (`DeviceAction`: update, remove, wake, forget, show in Finder; on the server's row update all
+  and copy grant);
+- a **space** is a folder on a worker, and a **chat** is a thread there, its **session** the
+  thread's live status; a subagent is a child thread under its parent;
+- a chat's **transcript** is its thread's turns, the person's messages as user entries and each
+  answer as one assistant entry of text, reasoning, tool calls and notices, followed while the
+  shell holds a watch on it (`Ask::Follow`).
 
-What a tile's project is comes from `slopty-client::groups`: each tile yields an open
-map of facts (`machine`, `kind`, `os`, `agent`, `cwd`, `repo`, `folder`, `branch`, `project`,
-`facts.<key>` from its thread; `slopty-ui::workspace::grouping` assembles them from what the
-client holds), a grouping is a chain of fact keys (by default `project`, `repo`, `folder`,
-`machine`), and tiles that share any value of their first fact on the chain are one group, so
-one repository's clones on three machines are one project. An item pinned to a project says
-so in its own `project` fact (`ItemOp::SetFact`). The navigator lists *Projects*, each
-followed by its threads at work that have no tile here, then *Machines* (each machine's health and what has no project); a
-notification stacks in its project's thread; the palette goes to a project by frecency, scopes
-the frame to one and regroups the navigator by any fact (`docs/decisions/ui.md`, "The
-navigator groups by project; the machine is a facet"). A worker that drops keeps its tiles
-("reconnecting"); its next snapshot removes only what it no longer has. Each terminal's agent
-badge starts from its `SessionSummary.agent` when the worker connects or the session opens
-(`WorkspaceView::seed_agents`), so a client that joins late names the running agents and
-their status before any event arrives, and offers the hooks only where the seed's source is not
-a hook; an event always wins over the seed. A project's row in the navigator shows that project on the tab it was left on, a
-tile's row goes to its tab and pane, and the breadcrumb's project menu goes between projects.
+A chat the shell mints before its first message is held by the bridge
+(`workspace::view_model::Bridge`) until that message starts its thread, and the thread then goes
+by the chat's id. The standing lists (devices, spaces, chats, sessions, the server's presence)
+are gathered for a frame and published as watches (`Feed`); live sessions are said again every
+15 s, inside the shell's 45 s staleness window. Every other call is answered on the UI thread by
+the workspace (`Ask::Call`) or refused as an unknown method.
 
-The view draws the tab on show (`workspace::area`, `workspace::panes`):
+**Each worker** is one entry in `WorkspaceView`: its link (`slopty_client::WorkerLink`), its
+thread hub (`ThreadHub`, the worker's thread table and a mirror per followed thread), its
+sessions and its item registry. The worker keeps the registry
+(`slopty-worker::items::ItemStore`: terminals, and the windows and displays being streamed,
+each with a name and open facts; `Add`/`Remove`/`Rename`/`SetFact`, each op carrying only what
+it changes, a refused one answered with a snapshot, a session's item made and removed with it);
+`slopty_client::ItemDoc` mirrors it with optimistic local ops and knows its own echo by
+`by == me`. A shell opened for a chat carries the fact `chat`, so one still running when the app
+comes back is found again by the chat that asks (`surfaces::live::terminals`).
 
-- **Panes.** Each pane is an absolutely placed element at its rectangle, so no nested flex solve
-  weighs siblings against each other. Sashes lie over the edges between panes; a drag on one
-  shares the room out again, and a double-click evens it.
-- **The title bar** holds the project's tabs. Each says the title of its focused work, a mark
-  for each agent in it at work or finished, and its close.
-- **Only what shows costs anything.** A tile in a background tab, in a hidden pane or behind
-  its pane's shown tab builds no element. A terminal sizes its grid from its pane and asks for a
-  PTY size only when its whole cell count changes (`TerminalView::fitted`). A remote tile's
-  stream goes after 5 s off screen, and frames are asked for only while something moves.
-- **Carrying.** A pane's header or tab, a navigator row or a title tab, pressed and moved 4 pt,
-  carries its tile or tab. Within a fifth of a pane's side from an edge it splits that pane;
-  in the middle it joins the pane's tabs; on the title strip it makes or moves a tab; on a
-  project's row it goes to that project.
-- **Zoom.** ⇧⌘↩ zooms the focused pane over the tab, and the docked navigator steps aside until
-  the zoom ends.
-- **Keys.** ⌘⌥ and an arrow focus a pane, and ⌘⌥⇧ and an arrow move the tile, splitting out at
-  the tab's edge. ⌘1–9 pick a tab, ⌘[ and ⌘] go back and forward through the tabs visited, and
-  ⌘⌥[ and ⌘⌥] step a pane's tabs. They are bound in `Workspace && !Screen`, so a focused remote
-  window gets them all, and ⌃Tab is the way back.
-- **The phone's model** applies below 700 pt, or 900 pt on touch, which takes in an iPad in
-  Split View. The focused pane fills the tab, its title is the way to the tab's other panes and
-  the project's tabs, and every new tile is a tab.
+**The right pane and the dock** (`workspace::view_model::surfaces`) answer the shell's calls
+through each worker's own verbs:
 
-The window has no title bar and no status bar. Its top line is the navigator's header and every
-top pane's tab bar, one row on one rule; a top tab bar's empty run drags the window. A project's
-tabs are its rows in the navigator; every pane shows its tab bar, one cell for a lone tile. The
-top line's two ends are views of their own drawn in the top-left and top-right tab bars
-(`workspace::cluster`), or in a line of the window's own while no pane meets the top:
+- *Changes*: a thread's diff, the working tree's live and the branch's or the latest turn's on
+  asking, cut by the worker's review (`GitOp::Changes`) and written as the unified patch the
+  shell reads, with each file's two sides whole for its highlighting.
+- *Files*: a space's tree, its search, a file read and saved (its version is its size and
+  modification time, which the worker's save checks a conflict by), an entry moved or trashed,
+  and the tree's and git's changes watched.
+- *Terminal* (⌘J, and a right-pane tab): `OpenTerminal` asks the chat's machine for a shell in
+  its folder and answers with the session; the shell then hosts Slopty's own `TerminalView`
+  for it (`slopty_shell::live`, a `Host` the app installs that hands the shell a view by id).
+- *Remote window*: the machine's windows and displays to pick from (`slopty.ListScreens`), one
+  shown (`slopty.OpenScreen`, which puts a window or display item on the worker whose stream
+  `reconcile_screens` opens) and let go (`slopty.CloseScreen`); the shell hosts the
+  `ScreenView`.
+- *Browser*: the ports the chat's machine listens on, each forwarded to a loopback port here
+  (`slopty_client::tunnel`), so a preview loads the worker's page at a local address.
+- *Settings*: the agents each machine offers (from its worker's caps; installed by the person,
+  never by Slopty), the one autonomy setting, Devices with Add device (this Mac shared, a
+  machine installed over ssh, a server joined or set up; `surfaces::adding`), a phone's code to
+  join, and the threads the person archived (`interface/archived.json`, the person's own filing:
+  archiving stops nothing).
 
-- the lead: the lights' room and the navigator's toggle while it is hidden, then back and
-  forward through the tabs visited;
-- the cluster: the tab's terminal toggle, the breadcrumb (`project ▾ / checkout ▾ / branch`)
-  while the navigator is hidden, the readouts only while they warn (`workspace::readouts`), the
-  transfers in flight, the bell and "…" (settings and adding a machine; on a phone the palette
-  too). The notices about no one tile's work hang under it.
+**Around the shell**, the workspace keeps what makes a worker feel local and what reaches the
+person away from it:
 
-A file's language, indent and caret end its own tab bar (`file::FileFacts`).
+- the clipboard shared with the workers, following the keyboard into whichever live view has it
+  (`workspace::remote`, `clipboard`), files dropped onto a terminal or a window, uploaded and
+  typed or pasted there (`remote::transfers`), and the forwarded ports;
+- the notes posted while the app is not in front (`workspace::attention`: an agent that comes
+  to need the person, a program's `blocked` status, a long turn or command that ends), with
+  Allow and Deny answered from the note (`workspace::approvals`), the turns left unread
+  (`workspace::turns`, the worker's word, so a turn read on the phone is read on the Mac), and
+  where the person is (`workspace::presence`), which the server uses to send a notice only
+  where it is wanted.
 
-A shell's title is, first that says something, the command it runs, a title its program set
-(not the shell's own name, a path or a `user@host:path` prompt), its repository or directory,
-else "Terminal"; an agent's is its own title, else the agent's name. Its header context then
-says where it is less what the title said (`WorkspaceView::terminal_title`, `shell_context`),
-and a path under the worker's home, which its `HelloAck` names, reads `~/…`. A command past
-`RUNNING_AFTER` (3 s) is `Status::Running`: the neutral tone and a calm mark that steps once a
-second, beside its running time, the least of what a rollup counts. A menu that closes hands the keyboard back to the
-focused tile (`WorkspaceView::return_keyboard`), as the settings and the add-worker dialog do. ⌘W on any tile takes it off and offers it
-back for `UNDO_CLOSE` (5 s): ⌘Z, the palette's "Undo close" or the notice's "Undo" (under the cluster, `workspace::toast`) put the
-item back as it was (`remember_closed`, `take_back`), else `forget_closed` lets go. An idle
-shell keeps its session and its attached view through the wait, so its rows come back
-untouched and `forget_closed` sends the worker `Close`; every other tile is its item, so the
-document restores it (a file tile's editor waits with it, so its edit comes back too). An ended
-shell is the one exception: it has no session to keep and no rows the worker could replay, so it
-goes at once. A note (⌘⇧N) is a Markdown file on the worker, opened as a file tile: the focused
-shell's directory, else the worker's home, and a name for the moment on this device's clock
-(`note-2026-10-05-143210.md`, `workspace::commands::note_path`). It opens on its source and
-is written to disk by ⌘S like any file, so agents read and write notes as the files they are.
-Any tile takes a **name** (⌘E, or a double-click on its header; `Item.name`,
-protocol 37, worker-sanitised to 128 characters): document state every client shows in place
-of the derived title until it is cleared, and what the palette's "Go to" line says. A
-**file tile** (`ItemKind::File { path }`, `slopty-ui::file`) is an editor on a file on the
-worker: the item names the absolute path and lives in the shared document, the text does
-not. Each client asks `ClientMsg::ReadFile` when the tile appears (`workspace
-reconcile_files`, which also sends the set of paths as `ClientMsg::WatchFiles`: the
-worker follows each one on the kernel's events and re-sends a changed file unasked) and puts the `WorkerMsg::File` answer (`slopty-worker::file::read`: the whole
-text up to 16 MiB, `FileRead::Text | Streamed | Binary | Missing | TooLarge`) into gpui-kit's code
-editor (`EditorState`, line numbers, no folding or wrap) in the theme's mono font, or one line
-saying why not. Colour comes from the grammar the path names (`slopty-kit::highlight`: syntect's
-bundled grammars on the pure-Rust regex engine, reduced to nine tokens painted from the
-theme's palette); `highlight::editor::EditorHighlighter` is the editor's highlighter, which
-moves the last parse's colours with each edit (`editor::splice`) and parses the whole text
-again on a background thread 60 ms after the typing stops. The same hook colours a fenced
-block in an answer through gpui-kit's `TextViewDefaults`. ⌘S (`SaveFile`, key context
-`FileEditor`) sends `ClientMsg::WriteFile { path, text, base_modified_ms }`, the text
-carrying the file's final newline when the read had one (`FileRead::Text.final_newline`); the header shows a quiet dot while the text differs from the read, and the answer
-(`WorkerMsg::Written`, `FileView::written`) clears it, or keeps it with a one-line reason.
-What the worker sends next is taken by the state the tile is in: its own save's echo changes
-nothing; a clean tile takes a change on disk silently, tints the lines that differ
-(`file::changed_lines`, `similar` over the lines) and puts the caret on the first; a dirty tile
-keeps the edit and shows "Changed on disk" with "Reload" and "Overwrite" inline, and a
-`Conflict` answer to a save does the same. Reload asks for the file again and takes it;
-Overwrite saves with no base. A file past 16 MiB (`TooLarge`) is not read at all: the tile
-says so in that line and stays read-only. A
-tile opened from an edit lands on the edit's line (`ToolDetail::Diff.line`: the worker finds
-`old_string` in the file, or `new_string` once the edit landed, `transcript::locate`,
-tinted in the accent tone, `FileView::focus_line`). The tile reads again when any agent's
-Edit/Write result arrives in the workspace and when "view" is pressed on another call for the
-same path (one tile per path: `WorkspaceView::open_file` reveals the existing one). Titled
-`name · parent` (`workspace::file_title`), after a small page glyph that drags the file out
-of the app (macOS, `WorkspaceView::file_proxy`); its dump entry is `ItemInfo.file` (path, summary,
-lines, edited, trouble, read-only). The way in is the palette: a path typed in opens as an
-`Open <path>` line against the active shell's directory, and a word asked of the worker's
-files does the same for its hits; either opens the tile with the keyboard in the editor. The
-palette lists every tile as "Go to <title>" after the sessions (`PaletteRun::Item`). ⌘F with the
-tile active opens the kit's find bar, as every tile does (`kit::FindBar`, `FileView::find`, key
-context `FileSearch`): a hit is a match of the query (`kit::find::Query`: smart case, whole word,
-pattern), tinted in the terminal's search tones, stepped with ⌘G/↩ and wrapped; Esc closes it and the editor takes the keyboard back. Inside
-the editor, ⌘F is the tile's find, not gpui-kit's, and ⌘⌥↑/↓ move the focus between tiles, not add
-carets (bindings in `FileEditor > Input`).
-
-**Hot exit.** An edit not yet saved is kept on this device as it is typed, so a quit, a crash
-or a SIGKILL loses none of it. `slopty_client::unsaved::Store` holds one backup per file tile,
-keyed by its worker and item, in `<data dir>/unsaved/` (the whole text, the version it started
-from, whether it was already a conflict). Each is written by `slopty_platform::fs::replace`,
-and every change is numbered so the later of two to one backup stands whichever thread lands
-it. `workspace/unsaved.rs` decides what to write: a tile's `FileView::backup_mark` moving
-(never a caret blink) brings on a pass, which compares marks on the UI thread and takes the
-editor's rope, shared, for a tile that is behind. The text is read out and written off the UI
-thread, at once after a quiet spell, then at most every 200 ms, or less often for a large edit
-(8 MiB a second at most). A failed write is tried again with a growing wait, and on quit what
-is left is written synchronously (`keep_unsaved_now`, from the app's `on_app_quit`). A tile's
-backup goes once the tile is clean, or closed for good after ⌘Z's window. At start the backups
-are read off the UI thread and each is laid over its own tile's first read
-(`FileView::restore`), as a conflict when the disk moved meanwhile. One whose tile went waits
-for its worker's first snapshot, then goes to a clean tile on its file or to a new tile
-(decisions, "An unsaved edit survives a quit or a crash").
-
-A **folder tile** (`ItemKind::Folder { path }`, `slopty-ui::folder`) browses a directory on the
-worker in place: `ClientMsg::ListFolder` → `WorkerMsg::Folder` (`slopty_worker::listing::folder`,
-folders first, cut at 2 000 with the whole count), rows walked by ↑/↓/↩/⌫, a folder opened moves
-the item (`ItemOp::SetFolder`), a file opens as a file tile beside it, rows drag out and drops go
-up into it; a path of unknown kind is asked as a folder first (`WorkspaceView::open_path_on`).
-Each linked worker is sent the set of directories its folder tiles show
-(`ClientMsg::WatchFolders`, `workspace::folders::reconcile_folders`), and it lists one again
-unasked when an entry is made, removed or renamed (`fswatch::follow_folders`), and after
-`CONTENT_HOLD` when a file in it is written, for its size (inotify, or on macOS an `FSEvents`
-stream over the followed folders that rings the kqueue); the tile keeps
-its selection on the same name (`FolderView::set_listing`).
-A file tile whose read is `FileRead::Media` shows it instead of the editor
-(`slopty-ui::file::preview`): a picture decoded by ImageIO at the pixels it is drawn at, its
-frames animated unless Reduce Motion is on, and a PDF as a virtualized list of pages that
-CoreGraphics draws at the tile's width on a background thread, the pages near the view kept
-(`file::decode`). The pages take Preview's scroll keys in the key context
-`FileEditor FilePages`. A Markdown file (`.md`, `.markdown`, `.mdown`, `.mkd`) opens on its
-preview once its text is in (`slopty-ui::file::reading`): the editor's text in segments
-(`markdown::segments`) in a gpui `list`, prose through `markdown::style`, task lines as rows
-whose box ticks the line in the editor (`FileView::toggle_task`, saved at once when nothing
-else is unsaved), fenced blocks with "Copy" and, given a shell, "Run"
-(`FileViewEvent::RunBlock` → `run_in_shell`). ⌘⇧V, the header's toggle and the palette swap
-the preview and the source; a tile opened to edit (a new or empty file, one opened at a line,
-one a program waits on, one with a kept edit) opens on the source, and ⌘F swaps to it.
-
-**Search in files** (⌘⇧F, `slopty-ui::search::ProjectSearch`) runs on the worker next to the
-files: `ClientMsg::Search(SearchRequest::Start)` → pages of `WorkerMsg::Search(SearchEvent::Hits)`
-(`slopty_worker::search`, ripgrep's `ignore` and `grep-searcher`, capped at 2 000 lines), each
-file's matching lines and, when the context toggle is on, the lines round each match merged
-once (`FileHits::context`). `slopty_client::search::SearchResults` keeps them in path order and
-lays out the rows: a file, then its matches and context in line order. It finds and does not
-replace: a match opens its file tile at the line, where ⌘⇧H replaces in that file. Its scope
-chip turns the same query on the open tiles (`search::tiles`): the workspace asks each shell for
-the query as one pattern (`TermRequest::Search`, the toggles written in by `Query::source`) and
-counts the file tiles itself, and a row goes to its tile with that tile's find bar open
-on the query. Scripts and
-agents reach the same search through `Verb::Search` (`slopty search`), one capped reply in path
-order.
-
-A **browser tile** (`ItemKind::Browser { url }`, `slopty-ui::browser`) shows a web page,
-usually a port on the worker, in the platform's `WKWebView` (`slopty_platform::web`). The window
-composes it with GPUI's content through a gpui-fast native host: the tile's body is a
-`native_view` element, so the page shows where its pane draws the tile, clipped with it, under
-a hole GPUI cuts in its own layer, and whatever GPUI draws afterwards (the palette, a menu, a
-notice, a script's dialog, an app dialog) is over the page. A render, which cannot see a native
-view, shows the page's last snapshot instead (`takeSnapshot` → PNG → `RenderImage`). The page's
-keyboard is GPUI's focus on its element (`track_focus`): a click in the page focuses it and its
-tile, the platform's first responder follows GPUI's focus both ways, keys go through GPUI's
-keymap first, and Esc twice gives the keyboard back to the workspace. Undo, redo, cut and select
-all, which no menu item sends to a native view, are bound under the page's element and done by
-the page (`web::Edit`); copy and paste reach it through the Edit menu. The
-item's address is the worker's (`http://localhost:5173/`, the same on every client): each
-client asks its link to serve a loopback port the address names (`Remote::forward`) and loads
-the page from the local port it got (`browser::local_url`), asking again when the link comes
-back; what the header and the dump show is put back on the worker's port
-(`browser::worker_url`). The header shows the page's title and its
-address as text, "←" while there is history and "↻"; the title and address are read after
-each navigation and every second while the page is open. The ways in: the port list (the
-palette's "Forwarded ports") opens the worker's port in a tile or the default browser, "Open URL…" in the
-palette starts at `http://localhost:`, and an address typed into the palette is an "Open
-<address> in a tile" line. Only http and https open (`browser::is_web_url`). The picker (⌘O, a field at
-the top filtering by every word typed, ↑/↓/↩ choosing) lists the workspace's sessions first — agents waiting on the human, then other agents with their status
-line, then plain shells — and a click reveals and focuses that terminal; below them the worker's
-windows and displays. Remote-window items are
-created from the picker; `reconcile_screens` opens a stream for every window/display item
-that lacks one and closes streams for items that disappeared, so the document, not the UI, is
-the source of truth for what is being streamed. The command palette (⌘⇧P, `slopty-ui::palette`)
-lists the workspace's sessions to go to ("Go to <title>", agents waiting on the human first,
-their status on the right) and every action by name with its keys read from the binding
-tables (`workspace::palette_items` for the workspace's and the terminal's, the app's own appended
-with `extend_palette`; the View menu's "Commands…" opens it on the Mac): typing
-keeps the lines every word of the text is found in, ↑/↓ choose, ↩ or a click runs one, Esc
-closes; a path typed in (`src/lib.rs:7`, `~/notes.md`) is an `Open <path>` line first, which
-opens a file tile against the active shell's directory (`palette::path_query`); a directory
-spelled from the root or home with a slash at the end (`~/proj/`) is instead a "New terminal
-in …" and a "New agent in …" line (`palette::path_items`), the worker expanding `~`; and a word is
-also asked of the worker's files under that directory (`ClientMsg::FindFiles` →
-`WorkerMsg::FoundFiles`, protocol 36) whose hits are `Open <path>`
-lines after the commands. The worker answers from an index of the whole worktree the directory
-is in (`slopty_worker::find::Index`, one parallel walk honouring the ignore files, kept fresh by
-an `FSEvents` stream on macOS, an inotify watch a directory on Linux, and directory times
-elsewhere or past the kernel's watches, which `FoundFiles.notice` tells the person) and ranks with
-`nucleo-matcher`, fuzzily, across the cores; outside a worktree a bounded walk answers; the top bar's "⋯" button (`commands`, a11y "Commands") opens it too, the phone's way
-to every action. The palette remembers where the keyboard was (`window.focused`), puts it
-back when it closes and dispatches the choice on the next frame from there, so a terminal's
-own actions (find, the prompts) reach the terminal that had the focus.
-
-Nothing tells a client where another one is looking: each device's layout is its own, and
-pointing other devices at a tile is gone (`docs/decisions/workspace.md`, "Pointing is gone").
+A worker that drops keeps its rows ("reconnecting"); its next snapshot replaces only what it no
+longer has. What an agent is doing comes from its worker's thread table, which a client that
+joins late is sent whole, so it names every running agent and its status at once
+(`workspace::agents`, `workspace::faces`).
 
 ## 5. Agents
 

@@ -3,8 +3,7 @@
 
 use std::time::{Duration, Instant};
 
-use slopty_client::WorkerLink;
-use slopty_client::layout::WorkerKey;
+use slopty_client::{WorkerKey, WorkerLink};
 use slopty_core::WorkerId;
 use slopty_platform::resume::Resume;
 use slopty_ui::workspace::WorkerStatus;

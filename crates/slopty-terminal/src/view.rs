@@ -18,9 +18,8 @@ use gpui::{
 };
 use gpui_kit::component::input::{self, InputEvent, InputState};
 use slopty_client::clip::{ClipFiles, ClipSync, ShellPaste};
-use slopty_client::layout::WorkerKey;
 use slopty_client::term::{BlockHead, CommandBlock, TermImage};
-use slopty_client::{Effect, TermState};
+use slopty_client::{Effect, TermState, WorkerKey};
 use slopty_core::{ClientId, SessionId};
 use slopty_grid::{CellWidth, Cursor, LineFlags, LineIndex, TermModes};
 use slopty_kit::colors::{hsla, hsla_alpha};

@@ -6,11 +6,9 @@
 use slopty_core::WorkerId;
 use slopty_proto::agent::{AgentEntry, AgentStart, Worktree};
 use slopty_proto::folder::FsOp;
-use slopty_proto::items::{Item, ItemKind};
 use slopty_proto::orchestration::{
-    Command, DirEntry, EventFilter, FileStat, HubEvent, IdempotencyKey, Input, ItemRef, Line,
-    Outcome, Port, Screen, Size, TermAgent, TermRef, ThreadOf, ThreadRead, ThreadView, Verb,
-    WaitUntil, Waited,
+    Command, DirEntry, EventFilter, FileStat, HubEvent, IdempotencyKey, Input, Line, Outcome, Port,
+    Screen, Size, TermAgent, TermRef, ThreadOf, ThreadRead, ThreadView, Verb, WaitUntil, Waited,
 };
 use slopty_proto::screen::{CaptureTarget, DisplayInfo, WindowInfo};
 use slopty_proto::search::{FileHits, SearchQuery, SearchSummary};
@@ -409,54 +407,6 @@ pub async fn ports<D: Dispatch>(
         Outcome::Ports(list) => Ok((worker, list)),
         other => Err(ToolError::unexpected(other)),
     }
-}
-
-/// The items on a worker's workspace, and the worker.
-pub async fn items<D: Dispatch>(
-    res: &mut Resolver<'_, D>,
-    worker: Option<&str>,
-) -> Result<(WorkerId, Vec<Item>), ToolError> {
-    let worker = res.worker(worker).await?;
-    match res.dispatch().call(Verb::ListItems { worker }).await {
-        Outcome::Items(list) => Ok((worker, list)),
-        other => Err(ToolError::unexpected(other)),
-    }
-}
-
-/// Put an item on a worker's workspace.
-pub async fn open_item<D: Dispatch>(
-    res: &mut Resolver<'_, D>,
-    worker: Option<&str>,
-    kind: ItemKind,
-    name: Option<String>,
-    key: Option<IdempotencyKey>,
-) -> Result<ItemRef, ToolError> {
-    let worker = res.worker(worker).await?;
-    match res.dispatch().send(key, Verb::OpenItem { worker, kind, name }).await {
-        Outcome::Item(item) => Ok(item),
-        other => Err(ToolError::unexpected(other)),
-    }
-}
-
-/// Name an item, or take its name away.
-pub async fn rename_item<D: Dispatch>(
-    res: &mut Resolver<'_, D>,
-    item: &str,
-    name: Option<String>,
-    key: Option<IdempotencyKey>,
-) -> Result<(), ToolError> {
-    let item = res.item(item).await?;
-    done(res.dispatch(), key, Verb::RenameItem { item, name }).await
-}
-
-/// Take an item off its workspace.
-pub async fn remove_item<D: Dispatch>(
-    res: &mut Resolver<'_, D>,
-    item: &str,
-    key: Option<IdempotencyKey>,
-) -> Result<(), ToolError> {
-    let item = res.item(item).await?;
-    done(res.dispatch(), key, Verb::RemoveItem { item }).await
 }
 
 /// The windows and displays a worker can stream, and the worker.

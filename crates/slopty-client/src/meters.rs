@@ -11,7 +11,7 @@ use std::time::Duration;
 use slopty_core::WallMs;
 use slopty_proto::thread::Limit;
 
-use crate::layout::WorkerKey;
+use crate::WorkerKey;
 
 /// One agent's windows on one machine, and when they were last heard.
 #[derive(Clone, PartialEq, Eq, Debug)]

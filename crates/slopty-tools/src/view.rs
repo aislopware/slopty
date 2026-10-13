@@ -11,10 +11,9 @@ use std::fmt::Write as _;
 
 use serde::Serialize;
 use slopty_core::{SessionId, WallMs, WorkerId};
-use slopty_proto::items::{Item, ItemKind};
 use slopty_proto::orchestration::{
-    Command, DirEntry, FileKind, FileStat, Happening, HubEvent, ItemRef, Line, Port, Screen,
-    TermAgent, TermRef, Waited,
+    Command, DirEntry, FileKind, FileStat, Happening, HubEvent, Line, Port, Screen, TermAgent,
+    TermRef, Waited,
 };
 use slopty_proto::screen::{DisplayInfo, WindowInfo};
 use slopty_proto::search::{FileHits, SearchSummary};
@@ -40,11 +39,6 @@ const MIN_PREFIX: usize = 8;
 /// A terminal's full handle.
 pub fn term_string(term: TermRef) -> String {
     format!("{}/{}", term.worker, term.session)
-}
-
-/// An item's full handle.
-pub fn item_string(item: ItemRef) -> String {
-    format!("{}/{}", item.worker, item.item)
 }
 
 /// Everything `slopty workers` shows: the directory and the terminals, each with its agent.
@@ -1037,34 +1031,6 @@ impl ShortTerms {
     }
 }
 
-/// An item on a workspace, for JSON: its handle, its kind and the one field that says what it
-/// shows.
-#[derive(Debug, Serialize)]
-pub struct ItemView<'a> {
-    item: String,
-    kind: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    name: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    term: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    window: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    display: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    path: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    url: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    thread: Option<String>,
-}
-
-/// A new item, for JSON.
-#[derive(Debug, Serialize)]
-pub struct OpenedItemView {
-    item: String,
-}
-
 /// A window a worker can stream, for JSON.
 #[derive(Debug, Serialize)]
 pub struct WindowView<'a> {
@@ -1092,91 +1058,6 @@ pub struct DisplayView {
 pub struct ScreensView<'a> {
     windows: Vec<WindowView<'a>>,
     displays: Vec<DisplayView>,
-}
-
-const fn kind_word(kind: &ItemKind) -> &'static str {
-    match kind {
-        ItemKind::Terminal { .. } => "terminal",
-        ItemKind::Window { .. } => "window",
-        ItemKind::Display { .. } => "display",
-        ItemKind::File { .. } => "file",
-        ItemKind::Folder { .. } => "folder",
-        ItemKind::Browser { .. } => "browser",
-        ItemKind::Review { .. } => "review",
-        ItemKind::Thread { .. } => "thread",
-        ItemKind::Changes { .. } => "changes",
-    }
-}
-
-/// A workspace's items, for JSON.
-pub fn items(worker: WorkerId, items: &[Item]) -> Vec<ItemView<'_>> {
-    items
-        .iter()
-        .map(|i| {
-            let mut view = ItemView {
-                item: item_string(ItemRef { worker, item: i.id }),
-                kind: kind_word(&i.kind),
-                name: i.name.as_deref(),
-                term: None,
-                window: None,
-                display: None,
-                path: None,
-                url: None,
-                thread: None,
-            };
-            match &i.kind {
-                ItemKind::Terminal { session } => {
-                    view.term = Some(term_string(TermRef { worker, session: *session }));
-                }
-                ItemKind::Window { window } => view.window = Some(window.0),
-                ItemKind::Display { display } => view.display = Some(display.0),
-                ItemKind::File { path }
-                | ItemKind::Folder { path }
-                | ItemKind::Changes { path, .. } => view.path = Some(path),
-                ItemKind::Browser { url } => view.url = Some(url),
-                ItemKind::Review { thread } | ItemKind::Thread { thread } => {
-                    view.thread = Some(thread.to_string());
-                }
-            }
-            view
-        })
-        .collect()
-}
-
-/// A workspace's items, for a person.
-pub fn items_text(worker: WorkerId, items: &[Item]) -> String {
-    if items.is_empty() {
-        return "no items\n".to_owned();
-    }
-    let rows = items
-        .iter()
-        .map(|i| {
-            let shows = match &i.kind {
-                ItemKind::Terminal { session } => {
-                    term_string(TermRef { worker, session: *session })
-                }
-                ItemKind::Window { window } => window.0.to_string(),
-                ItemKind::Display { display } => display.to_string(),
-                ItemKind::File { path }
-                | ItemKind::Folder { path }
-                | ItemKind::Changes { path, .. } => path.clone(),
-                ItemKind::Browser { url } => url.clone(),
-                ItemKind::Review { thread } | ItemKind::Thread { thread } => thread.to_string(),
-            };
-            vec![
-                i.id.to_string(),
-                kind_word(&i.kind).to_owned(),
-                i.name.clone().unwrap_or_default(),
-                shows,
-            ]
-        })
-        .collect();
-    table(&["ITEM", "KIND", "NAME", "SHOWS"], rows)
-}
-
-/// A new item, for JSON.
-pub fn opened_item(item: ItemRef) -> OpenedItemView {
-    OpenedItemView { item: item_string(item) }
 }
 
 /// What a worker can stream, for JSON.

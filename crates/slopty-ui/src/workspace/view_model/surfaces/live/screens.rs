@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 
 use gpui::{App, Context, Focusable as _, SharedString, Subscription, Task};
-use slopty_client::layout::WorkerKey;
+use slopty_client::WorkerKey;
 use slopty_core::{DisplayId, ItemId, WindowId};
 use slopty_proto::ClientMsg;
 use slopty_proto::items::{Item, ItemKind, ItemOp};

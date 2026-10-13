@@ -1,6 +1,6 @@
 //! How the workspace keys workers: a worker's key from its server id and back.
 
-use slopty_client::layout::WorkerKey;
+use slopty_client::WorkerKey;
 use slopty_core::WorkerId;
 
 /// `id` as the workspace keys workers: the one the app gives the server's worker ids.

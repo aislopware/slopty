@@ -2,20 +2,12 @@
 //!
 //! The worker is authoritative: the client applies every [`ItemSync`] it receives and proposes
 //! changes as [`ItemOp`]s, each carrying only the field it changes. So that a rename or a new
-//! tile shows at once, the client applies its own proposals immediately (optimistic) and
+//! item shows at once, the client applies its own proposals immediately (optimistic) and
 //! recognises the worker's echo of them.
-//!
-//! The list as last seen is kept on this device ([`ItemCache`]), so a cold launch draws each
-//! tile of a worker not yet linked as what it was, under the pill saying where the worker is,
-//! rather than a hole, until the worker's first snapshot replaces it.
 
 use std::collections::BTreeMap;
-use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
-use std::path::{Path, PathBuf};
-use std::{fs, io};
 
 use slopty_core::{ClientId, ItemId, SessionId};
-use slopty_proto::codec;
 use slopty_proto::items::{Item, ItemKind, ItemOp, ItemSync};
 
 /// The registry mirror.
@@ -31,15 +23,14 @@ pub enum ItemChange {
     /// Everything (snapshot).
     Reset,
     /// An item this registry did not have. `by_me` when this client caused it (its own
-    /// proposal, or the terminal the worker made for its `OpenSession`), which is what decides
-    /// where the layout puts it.
+    /// proposal, or the terminal the worker made for its `OpenSession`).
     Added {
         /// The item.
         id: ItemId,
         /// This client caused it.
         by_me: bool,
     },
-    /// An item it had changed (a rename, a page's address, a folder's path).
+    /// An item it had changed (a rename, a fact).
     Changed(ItemId),
     /// One item disappeared.
     Removed(ItemId),
@@ -48,13 +39,6 @@ pub enum ItemChange {
 }
 
 impl ItemDoc {
-    /// The registry as this device last saw it ([`ItemCache`]), at version 0: the worker's
-    /// first snapshot replaces it whole.
-    #[must_use]
-    pub fn cached(items: Vec<Item>) -> Self {
-        Self { version: 0, items: items.into_iter().map(|i| (i.id, i)).collect() }
-    }
-
     /// Registry version (0 before the first snapshot).
     #[must_use]
     pub const fn version(&self) -> u64 {
@@ -128,89 +112,13 @@ impl ItemDoc {
                 Some(_) => ItemChange::Removed(id),
                 None => ItemChange::Echo,
             },
-            ItemOp::Rename { .. }
-            | ItemOp::SetUrl { .. }
-            | ItemOp::SetFolder { .. }
-            | ItemOp::SetFact { .. } => match self.items.get_mut(&id).map(|item| item.apply(op)) {
-                Some(Ok(true)) => ItemChange::Changed(id),
-                Some(Ok(false) | Err(_)) | None => ItemChange::Echo,
-            },
+            ItemOp::Rename { .. } | ItemOp::SetFact { .. } => {
+                match self.items.get_mut(&id).map(|item| item.apply(op)) {
+                    Some(Ok(true)) => ItemChange::Changed(id),
+                    Some(Ok(false) | Err(_)) | None => ItemChange::Echo,
+                }
+            }
         }
-    }
-}
-
-/// Why the item cache could not be written.
-#[derive(Debug, thiserror::Error)]
-pub enum ItemCacheError {
-    /// The file system refused.
-    #[error("item cache: {0}")]
-    Io(#[from] io::Error),
-    /// The list did not encode.
-    #[error("item cache: {0}")]
-    Codec(#[from] codec::CodecError),
-}
-
-/// Each worker's items as this device last saw them, a file per worker under one directory.
-///
-/// The directory and files are the user's alone (0700 and 0600, as the paths and names of what
-/// is open are in them),
-/// in postcard, replaced whole so a crash mid-write leaves the one before. A file from another
-/// build, or cut short, reads as nothing and goes.
-#[derive(Clone, Debug)]
-pub struct ItemCache {
-    dir: PathBuf,
-}
-
-impl ItemCache {
-    /// The cache under `dir`, made when first written.
-    #[must_use]
-    pub const fn new(dir: PathBuf) -> Self {
-        Self { dir }
-    }
-
-    fn file(&self, worker: &str) -> PathBuf {
-        self.dir.join(format!("{worker}.items"))
-    }
-
-    /// `worker`'s items as last kept; none when they were not, or the file is unreadable.
-    #[must_use]
-    pub fn items(&self, worker: &str) -> Vec<Item> {
-        let path = self.file(worker);
-        match fs::read(&path) {
-            Ok(bytes) => codec::decode_body(&bytes).unwrap_or_else(|error| {
-                tracing::debug!(%error, path = %path.display(), "item cache dropped");
-                let _gone = fs::remove_file(&path);
-                Vec::new()
-            }),
-            Err(_) => Vec::new(),
-        }
-    }
-
-    /// What [`Self::write`] keeps of `items`: encoded where the registry lives, written off it.
-    ///
-    /// # Errors
-    /// The encoder's.
-    pub fn encode<'a>(items: impl Iterator<Item = &'a Item>) -> Result<Vec<u8>, ItemCacheError> {
-        let items: Vec<&Item> = items.collect();
-        Ok(codec::encode_body(&items)?)
-    }
-
-    /// Keep `bytes` ([`Self::encode`]) as `worker`'s items.
-    ///
-    /// # Errors
-    /// The file system's.
-    pub fn write(&self, worker: &str, bytes: &[u8]) -> Result<(), ItemCacheError> {
-        fs::DirBuilder::new().recursive(true).mode(0o700).create(&self.dir)?;
-        let path = self.file(worker);
-        slopty_platform::fs::replace(&path, bytes)?;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
-        Ok(())
-    }
-
-    /// Where it is.
-    #[must_use]
-    pub fn dir(&self) -> &Path {
-        &self.dir
     }
 }
 
@@ -248,7 +156,7 @@ mod tests {
         let delta = ItemSync::Delta { version: 4, by: other, op: ItemOp::Add(c.clone()) };
         assert_eq!(doc.apply_sync(delta, me), ItemChange::Added { id: c.id, by_me: false });
 
-        let note = Item { kind: ItemKind::File { path: "/w/PLAN.md".to_owned() }, ..term() };
+        let note = Item { kind: ItemKind::Window { window: slopty_core::WindowId(4) }, ..term() };
         assert_eq!(
             doc.apply_op(&ItemOp::Add(note.clone()), true),
             ItemChange::Added { id: note.id, by_me: true }
@@ -286,123 +194,8 @@ mod tests {
         let again = ItemSync::Delta { version: 10, by: other, op: ItemOp::Remove(a.id) };
         assert_eq!(doc.apply_sync(again, me), ItemChange::Echo, "gone already");
         assert_eq!(doc.version(), 10);
-    }
 
-    /// Another client's move of a folder changes only its path: the name this client just
-    /// gave it stays. An edit or a rename of an item this registry lacks, and a folder's path
-    /// for a shell, change nothing.
-    #[test]
-    fn a_folder_move_keeps_the_name_and_a_stray_op_changes_nothing() {
-        let me = ClientId::new();
-        let other = ClientId::new();
-        let mut doc = ItemDoc::default();
-        let shell = term();
-        let folder = Item { kind: ItemKind::Folder { path: "~/".to_owned() }, ..term() };
-        let items = vec![shell.clone(), folder.clone()];
-        assert_eq!(doc.apply_sync(ItemSync::Snapshot { version: 1, items }, me), ItemChange::Reset);
-
-        let named = ItemOp::Rename { id: folder.id, name: Some("code".to_owned()) };
-        assert_eq!(doc.apply_op(&named, true), ItemChange::Changed(folder.id));
-        let path = "~/src".to_owned();
-        let into = ItemOp::SetFolder { id: folder.id, path: path.clone() };
-        let delta = ItemSync::Delta { version: 2, by: other, op: into };
-        assert_eq!(doc.apply_sync(delta, me), ItemChange::Changed(folder.id));
-        let now = doc.get(folder.id).cloned();
-        assert_eq!(now.as_ref().and_then(|i| i.name.as_deref()), Some("code"));
-        assert_eq!(now.map(|i| i.kind), Some(ItemKind::Folder { path }));
-
-        let stray = ItemOp::SetFolder { id: shell.id, path: "~/no".to_owned() };
-        assert_eq!(doc.apply_op(&stray, false), ItemChange::Echo);
-        assert_eq!(doc.get(shell.id), Some(&shell));
-        let gone = ItemId::new();
-        let edit = ItemOp::SetFolder { id: gone, path: "~/".to_owned() };
-        assert_eq!(doc.apply_op(&edit, false), ItemChange::Echo);
-        let rename = ItemOp::Rename { id: gone, name: None };
-        assert_eq!(doc.apply_op(&rename, false), ItemChange::Echo);
-        assert_eq!(doc.len(), 2);
-    }
-
-    /// A browser's address moves with another client's `SetUrl`; the same address again, or
-    /// an address for a shell, changes nothing.
-    #[test]
-    fn a_browser_takes_a_new_address_and_nothing_else_does() {
-        let me = ClientId::new();
-        let mut doc = ItemDoc::default();
-        let shell = term();
-        let page =
-            Item { kind: ItemKind::Browser { url: "http://localhost:5173/".into() }, ..term() };
-        let items = vec![shell.clone(), page.clone()];
-        assert_eq!(doc.apply_sync(ItemSync::Snapshot { version: 1, items }, me), ItemChange::Reset);
-        let url = "http://localhost:3000/docs".to_owned();
-        let moved = ItemOp::SetUrl { id: page.id, url: url.clone() };
-        let delta = ItemSync::Delta { version: 2, by: ClientId::new(), op: moved.clone() };
-        assert_eq!(doc.apply_sync(delta, me), ItemChange::Changed(page.id));
-        assert_eq!(doc.get(page.id).map(|i| i.kind.clone()), Some(ItemKind::Browser { url }));
-        assert_eq!(doc.apply_op(&moved, false), ItemChange::Echo, "already there");
-        let stray = ItemOp::SetUrl { id: shell.id, url: "http://a.test/".into() };
-        assert_eq!(doc.apply_op(&stray, false), ItemChange::Echo);
-        assert_eq!(doc.get(shell.id), Some(&shell));
-    }
-
-    /// A folder moves with another client's `SetFolder`; the same folder again, or a folder
-    /// for a shell, changes nothing.
-    #[test]
-    fn a_folder_moves_and_nothing_else_does() {
-        let me = ClientId::new();
-        let mut doc = ItemDoc::default();
-        let shell = term();
-        let folder = Item { kind: ItemKind::Folder { path: "/w".into() }, ..term() };
-        let items = vec![shell.clone(), folder.clone()];
-        assert_eq!(doc.apply_sync(ItemSync::Snapshot { version: 1, items }, me), ItemChange::Reset);
-        let path = "/w/src".to_owned();
-        let moved = ItemOp::SetFolder { id: folder.id, path: path.clone() };
-        let delta = ItemSync::Delta { version: 2, by: ClientId::new(), op: moved.clone() };
-        assert_eq!(doc.apply_sync(delta, me), ItemChange::Changed(folder.id));
-        assert_eq!(doc.get(folder.id).map(|i| i.kind.clone()), Some(ItemKind::Folder { path }));
-        assert_eq!(doc.apply_op(&moved, false), ItemChange::Echo, "already there");
-        let stray = ItemOp::SetFolder { id: shell.id, path: "/tmp".into() };
-        assert_eq!(doc.apply_op(&stray, false), ItemChange::Echo);
-        assert_eq!(doc.get(shell.id), Some(&shell));
-    }
-
-    /// A review item comes in with the registry's snapshot and stays through the next one,
-    /// so its tile is restored where the layout keeps it.
-    #[test]
-    fn a_review_is_restored_from_the_snapshot() {
-        let me = ClientId::new();
-        let mut doc = ItemDoc::default();
-        let thread = slopty_proto::thread::ThreadId::new();
-        let review = Item { kind: ItemKind::Review { thread }, ..term() };
-        let items = vec![review.clone()];
-        let first = ItemSync::Snapshot { version: 1, items: items.clone() };
-        assert_eq!(doc.apply_sync(first, me), ItemChange::Reset);
-        assert_eq!(doc.get(review.id), Some(&review));
-        let again = ItemSync::Snapshot { version: 2, items };
-        doc.apply_sync(again, me);
-        assert_eq!(doc.get(review.id).map(|i| i.kind.clone()), Some(ItemKind::Review { thread }));
-    }
-
-    /// What is kept reads back as it was, the user's alone; a file cut short reads as nothing
-    /// and goes, and a worker never kept has nothing.
-    #[test]
-    fn the_items_kept_read_back_and_a_broken_file_goes() {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        let dir = tempfile::tempdir().unwrap();
-        let cache = ItemCache::new(dir.path().join("items"));
-        let file = Item { kind: ItemKind::File { path: "/w/PLAN.md".to_owned() }, ..term() };
-        let items = [term(), file];
-        let bytes = ItemCache::encode(items.iter()).unwrap();
-        cache.write("w1", &bytes).unwrap();
-        assert_eq!(cache.items("w1"), items);
-        let file = cache.dir().join("w1.items");
-        assert_eq!(fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
-        let doc = ItemDoc::cached(cache.items("w1"));
-        assert_eq!((doc.version(), doc.len()), (0, 2), "before any snapshot");
-
-        fs::write(&file, &bytes[..bytes.len() / 2]).unwrap();
-        assert_eq!(cache.items("w1"), []);
-        assert!(!file.exists(), "a broken file goes");
-        assert_eq!(cache.items("never"), []);
+        let gone = ItemOp::Rename { id: ItemId::new(), name: None };
+        assert_eq!(doc.apply_op(&gone, false), ItemChange::Echo, "an item it lacks");
     }
 }
