@@ -1196,12 +1196,9 @@ fn build_checks(name: &str) -> &'static [(&'static str, &'static str)] {
                 "cargo test --locked -p gpui-component-story -p gpui-kit-recipes --features \
                  gpui-component-story/test-support",
             ),
-            // The shell hosts draw real windows, so they are what sees a change in when
-            // gpui-fast re-renders a view.
-            (
-                "test gpui-kit shells",
-                "cargo test --locked --no-fail-fast -p gpui-shell -p gpui-component-shell",
-            ),
+            // The shell host draws real windows, so it is what sees a change in when gpui-fast
+            // re-renders a view.
+            ("test gpui-kit shell", "cargo test --locked --no-fail-fast -p gpui-shell"),
         ],
         // `take` points `GHOSTTY_SOURCE_DIR` at the ghostty tree it pins, so these build the
         // ghostty the pin names, and they are ghostty's check too: the merged terminal must
