@@ -212,3 +212,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     each with its file). End to end: a `dist` worker from the lean bundle, crashed in the field
     with no dSYM, resolved by `cargo xtask symbolicate` against the collected dSYMs and their
     archive (MEASUREMENTS).
+- ✅ **The app keeps a log of its own (2026-10-14).** The app logged to stderr only, which goes
+  nowhere when it is opened from the Finder: a chat whose start never reached its worker, as
+  both links went quiet, left nothing on the client's side to read. With no terminal, the app
+  now logs to `~/Library/Logs/Slopty/slopty-app.log`, beside the server's and the worker's,
+  begun afresh past 32 MiB at launch.

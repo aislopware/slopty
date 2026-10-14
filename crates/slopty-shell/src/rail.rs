@@ -160,6 +160,13 @@ pub fn bucket_of(buckets: &[(usize, usize)], ix: usize) -> Option<usize> {
     buckets.iter().position(|&(s, e)| ix >= s && ix < e)
 }
 
+/// How far below the list's top a prompt the rail jumps to lands (slopty): past the titlebar
+/// the transcript scrolls and fades under, at the inset a sent prompt is held at. The first row
+/// carries the titlebar's gap itself.
+pub fn landing_inset(row: usize) -> f32 {
+    if row == 0 { 0.0 } else { crate::transcript::OWN_SEND_TOP_INSET_PX }
+}
+
 /// Char-cap a preview with an ellipsis. Whitespace runs (including newlines —
 /// prompts and replies are free text) collapse to single spaces first: the
 /// preview card's title is a one-line surface (message-rail.tsx line-clamp-1).
@@ -251,10 +258,13 @@ impl Transcript {
     /// - once the target row is measured the glide is pixel-exact.
     pub fn scroll_to_row(&mut self, target: usize, cx: &mut Context<Self>) {
         self.begin_scroll_navigation();
+        // slopty: the prompt lands below the titlebar the transcript fades under, where a sent
+        // one is parked, not behind it; the first row carries its own titlebar gap.
+        let land = landing_inset(target);
         if motion::reduced_motion(cx) {
             self.list_state().scroll_to(ListOffset {
                 item_ix: target,
-                offset_in_item: px(0.0),
+                offset_in_item: px(-land),
             });
             cx.notify();
             return;
@@ -278,7 +288,7 @@ impl Transcript {
                     if raw >= 1.0 {
                         list.scroll_to(ListOffset {
                             item_ix: target,
-                            offset_in_item: px(0.0),
+                            offset_in_item: px(-land),
                         });
                         cx.notify();
                         return true;
@@ -374,7 +384,8 @@ impl Transcript {
                     match list.bounds_for_item(target) {
                         Some(bounds) => {
                             // Measured: pixel-exact step along the timeline.
-                            let delta = f32::from(bounds.top() - list.viewport_bounds().top());
+                            let delta =
+                                f32::from(bounds.top() - list.viewport_bounds().top()) - land;
                             list.scroll_by(px(frac * delta));
                         }
                         None => {
@@ -400,7 +411,7 @@ impl Transcript {
             this.update(cx, |t, cx| {
                 t.list_state().scroll_to(ListOffset {
                     item_ix: target,
-                    offset_in_item: px(0.0),
+                    offset_in_item: px(-land),
                 });
                 cx.notify();
             })

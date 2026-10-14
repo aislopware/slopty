@@ -772,6 +772,45 @@ mod roundtrip {
         id
     }
 
+    /// A child that writes as it exits, as a TUI puts the terminal back, still exits once its
+    /// session is closed: macOS holds the last close of a terminal's side until the master has
+    /// read what was written, so ptyd reads on after the close, whoever held the master.
+    #[tokio::test]
+    async fn a_child_that_writes_as_it_exits_ends_once_closed() {
+        let daemon = start().await;
+        let (mut client, mut exits) = PtydClient::connect(&daemon.socket).await.unwrap();
+        let id = SessionId::new();
+        let spec = SpawnSpec {
+            command: vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "trap 'printf goodbye; exit 3' HUP; printf ready; while :; do sleep 0.05; done"
+                    .into(),
+            ],
+            cwd: None,
+            env: Vec::new(),
+            size: size(),
+        };
+        client.spawn(id, spec).await.unwrap();
+        let attached = client.attach(id).await.unwrap();
+        let master = PtyMaster::new(attached.master).unwrap();
+        let _ready = read_until(&master, b"ready", attached.backlog).await;
+        drop(master);
+        client.close(id).await.unwrap();
+        let exit = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let (of, exit) = exits.recv().await.expect("ptyd is up");
+                if of == id {
+                    return exit;
+                }
+            }
+        })
+        .await
+        .expect("a closed session's child exits, its last words unread by any worker");
+        assert_eq!(exit, Exit::with(3));
+        client.shutdown().await.unwrap();
+    }
+
     /// A closed session gives back everything ptyd held for it, attached or not when it closed:
     /// after many opens and closes the daemon holds the descriptors it held before, and lists
     /// nothing.

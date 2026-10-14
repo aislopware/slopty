@@ -3048,3 +3048,12 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   conversation it names that is not written yet is waited for. Only a process the registry
   does not list is still found by time. Test: `slopty-agent`
   `discover::tests::the_registry_names_the_transcript_over_the_newest_file`.
+
+- ✅ **A prompt ends the turn still open before it** (2026-10-14). A message the person sent
+  while Claude Code was mid-turn opened a new turn and left the one before it running for
+  good: that turn's answer stayed "streaming" in the middle of the transcript. Claude Code
+  closes a turn with its `stop_hook_summary` or `turn_duration` record, which an interrupted
+  turn may never write. A prompt now ends the turn before it at the prompt's time when nothing
+  ended it first (`conversation::start_turn`); the observer marks it interrupted when Claude
+  Code recorded the interruption, complete otherwise. Test: `slopty-agent`
+  `conversation::tests::a_prompt_ends_the_turn_still_open_before_it`.

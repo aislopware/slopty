@@ -608,6 +608,25 @@ impl Shell {
             )
             .when(open, |button| button.bg(crate::theme::wash(0.09)))
         });
+        // slopty: a Claude Code chat's own TUI, on the same session, beside the chat.
+        let tui_toggle = (!takeover
+            && !on_canvas
+            && harness == Some(slopty_view_proto::HarnessId::CLAUDE_CODE))
+        .then(|| {
+            let open = self.agent_tui_shown(cx).is_some();
+            let label = if open { "Hide Claude Code's TUI" } else { "Claude Code's TUI beside the chat" };
+            header_icon_button(
+                "toggle-agent-tui",
+                icons::TERMINAL,
+                label,
+                &theme,
+                cx.listener(|this, _, window, cx| this.toggle_agent_tui(window, cx)),
+            )
+            .role(gpui::Role::Button)
+            .aria_label(label)
+            .flex_none()
+            .when(open, |button| button.bg(crate::theme::wash(0.09)))
+        });
         let inner = div()
             .size_full()
             .flex()
@@ -655,6 +674,7 @@ impl Shell {
                 )
             })
             .child(div().flex_1())
+            .children(tui_toggle) // slopty: the agent's TUI
             .children(session_info_toggle)
             .children(trailing);
 

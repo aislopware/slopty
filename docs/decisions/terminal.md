@@ -3968,3 +3968,12 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `remote::drop_in::tests::a_file_dropped_on_a_shell_goes_to_its_directory`; `slopty-shell`
     `composer::tests::context_from_a_terminal_lands_on_its_own_lines`; `slopty-kit`
     `spot::tests::a_body_is_at_a_point_it_shows`.
+- ✅ **A closed terminal is read until its program has gone (2026-10-14).** Closing a session
+  stopped ptyd's reader at once and hung the child up. A program writes as it exits (Claude
+  Code puts the terminal back), and macOS holds the last close of a terminal's side until the
+  master has read all of it: with the master open and unread, the child stayed in its exit for
+  good, past SIGKILL. Its chat then read as working or needing the person forever, and Claude
+  Code's registry still named its session as running, so a resume was refused. ptyd now reads
+  and drops what a closed session's child writes until its side is gone
+  (`session::Reader::Discard`). Test: `slopty-ptyd`
+  `roundtrip::a_child_that_writes_as_it_exits_ends_once_closed`, which fails on the old close.

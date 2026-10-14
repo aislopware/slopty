@@ -11663,6 +11663,44 @@ mod tests {
         crate::markdown::selection::clear_if_owner("probe-0");
     }
 
+    /// slopty: a prompt the rail jumps to lands below the titlebar the transcript fades under,
+    /// where a sent prompt is held, not behind it.
+    #[gpui::test]
+    fn a_rail_jump_lands_the_prompt_below_the_titlebar(cx: &mut gpui::TestAppContext) {
+        struct Fixture(Entity<Transcript>);
+        impl Render for Fixture {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().child(self.0.clone())
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            cx.set_reduce_motion(true);
+        });
+        let state = cx.new(|_| AppState::new());
+        let transcript = cx.new(|cx| Transcript::new(state, cx));
+        transcript.update(cx, |this, cx| {
+            this.rows =
+                (0..60).map(|ix| viewport_row(&format!("row-{ix}"), &format!("entry-{ix}"))).collect();
+            this.list.reset(60);
+            this.pinned = false;
+            this.rail_enabled = false;
+            cx.notify();
+        });
+        let (_fixture, cx) = cx.add_window_view(|_, _| Fixture(transcript.clone()));
+        cx.run_until_parked();
+        transcript.update(cx, |this, cx| this.scroll_to_row(30, cx));
+        cx.run_until_parked();
+        transcript.read_with(cx, |this, _| {
+            let row = this.list.bounds_for_item(30).expect("the row is drawn");
+            let below = f32::from(row.top() - this.list.viewport_bounds().top());
+            assert!((below - OWN_SEND_TOP_INSET_PX).abs() <= 0.5, "landed {below}px down");
+        });
+    }
+
     #[gpui::test]
     fn generated_image_click_opens_lightbox_and_escape_restores_focus(
         cx: &mut gpui::TestAppContext,

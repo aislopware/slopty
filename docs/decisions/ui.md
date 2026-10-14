@@ -12040,3 +12040,22 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   nothing. It now reads as Idle: the person can write to it, and it works again when what it
   waits on wakes it. The server still counts it busy, so the machine stays awake for that work.
   Test: `slopty-ui` `view_model::tests::a_threads_phase_reads_as_a_session`.
+- ✅ **A prompt the rail jumps to lands below the titlebar (2026-10-14).** The transcript scrolls
+  under the titlebar and is fully faded by its bottom edge. zeron's rail scrolled the clicked
+  prompt's row to the very top of the list, so the prompt sat behind the titlebar and the person
+  saw the reply below it: the jump read as landing in the wrong place. The rail already read
+  the active mark from a reading line one titlebar plus 10 px down (`OWN_SEND_TOP_INSET_PX`), as
+  a sent prompt is held; the jump now lands the row there too (`rail::landing_inset`), the first
+  row excepted since it carries the titlebar's gap itself. Test: `slopty-shell`
+  `transcript::tests::a_rail_jump_lands_the_prompt_below_the_titlebar`, which fails on the old
+  landing.
+- ✅ **A Claude Code chat shows its TUI beside it (2026-10-14).** The person wants to go back
+  and forth between Claude Code's GUI and its own TUI on the same session, and use both at
+  once. A Claude Code chat's titlebar carries a switch beside the session-details toggle: it
+  opens the agent's own terminal (its TUI, on the session the chat shows) as a tab of the right
+  pane, beside the transcript and composer, lit while that tab is in front, and puts it away
+  again, the agent going on. It asks for the agent's terminal alone (`OpenTerminal` with
+  `agent`), never a shell in its place: an agent with no terminal here says so in the tab.
+  Replacing the transcript in place was weighed and set aside: side by side keeps both doors to
+  the same session open at once, which is the point. Other harnesses have no TUI of their own
+  here, so their chats show none. Test: `slopty-e2e` `app::surfaces_files` (live).

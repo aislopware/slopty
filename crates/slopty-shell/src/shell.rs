@@ -1721,6 +1721,8 @@ pub struct Shell {
     /// entity from the bottom drawer's (own PTYs, own grid geometry; one
     /// panel can only size one visible grid at a time).
     right_terminal: Option<Entity<TerminalPanel>>,
+    /// slopty: per chat, the right-pane terminal tab that shows its agent's own TUI.
+    agent_tui: std::collections::HashMap<String, u64>,
     /// The surface-tab strip's `+` menu (Browser / Terminal / Diffs / History rows).
     right_plus: popover::Popup<()>,
     /// Host-owned project Actions cached per (device, space).
@@ -2198,6 +2200,7 @@ impl Shell {
             jump_hints: false,
             terminal: None,
             right_terminal: None,
+            agent_tui: std::collections::HashMap::new(),
             right_plus: popover::Popup::default(),
             project_actions: crate::project_actions::ProjectActionsController::default(),
             diffs: std::collections::HashMap::new(),
@@ -2801,6 +2804,49 @@ impl Shell {
     /// Open and on screen: the window fit is not hiding it.
     fn right_pane_shown(&self, cx: &App) -> bool {
         self.right_pane_open(cx) && self.horizontal_fit().right
+    }
+
+    /// slopty: the right-pane tab of the current chat that shows its agent's own TUI, when it
+    /// is open there and in front.
+    pub(crate) fn agent_tui_shown(&self, cx: &App) -> Option<u64> {
+        let key = self.panel_key(cx);
+        let tab = *self.agent_tui.get(&key)?;
+        let surface = RightSurface::Terminal(tab);
+        let listed = self.right_tabs.get(&key).is_some_and(|tabs| tabs.contains(&surface));
+        (listed && self.right_pane_open(cx) && self.resolved_right_active(cx) == surface)
+            .then_some(tab)
+    }
+
+    /// slopty: the current chat's agent's own TUI (Claude Code's, on the session the chat
+    /// shows) beside the chat, in the right pane, so the person works in either at once; put
+    /// away when it is in front there (its tab closes, the agent goes on).
+    pub(crate) fn toggle_agent_tui(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(tab) = self.agent_tui_shown(cx) {
+            self.close_right_surface(RightSurface::Terminal(tab), window, cx);
+            return;
+        }
+        let key = self.panel_key(cx);
+        let kept = self.agent_tui.get(&key).copied().filter(|tab| {
+            let surface = RightSurface::Terminal(*tab);
+            self.right_tabs.get(&key).is_some_and(|tabs| tabs.contains(&surface))
+        });
+        let tab = match kept {
+            Some(tab) => tab,
+            None => {
+                let panel = self.right_terminal_panel(cx);
+                let opened = panel.update(cx, |panel, cx| {
+                    panel.set_open(true, cx);
+                    panel.open_agent_tab_for_selected(cx)
+                });
+                let Some(tab) = opened else { return };
+                self.right_tabs.entry(key.clone()).or_default().push(RightSurface::Terminal(tab));
+                self.agent_tui.insert(key, tab);
+                tab
+            }
+        };
+        self.set_surfaces_open(true, cx);
+        self.set_right_active(RightSurface::Terminal(tab), cx);
+        cx.notify();
     }
 
     /// The current chat's terminal flag (per-session, in-memory).

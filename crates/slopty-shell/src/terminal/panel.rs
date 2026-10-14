@@ -386,6 +386,7 @@ impl TerminalPanel {
             target_device_id,
             Some(session),
             None,
+            false,
             cx,
         );
         if let Some(tab) = self.tab_mut(chat, key) {
@@ -528,15 +529,32 @@ impl TerminalPanel {
         let key = self.reserve_tab_for_chat(chat.clone(), format!("Terminal {tab_no}"), cx);
         let target = self.chat_target(&chat, cx);
         let cwd = self.state.read(cx).terminal_open_cwd_for(&chat);
-        let run = Self::spawn_session(chat.clone(), key, engine, target, None, cwd, cx);
+        let run = Self::spawn_session(chat.clone(), key, engine, target, None, cwd, false, cx);
         if let Some(tab) = self.tab_mut(&chat, key) {
             tab._run = Some(run);
         }
         cx.notify();
     }
 
+    /// slopty: a tab on the selected chat's agent's own terminal (Claude Code's TUI, on the
+    /// session the chat shows), never a shell: when that is not here to show, the tab says so.
+    pub fn open_agent_tab_for_selected(&mut self, cx: &mut Context<Self>) -> Option<u64> {
+        let chat = self.selected_chat(cx);
+        let engine = self.engine(cx)?;
+        let key = self.reserve_tab_for_chat(chat.clone(), "Claude Code", cx);
+        let target = self.chat_target(&chat, cx);
+        let run = Self::spawn_session(chat.clone(), key, engine, target, None, None, true, cx);
+        if let Some(tab) = self.tab_mut(&chat, key) {
+            tab._run = Some(run);
+        }
+        self.request_focus(cx);
+        Some(key)
+    }
+
     /// OpenTerminal, then show the session's view. slopty: the view streams
-    /// its own session; nothing is subscribed here.
+    /// its own session; nothing is subscribed here. `agent` asks for the
+    /// chat's agent's own terminal alone.
+    #[expect(clippy::too_many_arguments, reason = "slopty: zeron's open plus the agent's")]
     fn spawn_session(
         chat: String,
         key: u64,
@@ -544,6 +562,7 @@ impl TerminalPanel {
         target: Option<String>,
         existing_session: Option<TerminalSession>,
         cwd: Option<String>,
+        agent: bool,
         cx: &mut Context<Self>,
     ) -> Task<()> {
         cx.spawn(async move |this, cx| {
@@ -554,6 +573,9 @@ impl TerminalPanel {
                     let mut params = serde_json::json!({ "chatId": chat, "cols": 80, "rows": 24 });
                     if let (Some(cwd), Some(object)) = (cwd, params.as_object_mut()) {
                         object.insert("cwd".into(), serde_json::Value::String(cwd));
+                    }
+                    if agent {
+                        params["agent"] = serde_json::Value::Bool(true);
                     }
                     match engine
                         .client()

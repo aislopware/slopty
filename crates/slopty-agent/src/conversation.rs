@@ -530,9 +530,15 @@ impl Conversation {
         }
     }
 
-    /// A prompt opens a turn: what the thread's records say from here on is its.
+    /// A prompt opens a turn: what the thread's records say from here on is its. One the person
+    /// sent while the turn before it still ran ends that turn here, if Claude Code did not
+    /// close it first: no turn stays running behind a later one.
     fn start_turn(&mut self, ctx: &Ctx<'_>, prompt: &str, mode: Option<String>, batch: &mut Batch) {
         let thread = self.threads.entry(ctx.thread.clone()).or_default();
+        if let Some(open) = thread.turns.last_mut().filter(|t| t.ended_ms.is_none()) {
+            open.ended_ms = Some(ctx.at_ms);
+            batch.turn(ctx.thread, open.clone());
+        }
         let turn =
             Turn { prompt: prompt.to_owned(), started_ms: ctx.at_ms, mode, ..Turn::default() };
         thread.turns.push(turn.clone());

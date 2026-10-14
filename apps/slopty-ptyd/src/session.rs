@@ -97,8 +97,11 @@ enum Reader {
     Drain,
     /// Stay out of it: a worker holds it.
     Pause,
-    /// Let go of the session: it is closed.
-    Stop,
+    /// The session is closed: read and drop what the child still writes until its side is
+    /// gone. A child writes as it exits (a TUI puts the terminal back), and macOS holds the
+    /// last close of its side until the master has read all of it: a closed terminal no one
+    /// read left its child stuck in its exit for good, past any signal.
+    Discard,
 }
 
 /// A session's state that the connections share: one lock, so an attach sees a checkpoint and
@@ -357,16 +360,18 @@ impl Session {
         });
     }
 
-    /// Drain the master into the ring whenever not paused, until stopped or the child's side
-    /// is gone. The task holds the session, master included, until this returns.
+    /// Drain the master into the ring whenever not paused, and once the session is closed drop
+    /// what comes, until the child's side is gone. The task holds the session, master
+    /// included, until this returns.
     async fn read_loop(&self) {
         let mut mode = self.reader.subscribe();
         let mut buf = vec![0_u8; 64 << 10];
         loop {
             let now = *mode.borrow_and_update();
             match now {
-                Reader::Stop => {
+                Reader::Discard => {
                     self.parked.send_replace(true);
+                    while self.master.read(&mut buf).await.is_ok_and(|n| n > 0) {}
                     return;
                 }
                 Reader::Pause => {
@@ -617,11 +622,12 @@ impl Session {
         });
     }
 
-    /// The session is closed: the reader lets go of it now, whoever holds the master, and the
-    /// child is hung up, then killed if it has not exited within `grace`. Once the child is
-    /// reaped nothing holds the session, so its master, ring and checkpoint go.
+    /// The session is closed: the reader drops what the child still writes from now on,
+    /// whoever holds the master ([`Reader::Discard`]), and the child is hung up, then killed if
+    /// it has not exited within `grace`. Once the child is reaped nothing holds the session, so
+    /// its master, ring and checkpoint go.
     pub fn close(self: Arc<Self>, grace: Duration) {
-        self.reader.send_replace(Reader::Stop);
+        self.reader.send_replace(Reader::Discard);
         if self.exited.borrow().is_some() {
             return;
         }

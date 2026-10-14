@@ -592,6 +592,21 @@ fn the_results_of_parallel_calls_branch_nothing() {
     assert_eq!(c.entries(&MAIN).len(), 2);
 }
 
+/// A prompt the person sent while the turn before it still ran ends that turn at the prompt.
+#[test]
+fn a_prompt_ends_the_turn_still_open_before_it() {
+    let mut c = Conversation::default();
+    c.ingest(&MAIN, &user("p1", None, &json!("first")));
+    c.ingest(&MAIN, &assistant("a1", Some("p1"), &json!([{"type": "text", "text": "on it"}])));
+    let mut second = user("p2", Some("a1"), &json!("and this"));
+    second["timestamp"] = json!("2026-09-27T03:16:00.000Z");
+    c.ingest(&MAIN, &second);
+    let [first, next] = c.turns(&MAIN) else { panic!("two turns: {:?}", c.turns(&MAIN)) };
+    assert_eq!(first.ended_ms, parse_ms("2026-09-27T03:16:00.000Z"));
+    assert_eq!((first.prompt.as_str(), next.prompt.as_str()), ("p1", "p2"));
+    assert_eq!(next.ended_ms, None, "the new turn runs");
+}
+
 /// An assistant record with a model and usage, as Claude Code writes one per content block of a
 /// request (every block of the request repeats the request's usage).
 fn answered(uuid: &str, message: &str, blocks: &Value, usage: &Value, stop: Option<&str>) -> Value {

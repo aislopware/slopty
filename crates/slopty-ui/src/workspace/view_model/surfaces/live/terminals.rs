@@ -11,9 +11,9 @@ use std::collections::{HashMap, HashSet};
 
 use gpui::{App, Context, Focusable as _, SharedString, Subscription, Task};
 use slopty_client::WorkerKey;
-use slopty_core::SessionId;
+use slopty_core::{ItemId, SessionId};
 use slopty_proto::git::RunScript;
-use slopty_proto::items::{ItemKind, ItemOp};
+use slopty_proto::items::{Item, ItemKind, ItemOp};
 use slopty_proto::terminal::{OpenSession, SessionState, TermSize};
 use slopty_proto::{ClientMsg, RequestId};
 use slopty_terminal::{GridFrame, TerminalViewEvent};
@@ -48,12 +48,26 @@ fn shell_of(command: &[String]) -> String {
 
 impl WorkspaceView {
     /// `OpenTerminal`: a shell for `params.chatId` on its machine, in its folder or
-    /// `params.cwd`, sized `params.cols` × `params.rows` until its view fits it.
+    /// `params.cwd`, sized `params.cols` × `params.rows` until its view fits it. With
+    /// `params.agent`, the terminal the chat's agent runs in alone, its TUI on the session the
+    /// chat shows, and never a shell in its place.
     pub(super) fn live_open_terminal(
         &mut self,
         params: &serde_json::Value,
         cx: &mut Context<Self>,
     ) -> Task<Result<RpcReply, RpcError>> {
+        if params.get("agent").and_then(serde_json::Value::as_bool) == Some(true) {
+            let chat = param(params, "chatId").unwrap_or_default().to_owned();
+            let Some(session) = self.live_agent_terminal(&chat, cx) else {
+                let why = "Its agent runs in no terminal here now, or it is open in another tab";
+                return now(Err(RpcError::Failed(why.to_owned())));
+            };
+            self.live_hold(session, &chat, cx);
+            let (reply, answer) = oneshot::channel();
+            cx.global_mut::<Live>().terminals.coming.insert(session, (chat, reply));
+            self.live_settle_terminals(cx);
+            return later(answer, cx);
+        }
         self.live_open_session(params, None, cx)
     }
 
@@ -79,6 +93,7 @@ impl WorkspaceView {
             && let Some(session) =
                 self.live_agent_terminal(&chat, cx).or_else(|| self.live_kept_shell(key, &chat, cx))
         {
+            self.live_hold(session, &chat, cx);
             cx.global_mut::<Live>().terminals.coming.insert(session, (chat, reply));
             self.live_settle_terminals(cx);
             return later(answer, cx);
@@ -130,6 +145,20 @@ impl WorkspaceView {
             .get(&session)
             .is_some_and(|s| !matches!(s.state, SessionState::Exited { .. }));
         (free && alive).then_some(session)
+    }
+
+    /// `session` held for `chat` in its worker's items. A terminal is shown only through its
+    /// item, whose view the workspace makes; an agent's terminal the worker opened itself (a
+    /// start, a seat) has none until one is added here, and its open would wait for good.
+    fn live_hold(&mut self, session: SessionId, chat: &str, cx: &mut Context<Self>) {
+        let Some(key) = self.worker_of_session(session) else { return };
+        if self.workers.get(&key).is_some_and(|w| w.doc.item_for_session(session).is_some()) {
+            return;
+        }
+        let facts = std::collections::BTreeMap::from([(CHAT.to_owned(), chat.to_owned())]);
+        let item =
+            Item { id: ItemId::new(), kind: ItemKind::Terminal { session }, name: None, facts };
+        self.propose(key, ItemOp::Add(item), cx);
     }
 
     /// Whether `session` is the terminal an agent runs in.
@@ -288,5 +317,46 @@ impl WorkspaceView {
                 changed(cx);
             }
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::{AppContext as _, TestAppContext};
+    use slopty_core::SessionId;
+    use slopty_proto::items::{ItemKind, ItemSync};
+    use slopty_theme::Theme;
+
+    use crate::workspace::WorkspaceView;
+    use crate::workspace::rig::{KEY, link, mac, shell};
+
+    /// An agent's terminal the worker opened itself has no item, and a terminal shows only
+    /// through its item: holding it for a chat adds one, once, carrying the chat. A session no
+    /// worker has gets none.
+    #[gpui::test]
+    fn an_agent_s_terminal_is_held_for_its_chat_once(cx: &mut TestAppContext) {
+        let workspace = cx.new(|_| WorkspaceView::new(Theme::default()));
+        let cx = cx.add_empty_window();
+        let agent = SessionId::new();
+        workspace.update(cx, |v, cx| v.add_worker(KEY, "studio".to_owned(), cx));
+        let _rx = link(&workspace, cx, mac(|_| {}), vec![shell(agent)]);
+        workspace.update(cx, |v, cx| {
+            v.apply_sync(KEY, ItemSync::Snapshot { version: 1, items: Vec::new() }, cx);
+        });
+        cx.run_until_parked();
+
+        workspace.update(cx, |v, cx| {
+            v.live_hold(agent, "chat-1", cx);
+            v.live_hold(agent, "chat-1", cx);
+            v.live_hold(SessionId::new(), "chat-1", cx);
+        });
+        let held: Vec<_> = workspace.read_with(cx, |v, _| {
+            v.workers[&KEY]
+                .doc
+                .items()
+                .map(|item| (item.kind, item.facts.get(super::CHAT).cloned()))
+                .collect()
+        });
+        assert_eq!(held, [(ItemKind::Terminal { session: agent }, Some("chat-1".to_owned()))]);
     }
 }
