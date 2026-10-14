@@ -1124,6 +1124,9 @@ impl Peer<'_> {
             ClientMsg::FindFiles { root, query } => {
                 self.tasks.spawn(crate::files::find(self.out.clone(), root, query));
             }
+            ClientMsg::FindFolders { query, limit } => {
+                self.tasks.spawn(crate::files::find_folders(self.out.clone(), query, limit));
+            }
             ClientMsg::Search(request) => self.searches.handle(request, &self.out),
             ClientMsg::ReadFile { path } => {
                 // An admitted client can open a shell here; a read is nothing it could not do.

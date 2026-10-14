@@ -1,5 +1,6 @@
 //! The person's own marks on a thread, which no agent's session has: how far they have seen
-//! it and what they were writing to it ([`Intent::Seen`], [`Intent::Draft`]).
+//! it, what they were writing to it and their own name for it ([`Intent::Seen`],
+//! [`Intent::Draft`], [`Intent::Name`]).
 //!
 //! Any device sets them and every device reads them on the thread's row, so what is unread
 //! and a message begun on one device follow the person to the next. They are the worker's,
@@ -43,6 +44,17 @@ pub fn act(state: &ThreadState, intent: &Intent, now: WallMs) -> (Outcome, Vec<A
         Intent::Draft { text } => {
             let draft = Draft { text: text.clone(), at_ms: now };
             (Outcome::Done, vec![Action::DraftSet(draft)])
+        }
+        Intent::Name { title } if title.trim().chars().count() > Intent::NAME_MAX => (
+            Outcome::Refused {
+                reason: format!("a thread's name is at most {} characters", Intent::NAME_MAX),
+            },
+            Vec::new(),
+        ),
+        Intent::Name { title } => {
+            let name = title.trim();
+            let renamed = (state.named != name).then(|| Action::NameSet(name.to_owned()));
+            (Outcome::Done, renamed.into_iter().collect())
         }
         _ => (Outcome::Refused { reason: "not a mark of the person's".to_owned() }, Vec::new()),
     }
@@ -112,6 +124,26 @@ mod tests {
         assert_eq!(act(&seen, &Intent::Seen { turn: TurnId(1) }, WallMs::ZERO).1, []);
         let (_, past) = after(seen, &Intent::Seen { turn: TurnId(9) });
         assert_eq!(past.seen, TurnId(3), "not past the last turn");
+    }
+
+    /// The person's name shows over the agent's on the row, empty words take it back, and an
+    /// agent naming the thread afterwards changes nothing the person named.
+    #[test]
+    fn the_persons_name_shows_over_the_agents() {
+        let mut agents = state(1);
+        agents.meta.title = "Fix the build".to_owned();
+        let (outcome, named) = after(agents, &Intent::Name { title: " Release ".to_owned() });
+        assert_eq!(outcome, Outcome::Done);
+        assert_eq!(named.row(WallMs::ZERO).title, "Release");
+        let mut renamed = named.clone();
+        let mut meta = renamed.meta.clone();
+        meta.title = "Agent's new title".to_owned();
+        renamed.apply(&Action::Meta(Box::new(meta)));
+        assert_eq!(renamed.row(WallMs::ZERO).title, "Release", "the agent's own does not win");
+        let (_, back) = after(renamed, &Intent::Name { title: String::new() });
+        assert_eq!(back.row(WallMs::ZERO).title, "Agent's new title");
+        let long = Intent::Name { title: "x".repeat(Intent::NAME_MAX + 1) };
+        assert!(matches!(after(named, &long).0, Outcome::Refused { .. }));
     }
 
     /// A draft is kept with the worker's time, cleared by empty words, and one too long for a

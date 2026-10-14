@@ -208,6 +208,7 @@ impl WorkspaceView {
     pub fn threads_linked(&mut self, key: WorkerKey, cx: &mut Context<Self>) {
         let hub = self.thread_hub(key, cx);
         hub.update(cx, ThreadHub::connected);
+        self.view_resend(key, None);
     }
 
     /// Tell `key`'s thread hub what that machine can start now ("Continue in…"), if it has

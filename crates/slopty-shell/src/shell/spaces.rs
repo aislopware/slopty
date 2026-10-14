@@ -2315,6 +2315,9 @@ struct HomeFolderSearch {
     /// The host's index was still scanning at the last answer.
     indexing: bool,
     results: Vec<HomeFolderMatch>,
+    /// slopty: the folders the person goes to most, as the warming answer gave them: listed
+    /// first while nothing is typed.
+    visited: Vec<HomeFolderMatch>,
     /// A request reached the host, so it may hold an index to release.
     started: bool,
     /// The host predates `SearchHomeFolders`; the section stays hidden.
@@ -2358,10 +2361,26 @@ fn request_home_folders(
                         .add_space
                         .as_ref()
                         .and_then(|flow| shell.add_space_folder_rows(cx).get(flow.active).cloned());
+                    let untyped = shell
+                        .add_space
+                        .as_ref()
+                        .is_some_and(|flow| flow.search.read(cx).text().trim().is_empty());
                     let Some(search) = shell.add_space.as_mut().map(|flow| &mut flow.home_search)
                     else {
                         return false;
                     };
+                    // slopty: the warming answer, while nothing is typed, is the folders the
+                    // person goes to most: they lead the list.
+                    if generation.is_none()
+                        && untyped
+                        && !search.unsupported
+                        && let Ok(Ok(found)) =
+                            result.as_ref().map(|v| serde_json::from_value::<HomeFolderSearchResult>(v.clone()))
+                    {
+                        search.visited = found.matches;
+                        cx.notify();
+                        return false;
+                    }
                     if generation.is_some() && generation != Some(search.generation) {
                         return false;
                     }
@@ -6258,6 +6277,28 @@ impl Shell {
         } else {
             &[]
         };
+        // slopty: with nothing typed, the folders gone to most lead and the home's own follow.
+        let gone_to = if self.add_space_in_home() {
+            flow.home_search.visited.as_slice()
+        } else {
+            &[]
+        };
+        if flow.search.read(cx).text().trim().is_empty() && !gone_to.is_empty() {
+            let keys: HashSet<String> =
+                gone_to.iter().map(|found| folder_path_key(&found.path)).collect();
+            let shown = |entry: &slopty_view_proto::FolderEntry| {
+                open.is_none_or(|open| {
+                    let path = crate::pickers::child_path(open, &entry.name);
+                    !keys.contains(&folder_path_key(&path))
+                })
+            };
+            return gone_to
+                .iter()
+                .cloned()
+                .map(FolderRow::Home)
+                .chain(local.into_iter().filter(|entry| shown(entry)).map(FolderRow::Local))
+                .collect();
+        }
         local
             .into_iter()
             .map(FolderRow::Local)
@@ -8186,6 +8227,37 @@ mod home_folder_search_tests {
         assert_eq!(rows.len(), 2);
         assert!(matches!(&rows[0], FolderRow::Local(entry) if entry.name == "code"));
         assert!(matches!(&rows[1], FolderRow::Home(m) if m.relative == "dev/comet" && m.is_repo));
+    }
+
+    // slopty: the folders gone to most lead Home while nothing is typed.
+    #[gpui::test]
+    fn home_lists_the_folders_gone_to_most_first_until_a_query(cx: &mut TestAppContext) {
+        let (window, _dir, mut engine) = picker(cx, "local");
+        go_home(window, cx);
+        let warm = engine.take(methods::SEARCH_HOME_FOLDERS, cx);
+        engine.reply(
+            &warm[0],
+            serde_json::json!({
+                "matches": [
+                    found("/home/me/code", "code", false),
+                    found("/Volumes/Work/oss/slopty", "/Volumes/Work/oss/slopty", true),
+                ],
+                "indexing": false,
+            }),
+        );
+        cx.run_until_parked();
+        let listed = rows(window, cx);
+        assert_eq!(listed.len(), 2, "the home's own code is listed once, as gone to");
+        assert!(matches!(&listed[0], FolderRow::Home(m) if m.relative == "code"));
+        assert!(matches!(&listed[1], FolderRow::Home(m) if m.is_repo));
+        cx.executor().advance_clock(Duration::from_secs(10));
+        assert!(engine.take(methods::SEARCH_HOME_FOLDERS, cx).is_empty(), "no polling");
+        type_query(window, "zz", cx);
+        cx.run_until_parked();
+        assert!(rows(window, cx).iter().all(|row| !matches!(row, FolderRow::Home(_))));
+        type_query(window, "", cx);
+        cx.run_until_parked();
+        assert_eq!(rows(window, cx).len(), 2, "cleared, the folders gone to most are back");
     }
 
     #[gpui::test]

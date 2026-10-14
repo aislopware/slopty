@@ -142,6 +142,7 @@ pub fn run(sh: &Shell, opts: &DistOpts) -> Result<()> {
     let keychain = vault_identity(sh, opts, tag, &root.join("target").join("dist-keychain"))?;
     let bundle_opts = BundleOpts {
         debug: false,
+        fast: false,
         sign: keychain.as_ref().map(|k| k.identity.clone()).or_else(|| opts.sign.clone()),
         ad_hoc: opts.ad_hoc,
         no_linux: false,

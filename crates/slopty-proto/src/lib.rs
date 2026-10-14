@@ -193,6 +193,15 @@ pub enum ClientMsg {
         /// Where the clone goes: absolute, or `~/…`.
         into: String,
     },
+    /// The folders a new project may be, for the person's typing in its picker: those they go
+    /// to most, and any under the home whose path `query` matches
+    /// ([`folder::FolderHit`]). Answered with `WorkerMsg::FoundFolders`.
+    FindFolders {
+        /// What was typed; empty for the folders gone to most.
+        query: String,
+        /// How many the answer holds at most.
+        limit: u16,
+    },
 }
 
 impl ClientMsg {
@@ -222,6 +231,7 @@ impl ClientMsg {
             Self::FsOp { .. } => "FsOp",
             Self::Git { .. } => "Git",
             Self::CloneRepo { .. } => "CloneRepo",
+            Self::FindFolders { .. } => "FindFolders",
         }
     }
 }
@@ -388,6 +398,17 @@ pub enum WorkerMsg {
         /// How it went.
         outcome: cloning::CloneOutcome,
     },
+    /// The answer to `ClientMsg::FindFolders`.
+    FoundFolders {
+        /// The query answered, so a stale answer can be told from the current one.
+        query: String,
+        /// The worker's home, absolute.
+        home: String,
+        /// The folders, best first.
+        folders: Vec<folder::FolderHit>,
+        /// An index of the folders is still being made: asked again, more may be found.
+        indexing: bool,
+    },
 }
 
 impl WorkerMsg {
@@ -426,6 +447,7 @@ impl WorkerMsg {
             Self::GitDone { .. } => "GitDone",
             Self::RepoCloning { .. } => "RepoCloning",
             Self::RepoCloned { .. } => "RepoCloned",
+            Self::FoundFolders { .. } => "FoundFolders",
         }
     }
 }

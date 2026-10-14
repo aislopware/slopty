@@ -20,6 +20,7 @@ pub mod conversation;
 pub mod facts;
 pub mod file;
 pub mod find;
+pub mod folders;
 #[cfg(target_os = "macos")]
 mod fsevents;
 pub mod fsop;

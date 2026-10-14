@@ -4,7 +4,7 @@
 use chrono::{DateTime, Utc};
 use slopty_core::WallMs;
 use slopty_proto::thread::wire::ThreadRow;
-use slopty_proto::thread::{Phase, ThreadId};
+use slopty_proto::thread::{Phase, ThreadId, ThreadMeta};
 use slopty_view_proto::{Chat, Session, SessionStatus, Space};
 
 /// A wall time as the shell's.
@@ -42,11 +42,14 @@ pub fn folder(row: &ThreadRow) -> Option<&str> {
 }
 
 /// The thread that started this one: the row's link to it, else the parent its agent was
-/// started under ([`slopty_proto::agent::PARENT_FACT`]).
+/// started under ([`slopty_proto::agent::PARENT_FACT`]), else the thread it was asked aside of
+/// ([`ThreadMeta::ASIDE_FACT`]).
 #[must_use]
 pub fn parent(row: &ThreadRow) -> Option<ThreadId> {
     row.parent.as_ref().map(|link| link.thread).or_else(|| {
-        row.facts.get(slopty_proto::agent::PARENT_FACT).and_then(|thread| thread.parse().ok())
+        [slopty_proto::agent::PARENT_FACT, ThreadMeta::ASIDE_FACT]
+            .iter()
+            .find_map(|fact| row.facts.get(*fact).and_then(|thread| thread.parse().ok()))
     })
 }
 
@@ -67,7 +70,7 @@ pub fn chat(row: &ThreadRow, device: &str) -> Chat {
         last_message_preview: row.last_line.clone(),
         last_message_at: row.ended.map(|ended| time(ended.at_ms)).or(Some(updated)),
         created_at: updated,
-        harness_session_id: None,
+        harness_session_id: Some(row.native.clone()).filter(|native| !native.is_empty()),
         harness_session_cwd: None,
         space_id: folder(row).map(|path| space_id(device, path)),
         last_seen_at: row
@@ -77,6 +80,35 @@ pub fn chat(row: &ThreadRow, device: &str) -> Chat {
         room_gen: None,
         parent_chat_id: parent(row).map(|thread| thread.to_string()),
     }
+}
+
+/// The pull request a thread's row shows, as the shell's summary of it, on branch `branch`.
+#[must_use]
+pub fn pull(
+    row: &ThreadRow,
+    branch: Option<&str>,
+) -> Option<slopty_view_proto::ChangeRequestSummary> {
+    use slopty_proto::thread::wire::PullStands;
+    use slopty_view_proto::ChangeRequestState;
+    let pull = row.pull.as_ref()?;
+    let state = match pull.stands {
+        PullStands::Merged => ChangeRequestState::Merged,
+        PullStands::Closed => ChangeRequestState::Closed,
+        _ => ChangeRequestState::Open,
+    };
+    Some(slopty_view_proto::ChangeRequestSummary {
+        provider: match pull.forge {
+            slopty_proto::git::Forge::GitHub => "github",
+            slopty_proto::git::Forge::GitLab => "gitlab",
+        }
+        .to_owned(),
+        number: u64::from(pull.number),
+        title: pull.title.clone(),
+        url: pull.url.clone(),
+        state,
+        base_ref: pull.base.clone(),
+        head_ref: branch.unwrap_or_default().to_owned(),
+    })
 }
 
 /// A thread's live status as a session, as of `now`, with the subagents of it that run.

@@ -21,7 +21,10 @@ Tests make no sound on this Mac: the drawn screen's worker sounds only under `SL
    scratch frame saved beside the render, when the frame the app drew is stale: the goldens are
    the frames the app draws through its notifies, never a forced full redraw. The check runs
    once the frame's next-frame callbacks have run, so an animation's own notify is in the frame
-   it judges. A live app cannot hold the clock, so the self-test runs under GPUI's Reduce Motion
+   it judges, and only after a frame that painted nothing new (at most eight): a value measured
+   while drawing reaches the views that read it a frame later (ARCHITECTURE.md, "Drawing under
+   retention"), as when a narrower column flips the composer to two rows and the transcript
+   then clears the taller stack. A live app cannot hold the clock, so the self-test runs under GPUI's Reduce Motion
    and a frame whose two scratch draws disagree is in motion and not judged.
 3. **App self-test**, `cargo xtask e2e app` (`crates/slopty-e2e`):
    launches a server, ptyd, the worker registered with the server, and the app (built with

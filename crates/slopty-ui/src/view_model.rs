@@ -25,7 +25,9 @@ use futures::StreamExt as _;
 use futures::stream::BoxStream;
 use parking_lot::Mutex;
 use serde::Serialize;
-use slopty_view_doc::{SessionMessageEntry, TranscriptBaseline, TranscriptFrame, TranscriptUpdate};
+use slopty_view_doc::{
+    QueuedMessage, SessionMessageEntry, TranscriptBaseline, TranscriptFrame, TranscriptUpdate,
+};
 use slopty_view_proto::{
     Chat, Connectivity, Device, EngineInfo, ServerPresence, Session, SidebarPreferencesState,
     Space, WorkspaceScope,
@@ -40,6 +42,8 @@ pub enum Ask {
     Follow(String),
     /// The last watch on this chat's transcript closed.
     Unfollow(String),
+    /// A watch opened on what the workspace publishes: publish it all again now.
+    Republish,
     /// Any other call: answer it on `reply`, a value or a watch's stream, or say the method is
     /// unknown.
     Call {
@@ -57,6 +61,7 @@ impl std::fmt::Debug for Ask {
         match self {
             Self::Follow(chat) => f.debug_tuple("Follow").field(chat).finish(),
             Self::Unfollow(chat) => f.debug_tuple("Unfollow").field(chat).finish(),
+            Self::Republish => f.write_str("Republish"),
             Self::Call { method, params, .. } => f
                 .debug_struct("Call")
                 .field("method", method)
@@ -79,6 +84,25 @@ pub struct Feed {
     local: watch::Sender<Local>,
     /// Each followed chat's transcript, `None` until its thread has come.
     transcripts: Mutex<HashMap<String, Transcript>>,
+    /// The messages waiting to go to each chat's agent, for the chats whose queue is watched.
+    queues: Mutex<HashMap<String, watch::Sender<Arc<[QueuedMessage]>>>>,
+    /// The pull requests the threads' branches have, as their rows show them.
+    pulls: watch::Sender<Arc<[Pull]>>,
+    /// The sidebar's pins and sections, `None` until the workspace says them.
+    sidebar: watch::Sender<Option<SidebarPreferencesState>>,
+}
+
+/// A pull request a thread's branch has, where the thread works.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Pull {
+    /// The machine, as a device id.
+    pub device: String,
+    /// The folders the thread works in: where it runs and its repository's root.
+    pub folders: Vec<String>,
+    /// The branch, when known.
+    pub branch: Option<String>,
+    /// The pull request.
+    pub summary: slopty_view_proto::ChangeRequestSummary,
 }
 
 /// This machine's own worker, as the app last said.
@@ -107,6 +131,9 @@ impl Feed {
             connectivity: watch::Sender::new(Connectivity::default()),
             local: watch::Sender::new(Local::Unknown),
             transcripts: Mutex::new(HashMap::new()),
+            queues: Mutex::new(HashMap::new()),
+            pulls: watch::Sender::new(Arc::default()),
+            sidebar: watch::Sender::new(None),
         }
     }
 
@@ -119,6 +146,15 @@ impl Feed {
             *now = known;
             changed
         });
+    }
+
+    /// This machine's own worker, as a device id, once the app has said it has one.
+    #[must_use]
+    pub fn local_worker(&self) -> Option<String> {
+        match &*self.local.borrow() {
+            Local::Known(device) => device.clone(),
+            Local::Unknown => None,
+        }
     }
 
     /// The workers, as devices. Unchanged lists wake no watch.
@@ -134,6 +170,20 @@ impl Feed {
     /// The threads, as chats.
     pub fn chats(&self, chats: Vec<Chat>) {
         publish(&self.chats, chats);
+    }
+
+    /// The sidebar's pins and sections.
+    pub fn sidebar(&self, state: SidebarPreferencesState) {
+        self.sidebar.send_if_modified(|now| {
+            let changed = now.as_ref() != Some(&state);
+            *now = Some(state);
+            changed
+        });
+    }
+
+    /// The pull requests the threads' branches have.
+    pub fn pulls(&self, pulls: Vec<Pull>) {
+        publish(&self.pulls, pulls);
     }
 
     /// The threads' live status, as sessions.
@@ -171,6 +221,29 @@ impl Feed {
             *now = Some(entries.into());
             true
         });
+    }
+
+    /// The chats whose queue is watched: the workspace publishes their waiting messages.
+    #[must_use]
+    pub fn queued(&self) -> Vec<String> {
+        self.queues.lock().keys().cloned().collect()
+    }
+
+    /// The messages waiting to go to `chat`'s agent; nothing while no watch is open on it.
+    pub fn queue(&self, chat: &str, items: Vec<QueuedMessage>) {
+        let sender = self.queues.lock().get(chat).cloned();
+        if let Some(sender) = sender {
+            publish(&sender, items);
+        }
+    }
+
+    /// A watch opened on `chat`'s queue.
+    fn watch_queue(&self, chat: &str) -> watch::Receiver<Arc<[QueuedMessage]>> {
+        let mut queues = self.queues.lock();
+        queues
+            .entry(chat.to_owned())
+            .or_insert_with(|| watch::Sender::new(Arc::default()))
+            .subscribe()
     }
 
     /// A watch opened on `chat`: the receiver it reads, and whether it is the first.
@@ -353,6 +426,60 @@ fn still<T: Serialize>(value: &T) -> Result<RpcReply, RpcError> {
     ))
 }
 
+/// The pull request of the checkout `cwd` on `device` with `branch` checked out, among `pulls`.
+fn checkout_pull<'a>(pulls: &'a [Pull], device: &str, cwd: &str, branch: &str) -> Option<&'a Pull> {
+    let cwd = cwd.trim_end_matches('/');
+    pulls.iter().find(|pull| {
+        pull.device == device
+            && pull.folders.iter().any(|folder| folder.trim_end_matches('/') == cwd)
+            && (branch.is_empty() || pull.branch.as_deref().is_none_or(|b| b == branch))
+    })
+}
+
+impl ViewModel {
+    /// `WatchCheckoutChangeRequest`: the pull request of a checkout's branch, as its threads'
+    /// rows show it, said again each time it changes.
+    fn change_request(&self, params: &serde_json::Value) -> RpcReply {
+        let text = |key: &str| params.get(key).and_then(serde_json::Value::as_str).unwrap_or("");
+        let device = Some(text("targetDeviceId"))
+            .filter(|device| !device.is_empty())
+            .map(str::to_owned)
+            .or_else(|| self.feed.local_worker())
+            .unwrap_or_default();
+        let (cwd, branch) = (text("cwd").to_owned(), text("branch").to_owned());
+        let pulls = self.feed.pulls.subscribe();
+        let frames = futures::stream::unfold(
+            (pulls, None::<Option<slopty_view_proto::ChangeRequestSummary>>),
+            move |(mut pulls, last)| {
+                let (device, cwd, branch) = (device.clone(), cwd.clone(), branch.clone());
+                async move {
+                    loop {
+                        if last.is_some() {
+                            pulls.changed().await.ok()?;
+                        }
+                        let now = checkout_pull(&pulls.borrow_and_update(), &device, &cwd, &branch)
+                            .map(|pull| pull.summary.clone());
+                        if last.as_ref() == Some(&now) {
+                            continue;
+                        }
+                        let status = slopty_view_proto::CheckoutChangeRequestStatus {
+                            checkout_id: cwd.clone(),
+                            device_id: device.clone(),
+                            cwd: cwd.clone(),
+                            branch: branch.clone(),
+                            change_request: now.clone(),
+                            updated_at: chrono::Utc::now(),
+                        };
+                        let value = serde_json::to_value(&status).ok()?;
+                        return Some((value, (pulls, Some(now))));
+                    }
+                }
+            },
+        );
+        RpcReply::Stream(frames.boxed())
+    }
+}
+
 #[async_trait]
 impl RpcService for ViewModel {
     async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
@@ -382,14 +509,34 @@ impl RpcService for ViewModel {
                 Ok(RpcReply::Stream(list_frames(self.feed.sessions.subscribe())))
             }
             methods::WATCH_DOC_MESSAGES => self.transcript(&params),
-            // Pins and sections live on this device; Slopty syncs none of them.
-            methods::WATCH_SIDEBAR_PREFERENCES => still(&SidebarPreferencesState {
-                revision: 0,
-                synced: false,
-                initialized: true,
-                pinned_session_ids: Vec::new(),
-                sections: Vec::new(),
-            }),
+            methods::WATCH_QUEUE => {
+                let chat = params.get("chatId").and_then(serde_json::Value::as_str).unwrap_or("");
+                let queue = self.feed.watch_queue(chat);
+                // A queue the workspace has not published yet still reads from the start.
+                let _sent = self.asks.send(Ask::Republish);
+                let frames = futures::stream::unfold((queue, true), async |(mut queue, first)| {
+                    if !first {
+                        queue.changed().await.ok()?;
+                    }
+                    let items = queue.borrow_and_update().clone();
+                    Some((serde_json::json!({ "items": &*items }), (queue, false)))
+                });
+                Ok(RpcReply::Stream(frames.boxed()))
+            }
+            methods::WATCH_CHECKOUT_CHANGE_REQUEST => Ok(self.change_request(&params)),
+            // Pins and sections are this client's own, kept by the workspace.
+            methods::WATCH_SIDEBAR_PREFERENCES => {
+                let sidebar = self.feed.sidebar.subscribe();
+                let _sent = self.asks.send(Ask::Republish);
+                let frames = futures::stream::unfold((sidebar, true), async |(mut rx, first)| {
+                    if !first {
+                        rx.changed().await.ok()?;
+                    }
+                    let state = rx.wait_for(Option::is_some).await.ok()?.clone()?;
+                    Some((serde_json::to_value(&state).ok()?, (rx, false)))
+                });
+                Ok(RpcReply::Stream(frames.boxed()))
+            }
             methods::WATCH_CONNECTIVITY => {
                 Ok(RpcReply::Stream(value_frames(self.feed.connectivity.subscribe())))
             }

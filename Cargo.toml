@@ -67,6 +67,7 @@ slopty-dnd = { path = "crates/slopty-dnd" }
 
 # core
 anyhow = "1.0.104"
+base64 = "0.22.1"
 thiserror = "2.0.21"
 raw-window-handle = "0.6.2"
 regex = "1.13.1"
@@ -720,6 +721,14 @@ inherits = "release"
 debug = "limited"
 split-debuginfo = "packed"
 strip = "debuginfo"
+
+# A bundle to try on real machines (`cargo xtask bundle --fast`): the shipping build's
+# optimisation and debug info, but thin LTO over parallel codegen units, so the final links use
+# every core instead of one.
+[profile.fast]
+inherits = "dist"
+lto = "thin"
+codegen-units = 16
 
 # Fast-starting per-event binaries (hook relay): size over throughput.
 [profile.tiny]

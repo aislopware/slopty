@@ -750,22 +750,72 @@ pub struct ChatPanels {
     pub right_active: RightSurface,
 }
 
+/// slopty: how many chats' panes are kept across launches.
+const KEPT_PANELS: usize = 500;
+
 /// The session-scoped panel map. Keys are chat ids; the new-chat canvas uses
 /// the empty key. Not persisted — a fresh app starts with everything closed.
 #[derive(Debug, Default)]
 pub struct SessionPanels {
     map: std::collections::HashMap<String, ChatPanels>,
+    /// slopty: a flag changed since the panes were last saved.
+    dirty: bool,
     /// Unique surface visits, oldest first, independent of the strip order.
     right_tab_history: std::collections::HashMap<String, Vec<RightSurface>>,
 }
 
 impl SessionPanels {
+    /// slopty: the panes each chat had open when the app last ran.
+    pub fn restored(saved: &std::collections::BTreeMap<String, settings::SavedPanels>) -> Self {
+        let map = saved
+            .iter()
+            .map(|(key, saved)| {
+                let panels = ChatPanels {
+                    files_open: saved.files,
+                    terminal_open: saved.terminal,
+                    changes_open: saved.changes,
+                    right_expanded: saved.expanded,
+                    ..ChatPanels::default()
+                };
+                (key.clone(), panels)
+            })
+            .collect();
+        Self { map, ..Self::default() }
+    }
+
+    /// slopty: the panes to keep, once a flag changed since the last save: each chat with any
+    /// open, at most [`KEPT_PANELS`] of them.
+    pub fn take_saved(
+        &mut self,
+    ) -> Option<std::collections::BTreeMap<String, settings::SavedPanels>> {
+        if !std::mem::take(&mut self.dirty) {
+            return None;
+        }
+        let saved = self
+            .map
+            .iter()
+            .map(|(key, panels)| {
+                let saved = settings::SavedPanels {
+                    files: panels.files_open,
+                    terminal: panels.terminal_open,
+                    changes: panels.changes_open,
+                    expanded: panels.right_expanded,
+                };
+                (key.clone(), saved)
+            })
+            .filter(|(_, saved)| *saved != settings::SavedPanels::default())
+            .take(KEPT_PANELS)
+            .collect();
+        Some(saved)
+    }
+
     pub fn get(&self, key: &str) -> ChatPanels {
         self.map.get(key).copied().unwrap_or_default()
     }
 
     /// Flip the terminal flag for `key`; returns the new value.
     pub fn toggle_terminal(&mut self, key: &str) -> bool {
+        self.dirty = true; // slopty: kept panes
         let entry = self.map.entry(key.to_string()).or_default();
         entry.terminal_open = !entry.terminal_open;
         entry.terminal_open
@@ -773,6 +823,7 @@ impl SessionPanels {
 
     /// Flip the changes flag for `key`; returns the new value.
     pub fn toggle_changes(&mut self, key: &str) -> bool {
+        self.dirty = true; // slopty: kept panes
         let entry = self.map.entry(key.to_string()).or_default();
         entry.changes_open = !entry.changes_open;
         entry.changes_open
@@ -782,7 +833,11 @@ impl SessionPanels {
     pub fn update(&mut self, key: &str, f: impl FnOnce(&mut ChatPanels)) {
         let panel = self.map.entry(key.to_string()).or_default();
         let previous = panel.right_active;
+        let before = *panel;
         f(panel);
+        // slopty: kept panes
+        self.dirty |= (panel.files_open, panel.terminal_open, panel.changes_open, panel.right_expanded)
+            != (before.files_open, before.terminal_open, before.changes_open, before.right_expanded);
         let surface = panel.right_active;
         if surface != previous && surface != RightSurface::Picker {
             let history = self.right_tab_history.entry(key.to_string()).or_default();
@@ -2120,6 +2175,7 @@ impl Shell {
             shell: shell.downgrade(),
             _observation: cx.observe(&shell, |_, _, cx| cx.notify()),
         });
+        let panels = SessionPanels::restored(&settings.session_panels); // slopty: kept panes
         Self {
             state,
             sidebar_pane,
@@ -2252,7 +2308,7 @@ impl Shell {
             data_dir,
             settings_base: settings::current(cx),
             settings,
-            panels: SessionPanels::default(),
+            panels, // slopty: kept panes
             panel_open_sequence: 0,
             sidebar_opened_at: 0,
             active_chat: String::new(),
@@ -10651,6 +10707,14 @@ impl Render for Shell {
         let wake = shell_clock_wake(self.state.read(cx), now);
         self.clock
             .arm(wake, now, |shell: &mut Shell| &mut shell.clock, cx);
+        // slopty: the panes a chat has open are kept across launches, saved after the frame.
+        if let Some(saved) = self.panels.take_saved() {
+            self.settings.session_panels = saved;
+            cx.spawn(async move |this, cx| {
+                this.update(cx, |shell, cx| shell.schedule_save(cx)).ok();
+            })
+            .detach();
+        }
         let active_files_key = self.panel_key(cx);
         let hidden_explorers = self
             .files
@@ -12120,6 +12184,23 @@ mod tests {
     }
 
     // ---- per-session panel flags (§1.10/1.11 parity: slopty sessionPanels) ----
+
+    #[test]
+    fn session_panels_are_kept_across_launches() {
+        // slopty: the panes a chat has open come back on the next launch.
+        let mut panels = SessionPanels::default();
+        assert!(panels.take_saved().is_none(), "nothing changed, nothing to save");
+        panels.update("c1", |p| p.files_open = true);
+        panels.toggle_terminal("c2");
+        panels.toggle_terminal("c2");
+        let saved = panels.take_saved().expect("a pane opened");
+        assert!(saved["c1"].files && !saved["c1"].terminal);
+        assert!(!saved.contains_key("c2"), "a chat with every pane closed is not kept");
+        assert!(panels.take_saved().is_none(), "saved once");
+        let restored = SessionPanels::restored(&saved);
+        assert!(restored.get("c1").files_open);
+        assert!(!restored.get("c2").terminal_open);
+    }
 
     #[test]
     fn session_panels_default_closed_per_chat() {

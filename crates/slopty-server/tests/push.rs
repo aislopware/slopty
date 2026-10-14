@@ -142,6 +142,7 @@ mod tests {
         ThreadRow {
             id,
             agent: AgentId::named(AgentId::CLAUDE_CODE),
+            native: String::new(),
             title: "Rank the fleet".to_owned(),
             status: Status {
                 phase,

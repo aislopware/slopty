@@ -431,6 +431,7 @@ mod golden_thread {
         snap("intent_fork_whole", &send(Intent::Fork { after: None }));
         snap("intent_seen", &send(Intent::Seen { turn: TurnId(3) }));
         snap("intent_draft", &send(Intent::Draft { text: "and the README".to_owned() }));
+        snap("intent_name", &send(Intent::Name { title: "Release 0.9".to_owned() }));
     }
 
     #[test]

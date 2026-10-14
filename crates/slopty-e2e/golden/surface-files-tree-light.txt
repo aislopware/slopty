@@ -1,8 +1,8 @@
 Window
 Button │ Server: e2e-server, Connected
 Button │ Settings
-Button │ Attach images
 MultilineTextInput │ Do anything…
+Button │ Attach images
 Group │ Workspace files
 SearchInput │ Search files
 Button │ Show all files (even hidden)

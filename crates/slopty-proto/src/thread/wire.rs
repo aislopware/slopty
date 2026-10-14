@@ -316,6 +316,13 @@ pub enum Intent {
         /// The words.
         text: String,
     },
+    /// The person's own name for the thread: what every list shows over the agent's own
+    /// ([`ThreadRow::title`]), on every device. Empty words take it back. At most
+    /// [`Self::NAME_MAX`] characters. Any thread takes it.
+    Name {
+        /// The name.
+        title: String,
+    },
 }
 
 /// A file's change as a review showed it, or some of its hunks.
@@ -337,13 +344,19 @@ pub struct Pick {
 }
 
 impl Intent {
+    /// The most characters a thread's name ([`Self::Name`]) holds.
+    pub const NAME_MAX: usize = 200;
+
     /// The capability a thread needs for this intent; none for closing it ([`Self::Discard`])
-    /// or for the person's own marks on it ([`Self::Seen`], [`Self::Draft`]), which the worker
+    /// or for the person's own marks on it ([`Self::Seen`], [`Self::Draft`], [`Self::Name`]),
+    /// which the worker
     /// does whatever its agent can.
     #[must_use]
     pub const fn needs(&self) -> Option<&'static str> {
         Some(match self {
-            Self::Discard | Self::Seen { .. } | Self::Draft { .. } => return None,
+            Self::Discard | Self::Seen { .. } | Self::Draft { .. } | Self::Name { .. } => {
+                return None;
+            }
             Self::Send { delivery: Delivery::Steer, .. } => Cap::STEER,
             Self::Send { delivery: Delivery::At { .. }, .. } => Cap::SCHEDULE,
             Self::Send { delivery: Delivery::Queue, .. }
@@ -671,6 +684,9 @@ pub struct ThreadRow {
     pub id: ThreadId,
     /// Its agent.
     pub agent: AgentId,
+    /// The agent's own id for its session ([`ThreadMeta::native`](super::ThreadMeta::native)):
+    /// what the agent's own terminal resumes it by (`claude --resume`).
+    pub native: String,
     /// What it is about.
     pub title: String,
     /// Where it is.

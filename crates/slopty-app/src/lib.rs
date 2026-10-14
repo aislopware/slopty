@@ -1202,6 +1202,7 @@ fn apply_link_event(
             | WorkerMsg::File { .. }
             | WorkerMsg::Written { .. }
             | WorkerMsg::FoundFiles { .. }
+            | WorkerMsg::FoundFolders { .. }
             | WorkerMsg::Folder { .. }
             | WorkerMsg::FolderPage { .. }
             | WorkerMsg::Search(_)

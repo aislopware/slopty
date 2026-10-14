@@ -14,6 +14,8 @@ workspace = true
 anyhow.workspace = true
 # The interface's RPC service (`view_model`).
 async-trait.workspace = true
+# A file attached to a message, which the composer sends in base64 parts (`view_model`).
+base64.workspace = true
 # A file tile's picture or PDF, shared with its link without a copy (`file::decode`).
 bytes.workspace = true
 core-foundation.workspace = true

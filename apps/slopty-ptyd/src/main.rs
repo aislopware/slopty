@@ -79,6 +79,7 @@ fn backlog_bytes(text: &str) -> Result<usize, String> {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
+    slopty_proto::wire::set_commit(option_env!("SLOPTY_COMMIT"));
     let args = Args::parse();
     if args.custody {
         use std::io::Write as _;

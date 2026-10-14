@@ -126,6 +126,7 @@ mod tests {
         let row = ThreadRow {
             id: thread,
             agent: AgentId::named(AgentId::CLAUDE_CODE),
+            native: String::new(),
             title: "Soak".to_owned(),
             status: Status { phase, wait: None, liveness: Liveness::Live, since_ms: now },
             requests: Vec::new(),

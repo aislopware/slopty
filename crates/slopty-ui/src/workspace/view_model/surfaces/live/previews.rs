@@ -12,7 +12,6 @@ use slopty_view_rpc::{RpcError, RpcReply};
 use tokio::sync::watch;
 
 use super::{Live, now, param};
-use crate::view_model::rows;
 use crate::workspace::WorkspaceView;
 
 /// The previews watched, by the chat they are for.
@@ -89,7 +88,7 @@ impl WorkspaceView {
         let project_cwd = folder.unwrap_or_default().to_owned();
         let project_name =
             project_cwd.rsplit('/').find(|part| !part.is_empty()).unwrap_or_default().to_owned();
-        let project_id = rows::space_id(&device, &project_cwd);
+        let project_id = self.view_space_id(&device, &project_cwd);
         let mut services: Vec<PreviewService> = self
             .ports
             .iter()

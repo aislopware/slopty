@@ -1,12 +1,12 @@
 # Third-party notices
 
-Slopty's interface is copied from zeron. Its code, fonts and icons come from the works below,
-each kept under its own licence.
+Slopty's interface draws on zeron's ideas and design. The code, fonts and icons Slopty takes
+from the works below each keep their own licence.
 
 ## Zeron
 
 Every file whose first line reads `// Derived from zeron (MIT, github.com/zeronsh/zeron @
-053ce2e)` is copied from or adapted from zeron at that commit; so are the other files of
+<commit>)` is based on zeron at that commit; so are the other files of
 `crates/slopty-shell`, `slopty-view-proto`, `slopty-view-doc`, `slopty-view-rpc`,
 `slopty-shell-theme`, `slopty-syntax`, `slopty-markdown` and `slopty-veil`.
 
@@ -33,6 +33,25 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+## T3 Code's model manifest
+
+`crates/slopty-ui/assets/t3code-model-manifest.json` is T3 Code's
+`apps/server/src/provider/model-manifest.json` (github.com/pingdotgg/t3code, commit 08e18b78),
+copyright 2026 T3 Tools Inc., under the MIT licence:
+
+> Permission is hereby granted, free of charge, to any person obtaining a copy of this software
+> and associated documentation files (the "Software"), to deal in the Software without
+> restriction, including without limitation the rights to use, copy, modify, merge, publish,
+> distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the
+> Software is furnished to do so, subject to the following conditions: The above copyright
+> notice and this permission notice shall be included in all copies or substantial portions of
+> the Software. THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+> IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+> PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+> LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+> OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+> DEALINGS IN THE SOFTWARE.
 
 ## Geist and Geist Mono
 

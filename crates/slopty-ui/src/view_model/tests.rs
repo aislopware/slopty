@@ -27,11 +27,32 @@ fn device(
     }
 }
 
+/// A message the shell sent goes by the id the shell gave it, so the shell's echo of it gives
+/// way to it instead of waiting below it as "Sending…" for good.
+#[test]
+fn a_message_the_shell_sent_goes_by_the_id_it_gave() {
+    let mut state = fixtures::thread("tools");
+    let sent = slopty_proto::thread::IntentId::new();
+    let item = state
+        .items
+        .iter_mut()
+        .find(|item| matches!(item.body, slopty_proto::thread::ItemBody::User(_)))
+        .expect("the person's message");
+    if let slopty_proto::thread::ItemBody::User(message) = &mut item.body {
+        message.intent = Some(sent);
+    }
+    let named = |intent| (intent == sent).then(|| "m-1".to_owned());
+    let entries = transcript::entries(&state, "w", |_| None, named);
+    assert_eq!(entries.first().map(|e| e.id.as_str()), Some("m-1"));
+    let unnamed = transcript::entries(&state, "w", |_| None, |_| None);
+    assert_ne!(unnamed.first().map(|e| e.id.as_str()), Some("m-1"), "not sent from here");
+}
+
 /// A recorded session's thread, as the shell's transcript, applied by the shell's own reducer.
 #[test]
 fn a_recorded_session_reads_as_the_shells_transcript() {
     let state = fixtures::thread("tools");
-    let entries = transcript::entries(&state, "w", |_| None);
+    let entries = transcript::entries(&state, "w", |_| None, |_| None);
 
     let first = entries.first().expect("the person's message");
     assert_eq!(first.role, MessageRole::User);
@@ -59,7 +80,7 @@ fn a_recorded_session_reads_as_the_shells_transcript() {
 #[test]
 fn an_edit_carries_its_counts() {
     let state = fixtures::thread("edit");
-    let entries = transcript::entries(&state, "w", |_| None);
+    let entries = transcript::entries(&state, "w", |_| None, |_| None);
     let edit = entries
         .iter()
         .flat_map(|e| &e.parts)
@@ -118,6 +139,43 @@ async fn a_list_watch_follows_the_feed() {
     assert_eq!(read, vec![mac]);
 }
 
+/// A checkout's pull request watch says the one its threads show for that folder and branch,
+/// and says it again only when it changes.
+#[tokio::test]
+async fn a_checkouts_pull_request_follows_its_threads() {
+    let (view_model, feed, _asks) = ViewModel::new("me".to_owned());
+    feed.local_device(Some("w".to_owned()));
+    let client = memory_client(view_model);
+    let params = serde_json::json!({ "cwd": "/w/slopty/", "branch": "fix" });
+    let mut watch = client
+        .subscribe_scoped(methods::WATCH_CHECKOUT_CHANGE_REQUEST, params)
+        .await
+        .expect("the watch");
+    let read = |value: Option<serde_json::Value>| {
+        let status: slopty_view_proto::CheckoutChangeRequestStatus =
+            serde_json::from_value(value.expect("a status")).expect("reads");
+        status.change_request.map(|pr| pr.number)
+    };
+    assert_eq!(read(watch.recv().await), None, "none yet");
+    let pull = |number, branch: &str| super::Pull {
+        device: "w".to_owned(),
+        folders: vec!["/w/slopty".to_owned()],
+        branch: Some(branch.to_owned()),
+        summary: slopty_view_proto::ChangeRequestSummary {
+            provider: "github".to_owned(),
+            number,
+            title: "Fix".to_owned(),
+            url: format!("https://github.com/o/r/pull/{number}"),
+            state: slopty_view_proto::ChangeRequestState::Open,
+            base_ref: "main".to_owned(),
+            head_ref: branch.to_owned(),
+        },
+    };
+    feed.pulls(vec![pull(7, "other")]);
+    feed.pulls(vec![pull(7, "other"), pull(42, "fix")]);
+    assert_eq!(read(watch.recv().await), Some(42), "the branch's own, once");
+}
+
 /// A transcript watch follows its chat, says the whole of it once and then what changed, and
 /// lets it go when it closes.
 #[tokio::test]
@@ -130,7 +188,7 @@ async fn a_transcript_watch_follows_and_lets_go() {
     assert!(matches!(asks.recv().await, Some(Ask::Follow(chat)) if chat == "c"));
 
     let state = fixtures::thread("tools");
-    let all = transcript::entries(&state, "w", |_| None);
+    let all = transcript::entries(&state, "w", |_| None, |_| None);
     let (head, _) = all.split_at(1);
     // A watch holds the latest transcript only, so each is read before the next is said.
     let mut rows = Vec::new();

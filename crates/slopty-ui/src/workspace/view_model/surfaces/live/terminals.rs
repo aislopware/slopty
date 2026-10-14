@@ -2,13 +2,17 @@
 //! answer, once the shell's view is attached, is the session's id; the panel then shows that
 //! view. A shell opened for a chat and still running when it is asked again (the app came back,
 //! the session lived on in its worker) is found by its `chat` fact and shown again instead of a
-//! new one. `CloseTerminal` ends the shell.
+//! new one. A chat whose agent runs in a terminal (Claude Code's TUI) shows that terminal
+//! first, the same session the chat shows, so the person goes on in either. A project's run
+//! script opens in a terminal of its own. `CloseTerminal` ends the shell, but only puts an
+//! agent's terminal away.
 
 use std::collections::{HashMap, HashSet};
 
 use gpui::{App, Context, Focusable as _, SharedString, Subscription, Task};
 use slopty_client::WorkerKey;
 use slopty_core::SessionId;
+use slopty_proto::git::RunScript;
 use slopty_proto::items::{ItemKind, ItemOp};
 use slopty_proto::terminal::{OpenSession, SessionState, TermSize};
 use slopty_proto::{ClientMsg, RequestId};
@@ -50,13 +54,31 @@ impl WorkspaceView {
         params: &serde_json::Value,
         cx: &mut Context<Self>,
     ) -> Task<Result<RpcReply, RpcError>> {
+        self.live_open_session(params, None, cx)
+    }
+
+    /// A terminal for `params.chatId` as [`Self::live_open_terminal`] opens one, running `script`
+    /// on `key` where one is named, in a fresh terminal of its own.
+    pub(in crate::workspace) fn live_open_session(
+        &mut self,
+        params: &serde_json::Value,
+        script: Option<(WorkerKey, RunScript)>,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<RpcReply, RpcError>> {
         let chat = param(params, "chatId").unwrap_or_default().to_owned();
-        let Some((key, cwd)) = self.live_place(params, cx) else {
+        let place = match &script {
+            Some((key, script)) => Some((*key, Some(script.cwd.clone()))),
+            None => self.live_place(params, cx),
+        };
+        let Some((key, cwd)) = place else {
             return now(Err(RpcError::Failed("no machine to open a terminal on".to_owned())));
         };
-        let cwd = param(params, "cwd").map(str::to_owned).or(cwd);
+        let cwd = param(params, "cwd").filter(|_| script.is_none()).map(str::to_owned).or(cwd);
         let (reply, answer) = oneshot::channel();
-        if let Some(session) = self.live_kept_shell(key, &chat, cx) {
+        if script.is_none()
+            && let Some(session) =
+                self.live_agent_terminal(&chat, cx).or_else(|| self.live_kept_shell(key, &chat, cx))
+        {
             cx.global_mut::<Live>().terminals.coming.insert(session, (chat, reply));
             self.live_settle_terminals(cx);
             return later(answer, cx);
@@ -79,9 +101,9 @@ impl WorkspaceView {
                 ..TermSize::default()
             },
             cwd,
-            command: Vec::new(),
-            env: Vec::new(),
-            title: None,
+            command: script.as_ref().map(|(_, s)| s.command.clone()).unwrap_or_default(),
+            env: script.as_ref().map(|(_, s)| s.env.clone()).unwrap_or_default(),
+            title: script.map(|(_, s)| s.name),
             attach: false,
         };
         let request = self.next_open.get();
@@ -90,6 +112,32 @@ impl WorkspaceView {
         tracing::debug!(%key, request, cwd = ?spec.cwd, "a terminal for the interface");
         self.send(key, ClientMsg::OpenSession { request, spec });
         later(answer, cx)
+    }
+
+    /// The terminal the agent of `chat` runs in (Claude Code's own TUI, on the same session the
+    /// chat shows), still running and shown nowhere: a chat's terminal opens on it first, so the
+    /// person can go on in the TUI and the GUI at once.
+    fn live_agent_terminal(&self, chat: &str, cx: &Context<Self>) -> Option<SessionId> {
+        let (key, thread) = self.chat_thread(chat, cx)?;
+        let (_, hub) = self.hubs().find(|(at, _)| *at == key)?;
+        let session = hub.read(cx).threads().rows().rows.get(&thread)?.terminal?;
+        let terminals = &cx.try_global::<Live>()?.terminals;
+        let free = !terminals.shown.contains(&session) && !terminals.coming.contains_key(&session);
+        let alive = self
+            .workers
+            .get(&key)?
+            .sessions
+            .get(&session)
+            .is_some_and(|s| !matches!(s.state, SessionState::Exited { .. }));
+        (free && alive).then_some(session)
+    }
+
+    /// Whether `session` is the terminal an agent runs in.
+    fn agent_runs_in(&self, session: SessionId, cx: &App) -> bool {
+        self.hubs().any(|(_, hub)| {
+            let rows = &hub.read(cx).threads().rows().rows;
+            rows.values().any(|row| row.terminal == Some(session))
+        })
     }
 
     /// A shell on `key` opened for `chat`, still running and shown nowhere.
@@ -194,6 +242,10 @@ impl WorkspaceView {
             .and_then(|id| id.parse().ok())
             .ok_or_else(|| RpcError::BadParams("terminalId is required".to_owned()))?;
         cx.global_mut::<Live>().terminals.shown.remove(&session);
+        // An agent's own terminal is only put away: closing its tab never ends the agent.
+        if self.agent_runs_in(session, cx) {
+            return Ok(serde_json::json!({}));
+        }
         if let Some(key) = self.worker_of_session(session) {
             self.close_session_on(key, session);
             if let Some(tile) = self.tile_of_session(session) {

@@ -688,6 +688,16 @@ pub const SKILL_COMPLETION_HARNESSES: [(slopty_view_proto::HarnessId, &str); 9] 
     (slopty_view_proto::HarnessId::OPENCODE, "OpenCode"),
 ];
 
+/// slopty: one chat's open panes, as `ui-settings.json` keeps them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SavedPanels {
+    pub files: bool,
+    pub terminal: bool,
+    pub changes: bool,
+    pub expanded: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct UiSettings {
@@ -782,6 +792,8 @@ pub struct UiSettings {
     pub terminal_height: f32,
     /// Legacy — see [`Self::right_pane_open`].
     pub terminal_open: bool,
+    /// slopty: which panes each chat had open, kept across launches (`shell::SessionPanels`).
+    pub session_panels: std::collections::BTreeMap<String, SavedPanels>,
     /// Customizable shortcut combos (feature-inventory §1.4).
     pub keymap: KeymapConfig,
     // slopty: appshots removed.
@@ -903,6 +915,7 @@ impl Default for UiSettings {
             right_pane_open: false,
             terminal_height: TERMINAL_DEFAULT_HEIGHT,
             terminal_open: false,
+            session_panels: std::collections::BTreeMap::new(), // slopty: kept panes
             keymap: KeymapConfig::default(),
             escape_stops_active_agent: false,
             settings_section: crate::shell::SettingsSection::default(),
@@ -1533,6 +1546,7 @@ impl UiSettings {
             right_pane_open,
             terminal_height,
             terminal_open,
+            session_panels, // slopty: kept panes
             keymap,
             // slopty: appshots removed.
             escape_stops_active_agent,
@@ -2468,6 +2482,7 @@ mod tests {
             right_pane_open: true,
             terminal_height: 320.0,
             terminal_open: true,
+            session_panels: std::collections::BTreeMap::new(), // slopty: kept panes
             keymap: KeymapConfig {
                 toggle_sidebar: "mod-shift-s".into(),
                 ..KeymapConfig::default()

@@ -35,19 +35,33 @@ pub const BUILD_MAX: usize = u8::MAX as usize;
 /// `SLOPTY_COMMIT`. A plain `cargo build` has none, and is told apart from another build of its
 /// version only by its wire.
 ///
-/// It is read here and not by a build script, so a commit rebuilds nothing: only a build given
-/// another commit compiles this crate again.
-pub const COMMIT: Option<&str> = option_env!("SLOPTY_COMMIT");
+/// Each binary's `main` names it first ([`set_commit`]) from its own
+/// `option_env!("SLOPTY_COMMIT")`, so a build given another commit compiles only the binaries
+/// again, not this crate and every crate above it.
+static COMMIT: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+
+/// Name the commit this binary was made from; its `main` does, before anything says its build.
+pub fn set_commit(commit: Option<&'static str>) {
+    if let Some(commit) = commit {
+        let _first = COMMIT.set(commit);
+    }
+}
+
+/// The commit this binary was made from, when its `main` named one ([`set_commit`]).
+#[must_use]
+pub fn commit() -> Option<&'static str> {
+    COMMIT.get().copied()
+}
 
 /// This build in full, as a daemon tells its clients.
 ///
-/// [`BUILD`], then `.commit.` and [`COMMIT`] when it has one
+/// [`BUILD`], then `.commit.` and [`commit`] when it has one
 /// (`0.4.0+wire.0badf00d.20261009T2307Z.commit.1a2b3c4d5e6f.20261010T0930Z`), as the wire
 /// prefix, [`crate::server::WorkerCaps::build`] and [`crate::server::FromServer::Welcome`]
 /// carry it.
 #[must_use]
 pub fn this_build() -> String {
-    COMMIT.map_or_else(|| BUILD.to_owned(), |commit| format!("{BUILD}.commit.{commit}"))
+    commit().map_or_else(|| BUILD.to_owned(), |commit| format!("{BUILD}.commit.{commit}"))
 }
 
 /// Which of two builds is the newer.
@@ -317,7 +331,7 @@ mod tests {
     fn this_build_is_the_wire_build_and_its_commit() {
         let build = this_build();
         assert!(build.starts_with(BUILD), "{build}");
-        match COMMIT {
+        match commit() {
             Some(commit) => assert_eq!(build, format!("{BUILD}.commit.{commit}")),
             None => assert_eq!(build, BUILD),
         }

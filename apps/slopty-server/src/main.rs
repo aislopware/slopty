@@ -177,6 +177,7 @@ fn admission(allow: &[String]) -> Admission {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    slopty_proto::wire::set_commit(option_env!("SLOPTY_COMMIT"));
     slopty_crash::install(slopty_crash::Process::Server, &slopty_platform::dirs::data_dir());
     // Capped at its file's size bound under launchd (`slopty_crash::log`).
     slopty_crash::log::init("info");

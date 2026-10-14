@@ -174,6 +174,13 @@ pub enum GitOp {
     /// (`gh pr ready`; `glab mr update --ready` on a GitLab), answered with the pull request as
     /// it stands after ([`GitDone::PullStatus`]).
     MarkReady,
+    /// Check out `branch` in the clone's own folder (`git switch`), a branch only `origin` has
+    /// made the clone's own ([`GitDone::Switched`]). Refused in git's words when the working
+    /// tree's changes are in the way.
+    Switch {
+        /// The branch, with no remote's prefix.
+        branch: String,
+    },
 }
 
 /// What a person's review of a pull request says of the whole ([`GitOp::PullReview`]).
@@ -291,6 +298,11 @@ pub enum GitDone {
         url: Option<String>,
         /// How many notes on lines went with it.
         posted: u32,
+    },
+    /// The branch checked out switched.
+    Switched {
+        /// The branch now checked out.
+        branch: String,
     },
 }
 

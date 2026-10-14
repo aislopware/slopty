@@ -75,6 +75,7 @@ pub(crate) fn serve(
                     // A stream's picture is on a layer of its own, which the render cannot see:
                     // for this frame each stream draws it with GPUI too, over its layer.
                     cx.update(|cx| slopty_ui::screen::capture_pictures(true, cx));
+                    settle(window, cx).await;
                     let (done_tx, done_rx) = oneshot::channel();
                     // `update_window` (not `WindowHandle::update`): the root view must not be
                     // leased while a dispatched action updates it.
@@ -96,6 +97,7 @@ pub(crate) fn serve(
                     // Every dump also holds the frame the app draws against the same state
                     // drawn from scratch (`Dump::stale`), so any test's dump catches a view
                     // left showing an old state.
+                    settle(window, cx).await;
                     let (done_tx, done_rx) = oneshot::channel();
                     let workspace = workspace.clone();
                     let scheduled = cx.update_window(window, |_root, window, _cx| {
@@ -178,6 +180,38 @@ fn before_next_draw(window: &Window, f: impl FnOnce(&mut Window, &mut App) + 'st
         });
     });
 }
+
+/// Once the window has drawn the frames the app asked for: a value measured while drawing (the
+/// composer stack the transcript clears, a fitted grid) reaches the views that read it in the
+/// frame after (ARCHITECTURE.md, "Drawing under retention"), so a frame is judged only after a
+/// frame that painted nothing new. The platform draws them, as a person's would be; at most
+/// [`SETTLE_FRAMES`], since something in motion never stops painting anew.
+#[cfg(feature = "e2e")]
+async fn settle(window: AnyWindowHandle, cx: &mut gpui::AsyncApp) {
+    let mut last = None;
+    for _ in 0..SETTLE_FRAMES {
+        let (done_tx, done_rx) = oneshot::channel();
+        let scheduled = cx.update_window(window, |_root, window, _cx| {
+            // Read before this frame's draw: what the last frame painted.
+            before_next_draw(window, move |window, _cx| {
+                let _sent = done_tx.send(slopty_kit::retained::painted(window));
+            });
+        });
+        let (Ok(()), Ok(painted)) = (scheduled, done_rx.await) else { return };
+        if last.as_ref() == Some(&painted) {
+            return;
+        }
+        last = Some(painted);
+    }
+}
+
+#[cfg(not(feature = "e2e"))]
+#[expect(clippy::unused_async, reason = "one signature for both builds")]
+async fn settle(_window: AnyWindowHandle, _cx: &mut gpui::AsyncApp) {}
+
+/// How many frames [`settle`] waits at most.
+#[cfg(feature = "e2e")]
+const SETTLE_FRAMES: usize = 8;
 
 /// `answer`, once the window has had a frame with everything dispatched so far. The frame draws
 /// only what the command notified, as a person's input would: a view the command changed

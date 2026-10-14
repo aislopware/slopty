@@ -4,5 +4,6 @@
 #![forbid(unsafe_code)]
 
 fn main() -> anyhow::Result<std::process::ExitCode> {
+    slopty_proto::wire::set_commit(option_env!("SLOPTY_COMMIT"));
     slopty_cli::probe_main()
 }

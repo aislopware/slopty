@@ -2,17 +2,21 @@
 //! one assistant entry whose parts are its text, reasoning, tool calls and notices.
 
 use slopty_proto::thread::{
-    ItemBody, ThreadId, ThreadState, ToolCall, ToolDetail, ToolState, Turn, TurnId, TurnState, kind,
+    IntentId, ItemBody, ThreadId, ThreadState, ToolCall, ToolDetail, ToolState, Turn, TurnId,
+    TurnState, kind,
 };
 use slopty_view_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry, ToolDiffStat};
 
-/// `state`'s transcript, its entries written on `device`. `child_running` says whether a
-/// subagent's thread still runs, for its spawn chip.
+/// `state`'s transcript, its entries written on `device`.
+///
+/// `child_running` says whether a subagent's thread still runs, for its spawn chip; `named`
+/// gives the id the shell gave a message it sent, by the intent that sent it.
 #[must_use]
 pub fn entries(
     state: &ThreadState,
     device: &str,
     child_running: impl Fn(ThreadId) -> Option<bool>,
+    named: impl Fn(IntentId) -> Option<String>,
 ) -> Vec<SessionMessageEntry> {
     let mut out: Vec<SessionMessageEntry> = Vec::new();
     // The answer being gathered: its turn, and its entry.
@@ -21,6 +25,8 @@ pub fn entries(
         let id = item.id.0.clone();
         let at = i64::try_from(item.at_ms.as_millis()).unwrap_or(i64::MAX);
         if let ItemBody::User(message) = &item.body {
+            // The id the shell gave the message, where it sent it, so its echo gives way.
+            let id = message.intent.and_then(&named).unwrap_or(id);
             if let Some((_, entry)) = answer.take() {
                 out.push(entry);
             }

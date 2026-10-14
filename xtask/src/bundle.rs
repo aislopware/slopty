@@ -19,7 +19,7 @@
 //! "Bundles are signed with a stable identity").
 //!
 //! Every binary in it knows the commit it was made from (`SLOPTY_COMMIT`,
-//! `slopty_proto::wire::COMMIT`), so two builds of one version tell which is the newer and an
+//! `slopty_proto::wire::commit`), so two builds of one version tell which is the newer and an
 //! update never takes a machine back. A tree with changes not committed is stamped with when it
 //! was built, its hash marked `-dirty`.
 //!
@@ -73,8 +73,12 @@ const GROUP: &str = concat!(env!("SLOPTY_TEAM"), ".dev.aislopware.slopty");
 pub struct BundleOpts {
     /// Build with the `dist` profile (default), its dSYMs beside the bundle; `--debug` for a
     /// dev bundle, whose debug info stays in this checkout's object files.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "fast")]
     pub debug: bool,
+    /// Build with the `fast` profile: as `dist`, but thin LTO over parallel codegen units, so
+    /// the links use every core. For a bundle to try, not to ship.
+    #[arg(long)]
+    pub fast: bool,
     /// Code-signing identity (`Developer ID Application: …`); default `$SLOPTY_SIGN_IDENTITY`,
     /// else the keychain's Developer ID Application certificate, else ad hoc.
     #[arg(long, conflicts_with = "ad_hoc")]
@@ -181,8 +185,12 @@ pub struct Bundle {
 
 pub fn run(sh: &Shell, opts: &BundleOpts) -> Result<Bundle> {
     let root = repo_root()?;
-    let profile = if opts.debug { "debug" } else { "dist" };
-    let flags: &[&str] = if opts.debug { &[] } else { &["--profile", "dist"] };
+    let profile = match (opts.debug, opts.fast) {
+        (true, _) => "debug",
+        (false, true) => "fast",
+        (false, false) => "dist",
+    };
+    let flags: &[&str] = if opts.debug { &[] } else { &["--profile", profile] };
     let signing = signing(sh, opts);
     let commit = commit(sh)?;
     println!("  built from {commit}");
@@ -197,7 +205,7 @@ pub fn run(sh: &Shell, opts: &BundleOpts) -> Result<Bundle> {
     let linux = if opts.no_linux {
         Vec::new()
     } else {
-        linux::build_shipped(sh, if opts.debug { "dev" } else { "dist" })?
+        linux::build_shipped(sh, if opts.debug { "dev" } else { profile })?
     };
     let built = root.join("target").join(profile);
     let out = opts.out.clone().unwrap_or_else(|| root.join("target").join("bundle"));
@@ -284,7 +292,7 @@ pub fn run(sh: &Shell, opts: &BundleOpts) -> Result<Bundle> {
     Ok(Bundle { app, signing, linux, dsyms })
 }
 
-/// The commit this tree is, as `slopty_proto::wire::COMMIT` reads it: `<hash>.<YYYYMMDDTHHMMZ>`,
+/// The commit this tree is, as `slopty_proto::wire::commit` reads it: `<hash>.<YYYYMMDDTHHMMZ>`,
 /// twelve digits of the hash and the commit's time in UTC. A tree with changes not committed
 /// is `<hash>-dirty.<now>`, so it counts as newer than the commit it started from.
 fn commit(sh: &Shell) -> Result<String> {
@@ -555,7 +563,7 @@ mod tests {
         assert!(!stable(developer_id, "dev.aislopware.slopty.ptyd"));
     }
 
-    /// The commit stamped into a bundle reads as `slopty_proto::wire::COMMIT` does: a hash, a
+    /// The commit stamped into a bundle reads as `slopty_proto::wire::commit` does: a hash, a
     /// dot, and a UTC minute that sorts as it reads.
     #[test]
     fn the_bundle_names_its_commit() {

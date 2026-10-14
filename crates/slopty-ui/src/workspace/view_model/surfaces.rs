@@ -13,7 +13,9 @@
 //! their path, and the workspace's own tiles hear them too.
 
 mod adding;
+mod catalog;
 mod changes;
+mod composer;
 mod devices;
 
 pub use adding::{
@@ -22,7 +24,9 @@ pub use adding::{
 };
 mod files;
 mod live;
+mod projects;
 mod settings;
+mod sidebar;
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -51,6 +55,9 @@ const ANSWER_WITHIN: Duration = Duration::from_secs(30);
 /// The paths a find answered, relative to its root.
 type FoundPaths = Vec<String>;
 
+/// A worker's home, the folders it found for a new project, and whether it still indexes.
+type FoundFolders = (String, Vec<slopty_proto::folder::FolderHit>, bool);
+
 /// What the surfaces wait on from the workers.
 #[derive(Default)]
 pub(super) struct Surfaces {
@@ -70,6 +77,9 @@ pub(super) struct Surfaces {
     listings: HashMap<(WorkerKey, String), Vec<oneshot::Sender<Listing>>>,
     /// Finds waiting, by worker, root and query as asked.
     finds: HashMap<(WorkerKey, String, String), Vec<oneshot::Sender<FoundPaths>>>,
+    /// New project's folder finds waiting, by worker and query: the worker's home and the
+    /// folders.
+    folder_finds: HashMap<(WorkerKey, String), Vec<oneshot::Sender<FoundFolders>>>,
     /// The sides of the recent diffs' files, for their highlighting.
     changes: changes::Kept,
     /// What the files surfaces keep between calls: pictures being read in chunks, the folders
@@ -79,6 +89,16 @@ pub(super) struct Surfaces {
     archived: devices::Archived,
     /// The Add device runs under way.
     adding: adding::Adding,
+    /// The projects the person added.
+    projects: projects::Projects,
+    /// The files being attached to a message.
+    uploads: composer::Uploads,
+    /// The model and effort the person picked for each chat.
+    configs: composer::Configs,
+    /// The attached files read back, while they are read.
+    read_back: composer::ReadBack,
+    /// The sidebar's pins and sections.
+    sidebar: sidebar::Sidebar,
 }
 
 impl std::fmt::Debug for Surfaces {
@@ -149,12 +169,18 @@ impl WorkspaceView {
         if let Some(answer) = self.live_surface_call(method, params, cx) {
             return Some(answer);
         }
+        if let Some(answer) = self.composer_call(method, params, cx) {
+            return Some(answer);
+        }
         let params = params.clone();
         let answer = match method {
             methods::WATCH_CHECKOUT_DIFFS => self.watch_diffs(&params, cx),
             methods::GET_CHECKOUT_DIFF => self.checkout_diff(&params, cx),
             methods::GET_CHECKOUT_FILE_DIFF_TEXT => self.file_diff_text(params, cx),
             methods::LIST_BRANCHES => self.list_branches(&params, cx),
+            methods::LIST_FOLDERS => self.list_folders(&params, cx),
+            methods::LIST_DRIVES => self.list_drives(&params, cx),
+            methods::SEARCH_HOME_FOLDERS => self.search_home_folders(&params, cx),
             methods::LIST_WORKSPACE_DIRECTORY => self.list_directory(params, cx),
             methods::SEARCH_WORKSPACE_FILES => self.search_files(params, cx),
             methods::SEARCH_WORKSPACE_CONTENT => self.search_content(params, cx),
@@ -226,6 +252,12 @@ impl WorkspaceView {
             WorkerMsg::Folder { path, listing } => {
                 for tx in surfaces.listings.remove(&(key, path.clone())).unwrap_or_default() {
                     let _gone = tx.send(listing.clone());
+                }
+                false
+            }
+            WorkerMsg::FoundFolders { query, home, folders, indexing } => {
+                for tx in surfaces.folder_finds.remove(&(key, query.clone())).unwrap_or_default() {
+                    let _gone = tx.send((home.clone(), folders.clone(), *indexing));
                 }
                 false
             }
@@ -320,6 +352,20 @@ impl WorkspaceView {
         rx
     }
 
+    /// The folders a new project on `key` may be for `query`, at most `limit`.
+    fn surface_find_folders(
+        &mut self,
+        key: WorkerKey,
+        query: String,
+        limit: u16,
+    ) -> oneshot::Receiver<FoundFolders> {
+        let (tx, rx) = oneshot::channel();
+        if self.surface_send(key, ClientMsg::FindFolders { query: query.clone(), limit }) {
+            self.view_model.surfaces.folder_finds.entry((key, query)).or_default().push(tx);
+        }
+        rx
+    }
+
     /// Start a text search under `root` on `key`: its number and its events.
     fn surface_search(
         &mut self,
@@ -342,9 +388,18 @@ impl WorkspaceView {
         }
     }
 
-    /// The worker the interface's device id names, from a call's `targetDeviceId`.
+    /// The worker a call names: its `targetDeviceId`, else this Mac's own worker, which the
+    /// shell leaves unnamed.
     fn surface_device(&self, params: &serde_json::Value) -> Option<WorkerKey> {
-        param(params, "targetDeviceId").and_then(|device| self.view_worker(device))
+        match param(params, "targetDeviceId") {
+            Some(device) => self.view_worker(device),
+            None => self
+                .view_model
+                .feed
+                .as_ref()
+                .and_then(|feed| feed.local_worker())
+                .and_then(|device| self.view_worker(&device)),
+        }
     }
 
     /// Where a call's workspace is: its worker and the folder its paths are under. A chat's is

@@ -148,6 +148,12 @@ async fn applied(programs: &Programs, repo: &str, op: GitOp, terminals: &[PathBu
         GitOp::Branches => {
             super::branches::branches(git, &root).await.map(|b| GitDone::Branches(Box::new(b)))
         }
+        GitOp::Switch { branch } if branch.starts_with('-') || branch.is_empty() => {
+            Err(GitOutcome::Refused { why: format!("{branch:?} is no branch name") })
+        }
+        GitOp::Switch { branch } => run(git, &root, &["switch", &branch], None, LOCAL)
+            .await
+            .map(|_| GitDone::Switched { branch }),
         GitOp::PullComments { number } => super::pull::comments(programs, &root, number).await,
         GitOp::Scripts => {
             let at = root.clone();

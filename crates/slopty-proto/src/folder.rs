@@ -37,6 +37,17 @@ pub enum Listing {
     },
 }
 
+/// A folder a new project may be ([`crate::ClientMsg::FindFolders`]).
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct FolderHit {
+    /// Where it is, absolute.
+    pub path: String,
+    /// It is a git repository's root.
+    pub repo: bool,
+    /// The person goes to it, as their directory jumper (zoxide) counts.
+    pub visited: bool,
+}
+
 /// One entry of a folder.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct FolderEntry {

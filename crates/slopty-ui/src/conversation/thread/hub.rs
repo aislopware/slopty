@@ -535,6 +535,7 @@ pub fn refused_words(intent: &Intent, why: &str) -> String {
         Intent::Review { .. } => "The review didn't start".to_owned(),
         Intent::Seen { .. } => "Couldn't mark it seen".to_owned(),
         Intent::Draft { .. } => "Couldn't keep the draft".to_owned(),
+        Intent::Name { .. } => "Couldn't rename the chat".to_owned(),
     };
     format!("{what}: {why}")
 }

@@ -35,6 +35,8 @@ gpui-kit.workspace = true
 slopty-app.workspace = true
 slopty-crash.workspace = true
 slopty-platform.workspace = true
+# The commit the binary was made from, named at its start (`slopty_proto::wire::set_commit`).
+slopty-proto.workspace = true
 tokio.workspace = true
 tracing-subscriber.workspace = true
 # The application the app runs: the shell's, with its assets.

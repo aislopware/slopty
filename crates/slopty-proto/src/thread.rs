@@ -1263,6 +1263,8 @@ pub enum Action {
     /// What the person was writing to it and has not sent ([`wire::Intent::Draft`]); empty
     /// words once it went or was cleared, kept with when, as a tombstone.
     DraftSet(wire::Draft),
+    /// The person's own name for it ([`wire::Intent::Name`]); empty once taken back.
+    NameSet(String),
 }
 
 /// A window or display on the thread's worker that its agent drives.

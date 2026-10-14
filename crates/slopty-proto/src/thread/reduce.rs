@@ -55,6 +55,8 @@ pub struct ThreadState {
     pub seen: TurnId,
     /// What the person was writing to it and has not sent ([`Action::DraftSet`]).
     pub draft: Option<Draft>,
+    /// The person's own name for it, over the agent's ([`Action::NameSet`]); empty for none.
+    pub named: String,
 }
 
 impl ThreadState {
@@ -78,6 +80,7 @@ impl ThreadState {
             pull: None,
             seen: TurnId::BEFORE,
             draft: None,
+            named: String::new(),
         }
     }
 
@@ -152,6 +155,7 @@ impl ThreadState {
             Action::PullSeen(pull) => self.pull.clone_from(pull),
             Action::Seen(turn) => self.seen = self.seen.max(*turn),
             Action::DraftSet(draft) => self.draft = Some(draft.clone()),
+            Action::NameSet(name) => self.named.clone_from(name),
         }
     }
 
@@ -253,7 +257,8 @@ impl ThreadState {
         ThreadRow {
             id: self.meta.id,
             agent: self.meta.agent.clone(),
-            title: self.meta.title.clone(),
+            native: self.meta.native.clone(),
+            title: if self.named.is_empty() { self.meta.title.clone() } else { self.named.clone() },
             status: self.status.clone(),
             requests: self
                 .open_requests()

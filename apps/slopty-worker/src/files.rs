@@ -303,6 +303,7 @@ pub async fn git_op(
         GitOp::Blob { .. } => "blob",
         GitOp::PullReview { .. } => "pull request review",
         GitOp::MarkReady => "mark ready",
+        GitOp::Switch { .. } => "switch",
     };
     // An op that moves the pull request has its watch read it again once it is done.
     let moves_pull = matches!(
@@ -364,6 +365,16 @@ pub async fn find(out: mpsc::Sender<WorkerMsg>, root: String, query: String) {
     };
     let slopty_worker::find::Answer { paths, notice } = answer;
     let _sent = out.send(WorkerMsg::FoundFiles { root, query, paths, notice }).await;
+}
+
+/// The folders a new project may be for `query`, at most `limit`
+/// ([`slopty_worker::folders`]), answered to `out`.
+pub async fn find_folders(out: mpsc::Sender<WorkerMsg>, query: String, limit: u16) {
+    let home = slopty_worker::folders::home();
+    let (folders, indexing) =
+        slopty_worker::folders::folders(&home, &query, usize::from(limit)).await;
+    let home = home.to_string_lossy().into_owned();
+    let _sent = out.send(WorkerMsg::FoundFolders { query, home, folders, indexing }).await;
 }
 
 /// Watch the files behind a client's file tiles: each list `lists` holds replaces the last, and a

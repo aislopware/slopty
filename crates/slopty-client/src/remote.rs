@@ -29,6 +29,22 @@ pub trait Remote: Send + Sync + std::fmt::Debug {
     /// of the app, sends each file from what the worker holds of it.
     fn upload(&self, xfer: XferId, files: Vec<PathBuf>, dest: Dest, again: bool);
 
+    /// [`Self::upload`], blocking until every file has landed: where they landed, as the worker
+    /// named them. Never call it on the main thread. A remote that sends nothing this way says
+    /// so.
+    ///
+    /// # Errors
+    ///
+    /// Why it ended without them, as [`crate::xfer::upload_landed`].
+    fn upload_landed(
+        &self,
+        _xfer: XferId,
+        _files: Vec<PathBuf>,
+        _dest: Dest,
+    ) -> Result<Vec<String>, XferError> {
+        Err(XferError::Cut("this link sends no files".to_owned()))
+    }
+
     /// Stop transfer `xfer`, on whichever link it is by then or while it waits for one; what
     /// the worker holds of it stays for a resume.
     fn cancel(&self, xfer: XferId);
@@ -135,6 +151,15 @@ impl Remote for LinkRemote {
         let (up, line) = (self.up.clone(), Arc::clone(&self.line));
         self.runtime
             .spawn(async move { xfer::upload(&up, &line, xfer, &files, dest, again).await });
+    }
+
+    fn upload_landed(
+        &self,
+        xfer: XferId,
+        files: Vec<PathBuf>,
+        dest: Dest,
+    ) -> Result<Vec<String>, XferError> {
+        self.runtime.block_on(xfer::upload_landed(&self.up, &self.line, xfer, &files, dest))
     }
 
     fn cancel(&self, xfer: XferId) {

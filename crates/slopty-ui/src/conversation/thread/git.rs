@@ -353,6 +353,8 @@ fn repo_done(repo: &mut Repo, request: RequestId, done: GitDone, push: bool, the
             ReviewScope::Turn(_) | ReviewScope::Since(_) | ReviewScope::Kept => {}
         },
         GitDone::Branches(branches) => repo.branches = Some(Arc::from(branches)),
+        // Another branch checked out: what the clone holds is read again.
+        GitDone::Switched { .. } => then.push(Then::Status),
         GitDone::Worktrees(listed) => repo.worktrees = Some(Arc::from(listed)),
         GitDone::Scripts(scripts) => repo.scripts = Some(Arc::from(scripts)),
         GitDone::FileDiff { from, to, patch } => {

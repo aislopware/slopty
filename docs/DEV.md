@@ -163,7 +163,8 @@ What a person installs, and how this tree makes it.
   worker (`slopty-ptyd`, `slopty-worker`, `slopty`) and server that the app installs over SSH.
   A worker or server must be this very build to let the app in, so the app carries every build it
   installs. `--no-linux` leaves the Linux builds out (no zig needed, and no Linux installs);
-  `--debug` builds a dev bundle.
+  `--debug` builds a dev bundle; `--fast` builds one to try on real machines, as `dist` but
+  with thin LTO over 16 codegen units, so its links use every core instead of one.
 - **Signing team.** `SLOPTY_TEAM` in `.cargo/config.toml` names the Apple team that signs Slopty
   (UK58J62H8L, JMango's). It prefixes the app group the app and its File Provider share, and
   picks the Developer ID certificate. To build signed with your own Developer ID, export your

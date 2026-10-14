@@ -122,19 +122,9 @@ fn line_ending(text: &str) -> WorkspaceLineEnding {
 }
 
 /// Base64 of `bytes`, standard alphabet, padded.
-fn base64(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let symbol = |six: u32| char::from(ALPHABET.get((six & 63) as usize).copied().unwrap_or(b'A'));
-    let mut out = String::with_capacity(bytes.len().div_ceil(3).saturating_mul(4));
-    for chunk in bytes.chunks(3) {
-        let at = |ix: usize| u32::from(chunk.get(ix).copied().unwrap_or(0));
-        let triple = (at(0) << 16) | (at(1) << 8) | at(2);
-        out.push(symbol(triple >> 18));
-        out.push(symbol(triple >> 12));
-        out.push(if chunk.len() > 1 { symbol(triple >> 6) } else { '=' });
-        out.push(if chunk.len() > 2 { symbol(triple) } else { '=' });
-    }
-    out
+pub(super) fn base64(bytes: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
 /// Why a change to the files was not made, in the shell's words.

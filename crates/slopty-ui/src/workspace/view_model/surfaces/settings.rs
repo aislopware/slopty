@@ -24,7 +24,7 @@ const AGENTS: [(HarnessId, &str, &str); 3] = [
 ];
 
 /// The efforts each agent takes.
-fn efforts(harness: HarnessId) -> Vec<ReasoningLevel> {
+pub(super) fn efforts(harness: HarnessId) -> Vec<ReasoningLevel> {
     use ReasoningLevel::{High, Low, Max, Medium, Minimal, XHigh};
     match harness {
         HarnessId::CLAUDE_CODE => vec![Low, Medium, High, XHigh, Max],
@@ -42,7 +42,11 @@ impl WorkspaceView {
         cx: &Context<Self>,
     ) -> Option<Task<Result<RpcReply, RpcError>>> {
         let answer = match method {
-            methods::LIST_HARNESSES => value(&self.harnesses(params)),
+            methods::LIST_HARNESSES => {
+                return Some(
+                    self.once_known(params, cx, |view, params, _| value(&view.harnesses(params))),
+                );
+            }
             methods::SET_HARNESS_ENABLED => Err(RpcError::Failed(
                 "Slopty offers every agent installed on the machine".to_owned(),
             )),

@@ -11930,3 +11930,106 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   per-device worktree settings are in `xtask/zeron.toml`'s `[skip]`: a pull request opens in
   the web browser, and the worktree locations are the engine's, which is not taken. Their
   traces in the shell are cut and marked `// slopty:`.
+- ✅ **Every call the shell makes has an answer from Slopty (2026-10-14).** Tried across two
+  Macs, the copied shell asked 35 calls nothing on Slopty's side answered, so New project, the
+  model picker and more said "unknown method". The view model now answers each one from what
+  Slopty has, and says in words what it leaves to the agents:
+  - New project lists a folder through the worker's own listing (home when no path is given,
+    hidden entries left out) and offers the system root and each mounted volume. A project
+    the person adds is kept by the id the shell gave it, with its name, in
+    `interface/projects.json` under the data directory. That id stands for the folder
+    everywhere its threads appear, and a folder a thread works in is still a project without
+    being added.
+  - The model picker and `/` list what the worker says the agent offers
+    (`InstalledAgent::offers`): its models, each with its efforts, and its commands. A start
+    passes the effort chosen. Skills are the agent's own, so none are listed ahead. For
+    Claude Code the models are its own `/model` menu as Slopty's mod reads it from the running
+    Claude Code (what this account and its managed settings allow), each alias named as the
+    model it answers for from T3 Code's model manifest (copied, MIT, `THIRD_PARTY_NOTICES.md`),
+    so the picker says Opus 5.5, Sonnet 5.5, Haiku 5.5 and Fable 5.1 by their ids. With no menu
+    read yet, it offers the manifest's current models the installed Claude Code runs. The model
+    a chat was last started on comes first, so a new chat starts where the person left off.
+  - A model or effort picked for a chat is kept for it and, where the chat runs, switched in
+    its agent through its own door (`Intent::SetModel`, `Intent::SetEffort`).
+  - `@` finds files under the chat's or the project's folder with the worker's find.
+  - The branch picker lists the clone's branches, the one checked out first, and switches with
+    the worker's new `GitOp::Switch` (`git switch`, refused in git's words when changes are in
+    the way).
+  - A file attached to a message arrives in base64 parts, goes to the worker as a transfer
+    into a fresh drop folder (`Dest::Attachment`, `Remote::upload_landed`), and its path goes
+    with the message.
+  - A message held for the turn's end waits in the worker's queue for the thread
+    (`Delivery::Queue`, where the agent has `Cap::QUEUE`). The shell's queue shows it, and its
+    edit, send-now, steer-now and remove are the worker's `Edit`, `Promote` and `Withdraw`.
+  - A side chat is the agent's own aside of the chat (`Intent::Aside`): the whole thread
+    branched into one that shares its context and stays out of the lists, answered once it
+    started, under the chat it was asked of.
+  - A project's actions are its repository's run scripts (`GitOp::Scripts`), each by its name
+    with an icon from what it does; running one opens it in a terminal of its own. Editing them
+    is the repository's business, and the shell says so.
+  - A retry of a message that did not go sends again, under the same ids, what this client
+    asked of the chat's thread and the worker has not answered, so each is acted on once. A new
+    chat's start and a side chat's aside are kept until answered too: they are sent again when
+    the link comes back, where before one sent while the link was down was lost without a word.
+  - A checkout's pull request is the one the thread's row shows (`ThreadRow::pull`), for its
+    folder and branch, said again whenever it changes, so the composer's chip follows the
+    agent's pull request.
+  - An attached file is read back from its machine whole once and handed over in chunks: a
+    picture in a message shows, and a queued message restored for editing keeps its files.
+  - Renaming a chat is the person's own mark on its thread (`Intent::Name`, beside `Seen` and
+    `Draft`): the worker keeps it apart from the agent's meta (`ThreadState::named`), so an
+    agent naming the thread later does not undo it, and every device's lists show it. Empty
+    words give the agent's own title back.
+  - Pins and sections in the sidebar are this client's own, applied as the shell projects
+    them and kept in `interface/sidebar.json`, said to the shell's watch as they change.
+  - Agent updates say in words that Slopty does not do them. Focus, sync probes and a home
+    search's release are taken quietly.
+  - Left unanswered on purpose: a finished subagent's transcript kept apart from it, since the
+    shell then follows the subagent's own thread, which Slopty serves.
+  - A call that names no machine is this Mac's own worker's, as the shell means it.
+  - A call about a machine's agents (the agents, their models and commands) waits, at most
+    15 s, for the machine to say what it has: an app just opened asked before its links were
+    up, was told no agent was there, and kept saying "No agents available".
+
+  Tests: `slopty-ui` `surfaces::projects::tests` and `surfaces::composer::tests`.
+- ✅ **A Claude Code chat's TUI is one key away, on the same session (2026-10-14).** The person
+  wants to work in Claude Code's TUI and Slopty's GUI side by side. Claude Code already runs
+  as its real TUI in a worker terminal, and the GUI follows and drives that same session
+  (`agents.md`, "Claude Code runs in a terminal and is observed"), but the GUI never showed
+  that terminal.
+  - The chat's terminal (Cmd+J) now opens on the agent's own terminal first, so typing in the
+    TUI and in the composer reach one session. Another terminal tab is an ordinary shell.
+  - Closing that tab only puts it away; it never ends the agent.
+  - A thread's row carries the agent's own session id (`ThreadRow::native`). The chat menu's
+    session id copy gives it, for `claude --resume` anywhere else.
+- ✅ **New project finds folders as the person's own tools do (2026-10-14).** The picker only
+  browsed one folder at a time, and its search under the home said nothing. The person wants
+  the folders they open most first, fzf-quick fuzzy search, and nested folders found the way
+  Spotlight or Raycast find them. The worker now answers it (`ClientMsg::FindFolders`,
+  `slopty_worker::folders`):
+  - With nothing typed, the folders zoxide says they go to most lead the list, most first,
+    with the home's own after them.
+  - Typing searches every folder under the home and under each drive a visited folder is on,
+    however deep. It ranks with fzf's scoring (`nucleo-matcher`, which quick open already uses)
+    over the path, so `oss/slo` finds `…/oss/slopty`. A folder whose own name holds the last
+    word gains, and so does one zoxide counts as visited.
+  - The folders come from the worker's own index, walked in parallel with the walker `fd` is
+    built on. It leaves out hidden folders, what ignore files exclude, `~/Library`,
+    `node_modules`, `target`, `build` and `dist`, and is walked again in the background after
+    2 minutes. On this Mac it holds the home's 31k folders and the work drive's 70k, about
+    1.3 s per walk.
+  - Spotlight alone could not do it: the person's work drive has Spotlight indexing off.
+    Spotlight (`mdfind`, folders by name) answers for the home only while the first index is
+    built, and the picker asks again until it is.
+  - Raycast's File Search reads Spotlight's index or, in its beta engine, an index of its own
+    kept in the background, as this one is. Its documentation offers no way for another program
+    to ask that index, so Slopty keeps its own.
+- ✅ **The panes a chat has open are kept across launches (2026-10-14).** zeron keeps which
+  panes each chat has open (files, terminal, changes, the right pane taken over) for the app's
+  run only, so every launch started with them all closed. The person wants them back as they
+  left them. The shell now saves each chat's open panes in `ui-settings.json`
+  (`sessionPanels`, at most 500 chats, those with every pane closed left out) after the frame
+  that changed them, and restores them at start; a chat never visited still opens with every
+  pane closed, as zeron chose. A files pane restored open builds its explorer on its first
+  frame, as its toggle would, so it shows the tree, not an empty column. Test: `slopty-shell`
+  `shell::tests::session_panels_are_kept_across_launches`.

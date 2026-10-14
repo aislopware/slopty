@@ -565,6 +565,27 @@ mod golden {
                 notice: None,
             },
         );
+        snap("client_find_folders", &ClientMsg::FindFolders { query: "slo".to_owned(), limit: 50 });
+        snap(
+            "worker_found_folders",
+            &WorkerMsg::FoundFolders {
+                query: "slo".to_owned(),
+                home: "/Users/dev".to_owned(),
+                folders: vec![
+                    slopty_proto::folder::FolderHit {
+                        path: "/Users/dev/oss/slopty".to_owned(),
+                        repo: true,
+                        visited: true,
+                    },
+                    slopty_proto::folder::FolderHit {
+                        path: "/Users/dev/notes/slow".to_owned(),
+                        repo: false,
+                        visited: false,
+                    },
+                ],
+                indexing: true,
+            },
+        );
         snap(
             "worker_found_files_notice",
             &WorkerMsg::FoundFiles {

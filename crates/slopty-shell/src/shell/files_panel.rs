@@ -464,6 +464,14 @@ impl Shell {
         }
         let theme = Theme::of(cx).clone();
         let content = self.files.get(&self.panel_key(cx)).cloned();
+        // slopty: a pane kept open across launches has its flag, not its explorer: open it as
+        // the toggle does, leaving the keys with the composer.
+        if content.is_none() && self.files_panel_open(cx) {
+            cx.defer_in(window, |shell, window, cx| {
+                shell.add_files_surface(window, cx);
+                window.focus(&shell.composer.focus_handle(cx), cx);
+            });
+        }
         if let Some(files) = &content {
             files.update(cx, |files, cx| {
                 files.ensure_loaded(cx);

@@ -22,7 +22,7 @@ use slopty_view_rpc::{RpcError, RpcReply, methods};
 use tokio::sync::mpsc;
 
 use super::WorkspaceView;
-use crate::view_model::{Ask, Feed, rows, transcript};
+use crate::view_model::{Ask, Feed, Pull, rows, transcript};
 
 mod surfaces;
 
@@ -66,6 +66,13 @@ pub(super) struct Bridge {
     minted: HashMap<String, Minted>,
     /// Starts sent for minted chats, by their intent.
     starts: HashMap<IntentId, String>,
+    /// What the view model sent a worker itself (a minted chat's start, a side chat's aside) and
+    /// the worker has not answered, by its intent: sent again, under the same id, when the link
+    /// comes back and when the person retries.
+    unanswered: HashMap<IntentId, (WorkerKey, ClientMsg)>,
+    /// The id the shell gave each message it sent, by the intent that sent it: its entry in
+    /// the transcript goes by it, so the shell's own echo of the message gives way to it.
+    named: HashMap<IntentId, String>,
     /// What the right-pane surfaces wait on from the workers ([`surfaces`]).
     surfaces: surfaces::Surfaces,
 }
@@ -180,6 +187,7 @@ impl WorkspaceView {
             self.workers.keys().filter_map(|key| self.surface_device_row(*key, now)).collect();
         let mut chats = Vec::new();
         let mut sessions = Vec::new();
+        let mut pulls = Vec::new();
         // Each folder, and whether a thread in it named it as its repository.
         let mut folders: BTreeMap<(String, String), bool> = BTreeMap::new();
         // Every worker's rows at once: an agent may start its subagents on other machines.
@@ -194,6 +202,16 @@ impl WorkspaceView {
             let row = *row;
             let id = self.chat_id(row.id);
             let mut chat = rows::chat(row, device);
+            chat.space_id = rows::folder(row).map(|path| self.view_space_id(device, path));
+            chat.config = Some(self.chat_config(&id, device, row));
+            if chat.branch.is_none() {
+                chat.branch = self.view_branch(device, row);
+            }
+            if let Some(summary) = rows::pull(row, chat.branch.as_deref()) {
+                let folders = [row.cwd.clone(), row.repo.clone()].into_iter().flatten().collect();
+                let branch = chat.branch.clone();
+                pulls.push(Pull { device: device.clone(), folders, branch, summary });
+            }
             chat.archived = self.surface_archived(&id);
             chat.id.clone_from(&id);
             if let Some(parent) = rows::parent(row) {
@@ -227,24 +245,65 @@ impl WorkspaceView {
                 created_at: minted.created,
                 harness_session_id: None,
                 harness_session_cwd: None,
-                space_id: Some(rows::space_id(&device, &minted.cwd)),
+                space_id: Some(self.view_space_id(&device, &minted.cwd)),
                 last_seen_at: None,
                 room_gen: None,
                 parent_chat_id: None,
             });
         }
+        for project in self.added_projects() {
+            folders.entry((project.device.clone(), project.path.clone())).or_default();
+        }
         let spaces = folders
             .into_iter()
-            .map(|((device, path), git)| rows::space(&device, &path, git, now))
+            .map(|((device, path), git)| {
+                let mut space = rows::space(&device, &path, git, now);
+                if let Some(project) = self.added_project_at(&device, &path) {
+                    space.id.clone_from(&project.id);
+                    space.name.clone_from(&project.name);
+                }
+                space
+            })
             .collect();
         feed.devices(devices);
         feed.spaces(spaces);
         feed.chats(chats);
         feed.sessions(sessions);
+        feed.pulls(pulls);
+        feed.sidebar(self.sidebar_state());
         for chat in feed.followed() {
             let entries = self.view_transcript(&chat, cx).unwrap_or_default();
             feed.transcript(&chat, entries);
         }
+        for chat in feed.queued() {
+            feed.queue(&chat, self.view_queue(&chat, cx));
+        }
+    }
+
+    /// The messages waiting to go to the chat `chat`'s agent, as its thread holds them.
+    fn view_queue(&self, chat: &str, cx: &Context<Self>) -> Vec<slopty_view_doc::QueuedMessage> {
+        let Some((key, thread)) = self.chat_thread(chat, cx) else { return Vec::new() };
+        let Some(hub) = self.held_hub(key) else { return Vec::new() };
+        let hub = hub.read(cx);
+        let Some(state) =
+            hub.threads().mirror(thread).and_then(slopty_client::threads::Mirror::state)
+        else {
+            return Vec::new();
+        };
+        state
+            .pending
+            .iter()
+            .map(|pending| slopty_view_doc::QueuedMessage {
+                id: pending.intent.to_string(),
+                text: pending.text.clone(),
+                attachments: pending.attachments.clone(),
+                hold_for_turn_end: pending.delivery == Delivery::Queue,
+                issued_by: key.to_string(),
+                issued_at: 0,
+                edited_at: None,
+                delivery_gate: None,
+            })
+            .collect()
     }
 
     /// The transcript of the chat `chat` as its thread stands here.
@@ -258,13 +317,20 @@ impl WorkspaceView {
         let state = hub.threads().mirror(thread)?.state()?;
         let table = &hub.threads().rows().rows;
         let device = key.to_string();
-        Some(transcript::entries(state, &device, |child| table.get(&child).map(rows::running)))
+        let named = &self.view_model.named;
+        Some(transcript::entries(
+            state,
+            &device,
+            |child| table.get(&child).map(rows::running),
+            |intent| named.get(&intent).cloned(),
+        ))
     }
 
     /// Answer one of the interface's asks.
     fn view_ask(&mut self, ask: Ask, cx: &mut Context<Self>) {
         match ask {
             Ask::Follow(chat) => self.view_follow(chat, cx),
+            Ask::Republish => self.view_changed(cx),
             Ask::Unfollow(chat) => {
                 if let Some((key, thread)) = self.view_model.followed.remove(&chat)
                     && let Some(hub) = self.held_hub(key).cloned()
@@ -310,6 +376,7 @@ impl WorkspaceView {
         match method {
             methods::MUTATE => self.view_mutate(params, cx),
             methods::QUEUE_COMMAND => self.view_command(params, cx),
+            methods::QUEUE_MESSAGE => self.view_queue_message(params, cx),
             _ => Err(RpcError::UnknownMethod(method.to_owned())),
         }
     }
@@ -352,14 +419,29 @@ impl WorkspaceView {
                 }
                 Ok(serde_json::json!({}))
             }
+            // The person's own name for the chat, kept on its worker for every device.
+            ("renameChat", Some(chat)) => {
+                let title = param(params, "title").unwrap_or_default().to_owned();
+                let (key, thread) = self
+                    .chat_thread(chat, cx)
+                    .ok_or_else(|| RpcError::Failed("Name the chat once it has started".into()))?;
+                let hub = self.thread_hub(key, cx);
+                hub.update(cx, |hub, cx| hub.intent(thread, Intent::Name { title }, cx));
+                Ok(serde_json::json!({}))
+            }
             ("deleteChat", Some(chat)) => {
                 self.view_model.minted.remove(chat);
                 self.view_changed(cx);
                 Ok(serde_json::json!({}))
             }
-            _ => self.surface_mutate(op, params, cx).unwrap_or_else(|| {
-                Err(RpcError::Failed(format!("{op} is not something Slopty does to a thread")))
-            }),
+            _ => self
+                .surface_mutate(op, params, cx)
+                .or_else(|| self.project_mutate(op, params, cx))
+                .or_else(|| self.config_mutate(op, params, cx))
+                .or_else(|| self.sidebar_mutate(op, params, cx))
+                .unwrap_or_else(|| {
+                    Err(RpcError::Failed(format!("{op} is not something Slopty does to a thread")))
+                }),
         }
     }
 
@@ -368,10 +450,68 @@ impl WorkspaceView {
         self.workers.keys().find(|key| key.to_string() == device).copied()
     }
 
+    /// The id of the space of the folder `path` on `device`: the one the person added it by,
+    /// else the folder's own ([`rows::space_id`]).
+    fn view_space_id(&self, device: &str, path: &str) -> String {
+        self.added_project_at(device, path)
+            .map_or_else(|| rows::space_id(device, path), |project| project.id.clone())
+    }
+
     /// The worker and folder a space id of the interface names ([`rows::space_id`]).
     fn view_space(&self, space: &str) -> Option<(WorkerKey, String)> {
+        if let Some(project) = self.added_project(space) {
+            return Some((self.view_worker(&project.device)?, project.path.clone()));
+        }
         let (device, path) = space.split_once(':')?;
         Some((self.view_worker(device)?, path.to_owned()))
+    }
+
+    /// The branch the thread `row` on `device` works on where its agent names none: the one its
+    /// terminal's checkout has, as the worker reads it at each prompt.
+    fn view_branch(&self, device: &str, row: &ThreadRow) -> Option<String> {
+        let worker = self.workers.get(&self.view_worker(device)?)?;
+        worker.sessions.get(&row.terminal?)?.branch.clone()
+    }
+
+    /// `QueueMessage`: a message written while the agent works. Held for the turn's end, it
+    /// waits in the worker's queue for the thread where the agent has one (`Cap::QUEUE`); else
+    /// it goes to the agent at once, which queues or steers it as it does.
+    fn view_queue_message(
+        &mut self,
+        params: &serde_json::Value,
+        cx: &mut Context<Self>,
+    ) -> Result<serde_json::Value, RpcError> {
+        let chat = param(params, "chatId")
+            .ok_or_else(|| RpcError::BadParams("chatId is required".to_owned()))?;
+        let attachments: Vec<String> = params
+            .get("attachments")
+            .cloned()
+            .and_then(|a| serde_json::from_value(a).ok())
+            .unwrap_or_default();
+        let (key, thread) = self
+            .chat_thread(chat, cx)
+            .ok_or_else(|| RpcError::Failed(format!("no thread {chat}")))?;
+        let text = param(params, "text").unwrap_or_default().to_owned();
+        let hub = self.thread_hub(key, cx);
+        // Held for the turn's end where the agent can hold it, as the shell asks.
+        let hold = params.get("holdForTurnEnd").and_then(serde_json::Value::as_bool) == Some(true);
+        let delivery = hub
+            .read(cx)
+            .threads()
+            .mirror(thread)
+            .and_then(slopty_client::threads::Mirror::state)
+            .map_or(Delivery::Steer, |state| {
+                if hold && state.meta.can(slopty_proto::thread::Cap::QUEUE) {
+                    Delivery::Queue
+                } else {
+                    state.meta.delivery_now()
+                }
+            });
+        let intent = Intent::Send { text, delivery, attachments };
+        let id = hub.update(cx, |hub, cx| hub.intent(thread, intent, cx));
+        // The queue's row goes by the intent's id, and so does the message once it went.
+        self.view_model.named.insert(id, id.to_string());
+        Ok(serde_json::json!({ "id": id.to_string() }))
     }
 
     /// `QueueCommand`: a message to a chat's thread, or the start of a minted chat's.
@@ -391,7 +531,7 @@ impl WorkspaceView {
             .map_err(|e| RpcError::BadParams(e.to_string()))?
             .ok_or_else(|| RpcError::BadParams("command is required".to_owned()))?;
         if let Some(minted) = self.view_model.minted.get(&chat).cloned() {
-            let SessionCommandPayload::Run { request, .. } = command else {
+            let SessionCommandPayload::Run { request, message_id } = command else {
                 return Err(RpcError::Failed("the thread has not started yet".to_owned()));
             };
             let id = IntentId::new();
@@ -402,16 +542,18 @@ impl WorkspaceView {
                 prompt: Some(request.prompt),
                 model: request.model,
                 mode: None,
-                effort: None,
+                effort: request
+                    .reasoning
+                    .and_then(|level| serde_json::to_value(level).ok())
+                    .and_then(|level| level.as_str().map(str::to_owned)),
                 attachments: request.attachments,
                 args: Vec::new(),
                 worktree: None,
             };
             self.view_model.starts.insert(id, chat);
-            self.send(
-                minted.worker,
-                ClientMsg::Thread(ThreadRequest::Start { id, start: Box::new(start) }),
-            );
+            self.view_model.named.insert(id, message_id);
+            let msg = ClientMsg::Thread(ThreadRequest::Start { id, start: Box::new(start) });
+            self.view_send_kept(minted.worker, id, msg);
             return Ok(serde_json::json!({ "commandId": id.to_string() }));
         }
         let (key, thread) = self
@@ -424,22 +566,51 @@ impl WorkspaceView {
                 .and_then(slopty_client::threads::Mirror::state)
                 .map_or(Delivery::Steer, |state| state.meta.delivery_now())
         };
-        let intent = match command {
-            SessionCommandPayload::Run { request, .. } => Intent::Send {
-                text: request.prompt,
-                delivery: delivery_now(hub.read(cx)),
-                attachments: request.attachments,
-            },
-            SessionCommandPayload::Steer { prompt, .. } => {
-                Intent::Send { text: prompt, delivery: Delivery::Steer, attachments: Vec::new() }
-            }
-            SessionCommandPayload::Interrupt {} => Intent::Interrupt,
+        let (intent, message_id) = match command {
+            SessionCommandPayload::Run { request, message_id } => (
+                Intent::Send {
+                    text: request.prompt,
+                    delivery: delivery_now(hub.read(cx)),
+                    attachments: request.attachments,
+                },
+                Some(message_id),
+            ),
+            SessionCommandPayload::Steer { prompt, message_id } => (
+                Intent::Send { text: prompt, delivery: Delivery::Steer, attachments: Vec::new() },
+                message_id,
+            ),
+            SessionCommandPayload::Interrupt {} => (Intent::Interrupt, None),
             SessionCommandPayload::RespondInput { .. } => {
                 return Err(RpcError::Failed("answers go through the request card".to_owned()));
             }
         };
         let id = hub.update(cx, |hub, cx| hub.intent(thread, intent, cx));
+        if let Some(message_id) = message_id {
+            self.view_model.named.insert(id, message_id);
+        }
         Ok(serde_json::json!({ "commandId": id.to_string() }))
+    }
+
+    /// Send `msg` for intent `id` to `key`, kept until the worker answers it.
+    pub(super) fn view_send_kept(&mut self, key: WorkerKey, id: IntentId, msg: ClientMsg) {
+        self.send(key, msg.clone());
+        self.view_model.unanswered.insert(id, (key, msg));
+    }
+
+    /// Send again what the view model sent `key` and `key` has not answered; for the chat
+    /// `chat` alone when one is named. How many went.
+    pub(in crate::workspace) fn view_resend(&self, key: WorkerKey, chat: Option<&str>) -> usize {
+        let kept = self.view_model.unanswered.iter().filter(|(id, (at, _))| {
+            *at == key
+                && chat
+                    .is_none_or(|chat| self.view_model.starts.get(*id).is_some_and(|c| c == chat))
+        });
+        let mut sent = 0_usize;
+        for (_, (_, msg)) in kept {
+            self.send(key, msg.clone());
+            sent = sent.saturating_add(1);
+        }
+        sent
     }
 
     /// A start sent for a minted chat was answered: its thread goes by the chat's id from now
@@ -451,6 +622,7 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) -> bool {
         let Some(chat) = self.view_model.starts.remove(&done.id) else { return false };
+        self.view_model.unanswered.remove(&done.id);
         match &done.outcome {
             Outcome::Started { thread } => {
                 self.view_model.minted.remove(&chat);

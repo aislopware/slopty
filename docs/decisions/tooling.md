@@ -2017,3 +2017,11 @@ more full-window layer.
     passed.
   - Checks: the sync's probe on runners (forks build and test) passed; the fork's
     `fast::draw_timing` test passes.
+- ✅ **A bundle to try builds on every core, and a new commit rebuilds only the binaries
+  (2026-10-14).** The `dist` profile's fat LTO over one codegen unit linked the app on one core
+  for minutes, and `slopty-proto` read `SLOPTY_COMMIT` at compile time, so every bundle, whose
+  stamp changes with each commit (and each minute on a dirty tree), compiled proto and every
+  crate above it again. `cargo xtask bundle --fast` builds with the `fast` profile, `dist` with
+  thin LTO over 16 codegen units, for a bundle to try on real machines; shipping keeps `dist`.
+  Each binary's `main` now reads `SLOPTY_COMMIT` and names it to proto
+  (`slopty_proto::wire::set_commit`), so a new stamp compiles only the binaries.

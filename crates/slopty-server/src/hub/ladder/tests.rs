@@ -18,6 +18,7 @@ pub(in crate::hub) fn row(phase: Phase, since: u64, terminal: Option<SessionId>)
     ThreadRow {
         id: ThreadId::new(),
         agent: AgentId::named(AgentId::CLAUDE_CODE),
+        native: String::new(),
         title: "Make the ladder".to_owned(),
         status: Status {
             phase,

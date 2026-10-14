@@ -25,6 +25,8 @@ slopty-crash.workspace = true
 slopty-net.workspace = true
 # The machine's name, per platform.
 slopty-platform.workspace = true
+# The commit the binary was made from, named at its start (`slopty_proto::wire::set_commit`).
+slopty-proto.workspace = true
 slopty-server.workspace = true
 slopty-settings.workspace = true
 tokio.workspace = true
