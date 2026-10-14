@@ -604,6 +604,9 @@ pub struct Observation {
 pub struct Discovery {
     /// The terminal session.
     pub session: SessionId,
+    /// The agent's process, once seen: Claude Code's registry names its conversation
+    /// ([`discover::registered_transcript`]).
+    pub pid: Option<i32>,
     /// The directory the agent runs in ([`discover::project_dir`]).
     pub cwd: PathBuf,
     /// When the agent process was first seen; older files are other conversations.
@@ -978,6 +981,7 @@ impl Tracker {
         }
         Some(Discovery {
             session,
+            pid: self.process.map(|(pid, _started)| pid),
             cwd: self.cwd.clone()?,
             since: self.first_seen?,
             current: self.transcript_path.clone(),
@@ -2331,6 +2335,7 @@ mod tests {
             table.discoveries(),
             vec![Discovery {
                 session: a,
+                pid: Some(4321),
                 cwd: PathBuf::from("/tmp/project"),
                 since: now(),
                 current: None,

@@ -8,11 +8,13 @@
 //! working directory the agent was started in, which the worker knows: the foreground process's
 //! own cwd, or OSC 7 from the shell that launched it.
 //!
-//! Which file in that directory is *this* session is decided by time: the live session is the
-//! one still being written, so the newest `.jsonl` whose modification time is at or after the
-//! moment the process was first seen. A resumed conversation reuses its old file and moves its
-//! mtime forward, so it is found the same way; a session that has not written since the worker
-//! restarted is found as soon as it writes again.
+//! Which file in that directory is *this* session is what Claude Code's own registry of its live
+//! sessions says ([`crate::roster`]): the entry of the agent's process names its conversation,
+//! and `/clear` or `/resume` changes it there ([`registered_transcript`]). Only an agent the
+//! registry does not list is found by time ([`transcript_for`]): the newest `.jsonl` whose
+//! modification time is at or after the moment the process was first seen. That is a guess,
+//! wrong whenever another Claude Code writes in the same folder at once (a person's own session
+//! beside one Slopty started), so it is never taken over the registry's word.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -68,7 +70,42 @@ fn newest_transcript(dir: &Path, since: SystemTime) -> Option<PathBuf> {
     best.map(|(_at, path)| path)
 }
 
-/// The transcript of an agent running in `cwd`, first seen at `since`.
+/// What Claude Code's registry says of an agent's transcript ([`registered_transcript`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Registered {
+    /// The registry lists neither the process nor a child of it, or names no conversation.
+    Unlisted,
+    /// It names a conversation whose file is not there yet.
+    Unwritten,
+    /// The file the conversation is written to.
+    At(PathBuf),
+}
+
+/// The transcript of the Claude Code process `pid` runs, as Claude Code's registry names it.
+///
+/// `listed` is the registry; a managed launcher runs Claude Code as its child, and `children`
+/// lists a process's direct children. The entry's own working directory names the project
+/// directory, `cwd` when it has none.
+#[must_use]
+pub fn registered_transcript(
+    home: &Path,
+    listed: &[crate::roster::Listed],
+    pid: i32,
+    children: impl Fn(i32) -> Vec<i32>,
+    cwd: &Path,
+) -> Registered {
+    let named = |pid: i32| listed.iter().find(|l| l.pid == Some(pid));
+    let entry = named(pid).or_else(|| children(pid).into_iter().find_map(named));
+    let Some(entry) = entry else { return Registered::Unlisted };
+    let id = entry.session_id.as_deref().filter(|id| crate::resume::is_session_id(id));
+    let Some(id) = id else { return Registered::Unlisted };
+    let cwd = entry.cwd.as_deref().map_or(cwd, Path::new);
+    let path = project_dir(home, cwd).join(format!("{id}.jsonl"));
+    if path.is_file() { Registered::At(path) } else { Registered::Unwritten }
+}
+
+/// The transcript of an agent running in `cwd`, first seen at `since`, by time alone: the guess
+/// for an agent Claude Code's registry does not list ([`registered_transcript`]).
 #[must_use]
 pub fn transcript_for(home: &Path, cwd: &Path, since: SystemTime) -> Option<PathBuf> {
     newest_transcript(&project_dir(home, cwd), since)
@@ -188,6 +225,57 @@ mod tests {
         assert_eq!(
             transcript_for(home.path(), cwd, started).as_deref(),
             Some(dir.join("newer.jsonl").as_path())
+        );
+    }
+
+    /// Two Claude Codes in one folder: each is read from the conversation Claude Code's registry
+    /// names for its process (or the managed launcher's child), never from the file written
+    /// last; one the registry does not list is still found by time.
+    #[test]
+    fn the_registry_names_the_transcript_over_the_newest_file() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let cwd = Path::new("/tmp/project");
+        let dir = project_dir(home.path(), cwd);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let at = |secs: u64| {
+            SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(secs)).expect("in range")
+        };
+        let mine = "53655038-c219-47c3-91a4-2bc72d07a295";
+        let theirs = "4d070c6c-13d1-4acb-b3e8-4b23875f6f13";
+        touch(&dir.join(format!("{mine}.jsonl")), at(1_000_001));
+        // The person's own session beside it writes all the time.
+        touch(&dir.join(format!("{theirs}.jsonl")), at(1_000_090));
+        let entry = |pid: i32, session: &str| crate::roster::Listed {
+            pid: Some(pid),
+            session_id: Some(session.to_owned()),
+            cwd: Some(cwd.to_string_lossy().into_owned()),
+            ..crate::roster::Listed::default()
+        };
+        let listed = [entry(46328, mine), entry(73656, theirs)];
+        let none = |_pid: i32| Vec::new();
+        let found = |pid: i32, children: &dyn Fn(i32) -> Vec<i32>| {
+            registered_transcript(home.path(), &listed, pid, children, cwd)
+        };
+        assert_eq!(found(46328, &none), Registered::At(dir.join(format!("{mine}.jsonl"))));
+        // A managed launcher's terminal runs the launcher; Claude Code is its child.
+        let launcher = |pid: i32| if pid == 46323 { vec![46328] } else { Vec::new() };
+        assert_eq!(found(46323, &launcher), Registered::At(dir.join(format!("{mine}.jsonl"))));
+        assert_eq!(
+            transcript_for(home.path(), cwd, at(1_000_000)),
+            Some(dir.join(format!("{theirs}.jsonl"))),
+            "by time alone the other session's file would be taken"
+        );
+        // A conversation not written yet is waited for, not guessed.
+        let fresh = "0e1f2a3b-4c5d-4e6f-8a9b-0c1d2e3f4a5b";
+        let listed = [entry(500, fresh)];
+        assert_eq!(
+            registered_transcript(home.path(), &listed, 500, none, cwd),
+            Registered::Unwritten
+        );
+        // A process the registry does not list is left to the guess.
+        assert_eq!(
+            registered_transcript(home.path(), &listed, 999, none, cwd),
+            Registered::Unlisted
         );
     }
 

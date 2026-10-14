@@ -392,10 +392,23 @@ async fn discover(
     }
     let home = home.to_path_buf();
     let found = tokio::task::spawn_blocking(move || {
+        // Claude Code's registry names each live session's conversation; the newest file in the
+        // folder is only a guess, for an agent it does not list.
+        let sessions = slopty_agent::roster::sessions_dir(&home);
+        let listed = slopty_agent::roster::registered(&sessions, slopty_worker::ports::alive);
         wanted
             .into_iter()
             .filter_map(|d| {
-                let path = slopty_agent::discover::transcript_for(&home, &d.cwd, d.since)?;
+                use slopty_agent::discover::{self, Registered};
+                let registered = d.pid.map_or(Registered::Unlisted, |pid| {
+                    let children = slopty_worker::ports::child_pids;
+                    discover::registered_transcript(&home, &listed, pid, children, &d.cwd)
+                });
+                let path = match registered {
+                    Registered::At(path) => path,
+                    Registered::Unwritten => return None,
+                    Registered::Unlisted => discover::transcript_for(&home, &d.cwd, d.since)?,
+                };
                 (d.current.as_deref() != Some(path.to_string_lossy().as_ref()))
                     .then_some((d.session, path))
             })

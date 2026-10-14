@@ -12033,3 +12033,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   pane closed, as zeron chose. A files pane restored open builds its explorer on its first
   frame, as its toggle would, so it shows the tree, not an empty column. Test: `slopty-shell`
   `shell::tests::session_panels_are_kept_across_launches`.
+- ✅ **An agent waiting on its own background work reads as at rest (2026-10-14).** A thread in
+  `Phase::Waiting` (Claude Code at its prompt with background tasks or a wakeup pending) read
+  as the shell's Working: a spinner that never ended and a Stop the worker refuses, since there
+  is no turn to stop. The person saw a chat that only said hello "run forever" and Stop do
+  nothing. It now reads as Idle: the person can write to it, and it works again when what it
+  waits on wakes it. The server still counts it busy, so the machine stays awake for that work.
+  Test: `slopty-ui` `view_model::tests::a_threads_phase_reads_as_a_session`.

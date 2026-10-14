@@ -3034,3 +3034,17 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     guard, and Slopty never answers in the person's place.
   - Tests: `a_start_names_its_parent_and_takes_the_person_s_autonomy` (`slopty-server`), the
     settings' `agents_autonomy`, and `apps/slopty-cli/tests/agents.rs` end to end.
+
+- ✅ **An observed Claude Code is read from the conversation its registry names** (2026-10-14).
+  A Claude Code no hook speaks for (one started by hand, one whose managed settings keep hooks
+  off, one adopted after the worker restarted) was read from the newest `.jsonl` in its
+  folder's project directory written since it was first seen. With two Claude Codes in one
+  folder that guess takes the other one's file: a chat Slopty started beside the person's own
+  session showed the person's conversation, under the chat's thread, after the worker
+  restarted. Claude Code keeps a registry of its live sessions (`~/.claude/sessions/<pid>.json`,
+  `slopty_agent::roster`) whose entry names each process's conversation and moves with `/clear`
+  and `/resume`. Discovery now reads it on each pass: the entry of the agent's process, or of
+  its child under a managed launcher, names the file (`discover::registered_transcript`); a
+  conversation it names that is not written yet is waited for. Only a process the registry
+  does not list is still found by time. Test: `slopty-agent`
+  `discover::tests::the_registry_names_the_transcript_over_the_newest_file`.

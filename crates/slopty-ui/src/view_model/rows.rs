@@ -114,11 +114,13 @@ pub fn pull(
 /// A thread's live status as a session, as of `now`, with the subagents of it that run.
 #[must_use]
 pub fn session(row: &ThreadRow, device: &str, running: u32, now: DateTime<Utc>) -> Session {
+    // An agent waiting on its own background work or a wakeup is at its prompt: the person may
+    // write to it, and there is no turn for a stop to end. It works again when one wakes it.
     let status = match row.status.phase {
-        Phase::Working | Phase::Waiting => SessionStatus::Working,
+        Phase::Working => SessionStatus::Working,
         Phase::NeedsYou => SessionStatus::AwaitingInput,
         Phase::Failed => SessionStatus::Errored,
-        Phase::Idle | Phase::Done | Phase::Stopped => SessionStatus::Idle,
+        Phase::Waiting | Phase::Idle | Phase::Done | Phase::Stopped => SessionStatus::Idle,
     };
     Session {
         last_completed_turn: row

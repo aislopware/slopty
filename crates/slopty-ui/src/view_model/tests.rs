@@ -97,7 +97,8 @@ fn an_edit_carries_its_counts() {
     assert!(stats.iter().any(|s| s.additions + s.deletions > 0));
 }
 
-/// A thread's phase reads as the shell's session status.
+/// A thread's phase reads as the shell's session status; one waiting on its background work is
+/// at rest.
 #[test]
 fn a_threads_phase_reads_as_a_session() {
     use slopty_proto::thread::Phase;
@@ -111,7 +112,7 @@ fn a_threads_phase_reads_as_a_session() {
     let now = Utc::now();
     for (phase, status) in [
         (Phase::Working, SessionStatus::Working),
-        (Phase::Waiting, SessionStatus::Working),
+        (Phase::Waiting, SessionStatus::Idle),
         (Phase::NeedsYou, SessionStatus::AwaitingInput),
         (Phase::Failed, SessionStatus::Errored),
         (Phase::Idle, SessionStatus::Idle),
