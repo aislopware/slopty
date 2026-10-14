@@ -11920,3 +11920,13 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   that stays on DERP says so"; `RelayWatch::take_notice`). Tests: `slopty-ui`
   `workspace::workers::tests::a_link_that_stays_on_derp_says_so_once`, `slopty-client`
   `relay::tests::a_stay_on_derp_is_said_once`.
+
+  A third pass dropped the 48 glyphs no surface draws any more (`Symbol`, with their Octicons
+  files and `NOTICE` lines), Slopty's own laptop among them, so the chrome's icons are Octicons
+  alone; `icons::glyphs::tests::every_glyph_reads` still fails on a file nothing draws.
+- ✅ **zeron adopted to `75b7260` (2026-10-14).** The adopt brought the shell's overscroll and
+  the view protocol's device paths, and zeron's other fixes across 23 files. The pull-request
+  pane and chat list that came with it (`chat_pull_requests`, `pull_request_pane`) and the
+  per-device worktree settings are in `xtask/zeron.toml`'s `[skip]`: a pull request opens in
+  the web browser, and the worktree locations are the engine's, which is not taken. Their
+  traces in the shell are cut and marked `// slopty:`.

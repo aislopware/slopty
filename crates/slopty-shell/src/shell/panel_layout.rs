@@ -1,4 +1,4 @@
-// Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
+// Derived from zeron (MIT, github.com/zeronsh/zeron @ 75b7260), see THIRD_PARTY_NOTICES.md
 //! Panel layout policy: which columns fit the window, how the open ones
 //! share its width, and the motion between arrangements.
 use super::*;
@@ -452,7 +452,7 @@ impl Shell {
                 let to = self.files_settled_width(cx);
                 self.transition_files(before.files, before.files_content, to);
             }
-            PaneResizeKind::Right | PaneResizeKind::Terminal => {}
+            PaneResizeKind::Right | PaneResizeKind::Terminal => {} // slopty: no PR pane
         }
         self.right_edge_bounce = None;
         self.resplit_panels(before, None, cx);

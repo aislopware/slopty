@@ -1,4 +1,4 @@
-// Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
+// Derived from zeron (MIT, github.com/zeronsh/zeron @ 75b7260), see THIRD_PARTY_NOTICES.md
 //! slopty-view-proto — wire types shared by engine, UI, and RPC.
 //!
 //! Ported from slopty's `packages/control/src/wire.ts` + `packages/harness/src/types.ts`.
@@ -8,6 +8,7 @@ pub mod agent;
 pub mod attachment_mentions;
 pub mod chat_mentions;
 pub mod change_request_assessment;
+pub mod device_paths;
 pub mod entities;
 pub mod file_mentions;
 pub mod invocation;

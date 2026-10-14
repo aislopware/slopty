@@ -1,4 +1,4 @@
-// Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
+// Derived from zeron (MIT, github.com/zeronsh/zeron @ 75b7260), see THIRD_PARTY_NOTICES.md
 //! Synced entity rows (workspace doc) and local projections.
 //!
 //! In slopty these were synced Postgres rows; in slopty they live in the per-org
@@ -395,6 +395,25 @@ pub struct FolderListing {
     /// True when the listing hit the entry cap.
     #[serde(default)]
     pub truncated: bool,
+}
+
+/// Device-local preferences, used only when creating a new worktree.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct WorktreeSettings {
+    pub use_custom_directory: bool,
+    /// Remembered even while the custom location is disabled.
+    pub custom_directory: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeSettingsStatus {
+    pub settings: WorktreeSettings,
+    pub default_directory: String,
+    pub effective_directory: String,
+    /// An explicit host environment override takes precedence over preferences.
+    pub environment_override: Option<String>,
 }
 
 /// `SearchHomeFolders`: folders anywhere under the host's home whose names

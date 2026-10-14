@@ -182,6 +182,10 @@ paths = [
     "crates/ui/src/pull_request_test_support.rs",
     "crates/ui/src/pull_request_code.rs",
     "crates/ui/src/pull_request_interactions.rs",
+    "crates/ui/src/shell/chat_pull_requests.rs",
+    "crates/ui/src/shell/pull_request_pane.rs",
+    # Per-device worktree locations: the engine side is not taken.
+    "crates/ui/src/settings/worktrees.rs",
     # Agent accounts and their usage: Slopty never touches a credential.
     "crates/ui/src/settings/accounts.rs",
     # Images fetched over HTTP by the interface itself.

@@ -1,4 +1,4 @@
-// Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
+// Derived from zeron (MIT, github.com/zeronsh/zeron @ 75b7260), see THIRD_PARTY_NOTICES.md
 //! Popover / menu primitives: an anchored floating layer with the `menu-in`
 //! animation, outside-click dismissal, and pure keyboard-navigation + search
 //! reducers shared by every picker and menu (feature-inventory §1.12 popovers).
@@ -14,7 +14,7 @@
 
 mod contained;
 mod hover_intent;
-pub(crate) use contained::contained_menu;
+pub(crate) use contained::{MenuAlign, contained_menu};
 pub use hover_intent::{HoverAction, HoverIntent};
 
 use gpui::{

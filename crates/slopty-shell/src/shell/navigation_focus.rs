@@ -1,4 +1,4 @@
-// Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
+// Derived from zeron (MIT, github.com/zeronsh/zeron @ 75b7260), see THIRD_PARTY_NOTICES.md
 //! Focus boundaries shared by contextual navigation and focus recovery.
 use super::*;
 
@@ -89,9 +89,14 @@ impl Shell {
     }
 
     pub(super) fn navigation_focus_fallback(&self, cx: &App) -> (FocusHandle, FocusHandle) {
+        let right_open = match self.route {
+            Route::Chat => self.right_pane_open(cx),
+            // slopty: no pull-request pages.
+            Route::Settings(_) => false,
+        };
         if matches!(self.route, Route::Settings(_)) {
             (self.settings_focus.clone(), self.unfocused.clone())
-        } else if self.right_pane_open(cx) && self.navigation_focus.right_was_focused {
+        } else if right_open && self.navigation_focus.right_was_focused {
             (
                 self.navigation_focus.right.clone(),
                 self.navigation_focus.right.clone(),

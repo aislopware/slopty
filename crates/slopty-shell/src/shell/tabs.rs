@@ -1,4 +1,4 @@
-// Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
+// Derived from zeron (MIT, github.com/zeronsh/zeron @ 75b7260), see THIRD_PARTY_NOTICES.md
 //! Session navigation — the horizontal tab strip is gone (wing 2026-08-10):
 //! the activity sidebar IS the session list, and the titlebar names the
 //! selected session (harness brand icon + title). A `+` new-session button
@@ -93,6 +93,7 @@ impl Shell {
         if self.navigation_overlay_open(cx) {
             return;
         }
+        // slopty: no pull-request pages.
         if matches!(self.route, Route::Chat)
             && self.right_pane_open(cx)
             && self.navigation_focus.in_right(window, cx)
@@ -123,6 +124,7 @@ impl Shell {
             || self.rename_space_dialog.is_some()
             // slopty: no Discard changes (ruled out).
             || self.chat_menu.get().is_some()
+            // slopty: no pull-request pages.
             || self.space_menu.get().is_some()
             || self.user_menu.get().is_some()
             || self.spaces_menu.get().is_some()

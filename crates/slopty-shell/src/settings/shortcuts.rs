@@ -1,4 +1,4 @@
-// Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
+// Derived from zeron (MIT, github.com/zeronsh/zeron @ 75b7260), see THIRD_PARTY_NOTICES.md
 //! Settings → Shortcuts (feature-inventory §1.4): a table of the rebindable
 //! bindings — click a combo to record (Esc cancels), live conflict detection,
 //! per-row Reset and Restore defaults. Changes emit [`ShortcutsEvent`]; the

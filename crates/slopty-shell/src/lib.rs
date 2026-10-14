@@ -1,4 +1,4 @@
-// Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
+// Derived from zeron (MIT, github.com/zeronsh/zeron @ 75b7260), see THIRD_PARTY_NOTICES.md
 //! slopty-shell — the gpui viewport. Shell, sidebar, conversation, composer, terminal,
 //! diff pane.
 //!
@@ -51,6 +51,7 @@ mod new_thread_background_image;
 mod new_thread_background_mask;
 mod notice;
 pub mod notify;
+pub mod overscroll;
 pub mod pickers;
 pub mod popover;
 pub mod project_actions;

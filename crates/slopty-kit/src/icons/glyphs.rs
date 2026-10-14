@@ -1,8 +1,7 @@
 //! The chrome's glyphs: GitHub's Octicons (`assets/icons/octicons/`, MIT, credited in its
 //! `NOTICE`), one family on every platform, filled outlines on a 16 grid whose 1.5-unit line is
 //! the 1.31 px stem of the IBM Plex beside it when drawn at 14 (`docs/decisions/ui.md`, "The
-//! chrome's icons are Octicons at 14"). Chevrons and a tab's close are Octicons' 12-grid art;
-//! the laptop is our own, drawn on Octicons' grid (`assets/icons/ours/`).
+//! chrome's icons are Octicons at 14"). Chevrons and a tab's close are Octicons' 12-grid art.
 //!
 //! A glyph is drawn by us from its outline ([`slopty_platform::outline::rasterize_on_grid`]):
 //! its grid scaled to a whole number of device pixels and filled. Each becomes an alpha mask
@@ -62,97 +61,49 @@ macro_rules! glyphs {
 }
 
 glyphs! {
-    AiAgent => "octicons/ai-model-16",
-    ArrowClockwise => "octicons/sync-16",
     ArrowDown => "octicons/arrow-down-16",
-    ArrowDownToLine => "octicons/move-to-bottom-16",
     ArrowLeft => "octicons/arrow-left-16",
     ArrowRight => "octicons/arrow-right-16",
-    ArrowTriangleBranch => "octicons/git-branch-16",
-    ArrowTriangleMerge => "octicons/git-merge-16",
-    ArrowTrianglePull => "octicons/git-pull-request-16",
     ArrowUp => "octicons/arrow-up-16",
-    ArrowUpAndDown => "octicons/arrow-both-16",
-    ArrowUpRight => "octicons/link-external-16",
-    ArrowUpToLine => "octicons/move-to-top-16",
-    ArrowUturnBackward => "octicons/undo-16",
     Bell => "octicons/bell-16",
-    BellSlash => "octicons/bell-slash-16",
     CharacterCursorIbeam => "octicons/typography-16",
-    Checklist => "octicons/checklist-16",
     Checkmark => "octicons/check-16",
     CheckmarkCircle => "octicons/check-circle-16",
-    CheckmarkCircleFill => "octicons/check-circle-fill-16",
     ChevronDown => "octicons/chevron-down-12",
     ChevronLeft => "octicons/chevron-left-12",
-    ChevronLeftForwardslashChevronRight => "octicons/code-16",
     ChevronRight => "octicons/chevron-right-12",
     ChevronUp => "octicons/chevron-up-12",
-    CircleInsetFilled => "octicons/dot-fill-16",
     Clock => "octicons/clock-16",
     Command => "octicons/command-palette-16",
-    Cursorarrow => "octicons/cursor-16",
     Display => "octicons/device-desktop-16",
     Doc => "octicons/file-16",
-    DocBadgePlus => "octicons/file-added-16",
-    DocOnClipboard => "octicons/paste-16",
     DocOnDoc => "octicons/copy-16",
     Ellipsis => "octicons/kebab-horizontal-16",
     ExclamationmarkTriangle => "octicons/alert-16",
     ExclamationmarkTriangleFill => "octicons/alert-fill-16",
     Eye => "octicons/eye-16",
     EyeSlash => "octicons/eye-closed-16",
-    FileBinary => "octicons/file-binary-16",
-    FileCode => "octicons/file-code-16",
-    FileMedia => "octicons/file-media-16",
-    FileZip => "octicons/file-zip-16",
     Flag => "octicons/goal-16",
     Fold => "octicons/fold-16",
     Folder => "octicons/file-directory-16",
-    Gearshape => "octicons/gear-16",
-    GitCommit => "octicons/git-commit-16",
-    GitRepo => "octicons/repo-16",
     Globe => "octicons/globe-16",
     InfoCircle => "octicons/info-16",
-    Iphone => "octicons/device-mobile-16",
-    Laptopcomputer => "ours/laptop-16",
     Link => "octicons/link-16",
     Lock => "octicons/lock-16",
-    Macwindow => "octicons/browser-16",
     Magnifyingglass => "octicons/search-16",
     Markdown => "octicons/markdown-16",
     Minus => "octicons/dash-16",
     Paperclip => "octicons/paperclip-16",
-    PauseCircle => "octicons/pause-16",
-    Pencil => "octicons/pencil-16",
     Person => "octicons/person-16",
-    Photo => "octicons/image-16",
     Pin => "octicons/pin-16",
     Plus => "octicons/plus-16",
-    PlusForwardslashMinus => "octicons/diff-16",
-    PullClosed => "octicons/git-pull-request-closed-16",
-    PullDraft => "octicons/git-pull-request-draft-16",
-    PuzzlepieceExtension => "octicons/plug-16",
-    QuestionmarkBubble => "octicons/question-16",
-    RectangleSplit3x1 => "octicons/columns-16",
     Send => "octicons/paper-airplane-16",
-    ServerRack => "octicons/server-16",
-    SidebarExpand => "octicons/sidebar-expand-16",
-    SidebarLeft => "octicons/sidebar-collapse-16",
-    SpeakerSlash => "octicons/mute-16",
-    SpeakerWave2 => "octicons/unmute-16",
-    SquareGrid2x2 => "octicons/apps-16",
     Stop => "octicons/stop-16",
-    StopFill => "octicons/square-fill-16",
     Terminal => "octicons/terminal-16",
-    TextBubble => "octicons/comment-discussion-16",
     Trash => "octicons/trash-16",
-    Unfold => "octicons/unfold-16",
     WifiSlash => "octicons/cloud-offline-16",
-    WrenchAndScrewdriver => "octicons/tools-16",
     Xmark => "octicons/x-16",
     XmarkCircle => "octicons/x-circle-16",
-    XmarkSmall => "octicons/x-12",
 }
 
 /// A glyph's drawing as its file has it: the outline and the side of its grid in its own units.
@@ -252,7 +203,7 @@ mod tests {
             });
             assert!(listed, "the NOTICE names {symbol:?} with {file}");
         }
-        for dir in ["octicons", "ours"] {
+        for dir in ["octicons"] {
             let path = format!("{}/assets/icons/{dir}", env!("CARGO_MANIFEST_DIR"));
             let files: Vec<String> = std::fs::read_dir(&path)
                 .map(|entries| {
