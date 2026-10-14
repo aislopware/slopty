@@ -223,14 +223,21 @@ mod golden {
         assert_eq!(frame.as_bytes(), codec::encode(&request).unwrap().as_ref());
     }
 
-    /// The fingerprint the binary says is the one these goldens and the shell scripts make,
-    /// so a changed golden or script moves it; and it moves with either.
+    /// The fingerprint the binary says is the one these goldens, the shell scripts and ptyd's
+    /// own source make, so a changed golden, script or line of ptyd moves it.
     #[test]
     fn the_custody_is_the_goldens_and_the_scripts() {
         let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let (goldens, shell) = super::custody::sources(&manifest);
         let goldens = super::custody::goldens(&goldens).unwrap();
-        let scripts = super::custody::scripts(&shell).unwrap();
+        let mut scripts = super::custody::scripts(&shell).unwrap();
+        let code = super::custody::code(&manifest).unwrap();
+        assert!(
+            code.iter().any(|(path, _)| path == "code/slopty-ptyd/session.rs")
+                && code.iter().any(|(path, _)| path == "code/slopty-pty/pty.rs"),
+            "ptyd's own source is read"
+        );
+        scripts.extend(code);
         assert!(
             goldens.iter().any(|(name, _)| name.contains("request_spawn")),
             "the goldens are read: {:?}",
@@ -247,6 +254,12 @@ mod golden {
         let said = String::from_utf8(said.stdout).unwrap();
         let succession = super::custody::succession(&goldens);
         assert_eq!(said.trim(), format!("{derived} {succession}"), "custody, then succession");
+        let (baked, baked_succession, _read) = super::custody::derive(&manifest).unwrap();
+        assert_eq!(
+            (baked.as_str(), baked_succession.as_str()),
+            (derived.as_str(), succession.as_str()),
+            "the derivation both build scripts bake (ptyd's and the worker's) is this one"
+        );
         assert_eq!(derived.len(), 16, "{derived}");
         assert!(
             goldens.iter().any(|(name, _)| name.contains("golden__succession_heir")),
@@ -281,6 +294,13 @@ mod golden {
             bytes.push(b'\n');
         }
         assert_ne!(super::custody::of(goldens.clone(), edited), derived, "a script moves it");
+        let mut fixed = scripts.clone();
+        if let Some((_, bytes)) =
+            fixed.iter_mut().find(|(path, _)| path == "code/slopty-ptyd/session.rs")
+        {
+            bytes.push(b'\n');
+        }
+        assert_ne!(super::custody::of(goldens.clone(), fixed), derived, "a line of ptyd moves it");
         let mut header = goldens;
         for (_, text) in &mut header {
             *text = text.replacen("expression:", "expression: moved", 1);

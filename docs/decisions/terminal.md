@@ -3977,3 +3977,15 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   and drops what a closed session's child writes until its side is gone
   (`session::Reader::Discard`). Test: `slopty-ptyd`
   `roundtrip::a_child_that_writes_as_it_exits_ends_once_closed`, which fails on the old close.
+- ✅ **A fix to ptyd reaches the running one by handover (2026-10-14).** ptyd's custody
+  fingerprint hashed its protocol's goldens and the shell scripts alone, so a build that changed
+  only how ptyd treats its sessions read as the same custody: an update kept the old process,
+  and the fix waited for a restart that would end every session. The fix that reads a closed
+  terminal until its program has gone stayed inactive on a deployed Mac this way. The
+  fingerprint now hashes ptyd's own source and `slopty-pty`'s too (`custody::code`): any change
+  to them makes the next update hand every session to the new build in place, as a protocol
+  change does when the succession is the same. The worker bakes the custody of its own build's
+  ptyd and dials no other; its build script and ptyd's now run one derivation
+  (`custody::derive`), since a first cut changed only ptyd's and the new worker refused the new
+  ptyd. Test: `slopty-ptyd` `custody::the_custody_is_the_goldens_and_the_scripts` ("a line of
+  ptyd moves it", and the baked derivation is the one checked).

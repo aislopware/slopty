@@ -1,12 +1,14 @@
 //! How ptyd's custody fingerprint is derived, shared by the build script, which bakes it into
 //! the binary (`slopty-ptyd --custody`), and the test that derives it again.
 //!
-//! A running ptyd hands a new worker two things: the protocol they speak over its socket, and
-//! the shell integration scripts it wrote when it started, which every shell it spawns runs.
-//! The fingerprint hashes what pins each: the protocol's goldens (`tests/snapshots`, each by
-//! name and body; the insta header is not the protocol) and every file of `slopty-pty`'s
-//! `assets/shell`. Two builds whose fingerprints are equal can share one running ptyd, so a
-//! worker update leaves it, and every session it holds, alone.
+//! A running ptyd hands a new worker three things: the protocol they speak over its socket, the
+//! shell integration scripts it wrote when it started, which every shell it spawns runs, and its
+//! own behaviour with the sessions it holds. The fingerprint hashes what pins each: the
+//! protocol's goldens (`tests/snapshots`, each by name and body; the insta header is not the
+//! protocol), every file of `slopty-pty`'s `assets/shell`, and the source of ptyd and of
+//! `slopty-pty` ([`code`]). Two builds whose fingerprints are equal can share one running ptyd,
+//! so a worker update leaves it, and every session it holds, alone; a fix to ptyd itself is
+//! handed over to, never left waiting for a restart that ends every session.
 //!
 //! Its succession fingerprint hashes the goldens of the handover alone: how a ptyd hands its
 //! sessions to the new build it runs in place. Two builds whose custody differs and whose
@@ -110,6 +112,44 @@ pub(crate) fn scripts(dir: &Path) -> std::io::Result<Vec<(String, Vec<u8>)>> {
         }
     }
     Ok(files)
+}
+
+/// The custody and succession fingerprints of the ptyd whose package is at `manifest_dir`, as
+/// its binary says them: the one derivation both ptyd's and the worker's build scripts bake,
+/// so a worker and the ptyd of its own build never disagree. With the paths read, for
+/// `rerun-if-changed`.
+pub(crate) fn derive(
+    manifest_dir: &Path,
+) -> std::io::Result<(String, String, Vec<std::path::PathBuf>)> {
+    let (goldens_dir, shell) = sources(manifest_dir);
+    let read = goldens(&goldens_dir)?;
+    let succession = succession(&read);
+    let mut held = scripts(&shell)?;
+    held.extend(code(manifest_dir)?);
+    let custody = of(read, held);
+    let mut paths = vec![goldens_dir, shell, manifest_dir.join("src/custody.rs")];
+    paths.extend(code_dirs(manifest_dir).map(|(_, dir)| dir));
+    Ok((custody, succession, paths))
+}
+
+/// The source of ptyd and of the `slopty-pty` it is built on, from the package's own
+/// directory: each file by `code/<crate>/<path>`, with its bytes.
+pub(crate) fn code(manifest_dir: &Path) -> std::io::Result<Vec<(String, Vec<u8>)>> {
+    let mut files = Vec::new();
+    for (name, dir) in code_dirs(manifest_dir) {
+        files.extend(
+            scripts(&dir)?.into_iter().map(|(path, bytes)| (format!("code/{name}/{path}"), bytes)),
+        );
+    }
+    Ok(files)
+}
+
+/// The source directories [`code`] reads, by crate.
+pub(crate) fn code_dirs(manifest_dir: &Path) -> [(&'static str, std::path::PathBuf); 2] {
+    [
+        ("slopty-ptyd", manifest_dir.join("src")),
+        ("slopty-pty", manifest_dir.join("../../crates/slopty-pty/src")),
+    ]
 }
 
 /// Where the goldens and the shell assets are, from the package's own directory.
