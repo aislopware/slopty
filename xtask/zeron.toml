@@ -184,6 +184,8 @@ paths = [
     "crates/ui/src/pull_request_interactions.rs",
     "crates/ui/src/shell/chat_pull_requests.rs",
     "crates/ui/src/shell/pull_request_pane.rs",
+    # The right pane's subagent list: subagents are rows under their agent in the sidebar.
+    "crates/ui/src/files/subagents.rs",
     # Per-device worktree locations: the engine side is not taken.
     "crates/ui/src/settings/worktrees.rs",
     # Agent accounts and their usage: Slopty never touches a credential.

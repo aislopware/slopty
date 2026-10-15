@@ -538,6 +538,10 @@ impl Composer {
             Some(QueueDeliveryGate::ReviewRequired { .. }) if !being_edited => {
                 (SharedString::from("Needs review"), Vec::new())
             }
+            // slopty: what holds the message on its machine.
+            Some(QueueDeliveryGate::Held { reason }) if !being_edited => {
+                (SharedString::from(reason.clone()), Vec::new())
+            }
             _ => queue_row_text(&item.text, &item.attachments),
         };
 

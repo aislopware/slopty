@@ -7370,7 +7370,8 @@ impl Transcript {
                 .flex_row()
                 .items_center()
                 .gap(px(Theme::SPACE_SM));
-            let metadata = metadata.child(timestamp).children(copy);
+            // slopty: a time the agent never said (0) shows none; the copy action stays.
+            let metadata = metadata.when(ms > 0, |el| el.child(timestamp)).children(copy);
             div()
                 .h(px(Theme::SPACE_SM + Theme::SPACE_MD * 2.0))
                 .pt(px(Theme::SPACE_SM))

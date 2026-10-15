@@ -12152,3 +12152,40 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 - ✅ **An agent switched off is offered nowhere (2026-10-15).** Settings → Agents' switch said it
   changed nothing. The agents switched off are kept on this app (`interface/agents-off.json`) and
   the pickers leave them out.
+- ✅ **Subagents hang under their agent in the sidebar (2026-10-15).** The person wants no
+  subagents in the right pane. Its Subagents section is gone; each subagent (a chat another
+  agent started, `Chat::subagent`, set by the view model from the thread's parent link) is a
+  row under its agent's row in the sidebar: the compact row stepped in and muted, its status
+  glyph, a click opening its transcript as the session view. Those at work or waiting on the
+  person always show; finished ones fold behind "N finished" per agent (for the run only), the
+  open one showing anyway. The rows ride inside their agent's slot, so pins, drags and jump
+  slots still count one row per session. Side chats (asides, forks) stay in the explorer's Chats
+  section, which now stays open or closed as the person last left it, in every chat and across
+  restarts (`UiSettings::files_chats_open`), closed at first. Tests: `slopty-shell`
+  `shell::sidebar_subagents::tests`,
+  `files::sections::tests::chats_section_starts_closed_and_says_its_toggles`.
+- ✅ **A request of choices is one click (2026-10-15).** Every open request reached the shell as an
+  agent's question, with a field to type in: Claude Code's "Trust this folder" read as
+  AskUserQuestion, and typed words failed. A request that offers choices and asks no questions
+  (an approval, a plan, Claude Code's dialogs) is headed by its own title and goes on the click
+  that picks (`UserInputQuestion::choices_only`); an agent's own questions keep the field. Tests:
+  `slopty-ui` `view_model::tests::a_request_of_choices_is_one_click_under_its_title`,
+  `slopty-shell` `composer::tests::wizard_choices_only_submits_on_click`.
+- ✅ **A transcript waits for its thread (2026-10-15).** Opening a chat drew its tool groups open,
+  then closed: the view model said an empty transcript while the thread's state was on its way,
+  the shell took that as the whole history and the real one as live arrivals. Nothing is said
+  until the state comes. A time an agent never said (a resumed session's history) is no time,
+  not 1 January 1970. Tests: `slopty-ui`
+  `workspace::view_model::tests::a_transcript_waits_for_its_threads_state`,
+  `view_model::tests::an_unknown_time_is_no_time`.
+- ✅ **A chat started here keeps its id, and its first moments hold together (2026-10-15).** A chat
+  made in the shell goes by the id the shell minted; its thread's id stood in for it after a
+  restart, so its pin and section went. The ids are kept (`interface/aliases.json`) and read back
+  when the app serves the interface. While a chat starts, what the person writes waits for its
+  thread and goes to it in order, never as a second start; a start turned down says why in the
+  chat and goes again under a new id on Retry; a chat deleted while it starts has its thread
+  closed once it is there. A message sent at once is the shell's own echo, never also a queue
+  row; a message the worker holds says why on its row (`QueueDeliveryGate::Held`), and one
+  being typed into the agent is not taken back. "Send now" stops the turn, then sends; a Stop
+  answers once the worker said how it went, so a refused one says why. Tests: `slopty-ui`
+  `workspace::view_model::tests`.

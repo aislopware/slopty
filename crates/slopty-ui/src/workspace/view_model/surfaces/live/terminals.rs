@@ -2,8 +2,9 @@
 //! answer, once the shell's view is attached, is the session's id; the panel then shows that
 //! view. A shell opened for a chat and still running when it is asked again (the app came back,
 //! the session lived on in its worker) is found by its `chat` fact and shown again instead of a
-//! new one. A chat whose agent runs in a terminal (Claude Code's TUI) shows that terminal
-//! first, the same session the chat shows, so the person goes on in either. A project's run
+//! new one. A chat whose agent runs in a terminal (Claude Code's TUI) shows that terminal when
+//! asked for the agent's (`agent`), the same session the chat shows, so the person goes on in
+//! either; a terminal asked for plainly is always a shell, never the agent's. A project's run
 //! script opens in a terminal of its own. `CloseTerminal` ends the shell, but only puts an
 //! agent's terminal away.
 
@@ -93,8 +94,7 @@ impl WorkspaceView {
         let cwd = param(params, "cwd").filter(|_| script.is_none()).map(str::to_owned).or(cwd);
         let (reply, answer) = oneshot::channel();
         if script.is_none()
-            && let Some(session) =
-                self.live_agent_terminal(&chat, cx).or_else(|| self.live_kept_shell(key, &chat, cx))
+            && let Some(session) = self.live_kept_shell(key, &chat, cx)
         {
             self.live_hold(session, &chat, cx);
             cx.global_mut::<Live>().terminals.coming.insert(session, (chat, reply));
@@ -243,8 +243,16 @@ impl WorkspaceView {
     fn live_kept_shell(&self, key: WorkerKey, chat: &str, cx: &App) -> Option<SessionId> {
         let terminals = &cx.try_global::<Live>()?.terminals;
         let w = self.workers.get(&key)?;
+        // The agent's own terminal, held for the chat once its TUI was shown, is no shell.
+        let agent = self.chat_thread(chat, cx).and_then(|(at, thread)| {
+            let (_, hub) = self.hubs().find(|(k, _)| *k == at)?;
+            hub.read(cx).threads().rows().rows.get(&thread)?.terminal
+        });
         w.doc.items().find_map(|item| {
             let ItemKind::Terminal { session } = item.kind else { return None };
+            if Some(session) == agent {
+                return None;
+            }
             let alive = w
                 .sessions
                 .get(&session)
@@ -428,5 +436,37 @@ mod tests {
                 .collect()
         });
         assert_eq!(held, [(ItemKind::Terminal { session: agent }, Some("chat-1".to_owned()))]);
+    }
+
+    /// A terminal asked for plainly is a shell: the agent's own terminal, held for its chat once
+    /// its TUI was shown, is never taken for one.
+    #[gpui::test]
+    fn a_plain_terminal_is_never_the_agents(cx: &mut TestAppContext) {
+        use slopty_proto::thread::Cursor;
+        use slopty_proto::thread::wire::TableFrame;
+        let workspace = cx.new(|_| WorkspaceView::new(Theme::default()));
+        let cx = cx.add_empty_window();
+        let (agent, other) = (SessionId::new(), SessionId::new());
+        workspace.update(cx, |v, cx| v.add_worker(KEY, "studio".to_owned(), cx));
+        let _rx = link(&workspace, cx, mac(|_| {}), vec![shell(agent), shell(other)]);
+        let mut state = crate::conversation::thread::fixtures::thread("tools");
+        state.meta.terminal = Some(agent);
+        let chat = state.meta.id.to_string();
+        workspace.update(cx, |v, cx| {
+            v.apply_sync(KEY, ItemSync::Snapshot { version: 1, items: Vec::new() }, cx);
+            v.threads_linked(KEY, cx);
+            let rows = vec![state.row(slopty_core::WallMs::ZERO)];
+            v.thread_table(
+                KEY,
+                &TableFrame::Snapshot { cursor: Cursor { epoch: 1, seq: 1 }, rows },
+                cx,
+            );
+            cx.default_global::<super::Live>();
+            v.live_hold(agent, &chat, cx);
+            v.live_hold(other, &chat, cx);
+        });
+        cx.run_until_parked();
+        let kept = workspace.update(cx, |v, cx| v.live_kept_shell(KEY, &chat, cx));
+        assert_eq!(kept, Some(other));
     }
 }

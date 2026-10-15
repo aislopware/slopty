@@ -846,6 +846,9 @@ pub struct UiSettings {
     pub files_word_wrap: bool,
     /// Include hidden and ignored entries in workspace file trees.
     pub files_show_all: bool,
+    // slopty: the explorer's Chats section stays as the person left it, closed at first.
+    /// The explorer's Chats section is expanded.
+    pub files_chats_open: bool,
     /// The user hid the session card (project, device, side chats, actions)
     /// that otherwise shows beside a transcript with room for it.
     pub session_info_hidden: bool,
@@ -944,6 +947,7 @@ impl Default for UiSettings {
             files_autosave_delay_ms: FILES_AUTOSAVE_DELAY_DEFAULT_MS,
             files_word_wrap: false,
             files_show_all: false,
+            files_chats_open: false, // slopty: closed at first
             session_info_hidden: false,
             accent: slopty_shell_theme::AccentSelection::default(),
             surface: slopty_shell_theme::SurfacePreference::default(),
@@ -1570,6 +1574,7 @@ impl UiSettings {
             files_autosave_delay_ms,
             files_word_wrap,
             files_show_all,
+            files_chats_open, // slopty: remembered Chats section
             session_info_hidden,
             accent,
             surface,
@@ -2517,6 +2522,7 @@ mod tests {
             code_font_family: crate::typography::UiFontFamily::Geist,
             code_font_size: 11.0,
             files_show_all: true,
+            files_chats_open: true, // slopty: remembered Chats section
             session_info_hidden: true,
             accent: slopty_shell_theme::AccentSelection::Preset(slopty_shell_theme::AccentPreset::Cyan),
             surface: slopty_shell_theme::SurfacePreference::Frosted,

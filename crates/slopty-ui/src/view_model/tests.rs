@@ -351,6 +351,54 @@ fn a_request_before_any_answer_is_asked_on_one_of_its_own() {
     assert_eq!(questions[0].options, ["Trust this folder"]);
 }
 
+/// A request that offers choices and asks no questions (Claude Code's trust dialog, an approval)
+/// is one click, headed by its own title; an agent's own questions keep the words one may add.
+#[test]
+fn a_request_of_choices_is_one_click_under_its_title() {
+    use slopty_proto::thread::Effect;
+    let mut state = fixtures::thread("tools");
+    state.items.clear();
+    state.turns.clear();
+    state.requests.push(request("input", &[("trust", "Trust this folder", Effect::Allow)]));
+    let mut entries = Vec::new();
+    transcript::asks(&state, "w", &mut entries);
+    let (_, questions) = served(&entries).expect("the panel serves it");
+    assert!(questions[0].choices_only);
+    assert_eq!(questions[0].header, "Run cargo test?");
+
+    let mut asked = request(slopty_proto::thread::Request::QUESTION, &[]);
+    asked.questions = vec![slopty_proto::thread::detail::Question {
+        header: Some("Scope".to_owned()),
+        text: "Which tests?".to_owned(),
+        options: Vec::new(),
+        multi_select: false,
+    }];
+    state.requests = vec![asked];
+    let mut entries = Vec::new();
+    transcript::asks(&state, "w", &mut entries);
+    let (_, questions) = served(&entries).expect("the panel serves it");
+    assert!(!questions[0].choices_only, "a question takes words");
+}
+
+/// A time the agent never said (a resumed session's history) is no time, not 1970.
+#[test]
+fn an_unknown_time_is_no_time() {
+    let mut state = fixtures::thread("tools");
+    let times = |state: &mut slopty_proto::thread::ThreadState, ms| {
+        for item in &mut state.items {
+            item.at_ms = slopty_core::WallMs::from_millis(ms);
+        }
+        transcript::entries(state, "w", |_| None, |_| None)
+            .iter()
+            .map(|entry| entry.created_at)
+            .collect::<Vec<_>>()
+    };
+    let real = times(&mut state, 1_760_000_000_000);
+    assert!(!real.is_empty() && real.iter().all(|at| *at == 1_760_000_000_000));
+    assert!(times(&mut state, 0).iter().all(|at| *at == 0), "never said: no time");
+    assert!(times(&mut state, 1_000).iter().all(|at| *at == 0), "1970: no time");
+}
+
 /// A turn left open by a stale cache, or by an agent gone without ending it, reads as finished
 /// while the thread does not work: its tool groups stay closed.
 #[test]
@@ -377,4 +425,79 @@ fn the_shell_is_told_what_slopty_answers() {
     ] {
         assert!(can.iter().any(|c| c == capability), "{capability}");
     }
+}
+
+/// A stop leaves no mark of its own (the answer says it was stopped); what a command printed
+/// or the agent said reads as words; a failure stays red.
+#[test]
+fn a_notice_reads_by_its_kind() {
+    use slopty_proto::thread::detail::Clipped;
+    use slopty_proto::thread::{ItemBody, Notice};
+    let mut state = fixtures::thread("tools");
+    let notice = |kind: &str| ItemBody::Notice(Notice::new(kind, Clipped::whole(kind)));
+    let kinds = [Notice::INTERRUPTED, Notice::INFO, Notice::COMMAND, Notice::API_ERROR];
+    let last = state.items.len().saturating_sub(kinds.len());
+    let ids: Vec<String> = state.items[last..].iter().map(|item| item.id.0.clone()).collect();
+    for (item, kind) in state.items[last..].iter_mut().zip(kinds) {
+        item.body = notice(kind);
+    }
+    let entries = transcript::entries(&state, "w", |_| None, |_| None);
+    let part = |id: &str| entries.iter().flat_map(|e| &e.parts).find(|p| p.id() == id).cloned();
+    assert!(part(&ids[0]).is_none(), "a stop: no mark");
+    assert!(matches!(part(&ids[1]), Some(MessagePart::Text { .. })));
+    assert!(matches!(part(&ids[2]), Some(MessagePart::Text { .. })));
+    assert!(matches!(part(&ids[3]), Some(MessagePart::Error { .. })));
+}
+
+/// A file written shows what was written, and a long output can be fetched whole.
+#[test]
+fn a_write_shows_its_content_and_a_long_output_its_way_in() {
+    use slopty_proto::thread::detail::{Clipped, WriteDetail};
+    use slopty_proto::thread::{ItemBody, ToolDetail};
+    let mut state = fixtures::thread("tools");
+    let thread = state.meta.id;
+    let item = state
+        .items
+        .iter_mut()
+        .find(|item| matches!(item.body, ItemBody::Tool(_)))
+        .expect("a tool call");
+    let id = item.id.0.clone();
+    if let ItemBody::Tool(call) = &mut item.body {
+        call.detail = Some(ToolDetail::Write(WriteDetail {
+            path: "/w/a.txt".to_owned(),
+            lines: 1,
+            created: Some(true),
+            patch: slopty_proto::thread::Patch::default(),
+        }));
+        call.input = Clipped::whole(r#"{"file_path":"/w/a.txt","content":"hello"}"#);
+        call.output = Some(Clipped::whole(&"a line of output\n".repeat(200)));
+    }
+    let entries = transcript::entries(&state, "w", |_| None, |_| None);
+    let (call, output_ref) = entries
+        .iter()
+        .flat_map(|e| &e.parts)
+        .find_map(|p| match p {
+            MessagePart::Tool { id: at, call, output_ref, .. } if *at == id => {
+                Some((call.clone(), output_ref.clone()))
+            }
+            _ => None,
+        })
+        .expect("the write");
+    assert!(matches!(
+        call,
+        slopty_view_proto::ToolCall::WriteFile { content: Some(content), .. } if content == "hello"
+    ));
+    assert_eq!(output_ref, Some(format!("{thread}/{id}")));
+}
+
+/// A chat is made when its thread began, and has nothing to read until a turn ended.
+#[test]
+fn a_chat_is_made_when_its_thread_began() {
+    let state = fixtures::thread("tools");
+    let mut row = state.row(slopty_core::WallMs::from_millis(1_760_000_100_000));
+    row.created_ms = slopty_core::WallMs::from_millis(1_760_000_000_000);
+    row.ended = None;
+    let chat = rows::chat(&row, "w");
+    assert_eq!(chat.created_at.timestamp_millis(), 1_760_000_000_000);
+    assert_eq!(chat.last_message_at, None, "nothing to read yet");
 }

@@ -489,6 +489,16 @@ impl WorkspaceView {
         picked.unwrap_or_else(|| self.thread_config(device, row))
     }
 
+    /// The model and effort the person picked for the chat `chat`, if they did.
+    pub(in crate::workspace) fn picked_config(&self, chat: &str) -> Option<ChatConfig> {
+        self.view_model.surfaces.configs.0.get(chat).map(|p| p.config.clone())
+    }
+
+    /// The person picked `config` for the chat `chat` before it has a thread: it starts with it.
+    pub(in crate::workspace) fn pick_config(&mut self, chat: &str, config: ChatConfig) {
+        self.view_model.surfaces.configs.0.insert(chat.to_owned(), Picked { config, asked: None });
+    }
+
     /// Drop each pick whose switch the chat's thread turned down: the chat shows what its thread
     /// runs again, beside the refusal its transcript says.
     pub(in crate::workspace) fn settle_configs(&mut self, cx: &Context<Self>) {
@@ -567,11 +577,15 @@ impl WorkspaceView {
     /// yet, its start) and the worker has not answered, sent again under the same ids, so each is
     /// still acted on once.
     fn retry_delivery(
-        &self,
+        &mut self,
         params: &serde_json::Value,
         cx: &Context<Self>,
     ) -> Result<RpcReply, RpcError> {
         let chat = param(params, "chatId").ok_or_else(|| RpcError::BadParams("chatId".into()))?;
+        // A start turned down goes again, under a new id.
+        if self.view_retry_start(chat, cx) {
+            return value(&serde_json::json!({ "retried": 1 }));
+        }
         if let Some(minted) = self.view_model.minted.get(chat) {
             let retried = self.view_resend(minted.worker, Some(chat));
             return value(&serde_json::json!({ "retried": retried }));
@@ -739,15 +753,22 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) -> Result<RpcReply, RpcError> {
         let chat = param(params, "chatId").ok_or_else(|| RpcError::BadParams("chatId".into()))?;
-        let pending: slopty_proto::thread::IntentId = param(params, "id")
-            .and_then(|id| id.parse().ok())
-            .ok_or_else(|| RpcError::BadParams("id".to_owned()))?;
+        let row = param(params, "id").ok_or_else(|| RpcError::BadParams("id".to_owned()))?;
+        let pending =
+            self.queued_intent(row).ok_or_else(|| RpcError::BadParams("id".to_owned()))?;
         let (key, thread) = self
             .chat_thread(chat, cx)
             .ok_or_else(|| RpcError::Failed(format!("no thread {chat}")))?;
-        let waiting = self.view_queue_has(key, thread, pending, cx);
+        let state = self.view_queue_state(key, thread, pending, cx);
+        // A message being typed into the agent can no longer be changed, moved or taken back.
+        if state == Some(slopty_proto::thread::PendingState::Sending)
+            && method != methods::RENEW_QUEUED_MESSAGE_EDIT
+        {
+            return Err(RpcError::Failed("That message is going to the agent now".to_owned()));
+        }
+        let waiting = state.is_some();
         let text = param(params, "text").map(str::to_owned);
-        let queued = || self.view_queue(chat, cx).into_iter().find(|m| m.id == pending.to_string());
+        let queued = || self.view_queue(chat, cx).into_iter().find(|m| m.id == row);
         // The files a change names; one that names none keeps the message's own.
         let attachments = params
             .get("attachments")
@@ -758,7 +779,15 @@ impl WorkspaceView {
             methods::REMOVE_QUEUED_MESSAGE => {
                 (Some(Intent::Withdraw { pending }), serde_json::json!({ "removed": waiting }))
             }
-            methods::SEND_QUEUED_MESSAGE_NOW | methods::STEER_QUEUED_MESSAGE_NOW => {
+            // Sent now: the turn stops and the message goes next.
+            methods::SEND_QUEUED_MESSAGE_NOW => {
+                if waiting {
+                    let hub = self.thread_hub(key, cx);
+                    hub.update(cx, |hub, cx| hub.intent(thread, Intent::Interrupt, cx));
+                }
+                (Some(Intent::Promote { pending }), serde_json::json!({ "sent": waiting }))
+            }
+            methods::STEER_QUEUED_MESSAGE_NOW => {
                 (Some(Intent::Promote { pending }), serde_json::json!({ "sent": waiting }))
             }
             methods::UPDATE_QUEUED_MESSAGE => (
@@ -772,7 +801,7 @@ impl WorkspaceView {
                 let lease = match message.filter(|_| waiting) {
                     Some(m) => serde_json::json!({
                         "outcome": "acquired",
-                        "leaseId": pending.to_string(),
+                        "leaseId": row,
                         "text": m.text,
                         "baseTextHash": text_hash(&m.text, &m.attachments),
                         "attachments": m.attachments,
@@ -810,9 +839,9 @@ impl WorkspaceView {
                     .view_queue(chat, cx)
                     .into_iter()
                     .map(|m| m.id)
-                    .filter(|id| *id != pending.to_string())
+                    .filter(|id| id != row)
                     .collect();
-                let before = others.get(to).and_then(|id| id.parse().ok());
+                let before = others.get(to).and_then(|id| self.queued_intent(id));
                 (Some(Intent::Move { pending, before }), serde_json::json!({ "changed": waiting }))
             }
             _ => (None, serde_json::json!({ "changed": false })),
@@ -824,21 +853,17 @@ impl WorkspaceView {
         Ok(RpcReply::Value(answer))
     }
 
-    /// Whether `pending` still waits in `thread`'s queue on `key`.
-    fn view_queue_has(
+    /// How `pending` stands in `thread`'s queue on `key`; `None` once it left.
+    fn view_queue_state(
         &self,
         key: WorkerKey,
         thread: slopty_proto::thread::ThreadId,
         pending: slopty_proto::thread::IntentId,
         cx: &gpui::App,
-    ) -> bool {
-        self.held_hub(key).is_some_and(|hub| {
-            hub.read(cx)
-                .threads()
-                .mirror(thread)
-                .and_then(slopty_client::threads::Mirror::state)
-                .is_some_and(|state| state.pending.iter().any(|p| p.intent == pending))
-        })
+    ) -> Option<slopty_proto::thread::PendingState> {
+        let hub = self.held_hub(key)?.read(cx);
+        let state = hub.threads().mirror(thread).and_then(slopty_client::threads::Mirror::state)?;
+        state.pending.iter().find(|p| p.intent == pending).map(|p| p.state.clone())
     }
 
     /// `UploadChunk`: one part of a file being attached.

@@ -249,6 +249,7 @@ impl WorkspaceView {
     /// `key`'s answer to one of this client's intents. A start answered with its thread
     /// opens the thread as a tile there; one refused says why.
     pub fn thread_done(&mut self, key: WorkerKey, done: &IntentDone, cx: &mut Context<Self>) {
+        self.view_intent_done(done);
         if self.view_start_done(key, done, cx) {
             return;
         }

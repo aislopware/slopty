@@ -255,6 +255,10 @@ pub struct Chat {
     /// deleted) is tolerated rather than cascaded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_chat_id: Option<String>,
+    // slopty: a subagent lists under its agent in the sidebar; a side chat in the explorer.
+    /// A subagent its parent's agent started, not a side chat the person opened.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub subagent: bool,
 }
 
 impl Chat {

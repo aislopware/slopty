@@ -2,8 +2,8 @@
 //! one assistant entry whose parts are its text, reasoning, tool calls and notices.
 
 use slopty_proto::thread::{
-    IntentId, ItemBody, Request, ThreadId, ThreadState, ToolCall, ToolDetail, ToolState, Turn,
-    TurnId, TurnState, kind,
+    IntentId, ItemBody, Notice, Request, ThreadId, ThreadState, ToolCall, ToolDetail, ToolState,
+    Turn, TurnId, TurnState, kind,
 };
 use slopty_view_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry, ToolDiffStat};
 use slopty_view_proto::{UserInputAnswer, UserInputQuestion};
@@ -24,7 +24,7 @@ pub fn entries(
     let mut answer: Option<(TurnId, SessionMessageEntry)> = None;
     for item in &state.items {
         let id = item.id.0.clone();
-        let at = i64::try_from(item.at_ms.as_millis()).unwrap_or(i64::MAX);
+        let at = at(item.at_ms);
         if let ItemBody::User(message) = &item.body {
             // The id the shell gave the message, where it sent it, so its echo gives way.
             let id = message.intent.and_then(&named).unwrap_or(id);
@@ -46,7 +46,7 @@ pub fn entries(
             });
             continue;
         }
-        let Some(part) = part(&id, &item.body, &child_running) else { continue };
+        let Some(part) = part(state.meta.id, &id, &item.body, &child_running) else { continue };
         match &mut answer {
             Some((turn, entry)) if *turn == item.turn => entry.parts.push(part),
             _ => {
@@ -62,6 +62,21 @@ pub fn entries(
         out.push(entry);
     }
     out
+}
+
+/// The first wall time an item may truly carry (2000-01-01): anything before it is a time its
+/// agent never said, as a resumed session's history may come with none.
+const FIRST_TIME_MS: u64 = 946_684_800_000;
+
+/// An item's wall time as an entry's, in ms since the epoch; `0`, which the shell shows as no
+/// time, for a time its agent never said.
+#[must_use]
+pub fn at(time: slopty_core::WallMs) -> i64 {
+    let ms = time.as_millis();
+    if ms < FIRST_TIME_MS {
+        return 0;
+    }
+    i64::try_from(ms).unwrap_or(i64::MAX)
 }
 
 /// Answers still streaming in `entries` read as finished when their thread is not `live`.
@@ -88,7 +103,7 @@ pub fn asks(state: &ThreadState, device: &str, entries: &mut Vec<SessionMessageE
     let parts: Vec<MessagePart> =
         state.requests.iter().filter(|request| request.is_open()).map(input).collect();
     let Some(first) = state.requests.iter().find(|request| request.is_open()) else { return };
-    let at = i64::try_from(first.opened_ms.as_millis()).unwrap_or(i64::MAX);
+    let at = at(first.opened_ms);
     if let Some(entry) = tail(entries, &format!("ask:{}", first.id.0), at, device) {
         entry.parts.extend(parts);
     }
@@ -152,8 +167,25 @@ fn choice_label(choice: &slopty_proto::thread::Choice) -> String {
 }
 
 /// An open request as the shell's input part.
+///
+/// A request that offers choices and asks no questions (an approval, a plan, Claude Code's trust
+/// dialog) takes one of them on a click, headed by its own title; one that offers none takes
+/// words; an agent's questions keep their own headers and the words one may add.
 fn input(request: &Request) -> MessagePart {
-    let questions = if request.questions.is_empty() {
+    let questions = if request.questions.is_empty() && !request.options.is_empty() {
+        let title = request.title.trim();
+        let text = request.text.as_ref().map(|text| text.text.trim()).unwrap_or_default();
+        vec![UserInputQuestion {
+            id: CHOICE.to_owned(),
+            header: if title.is_empty() { header(request) } else { title.to_owned() },
+            question: text.to_owned(),
+            options: request.options.iter().map(choice_label).collect(),
+            multi_select: false,
+            prefill: None,
+            multiline: false,
+            choices_only: true,
+        }]
+    } else if request.questions.is_empty() {
         let mut question = request.title.clone();
         if let Some(text) = request.text.as_ref().filter(|text| !text.text.trim().is_empty()) {
             question = format!("{question}\n\n{}", text.text);
@@ -162,10 +194,11 @@ fn input(request: &Request) -> MessagePart {
             id: CHOICE.to_owned(),
             header: header(request),
             question,
-            options: request.options.iter().map(choice_label).collect(),
+            options: Vec::new(),
             multi_select: false,
             prefill: None,
-            multiline: request.options.is_empty(),
+            multiline: true,
+            choices_only: false,
         }]
     } else {
         request
@@ -180,6 +213,7 @@ fn input(request: &Request) -> MessagePart {
                 multi_select: question.multi_select,
                 prefill: None,
                 multiline: false,
+                choices_only: false,
             })
             .collect()
     };
@@ -270,8 +304,10 @@ fn assistant(
     }
 }
 
-/// An item of the agent's as a part of its answer; nothing for what the shell draws no part of.
+/// An item of `thread`'s agent as a part of its answer; nothing for what the shell draws no
+/// part of.
 fn part(
+    thread: ThreadId,
     id: &str,
     body: &ItemBody,
     child_running: &impl Fn(ThreadId) -> Option<bool>,
@@ -280,8 +316,8 @@ fn part(
     Some(match body {
         ItemBody::Text(text) => MessagePart::Text { id, text: text.text.clone() },
         ItemBody::Reasoning(text) => MessagePart::Reasoning { id, text: text.text.clone() },
-        ItemBody::Tool(call) => tool(id, call, child_running),
-        ItemBody::Notice(notice) => MessagePart::Error { id, message: notice.text.text.clone() },
+        ItemBody::Tool(call) => tool(thread, id, call, child_running),
+        ItemBody::Notice(notice) => return notice_part(id, notice),
         ItemBody::User(_)
         | ItemBody::Compaction(_)
         | ItemBody::Review { .. }
@@ -289,8 +325,21 @@ fn part(
     })
 }
 
-/// A tool call as the shell's tool part.
+/// A notice as the shell draws it: a failure in red, what a command printed or the agent said
+/// as words, and nothing for a stop, which the answer already says it was.
+fn notice_part(id: String, notice: &Notice) -> Option<MessagePart> {
+    let text = notice.text.text.clone();
+    match notice.kind.as_str() {
+        Notice::INTERRUPTED => None,
+        Notice::INFO | Notice::COMMAND | Notice::REWOUND => Some(MessagePart::Text { id, text }),
+        _ => Some(MessagePart::Error { id, message: text }),
+    }
+}
+
+/// A tool call of `thread` as the shell's tool part. Its whole output, as the thread holds it,
+/// is fetched by `{thread}/{item}` when the summary leaves some out.
 fn tool(
+    thread: ThreadId,
     id: String,
     call: &ToolCall,
     child_running: &impl Fn(ThreadId) -> Option<bool>,
@@ -329,7 +378,10 @@ fn tool(
                 additions: u64::from(write.patch.added),
                 deletions: u64::from(write.patch.removed),
             }]);
-            slopty_view_proto::ToolCall::WriteFile { path: write.path.clone(), content: None }
+            slopty_view_proto::ToolCall::WriteFile {
+                path: write.path.clone(),
+                content: text("content"),
+            }
         }
         (Some(ToolDetail::Search(search)), _) => slopty_view_proto::ToolCall::Search {
             pattern: search.pattern.clone(),
@@ -366,17 +418,21 @@ fn tool(
         _ if call.state == ToolState::Failed => slopty_view_doc::SubagentStatus::Failed,
         _ => slopty_view_doc::SubagentStatus::Done,
     });
+    let output =
+        call.output.as_ref().and_then(|out| slopty_view_doc::summarize_tool_output(&out.text));
+    let output_ref = call
+        .output
+        .as_ref()
+        .filter(|out| output.as_deref() != Some(out.text.trim()))
+        .map(|_| format!("{thread}/{id}"));
     MessagePart::Tool {
-        id,
-        call: decoded,
         is_error: matches!(call.state, ToolState::Failed | ToolState::Rejected),
         resolved: call.state.is_final(),
-        output: call
-            .output
-            .as_ref()
-            .and_then(|out| slopty_view_doc::summarize_tool_output(&out.text)),
+        output,
         diff: None,
-        output_ref: None,
+        output_ref,
+        id,
+        call: decoded,
         output_bytes: call.output.as_ref().map(|out| u64::from(out.chars)),
         diff_ref: None,
         diff_stats,

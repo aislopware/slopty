@@ -85,6 +85,7 @@ mod session_info;
 mod side_chats;
 mod sidebar_pins;
 mod sidebar_sections;
+mod sidebar_subagents; // slopty: an agent's subagents under its sidebar row
 mod search_warm;
 pub(crate) mod spaces;
 mod thread_search;
@@ -1838,6 +1839,8 @@ pub struct Shell {
     sidebar_view_trigger_focus: gpui::FocusHandle,
     /// Current pinned-row metrics shared by hit testing and displacement animations.
     sidebar_pinned_heights: Vec<f32>,
+    /// slopty: the agents whose finished subagents are unfolded in the sidebar.
+    sidebar_finished_subagents: std::collections::HashSet<String>,
     project_icons: project_icon::ProjectIcons,
     /// Hovered row whose status is replaced by the archive control.
     chat_status_hover: Option<String>,
@@ -2280,6 +2283,7 @@ impl Shell {
             sidebar_view_menu: popover::Popup::default(),
             sidebar_view_trigger_focus: cx.focus_handle().tab_stop(true),
             sidebar_pinned_heights: Vec::new(),
+            sidebar_finished_subagents: Default::default(), // slopty: subagents
             project_icons: Default::default(),
             chat_status_hover: None,
             chat_hover_resync: false,
@@ -3338,6 +3342,18 @@ impl Shell {
         cx.notify();
     }
 
+    // slopty: the explorer's Chats section stays as the person left it, in every explorer.
+    fn set_files_chats_open(&mut self, open: bool, cx: &mut Context<Self>) {
+        if self.settings.files_chats_open == open {
+            return;
+        }
+        self.settings.files_chats_open = open;
+        for explorer in self.files.values().cloned().collect::<Vec<_>>() {
+            explorer.update(cx, |explorer, cx| explorer.set_chats_open(open, cx));
+        }
+        self.schedule_save(cx);
+    }
+
     fn set_files_show_all(&mut self, show_all_files: bool, cx: &mut Context<Self>) {
         self.settings.files_show_all = show_all_files;
         if let Some(page) = self.files_settings_page.clone() {
@@ -3695,7 +3711,7 @@ impl Shell {
                     }
                     // Footer rows exist on the explorer only; an editor
                     // surface never emits them.
-                    FilesEvent::OpenSubagent { .. }
+                    FilesEvent::ChatsOpenChanged(_) // slopty: the explorer's only
                     | FilesEvent::OpenChildChat(_)
                     | FilesEvent::RenameChildChat(_)
                     | FilesEvent::ChildChatContextMenu { .. }
@@ -11535,6 +11551,7 @@ mod tests {
             last_seen_at: None,
             room_gen: None,
             parent_chat_id: None,
+            subagent: false, // slopty: subagents
         }
     }
 
@@ -13452,6 +13469,7 @@ mod exit_regressions {
                         harness_session_id: None,
                         harness_session_cwd: None,
                         parent_chat_id: None,
+                        subagent: false, // slopty: subagents
                         space_id: Some("other".into()),
                         last_seen_at: None,
                         room_gen: None,

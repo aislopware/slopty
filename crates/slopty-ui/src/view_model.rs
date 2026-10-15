@@ -247,7 +247,7 @@ impl Feed {
     }
 
     /// A watch opened on `chat`: the receiver it reads, and whether it is the first.
-    fn watch_transcript(
+    pub(crate) fn watch_transcript(
         &self,
         chat: &str,
     ) -> (watch::Receiver<Option<Arc<[SessionMessageEntry]>>>, bool) {

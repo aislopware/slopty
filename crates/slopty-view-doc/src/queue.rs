@@ -75,6 +75,9 @@ pub enum QueueDeliveryGate {
         since_ms: i64,
         base_text_hash: String,
     },
+    // slopty: the worker holds a message for a reason it says (a draft in the way, being typed).
+    /// Its machine holds it, and says why.
+    Held { reason: String },
 }
 
 fn is_false(value: &bool) -> bool {

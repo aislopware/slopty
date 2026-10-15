@@ -269,13 +269,16 @@ impl Shell {
         }
         let key = self.panel_key(cx);
         if !self.files.contains_key(&key) {
+            let chats_open = self.settings.files_chats_open; // slopty: remembered
             let files = cx.new(|cx| {
-                FilesSurface::new_explorer(
+                let mut files = FilesSurface::new_explorer(
                     self.state.clone(),
                     self.active_chat.clone(),
                     self.settings.files_show_all,
                     cx,
-                )
+                );
+                files.set_chats_open(chats_open, cx);
+                files
             });
             let owner = key.clone();
             let sub = cx.subscribe_in(
@@ -335,17 +338,8 @@ impl Shell {
                     }
                     // Footer rows land in the surface host beside the explorer,
                     // through the same paths a spawn chip and a side-chat tab use.
-                    FilesEvent::OpenSubagent {
-                        doc_id,
-                        title,
-                        frozen,
-                    } => this.add_subagent_surface(
-                        this.active_chat.clone(),
-                        doc_id.clone(),
-                        title.clone(),
-                        *frozen,
-                        cx,
-                    ),
+                    // slopty: the Chats section stays as the person left it.
+                    FilesEvent::ChatsOpenChanged(open) => this.set_files_chats_open(*open, cx),
                     FilesEvent::OpenChildChat(chat_id) => this.open_child_chat_tab(chat_id, cx),
                     FilesEvent::RenameChildChat(chat_id) => {
                         this.open_rename_chat(chat_id.clone(), cx)

@@ -592,6 +592,10 @@ pub struct UserInputQuestion {
     pub prefill: Option<String>,
     #[serde(default)]
     pub multiline: bool,
+    // slopty: an approval or a prompt like Claude Code's trust dialog offers choices, not a field.
+    /// It takes one of its options, on a click, and no words of one's own.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub choices_only: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

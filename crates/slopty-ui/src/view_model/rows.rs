@@ -53,10 +53,19 @@ pub fn parent(row: &ThreadRow) -> Option<ThreadId> {
     })
 }
 
+/// Whether another agent started the thread: a subagent of a call, or an agent started by
+/// another; not a side chat the person asked aside.
+#[must_use]
+pub fn subagent(row: &ThreadRow) -> bool {
+    row.parent.is_some() || row.facts.contains_key(slopty_proto::agent::PARENT_FACT)
+}
+
 /// A thread's row on `device` as a chat.
 #[must_use]
 pub fn chat(row: &ThreadRow, device: &str) -> Chat {
     let updated = time(row.updated_ms);
+    // When it began; a row that cannot say goes by when it last moved.
+    let created = if row.created_ms.is_zero() { updated } else { time(row.created_ms) };
     Chat {
         id: row.id.to_string(),
         device_id: device.to_owned(),
@@ -68,8 +77,10 @@ pub fn chat(row: &ThreadRow, device: &str) -> Chat {
         source_context: None,
         config: None,
         last_message_preview: row.last_line.clone(),
-        last_message_at: row.ended.map(|ended| time(ended.at_ms)).or(Some(updated)),
-        created_at: updated,
+        // Only a turn that ended is a message to read: an agent that has answered nothing yet
+        // has nothing unread.
+        last_message_at: row.ended.map(|ended| time(ended.at_ms)),
+        created_at: created,
         harness_session_id: Some(row.native.clone()).filter(|native| !native.is_empty()),
         harness_session_cwd: None,
         space_id: folder(row).map(|path| space_id(device, path)),
@@ -79,6 +90,7 @@ pub fn chat(row: &ThreadRow, device: &str) -> Chat {
             .map(|ended| time(ended.at_ms)),
         room_gen: None,
         parent_chat_id: parent(row).map(|thread| thread.to_string()),
+        subagent: subagent(row),
     }
 }
 

@@ -721,6 +721,7 @@ impl Wizard {
             return WizardStep::Stay;
         }
         let multi = question.multi_select;
+        let choices_only = question.choices_only; // slopty: one-click choices
         let Some(picked) = self.picked.get_mut(self.page) else {
             return WizardStep::Stay;
         };
@@ -734,6 +735,10 @@ impl Wizard {
             WizardStep::Stay
         } else {
             *picked = vec![option_ix];
+            // slopty: a choice-only request (an approval, a trust prompt) goes on its click.
+            if choices_only {
+                return self.advance();
+            }
             WizardStep::AutoAdvance
         }
     }
@@ -781,6 +786,7 @@ impl Wizard {
                 let typed = self
                     .typed
                     .get(ix)
+                    .filter(|_| !q.choices_only) // slopty: no words of one's own
                     .map(|s| if q.multiline { s.as_str() } else { s.trim() })
                     .unwrap_or("");
                 let labels = if !typed.is_empty() || q.multiline {
@@ -7827,7 +7833,11 @@ impl Composer {
                 self.last_rendered_height = 0.0;
                 self.route_snap_until = Some(Instant::now() + Duration::from_millis(ROUTE_SNAP_MS));
             }
-            self.input.update(cx, |input, cx| input.set_text(draft, cx));
+            self.input.update(cx, |input, cx| {
+                input.set_text(draft, cx);
+                // slopty: the question left with its chat; so does its prompt.
+                input.set_placeholder("Do anything…", cx);
+            });
         }
 
         // A pending agent question must not take over an active queue edit.
@@ -9225,15 +9235,18 @@ impl Composer {
                                 )
                             }),
                     )
-                    .child(
-                        div()
-                            .mt(px(6.0))
-                            .text_size(crate::typography::ui_rems(15.0))
-                            .line_height(px(20.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.text)
-                            .child(SharedString::from(question.question.clone())),
-                    )
+                    // slopty: a request its title says whole asks no line more.
+                    .when(!question.question.is_empty(), |el| {
+                        el.child(
+                            div()
+                                .mt(px(6.0))
+                                .text_size(crate::typography::ui_rems(15.0))
+                                .line_height(px(20.0))
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(theme.text)
+                                .child(SharedString::from(question.question.clone())),
+                        )
+                    })
                     .when(question.multi_select, |el| {
                         el.child(
                             div()
@@ -9253,16 +9266,19 @@ impl Composer {
                     )
                     // Free-text override over a hairline (shares the composer
                     // input entity).
-                    .child(
-                        div()
-                            .mt(px(12.0))
-                            .border_t_1()
-                            .border_color(crate::theme::hairline(0.06))
-                            .pt(px(12.0))
-                            .pb(px(4.0))
-                            .px(px(4.0))
-                            .child(self.input.clone()),
-                    ),
+                    // slopty: a choice-only request takes a click, never words.
+                    .when(!question.choices_only, |el| {
+                        el.child(
+                            div()
+                                .mt(px(12.0))
+                                .border_t_1()
+                                .border_color(crate::theme::hairline(0.06))
+                                .pt(px(12.0))
+                                .pb(px(4.0))
+                                .px(px(4.0))
+                                .child(self.input.clone()),
+                        )
+                    }),
             )
             .child(
                 div()
@@ -9281,13 +9297,19 @@ impl Composer {
                     } else {
                         gpui::Empty.into_any_element()
                     })
-                    .child(
-                        crate::popover::btn_primary(&theme, if last { "Submit" } else { "Next" })
+                    // slopty: a choice-only request goes on its click.
+                    .when(!question.choices_only, |el| {
+                        el.child(
+                            crate::popover::btn_primary(
+                                &theme,
+                                if last { "Submit" } else { "Next" },
+                            )
                             .id("wizard-submit")
                             .px(px(16.0))
                             .when(!can_advance, |el| el.opacity(0.4))
                             .on_click(cx.listener(|this, _, _, cx| this.wizard_advance(cx))),
-                    ),
+                        )
+                    }),
             );
         crate::frost::frosted(COMPOSER_RADIUS, crate::frost::MENU_BLUR, panel).into_any_element()
     }
@@ -13799,6 +13821,7 @@ mod tests {
             prefill: None,
             multiline: false,
             multi_select: multi,
+            choices_only: false, // slopty: one-click choices
         }
     }
 
@@ -14521,6 +14544,59 @@ mod tests {
         assert_eq!(answers.len(), 2);
         assert_eq!(answers[0].labels, vec!["b"]);
         assert_eq!(answers[1].labels, vec!["x"]);
+    }
+
+    /// A choice-only request (an approval, a trust prompt) goes on the click
+    /// that picks, and takes no words of one's own.
+    #[test]
+    fn wizard_choices_only_submits_on_click() {
+        let mut q = question("choice", &["Trust this folder"], false);
+        q.choices_only = true;
+        let mut w = Wizard::new("req".into(), vec![q]);
+        w.set_typed("typed by accident".into());
+        let WizardStep::Done(answers) = w.select(0) else {
+            panic!("expected Done on the click")
+        };
+        assert_eq!(answers[0].labels, vec!["Trust this folder"]);
+    }
+
+    /// A question's prompt leaves the composer with its chat.
+    #[gpui::test]
+    fn wizard_placeholder_resets_on_navigation(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| AppState::new());
+        let composer = cx.new(|cx| Composer::new(state.clone(), cx));
+        state.update(cx, |s, _| {
+            s.selected_chat = Some("a".into());
+            s.transcript = vec![SessionMessageEntry {
+                id: "assistant".into(),
+                role: MessageRole::Assistant,
+                parts: vec![MessagePart::Input {
+                    id: "input".into(),
+                    request_id: "ask".into(),
+                    questions: vec![question("q", &["a", "b"], false)],
+                    resolved: false,
+                }],
+                created_at: 0,
+                device_id: "device".into(),
+                status: Some(slopty_view_doc::MessageStatus::Streaming),
+                continuation_of: None,
+                duration_ms: None,
+            }];
+        });
+        composer.update(cx, |c, cx| {
+            c.on_state_changed(cx);
+            assert!(c.wizard.is_some());
+            assert_ne!(c.input.read(cx).placeholder.as_ref(), "Do anything…");
+        });
+        state.update(cx, |s, _| {
+            s.selected_chat = Some("b".into());
+            s.transcript.clear();
+        });
+        composer.update(cx, |c, cx| {
+            c.on_state_changed(cx);
+            assert!(c.wizard.is_none());
+            assert_eq!(c.input.read(cx).placeholder.as_ref(), "Do anything…");
+        });
     }
 
     #[test]
