@@ -6,9 +6,12 @@
 //! asked for the agent's (`agent`), the same session the chat shows, so the person goes on in
 //! either; a terminal asked for plainly is always a shell, never the agent's. A project's run
 //! script opens in a terminal of its own. `CloseTerminal` ends the shell, but only puts an
-//! agent's terminal away.
+//! agent's terminal away. A tab the app showed when it last ran asks for its terminal again by
+//! its id (`terminalId`): shown once its machine says it still runs, refused once it ended or
+//! [`AGAIN_GRACE`] passed with its machine silent of it.
 
 use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 
 use gpui::{App, Context, Focusable as _, SharedString, Subscription, Task};
 use slopty_client::WorkerKey;
@@ -32,6 +35,10 @@ const CHAT: &str = crate::workspace::CHAT_FACT;
 /// Where an open's answer goes.
 type Reply = oneshot::Sender<Result<RpcReply, RpcError>>;
 
+/// How long a terminal asked for again by its id is waited for: the app's links to its machines,
+/// and their sessions, come back after the app does.
+pub(super) const AGAIN_GRACE: Duration = Duration::from_secs(20);
+
 /// The terminals asked for, coming and shown.
 #[derive(Default)]
 pub(super) struct Terminals {
@@ -44,6 +51,9 @@ pub(super) struct Terminals {
     /// Agents' terminals asked for while their agent had exited, by chat: the start taking the
     /// agent up again in a terminal of its own, and the answer, given once the terminal is there.
     resuming: HashMap<String, (IntentId, Reply)>,
+    /// Terminals asked for again by their id, by session: the chat, the answer, and until when
+    /// its machine is waited for.
+    again: HashMap<SessionId, (String, Reply, Instant)>,
 }
 
 /// The program a session runs, as a tab names it: the command's last path part.
@@ -61,6 +71,10 @@ impl WorkspaceView {
         params: &serde_json::Value,
         cx: &mut Context<Self>,
     ) -> Task<Result<RpcReply, RpcError>> {
+        if let Some(session) = param(params, "terminalId").and_then(|id| id.parse().ok()) {
+            let chat = param(params, "chatId").unwrap_or_default().to_owned();
+            return self.live_open_again(session, chat, cx);
+        }
         if params.get("agent").and_then(serde_json::Value::as_bool) == Some(true) {
             let chat = param(params, "chatId").unwrap_or_default().to_owned();
             let Some(session) = self.live_agent_terminal(&chat, cx) else {
@@ -130,6 +144,70 @@ impl WorkspaceView {
         tracing::debug!(%key, request, cwd = ?spec.cwd, "a terminal for the interface");
         self.send(key, ClientMsg::OpenSession { request, spec });
         later(answer, cx)
+    }
+
+    /// Terminal `session` for `chat` again, which a tab showed when the app last ran: answered
+    /// once its machine says it still runs, refused once it ended or [`AGAIN_GRACE`] passed.
+    fn live_open_again(
+        &mut self,
+        session: SessionId,
+        chat: String,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<RpcReply, RpcError>> {
+        let (reply, answer) = oneshot::channel();
+        let until = Instant::now().checked_add(AGAIN_GRACE).unwrap_or_else(Instant::now);
+        let terminals = &mut cx.global_mut::<Live>().terminals;
+        if let Some((_, earlier, _)) = terminals.again.insert(session, (chat, reply, until)) {
+            let _gone = earlier.send(Err(RpcError::Failed("Asked again".to_owned())));
+        }
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(AGAIN_GRACE).await;
+            let _gone = this.update(cx, Self::live_settle_again);
+        })
+        .detach();
+        self.live_settle_again(cx);
+        later(answer, cx)
+    }
+
+    /// Answer each terminal asked for again: shown once its machine says it runs and no tab
+    /// shows it, refused once it ended or its wait is over.
+    pub(in crate::workspace) fn live_settle_again(&mut self, cx: &mut Context<Self>) {
+        let Some(live) = cx.try_global::<Live>() else { return };
+        if live.terminals.again.is_empty() {
+            return;
+        }
+        let again = std::mem::take(&mut cx.global_mut::<Live>().terminals.again);
+        let mut waiting = HashMap::new();
+        let now = Instant::now();
+        for (session, (chat, reply, until)) in again {
+            if reply.is_closed() {
+                continue;
+            }
+            let state = self
+                .worker_of_session(session)
+                .and_then(|key| self.workers.get(&key)?.sessions.get(&session))
+                .map(|summary| summary.state);
+            let terminals = &cx.global::<Live>().terminals;
+            let free =
+                !terminals.shown.contains(&session) && !terminals.coming.contains_key(&session);
+            match state {
+                Some(SessionState::Exited { .. }) => {
+                    let _gone = reply.send(Err(RpcError::Failed("The terminal has ended".into())));
+                }
+                Some(_) if free => {
+                    self.live_hold(session, &chat, cx);
+                    cx.global_mut::<Live>().terminals.coming.insert(session, (chat, reply));
+                }
+                _ if now >= until => {
+                    let _gone = reply.send(Err(RpcError::Failed("The terminal is gone".into())));
+                }
+                _ => {
+                    waiting.insert(session, (chat, reply, until));
+                }
+            }
+        }
+        cx.global_mut::<Live>().terminals.again.extend(waiting);
+        self.live_settle_terminals(cx);
     }
 
     /// The terminal of `chat`'s agent asked for while it runs in none: an agent that exited (a
@@ -468,5 +546,41 @@ mod tests {
         cx.run_until_parked();
         let kept = workspace.update(cx, |v, cx| v.live_kept_shell(KEY, &chat, cx));
         assert_eq!(kept, Some(other));
+    }
+
+    /// A terminal a tab showed when the app last ran, asked for again by its id: one its
+    /// machine says still runs is shown again for the chat, one that ended is refused at once,
+    /// and one its machine has not spoken of yet is waited for.
+    #[gpui::test]
+    fn a_terminal_asked_for_again_is_shown_while_it_runs(cx: &mut TestAppContext) {
+        let workspace = cx.new(|_| WorkspaceView::new(Theme::default()));
+        let cx = cx.add_empty_window();
+        let (runs, ended, unknown) = (SessionId::new(), SessionId::new(), SessionId::new());
+        let mut gone = shell(ended);
+        gone.state = slopty_proto::terminal::SessionState::Exited { status: Some(0) };
+        workspace.update(cx, |v, cx| v.add_worker(KEY, "studio".to_owned(), cx));
+        let _rx = link(&workspace, cx, mac(|_| {}), vec![shell(runs), gone]);
+        workspace.update(cx, |v, cx| {
+            v.apply_sync(KEY, ItemSync::Snapshot { version: 1, items: Vec::new() }, cx);
+        });
+        cx.run_until_parked();
+
+        let _answers = workspace.update(cx, |v, cx| {
+            cx.default_global::<super::Live>();
+            [runs, ended, unknown].map(|session| v.live_open_again(session, "chat-1".into(), cx))
+        });
+        let (again, coming, held) = workspace.read_with(cx, |v, cx| {
+            let terminals = &cx.global::<super::Live>().terminals;
+            let again: Vec<SessionId> = terminals.again.keys().copied().collect();
+            // Come, or already shown once its view was there.
+            let coming: Vec<SessionId> =
+                terminals.coming.keys().chain(&terminals.shown).copied().collect();
+            let held: Vec<_> = v.workers[&KEY].doc.items().map(|item| item.kind).collect();
+            (again, coming, held)
+        });
+        // The one that ended was answered at once: neither waited for nor shown.
+        assert_eq!(again, [unknown], "only the one its machine never spoke of waits");
+        assert_eq!(coming, [runs], "the one that runs is shown again");
+        assert_eq!(held, [ItemKind::Terminal { session: runs }]);
     }
 }

@@ -92,6 +92,7 @@ mod thread_search;
 use side_chats::SideChatTab;
 mod tabs;
 mod live_surfaces; // slopty: remote window and desktop surfaces
+mod kept_tabs; // slopty: the pane's tabs kept across launches
 mod compact; // slopty: the phone's anatomy
 // slopty: voice removed.
 
@@ -1724,6 +1725,9 @@ pub struct Shell {
     right_terminal: Option<Entity<TerminalPanel>>,
     /// slopty: per chat, the right-pane terminal tab that shows its agent's own TUI.
     agent_tui: std::collections::HashMap<String, u64>,
+    /// slopty: the tabs each chat's pane had when the app last ran, until it is shown again
+    /// (`kept_tabs`).
+    unrestored_tabs: std::collections::BTreeMap<String, crate::settings::SavedTabs>,
     /// The surface-tab strip's `+` menu (Browser / Terminal / Diffs / History rows).
     right_plus: popover::Popup<()>,
     /// Host-owned project Actions cached per (device, space).
@@ -1902,6 +1906,9 @@ pub struct Shell {
     sidebar_opened_at: u64,
     /// The panel key of the chat currently shown ("" = new-chat canvas).
     active_chat: String,
+    /// slopty: the chat whose panes the active one shows (`AppState::panel_owner`), with the
+    /// chat it was found for: its agent, for a subagent of a call ([`Self::active_owner`]).
+    active_owner: Option<(String, String)>,
     // slopty: appshots removed.
     /// Last rendered sidebar order (key + estimated height) — the FLIP baseline
     /// for the §1.6 resort glide.
@@ -2204,6 +2211,7 @@ impl Shell {
             terminal: None,
             right_terminal: None,
             agent_tui: std::collections::HashMap::new(),
+            unrestored_tabs: settings.session_tabs.clone(),
             right_plus: popover::Popup::default(),
             project_actions: crate::project_actions::ProjectActionsController::default(),
             diffs: std::collections::HashMap::new(),
@@ -2319,6 +2327,7 @@ impl Shell {
             panel_open_sequence: 0,
             sidebar_opened_at: 0,
             active_chat: String::new(),
+            active_owner: None,
             // slopty: appshots removed.
             sidebar_prev_order: Vec::new(),
             sidebar_resort: std::collections::HashMap::new(),
@@ -2695,14 +2704,18 @@ impl Shell {
         // new-chat canvas is the exception: it always lands with the terminal
         // hidden.
         let selected = state.read(cx).selected_chat.clone().unwrap_or_default();
+        // slopty: the panes a chat shows are its owner's: a subagent's are its agent's, and one
+        // whose agent's row came only now moves to them.
+        let owner = state.read(cx).panel_owner(&selected);
         // slopty: appshots removed.
-        if selected != self.active_chat {
+        if selected != self.active_chat || owner != self.active_owner() {
             self.suspend_file_images(cx);
             if !self.active_chat.is_empty() {
                 let expanded = self.right_pane_expanded;
-                self.panels
-                    .update(&self.active_chat, |panels| panels.right_expanded = expanded);
+                let previous = self.active_owner().to_owned();
+                self.panels.update(&previous, |panels| panels.right_expanded = expanded);
             }
+            self.active_owner = Some((selected.clone(), owner));
             self.active_chat = selected;
             // Route history: a chat switch is a navigation. The very first
             // selection off the untouched boot canvas REPLACES that entry —
@@ -2794,7 +2807,16 @@ impl Shell {
         if self.active_chat.is_empty() {
             crate::state::canvas_panel_key(self.state.read(cx).selected_space.as_deref())
         } else {
-            self.active_chat.clone()
+            // slopty: a subagent shows its agent's panes.
+            self.active_owner().to_owned()
+        }
+    }
+
+    /// slopty: the chat whose panes the active chat shows: its agent's, for a subagent of a call.
+    fn active_owner(&self) -> &str {
+        match &self.active_owner {
+            Some((chat, owner)) if *chat == self.active_chat => owner,
+            _ => &self.active_chat,
         }
     }
 
@@ -10780,6 +10802,9 @@ impl Render for Shell {
             })
             .detach();
         }
+        // slopty: and what their panes show.
+        self.restore_tabs(window, cx);
+        self.keep_tabs(cx);
         let active_files_key = self.panel_key(cx);
         let hidden_explorers = self
             .files
@@ -11555,6 +11580,7 @@ mod tests {
             room_gen: None,
             parent_chat_id: None,
             subagent: false, // slopty: subagents
+            in_parent: false,
         }
     }
 
@@ -13473,6 +13499,7 @@ mod exit_regressions {
                         harness_session_cwd: None,
                         parent_chat_id: None,
                         subagent: false, // slopty: subagents
+                        in_parent: false,
                         space_id: Some("other".into()),
                         last_seen_at: None,
                         room_gen: None,

@@ -616,9 +616,29 @@ impl AppState {
     /// don't share one drawer.
     pub fn panel_session_key(&self) -> String {
         match self.selected_chat.as_deref() {
-            Some(id) if !id.is_empty() => id.to_string(),
+            Some(id) if !id.is_empty() => self.panel_owner(id),
             _ => canvas_panel_key(self.selected_space.as_deref()),
         }
+    }
+
+    /// slopty: the chat whose panes `chat` shows. A subagent runs inside its agent's session (its
+    /// terminal, its checkout), so it shows that agent's panes, as zeron's subagent tabs live in
+    /// their agent's pane: the subagent rows of one agent and the agent itself are one session.
+    pub fn panel_owner(&self, chat: &str) -> String {
+        let mut owner = chat;
+        // Bounded: a parent link that loops ends at the chat it started from.
+        for _ in 0..self.chats.len() {
+            let parent = self
+                .chats
+                .iter()
+                .find(|row| row.id == owner && row.in_parent)
+                .and_then(|row| row.parent_chat_id.as_deref());
+            match parent {
+                Some(parent) if parent != chat => owner = parent,
+                _ => break,
+            }
+        }
+        owner.to_owned()
     }
 
     /// Optional `OpenTerminal` cwd. Existing chats leave this unset so the
@@ -3172,6 +3192,7 @@ mod tests {
             harness_session_cwd: None,
             parent_chat_id: None,
             subagent: false, // slopty: subagents
+            in_parent: false,
             space_id: None,
             last_seen_at: None,
             room_gen: None,

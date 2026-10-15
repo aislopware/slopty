@@ -12035,6 +12035,32 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   pane closed, as zeron chose. A files pane restored open builds its explorer on its first
   frame, as its toggle would, so it shows the tree, not an empty column. Test: `slopty-shell`
   `shell::tests::session_panels_are_kept_across_launches`.
+- ✅ **A pane's tabs come back with it, and a subagent shows its agent's pane (2026-10-15).**
+  After a quit, a chat's pane came back open but empty: only the open flags were kept, not
+  its tabs. Each chat's surface tabs are now kept too (`sessionTabs` in `ui-settings.json`,
+  their order and the one in front), each as what opens it again:
+  - terminals and the agent's TUI by their session, which lives on in its machine, shown
+    again once the machine says it still runs and dropped if it ended or stays unknown for
+    20 s;
+  - files by path and owning chat;
+  - pages by address;
+  - diffs fresh;
+  - side chats by chat;
+  - remote windows by what was chosen, listed again when it is gone.
+
+  They come back the first time the chat is shown in a launch, never in a chat given tabs
+  meanwhile. Remembering per project was weighed and rejected. The pane's tabs are a session's
+  own: its agent's TUI, its terminals in its checkout, its diff. Two chats of one project
+  sharing them would put one agent's TUI beside another's chat. zeron keys the panes per
+  session too.
+
+  What made the panes jump was elsewhere. Slopty lists a call's subagents as sidebar rows,
+  where zeron opens them as tabs in their agent's pane. So each subagent got panes of its own,
+  closed, and its TUI toggle tried to take the subagent up alone, which Claude Code cannot. A
+  call's subagent (`Chat::in_parent`) now shows its agent's panes, since it runs inside that
+  agent's session. Its TUI toggle shows that agent's TUI. An agent started by another runs on
+  its own and keeps its own panes. Test: `slopty-shell`
+  `shell::panel_interaction_tests::a_subagent_shows_its_agents_pane_and_the_pane_comes_back`.
 - ✅ **An agent waiting on its own background work reads as at rest (2026-10-14).** A thread in
   `Phase::Waiting` (Claude Code at its prompt with background tasks or a wakeup pending) read
   as the shell's Working: a spinner that never ended and a Stop the worker refuses, since there

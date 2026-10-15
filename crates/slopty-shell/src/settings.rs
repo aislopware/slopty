@@ -688,6 +688,32 @@ pub const SKILL_COMPLETION_HARNESSES: [(slopty_view_proto::HarnessId, &str); 9] 
     (slopty_view_proto::HarnessId::OPENCODE, "OpenCode"),
 ];
 
+/// slopty: the surface tabs one chat's pane showed, in their order, and the one in front.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SavedTabs {
+    pub tabs: Vec<SavedSurface>,
+    pub active: Option<usize>,
+}
+
+/// slopty: one surface tab as kept: what opens it again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum SavedSurface {
+    /// A terminal, by its session; `agent` when it is the chat's agent's own TUI.
+    Terminal { id: String, agent: bool },
+    /// A file, owned by chat `chat`.
+    File { chat: String, path: String },
+    /// A web page.
+    Browser { url: String },
+    /// A diff.
+    Diff,
+    /// A side chat.
+    SideChat { chat: String },
+    /// A remote window or desktop, by what was chosen.
+    Screen { screen: String, title: String },
+}
+
 /// slopty: one chat's open panes, as `ui-settings.json` keeps them.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -794,6 +820,8 @@ pub struct UiSettings {
     pub terminal_open: bool,
     /// slopty: which panes each chat had open, kept across launches (`shell::SessionPanels`).
     pub session_panels: std::collections::BTreeMap<String, SavedPanels>,
+    /// slopty: what each chat's pane showed, kept across launches (`shell::kept_tabs`).
+    pub session_tabs: std::collections::BTreeMap<String, SavedTabs>,
     /// Customizable shortcut combos (feature-inventory §1.4).
     pub keymap: KeymapConfig,
     // slopty: appshots removed.
@@ -919,6 +947,7 @@ impl Default for UiSettings {
             terminal_height: TERMINAL_DEFAULT_HEIGHT,
             terminal_open: false,
             session_panels: std::collections::BTreeMap::new(), // slopty: kept panes
+            session_tabs: std::collections::BTreeMap::new(), // slopty: kept panes
             keymap: KeymapConfig::default(),
             escape_stops_active_agent: false,
             settings_section: crate::shell::SettingsSection::default(),
@@ -1551,6 +1580,7 @@ impl UiSettings {
             terminal_height,
             terminal_open,
             session_panels, // slopty: kept panes
+            session_tabs, // slopty: kept panes
             keymap,
             // slopty: appshots removed.
             escape_stops_active_agent,
@@ -2488,6 +2518,7 @@ mod tests {
             terminal_height: 320.0,
             terminal_open: true,
             session_panels: std::collections::BTreeMap::new(), // slopty: kept panes
+            session_tabs: std::collections::BTreeMap::new(), // slopty: kept panes
             keymap: KeymapConfig {
                 toggle_sidebar: "mod-shift-s".into(),
                 ..KeymapConfig::default()

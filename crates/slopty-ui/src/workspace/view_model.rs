@@ -546,6 +546,7 @@ impl WorkspaceView {
                 room_gen: None,
                 parent_chat_id: minted.parent.clone(),
                 subagent: false,
+                in_parent: false,
             });
         }
         for project in self.added_projects() {

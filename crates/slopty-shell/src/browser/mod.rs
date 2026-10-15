@@ -221,6 +221,10 @@ impl BrowserSurface {
     pub fn title(&self) -> gpui::SharedString {
         self.page.label().into()
     }
+    /// slopty: the page shown, kept to show it again.
+    pub fn url(&self) -> Option<&str> {
+        self.page.url.as_deref()
+    }
     pub fn set_remote(&mut self, remote: bool) {
         self.remote = remote;
     }

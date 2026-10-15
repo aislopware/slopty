@@ -259,6 +259,11 @@ pub struct Chat {
     /// A subagent its parent's agent started, not a side chat the person opened.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub subagent: bool,
+    // slopty: a call's subagent runs inside its agent's session, and shows that agent's panes.
+    /// A subagent of one of its parent's calls, running inside the parent's agent (its
+    /// terminal, its checkout), not an agent started on its own.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub in_parent: bool,
 }
 
 impl Chat {

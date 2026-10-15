@@ -7654,6 +7654,7 @@ mod tests {
             harness_session_cwd: None,
             parent_chat_id: None,
             subagent: false, // slopty: subagents
+            in_parent: false,
             space_id: None,
             last_seen_at: None,
             room_gen: None,

@@ -95,6 +95,7 @@ impl WorkspaceView {
     /// Answer what waited on the workspace and is there now.
     fn live_settle(&mut self, cx: &mut Context<Self>) {
         self.live_settle_resumes(cx);
+        self.live_settle_again(cx);
         self.live_settle_terminals(cx);
         self.live_publish_previews(cx);
     }

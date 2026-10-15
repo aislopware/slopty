@@ -162,6 +162,7 @@ pub fn chat(row: &ThreadRow, device: &str) -> Chat {
         room_gen: None,
         parent_chat_id: parent(row).map(|thread| thread.to_string()),
         subagent: subagent(row),
+        in_parent: row.parent.is_some(),
     }
 }
 

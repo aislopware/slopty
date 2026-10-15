@@ -384,3 +384,62 @@ fn panels_share_space_and_keep_rendered_geometry_through_their_lifecycle(cx: &mu
         expect(settled(&shell, cx), landed.widths);
     }
 }
+
+/// slopty: a subagent of a call runs inside its agent's session, so its row shows that agent's
+/// pane, open and with the same tabs; an agent another agent started keeps a pane of its own.
+/// What the pane shows is kept, and comes back in a new launch once the chat is shown.
+#[gpui::test]
+fn a_subagent_shows_its_agents_pane_and_the_pane_comes_back(cx: &mut TestAppContext) {
+    let (_dir, shell, cx) = setup(cx);
+    change(&shell, cx, |shell, window, cx| {
+        shell.state.update(cx, |state, _| {
+            let main = state.chats[0].clone();
+            let mut sub = main.clone();
+            sub.id = "s".into();
+            sub.parent_chat_id = Some("a".into());
+            (sub.subagent, sub.in_parent) = (true, true);
+            let mut started = sub.clone();
+            started.id = "o".into();
+            started.in_parent = false;
+            state.chats.extend([sub, started]);
+        });
+        shell.add_diff_surface(window, cx);
+        shell.set_surfaces_open(true, cx);
+    });
+    settled(&shell, cx);
+    let tabs = shell.read_with(cx, |shell, _| shell.right_tabs["a"].clone());
+    assert!(matches!(tabs.as_slice(), [RightSurface::Diff(_)]), "{tabs:?}");
+
+    change(&shell, cx, |shell, _, cx| select(shell, Some("s"), cx));
+    settled(&shell, cx);
+    shell.read_with(cx, |shell, cx| {
+        assert_eq!(shell.panel_key(cx), "a");
+        assert!(shell.right_pane_open(cx), "the agent's pane stays open on its subagent");
+    });
+    change(&shell, cx, |shell, _, cx| select(shell, Some("o"), cx));
+    settled(&shell, cx);
+    shell.read_with(cx, |shell, cx| {
+        assert_eq!(shell.panel_key(cx), "o");
+        assert!(!shell.right_pane_open(cx), "an agent started on its own has its own pane");
+    });
+
+    change(&shell, cx, |shell, _, cx| shell.keep_tabs(cx));
+    let kept = shell.read_with(cx, |shell, _| shell.settings.session_tabs.clone());
+    assert_eq!(kept.keys().collect::<Vec<_>>(), ["a"], "only a pane with tabs keeps them");
+    assert_eq!(kept["a"].tabs, [crate::settings::SavedSurface::Diff]);
+    assert_eq!(kept["a"].active, Some(0));
+
+    // A new launch: nothing open in this run, the kept tabs come back once "a" shows.
+    change(&shell, cx, |shell, _, cx| {
+        shell.right_tabs.clear();
+        shell.unrestored_tabs = kept.clone();
+        select(shell, Some("s"), cx);
+    });
+    settled(&shell, cx);
+    shell.read_with(cx, |shell, cx| {
+        let tabs = &shell.right_tabs["a"];
+        assert!(matches!(tabs.as_slice(), [RightSurface::Diff(_)]), "{tabs:?}");
+        assert_eq!(shell.resolved_right_active(cx), tabs[0]);
+        assert!(shell.unrestored_tabs.is_empty());
+    });
+}

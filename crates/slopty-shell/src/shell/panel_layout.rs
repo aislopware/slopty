@@ -175,7 +175,7 @@ impl Shell {
                 sidebar_limit: self.settings.sidebar_width,
             };
         }
-        let panels = self.panels.get(&self.active_chat);
+        let panels = self.panels.get(self.active_owner()); // slopty: a subagent's are its agent's
         let on_chat = !self.active_chat.is_empty();
         // A closing column keeps its slot while it still paints: one the fit
         // had already hidden closes from zero and claims nothing.
@@ -244,7 +244,7 @@ impl Shell {
         }
         if let Some((previous, painted)) = previous.filter(|_| !direct) {
             // Closing columns count too: the fit may hide one mid-close.
-            let panels = self.panels.get(&self.active_chat);
+            let panels = self.panels.get(self.active_owner()); // slopty: a subagent's are its agent's
             let open = [
                 !self.settings.sidebar_collapsed || self.tween_active(self.sidebar_tween),
                 panels.changes_open || self.tween_active(self.right_tween),

@@ -46,6 +46,10 @@ pub struct ScreenSurface {
     chat: String,
     target: Option<String>,
     stage: Stage,
+    /// What the person chose to show: its id and title, kept to show it again.
+    chosen: Option<(String, String)>,
+    /// Showing again what the app showed when it last ran: gone, the surface lists instead.
+    again: bool,
     focus_pending: bool,
     _watch: Option<Subscription>,
     _task: Option<Task<()>>,
@@ -61,12 +65,45 @@ impl ScreenSurface {
             chat,
             target,
             stage: Stage::Listing,
+            chosen: None,
+            again: false,
             focus_pending: false,
             _watch: None,
             _task: None,
         };
         surface.list(cx);
         surface
+    }
+
+    /// A surface showing again `screen`, titled `title`, which the app showed when it last ran.
+    pub fn reopen(
+        state: Entity<AppState>,
+        screen: String,
+        title: String,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let chat = state.read(cx).panel_session_key();
+        let target = state.read(cx).terminal_target_device(&chat);
+        let mut surface = Self {
+            state,
+            chat,
+            target,
+            stage: Stage::Listing,
+            chosen: None,
+            again: false,
+            focus_pending: false,
+            _watch: None,
+            _task: None,
+        };
+        let choice = Choice { id: screen, title, app: String::new(), kind: String::new() };
+        surface.again = true;
+        surface.choose(choice, cx);
+        surface
+    }
+
+    /// What the person chose to show, its id and title, once they chose.
+    pub fn chosen(&self) -> Option<(String, String)> {
+        self.chosen.clone()
     }
 
     fn params(&self, mut extra: serde_json::Value) -> serde_json::Value {
@@ -105,6 +142,7 @@ impl ScreenSurface {
             return;
         };
         let title: SharedString = choice.title.clone().into();
+        self.chosen = Some((choice.id.clone(), choice.title.clone()));
         self.stage = Stage::Opening(title.clone());
         let params = self.params(serde_json::json!({
             "screen": choice.id,
@@ -118,6 +156,11 @@ impl ScreenSurface {
                     .and_then(|value| value.get("id")?.as_str().map(str::to_owned))
                 {
                     Some(id) => this.show(id, title, cx),
+                    // What the app showed before is gone: what there is to show now is listed.
+                    None if std::mem::take(&mut this.again) => {
+                        this.chosen = None;
+                        this.list(cx);
+                    }
                     None => this.stage = Stage::Failed("The window could not be shown".into()),
                 }
                 cx.notify();

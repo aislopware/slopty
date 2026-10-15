@@ -387,6 +387,7 @@ impl TerminalPanel {
             Some(session),
             None,
             false,
+            None,
             cx,
         );
         if let Some(tab) = self.tab_mut(chat, key) {
@@ -529,7 +530,8 @@ impl TerminalPanel {
         let key = self.reserve_tab_for_chat(chat.clone(), format!("Terminal {tab_no}"), cx);
         let target = self.chat_target(&chat, cx);
         let cwd = self.state.read(cx).terminal_open_cwd_for(&chat);
-        let run = Self::spawn_session(chat.clone(), key, engine, target, None, cwd, false, cx);
+        let run =
+            Self::spawn_session(chat.clone(), key, engine, target, None, cwd, false, None, cx);
         if let Some(tab) = self.tab_mut(&chat, key) {
             tab._run = Some(run);
         }
@@ -543,7 +545,8 @@ impl TerminalPanel {
         let engine = self.engine(cx)?;
         let key = self.reserve_tab_for_chat(chat.clone(), "Claude Code", cx);
         let target = self.chat_target(&chat, cx);
-        let run = Self::spawn_session(chat.clone(), key, engine, target, None, None, true, cx);
+        let run =
+            Self::spawn_session(chat.clone(), key, engine, target, None, None, true, None, cx);
         if let Some(tab) = self.tab_mut(&chat, key) {
             tab._run = Some(run);
         }
@@ -551,9 +554,51 @@ impl TerminalPanel {
         Some(key)
     }
 
+    /// slopty: a tab of the selected chat on terminal `id` again, which it showed when the app
+    /// last ran (`agent`: its agent's own TUI). A terminal that has ended takes its tab with it.
+    pub fn reopen_tab_for_selected(
+        &mut self,
+        id: String,
+        agent: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<u64> {
+        let chat = self.selected_chat(cx);
+        let engine = self.engine(cx)?;
+        let title = if agent {
+            "Claude Code".to_owned()
+        } else {
+            format!("Terminal {}", self.chats.get(&chat).map_or(1, |entry| entry.tabs.len() + 1))
+        };
+        let key = self.reserve_tab_for_chat(chat.clone(), title, cx);
+        let target = self.chat_target(&chat, cx);
+        let run = Self::spawn_session(
+            chat.clone(),
+            key,
+            engine,
+            target,
+            None,
+            None,
+            agent,
+            Some(id),
+            cx,
+        );
+        if let Some(tab) = self.tab_mut(&chat, key) {
+            tab._run = Some(run);
+        }
+        Some(key)
+    }
+
+    /// slopty: the session tab `key` of chat `chat` shows, once it is attached.
+    pub fn terminal_id(&self, chat: &str, key: u64) -> Option<&str> {
+        let tabs = self.chats.get(chat)?;
+        tabs.tabs.iter().find(|tab| tab.key == key)?.terminal_id.as_deref()
+    }
+
     /// OpenTerminal, then show the session's view. slopty: the view streams
     /// its own session; nothing is subscribed here. `agent` asks for the
-    /// chat's agent's own terminal alone.
+    /// chat's agent's own terminal alone; `again` names a terminal the tab
+    /// showed when the app last ran, which it shows again, or closes when it
+    /// has ended.
     #[expect(clippy::too_many_arguments, reason = "slopty: zeron's open plus the agent's")]
     fn spawn_session(
         chat: String,
@@ -563,6 +608,7 @@ impl TerminalPanel {
         existing_session: Option<TerminalSession>,
         cwd: Option<String>,
         agent: bool,
+        again: Option<String>,
         cx: &mut Context<Self>,
     ) -> Task<()> {
         cx.spawn(async move |this, cx| {
@@ -577,6 +623,13 @@ impl TerminalPanel {
                     if agent {
                         params["agent"] = serde_json::Value::Bool(true);
                     }
+                    let again = match (again, params.as_object_mut()) {
+                        (Some(id), Some(object)) => {
+                            object.insert("terminalId".into(), serde_json::Value::String(id));
+                            true
+                        }
+                        _ => false,
+                    };
                     match engine
                         .client()
                         .call_as::<TerminalSession>(
@@ -586,6 +639,17 @@ impl TerminalPanel {
                         .await
                     {
                         Ok(session) => session,
+                        // slopty: a terminal shown before that has ended goes with its tab.
+                        Err(_) if again => {
+                            let _ = this.update(cx, |panel, cx| {
+                                if let Some(tabs) = panel.chats.get_mut(&chat) {
+                                    tabs.tabs.retain(|tab| tab.key != key);
+                                    tabs.active = tabs.active.min(tabs.tabs.len().saturating_sub(1));
+                                }
+                                cx.notify();
+                            });
+                            return;
+                        }
                         Err(err) => {
                             tracing::warn!(error = %err, "OpenTerminal failed");
                             let _ = this.update(cx, |panel, cx| {
