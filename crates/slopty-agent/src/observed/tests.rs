@@ -80,7 +80,8 @@ fn replay(dir: &Path) -> (Observed, Host, Transcripts) {
 }
 
 /// Every entry the decoder reads is an item of its thread, in order with its id; each sits in
-/// the turn of the prompt before it; every turn the transcript closed is ended.
+/// the turn of the prompt before it; every turn the transcript closed is ended, and a subagent's
+/// once its call ended.
 #[test]
 fn every_entry_is_an_item_in_its_prompts_turn() {
     for scenario in CONVERSATIONS {
@@ -110,7 +111,16 @@ fn every_entry_is_an_item_in_its_prompts_turn() {
                 .filter(|t| t.ended_ms.is_some() && !t.prompt.is_empty())
                 .count();
             let ended = state.turns.iter().filter(|t| t.ended_ms.is_some()).count();
-            assert_eq!(ended, closed, "{scenario} {thread:?}: turns ended");
+            // A subagent's turn ends with the call that started it, too.
+            let ran = matches!(thread, conv::ThreadId::Agent(_))
+                && matches!(state.status.liveness, Liveness::Exited { .. });
+            if ran {
+                assert!(ended >= closed, "{scenario} {thread:?}: turns ended");
+                let open = state.turns.iter().any(|t| t.state == TurnState::Active);
+                assert!(!open, "{scenario} {thread:?}: a turn left open");
+            } else {
+                assert_eq!(ended, closed, "{scenario} {thread:?}: turns ended");
+            }
             assert!(
                 state.turns.iter().all(|t| t.ended_ms.is_none() || t.state != TurnState::Active)
             );
@@ -159,6 +169,57 @@ fn a_subagent_is_a_linked_thread() {
         assert_eq!(sub.meta.origin, ThreadMeta::SUBAGENT);
         assert_ne!(sub.items, Vec::<Item>::new());
     }
+}
+
+/// A subagent's thread says where its run stands. Its own transcript comes before the call in
+/// the foreground names it: begun then, it works, unlinked. Once the call's result names it, it
+/// hangs off the call, takes the call's description as its title, and ends as the call did:
+/// its turn ended, done, exited and not resumable.
+#[test]
+fn a_subagent_works_until_its_call_ends_then_is_done() {
+    let source = dir("conversation", "tools");
+    let text = std::fs::read_to_string(source.join("transcript.jsonl")).expect("a transcript");
+    let lines: Vec<&str> = text.lines().collect();
+    let result = lines.iter().position(|l| l.contains("agentId")).expect("the call's result");
+    let scratch = tempfile::tempdir().expect("a temp dir");
+    let main = scratch.path().join("s.jsonl");
+    let before: String = lines.iter().take(result).flat_map(|l| [*l, "\n"]).collect();
+    std::fs::write(&main, before).expect("written");
+    let agents = subagents(&source);
+    let (mut transcripts, mut observed, mut host) =
+        (Transcripts::default(), observed(), Host::default());
+    host.take(observed.drain());
+    host.take(observed.transcript(&transcripts.read(&main, &agents), &[]));
+    let (child, call) = host
+        .thread(observed.main())
+        .items
+        .iter()
+        .find_map(|i| match &i.body {
+            ItemBody::Tool(call) if call.kind == kind::AGENT => {
+                Some((i.id.clone(), call.title.clone()))
+            }
+            _ => None,
+        })
+        .expect("the Agent call");
+    let sub = host
+        .threads
+        .values()
+        .find(|t| t.meta.origin == ThreadMeta::SUBAGENT)
+        .expect("the subagent begun from its own transcript")
+        .clone();
+    assert_eq!(sub.meta.parent, None, "not named by its call yet");
+    assert_eq!((sub.status.phase, sub.status.liveness), (Phase::Working, Liveness::Live));
+
+    let all: String = lines.iter().flat_map(|l| [*l, "\n"]).collect();
+    std::fs::write(&main, all).expect("written");
+    host.take(observed.transcript(&transcripts.read(&main, &agents), &[]));
+    let sub = host.thread(sub.meta.id);
+    let parent = sub.meta.parent.clone().expect("hung off its call");
+    assert_eq!((parent.thread, parent.item), (observed.main(), child));
+    assert_eq!(sub.meta.title, call, "titled by the call's description");
+    assert_eq!(sub.status.phase, Phase::Done);
+    assert_eq!(sub.status.liveness, Liveness::Exited { resumable: false });
+    assert!(sub.turns.iter().all(|t| t.state != TurnState::Active), "{:?}", sub.turns);
 }
 
 /// Read a line at a time, the transcript gives the threads it gives read whole.

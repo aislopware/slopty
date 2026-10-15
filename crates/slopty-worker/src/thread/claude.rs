@@ -47,7 +47,8 @@ use slopty_core::{SessionId, WallMs};
 use slopty_proto::WorkerMsg;
 use slopty_proto::thread::wire::{EXPANDED_CHARS, Expanded};
 use slopty_proto::thread::{
-    AgentId, ContentRef, Drive, Liveness, Phase, ThreadId, ThreadState, TurnState,
+    Action, AgentId, ContentRef, Drive, Liveness, Pending, PendingState, Phase, ThreadId,
+    ThreadMeta, ThreadState, TurnState,
 };
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
@@ -175,10 +176,45 @@ pub fn spawn(
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         // What an earlier worker observed is begun again by its terminal's observer where its
-        // agent still runs; nothing reads the rest, which end as that worker left them.
-        let left = host.visit(|s| busy(s).then_some(s.meta.id));
-        for thread in left {
+        // agent still runs; nothing reads the rest, which end as that worker left them. One
+        // whose terminal is gone ends at once; one on a terminal still open waits out the agents'
+        // first word, so an agent that runs on is never said to have ended.
+        let left = host.visit(|s| busy(s).then_some((s.meta.id, s.meta.terminal)));
+        let (gone, open): (Vec<_>, Vec<_>) =
+            left.into_iter().partition(|(_, terminal)| terminal.is_none_or(|t| !sources.open(t)));
+        for (thread, _) in gone {
             cut_short(&host, thread);
+        }
+        let waiting: Vec<(ThreadId, u64)> = open
+            .into_iter()
+            .filter_map(|(thread, _)| host.state(thread).map(|(_, at)| (thread, at.epoch)))
+            .collect();
+        if !waiting.is_empty() {
+            drop(tokio::spawn(unheard(host.clone(), waiting)));
+        }
+        // A message the earlier worker was typing went to ptyd whole or not at all, under a
+        // delivery named for it: it waits to go again, as a read again leaves it, where it can
+        // be withdrawn or changed while its agent is gone.
+        let typing = host.visit(|s| {
+            let observed =
+                s.meta.agent.is(AgentId::CLAUDE_CODE) && s.meta.drive.is(Drive::OBSERVED);
+            (observed && s.pending.iter().any(|p| p.state == PendingState::Sending))
+                .then_some(s.meta.id)
+        });
+        for thread in typing {
+            host.update(thread, |state| {
+                let pending = state
+                    .pending
+                    .iter()
+                    .map(|p| match p.state {
+                        PendingState::Sending => {
+                            Pending { state: PendingState::Waiting, ..p.clone() }
+                        }
+                        _ => p.clone(),
+                    })
+                    .collect();
+                (vec![Action::PendingSet(pending)], ())
+            });
         }
         let mut on = Observers {
             host,
@@ -458,28 +494,33 @@ impl Session {
     }
 
     async fn status(&mut self, event: AgentEvent) {
-        let native = event.agent_session.clone().or_else(|| self.native_from_file());
+        // The transcript's name is the session's, whatever word of an older one is still on its
+        // way: a hook moves both at once, and the file is what is read.
+        let native = self.native_from_file().or_else(|| event.agent_session.clone());
+        let gone = event.status == AgentStatus::None;
         match native {
-            Some(native) => {
-                self.begin(&native);
-                // The agent went: its session's id is free for another terminal to take up.
-                if event.status == AgentStatus::None {
-                    self.unclaim();
-                }
-            }
-            None if event.status == AgentStatus::None => self.forget_provisional(),
+            Some(native) => self.begin(&native),
+            None if gone => self.forget_provisional(),
             None if self.observed.is_none() => {
                 let observed = Observed::provisional("", self.terminal, &self.cwd, WallMs::now());
                 self.start(observed);
             }
             None => {}
         }
+        // The agent went: its session's id is free for another terminal to take up. The word
+        // that it went names no session (the tracker forgot it), so the id let go is the one
+        // observed here.
+        if gone {
+            self.unclaim();
+        }
         if let Some(observed) = self.observed.as_mut() {
             take(&self.host, observed.status(&event));
         }
-        // The agent went: a turn it left under way ends with it.
-        if event.status == AgentStatus::None {
+        // The agent went: a turn it left under way ends with it, and nothing of this terminal
+        // speaks for its session any more, which another terminal may take up.
+        if gone {
             retire(&self.host, self.terminal, None);
+            self.observed = None;
         }
         self.status = Some(event);
         self.read().await;
@@ -551,7 +592,7 @@ impl Session {
         }
         let known = self.status.as_ref().and_then(|s| s.agent_session.clone());
         // Begun now, the thread is told the prompts held, this one with them.
-        if let Some(native) = known.or_else(|| self.native_from_file()) {
+        if let Some(native) = self.native_from_file().or(known) {
             self.begin(&native);
         } else {
             let observed = Observed::provisional("", self.terminal, &self.cwd, WallMs::now());
@@ -678,8 +719,14 @@ impl Session {
         let paths: Vec<PathBuf> = sources.main.iter().chain(&sources.subagents).cloned().collect();
         self.followed.set(&paths);
         let Some(main) = sources.main else { return };
-        if self.observed.as_ref().is_none_or(Observed::is_provisional)
-            && let Some(native) = stem(&main)
+        // The transcript names the session the terminal runs now: a hook moves it (`/clear`,
+        // `/resume`) before the status that says so may reach here, and the new file is never
+        // read into the thread of the session left.
+        if let Some(native) = stem(&main)
+            && self
+                .observed
+                .as_ref()
+                .is_none_or(|o| o.is_provisional() || o.meta().native != native)
         {
             self.begin(&native);
         }
@@ -741,6 +788,25 @@ fn stem(path: &Path) -> Option<String> {
     path.file_stem().map(|s| s.to_string_lossy().into_owned()).filter(|s| !s.is_empty())
 }
 
+/// How long a thread left at work on a terminal still open waits to be begun again.
+///
+/// Past it, the thread ends unless its observer began it again. It outlasts the agents' first
+/// probes and Claude Code's own registry, which name a session that still runs there.
+pub const STARTUP_GRACE: Duration = Duration::from_secs(10);
+
+/// Each of `waiting`, threads an earlier worker left at work on terminals still open, with the
+/// epoch it had then, ended once [`STARTUP_GRACE`] has passed unless its observer began it again
+/// (a new epoch) or it is at work no more.
+async fn unheard(host: Host, waiting: Vec<(ThreadId, u64)>) {
+    tokio::time::sleep(STARTUP_GRACE).await;
+    for (thread, epoch) in waiting {
+        let left = host.state(thread).is_some_and(|(state, at)| at.epoch == epoch && busy(&state));
+        if left {
+            cut_short(&host, thread);
+        }
+    }
+}
+
 /// Whether `state` is a Claude Code session observed in a terminal that still runs, or still
 /// says it works or waits, or has a turn under way.
 fn busy(state: &ThreadState) -> bool {
@@ -773,7 +839,8 @@ fn retire(host: &Host, terminal: SessionId, keep: Option<ThreadId>) {
 /// known.
 fn cut_short(host: &Host, thread: ThreadId) {
     host.update(thread, |state| {
-        let resumable = !state.meta.native.is_empty();
+        // A subagent is taken up again only with its session, never alone.
+        let resumable = !state.meta.native.is_empty() && state.meta.origin != ThreadMeta::SUBAGENT;
         (slopty_agent::driven::cut_short(state, resumable, WallMs::now()), ())
     });
 }

@@ -1204,3 +1204,49 @@ async fn a_finished_note_is_taken_back_once_its_turn_is_seen() {
     hub.rank_ladder();
     assert!(pushed.try_recv().is_err(), "once");
 }
+
+/// An agent that ended with its work under way finished nothing, so no phone hears it did: one
+/// cut short mid-turn (as its worker restarted, to read it again), or ended at work with only an
+/// older turn answered. One that answered its turn and then ended did finish.
+#[tokio::test]
+async fn an_agent_that_ended_at_work_is_not_finished() {
+    use slopty_proto::thread::wire::TurnEnded;
+
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let (out, mut pushed) = mpsc::channel(8);
+    hub.push_to(Some(out));
+    let worker = WorkerId::new();
+    let (tx, _rx) = mpsc::channel(8);
+    let lease = hub.register(registration(worker, Vec::new()), [100, 64, 0, 9].into(), tx).unwrap();
+    let phone = Client::sit(&hub, "phone");
+    pocketed_phone(&hub, phone.seated.link(), ClientId::new());
+    let (cut, older, answered) = (
+        row(Phase::Working, 1_000, None),
+        row(Phase::Working, 1_000, None),
+        row(Phase::Working, 1_000, None),
+    );
+    lease.handle(snapshot(vec![cut.clone(), older.clone(), answered.clone()]));
+    hub.rank_ladder();
+    let ended = |turn: u32, at: u64, answered: bool| TurnEnded {
+        turn: TurnId(turn),
+        at_ms: WallMs::from_millis(at),
+        ran_ms: 1_000,
+        answered,
+    };
+    let exited = |row: &ThreadRow, phase: Phase, turn: TurnEnded| {
+        let mut row = moved(row, phase, 5_000);
+        row.status.liveness = Liveness::Exited { resumable: true };
+        row.ended = Some(turn);
+        row
+    };
+    lease.handle(delta(vec![
+        exited(&cut, Phase::Stopped, ended(2, 5_000, false)),
+        exited(&older, Phase::Idle, ended(1, 500, true)),
+    ]));
+    hub.rank_ladder();
+    assert!(pushed.try_recv().is_err(), "neither finished anything");
+    lease.handle(delta(vec![exited(&answered, Phase::Done, ended(2, 4_000, true))]));
+    hub.rank_ladder();
+    let note = pushed.try_recv().expect("a turn answered, then the agent ended");
+    assert_eq!(body(&note).notice.kind, NoticeKind::Finished);
+}

@@ -24,8 +24,8 @@ use parking_lot::Mutex;
 use slopty_core::{SessionId, WallMs};
 use slopty_proto::thread::wire::{Outcome, Page, Start, TableFrame, ThreadRow};
 use slopty_proto::thread::{
-    Action, AgentId, Cursor, Edge, Fork, IntentId, ItemBody, ItemId, Pending, PendingState, Phase,
-    ThreadId, ThreadMeta, ThreadState, ToolCall, ToolState, TreeRef, TurnId,
+    Action, AgentId, Cursor, Edge, Fork, IntentId, ItemBody, ItemId, Link, Pending, PendingState,
+    Phase, ThreadId, ThreadMeta, ThreadState, ToolCall, ToolState, TreeRef, TurnId, UserMessage,
 };
 use tokio::sync::{broadcast, watch};
 
@@ -246,8 +246,8 @@ impl Hosted {
 /// ([`Host::reset`]) gets them back as the adapter tells its items and turns again.
 #[derive(Debug, Default)]
 struct Own {
-    /// Messages typed and not yet seen in the thread: the intent and the words.
-    typed: VecDeque<(IntentId, String)>,
+    /// Messages typed and not yet seen in the thread.
+    typed: VecDeque<Typed>,
     /// The intent each of the person's items came from.
     sent: HashMap<ItemId, IntentId>,
     /// Each turn's snapshots.
@@ -262,6 +262,9 @@ struct Own {
     seated: Option<Seated>,
     /// The thread it is an aside of, while it is one ([`ThreadMeta::ASIDE_FACT`]).
     aside: Option<ThreadId>,
+    /// The call it hangs off, once its adapter said: an adapter that reads a subagent again from
+    /// nothing may know its parent only later, and a thread never moves to another.
+    parent: Option<Link>,
     /// The messages the worker holds until their moment ([`super::schedule`]), which no
     /// adapter knows: put back in every pending list an adapter tells.
     scheduled: Vec<Pending>,
@@ -272,6 +275,85 @@ struct Own {
 
 /// Messages typed whose items are waited for; past it the oldest is given up.
 const TYPED: usize = 64;
+
+/// A message typed into its agent's terminal, until the agent's item for it shows.
+#[derive(Debug)]
+struct Typed {
+    intent: IntentId,
+    /// The person's words.
+    words: String,
+    /// What was typed: the words with the paths of the files sent with them after.
+    text: String,
+}
+
+impl Typed {
+    /// Whether `message`, an item the agent made of something typed, is this message.
+    ///
+    /// The agent keeps the head of a long one ([`slopty_proto::thread::Clipped::is_clipped`]),
+    /// which is this one's when it begins this one's text and counts its characters. Of a whole
+    /// one, its words count, the spacing aside: a command as its name and arguments, the
+    /// pictures Claude Code took from the paths typed (`[Image #1]`) left out, and of the paths
+    /// typed only those it kept in its text.
+    fn is(&self, message: &UserMessage) -> bool {
+        let shown = &message.text;
+        if shown.is_clipped() {
+            let head = spaced(shown.text.strip_suffix('…').unwrap_or(&shown.text));
+            let counted = |text: &str| {
+                let whole = u32::try_from(text.chars().count()).unwrap_or(u32::MAX);
+                let trimmed = u32::try_from(text.trim().chars().count()).unwrap_or(u32::MAX);
+                shown.chars == whole || shown.chars == trimmed
+            };
+            return [&self.text, &self.words]
+                .into_iter()
+                .any(|text| counted(text) && spaced(text).starts_with(&head));
+        }
+        let said = said(message);
+        let (words, text) = (spaced(&self.words), spaced(&self.text));
+        if said == text || said == words {
+            return true;
+        }
+        // The paths typed after the words, of which the agent kept some in its text.
+        let Some(rest) = said.strip_prefix(&words) else { return false };
+        let paths: Vec<&str> =
+            text.strip_prefix(&words).unwrap_or_default().split_whitespace().collect();
+        rest.split_whitespace().all(|kept| paths.contains(&kept))
+    }
+}
+
+/// `text`'s words, each run of spaces one space, the ends trimmed.
+fn spaced(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// What `message` says as a person typed it ([`spaced`]): a command with its name, without the
+/// placeholders Claude Code puts for the pictures it took from paths typed.
+fn said(message: &UserMessage) -> String {
+    let mut text = String::with_capacity(message.text.text.len());
+    let mut rest = message.text.text.as_str();
+    while let Some((before, after)) = rest.split_once("[Image #") {
+        text.push_str(before);
+        match after.split_once(']') {
+            Some((number, tail))
+                if !number.is_empty() && number.chars().all(|c| c.is_ascii_digit()) =>
+            {
+                text.push(' ');
+                rest = tail;
+            }
+            _ => {
+                text.push_str("[Image #");
+                rest = after;
+            }
+        }
+    }
+    text.push_str(rest);
+    let text = spaced(&text);
+    match message.command.as_deref() {
+        Some("!") => format!("!{text}"),
+        Some(command) if text.is_empty() => command.to_owned(),
+        Some(command) => format!("{command} {text}"),
+        None => text,
+    }
+}
 
 impl Own {
     fn of(state: &ThreadState) -> Self {
@@ -292,6 +374,7 @@ impl Own {
         let fork = state.meta.forked_from;
         let seat = state.meta.facts.get(slopty_proto::agent::SEAT_FACT).cloned();
         let aside = state.meta.aside_of();
+        let parent = state.meta.parent.clone();
         // One going as the worker stopped is never sent again.
         let scheduled = state
             .pending
@@ -313,9 +396,20 @@ impl Own {
             seat,
             seated: None,
             aside,
+            parent,
             scheduled,
             first: None,
         }
+    }
+
+    /// Wait for the agent's item for message `intent`, the person's `words` typed as `text`.
+    fn typed(&mut self, intent: IntentId, words: &str, text: &str) {
+        if self.typed.len() >= TYPED {
+            self.typed.pop_front();
+        }
+        self.typed.retain(|typed| typed.intent != intent);
+        let (words, text) = (words.to_owned(), text.to_owned());
+        self.typed.push_back(Typed { intent, words, text });
     }
 
     /// The start's first message, once `actions` show the agent's item for it: it leaves the
@@ -339,9 +433,13 @@ impl Own {
     }
 
     /// `meta` with what the worker knows of it: where it branched, the seat it was started at,
-    /// whether it is an aside.
-    fn meta(&self, meta: &mut ThreadMeta) {
+    /// whether it is an aside, the call it hangs off.
+    fn meta(&mut self, meta: &mut ThreadMeta) {
         self.branched(meta);
+        match &meta.parent {
+            Some(parent) => self.parent = Some(parent.clone()),
+            None => meta.parent.clone_from(&self.parent),
+        }
         if let Some(seat) = &self.seat {
             meta.facts.insert(slopty_proto::agent::SEAT_FACT.to_owned(), seat.clone());
         }
@@ -380,11 +478,10 @@ impl Own {
                         continue;
                     }
                     message.intent = self.sent.get(&item.id).copied().or_else(|| {
-                        let words = message.text.text.trim();
-                        let at = self.typed.iter().position(|(_, typed)| typed.trim() == words)?;
-                        let (intent, _) = self.typed.remove(at)?;
-                        self.sent.insert(item.id.clone(), intent);
-                        Some(intent)
+                        let at = self.typed.iter().position(|typed| typed.is(message))?;
+                        let typed = self.typed.remove(at)?;
+                        self.sent.insert(item.id.clone(), typed.intent);
+                        Some(typed.intent)
                     });
                 }
                 Action::TurnStarted(turn) => {
@@ -466,9 +563,7 @@ impl Host {
                         }
                     }
                 }
-                Err(e) => {
-                    tracing::warn!(path = %path.display(), "a thread's log is unreadable: {e}");
-                }
+                Err(e) => unreadable(&path, &e),
             }
         }
         let starts = Intents::open(&dir.join("starts"))?;
@@ -551,6 +646,24 @@ impl Host {
                     .collect();
                 (vec![Action::PendingSet(pending)], ())
             });
+            // Its item, when the agent's transcript is read again, still takes it off the list:
+            // that item is known as it as any message typed is.
+            let mut inner = self.inner.lock();
+            let Some(hosted) = inner.hosted(thread) else { continue };
+            let held: Vec<Pending> = hosted
+                .log
+                .state()
+                .pending
+                .iter()
+                .filter(|p| first.contains(&p.intent))
+                .cloned()
+                .collect();
+            for pending in held {
+                let paths = pending.attachments.iter().map(String::as_str);
+                let text = slopty_agent::attach::with_paths(&pending.text, paths);
+                hosted.own.typed(pending.intent, &pending.text, &text);
+                hosted.own.first.get_or_insert(pending.intent);
+            }
         }
     }
 
@@ -906,17 +1019,14 @@ impl Host {
         open.map(|(thread, _)| *thread).or_else(|| cold().map(|(thread, _)| *thread))
     }
 
-    /// Message `text` was typed for intent `id` into `thread`'s agent: the item the agent
-    /// makes of it is marked with the intent ([`slopty_proto::thread::UserMessage::intent`]).
-    pub fn typed(&self, thread: ThreadId, id: IntentId, text: &str) {
+    /// The person's `words` were typed for intent `id` into `thread`'s agent as `text` (with
+    /// the paths of the files sent with them): the item the agent makes of it is marked with the
+    /// intent ([`slopty_proto::thread::UserMessage::intent`]).
+    pub fn typed(&self, thread: ThreadId, id: IntentId, words: &str, text: &str) {
         let mut inner = self.inner.lock();
         inner.load(thread);
         let Some(hosted) = inner.threads.get_mut(&thread) else { return };
-        let typed = &mut hosted.own.typed;
-        if typed.len() >= TYPED {
-            typed.pop_front();
-        }
-        typed.push_back((id, text.to_owned()));
+        hosted.own.typed(id, words, text);
     }
 
     /// The first message of the start that opened `thread`'s agent, `pending`, given on the
@@ -1243,6 +1353,21 @@ fn set_scheduled(
     apply(hosted, &mut inner.table, &inner.heard, vec![Action::PendingSet(pending)]);
 }
 
+/// The log in thread directory `path` did not read, for `e`. One that no longer decodes (an
+/// older build wrote it) is deleted, with a warning: it would never read, its agent's own
+/// session still has everything, and its adapter begins the thread anew. One the disk refused
+/// is left for the next start.
+fn unreadable(path: &Path, e: &io::Error) {
+    if e.kind() != io::ErrorKind::InvalidData {
+        tracing::warn!(path = %path.display(), "a thread's log is unreadable: {e}");
+        return;
+    }
+    tracing::warn!(path = %path.display(), "a thread's log no longer reads, so it goes: {e}");
+    if let Err(e) = std::fs::remove_dir_all(path) {
+        tracing::warn!(path = %path.display(), "an unreadable thread's log could not go: {e}");
+    }
+}
+
 /// Keep `seated` in thread directory `dir`, whole or not at all: it goes to a sibling that is
 /// renamed into place.
 fn write_seat(dir: &Path, seated: &Seated) -> io::Result<()> {
@@ -1310,7 +1435,7 @@ impl Inner {
                 self.threads.insert(thread, hosted);
             }
             Err(e) => {
-                tracing::warn!(%thread, "a thread's log is unreadable: {e}");
+                unreadable(&dir, &e);
                 self.table.remove(thread);
             }
         }

@@ -575,6 +575,7 @@ impl Hub {
         self.happen(Happening::Worker { worker, name: name.clone(), liveness });
         self.announce(FromServer::Worker(info));
         self.machine_seen(&mut state, worker, &name, true);
+        state.board.linked(worker, true);
         if !replaced.is_empty() {
             self.announce(FromServer::Directory(listing(&state)));
         }
@@ -1136,6 +1137,7 @@ impl Hub {
         self.happen(Happening::Worker { worker, name, liveness });
         self.announce(FromServer::Worker(info));
         self.persist(&state);
+        state.board.linked(worker, false);
         drop(state);
         // Its agents' parents hear it went away only once it stays away ([`Self::expire`]): a
         // worker that restarts, as every update does, is back well within that, and nothing

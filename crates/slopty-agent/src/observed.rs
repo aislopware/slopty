@@ -307,6 +307,8 @@ struct Mapped {
     /// The entries that settled a live text or thinking block, and that block's item, which
     /// they are shown as: where the block stood, not after what began since.
     shown_as: HashMap<String, ItemId>,
+    /// A subagent's status as last told ([`Observed::settle_subagents`]).
+    told: Option<Status>,
 }
 
 impl Mapped {
@@ -324,6 +326,7 @@ impl Mapped {
             calls: HashMap::new(),
             tasks: Vec::new(),
             shown_as: HashMap::new(),
+            told: None,
         }
     }
 
@@ -361,6 +364,80 @@ impl Mapped {
     }
 }
 
+/// The `Agent` call that started a subagent, as last read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Spawn {
+    /// The decoder's thread the call is in.
+    thread: conv::ThreadId,
+    /// The call's id.
+    call: String,
+    /// What the model said the subagent is for: its thread's title.
+    title: String,
+    /// How it ended, once it did, and when.
+    end: Option<(SubagentEnd, WallMs)>,
+}
+
+impl Spawn {
+    /// The call `entry` (`call`, starting `agent`) in the decoder's `thread`.
+    fn of(
+        thread: &conv::ThreadId,
+        entry: &conv::Entry,
+        call: &conv::ToolCall,
+        agent: &conv::AgentDetail,
+    ) -> Self {
+        // One run in the background ends when Claude Code says it did, after its run; one in
+        // the foreground with its call's result.
+        let ran = agent
+            .duration_ms
+            .map(|ms| WallMs::from_millis(entry.at_ms.as_millis().saturating_add(ms)));
+        let at_ms = ran.or_else(|| call.result.as_ref().map(|r| r.at_ms)).unwrap_or(entry.at_ms);
+        let end = match agent.status {
+            conv::AgentRun::Running => None,
+            conv::AgentRun::Completed => Some(SubagentEnd::Completed),
+            conv::AgentRun::Killed => Some(SubagentEnd::Stopped),
+            conv::AgentRun::Failed => {
+                let said = agent.report.as_ref().or_else(|| call.result.as_ref()?.text.as_ref());
+                // Its first line, as a turn's error is said.
+                let error = said
+                    .map(|text| title_of(&text.text))
+                    .filter(|text| !text.is_empty())
+                    .unwrap_or_else(|| "The subagent failed".to_owned());
+                Some(SubagentEnd::Failed(error))
+            }
+        };
+        Self {
+            thread: thread.clone(),
+            call: entry.id.clone(),
+            title: agent.description.clone().unwrap_or_default(),
+            end: end.map(|end| (end, at_ms)),
+        }
+    }
+}
+
+/// How a subagent ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SubagentEnd {
+    /// It reported back.
+    Completed,
+    /// It was stopped.
+    Stopped,
+    /// It failed, saying this.
+    Failed(String),
+}
+
+impl SubagentEnd {
+    /// Its turn's end and its phase.
+    fn ended(&self) -> (TurnState, Phase) {
+        match self {
+            Self::Completed => (TurnState::Complete, Phase::Done),
+            Self::Stopped => (TurnState::Interrupted, Phase::Stopped),
+            Self::Failed(error) => {
+                (TurnState::Failed { error: error.clone(), until_ms: None }, Phase::Failed)
+            }
+        }
+    }
+}
+
 /// A live block as an item.
 #[derive(Debug)]
 struct Provisional {
@@ -393,8 +470,8 @@ struct Waiting {
 pub struct Observed {
     meta: ThreadMeta,
     threads: HashMap<conv::ThreadId, Mapped>,
-    /// Each subagent's call: the decoder's thread it is in, and its id.
-    spawned: HashMap<String, (conv::ThreadId, String)>,
+    /// Each subagent's call, by the subagent's id.
+    spawned: HashMap<String, Spawn>,
     overlay: live::Overlay,
     live: HashMap<LiveId, Provisional>,
     /// Live blocks held until their prompt opens their turn, oldest first.
@@ -707,6 +784,7 @@ impl Observed {
         }
         let cleared: Vec<Live> = settled.into_iter().map(|(_, clear)| clear).collect();
         self.cleared(&cleared);
+        self.settle_subagents();
         self.drain()
     }
 
@@ -732,6 +810,7 @@ impl Observed {
                 Live::Clear { id } => self.cleared(&[Live::Clear { id }]),
             }
         }
+        self.settle_subagents();
         self.drain()
     }
 
@@ -1184,14 +1263,15 @@ impl Observed {
     }
 
     fn subagent_meta(&self, id: ThreadId, agent: &str) -> ThreadMeta {
-        let parent = self.spawned.get(agent).map(|(thread, call)| Link {
-            thread: self.threads.get(thread).map_or(self.meta.id, |m| m.id),
-            item: ItemId(call.clone()),
+        let spawn = self.spawned.get(agent);
+        let parent = spawn.map(|spawn| Link {
+            thread: self.threads.get(&spawn.thread).map_or(self.meta.id, |m| m.id),
+            item: ItemId(spawn.call.clone()),
         });
         ThreadMeta {
             id,
             native: agent.to_owned(),
-            title: String::new(),
+            title: spawn.map(|spawn| spawn.title.clone()).unwrap_or_default(),
             parent,
             origin: ThreadMeta::SUBAGENT.to_owned(),
             caps: Vec::new(),
@@ -1253,7 +1333,7 @@ impl Observed {
             && let conv::ToolDetail::Agent(agent) = &call.detail
             && let Some(agent_id) = &agent.agent_id
         {
-            self.spawned.insert(agent_id.clone(), (thread.clone(), entry.id.clone()));
+            self.spawn(agent_id, Spawn::of(thread, entry, call, agent));
         }
         let id = self.ensure(thread);
         let body = self.body(thread, entry);
@@ -1354,6 +1434,78 @@ impl Observed {
         // A new prompt leaves the failure behind: its own turn's end says how it went.
         if began {
             self.failed = false;
+        }
+    }
+
+    /// The `Agent` call that started subagent `agent`, read again. A subagent whose own
+    /// transcript came before its call named it (a call in the foreground names its subagent
+    /// only with its result) was begun with no parent and no title: it is told them now.
+    fn spawn(&mut self, agent: &str, spawn: Spawn) {
+        let named = |s: &Spawn| (s.thread.clone(), s.call.clone(), s.title.clone());
+        let renamed = self.spawned.get(agent).is_none_or(|was| named(was) != named(&spawn));
+        self.spawned.insert(agent.to_owned(), spawn);
+        let Some(id) = self.threads.get(&conv::ThreadId::Agent(agent.to_owned())).map(|m| m.id)
+        else {
+            return;
+        };
+        if renamed {
+            let meta = self.subagent_meta(id, agent);
+            self.push(id, Action::Meta(Box::new(meta)));
+        }
+    }
+
+    /// Each subagent's thread says where its run stands: working while its call runs, and once
+    /// the call that started it ended (or Claude Code said its run in the background did), its
+    /// open turn ended and the thread exited as the run ended, done, failed or stopped. Nothing
+    /// takes a subagent up again alone, so it is not resumable.
+    fn settle_subagents(&mut self) {
+        let agents: Vec<String> = self
+            .threads
+            .keys()
+            .filter_map(|thread| match thread {
+                conv::ThreadId::Agent(agent) => Some(agent.clone()),
+                conv::ThreadId::Main => None,
+            })
+            .collect();
+        for agent in agents {
+            let end = self.spawned.get(&agent).and_then(|spawn| spawn.end.clone());
+            let wall = self.wall;
+            let Some(mapped) = self.threads.get_mut(&conv::ThreadId::Agent(agent)) else {
+                continue;
+            };
+            let mut actions = Vec::new();
+            let status = match end {
+                None => {
+                    let began = mapped.turns.values().map(|t| t.started_ms).min();
+                    let since_ms = began.unwrap_or(wall);
+                    Status { phase: Phase::Working, wait: None, liveness: Liveness::Live, since_ms }
+                }
+                Some((end, at_ms)) => {
+                    let (state, phase) = end.ended();
+                    let turn = mapped.turn;
+                    if turn != TurnId::BEFORE && mapped.ended.insert(turn) {
+                        let usage = mapped.turns.get(&turn).map(|t| t.usage.clone());
+                        if let Some(t) = mapped.turns.get_mut(&turn) {
+                            t.state = state.clone();
+                            t.ended_ms = Some(at_ms);
+                        }
+                        let usage = usage.unwrap_or_default();
+                        actions.push(Action::TurnEnded { turn, state, usage, ended_ms: at_ms });
+                    }
+                    let liveness = Liveness::Exited { resumable: false };
+                    Status { phase, wait: None, liveness, since_ms: at_ms }
+                }
+            };
+            let same =
+                |told: &Status| told.phase == status.phase && told.liveness == status.liveness;
+            if !mapped.told.as_ref().is_some_and(same) {
+                mapped.told = Some(status.clone());
+                actions.push(Action::Status(status));
+            }
+            let id = mapped.id;
+            for action in actions {
+                self.push(id, action);
+            }
         }
     }
 

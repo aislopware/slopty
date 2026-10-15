@@ -8,6 +8,7 @@ use serde::Serialize;
 use slopty_agent::acp::driven::{self, Answered, Cancelled, Session, Switch};
 use slopty_agent::acp::rpc::{self, Incoming};
 use slopty_agent::acp::schema as acp;
+use slopty_agent::queue::Queue;
 use slopty_core::WallMs;
 use slopty_proto::thread::{Action, IntentId, ThreadId, ThreadState};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
@@ -519,8 +520,12 @@ impl Task {
             }
             Some(Opening::Load) => {
                 // Read again from nothing: the agent replays the session before it answers.
+                // What waits in the thread's queue waits still, to go as turns end.
                 let empty = ThreadState::new(self.session.meta().clone());
                 self.session = Session::of(&empty, WallMs::now());
+                if let Some((state, _)) = self.host.state(self.thread) {
+                    *self.session.queue() = Queue::of(&state.pending);
+                }
                 match self.session.session_load() {
                     Some(request) => {
                         self.replay = Some(Vec::new());

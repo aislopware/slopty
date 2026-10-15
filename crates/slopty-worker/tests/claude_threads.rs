@@ -45,7 +45,7 @@ mod claude_threads {
 
     struct Fake {
         /// The terminal whose agent writes the transcript.
-        terminal: SessionId,
+        terminal: parking_lot::Mutex<SessionId>,
         /// The main transcript, once the agent has written one.
         main: watch::Sender<Option<PathBuf>>,
         seen: watch::Sender<Seen>,
@@ -57,7 +57,7 @@ mod claude_threads {
 
     impl Sources for Fake {
         fn sources(&self, session: SessionId) -> orchestrate::Sources {
-            let main = self.main.borrow().clone().filter(|_| session == self.terminal);
+            let main = self.main.borrow().clone().filter(|_| session == *self.terminal.lock());
             orchestrate::Sources { main, ..Default::default() }
         }
 
@@ -95,7 +95,7 @@ mod claude_threads {
             std::fs::write(&main, "").unwrap();
             let terminal = SessionId::new();
             let seen = Arc::new(Fake {
-                terminal,
+                terminal: parking_lot::Mutex::new(terminal),
                 main: watch::Sender::new(Some(main.clone())),
                 seen: watch::Sender::new(Seen::default()),
                 standing: parking_lot::Mutex::new(Vec::new()),
@@ -649,9 +649,9 @@ mod claude_threads {
 
     /// A thread no agent feeds any more ends with its turn: one an earlier worker left working
     /// on a terminal (here under a session that terminal does not run, as an older worker's guess
-    /// took it) once the worker restarts, before any word of its terminal; the session a `/clear`
-    /// leaves; a session whose agent quits mid-turn; and one whose terminal closes. The terminal's
-    /// live session is the only thread that keeps it.
+    /// took it) once the worker restarts and its grace passes with no word of it; the session a
+    /// `/clear` leaves; a session whose agent quits mid-turn; and one whose terminal closes.
+    /// The terminal's live session is the only thread that keeps it.
     #[tokio::test]
     async fn a_thread_no_agent_feeds_ends_with_its_turn() {
         const WRONG: &str = "00000000-0000-4000-8000-000000000002";
@@ -694,8 +694,9 @@ mod claude_threads {
         assert_eq!(state.meta.terminal, Some(rig.terminal));
         assert!(cut(&host.state(left).unwrap().0), "the left one stays ended");
 
-        // Its agent quits mid-turn.
-        rig.tracked(AgentStatus::None, Some(CLEARED), AgentSource::Process);
+        // Its agent quits mid-turn: the tracker forgets it, so the word names no session.
+        rig.seen.main.send_replace(None);
+        rig.tracked(AgentStatus::None, None, AgentSource::Process);
         until(&host, now, cut).await;
 
         // Another, mid-turn, whose terminal closes with no word of its agent going.
@@ -709,5 +710,129 @@ mod claude_threads {
         let reason = slopty_proto::terminal::CloseReason::Exited;
         rig.events.send(WorkerMsg::SessionClosed { session: rig.terminal, reason }).unwrap();
         until(&host, last, cut).await;
+    }
+
+    /// A hook that moves the terminal to another session (`/clear`, `/resume`) names its
+    /// transcript before the status that says so reaches the observer: the new session is a
+    /// thread of its own from that transcript alone, and the session left keeps its history.
+    #[tokio::test]
+    async fn a_new_session_in_the_terminal_never_overwrites_the_one_left() {
+        const CLEARED: &str = "00000000-0000-4000-8000-000000000003";
+        let rig = Rig::new();
+        let host = rig.host();
+        let _observer = rig.observe(&host);
+        let thread = thread_of(NATIVE);
+        rig.status(AgentStatus::Working);
+        rig.write("tools");
+        let want = entries("tools");
+        until(&host, thread, |s| ids(s) == want).await;
+
+        let cleared = rig.main.with_file_name(format!("{CLEARED}.jsonl"));
+        mid_turn(&cleared);
+        rig.seen.main.send_replace(Some(cleared));
+        rig.heard();
+        let now = thread_of(CLEARED);
+        let state =
+            until(&host, now, |s| s.items.iter().any(|i| matches!(i.body, ItemBody::User(_))))
+                .await;
+        assert_eq!(state.meta.terminal, Some(rig.terminal));
+        let left = until(&host, thread, cut).await;
+        assert_eq!(ids(&left), want, "the session left keeps its history");
+    }
+
+    /// A session whose agent quits lets go of its id, though the word that it went names no
+    /// session: taken up again in another terminal (the chat resumed while the first terminal
+    /// is kept), it is the same thread, not one beside it.
+    #[tokio::test]
+    async fn a_session_resumed_elsewhere_after_its_agent_quits_is_the_same_thread() {
+        let rig = Rig::new();
+        let host = rig.host();
+        let _observer = rig.observe(&host);
+        let thread = thread_of(NATIVE);
+        rig.status(AgentStatus::Idle);
+        until(&host, thread, |s| s.status.liveness == Liveness::Live).await;
+        rig.seen.main.send_replace(None);
+        rig.tracked(AgentStatus::None, None, AgentSource::Process);
+        until(&host, thread, |s| matches!(s.status.liveness, Liveness::Exited { .. })).await;
+
+        let elsewhere = SessionId::new();
+        *rig.seen.terminal.lock() = elsewhere;
+        rig.seen.main.send_replace(Some(rig.main.clone()));
+        let working = said(elsewhere, AgentStatus::Working, Some(NATIVE), AgentSource::Hook);
+        rig.heard.send(working).unwrap();
+        let state = until(&host, thread, |s| {
+            s.meta.terminal == Some(elsewhere) && s.status.liveness == Liveness::Live
+        })
+        .await;
+        assert_eq!(state.status.phase, Phase::Working);
+        assert!(
+            !host.holds(slopty_agent::observed::thread_in(NATIVE, elsewhere)),
+            "none beside it"
+        );
+    }
+
+    /// A message an earlier worker was typing into a Claude Code that is gone by the restart
+    /// waits to go again, where it can be withdrawn or changed, not "being typed" for good.
+    #[tokio::test]
+    async fn a_message_left_being_typed_by_a_restart_waits_again() {
+        use slopty_proto::thread::{Action, Delivery, IntentId, Pending, PendingState};
+        let rig = Rig::new();
+        let host = rig.host();
+        let observer = rig.observe(&host);
+        let thread = thread_of(NATIVE);
+        rig.status(AgentStatus::Idle);
+        until(&host, thread, |s| s.status.liveness == Liveness::Live).await;
+        let typing = Pending {
+            intent: IntentId::new(),
+            text: "hello".to_owned(),
+            attachments: vec![],
+            delivery: Delivery::Steer,
+            state: PendingState::Sending,
+        };
+        host.apply(thread, vec![Action::PendingSet(vec![typing])]);
+        observer.0.abort();
+        drop(host);
+
+        let host = rig.host();
+        let _observer = rig.observe(&host);
+        let state = until(&host, thread, |s| {
+            cut(s) && s.pending.iter().all(|p| p.state != PendingState::Sending)
+        })
+        .await;
+        let states: Vec<&PendingState> = state.pending.iter().map(|p| &p.state).collect();
+        assert_eq!(states, [&PendingState::Waiting]);
+    }
+
+    /// A thread an earlier worker left at work on a terminal still open is not ended by the
+    /// restart while its agent may run on there: the agent's first word begins it again, and it
+    /// never says it exited, so nothing hears that it ended.
+    #[tokio::test]
+    async fn a_thread_whose_agent_runs_on_is_not_ended_by_a_restart() {
+        use slopty_proto::thread::{Action, Status};
+        let rig = Rig::new();
+        mid_turn(&rig.main);
+        let host = rig.host();
+        let observer = rig.observe(&host);
+        let thread = thread_of(NATIVE);
+        rig.status(AgentStatus::Working);
+        until(&host, thread, |s| under_way(s) && s.status.phase == Phase::Working).await;
+        observer.0.abort();
+        drop(host);
+
+        let host = rig.host();
+        let mut feed = host.watch(thread).unwrap();
+        let _observer = rig.observe(&host);
+        rig.status(AgentStatus::Working);
+        tokio::time::sleep(claude::STARTUP_GRACE + Duration::from_secs(1)).await;
+        let state = host.state(thread).unwrap().0;
+        assert_eq!((state.status.liveness, state.status.phase), (Liveness::Live, Phase::Working));
+        let mut told = Vec::new();
+        while let Ok(batch) = feed.try_recv() {
+            told.extend(batch.actions.iter().filter_map(|a| match a {
+                Action::Status(Status { liveness, .. }) => Some(*liveness),
+                _ => None,
+            }));
+        }
+        assert!(told.iter().all(|l| *l == Liveness::Live), "never exited: {told:?}");
     }
 }

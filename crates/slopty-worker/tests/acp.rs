@@ -489,6 +489,70 @@ mod acp {
         assert_eq!(record["unexpected"], serde_json::json!([]));
     }
 
+    /// What waits in the queue of a thread whose agent is gone is the thread's still: a message
+    /// there is withdrawn and moved while no agent runs, one sent now takes the thread up
+    /// again, and what is left goes after it once the session is loaded, each its own turn.
+    #[tokio::test]
+    async fn a_queue_left_by_a_gone_agent_is_changed_at_rest_and_goes_after_the_load() {
+        let rig = Rig::new();
+        let (acp, served) = rig.serve();
+        let Outcome::Started { thread } =
+            acp.start(IntentId::new(), rig.start("acp:opencode", "Say hello.")).await
+        else {
+            panic!("not started");
+        };
+        rig.until(thread, "the first turn", turn_ended(1, TurnState::Complete)).await;
+        served.abort();
+        let exited = |s: &ThreadState| s.status.liveness == (Liveness::Exited { resumable: true });
+        rig.until(thread, "the agent ends with the worker", exited).await;
+        let (never, later, again) = (IntentId::new(), IntentId::new(), IntentId::new());
+        let queued = |intent, text: &str| Pending {
+            intent,
+            text: text.to_owned(),
+            attachments: vec![],
+            delivery: Delivery::Queue,
+            state: slopty_proto::thread::PendingState::Waiting,
+        };
+        let left = vec![
+            queued(never, "Never."),
+            queued(later, "Say hello later."),
+            queued(again, "Say hello again."),
+        ];
+        rig.host.apply(thread, vec![slopty_proto::thread::Action::PendingSet(left)]);
+        // The load's recording, then its last turn again for the message left queued.
+        let lines = lines("load.jsonl");
+        let next = lines[18..].iter().map(|l| {
+            l.replace("Say hello again.", "Say hello later.").replace(r#""id":3"#, r#""id":4"#)
+        });
+        let composed: Vec<String> = lines.iter().cloned().chain(next).collect();
+        rig.replay_lines(&composed);
+        let (acp, _served) = rig.serve();
+        let texts_of =
+            |s: &ThreadState| s.pending.iter().map(|p| p.text.clone()).collect::<Vec<_>>();
+
+        let (_, gone) = rig.intent(&acp, thread, &Intent::Withdraw { pending: never });
+        assert_eq!(gone, Outcome::Done);
+        let moved = Intent::Move { pending: again, before: Some(later) };
+        assert_eq!(rig.intent(&acp, thread, &moved).1, Outcome::Done);
+        let changed = |s: &ThreadState| texts_of(s) == ["Say hello again.", "Say hello later."];
+        rig.until(thread, "the queue changed at rest", changed).await;
+
+        assert_eq!(rig.intent(&acp, thread, &Intent::Promote { pending: again }).1, Outcome::Done);
+        let state = rig.until(thread, "both went", turn_ended(6, TurnState::Complete)).await;
+        assert!(state.pending.is_empty(), "{:?}", state.pending);
+        let last: Vec<(String, Option<IntentId>)> =
+            users(&state).into_iter().rev().take(2).collect();
+        assert_eq!(
+            last,
+            [
+                ("Say hello later.".to_owned(), Some(later)),
+                ("Say hello again.".to_owned(), Some(again))
+            ],
+            "the one sent now, then the one left"
+        );
+        assert_eq!(rig.record()["unexpected"], serde_json::json!([]));
+    }
+
     /// An agent that asks to be signed in is left as it is: the thread says so in words and
     /// is exited, the first message is not sent to an agent started over and over, and since
     /// the agent named no session there is nothing to take up again.

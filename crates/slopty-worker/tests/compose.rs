@@ -25,7 +25,7 @@ mod compose {
     use slopty_worker::session::SessionHandle;
     use slopty_worker::thread::compose::{DRAFT, RETRY, TAKEN_BACK, Terminals};
     use slopty_worker::thread::log::Limits;
-    use slopty_worker::thread::{Composer, Host};
+    use slopty_worker::thread::{Composer, Host, schedule};
     use slopty_worker::{Worker, WorkerError};
     use tokio::process::{Child, Command};
 
@@ -414,6 +414,66 @@ mod compose {
         rig.until(|s| s.pending.is_empty()).await;
     }
 
+    /// A message that may have gone as the worker stopped (a start's first, held cut off) is
+    /// never typed on its own: the person's promote sends it.
+    #[tokio::test]
+    async fn a_message_cut_off_by_a_restart_goes_only_when_promoted() {
+        let rig = Rig::new().await;
+        let held = IntentId::new();
+        let cut = Pending {
+            intent: held,
+            text: "first".to_owned(),
+            attachments: vec![],
+            delivery: Delivery::Queue,
+            state: PendingState::Held { reason: schedule::CUT_OFF.to_owned() },
+        };
+        rig.host.apply(rig.thread, vec![Action::PendingSet(vec![cut])]);
+        rig.composer.kick(rig.thread);
+        tokio::time::sleep(RETRY * 4).await;
+        assert_eq!(read(&rig.record), "", "nothing typed on its own");
+        let promote = Intent::Promote { pending: held };
+        assert_eq!(rig.intent(IntentId::new(), &promote), Outcome::Done);
+        rig.recorded("first\r").await;
+        rig.until(|s| s.pending.is_empty()).await;
+    }
+
+    /// A queued command the agent runs itself (`/model`) starts no turn of the model's and never
+    /// shows it working: once the transcript shows it, the next queued message goes.
+    #[tokio::test]
+    async fn a_queued_command_lets_the_next_go_once_it_shows() {
+        let rig = Rig::new().await;
+        rig.send("/model opus", Delivery::Queue);
+        rig.recorded("/model opus\r").await;
+        rig.send("after", Delivery::Queue);
+        rig.until(|s| s.pending.len() == 1).await;
+        let turn = Turn {
+            id: TurnId(1),
+            input: Some(ItemId("c1".to_owned())),
+            state: TurnState::Active,
+            started_ms: WallMs::ZERO,
+            ended_ms: None,
+            usage: Usage::default(),
+            models: Vec::new(),
+            changed: Changed::default(),
+            before: None,
+            after: None,
+        };
+        let command = Item {
+            id: ItemId("c1".to_owned()),
+            turn: TurnId(1),
+            at_ms: WallMs::ZERO,
+            body: ItemBody::User(UserMessage {
+                text: Clipped::whole("opus"),
+                images: Vec::new(),
+                command: Some("/model".to_owned()),
+                intent: None,
+            }),
+        };
+        rig.host.apply(rig.thread, vec![Action::TurnStarted(turn), Action::ItemStarted(command)]);
+        rig.recorded("/model opus\rafter\r").await;
+        rig.until(|s| s.pending.is_empty()).await;
+    }
+
     /// An interrupt is Esc, only while the agent works and not over a person's draft; a model
     /// is `/model` with an id from the thread's catalogue, typed once the agent is at rest.
     #[tokio::test]
@@ -439,6 +499,11 @@ mod compose {
         rig.recorded("draft\r\x1bthen this\r").await;
         rig.agent(AgentStatus::Idle);
         rig.recorded("draft\r\x1bthen this\r/model opus\r").await;
+
+        // A tool running is a turn under way: it stops as the model writing does.
+        rig.agent(AgentStatus::Tool { tool: "Bash".to_owned() });
+        assert_eq!(rig.intent(IntentId::new(), &Intent::Interrupt), Outcome::Accepted);
+        rig.recorded("draft\r\x1bthen this\r/model opus\r\x1b").await;
     }
 
     /// A message Claude Code takes back into its input before it begins (Esc right after

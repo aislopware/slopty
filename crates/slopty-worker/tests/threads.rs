@@ -575,7 +575,7 @@ mod threads {
         let thread = meta.id;
         host.create(meta.clone()).unwrap();
         let (sent, waiting, sending) = (IntentId::new(), IntentId::new(), IntentId::new());
-        host.typed(thread, sent, "hello there");
+        host.typed(thread, sent, "hello there", "hello there");
         let tree = TreeRef("4b825dc6".to_owned());
         let pending = |intent, state| Pending {
             intent,
@@ -801,6 +801,124 @@ mod threads {
             ],
             "the first held; the composer's left to go again"
         );
+        // The agent's transcript read again shows it, knowing nothing of the intent: it is
+        // the held one's, which leaves the list.
+        host.reset(left, ThreadState::new(state(&host, left).0.meta)).unwrap();
+        host.apply(left, vec![turn(1), self::prompt("p1", 1, "hello")]);
+        assert_eq!(intent_of(&state(&host, left).0, "p1"), Some(lost), "the item is the intent's");
+        assert_eq!(
+            pending_of(&host, left),
+            [("next".to_owned(), Delivery::Queue, PendingState::Waiting)],
+            "taken: gone from the list"
+        );
+    }
+
+    /// A thread whose log no longer reads (an older build wrote it) goes with its directory, so
+    /// it is not read and warned of at every start; what is not a thread's stays.
+    #[test]
+    fn a_log_that_no_longer_reads_is_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = open(dir.path());
+        let meta = meta();
+        let thread = meta.id;
+        host.create(meta).unwrap();
+        drop(host);
+        let kept = dir.path().join(thread.to_string());
+        let _no_head = std::fs::remove_file(kept.join("head"));
+        std::fs::write(kept.join("snapshot"), [0xff_u8; 64]).unwrap();
+
+        let host = open(dir.path());
+        assert!(!host.holds(thread), "not held");
+        assert!(!kept.exists(), "its directory went");
+        assert!(dir.path().join("starts").is_file(), "the starts stay");
+    }
+
+    /// The call a thread hangs off is the thread's for good: an adapter that tells its metadata
+    /// again, or reads it again from nothing, before it knows the parent (a subagent followed
+    /// before the thread that started it, after a restart) does not unlink it.
+    #[test]
+    fn a_threads_parent_outlives_an_adapter_that_does_not_know_it() {
+        use slopty_proto::thread::Link;
+        let dir = tempfile::tempdir().unwrap();
+        let host = open(dir.path());
+        let link = Link { thread: ThreadId::new(), item: ItemId("call".to_owned()) };
+        let mut child = meta();
+        child.parent = Some(link.clone());
+        child.origin = ThreadMeta::SUBAGENT.to_owned();
+        let thread = child.id;
+        host.create(child.clone()).unwrap();
+        let unknown = ThreadMeta { parent: None, title: "Renamed".to_owned(), ..child };
+        host.apply(thread, vec![Action::Meta(Box::new(unknown.clone()))]);
+        let (state, _) = state(&host, thread);
+        assert_eq!((state.meta.title.as_str(), state.meta.parent), ("Renamed", Some(link.clone())));
+        drop(host);
+
+        let host = open(dir.path());
+        host.reset(thread, ThreadState::new(unknown)).unwrap();
+        let (again, _) = self::state(&host, thread);
+        assert_eq!(again.meta.parent, Some(link), "read again from nothing");
+    }
+
+    /// The agent's copy of a message typed into its terminal is the message's where it is not
+    /// what was typed word for word: the head of a long one, which Claude Code keeps clipped; a
+    /// command, which it keeps as its name and arguments; and one sent with files, whose paths
+    /// were typed after the words, of which Claude Code kept a picture as a placeholder, or as a
+    /// picture apart. Another message's copy is not.
+    #[test]
+    fn a_typed_message_is_known_in_the_agents_copy() {
+        use slopty_proto::thread::ContentRef;
+        use slopty_proto::thread::detail::Clip;
+        let dir = tempfile::tempdir().unwrap();
+        let host = open(dir.path());
+        let meta = meta();
+        let thread = meta.id;
+        host.create(meta).unwrap();
+        let user = |id: &str, text: Clipped, command: Option<&str>| {
+            Action::ItemStarted(Item {
+                id: ItemId(id.to_owned()),
+                turn: TurnId(1),
+                at_ms: WallMs::ZERO,
+                body: ItemBody::User(UserMessage {
+                    text,
+                    images: vec![],
+                    command: command.map(str::to_owned),
+                    intent: None,
+                }),
+            })
+        };
+        let long = (0..2_000).fold(String::new(), |mut long, n| {
+            std::fmt::Write::write_fmt(&mut long, format_args!("line {n} of a long paste\n"))
+                .unwrap();
+            long
+        });
+        assert!(long.chars().count() > 32_000, "longer than an agent keeps");
+        let prose = Clip { lines: 400, chars: 32_000 };
+        let head = Clipped::head(&long, prose, Some(ContentRef("p1".to_owned())));
+        assert!(head.is_clipped());
+        let paths = ["/drop/a/shot.png", "/drop/b/notes.txt"];
+        let with_files = slopty_agent::attach::with_paths("Look at this", paths);
+        let (cut, command, picture, apart, other) =
+            (IntentId::new(), IntentId::new(), IntentId::new(), IntentId::new(), IntentId::new());
+        host.typed(thread, cut, &long, &long);
+        host.typed(thread, command, "/model opus", "/model opus");
+        host.typed(thread, picture, "Look at this", &with_files);
+        host.typed(thread, apart, "Look at this", &with_files);
+        host.typed(thread, other, "Something else", "Something else");
+        host.apply(
+            thread,
+            vec![
+                turn(1),
+                user("p1", head, None),
+                user("p2", Clipped::whole("opus"), Some("/model")),
+                user("p3", Clipped::whole("Look at this [Image #1] /drop/b/notes.txt"), None),
+                user("p4", Clipped::whole("Look at this"), None),
+                user("p5", Clipped::whole("Look at that"), None),
+            ],
+        );
+        let (state, _) = state(&host, thread);
+        let intents: Vec<Option<IntentId>> =
+            ["p1", "p2", "p3", "p4", "p5"].iter().map(|id| intent_of(&state, id)).collect();
+        assert_eq!(intents, [Some(cut), Some(command), Some(picture), Some(apart), None]);
     }
 
     /// A message the person schedules waits in the thread's pending list on the worker, once

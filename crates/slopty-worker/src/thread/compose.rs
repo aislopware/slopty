@@ -168,6 +168,10 @@ impl Composer {
                     }
                     _ => {}
                 }
+                // One that may have gone as the worker stopped goes again on the person's word.
+                if cut_off(promoted) {
+                    promoted.state = PendingState::Waiting;
+                }
                 promoted.delivery = Delivery::Steer;
                 self.kick(thread);
                 Some((Outcome::Done, vec![Action::PendingSet(pending)]))
@@ -193,10 +197,8 @@ impl Composer {
             }
             Intent::Interrupt => {
                 let session = state.meta.terminal?;
-                let working = self
-                    .terminals
-                    .status(session)
-                    .is_some_and(|a| a.status == AgentStatus::Working);
+                // A tool running is a turn under way as much as the model writing.
+                let working = self.terminals.status(session).is_some_and(|a| a.status.in_turn());
                 if let Err(reason) = self.guard(session) {
                     return refused(&reason);
                 }
@@ -297,8 +299,8 @@ fn words(refused: &Failure) -> String {
 
 /// What a thread's task does next.
 enum Next {
-    /// Type a message, now marked as being sent.
-    Message { intent: IntentId, text: String, delivery: Delivery },
+    /// Type a message, now marked as being sent: the person's `words`, typed as `text`.
+    Message { intent: IntentId, words: String, text: String, delivery: Delivery },
     /// Nothing can go now; try again in a while when `held`, else when the thread changes.
     Wait { held: bool },
     /// The thread is gone.
@@ -308,6 +310,7 @@ enum Next {
 /// Where a queued message that went stands: it waits for the turn it started to be seen.
 #[derive(Clone, Copy)]
 struct Started {
+    intent: IntentId,
     turns: usize,
     working: bool,
 }
@@ -340,8 +343,8 @@ async fn compose(c: Composer, thread: ThreadId, mut jobs: mpsc::UnboundedReceive
             c.host.update(thread, |state| next(&c, state, session, &mut started, &mut unconfirmed));
         let held = match next.unwrap_or(Next::Gone) {
             Next::Gone => return,
-            Next::Message { intent, text, delivery } => {
-                c.host.typed(thread, intent, &text);
+            Next::Message { intent, words, text, delivery } => {
+                c.host.typed(thread, intent, &words, &text);
                 let left = send(&c, session, intent, &text).await;
                 let after = c.host.update(thread, |state| {
                     let went = state.pending.iter().find(|p| p.intent == intent).cloned();
@@ -352,7 +355,7 @@ async fn compose(c: Composer, thread: ThreadId, mut jobs: mpsc::UnboundedReceive
                     let (turns, went) = after.unzip();
                     unconfirmed = went.flatten();
                     if delivery == Delivery::Queue {
-                        started = turns.map(|turns| Started { turns, working: false });
+                        started = turns.map(|turns| Started { intent, turns, working: false });
                     }
                 }
                 continue;
@@ -398,15 +401,22 @@ fn next(
         return (vec![], Next::Wait { held: false });
     }
     // A queued message that went holds the next until the agent has taken it: it was seen
-    // working since, or the turn the message started has ended.
+    // working since, the turn the message started has ended, or the transcript shows it as a
+    // command the agent ran itself (`/model`), which starts no work of the model's.
     if let Some(at) = started.as_mut() {
-        at.working |= c.terminals.status(session).is_some_and(|a| a.status == AgentStatus::Working);
+        at.working |= c.terminals.status(session).is_some_and(|a| a.status.in_turn());
         let ended = state.turns.get(at.turns).is_some_and(|t| t.state != TurnState::Active);
-        if at.working || ended {
+        let ran = state.items.iter().rev().take(SHOWN_WITHIN).any(|item| {
+            matches!(&item.body, ItemBody::User(m) if m.intent == Some(at.intent) && m.command.is_some())
+        });
+        if at.working || ended || ran {
             *started = None;
         }
     }
-    let open = |p: &&Pending| p.state != PendingState::Sending && !in_terminal(p) && !p.stopped();
+    // One that may have gone as the worker stopped is the person's to send again.
+    let open = |p: &&Pending| {
+        p.state != PendingState::Sending && !in_terminal(p) && !p.stopped() && !cut_off(p)
+    };
     let steer = state.pending.iter().filter(open).find(|p| p.delivery == Delivery::Steer);
     let queue = state.pending.iter().filter(open).find(|p| p.delivery == Delivery::Queue);
     let resting = started.is_none() && c.at_rest(session);
@@ -417,7 +427,7 @@ fn next(
     // as a path.
     let text =
         slopty_agent::attach::with_paths(&pick.text, pick.attachments.iter().map(String::as_str));
-    let (intent, delivery) = (pick.intent, pick.delivery);
+    let (intent, delivery, words) = (pick.intent, pick.delivery, pick.text.clone());
     let now = match c.guard(session) {
         Ok(()) => PendingState::Sending,
         Err(reason) => PendingState::Held { reason },
@@ -427,8 +437,11 @@ fn next(
         return (vec![], Next::Wait { held: true });
     }
     let pending = with_state(&state.pending, intent, &now);
-    let next =
-        if sending { Next::Message { intent, text, delivery } } else { Next::Wait { held: true } };
+    let next = if sending {
+        Next::Message { intent, words, text, delivery }
+    } else {
+        Next::Wait { held: true }
+    };
     (vec![Action::PendingSet(pending)], next)
 }
 
@@ -459,6 +472,12 @@ fn taken_back(
     let held = Pending { state: PendingState::Held { reason: TAKEN_BACK.to_owned() }, ..went };
     let pending = std::iter::once(held).chain(state.pending.iter().cloned()).collect();
     Some((vec![Action::PendingSet(pending)], Next::Wait { held: false }))
+}
+
+/// Whether `pending` was on its way as the worker stopped and may have gone
+/// ([`super::schedule::CUT_OFF`]): nothing types it again unless the person promotes it.
+fn cut_off(pending: &Pending) -> bool {
+    matches!(&pending.state, PendingState::Held { reason } if reason == super::schedule::CUT_OFF)
 }
 
 /// Whether `pending` was typed into the terminal and stays there unsent ([`TAKEN_BACK`]).

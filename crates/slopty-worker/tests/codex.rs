@@ -1635,4 +1635,301 @@ mod codex {
         let held = state.pending.iter().find(|p| p.intent == intent).unwrap();
         assert_eq!(held.text, "accept", "the choice, as no request names it");
     }
+
+    /// An answer to the worker's `msg`, with `result`.
+    fn reply(msg: &Value, result: &Value) -> Value {
+        json!({ "id": msg["id"], "result": result })
+    }
+
+    /// An error answer to the worker's `msg`, in Codex's `message`.
+    fn refusal(msg: &Value, message: &str) -> Value {
+        json!({ "id": msg["id"], "error": { "code": -32600, "message": message } })
+    }
+
+    /// The recording's answer to `turn/start`, to the worker's `msg`.
+    fn turn_answer(msg: &Value) -> Value {
+        let lines = starter();
+        reply(msg, &lines[recorded(&lines, "turn/start").1].msg["result"])
+    }
+
+    /// The recording's own thread taken up again, as Codex answers the worker's `msg`.
+    fn resume_answer(msg: &Value) -> Value {
+        let mut answer = resumed();
+        answer["id"] = msg["id"].clone();
+        answer
+    }
+
+    /// Codex beginning a turn on the recording's thread, as the recording told it.
+    fn turn_started() -> Value {
+        starter().into_iter().find(|l| l.msg["method"] == "turn/started").unwrap().msg
+    }
+
+    /// The recording's thread, Codex says, is closed.
+    fn closed() -> Value {
+        let native = resumed()["result"]["thread"]["id"].clone();
+        json!({ "method": "thread/closed", "params": { "threadId": native } })
+    }
+
+    /// A stand-in daemon that answers the handshake as the recording did, with the recording's
+    /// thread loaded when `loaded` says so, and every other frame the worker sends as `script`
+    /// says: the frames it gives are said back in order, and with none it closes the link and
+    /// listens no more. Every frame the worker sent goes to `heard`.
+    async fn scripted(
+        listener: UnixListener,
+        heard: mpsc::UnboundedSender<Value>,
+        loaded: bool,
+        mut script: impl FnMut(&Value) -> Option<Vec<Value>>,
+    ) {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let lines = starter();
+        let native = resumed()["result"]["thread"]["id"].clone();
+        while let Some(msg) = next(&mut ws, &heard).await {
+            let said = match msg["method"].as_str() {
+                Some("initialize") => {
+                    let mut answer = lines[recorded(&lines, "initialize").1].msg.clone();
+                    answer["id"] = msg["id"].clone();
+                    vec![answer]
+                }
+                Some("thread/loaded/list") => {
+                    let data = if loaded { vec![native.clone()] } else { Vec::new() };
+                    vec![reply(&msg, &json!({ "data": data, "nextCursor": null }))]
+                }
+                _ => match script(&msg) {
+                    Some(said) => said,
+                    None => return,
+                },
+            };
+            for frame in said {
+                say(&mut ws, &frame).await;
+            }
+        }
+    }
+
+    /// Ended as Codex left it: exited and resumable, its last turn stopped, nothing working.
+    fn cut(state: &ThreadState) -> bool {
+        use slopty_proto::thread::{Liveness, Phase};
+        state.status.liveness == Liveness::Exited { resumable: true }
+            && state.status.phase != Phase::Working
+            && state.turns.last().is_some_and(|t| t.state != TurnState::Active)
+    }
+
+    /// A turn under way when Codex's app-server goes ends with it, stopped, rather than
+    /// working for good: Codex is not there to say it ended.
+    #[tokio::test]
+    async fn a_turn_under_way_ends_stopped_when_codex_goes() {
+        let dir = tempfile::tempdir().unwrap();
+        let short = tempfile::Builder::new().prefix("slopty-codex").tempdir_in("/tmp").unwrap();
+        let socket: PathBuf = short.path().join("s.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let (tx, _heard) = mpsc::unbounded_channel();
+        let server = tokio::spawn(scripted(listener, tx, true, |msg| {
+            Some(match msg["method"].as_str() {
+                Some("thread/resume") => vec![resume_answer(msg)],
+                Some("turn/start") => vec![turn_answer(msg), turn_started()],
+                _ => Vec::new(),
+            })
+        }));
+        let host = host(dir.path());
+        let (handle, asks) = Codex::channel();
+        let _served = codex::spawn(host.clone(), socket, None, asks);
+        let native = resumed()["result"]["thread"]["id"].as_str().unwrap().to_owned();
+        let thread = shared::thread_of(&native);
+        until(&host, thread, |s| !s.turns.is_empty()).await;
+        handle.send(thread, "Go on.".to_owned(), Vec::new(), Delivery::Steer, IntentId::new());
+        let active = |s: &ThreadState| s.turns.last().is_some_and(|t| t.state == TurnState::Active);
+        polled(&host, thread, active).await;
+
+        server.abort();
+        let state = until(&host, thread, cut).await;
+        assert_eq!(state.turns.last().unwrap().state, TurnState::Interrupted);
+    }
+
+    /// A thread an earlier worker left working, while no Codex answers as this one starts, ends
+    /// as it was left rather than working for good: no Codex is there to read it again from.
+    #[tokio::test]
+    async fn a_thread_left_working_ends_when_no_codex_answers_at_the_start() {
+        use slopty_proto::thread::{Action, Liveness, Phase, Status};
+        let dir = tempfile::tempdir().unwrap();
+        let short = tempfile::Builder::new().prefix("slopty-codex").tempdir_in("/tmp").unwrap();
+        let (host, thread) = kept_thread(dir.path(), short.path()).await;
+        let working = Status {
+            phase: Phase::Working,
+            wait: None,
+            liveness: Liveness::Live,
+            since_ms: slopty_core::WallMs::ZERO,
+        };
+        host.apply(thread, vec![Action::Status(working)]);
+        let (_handle, asks) = Codex::channel();
+        let _served = codex::spawn(host.clone(), short.path().join("gone.sock"), None, asks);
+        until(&host, thread, cut).await;
+    }
+
+    /// A thread Codex closes mid-turn ends as Codex left it, its turn stopped, and counts as let
+    /// go: the next message takes it up again first, then goes as its turn.
+    #[tokio::test]
+    async fn a_thread_codex_closes_ends_and_is_taken_up_again_by_a_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let short = tempfile::Builder::new().prefix("slopty-codex").tempdir_in("/tmp").unwrap();
+        let socket: PathBuf = short.path().join("s.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let (tx, mut heard) = mpsc::unbounded_channel();
+        let mut turns = 0_u32;
+        let _server = tokio::spawn(scripted(listener, tx, true, move |msg| {
+            Some(match msg["method"].as_str() {
+                Some("thread/resume") => vec![resume_answer(msg)],
+                Some("turn/start") => {
+                    turns = turns.saturating_add(1);
+                    if turns == 1 {
+                        vec![turn_answer(msg), turn_started(), closed()]
+                    } else {
+                        vec![turn_answer(msg)]
+                    }
+                }
+                _ => Vec::new(),
+            })
+        }));
+        let host = host(dir.path());
+        let (handle, asks) = Codex::channel();
+        let _served = codex::spawn(host.clone(), socket, None, asks);
+        let native = resumed()["result"]["thread"]["id"].as_str().unwrap().to_owned();
+        let thread = shared::thread_of(&native);
+        until(&host, thread, |s| !s.turns.is_empty()).await;
+        handle.send(thread, "Go on.".to_owned(), Vec::new(), Delivery::Steer, IntentId::new());
+        until_sent(&mut heard, "turn/start").await;
+        let state = until(&host, thread, cut).await;
+        assert_eq!(state.turns.last().unwrap().state, TurnState::Interrupted);
+
+        handle.send(thread, "Again.".to_owned(), Vec::new(), Delivery::Steer, IntentId::new());
+        let sent = until_sent(&mut heard, "turn/start").await;
+        let methods: Vec<&str> = sent.iter().filter_map(|m| m["method"].as_str()).collect();
+        assert_eq!(methods, ["thread/resume", "turn/start"], "taken up again first");
+        assert_eq!(sent[1]["params"]["input"][0]["text"], "Again.");
+    }
+
+    /// A thread kept at work that Codex cannot take up again yet is tried again every
+    /// [`codex::RETRY`], on its own timer rather than at the next look over resting threads,
+    /// and is not cut short while tries are left: once Codex takes it up, it reads as Codex has
+    /// it.
+    #[tokio::test]
+    async fn a_thread_codex_cannot_take_up_yet_is_tried_again_before_it_is_cut_short() {
+        use slopty_proto::thread::{Action, Liveness, Phase, Status};
+        let dir = tempfile::tempdir().unwrap();
+        let short = tempfile::Builder::new().prefix("slopty-codex").tempdir_in("/tmp").unwrap();
+        let (host, thread) = kept_thread(dir.path(), short.path()).await;
+        let working = Status {
+            phase: Phase::Working,
+            wait: None,
+            liveness: Liveness::Live,
+            since_ms: slopty_core::WallMs::ZERO,
+        };
+        host.apply(thread, vec![Action::Status(working)]);
+        let socket: PathBuf = short.path().join("after.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let (tx, mut heard) = mpsc::unbounded_channel();
+        let mut resumes = 0_u32;
+        let _server = tokio::spawn(scripted(listener, tx, false, move |msg| {
+            Some(match msg["method"].as_str() {
+                Some("thread/resume") => {
+                    resumes = resumes.saturating_add(1);
+                    if resumes <= 2 {
+                        vec![refusal(msg, "no rollout found")]
+                    } else {
+                        vec![resume_answer(msg)]
+                    }
+                }
+                _ => Vec::new(),
+            })
+        }));
+        let (_handle, asks) = Codex::channel();
+        let _served = codex::spawn(host.clone(), socket, None, asks);
+        until_sent(&mut heard, "thread/resume").await;
+        until_sent(&mut heard, "thread/resume").await;
+        let (state, _) = host.state(thread).unwrap();
+        assert_eq!(state.status.phase, Phase::Working, "not cut short while tries are left");
+        until_sent(&mut heard, "thread/resume").await;
+        until(&host, thread, |s| {
+            s.status.phase != Phase::Working && s.status.liveness == Liveness::Live
+        })
+        .await;
+    }
+
+    /// A message queued behind a turn whose end went unheard goes as the next turn once the
+    /// quiet thread is read again and the turn turns out to have ended.
+    #[tokio::test]
+    async fn a_message_queued_behind_a_quiet_turn_goes_once_it_is_read_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let short = tempfile::Builder::new().prefix("slopty-codex").tempdir_in("/tmp").unwrap();
+        let socket: PathBuf = short.path().join("s.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let (tx, mut heard) = mpsc::unbounded_channel();
+        let _server = tokio::spawn(scripted(listener, tx, true, |msg| {
+            Some(match msg["method"].as_str() {
+                Some("thread/resume") => {
+                    let mut running = resume_answer(msg);
+                    let thread = &mut running["result"]["thread"];
+                    thread["status"] = json!({ "type": "active", "activeFlags": [] });
+                    let turn = &mut thread["turns"][0];
+                    turn["status"] = json!("inProgress");
+                    turn["items"] = json!([]);
+                    turn["itemsView"] = json!("notLoaded");
+                    vec![running]
+                }
+                Some("thread/read") => {
+                    vec![reply(msg, &json!({ "thread": resumed()["result"]["thread"] }))]
+                }
+                Some("turn/start") => vec![turn_answer(msg)],
+                _ => Vec::new(),
+            })
+        }));
+        let host = host(dir.path());
+        let (handle, asks) = Codex::channel();
+        let rest = Duration::from_millis(300);
+        let _served = codex::spawn(host.clone(), socket, None, asks.rest_after(rest));
+        let native = resumed()["result"]["thread"]["id"].as_str().unwrap().to_owned();
+        let thread = shared::thread_of(&native);
+        let active = |s: &ThreadState| s.turns.last().is_some_and(|t| t.state == TurnState::Active);
+        until(&host, thread, active).await;
+        let queued = IntentId::new();
+        handle.send(thread, "Then this.".to_owned(), Vec::new(), Delivery::Queue, queued);
+        polled(&host, thread, |s| s.pending.iter().any(|p| p.intent == queued)).await;
+        let sent = until_sent(&mut heard, "turn/start").await;
+        assert!(sent.iter().any(|m| m["method"] == "thread/read"), "read again first: {sent:?}");
+        assert_eq!(sent.last().unwrap()["params"]["input"][0]["text"], "Then this.");
+        polled(&host, thread, |s| !s.pending.iter().any(|p| p.intent == queued)).await;
+    }
+
+    /// A message Codex refuses (its turn or its steer) is held in the thread's list saying so,
+    /// in Codex's words, rather than gone, and the person can take it back.
+    #[tokio::test]
+    async fn a_message_codex_refuses_is_held_and_can_be_taken_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let short = tempfile::Builder::new().prefix("slopty-codex").tempdir_in("/tmp").unwrap();
+        let socket: PathBuf = short.path().join("s.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let (tx, mut heard) = mpsc::unbounded_channel();
+        let _server = tokio::spawn(scripted(listener, tx, true, |msg| {
+            Some(match msg["method"].as_str() {
+                Some("thread/resume") => vec![resume_answer(msg)],
+                Some("turn/start") => vec![refusal(msg, "the model is unavailable")],
+                _ => Vec::new(),
+            })
+        }));
+        let host = host(dir.path());
+        let (handle, asks) = Codex::channel();
+        let _served = codex::spawn(host.clone(), socket, None, asks);
+        let native = resumed()["result"]["thread"]["id"].as_str().unwrap().to_owned();
+        let thread = shared::thread_of(&native);
+        until(&host, thread, |s| !s.turns.is_empty()).await;
+        let intent = IntentId::new();
+        handle.send(thread, "Say hello.".to_owned(), Vec::new(), Delivery::Steer, intent);
+        until_sent(&mut heard, "turn/start").await;
+        let reason = format!("{}: the model is unavailable", codex::REFUSED);
+        let state = polled(&host, thread, |s| held_back(s, intent, &reason)).await;
+        let held = state.pending.iter().find(|p| p.intent == intent).unwrap();
+        assert_eq!(held.text, "Say hello.");
+
+        handle.withdraw(thread, intent);
+        polled(&host, thread, |s| !s.pending.iter().any(|p| p.intent == intent)).await;
+    }
 }

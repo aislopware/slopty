@@ -3093,3 +3093,89 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   ended it first (`conversation::start_turn`); the observer marks it interrupted when Claude
   Code recorded the interruption, complete otherwise. Test: `slopty-agent`
   `conversation::tests::a_prompt_ends_the_turn_still_open_before_it`.
+
+- ✅ **An observed Claude Code's threads follow its sessions, not the last word heard**
+  (2026-10-15). A hook that moves a terminal to another session (`/clear`, `/resume`) names the
+  new transcript before the status that says so reaches the observer, which read the new file
+  into the old session's thread and wiped its history. The transcript's file name now decides:
+  a name other than the observed session's begins that session's thread, and the one left ends
+  with its history. The word that an agent went names no session (the tracker forgot it), so
+  the session's id stayed claimed by the kept terminal and a chat resumed in another terminal
+  became a second thread beside it; an agent that goes now always lets go of the id it held. A
+  worker restart no longer ends at once a thread whose terminal is still open: it waits
+  `claude::STARTUP_GRACE` for the agent's first word and ends only the threads nothing began
+  again, so an agent that runs on is never said to have ended. A message the earlier worker was
+  typing waits to go again (ptyd types it only if it never took it) and can be withdrawn or
+  changed while its agent is gone. Tests: `claude_threads.rs`
+  `a_new_session_in_the_terminal_never_overwrites_the_one_left`,
+  `a_session_resumed_elsewhere_after_its_agent_quits_is_the_same_thread`,
+  `a_message_left_being_typed_by_a_restart_waits_again`,
+  `a_thread_whose_agent_runs_on_is_not_ended_by_a_restart`.
+
+- ✅ **A Claude Code subagent's thread says where its run stands** (2026-10-15). Subagent
+  threads had no status, no title, never ended, and one whose own transcript came before its
+  `Agent` call named it (a call in the foreground names its subagent only with its result)
+  stayed unlinked from its parent. Now the call's description is its title, it works while the
+  call runs, and once the call ends (or Claude Code says a background run did) its open turn
+  ends and the thread exits done, failed or stopped, not resumable, since a subagent is never
+  taken up alone. A thread begun before its call named it is told its parent then. Test:
+  `slopty-agent` `observed::tests::a_subagent_works_until_its_call_ends_then_is_done`.
+
+- ✅ **What the composer types is matched to the agent's copy, and nothing is typed twice**
+  (2026-10-15). A stop is accepted while Claude Code runs a tool, not only while the model
+  writes. The agent's copy of a typed message is found by more than exact words: the head of a
+  long one Claude Code keeps clipped (it begins the message and counts its characters), a
+  command kept as its name and arguments, and a message sent with files, whose paths were typed
+  after the words and whose pictures Claude Code keeps as `[Image #n]` or apart. A queued
+  command Claude Code runs itself (`/model`) starts no turn of the model's, so its showing in
+  the transcript lets the next queued message go. A start's first message cut off by a restart
+  is held and never typed again on its own; its copy in the transcript read again takes it off
+  the list, and the person's promote sends it. A thread's parent stays with it when an adapter
+  tells its metadata, or reads it again, before it knows the parent. A thread log an older
+  build wrote, which no longer decodes, is deleted with a warning instead of being skipped at
+  every start. Tests: `compose.rs`
+  `a_message_cut_off_by_a_restart_goes_only_when_promoted`,
+  `a_queued_command_lets_the_next_go_once_it_shows`, the tool case in
+  `an_interrupt_is_esc_and_a_model_is_its_command`; `threads.rs`
+  `a_typed_message_is_known_in_the_agents_copy`,
+  `a_threads_parent_outlives_an_adapter_that_does_not_know_it`,
+  `a_log_that_no_longer_reads_is_deleted`, and the read-again step of
+  `a_starts_first_message_cut_off_by_a_restart_is_settled`.
+
+- ✅ **An ACP thread's queue is the thread's while its agent is gone** (2026-10-15). Queued
+  messages on an exited ACP thread could not be withdrawn, edited, moved or sent now, and an
+  agent taken up again started with an empty queue, so they never went. As with pi, the queue
+  is changed in the thread's record while no agent runs, a message sent now takes the thread up
+  again, and a session loaded again starts from the queue the thread holds. Test: `acp.rs`
+  `a_queue_left_by_a_gone_agent_is_changed_at_rest_and_goes_after_the_load`.
+
+- ✅ **A Codex thread ends as Codex left it, and no message to it vanishes** (2026-10-15). A
+  thread whose app-server went, that Codex closed, or that a worker found at work with no Codex
+  answering its first try was only marked exited, so it went on saying it worked; it now ends
+  as an agent that quit does (`driven::cut_short`). A thread Codex cannot take up again is
+  tried again on its own timer and ended only after the last try. A turn or steer Codex refuses
+  (an answer's reason among them) stays in the list in Codex's words, and every message held as
+  not sent stays there, to be sent again, changed or taken back. An exited, resumable Codex
+  thread still takes messages and changes to waiting ones, which take it up again; answers and
+  stops are refused, since the request and the turn ended with Codex. After a quiet thread is
+  read again, what was queued behind its turn goes. Tests: `codex.rs`
+  `a_turn_under_way_ends_stopped_when_codex_goes`,
+  `a_thread_left_working_ends_when_no_codex_answers_at_the_start`,
+  `a_thread_codex_closes_ends_and_is_taken_up_again_by_a_message`,
+  `a_thread_codex_cannot_take_up_yet_is_tried_again_before_it_is_cut_short`,
+  `a_message_queued_behind_a_quiet_turn_goes_once_it_is_read_again`,
+  `a_message_codex_refuses_is_held_and_can_be_taken_back`; `apps/slopty-worker` threads'
+  `an_exited_codex_thread_still_takes_a_message`.
+
+- ✅ **An ended agent finished nothing, and an unreachable worker holds nothing** (2026-10-15).
+  The server keeps its machine awake only for agents at work on workers linked now: an
+  unreachable worker's rows say what it last said, and nothing keeps that true. An agent that
+  ended with its work under way (it quit, or a worker cut it short) finished nothing, so no
+  phone hears that it did; only a turn it answered since it got busy is a finish. At a
+  terminal, a session whose agent still runs outranks one that ended later, so an ended row
+  never makes an agent's shell count as the person's. A thread removed and made again under
+  the same id stays in every client's table. Tests: `slopty-server`
+  `a_worker_out_of_reach_holds_nothing`, `an_agent_that_ended_at_work_is_not_finished`,
+  `an_ended_session_does_not_hide_the_agent_at_its_terminal`; `slopty-proto`
+  `a_thread_removed_and_made_again_stays_in_the_table`; the worker table's
+  `a_thread_made_again_is_a_row_not_a_removal`.

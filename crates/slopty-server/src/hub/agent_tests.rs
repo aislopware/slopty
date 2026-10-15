@@ -244,3 +244,18 @@ async fn an_agent_reaches_only_its_own_tree() {
     assert_eq!(agents.len(), 4);
     assert_eq!(parent_of(grandchild.id), Some(child.id), "a tree at any depth");
 }
+
+/// A terminal whose agent runs stays an agent's though a session it ran before ended later
+/// (cut short as its worker restarted): the shell there is not the person's, and no agent
+/// types into its TUI.
+#[tokio::test]
+async fn an_ended_session_does_not_hide_the_agent_at_its_terminal() {
+    let fleet = Fleet::new();
+    let mut ended = row(Phase::Stopped, 2_000, Some(fleet.shell));
+    ended.status.liveness = slopty_proto::thread::Liveness::Exited { resumable: true };
+    fleet.lease.handle(snapshot(vec![fleet.parent.clone(), ended]));
+    assert_eq!(fleet.hub.caller(Speaker::Shell(fleet.shell)), Caller::Agent);
+    let term = TermRef { worker: fleet.worker, session: fleet.shell };
+    assert!(fleet.hub.types_into_shell(term).is_err(), "an agent's TUI takes no agent's keys");
+    assert_eq!(fleet.hub.inner.state.lock().board.thread_at(term), Some(fleet.parent.id));
+}

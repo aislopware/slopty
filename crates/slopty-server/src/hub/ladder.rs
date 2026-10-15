@@ -77,6 +77,9 @@ pub(super) struct Board {
     phones: Phones,
     /// Counts each frame of rows taken in, for a wait on the agents ([`Self::rows_changed`]).
     rows: watch::Sender<u64>,
+    /// The workers whose link ended and has not come back: their rows say what they last said,
+    /// which nothing keeps true, so none of them holds the machine awake.
+    unlinked: HashSet<WorkerId>,
 }
 
 /// How long a take-back the push queue could not take waits before it is tried again.
@@ -529,15 +532,26 @@ impl Board {
         self.awake.set_policy(policy, linked, working);
     }
 
-    /// Whether a person's client is linked, and whether an agent is at work on any worker: a
-    /// thread whose agent is there working, or waiting on its own background work.
+    /// Whether a person's client is linked, and whether an agent is at work on any worker
+    /// linked now: a thread whose agent is there working, or waiting on its own background
+    /// work. A worker out of reach may have stopped mid-turn, its rows left as they were.
     fn linked_and_working(&self) -> (bool, bool) {
         let working = self
             .tables
-            .values()
-            .flat_map(BTreeMap::values)
+            .iter()
+            .filter(|(worker, _)| !self.unlinked.contains(worker))
+            .flat_map(|(_, table)| table.values())
             .any(|r| there(r) && matches!(r.status.phase, Phase::Working | Phase::Waiting));
         (!self.seats.is_empty(), working)
+    }
+
+    /// `worker`'s link came (`linked`) or ended: only a linked worker's agents hold the machine.
+    pub(super) fn linked(&mut self, worker: WorkerId, linked: bool) {
+        let moved =
+            if linked { self.unlinked.remove(&worker) } else { self.unlinked.insert(worker) };
+        if moved {
+            self.settle_awake();
+        }
     }
 
     /// Hold the machine as the seats and the tables imply now.
@@ -588,13 +602,15 @@ impl Board {
     }
 
     /// The thread seated at `term` (its TUI runs there, or an agent's thread was started there)
-    /// and hanging from no other, the latest to change when there were several.
+    /// and hanging from no other: one whose agent is there before one whose agent ended, then
+    /// the latest to change. A session that ended later than the one running now (cut short as
+    /// a worker restarted) does not hide the agent at the terminal.
     fn thread_in(&self, term: TermRef) -> Option<&ThreadRow> {
         let table = self.tables.get(&term.worker)?;
         table
             .values()
             .filter(|r| seat_of(r) == Some(term.session) && root_of(table, r) == r.id)
-            .max_by_key(|r| (r.updated_ms, r.id))
+            .max_by_key(|r| (there(r), r.updated_ms, r.id))
     }
 
     /// The thread whose agent runs or is seated at `term`, hanging from no other.
@@ -879,6 +895,7 @@ impl Hub {
         let state = &mut *guard;
         let live = &state.workers;
         state.board.tables.retain(|worker, _| live.contains_key(worker));
+        state.board.unlinked.retain(|worker| live.contains_key(worker));
         state.board.settle_awake();
         let ladder = ladder(&state.board.tables);
         let board = &mut state.board;
@@ -1215,25 +1232,33 @@ fn moved(board: &mut Board, ladder: &Ladder) -> Vec<Told> {
             (Some(was), Rung::ToReview | Rung::Idle) if busy(was) => Some(NoticeKind::Finished),
             _ => None,
         };
-        let worked_ms = if rest {
-            let since = board.busy.remove(&now.at);
-            since.map(|since| now.since_ms.as_millis().saturating_sub(since.as_millis()))
-        } else {
-            None
-        };
+        let since = if rest { board.busy.remove(&now.at) } else { None };
+        let worked_ms =
+            since.map(|since| now.since_ms.as_millis().saturating_sub(since.as_millis()));
         let Some(kind) = kind else { continue };
         let finished = kind == NoticeKind::Finished;
+        // An agent that ended with its work under way (it quit, or its worker cut it short as
+        // it restarted, to read it again) finished nothing: only a turn it answered since it
+        // got busy is a finish.
+        let row = board.tables.get(&now.at.worker).and_then(|t| t.get(&now.at.thread));
+        if finished && row.is_some_and(|r| !there(r) && !answered_since(r, since)) {
+            continue;
+        }
         let worked_ms = finished.then_some(worked_ms).flatten();
         let Some((notice, ask)) = notice_of(board, now.at, (kind, worked_ms)) else {
             continue;
         };
-        let row = board.tables.get(&now.at.worker).and_then(|t| t.get(&now.at.thread));
         let turn = row.and_then(|r| r.ended.as_ref()).map(|e| e.turn).filter(|_| finished);
         notices.push(Told { notice, ask, turn, first: was.is_none() });
     }
     let standing: Vec<ThreadAt> = ladder.threads.iter().map(|r| r.at).collect();
     board.busy.retain(|at, _| standing.binary_search(at).is_ok());
     notices
+}
+
+/// Whether `row`'s latest turn ended answered, at or after `since` when that is known.
+fn answered_since(row: &ThreadRow, since: Option<WallMs>) -> bool {
+    row.ended.is_some_and(|e| e.answered && since.is_none_or(|since| e.at_ms >= since))
 }
 
 /// The notice of `kind` about the thread at `at`, with how long it worked when it finished,

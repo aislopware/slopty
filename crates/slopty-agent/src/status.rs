@@ -78,6 +78,13 @@ impl AgentStatus {
         }
     }
 
+    /// Whether a turn is under way: the agent thinks, writes or runs a tool. What a stop can
+    /// interrupt.
+    #[must_use]
+    pub const fn in_turn(&self) -> bool {
+        matches!(self, Self::Working | Self::Tool { .. })
+    }
+
     /// Whether the agent is at rest: no turn under way and nothing asked of the person.
     #[must_use]
     pub const fn at_rest(&self) -> bool {

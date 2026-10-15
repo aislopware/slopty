@@ -49,6 +49,14 @@
 //!
 //! A message queued while a turn runs is held by the thread's mapping ([`Shared::send`]) and goes
 //! as the next turn once Codex says the turn ended; it can be changed or taken back until then.
+//! A message that cannot go, or that Codex refuses (its turn or its steer), is held in the
+//! thread's list saying why, for the person to send again, change or take back: the mapping's
+//! queue never holds those, so every list it shows keeps them.
+//!
+//! A thread Codex closes, and every thread when Codex goes, ends as Codex left it: what it asked
+//! withdrawn, its turn under way stopped, exited and resumable. So does each thread an earlier
+//! worker left at work when no Codex answers as this one starts; one that answers has them read
+//! again instead. A thread left exited still takes a message, which takes it up again.
 //! A request with nothing to answer in the GUI (a secret, a permissions grant, a page to open) is
 //! handed to Codex's own TUI ([`Codex::release`]): `codex resume <thread>` in one of the worker's
 //! terminals, in the thread's folder, which joins the running daemon as one more client. The
@@ -72,8 +80,8 @@ use slopty_agent::queue::Queue;
 use slopty_core::{SessionId, WallMs};
 use slopty_proto::thread::wire::{Outcome, PastSession, Start};
 use slopty_proto::thread::{
-    Action, AgentId, Answerer, AskId, Delivery, Drive, Fork, IntentId, ItemBody, Link, Liveness,
-    Pending, PendingState, Phase, Status, ThreadId, ThreadState, TurnId, TurnState,
+    Action, AgentId, Answerer, AskId, Delivery, Drive, Fork, IntentId, ItemBody, Link, Pending,
+    PendingState, Phase, ThreadId, ThreadState, TurnId, TurnState,
 };
 use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot};
@@ -87,6 +95,10 @@ use super::{Host, Seated};
 
 /// Why a message to a Codex thread did not go: the person's Codex holds no such thread.
 const NOT_HELD: &str = "Codex no longer holds this thread, so the message did not go";
+
+/// Why a message to a Codex thread is held again: Codex refused the turn or the steer that
+/// carried it, in the words that follow.
+pub const REFUSED: &str = "Codex didn't take the message";
 
 /// How long the worker waits before it tries the daemon again.
 pub const RETRY: Duration = Duration::from_secs(2);
@@ -719,8 +731,15 @@ pub fn spawn(
         // The messages written while no daemon answers, waiting for one ([`HOLD_FOR`]).
         let mut parked: Vec<Parked> = Vec::new();
         let mut bringing = Bringing::Idle;
+        // Until the first try at the daemon: what an earlier worker left at work is read again
+        // from Codex once it answers, and ends as it was left when it does not.
+        let mut first = true;
         loop {
-            match connect(&socket).await {
+            let joined = connect(&socket).await;
+            if std::mem::take(&mut first) && joined.is_err() {
+                cut_short_at_work(&host);
+            }
+            match joined {
                 Ok(ws) => {
                     bringing = Bringing::Idle;
                     let mut session = Session::new(host.clone(), ws, open, rest);
@@ -898,8 +917,11 @@ enum Waiting {
     Resume {
         native: String,
     },
+    /// A turn, a steer or an interrupt of `thread`; for a message, the message as it waited,
+    /// held again should Codex refuse it ([`REFUSED`]).
     Turn {
         thread: ThreadId,
+        went: Option<Pending>,
     },
     /// A thread started for intent `id`, whose first turn is `prompt`, at a server task's
     /// seat when it has one.
@@ -1140,8 +1162,10 @@ impl Session {
         );
         sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
+            let retry = self.next_retry();
             let ended = tokio::select! {
                 _ = sweep.tick() => self.let_go().await.err(),
+                () = sleep_until(retry), if retry.is_some() => self.retry_due().await.err(),
                 frame = self.ws.next() => match frame {
                     Some(Ok(Message::Text(text))) => self.heard(&text).await.err(),
                     Some(Ok(Message::Close(_))) | None => Some("closed".to_owned()),
@@ -1163,19 +1187,14 @@ impl Session {
         }
     }
 
-    /// Every followed thread, and every one let go, is left exited and resumable: Codex is not
-    /// there to say more.
+    /// Every followed thread, and every one let go, is left exited and resumable, as Codex left
+    /// it: Codex is not there to say more, so a turn under way is stopped and what it asked
+    /// withdrawn ([`cut_short`]).
     fn exited(&self) {
         let unloaded =
             self.unloaded.iter().map(|native| slopty_agent::codex::shared::thread_of(native));
         for thread in self.threads.values().map(|f| f.id).chain(unloaded) {
-            let status = Status {
-                phase: Phase::Idle,
-                wait: None,
-                liveness: Liveness::Exited { resumable: true },
-                since_ms: WallMs::now(),
-            };
-            self.host.apply(thread, vec![Action::Status(status)]);
+            cut_short(&self.host, thread);
         }
     }
 
@@ -1197,23 +1216,6 @@ impl Session {
             }
             self.reread(native).await?;
         }
-        let due: Vec<String> = self
-            .retries
-            .iter()
-            .filter(|(native, (tries, at))| {
-                *tries <= RESUME_TRIES && *at <= now && !self.threads.contains_key(*native)
-            })
-            .map(|(native, _)| native.clone())
-            .collect();
-        for native in due {
-            if let Some((_, at)) = self.retries.get_mut(&native) {
-                *at = now.checked_add(self.rest).unwrap_or(now);
-            }
-            self.resume(native).await?;
-        }
-        self.retries.retain(|native, (tries, _)| {
-            *tries < RESUME_TRIES && !self.threads.contains_key(native)
-        });
         let resting: Vec<String> = self
             .threads
             .iter()
@@ -1233,12 +1235,39 @@ impl Session {
         Ok(())
     }
 
+    /// When the next thread Codex could not take up again is due to be tried again.
+    fn next_retry(&self) -> Option<Instant> {
+        self.retries.values().map(|(_, at)| *at).min()
+    }
+
+    /// Try again each thread Codex could not take up again whose moment has come; one followed
+    /// since needs no more tries. A try's answer schedules the next ([`Self::unresumed`]).
+    async fn retry_due(&mut self) -> Result<(), String> {
+        let threads = &self.threads;
+        self.retries.retain(|native, _| !threads.contains_key(native));
+        let now = Instant::now();
+        let due: Vec<String> = self
+            .retries
+            .iter()
+            .filter(|(_, (_, at))| *at <= now)
+            .map(|(native, _)| native.clone())
+            .collect();
+        for native in due {
+            // Not again until this try is answered.
+            if let Some((_, at)) = self.retries.get_mut(&native) {
+                *at = now.checked_add(self.rest).unwrap_or(now);
+            }
+            self.resume(native).await?;
+        }
+        Ok(())
+    }
+
     /// End thread `thread` for its settled task: its turn is stopped, Codex lets it go, and its
     /// seat is forgotten. A thread let go already has nothing to end.
     async fn close(&mut self, thread: ThreadId) -> Result<(), String> {
         let Some(native) = self.native.get(&thread).cloned() else { return Ok(()) };
         if let Some(params) = self.followed(thread).and_then(|f| f.shared.interrupt()) {
-            self.request(&params, Waiting::Turn { thread }).await?;
+            self.request(&params, Waiting::Turn { thread, went: None }).await?;
         }
         if self.threads.remove(&native).is_some() {
             self.unloaded.insert(native.clone());
@@ -1372,13 +1401,7 @@ impl Session {
                         self.settled(&resumed.thread.id, &settings);
                         // A revert that undid the turn a message was held for leaves nothing
                         // to end, so what it held goes now.
-                        let next = self.threads.get_mut(&native).and_then(|followed| {
-                            followed.shared.next_queued().map(|next| (followed.id, next))
-                        });
-                        if let Some((thread, (params, taken))) = next {
-                            self.host.apply(thread, taken);
-                            self.request(params.as_ref(), Waiting::Turn { thread }).await?;
-                        }
+                        self.start_queued(&native).await?;
                         for ask in self.waking.remove(&native).unwrap_or_default() {
                             self.ask(ask).await?;
                         }
@@ -1423,8 +1446,13 @@ impl Session {
                 tracing::debug!(%native, "Codex did not unarchive a thread: {e}");
                 self.unresumed(native, &e.to_string());
             }
-            (Waiting::Turn { thread }, Err(e)) => {
+            // A message Codex refused is held in the thread's list saying so, for the person to
+            // send again or take back, rather than gone.
+            (Waiting::Turn { thread, went }, Err(e)) => {
                 tracing::debug!(%thread, "Codex refused a turn: {e}");
+                if let Some(went) = went {
+                    self.not_sent(thread, went, &format!("{REFUSED}: {}", e.message));
+                }
             }
             (Waiting::Start { id, prompt, attachments, seated }, Ok(result)) => {
                 let outcome = match rpc::response::<p::ThreadStartParams>(result) {
@@ -1664,32 +1692,144 @@ impl Session {
         }
         self.partial.remove(&native);
         self.follow(thread).await?;
-        if matches!(thread.status, p::ThreadStatus::NotLoaded)
-            && self.threads.remove(&native).is_some()
-        {
-            self.unloaded.insert(native);
+        if matches!(thread.status, p::ThreadStatus::NotLoaded) {
+            return self.unload(native).await;
         }
-        Ok(())
+        // The turn it held messages for has ended: the next goes, as after a resume.
+        self.start_queued(&native).await
+    }
+
+    /// Followed Codex thread `native` is no longer loaded for this connection (Codex closed or
+    /// unloaded it): it ends as Codex left it ([`cut_short`]) and counts as let go, so a follow
+    /// or an ask takes it up again. What it held behind its turn goes now that no turn is under
+    /// way: the thread is taken up again for it at once.
+    async fn unload(&mut self, native: String) -> Result<(), String> {
+        let Some(mut followed) = self.threads.remove(&native) else { return Ok(()) };
+        cut_short(&self.host, followed.id);
+        let queued = followed.shared.queue().take_all();
+        if queued.is_empty() {
+            self.unloaded.insert(native);
+            return Ok(());
+        }
+        self.requeue.insert(native.clone(), queued);
+        self.resume(native).await
+    }
+
+    /// The next message followed thread `native` holds, sent as its turn once none is under way.
+    async fn start_queued(&mut self, native: &str) -> Result<(), String> {
+        let next = self
+            .threads
+            .get_mut(native)
+            .and_then(|followed| followed.shared.next_queued().map(|next| (followed.id, next)));
+        let Some((thread, (params, taken))) = next else { return Ok(()) };
+        let intent = params.client_user_message_id.as_deref().and_then(|id| id.parse().ok());
+        let went = self.listed(thread, intent);
+        self.put(thread, taken);
+        self.request(params.as_ref(), Waiting::Turn { thread, went }).await
+    }
+
+    /// Message `went` of followed thread `thread`, sent: into the turn under way or as a turn of
+    /// its own, leaving the thread's list, or held behind the turn under way. One for a thread
+    /// not followed is held in the list saying it did not go ([`NOT_HELD`]).
+    async fn send_message(&mut self, thread: ThreadId, went: Pending) -> Result<(), String> {
+        let attached = crate::thread::attach::read(&went.attachments).await;
+        let Some(followed) = self.followed(thread) else {
+            self.not_sent(thread, went, NOT_HELD);
+            return Ok(());
+        };
+        let intent = went.intent;
+        match followed.shared.send(&went.text, attached, went.delivery, intent) {
+            Send::Start(params) => {
+                self.gone_from_list(thread, intent);
+                self.request(params.as_ref(), Waiting::Turn { thread, went: Some(went) }).await
+            }
+            Send::Steer(params) => {
+                self.gone_from_list(thread, intent);
+                self.request(params.as_ref(), Waiting::Turn { thread, went: Some(went) }).await
+            }
+            Send::Held(actions) => {
+                self.put(thread, actions);
+                // What a stop held goes again at rest, ahead of this message.
+                let Some(native) = self.native.get(&thread).cloned() else { return Ok(()) };
+                self.start_queued(&native).await
+            }
+        }
+    }
+
+    /// Message `intent` of `thread`, as its list shows it.
+    fn listed(&self, thread: ThreadId, intent: Option<IntentId>) -> Option<Pending> {
+        let intent = intent?;
+        self.host
+            .update(thread, |s| {
+                (Vec::new(), s.pending.iter().find(|p| p.intent == intent).cloned())
+            })
+            .flatten()
+    }
+
+    /// The message `intent` of `thread` held in its list here, said not to have gone
+    /// ([`kept_here`]), which Codex's queue never held: changed in the list by `change`, given
+    /// the list and where it stands. Nothing when no such message is held here.
+    fn held_here(
+        &self,
+        thread: ThreadId,
+        intent: IntentId,
+        change: impl FnOnce(&mut Vec<Pending>, usize),
+    ) {
+        self.host.update(thread, |state| {
+            let Some(at) = state.pending.iter().position(|p| p.intent == intent && kept_here(p))
+            else {
+                return (Vec::new(), ());
+            };
+            let mut list = state.pending.clone();
+            change(&mut list, at);
+            (vec![Action::PendingSet(list)], ())
+        });
+    }
+
+    /// Put what the codec made of `thread` into the host. A list of messages it shows is its
+    /// queue alone: the messages held here, said not to have gone ([`kept_here`]), stay in it
+    /// ahead of the queue, for the person to send again or take back.
+    fn put(&self, thread: ThreadId, mut actions: Vec<Action>) {
+        if actions.iter().any(|a| matches!(a, Action::PendingSet(_))) {
+            let kept: Vec<Pending> = self
+                .host
+                .update(thread, |s| {
+                    (Vec::new(), s.pending.iter().filter(|p| kept_here(p)).cloned().collect())
+                })
+                .unwrap_or_default();
+            for action in &mut actions {
+                let Action::PendingSet(list) = action else { continue };
+                let missing: Vec<Pending> = kept
+                    .iter()
+                    .filter(|k| !list.iter().any(|p| p.intent == k.intent))
+                    .cloned()
+                    .collect();
+                list.splice(0..0, missing);
+            }
+        }
+        self.host.apply(thread, actions);
     }
 
     /// Codex thread `native` could not be taken up again, for `why`: what waited on it is
-    /// refused, and it is tried again at its next status change. One the host still holds at
-    /// work ends as Codex left it unsaid, its turn stopped, rather than working for good.
+    /// refused, and it is tried again at its next status change and every [`RETRY`], up to
+    /// [`RESUME_TRIES`] times. One the host still holds at work ends as Codex left it unsaid,
+    /// its turn stopped, once the last try failed too, rather than working for good.
     fn unresumed(&mut self, native: String, why: &str) {
         let reason = format!("Codex couldn't take the thread up again: {why}");
         self.reopened(&native, &reason);
         if !self.threads.contains_key(&native) {
-            self.host.update(slopty_agent::codex::shared::thread_of(&native), |state| {
-                let now = WallMs::now();
-                let cut = at_work(state).then(|| slopty_agent::driven::cut_short(state, true, now));
-                (cut.unwrap_or_default(), ())
-            });
             // Codex tells a status change only to the connections subscribed to it, so one not
-            // written yet (a subagent's first turn) is tried again on a timer.
+            // written yet (a subagent's first turn) is tried again on a timer of its own.
             let now = Instant::now();
-            let tries = self.retries.entry(native.clone()).or_insert_with(|| (0, now));
-            if tries.0 < RESUME_TRIES {
-                *tries = (tries.0.saturating_add(1), now.checked_add(RETRY).unwrap_or(now));
+            let tries = self.retries.entry(native.clone()).or_insert((0, now));
+            tries.0 = tries.0.saturating_add(1);
+            tries.1 = now.checked_add(RETRY).unwrap_or(now);
+            if tries.0 > RESUME_TRIES {
+                self.retries.remove(&native);
+                let thread = slopty_agent::codex::shared::thread_of(&native);
+                if self.host.update(thread, |state| (Vec::new(), at_work(state))) == Some(true) {
+                    cut_short(&self.host, thread);
+                }
             }
         }
         if let Some(held) = self.waking.remove(&native) {
@@ -1780,6 +1920,8 @@ impl Session {
             return Ok(());
         }
         self.native.insert(id, thread.id.clone());
+        // Followed again (a try that Codex took at last, say): let go no more.
+        self.unloaded.remove(&thread.id);
         self.adopt(id, &actions);
         self.host.apply(id, actions);
         self.threads.insert(thread.id.clone(), Followed { id, shared, heard: Instant::now() });
@@ -1799,7 +1941,7 @@ impl Session {
             }
         }
         if !late.is_empty() {
-            self.host.apply(id, late);
+            self.put(id, late);
         }
         for start in self.reopening.remove(&thread.id).unwrap_or_default() {
             self.answer_start(start, Outcome::Started { thread: id });
@@ -1889,6 +2031,11 @@ impl Session {
             self.requeue.insert(native.clone(), followed.shared.queue().take_all());
             return self.resume(native).await;
         }
+        // Codex closed the thread: nothing more of it reaches this connection until it is taken
+        // up again, so it ends as Codex left it.
+        if matches!(note, ServerNotification::ThreadClosed(_)) {
+            return self.unload(native).await;
+        }
         if matches!(note, ServerNotification::TurnCompleted(_)) && self.partial.remove(&native) {
             self.reread(native.clone()).await?;
         }
@@ -1897,16 +2044,12 @@ impl Session {
                 followed.heard = Instant::now();
                 let id = followed.id;
                 let actions = followed.shared.notification(note, now);
-                let next = followed.shared.next_queued();
                 self.adopt(id, &actions);
                 if !actions.is_empty() {
-                    self.host.apply(id, actions);
+                    self.put(id, actions);
                 }
                 // The turn under way ended: the message held for it goes as the next.
-                if let Some((params, taken)) = next {
-                    self.host.apply(id, taken);
-                    self.request(params.as_ref(), Waiting::Turn { thread: id }).await?;
-                }
+                self.start_queued(&native).await?;
                 // Codex says nothing when a command left in the background exits, so its list
                 // is read again whenever a call or a turn ends.
                 if slopty_agent::codex::shared::terminals_due(note) {
@@ -2082,76 +2225,78 @@ impl Session {
                 self.send(frame).await
             }
             Ask::Send { thread, text, attachments, delivery, intent } => {
+                let went =
+                    Pending { intent, text, attachments, delivery, state: PendingState::Sending };
                 if !self.native.contains_key(&thread) {
-                    let pending = Pending {
-                        intent,
-                        text,
-                        attachments,
-                        delivery,
-                        state: PendingState::Sending,
-                    };
-                    self.not_sent(thread, pending, NOT_HELD);
+                    self.not_sent(thread, went, NOT_HELD);
                     return Ok(());
                 }
-                let attached = crate::thread::attach::read(&attachments).await;
-                let Some(followed) = self.followed(thread) else { return Ok(()) };
-                match followed.shared.send(&text, attached, delivery, intent) {
-                    Send::Start(params) => {
-                        self.gone_from_list(thread, intent);
-                        self.request(params.as_ref(), Waiting::Turn { thread }).await
-                    }
-                    Send::Steer(params) => {
-                        self.gone_from_list(thread, intent);
-                        self.request(params.as_ref(), Waiting::Turn { thread }).await
-                    }
-                    Send::Held(actions) => {
-                        self.host.apply(thread, actions);
-                        // What a stop held goes again at rest, ahead of this message.
-                        let next = self.followed(thread).and_then(|f| f.shared.next_queued());
-                        let Some((params, taken)) = next else { return Ok(()) };
-                        self.host.apply(thread, taken);
-                        self.request(params.as_ref(), Waiting::Turn { thread }).await
-                    }
-                }
+                self.send_message(thread, went).await
             }
             Ask::Move { thread, intent, before } => {
                 let moved =
                     self.followed(thread).and_then(|f| f.shared.queue().move_to(intent, before));
-                if let Some(shown) = moved {
-                    self.host.apply(thread, vec![shown]);
+                match moved {
+                    Some(shown) => self.put(thread, vec![shown]),
+                    None => self.held_here(thread, intent, |list, at| {
+                        let moved = list.remove(at);
+                        let to = before
+                            .and_then(|before| list.iter().position(|p| p.intent == before))
+                            .unwrap_or(list.len());
+                        list.insert(to, moved);
+                    }),
                 }
                 Ok(())
             }
             Ask::Withdraw { thread, intent } => {
                 let taken = self.followed(thread).and_then(|f| f.shared.queue().withdraw(intent));
-                if let Some(shown) = taken {
-                    self.host.apply(thread, vec![shown]);
+                match taken {
+                    Some(shown) => self.put(thread, vec![shown]),
+                    None => self.held_here(thread, intent, |list, at| {
+                        list.remove(at);
+                    }),
                 }
                 Ok(())
             }
             Ask::Edit { thread, intent, text, attachments } => {
                 let attached = crate::thread::attach::read(&attachments).await;
-                let changed = self
-                    .followed(thread)
-                    .and_then(|f| f.shared.queue().edit(intent, &text, attachments, attached));
-                if let Some(shown) = changed {
-                    self.host.apply(thread, vec![shown]);
+                let changed = self.followed(thread).and_then(|f| {
+                    f.shared.queue().edit(intent, &text, attachments.clone(), attached)
+                });
+                match changed {
+                    Some(shown) => self.put(thread, vec![shown]),
+                    None => self.held_here(thread, intent, |list, at| {
+                        if let Some(held) = list.get_mut(at) {
+                            held.text = text;
+                            held.attachments = attachments;
+                        }
+                    }),
                 }
                 Ok(())
             }
             Ask::Promote { thread, intent } => {
+                let listed = self.listed(thread, Some(intent));
                 let Some(followed) = self.followed(thread) else { return Ok(()) };
-                let Some((send, actions)) = followed.shared.promote(intent) else { return Ok(()) };
-                self.host.apply(thread, actions);
+                let Some((send, actions)) = followed.shared.promote(intent) else {
+                    // Held here, said not to have gone: it goes now, as the person's steer.
+                    let Some(held) = listed.filter(kept_here) else { return Ok(()) };
+                    self.held_here(thread, intent, |list, at| {
+                        list.remove(at);
+                    });
+                    let went = Pending { delivery: Delivery::Steer, ..held };
+                    return self.send_message(thread, went).await;
+                };
+                self.put(thread, actions);
+                let went = listed.map(|p| Pending { delivery: Delivery::Steer, ..p });
                 match send {
                     Send::Start(params) => {
-                        self.request(params.as_ref(), Waiting::Turn { thread }).await
+                        self.request(params.as_ref(), Waiting::Turn { thread, went }).await
                     }
                     Send::Steer(params) => {
-                        self.request(params.as_ref(), Waiting::Turn { thread }).await
+                        self.request(params.as_ref(), Waiting::Turn { thread, went }).await
                     }
                     Send::Held(actions) => {
-                        self.host.apply(thread, actions);
+                        self.put(thread, actions);
                         Ok(())
                     }
                 }
@@ -2166,9 +2311,9 @@ impl Session {
                     return Ok(());
                 };
                 if !held.is_empty() {
-                    self.host.apply(thread, held);
+                    self.put(thread, held);
                 }
-                self.request(&params, Waiting::Turn { thread }).await
+                self.request(&params, Waiting::Turn { thread, went: None }).await
             }
             Ask::Set { thread, setting } => {
                 let Some(followed) = self.followed(thread) else { return Ok(()) };
@@ -2264,6 +2409,35 @@ impl Session {
     fn followed(&mut self, thread: ThreadId) -> Option<&mut Followed> {
         let native = self.native.get(&thread)?;
         self.threads.get_mut(native)
+    }
+}
+
+/// Until `at`, or for good with none.
+async fn sleep_until(at: Option<Instant>) {
+    match at {
+        Some(at) => tokio::time::sleep_until(at).await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Whether `pending` is held in its thread's list by the worker, said not to have gone
+/// ([`not_sent`]): Codex's queue holds only what waits behind a turn, and what the person's
+/// stop holds ([`Pending::STOPPED`]).
+fn kept_here(pending: &Pending) -> bool {
+    matches!(pending.state, PendingState::Held { .. }) && !pending.stopped()
+}
+
+/// `thread`, which Codex no longer runs for this worker, ended as Codex left it: what it asked
+/// withdrawn, its calls and its turn under way stopped, exited and resumable.
+fn cut_short(host: &Host, thread: ThreadId) {
+    host.update(thread, |state| (slopty_agent::driven::cut_short(state, true, WallMs::now()), ()));
+}
+
+/// Each Codex thread the host keeps at work, ended as Codex left it unsaid ([`cut_short`]): an
+/// earlier worker left it so, and no Codex answers to read it again from.
+fn cut_short_at_work(host: &Host) {
+    for thread in host.visit(|s| (is_shared(s) && at_work(s)).then_some(s.meta.id)) {
+        cut_short(host, thread);
     }
 }
 

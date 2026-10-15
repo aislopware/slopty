@@ -244,6 +244,21 @@ fn the_table_takes_snapshots_and_deltas() {
     assert_eq!(table.rows.into_values().collect::<Vec<_>>(), [other]);
 }
 
+/// A thread removed and made again under the same id since the client's cursor is in a delta's
+/// removals and its rows both: the client keeps it.
+#[test]
+fn a_thread_removed_and_made_again_stays_in_the_table() {
+    let row = run(&[]).row(WallMs::from_millis(5));
+    let mut table = TableState::default();
+    table.apply(&TableFrame::Snapshot { cursor: Cursor { epoch: 1, seq: 1 }, rows: vec![] });
+    table.apply(&TableFrame::Delta {
+        cursor: Cursor { epoch: 1, seq: 3 },
+        rows: vec![row.clone()],
+        removed: vec![row.id],
+    });
+    assert_eq!(table.rows.into_values().collect::<Vec<_>>(), [row]);
+}
+
 /// A row says what the agent is doing while a call of its runs or waits on the person, and
 /// nothing once the call is over.
 #[test]

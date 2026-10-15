@@ -155,12 +155,16 @@ impl Table {
                     .map(|(row, _)| row.clone())
                     .collect();
                 rows.sort_by_key(|r| r.id);
-                let removed = self
+                // A thread removed and made again since is back in the table: a row, not a
+                // removal.
+                let mut removed: Vec<ThreadId> = self
                     .removed
                     .iter()
-                    .filter(|(at, _)| *at > have.seq)
+                    .filter(|(at, id)| *at > have.seq && !self.rows.contains_key(id))
                     .map(|(_, id)| *id)
                     .collect();
+                removed.sort_unstable();
+                removed.dedup();
                 TableFrame::Delta { cursor: self.cursor, rows, removed }
             }
             _ => {
@@ -175,5 +179,57 @@ impl Table {
     const fn bump(&mut self) -> u64 {
         self.cursor.seq = self.cursor.seq.saturating_add(1);
         self.cursor.seq
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use slopty_core::WallMs;
+    use slopty_proto::thread::{AgentId, Drive, ThreadMeta, ThreadState};
+
+    use super::*;
+
+    fn row(id: ThreadId) -> ThreadRow {
+        let meta = ThreadMeta {
+            modes: Vec::new(),
+            efforts: Vec::new(),
+            id,
+            agent: AgentId::named(AgentId::PI),
+            agent_version: "1.1.0".to_owned(),
+            native: "s".to_owned(),
+            cwd: String::new(),
+            title: "t".to_owned(),
+            terminal: None,
+            parent: None,
+            origin: ThreadMeta::PERSON.to_owned(),
+            forked_from: None,
+            drive: Drive::named(Drive::DRIVEN),
+            caps: Vec::new(),
+            models: Vec::new(),
+            facts: std::collections::BTreeMap::new(),
+            created_ms: WallMs::ZERO,
+        };
+        ThreadState::new(meta).row(WallMs::from_millis(1))
+    }
+
+    /// A thread removed and made again under the same id since a client's cursor is sent as a
+    /// row alone, not as a removal too: the client keeps it.
+    #[test]
+    fn a_thread_made_again_is_a_row_not_a_removal() {
+        let mut table = Table::new(1);
+        let (kept, gone) = (ThreadId::new(), ThreadId::new());
+        table.put(row(kept));
+        table.put(row(gone));
+        let held = table.cursor();
+        table.remove(kept);
+        table.remove(gone);
+        let mut again = row(kept);
+        again.title = "again".to_owned();
+        table.put(again.clone());
+        let TableFrame::Delta { rows, removed, .. } = table.since(Some(held)) else {
+            panic!("a delta");
+        };
+        assert_eq!(rows, [again]);
+        assert_eq!(removed, [gone]);
     }
 }

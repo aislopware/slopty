@@ -215,13 +215,14 @@ mod claude_start {
             self.terminals.opened.lock().clone()
         }
 
-        /// The agent writes `scenario`'s transcript, and a hook fires.
-        fn write(&self, scenario: &str) {
+        /// The agent of `thread` writes `scenario`'s transcript, named by its session as Claude
+        /// Code names it, and a hook fires.
+        fn write(&self, thread: ThreadId, scenario: &str) {
             let from = Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../slopty-agent/tests/fixtures/conversation")
                 .join(scenario)
                 .join("transcript.jsonl");
-            let main = self.dir.path().join("transcript.jsonl");
+            let main = self.dir.path().join(format!("{}.jsonl", thread_native(self, thread)));
             std::fs::copy(from, &main).unwrap();
             self.sources.main.send_replace(Some(main));
             self.sources.seen.send_modify(|seen| seen.hooks = seen.hooks.wrapping_add(1));
@@ -320,7 +321,7 @@ mod claude_start {
         assert_eq!(again, outcome, "started once");
         assert_eq!(rig.opened().len(), 1, "one terminal");
 
-        rig.write("edit");
+        rig.write(thread, "edit");
         let state = until(&rig.host, thread, |s| !users(s).is_empty()).await;
         assert_eq!(users(&state)[0], (prompt, Some(id)), "the first message, as the start sent it");
     }
@@ -365,7 +366,7 @@ mod claude_start {
         assert_ne!(state.status.phase, Phase::NeedsYou, "it asks nothing now");
         assert_eq!(state.pending.len(), 1, "until the transcript shows the message");
 
-        rig.write("edit");
+        rig.write(thread, "edit");
         let state =
             until(&rig.host, thread, |s| !users(s).is_empty() && s.pending.is_empty()).await;
         assert_eq!(users(&state)[0], (prompt, Some(id)), "the first message, as the start sent it");
@@ -385,7 +386,7 @@ mod claude_start {
         let (state, _) = rig.host.state(thread).expect("begun");
         assert_eq!(state.open_requests().count(), 0, "nothing asked in its silence");
         assert_ne!(state.status.phase, Phase::NeedsYou);
-        let main = rig.dir.path().join("transcript.jsonl");
+        let main = rig.dir.path().join(format!("{}.jsonl", thread_native(&rig, thread)));
         let from = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../slopty-agent/tests/fixtures/conversation/edit/transcript.jsonl");
         std::fs::copy(from, &main).unwrap();
@@ -526,7 +527,7 @@ mod claude_start {
         assert!(env.contains(&variable), "{env:?}");
         assert_eq!(rig.host.seated_at(seat), Some(thread));
 
-        rig.write("edit");
+        rig.write(thread, "edit");
         let state = until(&rig.host, thread, |s| !users(s).is_empty()).await;
         let fact = state.meta.facts.get(slopty_proto::agent::SEAT_FACT);
         assert_eq!(fact, Some(&seat.to_string()), "kept through the transcript");
@@ -688,7 +689,7 @@ mod claude_start {
         let early = rig.starter.fork(thread, IntentId::new(), None).await;
         let want = Outcome::Refused { reason: "There is nothing to fork yet".to_owned() };
         assert_eq!(early, want);
-        rig.write("edit");
+        rig.write(thread, "edit");
         let state = until(&rig.host, thread, |s| !s.turns.is_empty()).await;
         let last = state.last_turn().map(|t| t.id);
         let earlier = Some(TurnId(last.unwrap().0 + 9));

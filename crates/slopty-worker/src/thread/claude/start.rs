@@ -378,7 +378,7 @@ async fn begin_as(
         host.seated(thread, seated);
     }
     if let Some(prompt) = prompt {
-        host.typed(thread, id, prompt);
+        host.typed(thread, id, start.prompt.as_deref().unwrap_or_default(), prompt);
         host.first_message(
             thread,
             Pending {

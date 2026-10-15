@@ -396,7 +396,8 @@ pub struct TableState {
 }
 
 impl TableState {
-    /// Apply a frame of the table.
+    /// Apply a frame of the table. A delta's removals go before its rows: a thread removed and
+    /// made again under the same id since the client's cursor is in both, and is there after.
     pub fn apply(&mut self, frame: &TableFrame) {
         match frame {
             TableFrame::Snapshot { cursor, rows } => {
@@ -405,11 +406,11 @@ impl TableState {
             }
             TableFrame::Delta { cursor, rows, removed } => {
                 self.cursor = *cursor;
-                for row in rows {
-                    self.rows.insert(row.id, row.clone());
-                }
                 for id in removed {
                     self.rows.remove(id);
+                }
+                for row in rows {
+                    self.rows.insert(row.id, row.clone());
                 }
             }
         }

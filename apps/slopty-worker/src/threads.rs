@@ -1178,8 +1178,7 @@ fn trust_pressed(threads: &Threads, state: &ThreadState, intent: &Intent) -> Opt
 /// What comes of `intent` on a Codex thread: it goes to the app-server as the Codex TUI's own
 /// would. An answer to a request already settled, from the TUI or another client, is no
 /// error: the card shows who settled it. A reason given with an answer goes as the person's
-/// next words into the turn, since a Codex decision carries none. Nothing goes while Codex does
-/// not run the thread: it would be lost.
+/// next words into the turn, since a Codex decision carries none.
 fn shared(
     who: &Who<'_>,
     codex: &Codex,
@@ -1188,8 +1187,8 @@ fn shared(
     intent: &Intent,
 ) -> Outcome {
     let thread = state.meta.id;
-    if matches!(state.status.liveness, Liveness::Exited { .. }) {
-        return refused("Codex isn't running this thread".to_owned());
+    if let Some(refusal) = not_while_exited(state, intent) {
+        return refusal;
     }
     match intent {
         Intent::Answer { ask, choice, message } => {
@@ -1280,6 +1279,29 @@ fn shared(
         }
         other => other.unsupported(),
     }
+}
+
+/// Why `intent` cannot go to the Codex thread `state` while Codex does not run it, if it cannot.
+///
+/// A thread Codex let go, or that was left exited when Codex went, takes a message or a change
+/// to one waiting, a switch of its settings: the worker takes the thread up again for it, waits
+/// for Codex to come back, or holds it in the list saying it did not go
+/// (`slopty_worker::thread::codex`). An answer or a stop has nothing left to act on: the request
+/// and the turn ended with Codex's run.
+fn not_while_exited(state: &ThreadState, intent: &Intent) -> Option<Outcome> {
+    let Liveness::Exited { resumable } = state.status.liveness else { return None };
+    let waits = matches!(
+        intent,
+        Intent::Send { .. }
+            | Intent::Withdraw { .. }
+            | Intent::Edit { .. }
+            | Intent::Promote { .. }
+            | Intent::Move { .. }
+            | Intent::SetModel { .. }
+            | Intent::SetEffort { .. }
+            | Intent::SetMode { .. }
+    );
+    (!(resumable && waits)).then(|| refused("Codex isn't running this thread".to_owned()))
 }
 
 /// An answer or a hand-back taken, or why not: someone answered first (another device a moment
@@ -1661,6 +1683,39 @@ mod tests {
         assert!(mid.into_iter().all(mid_turn));
         let resting = [Phase::Idle, Phase::Done, Phase::Failed, Phase::Stopped];
         assert!(!resting.into_iter().any(mid_turn));
+    }
+
+    /// A Codex thread left exited and resumable (let go, or Codex gone) still takes a message
+    /// and the changes to one waiting, which the worker sends once Codex takes the thread up
+    /// again; an answer or a stop has nothing left to act on, and a thread that cannot be taken
+    /// up again takes nothing.
+    #[test]
+    fn an_exited_codex_thread_still_takes_a_message() {
+        let now = slopty_core::WallMs::now();
+        let mut observed =
+            slopty_agent::observed::Observed::provisional("", SessionId::new(), "/w", now);
+        let Some(slopty_agent::observed::Out::Begin(meta)) = observed.drain().into_iter().next()
+        else {
+            panic!("a thread begins")
+        };
+        let mut state = ThreadState::new(*meta);
+        state.meta.agent = AgentId::named(AgentId::CODEX);
+        state.meta.drive = Drive::named(Drive::SHARED);
+        assert!(codex::is_shared(&state));
+        state.status.liveness = Liveness::Exited { resumable: true };
+        let send = Intent::Send {
+            text: "Go on.".to_owned(),
+            attachments: vec![],
+            delivery: Delivery::Queue,
+        };
+        let withdraw = Intent::Withdraw { pending: IntentId::new() };
+        assert_eq!(not_while_exited(&state, &send), None, "a message goes");
+        assert_eq!(not_while_exited(&state, &withdraw), None, "a change to one waiting goes");
+        assert!(not_while_exited(&state, &Intent::Interrupt).is_some(), "no turn to stop");
+        state.status.liveness = Liveness::Exited { resumable: false };
+        assert!(not_while_exited(&state, &send).is_some(), "not resumable");
+        state.status.liveness = Liveness::Live;
+        assert_eq!(not_while_exited(&state, &Intent::Interrupt), None);
     }
 
     /// "Trust this folder" goes through on a Claude Code held at its trust dialog, whose thread

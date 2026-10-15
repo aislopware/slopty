@@ -500,15 +500,6 @@ impl Shared {
             ServerNotification::ThreadGoalUpdated(_) | ServerNotification::ThreadGoalCleared(_) => {
                 Vec::new()
             }
-            ServerNotification::ThreadClosed(_) => {
-                let status = Status {
-                    phase: Phase::Idle,
-                    wait: None,
-                    liveness: Liveness::Exited { resumable: true },
-                    since_ms: now,
-                };
-                vec![Action::Status(status)]
-            }
             ServerNotification::TurnStarted(started) => {
                 self.usage = Usage::default();
                 self.retries = 0;
@@ -638,6 +629,8 @@ impl Shared {
                 };
                 vec![Action::ItemCompleted(item)]
             }
+            // A thread Codex closed is ended by the worker as Codex left it, from the whole of
+            // its state (`driven::cut_short`), which this does not hold.
             _ => Vec::new(),
         }
     }

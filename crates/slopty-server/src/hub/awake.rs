@@ -165,4 +165,30 @@ mod tests {
         hub.rank_ladder();
         assert_eq!(log.lock().len(), 6, "an agent alone holds nothing while attached only");
     }
+
+    /// A worker whose link ends mid-turn holds the Mac no more: its rows say what it last said,
+    /// which nothing keeps true. Back, it holds it again while its agent works.
+    #[tokio::test]
+    async fn a_worker_out_of_reach_holds_nothing() {
+        let hub = Hub::new("server".to_owned(), Vec::new());
+        let log = Arc::new(Mutex::new(Vec::new()));
+        hub.keep_awake(Box::new(Log(Arc::clone(&log))), Policy::Working);
+        let (worker, session) = (WorkerId::new(), SessionId::new());
+        let link = || {
+            let (tx, rx) = mpsc::channel(8);
+            let lease = hub
+                .register(registration(worker, vec![summary(session)]), [100, 64, 0, 9].into(), tx)
+                .unwrap();
+            (lease, rx)
+        };
+        let (lease, rx) = link();
+        lease.handle(snapshot(vec![row(Phase::Working, 10, Some(session))]));
+        hub.rank_ladder();
+        assert_eq!(*log.lock(), [true], "its agent at work");
+        drop((lease, rx));
+        hub.rank_ladder();
+        assert_eq!(*log.lock(), [true, false], "out of reach, its rows hold nothing");
+        let (_lease, _rx) = link();
+        assert_eq!(*log.lock(), [true, false, true], "back, with its agent still at work");
+    }
 }

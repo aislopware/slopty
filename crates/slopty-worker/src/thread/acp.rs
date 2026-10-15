@@ -36,6 +36,7 @@ use std::time::Duration;
 
 use slopty_agent::acp::driven::{self, Session};
 use slopty_agent::acp::registry;
+use slopty_agent::queue::Queue;
 use slopty_core::WallMs;
 use slopty_proto::thread::wire::{Intent, Outcome, PastSession, Start};
 use slopty_proto::thread::{
@@ -315,8 +316,21 @@ impl Acp {
             }
             other => return other.unsupported(),
         };
-        if !live && !matches!(asked, ThreadAsk::Send { .. }) {
+        // What is queued is the thread's record, answered whether the agent runs or not; one
+        // sent now takes the thread up again, as a message does.
+        let held = matches!(
+            asked,
+            ThreadAsk::Send { .. }
+                | ThreadAsk::Withdraw { .. }
+                | ThreadAsk::Edit { .. }
+                | ThreadAsk::Promote { .. }
+                | ThreadAsk::Move { .. }
+        );
+        if !live && !held {
             return refused("The agent is not running");
+        }
+        if !live && matches!(asked, ThreadAsk::Promote { .. }) && !driven::resumable(&state.meta) {
+            return refused("The agent cannot take this session up again; start a new thread");
         }
         for ask in std::iter::once(asked).chain(reason) {
             if self.0.send(Ask::Thread { thread, ask }).is_err() {
@@ -582,6 +596,10 @@ impl Served {
             return;
         }
         self.running.remove(&thread);
+        let Some((state, _)) = self.host.state(thread).filter(|(s, _)| is_acp(s)) else {
+            return;
+        };
+        let left = self.held_at_rest(thread, &state, left);
         let (sends, dropped): (Vec<_>, Vec<_>) =
             left.into_iter().partition(|ask| matches!(ask, ThreadAsk::Send { .. }));
         for ask in &dropped {
@@ -591,6 +609,44 @@ impl Served {
             return;
         }
         self.reopen(thread, sends).await;
+    }
+
+    /// `asks` of `thread`'s queue while no agent runs: a message taken back, changed or moved in
+    /// the record, and one sent now made a message that takes the thread up again. The other
+    /// asks.
+    fn held_at_rest(
+        &self,
+        thread: ThreadId,
+        state: &ThreadState,
+        asks: Vec<ThreadAsk>,
+    ) -> Vec<ThreadAsk> {
+        let mut queue = Queue::of(&state.pending);
+        let mut shown = None;
+        let mut left = Vec::new();
+        for ask in asks {
+            match ask {
+                ThreadAsk::Withdraw { intent } => shown = queue.withdraw(intent).or(shown),
+                ThreadAsk::Edit { intent, text, attachments } => {
+                    shown = queue.edit(intent, &text, attachments, ()).or(shown);
+                }
+                ThreadAsk::Move { intent, before } => {
+                    shown = queue.move_to(intent, before).or(shown);
+                }
+                ThreadAsk::Promote { intent } => {
+                    if let Some((held, ())) = queue.take(intent) {
+                        queue.release();
+                        shown = Some(queue.shown());
+                        let (text, attachments) = (held.text, held.attachments);
+                        left.push(ThreadAsk::Send { text, attachments, intent });
+                    }
+                }
+                ask => left.push(ask),
+            }
+        }
+        if let Some(shown) = shown {
+            self.host.apply(thread, vec![shown]);
+        }
+        left
     }
 
     /// Run `thread`'s agent again on its session, loaded, and send `sends` once it is.
