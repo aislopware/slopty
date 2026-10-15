@@ -6,7 +6,9 @@
 //! would grow it without end. When stderr is a regular file, the log caps it itself: once the
 //! file passes [`CAP`] it moves to `<file>.1`, replacing the one before, and a new file takes
 //! its name, put in place of stdout too when that was the same file. A daemon's log so holds
-//! at most twice [`CAP`]. A journal (systemd) or a terminal is left to bound itself.
+//! at most twice [`CAP`]. A file deleted under it, its folder and all, is made again within
+//! [`LOOK_EVERY`] of the next line, so a log cleaned away keeps being written where it is read.
+//! A journal (systemd) or a terminal is left to bound itself.
 //!
 //! [`Repeats`] keeps a failure that repeats from writing a line each time it happens: the
 //! first, then one every so often while it lasts, then how long it lasted once it ends.
@@ -20,6 +22,9 @@ use std::time::{Duration, Instant};
 /// The most a daemon's log file holds before it moves aside.
 pub const CAP: u64 = 8 * 1024 * 1024;
 
+/// How often a daemon's log looks whether its file is still there.
+pub const LOOK_EVERY: Duration = Duration::from_secs(10);
+
 /// How often a failure that goes on is told again ([`Repeats`]).
 pub const STILL_EVERY: Duration = Duration::from_hours(1);
 
@@ -31,12 +36,17 @@ pub fn init(default: &str) {
 
 /// [`init`] with the cap at `cap` bytes.
 pub fn init_capped(default: &str, cap: u64) {
+    init_looking(default, cap, LOOK_EVERY);
+}
+
+/// [`init_capped`], looking whether the file is still there once every `every`.
+pub fn init_looking(default: &str, cap: u64, every: Duration) {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default));
     let ansi = std::io::stderr().is_terminal();
     let builder = tracing_subscriber::fmt().with_env_filter(filter).with_ansi(ansi);
     // Already set, by a test's harness or an earlier call: that one stays.
-    let _set = match Capped::of_stderr(cap) {
+    let _set = match Capped::of_stderr(cap, every) {
         Some(capped) => builder.with_writer(capped).try_init(),
         None => builder.with_writer(std::io::stderr).try_init(),
     };
@@ -58,11 +68,17 @@ struct File {
     size: AtomicU64,
     /// Set while one writer moves it aside, so no other does at the same time.
     moving: AtomicBool,
+    /// When the log began.
+    born: Instant,
+    /// How often it looks whether the file is still at its path.
+    every: Duration,
+    /// When its path was last looked at, in milliseconds since `born`.
+    looked: AtomicU64,
 }
 
 impl Capped {
     /// The cap on stderr's file, or none when stderr is no regular file whose path is known.
-    fn of_stderr(cap: u64) -> Option<Self> {
+    fn of_stderr(cap: u64, every: Duration) -> Option<Self> {
         let stderr = std::io::stderr();
         let stat = rustix::fs::fstat(&stderr).ok()?;
         if rustix::fs::FileType::from_raw_mode(stat.st_mode) != rustix::fs::FileType::RegularFile {
@@ -78,6 +94,9 @@ impl Capped {
             cap,
             size: AtomicU64::new(size),
             moving: AtomicBool::new(false),
+            born: Instant::now(),
+            every,
+            looked: AtomicU64::new(0),
         };
         let capped = Self(Arc::new(file));
         capped.0.wrote(0);
@@ -100,10 +119,10 @@ fn path_of_stderr() -> Option<PathBuf> {
 }
 
 impl File {
-    /// `bytes` more were written; past the cap, the file moves aside.
+    /// `bytes` more were written; past the cap, or deleted, the file moves aside.
     fn wrote(&self, bytes: u64) {
         let size = self.size.fetch_add(bytes, Ordering::Relaxed).saturating_add(bytes);
-        if size <= self.cap || self.moving.swap(true, Ordering::Acquire) {
+        if (size <= self.cap && !self.gone()) || self.moving.swap(true, Ordering::Acquire) {
             return;
         }
         // A file that cannot move aside is written on: the next line tries again.
@@ -113,7 +132,20 @@ impl File {
         self.moving.store(false, Ordering::Release);
     }
 
-    /// `<file>` to `<file>.1`, and a new `<file>` in place of stderr (and stdout).
+    /// Whether the file is no longer at its path, looked at once every `every`.
+    fn gone(&self) -> bool {
+        let ms = |d: Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
+        let now = ms(self.born.elapsed());
+        let last = self.looked.load(Ordering::Relaxed);
+        if now < last.saturating_add(ms(self.every)) {
+            return false;
+        }
+        self.looked.store(now, Ordering::Relaxed);
+        !self.path.exists()
+    }
+
+    /// `<file>` to `<file>.1`, and a new `<file>` in place of stderr (and stdout), its folder made
+    /// again if it went.
     fn move_aside(&self) -> std::io::Result<()> {
         let mut old = self.path.clone().into_os_string();
         old.push(".1");
@@ -121,6 +153,9 @@ impl File {
         match std::fs::rename(&self.path, &old) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
             _ => {}
+        }
+        if let Some(folder) = self.path.parent() {
+            std::fs::create_dir_all(folder)?;
         }
         let new = std::fs::OpenOptions::new().create(true).append(true).open(&self.path)?;
         rustix::stdio::dup2_stderr(&new)?;

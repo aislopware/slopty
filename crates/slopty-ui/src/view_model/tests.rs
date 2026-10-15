@@ -252,3 +252,129 @@ fn a_started_agent_nests_under_its_parent() {
     child.status.phase = Phase::Done;
     assert_eq!(rows::running_children(parent.id, [&parent, &child].into_iter()), 0);
 }
+
+/// A request open on a thread, as an agent's worker holds it.
+fn request(
+    kind: &str,
+    options: &[(&str, &str, slopty_proto::thread::Effect)],
+) -> slopty_proto::thread::Request {
+    use slopty_proto::thread::{AskId, Choice, Request, RequestState};
+    Request {
+        id: AskId("ask-1".to_owned()),
+        item: None,
+        kind: kind.to_owned(),
+        title: "Run cargo test?".to_owned(),
+        text: None,
+        options: options
+            .iter()
+            .map(|(id, label, effect)| Choice {
+                id: (*id).to_owned(),
+                label: (*label).to_owned(),
+                effect: *effect,
+                scope: None,
+                stops: false,
+            })
+            .collect(),
+        questions: Vec::new(),
+        proposed: None,
+        schema_json: None,
+        url: None,
+        state: RequestState::Open,
+        opened_ms: slopty_core::WallMs::from_millis(1),
+        until_ms: None,
+    }
+}
+
+/// The request the shell's question panel serves (`slopty_shell::composer::pending_input_request`):
+/// an unanswered input on the last answer.
+fn served(
+    entries: &[slopty_view_doc::SessionMessageEntry],
+) -> Option<(String, Vec<slopty_view_proto::UserInputQuestion>)> {
+    entries.iter().rev().find(|e| e.role == MessageRole::Assistant).and_then(|entry| {
+        entry.parts.iter().find_map(|part| match part {
+            MessagePart::Input { request_id, questions, resolved: false, .. } => {
+                Some((request_id.clone(), questions.clone()))
+            }
+            _ => None,
+        })
+    })
+}
+
+/// The question panel's answer to the question `id`.
+fn picked(id: &str, label: &str) -> slopty_view_proto::UserInputAnswer {
+    slopty_view_proto::UserInputAnswer {
+        question_id: id.to_owned(),
+        labels: vec![label.to_owned()],
+    }
+}
+
+/// An approval the agent waits on is asked where the person looks: the question panel serves
+/// it from the last answer, and the pick goes back as the choice it names.
+#[test]
+fn an_open_approval_is_asked_and_answered_by_its_choice() {
+    use slopty_proto::thread::Effect;
+    let mut state = fixtures::thread("tools");
+    let approval = request(
+        slopty_proto::thread::Request::APPROVAL,
+        &[("allow", "Allow", Effect::Allow), ("deny", "Deny", Effect::Deny)],
+    );
+    state.requests.push(approval.clone());
+    let mut entries = transcript::entries(&state, "w", |_| None, |_| None);
+    transcript::asks(&state, "w", &mut entries);
+
+    let (asked, questions) = served(&entries).expect("the panel serves it");
+    assert_eq!(asked, "ask-1");
+    assert_eq!(questions[0].options, ["Allow", "Deny"]);
+    assert_eq!(
+        transcript::answer(&approval, &[picked(&questions[0].id, "Allow")]),
+        Ok(("allow".to_owned(), None))
+    );
+    // Words of one's own turn the call down, with them as the reason.
+    assert_eq!(
+        transcript::answer(&approval, &[picked(&questions[0].id, "use nextest")]),
+        Ok(("deny".to_owned(), Some("use nextest".to_owned())))
+    );
+}
+
+/// Claude Code held at its trust dialog has said nothing yet: its request still gets an answer of
+/// its own to be asked on.
+#[test]
+fn a_request_before_any_answer_is_asked_on_one_of_its_own() {
+    use slopty_proto::thread::Effect;
+    let mut state = fixtures::thread("tools");
+    state.items.clear();
+    state.turns.clear();
+    state.requests.push(request("input", &[("trust", "Trust this folder", Effect::Answer)]));
+    let mut entries = Vec::new();
+    transcript::asks(&state, "w", &mut entries);
+    let (_, questions) = served(&entries).expect("the panel serves it");
+    assert_eq!(questions[0].options, ["Trust this folder"]);
+}
+
+/// A turn left open by a stale cache, or by an agent gone without ending it, reads as finished
+/// while the thread does not work: its tool groups stay closed.
+#[test]
+fn an_open_turn_of_a_thread_at_rest_reads_as_finished() {
+    let mut state = fixtures::thread("tools");
+    let last = state.turns.last_mut().expect("a turn");
+    last.state = slopty_proto::thread::TurnState::Active;
+    let mut entries = transcript::entries(&state, "w", |_| None, |_| None);
+    assert!(entries.iter().any(|e| e.status == Some(MessageStatus::Streaming)));
+    transcript::settle(&mut entries, true);
+    assert!(entries.iter().any(|e| e.status == Some(MessageStatus::Streaming)), "live: as it is");
+    transcript::settle(&mut entries, false);
+    assert!(entries.iter().all(|e| e.status != Some(MessageStatus::Streaming)));
+}
+
+/// The shell may queue messages and send its chips: Slopty answers both.
+#[test]
+fn the_shell_is_told_what_slopty_answers() {
+    let can = super::capabilities();
+    for capability in [
+        slopty_view_proto::capabilities::COMPOSER_REFERENCES_V1,
+        slopty_view_proto::capabilities::MESSAGE_QUEUE_V1,
+        slopty_view_proto::capabilities::MESSAGE_QUEUE_ACTIONS_V1,
+    ] {
+        assert!(can.iter().any(|c| c == capability), "{capability}");
+    }
+}

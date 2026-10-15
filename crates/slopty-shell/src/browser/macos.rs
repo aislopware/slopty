@@ -88,6 +88,10 @@ impl BrowserData {
         let configuration = unsafe { objc2_web_kit::WKWebViewConfiguration::new(mtm) };
         unsafe {
             configuration.setWebsiteDataStore(data.store.as_ref().unwrap());
+            // slopty: WebKit's bare user agent names no browser, and sites (Google's among them)
+            // serve it their pages for old browsers; it says what Safari says.
+            configuration
+                .setApplicationNameForUserAgent(Some(&NSString::from_str(&safari_user_agent())));
         }
         configuration
     }
@@ -114,6 +118,23 @@ impl BrowserData {
             }
         }
     }
+}
+
+/// What Safari adds to WebKit's user agent (slopty): its version, read from the Safari on this
+/// Mac, and the WebKit build Safari has said since it froze it.
+fn safari_user_agent() -> String {
+    const PLIST: &str = "/Applications/Safari.app/Contents/Info.plist";
+    const KEY: &str = "<key>CFBundleShortVersionString</key>";
+    let version = std::fs::read_to_string(PLIST).ok().and_then(|plist| {
+        let after = &plist[plist.find(KEY)? + KEY.len()..];
+        let value = after.split_once("<string>")?.1.split_once("</string>")?.0.trim();
+        let mut parts = value.split('.');
+        let major = parts.next().filter(|p| p.parse::<u32>().is_ok())?;
+        let minor = parts.next().filter(|p| p.parse::<u32>().is_ok()).unwrap_or("0");
+        Some(format!("{major}.{minor}"))
+    });
+    let version = version.as_deref().unwrap_or("26.0");
+    format!("Version/{version} Safari/605.1.15")
 }
 
 /// macOS 12/13 have only a single default persistent store. Do not silently

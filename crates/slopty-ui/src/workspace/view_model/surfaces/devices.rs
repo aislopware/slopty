@@ -98,7 +98,7 @@ impl WorkspaceView {
             created_at: None,
             version: caps.and_then(|caps| version(&caps.build)),
             cursor_sdk_version: None,
-            capabilities: Vec::new(),
+            capabilities: crate::view_model::capabilities(),
             actions: self.device_actions.get(&key).cloned().unwrap_or_default(),
         })
     }

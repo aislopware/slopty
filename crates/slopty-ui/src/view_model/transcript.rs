@@ -2,10 +2,11 @@
 //! one assistant entry whose parts are its text, reasoning, tool calls and notices.
 
 use slopty_proto::thread::{
-    IntentId, ItemBody, ThreadId, ThreadState, ToolCall, ToolDetail, ToolState, Turn, TurnId,
-    TurnState, kind,
+    IntentId, ItemBody, Request, ThreadId, ThreadState, ToolCall, ToolDetail, ToolState, Turn,
+    TurnId, TurnState, kind,
 };
 use slopty_view_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry, ToolDiffStat};
+use slopty_view_proto::{UserInputAnswer, UserInputQuestion};
 
 /// `state`'s transcript, its entries written on `device`.
 ///
@@ -61,6 +62,178 @@ pub fn entries(
         out.push(entry);
     }
     out
+}
+
+/// Answers still streaming in `entries` read as finished when their thread is not `live`.
+///
+/// A turn a stale cache, or an agent that went without ending it, left open is over, and its
+/// tool groups stay closed instead of opening and then closing as the worker catches up.
+pub fn settle(entries: &mut [SessionMessageEntry], live: bool) {
+    if live {
+        return;
+    }
+    for entry in entries {
+        if entry.status == Some(MessageStatus::Streaming) {
+            entry.status = Some(MessageStatus::Complete);
+        }
+    }
+}
+
+/// `state`'s open requests as the shell's question panel takes them.
+///
+/// They go on the answer the agent is giving: the last entry when it is the agent's, else an
+/// entry of their own after the person's message. A request is asked where the person looks,
+/// whatever it is: an approval, a question, a plan, Claude Code's own dialog at start.
+pub fn asks(state: &ThreadState, device: &str, entries: &mut Vec<SessionMessageEntry>) {
+    let parts: Vec<MessagePart> =
+        state.requests.iter().filter(|request| request.is_open()).map(input).collect();
+    let Some(first) = state.requests.iter().find(|request| request.is_open()) else { return };
+    let at = i64::try_from(first.opened_ms.as_millis()).unwrap_or(i64::MAX);
+    if let Some(entry) = tail(entries, &format!("ask:{}", first.id.0), at, device) {
+        entry.parts.extend(parts);
+    }
+}
+
+/// `why` an intent was turned down, said at the end of the transcript.
+pub fn refused(why: &str, at: i64, device: &str, entries: &mut Vec<SessionMessageEntry>) {
+    let id = format!("refused:{at}");
+    let part = MessagePart::Error { id: id.clone(), message: why.to_owned() };
+    if let Some(entry) = tail(entries, &id, at, device) {
+        entry.parts.push(part);
+    }
+}
+
+/// The agent's last answer when the transcript ends on it, else a new one with id `id`; `None`
+/// never, as the list is not empty after.
+fn tail<'a>(
+    entries: &'a mut Vec<SessionMessageEntry>,
+    id: &str,
+    at: i64,
+    device: &str,
+) -> Option<&'a mut SessionMessageEntry> {
+    let ends_on_answer = entries.last().is_some_and(|entry| entry.role == MessageRole::Assistant);
+    if !ends_on_answer {
+        entries.push(SessionMessageEntry {
+            id: id.to_owned(),
+            role: MessageRole::Assistant,
+            parts: Vec::new(),
+            created_at: at,
+            device_id: device.to_owned(),
+            status: None,
+            continuation_of: None,
+            duration_ms: None,
+        });
+    }
+    entries.last_mut()
+}
+
+/// The id of the one question of a request that offers its choices.
+const CHOICE: &str = "choice";
+
+/// What a request asks, as the panel heads it.
+fn header(request: &Request) -> String {
+    match request.kind.as_str() {
+        Request::APPROVAL | Request::RETRY => "Approval",
+        Request::PLAN => "Plan",
+        Request::QUESTION => "Question",
+        Request::ELICITATION => "Form",
+        _ => "Input",
+    }
+    .to_owned()
+}
+
+/// A choice as the panel offers it: its label, and how far it reaches when it reaches beyond
+/// this once.
+fn choice_label(choice: &slopty_proto::thread::Choice) -> String {
+    match &choice.scope {
+        Some(scope) if !scope.trim().is_empty() => format!("{} ({scope})", choice.label),
+        _ => choice.label.clone(),
+    }
+}
+
+/// An open request as the shell's input part.
+fn input(request: &Request) -> MessagePart {
+    let questions = if request.questions.is_empty() {
+        let mut question = request.title.clone();
+        if let Some(text) = request.text.as_ref().filter(|text| !text.text.trim().is_empty()) {
+            question = format!("{question}\n\n{}", text.text);
+        }
+        vec![UserInputQuestion {
+            id: CHOICE.to_owned(),
+            header: header(request),
+            question,
+            options: request.options.iter().map(choice_label).collect(),
+            multi_select: false,
+            prefill: None,
+            multiline: request.options.is_empty(),
+        }]
+    } else {
+        request
+            .questions
+            .iter()
+            .enumerate()
+            .map(|(ix, question)| UserInputQuestion {
+                id: ix.to_string(),
+                header: question.header.clone().unwrap_or_else(|| header(request)),
+                question: question.text.clone(),
+                options: question.options.iter().map(|o| o.label.clone()).collect(),
+                multi_select: question.multi_select,
+                prefill: None,
+                multiline: false,
+            })
+            .collect()
+    };
+    MessagePart::Input {
+        id: format!("ask:{}", request.id.0),
+        request_id: request.id.0.clone(),
+        questions,
+        resolved: false,
+    }
+}
+
+/// The choice and words an [`Intent::Answer`](slopty_proto::thread::wire::Intent::Answer) to
+/// `request` carries for the panel's `answers`; why not, when they answer nothing it offers.
+///
+/// A question's answers go as its agent takes them
+/// ([`Answer::choice`](slopty_proto::thread::detail::Answer::choice)); any other request takes
+/// the choice picked, or, for words of one's own, its plain deny with them as the reason, or the
+/// words themselves where it offers nothing to pick.
+pub fn answer(
+    request: &Request,
+    answers: &[UserInputAnswer],
+) -> Result<(String, Option<String>), String> {
+    use slopty_proto::thread::detail::Answer;
+    if !request.questions.is_empty() {
+        let given: Vec<Answer> = request
+            .questions
+            .iter()
+            .enumerate()
+            .filter_map(|(ix, question)| {
+                let labels = &answers.iter().find(|a| a.question_id == ix.to_string())?.labels;
+                Some(Answer { question: question.text.clone(), answer: labels.join(Answer::JOIN) })
+            })
+            .collect();
+        if given.len() != request.questions.len() {
+            return Err("Answer every question".to_owned());
+        }
+        return Ok((Answer::choice(&request.questions, &given), None));
+    }
+    let picked = answers
+        .iter()
+        .find(|a| a.question_id == CHOICE)
+        .and_then(|a| a.labels.first())
+        .map(|label| label.trim().to_owned())
+        .filter(|label| !label.is_empty())
+        .ok_or_else(|| "Pick an answer".to_owned())?;
+    if let Some(choice) = request.options.iter().find(|c| choice_label(c) == picked) {
+        return Ok((choice.id.clone(), None));
+    }
+    if request.options.is_empty() {
+        return Ok((picked, None));
+    }
+    let deny = slopty_proto::thread::plain_deny(&request.options)
+        .ok_or_else(|| format!("{picked} is not one of its answers"))?;
+    Ok((deny.id.clone(), Some(picked)))
 }
 
 /// A turn's answer, begun with its first part.

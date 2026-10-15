@@ -378,6 +378,22 @@ impl ThreadHub {
         }
     }
 
+    /// How `thread`'s agent, exited, is taken up again on its own session: the start that does
+    /// it; `Err` with why it cannot be. `Ok(None)` while the agent runs, or when the next message
+    /// takes it up by itself.
+    pub fn resume_start(&self, thread: ThreadId) -> Result<Option<Start>, String> {
+        let Some(state) = self.threads.mirror(thread).and_then(|m| m.state()) else {
+            return Ok(None);
+        };
+        match gone(state) {
+            Some(Gone::Resume(start)) => Ok(Some(*start)),
+            Some(Gone::Over) => {
+                Err(format!("{} can't take this session up again", agent_label(&state.meta.agent)))
+            }
+            Some(Gone::ByMessage) | None => Ok(None),
+        }
+    }
+
     /// Whether a start taking `thread` up again is on its way.
     #[must_use]
     pub fn resuming(&self, thread: ThreadId) -> bool {

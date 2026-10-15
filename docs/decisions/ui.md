@@ -12059,3 +12059,54 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   Replacing the transcript in place was weighed and set aside: side by side keeps both doors to
   the same session open at once, which is the point. Other harnesses have no TUI of their own
   here, so their chats show none. Test: `slopty-e2e` `app::surfaces_files` (live).
+- ✅ **What an agent waits on is asked in its chat (2026-10-15).** The view model never put a
+  thread's open requests in the transcript, so a permission prompt, an `AskUserQuestion`, a plan
+  to approve or Claude Code's own trust dialog at start showed only as "Input" in the sidebar,
+  with nothing in the chat to answer: two chats in an untrusted folder sat at "New session" for
+  good. Each open request is now an input part on the agent's last answer, or on one of its own
+  when it has said nothing yet, and zeron's question panel serves it as it serves any question:
+  a request's choices as its options (a scope after the label), a question's own questions and
+  answers as Claude Code takes them. Words of one's own on a request that offers choices turn the
+  call down with them as the reason. The answer goes back as `Intent::Answer` through
+  `RespondInput`. Tests: `slopty-ui` `view_model::tests::an_open_approval_is_asked_and_answered_by_its_choice`,
+  `a_request_before_any_answer_is_asked_on_one_of_its_own`.
+- ✅ **Delete closes a session for good (2026-10-15).** zeron's "Delete session?" says the chat
+  is permanently deleted, but the view model only forgot chats not yet started: a real session
+  stayed. Delete now closes the thread on its worker (`Intent::Discard`): its agent ends, the
+  worker forgets it, and every device stops showing it; the agent's own session file stays where
+  the agent keeps it. Removing a project, whose dialog says it deletes its sessions, closes each
+  thread in it. Test: `slopty-ui` `workspace::view_model::tests::deleting_a_started_chat_closes_its_thread`.
+- ✅ **An exited agent is taken up again where the person goes on (2026-10-15).** A Claude Code
+  or Codex chat whose agent had exited refused every message ("runs in no terminal here"), and
+  its TUI tab said the same: the resume path had gone with the old workspace. A message to such
+  a chat now resumes its session with the message as its first words (`ThreadHub::resume`, the
+  start `--resume <id>` the worker already takes), and the TUI switch resumes Claude Code in a
+  terminal of its own and shows that terminal once it runs. Test: `slopty-ui`
+  `workspace::view_model::tests::a_message_to_an_exited_agent_takes_its_session_up_again`.
+- ✅ **The shell is told what Slopty answers (2026-10-15).** The view model said it supported no
+  host feature, so the shell refused to send while an agent worked ("Update the chat's engine"),
+  refused every draft with a file or command chip, and never showed the queue. The engine and
+  every worker now name composer references and the message queue (its actions, attachments
+  and edit lease), and each message goes to its agent through zeron's own decoder
+  (`invocation::harness_prompt`), which puts the chips in the agent's words. A new chat's "New
+  worktree" now starts in a worktree of its own (`Start::worktree`) instead of the main
+  checkout, and a side chat begun from the side panel asks its chat aside instead of starting a
+  thread with no parent. Test: `slopty-ui` `view_model::tests::the_shell_is_told_what_slopty_answers`.
+- ✅ **A turn the agent no longer runs reads as finished (2026-10-15).** Opening a chat drew it
+  from the client's cache first, which can hold a turn still open; its tool groups opened as a
+  live turn's do, then closed as the worker caught up. A turn reads as streaming only while the
+  worker's table says the thread works or waits on the person. Test: `slopty-ui`
+  `view_model::tests::an_open_turn_of_a_thread_at_rest_reads_as_finished`.
+- ✅ **What a worker turned down is said in the chat (2026-10-15).** A refused intent (a message,
+  an answer, a resume) was kept by the hub and shown nowhere, so actions failed in silence. The
+  last refusal newer than the thread's last item shows as an error line at the end of the chat.
+- ✅ **The browser says it is Safari (2026-10-15).** The right pane's browser is WebKit
+  (`WKWebView`), whose bare user agent names no browser, so Google and others served it their
+  pages for old browsers. It now adds Safari's own words (`Version/<Safari's version>
+  Safari/605.1.15`), as Safari on the same Mac does.
+- ✅ **A rail jump no longer crashes the app (2026-10-15).** The landing inset above holds the
+  prompt with a negative `offset_in_item`, which `ListState::scroll_to` allows; a later small
+  scroll then sought backward in the list's tree and panicked ("cannot seek backward"), twice in
+  the person's use. Fixed in gpui-fast (`ccf27de`, as zeronsh/zui does): `scroll_by` compares the
+  target with the cursor's position. Test: gpui-fast
+  `fast::tests::list_scroll_by::a_nudge_from_a_negative_offset_lands_in_the_item_above`.

@@ -15,6 +15,7 @@ use slopty_core::{ItemId, SessionId};
 use slopty_proto::git::RunScript;
 use slopty_proto::items::{Item, ItemKind, ItemOp};
 use slopty_proto::terminal::{OpenSession, SessionState, TermSize};
+use slopty_proto::thread::{AgentId, IntentId};
 use slopty_proto::{ClientMsg, RequestId};
 use slopty_terminal::{GridFrame, TerminalViewEvent};
 use slopty_view_proto::TerminalSession;
@@ -39,6 +40,9 @@ pub(super) struct Terminals {
     coming: HashMap<SessionId, (String, Reply)>,
     /// Shown in a tab of the interface.
     shown: HashSet<SessionId>,
+    /// Agents' terminals asked for while their agent had exited, by chat: the start taking the
+    /// agent up again in a terminal of its own, and the answer, given once the terminal is there.
+    resuming: HashMap<String, (IntentId, Reply)>,
 }
 
 /// The program a session runs, as a tab names it: the command's last path part.
@@ -59,8 +63,7 @@ impl WorkspaceView {
         if params.get("agent").and_then(serde_json::Value::as_bool) == Some(true) {
             let chat = param(params, "chatId").unwrap_or_default().to_owned();
             let Some(session) = self.live_agent_terminal(&chat, cx) else {
-                let why = "Its agent runs in no terminal here now, or it is open in another tab";
-                return now(Err(RpcError::Failed(why.to_owned())));
+                return self.live_resume_in_terminal(chat, cx);
             };
             self.live_hold(session, &chat, cx);
             let (reply, answer) = oneshot::channel();
@@ -127,6 +130,67 @@ impl WorkspaceView {
         tracing::debug!(%key, request, cwd = ?spec.cwd, "a terminal for the interface");
         self.send(key, ClientMsg::OpenSession { request, spec });
         later(answer, cx)
+    }
+
+    /// The terminal of `chat`'s agent asked for while it runs in none: an agent that exited (a
+    /// Claude Code closed, its machine restarted) is taken up again on its own session, in a
+    /// terminal of its own, and the answer waits for that terminal.
+    fn live_resume_in_terminal(
+        &mut self,
+        chat: String,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<RpcReply, RpcError>> {
+        const NONE: &str =
+            "Its agent has no terminal here, or that terminal is open in another tab";
+        let Some((key, thread)) = self.chat_thread(&chat, cx) else {
+            return now(Err(RpcError::Failed("The chat has not started yet".to_owned())));
+        };
+        let hub = self.thread_hub(key, cx);
+        let start = match hub.read(cx).resume_start(thread) {
+            Ok(Some(start)) if start.agent.is(AgentId::CLAUDE_CODE) => start,
+            Ok(_) => return now(Err(RpcError::Failed(NONE.to_owned()))),
+            Err(why) => return now(Err(RpcError::Failed(why))),
+        };
+        let (reply, answer) = oneshot::channel();
+        let id = hub.update(cx, |hub, cx| hub.resume(thread, start, cx));
+        if let Some((_, earlier)) =
+            cx.global_mut::<Live>().terminals.resuming.insert(chat, (id, reply))
+        {
+            let _gone = earlier.send(Err(RpcError::Failed("Asked again".to_owned())));
+        }
+        later(answer, cx)
+    }
+
+    /// Answer each terminal asked of an agent taken up again: once it runs in its terminal, that
+    /// terminal; once its start was turned down, why.
+    pub(in crate::workspace) fn live_settle_resumes(&mut self, cx: &mut Context<Self>) {
+        let Some(live) = cx.try_global::<Live>() else { return };
+        if live.terminals.resuming.is_empty() {
+            return;
+        }
+        let resuming = std::mem::take(&mut cx.global_mut::<Live>().terminals.resuming);
+        let mut waiting = HashMap::new();
+        for (chat, (id, reply)) in resuming {
+            if reply.is_closed() {
+                continue;
+            }
+            if let Some(session) = self.live_agent_terminal(&chat, cx) {
+                self.live_hold(session, &chat, cx);
+                cx.global_mut::<Live>().terminals.coming.insert(session, (chat, reply));
+                continue;
+            }
+            let refused = self.chat_thread(&chat, cx).and_then(|(key, thread)| {
+                let hub = self.held_hub(key)?.read(cx);
+                hub.refusals(thread).find(|r| r.id == id).map(|r| r.words.clone())
+            });
+            if let Some(words) = refused {
+                let _gone = reply.send(Err(RpcError::Failed(words)));
+                continue;
+            }
+            waiting.insert(chat, (id, reply));
+        }
+        cx.global_mut::<Live>().terminals.resuming.extend(waiting);
+        self.live_settle_terminals(cx);
     }
 
     /// The terminal the agent of `chat` runs in (Claude Code's own TUI, on the same session the

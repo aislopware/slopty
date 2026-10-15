@@ -217,3 +217,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   both links went quiet, left nothing on the client's side to read. With no terminal, the app
   now logs to `~/Library/Logs/Slopty/slopty-app.log`, beside the server's and the worker's,
   begun afresh past 32 MiB at launch.
+- ✅ **A daemon's log deleted under it is made again (2026-10-15).** The server's and the worker's
+  logs went missing on this Mac: `~/Library/Logs/Slopty` had been cleaned away while they ran,
+  and launchd's descriptors kept writing to the deleted file, so nothing after it could be read.
+  A daemon's log now looks every 10 s whether its file is still at its path and, when it is
+  not, makes the folder and the file again and points stderr (and stdout) at it, as it does when
+  the file passes its cap. Test: `slopty-crash` `log_gone::a_log_deleted_under_the_daemon_is_made_again`.

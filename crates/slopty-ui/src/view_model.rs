@@ -293,6 +293,26 @@ pub struct ViewModel {
     asks: mpsc::UnboundedSender<Ask>,
 }
 
+/// What the shell may ask of Slopty, on this device and on every worker.
+///
+/// Its composer's chips, put in each agent's words on the way, and the thread's queue of
+/// messages sent while the agent works. The rest of zeron's host features (a projectless scratch
+/// folder, the cleaned text of a queued attachment, updating an agent) Slopty does not do.
+#[must_use]
+pub fn capabilities() -> Vec<String> {
+    use slopty_view_proto::capabilities as can;
+    [
+        can::COMPOSER_REFERENCES_V1,
+        can::MESSAGE_QUEUE_V1,
+        can::MESSAGE_QUEUE_ACTIONS_V1,
+        can::MESSAGE_QUEUE_ATTACHMENTS_V1,
+        can::MESSAGE_QUEUE_EDIT_LEASE_V1,
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
+}
+
 impl ViewModel {
     /// A view model for the client `device`, with the feed the workspace publishes into and the
     /// asks it answers.
@@ -305,7 +325,7 @@ impl ViewModel {
             // Slopty has no sign-in of its own: the tailnet decides who reaches what.
             workspace_scope: WorkspaceScope::Local,
             cursor_sdk_version: None,
-            capabilities: Vec::new(),
+            capabilities: capabilities(),
         };
         (Arc::new(Self { info, feed: Arc::clone(&feed), asks }), feed, asked)
     }

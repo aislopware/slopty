@@ -14,7 +14,9 @@ use chrono::{DateTime, Utc};
 use gpui::{Context, Subscription, Task};
 use slopty_client::WorkerKey;
 use slopty_proto::ClientMsg;
-use slopty_proto::thread::wire::{Intent, IntentDone, Outcome, Start, ThreadRequest, ThreadRow};
+use slopty_proto::thread::wire::{
+    Intent, IntentDone, NewWorktree, Outcome, Start, ThreadRequest, ThreadRow,
+};
 use slopty_proto::thread::{AgentId, Delivery, IntentId, ThreadId};
 use slopty_view_doc::SessionCommandPayload;
 use slopty_view_proto::HarnessId;
@@ -43,6 +45,8 @@ struct Minted {
     worker: WorkerKey,
     cwd: String,
     created: DateTime<Utc>,
+    /// The chat it is a side chat of: its first message asks that chat's thread aside.
+    parent: Option<String>,
 }
 
 /// What the workspace keeps for the shell.
@@ -70,6 +74,9 @@ pub(super) struct Bridge {
     /// the worker has not answered, by its intent: sent again, under the same id, when the link
     /// comes back and when the person retries.
     unanswered: HashMap<IntentId, (WorkerKey, ClientMsg)>,
+    /// The first message of a side chat, by the aside that starts it: sent to the aside once
+    /// it has started, with the id the shell gave it.
+    first_words: HashMap<IntentId, (String, Vec<String>, String)>,
     /// The id the shell gave each message it sent, by the intent that sent it: its entry in
     /// the transcript goes by it, so the shell's own echo of the message gives way to it.
     named: HashMap<IntentId, String>,
@@ -86,6 +93,23 @@ impl std::fmt::Debug for Bridge {
     }
 }
 
+/// The harness the shell knows agent `agent` by: the inverse of [`agent_of`].
+fn harness_of(agent: &AgentId) -> HarnessId {
+    agent.acp_name().map_or_else(|| HarnessId::named(&agent.0), HarnessId::named)
+}
+
+/// `text` from the composer as agent `harness` reads it: the shell's chips (a file, a folder, a
+/// command, a skill, a chat, an attachment) put in the agent's own words (zeron's own decoder,
+/// [`slopty_view_proto::invocation::harness_prompt`]). Codex's skills too: Slopty gives Codex
+/// its prompt as text.
+fn agent_prompt(text: &str, harness: HarnessId) -> String {
+    let prompt = slopty_view_proto::invocation::harness_prompt(text, harness);
+    if harness == HarnessId::CODEX {
+        return slopty_view_proto::invocation::invocation_prompt(&prompt);
+    }
+    prompt
+}
+
 /// The agent a shell harness names: Claude Code, Codex and pi by their own ids, any other an
 /// ACP agent by its registry's name; Claude Code when the shell names none.
 fn agent_of(harness: Option<HarnessId>) -> AgentId {
@@ -97,6 +121,28 @@ fn agent_of(harness: Option<HarnessId>) -> AgentId {
         Some(HarnessId::PI) => AgentId::named(AgentId::PI),
         Some(other) => AgentId::acp(other.as_str()),
     }
+}
+
+/// The name of a worktree a chat starts in: the first words of its first message, then a few
+/// letters of the start's own id so no two chats share one.
+fn worktree_name(prompt: &str, id: IntentId) -> String {
+    let words: Vec<String> = prompt
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .take(4)
+        .map(str::to_ascii_lowercase)
+        .collect();
+    let mut name = words.join("-");
+    name.truncate(32);
+    let name = name.trim_end_matches('-');
+    let tag: String = id.to_string().chars().rev().take(4).collect();
+    if name.is_empty() { format!("chat-{tag}") } else { format!("{name}-{tag}") }
+}
+
+/// When intent `id` was made, in ms since the epoch: its id is time-ordered (`UUIDv7`).
+fn refused_at(id: IntentId) -> Option<u64> {
+    let (secs, nanos) = id.as_uuid().get_timestamp()?.to_unix();
+    Some(secs.saturating_mul(1000).saturating_add(u64::from(nanos / 1_000_000)))
 }
 
 /// A string parameter.
@@ -248,7 +294,7 @@ impl WorkspaceView {
                 space_id: Some(self.view_space_id(&device, &minted.cwd)),
                 last_seen_at: None,
                 room_gen: None,
-                parent_chat_id: None,
+                parent_chat_id: minted.parent.clone(),
             });
         }
         for project in self.added_projects() {
@@ -278,6 +324,8 @@ impl WorkspaceView {
         for chat in feed.queued() {
             feed.queue(&chat, self.view_queue(&chat, cx));
         }
+        // An agent taken up again for its terminal shows in the table, not the workspace.
+        self.live_settle_resumes(cx);
     }
 
     /// The messages waiting to go to the chat `chat`'s agent, as its thread holds them.
@@ -318,12 +366,32 @@ impl WorkspaceView {
         let table = &hub.threads().rows().rows;
         let device = key.to_string();
         let named = &self.view_model.named;
-        Some(transcript::entries(
+        let mut entries = transcript::entries(
             state,
             &device,
             |child| table.get(&child).map(rows::running),
             |intent| named.get(&intent).cloned(),
-        ))
+        );
+        // The table is the worker's word on whether the agent works now; a mirror drawn from the
+        // cache may still hold a turn that ended since.
+        let live = table.get(&thread).is_some_and(|row| {
+            rows::running(row) || row.status.phase == slopty_proto::thread::Phase::NeedsYou
+        });
+        transcript::settle(&mut entries, live);
+        transcript::asks(state, &device, &mut entries);
+        // What the worker last turned down, until the thread moves past it.
+        let last = state.items.last().map_or(0, |item| item.at_ms.as_millis());
+        // The marks the app keeps by itself (seen, a draft) are no act of the person's.
+        let acted = |r: &&crate::conversation::thread::hub::Refusal| {
+            !matches!(r.intent, Some(Intent::Seen { .. } | Intent::Draft { .. }))
+        };
+        if let Some(refusal) = hub.refusals(thread).rfind(acted)
+            && let Some(at) = refused_at(refusal.id).filter(|at| *at > last)
+        {
+            let at = i64::try_from(at).unwrap_or(i64::MAX);
+            transcript::refused(&refusal.words, at, &device, &mut entries);
+        }
+        Some(entries)
     }
 
     /// Answer one of the interface's asks.
@@ -403,9 +471,10 @@ impl WorkspaceView {
                     (worker, "~".to_owned())
                 };
                 let cwd = param(params, "cwd").map_or(cwd, str::to_owned);
+                let parent = param(params, "parentChatId").map(str::to_owned);
                 self.view_model
                     .minted
-                    .insert(chat.to_owned(), Minted { worker, cwd, created: Utc::now() });
+                    .insert(chat.to_owned(), Minted { worker, cwd, created: Utc::now(), parent });
                 self.view_changed(cx);
                 Ok(serde_json::json!({}))
             }
@@ -429,10 +498,27 @@ impl WorkspaceView {
                 hub.update(cx, |hub, cx| hub.intent(thread, Intent::Name { title }, cx));
                 Ok(serde_json::json!({}))
             }
+            // Deleted for good: a chat not started is forgotten; a thread is closed on its worker,
+            // its agent ended and the worker's record of it gone, and every device stops showing
+            // it. The agent's own session stays wherever the agent keeps it.
             ("deleteChat", Some(chat)) => {
-                self.view_model.minted.remove(chat);
+                if self.view_model.minted.remove(chat).is_none() {
+                    let (key, thread) = self
+                        .chat_thread(chat, cx)
+                        .ok_or_else(|| RpcError::Failed(format!("no thread {chat}")))?;
+                    let hub = self.thread_hub(key, cx);
+                    hub.update(cx, |hub, cx| hub.intent(thread, Intent::Discard, cx));
+                    self.view_model.followed.remove(chat);
+                }
                 self.view_changed(cx);
                 Ok(serde_json::json!({}))
+            }
+            // A project removed takes its sessions with it, as the shell says it does.
+            ("deleteSpace", _) => {
+                if let Some(space) = param(params, "spaceId") {
+                    self.view_discard_space(space, cx);
+                }
+                self.project_mutate(op, params, cx).unwrap_or_else(|| Ok(serde_json::json!({})))
             }
             _ => self
                 .surface_mutate(op, params, cx)
@@ -443,6 +529,36 @@ impl WorkspaceView {
                     Err(RpcError::Failed(format!("{op} is not something Slopty does to a thread")))
                 }),
         }
+    }
+
+    /// Close for good every thread in the space `space`, and forget the chats made in it and not
+    /// started.
+    fn view_discard_space(&mut self, space: &str, cx: &mut Context<Self>) {
+        let mut doomed = Vec::new();
+        for (key, hub) in self.hubs() {
+            let device = key.to_string();
+            for row in hub.read(cx).threads().rows().rows.values() {
+                if rows::folder(row).is_some_and(|path| self.view_space_id(&device, path) == space)
+                {
+                    doomed.push((key, row.id));
+                }
+            }
+        }
+        for (key, thread) in doomed {
+            let hub = self.thread_hub(key, cx);
+            hub.update(cx, |hub, cx| hub.intent(thread, Intent::Discard, cx));
+        }
+        let unstarted: Vec<String> = self
+            .view_model
+            .minted
+            .iter()
+            .filter(|(_, m)| self.view_space_id(&m.worker.to_string(), &m.cwd) == space)
+            .map(|(chat, _)| chat.clone())
+            .collect();
+        for chat in unstarted {
+            self.view_model.minted.remove(&chat);
+        }
+        self.view_changed(cx);
     }
 
     /// The worker a device id of the interface names.
@@ -491,8 +607,9 @@ impl WorkspaceView {
         let (key, thread) = self
             .chat_thread(chat, cx)
             .ok_or_else(|| RpcError::Failed(format!("no thread {chat}")))?;
-        let text = param(params, "text").unwrap_or_default().to_owned();
         let hub = self.thread_hub(key, cx);
+        let harness = self.thread_harness(key, thread, cx);
+        let text = agent_prompt(param(params, "text").unwrap_or_default(), harness);
         // Held for the turn's end where the agent can hold it, as the shell asks.
         let hold = params.get("holdForTurnEnd").and_then(serde_json::Value::as_bool) == Some(true);
         let delivery = hub
@@ -535,11 +652,34 @@ impl WorkspaceView {
                 return Err(RpcError::Failed("the thread has not started yet".to_owned()));
             };
             let id = IntentId::new();
+            // A side chat's first message asks its chat's thread aside, and goes to the aside.
+            if let Some(parent) = minted.parent.as_deref() {
+                let (key, thread) = self
+                    .chat_thread(parent, cx)
+                    .ok_or_else(|| RpcError::Failed("Its chat has not started yet".to_owned()))?;
+                let harness = self.thread_harness(key, thread, cx);
+                let text = agent_prompt(&request.prompt, harness);
+                self.view_model.first_words.insert(id, (text, request.attachments, message_id));
+                self.view_model.starts.insert(id, chat);
+                let msg =
+                    ClientMsg::Thread(ThreadRequest::Intent { id, thread, intent: Intent::Aside });
+                self.view_send_kept(key, id, msg);
+                return Ok(serde_json::json!({ "commandId": id.to_string() }));
+            }
+            let worktree = request.worktree.as_ref().map(|spec| NewWorktree {
+                name: worktree_name(&request.prompt, id),
+                base: Some(spec.base.clone()).filter(|base| base != "HEAD"),
+                merge_base: None,
+                pull: None,
+                setup: true,
+            });
+            let agent = agent_of(request.harness);
+            let prompt = agent_prompt(&request.prompt, harness_of(&agent));
             let start = Start {
-                agent: agent_of(request.harness),
+                agent,
                 cwd: minted.cwd,
                 drive: None,
-                prompt: Some(request.prompt),
+                prompt: Some(prompt),
                 model: request.model,
                 mode: None,
                 effort: request
@@ -548,7 +688,7 @@ impl WorkspaceView {
                     .and_then(|level| level.as_str().map(str::to_owned)),
                 attachments: request.attachments,
                 args: Vec::new(),
-                worktree: None,
+                worktree,
             };
             self.view_model.starts.insert(id, chat);
             self.view_model.named.insert(id, message_id);
@@ -566,22 +706,58 @@ impl WorkspaceView {
                 .and_then(slopty_client::threads::Mirror::state)
                 .map_or(Delivery::Steer, |state| state.meta.delivery_now())
         };
+        let harness = self.thread_harness(key, thread, cx);
+        // A message to a thread whose agent exited takes its session up again, with the message
+        // as its first words.
+        if let SessionCommandPayload::Run { request, message_id } = &command {
+            let resume = hub.read(cx).resume_start(thread).map_err(RpcError::Failed)?;
+            if let Some(mut start) = resume {
+                if hub.read(cx).resuming(thread) {
+                    return Err(RpcError::Failed("It is starting again: one moment".to_owned()));
+                }
+                start.prompt = Some(agent_prompt(&request.prompt, harness));
+                start.attachments.clone_from(&request.attachments);
+                if request.model.is_some() {
+                    start.model.clone_from(&request.model);
+                }
+                let id = hub.update(cx, |hub, cx| hub.resume(thread, start, cx));
+                self.view_model.named.insert(id, message_id.clone());
+                return Ok(serde_json::json!({ "commandId": id.to_string() }));
+            }
+        }
         let (intent, message_id) = match command {
             SessionCommandPayload::Run { request, message_id } => (
                 Intent::Send {
-                    text: request.prompt,
+                    text: agent_prompt(&request.prompt, harness),
                     delivery: delivery_now(hub.read(cx)),
                     attachments: request.attachments,
                 },
                 Some(message_id),
             ),
             SessionCommandPayload::Steer { prompt, message_id } => (
-                Intent::Send { text: prompt, delivery: Delivery::Steer, attachments: Vec::new() },
+                Intent::Send {
+                    text: agent_prompt(&prompt, harness),
+                    delivery: Delivery::Steer,
+                    attachments: Vec::new(),
+                },
                 message_id,
             ),
             SessionCommandPayload::Interrupt {} => (Intent::Interrupt, None),
-            SessionCommandPayload::RespondInput { .. } => {
-                return Err(RpcError::Failed("answers go through the request card".to_owned()));
+            SessionCommandPayload::RespondInput { request_id, answers } => {
+                let state = hub
+                    .read(cx)
+                    .threads()
+                    .mirror(thread)
+                    .and_then(slopty_client::threads::Mirror::state);
+                let request = state
+                    .and_then(|state| state.requests.iter().find(|r| r.id.0 == request_id))
+                    .filter(|request| request.is_open())
+                    .ok_or_else(|| {
+                        RpcError::Failed("It no longer waits on an answer".to_owned())
+                    })?;
+                let (choice, message) =
+                    transcript::answer(request, &answers).map_err(RpcError::Failed)?;
+                (Intent::Answer { ask: request.id.clone(), choice, message }, None)
             }
         };
         let id = hub.update(cx, |hub, cx| hub.intent(thread, intent, cx));
@@ -589,6 +765,15 @@ impl WorkspaceView {
             self.view_model.named.insert(id, message_id);
         }
         Ok(serde_json::json!({ "commandId": id.to_string() }))
+    }
+
+    /// The harness the shell knows `thread`'s agent by.
+    fn thread_harness(&self, key: WorkerKey, thread: ThreadId, cx: &Context<Self>) -> HarnessId {
+        self.held_hub(key)
+            .and_then(|hub| {
+                hub.read(cx).threads().rows().rows.get(&thread).map(|r| harness_of(&r.agent))
+            })
+            .unwrap_or(HarnessId::CLAUDE_CODE)
     }
 
     /// Send `msg` for intent `id` to `key`, kept until the worker answers it.
@@ -627,6 +812,14 @@ impl WorkspaceView {
             Outcome::Started { thread } => {
                 self.view_model.minted.remove(&chat);
                 self.view_model.aliases.insert(*thread, chat.clone());
+                if let Some((text, attachments, message_id)) =
+                    self.view_model.first_words.remove(&done.id)
+                {
+                    let hub = self.thread_hub(key, cx);
+                    let send = Intent::Send { text, delivery: Delivery::Steer, attachments };
+                    let sent = hub.update(cx, |hub, cx| hub.intent(*thread, send, cx));
+                    self.view_model.named.insert(sent, message_id);
+                }
                 if self.view_model.feed.as_ref().is_some_and(|feed| feed.followed().contains(&chat))
                 {
                     self.view_model.followed.insert(chat, (key, *thread));
@@ -635,6 +828,7 @@ impl WorkspaceView {
                 }
             }
             outcome => {
+                self.view_model.first_words.remove(&done.id);
                 tracing::warn!(?outcome, %chat, "a thread the interface asked for did not start");
             }
         }
@@ -645,10 +839,20 @@ impl WorkspaceView {
 
 #[cfg(test)]
 mod tests {
-    use slopty_proto::thread::AgentId;
+    use gpui::AppContext as _;
+    use slopty_core::WallMs;
+    use slopty_proto::ClientMsg;
+    use slopty_proto::thread::wire::{Intent, TableFrame, ThreadFrame, ThreadRequest};
+    use slopty_proto::thread::{AgentId, Cursor, Liveness, ThreadState};
+    use slopty_view_doc::SessionCommandPayload;
     use slopty_view_proto::HarnessId;
+    use slopty_view_rpc::methods;
+    use tokio::sync::mpsc::Receiver;
 
     use super::agent_of;
+    use crate::conversation::thread::fixtures;
+    use crate::workspace::WorkspaceView;
+    use crate::workspace::rig::{KEY, link, mac};
 
     /// A chat starts the agent its harness names: Claude Code, Codex and pi by their own ids,
     /// any other harness an ACP agent by its registry's name, and Claude Code when none is named.
@@ -661,5 +865,90 @@ mod tests {
         assert_eq!(agent_of(Some(HarnessId::OPENCODE)).acp_name(), Some("opencode"));
         let gemini = HarnessId::named("gemini");
         assert_eq!(agent_of(Some(gemini)).acp_name(), Some("gemini"));
+    }
+
+    /// A workspace linked to one worker whose table holds `state`'s thread, followed so its
+    /// state is here, and what the worker has been sent since.
+    fn holding<'a>(
+        state: &ThreadState,
+        cx: &'a mut gpui::TestAppContext,
+    ) -> (gpui::Entity<WorkspaceView>, &'a mut gpui::VisualTestContext, Receiver<ClientMsg>) {
+        let workspace = cx.new(|_| WorkspaceView::new(slopty_theme::Theme::default()));
+        let cx = cx.add_empty_window();
+        workspace.update(cx, |v, cx| v.add_worker(KEY, "studio".to_owned(), cx));
+        let mut rx = link(&workspace, cx, mac(|_| {}), Vec::new());
+        let cursor = Cursor { epoch: 1, seq: 1 };
+        let thread = state.meta.id;
+        let rows = vec![state.row(WallMs::ZERO)];
+        workspace.update(cx, |v, cx| {
+            v.threads_linked(KEY, cx);
+            v.thread_table(KEY, &TableFrame::Snapshot { cursor, rows }, cx);
+            v.thread_hub(KEY, cx).update(cx, |hub, cx| hub.open(thread, cx));
+            let frame = ThreadFrame::Snapshot { cursor, state: Box::new(state.clone()) };
+            v.thread_frame(KEY, thread, frame, cx);
+        });
+        cx.run_until_parked();
+        while rx.try_recv().is_ok() {}
+        (workspace, cx, rx)
+    }
+
+    /// What the worker was sent about its threads.
+    fn sent_threads(rx: &mut Receiver<ClientMsg>) -> Vec<ThreadRequest> {
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|msg| match msg {
+                ClientMsg::Thread(request) => Some(request),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Deleting a chat whose thread started closes the thread for good on its worker: its
+    /// agent ends and every device stops showing it, as the shell's dialog says.
+    #[gpui::test]
+    fn deleting_a_started_chat_closes_its_thread(cx: &mut gpui::TestAppContext) {
+        let state = fixtures::thread("tools");
+        let thread = state.meta.id;
+        let (workspace, cx, mut rx) = holding(&state, cx);
+        let params = serde_json::json!({ "op": "deleteChat", "chatId": thread.to_string() });
+        let answer = workspace.update(cx, |v, cx| v.view_call(methods::MUTATE, &params, cx));
+        assert!(answer.is_ok(), "{answer:?}");
+        cx.run_until_parked();
+        let closed = sent_threads(&mut rx).into_iter().any(|request| {
+            matches!(request, ThreadRequest::Intent { thread: t, intent: Intent::Discard, .. }
+                if t == thread)
+        });
+        assert!(closed, "the thread is closed on its worker");
+    }
+
+    /// A message to a chat whose Claude Code exited takes its session up again, with the message
+    /// as its first words, instead of going to an agent that is not there.
+    #[gpui::test]
+    fn a_message_to_an_exited_agent_takes_its_session_up_again(cx: &mut gpui::TestAppContext) {
+        let mut state = fixtures::thread("tools");
+        state.status.liveness = Liveness::Exited { resumable: true };
+        let thread = state.meta.id;
+        let native = state.meta.native.clone();
+        let (workspace, cx, mut rx) = holding(&state, cx);
+        let request: slopty_view_proto::RunRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "go on",
+            "model": null,
+            "reasoning": null,
+            "cwd": "/w",
+            "sandbox": "workspace-write",
+            "resume": null,
+        }))
+        .expect("a run");
+        let command = SessionCommandPayload::Run { request, message_id: "m-1".to_owned() };
+        let params = serde_json::json!({ "chatId": thread.to_string(), "command": command });
+        let answer = workspace.update(cx, |v, cx| v.view_call(methods::QUEUE_COMMAND, &params, cx));
+        assert!(answer.is_ok(), "{answer:?}");
+        cx.run_until_parked();
+        let started = sent_threads(&mut rx).into_iter().find_map(|request| match request {
+            ThreadRequest::Start { start, .. } => Some(start),
+            _ => None,
+        });
+        let start = started.expect("a start that takes the session up again");
+        assert_eq!(start.args, ["--resume".to_owned(), native]);
+        assert_eq!(start.prompt.as_deref(), Some("go on"));
     }
 }
