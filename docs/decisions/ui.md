@@ -12189,3 +12189,40 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   being typed into the agent is not taken back. "Send now" stops the turn, then sends; a Stop
   answers once the worker said how it went, so a refused one says why. Tests: `slopty-ui`
   `workspace::view_model::tests`.
+- ✅ **A chat's whole history reaches the shell, and its cut words come whole (2026-10-15).**
+  zeron's shell never asks for older turns: it takes an opening tail marked `historyPending`,
+  then one full transcript as history. A worker sends a thread's latest turns only, so the view
+  model pages the older ones while a chat is followed (`ThreadRequest::Page`, 200 turns at a
+  time, one page in flight per thread), says the transcript as history-pending until every turn
+  is held, and says it again in full whenever older entries came in front. Words the worker cut
+  read as their kept part and "… N more lines" until their whole comes, asked once per followed
+  chat (`ThreadRequest::Expand`); a tool's whole output, an edit's diff (from its hunks, its
+  whole patch, or Edit's and Write's own inputs) and the pictures of messages and calls are read
+  the same way, the pictures under paths of their own (`slopty-image:`). A failed turn says its
+  error once, at the end of the turn; a task list is the shell's checklist, a change to one task named by its id from the calls before it; how full the context
+  is rides on every frame. Tests: `slopty-ui` `view_model::tests`,
+  `workspace::view_model::tests::older_turns_are_asked_while_a_chat_is_followed`,
+  `a_cut_output_is_fetched_whole`, `a_threads_picture_is_read_back`, `slopty-client`
+  `threads::tests::older_turns_are_paged_once_until_every_turn_is_held`.
+- ✅ **The lists wait for every machine, and pins outlast a machine out of reach (2026-10-15).**
+  The first chats frame came before any worker's table, so the shell, holding pins locally,
+  pruned every pin and filter as dangling. The view model says no spaces or chats until every
+  linked worker's table came or five seconds passed, and the shell prunes pins and heals filters
+  only while every device it knows is reached (`// slopty:` in `shell.rs`). Tests: `slopty-ui`
+  `workspace::view_model::tests::the_chats_wait_for_every_machines_threads`, `slopty-shell`
+  `shell::spaces::tests::pins_wait_while_a_device_is_out_of_reach`.
+- ✅ **A chat belongs to the project folder it runs in (2026-10-15).** A thread's project is the
+  deepest added project holding its folder or repository; else a Claude Code worktree
+  (`.claude/worktrees/…`) goes under its clone; else its repository or folder. A chat in the home
+  folder has no project. Projects of one repository group by `commit:{root}` (else origin), keep
+  the order they were added in (their own created time, kept with the project), show a rename
+  at once, and an added folder that is a repository says so (the add dialog's detection, then a
+  look for `.git` once per run). Tests: `slopty-ui`
+  `view_model::tests::a_chat_belongs_to_its_project_folder`,
+  `workspace::view_model::surfaces::projects::served`.
+- ✅ **Autonomy is the server's, set through the server (2026-10-15).** Settings → Agents wrote
+  `[agents] autonomy` to this device's own `settings.toml`, which nothing reads when the server
+  runs elsewhere. It is read and written through the server's own settings
+  (`Verb::Settings { of: None }`), which takes its file up again; with no server linked the page
+  says so. Tests: `slopty-ui`
+  `workspace::view_model::surfaces::settings::tests::autonomy_is_set_on_the_server`.

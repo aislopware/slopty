@@ -2680,6 +2680,8 @@ impl Shell {
         if state.read(cx).spaces_synced
             && let Some(filter) = self.settings.space_filter.clone()
             && state.read(cx).space_row(&filter).is_none()
+            // slopty: not while a machine is out of reach: its projects are missing, not gone.
+            && spaces::every_device_reached(state.read(cx), Utc::now())
         {
             self.settings.space_filter = None;
             self.schedule_save(cx);
@@ -5526,7 +5528,8 @@ impl Shell {
         };
         let state = self.state.read(cx);
         if state.workspace_scope == Some(WorkspaceScope::Local) {
-            if !state.chats_synced {
+            // slopty: not while a machine is out of reach: its chats are missing, not gone.
+            if !state.chats_synced || !spaces::every_device_reached(state, Utc::now()) {
                 return;
             }
             let known = state.chats.iter().map(|chat| chat.id.clone()).collect();

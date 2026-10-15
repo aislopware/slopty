@@ -3257,6 +3257,10 @@ pub struct Transcript {
     /// tick) — restick and escape are direction-aware
     /// (see [`Transcript::should_restick`]).
     last_scroll_distance: f32,
+    // slopty: the wheel's own travel since the last scroll decision (positive
+    // toward the top), so rows measured taller under a glide are not read as
+    // the person scrolling up, which broke the jump short of the end.
+    wheel_travel: f32,
     /// The stick-to-bottom pin. Broken only by user input (wheel/touch up);
     /// re-engaged inside the 70px band, after an own-send first overflows, and
     /// on the jump button.
@@ -3600,6 +3604,7 @@ impl Transcript {
             highlights: HighlightStore::default(),
             show_jump_button: false,
             last_scroll_distance: 0.0,
+            wheel_travel: 0.0,
             pinned,
             own_turn: None,
             pending_queued_turns: PendingQueuedTurns::default(),
@@ -3848,6 +3853,18 @@ impl Transcript {
         (max + cur).max(0.0)
     }
 
+    // slopty: where the wheel alone left the distance from the bottom. Rows
+    // measured under a glide move the distance too; read against the last
+    // observation they looked like a scroll up and broke the pin.
+    fn wheel_previous_distance(&mut self, distance: f32) -> f32 {
+        let travel = std::mem::take(&mut self.wheel_travel);
+        if travel == 0.0 {
+            self.last_scroll_distance
+        } else {
+            distance - travel
+        }
+    }
+
     /// Whether a user scroll should re-engage the bottom pin: inside the 70px
     /// stick band *and* moving toward the bottom. Direction matters — a small
     /// wheel-up notch near the bottom stays inside the band, and re-sticking
@@ -3885,7 +3902,7 @@ impl Transcript {
                 // made scrolling down impossible until an upward gesture.
                 if this.own_turn.is_some() {
                     let distance = this.distance_from_bottom();
-                    let previous = this.last_scroll_distance;
+                    let previous = this.wheel_previous_distance(distance); // slopty
                     this.last_scroll_distance = distance;
                     // Reaching the end preserves normal tail-follow intent
                     // without reasserting a possibly stale prompt hold.
@@ -3919,7 +3936,7 @@ impl Transcript {
                     return;
                 }
                 let distance = this.distance_from_bottom();
-                let previous = this.last_scroll_distance;
+                let previous = this.wheel_previous_distance(distance); // slopty
                 this.last_scroll_distance = distance;
                 if distance > previous + 1.0 && distance > AT_BOTTOM_PX {
                     // User input moving away from the bottom breaks the pin.
@@ -9979,6 +9996,9 @@ impl Render for Transcript {
                     .ok();
             });
         }
+        // slopty: travel no scroll decision took (a nested scroller's step) is
+        // not this list's.
+        self.wheel_travel = 0.0;
         // Spring driver: one on_next_frame callback at a time; each tick
         // notifies, which re-enters render and schedules the next frame until
         // the spring parks. Reduced motion never schedules (sync snaps).
@@ -10094,6 +10114,10 @@ impl Render for Transcript {
             .on_mouse_move(cx.listener(Self::on_selection_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_selection_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_selection_mouse_up))
+            // slopty: the list's wheel step, before its deferred scroll decision.
+            .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, _, _| {
+                this.wheel_travel += f32::from(event.delta.pixel_delta(px(20.0)).y);
+            }))
             // FIRST child ⇒ paints first: clears this transcript's slice of the
             // frame's markdown text-selection registry before any row's text
             // elements re-register (document paint order = selection order;
@@ -13917,6 +13941,51 @@ mod tests {
                 let after = this.list.logical_scroll_top();
                 assert_eq!(before.item_ix, after.item_ix);
                 assert!((before.offset_in_item - after.offset_in_item).abs() <= px(1.0));
+            });
+        }
+
+        // slopty: a jump reaches the end though rows measured under its glide
+        // move the distance between wheel steps; a step up still breaks it.
+        #[test]
+        fn a_jump_reaches_the_end_whatever_rows_measure_under_it() {
+            with_window(|transcript, window, cx| {
+                transcript.update(cx, |this, cx| {
+                    let entries = (0..12)
+                        .map(|ix| {
+                            assistant(
+                                &format!("reply-{ix}"),
+                                MessageStatus::Complete,
+                                vec![text_part("text", &"A long paragraph.\n\n".repeat(20))],
+                            )
+                        })
+                        .collect();
+                    feed(this, entries, cx);
+                    this.rail_enabled = false;
+                });
+                draw(window, cx);
+                for _ in 0..6 {
+                    wheel(window, 2_000.0, cx);
+                    draw(window, cx);
+                }
+                assert!(transcript.read(cx).jump_button_shown());
+                transcript.update(cx, |this, cx| this.jump_to_bottom(cx));
+                tick(&transcript, window, cx);
+                // Rows measured taller since the last observation, then the
+                // wheel moves a little down: the pin holds.
+                transcript.update(cx, |this, _| this.last_scroll_distance = 0.0);
+                wheel(window, -5.0, cx);
+                draw(window, cx);
+                assert!(transcript.read(cx).pinned, "measured rows broke the jump");
+                for _ in 0..120 {
+                    tick(&transcript, window, cx);
+                }
+                let this = transcript.read(cx);
+                assert!(this.distance_from_bottom() <= AT_BOTTOM_PX, "the jump stopped short");
+                assert!(!this.jump_button_shown());
+                // A step up is the person leaving the end.
+                wheel(window, 300.0, cx);
+                draw(window, cx);
+                assert!(!transcript.read(cx).pinned);
             });
         }
 

@@ -7,6 +7,7 @@
 //! is known by that id everywhere, its threads' rows included.
 
 use std::cell::OnceCell;
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use gpui::{AppContext as _, Context, Task};
@@ -61,11 +62,31 @@ pub(in crate::workspace) struct Project {
     /// The name the person gave it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Its folder is a git repository, as the picker or a look at the folder found: it has
+    /// branches and worktrees to pick and changes to show before any thread works there.
+    #[serde(default)]
+    pub git: bool,
+    /// When it was added, in ms since the epoch: the projects keep the order they came in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_ms: Option<i64>,
 }
 
-/// The projects the person added, read from their file the first time they are asked of.
-#[derive(Debug, Default)]
-pub(in crate::workspace) struct Projects(OnceCell<Vec<Project>>);
+/// The projects the person added, read from their file the first time they are asked of, and
+/// kept there; a test's are its own.
+#[derive(Debug)]
+pub(in crate::workspace) struct Projects {
+    all: OnceCell<Vec<Project>>,
+    /// Where they are kept; `None` keeps them in memory alone.
+    file: Option<PathBuf>,
+    /// The projects looked at this run for being a repository.
+    probed: HashSet<String>,
+}
+
+impl Default for Projects {
+    fn default() -> Self {
+        Self { all: OnceCell::new(), file: Some(projects_path()), probed: HashSet::default() }
+    }
+}
 
 /// Where the added projects are kept.
 fn projects_path() -> PathBuf {
@@ -73,10 +94,16 @@ fn projects_path() -> PathBuf {
 }
 
 impl Projects {
+    /// Projects held in memory alone, starting with `all`.
+    #[cfg(test)]
+    pub(in crate::workspace) fn held(all: Vec<Project>) -> Self {
+        Self { all: OnceCell::from(all), file: None, probed: HashSet::default() }
+    }
+
     /// The added projects, read from their file the first time.
     pub(in crate::workspace) fn all(&self) -> &[Project] {
-        self.0.get_or_init(|| {
-            let path = projects_path();
+        self.all.get_or_init(|| {
+            let Some(path) = self.file.clone() else { return Vec::new() };
             match std::fs::read(&path) {
                 Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
                     tracing::warn!(path = %path.display(), %e, "the projects do not read");
@@ -105,7 +132,7 @@ impl Projects {
     /// Change the projects with `change`; whether that changed anything.
     fn change(&mut self, change: impl FnOnce(&mut Vec<Project>)) -> bool {
         self.all();
-        let Some(projects) = self.0.get_mut() else { return false };
+        let Some(projects) = self.all.get_mut() else { return false };
         let before = projects.clone();
         change(projects);
         *projects != before
@@ -238,7 +265,8 @@ impl WorkspaceView {
         })
     }
 
-    /// `createSpace`, `renameSpace` and `deleteSpace`; `None` for every other operation.
+    /// `createSpace`, `renameSpace` and `deleteSpace`; `None` for every other operation. The
+    /// projects as they are now show at once.
     pub(in crate::workspace) fn project_mutate(
         &mut self,
         op: &str,
@@ -256,8 +284,15 @@ impl WorkspaceView {
                 if self.view_worker(device).is_none() {
                     return Some(Err(RpcError::Failed(format!("no machine {device}"))));
                 }
-                let project =
-                    Project { id, device: device.to_owned(), path: path.to_owned(), name: None };
+                let git = params.get("gitDetected").and_then(serde_json::Value::as_bool);
+                let project = Project {
+                    id,
+                    device: device.to_owned(),
+                    path: path.trim_end_matches('/').to_owned(),
+                    name: None,
+                    git: git == Some(true),
+                    created_ms: Some(chrono::Utc::now().timestamp_millis()),
+                };
                 self.view_model.surfaces.projects.change(|projects| {
                     if !projects
                         .iter()
@@ -280,7 +315,15 @@ impl WorkspaceView {
                     if let Some(project) = projects.iter_mut().find(|p| p.id == id) {
                         project.name = name.map(str::to_owned);
                     } else {
-                        projects.push(Project { id, device, path, name: name.map(str::to_owned) });
+                        let name = name.map(str::to_owned);
+                        projects.push(Project {
+                            id,
+                            device,
+                            path,
+                            name,
+                            git: false,
+                            created_ms: None,
+                        });
                     }
                 })
             }
@@ -293,21 +336,64 @@ impl WorkspaceView {
             _ => return None,
         };
         if changed {
-            let kept = self.view_model.surfaces.projects.all().to_vec();
-            cx.background_spawn(async move {
-                let path = projects_path();
-                let written =
-                    path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| {
-                        let text = serde_json::to_vec(&kept).map_err(std::io::Error::other)?;
-                        std::fs::write(&path, text)
-                    });
-                if let Err(e) = written {
-                    tracing::warn!(path = %path.display(), %e, "the projects were not kept");
+            self.keep_projects(cx);
+            self.view_changed(cx);
+        }
+        Some(Ok(serde_json::json!({})))
+    }
+
+    /// Keep the added projects where they outlive the app.
+    fn keep_projects(&self, cx: &Context<Self>) {
+        let Some(path) = self.view_model.surfaces.projects.file.clone() else { return };
+        let kept = self.view_model.surfaces.projects.all().to_vec();
+        cx.background_spawn(async move {
+            let written = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| {
+                let text = serde_json::to_vec(&kept).map_err(std::io::Error::other)?;
+                std::fs::write(&path, text)
+            });
+            if let Err(e) = written {
+                tracing::warn!(path = %path.display(), %e, "the projects were not kept");
+            }
+        })
+        .detach();
+    }
+
+    /// Look once a run whether each added project not known to be a repository is one, on its
+    /// machine once it is linked: a folder with `.git` in it (a clone's directory, a worktree's
+    /// file). The picker's word on a folder can be missing or stale.
+    pub(in crate::workspace) fn probe_projects(&mut self, cx: &Context<Self>) {
+        let unknown: Vec<(String, WorkerKey, String)> = self
+            .added_projects()
+            .iter()
+            .filter(|p| !p.git && !self.view_model.surfaces.projects.probed.contains(&p.id))
+            .filter_map(|p| {
+                let key = self.view_worker(&p.device)?;
+                let linked = self.workers.get(&key).is_some_and(|w| w.link.is_some());
+                linked.then(|| (p.id.clone(), key, p.path.clone()))
+            })
+            .collect();
+        for (id, key, path) in unknown {
+            self.view_model.surfaces.projects.probed.insert(id.clone());
+            let rx = self.surface_list(key, path);
+            cx.spawn(async move |this, cx| {
+                let Ok(Listing::Listed { entries, .. }) = within(cx, rx).await else { return };
+                if !entries.iter().any(|entry| entry.name == ".git") {
+                    return;
                 }
+                let _gone = this.update(cx, |view, cx| {
+                    let changed = view.view_model.surfaces.projects.change(|projects| {
+                        if let Some(project) = projects.iter_mut().find(|p| p.id == id) {
+                            project.git = true;
+                        }
+                    });
+                    if changed {
+                        view.keep_projects(cx);
+                        view.view_changed(cx);
+                    }
+                });
             })
             .detach();
         }
-        Some(Ok(serde_json::json!({})))
     }
 }
 
@@ -383,9 +469,15 @@ mod tests {
 
     #[test]
     fn a_project_is_found_by_its_id_and_by_its_folder() {
-        let mut projects = Projects(OnceCell::from(Vec::new()));
-        let project =
-            Project { id: "p1".into(), device: "d".into(), path: "/a".into(), name: None };
+        let mut projects = Projects::held(Vec::new());
+        let project = Project {
+            id: "p1".into(),
+            device: "d".into(),
+            path: "/a".into(),
+            name: None,
+            git: false,
+            created_ms: None,
+        };
         assert!(projects.change(|all| all.push(project.clone())));
         assert_eq!(projects.at("d", "/a").map(|p| p.id.as_str()), Some("p1"));
         assert!(projects.change(|all| {
@@ -397,5 +489,104 @@ mod tests {
         assert!(!projects.change(|_| {}));
         assert!(projects.change(|all| all.retain(|p| p.id != "p1")));
         assert_eq!(projects.all().len(), 0, "removed");
+    }
+}
+
+#[cfg(test)]
+mod served {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use gpui::AppContext as _;
+    use slopty_proto::thread::Cursor;
+    use slopty_proto::thread::wire::TableFrame;
+
+    use super::{Project, Projects};
+    use crate::view_model::{Feed, ViewModel};
+    use crate::workspace::WorkspaceView;
+    use crate::workspace::rig::{KEY, link, mac};
+
+    /// A workspace linked to one worker with no threads, its projects `projects`, serving a
+    /// feed.
+    fn serving(
+        projects: Vec<Project>,
+        cx: &mut gpui::TestAppContext,
+    ) -> (gpui::Entity<WorkspaceView>, &mut gpui::VisualTestContext, Arc<Feed>) {
+        let workspace = cx.new(|_| WorkspaceView::new(slopty_theme::Theme::default()));
+        let cx = cx.add_empty_window();
+        workspace.update(cx, |v, cx| v.add_worker(KEY, "studio".to_owned(), cx));
+        let _rx = link(&workspace, cx, mac(|_| {}), Vec::new());
+        let (_, feed, _asks) = ViewModel::new("me".to_owned());
+        workspace.update(cx, |v, cx| {
+            v.view_model.feed = Some(Arc::clone(&feed));
+            v.view_model.surfaces.projects = Projects::held(projects);
+            v.threads_linked(KEY, cx);
+            let frame =
+                TableFrame::Snapshot { cursor: Cursor { epoch: 1, seq: 1 }, rows: Vec::new() };
+            v.thread_table(KEY, &frame, cx);
+        });
+        (workspace, cx, feed)
+    }
+
+    fn project(id: &str, path: &str, created_ms: Option<i64>) -> Project {
+        Project {
+            id: id.to_owned(),
+            device: KEY.to_string(),
+            path: path.to_owned(),
+            name: None,
+            git: false,
+            created_ms,
+        }
+    }
+
+    /// A repository added as a project has its branches, worktrees and changes from the first,
+    /// before any thread works there.
+    #[gpui::test]
+    fn a_repository_added_is_a_repository(cx: &mut gpui::TestAppContext) {
+        let (workspace, cx, feed) = serving(Vec::new(), cx);
+        let params = serde_json::json!({
+            "op": "createSpace", "spaceId": "p1", "deviceId": KEY.to_string(),
+            "path": "/w/app", "gitDetected": true,
+        });
+        workspace.update(cx, |v, cx| {
+            let made = v.project_mutate("createSpace", &params, cx);
+            assert!(matches!(made, Some(Ok(_))), "{made:?}");
+            v.view_publish(cx);
+        });
+        let spaces = feed.said_spaces().expect("said");
+        let added = spaces.iter().find(|space| space.id == "p1").expect("the project");
+        assert!(added.git_detected);
+    }
+
+    /// A project renamed shows its new name at once, not at the next heartbeat.
+    #[gpui::test]
+    fn a_project_renamed_shows_at_once(cx: &mut gpui::TestAppContext) {
+        let (workspace, cx, feed) = serving(vec![project("p1", "/w/app", Some(1))], cx);
+        let params = serde_json::json!({ "op": "renameSpace", "spaceId": "p1", "name": "App" });
+        workspace.update(cx, |v, cx| {
+            let renamed = v.project_mutate("renameSpace", &params, cx);
+            assert!(matches!(renamed, Some(Ok(_))), "{renamed:?}");
+        });
+        cx.executor().advance_clock(Duration::from_millis(50));
+        cx.run_until_parked();
+        let spaces = feed.said_spaces().expect("said");
+        let name = spaces.iter().find(|space| space.id == "p1").and_then(|s| s.name.clone());
+        assert_eq!(name.as_deref(), Some("App"));
+    }
+
+    /// Projects keep the order they were added in.
+    #[gpui::test]
+    fn projects_keep_the_order_they_came_in(cx: &mut gpui::TestAppContext) {
+        let projects = vec![
+            project("late", "/w/b", Some(1_760_000_002_000)),
+            project("early", "/w/a", Some(1_760_000_001_000)),
+        ];
+        let (workspace, cx, feed) = serving(projects, cx);
+        workspace.update(cx, WorkspaceView::view_publish);
+        let mut spaces = feed.said_spaces().expect("said").to_vec();
+        slopty_view_proto::view::sort_spaces(&mut spaces);
+        let order: Vec<(&str, i64)> =
+            spaces.iter().map(|s| (s.id.as_str(), s.created_at.timestamp_millis())).collect();
+        assert_eq!(order, [("early", 1_760_000_001_000), ("late", 1_760_000_002_000)]);
     }
 }

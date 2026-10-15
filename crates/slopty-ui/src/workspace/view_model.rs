@@ -17,15 +17,16 @@ use slopty_proto::ClientMsg;
 use slopty_proto::thread::wire::{
     Intent, IntentDone, NewWorktree, Outcome, Start, ThreadRequest, ThreadRow,
 };
-use slopty_proto::thread::{AgentId, Delivery, IntentId, PendingState, ThreadId};
+use slopty_proto::thread::{AgentId, Delivery, IntentId, PendingState, Phase, ThreadId, TurnState};
 use slopty_view_doc::SessionCommandPayload;
 use slopty_view_proto::HarnessId;
 use slopty_view_rpc::{RpcError, RpcReply, methods};
 use tokio::sync::mpsc;
 
 use super::WorkspaceView;
-use crate::view_model::{Ask, Feed, Pull, rows, transcript};
+use crate::view_model::{Ask, Feed, Pull, Transcript, rows, transcript};
 
+mod blobs;
 mod surfaces;
 
 pub use surfaces::{
@@ -41,6 +42,13 @@ const HEARTBEAT: Duration = Duration::from_secs(15);
 
 /// How long a Stop waits for its worker's word before the shell is told it went.
 const INTERRUPT_WITHIN: Duration = Duration::from_secs(15);
+
+/// How long the chats and projects wait for every machine's threads before they go out with
+/// those that came: a machine out of reach must not hold the sidebar back for good.
+const TABLES_WITHIN: Duration = Duration::from_secs(5);
+
+/// How many older turns one page asks for: a followed thread's whole history comes in a few.
+const PAGE_TURNS: u32 = 200;
 
 /// A chat the interface made that has no thread yet.
 #[derive(Debug, Clone)]
@@ -76,13 +84,45 @@ struct RefusedStart {
     /// What was sent: the start, or the aside a side chat starts with.
     msg: ClientMsg,
     /// The side chat's first message, which goes once its aside has started.
-    first_words: Option<(String, Vec<String>, String)>,
-    /// The id the shell gave the first message.
-    named: Option<String>,
+    first_words: Option<FirstWords>,
+    /// The id the shell gave the first message, and its words as the person wrote them.
+    named: Option<(String, String)>,
     /// Why, as the person reads it.
     words: String,
     /// When, in ms since the epoch.
     at: i64,
+}
+
+/// A side chat's first message, sent to its aside once it started.
+#[derive(Debug, Clone)]
+struct FirstWords {
+    /// In the agent's words.
+    text: String,
+    attachments: Vec<String>,
+    /// The id the shell gave it.
+    name: String,
+    /// As the person wrote it.
+    said: String,
+}
+
+/// A project folder as the threads and the person name it.
+#[derive(Debug, Default)]
+struct Folder {
+    /// It is in a git repository.
+    git: bool,
+    /// The repository, as the shell groups clones and worktrees by it.
+    repository: Option<String>,
+    /// When its first chat began or the person added it, in ms since the epoch.
+    created: Option<i64>,
+}
+
+impl Folder {
+    /// Something in it began at `ms`.
+    fn began(&mut self, ms: i64) {
+        if ms > 0 {
+            self.created = Some(self.created.map_or(ms, |was| was.min(ms)));
+        }
+    }
 }
 
 /// What the workspace keeps for the shell.
@@ -112,10 +152,19 @@ pub(super) struct Bridge {
     unanswered: HashMap<IntentId, (WorkerKey, ClientMsg)>,
     /// The first message of a side chat, by the aside that starts it: sent to the aside once
     /// it has started, with the id the shell gave it.
-    first_words: HashMap<IntentId, (String, Vec<String>, String)>,
+    first_words: HashMap<IntentId, FirstWords>,
     /// The id the shell gave each message it sent, by the intent that sent it: its entry in
     /// the transcript goes by it, so the shell's own echo of the message gives way to it.
     named: HashMap<IntentId, String>,
+    /// The words of each message the shell sent, by its intent, as the person wrote them: the
+    /// agent was given them in its own words, and the chat shows the person's.
+    said: HashMap<IntentId, String>,
+    /// When each thread's row first said it works in its current turn, by thread with the last
+    /// turn it had ended then: its phases come and go within the turn (an approval, a wait).
+    busy: HashMap<ThreadId, (Option<slopty_proto::thread::TurnId>, slopty_core::WallMs)>,
+    /// When the app began to serve the interface: the lists wait [`TABLES_WITHIN`] at most for
+    /// every machine's threads.
+    serving_since: Option<std::time::Instant>,
     /// What the right-pane surfaces wait on from the workers ([`surfaces`]).
     surfaces: surfaces::Surfaces,
     /// The messages the shell queued (`QueueMessage`), by their intent: the id of the queue
@@ -272,6 +321,7 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         self.view_model.feed = Some(feed);
+        self.view_model.serving_since.get_or_insert_with(std::time::Instant::now);
         if !self.view_model.aliases_read {
             self.view_model.aliases_read = true;
             for (thread, chat) in read_aliases() {
@@ -287,6 +337,13 @@ impl WorkspaceView {
         }));
         let this = cx.entity();
         self.view_model.hearing.push(cx.observe(&this, |view, _, cx| view.view_changed(cx)));
+        // The lists go out once every machine's threads came, or once waiting has gone on long
+        // enough.
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(TABLES_WITHIN).await;
+            let _gone = this.update(cx, |view, cx| view.view_changed(cx));
+        })
+        .detach();
         self.view_model.heartbeat = Some(cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(HEARTBEAT).await;
@@ -345,7 +402,7 @@ impl WorkspaceView {
     }
 
     /// The id the interface knows `thread` by.
-    fn chat_id(&self, thread: ThreadId) -> String {
+    pub(super) fn chat_id(&self, thread: ThreadId) -> String {
         self.view_model.aliases.get(&thread).cloned().unwrap_or_else(|| thread.to_string())
     }
 
@@ -362,10 +419,40 @@ impl WorkspaceView {
         Some((worker, thread))
     }
 
+    /// Whether every machine's threads have come, or the lists waited [`TABLES_WITHIN`] for
+    /// them: until then the chats and projects are not said.
+    fn view_tables_known(&self, cx: &gpui::App) -> bool {
+        let waited =
+            self.view_model.serving_since.is_some_and(|since| since.elapsed() >= TABLES_WITHIN);
+        waited
+            || self.workers.keys().all(|key| {
+                self.held_hub(*key).is_some_and(|hub| hub.read(cx).threads().heard_table())
+            })
+    }
+
+    /// The home of the machine `device` names, when its link said it.
+    fn view_home(&self, device: &str) -> Option<&str> {
+        self.workers.get(&self.view_worker(device)?)?.home.as_deref()
+    }
+
+    /// The project folder a chat working in `cwd` (in the repository at `repo`) on `device`
+    /// belongs to; `None` for one with no project ([`rows::place`]).
+    fn view_place(&self, device: &str, cwd: Option<&str>, repo: Option<&str>) -> Option<String> {
+        let added: Vec<&str> = self
+            .added_projects()
+            .iter()
+            .filter(|project| project.device == device)
+            .map(|project| project.path.as_str())
+            .collect();
+        rows::place(cwd, repo, self.view_home(device), &added)
+    }
+
     /// Publish everything the interface watches.
     fn view_publish(&mut self, cx: &mut Context<Self>) {
         self.view_hear_hubs(cx);
         self.settle_configs(cx);
+        self.probe_projects(cx);
+        self.view_fetch_followed(cx);
         let Some(feed) = self.view_model.feed.clone() else { return };
         let now = Utc::now();
         let devices =
@@ -373,21 +460,27 @@ impl WorkspaceView {
         let mut chats = Vec::new();
         let mut sessions = Vec::new();
         let mut pulls = Vec::new();
-        // Each folder, and whether a thread in it named it as its repository.
-        let mut folders: BTreeMap<(String, String), bool> = BTreeMap::new();
+        let mut folders: BTreeMap<(String, String), Folder> = BTreeMap::new();
+        let mut busy = HashMap::new();
         // Every worker's rows at once: an agent may start its subagents on other machines.
-        let all: Vec<(String, &ThreadRow)> = self
+        let all: Vec<(WorkerKey, String, &ThreadRow)> = self
             .hubs()
             .flat_map(|(key, hub)| {
                 let device = key.to_string();
-                hub.read(cx).threads().rows().rows.values().map(move |row| (device.clone(), row))
+                hub.read(cx)
+                    .threads()
+                    .rows()
+                    .rows
+                    .values()
+                    .map(move |row| (key, device.clone(), row))
             })
             .collect();
-        for (device, row) in &all {
+        for (key, device, row) in &all {
             let row = *row;
             let id = self.chat_id(row.id);
             let mut chat = rows::chat(row, device);
-            chat.space_id = rows::folder(row).map(|path| self.view_space_id(device, path));
+            let place = self.view_place(device, row.cwd.as_deref(), row.repo.as_deref());
+            chat.space_id = place.as_deref().map(|path| self.view_space_id(device, path));
             chat.config = Some(self.chat_config(&id, device, row));
             if chat.branch.is_none() {
                 chat.branch = self.view_branch(device, row);
@@ -402,19 +495,41 @@ impl WorkspaceView {
             if let Some(parent) = rows::parent(row) {
                 chat.parent_chat_id = Some(self.chat_id(parent));
             }
-            if let Some(folder) = rows::folder(row) {
-                let git = row.repo.as_deref() == Some(folder);
-                *folders.entry((device.clone(), folder.to_owned())).or_default() |= git;
+            if let Some(path) = place {
+                let folder = folders.entry((device.clone(), path)).or_default();
+                folder.git |= row.repo.is_some();
+                if folder.repository.is_none() {
+                    folder.repository = rows::repository_id(row);
+                }
+                folder.began(chat.created_at.timestamp_millis());
             }
-            let running = rows::running_children(row.id, all.iter().map(|(_, row)| *row));
+            let running = rows::running_children(row.id, all.iter().map(|(_, _, row)| *row));
             let mut session = rows::session(row, device, running, now);
             session.chat_id = id;
+            // A turn's time runs from when it began, through its approvals and waits.
+            if matches!(row.status.phase, Phase::Working | Phase::NeedsYou) {
+                let ended = row.ended.map(|ended| ended.turn);
+                let since = match self.view_model.busy.get(&row.id) {
+                    Some((was, since)) if *was == ended => *since,
+                    _ => row.status.since_ms,
+                };
+                busy.insert(row.id, (ended, since));
+                if session.status == slopty_view_proto::SessionStatus::Working {
+                    let began = self.view_turn_began(*key, row.id, cx).unwrap_or(since);
+                    session.started_at = Some(rows::time(began));
+                }
+            }
             chats.push(chat);
             sessions.push(session);
         }
+        self.view_model.busy = busy;
         for (id, minted) in &self.view_model.minted {
             let device = minted.worker.to_string();
-            folders.entry((device.clone(), minted.cwd.clone())).or_default();
+            let place = self.view_place(&device, Some(&minted.cwd), None);
+            if let Some(path) = &place {
+                let folder = folders.entry((device.clone(), path.clone())).or_default();
+                folder.began(minted.created.timestamp_millis());
+            }
             chats.push(slopty_view_proto::Chat {
                 id: id.clone(),
                 device_id: device.clone(),
@@ -430,7 +545,7 @@ impl WorkspaceView {
                 created_at: minted.created,
                 harness_session_id: None,
                 harness_session_cwd: None,
-                space_id: Some(self.view_space_id(&device, &minted.cwd)),
+                space_id: place.map(|path| self.view_space_id(&device, &path)),
                 last_seen_at: None,
                 room_gen: None,
                 parent_chat_id: minted.parent.clone(),
@@ -438,12 +553,22 @@ impl WorkspaceView {
             });
         }
         for project in self.added_projects() {
-            folders.entry((project.device.clone(), project.path.clone())).or_default();
+            let path = project.path.trim_end_matches('/').to_owned();
+            let folder = folders.entry((project.device.clone(), path)).or_default();
+            folder.git |= project.git;
+            if let Some(created) = project.created_ms {
+                folder.began(created);
+            }
         }
         let spaces = folders
             .into_iter()
-            .map(|((device, path), git)| {
-                let mut space = rows::space(&device, &path, git, now);
+            .map(|((device, path), folder)| {
+                let created = folder
+                    .created
+                    .and_then(DateTime::from_timestamp_millis)
+                    .unwrap_or(DateTime::UNIX_EPOCH);
+                let mut space = rows::space(&device, &path, folder.git, created);
+                space.repository_id = folder.repository;
                 if let Some(project) = self.added_project_at(&device, &path) {
                     space.id.clone_from(&project.id);
                     space.name.clone_from(&project.name);
@@ -452,8 +577,12 @@ impl WorkspaceView {
             })
             .collect();
         feed.devices(devices);
-        feed.spaces(spaces);
-        feed.chats(chats);
+        // The chats and projects wait for every machine's threads: a list without them would
+        // read as theirs gone.
+        if self.view_tables_known(cx) {
+            feed.spaces(spaces);
+            feed.chats(chats);
+        }
         feed.sessions(sessions);
         feed.pulls(pulls);
         feed.sidebar(self.sidebar_state());
@@ -461,17 +590,17 @@ impl WorkspaceView {
         // its whole history, and the real one, once it comes, as live arrivals. A chat with no
         // thread had its empty transcript when followed.
         for chat in feed.followed() {
-            if let Some(entries) = self.view_transcript(&chat, cx) {
-                feed.transcript(&chat, entries);
+            if let Some(said) = self.view_transcript(&chat, cx) {
+                feed.transcript(&chat, said);
             } else if let Some(refused) = self.view_model.refused.get(&chat) {
                 let mut entries = Vec::new();
                 let device = refused.worker.to_string();
                 transcript::refused(&refused.words, refused.at, &device, &mut entries);
-                feed.transcript(&chat, entries);
+                feed.transcript(&chat, Transcript::of(entries));
             } else if self.view_unreachable(&chat, cx) {
                 // Its machine is out of reach and nothing of the thread is kept here: the chat
                 // shows it has nothing rather than waiting for good.
-                feed.transcript(&chat, Vec::new());
+                feed.transcript(&chat, Transcript::of(Vec::new()));
             }
         }
         for chat in feed.queued() {
@@ -481,8 +610,40 @@ impl WorkspaceView {
         self.live_settle_resumes(cx);
     }
 
+    /// When `thread`'s running turn began, where its state is followed here.
+    fn view_turn_began(
+        &self,
+        key: WorkerKey,
+        thread: ThreadId,
+        cx: &gpui::App,
+    ) -> Option<slopty_core::WallMs> {
+        let hub = self.held_hub(key)?.read(cx);
+        let state = hub.threads().mirror(thread)?.state()?;
+        let turn = state.turns.last().filter(|turn| turn.state == TurnState::Active)?;
+        (transcript::at(turn.started_ms) > 0).then_some(turn.started_ms)
+    }
+
     /// The messages waiting to go to the chat `chat`'s agent, as its thread holds them.
+    /// A chat still starting shows what it holds for its thread. A message reads as the person
+    /// wrote it, its chips as chips.
     fn view_queue(&self, chat: &str, cx: &Context<Self>) -> Vec<slopty_view_doc::QueuedMessage> {
+        if let Some(minted) = self.view_model.minted.get(chat) {
+            let held = self.view_model.held.get(chat).map(Vec::as_slice).unwrap_or_default();
+            return held
+                .iter()
+                .filter(|held| held.queued)
+                .map(|held| slopty_view_doc::QueuedMessage {
+                    id: held.name.clone(),
+                    text: held.text.clone(),
+                    attachments: held.attachments.clone(),
+                    hold_for_turn_end: held.hold,
+                    issued_by: minted.worker.to_string(),
+                    issued_at: 0,
+                    edited_at: None,
+                    delivery_gate: None,
+                })
+                .collect();
+        }
         let Some((key, thread)) = self.chat_thread(chat, cx) else { return Vec::new() };
         let Some(hub) = self.held_hub(key) else { return Vec::new() };
         let hub = hub.read(cx);
@@ -493,6 +654,7 @@ impl WorkspaceView {
         };
         let rows = &self.view_model.queue_rows;
         let named = &self.view_model.named;
+        let said = &self.view_model.said;
         state
             .pending
             .iter()
@@ -505,7 +667,7 @@ impl WorkspaceView {
                     .get(&pending.intent)
                     .cloned()
                     .unwrap_or_else(|| pending.intent.to_string()),
-                text: pending.text.clone(),
+                text: said.get(&pending.intent).cloned().unwrap_or_else(|| pending.text.clone()),
                 attachments: pending.attachments.clone(),
                 hold_for_turn_end: pending.delivery == Delivery::Queue,
                 issued_by: key.to_string(),
@@ -533,29 +695,35 @@ impl WorkspaceView {
         self.held_hub(*key).is_none_or(|hub| !hub.read(cx).threads().linked())
     }
 
-    /// The transcript of the chat `chat` as its thread stands here.
-    fn view_transcript(
-        &self,
-        chat: &str,
-        cx: &Context<Self>,
-    ) -> Option<Vec<slopty_view_doc::SessionMessageEntry>> {
+    /// The transcript of the chat `chat` as its thread stands here, with how full its agent's
+    /// context is and whether older turns are still on their way.
+    fn view_transcript(&self, chat: &str, cx: &gpui::App) -> Option<Transcript> {
         let (key, thread) = self.view_model.followed.get(chat).copied()?;
         let hub = self.held_hub(key)?.read(cx);
         let state = hub.threads().mirror(thread)?.state()?;
         let table = &hub.threads().rows().rows;
         let device = key.to_string();
-        let named = &self.view_model.named;
-        let mut entries = transcript::entries(
-            state,
-            &device,
-            |child| table.get(&child).map(rows::running),
-            |intent| named.get(&intent).cloned(),
-        );
+        let (named, said) = (&self.view_model.named, &self.view_model.said);
+        // A subagent may run on any machine.
+        let running = |child| {
+            self.hubs()
+                .find_map(|(_, hub)| hub.read(cx).threads().rows().rows.get(&child))
+                .map(rows::running)
+        };
+        let look = transcript::Look::new(&device)
+            .children(running)
+            .named(|intent| named.get(&intent).cloned())
+            .said(|intent| said.get(&intent).cloned())
+            .whole(|content| match hub.whole(content)?.as_ref() {
+                slopty_proto::thread::wire::Expanded::Text(text) => Some(text.clone()),
+                _ => None,
+            });
+        let mut entries = transcript::entries(state, &look);
         // The table is the worker's word on whether the agent works now; a mirror drawn from the
         // cache may still hold a turn that ended since.
-        let live = table.get(&thread).is_some_and(|row| {
-            rows::running(row) || row.status.phase == slopty_proto::thread::Phase::NeedsYou
-        });
+        let live = table
+            .get(&thread)
+            .is_some_and(|row| rows::running(row) || row.status.phase == Phase::NeedsYou);
         transcript::settle(&mut entries, live);
         transcript::asks(state, &device, &mut entries);
         // What the worker last turned down, until the thread moves past it.
@@ -570,7 +738,37 @@ impl WorkspaceView {
             let at = i64::try_from(at).unwrap_or(i64::MAX);
             transcript::refused(&refusal.words, at, &device, &mut entries);
         }
-        Some(entries)
+        let meters = &state.meters;
+        let context_usage = (meters.context_tokens.is_some() || meters.context_window.is_some())
+            .then_some(slopty_view_proto::ContextUsage {
+                tokens: meters.context_tokens,
+                window: meters.context_window,
+            });
+        let history_pending = state.older && hub.linked();
+        Some(Transcript { entries, context_usage, history_pending })
+    }
+
+    /// Ask for what the followed threads' transcripts still lack: their older turns, and the
+    /// wholes of the texts their workers cut.
+    fn view_fetch_followed(&self, cx: &mut Context<Self>) {
+        let followed: Vec<(WorkerKey, ThreadId)> =
+            self.view_model.followed.values().copied().collect();
+        for (key, thread) in followed {
+            let Some(hub) = self.held_hub(key).cloned() else { continue };
+            let cut: Vec<slopty_proto::thread::ContentRef> = {
+                let held = hub.read(cx);
+                let Some(state) = held.threads().mirror(thread).and_then(|m| m.state()) else {
+                    continue;
+                };
+                transcript::cut(state).filter(|c| held.whole(c).is_none()).cloned().collect()
+            };
+            hub.update(cx, |hub, cx| {
+                hub.page(thread, PAGE_TURNS, cx);
+                for content in &cut {
+                    hub.expand(thread, content, cx);
+                }
+            });
+        }
     }
 
     /// Answer one of the interface's asks.
@@ -588,6 +786,8 @@ impl WorkspaceView {
             Ask::Call { method, params, reply } => {
                 let answer = if method == methods::QUEUE_COMMAND && is_interrupt(&params) {
                     Some(self.view_interrupt(&params, cx))
+                } else if method == methods::FETCH_TOOL_BLOB {
+                    Some(self.view_tool_blob(&params, cx))
                 } else {
                     self.view_surface_call(&method, &params, cx)
                 };
@@ -608,7 +808,7 @@ impl WorkspaceView {
     fn view_follow(&mut self, chat: String, cx: &mut Context<Self>) {
         let Some((key, thread)) = self.chat_thread(&chat, cx) else {
             if let Some(feed) = &self.view_model.feed {
-                feed.transcript(&chat, Vec::new());
+                feed.transcript(&chat, Transcript::of(Vec::new()));
             }
             return;
         };
@@ -629,7 +829,6 @@ impl WorkspaceView {
             methods::MUTATE => self.view_mutate(params, cx),
             methods::QUEUE_COMMAND => self.view_command(params, cx),
             methods::QUEUE_MESSAGE => self.view_queue_message(params, cx),
-            methods::FETCH_TOOL_BLOB => self.view_tool_output(params, cx),
             _ => Err(RpcError::UnknownMethod(method.to_owned())),
         }
     }
@@ -648,11 +847,14 @@ impl WorkspaceView {
                 let (worker, cwd) = if let Some(found) = space {
                     found
                 } else {
-                    let device = param(params, "deviceId")
-                        .ok_or_else(|| RpcError::BadParams("a space or device".to_owned()))?;
-                    let worker = self
-                        .view_worker(device)
-                        .ok_or_else(|| RpcError::Failed(format!("no machine {device}")))?;
+                    // A device that runs no worker (this Mac, without one) starts it on the
+                    // machine in front, as every other call that names none does.
+                    let worker = param(params, "deviceId")
+                        .and_then(|device| self.view_worker(device))
+                        .or_else(|| self.context_worker())
+                        .ok_or_else(|| {
+                            RpcError::Failed("Connect a machine to start a chat on".to_owned())
+                        })?;
                     (worker, "~".to_owned())
                 };
                 let cwd = param(params, "cwd").map_or(cwd, str::to_owned);
@@ -672,11 +874,16 @@ impl WorkspaceView {
             }
             // The person looked at the chat: its thread is seen through its latest turn, on
             // its worker, which tells every other device.
+            // The latest turn is the row's word, whoever speaks for the thread's state: a
+            // Claude Code chat's terminal does while its agent lives.
             ("markChatSeen", Some(chat)) => {
-                if let Some((key, thread)) = self.chat_thread(chat, cx)
-                    && let Some(ended) = self.thread_stand(thread).and_then(|stand| stand.ended)
-                {
-                    self.mark_seen(key, thread, ended.turn, cx);
+                let ended = self.chat_thread(chat, cx).and_then(|(key, thread)| {
+                    let row = self.held_hub(key)?.read(cx).threads().rows().rows.get(&thread)?;
+                    let ended = row.ended.filter(|ended| ended.turn > row.seen)?;
+                    Some((key, thread, ended.turn))
+                });
+                if let Some((key, thread, turn)) = ended {
+                    self.mark_seen(key, thread, turn, cx);
                 }
                 Ok(serde_json::json!({}))
             }
@@ -862,6 +1069,7 @@ impl WorkspaceView {
             });
         let intent = Intent::Send { text, delivery, attachments: held.attachments };
         let id = hub.update(cx, |hub, cx| hub.intent(thread, intent, cx));
+        self.view_model.said.insert(id, held.text);
         let name = if held.name.is_empty() { id.to_string() } else { held.name };
         if held.queued {
             self.view_model.queue_rows.insert(id, name.clone());
@@ -910,8 +1118,13 @@ impl WorkspaceView {
                     .chat_thread(parent, cx)
                     .ok_or_else(|| RpcError::Failed("Its chat has not started yet".to_owned()))?;
                 let harness = self.thread_harness(key, thread, cx);
-                let text = agent_prompt(&request.prompt, harness);
-                self.view_model.first_words.insert(id, (text, request.attachments, message_id));
+                let first = FirstWords {
+                    text: agent_prompt(&request.prompt, harness),
+                    attachments: request.attachments,
+                    name: message_id,
+                    said: request.prompt,
+                };
+                self.view_model.first_words.insert(id, first);
                 self.view_model.starts.insert(id, chat);
                 let msg =
                     ClientMsg::Thread(ThreadRequest::Intent { id, thread, intent: Intent::Aside });
@@ -930,6 +1143,7 @@ impl WorkspaceView {
             });
             let agent = agent_of(request.harness);
             let prompt = agent_prompt(&request.prompt, harness_of(&agent));
+            self.view_model.said.insert(id, request.prompt.clone());
             let start = Start {
                 agent,
                 cwd: minted.cwd,
@@ -977,10 +1191,11 @@ impl WorkspaceView {
                 }
                 let id = hub.update(cx, |hub, cx| hub.resume(thread, start, cx));
                 self.view_model.named.insert(id, message_id.clone());
+                self.view_model.said.insert(id, request.prompt.clone());
                 return Ok(serde_json::json!({ "commandId": id.to_string() }));
             }
         }
-        let (intent, message_id) = match command {
+        let (intent, message_id, said) = match command {
             SessionCommandPayload::Run { request, message_id } => (
                 Intent::Send {
                     text: agent_prompt(&request.prompt, harness),
@@ -988,6 +1203,7 @@ impl WorkspaceView {
                     attachments: request.attachments,
                 },
                 Some(message_id),
+                Some(request.prompt),
             ),
             SessionCommandPayload::Steer { prompt, message_id } => (
                 Intent::Send {
@@ -996,8 +1212,9 @@ impl WorkspaceView {
                     attachments: Vec::new(),
                 },
                 message_id,
+                Some(prompt),
             ),
-            SessionCommandPayload::Interrupt {} => (Intent::Interrupt, None),
+            SessionCommandPayload::Interrupt {} => (Intent::Interrupt, None, None),
             SessionCommandPayload::RespondInput { request_id, answers } => {
                 let state = hub
                     .read(cx)
@@ -1012,12 +1229,15 @@ impl WorkspaceView {
                     })?;
                 let (choice, message) =
                     transcript::answer(request, &answers).map_err(RpcError::Failed)?;
-                (Intent::Answer { ask: request.id.clone(), choice, message }, None)
+                (Intent::Answer { ask: request.id.clone(), choice, message }, None, None)
             }
         };
         let id = hub.update(cx, |hub, cx| hub.intent(thread, intent, cx));
         if let Some(message_id) = message_id {
             self.view_model.named.insert(id, message_id);
+        }
+        if let Some(said) = said {
+            self.view_model.said.insert(id, said);
         }
         Ok(serde_json::json!({ "commandId": id.to_string() }))
     }
@@ -1079,13 +1299,13 @@ impl WorkspaceView {
                 self.view_model.aliases.insert(*thread, chat.clone());
                 self.keep_aliases(cx);
                 self.surface_rekey_archived(&chat, thread.to_string(), cx);
-                if let Some((text, attachments, message_id)) =
-                    self.view_model.first_words.remove(&done.id)
-                {
+                if let Some(first) = self.view_model.first_words.remove(&done.id) {
                     let hub = self.thread_hub(key, cx);
+                    let (text, attachments) = (first.text, first.attachments);
                     let send = Intent::Send { text, delivery: Delivery::Steer, attachments };
                     let sent = hub.update(cx, |hub, cx| hub.intent(*thread, send, cx));
-                    self.view_model.named.insert(sent, message_id);
+                    self.view_model.named.insert(sent, first.name);
+                    self.view_model.said.insert(sent, first.said);
                 }
                 for held in self.view_model.held.remove(&chat).unwrap_or_default() {
                     self.view_send_to(key, *thread, held, cx);
@@ -1122,7 +1342,9 @@ impl WorkspaceView {
                         worker,
                         msg,
                         first_words,
-                        named: self.view_model.named.remove(&done.id),
+                        named: self.view_model.named.remove(&done.id).map(|name| {
+                            (name, self.view_model.said.remove(&done.id).unwrap_or_default())
+                        }),
                         words,
                         at: Utc::now().timestamp_millis(),
                     };
@@ -1151,8 +1373,9 @@ impl WorkspaceView {
         if let Some(first_words) = refused.first_words {
             self.view_model.first_words.insert(id, first_words);
         }
-        if let Some(named) = refused.named {
-            self.view_model.named.insert(id, named);
+        if let Some((name, said)) = refused.named {
+            self.view_model.named.insert(id, name);
+            self.view_model.said.insert(id, said);
         }
         self.view_model.starts.insert(id, chat.to_owned());
         self.view_send_kept(refused.worker, id, msg);
@@ -1206,31 +1429,6 @@ impl WorkspaceView {
             let _gone = this.update(cx, |view, _| view.view_model.interrupts.remove(&id));
             answer
         })
-    }
-
-    /// `FetchToolBlob` for a tool call's whole output (`{thread}/{item}`), as its thread holds
-    /// it.
-    fn view_tool_output(
-        &self,
-        params: &serde_json::Value,
-        cx: &Context<Self>,
-    ) -> Result<serde_json::Value, RpcError> {
-        let missing = || RpcError::Failed("That output is not here".to_owned());
-        let blob = param(params, "blobRef").ok_or_else(missing)?;
-        let (chat, item) = blob.split_once('/').ok_or_else(missing)?;
-        let (key, thread) = self.chat_thread(chat, cx).ok_or_else(missing)?;
-        let hub = self.held_hub(key).ok_or_else(missing)?.read(cx);
-        let state = hub.threads().mirror(thread).and_then(|m| m.state()).ok_or_else(missing)?;
-        let text = state
-            .items
-            .iter()
-            .find(|i| i.id.0 == item)
-            .and_then(|i| match &i.body {
-                slopty_proto::thread::ItemBody::Tool(call) => call.output.as_ref(),
-                _ => None,
-            })
-            .ok_or_else(missing)?;
-        Ok(serde_json::json!({ "text": text.text }))
     }
 }
 
@@ -1322,7 +1520,7 @@ mod tests {
             v.view_publish(cx);
         });
         let history = said.borrow().clone().expect("the transcript once the state has come");
-        assert!(!history.is_empty(), "the whole history, at once");
+        assert!(!history.entries.is_empty(), "the whole history, at once");
     }
 
     /// A followed chat on a machine out of reach, with nothing of its thread kept here, shows
@@ -1349,7 +1547,7 @@ mod tests {
             v.view_publish(cx);
         });
         let said = said.borrow().clone();
-        assert!(said.is_some_and(|entries| entries.is_empty()), "nothing, said");
+        assert!(said.is_some_and(|said| said.entries.is_empty()), "nothing, said");
     }
 
     /// A message the shell sent at once is its own echo until it goes, never a queue row; one
@@ -1457,9 +1655,10 @@ mod tests {
             .expect("a tool call with output");
         let (workspace, cx, _rx) = holding(&state, cx);
         let params = serde_json::json!({ "blobRef": format!("{}/{item}", state.meta.id) });
-        let answer =
-            workspace.update(cx, |v, cx| v.view_call(methods::FETCH_TOOL_BLOB, &params, cx));
-        assert_eq!(answer.expect("the output")["text"], output);
+        let answer = workspace.update(cx, |v, cx| v.view_tool_blob(&params, cx));
+        cx.run_until_parked();
+        let answer = futures::FutureExt::now_or_never(answer).expect("answered at once");
+        assert_eq!(reply(answer)["text"], output);
     }
 
     /// A chat made in the interface, with the worker `rx` goes to, and the start its first
@@ -1753,5 +1952,333 @@ mod tests {
                 if pending == second && before == Some(first))
         });
         assert!(sent, "the move names the message it goes before");
+    }
+
+    /// The workspace serves a feed the test reads.
+    fn serve(
+        workspace: &gpui::Entity<WorkspaceView>,
+        cx: &mut gpui::VisualTestContext,
+    ) -> std::sync::Arc<crate::view_model::Feed> {
+        let (_, feed, _asks) = crate::view_model::ViewModel::new("me".to_owned());
+        workspace.update(cx, |v, _| v.view_model.feed = Some(std::sync::Arc::clone(&feed)));
+        feed
+    }
+
+    /// `state`'s chat is followed, its transcript watched.
+    fn follow(
+        workspace: &gpui::Entity<WorkspaceView>,
+        cx: &mut gpui::VisualTestContext,
+        state: &ThreadState,
+    ) -> String {
+        let chat = state.meta.id.to_string();
+        let thread = state.meta.id;
+        workspace.update(cx, |v, _| {
+            v.view_model.followed.insert(chat.clone(), (KEY, thread));
+        });
+        chat
+    }
+
+    /// A followed chat whose thread holds older turns than it was sent asks for them.
+    #[gpui::test]
+    fn older_turns_are_asked_while_a_chat_is_followed(cx: &mut gpui::TestAppContext) {
+        let mut state = fixtures::thread("tools");
+        state.older = true;
+        let thread = state.meta.id;
+        let (workspace, cx, mut rx) = holding(&state, cx);
+        follow(&workspace, cx, &state);
+        workspace.update(cx, |v, cx| v.view_fetch_followed(cx));
+        cx.run_until_parked();
+        let paged = sent_threads(&mut rx)
+            .into_iter()
+            .any(|request| matches!(request, ThreadRequest::Page { thread: t, .. } if t == thread));
+        assert!(paged, "its older turns are asked for");
+    }
+
+    /// A transcript says how full its agent's context is.
+    #[gpui::test]
+    fn a_transcript_says_how_full_its_context_is(cx: &mut gpui::TestAppContext) {
+        let mut state = fixtures::thread("tools");
+        state.meters.context_tokens = Some(50_000);
+        state.meters.context_window = Some(200_000);
+        let (workspace, cx, _rx) = holding(&state, cx);
+        let chat = follow(&workspace, cx, &state);
+        let said = workspace.read_with(cx, |v, cx| v.view_transcript(&chat, cx)).expect("said");
+        let usage = said.context_usage.expect("its context");
+        assert_eq!((usage.tokens, usage.window), (Some(50_000), Some(200_000)));
+    }
+
+    /// A queued message changed in the composer goes to the agent in its own words, and the
+    /// queue shows it as the person wrote it.
+    #[gpui::test]
+    fn a_queued_edit_goes_in_the_agents_words(cx: &mut gpui::TestAppContext) {
+        let (state, first, _) = queued();
+        let (workspace, cx, mut rx) = holding(&state, cx);
+        let chat = state.meta.id.to_string();
+        let begin = serde_json::json!({ "chatId": chat, "id": first.to_string() });
+        let lease = reply(
+            workspace
+                .update(cx, |v, cx| v.queue_call(methods::BEGIN_QUEUED_MESSAGE_EDIT, &begin, cx)),
+        );
+        let chip = slopty_view_proto::file_mentions::local_file_link("src/a.rs", false);
+        let written = format!("Check {chip}");
+        let commit = serde_json::json!({
+            "chatId": chat, "id": first.to_string(), "action": "commit", "text": written,
+            "expectedTextHash": lease["baseTextHash"], "attachments": [],
+        });
+        let done =
+            reply(workspace.update(cx, |v, cx| {
+                v.queue_call(methods::FINISH_QUEUED_MESSAGE_EDIT, &commit, cx)
+            }));
+        assert_eq!(done["outcome"], "committed");
+        cx.run_until_parked();
+        let edited = sent_threads(&mut rx).into_iter().find_map(|request| match request {
+            ThreadRequest::Intent { intent: Intent::Edit { text, .. }, .. } => Some(text),
+            _ => None,
+        });
+        let agent = super::agent_prompt(&written, HarnessId::CLAUDE_CODE);
+        assert_ne!(agent, written, "the chip is put in the agent's words");
+        assert_eq!(edited, Some(agent));
+        let shown = workspace.update(cx, |v, cx| v.view_queue(&chat, cx));
+        assert_eq!(shown.first().map(|m| m.text.clone()), Some(written), "as the person wrote it");
+    }
+
+    /// "Show full output" fetches what the worker cut, whole.
+    #[gpui::test]
+    fn a_cut_output_is_fetched_whole(cx: &mut gpui::TestAppContext) {
+        use slopty_proto::thread::detail::{Clip, Clipped};
+        use slopty_proto::thread::wire::Expanded;
+        use slopty_proto::thread::{ContentRef, ItemBody};
+        let mut state = fixtures::thread("tools");
+        let whole = "out\n".repeat(1000);
+        let full = ContentRef("t1:out".to_owned());
+        let item = state
+            .items
+            .iter_mut()
+            .find(|item| matches!(item.body, ItemBody::Tool(_)))
+            .expect("a tool call");
+        let id = item.id.0.clone();
+        if let ItemBody::Tool(call) = &mut item.body {
+            let clip = Clip { lines: 40, chars: 32_000 };
+            call.output = Some(Clipped::tail(&whole, clip, Some(full.clone())));
+        }
+        let thread = state.meta.id;
+        let (workspace, cx, mut rx) = holding(&state, cx);
+        let params = serde_json::json!({ "blobRef": format!("{thread}/{id}") });
+        let answer = workspace.update(cx, |v, cx| v.view_tool_blob(&params, cx));
+        cx.run_until_parked();
+        let asked = sent_threads(&mut rx).into_iter().any(
+            |request| matches!(request, ThreadRequest::Expand { content, .. } if content == full),
+        );
+        assert!(asked, "the whole is asked of the worker");
+        let frame = ThreadFrame::Expanded { content: full, body: Expanded::Text(whole.clone()) };
+        workspace.update(cx, |v, cx| v.thread_frame(KEY, thread, frame, cx));
+        cx.executor().advance_clock(std::time::Duration::from_millis(100));
+        cx.run_until_parked();
+        let answer = futures::FutureExt::now_or_never(answer).expect("answered");
+        assert_eq!(reply(answer)["text"], whole);
+    }
+
+    /// A picture of a thread is read back through the thread once its worker sent it.
+    #[gpui::test]
+    fn a_threads_picture_is_read_back(cx: &mut gpui::TestAppContext) {
+        use slopty_proto::thread::wire::Expanded;
+        use slopty_proto::thread::{ContentRef, Image, ItemBody};
+        let mut state = fixtures::thread("tools");
+        let at = ContentRef("img:1".to_owned());
+        let image = Image {
+            digest: "ab".repeat(32),
+            media_type: "image/png".to_owned(),
+            bytes: 3,
+            width: 1,
+            height: 1,
+            at: at.clone(),
+        };
+        let item = state
+            .items
+            .iter_mut()
+            .find(|item| matches!(item.body, ItemBody::Tool(_)))
+            .expect("a tool call");
+        let id = item.id.0.clone();
+        if let ItemBody::Tool(call) = &mut item.body {
+            call.images = vec![image.clone()];
+        }
+        let thread = state.meta.id;
+        let (workspace, cx, _rx) = holding(&state, cx);
+        let path = crate::view_model::transcript::image_path(thread, &id, 0, &image);
+        let answer = workspace.update(cx, |v, cx| v.view_image_chunk(&path, 0, cx));
+        let frame = ThreadFrame::Expanded { content: at, body: Expanded::Bytes(vec![1, 2, 3]) };
+        workspace.update(cx, |v, cx| v.thread_frame(KEY, thread, frame, cx));
+        cx.executor().advance_clock(std::time::Duration::from_millis(100));
+        cx.run_until_parked();
+        let chunk = reply(futures::FutureExt::now_or_never(answer).expect("answered"));
+        assert_eq!(chunk["mimeType"], "image/png");
+        assert_eq!(chunk["data"], "AQID");
+        assert_eq!(chunk["done"], true);
+    }
+
+    /// A working turn's time runs from when it began, through the approvals within it.
+    #[gpui::test]
+    fn a_turns_time_runs_from_when_it_began(cx: &mut gpui::TestAppContext) {
+        use slopty_proto::thread::Phase;
+        let mut state = fixtures::thread("tools");
+        let (workspace, cx, _rx) = holding(&state, cx);
+        let feed = serve(&workspace, cx);
+        let thread = state.meta.id;
+        let began = 1_760_000_000_000_u64;
+        for ((phase, since), seq) in [
+            (Phase::Working, began),
+            (Phase::NeedsYou, began + 5_000),
+            (Phase::Working, began + 9_000),
+        ]
+        .into_iter()
+        .zip(2_u64..)
+        {
+            state.status.phase = phase;
+            state.status.since_ms = WallMs::from_millis(since);
+            let cursor = Cursor { epoch: 1, seq };
+            let rows = vec![state.row(WallMs::ZERO)];
+            workspace.update(cx, |v, cx| {
+                v.thread_table(KEY, &TableFrame::Snapshot { cursor, rows }, cx);
+                v.view_publish(cx);
+            });
+        }
+        let sessions = feed.said_sessions();
+        let session =
+            sessions.iter().find(|s| s.chat_id == thread.to_string()).expect("its session");
+        let started = session.started_at.map(|at| at.timestamp_millis());
+        assert_eq!(started, Some(i64::try_from(began).expect("a time")));
+    }
+
+    /// A subagent running on another machine shows as running on its spawn.
+    #[gpui::test]
+    fn a_subagent_on_another_machine_runs(cx: &mut gpui::TestAppContext) {
+        use slopty_proto::thread::detail::{AgentDetail, Clipped};
+        use slopty_proto::thread::{ItemBody, Phase, ToolDetail};
+        let mut state = fixtures::thread("tools");
+        let mut child = fixtures::empty();
+        child.status.phase = Phase::Working;
+        let item = state
+            .items
+            .iter_mut()
+            .find(|item| matches!(item.body, ItemBody::Tool(_)))
+            .expect("a tool call");
+        if let ItemBody::Tool(call) = &mut item.body {
+            call.detail = Some(ToolDetail::Agent(AgentDetail {
+                agent_type: None,
+                description: Some("look around".to_owned()),
+                prompt: Clipped::whole("look"),
+                background: false,
+                report: None,
+                tokens: None,
+                tool_uses: None,
+                duration_ms: None,
+            }));
+            call.child = Some(child.meta.id);
+        }
+        let (workspace, cx, _rx) = holding(&state, cx);
+        let chat = follow(&workspace, cx, &state);
+        let other = slopty_client::WorkerKey::new(2);
+        let rows = vec![child.row(WallMs::ZERO)];
+        let cursor = Cursor { epoch: 1, seq: 1 };
+        workspace
+            .update(cx, |v, cx| v.thread_table(other, &TableFrame::Snapshot { cursor, rows }, cx));
+        let said = workspace.read_with(cx, |v, cx| v.view_transcript(&chat, cx)).expect("said");
+        let status = said.entries.iter().flat_map(|e| &e.parts).find_map(|part| match part {
+            slopty_view_doc::MessagePart::Tool { subagent_status, .. } => *subagent_status,
+            _ => None,
+        });
+        assert_eq!(status, Some(slopty_view_doc::SubagentStatus::Running));
+    }
+
+    /// A chat opened is marked seen through its latest turn, even while its terminal's agent
+    /// speaks for its thread.
+    #[gpui::test]
+    fn a_chat_opened_is_seen_while_its_terminal_speaks(cx: &mut gpui::TestAppContext) {
+        let mut state = fixtures::thread("tools");
+        state.meta.terminal = Some(slopty_core::SessionId::new());
+        state.status.liveness = Liveness::Live;
+        let ended = state.row(WallMs::ZERO).ended.expect("a turn that ended").turn;
+        let thread = state.meta.id;
+        let (workspace, cx, mut rx) = holding(&state, cx);
+        let params = serde_json::json!({ "op": "markChatSeen", "chatId": thread.to_string() });
+        let answer = workspace.update(cx, |v, cx| v.view_call(methods::MUTATE, &params, cx));
+        assert!(answer.is_ok(), "{answer:?}");
+        cx.run_until_parked();
+        let seen = sent_threads(&mut rx).into_iter().any(|request| {
+            matches!(request, ThreadRequest::Intent { intent: Intent::Seen { turn }, .. }
+                if turn == ended)
+        });
+        assert!(seen, "seen through its latest turn");
+    }
+
+    /// The chats wait for every machine's threads: an empty first list would read as every
+    /// chat gone.
+    #[gpui::test]
+    fn the_chats_wait_for_every_machines_threads(cx: &mut gpui::TestAppContext) {
+        let state = fixtures::thread("tools");
+        let workspace = cx.new(|_| WorkspaceView::new(slopty_theme::Theme::default()));
+        let cx = cx.add_empty_window();
+        workspace.update(cx, |v, cx| v.add_worker(KEY, "studio".to_owned(), cx));
+        let _rx = link(&workspace, cx, mac(|_| {}), Vec::new());
+        let feed = serve(&workspace, cx);
+        workspace.update(cx, WorkspaceView::view_publish);
+        assert!(feed.said_chats().is_none(), "nothing before the machine's threads");
+        let cursor = Cursor { epoch: 1, seq: 1 };
+        workspace.update(cx, |v, cx| {
+            v.threads_linked(KEY, cx);
+            let rows = vec![state.row(WallMs::ZERO)];
+            v.thread_table(KEY, &TableFrame::Snapshot { cursor, rows }, cx);
+            v.view_publish(cx);
+        });
+        let chats = feed.said_chats().expect("said once they came");
+        assert_eq!(chats.len(), 1);
+    }
+
+    /// A chat with no project on a device that runs no worker starts on the machine in front.
+    #[gpui::test]
+    fn a_projectless_chat_starts_on_the_machine_in_front(cx: &mut gpui::TestAppContext) {
+        let (workspace, cx, _rx) = holding(&fixtures::thread("tools"), cx);
+        let create = serde_json::json!({ "op": "createChat", "chatId": "m", "deviceId": "me" });
+        let made = workspace.update(cx, |v, cx| v.view_call(methods::MUTATE, &create, cx));
+        assert!(made.is_ok(), "{made:?}");
+        let worker = workspace.read_with(cx, |v, _| v.view_model.minted.get("m").map(|m| m.worker));
+        assert_eq!(worker, Some(KEY));
+    }
+
+    /// A message queued while its chat starts shows in the queue and can be taken back.
+    #[gpui::test]
+    fn a_message_queued_while_a_chat_starts_shows_and_goes(cx: &mut gpui::TestAppContext) {
+        let (workspace, cx, mut rx) = holding(&fixtures::thread("tools"), cx);
+        starting(&workspace, cx, &mut rx);
+        let more = serde_json::json!({ "chatId": "m", "text": "and then", "holdForTurnEnd": true });
+        let queued = workspace.update(cx, |v, cx| v.view_call(methods::QUEUE_MESSAGE, &more, cx));
+        let row = queued.expect("held")["id"].as_str().map(str::to_owned).expect("its row");
+        let shown = workspace.update(cx, |v, cx| v.view_queue("m", cx));
+        let texts: Vec<_> = shown.iter().map(|m| (m.id.clone(), m.text.clone())).collect();
+        assert_eq!(texts, [(row.clone(), "and then".to_owned())]);
+        let params = serde_json::json!({ "chatId": "m", "id": row });
+        let removed =
+            workspace.update(cx, |v, cx| v.queue_call(methods::REMOVE_QUEUED_MESSAGE, &params, cx));
+        assert_eq!(reply(removed)["removed"], true);
+        assert_eq!(workspace.update(cx, |v, cx| v.view_queue("m", cx)), Vec::new());
+    }
+
+    /// A tapped note opens the chat it is about.
+    #[gpui::test]
+    fn a_tapped_note_names_its_chat(cx: &mut gpui::TestAppContext) {
+        use slopty_platform::notify::info::{THREAD, WORKER};
+        let state = fixtures::thread("tools");
+        let (workspace, cx, _rx) = holding(&state, cx);
+        let tap = slopty_platform::notify::Tap {
+            id: "n".to_owned(),
+            info: std::collections::BTreeMap::from([
+                (WORKER.to_owned(), KEY.value().to_string()),
+                (THREAD.to_owned(), state.meta.id.to_string()),
+            ]),
+            action: None,
+            text: None,
+        };
+        let chat = workspace.read_with(cx, |v, _| v.tapped_chat(&tap));
+        assert_eq!(chat, Some(state.meta.id.to_string()));
     }
 }

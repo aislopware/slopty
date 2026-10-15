@@ -74,6 +74,9 @@ pub struct Threads {
     reviews_asked: Vec<(ThreadId, ReviewScope)>,
     /// Expansions asked for and not come yet.
     asked: HashSet<ContentRef>,
+    /// Pages of older turns asked for and not come yet, by thread: the first turn held when
+    /// each was asked.
+    paging: HashMap<ThreadId, slopty_proto::thread::TurnId>,
     linked: bool,
     outbox_changed: bool,
 }
@@ -160,6 +163,7 @@ impl Threads {
         self.linked = false;
         // What was asked and not answered is lost with the link.
         self.asked.clear();
+        self.paging.clear();
         for mirror in self.mirrors.values_mut() {
             mirror.lost();
         }
@@ -181,6 +185,7 @@ impl Threads {
     pub fn close_thread(&mut self, thread: ThreadId) -> (Option<Cached>, Option<ClientMsg>) {
         self.reviews.remove(&thread);
         self.reviews_asked.retain(|(t, _)| *t != thread);
+        self.paging.remove(&thread);
         let cached = self.mirrors.remove(&thread).and_then(|m| cached(&m));
         let msg = self.linked.then_some(ClientMsg::Thread(ThreadRequest::Unfollow { thread }));
         (cached, msg)
@@ -239,6 +244,9 @@ impl Threads {
             held.retain(|r| r.scope != review.scope);
             held.push(Arc::from(review));
             return (Changed::Review, Vec::new());
+        }
+        if matches!(frame, ThreadFrame::Page(_)) {
+            self.paging.remove(&thread);
         }
         let Some(mirror) = self.mirrors.get_mut(&thread) else {
             return (Changed::Nothing, Vec::new());
@@ -315,6 +323,19 @@ impl Threads {
         self.blobs.get(content)
     }
 
+    /// The whole of `content`, when it came, for a reader that only looks.
+    #[must_use]
+    pub fn whole(&self, content: &ContentRef) -> Option<&Arc<Expanded>> {
+        self.blobs.peek(content)
+    }
+
+    /// Whether a table frame has come since the client started: the table is the worker's
+    /// word, not an empty start.
+    #[must_use]
+    pub const fn heard_table(&self) -> bool {
+        self.heard_table
+    }
+
     /// What to send to fetch the whole of `content` in `thread`: nothing when it is held, on
     /// its way already, or the link is down.
     pub fn expand(&mut self, thread: ThreadId, content: &ContentRef) -> Option<ClientMsg> {
@@ -325,16 +346,22 @@ impl Threads {
         Some(ClientMsg::Thread(ThreadRequest::Expand { thread, content: content.clone() }))
     }
 
-    /// Ask for the turns of `thread` before the first one held.
-    #[must_use]
-    pub fn page(&self, thread: ThreadId, turns: u32) -> Option<ClientMsg> {
+    /// Ask for the turns of `thread` before the first one held: nothing when it holds them
+    /// all, the link is down, or the same page is on its way.
+    pub fn page(&mut self, thread: ThreadId, turns: u32) -> Option<ClientMsg> {
         let state = self.mirrors.get(&thread)?.state()?;
         let before = state.turns.first()?.id;
-        (state.older && self.linked).then_some(ClientMsg::Thread(ThreadRequest::Page {
-            thread,
-            before,
-            turns,
-        }))
+        if !state.older || !self.linked || self.paging.get(&thread) == Some(&before) {
+            return None;
+        }
+        self.paging.insert(thread, before);
+        Some(ClientMsg::Thread(ThreadRequest::Page { thread, before, turns }))
+    }
+
+    /// Whether `thread` holds turns before its first one that it has not fetched yet.
+    #[must_use]
+    pub fn older(&self, thread: ThreadId) -> bool {
+        self.mirrors.get(&thread).and_then(Mirror::state).is_some_and(|state| state.older)
     }
 }
 

@@ -737,6 +737,17 @@ impl WorkspaceView {
         }
     }
 
+    /// The chat a tapped note is about, as the interface knows it: its agent's thread; `None`
+    /// for a note about a terminal with no agent's thread in it.
+    #[must_use]
+    pub fn tapped_chat(&self, tap: &Tap) -> Option<String> {
+        let thread = match Route::of_tap(tap)?.about {
+            About::Session(session) => self.session_thread(session)?,
+            About::Thread(thread) => thread,
+        };
+        Some(self.chat_id(thread))
+    }
+
     /// What a note's title says: its agent's thread's name, else the worker's.
     #[must_use]
     pub fn route_title(&self, route: Route) -> String {

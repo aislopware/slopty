@@ -297,6 +297,15 @@ pub fn activate_main_window(cx: &mut App) {
     }
 }
 
+/// slopty: bring Slopty forward on the chat `chat_id`, as a clicked banner does: the host's
+/// own notes open their chats this way.
+pub fn open_chat(chat_id: String, cx: &mut App) {
+    let Some(state) = cx.try_global::<ReopenState>().map(|reopen| reopen.state.clone()) else {
+        return;
+    };
+    open_notification_target(chat_id, &state, cx);
+}
+
 /// A clicked banner: bring Slopty forward on its chat or settings destination,
 /// reopening the main window first if ⌘W closed it.
 fn open_notification_target(target: String, state: &gpui::Entity<state::AppState>, cx: &mut App) {

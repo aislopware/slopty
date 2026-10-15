@@ -418,3 +418,44 @@ fn a_thread_s_title_is_its_state_s_else_its_row_s() {
     threads.table(&delta);
     assert_eq!(threads.title(unknown), Some("From the table"), "unfollowed, from its row");
 }
+
+/// A page of older turns is asked once while it is on its way, and no more once every turn
+/// is held.
+#[test]
+fn older_turns_are_paged_once_until_every_turn_is_held() {
+    use slopty_proto::thread::wire::Page;
+    use slopty_proto::thread::{Changed as Lines, Turn, TurnState, Usage};
+    let turn = |n: u32| Turn {
+        id: TurnId(n),
+        input: None,
+        state: TurnState::Complete,
+        started_ms: WallMs::ZERO,
+        ended_ms: None,
+        usage: Usage::default(),
+        models: Vec::new(),
+        changed: Lines::default(),
+        before: None,
+        after: None,
+    };
+    let thread = ThreadId::new();
+    let mut threads = Threads::default();
+    let _sent = threads.connected();
+    let _follow = threads.open_thread(thread, None);
+    let mut state = ThreadState::new(meta(thread));
+    state.turns = vec![turn(5)];
+    state.older = true;
+    let frame =
+        ThreadFrame::Snapshot { cursor: Cursor { epoch: 7, seq: 0 }, state: Box::new(state) };
+    let _took = threads.frame(thread, frame);
+    assert!(threads.older(thread));
+    let asked = threads.page(thread, 50);
+    assert!(
+        matches!(asked, Some(ClientMsg::Thread(ThreadRequest::Page { before: TurnId(5), .. }))),
+        "{asked:?}"
+    );
+    assert!(threads.page(thread, 50).is_none(), "once while it is on its way");
+    let page = Page { turns: vec![turn(1), turn(2)], items: Vec::new(), older: false };
+    assert_eq!(threads.frame(thread, ThreadFrame::Page(page)).0, Changed::Thread);
+    assert!(!threads.older(thread), "every turn held");
+    assert!(threads.page(thread, 50).is_none(), "nothing more to ask");
+}

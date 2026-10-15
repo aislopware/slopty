@@ -1,13 +1,16 @@
 //! The settings pages' calls: the agents a machine offers (Settings → Agents), as its worker's
 //! caps name them, and the person's one setting for how freely they act (`[agents] autonomy`
-//! in `settings.toml`, which the server reads for each start).
+//! in the server's own `settings.toml`, read and written through the server, which reads it for
+//! each start).
 //!
 //! An agent is offered wherever its program is installed, unless the person switched it off
 //! here: the agents switched off are kept in `interface/agents-off.json` under Slopty's data
 //! directory, and no picker of this app offers them. Slopty installs nothing and updates
 //! nothing; the person installs an agent on the machine, and its worker says so.
 
-use gpui::{AppContext as _, Context, Task};
+use gpui::{Context, Task};
+use slopty_proto::orchestration::{Outcome, Verb};
+use slopty_proto::settings::SettingEdit;
 use slopty_proto::thread::AgentId;
 use slopty_settings::edit;
 use slopty_view_proto::{HarnessId, ReasoningLevel, SteeringMode};
@@ -70,12 +73,12 @@ impl WorkspaceView {
             // Agents update themselves on their machines; there is nothing to watch or check.
             methods::WATCH_HARNESS_UPDATES => return Some(still_empty()),
             methods::CHECK_HARNESS_UPDATES => value(&Vec::<serde_json::Value>::new()),
-            methods::GET_AGENT_SETTINGS => return Some(agent_settings(None, cx)),
+            methods::GET_AGENT_SETTINGS => return Some(self.agent_settings(None, cx)),
             methods::SET_AGENT_SETTINGS => {
-                let Some(autonomy) = super::param(params, "autonomy").map(str::to_owned) else {
+                let Some(autonomy) = super::param(params, "autonomy") else {
                     return Some(Task::ready(Err(RpcError::BadParams("autonomy".to_owned()))));
                 };
-                return Some(agent_settings(Some(autonomy), cx));
+                return Some(self.agent_settings(Some(autonomy), cx));
             }
             _ => return None,
         };
@@ -132,38 +135,85 @@ fn still_empty() -> Task<Result<RpcReply, RpcError>> {
 /// The autonomies `[agents] autonomy` takes, as the file writes them.
 const AUTONOMIES: [&str; 3] = ["auto", "full", "ask"];
 
-/// `[agents] autonomy` as `settings.toml` holds it, after writing `set` there when given; off
-/// the UI thread, since it is a file.
-fn agent_settings(
-    set: Option<String>,
-    cx: &Context<WorkspaceView>,
-) -> Task<Result<RpcReply, RpcError>> {
-    cx.background_spawn(async move {
-        let path = slopty_settings::path();
-        let text = match std::fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-            Err(e) => return Err(RpcError::Failed(format!("{}: {e}", path.display()))),
+/// `[agents] autonomy` as the server's settings file holds it: the server decides how far its
+/// agents go, on whichever machine it runs.
+fn autonomy_of(text: &str) -> String {
+    match edit::read(text, "agents", "autonomy") {
+        Some(edit::Value::Str(now)) if AUTONOMIES.contains(&now.as_str()) => now,
+        _ => AUTONOMIES[0].to_owned(),
+    }
+}
+
+impl WorkspaceView {
+    /// `[agents] autonomy` of the server's own settings file, after writing `set` there when
+    /// given, through the server ([`Verb::Settings`] of no worker), which takes its file up again.
+    fn agent_settings(
+        &self,
+        set: Option<&str>,
+        cx: &Context<Self>,
+    ) -> Task<Result<RpcReply, RpcError>> {
+        if let Some(set) = set.filter(|set| !AUTONOMIES.contains(set)) {
+            return Task::ready(Err(RpcError::BadParams(format!("no autonomy {set}"))));
+        }
+        let Some(caller) = self.server.clone() else {
+            return Task::ready(Err(RpcError::Failed(
+                "Autonomy is the server's: link a server to set it".to_owned(),
+            )));
         };
-        let autonomy = if let Some(set) = set {
-            if !AUTONOMIES.contains(&set.as_str()) {
-                return Err(RpcError::BadParams(format!("no autonomy {set}")));
+        let edits = set
+            .iter()
+            .map(|set| SettingEdit {
+                table: "agents".to_owned(),
+                key: "autonomy".to_owned(),
+                entry: None,
+                literal: Some(edit::quoted(set)),
+            })
+            .collect();
+        cx.spawn(async move |_, _| match caller.call(Verb::Settings { of: None, edits }).await {
+            Outcome::Settings(file) => {
+                value(&serde_json::json!({ "autonomy": autonomy_of(&file.text) }))
             }
-            let written = edit::write(&text, "agents", "autonomy", &edit::quoted(&set));
-            if let Some(error) = slopty_settings::Settings::parse(&written).error {
-                return Err(RpcError::Failed(error.to_string()));
-            }
-            if let Some(dir) = path.parent() {
-                std::fs::create_dir_all(dir).map_err(|e| RpcError::Failed(e.to_string()))?;
-            }
-            std::fs::write(&path, written).map_err(|e| RpcError::Failed(e.to_string()))?;
-            set
-        } else {
-            match edit::read(&text, "agents", "autonomy") {
-                Some(edit::Value::Str(now)) if AUTONOMIES.contains(&now.as_str()) => now,
-                _ => AUTONOMIES[0].to_owned(),
-            }
+            Outcome::Error { message, .. } => Err(RpcError::Failed(message)),
+            _ => Err(RpcError::Failed("the server answered something else".to_owned())),
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::AppContext as _;
+    use slopty_proto::orchestration::{Outcome, Verb};
+    use slopty_proto::settings::{DaemonSettings, SettingEdit};
+
+    use crate::workspace::WorkspaceView;
+
+    /// Autonomy is the server's own setting, read and written through it, wherever it runs.
+    #[gpui::test]
+    fn autonomy_is_set_on_the_server(cx: &mut gpui::TestAppContext) {
+        let workspace = cx.new(|_| WorkspaceView::new(slopty_theme::Theme::default()));
+        let cx = cx.add_empty_window();
+        let (caller, mut queue) = slopty_client::server::ServerCaller::queued();
+        workspace.update(cx, |v, _| v.server = Some(caller));
+        let answer = workspace.update(cx, |v, cx| v.agent_settings(Some("full"), cx));
+        cx.run_until_parked();
+        let (verb, reply) = queue.try_next().expect("asked of the server");
+        let edit = SettingEdit {
+            table: "agents".to_owned(),
+            key: "autonomy".to_owned(),
+            entry: None,
+            literal: Some("\"full\"".to_owned()),
         };
-        value(&serde_json::json!({ "autonomy": autonomy }))
-    })
+        assert_eq!(verb, Verb::Settings { of: None, edits: vec![edit] });
+        let file = DaemonSettings {
+            path: "/s/settings.toml".to_owned(),
+            text: "[agents]\nautonomy = \"full\"\n".to_owned(),
+            tables: Vec::new(),
+            problems: Vec::new(),
+        };
+        let _sent = reply.send(Outcome::Settings(Box::new(file)));
+        cx.run_until_parked();
+        let answer = futures::FutureExt::now_or_never(answer).expect("answered");
+        let Ok(slopty_view_rpc::RpcReply::Value(value)) = answer else { panic!("not a value") };
+        assert_eq!(value["autonomy"], "full");
+    }
 }

@@ -75,15 +75,18 @@ impl std::fmt::Debug for Ask {
 #[derive(Debug)]
 pub struct Feed {
     devices: watch::Sender<Arc<[Device]>>,
-    spaces: watch::Sender<Arc<[Space]>>,
-    chats: watch::Sender<Arc<[Chat]>>,
+    /// `None` until the workspace has heard every machine's threads, or given up waiting: an
+    /// empty or partial first list would read as chats and projects gone, and the shell would
+    /// let go of their pins and filter.
+    spaces: watch::Sender<Option<Arc<[Space]>>>,
+    chats: watch::Sender<Option<Arc<[Chat]>>>,
     sessions: watch::Sender<Arc<[Session]>>,
     /// The link to the server, for the sidebar's foot.
     connectivity: watch::Sender<Connectivity>,
     /// This machine's own worker as a device id, once the app knows whether it has one.
     local: watch::Sender<Local>,
     /// Each followed chat's transcript, `None` until its thread has come.
-    transcripts: Mutex<HashMap<String, Transcript>>,
+    transcripts: Mutex<HashMap<String, Followed>>,
     /// The messages waiting to go to each chat's agent, for the chats whose queue is watched.
     queues: Mutex<HashMap<String, watch::Sender<Arc<[QueuedMessage]>>>>,
     /// The pull requests the threads' branches have, as their rows show them.
@@ -116,17 +119,37 @@ enum Local {
 
 /// One followed chat's transcript and how many watches are open on it.
 #[derive(Debug)]
-struct Transcript {
-    entries: watch::Sender<Option<Arc<[SessionMessageEntry]>>>,
+struct Followed {
+    said: watch::Sender<Option<Arc<Transcript>>>,
     watches: usize,
+}
+
+/// A chat's transcript as the workspace says it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Transcript {
+    /// Its entries.
+    pub entries: Vec<SessionMessageEntry>,
+    /// How full the agent's context is, for the shell's ring.
+    pub context_usage: Option<slopty_view_proto::ContextUsage>,
+    /// Older turns are still on their way: the entries are the latest ones, which the shell
+    /// shows as it waits for the whole history (zeron's opening tail).
+    pub history_pending: bool,
+}
+
+impl Transcript {
+    /// The whole of a transcript of `entries`, with nothing more to say.
+    #[must_use]
+    pub const fn of(entries: Vec<SessionMessageEntry>) -> Self {
+        Self { entries, context_usage: None, history_pending: false }
+    }
 }
 
 impl Feed {
     fn new() -> Self {
         Self {
             devices: watch::Sender::new(Arc::default()),
-            spaces: watch::Sender::new(Arc::default()),
-            chats: watch::Sender::new(Arc::default()),
+            spaces: watch::Sender::new(None),
+            chats: watch::Sender::new(None),
             sessions: watch::Sender::new(Arc::default()),
             connectivity: watch::Sender::new(Connectivity::default()),
             local: watch::Sender::new(Local::Unknown),
@@ -164,12 +187,30 @@ impl Feed {
 
     /// The folders on the workers, as spaces.
     pub fn spaces(&self, spaces: Vec<Space>) {
-        publish(&self.spaces, spaces);
+        publish_once_known(&self.spaces, spaces);
     }
 
     /// The threads, as chats.
     pub fn chats(&self, chats: Vec<Chat>) {
-        publish(&self.chats, chats);
+        publish_once_known(&self.chats, chats);
+    }
+
+    /// The chats as last said, `None` before the first.
+    #[cfg(test)]
+    pub(crate) fn said_chats(&self) -> Option<Arc<[Chat]>> {
+        self.chats.borrow().clone()
+    }
+
+    /// The spaces as last said, `None` before the first.
+    #[cfg(test)]
+    pub(crate) fn said_spaces(&self) -> Option<Arc<[Space]>> {
+        self.spaces.borrow().clone()
+    }
+
+    /// The sessions as last said.
+    #[cfg(test)]
+    pub(crate) fn said_sessions(&self) -> Arc<[Session]> {
+        self.sessions.borrow().clone()
     }
 
     /// The sidebar's pins and sections.
@@ -211,14 +252,14 @@ impl Feed {
     }
 
     /// `chat`'s transcript as its thread stands now; nothing while no watch is open on it.
-    pub fn transcript(&self, chat: &str, entries: Vec<SessionMessageEntry>) {
-        let sender = self.transcripts.lock().get(chat).map(|t| t.entries.clone());
+    pub fn transcript(&self, chat: &str, said: Transcript) {
+        let sender = self.transcripts.lock().get(chat).map(|t| t.said.clone());
         let Some(sender) = sender else { return };
         sender.send_if_modified(|now| {
-            if now.as_deref() == Some(entries.as_slice()) {
+            if now.as_deref() == Some(&said) {
                 return false;
             }
-            *now = Some(entries.into());
+            *now = Some(Arc::new(said));
             true
         });
     }
@@ -250,13 +291,13 @@ impl Feed {
     pub(crate) fn watch_transcript(
         &self,
         chat: &str,
-    ) -> (watch::Receiver<Option<Arc<[SessionMessageEntry]>>>, bool) {
+    ) -> (watch::Receiver<Option<Arc<Transcript>>>, bool) {
         let mut transcripts = self.transcripts.lock();
         let transcript = transcripts
             .entry(chat.to_owned())
-            .or_insert_with(|| Transcript { entries: watch::Sender::new(None), watches: 0 });
+            .or_insert_with(|| Followed { said: watch::Sender::new(None), watches: 0 });
         transcript.watches = transcript.watches.saturating_add(1);
-        let watching = (transcript.entries.subscribe(), transcript.watches == 1);
+        let watching = (transcript.said.subscribe(), transcript.watches == 1);
         drop(transcripts);
         watching
     }
@@ -281,6 +322,18 @@ fn publish<T: PartialEq>(sender: &watch::Sender<Arc<[T]>>, list: Vec<T>) {
             return false;
         }
         *now = list.into();
+        true
+    });
+}
+
+/// Replace a list that waits to be known, waking its watches when it is first said and when it
+/// changed.
+fn publish_once_known<T: PartialEq>(sender: &watch::Sender<Option<Arc<[T]>>>, list: Vec<T>) {
+    sender.send_if_modified(|now| {
+        if now.as_deref() == Some(list.as_slice()) {
+            return false;
+        }
+        *now = Some(list.into());
         true
     });
 }
@@ -376,35 +429,56 @@ impl Drop for Closing {
 }
 
 /// A transcript as the shell's frames: the whole of it first, as history, then what changed.
+///
+/// While older turns are on their way the latest ones go as zeron's opening tail
+/// (`historyPending`), and the whole history, once here, as one reset the shell takes as
+/// history: older turns put in front never arrive as live ones. How full the context is rides
+/// every frame.
 fn transcript_frames(
-    entries: watch::Receiver<Option<Arc<[SessionMessageEntry]>>>,
+    said: watch::Receiver<Option<Arc<Transcript>>>,
     closing: Closing,
 ) -> BoxStream<'static, serde_json::Value> {
-    let start = (entries, None::<Arc<[SessionMessageEntry]>>, closing, true);
-    futures::stream::unfold(start, async |(mut entries, last, closing, mut first)| {
+    let start = (said, None::<Arc<Transcript>>, closing, true);
+    futures::stream::unfold(start, async |(mut said, last, closing, mut first)| {
         loop {
-            if !first && entries.changed().await.is_err() {
+            if !first && said.changed().await.is_err() {
                 return None;
             }
             first = false;
-            let Some(next) = entries.borrow_and_update().clone() else { continue };
-            let update = match &last {
-                None => TranscriptUpdate {
-                    replay_baseline: Some(TranscriptBaseline::capture(&next)),
-                    frame: TranscriptFrame::Reset { reset: next.to_vec() },
-                    context_usage: None,
-                },
-                Some(last) => TranscriptUpdate {
-                    replay_baseline: None,
-                    frame: slopty_view_doc::diff_transcript(last, &next),
-                    context_usage: None,
-                },
+            let Some(next) = said.borrow_and_update().clone() else { continue };
+            let whole = last.as_ref().is_none_or(|last| {
+                last.history_pending || next.history_pending || put_in_front(last, &next)
+            });
+            let update = if whole {
+                TranscriptUpdate {
+                    replay_baseline: Some(TranscriptBaseline::capture(&next.entries)),
+                    frame: TranscriptFrame::reset(&next.entries),
+                    context_usage: next.context_usage,
+                }
+            } else {
+                let last = last.as_ref()?;
+                let frame = slopty_view_doc::diff_transcript(&last.entries, &next.entries);
+                if frame.is_empty_delta() && last.context_usage == next.context_usage {
+                    continue;
+                }
+                TranscriptUpdate { replay_baseline: None, frame, context_usage: next.context_usage }
             };
-            let value = serde_json::to_value(&update).ok()?;
-            return Some((value, (entries, Some(next), closing, false)));
+            let mut value = serde_json::to_value(&update).ok()?;
+            if next.history_pending
+                && let Some(fields) = value.as_object_mut()
+            {
+                fields.insert("historyPending".to_owned(), serde_json::Value::Bool(true));
+            }
+            return Some((value, (said, Some(next), closing, false)));
         }
     })
     .boxed()
+}
+
+/// Whether `next` holds entries in front of everything `last` held: older turns came.
+fn put_in_front(last: &Transcript, next: &Transcript) -> bool {
+    let Some(first) = last.entries.first() else { return false };
+    next.entries.iter().position(|entry| entry.id == first.id).is_some_and(|at| at > 0)
 }
 
 /// A list's watch: the list now, then each time it changes.
@@ -417,6 +491,24 @@ where
             return None;
         }
         let value = serde_json::to_value(&**rx.borrow_and_update()).ok()?;
+        Some((value, (rx, false)))
+    })
+    .boxed()
+}
+
+/// A list's watch once the list is known: the list then, then each time it changes.
+fn known_list_frames<T>(
+    rx: watch::Receiver<Option<Arc<[T]>>>,
+) -> BoxStream<'static, serde_json::Value>
+where
+    T: Serialize + Send + Sync + 'static,
+{
+    futures::stream::unfold((rx, true), async |(mut rx, first)| {
+        if !first {
+            rx.changed().await.ok()?;
+        }
+        let list = rx.wait_for(Option::is_some).await.ok()?.clone()?;
+        let value = serde_json::to_value(&*list).ok()?;
         Some((value, (rx, false)))
     })
     .boxed()
@@ -522,9 +614,11 @@ impl RpcService for ViewModel {
                 Ok(RpcReply::Stream(list_frames(self.feed.devices.subscribe())))
             }
             methods::WATCH_SPACES => {
-                Ok(RpcReply::Stream(list_frames(self.feed.spaces.subscribe())))
+                Ok(RpcReply::Stream(known_list_frames(self.feed.spaces.subscribe())))
             }
-            methods::WATCH_CHATS => Ok(RpcReply::Stream(list_frames(self.feed.chats.subscribe()))),
+            methods::WATCH_CHATS => {
+                Ok(RpcReply::Stream(known_list_frames(self.feed.chats.subscribe())))
+            }
             methods::WATCH_SESSIONS => {
                 Ok(RpcReply::Stream(list_frames(self.feed.sessions.subscribe())))
             }

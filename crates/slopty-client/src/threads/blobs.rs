@@ -49,6 +49,12 @@ impl Blobs {
         Some(found)
     }
 
+    /// The expansion of `content`, as held, its recency untouched: for a reader that only looks.
+    #[must_use]
+    pub fn peek(&self, content: &ContentRef) -> Option<&Arc<Expanded>> {
+        self.held.get(content)
+    }
+
     /// Keep `body` as the expansion of `content`, letting the least recent go to stay within
     /// the budget. One larger than the whole budget is not kept.
     pub fn put(&mut self, content: ContentRef, body: Expanded) {

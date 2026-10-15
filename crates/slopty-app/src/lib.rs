@@ -1425,6 +1425,12 @@ pub fn open_workspace(cx: &mut App, handle: tokio::runtime::Handle) {
                 let _handled = window.update(cx, |_root, _window, cx| {
                     for_notifications.update(cx, |ws, cx| ws.open_notification(&tap, cx));
                 });
+                // "Show" opens the chat the note is about.
+                if !verdict
+                    && let Some(chat) = for_notifications.read(cx).view.read(cx).tapped_chat(&tap)
+                {
+                    slopty_shell::open_chat(chat, cx);
+                }
             });
         }
     })

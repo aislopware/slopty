@@ -28,8 +28,9 @@ use slopty_view_proto::{
 };
 use slopty_view_rpc::{RpcError, RpcReply, methods};
 
-use super::super::agent_of;
+use super::super::{agent_of, agent_prompt};
 use super::{param, value, within};
+use crate::view_model::transcript;
 use crate::workspace::WorkspaceView;
 
 /// How many files an `@` search answers with.
@@ -49,8 +50,8 @@ const ASIDE_WITHIN: Duration = Duration::from_secs(60);
 #[derive(Debug, Default)]
 pub(super) struct Uploads(HashMap<String, Upload>);
 
-/// The model and effort the person picked for each chat, by its id, until the app quits; a
-/// chat they never picked for shows what its thread runs.
+/// The model and effort the person picked for each chat, by its id, until its thread runs
+/// them or turns the switch down; a chat they never picked for shows what its thread runs.
 #[derive(Debug, Default)]
 pub(super) struct Configs(HashMap<String, Picked>);
 
@@ -499,24 +500,38 @@ impl WorkspaceView {
         self.view_model.surfaces.configs.0.insert(chat.to_owned(), Picked { config, asked: None });
     }
 
-    /// Drop each pick whose switch the chat's thread turned down: the chat shows what its thread
-    /// runs again, beside the refusal its transcript says.
+    /// Drop each pick the chat's thread settled: one whose switch it turned down, so the chat
+    /// shows what it runs again beside the refusal its transcript says, and one its meters say
+    /// it runs now, so what it runs from then on (a switch in its terminal) shows as it moves.
     pub(in crate::workspace) fn settle_configs(&mut self, cx: &Context<Self>) {
-        let refused: Vec<String> = self
+        let settled: Vec<String> = self
             .view_model
             .surfaces
             .configs
             .0
             .iter()
-            .filter(|(_, picked)| {
-                let Some((key, thread, asked)) = &picked.asked else { return false };
-                self.held_hub(*key).is_some_and(|hub| {
-                    hub.read(cx).refusals(*thread).any(|refusal| asked.contains(&refusal.id))
-                })
+            .filter(|(chat, picked)| {
+                if let Some((key, thread, asked)) = &picked.asked
+                    && self.held_hub(*key).is_some_and(|hub| {
+                        hub.read(cx).refusals(*thread).any(|refusal| asked.contains(&refusal.id))
+                    })
+                {
+                    return true;
+                }
+                let Some((key, thread)) = self.chat_thread(chat, cx) else { return false };
+                let Some(hub) = self.held_hub(key) else { return false };
+                let Some(row) = hub.read(cx).threads().rows().rows.get(&thread) else {
+                    return false;
+                };
+                let runs = self.thread_config(&key.to_string(), row);
+                let model = picked.config.model.is_none() || picked.config.model == runs.model;
+                let effort =
+                    picked.config.reasoning.is_none() || picked.config.reasoning == runs.reasoning;
+                model && effort
             })
             .map(|(chat, _)| chat.clone())
             .collect();
-        for chat in refused {
+        for chat in settled {
             self.view_model.surfaces.configs.0.remove(&chat);
         }
     }
@@ -622,6 +637,14 @@ impl WorkspaceView {
         params: &serde_json::Value,
         cx: &Context<Self>,
     ) -> Task<Result<RpcReply, RpcError>> {
+        // A picture of a thread's is read through the thread, not as a file.
+        if let Some(path) =
+            param(params, "path").filter(|path| path.starts_with(transcript::IMAGE_SCHEME))
+        {
+            let offset = params.get("offset").and_then(serde_json::Value::as_u64).unwrap_or(0);
+            let offset = usize::try_from(offset).unwrap_or(usize::MAX);
+            return self.view_image_chunk(path, offset, cx);
+        }
         let (Some(key), Some(path)) = (self.composer_worker(params), param(params, "path")) else {
             return Task::ready(Err(RpcError::BadParams("a machine and path".to_owned())));
         };
@@ -754,11 +777,16 @@ impl WorkspaceView {
     ) -> Result<RpcReply, RpcError> {
         let chat = param(params, "chatId").ok_or_else(|| RpcError::BadParams("chatId".into()))?;
         let row = param(params, "id").ok_or_else(|| RpcError::BadParams("id".to_owned()))?;
+        // A chat still starting holds its messages here until its thread is there.
+        if self.view_model.minted.contains_key(chat) {
+            return Ok(RpcReply::Value(self.held_call(method, chat, row, params)));
+        }
         let pending =
             self.queued_intent(row).ok_or_else(|| RpcError::BadParams("id".to_owned()))?;
         let (key, thread) = self
             .chat_thread(chat, cx)
             .ok_or_else(|| RpcError::Failed(format!("no thread {chat}")))?;
+        let harness = self.thread_harness(key, thread, cx);
         let state = self.view_queue_state(key, thread, pending, cx);
         // A message being typed into the agent can no longer be changed, moved or taken back.
         if state == Some(slopty_proto::thread::PendingState::Sending)
@@ -791,7 +819,7 @@ impl WorkspaceView {
                 (Some(Intent::Promote { pending }), serde_json::json!({ "sent": waiting }))
             }
             methods::UPDATE_QUEUED_MESSAGE => (
-                text.map(|text| Intent::Edit { pending, text, attachments }),
+                text.map(|text| self.queued_edit(pending, text, harness, attachments)),
                 serde_json::json!({ "changed": waiting }),
             ),
             // The lease is the message's own id; its hash lets a commit tell whether the message
@@ -821,11 +849,9 @@ impl WorkspaceView {
                         (Some(now), Some(expected)) if now != expected => "conflict",
                         (Some(_), _) => "committed",
                     };
-                    let edit = text.filter(|_| outcome == "committed").map(|text| Intent::Edit {
-                        pending,
-                        text,
-                        attachments,
-                    });
+                    let edit = text
+                        .filter(|_| outcome == "committed")
+                        .map(|text| self.queued_edit(pending, text, harness, attachments));
                     (edit, serde_json::json!({ "outcome": outcome }))
                 } else {
                     (None, serde_json::json!({ "outcome": "cancelled" }))
@@ -851,6 +877,106 @@ impl WorkspaceView {
             hub.update(cx, |hub, cx| hub.intent(thread, intent, cx));
         }
         Ok(RpcReply::Value(answer))
+    }
+
+    /// The change of the queued message `pending` to `text` as the person wrote it: the agent
+    /// is given its chips in its own words, and the queue keeps showing the person's.
+    fn queued_edit(
+        &mut self,
+        pending: slopty_proto::thread::IntentId,
+        text: String,
+        harness: HarnessId,
+        attachments: Vec<String>,
+    ) -> Intent {
+        let agent = agent_prompt(&text, harness);
+        self.view_model.said.insert(pending, text);
+        Intent::Edit { pending, text: agent, attachments }
+    }
+
+    /// A call on a message a chat still starting holds for its thread ([`Self::queue_call`]):
+    /// removed, changed, moved, or sent the moment the thread is there.
+    fn held_call(
+        &mut self,
+        method: &str,
+        chat: &str,
+        row: &str,
+        params: &serde_json::Value,
+    ) -> serde_json::Value {
+        let held = self.view_model.held.entry(chat.to_owned()).or_default();
+        let Some(at) = held.iter().position(|h| h.queued && h.name == row) else {
+            return match method {
+                methods::BEGIN_QUEUED_MESSAGE_EDIT | methods::FINISH_QUEUED_MESSAGE_EDIT => {
+                    serde_json::json!({ "outcome": "missing" })
+                }
+                methods::RENEW_QUEUED_MESSAGE_EDIT => serde_json::json!({ "outcome": "gone" }),
+                methods::REMOVE_QUEUED_MESSAGE => serde_json::json!({ "removed": false }),
+                methods::SEND_QUEUED_MESSAGE_NOW | methods::STEER_QUEUED_MESSAGE_NOW => {
+                    serde_json::json!({ "sent": false })
+                }
+                _ => serde_json::json!({ "changed": false }),
+            };
+        };
+        let text = param(params, "text").map(str::to_owned);
+        let attachments = params
+            .get("attachments")
+            .and_then(|a| serde_json::from_value::<Vec<String>>(a.clone()).ok());
+        match method {
+            methods::REMOVE_QUEUED_MESSAGE => {
+                held.remove(at);
+                serde_json::json!({ "removed": true })
+            }
+            methods::SEND_QUEUED_MESSAGE_NOW | methods::STEER_QUEUED_MESSAGE_NOW => {
+                if let Some(message) = held.get_mut(at) {
+                    message.hold = false;
+                }
+                serde_json::json!({ "sent": true })
+            }
+            methods::UPDATE_QUEUED_MESSAGE => {
+                if let (Some(message), Some(text)) = (held.get_mut(at), text) {
+                    message.text = text;
+                }
+                serde_json::json!({ "changed": true })
+            }
+            methods::BEGIN_QUEUED_MESSAGE_EDIT => {
+                let Some(message) = held.get(at) else { return serde_json::json!({}) };
+                serde_json::json!({
+                    "outcome": "acquired",
+                    "leaseId": row,
+                    "text": message.text,
+                    "baseTextHash": text_hash(&message.text, &message.attachments),
+                    "attachments": message.attachments,
+                })
+            }
+            methods::RENEW_QUEUED_MESSAGE_EDIT => serde_json::json!({ "outcome": "renewed" }),
+            methods::FINISH_QUEUED_MESSAGE_EDIT => {
+                if param(params, "action") != Some("commit") {
+                    return serde_json::json!({ "outcome": "cancelled" });
+                }
+                let Some(message) = held.get_mut(at) else { return serde_json::json!({}) };
+                let now = text_hash(&message.text, &message.attachments);
+                if param(params, "expectedTextHash").is_some_and(|expected| expected != now) {
+                    return serde_json::json!({ "outcome": "conflict" });
+                }
+                if let Some(text) = text {
+                    message.text = text;
+                }
+                if let Some(attachments) = attachments {
+                    message.attachments = attachments;
+                }
+                serde_json::json!({ "outcome": "committed" })
+            }
+            methods::MOVE_QUEUED_MESSAGE => {
+                let to = params.get("toIndex").and_then(serde_json::Value::as_u64);
+                let to = to.and_then(|to| usize::try_from(to).ok()).unwrap_or(usize::MAX);
+                let moved = held.remove(at);
+                // The place among the queued messages, the moved one taken out.
+                let before =
+                    held.iter().enumerate().filter(|(_, h)| h.queued).nth(to).map(|(ix, _)| ix);
+                held.insert(before.unwrap_or(held.len()), moved);
+                serde_json::json!({ "changed": true })
+            }
+            _ => serde_json::json!({ "changed": false }),
+        }
     }
 
     /// How `pending` stands in `thread`'s queue on `key`; `None` once it left.
@@ -1015,5 +1141,55 @@ mod tests {
         let said = commands(&offers);
         assert_eq!(said[0].name, "compact");
         assert_eq!(said[0].input_hint.as_deref(), Some("[focus]"));
+    }
+}
+
+#[cfg(test)]
+mod picks {
+    use gpui::AppContext as _;
+    use slopty_core::WallMs;
+    use slopty_proto::thread::Cursor;
+    use slopty_proto::thread::wire::TableFrame;
+    use slopty_view_proto::{ChatConfig, HarnessId, ReasoningLevel, SandboxLevel};
+
+    use crate::conversation::thread::fixtures;
+    use crate::workspace::WorkspaceView;
+    use crate::workspace::rig::{KEY, link, mac};
+
+    /// A pick stays until the thread runs it, then goes, so what the thread runs from then on
+    /// shows as it moves.
+    #[gpui::test]
+    fn a_pick_goes_once_the_thread_runs_it(cx: &mut gpui::TestAppContext) {
+        let mut state = fixtures::thread("tools");
+        state.meters.effort = Some("low".to_owned());
+        let chat = state.meta.id.to_string();
+        let workspace = cx.new(|_| WorkspaceView::new(slopty_theme::Theme::default()));
+        let cx = cx.add_empty_window();
+        workspace.update(cx, |v, cx| v.add_worker(KEY, "studio".to_owned(), cx));
+        let _rx = link(&workspace, cx, mac(|_| {}), Vec::new());
+        let table = |state: &slopty_proto::thread::ThreadState, seq| TableFrame::Snapshot {
+            cursor: Cursor { epoch: 1, seq },
+            rows: vec![state.row(WallMs::ZERO)],
+        };
+        let pick = ChatConfig {
+            harness: HarnessId::CLAUDE_CODE,
+            model: None,
+            reasoning: Some(ReasoningLevel::High),
+            model_options: serde_json::Map::new(),
+            sandbox: SandboxLevel::WorkspaceWrite,
+        };
+        workspace.update(cx, |v, cx| {
+            v.threads_linked(KEY, cx);
+            v.thread_table(KEY, &table(&state, 1), cx);
+            v.pick_config(&chat, pick);
+            v.settle_configs(cx);
+            assert!(v.picked_config(&chat).is_some(), "not run yet: the pick shows");
+        });
+        state.meters.effort = Some("high".to_owned());
+        workspace.update(cx, |v, cx| {
+            v.thread_table(KEY, &table(&state, 2), cx);
+            v.settle_configs(cx);
+            assert!(v.picked_config(&chat).is_none(), "run now: the thread's own shows");
+        });
     }
 }

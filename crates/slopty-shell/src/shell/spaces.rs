@@ -78,6 +78,14 @@ pub(super) fn retain_known_pins(
     pinned_ids.len() != before
 }
 
+// slopty: a pin or the filter is let go only while every machine is reached: a chat or project
+// on one out of reach is missing from the lists, not gone.
+/// Whether every device the workspace knows is reached now, so what the lists leave out is gone.
+pub(super) fn every_device_reached(state: &AppState, now: chrono::DateTime<chrono::Utc>) -> bool {
+    !state.devices.is_empty()
+        && state.devices.iter().all(|device| state.device_online(&device.id, now))
+}
+
 /// Convert viewport coordinates to the first pinned row, below its disclosure.
 fn pinned_session_pointer_y(pointer_y: f32, viewport_top: f32, scroll_top: f32) -> f32 {
     pointer_y - viewport_top + scroll_top
@@ -1832,6 +1840,24 @@ mod pinned_session_tests {
         assert!(retain_known_pins(&mut saved, &known));
         assert_eq!(saved, ids(&["active", "archived"]));
         assert!(!retain_known_pins(&mut saved, &known));
+    }
+
+    // slopty: pins and the filter outlive a machine out of reach.
+    #[test]
+    fn pins_wait_while_a_device_is_out_of_reach() {
+        let now = chrono::Utc::now();
+        let device = |id: &str, seen: Option<chrono::DateTime<chrono::Utc>>| -> super::Device {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "name": id, "platform": "macos", "lastSeenAt": seen,
+            }))
+            .unwrap()
+        };
+        let mut state = super::AppState::new();
+        assert!(!super::every_device_reached(&state, now), "no devices said yet");
+        state.devices = vec![device("mac", Some(now)), device("vps", None)];
+        assert!(!super::every_device_reached(&state, now), "the vps is out of reach");
+        state.devices = vec![device("mac", Some(now)), device("vps", Some(now))];
+        assert!(super::every_device_reached(&state, now));
     }
 
     #[test]

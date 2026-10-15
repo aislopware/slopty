@@ -413,6 +413,31 @@ impl ThreadHub {
         self.threads.review(thread, scope)
     }
 
+    /// Ask for the whole of `content` in `thread`, unless it is held or on its way; it comes as
+    /// [`HubEvent::Expanded`].
+    pub fn expand(&mut self, thread: ThreadId, content: &ContentRef, cx: &mut Context<Self>) {
+        if let Some(msg) = self.threads.expand(thread, content) {
+            cx.emit(HubEvent::Send(vec![msg]));
+        }
+    }
+
+    /// The whole of `content`, once it came.
+    #[must_use]
+    pub fn whole(
+        &self,
+        content: &ContentRef,
+    ) -> Option<&Arc<slopty_proto::thread::wire::Expanded>> {
+        self.threads.whole(content)
+    }
+
+    /// Ask for `turns` of `thread`'s turns before the first one held, unless it holds them all
+    /// or that page is on its way.
+    pub fn page(&mut self, thread: ThreadId, turns: u32, cx: &mut Context<Self>) {
+        if let Some(msg) = self.threads.page(thread, turns) {
+            cx.emit(HubEvent::Send(vec![msg]));
+        }
+    }
+
     // ----- git ---------------------------------------------------------------------------
 
     /// The worker answered git op `request`: what the repository said shows, and what goes

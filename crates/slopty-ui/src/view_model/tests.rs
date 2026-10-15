@@ -42,9 +42,9 @@ fn a_message_the_shell_sent_goes_by_the_id_it_gave() {
         message.intent = Some(sent);
     }
     let named = |intent| (intent == sent).then(|| "m-1".to_owned());
-    let entries = transcript::entries(&state, "w", |_| None, named);
+    let entries = transcript::entries(&state, &transcript::Look::new("w").named(named));
     assert_eq!(entries.first().map(|e| e.id.as_str()), Some("m-1"));
-    let unnamed = transcript::entries(&state, "w", |_| None, |_| None);
+    let unnamed = transcript::entries(&state, &transcript::Look::new("w"));
     assert_ne!(unnamed.first().map(|e| e.id.as_str()), Some("m-1"), "not sent from here");
 }
 
@@ -52,7 +52,7 @@ fn a_message_the_shell_sent_goes_by_the_id_it_gave() {
 #[test]
 fn a_recorded_session_reads_as_the_shells_transcript() {
     let state = fixtures::thread("tools");
-    let entries = transcript::entries(&state, "w", |_| None, |_| None);
+    let entries = transcript::entries(&state, &transcript::Look::new("w"));
 
     let first = entries.first().expect("the person's message");
     assert_eq!(first.role, MessageRole::User);
@@ -80,7 +80,7 @@ fn a_recorded_session_reads_as_the_shells_transcript() {
 #[test]
 fn an_edit_carries_its_counts() {
     let state = fixtures::thread("edit");
-    let entries = transcript::entries(&state, "w", |_| None, |_| None);
+    let entries = transcript::entries(&state, &transcript::Look::new("w"));
     let edit = entries
         .iter()
         .flat_map(|e| &e.parts)
@@ -189,12 +189,12 @@ async fn a_transcript_watch_follows_and_lets_go() {
     assert!(matches!(asks.recv().await, Some(Ask::Follow(chat)) if chat == "c"));
 
     let state = fixtures::thread("tools");
-    let all = transcript::entries(&state, "w", |_| None, |_| None);
+    let all = transcript::entries(&state, &transcript::Look::new("w"));
     let (head, _) = all.split_at(1);
     // A watch holds the latest transcript only, so each is read before the next is said.
     let mut rows = Vec::new();
     for said in [head.to_vec(), all.clone()] {
-        feed.transcript("c", said.clone());
+        feed.transcript("c", super::Transcript::of(said.clone()));
         let value = watch.recv().await.expect("a frame");
         let update: TranscriptUpdate = serde_json::from_value(value).expect("the shell's frame");
         slopty_view_doc::apply_transcript_frame(&mut rows, update.frame).expect("in step");
@@ -319,7 +319,7 @@ fn an_open_approval_is_asked_and_answered_by_its_choice() {
         &[("allow", "Allow", Effect::Allow), ("deny", "Deny", Effect::Deny)],
     );
     state.requests.push(approval.clone());
-    let mut entries = transcript::entries(&state, "w", |_| None, |_| None);
+    let mut entries = transcript::entries(&state, &transcript::Look::new("w"));
     transcript::asks(&state, "w", &mut entries);
 
     let (asked, questions) = served(&entries).expect("the panel serves it");
@@ -388,7 +388,7 @@ fn an_unknown_time_is_no_time() {
         for item in &mut state.items {
             item.at_ms = slopty_core::WallMs::from_millis(ms);
         }
-        transcript::entries(state, "w", |_| None, |_| None)
+        transcript::entries(state, &transcript::Look::new("w"))
             .iter()
             .map(|entry| entry.created_at)
             .collect::<Vec<_>>()
@@ -406,7 +406,7 @@ fn an_open_turn_of_a_thread_at_rest_reads_as_finished() {
     let mut state = fixtures::thread("tools");
     let last = state.turns.last_mut().expect("a turn");
     last.state = slopty_proto::thread::TurnState::Active;
-    let mut entries = transcript::entries(&state, "w", |_| None, |_| None);
+    let mut entries = transcript::entries(&state, &transcript::Look::new("w"));
     assert!(entries.iter().any(|e| e.status == Some(MessageStatus::Streaming)));
     transcript::settle(&mut entries, true);
     assert!(entries.iter().any(|e| e.status == Some(MessageStatus::Streaming)), "live: as it is");
@@ -441,7 +441,7 @@ fn a_notice_reads_by_its_kind() {
     for (item, kind) in state.items[last..].iter_mut().zip(kinds) {
         item.body = notice(kind);
     }
-    let entries = transcript::entries(&state, "w", |_| None, |_| None);
+    let entries = transcript::entries(&state, &transcript::Look::new("w"));
     let part = |id: &str| entries.iter().flat_map(|e| &e.parts).find(|p| p.id() == id).cloned();
     assert!(part(&ids[0]).is_none(), "a stop: no mark");
     assert!(matches!(part(&ids[1]), Some(MessagePart::Text { .. })));
@@ -472,7 +472,7 @@ fn a_write_shows_its_content_and_a_long_output_its_way_in() {
         call.input = Clipped::whole(r#"{"file_path":"/w/a.txt","content":"hello"}"#);
         call.output = Some(Clipped::whole(&"a line of output\n".repeat(200)));
     }
-    let entries = transcript::entries(&state, "w", |_| None, |_| None);
+    let entries = transcript::entries(&state, &transcript::Look::new("w"));
     let (call, output_ref) = entries
         .iter()
         .flat_map(|e| &e.parts)
@@ -500,4 +500,316 @@ fn a_chat_is_made_when_its_thread_began() {
     let chat = rows::chat(&row, "w");
     assert_eq!(chat.created_at.timestamp_millis(), 1_760_000_000_000);
     assert_eq!(chat.last_message_at, None, "nothing to read yet");
+}
+
+/// The first item of `state` that is the agent's own words.
+fn first_text(state: &mut slopty_proto::thread::ThreadState) -> &mut slopty_proto::thread::Item {
+    state
+        .items
+        .iter_mut()
+        .find(|item| matches!(item.body, slopty_proto::thread::ItemBody::Text(_)))
+        .expect("the agent's words")
+}
+
+/// The text of the part `id` among `entries`.
+fn text_of(entries: &[slopty_view_doc::SessionMessageEntry], id: &str) -> Option<String> {
+    entries.iter().flat_map(|e| &e.parts).find_map(|part| match part {
+        MessagePart::Text { id: at, text } if at == id => Some(text.clone()),
+        _ => None,
+    })
+}
+
+/// A text the worker cut says how much more there is, and reads whole once its whole came.
+#[test]
+fn a_cut_text_reads_whole_once_its_whole_came() {
+    use slopty_proto::thread::ContentRef;
+    use slopty_proto::thread::detail::{Clip, Clipped};
+    let mut state = fixtures::thread("tools");
+    let whole = (1..=500).map(|n| format!("line {n}")).collect::<Vec<_>>().join("\n");
+    let full = ContentRef("t1:text".to_owned());
+    let item = first_text(&mut state);
+    let id = item.id.0.clone();
+    item.body = slopty_proto::thread::ItemBody::Text(Clipped::head(
+        &whole,
+        Clip { lines: 400, chars: 32_000 },
+        Some(full.clone()),
+    ));
+    assert_eq!(transcript::cut(&state).collect::<Vec<_>>(), [&full], "worth asking for");
+    let entries = transcript::entries(&state, &transcript::Look::new("w"));
+    let cut = text_of(&entries, &id).expect("the words");
+    assert!(cut.starts_with("line 1\n") && cut.ends_with("… 100 more lines"), "{cut}");
+    let came = |content: &ContentRef| (*content == full).then(|| whole.clone());
+    let entries = transcript::entries(&state, &transcript::Look::new("w").whole(came));
+    assert_eq!(text_of(&entries, &id), Some(whole));
+}
+
+/// A message the shell sent reads as the person wrote it, chips and all, not in the words the
+/// agent was given.
+#[test]
+fn a_sent_message_reads_as_the_person_wrote_it() {
+    let mut state = fixtures::thread("tools");
+    let sent = slopty_proto::thread::IntentId::new();
+    let item = state
+        .items
+        .iter_mut()
+        .find(|item| matches!(item.body, slopty_proto::thread::ItemBody::User(_)))
+        .expect("the person's message");
+    if let slopty_proto::thread::ItemBody::User(message) = &mut item.body {
+        message.intent = Some(sent);
+        message.text = slopty_proto::thread::Clipped::whole("Check [a.rs](src/a.rs)");
+    }
+    let chip = slopty_view_proto::file_mentions::local_file_link("src/a.rs", false);
+    let written = format!("Check {chip}");
+    let look = transcript::Look::new("w")
+        .named(|intent| (intent == sent).then(|| "m-1".to_owned()))
+        .said(|intent| (intent == sent).then(|| written.clone()));
+    let entries = transcript::entries(&state, &look);
+    assert_eq!(text_of(&entries, "m-1:text"), Some(written.clone()));
+}
+
+/// An edit offers its diff by its own ref, read from its hunks: what it replaced and what with.
+#[test]
+fn an_edit_offers_its_diff_by_its_ref() {
+    use slopty_proto::thread::detail::{EditDetail, Hunk, Patch};
+    use slopty_proto::thread::{ItemBody, ToolDetail};
+    let mut state = fixtures::thread("tools");
+    let thread = state.meta.id;
+    let item = state
+        .items
+        .iter_mut()
+        .find(|item| matches!(item.body, ItemBody::Tool(_)))
+        .expect("a tool call");
+    let id = item.id.0.clone();
+    let ItemBody::Tool(call) = &mut item.body else { panic!("a tool call") };
+    let hunk = Hunk {
+        old_start: 3,
+        old_lines: 3,
+        new_start: 3,
+        new_lines: 3,
+        heading: None,
+        lines: vec![" fn a() {".into(), "-    old();".into(), "+    new();".into(), " }".into()],
+    };
+    call.detail = Some(ToolDetail::Edit(EditDetail {
+        path: "/w/src/a.rs".to_owned(),
+        edits: 1,
+        replace_all: false,
+        patch: Patch { hunks: vec![hunk], added: 1, removed: 1, clipped_lines: 0, full: None },
+    }));
+    let call = (**call).clone();
+    let entries = transcript::entries(&state, &transcript::Look::new("w"));
+    let diff_ref = entries.iter().flat_map(|e| &e.parts).find_map(|part| match part {
+        MessagePart::Tool { id: at, diff_ref, .. } if *at == id => diff_ref.clone(),
+        _ => None,
+    });
+    assert_eq!(diff_ref, Some(format!("{thread}/{id}.diff")));
+    let diff = transcript::tool_diff(&call, None).expect("its diff");
+    assert_eq!(diff.old_text.as_deref(), Some("fn a() {\n    old();\n}\n"));
+    assert_eq!(diff.new_text, "fn a() {\n    new();\n}\n");
+    let whole = "--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1 +1 @@\n-a\n+b\n";
+    let diff = transcript::tool_diff(&call, Some(whole)).expect("from the whole");
+    assert_eq!((diff.old_text.as_deref(), diff.new_text.as_str()), (Some("a\n"), "b\n"));
+}
+
+/// The agent's task list is the shell's checklist: a change to a task names it, a task call shows
+/// the list as the thread holds it, and a plan no call wrote shows at the end of the last answer.
+#[test]
+fn a_task_list_is_the_shells_checklist() {
+    use slopty_proto::thread::{ItemBody, Plan, Step, ToolDetail};
+    use slopty_view_proto::{TodoStatus, ToolCall};
+    let step = |text: &str, status: &str| Step {
+        id: None,
+        text: text.to_owned(),
+        status: status.to_owned(),
+    };
+    let todos =
+        |entries: &[slopty_view_doc::SessionMessageEntry]| -> Vec<Vec<(String, TodoStatus)>> {
+            entries
+                .iter()
+                .flat_map(|e| &e.parts)
+                .filter_map(|part| match part {
+                    MessagePart::Tool { call: ToolCall::Todo { items }, .. } => {
+                        Some(items.iter().map(|i| (i.text.clone(), i.status())).collect())
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+    let mut state = fixtures::thread("tools");
+    state.plan = None;
+    let shown = todos(&transcript::entries(&state, &transcript::Look::new("w")));
+    assert_eq!(shown.len(), 5, "each task call");
+    assert_eq!(
+        shown.get(2),
+        Some(&vec![("Survey files".to_owned(), TodoStatus::InProgress)]),
+        "a change names the task it changes"
+    );
+    state.items.retain(|item| {
+        !matches!(&item.body, ItemBody::Tool(call) if call.kind == slopty_proto::thread::kind::TASKS)
+    });
+    state.plan = Some(Plan {
+        text: None,
+        steps: vec![step("Build", "completed"), step("Test", "in_progress")],
+    });
+    let entries = transcript::entries(&state, &transcript::Look::new("w"));
+    let shown = todos(&entries);
+    assert_eq!(
+        shown,
+        [vec![
+            ("Build".to_owned(), TodoStatus::Completed),
+            ("Test".to_owned(), TodoStatus::InProgress)
+        ]],
+        "a plan no call wrote"
+    );
+    let item = state
+        .items
+        .iter_mut()
+        .find(|item| matches!(item.body, ItemBody::Tool(_)))
+        .expect("a tool call");
+    let ItemBody::Tool(call) = &mut item.body else { panic!("a tool call") };
+    call.kind = slopty_proto::thread::kind::TASKS.to_owned();
+    call.detail = Some(ToolDetail::Tasks { steps: vec![step("Test", "pending")], whole: false });
+    let entries = transcript::entries(&state, &transcript::Look::new("w"));
+    assert_eq!(todos(&entries).len(), 1, "the call is the checklist, said once");
+    assert_eq!(todos(&entries)[0].len(), 2, "the whole list as the thread holds it");
+}
+
+/// A failed turn says its error once, at the end of its answer: not again beside a notice that
+/// says it already.
+#[test]
+fn a_failed_turn_says_its_error_once_at_its_end() {
+    use slopty_proto::thread::detail::Clipped;
+    use slopty_proto::thread::{ItemBody, Notice, TurnState};
+    let errors = |entries: &[slopty_view_doc::SessionMessageEntry]| -> Vec<(usize, bool)> {
+        entries
+            .iter()
+            .flat_map(|e| e.parts.iter().enumerate().map(move |(ix, p)| (ix, ix + 1 == e.parts.len(), p)))
+            .filter(|(_, _, p)| matches!(p, MessagePart::Error { message, .. } if message == "Overloaded"))
+            .map(|(ix, last, _)| (ix, last))
+            .collect()
+    };
+    let mut state = fixtures::thread("tools");
+    let turn = state.turns.last_mut().expect("a turn");
+    turn.state = TurnState::Failed { error: "Overloaded".to_owned(), until_ms: None };
+    let entries = transcript::entries(&state, &transcript::Look::new("w"));
+    let said = errors(&entries);
+    assert_eq!(said.len(), 1, "once");
+    assert!(said[0].1, "at the end of its answer");
+    let last = state.items.last_mut().expect("an item");
+    last.body = ItemBody::Notice(Notice::new(Notice::API_ERROR, Clipped::whole("Overloaded")));
+    let entries = transcript::entries(&state, &transcript::Look::new("w"));
+    assert_eq!(errors(&entries).len(), 1, "the notice says it");
+}
+
+/// Pictures go by paths of their own: a message's with its words, a call's as parts after it,
+/// each read back by its thread, item and place.
+#[test]
+fn pictures_go_by_paths_of_their_own() {
+    use slopty_proto::thread::{ContentRef, Image, ItemBody};
+    let picture = |n: u8| Image {
+        digest: format!("{n:064x}"),
+        media_type: "image/png".to_owned(),
+        bytes: 10,
+        width: 1,
+        height: 1,
+        at: ContentRef(format!("img:{n}")),
+    };
+    let mut state = fixtures::thread("tools");
+    let thread = state.meta.id;
+    let user = state
+        .items
+        .iter_mut()
+        .find(|item| matches!(item.body, ItemBody::User(_)))
+        .expect("the person's message");
+    let user_id = user.id.0.clone();
+    if let ItemBody::User(message) = &mut user.body {
+        message.images = vec![picture(1)];
+    }
+    let tool = state
+        .items
+        .iter_mut()
+        .find(|item| matches!(item.body, ItemBody::Tool(_)))
+        .expect("a tool call");
+    let tool_id = tool.id.0.clone();
+    if let ItemBody::Tool(call) = &mut tool.body {
+        call.images = vec![picture(2)];
+    }
+    let entries = transcript::entries(&state, &transcript::Look::new("w"));
+    let words = text_of(&entries, &format!("{user_id}:text")).expect("the message");
+    let path = transcript::image_path(thread, &user_id, 0, &picture(1));
+    assert!(words.ends_with(&format!("\n- {path}")), "{words}");
+    assert_eq!(transcript::image_of(&path), Some((thread, user_id.as_str(), 0)));
+    let part = entries.iter().flat_map(|e| &e.parts).find_map(|part| match part {
+        MessagePart::Image { path, mime_type, .. } => Some((path.clone(), mime_type.clone())),
+        _ => None,
+    });
+    let path = transcript::image_path(thread, &tool_id, 0, &picture(2));
+    assert_eq!(part, Some((path, "image/png".to_owned())));
+}
+
+/// While older turns are on their way the latest go as the opening tail, and the whole
+/// history, once here, as one reset the shell takes as history; how full the context is rides
+/// along.
+#[tokio::test]
+async fn older_turns_arrive_as_history() {
+    let (view_model, feed, mut asks) = ViewModel::new("me".to_owned());
+    let client = memory_client(view_model);
+    let params = serde_json::json!({ "chatId": "c" });
+    let mut watch =
+        client.subscribe_scoped(methods::WATCH_DOC_MESSAGES, params).await.expect("the watch");
+    assert!(matches!(asks.recv().await, Some(Ask::Follow(_))));
+    let all = transcript::entries(&fixtures::thread("tools"), &transcript::Look::new("w"));
+    let tail = all.get(1..).expect("more than one entry").to_vec();
+    let usage = slopty_view_proto::ContextUsage { tokens: Some(50), window: Some(200) };
+    let said =
+        super::Transcript { entries: tail, context_usage: Some(usage), history_pending: true };
+    feed.transcript("c", said);
+    let value = watch.recv().await.expect("the tail");
+    assert_eq!(value["historyPending"], true);
+    feed.transcript(
+        "c",
+        super::Transcript {
+            entries: all.clone(),
+            context_usage: Some(usage),
+            history_pending: false,
+        },
+    );
+    let value = watch.recv().await.expect("the whole history");
+    assert!(value.get("historyPending").is_none());
+    let update: TranscriptUpdate = serde_json::from_value(value).expect("the shell's frame");
+    assert!(
+        matches!(&update.frame, slopty_view_doc::TranscriptFrame::Reset { reset } if *reset == all)
+    );
+    assert!(update.replay_baseline.is_some(), "taken as history");
+    assert_eq!(update.context_usage, Some(usage));
+}
+
+/// A chat belongs to the project folder it works in: an added one it is under, its clone's
+/// for one of Slopty's worktrees, its repository's root; none at home.
+#[test]
+fn a_chat_belongs_to_its_project_folder() {
+    let home = Some("/Users/me");
+    let place =
+        |cwd: &str, repo: Option<&str>, added: &[&str]| rows::place(Some(cwd), repo, home, added);
+    assert_eq!(place("/w/app/src", Some("/w/app"), &[]).as_deref(), Some("/w/app"));
+    assert_eq!(
+        place("/w/app/.claude/worktrees/fix-ab12", Some("/w/app/.claude/worktrees/fix-ab12"), &[])
+            .as_deref(),
+        Some("/w/app"),
+        "a worktree is its clone's"
+    );
+    assert_eq!(
+        place("/w/mono/web/src", Some("/w/mono"), &["/w/mono/web/"]).as_deref(),
+        Some("/w/mono/web"),
+        "the added folder it is under"
+    );
+    assert_eq!(place("/Users/me", None, &[]), None, "home has no project");
+    assert_eq!(place("~", None, &[]), None);
+    assert_eq!(place("~/code", None, &[]).as_deref(), Some("/Users/me/code"));
+    let mut row = fixtures::thread("tools").row(slopty_core::WallMs::ZERO);
+    row.repo_id = Some(slopty_proto::terminal::RepoId {
+        origin: Some("github.com/o/r".to_owned()),
+        root: Some("abc".to_owned()),
+        url: None,
+    });
+    assert_eq!(rows::repository_id(&row).as_deref(), Some("commit:abc"), "clones group by it");
 }

@@ -35,6 +35,63 @@ pub fn space(device: &str, path: &str, git: bool, created: DateTime<Utc>) -> Spa
     }
 }
 
+/// The repository a thread's row names, as the shell groups projects by it: its first commit,
+/// which every clone and worktree shares, else its normalized origin.
+#[must_use]
+pub fn repository_id(row: &ThreadRow) -> Option<String> {
+    let repo = row.repo_id.as_ref()?;
+    repo.root.as_deref().map(|root| format!("commit:{root}")).or_else(|| repo.origin.clone())
+}
+
+/// Where Slopty's own worktrees of a clone go: `<clone>/.claude/worktrees/<name>`.
+const WORKTREES: &str = "/.claude/worktrees/";
+
+/// `path` without a trailing slash, `~` spelled out under `home`.
+fn plain(path: &str, home: Option<&str>) -> String {
+    let path = path.trim_end_matches('/');
+    match (path.strip_prefix('~'), home) {
+        (Some(rest), Some(home)) if rest.is_empty() || rest.starts_with('/') => {
+            format!("{}{rest}", home.trim_end_matches('/'))
+        }
+        _ => path.to_owned(),
+    }
+}
+
+/// The project folder a chat working in `cwd`, in the repository whose root is `repo`, belongs
+/// to on a machine whose home is `home`, among the folders the person `added` there:
+///
+/// - the deepest added folder it works in, or whose repository it is;
+/// - else, in one of Slopty's worktrees of a clone, the clone's own folder;
+/// - else its repository's root, else where it works;
+/// - and none for a chat at home, which has no project.
+#[must_use]
+pub fn place(
+    cwd: Option<&str>,
+    repo: Option<&str>,
+    home: Option<&str>,
+    added: &[&str],
+) -> Option<String> {
+    let cwd = cwd.or(repo).filter(|path| !path.is_empty()).map(|path| plain(path, home))?;
+    let repo = repo.filter(|path| !path.is_empty()).map(|path| plain(path, home));
+    let under = |path: &str, root: &str| {
+        let root = root.trim_end_matches('/');
+        path == root || path.strip_prefix(root).is_some_and(|rest| rest.starts_with('/'))
+    };
+    let deepest = added
+        .iter()
+        .filter(|root| under(&cwd, root) || repo.as_deref().is_some_and(|repo| under(repo, root)))
+        .max_by_key(|root| root.len());
+    if let Some(root) = deepest {
+        return Some(root.trim_end_matches('/').to_owned());
+    }
+    let folder = repo.unwrap_or(cwd);
+    if let Some((clone, _)) = folder.split_once(WORKTREES) {
+        return Some(clone.to_owned());
+    }
+    let at_home = folder == "~" || home.is_some_and(|home| folder == home.trim_end_matches('/'));
+    (!at_home).then_some(folder)
+}
+
 /// The folder a thread's row places it in: its repository's root, else where it works.
 #[must_use]
 pub fn folder(row: &ThreadRow) -> Option<&str> {
