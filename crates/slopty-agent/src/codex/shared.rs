@@ -451,8 +451,13 @@ impl Shared {
         let mut actions = vec![Action::Meta(Box::new(shared.meta.clone()))];
         for turn in &thread.turns {
             actions.extend(shared.turn_started(turn));
+            // Codex keeps no time on an item it holds, only on its turn: the person's words are
+            // the turn's start, the rest its end.
+            let begun = turn.started_at.map_or(shared.meta.created_ms, seconds);
+            let ended = turn.completed_at.map_or(begun, seconds);
             for item in &turn.items {
-                actions.extend(shared.item(&turn.id, item, WallMs::ZERO, true));
+                let at = if matches!(item, ThreadItem::UserMessage { .. }) { begun } else { ended };
+                actions.extend(shared.item(&turn.id, item, at, true));
             }
             if !matches!(turn.status, TurnStatus::InProgress) {
                 actions.extend(shared.turn_completed(turn));
@@ -1316,7 +1321,7 @@ impl Shared {
             id,
             input: None,
             state: TurnState::Active,
-            started_ms: turn.started_at.map_or(WallMs::ZERO, seconds),
+            started_ms: turn.started_at.map_or_else(WallMs::now, seconds),
             ended_ms: None,
             usage: Usage::default(),
             models: self.meters.model.iter().cloned().collect(),
@@ -1357,7 +1362,7 @@ impl Shared {
             turn: id,
             state,
             usage: std::mem::take(&mut self.usage),
-            ended_ms: turn.completed_at.map_or(WallMs::ZERO, seconds),
+            ended_ms: turn.completed_at.or(turn.started_at).map_or_else(WallMs::now, seconds),
         });
         actions
     }

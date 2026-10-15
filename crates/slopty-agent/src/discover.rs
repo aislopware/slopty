@@ -24,10 +24,11 @@ use slopty_core::WallMs;
 use slopty_proto::thread::AgentId;
 use slopty_proto::thread::wire::PastSession;
 
-/// Claude Code's per-project directory under the home directory.
+/// Claude Code's per-project directory, under its own ([`crate::roster::config_dir`]): the
+/// registry and the transcripts are found under the same one.
 #[must_use]
 fn projects_dir(home: &Path) -> PathBuf {
-    home.join(".claude").join("projects")
+    crate::roster::config_dir(home).join("projects")
 }
 
 /// The directory Claude Code writes a session's transcript into, for an agent running in `cwd`.

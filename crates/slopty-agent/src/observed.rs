@@ -431,6 +431,8 @@ pub struct Observed {
     catalog: Option<live::Catalog>,
     /// The main thread's last turn ended failed, so its agent's done is a failure.
     failed: bool,
+    /// The wall clock as the live overlay was last looked at: when a live block shows.
+    wall: WallMs,
     /// Auto mode's declines of calls the transcript does not have yet, by call: each is said
     /// once its call is.
     declines: HashMap<String, (Notice, WallMs)>,
@@ -526,6 +528,7 @@ impl Observed {
             custom: Vec::new(),
             catalog: None,
             failed: false,
+            wall: WallMs::ZERO,
             declines: HashMap::new(),
         }
     }
@@ -709,6 +712,7 @@ impl Observed {
 
     /// The mod's board at `now` (`wall` by the wall clock): blocks started, grown and let go.
     pub fn live(&mut self, board: &live::Board, now: Instant, wall: WallMs) -> Vec<Out> {
+        self.wall = wall;
         let mut changes = self.overlay.update(board, now, wall);
         changes.extend(self.overlay.expire(now));
         for change in changes {
@@ -1540,7 +1544,7 @@ impl Observed {
             }
         };
         self.live.insert(id, Provisional { thread: thread.clone(), item: item.clone(), tool });
-        let item = Item { id: item, turn, at_ms: WallMs::ZERO, body };
+        let item = Item { id: item, turn, at_ms: self.wall, body };
         self.push(thread_id, Action::ItemStarted(item));
     }
 

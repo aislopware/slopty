@@ -289,6 +289,7 @@ impl ThreadState {
             ended: self.ended(),
             seen: self.seen,
             draft: self.draft.clone(),
+            created_ms: self.meta.created_ms,
             updated_ms,
         }
     }

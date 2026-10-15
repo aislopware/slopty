@@ -41,6 +41,7 @@ pub(in crate::hub) fn row(phase: Phase, since: u64, terminal: Option<SessionId>)
         ended: None,
         seen: TurnId::BEFORE,
         draft: None,
+        created_ms: WallMs::from_millis(since),
         updated_ms: WallMs::from_millis(since),
         cwd: None,
         repo: None,

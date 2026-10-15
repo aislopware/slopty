@@ -16,7 +16,8 @@
 //! A thread is followed by `thread/resume`, which brings back what Codex holds of it and keeps
 //! this connection subscribed, so the thread stays loaded while the worker runs. A thread is
 //! resumable only once its first turn has written it, so one that is not yet is tried again at
-//! its next status change, which the daemon tells every client. When the daemon is not there,
+//! its next status change, and on a timer, since Codex tells a status change only to the
+//! connections subscribed to the thread. When the daemon is not there,
 //! or goes, the worker tries again every [`RETRY`].
 //!
 //! A thread that has rested for [`REST`], with no turn under way, nothing asked or held, nobody
@@ -24,6 +25,12 @@
 //! its MCP servers. It stays in the table as it was. A follow ([`Codex::wake`]), anything asked of
 //! it, or Codex saying it works on it again takes it up again with `thread/resume`, and what was
 //! asked meanwhile goes once it is followed.
+//!
+//! What a thread says is Codex's word, read again where it may have gone stale: a thread followed
+//! from a turn under way, whose earlier items Codex left out, is read whole (`thread/read`) once
+//! that turn ends; one with a turn under way that has said nothing for [`QUIET`] is read again,
+//! and hosted again as Codex has it if the turn ended unheard; and one the host keeps at work
+//! that Codex no longer has loaded is taken up again as the worker joins Codex.
 //!
 //! A thread is started from a client ([`Codex::start`], `ThreadRequest::Start` for agent `codex`)
 //! as Codex's own TUI starts one: `thread/start` in the thread's folder, with nothing set but the
@@ -66,7 +73,7 @@ use slopty_core::{SessionId, WallMs};
 use slopty_proto::thread::wire::{Outcome, PastSession, Start};
 use slopty_proto::thread::{
     Action, AgentId, Answerer, AskId, Delivery, Drive, Fork, IntentId, ItemBody, Link, Liveness,
-    Pending, PendingState, Phase, Status, ThreadId, ThreadState, TurnId,
+    Pending, PendingState, Phase, Status, ThreadId, ThreadState, TurnId, TurnState,
 };
 use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot};
@@ -108,6 +115,15 @@ pub const DAEMON_WAIT: Duration = Duration::from_secs(20);
 
 /// How long a thread rests, with nobody following it, before the worker lets Codex unload it.
 pub const REST: Duration = Duration::from_mins(10);
+
+/// How long a turn under way may say nothing before its thread is read again (`thread/read`).
+///
+/// Its rest when that is shorter. Codex tells a connection only what it is subscribed to, so a
+/// turn whose end went unheard would otherwise say it works for good.
+pub const QUIET: Duration = Duration::from_secs(90);
+
+/// How often a thread Codex could not take up again is tried again, [`RETRY`] apart.
+const RESUME_TRIES: u8 = 10;
 
 /// Why a start is refused where the person has no `codex`.
 pub const NO_CODEX: &str = "Codex isn't installed on this machine";
@@ -911,6 +927,10 @@ enum Waiting {
     Unsubscribe {
         native: String,
     },
+    /// Codex thread `native` read again whole, as Codex has it now.
+    Reread {
+        native: String,
+    },
     /// The models Codex offers, the pages before this one gathered.
     Models {
         gathered: Vec<p::Model>,
@@ -988,6 +1008,14 @@ struct Session {
     models: Option<Vec<p::Model>>,
     /// The messages each thread being read again held, held again once it is followed.
     requeue: HashMap<String, Queue<Vec<Attached>>>,
+    /// The threads followed from a turn already under way whose earlier items Codex did not
+    /// give: read again whole once that turn ends.
+    partial: HashSet<String>,
+    /// The threads being read again ([`Waiting::Reread`]).
+    rereading: HashSet<String>,
+    /// The threads Codex could not take up again yet, with how often that was tried and when
+    /// to try next.
+    retries: HashMap<String, (u8, Instant)>,
 }
 
 /// What a server task's thread is loaded with: the seat's variables and Slopty's tools.
@@ -1019,6 +1047,9 @@ impl Session {
             waking: HashMap::new(),
             models: None,
             requeue: HashMap::new(),
+            partial: HashSet::new(),
+            rereading: HashSet::new(),
+            retries: HashMap::new(),
         }
     }
 
@@ -1153,6 +1184,36 @@ impl Session {
     /// The thread stays in the table, and is taken up again once someone follows or asks.
     async fn let_go(&mut self) -> Result<(), String> {
         let now = Instant::now();
+        let quiet: Vec<String> = self
+            .threads
+            .iter()
+            .filter(|(_, f)| f.shared.current().is_some())
+            .filter(|(_, f)| now.saturating_duration_since(f.heard) >= QUIET.min(self.rest))
+            .map(|(native, _)| native.clone())
+            .collect();
+        for native in quiet {
+            if let Some(followed) = self.threads.get_mut(&native) {
+                followed.heard = now;
+            }
+            self.reread(native).await?;
+        }
+        let due: Vec<String> = self
+            .retries
+            .iter()
+            .filter(|(native, (tries, at))| {
+                *tries <= RESUME_TRIES && *at <= now && !self.threads.contains_key(*native)
+            })
+            .map(|(native, _)| native.clone())
+            .collect();
+        for native in due {
+            if let Some((_, at)) = self.retries.get_mut(&native) {
+                *at = now.checked_add(self.rest).unwrap_or(now);
+            }
+            self.resume(native).await?;
+        }
+        self.retries.retain(|native, (tries, _)| {
+            *tries < RESUME_TRIES && !self.threads.contains_key(native)
+        });
         let resting: Vec<String> = self
             .threads
             .iter()
@@ -1220,7 +1281,7 @@ impl Session {
         let incoming = match rpc::read(text) {
             Ok(incoming) => incoming,
             Err(e) => {
-                tracing::debug!("Codex said what Slopty does not read: {e}");
+                tracing::warn!("Codex said what Slopty does not read: {e}");
                 return Ok(());
             }
         };
@@ -1297,7 +1358,11 @@ impl Session {
                 match rpc::response::<p::ThreadResumeParams>(result) {
                     Ok(resumed) => {
                         self.unarchived.remove(&native);
-                        self.follow(&resumed.thread).await?;
+                        // Followed meanwhile (its own start answered first): what was heard since
+                        // stands, rather than the snapshot this answer took before it.
+                        if !self.threads.contains_key(&native) {
+                            self.follow(&resumed.thread).await?;
+                        }
                         let settings = Settings {
                             approval: resumed.approval_policy,
                             sandbox: &resumed.sandbox,
@@ -1336,6 +1401,19 @@ impl Session {
                 // Not written yet: tried again at its next status change.
                 tracing::trace!(%native, "a Codex thread is not resumable yet: {e}");
                 self.unresumed(native, &e.to_string());
+            }
+            (Waiting::Reread { native }, Ok(result)) => {
+                match rpc::response::<p::ThreadReadParams>(result) {
+                    Ok(read) => self.reread_answered(native, &read.thread).await?,
+                    Err(e) => {
+                        tracing::debug!(%native, "Codex's read of a thread did not parse: {e}");
+                        self.rereading.remove(&native);
+                    }
+                }
+            }
+            (Waiting::Reread { native }, Err(e)) => {
+                tracing::debug!(%native, "Codex did not read a thread again: {e}");
+                self.rereading.remove(&native);
             }
             (Waiting::Unarchive { native }, Ok(_)) => {
                 self.resuming.remove(&native);
@@ -1562,11 +1640,58 @@ impl Session {
         self.request(&params, Waiting::Resume { native }).await
     }
 
+    /// Read Codex thread `native` again whole (`thread/read`), unless it already is.
+    async fn reread(&mut self, native: String) -> Result<(), String> {
+        if !self.rereading.insert(native.clone()) {
+            return Ok(());
+        }
+        let params = p::ThreadReadParams { include_turns: Some(true), thread_id: native.clone() };
+        self.request(&params, Waiting::Reread { native }).await
+    }
+
+    /// Codex thread `native` as Codex has it now, read again: a turn still under way leaves it
+    /// as it is; else it is hosted again as Codex has it, its held messages kept, and one Codex
+    /// no longer has loaded is let go, since nothing more of it reaches this connection.
+    async fn reread_answered(&mut self, native: String, thread: &p::Thread) -> Result<(), String> {
+        self.rereading.remove(&native);
+        let running = matches!(thread.status, p::ThreadStatus::Active { .. })
+            && thread.turns.last().is_some_and(|t| matches!(t.status, p::TurnStatus::InProgress));
+        if running && !self.partial.contains(&native) {
+            return Ok(());
+        }
+        if let Some(mut followed) = self.threads.remove(&native) {
+            self.requeue.insert(native.clone(), followed.shared.queue().take_all());
+        }
+        self.partial.remove(&native);
+        self.follow(thread).await?;
+        if matches!(thread.status, p::ThreadStatus::NotLoaded)
+            && self.threads.remove(&native).is_some()
+        {
+            self.unloaded.insert(native);
+        }
+        Ok(())
+    }
+
     /// Codex thread `native` could not be taken up again, for `why`: what waited on it is
-    /// refused, and it is tried again at its next status change.
+    /// refused, and it is tried again at its next status change. One the host still holds at
+    /// work ends as Codex left it unsaid, its turn stopped, rather than working for good.
     fn unresumed(&mut self, native: String, why: &str) {
         let reason = format!("Codex couldn't take the thread up again: {why}");
         self.reopened(&native, &reason);
+        if !self.threads.contains_key(&native) {
+            self.host.update(slopty_agent::codex::shared::thread_of(&native), |state| {
+                let now = WallMs::now();
+                let cut = at_work(state).then(|| slopty_agent::driven::cut_short(state, true, now));
+                (cut.unwrap_or_default(), ())
+            });
+            // Codex tells a status change only to the connections subscribed to it, so one not
+            // written yet (a subagent's first turn) is tried again on a timer.
+            let now = Instant::now();
+            let tries = self.retries.entry(native.clone()).or_insert_with(|| (0, now));
+            if tries.0 < RESUME_TRIES {
+                *tries = (tries.0.saturating_add(1), now.checked_add(RETRY).unwrap_or(now));
+            }
+        }
         if let Some(held) = self.waking.remove(&native) {
             for ask in held {
                 self.unanswered(ask, &reason);
@@ -1591,20 +1716,23 @@ impl Session {
     /// than finding nothing to go to.
     ///
     /// Those someone follows now are returned, to take up again at once: a client watching a
-    /// thread while Codex restarts sees it go on, not stand still until it is followed again.
+    /// thread while Codex restarts sees it go on, not stand still until it is followed again. So
+    /// are those the host still holds at work (a turn under way, a request open): Codex no longer
+    /// runs them, so what they say was left by a link that missed their end, and taking them up
+    /// again reads them as Codex has them. They are let go again once they rest.
     fn let_go_before(&mut self, loaded: &[String]) -> Vec<String> {
         let kept = self.host.visit(|state| {
             let native = &state.meta.native;
             (is_shared(state) && !native.is_empty() && !loaded.contains(native))
-                .then(|| (state.meta.id, native.clone()))
+                .then(|| (state.meta.id, native.clone(), at_work(state)))
         });
         let mut followed = Vec::new();
-        for (thread, native) in kept {
+        for (thread, native, at_work) in kept {
             if self.threads.contains_key(&native) {
                 continue;
             }
             self.native.insert(thread, native.clone());
-            if self.host.followers(thread) > 0 {
+            if at_work || self.host.followers(thread) > 0 {
                 followed.push(native);
             } else {
                 self.unloaded.insert(native);
@@ -1632,6 +1760,13 @@ impl Session {
 
     /// Host Codex thread `thread`, as it now stands.
     async fn follow(&mut self, thread: &p::Thread) -> Result<(), String> {
+        let under_way = thread.turns.iter().any(|t| {
+            matches!(t.status, p::TurnStatus::InProgress)
+                && t.items_view.is_some_and(|v| v != p::TurnItemsView::Full)
+        });
+        if under_way {
+            self.partial.insert(thread.id.clone());
+        }
         let terminal = self.tuis.running.get(&slopty_agent::codex::shared::thread_of(&thread.id));
         let (shared, actions) = Shared::new(thread, terminal.copied());
         let id = shared.meta().id;
@@ -1753,6 +1888,9 @@ impl Session {
         {
             self.requeue.insert(native.clone(), followed.shared.queue().take_all());
             return self.resume(native).await;
+        }
+        if matches!(note, ServerNotification::TurnCompleted(_)) && self.partial.remove(&native) {
+            self.reread(native.clone()).await?;
         }
         match self.threads.get_mut(&native) {
             Some(followed) => {
@@ -2127,6 +2265,14 @@ impl Session {
         let native = self.native.get(&thread)?;
         self.threads.get_mut(native)
     }
+}
+
+/// Whether `state` says its agent is at work: a turn under way, a request open, or a phase
+/// that only a running thread has.
+fn at_work(state: &ThreadState) -> bool {
+    matches!(state.status.phase, Phase::Working | Phase::NeedsYou | Phase::Waiting)
+        || state.last_turn().is_some_and(|t| t.state == TurnState::Active)
+        || state.open_requests().next().is_some()
 }
 
 /// Whether `state`'s thread is a Codex thread this adapter answers for.

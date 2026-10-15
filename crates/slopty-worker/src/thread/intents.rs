@@ -14,8 +14,8 @@ use std::path::{Path, PathBuf};
 use bytes::BytesMut;
 use serde::{Deserialize, Serialize};
 use slopty_proto::codec;
-use slopty_proto::thread::IntentId;
 use slopty_proto::thread::wire::Outcome;
+use slopty_proto::thread::{IntentId, ThreadId};
 
 /// Intent ids a thread remembers.
 pub const KEPT: usize = 512;
@@ -67,6 +67,12 @@ impl Intents {
     #[must_use]
     pub fn outcome(&self, id: &IntentId) -> Option<&Outcome> {
         self.outcomes.get(id)
+    }
+
+    /// Whether `id` was a start that began `thread`.
+    #[must_use]
+    pub fn started(&self, id: IntentId, thread: ThreadId) -> bool {
+        matches!(self.outcomes.get(&id), Some(Outcome::Started { thread: began }) if *began == thread)
     }
 
     /// Record how `id` went.

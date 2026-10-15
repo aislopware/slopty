@@ -222,6 +222,14 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     for a day while the terminal ran another session, and its TUI button opened that other
     session. The GUI opens an agent's terminal, and the worker types into it, only while the
     thread's agent runs there. Otherwise the session is taken up again in a terminal of its own.
+    The same day: a terminal that closes ends its threads too. A start's first message goes
+    on Claude Code's command line, not through ptyd, so one an earlier worker left "being sent"
+    is taken off the list when the transcript shows it, else held saying it may have gone,
+    rather than sitting there for good. "Trust this folder" no longer needs the approvals a
+    hook declares, since Claude Code held at its trust dialog has spoken no hook. The status
+    line's transcript path is kept, so an agent idle since the worker started is read without
+    waiting for its next hook, and transcripts are looked for under `CLAUDE_CONFIG_DIR` as the
+    registry already was.
   - **The mapping.**
     - A prompt opens the next turn of its thread, and later entries belong to that turn. A
       branch (a rewind or an edited prompt) truncates the thread back to before the prompt it
@@ -1378,6 +1386,28 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     still cannot go (Codex holds no such thread, or it could not be taken up again) is held
     in the thread's pending list with why, for the person to send again, instead of
     vanishing. Test: `a_thread_let_go_before_a_restart_is_taken_up_again_by_a_message`.
+  - **What a thread says is Codex's word, read again where it may be stale** (2026-10-15).
+    Four Codex threads, two of them subagents, said "working" for hours with one empty turn
+    and no title, while Codex had finished them long before. Each had been taken up again
+    (`thread/resume`) while its turn ran. Codex answers that with the running turn's items
+    left out, and it tells a status change or a close only to the connections subscribed to
+    the thread, not to every client. For a thread Slopty itself started, a resume sent on
+    `thread/started` also answered after the start's own answer and replaced what had been
+    heard since. Now:
+    - a resume answer for a thread already followed changes nothing;
+    - a thread followed from a running turn whose items Codex left out is read whole
+      (`thread/read`) once that turn ends;
+    - a followed turn that says nothing for 90 s is read again, and the thread is hosted as
+      Codex has it if the turn ended unheard;
+    - a thread the table keeps at work that Codex no longer has loaded is taken up again as
+      the worker joins Codex;
+    - a thread Codex cannot take up again yet (a subagent's first turn not written) is tried
+      again on a timer, and one kept at work that Codex refuses for good ends stopped.
+
+    Codex keeps no time on an item it holds, so a thread read from history stamps the
+    person's words with their turn's start and the rest with its end, never epoch zero.
+    Tests: `a_thread_left_working_is_read_again_once_codex_is_joined`,
+    `a_quiet_turn_is_read_again_and_ends_as_codex_has_it`.
 
 - ✅ **A Codex thread's commands claim no Slopty terminal** (2026-10-04). Codex's shared
   daemon runs every thread's commands with its own environment, which is that of whatever

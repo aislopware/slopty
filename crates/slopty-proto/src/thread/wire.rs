@@ -741,6 +741,8 @@ pub struct ThreadRow {
     /// What the person was writing to it and has not sent, as a device last kept it
     /// ([`Intent::Draft`]); empty words once cleared; none before any was kept.
     pub draft: Option<Draft>,
+    /// When it began ([`ThreadMeta::created_ms`](super::ThreadMeta::created_ms)).
+    pub created_ms: WallMs,
     /// When it last changed.
     pub updated_ms: WallMs,
 }

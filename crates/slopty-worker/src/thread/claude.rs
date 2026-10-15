@@ -349,9 +349,11 @@ async fn observe(
         let next = ticked.checked_add(every).unwrap_or(ticked);
         tokio::select! {
             input = inputs.recv() => match input {
+                // The terminal closed: its agent went with it, whatever was last heard.
                 None => {
                     on.forget_provisional();
                     on.unclaim();
+                    retire(&on.host, on.terminal, None);
                     return;
                 }
                 Some(Input::Status(event)) => on.status(*event).await,

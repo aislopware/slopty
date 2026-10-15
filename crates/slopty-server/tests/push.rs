@@ -165,6 +165,7 @@ mod tests {
             ended: None,
             seen: slopty_proto::thread::TurnId::BEFORE,
             draft: None,
+            created_ms: WallMs::from_millis(since),
             updated_ms: WallMs::from_millis(since),
             cwd: None,
             repo: None,

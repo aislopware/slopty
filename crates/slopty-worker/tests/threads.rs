@@ -748,6 +748,61 @@ mod threads {
         state.pending.iter().map(|p| (p.text.clone(), p.delivery, p.state.clone())).collect()
     }
 
+    /// A start's first message an earlier worker left on its way is never left "being sent"
+    /// for good: the next worker takes it off the list when the thread shows the agent took
+    /// it, and else holds it, saying it may have gone, so the person can withdraw it or send it
+    /// again. A message the composer was typing is left to go again on its own delivery.
+    #[test]
+    fn a_starts_first_message_cut_off_by_a_restart_is_settled() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = open(dir.path());
+        let sending = |intent, text: &str| Pending {
+            intent,
+            text: text.to_owned(),
+            attachments: vec![],
+            delivery: Delivery::Queue,
+            state: PendingState::Sending,
+        };
+        let begin = |intent| {
+            let meta = meta();
+            let thread = meta.id;
+            host.create(meta).unwrap();
+            host.record_start(intent, Outcome::Started { thread });
+            host.first_message(thread, sending(intent, "hello"));
+            thread
+        };
+        let (took, lost, typing) = (IntentId::new(), IntentId::new(), IntentId::new());
+        let taken = begin(took);
+        let prompt = Item {
+            id: ItemId("p1".to_owned()),
+            turn: TurnId(1),
+            at_ms: WallMs::ZERO,
+            body: ItemBody::User(UserMessage {
+                text: Clipped::whole("hello"),
+                images: Vec::new(),
+                command: None,
+                intent: Some(took),
+            }),
+        };
+        host.apply(taken, vec![turn(1), Action::ItemStarted(prompt)]);
+        let left = begin(lost);
+        let both = vec![sending(lost, "hello"), sending(typing, "next")];
+        host.apply(left, vec![Action::PendingSet(both)]);
+        drop(host);
+
+        let host = open(dir.path());
+        assert_eq!(pending_of(&host, taken), [], "taken: gone from the list");
+        let cut = PendingState::Held { reason: schedule::CUT_OFF.to_owned() };
+        assert_eq!(
+            pending_of(&host, left),
+            [
+                ("hello".to_owned(), Delivery::Queue, cut),
+                ("next".to_owned(), Delivery::Queue, PendingState::Sending),
+            ],
+            "the first held; the composer's left to go again"
+        );
+    }
+
     /// A message the person schedules waits in the thread's pending list on the worker, once
     /// per intent, whatever list the agent's adapter tells, and outlives a restart; it is taken
     /// back or changed there, and one being sent as the worker stopped comes back held, never

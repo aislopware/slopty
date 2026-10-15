@@ -91,12 +91,18 @@ pub const fn picture_type(head: &[u8]) -> Option<&'static str> {
     }
 }
 
-/// `text` with `paths` after it, each quoted as a shell word, as the person would paste them: the
-/// form a terminal agent reads a file by, and what a message carries of a file its agent takes no
-/// other way.
+/// `text` with `paths` after it, each quoted as a shell word, as the person would paste them.
+///
+/// It is the form a terminal agent reads a file by, and what a message carries of a file its agent
+/// takes no other way. A path the words already name (the interface lists what it attached) is
+/// not said twice.
 #[must_use]
 pub fn with_paths<'a>(text: &str, paths: impl IntoIterator<Item = &'a str>) -> String {
-    let quoted: Vec<String> = paths.into_iter().map(slopty_core::shell_quote).collect();
+    let quoted: Vec<String> = paths
+        .into_iter()
+        .filter(|path| !text.contains(path))
+        .map(slopty_core::shell_quote)
+        .collect();
     let text = text.trim_end();
     match (text.trim().is_empty(), quoted.is_empty()) {
         (_, true) => text.to_owned(),
@@ -135,6 +141,14 @@ mod tests {
         assert_eq!(picture_type(b"# notes\n"), None);
         assert_eq!(picture_type(&png[..4]), None, "too short to tell");
         assert_eq!(picture_type(&[]), None);
+    }
+
+    /// A path the words already name is not said again.
+    #[test]
+    fn a_path_the_words_name_is_not_said_twice() {
+        let text = "Look at this\n\nAttached images:\n- /tmp/a.png";
+        assert_eq!(with_paths(text, ["/tmp/a.png", "/tmp/b.png"]), format!("{text} /tmp/b.png"));
+        assert_eq!(with_paths(text, ["/tmp/a.png"]), text);
     }
 
     /// Paths follow the words, quoted as a shell takes them; with no words they stand alone.

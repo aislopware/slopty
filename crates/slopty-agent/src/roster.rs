@@ -66,13 +66,17 @@ impl Listed {
     }
 }
 
-/// The registry's directory, as Claude Code finds it: under `CLAUDE_CONFIG_DIR` when set,
-/// else `~/.claude`.
+/// Claude Code's own directory, as it finds it: `CLAUDE_CONFIG_DIR` when set, else `~/.claude`.
 #[must_use]
-pub fn sessions_dir(home: &Path) -> PathBuf {
+pub fn config_dir(home: &Path) -> PathBuf {
     std::env::var_os(crate::trust::CONFIG_DIR_ENV)
         .map_or_else(|| home.join(".claude"), PathBuf::from)
-        .join("sessions")
+}
+
+/// The registry's directory, under Claude Code's own ([`config_dir`]).
+#[must_use]
+pub fn sessions_dir(home: &Path) -> PathBuf {
+    config_dir(home).join("sessions")
 }
 
 /// The sessions registered in `dir` ([`sessions_dir`]) whose process is `alive`.

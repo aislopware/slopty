@@ -758,6 +758,13 @@ impl Tracker {
             if let Some(meters) = &hook.meters {
                 self.limit_resets = statusline::full_resets(meters);
             }
+            // It names the conversation too: the one word an agent idle since the worker
+            // started gives of its transcript, its own session's alone.
+            let same = self.agent_session.is_none() || self.agent_session == hook.session_id;
+            if same && hook.session_id.is_some() && hook.transcript_path.is_some() {
+                self.agent_session.clone_from(&hook.session_id);
+                self.transcript_path.clone_from(&hook.transcript_path);
+            }
             return None;
         }
         if !self.owns(hook) {
@@ -1497,6 +1504,24 @@ mod tests {
 
     fn hook(json: &str) -> Hook {
         Hook::parse(json).expect("hook json")
+    }
+
+    /// The status line names the session's transcript, so an agent at rest since the worker
+    /// started is read without waiting for its next hook; another session's is passed over.
+    #[test]
+    fn the_status_line_names_the_transcript() {
+        let sid = SessionId::new();
+        let mut t = Tracker::default();
+        let line = |session: &str, path: &str| {
+            hook(&format!(
+                r#"{{"hook_event_name":"Statusline","session_id":"{session}",
+                "transcript_path":"{path}"}}"#
+            ))
+        };
+        assert_eq!(t.apply(sid, &line("s1", "/p/s1.jsonl")), None, "nothing of the turn");
+        assert_eq!(t.transcript_path.as_deref(), Some("/p/s1.jsonl"));
+        t.apply(sid, &line("s2", "/p/s2.jsonl"));
+        assert_eq!(t.transcript_path.as_deref(), Some("/p/s1.jsonl"), "another's is passed over");
     }
 
     /// A turn that ended on an API error fails, with attention, by the error's kind; a limit

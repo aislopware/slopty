@@ -650,12 +650,13 @@ mod claude_threads {
     /// A thread no agent feeds any more ends with its turn: one an earlier worker left working
     /// on a terminal (here under a session that terminal does not run, as an older worker's guess
     /// took it) once the worker restarts, before any word of its terminal; the session a `/clear`
-    /// leaves; and a session whose agent quits mid-turn. The terminal's live session is the only
-    /// thread that keeps it.
+    /// leaves; a session whose agent quits mid-turn; and one whose terminal closes. The terminal's
+    /// live session is the only thread that keeps it.
     #[tokio::test]
     async fn a_thread_no_agent_feeds_ends_with_its_turn() {
         const WRONG: &str = "00000000-0000-4000-8000-000000000002";
         const CLEARED: &str = "00000000-0000-4000-8000-000000000003";
+        const CLOSING: &str = "00000000-0000-4000-8000-000000000004";
         let rig = Rig::new();
         let wrong = rig.main.with_file_name(format!("{WRONG}.jsonl"));
         mid_turn(&wrong);
@@ -696,5 +697,17 @@ mod claude_threads {
         // Its agent quits mid-turn.
         rig.tracked(AgentStatus::None, Some(CLEARED), AgentSource::Process);
         until(&host, now, cut).await;
+
+        // Another, mid-turn, whose terminal closes with no word of its agent going.
+        let closing = rig.main.with_file_name(format!("{CLOSING}.jsonl"));
+        mid_turn(&closing);
+        rig.seen.main.send_replace(Some(closing));
+        let last = thread_of(CLOSING);
+        rig.tracked(AgentStatus::Working, Some(CLOSING), AgentSource::Hook);
+        until(&host, last, |s| under_way(s) && s.status.liveness == Liveness::Live).await;
+        rig.seen.closed.lock().push(rig.terminal);
+        let reason = slopty_proto::terminal::CloseReason::Exited;
+        rig.events.send(WorkerMsg::SessionClosed { session: rig.terminal, reason }).unwrap();
+        until(&host, last, cut).await;
     }
 }

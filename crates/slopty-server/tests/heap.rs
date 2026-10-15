@@ -144,6 +144,7 @@ mod tests {
             ended: None,
             seen: slopty_proto::thread::TurnId::BEFORE,
             draft: None,
+            created_ms: now,
             updated_ms: now,
             cwd: None,
             repo: None,

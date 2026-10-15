@@ -483,7 +483,7 @@ impl Host {
                 Vec::new()
             }
         };
-        Ok(Self {
+        let host = Self {
             inner: Arc::new(Mutex::new(Inner {
                 dir: dir.to_owned(),
                 limits,
@@ -500,7 +500,58 @@ impl Host {
                 held,
                 under_way,
             })),
-        })
+        };
+        host.settle_cut_off();
+        Ok(host)
+    }
+
+    /// Each start's first message an earlier worker left on its way, settled: gone from the
+    /// list once its thread shows the agent took it, else held saying it may have gone
+    /// ([`super::schedule::CUT_OFF`]), for the person to withdraw or send again; its item still
+    /// takes it off the list if it shows later. It went on the agent's command line, not through
+    /// ptyd, so nothing would type it again, and a message the composer was typing waits to go
+    /// again as a read again leaves it (ptyd types it only if it never took it).
+    fn settle_cut_off(&self) {
+        let sending = self.visit(|s| {
+            let sending: Vec<IntentId> = s
+                .pending
+                .iter()
+                .filter(|p| p.state == PendingState::Sending)
+                .map(|p| p.intent)
+                .collect();
+            (!sending.is_empty()).then_some((s.meta.id, sending))
+        });
+        for (thread, intents) in sending {
+            let first: Vec<IntentId> = {
+                let inner = self.inner.lock();
+                intents.into_iter().filter(|i| inner.starts.started(*i, thread)).collect()
+            };
+            if first.is_empty() {
+                continue;
+            }
+            self.update(thread, |state| {
+                let took = |intent: IntentId| {
+                    state
+                        .items
+                        .iter()
+                        .any(|i| matches!(&i.body, ItemBody::User(m) if m.intent == Some(intent)))
+                };
+                let pending = state
+                    .pending
+                    .iter()
+                    .filter(|p| !(first.contains(&p.intent) && took(p.intent)))
+                    .map(|p| {
+                        if first.contains(&p.intent) {
+                            let reason = super::schedule::CUT_OFF.to_owned();
+                            Pending { state: PendingState::Held { reason }, ..p.clone() }
+                        } else {
+                            p.clone()
+                        }
+                    })
+                    .collect();
+                (vec![Action::PendingSet(pending)], ())
+            });
+        }
     }
 
     /// Host a new thread.
@@ -1242,7 +1293,19 @@ impl Inner {
         let Some(head) = self.cold.remove(&thread) else { return };
         let dir = self.dir.join(thread.to_string());
         match Log::open(&dir, self.limits).and_then(|log| Hosted::open(&dir, log)) {
-            Ok(hosted) => {
+            Ok(mut hosted) => {
+                // The start's first message, still on its way: its agent's item for it takes it
+                // off the list, after a restart too.
+                hosted.own.first = hosted
+                    .log
+                    .state()
+                    .pending
+                    .iter()
+                    .find(|p| {
+                        matches!(p.state, PendingState::Sending | PendingState::Held { .. })
+                            && self.starts.started(p.intent, thread)
+                    })
+                    .map(|p| p.intent);
                 self.table.put(hosted.log.state().row(head.row.updated_ms));
                 self.threads.insert(thread, hosted);
             }

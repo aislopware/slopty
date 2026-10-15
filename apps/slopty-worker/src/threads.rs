@@ -1080,8 +1080,11 @@ fn decide(
     id: IntentId,
     intent: &Intent,
 ) -> (Outcome, Vec<Action>) {
-    if intent.needs().is_some_and(|needs| !state.meta.can(needs)) {
+    if beyond_caps(state, intent) {
         return (intent.unsupported(), Vec::new());
+    }
+    if let Some(trusting) = trust_pressed(threads, state, intent) {
+        return (trusting, Vec::new());
     }
     if codex::is_shared(state) {
         return (shared(who, &threads.codex, state, id, intent), Vec::new());
@@ -1104,9 +1107,6 @@ fn decide(
         matches!(intent, Intent::Withdraw { .. } | Intent::Edit { .. } | Intent::Move { .. });
     if matches!(state.status.liveness, Liveness::Exited { .. }) && !waiting_only {
         return (refused("Claude Code no longer runs this session".to_owned()), Vec::new());
-    }
-    if let Some(trusting) = trust_pressed(threads, state, intent) {
-        return (trusting, Vec::new());
     }
     if let Some(decided) = threads.composer.decide(state, id, intent) {
         return decided;
@@ -1135,15 +1135,27 @@ fn decide(
     (outcome, Vec::new())
 }
 
+/// Whether `intent` asks what `state`'s thread does not declare it can do. "Trust this folder"
+/// is never beyond it: Claude Code held at its trust dialog has spoken no hook yet, so its thread
+/// declares no approvals, and the trust it offers is the start's own, not an approval.
+fn beyond_caps(state: &ThreadState, intent: &Intent) -> bool {
+    !presses_trust(intent) && intent.needs().is_some_and(|needs| !state.meta.can(needs))
+}
+
+/// Whether `intent` is the press of "Trust this folder" on a start held at the trust dialog.
+fn presses_trust(intent: &Intent) -> bool {
+    matches!(intent, Intent::Answer { ask, choice, .. }
+        if ask.0 == slopty_agent::observed::UNHEARD_ASK
+            && choice == slopty_agent::observed::TRUST_CHOICE)
+}
+
 /// "Trust this folder" pressed on a Claude Code start held at a dialog of its own, where the
 /// request offers it: the folder is trusted and Claude Code opened again past the dialog, on
 /// the starts' own task ([`claude::start::Starter::trust`]). Taken at once; the request settles
 /// when the agent's hooks first speak. `None` for any other intent.
 fn trust_pressed(threads: &Threads, state: &ThreadState, intent: &Intent) -> Option<Outcome> {
     let Intent::Answer { ask, choice, .. } = intent else { return None };
-    if ask.0 != slopty_agent::observed::UNHEARD_ASK
-        || choice != slopty_agent::observed::TRUST_CHOICE
-    {
+    if !presses_trust(intent) {
         return None;
     }
     let offered = state
@@ -1649,6 +1661,30 @@ mod tests {
         assert!(mid.into_iter().all(mid_turn));
         let resting = [Phase::Idle, Phase::Done, Phase::Failed, Phase::Stopped];
         assert!(!resting.into_iter().any(mid_turn));
+    }
+
+    /// "Trust this folder" goes through on a Claude Code held at its trust dialog, whose thread
+    /// declares no approvals since no hook has spoken; any other answer there is beyond it.
+    #[test]
+    fn trust_is_pressed_before_any_hook_declares_approvals() {
+        let now = slopty_core::WallMs::now();
+        let mut observed =
+            slopty_agent::observed::Observed::provisional("", SessionId::new(), "/w", now);
+        let Some(slopty_agent::observed::Out::Begin(meta)) = observed.drain().into_iter().next()
+        else {
+            panic!("a thread begins")
+        };
+        let state = ThreadState::new(*meta);
+        assert!(!state.meta.can(Cap::APPROVALS), "no hook has spoken");
+        let answer = |ask: &str, choice: &str| Intent::Answer {
+            ask: AskId(ask.to_owned()),
+            choice: choice.to_owned(),
+            message: None,
+        };
+        let trust =
+            answer(slopty_agent::observed::UNHEARD_ASK, slopty_agent::observed::TRUST_CHOICE);
+        assert!(!beyond_caps(&state, &trust), "the trust press goes");
+        assert!(beyond_caps(&state, &answer("tool-1", "allow")), "an approval does not");
     }
 
     /// A review asked for again stops the one still being read, and the stream's end stops the

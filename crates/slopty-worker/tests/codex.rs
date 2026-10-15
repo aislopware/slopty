@@ -1391,6 +1391,94 @@ mod codex {
         assert_eq!(sent.last().unwrap()["params"]["threadId"], native);
     }
 
+    /// A thread the host still holds at work that Codex no longer has loaded (a link that missed
+    /// the end of its turn, a worker that restarted meanwhile) is taken up again as soon as Codex
+    /// is joined, with nobody following it, and reads as Codex has it: not working for good.
+    #[tokio::test]
+    async fn a_thread_left_working_is_read_again_once_codex_is_joined() {
+        use slopty_proto::thread::{Action, Liveness, Phase, Status};
+        let dir = tempfile::tempdir().unwrap();
+        let short = tempfile::Builder::new().prefix("slopty-codex").tempdir_in("/tmp").unwrap();
+        let (host, thread) = kept_thread(dir.path(), short.path()).await;
+        let working = Status {
+            phase: Phase::Working,
+            wait: None,
+            liveness: Liveness::Live,
+            since_ms: slopty_core::WallMs::ZERO,
+        };
+        host.apply(thread, vec![Action::Status(working)]);
+        let socket: PathBuf = short.path().join("after.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let (tx, mut heard) = mpsc::unbounded_channel();
+        let _server = tokio::spawn(restarted(listener, tx));
+        let (_handle, asks) = Codex::channel();
+        let _served = codex::spawn(host.clone(), socket, None, asks);
+        let sent = until_sent(&mut heard, "thread/resume").await;
+        let native = resumed()["result"]["thread"]["id"].clone();
+        assert_eq!(sent.last().unwrap()["params"]["threadId"], native);
+        until(&host, thread, |s| s.status.phase != Phase::Working).await;
+    }
+
+    /// A stand-in daemon that has the recording's thread loaded and, taken up again, says its
+    /// turn is still under way, with none of its items; it never says the turn ended. Read again
+    /// (`thread/read`), it has the thread as the recording ended it. Every frame the worker sent
+    /// goes to `heard`.
+    async fn silent(listener: UnixListener, heard: mpsc::UnboundedSender<Value>) {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let lines = starter();
+        let native = resumed()["result"]["thread"]["id"].clone();
+        while let Some(msg) = next(&mut ws, &heard).await {
+            let id = msg["id"].clone();
+            let mut answer = match msg["method"].as_str() {
+                Some("initialize") => lines[recorded(&lines, "initialize").1].msg.clone(),
+                Some("thread/loaded/list") => {
+                    json!({ "result": { "data": [native], "nextCursor": null } })
+                }
+                Some("thread/resume") => {
+                    let mut running = resumed();
+                    let thread = &mut running["result"]["thread"];
+                    thread["status"] = json!({ "type": "active", "activeFlags": [] });
+                    let turn = &mut thread["turns"][0];
+                    turn["status"] = json!("inProgress");
+                    turn["items"] = json!([]);
+                    turn["itemsView"] = json!("notLoaded");
+                    running
+                }
+                Some("thread/read") => {
+                    json!({ "result": { "thread": resumed()["result"]["thread"] } })
+                }
+                _ => continue,
+            };
+            answer["id"] = id;
+            say(&mut ws, &answer).await;
+        }
+    }
+
+    /// A thread followed from a turn under way that then says nothing is read again once it has
+    /// been quiet a while, and reads as Codex has it: its turn ended, not working for good.
+    #[tokio::test]
+    async fn a_quiet_turn_is_read_again_and_ends_as_codex_has_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let short = tempfile::Builder::new().prefix("slopty-codex").tempdir_in("/tmp").unwrap();
+        let socket: PathBuf = short.path().join("s.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let (tx, mut heard) = mpsc::unbounded_channel();
+        let _server = tokio::spawn(silent(listener, tx));
+        let host = host(dir.path());
+        let (_handle, asks) = Codex::channel();
+        let rest = Duration::from_millis(300);
+        let _served = codex::spawn(host.clone(), socket, None, asks.rest_after(rest));
+        let native = resumed()["result"]["thread"]["id"].as_str().unwrap().to_owned();
+        let thread = shared::thread_of(&native);
+        let active = |s: &ThreadState| s.turns.last().is_some_and(|t| t.state == TurnState::Active);
+        until(&host, thread, active).await;
+        let sent = until_sent(&mut heard, "thread/read").await;
+        assert_eq!(sent.last().unwrap()["params"]["threadId"], native.as_str());
+        let state = until(&host, thread, |s| !active(s)).await;
+        assert!(!state.items.is_empty(), "read whole");
+    }
+
     /// A stand-in for the person's Codex whose link goes in the middle of a turn: it has the
     /// recording's thread loaded, takes it up again, starts the first turn as the recording did
     /// and leaves it running; once `cut` fires it closes the link, and the next one is Codex
