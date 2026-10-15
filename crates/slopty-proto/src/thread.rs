@@ -1268,6 +1268,14 @@ pub enum Action {
     DraftSet(wire::Draft),
     /// The person's own name for it ([`wire::Intent::Name`]); empty once taken back.
     NameSet(String),
+    /// The person's own words for a message given the agent in its words
+    /// ([`wire::Intent::Said`]); empty words take them back.
+    Said {
+        /// The intent that sent the message.
+        message: IntentId,
+        /// The words as the person wrote them.
+        words: String,
+    },
 }
 
 /// A window or display on the thread's worker that its agent drives.

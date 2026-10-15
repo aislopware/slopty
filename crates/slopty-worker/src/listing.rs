@@ -82,7 +82,13 @@ pub fn folder_page(path: &Path, after: Option<&After>) -> Listing {
         Err(e) => return Listing::Missing { error: crate::file::os_word(&e) },
     };
     let entries = names.iter().filter_map(|name| folder_entry(&dir, name)).collect();
-    Listing::Listed { dir: dir.to_string_lossy().into_owned(), entries, total }
+    let real = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
+    Listing::Listed {
+        dir: dir.to_string_lossy().into_owned(),
+        real: real.to_string_lossy().into_owned(),
+        entries,
+        total,
+    }
 }
 
 /// Folders before everything else, then the name with its case folded; [`After`] is this key
@@ -110,8 +116,10 @@ fn folder_entry(dir: &Path, name: &OsStr) -> Option<FolderEntry> {
         .then(|| std::fs::read_dir(&at).ok())
         .flatten()
         .map(|entries| u32::try_from(entries.count()).unwrap_or(u32::MAX));
+    let repo = kind == FileKind::Dir && std::fs::symlink_metadata(at.join(".git")).is_ok();
     let name = name.to_string_lossy().into_owned();
     Some(FolderEntry {
+        repo,
         hidden: name.starts_with('.') || flagged_hidden(&own),
         size: if kind == FileKind::File { meta.len() } else { 0 },
         modified_ms: modified_ms(meta),
@@ -159,9 +167,34 @@ mod tests {
 
     fn listed(listing: Listing) -> (String, Vec<FolderEntry>, u32) {
         match listing {
-            Listing::Listed { dir, entries, total } => (dir, entries, total),
+            Listing::Listed { dir, entries, total, .. } => (dir, entries, total),
             other => panic!("not listed: {other:?}"),
         }
+    }
+
+    /// A folder holding `.git` (a clone's directory or a worktree's file) is a repository, and a
+    /// folder reached through a link is named as it is reached and as it really is.
+    #[test]
+    fn a_listing_says_its_repositories_and_where_it_really_is() {
+        let root = tempfile::tempdir().unwrap();
+        let real = std::fs::canonicalize(root.path()).unwrap();
+        for name in ["clone/.git", "plain"] {
+            std::fs::create_dir_all(real.join("work").join(name)).unwrap();
+        }
+        std::fs::create_dir_all(real.join("work/tree")).unwrap();
+        std::fs::write(real.join("work/tree/.git"), b"gitdir: ../clone/.git/worktrees/tree")
+            .unwrap();
+        std::os::unix::fs::symlink(real.join("work"), real.join("via")).unwrap();
+
+        let listing = folder(&real.join("via"));
+        let Listing::Listed { dir, real: resolved, entries, .. } = listing else {
+            panic!("not listed: {listing:?}")
+        };
+        assert_eq!(dir, real.join("via").to_string_lossy());
+        assert_eq!(resolved, real.join("work").to_string_lossy());
+        let repo = |name: &str| entries.iter().find(|e| e.name == name).unwrap().repo;
+        assert!(repo("clone") && repo("tree"));
+        assert!(!repo("plain"));
     }
 
     /// Folders come first, then everything else, each by name whatever its case; a dot name is

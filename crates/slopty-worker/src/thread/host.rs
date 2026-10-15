@@ -15,7 +15,7 @@
 //! not yet seen, a first message, one scheduled). Its next use opens it again, the same, so a
 //! worker that runs for weeks holds the threads in use and not every thread ever opened.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -210,8 +210,7 @@ impl Hosted {
         if self.own.trees.is_empty() {
             return true;
         }
-        let turns: std::collections::HashSet<TurnId> =
-            self.log.state().turns.iter().map(|turn| turn.id).collect();
+        let turns: HashSet<TurnId> = self.log.state().turns.iter().map(|turn| turn.id).collect();
         self.own.trees.keys().all(|turn| turns.contains(turn))
     }
 }
@@ -825,8 +824,8 @@ impl Host {
         inner.load(thread);
         let Some(hosted) = inner.threads.get_mut(&thread) else { return Ok(None) };
         // What waits to be sent, whether the tree is to review and the person's own marks
-        // (how far they have seen it, what they were writing) are the worker's, which no
-        // agent's session has: they stay.
+        // (how far they have seen it, what they were writing, their name for it and their own
+        // words for its messages) are the worker's, which no agent's session has: they stay.
         // One that was being sent went to ptyd whole or not at all, under a delivery named for
         // it: it waits to go again, and ptyd types it only if it never took it.
         let mut state = state;
@@ -835,6 +834,8 @@ impl Host {
         state.to_review = hosted.log.state().to_review;
         state.seen = hosted.log.state().seen;
         state.draft.clone_from(&hosted.log.state().draft);
+        state.named.clone_from(&hosted.log.state().named);
+        state.said.clone_from(&hosted.log.state().said);
         let first = hosted.own.first;
         for pending in state.pending.iter_mut().filter(|p| Some(p.intent) != first) {
             if pending.state == PendingState::Sending {
@@ -1027,6 +1028,54 @@ impl Host {
         inner.load(thread);
         let Some(hosted) = inner.threads.get_mut(&thread) else { return };
         hosted.own.typed(id, words, text);
+    }
+
+    /// Settle the messages a restart caught being typed into `thread`'s agent
+    /// ([`super::schedule::CHECKING`]): once its transcript was read again they wait to go
+    /// (`went_on`, the agent back in the terminal they were typed into, whose delivery names
+    /// guard them, and the transcript's copy of one that went takes it off the list); else, its
+    /// agent back elsewhere or not back at all, each waits for the person as cut off.
+    pub fn settle_checking(&self, thread: ThreadId, went_on: bool) {
+        let mut guard = self.inner.lock();
+        let inner = &mut *guard;
+        inner.load(thread);
+        let Some(hosted) = inner.threads.get_mut(&thread) else { return };
+        let checking = |p: &Pending| matches!(&p.state, PendingState::Held { reason } if reason == super::schedule::CHECKING);
+        if !hosted.log.state().pending.iter().any(checking) {
+            return;
+        }
+        let now = if went_on {
+            PendingState::Waiting
+        } else {
+            PendingState::Held { reason: super::schedule::CUT_OFF.to_owned() }
+        };
+        let pending =
+            hosted
+                .log
+                .state()
+                .pending
+                .iter()
+                .map(|p| {
+                    if checking(p) {
+                        Pending { state: now.clone(), ..p.clone() }
+                    } else {
+                        p.clone()
+                    }
+                })
+                .collect();
+        apply(hosted, &mut inner.table, &inner.heard, vec![Action::PendingSet(pending)]);
+    }
+
+    /// Whether `thread` was last in a terminal other than `terminal`.
+    #[must_use]
+    pub fn moved(&self, thread: ThreadId, terminal: SessionId) -> bool {
+        let mut inner = self.inner.lock();
+        inner.load(thread);
+        inner
+            .threads
+            .get(&thread)
+            .and_then(|h| h.log.state().meta.terminal)
+            .is_some_and(|was| was != terminal)
     }
 
     /// The first message of the start that opened `thread`'s agent, `pending`, given on the

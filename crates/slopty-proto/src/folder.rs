@@ -23,6 +23,9 @@ pub enum Listing {
         /// The directory listed, absolute (`~` spelled out), for the tile to say and to go up
         /// from.
         dir: String,
+        /// The same directory with every link resolved, as the worker names the folders its
+        /// threads run in; `dir` itself when it could not be resolved.
+        real: String,
         /// The kept entries, in order.
         entries: Vec<FolderEntry>,
         /// Every entry the directory holds; more than `entries` when the listing was cut.
@@ -64,6 +67,8 @@ pub struct FolderEntry {
     pub size: u64,
     /// Entries inside, for a directory that could be read.
     pub items: Option<u32>,
+    /// A directory with `.git` in it: a repository's clone or one of its worktrees.
+    pub repo: bool,
     /// Last modification.
     pub modified_ms: WallMs,
 }

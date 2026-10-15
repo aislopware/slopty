@@ -146,6 +146,7 @@ mod tests {
             hidden: false,
             size: 1,
             items: None,
+            repo: false,
             modified_ms: WallMs::from_millis(0),
         }
     }
@@ -190,7 +191,12 @@ mod tests {
                 .cloned()
                 .collect();
             let total = u32::try_from(self.entries.len()).unwrap_or(u32::MAX);
-            Listing::Listed { dir: "/home/me/big".to_owned(), entries, total }
+            Listing::Listed {
+                dir: "/home/me/big".to_owned(),
+                real: "/home/me/big".to_owned(),
+                entries,
+                total,
+            }
         }
     }
 
@@ -308,7 +314,12 @@ mod tests {
 
         let mut shrunk = Gather::new(Fake::new(0, 2500).page(None));
         assert!(shrunk.wants().is_some());
-        shrunk.add(Listing::Listed { dir: String::new(), entries: Vec::new(), total: 2500 });
+        shrunk.add(Listing::Listed {
+            dir: String::new(),
+            real: String::new(),
+            entries: Vec::new(),
+            total: 2500,
+        });
         assert_eq!(shrunk.wants(), None, "an empty page ends it");
 
         let mut gone = Gather::new(Fake::new(0, 2500).page(None));

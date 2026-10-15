@@ -39,6 +39,7 @@ pub(in crate::hub) fn row(phase: Phase, since: u64, terminal: Option<SessionId>)
         pull: None,
         meters: Meters::default(),
         ended: None,
+        began_ms: None,
         seen: TurnId::BEFORE,
         draft: None,
         created_ms: WallMs::from_millis(since),

@@ -437,6 +437,56 @@ mod compose {
         rig.until(|s| s.pending.is_empty()).await;
     }
 
+    /// A message the transcript already shows went before, as a restart caught it being typed:
+    /// it leaves the list once its agent is at rest, never typed a second time; one it does not
+    /// show goes.
+    #[tokio::test]
+    async fn a_message_the_transcript_shows_leaves_the_list_untyped() {
+        let rig = Rig::new().await;
+        let (went, not) = (IntentId::new(), IntentId::new());
+        let waiting = |intent, text: &str| Pending {
+            intent,
+            text: text.to_owned(),
+            attachments: vec![],
+            delivery: Delivery::Queue,
+            state: PendingState::Waiting,
+        };
+        let turn = Turn {
+            id: TurnId(1),
+            input: Some(ItemId("p1".to_owned())),
+            state: TurnState::Complete,
+            started_ms: WallMs::ZERO,
+            ended_ms: Some(WallMs::ZERO),
+            usage: Usage::default(),
+            models: Vec::new(),
+            changed: Changed::default(),
+            before: None,
+            after: None,
+        };
+        let prompt = Item {
+            id: ItemId("p1".to_owned()),
+            turn: TurnId(1),
+            at_ms: WallMs::ZERO,
+            body: ItemBody::User(UserMessage {
+                text: Clipped::whole("went"),
+                images: Vec::new(),
+                command: None,
+                intent: Some(went),
+            }),
+        };
+        rig.host.apply(
+            rig.thread,
+            vec![
+                Action::TurnStarted(turn),
+                Action::ItemStarted(prompt),
+                Action::PendingSet(vec![waiting(went, "went"), waiting(not, "not yet")]),
+            ],
+        );
+        rig.composer.kick(rig.thread);
+        rig.recorded("not yet\r").await;
+        rig.until(|s| s.pending.is_empty()).await;
+    }
+
     /// A queued command the agent runs itself (`/model`) starts no turn of the model's and never
     /// shows it working: once the transcript shows it, the next queued message goes.
     #[tokio::test]

@@ -562,6 +562,44 @@ mod threads {
         })
     }
 
+    /// A message a restart caught being typed waits for its transcript's word: it goes on once
+    /// that was read with its agent back where it was typed, and waits for the person when its
+    /// agent came back elsewhere or not at all; the other messages are left as they were.
+    #[tokio::test]
+    async fn a_message_caught_being_typed_waits_for_its_transcripts_word() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = open(dir.path());
+        let (first, second) = (slopty_core::SessionId::new(), slopty_core::SessionId::new());
+        let meta = ThreadMeta { terminal: Some(first), ..meta() };
+        let thread = meta.id;
+        host.create(meta).unwrap();
+        assert!(!host.moved(thread, first) && host.moved(thread, second));
+        let checking = PendingState::Held { reason: schedule::CHECKING.to_owned() };
+        let (caught, queued) = (IntentId::new(), IntentId::new());
+        let pending = |intent, state| Pending {
+            intent,
+            text: "later".to_owned(),
+            attachments: vec![],
+            delivery: Delivery::Queue,
+            state,
+        };
+        let set = |host: &Host| {
+            let list =
+                vec![pending(caught, checking.clone()), pending(queued, PendingState::Waiting)];
+            host.apply(thread, vec![Action::PendingSet(list)]);
+        };
+        let states = |host: &Host| -> Vec<PendingState> {
+            state(host, thread).0.pending.iter().map(|p| p.state.clone()).collect()
+        };
+        set(&host);
+        host.settle_checking(thread, true);
+        assert_eq!(states(&host), [PendingState::Waiting, PendingState::Waiting], "it goes on");
+        set(&host);
+        host.settle_checking(thread, false);
+        let cut = PendingState::Held { reason: schedule::CUT_OFF.to_owned() };
+        assert_eq!(states(&host), [cut, PendingState::Waiting], "the person's to send again");
+    }
+
     /// What the worker adds to a thread and its agent never tells (the intent a message came
     /// from, each turn's snapshots, what waits to be sent) outlives the thread being read again
     /// from the agent's session, after a worker restart too. A message that was being sent
@@ -594,6 +632,8 @@ mod threads {
                     pending(waiting, PendingState::Waiting),
                     pending(sending, PendingState::Sending),
                 ]),
+                Action::NameSet("Greetings".to_owned()),
+                Action::Said { message: sent, words: "hello @there".to_owned() },
             ],
         );
         assert_eq!(
@@ -609,6 +649,8 @@ mod threads {
         let (again, _) = state(&host, thread);
         assert_eq!(intent_of(&again, "p1"), Some(sent));
         assert_eq!(again.turns.first().and_then(|t| t.before.clone()), Some(tree));
+        assert_eq!(again.named, "Greetings", "the person's name for it stays");
+        assert_eq!(again.said.get(&sent).map(String::as_str), Some("hello @there"));
         let states: Vec<_> = again.pending.iter().map(|p| (p.intent, p.state.clone())).collect();
         assert_eq!(
             states,

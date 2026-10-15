@@ -8,9 +8,9 @@ use slopty_core::WallMs;
 
 use super::wire::{Draft, Page, PullSeen, RequestCard, TableFrame, ThreadRow, TurnEnded};
 use super::{
-    Action, AgentScreen, BackgroundTask, Changed, Clipped, Command, Cursor, Edge, Item, ItemBody,
-    ItemId, Meters, PartKey, Pending, Plan, Request, Status, ThreadId, ThreadMeta, ToolState, Turn,
-    TurnId, TurnState,
+    Action, AgentScreen, BackgroundTask, Changed, Clipped, Command, Cursor, Edge, IntentId, Item,
+    ItemBody, ItemId, Meters, PartKey, Pending, Plan, Request, Status, ThreadId, ThreadMeta,
+    ToolState, Turn, TurnId, TurnState,
 };
 
 /// Settled requests a thread keeps, newest last, so a client that comes back still sees who
@@ -57,6 +57,9 @@ pub struct ThreadState {
     pub draft: Option<Draft>,
     /// The person's own name for it, over the agent's ([`Action::NameSet`]); empty for none.
     pub named: String,
+    /// The person's own words for the messages given the agent in its words, by the intent
+    /// that sent each ([`Action::Said`]): shown in their place.
+    pub said: BTreeMap<IntentId, String>,
 }
 
 impl ThreadState {
@@ -81,6 +84,7 @@ impl ThreadState {
             seen: TurnId::BEFORE,
             draft: None,
             named: String::new(),
+            said: BTreeMap::new(),
         }
     }
 
@@ -156,6 +160,12 @@ impl ThreadState {
             Action::Seen(turn) => self.seen = self.seen.max(*turn),
             Action::DraftSet(draft) => self.draft = Some(draft.clone()),
             Action::NameSet(name) => self.named.clone_from(name),
+            Action::Said { message, words } if words.is_empty() => {
+                self.said.remove(message);
+            }
+            Action::Said { message, words } => {
+                self.said.insert(*message, words.clone());
+            }
         }
     }
 
@@ -287,6 +297,11 @@ impl ThreadState {
             pull: self.pull.clone(),
             meters: self.meters.clone(),
             ended: self.ended(),
+            began_ms: self
+                .turns
+                .last()
+                .filter(|turn| turn.state == TurnState::Active)
+                .map(|turn| turn.started_ms),
             seen: self.seen,
             draft: self.draft.clone(),
             created_ms: self.meta.created_ms,

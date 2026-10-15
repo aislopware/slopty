@@ -3179,3 +3179,15 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   `an_ended_session_does_not_hide_the_agent_at_its_terminal`; `slopty-proto`
   `a_thread_removed_and_made_again_stays_in_the_table`; the worker table's
   `a_thread_made_again_is_a_row_not_a_removal`.
+- ✅ **A message caught being typed by a restart goes once (2026-10-15).** A restart holds a
+  Claude Code message it caught being typed until the agent's transcript is read again
+  (`schedule::CHECKING`, which the composer never types), knowing it as typed so the agent's
+  copy marks it, and the composer drops any message the transcript already shows. Read with
+  its agent back in that terminal, whose ptyd delivery name guards it, it waits to go again;
+  with the terminal gone, the session back elsewhere, or no agent back within the startup
+  grace, it waits for the person as cut off. The thread's own marks (a name, the person's own
+  words for a message) stay through a read again. Tests: `slopty-worker`
+  `claude_threads::a_message_left_being_typed_by_a_restart_waits_for_its_transcript`,
+  `compose::a_message_the_transcript_shows_leaves_the_list_untyped`,
+  `threads::a_message_caught_being_typed_waits_for_its_transcripts_word`,
+  `threads::what_the_worker_owns_outlives_a_read_again`.

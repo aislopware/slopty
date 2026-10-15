@@ -85,7 +85,8 @@ impl Sent {
             | Intent::Review { .. }
             | Intent::Seen { .. }
             | Intent::Draft { .. }
-            | Intent::Name { .. } => self.outcome.is_some(),
+            | Intent::Name { .. }
+            | Intent::Said { .. } => self.outcome.is_some(),
         }
     }
 

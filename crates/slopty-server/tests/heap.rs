@@ -142,6 +142,7 @@ mod tests {
             pull: None,
             meters: Meters::default(),
             ended: None,
+            began_ms: None,
             seen: slopty_proto::thread::TurnId::BEFORE,
             draft: None,
             created_ms: now,

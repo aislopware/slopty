@@ -333,6 +333,16 @@ pub enum Intent {
         /// The name.
         title: String,
     },
+    /// The person's own words for a message Slopty gave the agent in the agent's words (a
+    /// chip spelled out as a path or a tool's name): what every device shows for it, in the
+    /// queue and in the transcript ([`ThreadState::said`](super::ThreadState::said)). At most
+    /// [`Draft::MAX_BYTES`]; empty words take them back. Any thread takes it.
+    Said {
+        /// The intent that sent the message: its send, or the start whose first message it is.
+        message: IntentId,
+        /// The words as the person wrote them.
+        words: String,
+    },
 }
 
 /// A file's change as a review showed it, or some of its hunks.
@@ -364,7 +374,11 @@ impl Intent {
     #[must_use]
     pub const fn needs(&self) -> Option<&'static str> {
         Some(match self {
-            Self::Discard | Self::Seen { .. } | Self::Draft { .. } | Self::Name { .. } => {
+            Self::Discard
+            | Self::Seen { .. }
+            | Self::Draft { .. }
+            | Self::Name { .. }
+            | Self::Said { .. } => {
                 return None;
             }
             Self::Send { delivery: Delivery::Steer, .. } => Cap::STEER,
@@ -735,6 +749,9 @@ pub struct ThreadRow {
     pub meters: super::Meters,
     /// Its latest turn that ended, so a device that was not linked when it ended still knows.
     pub ended: Option<TurnEnded>,
+    /// When its turn under way began, while one is: its time at work runs from here, whatever
+    /// phases it passed through since.
+    pub began_ms: Option<WallMs>,
     /// The last turn the person has seen, on any device ([`Intent::Seen`]): a turn in
     /// [`Self::ended`] past it is unread. [`TurnId::BEFORE`] until one is seen.
     pub seen: TurnId,

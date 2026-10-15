@@ -53,7 +53,7 @@ use slopty_proto::thread::{
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
-use super::Host;
+use super::{Host, schedule};
 use crate::conversation::Seen;
 
 mod follow;
@@ -193,28 +193,56 @@ pub fn spawn(
             drop(tokio::spawn(unheard(host.clone(), waiting)));
         }
         // A message the earlier worker was typing went to ptyd whole or not at all, under a
-        // delivery named for it: it waits to go again, as a read again leaves it, where it can
-        // be withdrawn or changed while its agent is gone.
+        // delivery named for it, and whether it went the agent's transcript says. It waits for
+        // that word ([`schedule::CHECKING`]), known as typed so the transcript's copy takes it
+        // off the list, and goes again only once the transcript was read with its agent back in
+        // that terminal; with the terminal gone it waits for the person as cut off.
         let typing = host.visit(|s| {
             let observed =
                 s.meta.agent.is(AgentId::CLAUDE_CODE) && s.meta.drive.is(Drive::OBSERVED);
             (observed && s.pending.iter().any(|p| p.state == PendingState::Sending))
-                .then_some(s.meta.id)
+                .then_some((s.meta.id, s.meta.terminal))
         });
-        for thread in typing {
+        let mut checking = Vec::new();
+        for (thread, terminal) in typing {
+            let open = terminal.is_some_and(|t| sources.open(t));
+            if open {
+                checking.push(thread);
+            }
+            let reason = if open { schedule::CHECKING } else { schedule::CUT_OFF };
+            let sending: Vec<Pending> = host.state(thread).map_or_else(Vec::new, |(state, _)| {
+                state.pending.into_iter().filter(|p| p.state == PendingState::Sending).collect()
+            });
+            for pending in &sending {
+                let paths = pending.attachments.iter().map(String::as_str);
+                let text = slopty_agent::attach::with_paths(&pending.text, paths);
+                host.typed(thread, pending.intent, &pending.text, &text);
+            }
             host.update(thread, |state| {
                 let pending = state
                     .pending
                     .iter()
                     .map(|p| match p.state {
-                        PendingState::Sending => {
-                            Pending { state: PendingState::Waiting, ..p.clone() }
-                        }
+                        PendingState::Sending => Pending {
+                            state: PendingState::Held { reason: reason.to_owned() },
+                            ..p.clone()
+                        },
                         _ => p.clone(),
                     })
                     .collect();
                 (vec![Action::PendingSet(pending)], ())
             });
+        }
+        // An agent that never came back to its terminal leaves what was being typed to the
+        // person.
+        if !checking.is_empty() {
+            let host = host.clone();
+            drop(tokio::spawn(async move {
+                tokio::time::sleep(STARTUP_GRACE).await;
+                for thread in checking {
+                    host.settle_checking(thread, false);
+                }
+            }));
         }
         let mut on = Observers {
             host,
@@ -629,6 +657,11 @@ impl Session {
             tracing::info!(terminal = %self.terminal, native, "a session id another terminal runs");
             Observed::beside(native, "", self.terminal, &self.cwd, now)
         };
+        // Back in another terminal than the one a restart caught it typing into, whose
+        // delivery names never guarded what it typed: that waits for the person.
+        if self.host.moved(observed.main(), self.terminal) {
+            self.host.settle_checking(observed.main(), false);
+        }
         self.start(observed);
         self.transcripts = Some(Transcripts::default());
     }
@@ -743,11 +776,13 @@ impl Session {
             return;
         };
         self.transcripts = Some(transcripts);
-        if changes.is_empty() && outputs.is_empty() {
-            return;
-        }
         if let Some(observed) = self.observed.as_mut() {
-            take(&self.host, observed.transcript(&changes, &outputs));
+            if !changes.is_empty() || !outputs.is_empty() {
+                take(&self.host, observed.transcript(&changes, &outputs));
+            }
+            // Its transcript read, a message a restart caught being typed here goes on, unless
+            // the transcript showed it went.
+            self.host.settle_checking(observed.main(), true);
         }
     }
 }

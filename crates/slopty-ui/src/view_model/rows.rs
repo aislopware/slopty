@@ -57,10 +57,13 @@ fn plain(path: &str, home: Option<&str>) -> String {
     }
 }
 
-/// The project folder a chat working in `cwd`, in the repository whose root is `repo`, belongs
-/// to on a machine whose home is `home`, among the folders the person `added` there:
+/// The project folder a chat working in `cwd` belongs to, among the folders the person `added`.
 ///
-/// - the deepest added folder it works in, or whose repository it is;
+/// `repo` is its repository's root and `home` its machine's home; each added folder comes by
+/// the path it was added at and where it really is (its links resolved, as the worker names
+/// the folders threads work in):
+///
+/// - the deepest added folder it works in, or whose repository it is, by either path;
 /// - else, in one of Slopty's worktrees of a clone, the clone's own folder;
 /// - else its repository's root, else where it works;
 /// - and none for a chat at home, which has no project.
@@ -69,7 +72,7 @@ pub fn place(
     cwd: Option<&str>,
     repo: Option<&str>,
     home: Option<&str>,
-    added: &[&str],
+    added: &[(&str, &str)],
 ) -> Option<String> {
     let cwd = cwd.or(repo).filter(|path| !path.is_empty()).map(|path| plain(path, home))?;
     let repo = repo.filter(|path| !path.is_empty()).map(|path| plain(path, home));
@@ -77,12 +80,20 @@ pub fn place(
         let root = root.trim_end_matches('/');
         path == root || path.strip_prefix(root).is_some_and(|rest| rest.starts_with('/'))
     };
+    let holds = |root: &str| under(&cwd, root) || repo.as_deref().is_some_and(|r| under(r, root));
     let deepest = added
         .iter()
-        .filter(|root| under(&cwd, root) || repo.as_deref().is_some_and(|repo| under(repo, root)))
-        .max_by_key(|root| root.len());
-    if let Some(root) = deepest {
-        return Some(root.trim_end_matches('/').to_owned());
+        .filter_map(|&(path, real)| {
+            let depth = [path, real]
+                .into_iter()
+                .filter(|root| holds(root))
+                .map(|root| root.trim_end_matches('/').len())
+                .max()?;
+            Some((depth, path))
+        })
+        .max_by_key(|&(depth, _)| depth);
+    if let Some((_, path)) = deepest {
+        return Some(path.trim_end_matches('/').to_owned());
     }
     let folder = repo.unwrap_or(cwd);
     if let Some((clone, _)) = folder.split_once(WORKTREES) {
@@ -199,7 +210,9 @@ pub fn session(row: &ThreadRow, device: &str, running: u32, now: DateTime<Utc>) 
         chat_id: row.id.to_string(),
         device_id: device.to_owned(),
         status,
-        started_at: (status == SessionStatus::Working).then(|| time(row.status.since_ms)),
+        // A turn's time runs from when it began, through its approvals and waits.
+        started_at: (status == SessionStatus::Working)
+            .then(|| time(row.began_ms.unwrap_or(row.status.since_ms))),
         updated_at: now,
         running_subagents: running,
     }

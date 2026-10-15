@@ -25,9 +25,9 @@ mod claude_threads {
     };
     use slopty_worker::conversation::Seen;
     use slopty_worker::orchestrate;
-    use slopty_worker::thread::Host;
     use slopty_worker::thread::claude::{self, Sources};
     use slopty_worker::thread::log::Limits;
+    use slopty_worker::thread::{Host, schedule};
     use tokio::sync::{broadcast, watch};
 
     /// The recorded session's own id.
@@ -771,10 +771,11 @@ mod claude_threads {
         );
     }
 
-    /// A message an earlier worker was typing into a Claude Code that is gone by the restart
-    /// waits to go again, where it can be withdrawn or changed, not "being typed" for good.
+    /// A message the earlier worker was typing waits for the agent's transcript to say whether
+    /// it went, never typed on its own meanwhile; with the agent back in its terminal and the
+    /// transcript read, it waits to go again, which ptyd's delivery name guards.
     #[tokio::test]
-    async fn a_message_left_being_typed_by_a_restart_waits_again() {
+    async fn a_message_left_being_typed_by_a_restart_waits_for_its_transcript() {
         use slopty_proto::thread::{Action, Delivery, IntentId, Pending, PendingState};
         let rig = Rig::new();
         let host = rig.host();
@@ -794,13 +795,32 @@ mod claude_threads {
         drop(host);
 
         let host = rig.host();
-        let _observer = rig.observe(&host);
+        let observer = rig.observe(&host);
+        let checking = PendingState::Held { reason: schedule::CHECKING.to_owned() };
+        let waiting = |s: &ThreadState| s.pending.iter().all(|p| p.state == PendingState::Waiting);
         let state = until(&host, thread, |s| {
-            cut(s) && s.pending.iter().all(|p| p.state != PendingState::Sending)
+            s.pending.iter().all(|p| p.state == checking) || (!s.pending.is_empty() && waiting(s))
         })
         .await;
-        let states: Vec<&PendingState> = state.pending.iter().map(|p| &p.state).collect();
-        assert_eq!(states, [&PendingState::Waiting]);
+        assert!(state.pending.iter().all(|p| p.state != PendingState::Sending));
+        rig.status(AgentStatus::Idle);
+        let state = until(&host, thread, |s| !s.pending.is_empty() && waiting(s)).await;
+
+        // Its terminal gone, it can only come back elsewhere: the person's to send again.
+        host.apply(
+            thread,
+            vec![Action::PendingSet(vec![Pending {
+                state: PendingState::Sending,
+                ..state.pending[0].clone()
+            }])],
+        );
+        observer.0.abort();
+        drop(host);
+        rig.seen.closed.lock().push(rig.terminal);
+        let host = rig.host();
+        let _observer = rig.observe(&host);
+        let cut = PendingState::Held { reason: schedule::CUT_OFF.to_owned() };
+        until(&host, thread, |s| s.pending.iter().all(|p| p.state == cut)).await;
     }
 
     /// A thread an earlier worker left at work on a terminal still open is not ended by the

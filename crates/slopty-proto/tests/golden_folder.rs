@@ -46,10 +46,15 @@ mod golden_folder {
             hidden: false,
             size: 5,
             items: None,
+            repo: false,
             modified_ms: WallMs::from_millis(1_700_000_000_000),
         };
-        let listing =
-            Listing::Listed { dir: "/Users/dev/big".to_owned(), entries: vec![entry], total: 2001 };
+        let listing = Listing::Listed {
+            dir: "/Users/dev/big".to_owned(),
+            real: "/Volumes/Data/dev/big".to_owned(),
+            entries: vec![entry],
+            total: 2001,
+        };
         snap(
             "worker_folder_page",
             &WorkerMsg::FolderPage { path: "~/big".to_owned(), after: after(), listing },

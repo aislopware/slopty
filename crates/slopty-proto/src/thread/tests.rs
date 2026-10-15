@@ -287,8 +287,10 @@ fn a_row_carries_the_turn_that_ended_what_was_seen_and_the_draft() {
     };
     let under_way = run(&[Action::TurnStarted(turn(1))]);
     assert_eq!(under_way.row(WallMs::ZERO).ended, None, "a turn under way has not ended");
+    assert_eq!(under_way.row(WallMs::ZERO).began_ms, Some(WallMs::from_millis(1)));
     let mut state = run(&[Action::TurnStarted(turn(1)), ended(1, TurnState::Complete)]);
     let row = state.row(WallMs::ZERO);
+    assert_eq!(row.began_ms, None, "no turn is under way");
     assert_eq!(
         row.ended,
         Some(wire::TurnEnded {

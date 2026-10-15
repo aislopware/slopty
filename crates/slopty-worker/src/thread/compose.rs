@@ -395,6 +395,25 @@ fn next(
     if let Some(back) = taken_back(c, state, session, unconfirmed) {
         return back;
     }
+    // A message the transcript already shows went before (one a restart caught being typed,
+    // which the agent took): it leaves the list rather than going twice.
+    let shown = |intent: IntentId| {
+        state
+            .items
+            .iter()
+            .rev()
+            .take(SHOWN_WITHIN)
+            .any(|item| matches!(&item.body, ItemBody::User(m) if m.intent == Some(intent)))
+    };
+    if state.pending.iter().any(|p| p.state != PendingState::Sending && shown(p.intent)) {
+        let left = state
+            .pending
+            .iter()
+            .filter(|p| p.state == PendingState::Sending || !shown(p.intent))
+            .cloned()
+            .collect();
+        return (vec![Action::PendingSet(left)], Next::Wait { held: false });
+    }
     // An agent that exited left its terminal to whatever runs there now, maybe another session:
     // nothing of this thread's is typed into it until its own runs again.
     if matches!(state.status.liveness, Liveness::Exited { .. }) {
@@ -475,9 +494,14 @@ fn taken_back(
 }
 
 /// Whether `pending` was on its way as the worker stopped and may have gone
-/// ([`super::schedule::CUT_OFF`]): nothing types it again unless the person promotes it.
+/// ([`super::schedule::CUT_OFF`]), or waits for its transcript to say
+/// ([`super::schedule::CHECKING`]): nothing types it unless the person promotes it.
 fn cut_off(pending: &Pending) -> bool {
-    matches!(&pending.state, PendingState::Held { reason } if reason == super::schedule::CUT_OFF)
+    matches!(
+        &pending.state,
+        PendingState::Held { reason }
+            if reason == super::schedule::CUT_OFF || reason == super::schedule::CHECKING
+    )
 }
 
 /// Whether `pending` was typed into the terminal and stays there unsent ([`TAKEN_BACK`]).

@@ -631,7 +631,11 @@ impl Following {
             ThreadRequest::Intent {
                 id,
                 thread,
-                intent: intent @ (Intent::Seen { .. } | Intent::Draft { .. } | Intent::Name { .. }),
+                intent:
+                    intent @ (Intent::Seen { .. }
+                    | Intent::Draft { .. }
+                    | Intent::Name { .. }
+                    | Intent::Said { .. }),
             } => {
                 let now = slopty_core::WallMs::now();
                 let marked = threads.host.intent(thread, id, |state| {

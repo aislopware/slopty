@@ -1,6 +1,8 @@
-//! The person's own marks on a thread, which no agent's session has: how far they have seen
-//! it, what they were writing to it and their own name for it ([`Intent::Seen`],
-//! [`Intent::Draft`], [`Intent::Name`]).
+//! The person's own marks on a thread, which no agent's session has.
+//!
+//! How far they have seen it, what they were writing to it, their own name for it and their
+//! own words for the messages the agent was given in its words ([`Intent::Seen`],
+//! [`Intent::Draft`], [`Intent::Name`], [`Intent::Said`]).
 //!
 //! Any device sets them and every device reads them on the thread's row, so what is unread
 //! and a message begun on one device follow the person to the next. They are the worker's,
@@ -55,6 +57,21 @@ pub fn act(state: &ThreadState, intent: &Intent, now: WallMs) -> (Outcome, Vec<A
             let name = title.trim();
             let renamed = (state.named != name).then(|| Action::NameSet(name.to_owned()));
             (Outcome::Done, renamed.into_iter().collect())
+        }
+        Intent::Said { words, .. } if words.len() > Draft::MAX_BYTES => (
+            Outcome::Refused {
+                reason: format!(
+                    "a message's own words are kept up to {} KiB; the agent's stand",
+                    Draft::MAX_BYTES / 1024
+                ),
+            },
+            Vec::new(),
+        ),
+        Intent::Said { message, words } => {
+            let held = state.said.get(message).map_or("", String::as_str);
+            let said =
+                (held != words).then(|| Action::Said { message: *message, words: words.clone() });
+            (Outcome::Done, said.into_iter().collect())
         }
         _ => (Outcome::Refused { reason: "not a mark of the person's".to_owned() }, Vec::new()),
     }
@@ -112,6 +129,24 @@ mod tests {
             state.apply(action);
         }
         (outcome, state)
+    }
+
+    /// The person's own words for a message are kept by its intent, changed by a later edit,
+    /// taken back by empty words, and refused past a draft's size.
+    #[test]
+    fn a_messages_own_words_are_kept_by_its_intent() {
+        let message = slopty_proto::thread::IntentId::new();
+        let said = |words: &str| Intent::Said { message, words: words.to_owned() };
+        let (outcome, kept) = after(state(1), &said("Check @README.md"));
+        assert_eq!(outcome, Outcome::Done);
+        assert_eq!(kept.said.get(&message).map(String::as_str), Some("Check @README.md"));
+        assert_eq!(act(&kept, &said("Check @README.md"), WallMs::ZERO).1, [], "nothing new");
+        let (_, edited) = after(kept, &said("Check @NOTES.md"));
+        assert_eq!(edited.said.get(&message).map(String::as_str), Some("Check @NOTES.md"));
+        let (_, gone) = after(edited, &said(""));
+        assert!(gone.said.is_empty());
+        let big = "x".repeat(Draft::MAX_BYTES + 1);
+        assert!(matches!(after(state(1), &said(&big)).0, Outcome::Refused { .. }));
     }
 
     /// The seen mark moves up to the turn named, never back and never past the last turn.

@@ -873,8 +873,21 @@ impl WorkspaceView {
             _ => (None, serde_json::json!({ "changed": false })),
         };
         if waiting && let Some(intent) = intent {
+            // An edit's own words go with it, for every device; empty words take back the old.
+            let said = match &intent {
+                Intent::Edit { pending, .. } => Some(Intent::Said {
+                    message: *pending,
+                    words: self.view_model.said.get(pending).cloned().unwrap_or_default(),
+                }),
+                _ => None,
+            };
             let hub = self.thread_hub(key, cx);
-            hub.update(cx, |hub, cx| hub.intent(thread, intent, cx));
+            hub.update(cx, |hub, cx| {
+                let _edit = hub.intent(thread, intent, cx);
+                if let Some(said) = said {
+                    let _said = hub.intent(thread, said, cx);
+                }
+            });
         }
         Ok(RpcReply::Value(answer))
     }
@@ -889,7 +902,11 @@ impl WorkspaceView {
         attachments: Vec<String>,
     ) -> Intent {
         let agent = agent_prompt(&text, harness);
-        self.view_model.said.insert(pending, text);
+        if agent == text {
+            self.view_model.said.remove(&pending);
+        } else {
+            self.view_model.said.insert(pending, text);
+        }
         Intent::Edit { pending, text: agent, attachments }
     }
 

@@ -477,7 +477,7 @@ mod tests {
             })
             .await
             .unwrap();
-        let Listing::Listed { dir, entries, total } = listing else {
+        let Listing::Listed { dir, entries, total, .. } = listing else {
             panic!("a directory: {listing:?}")
         };
         assert_eq!(dir, format!("{home}/e2e"));

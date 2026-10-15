@@ -788,8 +788,10 @@ async fn older_turns_arrive_as_history() {
 #[test]
 fn a_chat_belongs_to_its_project_folder() {
     let home = Some("/Users/me");
-    let place =
-        |cwd: &str, repo: Option<&str>, added: &[&str]| rows::place(Some(cwd), repo, home, added);
+    let place = |cwd: &str, repo: Option<&str>, added: &[&str]| {
+        let added: Vec<(&str, &str)> = added.iter().map(|path| (*path, *path)).collect();
+        rows::place(Some(cwd), repo, home, &added)
+    };
     assert_eq!(place("/w/app/src", Some("/w/app"), &[]).as_deref(), Some("/w/app"));
     assert_eq!(
         place("/w/app/.claude/worktrees/fix-ab12", Some("/w/app/.claude/worktrees/fix-ab12"), &[])
@@ -805,6 +807,14 @@ fn a_chat_belongs_to_its_project_folder() {
     assert_eq!(place("/Users/me", None, &[]), None, "home has no project");
     assert_eq!(place("~", None, &[]), None);
     assert_eq!(place("~/code", None, &[]).as_deref(), Some("/Users/me/code"));
+    // A project added through a link holds the chats its machine names by the real folder.
+    let linked = [("/Users/me/work", "/Volumes/Data/work")];
+    assert_eq!(
+        rows::place(Some("/Volumes/Data/work/api"), Some("/Volumes/Data/work"), home, &linked)
+            .as_deref(),
+        Some("/Users/me/work"),
+        "the added folder, by where it really is"
+    );
     let mut row = fixtures::thread("tools").row(slopty_core::WallMs::ZERO);
     row.repo_id = Some(slopty_proto::terminal::RepoId {
         origin: Some("github.com/o/r".to_owned()),

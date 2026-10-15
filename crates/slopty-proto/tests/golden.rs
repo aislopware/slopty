@@ -783,6 +783,7 @@ mod golden {
                 path: "~/src".to_owned(),
                 listing: Listing::Listed {
                     dir: "/Users/w/src".to_owned(),
+                    real: "/Users/w/src".to_owned(),
                     entries: vec![
                         FolderEntry {
                             name: ".git".to_owned(),
@@ -791,6 +792,7 @@ mod golden {
                             hidden: true,
                             size: 0,
                             items: Some(12),
+                            repo: false,
                             modified_ms: WallMs::from_millis(1_788_000_000_000),
                         },
                         FolderEntry {
@@ -800,6 +802,7 @@ mod golden {
                             hidden: false,
                             size: 4096,
                             items: None,
+                            repo: false,
                             modified_ms: WallMs::from_millis(1_788_000_000_500),
                         },
                     ],

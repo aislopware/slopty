@@ -226,6 +226,7 @@ mod tests {
                 hidden: false,
                 size: 0,
                 items: None,
+                repo: false,
                 modified_ms: WallMs::ZERO,
             })
             .collect()
@@ -234,6 +235,7 @@ mod tests {
     fn page(from: usize, count: usize, total: u32) -> Listing {
         Listing::Listed {
             dir: "/w/big".to_owned(),
+            real: "/w/big".to_owned(),
             entries: entries((from..).take(count).map(|i| format!("f{i:05}"))),
             total,
         }

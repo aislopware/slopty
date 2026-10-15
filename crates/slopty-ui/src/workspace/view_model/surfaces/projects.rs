@@ -69,6 +69,10 @@ pub(in crate::workspace) struct Project {
     /// When it was added, in ms since the epoch: the projects keep the order they came in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_ms: Option<i64>,
+    /// Where its folder really is, its links resolved, as its machine last said: the folders
+    /// threads work in are named so, and a project added through a link still holds them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub real: Option<String>,
 }
 
 /// The projects the person added, read from their file the first time they are asked of, and
@@ -151,7 +155,7 @@ fn folder_listing(
         .map(|entry| FolderEntry {
             name: entry.name.clone(),
             is_dir: entry.kind == FileKind::Dir,
-            is_repo: false,
+            is_repo: entry.repo,
         })
         .collect();
     let listed = u32::try_from(entries.len()).unwrap_or(u32::MAX);
@@ -220,7 +224,9 @@ impl WorkspaceView {
         let path = param(params, "path").filter(|path| !path.is_empty()).unwrap_or("~");
         let rx = self.surface_list(key, path.to_owned());
         cx.spawn(async move |_, cx| match within(cx, rx).await? {
-            Listing::Listed { dir, entries, total } => value(&folder_listing(dir, &entries, total)),
+            Listing::Listed { dir, entries, total, .. } => {
+                value(&folder_listing(dir, &entries, total))
+            }
             Listing::NotFolder => Err(RpcError::Failed("not a folder".to_owned())),
             Listing::Missing { error } => Err(RpcError::Failed(error)),
         })
@@ -292,6 +298,7 @@ impl WorkspaceView {
                     name: None,
                     git: git == Some(true),
                     created_ms: Some(chrono::Utc::now().timestamp_millis()),
+                    real: None,
                 };
                 self.view_model.surfaces.projects.change(|projects| {
                     if !projects
@@ -323,6 +330,7 @@ impl WorkspaceView {
                             name,
                             git: false,
                             created_ms: None,
+                            real: None,
                         });
                     }
                 })
@@ -358,32 +366,34 @@ impl WorkspaceView {
         .detach();
     }
 
-    /// Look once a run whether each added project not known to be a repository is one, on its
-    /// machine once it is linked: a folder with `.git` in it (a clone's directory, a worktree's
-    /// file). The picker's word on a folder can be missing or stale.
+    /// Look once a run at each added project's folder, on its machine once it is linked: where
+    /// it really is (its links resolved) and whether it is a repository, a folder with `.git`
+    /// in it (a clone's directory, a worktree's file). The picker's word on a folder can be
+    /// missing or stale, and a folder added through a link is named otherwise by its threads.
     pub(in crate::workspace) fn probe_projects(&mut self, cx: &Context<Self>) {
-        let unknown: Vec<(String, WorkerKey, String)> = self
+        let unseen: Vec<(String, WorkerKey, String)> = self
             .added_projects()
             .iter()
-            .filter(|p| !p.git && !self.view_model.surfaces.projects.probed.contains(&p.id))
+            .filter(|p| !self.view_model.surfaces.projects.probed.contains(&p.id))
             .filter_map(|p| {
                 let key = self.view_worker(&p.device)?;
                 let linked = self.workers.get(&key).is_some_and(|w| w.link.is_some());
                 linked.then(|| (p.id.clone(), key, p.path.clone()))
             })
             .collect();
-        for (id, key, path) in unknown {
+        for (id, key, path) in unseen {
             self.view_model.surfaces.projects.probed.insert(id.clone());
             let rx = self.surface_list(key, path);
             cx.spawn(async move |this, cx| {
-                let Ok(Listing::Listed { entries, .. }) = within(cx, rx).await else { return };
-                if !entries.iter().any(|entry| entry.name == ".git") {
+                let Ok(Listing::Listed { real, entries, .. }) = within(cx, rx).await else {
                     return;
-                }
+                };
+                let git = entries.iter().any(|entry| entry.name == ".git");
                 let _gone = this.update(cx, |view, cx| {
                     let changed = view.view_model.surfaces.projects.change(|projects| {
                         if let Some(project) = projects.iter_mut().find(|p| p.id == id) {
-                            project.git = true;
+                            project.git = git;
+                            project.real = (real != project.path).then_some(real);
                         }
                     });
                     if changed {
@@ -432,6 +442,7 @@ mod tests {
             hidden,
             size: 0,
             items: None,
+            repo: false,
             modified_ms: slopty_core::WallMs::default(),
         }
     }
@@ -439,17 +450,22 @@ mod tests {
     #[test]
     fn a_listing_leaves_hidden_entries_out_and_says_when_it_was_cut() {
         let entries = [
+            slopty_proto::folder::FolderEntry { repo: true, ..entry("app", FileKind::Dir, false) },
             entry("src", FileKind::Dir, false),
             entry(".git", FileKind::Dir, true),
             entry("Cargo.toml", FileKind::File, false),
         ];
         let listing = folder_listing("/home/a/repo".to_owned(), &entries, 5);
         assert_eq!(listing.path, "/home/a/repo");
-        let names: Vec<(&str, bool)> =
-            listing.entries.iter().map(|e| (e.name.as_str(), e.is_dir)).collect();
-        assert_eq!(names, [("src", true), ("Cargo.toml", false)]);
-        assert!(listing.truncated, "five entries, three listed");
-        assert!(!folder_listing(String::new(), &entries, 3).truncated);
+        let names: Vec<(&str, bool, bool)> =
+            listing.entries.iter().map(|e| (e.name.as_str(), e.is_dir, e.is_repo)).collect();
+        assert_eq!(
+            names,
+            [("app", true, true), ("src", true, false), ("Cargo.toml", false, false)],
+            "a repository says so"
+        );
+        assert!(listing.truncated, "five entries, four listed");
+        assert!(!folder_listing(String::new(), &entries, 4).truncated);
     }
 
     #[test]
@@ -477,6 +493,7 @@ mod tests {
             name: None,
             git: false,
             created_ms: None,
+            real: None,
         };
         assert!(projects.change(|all| all.push(project.clone())));
         assert_eq!(projects.at("d", "/a").map(|p| p.id.as_str()), Some("p1"));
@@ -536,6 +553,7 @@ mod served {
             name: None,
             git: false,
             created_ms,
+            real: None,
         }
     }
 

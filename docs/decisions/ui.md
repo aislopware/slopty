@@ -12216,10 +12216,29 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   (`.claude/worktrees/…`) goes under its clone; else its repository or folder. A chat in the home
   folder has no project. Projects of one repository group by `commit:{root}` (else origin), keep
   the order they were added in (their own created time, kept with the project), show a rename
-  at once, and an added folder that is a repository says so (the add dialog's detection, then a
-  look for `.git` once per run). Tests: `slopty-ui`
-  `view_model::tests::a_chat_belongs_to_its_project_folder`,
-  `workspace::view_model::surfaces::projects::served`.
+  at once, and an added folder that is a repository says so (the worker marks each listed
+  folder holding `.git`, `FolderEntry::repo`, and each project's folder is looked at once per
+  run). A project added through a link holds its chats too: a listing names its folder as it
+  really is (`Listing::Listed::real`), kept with the project, and a chat's folder matches either
+  path. Tests: `slopty-ui` `view_model::tests::a_chat_belongs_to_its_project_folder`,
+  `workspace::view_model::surfaces::projects::served`, `slopty-worker`
+  `listing::tests::a_listing_says_its_repositories_and_where_it_really_is`.
+- ✅ **A message reads as the person wrote it, on every device (2026-10-15).** A message with
+  chips goes to the agent in the agent's words (a path, a tool's name); the person's own words
+  are a mark of theirs on the thread (`Intent::Said`, `ThreadState::said`, kept through a read
+  again like a draft or a name), so every device and every restart shows the chips in the queue
+  and the transcript, and an edit says its new words or takes the old back. The view model
+  shows them at once from its own copy until the thread has them. Tests: `slopty-ui`
+  `workspace::view_model::tests::a_queued_edit_goes_in_the_agents_words`,
+  `the_threads_own_words_show_where_this_app_kept_none`; `slopty-worker`
+  `thread::marks::tests::a_messages_own_words_are_kept_by_its_intent`.
+- ✅ **A turn's time and a machine out of reach (2026-10-15).** A row says when its turn under
+  way began (`ThreadRow::began_ms`), so the working timer runs from there on every chat, not
+  from its last phase. Sessions of a machine out of reach are said as of their row's last
+  change, not now, so the shell's staleness check lets a "working" lapse instead of spinning
+  while nothing is heard. Tests: `slopty-ui`
+  `workspace::view_model::tests::a_turns_time_runs_from_when_it_began`,
+  `a_working_thread_out_of_reach_goes_stale`.
 - ✅ **Autonomy is the server's, set through the server (2026-10-15).** Settings → Agents wrote
   `[agents] autonomy` to this device's own `settings.toml`, which nothing reads when the server
   runs elsewhere. It is read and written through the server's own settings

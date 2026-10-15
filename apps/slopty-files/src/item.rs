@@ -156,6 +156,7 @@ mod tests {
             hidden: false,
             size,
             items: (kind == FileKind::Dir).then_some(3),
+            repo: false,
             modified_ms: WallMs::from_millis(1_790_000_000_000),
         }
     }
