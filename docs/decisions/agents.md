@@ -214,8 +214,14 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     transcript's file name (before that, a provisional thread stands for it; see the entry on
     what a row carries). A thread held from before starts over under a new epoch and is
     read again, as the ruling has it: the log is a cache of the native session. When a
-    terminal moves to another session (`/clear`, `/resume`), the old thread is left exited and
-    resumable.
+    terminal moves to another session (`/clear`, `/resume`), every other thread on it is left
+    exited and resumable, with its turn under way stopped. So is a session whose agent quits,
+    and, as a worker starts, every thread an earlier worker left running; the ones whose agent
+    still runs begin again from their terminal. Since 2026-10-15: a thread from before a
+    restart, bound by an older worker to a session its terminal did not run, said "working"
+    for a day while the terminal ran another session, and its TUI button opened that other
+    session. The GUI opens an agent's terminal, and the worker types into it, only while the
+    thread's agent runs there. Otherwise the session is taken up again in a terminal of its own.
   - **The mapping.**
     - A prompt opens the next turn of its thread, and later entries belong to that turn. A
       branch (a rewind or an edited prompt) truncates the thread back to before the prompt it

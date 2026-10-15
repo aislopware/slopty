@@ -1098,6 +1098,13 @@ fn decide(
         let reason = "the thread's agent runs in no terminal here".to_owned();
         return (refused(reason), Vec::new());
     };
+    // An agent that exited left its terminal to whatever runs there now, maybe another session:
+    // nothing of this thread's goes into it. Its messages still waiting may be changed.
+    let waiting_only =
+        matches!(intent, Intent::Withdraw { .. } | Intent::Edit { .. } | Intent::Move { .. });
+    if matches!(state.status.liveness, Liveness::Exited { .. }) && !waiting_only {
+        return (refused("Claude Code no longer runs this session".to_owned()), Vec::new());
+    }
     if let Some(trusting) = trust_pressed(threads, state, intent) {
         return (trusting, Vec::new());
     }

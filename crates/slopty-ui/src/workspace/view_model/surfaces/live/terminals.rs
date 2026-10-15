@@ -15,7 +15,7 @@ use slopty_core::{ItemId, SessionId};
 use slopty_proto::git::RunScript;
 use slopty_proto::items::{Item, ItemKind, ItemOp};
 use slopty_proto::terminal::{OpenSession, SessionState, TermSize};
-use slopty_proto::thread::{AgentId, IntentId};
+use slopty_proto::thread::{AgentId, IntentId, Liveness};
 use slopty_proto::{ClientMsg, RequestId};
 use slopty_terminal::{GridFrame, TerminalViewEvent};
 use slopty_view_proto::TerminalSession;
@@ -199,7 +199,13 @@ impl WorkspaceView {
     fn live_agent_terminal(&self, chat: &str, cx: &Context<Self>) -> Option<SessionId> {
         let (key, thread) = self.chat_thread(chat, cx)?;
         let (_, hub) = self.hubs().find(|(at, _)| *at == key)?;
-        let session = hub.read(cx).threads().rows().rows.get(&thread)?.terminal?;
+        let row = hub.read(cx).threads().rows().rows.get(&thread)?;
+        // An agent that exited left its terminal to whatever runs there now, maybe another
+        // session: it is taken up again in a terminal of its own instead.
+        if row.status.liveness != Liveness::Live {
+            return None;
+        }
+        let session = row.terminal?;
         let terminals = &cx.try_global::<Live>()?.terminals;
         let free = !terminals.shown.contains(&session) && !terminals.coming.contains_key(&session);
         let alive = self

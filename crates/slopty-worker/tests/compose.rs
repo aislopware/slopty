@@ -17,8 +17,9 @@ mod compose {
     use slopty_proto::terminal::{OpenSession, TermRequest, TermSize};
     use slopty_proto::thread::wire::{Intent, Outcome};
     use slopty_proto::thread::{
-        Action, Changed, Clipped, Delivery, IntentId, Item, ItemBody, ItemId, Pending,
-        PendingState, ThreadId, ThreadState, Turn, TurnId, TurnState, Usage, UserMessage,
+        Action, Changed, Clipped, Delivery, IntentId, Item, ItemBody, ItemId, Liveness, Pending,
+        PendingState, Phase, Status, ThreadId, ThreadState, Turn, TurnId, TurnState, Usage,
+        UserMessage,
     };
     use slopty_worker::orchestrate::{Agents, BoxFuture, Deliver, Part};
     use slopty_worker::session::SessionHandle;
@@ -290,6 +291,24 @@ mod compose {
         };
         assert_eq!(rig.intent(first, &again), Outcome::Accepted, "its first outcome");
         assert!(rig.state().pending.is_empty(), "and nothing sent again");
+    }
+
+    /// A thread whose agent exited types nothing into the terminal it ran in, which may run
+    /// another session by now: its message waits until its own agent runs there again.
+    #[tokio::test]
+    async fn an_exited_threads_message_waits_for_its_agent() {
+        let rig = Rig::new().await;
+        let status =
+            |liveness| Status { phase: Phase::Idle, wait: None, liveness, since_ms: WallMs::ZERO };
+        rig.host
+            .apply(rig.thread, vec![Action::Status(status(Liveness::Exited { resumable: true }))]);
+        rig.send("not here", Delivery::Steer);
+        tokio::time::sleep(RETRY * 2).await;
+        assert_eq!(read(&rig.record), "", "nothing typed while the agent is gone");
+        assert_eq!(rig.state().pending.len(), 1, "the message waits");
+        rig.host.apply(rig.thread, vec![Action::Status(status(Liveness::Live))]);
+        rig.recorded("not here\r").await;
+        rig.until(|s| s.pending.is_empty()).await;
     }
 
     /// The person's stop holds what is queued: the turn is stopped with Esc, every queued

@@ -35,7 +35,8 @@ use slopty_core::SessionId;
 use slopty_proto::orchestration::{ErrorCode, Input};
 use slopty_proto::thread::wire::{Intent, Outcome};
 use slopty_proto::thread::{
-    Action, Delivery, IntentId, ItemBody, Pending, PendingState, ThreadId, ThreadState, TurnState,
+    Action, Delivery, IntentId, ItemBody, Liveness, Pending, PendingState, ThreadId, ThreadState,
+    TurnState,
 };
 use tokio::sync::{broadcast, mpsc};
 
@@ -390,6 +391,11 @@ fn next(
 ) -> (Vec<Action>, Next) {
     if let Some(back) = taken_back(c, state, session, unconfirmed) {
         return back;
+    }
+    // An agent that exited left its terminal to whatever runs there now, maybe another session:
+    // nothing of this thread's is typed into it until its own runs again.
+    if matches!(state.status.liveness, Liveness::Exited { .. }) {
+        return (vec![], Next::Wait { held: false });
     }
     // A queued message that went holds the next until the agent has taken it: it was seen
     // working since, or the turn the message started has ended.

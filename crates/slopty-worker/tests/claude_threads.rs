@@ -20,7 +20,9 @@ mod claude_threads {
     use slopty_core::{SessionId, WallMs};
     use slopty_proto::WorkerMsg;
     use slopty_proto::terminal::{SessionState, SessionSummary};
-    use slopty_proto::thread::{Cap, ItemBody, Phase, ThreadId, ThreadState, ToolState};
+    use slopty_proto::thread::{
+        Cap, ItemBody, Liveness, Phase, ThreadId, ThreadState, ToolState, TurnState,
+    };
     use slopty_worker::conversation::Seen;
     use slopty_worker::orchestrate;
     use slopty_worker::thread::Host;
@@ -180,6 +182,34 @@ mod claude_threads {
             };
             self.events.send(WorkerMsg::SessionChanged(summary)).unwrap();
         }
+    }
+
+    /// `path` holds a session `bash`'s capture begun: its prompt written, the model's answer
+    /// not yet, so its turn is under way.
+    fn mid_turn(path: &Path) {
+        let recorded = fixture("mod", "bash").join("transcript.jsonl");
+        let records: Vec<String> = std::fs::read_to_string(recorded)
+            .unwrap()
+            .lines()
+            .map(|line| {
+                let mut record: serde_json::Value = serde_json::from_str(line).unwrap();
+                record.as_object_mut().unwrap().remove("timestamp");
+                format!("{record}\n")
+            })
+            .collect();
+        let prompt = records.iter().position(|r| r.contains(r#""type":"user""#)).unwrap();
+        std::fs::write(path, records[..=prompt].concat()).unwrap();
+    }
+
+    fn under_way(state: &ThreadState) -> bool {
+        state.last_turn().is_some_and(|t| t.state == TurnState::Active)
+    }
+
+    /// Ended as its agent left it: exited, its turn stopped, so nothing says it still works.
+    fn cut(state: &ThreadState) -> bool {
+        !under_way(state)
+            && matches!(state.status.liveness, Liveness::Exited { .. })
+            && state.status.phase != Phase::Working
     }
 
     /// What the tracker says of `session`'s agent.
@@ -615,5 +645,56 @@ mod claude_threads {
         rig.status(AgentStatus::Working);
         let state = until(&host, thread_of(NATIVE), |s| s.meters.context_window.is_some()).await;
         assert_eq!(state.meters.context_window, Some(1_000_000));
+    }
+
+    /// A thread no agent feeds any more ends with its turn: one an earlier worker left working
+    /// on a terminal (here under a session that terminal does not run, as an older worker's guess
+    /// took it) once the worker restarts, before any word of its terminal; the session a `/clear`
+    /// leaves; and a session whose agent quits mid-turn. The terminal's live session is the only
+    /// thread that keeps it.
+    #[tokio::test]
+    async fn a_thread_no_agent_feeds_ends_with_its_turn() {
+        const WRONG: &str = "00000000-0000-4000-8000-000000000002";
+        const CLEARED: &str = "00000000-0000-4000-8000-000000000003";
+        let rig = Rig::new();
+        let wrong = rig.main.with_file_name(format!("{WRONG}.jsonl"));
+        mid_turn(&wrong);
+        rig.seen.main.send_replace(Some(wrong));
+        let host = rig.host();
+        let observer = rig.observe(&host);
+        let left = thread_of(WRONG);
+        rig.tracked(AgentStatus::Working, Some(WRONG), AgentSource::Hook);
+        until(&host, left, |s| under_way(s) && s.status.phase == Phase::Working).await;
+
+        observer.0.abort();
+        drop(host);
+        let host = rig.host();
+        let _observer = rig.observe(&host);
+        let state = until(&host, left, cut).await;
+        assert_eq!(state.status.liveness, Liveness::Exited { resumable: true });
+        assert_eq!(state.status.phase, Phase::Stopped, "its turn was cut short");
+
+        // The terminal's own session, mid-turn, then cleared: the session left ends too.
+        mid_turn(&rig.main);
+        rig.seen.main.send_replace(Some(rig.main.clone()));
+        let thread = thread_of(NATIVE);
+        rig.status(AgentStatus::Working);
+        let state =
+            until(&host, thread, |s| under_way(s) && s.status.phase == Phase::Working).await;
+        assert_eq!(state.meta.terminal, Some(rig.terminal));
+        let cleared = rig.main.with_file_name(format!("{CLEARED}.jsonl"));
+        mid_turn(&cleared);
+        rig.seen.main.send_replace(Some(cleared));
+        let now = thread_of(CLEARED);
+        rig.tracked(AgentStatus::Working, Some(CLEARED), AgentSource::Hook);
+        until(&host, thread, cut).await;
+        let state =
+            until(&host, now, |s| under_way(s) && s.status.liveness == Liveness::Live).await;
+        assert_eq!(state.meta.terminal, Some(rig.terminal));
+        assert!(cut(&host.state(left).unwrap().0), "the left one stays ended");
+
+        // Its agent quits mid-turn.
+        rig.tracked(AgentStatus::None, Some(CLEARED), AgentSource::Process);
+        until(&host, now, cut).await;
     }
 }

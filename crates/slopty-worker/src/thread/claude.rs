@@ -16,10 +16,12 @@
 //! terminal, removed once the session's own begins or the agent goes, since it never was a
 //! session. One Slopty started ([`start`]) is begun at once ([`Driver::begin`]) under the session
 //! id it was given, so it needs no provisional thread. A thread the host holds from before (a
-//! worker restart) starts over and is read again from the transcript, under a new epoch. When the
-//! terminal moves to another Claude Code session (`/clear`, `/resume`), the old thread is left
-//! exited and resumable, and the new one begins. A thread declares `approvals` once a hook has been
-//! heard in its terminal.
+//! worker restart) starts over and is read again from the transcript, under a new epoch; one whose
+//! agent no longer runs ends as the earlier worker left it, exited with its turn stopped. When the
+//! terminal moves to another Claude Code session (`/clear`, `/resume`), every other thread on the
+//! terminal is left exited and resumable, its turn under way stopped, and the new one begins; so
+//! is the session whose agent quits. A thread declares `approvals` once a hook has been heard in
+//! its terminal.
 //!
 //! A permission prompt held for a terminal opens a thread there when none is observed yet (the
 //! session's own when its id is known, else the terminal's provisional one), so the prompt is a
@@ -44,7 +46,9 @@ use slopty_agent::status::{AgentEvent, AgentStatus};
 use slopty_core::{SessionId, WallMs};
 use slopty_proto::WorkerMsg;
 use slopty_proto::thread::wire::{EXPANDED_CHARS, Expanded};
-use slopty_proto::thread::{Action, ContentRef, Liveness, Phase, Status, ThreadId, ThreadState};
+use slopty_proto::thread::{
+    AgentId, ContentRef, Drive, Liveness, Phase, ThreadId, ThreadState, TurnState,
+};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
@@ -170,6 +174,12 @@ pub fn spawn(
     Asks(mut asks): Asks,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
+        // What an earlier worker observed is begun again by its terminal's observer where its
+        // agent still runs; nothing reads the rest, which end as that worker left them.
+        let left = host.visit(|s| busy(s).then_some(s.meta.id));
+        for thread in left {
+            cut_short(&host, thread);
+        }
         let mut on = Observers {
             host,
             sources,
@@ -465,6 +475,10 @@ impl Session {
         if let Some(observed) = self.observed.as_mut() {
             take(&self.host, observed.status(&event));
         }
+        // The agent went: a turn it left under way ends with it.
+        if event.status == AgentStatus::None {
+            retire(&self.host, self.terminal, None);
+        }
         self.status = Some(event);
         self.read().await;
     }
@@ -562,15 +576,9 @@ impl Session {
         }
         self.forget_provisional();
         self.unclaim();
-        if let Some(old) = self.observed.take() {
-            let exited = Status {
-                phase: Phase::Idle,
-                wait: None,
-                liveness: Liveness::Exited { resumable: true },
-                since_ms: WallMs::now(),
-            };
-            self.host.apply(old.main(), vec![Action::Status(exited)]);
-        }
+        // The session left (`/clear`, `/resume`) is ended with the others on this terminal as
+        // the new one starts.
+        self.observed = None;
         let now = WallMs::now();
         let observed = if self.claim(native) {
             Observed::new(native, "", Some(self.terminal), &self.cwd, now)
@@ -585,6 +593,7 @@ impl Session {
     /// Put `observed` in the host, told what the session has heard so far.
     fn start(&mut self, mut observed: Observed) {
         take(&self.host, observed.drain());
+        retire(&self.host, self.terminal, Some(observed.main()));
         take(&self.host, observed.title(&self.title));
         if self.hooks > 0 {
             take(&self.host, observed.hooked());
@@ -728,6 +737,43 @@ fn clip(mut text: String) -> String {
 
 fn stem(path: &Path) -> Option<String> {
     path.file_stem().map(|s| s.to_string_lossy().into_owned()).filter(|s| !s.is_empty())
+}
+
+/// Whether `state` is a Claude Code session observed in a terminal that still runs, or still
+/// says it works or waits, or has a turn under way.
+fn busy(state: &ThreadState) -> bool {
+    state.meta.agent.is(AgentId::CLAUDE_CODE)
+        && state.meta.drive.is(Drive::OBSERVED)
+        && (state.status.liveness == Liveness::Live
+            || matches!(state.status.phase, Phase::Working | Phase::NeedsYou | Phase::Waiting)
+            || state.last_turn().is_some_and(|t| t.state == TurnState::Active))
+}
+
+/// Every thread `host` holds as terminal `terminal`'s Claude Code but `keep` and its
+/// subagents, ended: a terminal runs one session at a time, and a thread left from before (a
+/// `/clear`, a `/resume`, a worker restart, a session an earlier worker took for this one)
+/// would otherwise go on claiming the terminal, its turn under way for good.
+fn retire(host: &Host, terminal: SessionId, keep: Option<ThreadId>) {
+    let kept = |state: &ThreadState| {
+        keep.is_some_and(|keep| {
+            state.meta.id == keep || state.meta.id == keep.subagent(&state.meta.native)
+        })
+    };
+    let others = host
+        .visit(|s| (busy(s) && s.meta.terminal == Some(terminal) && !kept(s)).then_some(s.meta.id));
+    for thread in others {
+        cut_short(host, thread);
+    }
+}
+
+/// `thread`, an observed session nothing reads any more, ended as its agent left it: what it
+/// asked withdrawn, its turn under way stopped, exited, and resumable when its session id is
+/// known.
+fn cut_short(host: &Host, thread: ThreadId) {
+    host.update(thread, |state| {
+        let resumable = !state.meta.native.is_empty();
+        (slopty_agent::driven::cut_short(state, resumable, WallMs::now()), ())
+    });
 }
 
 /// Put what the codec made into the host: a thread begun anew if the host holds it already.
