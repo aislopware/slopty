@@ -3121,6 +3121,20 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   taken up alone. A thread begun before its call named it is told its parent then. Test:
   `slopty-agent` `observed::tests::a_subagent_works_until_its_call_ends_then_is_done`.
 
+- ✅ **A subagent stops with the Claude Code that ran it** (2026-10-15). Two background
+  subagents of a session taken up again with `--resume` said "running" for hours, and their
+  parent's badge counted them: a subagent runs only inside the process that started it, a
+  resumed session brings none back, and Claude Code never writes how one cut off that way
+  ended, so reading the transcript again put them back to work. The worker now hands the
+  observer the start of the process that runs the session (the tracker's foreground process,
+  from the kernel's process table); a subagent whose call came before it, with no end of its
+  own, ended stopped then. The clients count no subagent of a call under an agent that has
+  exited, and show it stopped. The explorer button's running-subagents badge is gone: the
+  subagents are rows under their agent in the sidebar. Tests: `slopty-agent`
+  `observed::tests::a_subagent_left_at_work_stops_with_the_claude_code_that_ran_it`,
+  `slopty-worker` `a_subagent_left_at_work_stops_once_a_later_claude_code_runs_its_session`,
+  `slopty-ui` `a_subagent_stops_with_the_agent_it_ran_in`.
+
 - ✅ **What the composer types is matched to the agent's copy, and nothing is typed twice**
   (2026-10-15). A stop is accepted while Claude Code runs a tool, not only while the model
   writes. The agent's copy of a typed message is found by more than exact words: the head of a

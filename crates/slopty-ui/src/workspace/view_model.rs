@@ -17,7 +17,7 @@ use slopty_proto::ClientMsg;
 use slopty_proto::thread::wire::{
     Intent, IntentDone, NewWorktree, Outcome, Start, ThreadRequest, ThreadRow,
 };
-use slopty_proto::thread::{AgentId, Delivery, IntentId, PendingState, Phase, ThreadId};
+use slopty_proto::thread::{AgentId, Delivery, IntentId, Liveness, PendingState, Phase, ThreadId};
 use slopty_view_doc::SessionCommandPayload;
 use slopty_view_proto::HarnessId;
 use slopty_view_rpc::{RpcError, RpcReply, methods};
@@ -473,8 +473,15 @@ impl WorkspaceView {
                     .map(move |row| (key, device.clone(), row))
             })
             .collect();
+        let exited: BTreeSet<ThreadId> = all
+            .iter()
+            .filter(|(_, _, row)| matches!(row.status.liveness, Liveness::Exited { .. }))
+            .map(|(_, _, row)| row.id)
+            .collect();
         for (key, device, row) in &all {
-            let row = *row;
+            // A subagent of an agent that exited stopped with it.
+            let standing = rows::standing(row, &exited);
+            let row = &*standing;
             let id = self.chat_id(row.id);
             let mut chat = rows::chat(row, device);
             let place = self.view_place(device, row.cwd.as_deref(), row.repo.as_deref());
@@ -501,7 +508,8 @@ impl WorkspaceView {
                 }
                 folder.began(chat.created_at.timestamp_millis());
             }
-            let running = rows::running_children(row.id, all.iter().map(|(_, _, row)| *row));
+            let running =
+                rows::running_children(row.id, all.iter().map(|(_, _, row)| *row), &exited);
             // A machine out of reach says nothing new of its threads: their status stands as of
             // their last change, so the shell lets a "working" go stale rather than spin on.
             let linked = self.held_hub(*key).is_some_and(|hub| hub.read(cx).threads().linked());

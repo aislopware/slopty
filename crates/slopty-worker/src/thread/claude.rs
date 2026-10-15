@@ -777,6 +777,9 @@ impl Session {
         };
         self.transcripts = Some(transcripts);
         if let Some(observed) = self.observed.as_mut() {
+            if let Some(started) = sources.started {
+                take(&self.host, observed.started(started));
+            }
             if !changes.is_empty() || !outputs.is_empty() {
                 take(&self.host, observed.transcript(&changes, &outputs));
             }

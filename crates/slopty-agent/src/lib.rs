@@ -1485,6 +1485,13 @@ impl AgentTable {
         self.sessions.get(&session)?.process.map(|(pid, _started)| pid)
     }
 
+    /// When the agent's process in `session` started, once the worker has seen it in the
+    /// foreground and the platform said.
+    #[must_use]
+    pub fn started(&self, session: SessionId) -> Option<WallMs> {
+        self.sessions.get(&session)?.process.and_then(|(_pid, started)| started).map(WallMs::of)
+    }
+
     /// Where the session's conversation is written, once a hook has said.
     #[must_use]
     pub fn transcript_path(&self, session: SessionId) -> Option<PathBuf> {

@@ -268,9 +268,13 @@ impl Conversations for Orchestrated {
     }
 
     fn sources(&self, session: SessionId) -> Sources {
-        let main = self.0.agents.lock().transcript_path(session);
+        let (main, started) = {
+            let agents = self.0.agents.lock();
+            (agents.transcript_path(session), agents.started(session))
+        };
         let seen = self.0.follows.lock().board.current(session);
-        Sources { main, subagents: seen.subagents.into_iter().collect(), meters: seen.meters }
+        let subagents = seen.subagents.into_iter().collect();
+        Sources { main, subagents, meters: seen.meters, started }
     }
 
     fn forget(&self, session: SessionId) {

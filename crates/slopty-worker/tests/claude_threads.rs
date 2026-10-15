@@ -21,7 +21,7 @@ mod claude_threads {
     use slopty_proto::WorkerMsg;
     use slopty_proto::terminal::{SessionState, SessionSummary};
     use slopty_proto::thread::{
-        Cap, ItemBody, Liveness, Phase, ThreadId, ThreadState, ToolState, TurnState,
+        Cap, ItemBody, Liveness, Phase, ThreadId, ThreadMeta, ThreadState, ToolState, TurnState,
     };
     use slopty_worker::conversation::Seen;
     use slopty_worker::orchestrate;
@@ -53,12 +53,15 @@ mod claude_threads {
         standing: parking_lot::Mutex<Vec<AgentEvent>>,
         /// The terminals closed.
         closed: parking_lot::Mutex<Vec<SessionId>>,
+        /// When the agent's process started, once the platform said.
+        started: parking_lot::Mutex<Option<WallMs>>,
     }
 
     impl Sources for Fake {
         fn sources(&self, session: SessionId) -> orchestrate::Sources {
             let main = self.main.borrow().clone().filter(|_| session == *self.terminal.lock());
-            orchestrate::Sources { main, ..Default::default() }
+            let started = *self.started.lock();
+            orchestrate::Sources { main, started, ..Default::default() }
         }
 
         fn seen(&self, _session: SessionId) -> watch::Receiver<Seen> {
@@ -100,6 +103,7 @@ mod claude_threads {
                 seen: watch::Sender::new(Seen::default()),
                 standing: parking_lot::Mutex::new(Vec::new()),
                 closed: parking_lot::Mutex::new(Vec::new()),
+                started: parking_lot::Mutex::new(None),
             });
             let (events, heard) = (broadcast::Sender::new(64), broadcast::Sender::new(64));
             Self { dir, main, terminal, events, heard, seen }
@@ -353,6 +357,49 @@ mod claude_threads {
         let after = host.state(thread).unwrap().1;
         assert_ne!(after.epoch, before.epoch, "read again under a new epoch");
         assert_eq!(state.open_requests().count(), 0, "a prompt is not carried over a restart");
+    }
+
+    /// A subagent its session's transcript leaves at work stops once the worker sees a Claude
+    /// Code that started after it run the session (`--resume`): it ran in the one before.
+    #[tokio::test]
+    async fn a_subagent_left_at_work_stops_once_a_later_claude_code_runs_its_session() {
+        let rig = Rig::new();
+        let host = rig.host();
+        let _observer = rig.observe(&host);
+        let from = fixture("conversation", "tools");
+        let to = rig.main.with_extension("").join("subagents");
+        std::fs::create_dir_all(&to).unwrap();
+        for agent in std::fs::read_dir(from.join("subagents")).unwrap() {
+            let agent = agent.unwrap().path();
+            std::fs::copy(&agent, to.join(agent.file_name().unwrap())).unwrap();
+        }
+        let text = std::fs::read_to_string(from.join("transcript.jsonl")).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        let result = lines.iter().position(|l| l.contains("agentId")).unwrap();
+        rig.status(AgentStatus::Working);
+        rig.write_main(&lines[..result].iter().flat_map(|l| [*l, "\n"]).collect::<String>());
+        let thread = thread_of(NATIVE);
+        until(&host, thread, |s| !s.items.is_empty()).await;
+        let sub = tokio::time::timeout(BOUND, async {
+            loop {
+                let found = host.visit(|s| {
+                    (s.meta.origin == ThreadMeta::SUBAGENT && s.status.phase == Phase::Working)
+                        .then_some(s.meta.id)
+                });
+                if let Some(sub) = found.first() {
+                    return *sub;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the subagent at work");
+
+        *rig.seen.started.lock() = Some(WallMs::now());
+        rig.heard();
+        let stopped = until(&host, sub, |s| s.status.phase == Phase::Stopped).await;
+        assert!(cut(&stopped), "{:?}", stopped.status);
+        assert_eq!(stopped.status.liveness, Liveness::Exited { resumable: false });
     }
 
     /// A text the thread carries clipped is read whole from the transcript through the driver;

@@ -248,9 +248,36 @@ fn a_started_agent_nests_under_its_parent() {
     child.status.phase = Phase::Working;
 
     assert_eq!(rows::chat(&child, "w").parent_chat_id, Some(parent.id.to_string()));
-    assert_eq!(rows::running_children(parent.id, [&parent, &child].into_iter()), 1);
+    let none = std::collections::BTreeSet::new();
+    assert_eq!(rows::running_children(parent.id, [&parent, &child].into_iter(), &none), 1);
     child.status.phase = Phase::Done;
-    assert_eq!(rows::running_children(parent.id, [&parent, &child].into_iter()), 0);
+    assert_eq!(rows::running_children(parent.id, [&parent, &child].into_iter(), &none), 0);
+}
+
+/// A subagent of a call runs inside its agent: once that agent exited it counts in nothing and
+/// stands stopped, whatever its own row last said. An agent another agent started runs on its
+/// own, and outlives it.
+#[test]
+fn a_subagent_stops_with_the_agent_it_ran_in() {
+    use slopty_proto::thread::{Link, Phase};
+    let state = fixtures::thread("tools");
+    let parent = state.row(slopty_core::WallMs::ZERO);
+    let mut child = parent.clone();
+    child.id = slopty_proto::thread::ThreadId::new();
+    child.parent =
+        Some(Link { thread: parent.id, item: slopty_proto::thread::ItemId("call".into()) });
+    child.status.phase = Phase::Working;
+    let mut started = child.clone();
+    started.id = slopty_proto::thread::ThreadId::new();
+    started.parent = None;
+    started.facts.insert(slopty_proto::agent::PARENT_FACT.to_owned(), parent.id.to_string());
+    let exited = std::collections::BTreeSet::from([parent.id]);
+
+    let rows = || [&parent, &child, &started].into_iter();
+    assert_eq!(rows::running_children(parent.id, rows(), &std::collections::BTreeSet::new()), 2);
+    assert_eq!(rows::running_children(parent.id, rows(), &exited), 1);
+    assert_eq!(rows::standing(&child, &exited).status.phase, Phase::Stopped);
+    assert_eq!(rows::standing(&started, &exited).status.phase, Phase::Working);
 }
 
 /// A request open on a thread, as an agent's worker holds it.

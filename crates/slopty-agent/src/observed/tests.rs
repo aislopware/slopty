@@ -222,6 +222,46 @@ fn a_subagent_works_until_its_call_ends_then_is_done() {
     assert!(sub.turns.iter().all(|t| t.state != TurnState::Active), "{:?}", sub.turns);
 }
 
+/// A subagent runs only in the Claude Code that started it: one the session's transcript left
+/// at work works on under a process that started before it, and once a process started after
+/// it runs the session (`--resume`, a worker that came back to a new one), it stopped with the
+/// one before: its turn ended, exited and not resumable.
+#[test]
+fn a_subagent_left_at_work_stops_with_the_claude_code_that_ran_it() {
+    let source = dir("conversation", "tools");
+    let text = std::fs::read_to_string(source.join("transcript.jsonl")).expect("a transcript");
+    let lines: Vec<&str> = text.lines().collect();
+    let result = lines.iter().position(|l| l.contains("agentId")).expect("the call's result");
+    let scratch = tempfile::tempdir().expect("a temp dir");
+    let main = scratch.path().join("s.jsonl");
+    let before: String = lines.iter().take(result).flat_map(|l| [*l, "\n"]).collect();
+    std::fs::write(&main, before).expect("written");
+    let (mut transcripts, mut observed, mut host) =
+        (Transcripts::default(), observed(), Host::default());
+    host.take(observed.drain());
+    host.take(observed.transcript(&transcripts.read(&main, &subagents(&source)), &[]));
+    let sub = host
+        .threads
+        .values()
+        .find(|t| t.meta.origin == ThreadMeta::SUBAGENT)
+        .map(|t| t.meta.id)
+        .expect("the subagent at work");
+    let began = host.thread(sub).turns.iter().map(|t| t.started_ms).min().expect("its turn");
+
+    host.take(observed.started(WallMs::from_millis(1)));
+    let working = host.thread(sub);
+    assert_eq!((working.status.phase, working.status.liveness), (Phase::Working, Liveness::Live));
+
+    let after = WallMs::from_millis(began.as_millis() + 60_000);
+    host.take(observed.started(after));
+    let stopped = host.thread(sub);
+    assert_eq!(stopped.status.phase, Phase::Stopped);
+    assert_eq!(stopped.status.liveness, Liveness::Exited { resumable: false });
+    assert!(stopped.turns.iter().all(|t| t.state != TurnState::Active), "{:?}", stopped.turns);
+    let row = stopped.row(after);
+    assert!(!matches!(row.status.phase, Phase::Working | Phase::Waiting), "{row:?}");
+}
+
 /// Read a line at a time, the transcript gives the threads it gives read whole.
 #[test]
 fn read_a_line_at_a_time_it_ends_the_same() {

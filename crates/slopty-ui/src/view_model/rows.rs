@@ -1,6 +1,9 @@
 //! Slopty's lists as the shell's rows: a worker as a device, a folder on it as a space, a thread as
 //! a chat with its live status as a session.
 
+use std::borrow::Cow;
+use std::collections::BTreeSet;
+
 use chrono::{DateTime, Utc};
 use slopty_core::WallMs;
 use slopty_proto::thread::wire::ThreadRow;
@@ -224,10 +227,36 @@ pub const fn running(row: &ThreadRow) -> bool {
     matches!(row.status.phase, Phase::Working | Phase::Waiting)
 }
 
-/// The subagents of `parent` that run, among `rows`.
+/// Whether `row` is a subagent hung off a call of an agent that has exited (`exited`): it ran
+/// inside that agent, so it ran no further, whatever its own row last said.
 #[must_use]
-pub fn running_children<'a>(parent: ThreadId, rows: impl Iterator<Item = &'a ThreadRow>) -> u32 {
-    let count =
-        rows.filter(|row| self::parent(row) == Some(parent)).filter(|row| running(row)).count();
+pub fn outlived(row: &ThreadRow, exited: &BTreeSet<ThreadId>) -> bool {
+    row.parent.as_ref().is_some_and(|link| exited.contains(&link.thread))
+}
+
+/// `row` as it stands: a subagent its agent [`outlived`] stopped with it.
+#[must_use]
+pub fn standing<'a>(row: &'a ThreadRow, exited: &BTreeSet<ThreadId>) -> Cow<'a, ThreadRow> {
+    if running(row) && outlived(row, exited) {
+        let mut stopped = row.clone();
+        stopped.status.phase = Phase::Stopped;
+        Cow::Owned(stopped)
+    } else {
+        Cow::Borrowed(row)
+    }
+}
+
+/// The subagents of `parent` that run, among `rows`, none of an agent that has exited
+/// (`exited`).
+#[must_use]
+pub fn running_children<'a>(
+    parent: ThreadId,
+    rows: impl Iterator<Item = &'a ThreadRow>,
+    exited: &BTreeSet<ThreadId>,
+) -> u32 {
+    let count = rows
+        .filter(|row| self::parent(row) == Some(parent))
+        .filter(|row| running(row) && !outlived(row, exited))
+        .count();
     u32::try_from(count).unwrap_or(u32::MAX)
 }

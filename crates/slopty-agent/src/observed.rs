@@ -373,6 +373,8 @@ struct Spawn {
     call: String,
     /// What the model said the subagent is for: its thread's title.
     title: String,
+    /// When the call started it.
+    at_ms: WallMs,
     /// How it ended, once it did, and when.
     end: Option<(SubagentEnd, WallMs)>,
 }
@@ -409,6 +411,7 @@ impl Spawn {
             thread: thread.clone(),
             call: entry.id.clone(),
             title: agent.description.clone().unwrap_or_default(),
+            at_ms: entry.at_ms,
             end: end.map(|end| (end, at_ms)),
         }
     }
@@ -513,6 +516,8 @@ pub struct Observed {
     /// Auto mode's declines of calls the transcript does not have yet, by call: each is said
     /// once its call is.
     declines: HashMap<String, (Notice, WallMs)>,
+    /// When the Claude Code that runs the session now started ([`Self::started`]).
+    started: Option<WallMs>,
 }
 
 impl Observed {
@@ -607,6 +612,7 @@ impl Observed {
             failed: false,
             wall: WallMs::ZERO,
             declines: HashMap::new(),
+            started: None,
         }
     }
 
@@ -1017,6 +1023,18 @@ impl Observed {
             self.commands.clone_from(&commands);
             self.push(self.meta.id, Action::CommandsSet(commands));
         }
+    }
+
+    /// The Claude Code that runs the session now started at `at`, as its process said. A
+    /// subagent runs only inside the process that started it, in the foreground or the
+    /// background, and a session taken up again (`--resume`) brings none back: one started
+    /// before then that never said how it ended ended with the process before.
+    pub fn started(&mut self, at: WallMs) -> Vec<Out> {
+        if self.started != Some(at) {
+            self.started = Some(at);
+            self.settle_subagents();
+        }
+        self.drain()
     }
 
     /// The status line's meters. A Claude Code thread shows no effort: Slopty does not follow
@@ -1456,8 +1474,10 @@ impl Observed {
 
     /// Each subagent's thread says where its run stands: working while its call runs, and once
     /// the call that started it ended (or Claude Code said its run in the background did), its
-    /// open turn ended and the thread exited as the run ended, done, failed or stopped. Nothing
-    /// takes a subagent up again alone, so it is not resumable.
+    /// open turn ended and the thread exited as the run ended, done, failed or stopped. One the
+    /// Claude Code before this one started, which never said how it ended, stopped with that
+    /// process ([`Self::started`]). Nothing takes a subagent up again alone, so it is not
+    /// resumable.
     fn settle_subagents(&mut self) {
         let agents: Vec<String> = self
             .threads
@@ -1468,11 +1488,18 @@ impl Observed {
             })
             .collect();
         for agent in agents {
-            let end = self.spawned.get(&agent).and_then(|spawn| spawn.end.clone());
-            let wall = self.wall;
+            let spawn = self.spawned.get(&agent);
+            let (wall, started) = (self.wall, self.started);
             let Some(mapped) = self.threads.get_mut(&conv::ThreadId::Agent(agent)) else {
                 continue;
             };
+            let began = spawn.map(|spawn| spawn.at_ms).or_else(|| {
+                mapped.turns.values().map(|t| t.started_ms).filter(|at| !at.is_zero()).min()
+            });
+            let before = started.filter(|started| began.is_some_and(|began| began < *started));
+            let end = spawn
+                .and_then(|spawn| spawn.end.clone())
+                .or_else(|| before.map(|started| (SubagentEnd::Stopped, started)));
             let mut actions = Vec::new();
             let status = match end {
                 None => {

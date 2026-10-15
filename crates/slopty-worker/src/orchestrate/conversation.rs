@@ -9,7 +9,7 @@
 use std::path::PathBuf;
 
 use slopty_agent::conversation::Meters;
-use slopty_core::SessionId;
+use slopty_core::{SessionId, WallMs};
 
 /// Where a session's conversation is written, and what the daemon heard of it.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -20,6 +20,9 @@ pub struct Sources {
     pub subagents: Vec<PathBuf>,
     /// The status line's latest meters.
     pub meters: Option<Meters>,
+    /// When the agent's process that runs the session now started, once the worker has seen
+    /// it in the foreground.
+    pub started: Option<WallMs>,
 }
 
 /// The daemon's followed Claude Code sessions, as orchestration reaches them.
