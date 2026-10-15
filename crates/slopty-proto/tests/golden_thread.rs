@@ -408,9 +408,14 @@ mod golden_thread {
         snap("intent_withdraw", &send(Intent::Withdraw { pending: intent() }));
         snap(
             "intent_edit",
-            &send(Intent::Edit { pending: intent(), text: "then the README".to_owned() }),
+            &send(Intent::Edit {
+                pending: intent(),
+                text: "then the README".to_owned(),
+                attachments: vec!["/tmp/slopty-attachments/notes.md".to_owned()],
+            }),
         );
         snap("intent_promote", &send(Intent::Promote { pending: intent() }));
+        snap("intent_move", &send(Intent::Move { pending: intent(), before: None }));
         snap("intent_interrupt", &send(Intent::Interrupt));
         snap(
             "intent_answer",
@@ -613,6 +618,7 @@ mod golden_thread {
                 description: "Compact the context".to_owned(),
                 argument_hint: Some("[instructions]".to_owned()),
                 source: "built-in".to_owned(),
+                skill: false,
             }]),
             Action::Truncated { after: Some(TurnId(1)) },
             Action::Truncated { after: None },

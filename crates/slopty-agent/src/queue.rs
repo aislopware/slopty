@@ -73,10 +73,30 @@ impl<X> Queue<X> {
         self.take(intent).map(|_| self.shown())
     }
 
-    /// Make the message held for `intent` say `text`, its files kept; `None` when none is.
-    pub fn edit(&mut self, intent: IntentId, text: &str) -> Option<Action> {
-        let (held, _) = self.held.iter_mut().find(|(p, _)| p.intent == intent)?;
+    /// Make the message held for `intent` say `text` with the files at `attachments`, `kept`
+    /// beside it now; `None` when none is.
+    pub fn edit(
+        &mut self,
+        intent: IntentId,
+        text: &str,
+        attachments: Vec<String>,
+        kept: X,
+    ) -> Option<Action> {
+        let (held, beside) = self.held.iter_mut().find(|(p, _)| p.intent == intent)?;
         text.clone_into(&mut held.text);
+        held.attachments = attachments;
+        *beside = kept;
+        Some(self.shown())
+    }
+
+    /// Move the message held for `intent` to just before the one held for `before`, or last;
+    /// `None` when none is held for `intent`.
+    pub fn move_to(&mut self, intent: IntentId, before: Option<IntentId>) -> Option<Action> {
+        let moved = self.take(intent)?;
+        let at = before
+            .and_then(|before| self.held.iter().position(|(p, _)| p.intent == before))
+            .unwrap_or(self.held.len());
+        self.held.insert(at, moved);
         Some(self.shown())
     }
 
@@ -177,8 +197,10 @@ mod tests {
         assert_eq!(order(&queue), ["now", "first", "second"], "an interrupt's goes first");
         assert_eq!(texts(&shown).len(), 3);
 
-        let edited = queue.edit(b, "second, changed").expect("held");
+        let edited = queue.edit(b, "second, changed", vec!["/a.png".to_owned()], ()).expect("held");
         assert_eq!(texts(&edited)[2].0, "second, changed");
+        let Action::PendingSet(shown) = &edited else { panic!("not the queue: {edited:?}") };
+        assert_eq!(shown[2].attachments, ["/a.png"], "its files are the edit's");
         assert!(queue.withdraw(IntentId::new()).is_none(), "nothing held for it");
         let taken = queue.take(c).expect("held");
         assert_eq!(taken.0.text, "now");
@@ -192,6 +214,24 @@ mod tests {
         assert!(queue.withdraw(b).is_some());
         assert!(queue.is_empty());
         assert!(queue.stop().is_none(), "nothing to hold");
+    }
+
+    /// A message moved goes just before the one named, or last when none is.
+    #[test]
+    fn a_message_moves_before_the_one_named_or_last() {
+        let (a, b, c) = (IntentId::new(), IntentId::new(), IntentId::new());
+        let mut queue = Queue::default();
+        for (intent, text) in [(a, "a"), (b, "b"), (c, "c")] {
+            let _shown = queue.hold(intent, text, Vec::new(), (), false);
+        }
+        let order = |q: &Queue| texts(&q.shown()).into_iter().map(|(t, _)| t).collect::<Vec<_>>();
+        assert!(queue.move_to(c, Some(a)).is_some());
+        assert_eq!(order(&queue), ["c", "a", "b"]);
+        assert!(queue.move_to(c, None).is_some());
+        assert_eq!(order(&queue), ["a", "b", "c"]);
+        assert!(queue.move_to(a, Some(IntentId::new())).is_some(), "one gone: last");
+        assert_eq!(order(&queue), ["b", "c", "a"]);
+        assert!(queue.move_to(IntentId::new(), None).is_none(), "nothing held for it");
     }
 
     /// A queue taken out while the thread is read again goes back ahead of what came since,

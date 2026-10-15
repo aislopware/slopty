@@ -9,7 +9,7 @@
 
 use std::cell::OnceCell;
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use gpui::{AppContext as _, Context};
@@ -20,40 +20,53 @@ use slopty_view_rpc::RpcError;
 
 use crate::workspace::{WorkerStatus, WorkspaceView};
 
-/// The threads the person archived, read from their file the first time they are asked of.
+/// A set of names the person filed on this app (the threads archived, the agents switched off),
+/// read from its file under Slopty's data directory the first time it is asked of.
 #[derive(Debug, Default)]
-pub(super) struct Archived(OnceCell<BTreeSet<String>>);
+pub(super) struct Filed(OnceCell<BTreeSet<String>>);
 
 /// Where the archived threads are kept.
 fn archived_path() -> PathBuf {
     slopty_platform::dirs::data_dir().join("interface").join("archived.json")
 }
 
-impl Archived {
-    /// The archived threads, read from their file the first time.
-    fn set(&self) -> &BTreeSet<String> {
-        self.0.get_or_init(|| {
-            let path = archived_path();
-            match std::fs::read(&path) {
-                Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
-                    tracing::warn!(path = %path.display(), %e, "the archived threads do not read");
-                    BTreeSet::new()
-                }),
-                Err(e) => {
-                    if e.kind() != std::io::ErrorKind::NotFound {
-                        tracing::warn!(path = %path.display(), %e, "the archived threads do not read");
-                    }
-                    BTreeSet::new()
+impl Filed {
+    /// The names, read from `path` the first time.
+    pub(super) fn set(&self, path: &Path) -> &BTreeSet<String> {
+        self.0.get_or_init(|| match std::fs::read(path) {
+            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+                tracing::warn!(path = %path.display(), %e, "a filed list does not read");
+                BTreeSet::new()
+            }),
+            Err(e) => {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!(path = %path.display(), %e, "a filed list does not read");
                 }
+                BTreeSet::new()
             }
         })
     }
 
-    /// Archive `thread`, or bring it back; whether that changed anything.
-    fn file(&mut self, thread: String, archived: bool) -> bool {
-        self.set();
+    /// File `name`, or take it out; whether that changed anything.
+    pub(super) fn file(&mut self, path: &Path, name: String, filed: bool) -> bool {
+        self.set(path);
         let Some(set) = self.0.get_mut() else { return false };
-        if archived { set.insert(thread) } else { set.remove(&thread) }
+        if filed { set.insert(name) } else { set.remove(&name) }
+    }
+
+    /// Write the names to `path`, off the UI thread.
+    pub(super) fn keep<T>(&self, path: PathBuf, cx: &Context<T>) {
+        let kept: Vec<String> = self.set(&path).iter().cloned().collect();
+        cx.background_spawn(async move {
+            let written = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| {
+                let text = serde_json::to_vec(&kept).map_err(std::io::Error::other)?;
+                std::fs::write(&path, text)
+            });
+            if let Err(e) = written {
+                tracing::warn!(path = %path.display(), %e, "a filed list was not kept");
+            }
+        })
+        .detach();
     }
 }
 
@@ -156,9 +169,26 @@ impl WorkspaceView {
             .map_or_else(|| chat.to_owned(), |(thread, _)| thread.to_string())
     }
 
+    /// The chat `chat`, archived before its first message, is the thread `thread` now: it stays
+    /// archived under the thread's id.
+    pub(in crate::workspace) fn surface_rekey_archived(
+        &mut self,
+        chat: &str,
+        thread: String,
+        cx: &Context<Self>,
+    ) {
+        let path = archived_path();
+        let archived = &mut self.view_model.surfaces.archived;
+        if archived.set(&path).contains(chat) {
+            archived.file(&path, chat.to_owned(), false);
+            archived.file(&path, thread, true);
+            archived.keep(path, cx);
+        }
+    }
+
     /// Whether the person archived the chat `chat`.
     pub(in crate::workspace) fn surface_archived(&self, chat: &str) -> bool {
-        self.view_model.surfaces.archived.set().contains(&self.archive_key(chat))
+        self.view_model.surfaces.archived.set(&archived_path()).contains(&self.archive_key(chat))
     }
 
     /// A change to the interface's lists the surfaces make: `setChatArchived`. `None` for any
@@ -179,23 +209,8 @@ impl WorkspaceView {
             return Some(Err(RpcError::BadParams("archived".to_owned())));
         };
         let key = self.archive_key(chat);
-        if self.view_model.surfaces.archived.file(key, archived) {
-            let kept: Vec<String> =
-                self.view_model.surfaces.archived.set().iter().cloned().collect();
-            cx.background_spawn(async move {
-                let path = archived_path();
-                let written = path
-                    .parent()
-                    .map_or(Ok(()), std::fs::create_dir_all)
-                    .and_then(|()| {
-                        let text = serde_json::to_vec(&kept).map_err(std::io::Error::other)?;
-                        std::fs::write(&path, text)
-                    });
-                if let Err(e) = written {
-                    tracing::warn!(path = %path.display(), %e, "the archived threads were not kept");
-                }
-            })
-            .detach();
+        if self.view_model.surfaces.archived.file(&archived_path(), key, archived) {
+            self.view_model.surfaces.archived.keep(archived_path(), cx);
             self.view_changed(cx);
         }
         Some(Ok(serde_json::json!({})))
@@ -217,12 +232,13 @@ mod tests {
 
     #[test]
     fn archiving_twice_changes_nothing_the_second_time() {
-        let mut archived = Archived(OnceCell::from(BTreeSet::new()));
-        assert!(archived.file("t1".to_owned(), true));
-        assert!(!archived.file("t1".to_owned(), true));
-        assert!(archived.set().contains("t1"));
-        assert!(archived.file("t1".to_owned(), false));
-        assert!(!archived.file("t1".to_owned(), false));
-        assert!(archived.set().is_empty());
+        let path = Path::new("/nonexistent/archived.json");
+        let mut archived = Filed(OnceCell::from(BTreeSet::new()));
+        assert!(archived.file(path, "t1".to_owned(), true));
+        assert!(!archived.file(path, "t1".to_owned(), true));
+        assert!(archived.set(path).contains("t1"));
+        assert!(archived.file(path, "t1".to_owned(), false));
+        assert!(!archived.file(path, "t1".to_owned(), false));
+        assert!(archived.set(path).is_empty());
     }
 }

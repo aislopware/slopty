@@ -12,6 +12,7 @@
 //! a search carry a number of the surfaces' own; a read, a listing and a find are told apart by
 //! their path, and the workspace's own tiles hear them too.
 
+mod actions;
 mod adding;
 mod catalog;
 mod changes;
@@ -86,11 +87,15 @@ pub(super) struct Surfaces {
     /// a watch follows.
     files: files::Kept,
     /// The threads the person archived.
-    archived: devices::Archived,
+    archived: devices::Filed,
+    /// The agents the person switched off: the pickers offer them nowhere.
+    agents_off: devices::Filed,
     /// The Add device runs under way.
     adding: adding::Adding,
     /// The projects the person added.
     projects: projects::Projects,
+    /// The person's own project actions, and the worktree actions waiting for their chats.
+    actions: actions::Actions,
     /// The files being attached to a message.
     uploads: composer::Uploads,
     /// The model and effort the person picked for each chat.

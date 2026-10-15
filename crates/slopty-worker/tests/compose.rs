@@ -355,7 +355,8 @@ mod compose {
         let waiting = rig.until(|s| s.pending.len() == 3).await;
         assert!(waiting.pending.iter().all(|p| p.state == PendingState::Waiting), "{waiting:?}");
 
-        let edit = Intent::Edit { pending: q2, text: "q2, edited".to_owned() };
+        let edit =
+            Intent::Edit { pending: q2, text: "q2, edited".to_owned(), attachments: Vec::new() };
         assert_eq!(rig.intent(IntentId::new(), &edit), Outcome::Done);
         let withdraw = Intent::Withdraw { pending: dropped };
         assert_eq!(rig.intent(IntentId::new(), &withdraw), Outcome::Done);
@@ -464,7 +465,8 @@ mod compose {
         assert_eq!(state.pending[0].state, PendingState::Held { reason: TAKEN_BACK.to_owned() });
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert_eq!(read(&rig.record), "shown\rnever mind\r", "not typed again");
-        let edit = Intent::Edit { pending: back, text: "again".to_owned() };
+        let edit =
+            Intent::Edit { pending: back, text: "again".to_owned(), attachments: Vec::new() };
         assert!(matches!(rig.intent(IntentId::new(), &edit), Outcome::Refused { .. }));
         let withdraw = Intent::Withdraw { pending: back };
         assert_eq!(rig.intent(IntentId::new(), &withdraw), Outcome::Done);

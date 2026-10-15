@@ -1262,21 +1262,33 @@ impl Shared {
     /// What a message of `text` and the files `attached` is to Codex: the words, with the paths
     /// of the files that are no pictures after them, then each picture as a `localImage`. Words
     /// that lead with one of the thread's skills as `/name` lead with Codex's own `$name`
-    /// instead, the skill named beside them.
+    /// instead; each skill the words name as `$name` goes beside them, as Codex's TUI sends it.
     fn input(&self, text: &str, attached: &[Attached]) -> Vec<UserInput> {
-        let skill = text.strip_prefix('/').and_then(|rest| {
+        let leads = text.strip_prefix('/').and_then(|rest| {
             let name = rest.split(char::is_whitespace).next()?;
-            self.skills.get_key_value(name)
+            self.skills.contains_key(name).then_some(())
         });
-        let text = skill.map_or_else(|| text.to_owned(), |_| text.replacen('/', "$", 1));
+        let text = leads.map_or_else(|| text.to_owned(), |()| text.replacen('/', "$", 1));
+        let mut named = Vec::new();
+        for word in text.split(char::is_whitespace) {
+            let name = word.strip_prefix('$').map(|name| {
+                name.trim_end_matches(|c: char| {
+                    matches!(c, '.' | ',' | ';' | ':' | '!' | '?' | ')')
+                })
+            });
+            if let Some((name, path)) = name.and_then(|name| self.skills.get_key_value(name))
+                && !named.iter().any(|(n, _)| n == name)
+            {
+                named.push((name.clone(), path.clone()));
+            }
+        }
         let words = crate::attach::with_files(&text, attached);
         let words = (!words.trim().is_empty())
             .then(|| UserInput::Text { text: words, text_elements: Some(Vec::new()) });
-        let skill = skill
-            .map(|(name, path)| UserInput::Skill { name: name.to_owned(), path: path.clone() });
+        let skills = named.into_iter().map(|(name, path)| UserInput::Skill { name, path });
         let pictures = crate::attach::pictures(attached)
             .map(|picture| UserInput::LocalImage { detail: None, path: picture.path().to_owned() });
-        words.into_iter().chain(skill).chain(pictures).collect()
+        words.into_iter().chain(skills).chain(pictures).collect()
     }
 
     /// The thread's latest turn, or [`TurnId::BEFORE`] before its first: where what Codex says
@@ -1784,6 +1796,7 @@ fn command_of(skill: &p::SkillMetadata) -> Command {
         description: short.unwrap_or_else(|| skill.description.clone()),
         argument_hint: None,
         source: source.to_owned(),
+        skill: true,
     }
 }
 

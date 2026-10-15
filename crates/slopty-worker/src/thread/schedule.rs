@@ -98,6 +98,9 @@ pub fn act(host: &Host, thread: ThreadId, id: IntentId, intent: &Intent) -> Opti
             });
             Some(decided.unwrap_or_else(|| refused("There is no such thread here")))
         }
+        Intent::Move { pending, .. } if host.is_scheduled(thread, *pending) => {
+            Some(refused("A scheduled message goes at its time"))
+        }
         Intent::Withdraw { pending }
         | Intent::Edit { pending, .. }
         | Intent::Promote { pending }
@@ -114,9 +117,10 @@ pub fn act(host: &Host, thread: ThreadId, id: IntentId, intent: &Intent) -> Opti
                     Intent::Withdraw { .. } => {
                         scheduled.remove(at);
                     }
-                    Intent::Edit { text, .. } => {
+                    Intent::Edit { text, attachments, .. } => {
                         if let Some(p) = scheduled.get_mut(at) {
                             p.text.clone_from(text);
+                            p.attachments.clone_from(attachments);
                         }
                     }
                     // Sent now: its moment is now, and the worker sends it at once.

@@ -523,6 +523,7 @@ impl Session {
                             _ => None,
                         }),
                         source: "agent".to_owned(),
+                        skill: false,
                     })
                     .collect();
                 vec![Action::CommandsSet(commands)]

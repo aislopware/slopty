@@ -18,13 +18,13 @@ use slopty_client::WorkerKey;
 use slopty_core::XferId;
 use slopty_proto::ClientMsg;
 use slopty_proto::file::FileRead;
-use slopty_proto::git::{GitDone, GitOp, GitOutcome, RunScript};
+use slopty_proto::git::{GitDone, GitOp, GitOutcome};
 use slopty_proto::thread::wire::{Intent, ThreadRequest, ThreadRow};
 use slopty_proto::thread::{AgentId, Offers};
 use slopty_proto::transfer::Dest;
 use slopty_view_proto::{
-    ChatConfig, FileSearchMatch, HarnessId, Model, ProjectAction, ProjectActionIcon,
-    ProjectActionRun, ProjectActionsSnapshot, ReasoningLevel, RepoRef, SandboxLevel, SlashCommand,
+    ChatConfig, FileSearchMatch, HarnessId, Model, ReasoningLevel, RepoRef, SandboxLevel,
+    SlashCommand,
 };
 use slopty_view_rpc::{RpcError, RpcReply, methods};
 
@@ -52,7 +52,15 @@ pub(super) struct Uploads(HashMap<String, Upload>);
 /// The model and effort the person picked for each chat, by its id, until the app quits; a
 /// chat they never picked for shows what its thread runs.
 #[derive(Debug, Default)]
-pub(super) struct Configs(HashMap<String, ChatConfig>);
+pub(super) struct Configs(HashMap<String, Picked>);
+
+/// A chat's pick, and the switches it asked of the chat's thread.
+#[derive(Debug)]
+struct Picked {
+    config: ChatConfig,
+    /// The thread and the intents that switch it; a refused one drops the pick.
+    asked: Option<(WorkerKey, slopty_proto::thread::ThreadId, Vec<slopty_proto::thread::IntentId>)>,
+}
 
 /// The attached files the shell reads back (a picture in a message, a queued message restored
 /// for editing), each read whole once from its machine and kept while its chunks are asked,
@@ -95,6 +103,16 @@ fn harness_of(agent: &AgentId) -> HarnessId {
     } else {
         HarnessId::CLAUDE_CODE
     }
+}
+
+/// What a queued message says and the files it names, as one hash an edit lease compares: the
+/// lease lives in this app only, so the hash need not outlive it.
+fn text_hash(text: &str, attachments: &[String]) -> String {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut hasher = std::hash::DefaultHasher::new();
+    text.hash(&mut hasher);
+    attachments.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
 }
 
 /// A call refused before it is asked of a machine.
@@ -145,6 +163,25 @@ pub(in crate::workspace) fn alias_in(
             row_wide == wide && !base.is_empty() && model.contains(&base.to_ascii_lowercase())
         })
         .map(|row| row.id.clone())
+}
+
+/// An agent's skills as the shell's, for its `$` menu: each by the command that runs it, which
+/// is how the agent takes it (`invocation::harness_prompt`), so the identity is the agent's own
+/// (`harness-skill:`), never a file this app reads.
+fn skills(offers: &Offers, harness: HarnessId) -> Vec<slopty_view_proto::invocation::Skill> {
+    use slopty_view_proto::invocation::{Skill, SkillCommand};
+    offers
+        .commands
+        .iter()
+        .filter(|command| command.skill)
+        .map(|command| Skill {
+            name: command.name.clone(),
+            path: format!("harness-skill:{harness}:{}", command.name),
+            description: command.description.clone(),
+            enabled: true,
+            command: Some(SkillCommand { name: command.name.clone(), harness }),
+        })
+        .collect()
 }
 
 /// An agent's commands as the shell's.
@@ -200,8 +237,14 @@ impl WorkspaceView {
                     &offered.map(|(installed, ..)| commands(&installed.offers)).unwrap_or_default(),
                 )
             }),
-            // Skills are the agent's own, found by it in its folders; it lists none ahead.
-            methods::LIST_SKILLS => Task::ready(value(&serde_json::Value::Null)),
+            methods::LIST_SKILLS => self.once_known(params, cx, |view, params, _| {
+                let offered = view.offered_to(params);
+                value(
+                    &offered
+                        .map(|(installed, harness, _)| skills(&installed.offers, harness))
+                        .unwrap_or_default(),
+                )
+            }),
             methods::SEARCH_FILES => self.find_mentioned(params, cx),
             methods::LIST_REFS => self.list_refs(params, cx),
             methods::SWITCH_REF => self.switch_ref(params, cx),
@@ -213,12 +256,9 @@ impl WorkspaceView {
             }
             methods::LIST_PROJECT_ACTIONS => self.list_project_actions(params, cx),
             methods::RUN_PROJECT_ACTION => self.run_project_action(params, cx),
-            methods::TAKE_PROJECT_ACTION_SETUP => {
-                Task::ready(value(&serde_json::json!({ "ready": true, "setupAction": null })))
-            }
-            methods::UPSERT_PROJECT_ACTION | methods::DELETE_PROJECT_ACTION => fail(
-                "A project's actions are its run scripts: edit them where the repository keeps them",
-            ),
+            methods::TAKE_PROJECT_ACTION_SETUP => self.take_project_action_setup(params, cx),
+            methods::UPSERT_PROJECT_ACTION => self.upsert_project_action(params, cx),
+            methods::DELETE_PROJECT_ACTION => self.delete_project_action(params, cx),
             methods::APPLY_HARNESS_UPDATE
             | methods::CANCEL_HARNESS_UPDATE
             | methods::SET_HARNESS_UPDATE_POLICY => {
@@ -407,76 +447,6 @@ impl WorkspaceView {
         })
     }
 
-    /// The run scripts of the project `spaceId` names, as its repository keeps them
-    /// ([`GitOp::Scripts`]); none where it keeps none or is no repository.
-    fn project_scripts(
-        &mut self,
-        params: &serde_json::Value,
-        cx: &Context<Self>,
-    ) -> Task<Result<(WorkerKey, Vec<RunScript>), RpcError>> {
-        let Some((key, path)) = param(params, "spaceId").and_then(|space| self.view_space(space))
-        else {
-            return Task::ready(Err(RpcError::BadParams("a project's spaceId".to_owned())));
-        };
-        let rx = self.surface_git(key, path, GitOp::Scripts);
-        cx.spawn(async move |_, cx| match within(cx, rx).await? {
-            GitOutcome::Done(GitDone::Scripts(scripts)) => Ok((key, scripts.list)),
-            outcome => {
-                tracing::debug!(?outcome, "a project's run scripts did not read");
-                Ok((key, Vec::new()))
-            }
-        })
-    }
-
-    /// `ListProjectActions`: the project's run scripts, each an action by its name.
-    fn list_project_actions(
-        &mut self,
-        params: &serde_json::Value,
-        cx: &Context<Self>,
-    ) -> Task<Result<RpcReply, RpcError>> {
-        let space_id = param(params, "spaceId").unwrap_or_default().to_owned();
-        let scripts = self.project_scripts(params, cx);
-        cx.background_spawn(async move {
-            let (_, scripts) = scripts.await?;
-            value(&ProjectActionsSnapshot {
-                space_id,
-                actions: scripts.iter().map(action).collect(),
-                importable_actions: Vec::new(),
-                project_file_issue: None,
-            })
-        })
-    }
-
-    /// `RunProjectAction`: the run script `actionId` names, in a terminal of its own.
-    fn run_project_action(
-        &mut self,
-        params: &serde_json::Value,
-        cx: &Context<Self>,
-    ) -> Task<Result<RpcReply, RpcError>> {
-        let Some(name) = param(params, "actionId").map(str::to_owned) else {
-            return Task::ready(Err(RpcError::BadParams("actionId".to_owned())));
-        };
-        let scripts = self.project_scripts(params, cx);
-        let params = params.clone();
-        cx.spawn(async move |this, cx| {
-            let (key, scripts) = scripts.await?;
-            let script = scripts
-                .into_iter()
-                .find(|script| script.name == name)
-                .ok_or_else(|| RpcError::Failed(format!("The project has no {name} any more")))?;
-            let opened = this
-                .update(cx, |view, cx| view.live_open_session(&params, Some((key, script)), cx))
-                .map_err(super::gone)?
-                .await?;
-            let RpcReply::Value(terminal) = opened else {
-                return Err(RpcError::Failed("the terminal did not open".to_owned()));
-            };
-            let terminal = serde_json::from_value(terminal)
-                .map_err(|e| RpcError::Failed(format!("the terminal did not read: {e}")))?;
-            value(&ProjectActionRun { action_id: name.clone(), action_name: name, terminal })
-        })
-    }
-
     /// What the thread `row` on `device` runs, as the shell's chat config: its agent, its model
     /// by the id the picker lists it by, its effort.
     fn thread_config(&self, device: &str, row: &ThreadRow) -> ChatConfig {
@@ -515,8 +485,30 @@ impl WorkspaceView {
         device: &str,
         row: &ThreadRow,
     ) -> ChatConfig {
-        let picked = self.view_model.surfaces.configs.0.get(chat).cloned();
+        let picked = self.view_model.surfaces.configs.0.get(chat).map(|p| p.config.clone());
         picked.unwrap_or_else(|| self.thread_config(device, row))
+    }
+
+    /// Drop each pick whose switch the chat's thread turned down: the chat shows what its thread
+    /// runs again, beside the refusal its transcript says.
+    pub(in crate::workspace) fn settle_configs(&mut self, cx: &Context<Self>) {
+        let refused: Vec<String> = self
+            .view_model
+            .surfaces
+            .configs
+            .0
+            .iter()
+            .filter(|(_, picked)| {
+                let Some((key, thread, asked)) = &picked.asked else { return false };
+                self.held_hub(*key).is_some_and(|hub| {
+                    hub.read(cx).refusals(*thread).any(|refusal| asked.contains(&refusal.id))
+                })
+            })
+            .map(|(chat, _)| chat.clone())
+            .collect();
+        for chat in refused {
+            self.view_model.surfaces.configs.0.remove(&chat);
+        }
     }
 
     /// `setChatConfig`: the model and effort the person picked for a chat, kept for it and,
@@ -537,7 +529,7 @@ impl WorkspaceView {
             return Some(Err(RpcError::BadParams("chatId and config".to_owned())));
         };
         let chat = chat.to_owned();
-        if let Some((key, thread)) = self.chat_thread(&chat, cx) {
+        let asked = if let Some((key, thread)) = self.chat_thread(&chat, cx) {
             let hub = self.thread_hub(key, cx);
             let shown = {
                 let hub = hub.read(cx);
@@ -558,18 +550,19 @@ impl WorkspaceView {
             {
                 intents.push(Intent::SetEffort { effort });
             }
-            for intent in intents {
-                hub.update(cx, |hub, cx| hub.intent(thread, intent, cx));
-            }
-        }
-        self.view_model.surfaces.configs.0.insert(chat, config);
+            let ids = intents
+                .into_iter()
+                .map(|intent| hub.update(cx, |hub, cx| hub.intent(thread, intent, cx)))
+                .collect();
+            Some((key, thread, ids))
+        } else {
+            None
+        };
+        self.view_model.surfaces.configs.0.insert(chat, Picked { config, asked });
         self.view_changed(cx);
         Some(Ok(serde_json::json!({})))
     }
 
-    /// A call on a message waiting in a chat's queue, the thread's own (`Pending`): removed
-    /// (`Withdraw`), changed (`Edit`), or sent now (`Promote`). An edit holds no lease, since
-    /// the worker changes a waiting message in place; the order is the agent's.
     /// `RetryDelivery`: what this client asked of the chat's thread (or, for a chat not started
     /// yet, its start) and the worker has not answered, sent again under the same ids, so each is
     /// still acted on once.
@@ -735,7 +728,11 @@ impl WorkspaceView {
         Some(value(&side))
     }
 
-    fn queue_call(
+    /// A call on a message waiting in a chat's queue, the thread's own (`Pending`): removed
+    /// (`Withdraw`), changed with its files (`Edit`), sent now (`Promote`) or moved (`Move`).
+    /// The composer's edit lease is the message itself, held while it waits: a commit over a
+    /// message changed meanwhile conflicts.
+    pub(in crate::workspace) fn queue_call(
         &mut self,
         method: &str,
         params: &serde_json::Value,
@@ -750,6 +747,13 @@ impl WorkspaceView {
             .ok_or_else(|| RpcError::Failed(format!("no thread {chat}")))?;
         let waiting = self.view_queue_has(key, thread, pending, cx);
         let text = param(params, "text").map(str::to_owned);
+        let queued = || self.view_queue(chat, cx).into_iter().find(|m| m.id == pending.to_string());
+        // The files a change names; one that names none keeps the message's own.
+        let attachments = params
+            .get("attachments")
+            .and_then(|a| serde_json::from_value::<Vec<String>>(a.clone()).ok())
+            .or_else(|| queued().map(|m| m.attachments))
+            .unwrap_or_default();
         let (intent, answer) = match method {
             methods::REMOVE_QUEUED_MESSAGE => {
                 (Some(Intent::Withdraw { pending }), serde_json::json!({ "removed": waiting }))
@@ -758,22 +762,23 @@ impl WorkspaceView {
                 (Some(Intent::Promote { pending }), serde_json::json!({ "sent": waiting }))
             }
             methods::UPDATE_QUEUED_MESSAGE => (
-                text.map(|text| Intent::Edit { pending, text }),
+                text.map(|text| Intent::Edit { pending, text, attachments }),
                 serde_json::json!({ "changed": waiting }),
             ),
+            // The lease is the message's own id; its hash lets a commit tell whether the message
+            // changed meanwhile, from another device.
             methods::BEGIN_QUEUED_MESSAGE_EDIT => {
-                let attachments = self
-                    .view_queue(chat, cx)
-                    .into_iter()
-                    .find(|m| m.id == pending.to_string())
-                    .map(|m| m.attachments)
-                    .unwrap_or_default();
-                let outcome = if waiting { "acquired" } else { "gone" };
-                let lease = serde_json::json!({
-                    "outcome": outcome,
-                    "leaseId": pending.to_string(),
-                    "attachments": attachments,
-                });
+                let message = queued();
+                let lease = match message.filter(|_| waiting) {
+                    Some(m) => serde_json::json!({
+                        "outcome": "acquired",
+                        "leaseId": pending.to_string(),
+                        "text": m.text,
+                        "baseTextHash": text_hash(&m.text, &m.attachments),
+                        "attachments": m.attachments,
+                    }),
+                    None => serde_json::json!({ "outcome": "missing" }),
+                };
                 (None, lease)
             }
             methods::RENEW_QUEUED_MESSAGE_EDIT => {
@@ -781,16 +786,35 @@ impl WorkspaceView {
             }
             methods::FINISH_QUEUED_MESSAGE_EDIT => {
                 if param(params, "action") == Some("commit") {
-                    let edit = text.map(|text| Intent::Edit { pending, text });
-                    (
-                        edit,
-                        serde_json::json!({ "outcome": if waiting { "committed" } else { "conflict" } }),
-                    )
+                    let now = queued().map(|m| text_hash(&m.text, &m.attachments));
+                    let outcome = match (now, param(params, "expectedTextHash")) {
+                        (None, _) => "missing",
+                        (Some(now), Some(expected)) if now != expected => "conflict",
+                        (Some(_), _) => "committed",
+                    };
+                    let edit = text.filter(|_| outcome == "committed").map(|text| Intent::Edit {
+                        pending,
+                        text,
+                        attachments,
+                    });
+                    (edit, serde_json::json!({ "outcome": outcome }))
                 } else {
                     (None, serde_json::json!({ "outcome": "cancelled" }))
                 }
             }
-            // The worker keeps its queue in the order it was sent.
+            // `toIndex` is the place in the queue as the shell shows it, the moved one taken out.
+            methods::MOVE_QUEUED_MESSAGE => {
+                let to = params.get("toIndex").and_then(serde_json::Value::as_u64);
+                let to = to.and_then(|to| usize::try_from(to).ok()).unwrap_or(usize::MAX);
+                let others: Vec<String> = self
+                    .view_queue(chat, cx)
+                    .into_iter()
+                    .map(|m| m.id)
+                    .filter(|id| *id != pending.to_string())
+                    .collect();
+                let before = others.get(to).and_then(|id| id.parse().ok());
+                (Some(Intent::Move { pending, before }), serde_json::json!({ "changed": waiting }))
+            }
             _ => (None, serde_json::json!({ "changed": false })),
         };
         if waiting && let Some(intent) = intent {
@@ -912,30 +936,6 @@ fn attached(path: &str, read: FileRead) -> Result<Attached, RpcError> {
     }
 }
 
-/// A run script as the shell's project action: by its name, its icon from what it does.
-fn action(script: &RunScript) -> ProjectAction {
-    let said = format!("{} {}", script.name, script.line).to_lowercase();
-    let icon = [
-        ("test", ProjectActionIcon::Test),
-        ("lint", ProjectActionIcon::Lint),
-        ("clippy", ProjectActionIcon::Lint),
-        ("build", ProjectActionIcon::Build),
-        ("debug", ProjectActionIcon::Debug),
-        ("setup", ProjectActionIcon::Configure),
-        ("install", ProjectActionIcon::Configure),
-    ]
-    .into_iter()
-    .find(|(word, _)| said.contains(word))
-    .map_or(ProjectActionIcon::Play, |(_, icon)| icon);
-    ProjectAction {
-        id: script.name.clone(),
-        name: script.name.clone(),
-        command: script.line.clone(),
-        icon,
-        run_on_worktree_create: false,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use slopty_proto::git::{Branch, Branches};
@@ -964,22 +964,6 @@ mod tests {
     }
 
     #[test]
-    fn a_run_script_is_an_action_by_its_name_with_the_icon_of_what_it_does() {
-        let script = |name: &str, line: &str| RunScript {
-            name: name.to_owned(),
-            line: line.to_owned(),
-            command: vec!["sh".to_owned(), "-c".to_owned(), line.to_owned()],
-            cwd: "/repo".to_owned(),
-            env: Vec::new(),
-        };
-        let dev = action(&script("dev", "bun run dev"));
-        assert_eq!((dev.id.as_str(), dev.command.as_str()), ("dev", "bun run dev"));
-        assert_eq!(dev.icon, ProjectActionIcon::Play);
-        assert_eq!(action(&script("check", "cargo test --all")).icon, ProjectActionIcon::Test);
-        assert_eq!(action(&script("ci", "cargo clippy")).icon, ProjectActionIcon::Lint);
-    }
-
-    #[test]
     fn an_agents_models_carry_the_efforts_it_offers() {
         let offers = Offers {
             models: vec![Offered { id: "opus".into(), label: "Opus".into() }],
@@ -993,6 +977,7 @@ mod tests {
                 description: "Compact".into(),
                 argument_hint: Some("[focus]".into()),
                 source: "built-in".into(),
+                skill: false,
             }],
             ..Offers::default()
         };

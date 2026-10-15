@@ -366,6 +366,7 @@ fn the_mods_catalog_is_the_threads_menu_and_models() {
         description: "Mine".to_owned(),
         argument_hint: Some("[dir]".to_owned()),
         source: conv::CommandSource::Project,
+        skill: false,
     };
     host.take(observed.commands(std::slice::from_ref(&own)));
     let main = observed.main();
@@ -1156,12 +1157,14 @@ fn slash_commands_are_the_threads() {
             description: "Compact the conversation".to_owned(),
             argument_hint: None,
             source: conv::CommandSource::BuiltIn,
+            skill: false,
         },
         conv::SlashCommand {
             name: "ship".to_owned(),
             description: "Ship it".to_owned(),
             argument_hint: Some("<branch>".to_owned()),
             source: conv::CommandSource::Project,
+            skill: false,
         },
     ];
     let mut observed = observed();
@@ -1185,6 +1188,7 @@ fn a_thread_reviews_while_claude_code_lists_code_review() {
         description: String::new(),
         argument_hint: None,
         source: conv::CommandSource::BuiltIn,
+        skill: false,
     };
     let mut observed = observed();
     let mut host = Host::default();

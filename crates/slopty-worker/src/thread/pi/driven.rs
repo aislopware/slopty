@@ -270,8 +270,12 @@ impl Task {
                 let shown = self.driven.queue().withdraw(intent);
                 self.apply(shown.into_iter().collect());
             }
-            ThreadAsk::Edit { intent, text } => {
-                let shown = self.driven.queue().edit(intent, &text);
+            ThreadAsk::Edit { intent, text, attachments } => {
+                let shown = self.driven.queue().edit(intent, &text, attachments, ());
+                self.apply(shown.into_iter().collect());
+            }
+            ThreadAsk::Move { intent, before } => {
+                let shown = self.driven.queue().move_to(intent, before);
                 self.apply(shown.into_iter().collect());
             }
             // Into the run under way, or a run of its own; what a stop held goes after it.

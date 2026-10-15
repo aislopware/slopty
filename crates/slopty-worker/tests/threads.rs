@@ -790,7 +790,11 @@ mod threads {
         host.apply(thread, vec![Action::PendingSet(Vec::new())]);
         assert_eq!(pending_of(&host, thread), both);
 
-        let edit = Intent::Edit { pending: second, text: "Review it all".to_owned() };
+        let edit = Intent::Edit {
+            pending: second,
+            text: "Review it all".to_owned(),
+            attachments: Vec::new(),
+        };
         assert_eq!(act(IntentId::new(), &edit), Some(Outcome::Done));
         let edited = vec![waiting("Run the checks", at), waiting("Review it all", after)];
         assert_eq!(pending_of(&host, thread), edited);

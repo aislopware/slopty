@@ -213,6 +213,8 @@ pub enum Intent {
         pending: IntentId,
         /// What it says now.
         text: String,
+        /// The files that go with it now, as [`Intent::Send`] names them.
+        attachments: Vec<String>,
     },
     /// Send a queued message now: into the turn under way, as a steer would go, where the agent
     /// takes one ([`Cap::STEER`]), else first after stopping that turn; with no turn under way it
@@ -221,6 +223,14 @@ pub enum Intent {
     Promote {
         /// The intent that sent it.
         pending: IntentId,
+    },
+    /// Move a message that has not gone yet to another place in the queue: just before
+    /// `before`, or last when `None`. Refused for one on its way, or one kept for its moment.
+    Move {
+        /// The intent that sent it.
+        pending: IntentId,
+        /// The message it goes before; last when `None`.
+        before: Option<IntentId>,
     },
     /// Stop the turn under way.
     Interrupt,
@@ -362,7 +372,8 @@ impl Intent {
             Self::Send { delivery: Delivery::Queue, .. }
             | Self::Withdraw { .. }
             | Self::Edit { .. }
-            | Self::Promote { .. } => Cap::QUEUE,
+            | Self::Promote { .. }
+            | Self::Move { .. } => Cap::QUEUE,
             Self::Interrupt => Cap::INTERRUPT,
             Self::Answer { .. } | Self::Release { .. } => Cap::APPROVALS,
             Self::SetModel { .. } => Cap::SET_MODEL,

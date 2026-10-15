@@ -917,6 +917,7 @@ impl Observed {
                     conv::CommandSource::Plugin => "plugin",
                 }
                 .to_owned(),
+                skill: c.skill,
             })
             .collect();
         let reviews = commands.iter().any(|c| c.name == REVIEW_COMMAND);

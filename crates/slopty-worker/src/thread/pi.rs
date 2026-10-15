@@ -92,14 +92,20 @@ enum ThreadAsk {
     Withdraw {
         intent: IntentId,
     },
-    /// Make the message held for `intent` say `text`.
+    /// Make the message held for `intent` say `text`, with the files at `attachments`.
     Edit {
         intent: IntentId,
         text: String,
+        attachments: Vec<String>,
     },
     /// Send the message held for `intent` now.
     Promote {
         intent: IntentId,
+    },
+    /// Move the message held for `intent` to just before `before`, or last.
+    Move {
+        intent: IntentId,
+        before: Option<IntentId>,
     },
     Interrupt,
     Answer {
@@ -207,13 +213,21 @@ impl Pi {
             Intent::Withdraw { pending }
             | Intent::Edit { pending, .. }
             | Intent::Promote { pending }
+            | Intent::Move { pending, .. }
                 if !state.pending.iter().any(|p| p.intent == *pending) =>
             {
                 return refused("That message is not waiting");
             }
             Intent::Withdraw { pending } => ThreadAsk::Withdraw { intent: *pending },
-            Intent::Edit { pending, text } => {
-                ThreadAsk::Edit { intent: *pending, text: text.clone() }
+            Intent::Move { pending, before } => {
+                ThreadAsk::Move { intent: *pending, before: *before }
+            }
+            Intent::Edit { pending, text, attachments } => {
+                if let Err(why) = super::attach::check(attachments) {
+                    return refused(&why);
+                }
+                let (text, attachments) = (text.clone(), attachments.clone());
+                ThreadAsk::Edit { intent: *pending, text, attachments }
             }
             Intent::Promote { pending } => ThreadAsk::Promote { intent: *pending },
             Intent::Interrupt => {
@@ -276,6 +290,7 @@ impl Pi {
                 | ThreadAsk::Withdraw { .. }
                 | ThreadAsk::Edit { .. }
                 | ThreadAsk::Promote { .. }
+                | ThreadAsk::Move { .. }
         );
         if !live && !held {
             return refused("pi is not running");
@@ -562,7 +577,12 @@ impl Served {
         for ask in asks {
             match ask {
                 ThreadAsk::Withdraw { intent } => shown = queue.withdraw(intent).or(shown),
-                ThreadAsk::Edit { intent, text } => shown = queue.edit(intent, &text).or(shown),
+                ThreadAsk::Edit { intent, text, attachments } => {
+                    shown = queue.edit(intent, &text, attachments, ()).or(shown);
+                }
+                ThreadAsk::Move { intent, before } => {
+                    shown = queue.move_to(intent, before).or(shown);
+                }
                 ThreadAsk::Promote { intent } => {
                     if let Some((held, ())) = queue.take(intent) {
                         queue.release();

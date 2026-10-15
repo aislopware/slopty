@@ -61,16 +61,18 @@ impl Sent {
             // A refused edit holds the person's new words: it stays while the message it was
             // for still waits, until they dismiss it. A done one shows once the message reads
             // as it says, or has gone.
-            Intent::Edit { pending, text } => {
+            Intent::Edit { pending, text, attachments } => {
                 let waiting = state.pending.iter().find(|p| p.intent == *pending);
                 if self.failed() {
                     waiting.is_none()
                 } else {
-                    self.outcome.is_some() && waiting.is_none_or(|p| p.text == *text)
+                    self.outcome.is_some()
+                        && waiting.is_none_or(|p| p.text == *text && p.attachments == *attachments)
                 }
             }
             Intent::Withdraw { .. }
             | Intent::Promote { .. }
+            | Intent::Move { .. }
             | Intent::SetModel { .. }
             | Intent::SetMode { .. }
             | Intent::Keep(_)

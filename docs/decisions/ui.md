@@ -11960,13 +11960,15 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     with the message.
   - A message held for the turn's end waits in the worker's queue for the thread
     (`Delivery::Queue`, where the agent has `Cap::QUEUE`). The shell's queue shows it, and its
-    edit, send-now, steer-now and remove are the worker's `Edit`, `Promote` and `Withdraw`.
+    edit, send-now, steer-now, reorder and remove are the worker's `Edit`, `Promote`, `Move`
+    and `Withdraw`.
   - A side chat is the agent's own aside of the chat (`Intent::Aside`): the whole thread
     branched into one that shares its context and stays out of the lists, answered once it
     started, under the chat it was asked of.
   - A project's actions are its repository's run scripts (`GitOp::Scripts`), each by its name
-    with an icon from what it does; running one opens it in a terminal of its own. Editing them
-    is the repository's business, and the shell says so.
+    with an icon from what it does, then the person's own; running one opens it in a terminal
+    of its own. The person adds, changes and removes them as zeron keeps them, on this app and
+    never in the repository (see "A project's actions are the person's to change").
   - A retry of a message that did not go sends again, under the same ids, what this client
     asked of the chat's thread and the worker has not answered, so each is acted on once. A new
     chat's start and a side chat's aside are kept until answered too: they are sent again when
@@ -12110,3 +12112,43 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   the person's use. Fixed in gpui-fast (`ccf27de`, as zeronsh/zui does): `scroll_by` compares the
   target with the cursor's position. Test: gpui-fast
   `fast::tests::list_scroll_by::a_nudge_from_a_negative_offset_lands_in_the_item_above`.
+- ✅ **A queued message is edited with its files (2026-10-15).** Editing a queued message in the
+  composer always failed ("invalid edit lease"): the lease said neither what the message says
+  nor its hash, which the shell needs. The lease is the message itself while it waits, with its
+  words, files and a hash of both; a commit over a message changed meanwhile conflicts and
+  changes nothing. `Intent::Edit` carries the message's files now, so files added or taken off
+  in the edit go with it; each adapter checks them as it checks a send's, and Codex reads them
+  again. Tests: `slopty-ui`
+  `workspace::view_model::tests::a_queued_edit_is_leased_and_committed_with_its_files`,
+  `slopty-agent` `queue::tests::a_queue_holds_in_order_and_a_stop_holds_it_until_the_person_speaks`.
+- ✅ **A queued message can be moved (2026-10-15).** The shell's queue reorders by drag, which
+  the view model answered with nothing. A move is `Intent::Move { pending, before }`: the
+  message goes just before the one named, or last, in the worker's queue (`Queue::move_to`),
+  in the Claude Code composer's list, and in Codex's, pi's and ACP's queues; a message kept for
+  its time has no place in the queue and is refused. Tests: `slopty-agent`
+  `queue::tests::a_message_moves_before_the_one_named_or_last`, `slopty-ui`
+  `workspace::view_model::tests::a_queued_message_moved_to_the_top_goes_before_the_first`.
+- ✅ **A project's actions are the person's to change (2026-10-15).** Adding, changing or removing
+  an action failed and then marked the project's actions unavailable. As zeron keeps them, the
+  person's actions live on this app beside the project (`interface/project-actions.json`, by
+  machine and folder), never in the repository. A change to one of the repository's run scripts
+  stays in its place, a removed one stays out here until it is changed again. An action of the
+  person's runs through the machine's login shell, as a run script does. The one action marked
+  to run on a new worktree runs in a chat's worktree once its thread started there, in a terminal
+  the shell shows (`TakeProjectActionSetup`), beside the repository's own setup. Tests:
+  `slopty-ui` `surfaces::actions::tests`.
+- ✅ **Skills are offered by `$` (2026-10-15).** The shell's `$` menu asks for skills, which the
+  view model never listed, so it stayed empty. A command that runs a skill says so
+  (`Command::skill`: Claude Code's `SKILL.md` ones, Codex's listed skills), and `ListSkills`
+  gives them under the agent's own identity (`harness-skill:`), so a pick goes as the command
+  that runs it: `/name` to Claude Code, `$name` to Codex, whose adapter sends each skill the
+  words name beside them, as Codex's TUI does. Test: `slopty-agent` `codex::codexs_skills_are_its_commands`.
+- ✅ **A switch an agent turned down leaves its picker (2026-10-15).** A model or effort picked for
+  a chat stayed in its picker even when the agent refused it. A pick whose switch was refused is
+  dropped, and the picker shows what the thread runs again, beside the refusal in the chat.
+- ✅ **An archived chat stays archived once it starts (2026-10-15).** A chat archived before its
+  first message was kept under the id the shell minted, which the thread's own id replaces at
+  start, so it came back. The archive follows the chat to its thread's id.
+- ✅ **An agent switched off is offered nowhere (2026-10-15).** Settings → Agents' switch said it
+  changed nothing. The agents switched off are kept on this app (`interface/agents-off.json`) and
+  the pickers leave them out.

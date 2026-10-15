@@ -105,9 +105,29 @@ fn harness_of(agent: &AgentId) -> HarnessId {
 fn agent_prompt(text: &str, harness: HarnessId) -> String {
     let prompt = slopty_view_proto::invocation::harness_prompt(text, harness);
     if harness == HarnessId::CODEX {
-        return slopty_view_proto::invocation::invocation_prompt(&prompt);
+        return slopty_view_proto::invocation::invocation_prompt(&codex_skills(&prompt));
     }
     prompt
+}
+
+/// The skills Codex lists, picked by `$` (the `harness-skill:` ones `ListSkills` gives), as
+/// Codex's own `$name`: its adapter sends each with the skill it names.
+fn codex_skills(text: &str) -> String {
+    use slopty_view_proto::invocation::{Invocation, invocation_links, native_skill_identity};
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    for (range, invocation) in invocation_links(text) {
+        let Invocation::Skill { name, path, .. } = &invocation else { continue };
+        if !native_skill_identity(path) {
+            continue;
+        }
+        out.push_str(text.get(at..range.start).unwrap_or_default());
+        out.push('$');
+        out.push_str(name);
+        at = range.end;
+    }
+    out.push_str(text.get(at..).unwrap_or_default());
+    out
 }
 
 /// The agent a shell harness names: Claude Code, Codex and pi by their own ids, any other an
@@ -227,6 +247,7 @@ impl WorkspaceView {
     /// Publish everything the interface watches.
     fn view_publish(&mut self, cx: &mut Context<Self>) {
         self.view_hear_hubs(cx);
+        self.settle_configs(cx);
         let Some(feed) = self.view_model.feed.clone() else { return };
         let now = Utc::now();
         let devices =
@@ -666,6 +687,9 @@ impl WorkspaceView {
                 self.view_send_kept(key, id, msg);
                 return Ok(serde_json::json!({ "commandId": id.to_string() }));
             }
+            if request.worktree.is_some() {
+                self.project_setup_for(&chat, minted.worker, &minted.cwd);
+            }
             let worktree = request.worktree.as_ref().map(|spec| NewWorktree {
                 name: worktree_name(&request.prompt, id),
                 base: Some(spec.base.clone()).filter(|base| base != "HEAD"),
@@ -812,6 +836,7 @@ impl WorkspaceView {
             Outcome::Started { thread } => {
                 self.view_model.minted.remove(&chat);
                 self.view_model.aliases.insert(*thread, chat.clone());
+                self.surface_rekey_archived(&chat, thread.to_string(), cx);
                 if let Some((text, attachments, message_id)) =
                     self.view_model.first_words.remove(&done.id)
                 {
@@ -843,7 +868,9 @@ mod tests {
     use slopty_core::WallMs;
     use slopty_proto::ClientMsg;
     use slopty_proto::thread::wire::{Intent, TableFrame, ThreadFrame, ThreadRequest};
-    use slopty_proto::thread::{AgentId, Cursor, Liveness, ThreadState};
+    use slopty_proto::thread::{
+        AgentId, Cursor, Delivery, IntentId, Liveness, Pending, PendingState, ThreadState,
+    };
     use slopty_view_doc::SessionCommandPayload;
     use slopty_view_proto::HarnessId;
     use slopty_view_rpc::methods;
@@ -950,5 +977,111 @@ mod tests {
         let start = started.expect("a start that takes the session up again");
         assert_eq!(start.args, ["--resume".to_owned(), native]);
         assert_eq!(start.prompt.as_deref(), Some("go on"));
+    }
+
+    /// The thread `state` holding two queued messages, the first with a file.
+    fn queued() -> (ThreadState, IntentId, IntentId) {
+        let mut state = fixtures::thread("tools");
+        let (first, second) = (IntentId::new(), IntentId::new());
+        let waiting = |intent, text: &str, attachments: Vec<String>| Pending {
+            intent,
+            text: text.to_owned(),
+            attachments,
+            delivery: Delivery::Queue,
+            state: PendingState::Waiting,
+        };
+        state.pending = vec![
+            waiting(first, "then the docs", vec!["/drop/shot.png".to_owned()]),
+            waiting(second, "and the tests", Vec::new()),
+        ];
+        (state, first, second)
+    }
+
+    fn reply(
+        answer: Result<slopty_view_rpc::RpcReply, slopty_view_rpc::RpcError>,
+    ) -> serde_json::Value {
+        match answer {
+            Ok(slopty_view_rpc::RpcReply::Value(value)) => value,
+            Ok(slopty_view_rpc::RpcReply::Stream(_)) => panic!("a stream, not a value"),
+            Err(e) => panic!("refused: {e:?}"),
+        }
+    }
+
+    /// A queued message edited in the composer is leased with what it says, and committed with
+    /// the files the composer holds now; a commit over a message changed meanwhile conflicts and
+    /// changes nothing.
+    #[gpui::test]
+    fn a_queued_edit_is_leased_and_committed_with_its_files(cx: &mut gpui::TestAppContext) {
+        let (state, first, _) = queued();
+        let thread = state.meta.id;
+        let (workspace, cx, mut rx) = holding(&state, cx);
+        let chat = thread.to_string();
+        let begin = serde_json::json!({ "chatId": chat, "id": first.to_string() });
+        let lease = reply(
+            workspace
+                .update(cx, |v, cx| v.queue_call(methods::BEGIN_QUEUED_MESSAGE_EDIT, &begin, cx)),
+        );
+        assert_eq!(lease["outcome"], "acquired", "{lease}");
+        assert_eq!(lease["text"], "then the docs");
+        assert_eq!(lease["attachments"], serde_json::json!(["/drop/shot.png"]));
+        let hash = lease["baseTextHash"].as_str().expect("a hash").to_owned();
+
+        let stale = serde_json::json!({
+            "chatId": chat, "id": first.to_string(), "action": "commit",
+            "text": "never", "expectedTextHash": "0", "attachments": [],
+        });
+        let conflict = reply(
+            workspace
+                .update(cx, |v, cx| v.queue_call(methods::FINISH_QUEUED_MESSAGE_EDIT, &stale, cx)),
+        );
+        assert_eq!(conflict["outcome"], "conflict");
+
+        let commit = serde_json::json!({
+            "chatId": chat, "id": first.to_string(), "action": "commit",
+            "text": "then the docs, briefly", "expectedTextHash": hash,
+            "attachments": ["/drop/other.png"],
+        });
+        let done =
+            reply(workspace.update(cx, |v, cx| {
+                v.queue_call(methods::FINISH_QUEUED_MESSAGE_EDIT, &commit, cx)
+            }));
+        assert_eq!(done["outcome"], "committed");
+        cx.run_until_parked();
+        let edits: Vec<Intent> = sent_threads(&mut rx)
+            .into_iter()
+            .filter_map(|request| match request {
+                ThreadRequest::Intent { intent: intent @ Intent::Edit { .. }, .. } => Some(intent),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            edits,
+            [Intent::Edit {
+                pending: first,
+                text: "then the docs, briefly".to_owned(),
+                attachments: vec!["/drop/other.png".to_owned()],
+            }],
+            "only the commit over the message as leased goes"
+        );
+    }
+
+    /// A queued message dragged to the top goes just before the one that was first.
+    #[gpui::test]
+    fn a_queued_message_moved_to_the_top_goes_before_the_first(cx: &mut gpui::TestAppContext) {
+        let (state, first, second) = queued();
+        let (workspace, cx, mut rx) = holding(&state, cx);
+        let params = serde_json::json!({
+            "chatId": state.meta.id.to_string(), "id": second.to_string(), "toIndex": 0,
+        });
+        let moved = reply(
+            workspace.update(cx, |v, cx| v.queue_call(methods::MOVE_QUEUED_MESSAGE, &params, cx)),
+        );
+        assert_eq!(moved["changed"], true);
+        cx.run_until_parked();
+        let sent = sent_threads(&mut rx).into_iter().any(|request| {
+            matches!(request, ThreadRequest::Intent { intent: Intent::Move { pending, before }, .. }
+                if pending == second && before == Some(first))
+        });
+        assert!(sent, "the move names the message it goes before");
     }
 }

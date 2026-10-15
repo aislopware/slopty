@@ -2,9 +2,10 @@
 //! caps name them, and the person's one setting for how freely they act (`[agents] autonomy`
 //! in `settings.toml`, which the server reads for each start).
 //!
-//! An agent is offered wherever its program is installed: Slopty keeps no list of its own to
-//! switch one off, installs nothing and updates nothing; the person installs an agent on the
-//! machine, and its worker says so.
+//! An agent is offered wherever its program is installed, unless the person switched it off
+//! here: the agents switched off are kept in `interface/agents-off.json` under Slopty's data
+//! directory, and no picker of this app offers them. Slopty installs nothing and updates
+//! nothing; the person installs an agent on the machine, and its worker says so.
 
 use gpui::{AppContext as _, Context, Task};
 use slopty_proto::thread::AgentId;
@@ -36,7 +37,7 @@ pub(super) fn efforts(harness: HarnessId) -> Vec<ReasoningLevel> {
 impl WorkspaceView {
     /// A settings page's call; `None` for one no page of Slopty's makes.
     pub(super) fn settings_call(
-        &self,
+        &mut self,
         method: &str,
         params: &serde_json::Value,
         cx: &Context<Self>,
@@ -47,9 +48,22 @@ impl WorkspaceView {
                     self.once_known(params, cx, |view, params, _| value(&view.harnesses(params))),
                 );
             }
-            methods::SET_HARNESS_ENABLED => Err(RpcError::Failed(
-                "Slopty offers every agent installed on the machine".to_owned(),
-            )),
+            methods::SET_HARNESS_ENABLED => {
+                let harness = super::param(params, "harness").map(str::to_owned);
+                let enabled = params.get("enabled").and_then(serde_json::Value::as_bool);
+                let (Some(harness), Some(enabled)) = (harness, enabled) else {
+                    return Some(Task::ready(Err(RpcError::BadParams(
+                        "harness and enabled".to_owned(),
+                    ))));
+                };
+                let path = agents_off_path();
+                if self.view_model.surfaces.agents_off.file(&path, harness, !enabled) {
+                    self.view_model.surfaces.agents_off.keep(path, cx);
+                }
+                return Some(
+                    self.once_known(params, cx, |view, params, _| value(&view.harnesses(params))),
+                );
+            }
             methods::INSTALL_HARNESS | methods::CANCEL_INSTALL => {
                 Err(RpcError::Failed("Install the agent on the machine itself".to_owned()))
             }
@@ -75,6 +89,7 @@ impl WorkspaceView {
             self.workers.iter().find(|(_, worker)| worker.link.is_some()).map(|(key, _)| *key)
         });
         let startable = key.map(|key| self.startable_on(key)).unwrap_or_default();
+        let off = self.view_model.surfaces.agents_off.set(&agents_off_path());
         let core = AGENTS.iter().map(|(harness, name, agent)| {
             (*harness, (*name).to_owned(), startable.iter().any(|id| id.is(agent)))
         });
@@ -84,6 +99,7 @@ impl WorkspaceView {
         });
         core.chain(acp)
             .map(|(harness, name, installed)| {
+                let on = !off.contains(harness.as_str());
                 serde_json::json!({
                     "id": harness,
                     "name": name,
@@ -92,11 +108,16 @@ impl WorkspaceView {
                     "reasoningLevels": efforts(harness),
                     "installed": installed,
                     "canInstall": false,
-                    "enabled": installed,
+                    "enabled": installed && on,
                 })
             })
             .collect()
     }
+}
+
+/// Where the agents the person switched off are kept.
+fn agents_off_path() -> std::path::PathBuf {
+    slopty_platform::dirs::data_dir().join("interface").join("agents-off.json")
 }
 
 /// A watch of an empty list that stays open, so the page does not ask again.

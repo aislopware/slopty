@@ -332,7 +332,11 @@ mod pi {
         assert_eq!(queued, Outcome::Done);
         let state = rig.until(thread, "held on the worker", |s| s.pending.len() == 1).await;
         assert_eq!(state.pending[0].intent, held);
-        let edit = Intent::Edit { pending: held, text: "Also say done.".to_owned() };
+        let edit = Intent::Edit {
+            pending: held,
+            text: "Also say done.".to_owned(),
+            attachments: Vec::new(),
+        };
         assert_eq!(rig.intent(&pi, thread, &edit).1, Outcome::Done);
         rig.until(thread, "changed", |s| {
             s.pending.first().is_some_and(|p| p.text == "Also say done.")

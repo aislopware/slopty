@@ -1210,9 +1210,14 @@ fn shared(
         Intent::Withdraw { pending }
         | Intent::Edit { pending, .. }
         | Intent::Promote { pending }
+        | Intent::Move { pending, .. }
             if !state.pending.iter().any(|p| p.intent == *pending) =>
         {
             refused("That message is not waiting".to_owned())
+        }
+        Intent::Move { pending, before } => {
+            codex.move_queued(thread, *pending, *before);
+            Outcome::Done
         }
         Intent::Withdraw { pending } => {
             codex.withdraw(thread, *pending);
@@ -1222,8 +1227,11 @@ fn shared(
             codex.promote(thread, *pending);
             Outcome::Done
         }
-        Intent::Edit { pending, text } => {
-            codex.edit(thread, *pending, text.clone());
+        Intent::Edit { pending, text, attachments } => {
+            if let Err(why) = slopty_worker::thread::attach::check(attachments) {
+                return refused(why);
+            }
+            codex.edit(thread, *pending, text.clone(), attachments.clone());
             Outcome::Done
         }
         Intent::Interrupt => {

@@ -108,10 +108,16 @@ enum ThreadAsk {
     Edit {
         intent: IntentId,
         text: String,
+        attachments: Vec<String>,
     },
     /// Send the message held for `intent` now, first after stopping the turn under way.
     Promote {
         intent: IntentId,
+    },
+    /// Move the message held for `intent` to just before `before`, or last.
+    Move {
+        intent: IntentId,
+        before: Option<IntentId>,
     },
     Interrupt,
     Answer {
@@ -252,14 +258,22 @@ impl Acp {
             Intent::Withdraw { pending }
             | Intent::Edit { pending, .. }
             | Intent::Promote { pending }
+            | Intent::Move { pending, .. }
                 if !state.pending.iter().any(|p| p.intent == *pending) =>
             {
                 return refused("That message is not waiting");
             }
             Intent::Withdraw { pending } => ThreadAsk::Withdraw { intent: *pending },
             Intent::Promote { pending } => ThreadAsk::Promote { intent: *pending },
-            Intent::Edit { pending, text } => {
-                ThreadAsk::Edit { intent: *pending, text: text.clone() }
+            Intent::Move { pending, before } => {
+                ThreadAsk::Move { intent: *pending, before: *before }
+            }
+            Intent::Edit { pending, text, attachments } => {
+                if let Err(why) = super::attach::check(attachments) {
+                    return refused(&why);
+                }
+                let (text, attachments) = (text.clone(), attachments.clone());
+                ThreadAsk::Edit { intent: *pending, text, attachments }
             }
             Intent::Interrupt => {
                 if !live || !matches!(state.status.phase, Phase::Working | Phase::NeedsYou) {

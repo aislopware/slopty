@@ -1161,6 +1161,9 @@ pub struct Command {
     pub argument_hint: Option<String>,
     /// Open, where it comes from: `built-in`, `personal`, `project`, `plugin`.
     pub source: String,
+    /// Whether it runs one of the agent's skills, which the composer offers by `$` too.
+    #[serde(default)]
+    pub skill: bool,
 }
 
 /// Where in an item an [`Action::Append`] goes.

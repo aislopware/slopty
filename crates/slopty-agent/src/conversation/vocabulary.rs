@@ -835,6 +835,9 @@ pub struct SlashCommand {
     pub argument_hint: Option<String>,
     /// Where it comes from.
     pub source: CommandSource,
+    /// Whether it runs a skill (a `SKILL.md`) rather than a command's file.
+    #[serde(default)]
+    pub skill: bool,
 }
 
 /// Where a [`SlashCommand`] comes from.

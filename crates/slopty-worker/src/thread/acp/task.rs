@@ -281,8 +281,12 @@ impl Task {
                     self.prompt(&held.text, &held.attachments, intent).await;
                 }
             }
-            ThreadAsk::Edit { intent, text } => {
-                let shown = self.session.queue().edit(intent, &text);
+            ThreadAsk::Edit { intent, text, attachments } => {
+                let shown = self.session.queue().edit(intent, &text, attachments, ());
+                self.apply(shown.into_iter().collect());
+            }
+            ThreadAsk::Move { intent, before } => {
+                let shown = self.session.queue().move_to(intent, before);
                 self.apply(shown.into_iter().collect());
             }
             ThreadAsk::Interrupt => {

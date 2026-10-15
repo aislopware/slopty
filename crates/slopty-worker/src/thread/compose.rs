@@ -140,9 +140,10 @@ impl Composer {
                     (Intent::Edit { .. }, Some(state)) if *state == back => {
                         return refused("That message is already in the terminal");
                     }
-                    (Intent::Edit { text, .. }, Some(_)) => {
+                    (Intent::Edit { text, attachments, .. }, Some(_)) => {
                         if let Some(p) = pending.get_mut(at) {
                             p.text.clone_from(text);
+                            p.attachments.clone_from(attachments);
                         }
                     }
                     _ => {
@@ -168,6 +169,25 @@ impl Composer {
                 }
                 promoted.delivery = Delivery::Steer;
                 self.kick(thread);
+                Some((Outcome::Done, vec![Action::PendingSet(pending)]))
+            }
+            Intent::Move { pending: which, before } => {
+                let mut pending = state.pending.clone();
+                let Some(at) = pending.iter().position(|p| p.intent == *which) else {
+                    return refused("That message has already gone");
+                };
+                match pending.get(at).map(|p| &p.state) {
+                    Some(PendingState::Sending) => return refused("That message is being typed"),
+                    Some(PendingState::Held { reason }) if reason == TAKEN_BACK => {
+                        return refused("That message is already in the terminal");
+                    }
+                    _ => {}
+                }
+                let moved = pending.remove(at);
+                let to = before
+                    .and_then(|before| pending.iter().position(|p| p.intent == before))
+                    .unwrap_or(pending.len());
+                pending.insert(to, moved);
                 Some((Outcome::Done, vec![Action::PendingSet(pending)]))
             }
             Intent::Interrupt => {

@@ -695,8 +695,8 @@ mod tests {
     }
 
     /// The composer's commands are the thread's enabled skills, as Codex lists them for its
-    /// folder; one led with as `/name` goes as Codex's own `$name` with the skill beside the
-    /// words, and any other `/` word goes as typed.
+    /// folder; one led with as `/name` goes as Codex's own `$name`, and any named by `$name`,
+    /// with the skill beside the words, and any other `/` word goes as typed.
     #[test]
     fn codexs_skills_are_its_commands() {
         use slopty_proto::thread::{Delivery, IntentId};
@@ -743,6 +743,14 @@ mod tests {
             json!([{"type": "text", "text": "/shipping now", "text_elements": []}]),
             "a word that only starts like a skill"
         );
+        assert_eq!(
+            input(&mut shared, "then $lint it, and $ship. $ship once"),
+            json!([{"type": "text", "text": "then $lint it, and $ship. $ship once", "text_elements": []},
+                {"type": "skill", "name": "lint", "path": "/skills/lint/SKILL.md"},
+                {"type": "skill", "name": "ship", "path": "/skills/ship/SKILL.md"}]),
+            "each skill named by `$` goes beside the words, once"
+        );
+        assert!(state.commands.iter().all(|c| c.skill), "each is a skill");
     }
 
     /// The commands Codex left running past their calls are the thread's background tasks,
@@ -1265,6 +1273,7 @@ mod tests {
             },
             Attached::File { path: "/drop/x/my notes.md".to_owned() },
         ];
+        let edited = files.clone();
         for (intent, text, attached) in
             [(kept, "Then the docs", files), (dropped, "And the changelog", vec![])]
         {
@@ -1277,7 +1286,8 @@ mod tests {
             }
         }
         assert_eq!(state.pending.len(), 2, "both show waiting");
-        state.apply(&shared.queue().edit(kept, "Then the docs, briefly").unwrap());
+        let paths = state.pending[0].attachments.clone();
+        state.apply(&shared.queue().edit(kept, "Then the docs, briefly", paths, edited).unwrap());
         state.apply(&shared.queue().withdraw(dropped).unwrap());
         assert_eq!(
             state.pending.iter().map(|p| p.text.as_str()).collect::<Vec<_>>(),

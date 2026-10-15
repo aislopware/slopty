@@ -168,10 +168,16 @@ enum Ask {
         thread: ThreadId,
         intent: IntentId,
         text: String,
+        attachments: Vec<String>,
     },
     Promote {
         thread: ThreadId,
         intent: IntentId,
+    },
+    Move {
+        thread: ThreadId,
+        intent: IntentId,
+        before: Option<IntentId>,
     },
     Interrupt {
         thread: ThreadId,
@@ -239,6 +245,7 @@ impl Ask {
             | Self::Withdraw { thread, .. }
             | Self::Edit { thread, .. }
             | Self::Promote { thread, .. }
+            | Self::Move { thread, .. }
             | Self::Interrupt { thread }
             | Self::Release { thread, .. }
             | Self::Fork { thread, .. }
@@ -429,14 +436,19 @@ impl Codex {
         let _gone = self.0.send(Ask::Withdraw { thread, intent });
     }
 
-    /// Make the message `intent` queued in `thread` say `text`.
-    pub fn edit(&self, thread: ThreadId, intent: IntentId, text: String) {
-        let _gone = self.0.send(Ask::Edit { thread, intent, text });
+    /// Make the message `intent` queued in `thread` say `text`, with the files at `attachments`.
+    pub fn edit(&self, thread: ThreadId, intent: IntentId, text: String, attachments: Vec<String>) {
+        let _gone = self.0.send(Ask::Edit { thread, intent, text, attachments });
     }
 
     /// Send the message `intent` queued in `thread` now, into the turn under way.
     pub fn promote(&self, thread: ThreadId, intent: IntentId) {
         let _gone = self.0.send(Ask::Promote { thread, intent });
+    }
+
+    /// Move the message `intent` queued in `thread` to just before `before`, or last.
+    pub fn move_queued(&self, thread: ThreadId, intent: IntentId, before: Option<IntentId>) {
+        let _gone = self.0.send(Ask::Move { thread, intent, before });
     }
 
     /// Switch `thread`'s `setting` for its next turns, the TUI's included
@@ -614,12 +626,12 @@ fn message_not_sent(host: &Host, ask: Ask, reason: &str) {
                 Pending { intent, text, attachments, delivery, state: PendingState::Sending };
             not_sent(host, thread, pending, reason);
         }
-        Ask::Edit { thread, intent, text } => {
+        Ask::Edit { thread, intent, text, attachments } => {
             let Some((state, _)) = host.state(thread) else { return };
             let Some(was) = state.pending.into_iter().find(|p| p.intent == intent) else {
                 return;
             };
-            not_sent(host, thread, Pending { text, ..was }, reason);
+            not_sent(host, thread, Pending { text, attachments, ..was }, reason);
         }
         other => tracing::debug!(?other, "not a message"),
     }
@@ -1964,6 +1976,14 @@ impl Session {
                     }
                 }
             }
+            Ask::Move { thread, intent, before } => {
+                let moved =
+                    self.followed(thread).and_then(|f| f.shared.queue().move_to(intent, before));
+                if let Some(shown) = moved {
+                    self.host.apply(thread, vec![shown]);
+                }
+                Ok(())
+            }
             Ask::Withdraw { thread, intent } => {
                 let taken = self.followed(thread).and_then(|f| f.shared.queue().withdraw(intent));
                 if let Some(shown) = taken {
@@ -1971,9 +1991,11 @@ impl Session {
                 }
                 Ok(())
             }
-            Ask::Edit { thread, intent, text } => {
-                let changed =
-                    self.followed(thread).and_then(|f| f.shared.queue().edit(intent, &text));
+            Ask::Edit { thread, intent, text, attachments } => {
+                let attached = crate::thread::attach::read(&attachments).await;
+                let changed = self
+                    .followed(thread)
+                    .and_then(|f| f.shared.queue().edit(intent, &text, attachments, attached));
                 if let Some(shown) = changed {
                     self.host.apply(thread, vec![shown]);
                 }

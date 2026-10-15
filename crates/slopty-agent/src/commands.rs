@@ -107,6 +107,7 @@ pub fn listed(agent: Option<&[CommandInfo]>, custom: &[SlashCommand]) -> Vec<Sla
                 description: cut(c.description.trim()),
                 argument_hint: own.and_then(|o| o.argument_hint.clone()),
                 source: own.map_or_else(|| source_of(&c.source), |o| o.source),
+                skill: own.is_some_and(|o| o.skill),
             }
         })
         .collect()
@@ -192,6 +193,7 @@ fn commands_in(
             description: cut(&description),
             argument_hint: field(&fields, "argument-hint").map(str::to_owned),
             source,
+            skill: false,
         });
     }
 }
@@ -216,6 +218,7 @@ fn skills_in(dir: &Path, plugin: Option<&str>, source: CommandSource, out: &mut 
             description: cut(&description),
             argument_hint: field(&fields, "argument-hint").map(str::to_owned),
             source,
+            skill: true,
         });
     }
 }
@@ -473,6 +476,7 @@ mod tests {
             description: "Review the diff".to_owned(),
             argument_hint: Some("[focus]".to_owned()),
             source: CommandSource::Project,
+            skill: false,
         }];
         let long = "x".repeat(400);
         let agent = [

@@ -182,6 +182,7 @@ mod tests {
             description: String::new(),
             argument_hint: None,
             source: "built-in".to_owned(),
+            skill: false,
         };
         host.apply(claude.id, vec![Action::CommandsSet(vec![review.clone()])]);
 
