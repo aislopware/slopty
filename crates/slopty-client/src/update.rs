@@ -7,7 +7,7 @@
 
 pub use slopty_net::Newer;
 use slopty_net::{NetError, WrongBuild};
-use slopty_proto::wire::BUILD;
+use slopty_proto::wire::this_build;
 
 /// Which end runs the other build.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -61,9 +61,9 @@ impl UpdateNotice {
         }
     }
 
-    /// Which build is the newer: by version, else by when each one's wire last changed (the
-    /// stamp [`BUILD`] ends with). `None` when the two cannot be told apart that way: a build
-    /// without a stamp, or two on the same version from the same minute.
+    /// Which build is the newer, as [`slopty_proto::wire::newer`] tells: by version, then by
+    /// the commit each was made from, else by when each one's wire last changed. `None` when the
+    /// two cannot be told apart.
     #[must_use]
     pub fn newer(&self) -> Option<Newer> {
         WrongBuild { peer: self.peer.clone() }.newer()
@@ -75,11 +75,12 @@ impl UpdateNotice {
         self.newer() == Some(Newer::There)
     }
 
-    /// What each side runs.
+    /// What each side runs, each in full: the commit it was made from too, which is what tells
+    /// two builds of one wire apart.
     #[must_use]
     pub fn detail(&self) -> String {
         let peer = WrongBuild { peer: self.peer.clone() };
-        format!("It runs {}; this build is {BUILD}.", peer.peer_build())
+        format!("It runs {}; this build is {}.", peer.peer_build(), this_build())
     }
 
     /// What updates it, to copy and run on this machine, which has this build: a deploy over
@@ -131,13 +132,14 @@ mod tests {
     fn a_worker_notice_names_both_builds_and_the_deploy() {
         let notice = UpdateNotice::worker("mini", &wrong("0.0.9+wire.0badf00d"));
         assert_eq!(notice.title(), "This machine runs a different build");
-        assert_eq!(notice.detail(), format!("It runs 0.0.9+wire.0badf00d; this build is {BUILD}."));
+        let here = this_build();
+        assert_eq!(notice.detail(), format!("It runs 0.0.9+wire.0badf00d; this build is {here}."));
         assert_eq!(notice.command(), "slopty worker deploy mini --update");
         assert_eq!(
             notice.to_string(),
             format!(
                 "mini runs a different build. It runs 0.0.9+wire.0badf00d; this build is \
-                 {BUILD}.\nUpdate it: slopty worker deploy mini --update"
+                 {here}.\nUpdate it: slopty worker deploy mini --update"
             )
         );
     }
@@ -149,7 +151,8 @@ mod tests {
     fn a_server_notice_deploys_this_build_and_an_older_build_is_said_so() {
         let notice = UpdateNotice::server("hub", &wrong(""));
         assert_eq!(notice.title(), "The server runs a different build");
-        assert_eq!(notice.detail(), format!("It runs an older one; this build is {BUILD}."));
+        let here = this_build();
+        assert_eq!(notice.detail(), format!("It runs an older one; this build is {here}."));
         assert_eq!(notice.command(), "slopty server deploy hub");
         assert!(notice.to_string().ends_with("Update it: slopty server deploy hub"));
         for here in ["127.0.0.1", "::1", "[::1]", "localhost"] {
