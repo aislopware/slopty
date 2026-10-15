@@ -3,6 +3,7 @@ Button │ Server: e2e-server, Connected
 Button │ Settings
 Button │ Attach images
 MultilineTextInput │ Do anything…
+Button │ Claude Code's TUI beside the chat
 Button │ Show session details
 Button │ Working tree
 Button │ Close tab

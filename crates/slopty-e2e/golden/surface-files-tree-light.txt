@@ -10,12 +10,12 @@ Tree │ Workspace file tree (focused)
 TreeItem │ src
 TreeItem │ NOTES.md
 TreeItem │ README.md
-Button │ Collapse Subagents
-Button │ Collapse Chats
+Button │ Expand Chats
 Button │ New side chat
 Button │ Fork this chat
 Button │ Fork
 Button │ New side chat
+Button │ Claude Code's TUI beside the chat
 Button │ Show session details
 Button │ Working tree
 Button │ Close tab

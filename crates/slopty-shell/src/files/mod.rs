@@ -472,7 +472,12 @@ impl FilesSurface {
                 Some(DirectoryLoadState::Unloaded | DirectoryLoadState::Loading { .. })
             )
         {
-            div().flex_1().into_any_element()
+            // slopty: the tree's focus waits here while its folder loads, so the
+            // explorer opened by Cmd-E keeps it rather than losing it to the window.
+            div()
+                .flex_1()
+                .track_focus(&self.tree_focus)
+                .into_any_element()
         } else {
             self.render_tree(cx)
         };
