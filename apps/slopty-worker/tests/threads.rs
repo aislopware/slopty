@@ -1306,4 +1306,91 @@ mod threads {
         let again = a.intent(IntentId::new(), thread, undo).await;
         assert!(matches!(again, Outcome::Refused { .. }), "{again:?}");
     }
+
+    /// What keeps the worker's machine awake, from its control socket (`slopty worker awake`).
+    async fn awake(daemons: &Daemons) -> slopty_proto::ctl::Awake {
+        use tokio::io::AsyncWriteExt as _;
+        let socket = daemons.dir.join("worker.sock");
+        let stream = tokio::net::UnixStream::connect(socket).await.unwrap();
+        let (rd, mut wr) = stream.into_split();
+        let mut line = serde_json::to_vec(&slopty_proto::ctl::CtlRequest::Wake).unwrap();
+        line.push(b'\n');
+        wr.write_all(&line).await.unwrap();
+        // The worker may close first; the reply is read below either way.
+        let _closed = wr.shutdown().await;
+        let mut reply = String::new();
+        BufReader::new(rd).read_line(&mut reply).await.unwrap();
+        match serde_json::from_str(reply.trim()).unwrap() {
+            slopty_proto::ctl::CtlReply::Wake(awake) => awake,
+            other => panic!("not what keeps it awake: {other:?}"),
+        }
+    }
+
+    /// Ask what keeps the machine awake until `holds` says it, every 50 ms: when it did.
+    async fn awake_until(
+        daemons: &Daemons,
+        holds: impl Fn(&slopty_proto::ctl::Awake) -> bool,
+    ) -> std::time::Instant {
+        loop {
+            if holds(&awake(daemons).await) {
+                return std::time::Instant::now();
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// A driven turn keeps the worker's machine awake with nobody linked, as the thread host
+    /// holds it (no terminal shows it): from within one sampling tick of the client leaving,
+    /// for as long as the turn runs, and no longer.
+    #[tokio::test]
+    async fn a_driven_turn_keeps_the_machine_awake_with_nobody_linked() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let (daemons, _record) = with_claude(&root).await;
+        let mut a = Client::connect(&daemons, ClientId::new()).await;
+        // Seventy-five deltas 200 ms apart: fifteen seconds of a turn.
+        let thread = started(&mut a, claude_in(&root, Some("slow 75"))).await;
+        a.follow(thread).await;
+        a.until(|c| c.thread.as_ref().is_some_and(|s| !s.items.is_empty())).await;
+        a.leave().await;
+        let left = std::time::Instant::now();
+
+        let held = awake_until(&daemons, |w| w.clients == 0 && w.agents == 1 && w.system).await;
+        let after = held.duration_since(left);
+        assert!(after <= TWO_TICKS, "held {after:?} after the client left");
+        let released = awake_until(&daemons, |w| w.agents == 0 && !w.system).await;
+        println!(
+            "held {:?} after the client left, released {:?} after",
+            held.duration_since(left),
+            released.duration_since(left)
+        );
+    }
+
+    /// A turn whose agent died holds nothing: the thread's process is gone, whatever its phase
+    /// last said.
+    #[tokio::test]
+    async fn a_turn_whose_agent_died_lets_the_machine_sleep() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let (daemons, _record) = with_claude_and(&root, &[("STUB_CRASH_MID_TURN", "1")]).await;
+        let mut a = Client::connect(&daemons, ClientId::new()).await;
+        let thread = started(&mut a, claude_in(&root, Some("slow 75"))).await;
+        a.follow(thread).await;
+        a.until(|c| {
+            c.thread.as_ref().is_some_and(|s| {
+                matches!(s.status.liveness, slopty_proto::thread::Liveness::Exited { .. })
+            })
+        })
+        .await;
+        a.leave().await;
+        // Two ticks: the sample after the exit has been taken.
+        tokio::time::sleep(TWO_TICKS).await;
+        let now = awake(&daemons).await;
+        assert_eq!((now.clients, now.agents, now.system), (0, 0, false), "{now:?}");
+    }
+
+    /// How often the worker looks its threads over for the sleep policy (`TICK` of the
+    /// daemon's `threads::awake`, private to its crate), twice: the sample after a change has
+    /// surely been taken by then.
+    const TWO_TICKS: Duration = Duration::from_secs(10);
 }

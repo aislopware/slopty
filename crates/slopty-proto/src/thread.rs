@@ -1,7 +1,7 @@
 //! The agent-neutral thread model: what any coding agent's session looks like to a client, and
 //! the one way it changes.
 //!
-//! Every agent (Claude Code observed through its TUI, Codex over its app-server, pi over its RPC
+//! Every agent (Claude Code driven over stream-json, Codex over its app-server, pi over its RPC
 //! mode, any ACP agent) is mapped on the worker by its adapter into the same shape: a thread of
 //! turns, each turn a run of items (what the person sent, what the agent wrote, the tools it
 //! called), beside the requests it holds open for the person, the messages waiting to go to it,

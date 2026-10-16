@@ -17,9 +17,12 @@
 //! - **Turns.** A turn begins with the engine's word that it began one, and ends with its result:
 //!   complete, interrupted or failed. Work the engine takes up alone (a background task's notice)
 //!   runs between them as it does in Claude Code.
-//! - **Interrupts.** A stop is a control request; one Claude Code does not acknowledge in
-//!   [`INTERRUPT_ACK`] is escalated: the worker ends the process, the turn is cut, and the next
-//!   message takes the session up again.
+//! - **Interrupts.** A stop is one ladder that always lands. It goes as a control request; one
+//!   Claude Code does not acknowledge in [`INTERRUPT_ACK`], or refuses, is escalated: the worker
+//!   ends the process, the turn is cut, and the next message takes the session up again. One it
+//!   acknowledges and whose turn does not end within [`END_WAIT`] is escalated the same way.
+//! - **Starting.** An `initialize` Claude Code does not answer in [`INIT_WAIT`] is said ("Claude
+//!   Code did not start") and the process is ended, as a stop is.
 //! - **Approvals.** Claude Code asks about each tool call it may not run alone
 //!   (`--permission-prompt-tool=stdio`): a request on the call's item, answered with the decision
 //!   it takes, by the request's own id. An `initialize` answer names those still open, so a worker
@@ -95,6 +98,16 @@ pub const DELIVERY: Duration = Duration::from_secs(120);
 
 /// How long a stop may go unacknowledged before the worker ends the process.
 pub const INTERRUPT_ACK: Duration = Duration::from_millis(1500);
+
+/// How long a turn has to end once Claude Code acknowledged its stop, before the worker ends the
+/// process (Orca's request end wait, zeron's stop settle).
+pub const END_WAIT: Duration = Duration::from_secs(3);
+
+/// How long Claude Code has to answer `initialize` before it is said not to have started.
+pub const INIT_WAIT: Duration = Duration::from_secs(30);
+
+/// What a Claude Code that never answered `initialize` is said with.
+pub const DID_NOT_START: &str = "Claude Code did not start";
 
 /// How long a turn may show no progress before it is said to have stalled.
 pub const STALL: Duration = Duration::from_mins(16);
@@ -236,6 +249,12 @@ pub struct Driven {
     running: bool,
     /// A stop was sent and not acknowledged, since then.
     interrupting: Option<WallMs>,
+    /// A stop was acknowledged while its turn ran, since then: the turn has [`END_WAIT`] to end.
+    stop_acked: Option<WallMs>,
+    /// `initialize` was asked and not answered, since then.
+    starting: Option<WallMs>,
+    /// The last tool call the model made, in a few words, for a stall to name.
+    last_call: Option<String>,
     /// The person's stop holds what is queued.
     stopped: bool,
     /// The process is being ended, since then.
@@ -348,6 +367,9 @@ impl Driven {
             agents: HashMap::new(),
             running: false,
             interrupting: None,
+            stop_acked: None,
+            starting: None,
+            last_call: None,
             stopped: false,
             ending: None,
             limit_until: None,
@@ -401,7 +423,7 @@ impl Driven {
     /// Whether a turn is under way, or a message is on its way and about to start one.
     #[must_use]
     pub fn busy(&self) -> bool {
-        self.running || !self.sends.is_empty()
+        self.running || self.sends.iter().any(|s| s.pending.state == PendingState::Sending)
     }
 
     /// The messages held.
@@ -465,6 +487,7 @@ impl Driven {
             "perTaskStopAffordance": true,
         });
         self.control(Control::Initialize, &request);
+        self.starting = Some(self.heard);
     }
 
     fn control(&mut self, control: Control, request: &Value) -> String {
@@ -844,6 +867,9 @@ impl Driven {
         let Some(response) = message.get("response") else { return Vec::new() };
         let Some(id) = str_at(response, "request_id") else { return Vec::new() };
         let Some(control) = self.controls.remove(id) else { return Vec::new() };
+        if control == Control::Initialize {
+            self.starting = None;
+        }
         let ok = str_at(response, "subtype") == Some("success");
         let said = response.get("response").cloned().unwrap_or(Value::Null);
         if !ok {
@@ -858,6 +884,9 @@ impl Driven {
             Control::Initialize => self.initialized(response, &said, now),
             Control::Interrupt => {
                 self.interrupting = None;
+                if self.running {
+                    self.stop_acked = Some(now);
+                }
                 Vec::new()
             }
             Control::SetModel(model) => {
@@ -933,9 +962,8 @@ impl Driven {
                 return self.unanswered(control, error);
             }
         };
-        if *control == Control::Interrupt {
-            self.interrupting = None;
-        }
+        // A stop refused is a stop not acknowledged: it goes on to end the process
+        // ([`INTERRUPT_ACK`]), and is never left at the refusal.
         self.history.notice(Notice::INFO, &format!("Claude Code refused {what}: {error}"), now)
     }
 
@@ -1535,6 +1563,7 @@ impl Driven {
         let was_running = self.running;
         self.running = false;
         self.interrupting = None;
+        self.stop_acked = None;
         outs.extend(self.history.stopping(None));
         outs.extend(self.history.compacting(false));
         let failed = bool_at(message, "is_error");
@@ -1628,12 +1657,18 @@ impl Driven {
             WallMs::from_millis(at.as_millis().saturating_add(ms(wait)))
         };
         let interrupt = self.interrupting.map(|at| after(at, INTERRUPT_ACK));
-        let delivery =
-            self.sends.iter().filter(|s| !s.line.is_empty()).map(|s| after(s.at, DELIVERY)).min();
+        let acked = self.stop_acked.filter(|_| self.running).map(|at| after(at, END_WAIT));
+        let starting = self.starting.map(|at| after(at, INIT_WAIT));
+        let delivery = self
+            .sends
+            .iter()
+            .filter(|s| s.pending.state == PendingState::Sending)
+            .map(|s| after(s.at, DELIVERY))
+            .min();
         let limit = self.limit_until.map(|at| after(at, LIMIT_SLACK));
         let stall = self.running.then(|| after(self.looked.unwrap_or(self.heard), TICK));
         let tail = self.tails_due().map(|at| after(at, TAIL_EVERY));
-        [interrupt, delivery, limit, stall, tail].into_iter().flatten().min()
+        [interrupt, acked, starting, delivery, limit, stall, tail].into_iter().flatten().min()
     }
 
     /// Time has come to `now`. Whether the process is to be ended: a stop went unacknowledged.
@@ -1641,11 +1676,20 @@ impl Driven {
         let mut outs = Vec::new();
         let past =
             |at: WallMs, wait: Duration| now.as_millis() >= at.as_millis().saturating_add(ms(wait));
-        let escalate = self.interrupting.is_some_and(|at| past(at, INTERRUPT_ACK));
-        // Messages not acknowledged: sent again once, then held as maybe not arrived.
+        let mut escalate = self.interrupting.is_some_and(|at| past(at, INTERRUPT_ACK))
+            || (self.running && self.stop_acked.is_some_and(|at| past(at, END_WAIT)));
+        if self.starting.is_some_and(|at| past(at, INIT_WAIT)) {
+            self.starting = None;
+            escalate = true;
+            let said = format!("{DID_NOT_START} in {} s", INIT_WAIT.as_secs());
+            outs.extend(self.history.notice(Notice::INFO, &said, now));
+        }
+        // Messages not acknowledged: sent again once, then held as maybe not arrived. One read
+        // again from the thread (a worker that restarted between sending it and hearing it) has
+        // no line left, and goes straight to held once its time is up.
         let mut changed = false;
         for sent in &mut self.sends {
-            if sent.line.is_empty() || !past(sent.at, DELIVERY) {
+            if sent.pending.state != PendingState::Sending || !past(sent.at, DELIVERY) {
                 continue;
             }
             if sent.again {
@@ -1679,7 +1723,11 @@ impl Driven {
                 self.heard = now;
             } else if past(self.heard, STALL) && !self.stalled {
                 self.stalled = true;
-                outs.extend(self.history.stalled(Some(STALLED_TEXT.to_owned())));
+                let said = match &self.last_call {
+                    Some(call) => format!("{STALLED_TEXT} · last: {call}"),
+                    None => STALLED_TEXT.to_owned(),
+                };
+                outs.extend(self.history.stalled(Some(said)));
             }
             self.looked = Some(now);
         } else {
@@ -1734,14 +1782,17 @@ impl Driven {
         }
         if self.running {
             // A stop asked for and not acknowledged ends the process: the turn ended stopped.
+            let stopping = self.interrupting.is_some() || self.stop_acked.is_some();
             let end = match why {
-                Some(why) if self.interrupting.is_none() => End::Failed(Some(why.to_owned())),
+                Some(why) if !stopping => End::Failed(Some(why.to_owned())),
                 _ => End::Interrupted,
             };
             outs.extend(self.history.ended(&end, now));
         }
         self.running = false;
         self.interrupting = None;
+        self.stop_acked = None;
+        self.starting = None;
         self.ending = None;
         outs.extend(self.history.stopping(None));
         outs.extend(self.history.gone(now));

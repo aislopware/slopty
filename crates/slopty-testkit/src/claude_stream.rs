@@ -68,7 +68,11 @@
 //! message (the turn still runs); `STUB_MALFORMED` writes a line that is no JSON and one cut short
 //! first; `STUB_NEVER_ANSWER_INIT` leaves `initialize` unanswered; `STUB_EXIT_ON_START=<code>` says
 //! so on stderr and exits with `code` at once. `STUB_TURN_GAP_MS` (20 by default) paces a turn's
-//! steps.
+//! steps. Orca's faults: `STUB_ACK_WITHOUT_ENDING` answers an `interrupt` at once and goes on
+//! with the turn; `STUB_IGNORE_SIGTERM` runs with `SIGTERM` ignored (it starts itself again
+//! under a shell that ignores it, keeping its pid); `STUB_GRANDCHILD=<secs>` leaves a process of
+//! its own group behind that holds its standard output for that long after it ends;
+//! `STUB_DEAF` stops reading its standard input once it heard its first message, and goes on.
 //!
 //! What it was started with goes to `STUB_RECORD` as one JSON document, replaced whole as it
 //! hears each line: its pid, arguments, directory, `SLOPTY_*` and `CLAUDE_*` environment, every
@@ -112,6 +116,12 @@ pub fn run(args: &[String]) -> ExitCode {
         drop(writeln!(err, "claude: this install is broken (STUB_EXIT_ON_START)"));
         return ExitCode::from(code.parse::<u8>().unwrap_or(1));
     }
+    if knob("STUB_IGNORE_SIGTERM", args).is_some() && std::env::var_os(SIGTERM_IGNORED).is_none() {
+        return ignoring_sigterm(args);
+    }
+    if let Some(secs) = knob("STUB_GRANDCHILD", args) {
+        hold_stdout(&secs);
+    }
     let mut stub = match Stub::new(args) {
         Ok(stub) => stub,
         Err(code) => return code,
@@ -124,6 +134,45 @@ const MCP_PATIENCE: Duration = Duration::from_secs(60);
 
 /// Where a tool call's arguments name the agent the turn last started.
 const STARTED_PLACE: &str = concat!("{", "started", "}");
+
+/// Set once the stand-in runs again with `SIGTERM` ignored ([`ignoring_sigterm`]).
+const SIGTERM_IGNORED: &str = "STUB_SIGTERM_IGNORED";
+
+/// Run again as this same process (`exec`, the pid kept) under a shell that ignores `SIGTERM`:
+/// an ignored signal stays ignored across `exec`, so the stand-in that comes back cannot be
+/// ended by it. Returns only when the `exec` failed.
+fn ignoring_sigterm(args: &[String]) -> ExitCode {
+    use std::os::unix::process::CommandExt as _;
+    let Ok(me) = std::env::current_exe() else { return ExitCode::from(2) };
+    let failed = Command::new("/bin/sh")
+        .arg("-c")
+        .arg("trap '' TERM; exec \"$0\" \"$@\"")
+        .arg(me)
+        .args(args)
+        .env(SIGTERM_IGNORED, "1")
+        .exec();
+    let mut err = std::io::stderr().lock();
+    drop(writeln!(err, "claude: could not ignore SIGTERM: {failed}"));
+    ExitCode::from(2)
+}
+
+/// Leave behind a `sleep` of `secs` seconds in a process group of its own, holding this
+/// process's standard output: its reader sees no end of it until the sleep ends, whatever
+/// becomes of the stand-in.
+fn hold_stdout(secs: &str) {
+    use std::os::unix::process::CommandExt as _;
+    let held = Command::new("sleep")
+        .arg(secs)
+        .stdin(Stdio::null())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn();
+    if let Err(e) = held {
+        let mut err = std::io::stderr().lock();
+        drop(writeln!(err, "claude: no grandchild: {e}"));
+    }
+}
 
 /// The variable `name`, with `{conversation}` the session the stand-in was started on and
 /// `{session}` the Slopty seat it runs in.
@@ -199,6 +248,8 @@ struct Stub {
     no_echo: bool,
     crash: bool,
     never_init: bool,
+    /// An `interrupt` is answered and the turn goes on (`STUB_ACK_WITHOUT_ENDING`).
+    ack_only: bool,
     gap: Duration,
     /// User messages waiting for their turn.
     queue: VecDeque<Value>,
@@ -272,12 +323,18 @@ impl Stub {
             }
         }
         let (tx, heard) = mpsc::channel();
+        let deaf = std::env::var_os("STUB_DEAF").is_some();
         drop(std::thread::spawn(move || {
             for line in std::io::stdin().lock().lines() {
                 let Ok(line) = line else { break };
-                if let Ok(value) = serde_json::from_str::<Value>(&line)
-                    && tx.send(Heard::Line(value)).is_err()
-                {
+                let Ok(value) = serde_json::from_str::<Value>(&line) else { continue };
+                let prompt = value.get("type").and_then(Value::as_str) == Some("user");
+                if tx.send(Heard::Line(value)).is_err() {
+                    return;
+                }
+                if deaf && prompt {
+                    // Reads nothing more, and never says its input ended.
+                    let _kept = Box::leak(Box::new(tx));
                     return;
                 }
             }
@@ -302,6 +359,7 @@ impl Stub {
             no_echo: set("STUB_NO_ECHO"),
             crash: set("STUB_CRASH_MID_TURN"),
             never_init: set("STUB_NEVER_ANSWER_INIT"),
+            ack_only: set("STUB_ACK_WITHOUT_ENDING"),
             gap: millis("STUB_TURN_GAP_MS", 20),
             queue: VecDeque::new(),
             asked: BTreeMap::new(),
@@ -451,6 +509,9 @@ impl Stub {
         match field("subtype").as_deref() {
             Some("initialize") if self.never_init => {}
             Some("initialize") => self.initialize(&id),
+            Some("interrupt") if self.running && self.ack_only => {
+                reply(&id, Some(json!({ "still_queued": [] })));
+            }
             Some("interrupt") if self.running => {
                 let due = Instant::now()
                     .checked_add(millis("STUB_SLOW_INTERRUPT_MS", 0))

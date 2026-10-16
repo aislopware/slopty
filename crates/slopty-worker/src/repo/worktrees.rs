@@ -429,6 +429,14 @@ async fn set_up(
     Ok(())
 }
 
+/// The main checkout of the repository `cwd` is in ([`clone_of`]), resolved: the clone whose
+/// agents' worktrees [`sweep`] looks over. `None` for a folder in no repository.
+#[must_use]
+pub fn main_checkout(cwd: &Path) -> Option<PathBuf> {
+    let (clone, _within) = clone_of(cwd).ok()?;
+    Some(std::fs::canonicalize(&clone).unwrap_or(clone))
+}
+
 /// The main checkout of the repository `cwd` is in, and where `cwd` stands in its own
 /// checkout. A worktree's main checkout is the one its git directory is shared from; a
 /// submodule's, whose shared directory is no checkout's `.git`, is its own.
@@ -628,14 +636,18 @@ pub async fn remove(
     }
     let status = bundle::run(git, &tree, &["status", "--porcelain"]).await?;
     if !status.trim().is_empty() {
-        let lines: Vec<&str> = status.lines().take(SAID_LINES).collect();
-        return Err(Failed::Uncommitted(format!(
-            "{} has changes not committed: {}",
-            tree.display(),
-            lines.join("; ")
-        )));
+        return Err(Failed::Uncommitted(kept_words(&tree, &status)));
     }
     take_out(git, (&tree, &clone, branch), landed, false).await
+}
+
+/// What is said of worktree `tree` kept for what `git status --porcelain` lists in it (`status`),
+/// as Claude desktop says it: how many, then the first few.
+fn kept_words(tree: &Path, status: &str) -> String {
+    let count = status.lines().count();
+    let noun = if count == 1 { "change" } else { "changes" };
+    let lines: Vec<&str> = status.lines().take(SAID_LINES).map(str::trim).collect();
+    format!("Kept: {count} uncommitted {noun} in {} ({})", tree.display(), lines.join("; "))
 }
 
 /// Remove the worktree at `worktree` for good, changes not committed and all.
@@ -748,6 +760,86 @@ pub async fn free(
         landed.push(branch);
     }
     remove(git, &tree, &landed, terminals).await
+}
+
+/// What a sweep of a clone's agent worktrees did ([`sweep`]).
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct Swept {
+    /// The worktrees that went, each with what went of its branch.
+    pub removed: Vec<(PathBuf, Removed)>,
+    /// The ones whose work landed but that hold something not committed, each with how many
+    /// files git lists as changed there: kept, nothing of them lost.
+    pub kept: Vec<(PathBuf, u32)>,
+}
+
+/// Take away the worktrees agents left under `clone`'s `.claude/worktrees/` whose work has
+/// landed, as [`free`] would for the person.
+///
+/// Each one clean, with no folder of `keep` in it (a thread the worker holds, a live terminal),
+/// and every commit on it in `origin`'s default branch or the branch the clone has checked out,
+/// by patch, or its pull request merged at its tip as the forge's command line says. One that holds
+/// anything not committed is kept and counted. A worktree with work not landed, one made by hand or
+/// by another tool elsewhere, and the clone itself are never touched. A worktree that cannot go
+/// (its archive script failed, git refused) is left as it is, for the next sweep.
+///
+/// # Errors
+/// [`Failed::NotOne`] for a `clone` in no repository, [`Failed::Other`] for a git that cannot
+/// list its worktrees.
+pub async fn sweep(
+    git: &Path,
+    programs: &super::commit::Programs,
+    clone: &Path,
+    keep: &[PathBuf],
+) -> Result<Swept, Failed> {
+    let clone = {
+        let root = clone.to_path_buf();
+        tokio::task::spawn_blocking(move || clone_of(&root))
+            .await
+            .map_err(|e| Failed::Other(e.to_string()))??
+            .0
+    };
+    let clone = std::fs::canonicalize(&clone).unwrap_or(clone);
+    let place = AGENT_WORKTREES.iter().fold(clone.clone(), |dir, part| dir.join(part));
+    let listed = bundle::run(git, &clone, &["worktree", "list", "--porcelain"]).await?;
+    let landed = [DEFAULT_BRANCH.to_owned(), "HEAD".to_owned()];
+    let mut swept = Swept::default();
+    for (tree, branch) in linked_trees(&listed) {
+        let tree = std::fs::canonicalize(&tree).unwrap_or(tree);
+        if tree.parent() != Some(place.as_path())
+            || !tree.is_dir()
+            || keep.iter().any(|cwd| inside(cwd, &tree))
+        {
+            continue;
+        }
+        let Ok(status) = bundle::run(git, &tree, &["status", "--porcelain"]).await else {
+            continue;
+        };
+        let mut gone = landed.to_vec();
+        let merged = ahead_of(git, &clone, &tree, &landed).await == 0
+            || (branch.is_some()
+                && programs.has_forge()
+                && merged_at_tip(git, programs, &tree).await);
+        if !merged {
+            continue;
+        }
+        if !status.trim().is_empty() {
+            let changed = u32::try_from(status.lines().count()).unwrap_or(u32::MAX);
+            tracing::info!(tree = %tree.display(), changed, "a landed worktree kept: uncommitted");
+            swept.kept.push((tree, changed));
+            continue;
+        }
+        if let Some(branch) = &branch
+            && !landed_in(git, &clone, branch, &landed).await
+        {
+            // Merged at its tip by the forge, which `git cherry` cannot see.
+            gone.push(branch.clone());
+        }
+        match take_out(git, (&tree, &clone, branch), &gone, false).await {
+            Ok(removed) => swept.removed.push((tree, removed)),
+            Err(e) => tracing::info!(tree = %tree.display(), "a landed worktree stays: {e}"),
+        }
+    }
+    Ok(swept)
 }
 
 /// How `origin`'s default branch is named in a clone.
@@ -1195,7 +1287,8 @@ mod tests {
         std::fs::write(tree.join("draft.txt"), "half done").expect("write");
         let dirty = remove(git, &tree, &landed, &[]).await;
         assert!(
-            matches!(&dirty, Err(Failed::Uncommitted(why)) if why.contains("draft.txt")),
+            matches!(&dirty, Err(Failed::Uncommitted(why))
+                if why.starts_with("Kept: 1 uncommitted change in ") && why.contains("draft.txt")),
             "{dirty:?}"
         );
         assert!(tree.join("draft.txt").exists(), "nothing of it is lost");
@@ -1216,6 +1309,52 @@ mod tests {
         let gone = remove(git, &elsewhere, &landed, &[]).await.expect("removed");
         assert!(gone.branch_removed, "{gone:?}");
         assert!(!elsewhere.exists());
+    }
+
+    /// A sweep takes the agents' worktrees whose work landed and that are clean, their branches
+    /// with them; it keeps and counts a landed one with something not committed, and never
+    /// touches one with work not landed, one a thread or a terminal works in, or one made by
+    /// hand elsewhere. Swept again, it finds nothing more to take.
+    #[tokio::test]
+    async fn a_sweep_takes_landed_clean_worktrees_and_keeps_the_rest() {
+        let Some(git) = crate::changes::git() else { return };
+        let tmp = tempfile::tempdir().expect("temp");
+        let clone = tmp.path().join("clone");
+        std::fs::create_dir_all(&clone).expect("mkdir");
+        git_in(&clone, &["init", "-q", "-b", "main"]);
+        git_in(&clone, &["commit", "-q", "--allow-empty", "-m", "c0"]);
+        let (landed, landed_branch) = agent_tree(&clone, "landed");
+        let (dirty, dirty_branch) = agent_tree(&clone, "dirty");
+        let (held, held_branch) = agent_tree(&clone, "held");
+        let (open, _) = agent_tree(&clone, "open");
+        for branch in [&landed_branch, &dirty_branch, &held_branch] {
+            git_in(&clone, &["cherry-pick", branch]);
+        }
+        std::fs::write(dirty.join("draft.txt"), "half done").expect("write");
+        std::fs::write(dirty.join("notes.txt"), "more").expect("write");
+        let elsewhere = tmp.path().join("elsewhere");
+        let elsewhere_text = elsewhere.to_string_lossy().into_owned();
+        git_in(&clone, &["worktree", "add", "-q", "-b", "mine", &elsewhere_text, "main"]);
+        let programs = crate::repo::commit::Programs::default();
+        std::fs::create_dir_all(held.join("src")).expect("mkdir");
+        let keep = [held.join("src")];
+
+        let swept = sweep(git, &programs, &clone, &keep).await.expect("swept");
+        let real = |p: &Path| std::fs::canonicalize(p).expect("there");
+        assert_eq!(swept.kept, [(real(&dirty), 2)], "{swept:?}");
+        let [(gone, removed)] = swept.removed.as_slice() else { panic!("{swept:?}") };
+        assert_eq!(gone.file_name(), landed.file_name());
+        assert_eq!(removed, &Removed { branch: Some(landed_branch.clone()), branch_removed: true });
+        assert!(!landed.exists() && !has_branch(&clone, &landed_branch), "it went whole");
+        for stays in [&dirty, &held, &open, &elsewhere] {
+            assert!(stays.exists(), "{} stays", stays.display());
+        }
+        assert!(dirty.join("draft.txt").exists(), "nothing of it lost");
+
+        let again = sweep(git, &programs, &clone, &keep).await.expect("swept");
+        assert!(again.removed.is_empty(), "{again:?}");
+        let not_one = sweep(git, &programs, tmp.path(), &keep).await;
+        assert!(matches!(not_one, Err(Failed::NotOne(_))), "{not_one:?}");
     }
 
     /// A run the person let go takes its worktree with it, changes not committed and all, but

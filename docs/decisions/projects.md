@@ -386,3 +386,25 @@ tools and its own judgement. Slopty adds reach and hearing, not a workflow.
     The project goldens changed, and `script_set`, `script_delete`, `script_run` and
     `run_script` are gone with their verbs.
 
+
+- ✅ **Landed worktrees are swept daily, and a kept one says what it keeps** (2026-10-16, goal
+  re-audit finding 25, the worker side). Nothing cleaned up the worktrees agents left (Claude
+  Code's subagent trees, the runs a terminal held when they were closed), and a worktree kept
+  for its uncommitted files said so only in a trace.
+  - **The sweep.** Ten minutes after the worker starts, then every 24 hours, it looks over each
+    clone a thread it holds works in (`repo::worktrees::sweep`). Under `.claude/worktrees/` it
+    removes each worktree whose work landed: every commit in `origin`'s default branch or the
+    clone's checked-out branch by patch, or its pull request merged at its tip as `gh` or `glab`
+    says. Its branch goes once landed, as `free` does. It never touches a worktree with work
+    not landed, one a held thread or a live terminal works in, one made elsewhere by hand or by
+    Codex, or the clone. A landed one with anything not committed is kept and counted. A
+    thread's own worktree is never swept while the worker holds the thread, so a chat taken up
+    again still finds its folder.
+  - **The words.** A worktree kept for what is not committed is refused as
+    "Kept: N uncommitted changes in <tree> (<first lines>)", Claude desktop's words, wherever it
+    is freed: `GitOp::RemoveWorktree`, orchestration's verbs, and the sweep's log. Freeing a
+    chat's worktree when the person archives it is the client's call of
+    `GitOp::RemoveWorktree`, which shows these words; archiving stays the person's filing on
+    the app.
+  - Tests: `repo::worktrees::tests::{a_sweep_takes_landed_clean_worktrees_and_keeps_the_rest,
+    a_worktree_in_use_or_not_committed_is_kept}` (`slopty-worker`).

@@ -38,6 +38,28 @@ pub const MODEL_FLAG: &str = "--model";
 /// The flag that has a resume keep the conversation only up to a message, by its record's id.
 pub const RESUME_AT_FLAG: &str = "--resume-session-at";
 
+/// The oldest Claude Code driven.
+///
+/// The version [`DRIVEN`]'s flags and the records read were last proved against. An older one may
+/// exit at once on a flag it does not know, so it is not started; the person is asked to update it
+/// ([`too_old`]).
+pub const MIN_VERSION: &str = "2.1.301";
+
+/// What to say when Claude Code at `version` (as it says its version) is older than
+/// [`MIN_VERSION`]; `None` when it is not, or says no version Slopty can read.
+#[must_use]
+pub fn too_old(version: &str) -> Option<String> {
+    let numbers = |text: &str| -> Option<Vec<u64>> {
+        let mut words = text.split(|c: char| !c.is_ascii_digit() && c != '.');
+        let dotted = words.find(|w| !w.is_empty())?;
+        dotted.split('.').map(|part| part.parse().ok()).collect()
+    };
+    let (have, least) = (numbers(version)?, numbers(MIN_VERSION)?);
+    (have < least).then(|| {
+        format!("Update Claude Code on this machine to {MIN_VERSION} or later: it is {version}")
+    })
+}
+
 /// The flags every driven Claude Code runs with.
 ///
 /// A run that prints, reading and writing stream-json, asking about tool calls over the same
@@ -180,6 +202,18 @@ pub fn model_label(model: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A version older than the floor is asked to be updated; the floor itself, a newer one, a
+    /// build's suffix and a version that cannot be read are not.
+    #[test]
+    fn a_claude_code_older_than_the_floor_is_asked_to_update() {
+        let said = too_old("2.1.300").expect("older");
+        assert!(said.contains(MIN_VERSION) && said.ends_with("it is 2.1.300"), "{said}");
+        assert!(too_old("1.0.128 (Claude Code)").is_some());
+        for fine in [MIN_VERSION, "2.1.301-stub", "2.1.1000", "2.2.0", "3.0.0", "unknown", ""] {
+            assert_eq!(too_old(fine), None, "{fine}");
+        }
+    }
 
     /// A driven run prints stream-json both ways, asks over the stream, and names its session;
     /// the thread's own flags come after.

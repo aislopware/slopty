@@ -277,8 +277,13 @@ impl Acp {
                 ThreadAsk::Edit { intent: *pending, text, attachments }
             }
             Intent::Interrupt => {
-                if !live || !matches!(state.status.phase, Phase::Working | Phase::NeedsYou) {
-                    return refused("The agent is not working");
+                // One that is gone wakes only by a message. One at rest has nothing left to
+                // stop: done, not refused, so a stop never fails for having come late.
+                if !live {
+                    return refused("The agent is not running");
+                }
+                if !matches!(state.status.phase, Phase::Working | Phase::NeedsYou) {
+                    return Outcome::Done;
                 }
                 ThreadAsk::Interrupt
             }

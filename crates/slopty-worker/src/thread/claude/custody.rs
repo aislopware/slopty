@@ -48,6 +48,9 @@ struct Inner {
     socket: PathBuf,
     /// The link, once dialled; `None` while a lost one is dialled again.
     link: tokio::sync::Mutex<Option<PtydClient>>,
+    /// A lost link is being dialled again: calls meanwhile are refused at once rather than
+    /// dialling a second link or waiting out the backoff.
+    redialing: std::sync::atomic::AtomicBool,
     /// Each child exit ptyd reports, of any session.
     exits: broadcast::Sender<(SessionId, Exit)>,
     /// The sessions this worker holds, each with a copy of its socket: what a ptyd reached
@@ -72,6 +75,7 @@ impl Custody {
         let inner = Inner {
             socket,
             link: tokio::sync::Mutex::new(None),
+            redialing: std::sync::atomic::AtomicBool::new(false),
             exits,
             held: parking_lot::Mutex::new(HashMap::new()),
         };
@@ -90,7 +94,9 @@ impl Custody {
         self.inner.exits.subscribe()
     }
 
-    /// Run `call` on the link, dialling it first when there is none.
+    /// Run `call` on the link, dialling it first when there is none. Each step on the link is
+    /// bounded (`slopty_pty::client::ANSWER_WITHIN`), so the lock is never held for good, and
+    /// while a lost link is dialled again the call is refused at once.
     #[expect(
         clippy::significant_drop_tightening,
         reason = "the link is held across the call: one request at a time on it"
@@ -100,6 +106,9 @@ impl Custody {
         call: impl AsyncFnOnce(&mut PtydClient) -> Result<T, PtyError>,
     ) -> Result<T, String> {
         let mut link = self.inner.link.lock().await;
+        if link.is_none() && self.inner.redialing.load(std::sync::atomic::Ordering::Acquire) {
+            return Err("slopty-ptyd is being reached again".to_owned());
+        }
         if link.is_none() {
             *link =
                 Some(self.dial().await.map_err(|e| format!("slopty-ptyd is not reached: {e}"))?);
@@ -134,10 +143,13 @@ impl Custody {
         })
     }
 
-    /// The link was lost: dialled again until ptyd answers, each session held handed back.
+    /// The link was lost: dialled again until ptyd answers, each session held handed back. The
+    /// link's lock is held only to take the lost link out and put the new one in, never while
+    /// backing off, so a stop or a start meanwhile is answered at once.
     async fn redial(&self) {
-        let mut link = self.inner.link.lock().await;
-        *link = None;
+        use std::sync::atomic::Ordering;
+        self.inner.redialing.store(true, Ordering::Release);
+        *self.inner.link.lock().await = None;
         let mut wait = REDIAL_FIRST;
         let mut client = loop {
             if Arc::strong_count(&self.inner) <= 1 {
@@ -152,6 +164,7 @@ impl Custody {
                 }
             }
         };
+        let mut link = self.inner.link.lock().await;
         let held: Vec<(SessionId, OwnedFd, Adoptee)> = self
             .inner
             .held
@@ -176,6 +189,8 @@ impl Custody {
             }
         }
         *link = Some(client);
+        drop(link);
+        self.inner.redialing.store(false, Ordering::Release);
     }
 
     /// Every piped session ptyd holds: the Claude Codes of this worker and of those before it.

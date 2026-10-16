@@ -10,15 +10,16 @@
 //! 2. **Title.** The spinning circle Claude Code paints into the terminal title separates a running
 //!    turn from an idle prompt (`slopty_agent::title`).
 //!
-//! Each tick also tells the sleep policy how many agents are working with their terminals still
-//! printing (`slopty_worker::wake`).
+//! What it sees serves orchestration alone (`Verb::AgentStatus`, `WaitUntil::AgentNeedsInput`).
+//! The sleep policy counts the threads Slopty drives, as their host holds them
+//! (`crate::threads::awake`), never a terminal's title.
 
 use std::path::PathBuf;
 use std::time::Duration;
 
 use slopty_agent::Observation;
 use slopty_agent::detect::Program;
-use slopty_agent::status::{AgentEvent, AgentStatus};
+use slopty_agent::status::AgentEvent;
 use slopty_core::SessionId;
 use slopty_worker::session::Probe;
 
@@ -29,7 +30,6 @@ const TICK: Duration = Duration::from_millis(750);
 
 /// Watch every session for an agent, until the daemon stops.
 pub async fn watch(daemon: Daemon) -> ! {
-    let mut quiet = slopty_worker::wake::Quiet::default();
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
@@ -51,31 +51,7 @@ pub async fn watch(daemon: Daemon) -> ! {
             broadcast(&daemon, &agents, events);
             drop(agents);
         }
-
-        keep_awake(&daemon, &mut quiet);
     }
-}
-
-/// Tell the sleep policy how many agents are working that showed signs of work within its cap:
-/// their terminals printing. Nothing is sampled while the person's policy lets no agent hold
-/// the machine.
-fn keep_awake(daemon: &Daemon, quiet: &mut slopty_worker::wake::Quiet) {
-    if !daemon.wake.lock().counts_agents() {
-        return;
-    }
-    // Taken whole, so the table's lock is let go before each terminal is asked.
-    let agents = daemon.agents.lock().snapshot();
-    let signs: Vec<slopty_worker::wake::Signs> = agents
-        .into_iter()
-        .filter(|event| event.status == AgentStatus::Working)
-        .map(|event| event.session)
-        .filter_map(|session| {
-            let output = daemon.worker.get(session).ok()?.activity().borrow().output;
-            Some(slopty_worker::wake::Signs { session, output, paused: None })
-        })
-        .collect();
-    let at_work = quiet.working(&signs, std::time::Instant::now());
-    daemon.wake.lock().agents(at_work);
 }
 
 /// Send what the poll found, dropping anything already overtaken.

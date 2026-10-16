@@ -1575,3 +1575,75 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     with `grep`, `slopty` points at it, and the same file works under systemd's journal.
   - Tests: `log::tests::a_repeated_failure_is_told_once_an_hour` and
     `log_cap::a_log_past_its_cap_moves_aside_and_starts_again` (`slopty-crash`).
+
+- ✅ **The threads Slopty drives keep the machine awake, not a terminal's title** (2026-10-16,
+  goal re-audit finding 2; amends the sleep policy of 2026-09-30). The policy counted only
+  agents seen in terminals, whose Working came from the spinner Claude Code paints into the
+  title. Since a0091d20 every Claude Code is `claude -p` with no terminal and no title, so an
+  unattended worker (a phone pocketed, a laptop lid closed) could sleep mid-turn.
+  - **What counts.** Every 5 s (`threads::awake::TICK`; idle sleep comes after minutes) the
+    daemon looks the thread host over. A thread counts while it is `Working`, or `Waiting` on
+    its own background work, with its agent's process live (`wake::signs`). One that waits on
+    the person, rests, or whose process ended holds nothing. Every adapter counts the same
+    way: Claude Code, Codex, pi and ACP.
+  - **Progress, not leases.** In a turn a thread holds while its progress moves within
+    `SILENT_CAP`: a number folded from its counts and sizes (turns, items, the last item's
+    length or tool state, the spinner's tokens, the tasks' output), never the text, and never
+    moved by the 10 s lease stamp. The cap is 1 hour, up from 15 minutes: the spinner used to
+    repaint every second, but a stream-json turn says nothing while a long tool call runs, and
+    Claude desktop gives a turn without progress the same hour.
+  - **Paused turns keep their ceiling.** A `Waiting` thread holds for `PAUSED_CEILING` = 2 hours
+    from the pause (`Status::since_ms`), whatever its commands do. The descendant-CPU sign was
+    never fed once the title path went quiet, so it goes; `ports::descendants_cpu` is left with
+    no caller outside its test.
+  - **The title stays, for orchestration only.** `AgentTable` still reads a hand-run agent's
+    title, because `Verb::AgentStatus` and `WaitUntil::AgentNeedsInput` read it. Deleting it
+    and its 750 ms poll needs those verbs ruled on first: they read a terminal's screen state to
+    tell a model when a TUI agent is idle.
+  - Tests: `wake::tests::{a_thread_at_work_is_sampled_and_its_progress_moves_with_what_it_says,
+    the_cap_lets_a_silent_thread_go, a_paused_turn_counts_up_to_the_ceiling}`; `slopty-workerd`
+    `threads::{a_driven_turn_keeps_the_machine_awake_with_nobody_linked,
+    a_turn_whose_agent_died_lets_the_machine_sleep}`, read through `CtlRequest::Wake` with no
+    client linked.
+
+- ✅ **One worker per data directory** (2026-10-16, goal re-audit finding 16). A second worker
+  started on a directory the first serves from (one run by hand beside the service's) touched
+  the curtain's marker, the Caps Lock and the input source before its bind failed, and exited 1
+  like any failure.
+  - The worker takes an exclusive `flock` on the data directory itself (`File::try_lock`)
+    before it reads or writes anything there. A second one ends at once with `75`
+    (`HELD_ELSEWHERE`, `EX_TEMPFAIL`): no control socket, no marker, no port, and on a Mac it
+    does not lock the screen as a failed worker does. launchd's `KeepAlive` starts it again
+    after its 2 s throttle, and it takes the directory once the other is gone.
+  - The directory, not a file in it: the kernel lets go of the lock however the process ends,
+    `kill -9` included, and the purge's list of worker paths (`WORKER_STATE`) gains nothing.
+    The directory's own lock is the worker's; another daemon sharing the directory takes a
+    file of its own.
+  - Test: `slopty-workerd` `lock::a_second_worker_on_the_same_data_dir_ends_with_its_own_code`
+    (the second exits 75 without opening its socket, the first still answers, and a third
+    takes the directory after the first is killed outright).
+
+- ✅ **The worker waits on ptyd for 10 s at most** (2026-10-16, goal re-audit finding 9, the
+  ptyd side). `PtydClient` had no timeout. A ptyd stopped or wedged held the request, and with
+  it the terminals' tap loop and Claude Code's custody, both behind a mutex.
+  - Every connect, frame and request has `ANSWER_WITHIN` = 10 s. ptyd answers from memory or
+    one system call, in milliseconds. Past the bound the call fails as
+    `PtyError::Unanswered`, and the connection is cut: the reader stops and the socket is shut
+    both ways. A frame half sent or a reply still to come would put the stream out of step, so
+    the connection is never used again. Its exits' receiver ends, which is how both holders
+    (`manager::keep_ptyd` and `claude::custody`) already hear to dial ptyd again and hand back
+    every session.
+  - The custody's redial still holds its lock while it backs off; that part is in
+    `thread/claude/custody.rs` and follows the TUI parity round.
+  - Tests: `client::tests::{a_request_ptyd_never_answers_cuts_the_link_within_its_bound,
+    a_ptyd_that_stops_reading_cuts_the_link_within_its_bound}` (`slopty-pty`).
+
+- ✅ **A client's queued answers are capped** (2026-10-16, goal re-audit, the clipboard queue).
+  What the connection loop answers a client (a terminal's error, an items snapshot, a
+  clipboard fetch, a handoff's word) waited in an unbounded queue for room on the control
+  stream. A client that stopped reading grew it until its link timed out.
+  - The queue counts the encoded bytes it holds. Past `POSTED_MAX` = 16 MiB it takes nothing
+    more and cuts the link once (`close_code::PROTOCOL`, "answers unread"). The client links
+    again and is sent everything afresh, as after any drop. What was queued still goes in
+    order should the client read again before the close lands.
+  - Test: `conn::tests::answers_a_client_does_not_read_are_capped_and_cut_its_link_once`.

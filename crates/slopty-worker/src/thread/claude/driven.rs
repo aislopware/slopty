@@ -3,14 +3,16 @@
 //!
 //! The task is the session's one writer. What a client asks becomes control requests and user
 //! messages through the codec (`slopty_agent::claude::driven`); what Claude Code writes becomes
-//! the thread's actions. A worker that goes leaves Claude Code running in ptyd's custody
-//! ([`super::custody`]); a stop Claude Code does not acknowledge in time, or the end of the
-//! agent, closes its session there.
+//! the thread's actions. Its lines reach Claude Code's standard input through a writer of their
+//! own ([`Stdin`]), so a Claude Code that stops reading never holds the thread: a stop still
+//! lands, and past [`STDIN_MAX`] waiting it is ended. A worker that goes leaves Claude Code
+//! running in ptyd's custody ([`super::custody`]); a stop Claude Code does not acknowledge in
+//! time, or the end of the agent, closes its session there.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use slopty_agent::claude::driven::{Answered, Driven};
@@ -20,7 +22,6 @@ use slopty_proto::thread::{Action, Delivery, ThreadId, ThreadState};
 use slopty_proto::visual::AppAnswer;
 use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::UnixStream;
-use tokio::net::unix::WriteHalf;
 use tokio::sync::{mpsc, oneshot};
 
 use super::custody::Custody;
@@ -32,6 +33,77 @@ const REAPED: Duration = Duration::from_secs(2);
 
 /// How much of the end of Claude Code's standard error says why it failed.
 const STDERR_TAIL: u64 = 4096;
+
+/// How much may wait for a Claude Code to read its standard input before it is ended as stuck:
+/// room for many messages with their images, never the worker's memory.
+const STDIN_MAX: usize = 64 << 20;
+
+/// Why a Claude Code that stopped reading was ended.
+const STOPPED_READING: &str = "Claude Code stopped reading what it was sent and was ended";
+
+/// How long a worker that goes gives the writer to hand Claude Code the lines it has, so the
+/// next worker does not find one cut short.
+const LEFT_WRITES: Duration = Duration::from_secs(2);
+
+/// Claude Code's standard input: lines go to a writer of their own on a duplicate of the socket.
+struct Stdin {
+    /// To the writer; `None` once it ended or Claude Code was ended as stuck.
+    lines: Option<mpsc::UnboundedSender<Vec<u8>>>,
+    /// Bytes sent to the writer and not yet written.
+    queued: Arc<AtomicUsize>,
+    writer: tokio::task::JoinHandle<()>,
+}
+
+impl Stdin {
+    /// The writer of `thread`'s Claude Code on a duplicate of `socket`: a plain stream, not a
+    /// write half, so it ending never ends Claude Code's input.
+    fn new(socket: &UnixStream, thread: ThreadId) -> std::io::Result<Self> {
+        use std::os::fd::AsFd as _;
+        let fd = socket.as_fd().try_clone_to_owned()?;
+        let stream = std::os::unix::net::UnixStream::from(fd);
+        stream.set_nonblocking(true)?;
+        let mut out = UnixStream::from_std(stream)?;
+        let (lines, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let queued = Arc::new(AtomicUsize::new(0));
+        let written = Arc::clone(&queued);
+        let writer = tokio::spawn(async move {
+            while let Some(bytes) = rx.recv().await {
+                if let Err(e) = out.write_all(&bytes).await {
+                    tracing::debug!(%thread, "Claude Code's stdin is closed: {e}");
+                    return;
+                }
+                let _left = written.fetch_sub(bytes.len(), Ordering::AcqRel);
+            }
+        });
+        Ok(Self { lines: Some(lines), queued, writer })
+    }
+
+    /// Hand `bytes` to the writer: `false` once more than [`STDIN_MAX`] waits.
+    fn write(&mut self, bytes: Vec<u8>) -> bool {
+        if self.lines.is_none() {
+            return true;
+        }
+        let len = bytes.len();
+        let queued = self.queued.fetch_add(len, Ordering::AcqRel).saturating_add(len);
+        if queued > STDIN_MAX {
+            self.lines = None;
+            return false;
+        }
+        if self.lines.as_ref().is_some_and(|lines| lines.send(bytes).is_err()) {
+            self.lines = None;
+        }
+        true
+    }
+
+    /// The writer, given [`LEFT_WRITES`] to write what it holds, and then stopped.
+    async fn finish(mut self) {
+        self.lines = None;
+        if tokio::time::timeout(LEFT_WRITES, &mut self.writer).await.is_err() {
+            tracing::warn!("Claude Code did not take its last lines: one may be cut short");
+            self.writer.abort();
+        }
+    }
+}
 
 /// One running Claude Code and its thread.
 pub(super) struct Task {
@@ -51,6 +123,10 @@ pub(super) struct Task {
     status_due: Option<tokio::time::Instant>,
     /// Whether a status line command still runs: the next waits for it.
     status_busy: Arc<AtomicBool>,
+    /// Its standard input, once served.
+    stdin: Option<Stdin>,
+    /// Why it was ended, when the worker ended it for a reason of its own.
+    ended_for: Option<&'static str>,
 }
 
 /// How a task ended.
@@ -82,6 +158,8 @@ impl Task {
             apps: (HashMap::new(), 0),
             status_due: Some(tokio::time::Instant::now()),
             status_busy: Arc::new(AtomicBool::new(false)),
+            stdin: None,
+            ended_for: None,
         }
     }
 
@@ -99,17 +177,22 @@ impl Task {
         // Stamped alive while Claude Code runs, and not after: the lease goes before the end
         // is told.
         let lease = self.host.lease(self.thread);
+        match Stdin::new(&socket, self.thread) {
+            Ok(stdin) => self.stdin = Some(stdin),
+            Err(e) => {
+                tracing::warn!(thread = %self.thread, "Claude Code's stdin is not reached: {e}");
+            }
+        }
         // Borrowed halves: an owned write half shuts the socket's writing down when dropped,
         // which is Claude Code's standard input ending for ptyd's copy too, so a worker that
-        // goes would end the turn it means to leave running.
+        // goes would end the turn it means to leave running. The write half only ends it.
         let (read, write) = socket.split();
-        let mut write = Some(write);
         let mut exits = self.custody.exits();
         let mut lines = BufReader::new(std::io::Cursor::new(backlog).chain(read)).split(b'\n');
         self.driven.initialize();
-        self.flush(&mut write).await;
+        self.flush().await;
         for ask in first {
-            self.ask(ask, &mut write).await;
+            self.ask(ask).await;
         }
         let mut exit_status = None;
         let mut reaped_at = None;
@@ -146,8 +229,8 @@ impl Task {
                     Ok(Some(line)) => {
                         let outs = self.driven.line(&line, WallMs::now());
                         self.take(outs);
-                        self.flush(&mut write).await;
-                        self.next(&mut write).await;
+                        self.flush().await;
+                        self.next().await;
                     }
                     Ok(None) | Err(_) => break End::Gone,
                 },
@@ -157,18 +240,18 @@ impl Task {
                         self.take(outs);
                         self.custody.close(self.session).await;
                     }
-                    Some(ask) => self.ask(ask, &mut write).await,
+                    Some(ask) => self.ask(ask).await,
                     None => break End::Left,
                 },
                 () = expiry => {
                     let (outs, escalate) = self.driven.tick(WallMs::now());
                     self.take(outs);
-                    self.flush(&mut write).await;
+                    self.flush().await;
                     if escalate {
                         tracing::info!(thread = %self.thread, "Claude Code did not stop in time: ended");
                         self.custody.close(self.session).await;
                     }
-                    self.next(&mut write).await;
+                    self.next().await;
                 }
                 exit = exits.recv() => {
                     if let Ok((session, exit)) = exit && session == self.session {
@@ -191,16 +274,23 @@ impl Task {
         while let Ok(ask) = asks.try_recv() {
             left.push(ask);
         }
+        let stdin = self.stdin.take();
         if matches!(end, End::Left) {
-            // Claude Code goes on in ptyd's keeping; the next worker takes it up.
+            // Claude Code goes on in ptyd's keeping; the next worker takes it up, from whole
+            // lines.
+            if let Some(stdin) = stdin {
+                stdin.finish().await;
+            }
             self.custody.let_go(self.session);
             let _gone = ended.send((self.thread, left));
             return;
         }
         // Its standard input ends: one whose output closed and that still runs hears it.
-        if let Some(mut out) = write.take() {
-            let _ended = out.shutdown().await;
+        if let Some(stdin) = stdin {
+            stdin.writer.abort();
         }
+        let mut write = write;
+        let _ended = write.shutdown().await;
         let mut status = exit_status;
         if status.is_none() {
             let reaped = async {
@@ -215,7 +305,11 @@ impl Task {
             status = tokio::time::timeout(REAPED, reaped).await.ok();
         }
         let failed = status.flatten().is_some_and(|s| s != 0);
-        let why = if failed { Some(self.why().await) } else { None };
+        let why = match self.ended_for {
+            Some(why) => Some(why.to_owned()),
+            None if failed => Some(self.why().await),
+            None => None,
+        };
         // ptyd forgets the session, and the thread its custody.
         self.custody.close(self.session).await;
         let mut outs = self.driven.exited(why.as_deref(), WallMs::now());
@@ -286,22 +380,24 @@ impl Task {
         });
     }
 
-    /// Write what the codec has for Claude Code.
-    async fn flush(&mut self, write: &mut Option<WriteHalf<'_>>) {
+    /// Hand what the codec has for Claude Code to its writer; one with more than [`STDIN_MAX`]
+    /// unread is ended.
+    async fn flush(&mut self) {
         let lines = self.driven.take_writes();
-        let Some(out) = write.as_mut() else { return };
+        let Some(stdin) = self.stdin.as_mut() else { return };
         for line in lines {
             let mut bytes = line.into_bytes();
             bytes.push(b'\n');
-            if let Err(e) = out.write_all(&bytes).await {
-                tracing::debug!(thread = %self.thread, "Claude Code's stdin is closed: {e}");
-                *write = None;
+            if !stdin.write(bytes) {
+                tracing::warn!(thread = %self.thread, "Claude Code stopped reading its stdin: ended");
+                self.ended_for = Some(STOPPED_READING);
+                self.custody.close(self.session).await;
                 return;
             }
         }
     }
 
-    async fn ask(&mut self, ask: ThreadAsk, write: &mut Option<WriteHalf<'_>>) {
+    async fn ask(&mut self, ask: ThreadAsk) {
         let now = WallMs::now();
         match ask {
             ThreadAsk::Send { text, attachments, intent, delivery } => {
@@ -397,17 +493,17 @@ impl Task {
             // [`ThreadAsk::ShellDone`].
             ThreadAsk::Close | ThreadAsk::Shell { .. } => {}
         }
-        self.flush(write).await;
-        self.next(write).await;
+        self.flush().await;
+        self.next().await;
     }
 
     /// The next message held goes, once Claude Code has nothing else to do.
-    async fn next(&mut self, write: &mut Option<WriteHalf<'_>>) {
+    async fn next(&mut self) {
         let Some(next) = self.driven.next_queued() else { return };
         let attached = crate::thread::attach::read(&next.attachments).await;
         let outs = self.driven.send(&next.text, &attached, next.intent, WallMs::now());
         self.take(outs);
-        self.flush(write).await;
+        self.flush().await;
     }
 }
 
@@ -434,4 +530,26 @@ pub(super) fn read_again(
     let mut driven = Driven::of(state, now);
     let outs = driven.replay(records, running, now);
     (driven, outs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A Claude Code that reads nothing: its lines wait with the writer, never the task, until
+    /// more than [`STDIN_MAX`] waits; then it is said stuck. A line on a closed input is let go.
+    #[tokio::test]
+    async fn lines_a_claude_code_does_not_read_wait_up_to_the_cap() {
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        let mut stdin = Stdin::new(&ours, ThreadId::new()).unwrap();
+        let half = vec![b'x'; STDIN_MAX / 2];
+        let began = std::time::Instant::now();
+        assert!(stdin.write(half.clone()), "the first half waits");
+        assert!(stdin.write(half.clone()), "the second half too: the cap is not passed");
+        assert!(!stdin.write(vec![b'x'; 2]), "past the cap it is stuck");
+        assert!(began.elapsed() < Duration::from_secs(1), "never waited on: {:?}", began.elapsed());
+        assert!(stdin.write(b"after\n".to_vec()), "once stuck, lines are let go");
+        drop(theirs);
+        stdin.finish().await;
+    }
 }

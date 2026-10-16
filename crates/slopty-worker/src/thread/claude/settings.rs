@@ -40,7 +40,11 @@ pub const SHELL_LIMIT: Duration = Duration::from_mins(10);
 pub const SHELL_KEPT: usize = 30_000;
 
 /// How often the status line runs at most.
-pub const STATUS_EVERY: Duration = Duration::from_millis(300);
+///
+/// Claude Code's TUI runs it 300 ms after a change for the one session it shows; a worker runs it
+/// for every thread at work at once, each a shell, so a line a moment old is the price of not
+/// starting several a second.
+pub const STATUS_EVERY: Duration = Duration::from_secs(2);
 
 /// The longest the status line command may take.
 pub const STATUS_LIMIT: Duration = Duration::from_secs(5);

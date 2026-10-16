@@ -356,7 +356,7 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
     let (watch_repos, repos) = watch::channel(Vec::new());
     tasks.spawn(crate::files::watch_repos(hello.client, out.clone(), repos));
     let (told, mut told_rx) = mpsc::unbounded_channel();
-    let posted = in_order(out.clone());
+    let posted = in_order(out.clone(), cut_when_stuck(&conn));
     daemon.clip.attach(link, clip_sink(posted.clone()));
     let (saves, saved) = mpsc::unbounded_channel();
     // Not one of the connection's tasks: saves and edit ends already sent are written and
@@ -372,7 +372,7 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
         hello.client,
         link,
         hello.name.clone(),
-        handoff_sink(out.clone()),
+        handoff_sink(out.clone(), cut_when_stuck(&conn)),
     );
     for session in unwatched {
         let _sent = daemon.presence.send((session, false));
@@ -491,7 +491,7 @@ const ASKING: &str = "macOS is asking on this machine whether Slopty may read th
 
 /// Where the clipboard sends this client a fetch its promises need: the control stream, in
 /// order and waiting for room ([`in_order`]) off the thread AppKit chose to answer a promise on.
-fn clip_sink(posted: mpsc::UnboundedSender<WorkerMsg>) -> slopty_worker::clip::Sink {
+fn clip_sink(posted: Posted) -> slopty_worker::clip::Sink {
     Arc::new(move |msg| {
         let _gone = posted.send(WorkerMsg::Clip(msg));
     })
@@ -697,26 +697,85 @@ impl InputOrder {
 /// Where the handoffs send this client an ask or a withdrawal: the control stream, in order,
 /// waiting for room. None is dropped: an ask lost leaves its program waiting, and a withdrawal
 /// lost leaves an ask on the client that is over. The handoffs call it under their lock, so a
-/// task of its own does the waiting; it ends when the handoffs let go of the client.
-fn handoff_sink(out: mpsc::Sender<WorkerMsg>) -> slopty_worker::handoff::Sink {
-    let told = in_order(out);
+/// task of its own does the waiting; it ends when the handoffs let go of the client. A client
+/// that reads none of it for [`POSTED_MAX`] is `stuck` ([`in_order`]).
+fn handoff_sink(out: mpsc::Sender<WorkerMsg>, stuck: Stuck) -> slopty_worker::handoff::Sink {
+    let told = in_order(out, stuck);
     Arc::new(move |msg| {
         let _gone = told.send(msg);
     })
 }
 
+/// The most a connection's answers may queue for a client that is not reading them, by their
+/// encoded size: an items snapshot, a terminal's error, a clipboard fetch, a handoff's word. A
+/// client that does not read this much is gone in all but name (its pings go unanswered past
+/// the relink's 6 s first), and a worker that kept queueing for it would grow without bound.
+const POSTED_MAX: usize = 16 << 20;
+
+/// What is done once with a connection whose client let [`POSTED_MAX`] queue unread.
+type Stuck = Arc<dyn Fn() + Send + Sync>;
+
+/// Close `conn` as stuck: its client links again, and is sent everything afresh.
+fn cut_when_stuck(conn: &Connection) -> Stuck {
+    let conn = conn.clone();
+    Arc::new(move || {
+        tracing::warn!("a client read none of {POSTED_MAX} bytes of answers; its link is cut");
+        conn.close(slopty_net::worker::close_code::PROTOCOL.into(), b"answers unread");
+    })
+}
+
+/// A queue into the control stream that never makes its sender wait ([`in_order`]).
+#[derive(Clone)]
+struct Posted {
+    tx: mpsc::UnboundedSender<(WorkerMsg, usize)>,
+    /// The encoded bytes queued and not yet taken by the control stream.
+    queued: Arc<std::sync::atomic::AtomicUsize>,
+    stuck: Stuck,
+}
+
+impl std::fmt::Debug for Posted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Posted").field("queued", &self.queued).finish_non_exhaustive()
+    }
+}
+
+impl Posted {
+    /// Queue `msg`; `false` when the queue is gone, or full: then nothing more is queued, and
+    /// the connection is `stuck` once.
+    fn send(&self, msg: WorkerMsg) -> bool {
+        use std::sync::atomic::Ordering;
+        let size = slopty_proto::codec::encode_body(&msg).map_or(0, |body| body.len());
+        let before = self.queued.fetch_add(size, Ordering::SeqCst);
+        if before > POSTED_MAX {
+            self.queued.fetch_sub(size, Ordering::SeqCst);
+            return false;
+        }
+        if before.saturating_add(size) > POSTED_MAX {
+            // Never below the cap again: what is queued stays unread, and nothing else goes.
+            self.queued.fetch_add(POSTED_MAX, Ordering::SeqCst);
+            (self.stuck)();
+            return false;
+        }
+        self.tx.send((msg, size)).is_ok()
+    }
+}
+
 /// A queue into `out` that never drops and never makes its sender wait: what is sent goes on
-/// in order, a task of its own waiting for room, until `out` closes or every sender is gone.
-fn in_order(out: mpsc::Sender<WorkerMsg>) -> mpsc::UnboundedSender<WorkerMsg> {
-    let (told, mut telling) = mpsc::unbounded_channel::<WorkerMsg>();
+/// in order, a task of its own waiting for room, until `out` closes or every sender is gone. It
+/// holds at most [`POSTED_MAX`] bytes the client has not read; one more is `stuck`.
+fn in_order(out: mpsc::Sender<WorkerMsg>, stuck: Stuck) -> Posted {
+    let (tx, mut telling) = mpsc::unbounded_channel::<(WorkerMsg, usize)>();
+    let queued = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let taken = Arc::clone(&queued);
     tokio::spawn(async move {
-        while let Some(msg) = telling.recv().await {
+        while let Some((msg, size)) = telling.recv().await {
             if out.send(msg).await.is_err() {
                 return;
             }
+            taken.fetch_sub(size, std::sync::atomic::Ordering::SeqCst);
         }
     });
-    told
+    Posted { tx, queued, stuck }
 }
 
 /// Tell the client a request about `session` failed, from a task that may wait for room.
@@ -732,11 +791,7 @@ async fn report(out: &mpsc::Sender<WorkerMsg>, client: ClientId, session: Sessio
 /// goes straight into the queue when it has room, ahead of what waits for it, since the client
 /// judges the link by how soon its pings come back (`slopty_net::liveness`); with none it
 /// waits in order too, as a pong lost is a ping missed.
-fn post(
-    (out, posted): (&mpsc::Sender<WorkerMsg>, &mpsc::UnboundedSender<WorkerMsg>),
-    client: ClientId,
-    msg: WorkerMsg,
-) {
+fn post((out, posted): (&mpsc::Sender<WorkerMsg>, &Posted), client: ClientId, msg: WorkerMsg) {
     let msg = match msg {
         WorkerMsg::Pong { .. } => match out.try_send(msg) {
             Err(mpsc::error::TrySendError::Full(msg)) => {
@@ -962,7 +1017,7 @@ struct Peer<'d> {
     conn: Connection,
     client: ClientId,
     /// What the loop answers the client, in order and never dropped ([`post`]).
-    posted: mpsc::UnboundedSender<WorkerMsg>,
+    posted: Posted,
     out: mpsc::Sender<WorkerMsg>,
     /// Receiver reports, for the task that applies them.
     reports: mpsc::Sender<Asked>,
@@ -1815,6 +1870,53 @@ mod tests {
         assert!(!lease.tick(at(30), true), "and the tick does not again");
     }
 
+    /// A queue whose client never reads is stuck as no one: the tests that read.
+    fn never_stuck() -> super::Stuck {
+        std::sync::Arc::new(|| panic!("stuck"))
+    }
+
+    /// A client that reads none of its answers holds at most [`super::POSTED_MAX`] of them:
+    /// the answer past it is refused and the link cut, once, and nothing is queued after; what
+    /// was queued before still goes, in order, should the client read again.
+    #[tokio::test]
+    async fn answers_a_client_does_not_read_are_capped_and_cut_its_link_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let (out, mut client) = tokio::sync::mpsc::channel(1);
+        let cuts = std::sync::Arc::new(AtomicUsize::new(0));
+        let counted = std::sync::Arc::clone(&cuts);
+        let posted = super::in_order(
+            out,
+            std::sync::Arc::new(move || {
+                counted.fetch_add(1, Ordering::SeqCst);
+            }),
+        );
+        let big = |request| WorkerMsg::Failed {
+            request,
+            code: slopty_proto::orchestration::ErrorCode::Invalid,
+            message: "x".repeat(1 << 20),
+        };
+        let mut taken = 0_u64;
+        while posted.send(big(taken)) {
+            taken = taken.saturating_add(1);
+            assert!(taken < 64, "a queue that never fills");
+        }
+        assert_eq!(cuts.load(Ordering::SeqCst), 1, "cut once");
+        assert!(!posted.send(big(99)), "nothing after");
+        assert!(!posted.send(WorkerMsg::Load(0.5)), "not even a small one");
+        assert_eq!(cuts.load(Ordering::SeqCst), 1, "and cut no more");
+        let queued = posted.queued.load(Ordering::SeqCst);
+        println!("{taken} answers of 1 MiB taken before the cap");
+        assert!(taken >= 15, "the cap holds what fits under it: {taken}");
+        assert!(queued >= super::POSTED_MAX, "it stays shut: {queued}");
+        for request in 0..taken {
+            match client.recv().await {
+                Some(WorkerMsg::Failed { request: got, .. }) => assert_eq!(got, request),
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
     /// A handoff's word reaches a client whose control queue is full at that moment, once there
     /// is room, and the words keep their order: an ask, then its withdrawal.
     #[tokio::test]
@@ -1824,7 +1926,7 @@ mod tests {
         let (out, mut client) = tokio::sync::mpsc::channel(1);
         out.try_send(WorkerMsg::Pong { sent_at: slopty_core::MonoTime::now() })
             .expect("room for one");
-        let sink = super::handoff_sink(out);
+        let sink = super::handoff_sink(out, never_stuck());
         for id in [1, 2, 3] {
             sink(WorkerMsg::Handoff(HandoffEvent::Withdrawn { id }));
         }
@@ -1853,7 +1955,7 @@ mod tests {
         let filler =
             WorkerMsg::SessionClosed { session: SessionId::new(), reason: CloseReason::Exited };
         out.try_send(filler).expect("room for one");
-        let posted = super::in_order(out.clone());
+        let posted = super::in_order(out.clone(), never_stuck());
         let session = SessionId::new();
         let failed = WorkerMsg::Term { session, event: TermEvent::Error(TermError::NoSuchSession) };
         let ponged = WorkerMsg::Pong { sent_at: slopty_core::MonoTime::now() };

@@ -56,6 +56,10 @@ pub enum PtyError {
     /// The socket closed.
     #[error("ptyd: connection closed")]
     Closed,
+    /// ptyd took no frame or gave no answer in time, and the connection was cut
+    /// ([`client::ANSWER_WITHIN`]); the word is what it was asked.
+    #[error("ptyd: no answer to {0} in time; the connection was cut")]
+    Unanswered(&'static str),
     /// Framing failed.
     #[error(transparent)]
     Codec(#[from] slopty_proto::codec::CodecError),

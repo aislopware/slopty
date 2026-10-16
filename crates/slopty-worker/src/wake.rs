@@ -5,25 +5,29 @@
 //! every session and stalls every agent mid-turn; a display that sleeps captures nothing.
 //!
 //! An agent keeps the machine up with nobody connected (a phone pocketed, a laptop lid closed)
-//! only while it shows signs of work ([`Quiet`]). During a turn that is its terminal: Claude Code
-//! repaints its spinner and timer throughout, so [`SILENT_CAP`] of silence means it hung or its
-//! end was never heard. A turn paused on background work is quiet on screen, so there it is
-//! also the processor time of the agent's descendant processes, the commands it left running:
-//! a build computes, a dev server waiting for requests does not. A paused turn holds the
-//! machine for [`PAUSED_CEILING`] at most, whatever it does, since a watcher that polls never
-//! ends. Otherwise an unattended worker sleeps as its owner set it to. The person may narrow it
+//! while its thread is at work ([`Quiet`]), as the thread host holds it: the thread is
+//! [`Phase::Working`] or [`Phase::Waiting`] on its own background work, and its agent's process
+//! runs. During a turn it holds only while the thread shows progress ([`signs`]): [`SILENT_CAP`]
+//! with nothing new from the agent means it hung or its end was never heard. A turn paused on
+//! background work says nothing while its commands run, so it holds from the pause on for
+//! [`PAUSED_CEILING`] at most, whatever they do, since a watcher that polls never ends.
+//! Otherwise an unattended worker sleeps as its owner set it to. The person may narrow it
 //! ([`Policy`], `[worker] keep_awake`, applied as the file changes): to attached clients only, or
 //! to nothing at all. The policy is pure and counts; the assertions behind [`Holds`] are the
 //! daemon's (`NSProcessInfo` activities through `slopty_platform::Activity`).
 
 use std::collections::HashMap;
+use std::hash::{Hash as _, Hasher as _};
 use std::time::{Duration, Instant};
 
-use slopty_core::SessionId;
+use slopty_core::WallMs;
+use slopty_proto::thread::{ItemBody, Liveness, Phase, ThreadId, ThreadState};
 
-/// How long a working agent may show no sign of work (its terminal printing, or for a paused
-/// turn its commands computing) before it stops keeping the machine awake.
-pub const SILENT_CAP: Duration = Duration::from_mins(15);
+/// How long a thread at work may show no progress before it stops keeping the machine awake.
+///
+/// A tool call that runs long (a build, a test run) streams nothing until it ends, so this is
+/// an hour, as Claude desktop gives a turn without progress.
+pub const SILENT_CAP: Duration = Duration::from_hours(1);
 
 /// How long a turn paused on background work holds the machine at most. A build or a test run
 /// is done well within it; a watcher that polls would otherwise hold the machine for good.
@@ -114,8 +118,8 @@ impl<H: Holds> Wake<H> {
         self.hold_system();
     }
 
-    /// How many agents are working now, not silent past [`SILENT_CAP`] ([`Quiet`]): the
-    /// machine is held while it is not zero, as while a client is attached.
+    /// How many threads are at work now, as [`Quiet`] counts them: the machine is held while
+    /// it is not zero, as while a client is attached.
     pub fn agents(&mut self, working: usize) {
         self.agents = working;
         self.hold_system();
@@ -172,42 +176,91 @@ impl<H: Holds> Wake<H> {
     }
 }
 
-/// One working agent's signs of work, sampled on a tick.
+/// One thread at work, as a tick samples it ([`signs`]).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Signs {
-    /// Its session.
-    pub session: SessionId,
-    /// Its terminal's output count (`session::Activity::output`).
-    pub output: u64,
-    /// For a turn paused on background work: how long it has been paused, and the processor
-    /// time its descendant processes have used (`ports::descendants_cpu`).
-    pub paused: Option<(Duration, u64)>,
+    /// The thread.
+    pub thread: ThreadId,
+    /// What it has said so far, folded to a number: it moves whenever the agent says anything
+    /// new (an item, a word of its answer, a tool's state or output, a task's output), and
+    /// never for a lease alone.
+    pub progress: u64,
+    /// For a turn paused on background work: how long it has been paused.
+    pub paused: Option<Duration>,
 }
 
-/// Which working agents showed signs of work lately.
+/// What `state` says of its thread for the sleep policy at `now`.
+///
+/// `None` unless it is at work, [`Phase::Working`] or [`Phase::Waiting`] with its agent's
+/// process running. A thread that waits on the person, or rests, holds nothing: the person is
+/// not there.
+#[must_use]
+pub fn signs(state: &ThreadState, now: WallMs) -> Option<Signs> {
+    if state.status.liveness != Liveness::Live {
+        return None;
+    }
+    let paused = match state.status.phase {
+        Phase::Working => None,
+        Phase::Waiting => {
+            let since = now.as_millis().saturating_sub(state.status.since_ms.as_millis());
+            Some(Duration::from_millis(since))
+        }
+        _ => return None,
+    };
+    Some(Signs { thread: state.meta.id, progress: progress(state), paused })
+}
+
+/// What a thread has said so far, folded to a number ([`Signs::progress`]): counts and sizes,
+/// never the text, so a tick reads nothing large.
+fn progress(state: &ThreadState) -> u64 {
+    let mut hash = std::hash::DefaultHasher::new();
+    (state.turns.len(), state.items.len(), state.requests.len()).hash(&mut hash);
+    if let Some(last) = state.items.last() {
+        last.id.hash(&mut hash);
+        match &last.body {
+            ItemBody::Text(text) | ItemBody::Reasoning(text) => text.chars.hash(&mut hash),
+            ItemBody::Tool(call) => {
+                std::mem::discriminant(&call.state).hash(&mut hash);
+                call.output.as_ref().map(|out| out.chars).hash(&mut hash);
+            }
+            _ => {}
+        }
+    }
+    if let Some(activity) = &state.activity {
+        activity.tokens.hash(&mut hash);
+    }
+    for task in &state.tasks {
+        (&task.state, task.output.as_ref().map(|out| out.chars)).hash(&mut hash);
+    }
+    hash.finish()
+}
+
+/// Which threads at work showed progress lately.
 #[derive(Debug, Default)]
 pub struct Quiet {
-    /// Per working agent's session: its signs as last seen, and when they last moved.
-    seen: HashMap<SessionId, ((u64, u64), Instant)>,
+    /// Per thread at work: its progress as last seen, and when it last moved.
+    seen: HashMap<ThreadId, (u64, Instant)>,
 }
 
 impl Quiet {
-    /// The agents working now, at `now`: how many showed a sign of work within [`SILENT_CAP`]
-    /// and, when paused, have been for less than [`PAUSED_CEILING`]. An agent that starts
+    /// The threads at work now, at `now`: those in a turn that showed progress within
+    /// [`SILENT_CAP`], and those paused for less than [`PAUSED_CEILING`]. A thread that starts
     /// working counts as having just moved, and one that stops is forgotten.
-    pub fn working(&mut self, agents: &[Signs], now: Instant) -> usize {
-        self.seen.retain(|session, _seen| agents.iter().any(|a| a.session == *session));
-        agents
+    pub fn working(&mut self, threads: &[Signs], now: Instant) -> usize {
+        self.seen.retain(|thread, _seen| threads.iter().any(|t| t.thread == *thread));
+        threads
             .iter()
-            .filter(|agent| {
-                let signs = (agent.output, agent.paused.map_or(0, |(_for, cpu)| cpu));
-                let (last, moved) = self.seen.entry(agent.session).or_insert((signs, now));
-                if *last != signs {
-                    *last = signs;
+            .filter(|thread| {
+                let (last, moved) =
+                    self.seen.entry(thread.thread).or_insert((thread.progress, now));
+                if *last != thread.progress {
+                    *last = thread.progress;
                     *moved = now;
                 }
-                let ceiling = agent.paused.is_some_and(|(paused, _cpu)| paused >= PAUSED_CEILING);
-                now.saturating_duration_since(*moved) < SILENT_CAP && !ceiling
+                match thread.paused {
+                    Some(paused) => paused < PAUSED_CEILING,
+                    None => now.saturating_duration_since(*moved) < SILENT_CAP,
+                }
             })
             .count()
     }
@@ -310,8 +363,6 @@ mod tests {
         assert!(!awake.system && !awake.display && awake.clients == 1 && awake.streams == 1);
     }
 
-    /// An agent whose terminal prints keeps counting; one silent for the cap stops, and
-    /// counts again as soon as it prints; one that stops working is forgotten.
     /// A policy changed while the worker runs takes and releases the holds at once.
     #[test]
     fn a_policy_changed_while_running_applies_at_once() {
@@ -333,10 +384,77 @@ mod tests {
         assert!(wake.awake().system && wake.awake().display);
     }
 
+    /// A Claude Code thread, at rest.
+    fn thread() -> ThreadState {
+        use slopty_proto::thread::{AgentId, Drive, ThreadMeta};
+        ThreadState::new(ThreadMeta {
+            modes: Vec::new(),
+            efforts: Vec::new(),
+            id: ThreadId::new(),
+            agent: AgentId::named(AgentId::CLAUDE_CODE),
+            agent_version: "2.1.300".to_owned(),
+            native: "s".to_owned(),
+            cwd: "/w".to_owned(),
+            title: "t".to_owned(),
+            parent: None,
+            origin: ThreadMeta::PERSON.to_owned(),
+            forked_from: None,
+            drive: Drive::named(Drive::DRIVEN),
+            caps: Vec::new(),
+            models: Vec::new(),
+            facts: std::collections::BTreeMap::new(),
+            created_ms: WallMs::ZERO,
+        })
+    }
+
+    /// Only a thread at work whose agent runs is sampled: working, or paused on its own
+    /// background work for as long as the pause has lasted. One waiting on the person, at rest,
+    /// or whose process ended holds nothing. Its progress moves with what the agent says, and
+    /// not with a lease.
     #[test]
-    fn the_cap_lets_a_silent_agent_go() {
-        let (a, b) = (SessionId::new(), SessionId::new());
-        let turn = |session, output| Signs { session, output, paused: None };
+    fn a_thread_at_work_is_sampled_and_its_progress_moves_with_what_it_says() {
+        use slopty_proto::thread::{Action, Clipped, Item, ItemId, Status, TurnId};
+
+        let now = WallMs::from_millis(10_000_000);
+        let mut state = thread();
+        assert_eq!(signs(&state, now), None, "at rest");
+        state.status = Status { phase: Phase::Working, since_ms: now, ..Status::default() };
+        let working = signs(&state, now).expect("working");
+        assert_eq!((working.thread, working.paused), (state.meta.id, None));
+
+        let said = |text: &str| Item {
+            id: ItemId("answer".to_owned()),
+            turn: TurnId(1),
+            at_ms: now,
+            body: ItemBody::Text(Clipped::whole(text)),
+        };
+        state.items.push(said("Rea"));
+        let first = signs(&state, now).unwrap().progress;
+        assert_ne!(first, working.progress, "an item");
+        state.items[0] = said("Reading the tests");
+        let more = signs(&state, now).unwrap().progress;
+        assert_ne!(more, first, "a word more of the answer");
+        state.apply(&Action::Lease(now));
+        assert_eq!(signs(&state, now).unwrap().progress, more, "a lease is no progress");
+
+        state.status.phase = Phase::Waiting;
+        let later = WallMs::from_millis(now.as_millis().saturating_add(90_000));
+        assert_eq!(signs(&state, later).unwrap().paused, Some(Duration::from_secs(90)));
+        for phase in [Phase::NeedsYou, Phase::Idle, Phase::Done, Phase::Failed, Phase::Stopped] {
+            state.status.phase = phase;
+            assert_eq!(signs(&state, now), None, "{phase:?}");
+        }
+        state.status.phase = Phase::Working;
+        state.status.liveness = Liveness::Exited { resumable: true };
+        assert_eq!(signs(&state, now), None, "its process ended");
+    }
+
+    /// A thread whose progress moves keeps counting; one silent for the cap stops, and counts
+    /// again as soon as it moves; one that stops working is forgotten.
+    #[test]
+    fn the_cap_lets_a_silent_thread_go() {
+        let (a, b) = (ThreadId::new(), ThreadId::new());
+        let turn = |thread, progress| Signs { thread, progress, paused: None };
         let mut quiet = Quiet::default();
         let t0 = Instant::now();
         let at = |d: Duration| t0.checked_add(d).unwrap();
@@ -344,7 +462,7 @@ mod tests {
         let late = SILENT_CAP.checked_add(Duration::from_secs(1)).unwrap();
         assert_eq!(quiet.working(&[turn(a, 11), turn(b, 5)], at(Duration::from_mins(1))), 2);
         assert_eq!(quiet.working(&[turn(a, 12), turn(b, 5)], at(late)), 1, "b went silent");
-        assert_eq!(quiet.working(&[turn(a, 12), turn(b, 6)], at(late)), 2, "b printed again");
+        assert_eq!(quiet.working(&[turn(a, 12), turn(b, 6)], at(late)), 2, "b moved again");
         assert_eq!(quiet.working(&[turn(b, 6)], at(late)), 1);
         assert_eq!(quiet.working(&[turn(a, 12), turn(b, 6)], at(late)), 2, "a starts afresh");
 
@@ -352,37 +470,25 @@ mod tests {
         let mut quiet = Quiet::default();
         wake.agents(quiet.working(&[turn(a, 1)], t0));
         wake.agents(quiet.working(&[turn(a, 1)], at(late)));
-        assert_eq!(wake.holds.0, ["system on", "system off"], "a hung agent lets the Mac sleep");
+        assert_eq!(wake.holds.0, ["system on", "system off"], "a hung turn lets the Mac sleep");
     }
 
-    /// A paused turn whose terminal is still counts while its commands compute, stops once
-    /// they have been idle for the cap (a dev server waiting), and stops at the ceiling
-    /// whatever they do (a watcher that polls).
+    /// A paused turn counts whatever its commands do, until the ceiling: a watcher that polls
+    /// would otherwise hold the machine for good.
     #[test]
-    fn a_paused_turn_counts_while_its_commands_compute_up_to_the_ceiling() {
-        let a = SessionId::new();
-        let paused =
-            |for_: Duration, cpu| Signs { session: a, output: 7, paused: Some((for_, cpu)) };
+    fn a_paused_turn_counts_up_to_the_ceiling() {
+        let a = ThreadId::new();
+        let paused = |for_: Duration| Signs { thread: a, progress: 7, paused: Some(for_) };
         let t0 = Instant::now();
         let at = |d: Duration| t0.checked_add(d).unwrap();
         let mut quiet = Quiet::default();
-        let step = Duration::from_mins(10);
-        assert_eq!(quiet.working(&[paused(Duration::ZERO, 100)], t0), 1);
-        assert_eq!(quiet.working(&[paused(step, 900)], at(step)), 1, "a build computes");
-        assert_eq!(quiet.working(&[paused(step * 2, 1700)], at(step * 2)), 1);
-        assert_eq!(quiet.working(&[paused(step * 3, 1700)], at(step * 3)), 1, "idle 10 min");
-        assert_eq!(quiet.working(&[paused(step * 4, 1700)], at(step * 4)), 0, "idle past the cap");
-        assert_eq!(quiet.working(&[paused(step * 5, 1800)], at(step * 5)), 1, "computing again");
-
-        let mut polling = Quiet::default();
-        let mut cpu = 0;
         let mut counted = Vec::new();
-        for minute in (0..=PAUSED_CEILING.as_secs() / 60 + 10).step_by(10) {
-            cpu += 5;
+        for minute in (0..=PAUSED_CEILING.as_secs() / 60 + 30).step_by(10) {
             let since = Duration::from_mins(minute);
-            counted.push(polling.working(&[paused(since, cpu)], at(since)));
+            counted.push(quiet.working(&[paused(since)], at(since)));
         }
         let held = counted.iter().take_while(|n| **n == 1).count();
         assert_eq!(u64::try_from(held).unwrap() * 10, PAUSED_CEILING.as_secs() / 60, "{counted:?}");
+        assert!(counted[held..].iter().all(|n| *n == 0), "and none after: {counted:?}");
     }
 }

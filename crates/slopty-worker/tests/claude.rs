@@ -364,6 +364,132 @@ mod claude {
         assert_eq!(state.turns.last().map(|t| t.state.clone()), Some(TurnState::Interrupted));
     }
 
+    /// Stop `thread` once its turn is under way, and the thread once its process ended, with
+    /// how long that took from the stop.
+    async fn stopped(rig: &Rig, claude: &Claude, thread: ThreadId) -> (ThreadState, Duration) {
+        rig.until(thread, "the turn under way", |s| {
+            s.turns.last().is_some_and(|t| t.state == TurnState::Active)
+        })
+        .await;
+        let asked = Instant::now();
+        assert_eq!(rig.intent(claude, thread, &Intent::Interrupt), Outcome::Done);
+        let state = rig.until(thread, "the process ended", exited).await;
+        (state, asked.elapsed())
+    }
+
+    /// Orca's fault "an ack without ending": Claude Code acknowledges the stop and goes on with
+    /// the turn. The stop still lands: once its turn has had [`END_WAIT`] to end, the process is
+    /// ended and the turn reads stopped.
+    ///
+    /// [`END_WAIT`]: slopty_agent::claude::driven::END_WAIT
+    #[tokio::test]
+    async fn a_stop_acknowledged_whose_turn_goes_on_still_ends_it() {
+        let rig = Rig::new(&[("STUB_ACK_WITHOUT_ENDING", "1")]).await;
+        let (claude, _served) = rig.serve();
+        let thread = rig.started(&claude, "slow 100").await;
+        let (state, took) = stopped(&rig, &claude, thread).await;
+        println!("an acknowledged stop whose turn went on ended Claude Code after {took:?}");
+        assert!(took >= slopty_agent::claude::driven::END_WAIT, "given its time first: {took:?}");
+        assert!(took < Duration::from_secs(12), "not left to finish: {took:?}");
+        assert_eq!(state.turns.last().map(|t| t.state.clone()), Some(TurnState::Interrupted));
+    }
+
+    /// A Claude Code that stops reading what it is sent does not hold its thread: a message it
+    /// never takes waits with the writer, and a stop still lands, by ending the process.
+    #[tokio::test]
+    async fn a_claude_code_that_stops_reading_still_stops() {
+        let rig = Rig::new(&[("STUB_DEAF", "1")]).await;
+        let (claude, _served) = rig.serve();
+        let thread = rig.started(&claude, "slow 300").await;
+        rig.until(thread, "the turn under way", |s| {
+            s.turns.last().is_some_and(|t| t.state == TurnState::Active)
+        })
+        .await;
+        rig.send(&claude, thread, &"x".repeat(4 << 20));
+        let (state, took) = stopped(&rig, &claude, thread).await;
+        println!("a Claude Code that stopped reading was ended {took:?} after its stop");
+        assert!(took < Duration::from_secs(10), "not held by its input: {took:?}");
+        assert_eq!(state.turns.last().map(|t| t.state.clone()), Some(TurnState::Interrupted));
+    }
+
+    /// Orca's fault "ignores SIGTERM": a Claude Code that neither acknowledges the stop nor
+    /// ends on `SIGTERM` is still ended, by ptyd's `SIGKILL` after its grace, and the turn reads
+    /// stopped.
+    #[tokio::test]
+    async fn a_claude_code_that_ignores_sigterm_is_still_ended() {
+        let rig =
+            Rig::new(&[("STUB_IGNORE_SIGTERM", "1"), ("STUB_SLOW_INTERRUPT_MS", "60000")]).await;
+        let (claude, _served) = rig.serve();
+        let thread = rig.started(&claude, "slow 300").await;
+        let (state, took) = stopped(&rig, &claude, thread).await;
+        println!("a Claude Code ignoring SIGTERM was ended {took:?} after its stop");
+        assert!(took < Duration::from_secs(20), "ended, not left running: {took:?}");
+        assert_eq!(state.turns.last().map(|t| t.state.clone()), Some(TurnState::Interrupted));
+    }
+
+    /// Orca's fault "a grandchild holding stdout": Claude Code dies mid-turn while a process it
+    /// left behind keeps its output open. The thread does not wait on that output: it reads
+    /// exited with why within moments of the death.
+    #[tokio::test]
+    async fn a_grandchild_holding_its_output_does_not_hold_the_thread() {
+        let rig = Rig::new(&[("STUB_GRANDCHILD", "40"), ("STUB_CRASH_MID_TURN", "1")]).await;
+        let (claude, _served) = rig.serve();
+        let began = Instant::now();
+        let thread = rig.started(&claude, "Say hello.").await;
+        let state = rig.until(thread, "the crash", exited).await;
+        let took = began.elapsed();
+        println!("a crash with its output held read exited after {took:?}");
+        assert!(took < Duration::from_secs(15), "not held by the grandchild: {took:?}");
+        assert!(
+            matches!(state.turns.last().map(|t| &t.state), Some(TurnState::Failed { .. })),
+            "{:?}",
+            state.turns
+        );
+    }
+
+    /// A stop that finds no turn running is done, not refused: it crossed the turn's end, or
+    /// came twice.
+    #[tokio::test]
+    async fn a_stop_with_no_turn_running_is_done() {
+        let rig = Rig::new(&[]).await;
+        let (claude, _served) = rig.serve();
+        let thread = rig.started(&claude, "Say hello.").await;
+        rig.until(thread, "the turn", turn_ended(1, TurnState::Complete)).await;
+        assert_eq!(rig.intent(&claude, thread, &Intent::Interrupt), Outcome::Done);
+        let state = rig.host.state(thread).unwrap().0;
+        assert_eq!(state.turns.len(), 1, "nothing was stopped: {:?}", state.turns);
+    }
+
+    /// A Claude Code that never answers `initialize` is said not to have started once
+    /// [`INIT_WAIT`] is up, and ended: the thread reads exited, not working for good.
+    ///
+    /// [`INIT_WAIT`]: slopty_agent::claude::driven::INIT_WAIT
+    #[tokio::test]
+    async fn a_claude_code_that_never_answers_initialize_is_said_not_to_start() {
+        let rig = Rig::new(&[("STUB_NEVER_ANSWER_INIT", "1")]).await;
+        let (claude, _served) = rig.serve();
+        let began = Instant::now();
+        let thread = rig.started(&claude, "Say hello.").await;
+        let bound = slopty_agent::claude::driven::INIT_WAIT.saturating_add(WAIT);
+        let state = tokio::time::timeout(bound, async {
+            loop {
+                let (state, _) = rig.host.state(thread).unwrap();
+                if exited(&state) {
+                    return state;
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        })
+        .await
+        .expect("ended");
+        println!("a Claude Code that never started read exited after {:?}", began.elapsed());
+        let said = state.items.iter().any(|i| {
+            matches!(&i.body, slopty_proto::thread::ItemBody::Notice(n)
+                if n.text.text.starts_with(slopty_agent::claude::driven::DID_NOT_START))
+        });
+        assert!(said, "{:#?}", state.items);
+    }
+
     /// Claude Code gone mid-turn fails the turn with why, from its standard error, and leaves
     /// the thread exited and resumable.
     #[tokio::test]
@@ -514,6 +640,38 @@ mod claude {
         assert_eq!(state.turns.len(), 2, "the first turn read again, the second after it");
     }
 
+    /// A thread whose transcript cannot be read is kept as it was, not read again from nothing:
+    /// its turns stay, the message that would take it up waits in its queue, and it says why.
+    #[tokio::test]
+    async fn a_transcript_that_cannot_be_read_keeps_the_thread() {
+        let rig = Rig::new(&[]).await;
+        let (claude, _served) = rig.serve();
+        let thread = rig.started(&claude, "Say hello.").await;
+        let state = rig.until(thread, "the first turn", turn_ended(1, TurnState::Complete)).await;
+        let transcript =
+            slopty_agent::claude::sessions::transcript(&rig.home, &rig.work, &state.meta.native);
+        assert_eq!(rig.intent(&claude, thread, &Intent::End), Outcome::Done);
+        rig.until(thread, "ended", exited).await;
+        let first = rig.record()["pid"].clone();
+        // A folder where the transcript was: there, and no file to read.
+        std::fs::remove_file(&transcript).unwrap();
+        std::fs::create_dir_all(&transcript).unwrap();
+
+        rig.send(&claude, thread, "Say more.");
+        let state = rig
+            .until(thread, "why it was kept", |s| {
+                notices(s).iter().any(|n| n.starts_with("Its transcript could not be read"))
+            })
+            .await;
+        assert_eq!(state.turns.len(), 1, "its turn kept: {:?}", state.turns);
+        assert!(
+            state.pending.iter().any(|p| p.text == "Say more."),
+            "the message waits: {:?}",
+            state.pending
+        );
+        assert_eq!(rig.record()["pid"], first, "nothing started");
+    }
+
     /// A live thread is stamped alive within 15 s while its Claude Code runs, idle or not,
     /// and never once the process is gone.
     #[tokio::test]
@@ -575,6 +733,26 @@ mod claude {
         }
         let at = argv.iter().position(|a| *a == "--session-id").expect("a session id");
         assert_eq!(argv[at + 1], state.meta.native);
+    }
+
+    /// A Claude Code older than the floor is not started: the start is refused with the words
+    /// that ask the person to update it, and nothing runs.
+    #[tokio::test]
+    async fn a_claude_code_older_than_the_floor_asks_to_be_updated() {
+        let rig = Rig::with(&[], |programs, _home| {
+            let script = programs.join("claude");
+            std::fs::write(&script, "#!/bin/sh\necho '2.0.14 (Claude Code)'\n").unwrap();
+            std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+                .unwrap();
+        })
+        .await;
+        let (claude, _served) = rig.serve();
+        let outcome = claude.start(IntentId::new(), rig.start("Say hello.")).await;
+        let Outcome::Refused { reason } = outcome else { panic!("{outcome:?}") };
+        assert!(reason.starts_with("Update Claude Code"), "{reason}");
+        assert!(reason.contains(slopty_agent::claude::MIN_VERSION), "{reason}");
+        assert!(reason.ends_with("it is 2.0.14"), "{reason}");
+        assert_eq!(rig.record(), Value::Null, "nothing started");
     }
 
     /// The tool calls a recorded transcript's main conversation makes.

@@ -2413,3 +2413,48 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **Wire.** `WorkerMsg::AgentBranch` and `AgentReport::Branch` (the worktree a status line
     named) and `FromServer::Pushes` (the word by which a worker held a prompt for a pocketed
     phone) are deleted; an agent's branch is its thread's `branch` fact.
+
+- ✅ **A driven Claude Code never holds its thread, and a stop always lands** (2026-10-16;
+  stability, after t3code's, Orca's and Claude desktop's failures). Every way a `claude -p` can
+  wedge has a bound, each proved against the stand-in's scripted fault
+  (`crates/slopty-worker/tests/claude.rs`, `slopty_agent::claude::driven` tests).
+  - **One stop ladder.** A stop is an `interrupt`; one Claude Code does not acknowledge within
+    `INTERRUPT_ACK` (1.5 s), or refuses, is ended through ptyd (`SIGTERM`, then `SIGKILL` after
+    the piped grace). One that acknowledges and goes on with its turn gets `END_WAIT` (3 s) for
+    the turn to end, then is ended the same way. Either way the turn reads stopped. A stop that
+    finds no turn under way while the agent runs (it crossed the turn's end, or came twice) is
+    done, not refused, for every driven agent (Claude Code, pi, ACP); one whose agent is gone is
+    still refused, since only a message wakes it. Orca's three faults are knobs of the stand-in and
+    a test each: an ack without ending, a `SIGTERM` ignored, a grandchild holding its output.
+  - **Stops and closes go around the queue.** The served loop that starts Claude Codes can wait
+    on a start; a stop, a task's stop and a close go straight to the running thread's task
+    (`Claude::at_once`), never behind it.
+  - **Its input has a writer of its own.** The lines for Claude Code's standard input go to a
+    task writing on a duplicate of the socket, so one that stops reading never holds the thread:
+    the stop still lands (`a_claude_code_that_stops_reading_still_stops`). Past 64 MiB unread it
+    is ended, saying so. A worker that goes gives the writer 2 s to finish its line, so the next
+    worker never finds one cut short. Every request to ptyd is bounded (`ANSWER_WITHIN`, 10 s,
+    `workers.md`); a lost ptyd link is dialled again without holding the link's lock, and a
+    call meanwhile is refused at once.
+  - **A message read again mid-send.** One that was on its way when the worker restarted is held
+    in time like any other: after `DELIVERY` it reads as maybe not arrived, and frees the queue.
+    `busy()` counts only messages still on their way.
+  - **A start that never answers.** A Claude Code that leaves `initialize` unanswered for
+    `INIT_WAIT` (30 s) is said not to have started ("Claude Code did not start in 30 s") and
+    ended. A late `result` from a cut turn needs no fence: one process writes one ordered
+    stream, and the thread's history already ends a turn once.
+  - **A stall names its last call**: "No progress for a while · last: Bash(cargo test)". Keep
+    waiting and Stop on it are the client's.
+  - **A version floor.** `MIN_VERSION` (2.1.301) is the version the drive's flags were last
+    proved against; an older `claude` (its version as the worker reads it) is not started, and
+    the start is refused with "Update Claude Code on this machine to 2.1.301 or later: it is
+    …", where before it exited on an unknown flag and read only "Claude Code ended". One whose
+    version cannot be read is started.
+  - **An unreadable transcript keeps the thread.** A transcript is read a line at a time and
+    lossily, so a byte that is not UTF-8 costs one character, never the file. One that cannot
+    be read at all no longer reads the thread again from nothing: the thread keeps what it held
+    and says why, the message that would take it up waits in its queue (the next tries again),
+    a Claude Code taken up after a restart is ended rather than served blind, and a fork through
+    an earlier turn is refused with why.
+  - **The status line** runs at most every 2 s per thread, not 300 ms: each run is a shell, and
+    a worker runs one for every thread at work.

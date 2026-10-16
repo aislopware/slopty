@@ -53,20 +53,27 @@ pub fn transcript(home: &Path, cwd: &Path, session: &str) -> PathBuf {
 /// Every record of session `session` run in `cwd`, as Claude Code wrote them.
 ///
 /// Its main transcript's come first, then each subagent's, in the order of their names. A file
-/// that is missing reads as none; a line that is not JSON is passed over.
+/// that is missing reads as none; a line that is not JSON is passed over. Each file is read a
+/// line at a time, and a byte that is not UTF-8 costs only its character, never the file.
 ///
 /// # Errors
 ///
 /// When a file is there but cannot be read.
 pub fn records(home: &Path, cwd: &Path, session: &str) -> std::io::Result<Vec<serde_json::Value>> {
+    use std::io::BufRead as _;
     let mut records = Vec::new();
     for file in files(home, cwd, session) {
-        let text = match std::fs::read_to_string(&file) {
-            Ok(text) => text,
+        let file = match std::fs::File::open(&file) {
+            Ok(file) => file,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => return Err(e),
         };
-        records.extend(text.lines().filter_map(|line| serde_json::from_str(line).ok()));
+        for line in std::io::BufReader::new(file).split(b'\n') {
+            let line = line?;
+            if let Ok(record) = serde_json::from_str(&String::from_utf8_lossy(&line)) {
+                records.push(record);
+            }
+        }
     }
     Ok(records)
 }
@@ -190,5 +197,23 @@ mod tests {
         let read = records(home.path(), cwd, "s1").expect("read");
         let ids: Vec<&str> = read.iter().filter_map(|r| r["uuid"].as_str()).collect();
         assert_eq!(ids, ["a", "b"]);
+    }
+
+    /// A byte that is not UTF-8 costs its record's character, never the transcript: the rest
+    /// of its line and every other line are read.
+    #[test]
+    fn a_byte_not_utf8_costs_only_its_character() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let cwd = Path::new("/slopty-absent/work");
+        let main = transcript(home.path(), cwd, "s2");
+        std::fs::create_dir_all(main.parent().expect("dir")).expect("mkdir");
+        let mut bytes = b"{\"uuid\":\"a\",\"text\":\"word".to_vec();
+        bytes.extend([0xff, b'"', b'}', b'\n']);
+        bytes.extend(b"{\"uuid\":\"b\"}\n");
+        std::fs::write(&main, bytes).expect("main");
+        let read = records(home.path(), cwd, "s2").expect("read");
+        let ids: Vec<&str> = read.iter().filter_map(|r| r["uuid"].as_str()).collect();
+        assert_eq!(ids, ["a", "b"]);
+        assert_eq!(read[0]["text"], "word\u{fffd}");
     }
 }

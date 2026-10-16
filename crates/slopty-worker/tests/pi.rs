@@ -286,7 +286,7 @@ mod pi {
         assert_eq!(tools(&state), want);
         assert_eq!(state.requests[2].state, RequestState::Withdrawn);
         let (_, late) = rig.intent(&pi, thread, &Intent::Interrupt);
-        assert!(matches!(late, Outcome::Refused { .. }), "nothing to stop: {late:?}");
+        assert_eq!(late, Outcome::Done, "nothing to stop: done, never refused");
 
         let record = rig.record();
         assert_eq!(record["unexpected"], serde_json::json!([]), "pi was sent what it was sent");

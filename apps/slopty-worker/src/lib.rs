@@ -548,6 +548,48 @@ type Curtain =
 #[cfg(target_os = "macos")]
 const PANICKED: i32 = 101;
 
+/// The exit code of a worker that found another holding its data directory ([`Held`]):
+/// `EX_TEMPFAIL`, as the service manager that started it may try again once the other is gone.
+pub const HELD_ELSEWHERE: u8 = 75;
+
+/// Another worker holds the data directory: this one ends before it does anything there.
+#[derive(Debug)]
+struct Held(String);
+
+impl std::fmt::Display for Held {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Held {}
+
+/// Hold `data_dir` for this worker alone, for as long as the answer lives: an exclusive `flock`
+/// on the directory itself, which the kernel lets go however the process ends, a crash or a
+/// `kill -9` included, so a lock never outlives its worker. Taken before anything is read or
+/// written there, so a second worker on the same directory (one started by hand beside the
+/// service's) touches nothing of the first's: not the curtain's marker, the Caps Lock, the input
+/// source, the threads, nor the port.
+///
+/// # Errors
+///
+/// [`Held`] when another process holds it; an I/O error when the directory cannot be opened.
+fn hold_data_dir(data_dir: &std::path::Path) -> Result<std::fs::File> {
+    let dir = std::fs::File::open(data_dir)
+        .with_context(|| format!("open data dir {}", data_dir.display()))?;
+    match dir.try_lock() {
+        Ok(()) => Ok(dir),
+        Err(std::fs::TryLockError::WouldBlock) => Err(Held(format!(
+            "another worker holds {}; this one ends without touching it",
+            data_dir.display()
+        ))
+        .into()),
+        Err(std::fs::TryLockError::Error(e)) => {
+            Err(e).with_context(|| format!("lock data dir {}", data_dir.display()))
+        }
+    }
+}
+
 /// One connection's hold on the curtain.
 type CurtainLink = slopty_worker::screen::curtain::Link<slopty_worker::screen::curtain::Native>;
 
@@ -703,7 +745,14 @@ pub fn main() -> Result<std::process::ExitCode> {
         .on_thread_start(slopty_platform::user_interactive_thread)
         .build()
         .context("start the runtime")?;
-    serve(runtime).map(|()| std::process::ExitCode::SUCCESS)
+    match serve(runtime) {
+        Ok(()) => Ok(std::process::ExitCode::SUCCESS),
+        Err(e) if e.is::<Held>() => {
+            tracing::warn!("{e}");
+            Ok(std::process::ExitCode::from(HELD_ELSEWHERE))
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// macOS: the main thread serves the run loop the displays made for clients live on
@@ -731,6 +780,11 @@ fn serve(runtime: tokio::runtime::Runtime) -> Result<()> {
             }));
             let code = match ended {
                 Ok(Ok(())) => 0,
+                // It did nothing, and holds nothing to lock the Mac for.
+                Ok(Err(e)) if e.is::<Held>() => {
+                    tracing::warn!("{e}");
+                    i32::from(HELD_ELSEWHERE)
+                }
                 Ok(Err(e)) => {
                     tracing::error!(error = ?e, "worker stopped");
                     lock_now(exit_lock.as_ref());
@@ -800,6 +854,8 @@ async fn run(
     let data_dir = args.data_dir.unwrap_or_else(slopty_platform::dirs::data_dir);
     std::fs::create_dir_all(&data_dir)
         .with_context(|| format!("create data dir {}", data_dir.display()))?;
+    // Before anything else in it: one worker per data directory.
+    let _held = hold_data_dir(&data_dir)?;
     let id = paths::worker_id(&data_dir)?;
     let own = slopty_settings::Settings::load(&slopty_settings::path_in(&data_dir)).settings.worker;
     // A run that ended with a client's source still selected puts the worker's own back first.

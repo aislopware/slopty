@@ -157,6 +157,7 @@ impl Driven {
                 continue;
             };
             let input = block.get("input").cloned().unwrap_or(Value::Null);
+            self.last_call = Some(call_words(name, &input));
             self.calls.insert(id.to_owned(), (name.to_owned(), input));
         }
     }
@@ -805,6 +806,26 @@ fn hook_allowed(message: &Value) -> bool {
             .or_else(|| specific.and_then(|s| s.get("decision")).and_then(|d| d.get("behavior")));
         decided.and_then(Value::as_str) == Some("allow")
     })
+}
+
+/// The most characters of a call's argument a stall names.
+const CALL_WORDS: usize = 60;
+
+/// A tool call in a few words, as the TUI heads it: `Bash(cargo test)`, `Edit(src/main.rs)`, or
+/// the tool's name alone.
+fn call_words(name: &str, input: &Value) -> String {
+    let argument = ["command", "file_path", "path", "pattern", "url", "description"]
+        .iter()
+        .find_map(|key| str_at(input, key))
+        .map(|said| said.lines().next().unwrap_or_default().trim());
+    match argument.filter(|said| !said.is_empty()) {
+        Some(said) if said.chars().count() > CALL_WORDS => {
+            let cut: String = said.chars().take(CALL_WORDS).collect();
+            format!("{name}({cut}…)")
+        }
+        Some(said) => format!("{name}({said})"),
+        None => name.to_owned(),
+    }
 }
 
 #[cfg(test)]

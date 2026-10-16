@@ -76,6 +76,8 @@ fn driven() -> (Driven, Host) {
     let mut host = Host::default();
     host.take(driven.drain());
     driven.initialize();
+    // Taken as answered: the tests of an `initialize` left unanswered start their own.
+    driven.starting = None;
     (driven, host)
 }
 
@@ -279,7 +281,120 @@ fn an_unacknowledged_stop_ends_the_process() {
         &json!({"type": "control_response", "response": {"subtype": "success", "request_id": id, "response": {"still_queued": []}}}),
         at(20),
     ));
-    assert!(!driven.tick(at(10_000)).1, "acknowledged");
+    assert!(!driven.tick(at(20 + ms(END_WAIT) - 1)).1, "acknowledged, its turn has a moment");
+    host.take(driven.incoming(
+        &json!({"type": "result", "subtype": "error_during_execution", "is_error": true}),
+        at(30),
+    ));
+    assert!(!driven.tick(at(10_000)).1, "the turn ended");
+    assert_eq!(driven.deadline(), None, "nothing waits");
+}
+
+/// A stop Claude Code acknowledges but whose turn never ends is escalated once [`END_WAIT`] is
+/// up, and the turn ends stopped, not failed, when the process goes. One it refuses is
+/// escalated as one it never acknowledged: the refusal is said, and the stop never rests there.
+#[test]
+fn a_stop_acknowledged_without_its_turn_ending_or_refused_still_lands() {
+    let answer = |id: &Value, ok: bool| {
+        let subtype = if ok { "success" } else { "error" };
+        json!({"type": "control_response", "response": {"subtype": subtype, "request_id": id,
+               "error": "busy", "response": {}}})
+    };
+    let (mut driven, mut host) = driven();
+    begun(&mut driven, &mut host, "go on", 1);
+    host.take(driven.interrupt(at(10)));
+    let stop: Value = serde_json::from_str(&driven.take_writes().pop().expect("a stop")).unwrap();
+    host.take(driven.incoming(&answer(&stop["request_id"], true), at(20)));
+    assert_eq!(driven.deadline(), Some(at(20 + ms(END_WAIT))), "the turn's moment to end");
+    assert!(!driven.tick(at(20 + ms(END_WAIT) - 1)).1);
+    assert!(driven.tick(at(20 + ms(END_WAIT))).1, "acknowledged, never ended: escalated");
+    host.take(driven.exited(Some("Claude Code ended: killed"), at(3_100)));
+    let thread = host.main(&driven);
+    let turn = thread.turns.last().expect("a turn");
+    assert_eq!(turn.state, TurnState::Interrupted, "stopped, as asked");
+
+    let (mut driven, mut host) = self::driven();
+    begun(&mut driven, &mut host, "go on", 1);
+    host.take(driven.interrupt(at(10)));
+    let stop: Value = serde_json::from_str(&driven.take_writes().pop().expect("a stop")).unwrap();
+    host.take(driven.incoming(&answer(&stop["request_id"], false), at(20)));
+    let said = notices(host.main(&driven));
+    assert!(said.iter().any(|(_, text)| text.contains("refused to stop")), "{said:?}");
+    assert!(driven.tick(at(10 + ms(INTERRUPT_ACK))).1, "refused: escalated all the same");
+}
+
+/// An `initialize` Claude Code never answers is said once [`INIT_WAIT`] is up, and the process
+/// is ended; one it answers waits on nothing.
+#[test]
+fn a_claude_code_that_never_answers_initialize_is_said_not_to_start() {
+    let mut driven = Driven::new(SESSION, "/work", at(0));
+    let mut host = Host::default();
+    host.take(driven.drain());
+    driven.initialize();
+    assert_eq!(driven.deadline(), Some(at(ms(INIT_WAIT))));
+    assert!(!driven.tick(at(ms(INIT_WAIT) - 1)).1, "not yet");
+    let (outs, escalate) = driven.tick(at(ms(INIT_WAIT)));
+    host.take(outs);
+    assert!(escalate, "ended");
+    let said = notices(host.main(&driven));
+    assert!(said.iter().any(|(_, text)| text.starts_with(DID_NOT_START)), "{said:?}");
+    assert!(!driven.tick(at(ms(INIT_WAIT) * 2)).1, "said once");
+
+    let mut driven = Driven::new(SESSION, "/work", at(0));
+    driven.initialize();
+    let ask: Value = serde_json::from_str(&driven.take_writes().pop().expect("asked")).unwrap();
+    drop(driven.incoming(
+        &json!({"type": "control_response", "response": {"subtype": "success",
+                "request_id": ask["request_id"], "response": {}}}),
+        at(5),
+    ));
+    assert!(!driven.tick(at(ms(INIT_WAIT) * 2)).1, "answered");
+}
+
+/// A message on its way when the worker restarted is read again with nothing to send again: once
+/// its time is up it is held as one that may not have arrived, and it holds back no message
+/// queued behind it.
+#[test]
+fn a_message_read_again_mid_send_is_held_in_time_and_frees_the_queue() {
+    let (mut driven, mut host) = driven();
+    host.take(driven.send("hello", &[], intent(1), at(0)));
+    let state = host.main(&driven).clone();
+    let mut again = Driven::of(&state, at(100));
+    let mut host = Host::default();
+    host.take(again.drain());
+    host.take(again.hold(intent(2), "next", Vec::new()));
+    assert!(again.busy(), "the first may still start a turn");
+    assert!(again.next_queued().is_none(), "the queue waits for it");
+    assert_eq!(again.deadline(), Some(at(100 + ms(DELIVERY))));
+    host.take(again.tick(at(100 + ms(DELIVERY))).0);
+    assert!(again.take_writes().is_empty(), "nothing to send again");
+    let pending = &host.main(&again).pending;
+    assert!(pending.iter().any(|p| p.intent == intent(1) && p.is_unknown()), "{pending:?}");
+    assert!(!again.busy());
+    assert_eq!(again.next_queued().map(|p| p.text), Some("next".to_owned()), "the queue goes on");
+}
+
+/// A stall names the last call the model made.
+#[test]
+fn a_stall_names_the_last_call() {
+    let (mut driven, mut host) = driven();
+    host.take(driven.incoming(
+        &json!({"type": "command_lifecycle", "command_uuid": "x", "state": "started"}),
+        at(0),
+    ));
+    host.take(driven.incoming(
+        &json!({"type": "assistant", "uuid": "a1", "session_id": SESSION,
+                "message": {"id": "m1", "role": "assistant", "content": [{"type": "tool_use",
+                "id": "toolu_1", "name": "Bash", "input": {"command": "cargo test --workspace"}}]}}),
+        at(1),
+    ));
+    let mut now = 1;
+    while now < ms(STALL) * 2 {
+        now += ms(TICK);
+        host.take(driven.tick(at(now)).0);
+    }
+    let wait = host.main(&driven).status.wait.clone().expect("stalled");
+    assert_eq!(wait.text, format!("{STALLED_TEXT} · last: Bash(cargo test --workspace)"));
 }
 
 /// A turn that shows no progress for [`STALL`] is said to have stalled, and moves on with the

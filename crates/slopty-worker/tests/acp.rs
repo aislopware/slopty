@@ -417,7 +417,7 @@ mod acp {
         let users: Vec<Option<IntentId>> = users(&state).into_iter().map(|(_, i)| i).collect();
         assert_eq!(users[2], Some(queued), "the waiting message, as its intent sent it");
         let (_, late) = rig.intent(&acp, thread, &Intent::Interrupt);
-        assert!(matches!(late, Outcome::Refused { .. }), "nothing to stop: {late:?}");
+        assert_eq!(late, Outcome::Done, "nothing to stop: done, never refused");
 
         let record = rig.record();
         assert_eq!(record["unexpected"], serde_json::json!([]), "the agent was sent what it was");

@@ -40,6 +40,7 @@ use tokio::task::{AbortHandle, JoinSet};
 
 use crate::Daemon;
 
+pub mod awake;
 mod starts;
 
 /// The daemon's threads and what serves them: each agent's adapter, and the snapshots of their
@@ -147,6 +148,8 @@ pub fn start(daemon: &Daemon, asks: Adapters) {
     let own: acp::Own =
         Arc::new(move || slopty_settings::Settings::load(&settings).settings.worker.acp);
     drop(tokio::spawn(rest(threads.host.clone())));
+    drop(tokio::spawn(awake::watch(daemon.clone(), threads.host.clone())));
+    drop(tokio::spawn(sweep_worktrees(threads.clone())));
     drop(pi::spawn(threads.host.clone(), asks.data, None, asks.pi));
     drop(acp::spawn(threads.host.clone(), None, own, asks.acp));
     // A scheduled message goes as the person's own, the way a client's does.
@@ -583,19 +586,7 @@ async fn free_worktree(threads: &Threads, state: &ThreadState) {
         return;
     }
     let tree = slopty_worker::file::expand_home(Path::new(&state.meta.cwd));
-    let others = threads.host.visit(|other| {
-        let cwd = &other.meta.cwd;
-        (!cwd.is_empty()).then(|| slopty_worker::file::expand_home(Path::new(cwd)))
-    });
-    let terminals = threads
-        .worker
-        .summaries()
-        .await
-        .into_iter()
-        .filter(|s| matches!(s.state, slopty_proto::terminal::SessionState::Running))
-        .filter_map(|s| s.cwd)
-        .map(|cwd| slopty_worker::file::expand_home(Path::new(&cwd)));
-    let cwds: Vec<PathBuf> = others.into_iter().chain(terminals).collect();
+    let cwds = worked_in(threads).await;
     match worktrees::discard(git, &tree, &cwds).await {
         Ok(removed) => tracing::info!(
             thread = %state.meta.id,
@@ -607,6 +598,76 @@ async fn free_worktree(threads: &Threads, state: &ThreadState) {
         Err(worktrees::Failed::NotOne(_)) => {}
         Err(kept) => {
             tracing::info!(thread = %state.meta.id, "a closed thread's worktree stayed: {kept}");
+        }
+    }
+}
+
+/// Every folder worked in now: each thread's the worker holds, and each live terminal's.
+async fn worked_in(threads: &Threads) -> Vec<PathBuf> {
+    let held = threads.host.visit(|other| {
+        let cwd = &other.meta.cwd;
+        (!cwd.is_empty()).then(|| slopty_worker::file::expand_home(Path::new(cwd)))
+    });
+    let terminals = threads
+        .worker
+        .summaries()
+        .await
+        .into_iter()
+        .filter(|s| matches!(s.state, slopty_proto::terminal::SessionState::Running))
+        .filter_map(|s| s.cwd)
+        .map(|cwd| slopty_worker::file::expand_home(Path::new(&cwd)));
+    held.into_iter().chain(terminals).collect()
+}
+
+/// How long after the worker starts it first sweeps the agents' worktrees: out of the way of
+/// the start's own work.
+const SWEEP_FIRST: Duration = Duration::from_mins(10);
+
+/// How often the agents' worktrees whose work landed are swept away ([`worktrees::sweep`]).
+const SWEEP_EVERY: Duration = Duration::from_hours(24);
+
+/// Sweep the agents' worktrees every [`SWEEP_EVERY`], for as long as the worker runs.
+async fn sweep_worktrees(threads: Threads) -> ! {
+    tokio::time::sleep(SWEEP_FIRST).await;
+    let mut every = tokio::time::interval(SWEEP_EVERY);
+    every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        every.tick().await;
+        sweep_once(&threads).await;
+    }
+}
+
+/// Sweep each clone a thread the worker holds works in, once ([`worktrees::sweep`]): what went
+/// and what was kept is logged, and nothing a thread or a live terminal works in is touched.
+async fn sweep_once(threads: &Threads) {
+    let Some(git) = slopty_worker::changes::git() else { return };
+    let programs = slopty_worker::repo::commit::Programs::here().await;
+    let cwds = worked_in(threads).await;
+    let clones = {
+        let cwds = cwds.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut clones: Vec<PathBuf> =
+                cwds.iter().map(PathBuf::as_path).filter_map(worktrees::main_checkout).collect();
+            clones.sort();
+            clones.dedup();
+            clones
+        })
+        .await
+        .unwrap_or_default()
+    };
+    for clone in clones {
+        match programs.scope(worktrees::sweep(git, &programs, &clone, &cwds)).await {
+            Ok(swept) => {
+                for (tree, removed) in &swept.removed {
+                    tracing::info!(
+                        tree = %tree.display(),
+                        branch = ?removed.branch,
+                        branch_removed = removed.branch_removed,
+                        "a landed worktree swept"
+                    );
+                }
+            }
+            Err(e) => tracing::debug!(clone = %clone.display(), "no sweep: {e}"),
         }
     }
 }

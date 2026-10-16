@@ -231,8 +231,13 @@ impl Pi {
             }
             Intent::Promote { pending } => ThreadAsk::Promote { intent: *pending },
             Intent::Interrupt => {
-                if !live || !matches!(state.status.phase, Phase::Working | Phase::NeedsYou) {
-                    return refused("pi is not working");
+                // One that is gone wakes only by a message. One at rest has nothing left to
+                // stop: done, not refused, so a stop never fails for having come late.
+                if !live {
+                    return refused("pi is not running");
+                }
+                if !matches!(state.status.phase, Phase::Working | Phase::NeedsYou) {
+                    return Outcome::Done;
                 }
                 ThreadAsk::Interrupt
             }
