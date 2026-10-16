@@ -633,6 +633,7 @@ mod checkout_tests {
             name: name.into(),
             current: false,
             worktree_path: None,
+            default: false,
         }
     }
 
@@ -641,6 +642,7 @@ mod checkout_tests {
             name: name.into(),
             current: false,
             worktree_path: Some(path.into()),
+            default: false,
         }
     }
 

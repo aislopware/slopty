@@ -124,6 +124,7 @@ impl Transcript {
                 .items_center()
                 .justify_center()
                 .rounded(px(Theme::CONTROL_RADIUS))
+                .map(|el| super::strip_control(el, theme)) // slopty: a tab stop.
                 .when(!busy, |el| {
                     el.cursor_pointer()
                         .bg(crate::motion::hover_blend(
@@ -248,6 +249,11 @@ impl Transcript {
                             .map(str::to_owned);
                         // slopty: S2's "Undo rewind" toast, when the rewind branched.
                         crate::composer::offer_undo_rewind(&value, this.state.clone(), cx);
+                        // A branched chat takes the prompt as its draft whenever its composer
+                        // comes to it, a fresh one (before the first turn) arriving later.
+                        if let Some(branched) = &branched {
+                            crate::composer::put_back_rewound(branched.clone(), prompt.clone(), cx);
+                        }
                         cx.emit(TranscriptEvent::Rewound {
                             from: chat,
                             chat_id: branched,

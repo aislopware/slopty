@@ -902,7 +902,7 @@ pub fn child_asks(
                     && !name.trim().is_empty()
                 {
                     for question in questions {
-                        question.sent_by = Some(name.trim().to_owned());
+                        question.sent_by = Some(super::text::escaped(name.trim()));
                     }
                 }
                 part
@@ -1032,8 +1032,38 @@ fn rule_offer(request: &Request) -> Option<slopty_view_proto::RuleOffer> {
     })
 }
 
+/// A dialog's payload with each string and name in it escaped (`text::escaped`): a
+/// dialog's payload is only shown, never sent back, so its every word may be.
+fn escaped_payload(payload: &str) -> String {
+    fn walk(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::String(words) => *words = super::text::escaped(words),
+            serde_json::Value::Array(items) => items.iter_mut().for_each(walk),
+            serde_json::Value::Object(fields) => {
+                *fields = std::mem::take(fields)
+                    .into_iter()
+                    .map(|(key, mut field)| {
+                        walk(&mut field);
+                        (super::text::escaped(&key), field)
+                    })
+                    .collect();
+            }
+            _ => {}
+        }
+    }
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(payload) else {
+        return super::text::escaped(payload);
+    };
+    walk(&mut value);
+    value.to_string()
+}
+
 /// The id of the one question of a request that offers its choices.
 const CHOICE: &str = "choice";
+
+/// The id an answer goes under that skips a request's questions (the shell's Skip): it goes as
+/// the request's plain decline.
+pub const SKIP: &str = "skip";
 
 /// What a request asks, as the panel heads it.
 fn header(request: &Request) -> String {
@@ -1316,15 +1346,34 @@ fn input(request: &Request, state: &ThreadState) -> MessagePart {
             question.aside = aside.map(|aside| escaped(&aside.label));
         }
     }
-    // slopty: what the dock draws the card by, on each of its questions.
-    let rule = rule_offer(request);
+    // slopty: what the dock draws the card by, on each of its questions, every shown word
+    // escaped here: the shell draws them as they come.
+    let rule = rule_offer(request).map(|mut rule| {
+        rule.rule = escaped(&rule.rule);
+        rule
+    });
+    let schema = request.schema_json.as_deref().map(|schema| {
+        if request.kind.starts_with(Request::DIALOG) {
+            escaped_payload(schema)
+        } else {
+            schema.to_owned()
+        }
+    });
     for question in &mut questions {
         question.kind.clone_from(&request.kind);
-        question.schema_json.clone_from(&request.schema_json);
-        question.url.clone_from(&request.url);
+        question.schema_json.clone_from(&schema);
+        question.url = request.url.as_deref().map(escaped);
         question.until_ms = request.until_ms.map(at).filter(|ms| *ms > 0);
-        question.reason.clone_from(&request.reason);
+        question.reason = request.reason.as_deref().map(escaped);
         question.needs_presence = request.needs_presence;
+        for words in question.option_descriptions.iter_mut().chain(&mut question.option_previews) {
+            *words = escaped(words);
+        }
+        if let Some(diff) = question.proposed.as_mut() {
+            diff.path = escaped(&diff.path);
+            diff.old_text = diff.old_text.as_deref().map(escaped);
+            diff.new_text = escaped(&diff.new_text);
+        }
         if question.id == CHOICE {
             question.rule.clone_from(&rule);
         }
@@ -1349,6 +1398,12 @@ pub fn answer(
     answers: &[UserInputAnswer],
 ) -> Result<(String, Option<String>), String> {
     use slopty_proto::thread::detail::Answer;
+    // slopty: questions skipped go as the agent's plain decline, its TUI's Esc.
+    if answers.iter().any(|a| a.question_id == SKIP) {
+        return slopty_proto::thread::plain_deny(&request.options)
+            .map(|deny| (deny.id.clone(), None))
+            .ok_or_else(|| "These questions can't be skipped".to_owned());
+    }
     // slopty: the choice beside the questions, picked alone.
     let aside =
         answers.iter().find(|a| a.question_id == CHOICE).and_then(|a| a.labels.first()).and_then(

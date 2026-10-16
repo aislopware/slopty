@@ -578,6 +578,7 @@ fn failure_line(
 ) -> AnyElement {
     use crate::settings::widgets::ActionHint as _;
     let key = id.clone();
+    let hover = format!("{id}-hover");
     div()
         .flex()
         .flex_row()
@@ -589,9 +590,13 @@ fn failure_line(
                 .id(id)
                 .role(gpui::Role::Button)
                 .text_size(crate::typography::ui_rems(12.0))
-                .text_color(theme.text_muted)
+                .text_color(crate::motion::hover_blend(&hover, theme.text_muted, theme.text))
                 .cursor_pointer()
-                .hover(|s| s.text_color(theme.text))
+                .on_hover(crate::motion::hover_listener(hover.clone()))
+                // slopty: a tab stop, its hover fading as the house's do.
+                .tab_index(0)
+                .rounded(px(4.0))
+                .map(|el| crate::surface_chrome::focus_ring(el, theme))
                 .hint(if copied { "Copied" } else { "Copy error" })
                 .on_click(move |_, _, cx| {
                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(detail.to_string()));
@@ -745,6 +750,9 @@ impl VisualFrame {
                 .id(self.element_id(path))
                 .role(gpui::Role::Button)
                 .aria_label(SharedString::from(label.clone()))
+                // slopty: a tab stop, Enter or Space pressing it.
+                .tab_index(0)
+                .map(|el| crate::surface_chrome::focus_ring(el, theme))
                 .child(label.clone())
                 .on_click(cx.listener(move |this, _, _, cx| {
                     cx.stop_propagation();
@@ -787,6 +795,8 @@ impl VisualFrame {
                         .cursor_pointer()
                         .role(gpui::Role::Tab)
                         .aria_selected(selected) // slopty: the tab list.
+                        .tab_index(0) // slopty: each tab a tab stop.
+                        .map(|el| crate::surface_chrome::focus_ring(el, theme))
                         .aria_label(SharedString::from(option.clone()))
                         .child(option.clone())
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -812,6 +822,11 @@ impl VisualFrame {
                     .cursor_pointer()
                     .role(gpui::Role::Switch)
                     .aria_label(SharedString::from(label.clone()))
+                    .aria_toggled(if *value { gpui::Toggled::True } else { gpui::Toggled::False })
+                    // slopty: a tab stop, Space or Enter flipping it.
+                    .tab_index(0)
+                    .rounded(px(6.0))
+                    .map(|el| crate::surface_chrome::focus_ring(el, theme))
                     .child(crate::settings::widgets::toggle_switch(
                         theme,
                         *value,
@@ -862,6 +877,10 @@ impl VisualFrame {
                     .cursor_pointer()
                     .hover(|s| s.underline())
                     .role(gpui::Role::Link)
+                    // slopty: a tab stop, Enter opening it.
+                    .tab_index(0)
+                    .rounded(px(4.0))
+                    .map(|el| crate::surface_chrome::focus_ring(el, theme))
                     .child(label.clone())
                     .on_click(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
@@ -930,17 +949,20 @@ impl VisualFrame {
         if stack.on_click.is_none() && !stack.hover {
             return el.into_any_element();
         }
-        let hover = theme.glass_hover();
+        // slopty: the house's faded hover.
+        let fade = format!("{}-hover", self.element_id(path));
         let mut el = el
             .id(self.element_id(path))
             .rounded(px(6.0))
-            .when(stack.hover || stack.on_click.is_some(), |el| {
-                el.hover(move |s| s.bg(hover))
-            });
+            .bg(crate::motion::hover_blend(&fade, gpui::transparent_black(), theme.glass_hover()))
+            .on_hover(crate::motion::hover_listener(fade));
         if let Some(handler) = stack.on_click {
             el = el
                 .cursor_pointer()
                 .role(gpui::Role::Button)
+                // slopty: a tab stop, Enter or Space pressing it.
+                .tab_index(0)
+                .map(|el| crate::surface_chrome::focus_ring(el, theme))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     cx.stop_propagation();
                     this.dispatch(handler, HandlerArg::None, cx);
@@ -1006,11 +1028,16 @@ impl VisualFrame {
             if r > 0 || !table.columns.is_empty() {
                 el = el.child(div().flex_none().h(px(1.0)).w_full().bg(table_hairline()));
             }
+            // slopty: the house's faded hover.
+            let fade = format!("{}-hover", self.element_id(&format!("{path}.r{r}")));
             let mut row_el = div()
                 .id(self.element_id(&format!("{path}.r{r}")))
                 .flex()
                 .flex_row()
-                .when(table.hover, |el| el.hover(move |s| s.bg(hover)));
+                .when(table.hover, |el| {
+                    el.bg(crate::motion::hover_blend(&fade, gpui::transparent_black(), hover))
+                        .on_hover(crate::motion::hover_listener(fade.clone()))
+                });
             for c in 0..columns {
                 let column = column(c);
                 let content = match row.get(c) {
@@ -1150,6 +1177,22 @@ impl SliderSpec {
         }
         value.clamp(self.min, self.max)
     }
+
+    /// slopty: the value a key moves to, as a native slider's keys move it: an arrow one step
+    /// (a hundredth of the range without one), Page Up and Down ten, Home and End to the ends.
+    fn value_by_key(&self, key: &str) -> Option<f64> {
+        let step = if self.step > 0.0 { self.step } else { (self.max - self.min) / 100.0 };
+        let value = match key {
+            "right" | "up" => self.value + step,
+            "left" | "down" => self.value - step,
+            "pageup" => self.value + step * 10.0,
+            "pagedown" => self.value - step * 10.0,
+            "home" => self.min,
+            "end" => self.max,
+            _ => return None,
+        };
+        Some(value.clamp(self.min, self.max))
+    }
 }
 
 const SLIDER_TRACK: f32 = 4.0;
@@ -1215,7 +1258,7 @@ impl VisualFrame {
                     )
                     .child(div().text_color(theme.text).child(spec.shown.clone())),
             )
-            .child(
+            .child(crate::surface_chrome::focus_ring(
                 div()
                     .id(SharedString::from(format!(
                         "{}-slider",
@@ -1225,6 +1268,21 @@ impl VisualFrame {
                     .w_full()
                     .cursor_pointer()
                     .role(gpui::Role::Slider)
+                    // slopty: a tab stop its arrows, pages and ends move.
+                    .aria_label(SharedString::from(spec.label.clone().unwrap_or_else(|| spec.shown.clone())))
+                    .tab_index(0)
+                    .rounded(px(6.0))
+                    .on_key_down({
+                        let spec = spec.clone();
+                        cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
+                            if let Some(value) = spec.value_by_key(&event.keystroke.key) {
+                                cx.stop_propagation();
+                                if (value - spec.value).abs() > f64::EPSILON {
+                                    this.dispatch(spec.handler, HandlerArg::Number(value), cx);
+                                }
+                            }
+                        })
+                    })
                     .on_mouse_down(MouseButton::Left, press)
                     .on_drag(VisualDrag(drag_key), |_, _, _, cx| cx.new(|_| DragGhost))
                     .on_drag_move(drag)
@@ -1271,7 +1329,8 @@ impl VisualFrame {
                         )
                         .size_full(),
                     ),
-            )
+                theme,
+            ))
             .into_any_element()
     }
 
@@ -2992,6 +3051,73 @@ end
         assert_eq!(p99.len(), 2, "{p99:?}");
         assert!((p99[1] / p99[0] - 210.0 / 240.0).abs() < 0.01, "{p99:?}");
         frame.read_with(cx, |frame, _| assert!(frame.error.is_none()));
+    }
+
+    /// slopty: a visual's controls are tab stops the keyboard presses: Tab walks to the p99
+    /// tab and Space chooses it, as a click does.
+    #[gpui::test]
+    fn a_visuals_tabs_answer_the_keyboard(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(Theme::dark());
+            cx.set_reduce_motion(true);
+        });
+        let (frame, cx) = cx.add_window_view(|_, cx| {
+            VisualFrame::from_script("entry#visual".into(), LATENCY, cx)
+        });
+        let draw = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| {
+                window.set_a11y_active(true);
+                window.refresh();
+                window.draw(cx).clear(cx);
+            });
+        };
+        let selected = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, _| tab_lists(window))[0].iter().map(|tab| tab.selected).collect::<Vec<_>>()
+        };
+        draw(cx);
+        assert_eq!(selected(cx), [true, false]);
+        let mut stops = 0;
+        while selected(cx) != [false, true] {
+            stops += 1;
+            assert!(stops <= 4, "Tab never reached the p99 tab");
+            cx.update(|window, cx| {
+                window.focus_next(cx);
+                for event in [
+                    gpui::PlatformInput::KeyDown(gpui::KeyDownEvent {
+                        keystroke: gpui::Keystroke::parse("space").unwrap(),
+                        is_held: false,
+                        prefer_character_input: false,
+                    }),
+                    gpui::PlatformInput::KeyUp(gpui::KeyUpEvent {
+                        keystroke: gpui::Keystroke::parse("space").unwrap(),
+                    }),
+                ] {
+                    window.dispatch_event(event, cx);
+                }
+            });
+            cx.run_until_parked();
+            draw(cx);
+        }
+        frame.read_with(cx, |frame, _| assert!(frame.error.is_none()));
+    }
+
+    /// slopty: a slider's keys move it as a native one's do, within its range.
+    #[test]
+    fn a_sliders_keys_move_it_by_steps() {
+        let spec = SliderSpec {
+            label: None,
+            value: 4.0,
+            min: 0.0,
+            max: 10.0,
+            step: 0.5,
+            handler: HandlerId(0),
+            shown: String::new(),
+        };
+        let moved: Vec<Option<f64>> =
+            ["right", "left", "pageup", "pagedown", "home", "end", "a"].iter().map(|key| spec.value_by_key(key)).collect();
+        assert_eq!(moved, [Some(4.5), Some(3.5), Some(9.0), Some(0.0), Some(0.0), Some(10.0), None]);
+        let free = SliderSpec { step: 0.0, ..spec };
+        assert!(free.value_by_key("up").is_some_and(|v| (v - 4.1).abs() < 1e-9), "a hundredth of the range");
     }
 
     /// The main thread's time for one whole frame of `frame`'s window after `change`: the

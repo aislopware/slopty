@@ -2342,6 +2342,9 @@ fn code_icon_action(
         .items_center()
         .justify_center()
         .cursor_pointer()
+        // slopty: a tab stop with the shared ring (M8).
+        .tab_index(0)
+        .map(|el| crate::surface_chrome::focus_ring(el, theme))
         .bg(crate::motion::hover_blend(
             &fade_key,
             gpui::transparent_black(),
@@ -2404,6 +2407,9 @@ fn code_copy_button(
             .items_center()
             .justify_center()
             .cursor_pointer()
+            // slopty: a tab stop with the shared ring (M8).
+            .tab_index(0)
+            .map(|el| crate::surface_chrome::focus_ring(el, theme))
             .bg(crate::motion::hover_blend(
                 &fade_key,
                 gpui::transparent_black(),
@@ -2759,6 +2765,10 @@ fn render_code_block_source_with_actions(
         let hover = crate::theme::ink(if fit_content { 0.13 } else { 0.08 });
         div()
             .id(SharedString::from(fade_key.clone()))
+            // slopty: the wrap toggle is a named button and a tab stop with the shared ring.
+            .role(gpui::Role::Button)
+            .tab_index(0)
+            .map(|el| crate::surface_chrome::focus_ring(el, theme))
             .size(px(CODE_ACTION_SIZE))
             .rounded(px(6.0))
             .flex()

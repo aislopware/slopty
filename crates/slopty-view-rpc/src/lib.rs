@@ -230,14 +230,6 @@ pub mod methods {
     /// Download + apply the newest release on the target device (symlink-managed
     /// installs; the service restart is scheduled after the reply flushes).
     pub const APPLY_UPDATE: &str = "ApplyUpdate";
-    /// Device-local agent CLI update lifecycle. The stream emits the complete
-    /// ordered status list initially and after every transition.
-    pub const WATCH_HARNESS_UPDATES: &str = "WatchHarnessUpdates";
-    pub const CHECK_HARNESS_UPDATES: &str = "CheckHarnessUpdates";
-    pub const APPLY_HARNESS_UPDATE: &str = "ApplyHarnessUpdate";
-    pub const CANCEL_HARNESS_UPDATE: &str = "CancelHarnessUpdate";
-    pub const DISMISS_HARNESS_UPDATE: &str = "DismissHarnessUpdate";
-    pub const SET_HARNESS_UPDATE_POLICY: &str = "SetHarnessUpdatePolicy";
     // slopty: the person's one setting for how freely agents act, `[agents] autonomy` in
     // Slopty's settings: `{ "autonomy": "auto" | "full" | "ask" }` read and written.
     pub const GET_AGENT_SETTINGS: &str = "GetAgentSettings";
@@ -392,7 +384,7 @@ mod tests {
         ) -> Result<RpcReply, RpcError> {
             if !matches!(
                 method,
-                methods::WATCH_CHECKOUT_CHANGE_REQUEST | methods::WATCH_HARNESS_UPDATES | "Silent"
+                methods::WATCH_CHECKOUT_CHANGE_REQUEST | "Silent"
             ) {
                 return Err(RpcError::UnknownMethod(method.into()));
             }
@@ -402,15 +394,6 @@ mod tests {
                 drop(guard);
                 item
             });
-            if method == methods::WATCH_HARNESS_UPDATES {
-                // Update watches send an initial status snapshot, then may stay
-                // quiet indefinitely. Legacy peers do not send a readiness frame.
-                return Ok(RpcReply::Stream(
-                    futures::stream::once(async { serde_json::json!([]) })
-                        .chain(stream)
-                        .boxed(),
-                ));
-            }
             Ok(RpcReply::Stream(stream.boxed()))
         }
     }
@@ -552,7 +535,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dropping_one_device_update_watch_preserves_the_other() {
+    async fn dropping_one_quiet_watch_preserves_the_other() {
         let (first_tx, first_rx) = tokio::sync::oneshot::channel();
         let (second_tx, mut second_rx) = tokio::sync::oneshot::channel();
         let first = memory_client(Arc::new(CancelAwareService {
@@ -562,11 +545,11 @@ mod tests {
             dropped: Mutex::new(Some(second_tx)),
         }));
         let first_watch = first
-            .subscribe_checked(methods::WATCH_HARNESS_UPDATES, serde_json::Value::Null)
+            .subscribe_checked(methods::WATCH_CHECKOUT_CHANGE_REQUEST, serde_json::Value::Null)
             .await
             .unwrap();
         let second_watch = second
-            .subscribe_checked(methods::WATCH_HARNESS_UPDATES, serde_json::Value::Null)
+            .subscribe_checked(methods::WATCH_CHECKOUT_CHANGE_REQUEST, serde_json::Value::Null)
             .await
             .unwrap();
 

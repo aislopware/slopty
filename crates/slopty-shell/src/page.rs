@@ -67,44 +67,57 @@ const SAVE: &str = "save";
 
 type ActionFn = Rc<dyn Fn(&mut Window, &mut gpui::App)>;
 
-/// One of a card's header actions, in the code block's icon chrome: a button named `label`
-/// with its tooltip, hidden until the card is hovered when `quiet`, a check for a moment once
-/// `done`.
-pub(crate) fn card_action(
+// slopty: a card's header action is the surfaces' own icon button (`live::chrome::icon_button`:
+// its size, its faded hover, its focus ring and tab stop); a quiet one fades in with the card's
+// hover, or shows while it has the keyboard.
+/// One of a card's header actions: a button named `label`, faded out until the card under
+/// `reveal` is hovered when `quiet`, a check for a moment once `done`.
+#[expect(clippy::too_many_arguments, reason = "an action is drawn from the card's parts")]
+pub(crate) fn header_action(
     id: SharedString,
     label: &'static str,
     icon: &'static str,
     quiet: bool,
     done: bool,
+    reveal: f32,
     theme: &Theme,
     handler: ActionFn,
 ) -> AnyElement {
-    let fade_key = id.to_string();
-    div()
-        .id(id)
-        .role(gpui::Role::Button)
-        .aria_label(label)
-        // slopty: the code block's header anatomy: 24 pt, glyph 12, the control hover.
-        .size(px(24.0))
-        .rounded(px(6.0))
-        .flex()
-        .items_center()
-        .justify_center()
-        .cursor_pointer()
-        .when(quiet && !done, |el| el.opacity(0.0).group_hover("page-card", |s| s.opacity(1.0)))
-        .bg(crate::motion::hover_blend(&fade_key, gpui::transparent_black(), crate::theme::wash(0.11)))
-        .on_hover(crate::motion::hover_listener(fade_key))
+    live::chrome::icon_button(id, if done { crate::icons::CHECK } else { icon }, label, theme)
+        .when(quiet && !done, |el| el.opacity(reveal).focus_visible(|style| style.opacity(1.0)))
+        .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
         .on_click(move |_, window, cx| {
             cx.stop_propagation();
             handler(window, cx);
         })
-        .tooltip(crate::settings::widgets::text_tooltip(label))
-        .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
-        .child(
-            crate::icons::icon(if done { crate::icons::CHECK } else { icon })
-                .size(px(12.0))
-                .text_color(theme.text_muted),
-        )
+        .into_any_element()
+}
+
+/// What a page's card or pane says when its page could not be shown: why, and Try again when
+/// a try could go otherwise (`retry`), which opens the page afresh.
+pub(crate) fn failed_body(id: &str, why: SharedString, retry: bool, page: &str, theme: &Theme) -> AnyElement {
+    let page = page.to_owned();
+    let again = retry.then(|| {
+        live::chrome::button(format!("{id}-try-again"), live::screen::TRY_AGAIN, live::chrome::Tone::Ghost, theme)
+            .on_click(move |_, _, cx| {
+                cx.stop_propagation();
+                live::page_act(&page, PageAct::Reload, cx);
+            })
+            .into_any_element()
+    });
+    div()
+        .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(live::chrome::empty_state(
+            SharedString::from(format!("{id}-failed")),
+            None,
+            "Couldn't show the page",
+            Some(why),
+            again,
+            theme,
+        ))
         .into_any_element()
 }
 
@@ -382,6 +395,11 @@ impl PageCardView {
         pane::ask_pane(&chat, &self.card.page, &self.card.title, show, cx);
     }
 
+    /// The key the card's hover fades under, which reveals its quiet actions.
+    fn hover_key(&self) -> String {
+        format!("{}-card-hover", self.card.page)
+    }
+
     /// The header's actions for what the page is.
     fn actions(&self, doc: Option<&PageDoc>, theme: &Theme, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let page = self.card.page.clone();
@@ -398,14 +416,16 @@ impl PageCardView {
         if self.in_pane() {
             return actions;
         }
+        let reveal = crate::motion::hover_t(&self.hover_key());
         let fence = fence::is_fence(&self.card.page);
         match doc {
-            Some(PageDoc::Table(_)) => actions.push(card_action(
+            Some(PageDoc::Table(_)) => actions.push(header_action(
                 id("copy-table"),
                 "Copy table",
                 crate::icons::COPY,
                 true,
                 done(COPY_TABLE),
+                reveal,
                 theme,
                 on(|this, window, cx| {
                     let Some(PageDoc::Table(table)) =
@@ -417,23 +437,25 @@ impl PageCardView {
                     this.show_done(COPY_TABLE, cx);
                 }),
             )),
-            _ => actions.push(card_action(
+            _ => actions.push(header_action(
                 id("copy-image"),
                 "Copy image",
                 crate::icons::GALLERY,
                 true,
                 done(COPY_IMAGE),
+                reveal,
                 theme,
                 on(|this, _, cx| this.call_done(COPY_IMAGE, calls::COPY_PAGE_IMAGE, cx)),
             )),
         }
         if fence {
-            actions.push(card_action(
+            actions.push(header_action(
                 id("copy-source"),
                 "Copy source",
                 crate::icons::COPY,
                 true,
                 done(COPY_SOURCE),
+                reveal,
                 theme,
                 on(|this, _, cx| {
                     if let Some(fence) = fence::fence(&this.card.page, cx) {
@@ -443,29 +465,31 @@ impl PageCardView {
                 }),
             ));
         } else if doc.is_none() {
-            actions.push(card_action(
+            actions.push(header_action(
                 id("save"),
                 "Save",
                 crate::icons::FLOPPY_DISK,
                 true,
                 done(SAVE),
+                reveal,
                 theme,
                 on(|this, _, cx| this.call_done(SAVE, calls::SAVE_PAGE, cx)),
             ));
         }
         if self.chat.is_some() {
-            actions.push(card_action(
+            actions.push(header_action(
                 id("open-in-pane"),
                 "Open in pane",
                 crate::icons::SPLIT_COLUMNS,
                 true,
                 false,
+                reveal,
                 theme,
                 on(|this, _, cx| this.move_to_pane(true, cx)),
             ));
         }
         if doc.is_none() {
-            actions.push(card_action(
+            actions.push(header_action(
                 id("expand"),
                 if self.expanded { "Collapse page" } else { "Expand page" },
                 if self.expanded {
@@ -475,6 +499,7 @@ impl PageCardView {
                 },
                 true,
                 false,
+                reveal,
                 theme,
                 on(|this, _, cx| {
                     this.expanded = !this.expanded;
@@ -524,6 +549,8 @@ impl PageCardView {
                         crate::theme::ink(0.1),
                     ))
                     .on_hover(crate::motion::hover_listener(format!("{}-bring-back", self.card.page)))
+                    .tab_index(0) // slopty: a tab stop.
+                    .map(|el| crate::surface_chrome::focus_ring(el, theme))
                     .on_click(cx.listener(|this, _, _, cx| this.move_to_pane(false, cx)))
                     .child(SharedString::from("Bring back")),
             )
@@ -539,11 +566,17 @@ impl PageCardView {
         match (&self.card.path, &self.chat) {
             (Some(path), Some(chat)) => {
                 let (path, chat) = (path.clone(), chat.clone());
+                let fade = format!("{}-source", self.card.page);
                 text.id("page-source")
                     .role(gpui::Role::Link)
                     .aria_label(SharedString::from(format!("Open {path}")))
                     .cursor_pointer()
-                    .hover(|s| s.text_color(theme.text))
+                    // slopty: a faded hover, and a tab stop.
+                    .text_color(crate::motion::hover_blend(&fade, theme.text_muted, theme.text))
+                    .on_hover(crate::motion::hover_listener(fade))
+                    .tab_index(0)
+                    .rounded(px(4.0))
+                    .map(|el| crate::surface_chrome::focus_ring(el, theme))
                     .on_click(cx.listener(move |_, _, _, cx| {
                         live::open_file(&chat, &path, cx);
                     }))
@@ -602,7 +635,12 @@ impl Render for PageCardView {
                 .clamp(PAGE_MIN_HEIGHT, cap)
         };
         let snapshot = hosted.as_ref().and_then(|page| page.snapshot.clone());
-        let value = presence_words(presence, snapshot.is_some(), failed);
+        // slopty: a PDF or a table draws here natively: once read, it is live.
+        let value = if doc.is_some() && !failed {
+            "live"
+        } else {
+            presence_words(presence, snapshot.is_some(), failed)
+        };
         let why = hosted
             .as_ref()
             .and_then(|page| page.failed.clone())
@@ -610,15 +648,8 @@ impl Render for PageCardView {
             .unwrap_or_else(|| "The page could not be shown".into());
 
         let body_content: AnyElement = match (&hosted, presence) {
-            _ if failed => div()
-                .size_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_size(crate::typography::ui_rems(12.0))
-                .text_color(theme.text_muted)
-                .child(why.clone())
-                .into_any_element(),
+            // slopty: why, and Try again unless the call that showed it failed.
+            _ if failed => failed_body(&self.card.page, why.clone(), !self.card.failed, &self.card.page, &theme),
             (
                 Some(live::HostedPage {
                     native: Some(native),
@@ -636,19 +667,14 @@ impl Render for PageCardView {
                     .size_full()
                     .object_fit(ObjectFit::Fill)
                     .into_any_element(),
-                None => div()
-                    .size_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_size(crate::typography::ui_rems(12.0))
-                    .text_color(theme.text_faint)
-                    .child(SharedString::from(if self.card.streaming {
-                        "Writing the page…"
-                    } else {
-                        "Loading the page…"
-                    }))
-                    .into_any_element(),
+                // slopty: the surfaces' loading anatomy, the spinner over its caption.
+                None => live::chrome::loading(
+                    if self.card.streaming { "Writing the page…" } else { "Loading the page…" },
+                    &theme,
+                    cx.entity_id(),
+                    cx,
+                )
+                .into_any_element(),
             },
         };
         let probe = self.bounds.clone();
@@ -840,6 +866,7 @@ impl Render for PageCardView {
         div()
             .id(SharedString::from(format!("{}-card", self.card.page)))
             .group("page-card")
+            .on_hover(crate::motion::hover_listener(self.hover_key()))
             .role(gpui::Role::Group)
             .aria_label(SharedString::from(format!("Page: {}", self.card.title)))
             .aria_value(value)
@@ -890,6 +917,8 @@ fn ask_line(
                 crate::theme::ink(0.1),
             ))
             .on_hover(crate::motion::hover_listener(format!("{id}-{text}-hover")))
+            .tab_index(0) // slopty: a tab stop.
+            .map(|el| crate::surface_chrome::focus_ring(el, theme))
             .on_click(move |event, window, cx| on_click(event, window, cx))
             .child(SharedString::from(text))
     });

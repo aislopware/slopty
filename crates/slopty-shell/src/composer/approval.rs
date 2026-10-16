@@ -1,8 +1,9 @@
 // slopty: Slopty's own file, beside zeron's question panel.
 //! What an approval shows and how it may be answered (Claude desktop's rules): a long, unknown
 //! or destructive call starts on its deny and takes no key, a sandbox-off command is read
-//! through before it can be allowed, every shown string draws hidden characters as visible
-//! escapes, an edit shows its change, and a plan's choices stand under "Plan ready".
+//! through before it can be allowed, every shown string comes with its hidden characters as
+//! visible escapes (the view model escapes them), an edit shows its change, and a plan's
+//! choices stand under "Plan ready".
 use gpui::AnyElement;
 
 use super::*;
@@ -15,45 +16,6 @@ pub(crate) const PLAN_READY: &str = "Plan ready";
 const PROPOSED_MAX_LINES: usize = 80;
 /// The tallest a read-gated body grows before it scrolls.
 pub(super) const GATED_BODY_MAX_HEIGHT: f32 = 160.0;
-
-/// A character that would hide or reorder what the person reads: controls (but line breaks and
-/// tabs), bidi overrides and isolates, default-ignorables and noncharacters.
-pub(crate) fn hidden(c: char) -> bool {
-    let u = c as u32;
-    (c.is_control() && c != '\n' && c != '\t')
-        || matches!(
-            u,
-            0x00AD
-                | 0x034F
-                | 0x061C
-                | 0x115F
-                | 0x1160
-                | 0x17B4
-                | 0x17B5
-                | 0x180B..=0x180F
-                | 0x200B..=0x200F
-                | 0x202A..=0x202E
-                | 0x2060..=0x206F
-                | 0x3164
-                | 0xFDD0..=0xFDEF
-                | 0xFE00..=0xFE0F
-                | 0xFEFF
-                | 0xFFA0
-                | 0xFFF0..=0xFFF8
-                | 0xE0000..=0xE0FFF
-        )
-        || (u & 0xFFFE) == 0xFFFE
-}
-
-/// `text` with every hidden character drawn as a visible escape, `[U+202E]`.
-pub(crate) fn visible_escapes(text: &str) -> String {
-    if !text.chars().any(hidden) {
-        return text.to_owned();
-    }
-    text.chars()
-        .map(|c| if hidden(c) { format!("[U+{:04X}]", c as u32) } else { c.to_string() })
-        .collect()
-}
 
 /// Whether `question` is a plan's choices: the transcript carries the plan itself as a card
 /// (`plan-card:<id>`, its text part `plan:<id>`), so the panel asks only for the choice.
@@ -102,10 +64,9 @@ pub(super) fn proposed_change(
             _ => None,
         })
         .take(24)
-        .map(|line| visible_escapes(&line))
         .collect();
     let name = diff.path.rsplit('/').next().unwrap_or(&diff.path).to_owned();
-    let label = format!("Proposed change to {}: {}", visible_escapes(&name), lines.join("; "));
+    let label = format!("Proposed change to {name}: {}", lines.join("; "));
     div()
         .id("approval-proposed-change")
         .role(Role::Group)
@@ -127,7 +88,7 @@ pub(super) fn proposed_change(
                 .bg(crate::theme::ink(0.03))
                 .text_size(crate::typography::ui_rems(11.5))
                 .text_color(theme.text_muted)
-                .child(div().min_w_0().truncate().child(SharedString::from(visible_escapes(&diff.path))))
+                .child(div().min_w_0().truncate().child(SharedString::from(diff.path.clone())))
                 .child(
                     div()
                         .flex_none()
@@ -206,8 +167,8 @@ impl Composer {
             .find(|line| !line.trim().is_empty())
             .map_or_else(|| question.header.clone(), str::to_owned);
         let words = match question.sent_by.as_deref().filter(|c| !c.trim().is_empty()) {
-            Some(child) => visible_escapes(&format!("{child} · {}: {ask}", question.header)),
-            None => visible_escapes(&format!("{}: {ask}", question.header)),
+            Some(child) => format!("{child} · {}: {ask}", question.header),
+            None => format!("{}: {ask}", question.header),
         };
         Some(
             div()
@@ -228,6 +189,12 @@ impl Composer {
                 .bg(crate::motion::hover_blend("question-strip", theme.warning.opacity(0.06), theme.warning.opacity(0.1)))
                 .on_hover(crate::motion::hover_listener("question-strip"))
                 .cursor_pointer()
+                // slopty: a tab stop; its hairline takes the shared ring's accent when focused.
+                .tab_index(0)
+                .focus_visible({
+                    let accent = theme.accent;
+                    move |style| style.border_color(accent)
+                })
                 .on_click(cx.listener(|this, _, _, cx| this.unfold_question(cx)))
                 .child(div().flex_none().size(px(6.0)).rounded_full().bg(theme.warning))
                 .child(
@@ -355,14 +322,6 @@ mod tests {
         assert_eq!(wizard.press_number(1), WizardStep::Stay);
         assert_eq!(wizard.press_enter(), WizardStep::Stay);
         assert_eq!(labels(wizard.select(1)), ["Always allow"]);
-    }
-
-    #[test]
-    fn an_approval_shows_bidi_overrides_as_visible_escapes() {
-        assert_eq!(visible_escapes("rm -rf /\u{202E}gnp.exe"), "rm -rf /[U+202E]gnp.exe");
-        assert_eq!(visible_escapes("a\u{200B}b\u{0007}c\u{FEFF}"), "a[U+200B]b[U+0007]c[U+FEFF]");
-        assert_eq!(visible_escapes("two\nlines\tand tab"), "two\nlines\tand tab");
-        assert_eq!(visible_escapes("plain é 日本"), "plain é 日本");
     }
 
     #[test]

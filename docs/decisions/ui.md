@@ -13051,8 +13051,15 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   opens to five lines on hover or focus and goes back to the prompt on click or Enter; it paints
   above the top fade and gives way to the next prompt and to find's card. A visual's buttons,
   tabs, toggles, links and clickable stacks are tab stops, and its sliders move by arrow, page
-  and Home/End keys. A message's copy and Rewind… stay tab stops while the strip is hidden,
-  each shown while it has the keyboard. Tests: `slopty-ui`
+  and Home/End keys. A message's copy and Rewind… are tab stops with the ring while its
+  strip shows, and an error card's detail scrolls in its box. A listing that failed listed
+  nothing: a group counts it as the failed command it was, and says what failed last ("Ran 2
+  commands · 1 failed"). A PDF or a table drawn in its card reads live, not loading. Find's keys
+  reach the transcript once the window's dispatch is done, so ⌘F opens find whether or not the
+  window is the key one. A rewind that branches names the branch as the conversation and keeps
+  the words taken back as its draft on its machine, and a composer already on the branch takes
+  them as they come. Tests: `slopty-ui`
+  `workspace::view_model::work::tests::a_rewind_goes_back_to_before_the_message`,
   `view_model::tests::a_cards_every_shown_word_comes_escaped`; `slopty-shell`
   `composer::dock_tests::the_mode_menu_walks_by_keys`,
   `composer::kept_attachments::tests::a_draft_comes_back_as_kept`,
@@ -13061,7 +13068,12 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `page::card_tests::a_failed_page_offers_try_again`,
   `transcript::tests::sent_chat_chips_open_their_chat`,
   `transcript::sticky::tests::a_long_turns_prompt_holds_at_the_top`,
-  `transcript::surface_tests::a_messages_copy_is_a_tab_stop`,
+  `transcript::surface_tests::an_error_card_copies_its_error_and_scrolls_its_detail`,
+  `composer::history::tests::a_rewound_prompt_is_the_new_chats_draft`,
+  `pickers::tests::the_agents_default_model_is_recommended`,
+  `transcript::find::tests::find_opens_from_the_windows_keys_key_or_not`,
+  `page::card_tests::a_csv_shows_as_a_table_of_its_rows`,
+  `composer::dock_tests::keys_land_in_the_draft_after_a_chat_switch`,
   `visuals::tests::a_visuals_tabs_answer_the_keyboard`.
 - ✅ **Every pane control is a keyboard stop with one ring (2026-10-17, M8, M23).** The ring
   is paint, not a border: `surface_chrome::focus_ring` draws 2 px of the accent 2 px clear of

@@ -46,6 +46,8 @@ use crate::theme::Theme;
 // slopty: approvals, prompt history and drafts, and the composer's notices.
 mod approval;
 mod history;
+pub use history::put_back_rewound; // slopty: a rewind's prompt, back as its new chat's draft.
+mod kept_attachments; // slopty: a draft's attachments, kept on this client.
 mod notices;
 // slopty: the dock around the composer: the chat's dock and work watched, the footer, the turn's
 // live line, its mods' surfaces.
@@ -6029,6 +6031,8 @@ impl Composer {
             },
         );
         let observe = cx.observe(&state, |this: &mut Self, _, cx| this.on_state_changed(cx));
+        // slopty: a rewind's prompt coming back for the chat on screen.
+        cx.observe_global::<history::RewoundDrafts>(|this: &mut Self, cx| this.adopt_rewound(cx)).detach();
         let input_events = cx.subscribe(&input, |this: &mut Self, _, event, cx| match event {
             ComposerInputEvent::Submitted => this.on_submit(cx),
             ComposerInputEvent::ModifiedSubmitted => this.on_modified_submit(cx),
@@ -6185,6 +6189,11 @@ impl Composer {
             _input_events: input_events,
             // slopty: dictation removed.
         };
+        // slopty: the chat it opens on has the draft kept here back, attachments and words.
+        let key = composer.current_key.clone();
+        if let Some(text) = composer.restore_draft_attachments(&key, cx) {
+            composer.input.update(cx, |input, cx| input.set_text(text, cx));
+        }
         // Dev knob: pre-stage attachments (drop/paste can't be synthesized on
         // a rig) — `SLOPTY_ATTACH=/path/a.png[,/path/b.png]`, and
         // `SLOPTY_ATTACH_PREVIEW=1` boots with the first one's lightbox open.
@@ -6542,6 +6551,8 @@ impl Composer {
         self.input.update(cx, |input, cx| {
             input.set_attachment_chips(&scope, attachments, cx)
         });
+        // slopty: what the draft holds is kept on this client with it.
+        self.keep_draft_attachments(cx);
     }
 
     /// Keep staged attachments and their chips in step: one whose last chip is
@@ -8039,6 +8050,9 @@ impl Composer {
                 // draft; a tail from a hero transition belongs to its old chat.
                 self.dock_reflow = Default::default();
             }
+            // slopty: a prompt a rewind gave back for this chat is its draft; put in the outgoing
+            // chat's composer before it arrived, it is not that chat's.
+            let rewound = history::take_rewound(&key, cx);
             let new_thread_launch =
                 self.launching_new_chat && self.current_key.is_empty() && !key.is_empty();
             let returning_to_new_thread = !self.current_key.is_empty() && key.is_empty();
@@ -8047,16 +8061,23 @@ impl Composer {
             // replace the ordinary chat draft saved when the panel opened.
             if !self.wizard_open() {
                 let old_text = self.input.read(cx).text().to_string();
-                if old_text.is_empty() {
+                if rewound.as_deref() == Some(old_text.as_str()) {
+                    // Keep the outgoing chat's draft as it was.
+                } else if old_text.is_empty() {
                     self.drafts.remove(&self.current_key);
                 } else {
                     self.drafts.insert(self.current_key.clone(), old_text);
                 }
             }
-            let mut draft = self.drafts.get(&key).cloned().unwrap_or_default();
-            // slopty: a chat opened with no draft here takes the one its machine keeps.
+            let mut draft =
+                rewound.clone().or_else(|| self.drafts.get(&key).cloned()).unwrap_or_default();
+            // slopty: a draft with attachments kept on this client brings them back before its
+            // words, whose chips name them.
+            let kept_here = self.restore_draft_attachments(&key, cx);
+            // slopty: a chat opened with no draft here takes the one its machine keeps, else
+            // the one kept here.
             if draft.is_empty()
-                && let Some(kept) = self.kept_draft(&key, cx)
+                && let Some(kept) = self.kept_draft(&key, cx).or(kept_here)
             {
                 draft = kept;
             }
@@ -9367,6 +9388,12 @@ impl Composer {
         cx.notify();
     }
 
+    // slopty: Skip: the agent's questions go unanswered, as its plain decline.
+    fn wizard_skip(&mut self, cx: &mut Context<Self>) {
+        let skip = UserInputAnswer { question_id: request_card::SKIP_ID.to_owned(), labels: Vec::new(), notes: None };
+        self.wizard_finish(vec![skip], cx);
+    }
+
     // slopty: option key `digit` at `now`: it picks only once the person has stopped typing and
     // the card has been up a moment; whether it was taken.
     fn wizard_digit(&mut self, digit: usize, now: Instant, cx: &mut Context<Self>) -> bool {
@@ -9461,6 +9488,7 @@ impl Composer {
         let last = page + 1 >= wizard.questions.len();
         let typed_empty = self.input.read(cx).is_empty();
         let can_advance = wizard.page_has_pick() || !typed_empty || question.multiline;
+        let skippable = question.kind == request_card::QUESTION && !wizard.revising; // slopty
         // slopty: a plan's choices stand under "Plan ready" (its card is in the transcript), more
         // than one open request says which this is, every shown string draws its hidden
         // characters, and a read-gated approval holds its allow until read through.
@@ -9472,11 +9500,11 @@ impl Composer {
             self.recheck_read_through(cx);
         }
         let wizard = self.wizard.clone().unwrap_or(wizard);
-        let header = approval::visible_escapes(&question.header);
+        let header = question.header.clone();
         let body = if plan {
             approval::PLAN_READY.to_owned()
         } else {
-            approval::visible_escapes(&question.question)
+            question.question.clone()
         };
         let title: String =
             body.lines().next().unwrap_or(header.as_str()).chars().take(160).collect();
@@ -9508,14 +9536,13 @@ impl Composer {
             let description = descriptions
                 .get(ix)
                 .filter(|d| !d.trim().is_empty())
-                .map(|d| approval::visible_escapes(d));
+                .cloned();
             // Selection reads on the row only while no typed override exists
             // (typed answers win — slopty question-panel.tsx `isSel`).
             let picked = wizard.is_picked(ix) && typed_empty;
             let blocked = wizard.allow_blocked(ix); // slopty
             // slopty: the keyboard's place, where Enter would take it.
             let keyed = keys_pick && focused == Some(ix) && !picked;
-            let label = approval::visible_escapes(label); // slopty
             div()
                 .id(("wizard-option", ix))
                 // slopty: each choice names itself; a held-back allow says so.
@@ -9649,13 +9676,10 @@ impl Composer {
                             .items_center()
                             .gap(px(10.0))
                             .child(
-                                div()
-                                    .text_size(crate::typography::ui_rems(10.5))
+                                // slopty: small caps tracked 0.1 em, laid out exactly.
+                                crate::typography::tracked_caps(&header, 10.5, 0.1)
                                     .font_weight(gpui::FontWeight::MEDIUM)
-                                    .text_color(theme.text_muted.opacity(0.6))
-                                    .child(SharedString::from(crate::popover::tracked_upper(
-                                        &header,
-                                    ))),
+                                    .text_color(theme.text_muted.opacity(0.6)),
                             )
                             // slopty: several requests open: which of them this is.
                             .when(open > 1, |el| {
@@ -9793,15 +9817,14 @@ impl Composer {
                     .px(px(16.0))
                     .pb(px(16.0))
                     .pt(px(4.0))
+                    // slopty: the footer's buttons are tab stops with the shared ring.
                     .child(if revising {
                         // slopty: a revision goes back to the choices.
-                        crate::popover::btn_ghost(&theme, "Back to choices", "wizard-unrevise")
-                            .id("wizard-unrevise")
+                        request_card::card_button(crate::popover::btn_ghost(&theme, "Back to choices", "wizard-unrevise"), "wizard-unrevise", &theme)
                             .on_click(cx.listener(|this, _, _, cx| this.card_escape_revision(cx)))
                             .into_any_element()
                     } else if page > 0 {
-                        crate::popover::btn_ghost(&theme, "Back", "wizard-back")
-                            .id("wizard-back")
+                        request_card::card_button(crate::popover::btn_ghost(&theme, "Back", "wizard-back"), "wizard-back", &theme)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.wizard_back(cx);
                             }))
@@ -9809,21 +9832,40 @@ impl Composer {
                     } else {
                         gpui::Empty.into_any_element()
                     })
-                    // slopty: a choice-only request goes on its click; a revision is sent.
-                    .when(takes_words, |el| {
-                        el.child(
-                            crate::popover::btn_primary(
-                                &theme,
-                                if revising { "Send" } else if last { "Submit" } else { "Next" },
-                            )
-                            .id("wizard-submit")
-                            .px(px(16.0))
-                            .when(!can_advance, |el| {
-                                el.opacity(crate::theme::DISABLED_OPACITY).cursor_default().aria_disabled(true)
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            // slopty: an agent's questions may be skipped, which declines them
+                            // as its TUI's Esc does.
+                            .when(skippable, |el| {
+                                el.child(
+                                    request_card::card_button(crate::popover::btn_ghost(&theme, "Skip", "wizard-skip"), "wizard-skip", &theme)
+                                        .role(Role::Button)
+                                        .aria_label("Skip")
+                                        .on_click(cx.listener(|this, _, _, cx| this.wizard_skip(cx))),
+                                )
                             })
-                            .on_click(cx.listener(|this, _, _, cx| this.wizard_advance(cx))),
-                        )
-                    }),
+                            // slopty: a choice-only request goes on its click; a revision is sent.
+                            .when(takes_words, |el| {
+                                el.child(
+                                    request_card::card_button(
+                                        crate::popover::btn_primary(
+                                            &theme,
+                                            if revising { "Send" } else if last { "Submit" } else { "Next" },
+                                        ),
+                                        "wizard-submit",
+                                        &theme,
+                                    )
+                                    .px(px(16.0))
+                                    .when(!can_advance, |el| {
+                                        el.opacity(crate::theme::DISABLED_OPACITY).cursor_default().aria_disabled(true)
+                                    })
+                                    .on_click(cx.listener(|this, _, _, cx| this.wizard_advance(cx))),
+                                )
+                            }),
+                    ),
             );
         crate::frost::frosted(COMPOSER_RADIUS, crate::frost::MENU_BLUR, panel).into_any_element()
     }
@@ -10208,6 +10250,12 @@ impl Render for Composer {
         let hint = self.suggestion(cx).map(|s| {
             let flat = s.split_whitespace().collect::<Vec<_>>().join(" ");
             SharedString::from(format!("{flat}  ⇥ Tab"))
+        });
+        // slopty: while the agent works, the empty draft says Enter queues for after its turn.
+        let send_with_mod =
+            crate::settings::current(cx).composer_send_behavior == crate::settings::ComposerSendBehavior::ModEnter;
+        let hint = hint.or_else(|| {
+            history::queue_hint(self.run_live(cx) && self.editing_queued.is_none(), send_with_mod).map(SharedString::from)
         });
         self.input.update(cx, |input, cx| input.set_hint(hint, cx));
         let dock_lines = self.render_dock_lines(&theme, cx);

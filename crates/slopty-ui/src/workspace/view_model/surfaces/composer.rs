@@ -219,6 +219,7 @@ fn models(offers: &Offers, harness: HarnessId) -> Vec<Model> {
             description: None,
             reasoning_levels: efforts.clone(),
             options: model_options(&model.options),
+            recommended: false,
         })
         .collect()
 }
@@ -295,7 +296,11 @@ fn refs(branches: &slopty_proto::git::Branches) -> Vec<RepoRef> {
             } else {
                 2
             };
-            (rank, RepoRef { name: branch.name.clone(), current: here, worktree_path: None })
+            let default = branches.default.as_deref() == Some(branch.name.as_str());
+            (
+                rank,
+                RepoRef { name: branch.name.clone(), current: here, worktree_path: None, default },
+            )
         })
         .collect();
     refs.sort_by_key(|(rank, _)| *rank);
@@ -341,11 +346,6 @@ impl WorkspaceView {
             methods::TAKE_PROJECT_ACTION_SETUP => self.take_project_action_setup(params, cx),
             methods::UPSERT_PROJECT_ACTION => self.upsert_project_action(params, cx),
             methods::DELETE_PROJECT_ACTION => self.delete_project_action(params, cx),
-            methods::APPLY_HARNESS_UPDATE
-            | methods::CANCEL_HARNESS_UPDATE
-            | methods::SET_HARNESS_UPDATE_POLICY => {
-                fail("An agent updates itself on its machine; Slopty installs and updates none")
-            }
             methods::BEGIN_QUEUED_MESSAGE_EDIT
             | methods::RENEW_QUEUED_MESSAGE_EDIT
             | methods::FINISH_QUEUED_MESSAGE_EDIT
@@ -457,6 +457,19 @@ impl WorkspaceView {
         if let Some(at) = first.and_then(|first| listed.iter().position(|m| m.id == first)) {
             let row = listed.remove(at);
             listed.insert(0, row);
+        }
+        // slopty: the agent's own default is the picker's "Recommended"; Claude Code's
+        // `default` is Opus on the plans that offer it, as its first row above.
+        let recommended = installed.offers.model.as_deref().and_then(|model| {
+            if installed.agent.is(AgentId::CLAUDE_CODE) {
+                let model = if model.eq_ignore_ascii_case("default") { "opus" } else { model };
+                super::catalog::claude_id(model).map(str::to_owned)
+            } else {
+                alias_in(&installed.offers.models, model)
+            }
+        });
+        for row in &mut listed {
+            row.recommended = recommended.as_deref() == Some(row.id.as_str());
         }
         // The agent's modes go with every model it runs.
         if let Some(mode) = mode_option(&installed.offers.modes, installed.offers.mode.as_deref()) {
@@ -1426,11 +1439,16 @@ mod tests {
             list: vec![branch("only-origin", false), branch("main", true), branch("feature", true)],
             more: 0,
         };
-        let shown: Vec<(String, bool)> =
-            refs(&branches).into_iter().map(|r| (r.name, r.current)).collect();
+        let shown: Vec<(String, bool, bool)> =
+            refs(&branches).into_iter().map(|r| (r.name, r.current, r.default)).collect();
         assert_eq!(
             shown,
-            [("feature".into(), true), ("main".into(), false), ("only-origin".into(), false)]
+            [
+                ("feature".into(), true, false),
+                ("main".into(), false, true),
+                ("only-origin".into(), false, false)
+            ],
+            "the checked-out first, and origin's default tagged"
         );
     }
 
@@ -1620,6 +1638,7 @@ mod picks {
         let offers = Offers {
             modes: vec![mode("default", "Ask"), mode("acceptEdits", "Edit"), mode("plan", "Plan")],
             mode: Some("acceptEdits".to_owned()),
+            model: Some("default".to_owned()),
             ..Offers::default()
         };
         let claude = InstalledAgent {
@@ -1646,6 +1665,13 @@ mod picks {
             v.listed_models(&params, cx)
         });
         assert!(!listed.is_empty(), "Claude's models");
+        let recommended: Vec<&str> =
+            listed.iter().filter(|m| m.recommended).map(|m| m.id.as_str()).collect();
+        assert_eq!(
+            recommended,
+            super::super::catalog::claude_id("opus").into_iter().collect::<Vec<_>>(),
+            "Claude Code's default, Opus, is the one recommended"
+        );
         for model in &listed {
             let modes =
                 model.options.iter().find(|o| o.id == super::MODE_OPTION).expect("its modes");

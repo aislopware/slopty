@@ -68,6 +68,12 @@ pub(super) struct Extras {
     pub(super) stopped_task: Option<Task<()>>,
     /// The stall the person chose to keep waiting through: its chat and what it said.
     pub(super) stall_kept: Option<(String, Option<String>)>,
+    /// What each chat's draft with attachments was when last kept on this client.
+    pub(super) kept_attachments: HashMap<String, Vec<String>>,
+    /// A pending keep of a chat's draft attachments.
+    pub(super) attachment_saves: HashMap<String, Task<()>>,
+    /// The chats told their draft could not be kept, until a keep goes through.
+    pub(super) draft_warned: HashSet<String>,
 }
 
 impl Default for Extras {
@@ -85,6 +91,9 @@ impl Default for Extras {
             stopped: None,
             stopped_task: None,
             stall_kept: None,
+            kept_attachments: HashMap::new(),
+            attachment_saves: HashMap::new(),
+            draft_warned: HashSet::new(),
         }
     }
 }
@@ -140,6 +149,45 @@ pub(super) fn step_history(
         c.shown = prompts.get(c.index)?.clone();
         Some(c.shown.clone())
     }
+}
+
+/// slopty: prompts a rewind gave back for a chat the composer has not shown yet (the fresh chat
+/// a rewind before the first turn starts, which arrives later), each that chat's draft once the
+/// composer comes to it.
+#[derive(Default)]
+pub(super) struct RewoundDrafts(pub HashMap<String, String>);
+
+impl gpui::Global for RewoundDrafts {}
+
+/// slopty: put `prompt` back as chat `chat`'s draft when the composer next shows that chat, where
+/// a rewind branched into it.
+pub fn put_back_rewound(chat: String, prompt: String, cx: &mut App) {
+    cx.default_global::<RewoundDrafts>().0.insert(chat, prompt);
+}
+
+/// slopty: the prompt a rewind gave back for chat `chat`, taken.
+pub(super) fn take_rewound(chat: &str, cx: &mut App) -> Option<String> {
+    if chat.is_empty() {
+        return None;
+    }
+    cx.try_global::<RewoundDrafts>()?;
+    cx.global_mut::<RewoundDrafts>().0.remove(chat)
+}
+
+/// slopty: where ↑ has walked to, as the footer says it: "History 3/20", the newest prompt 1;
+/// nothing while no walk is under way in `chat`.
+pub(super) fn history_words(cursor: Option<&HistoryCursor>, chat: &str, total: usize) -> Option<String> {
+    let cursor = cursor.filter(|c| c.chat == chat)?;
+    Some(format!("History {}/{}", cursor.index + 1, total.max(cursor.index + 1)))
+}
+
+/// slopty: what the empty draft says while the agent works: Enter queues the message for after
+/// its turn (Claude desktop's "⏎ to queue for later"), with the key that sends.
+pub(super) fn queue_hint(run_live: bool, send_with_mod: bool) -> Option<String> {
+    run_live.then(|| {
+        let key = crate::keys::combo_text(if send_with_mod { "mod-enter" } else { "enter" });
+        format!("Queue a message for after this turn  {key}")
+    })
 }
 
 /// The composer a quote from the transcript goes to.
@@ -232,6 +280,26 @@ impl Composer {
         true
     }
 
+    /// slopty: a prompt a rewind gave back for the chat already on screen is its draft, unless
+    /// the person has typed one.
+    pub(super) fn adopt_rewound(&mut self, cx: &mut Context<Self>) {
+        let key = self.current_key.clone();
+        let Some(prompt) = cx.try_global::<RewoundDrafts>().and_then(|drafts| drafts.0.get(&key).cloned()) else {
+            return;
+        };
+        if self.wizard_open() || self.editing_queued.is_some() {
+            return;
+        }
+        let typed = self.input.read(cx).text().to_owned();
+        if typed.is_empty() {
+            self.input.update(cx, |input, cx| input.set_text(prompt, cx));
+        } else if typed != prompt {
+            return;
+        }
+        take_rewound(&key, cx);
+        cx.notify();
+    }
+
     /// Keep the draft on the chat's machine once typing rests ([`DRAFT_SAVE_DEBOUNCE`]); empty
     /// words clear it. A recalled prompt, a queued message being edited and the new-session
     /// canvas are no draft.
@@ -259,18 +327,114 @@ impl Composer {
             cx.background_executor().timer(DRAFT_SAVE_DEBOUNCE).await;
             let params = serde_json::json!({ "chatId": key, "text": text });
             let saved = engine.client().call(methods::SAVE_DRAFT, params).await;
-            this.update(cx, |composer, _| {
+            this.update(cx, |composer, cx| {
                 composer.extras.draft_saves.remove(&key);
                 match saved {
                     Ok(_) => {
+                        composer.extras.draft_warned.remove(&key);
                         composer.extras.saved_drafts.insert(key, text);
                     }
-                    Err(err) => tracing::debug!(error = %err, "keeping the draft failed"),
+                    // slopty: a draft its machine could not keep says so, once per chat.
+                    Err(err) => {
+                        tracing::warn!(error = %err, "keeping the draft failed");
+                        let machine = composer.draft_machine(&key, cx);
+                        composer.warn_draft_not_kept(
+                            key,
+                            format!("Couldn't keep this draft on {machine}. It stays here until you send it."),
+                            cx,
+                        );
+                    }
                 }
             })
             .ok();
         });
         self.extras.draft_saves.insert(chat, task);
+    }
+
+    /// The name of the machine chat `chat` runs on, else "its machine".
+    fn draft_machine(&self, chat: &str, cx: &App) -> String {
+        let state = self.state.read(cx);
+        state
+            .chats
+            .iter()
+            .find(|c| c.id == chat)
+            .and_then(|c| state.devices.iter().find(|d| d.id == c.device_id))
+            .map_or_else(|| "its machine".to_owned(), |d| d.name.clone())
+    }
+
+    /// Say once per chat that its draft could not be kept, until a keep goes through.
+    fn warn_draft_not_kept(&mut self, chat: String, words: String, cx: &mut Context<Self>) {
+        if self.extras.draft_warned.insert(chat) {
+            crate::toast::error(cx, words);
+        }
+    }
+
+    /// Keep a draft that holds attachments on this client, its words with them, once it changes
+    /// (`kept_attachments`) and typing rests; the draft of the
+    /// new-session canvas, a recalled prompt or a queued message is no draft.
+    pub(super) fn keep_draft_attachments(&mut self, cx: &mut Context<Self>) {
+        let chat = self.current_key.clone();
+        if chat.is_empty() || self.wizard_open() || self.editing_queued.is_some() || self.extras.history.is_some() {
+            return;
+        }
+        let Some(dir) = self.state.read(cx).data_dir.clone() else { return };
+        let staged = self.staged().to_vec();
+        let text = self.input.read(cx).text().to_owned();
+        let print = super::kept_attachments::fingerprint(&text, &staged);
+        let before = self.extras.kept_attachments.insert(chat.clone(), print.clone());
+        // Unchanged, or no attachments where none were kept by this composer: nothing to write.
+        if before.as_ref() == Some(&print) || (before.is_none() && print.is_empty()) {
+            return;
+        }
+        let (key, held) = (chat.clone(), chat.clone());
+        let task = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(DRAFT_SAVE_DEBOUNCE).await;
+            let kept = cx
+                .background_spawn(async move { super::kept_attachments::save(&dir, &key, &text, &staged) })
+                .await;
+            this.update(cx, |composer, cx| {
+                composer.extras.attachment_saves.remove(&chat);
+                match kept {
+                    Ok(()) => {
+                        composer.extras.draft_warned.remove(&chat);
+                    }
+                    Err(err) => {
+                        tracing::warn!(error = %err, "keeping the draft's attachments failed");
+                        composer.extras.kept_attachments.remove(&chat);
+                        composer.warn_draft_not_kept(
+                            chat,
+                            "Couldn't keep this draft's attachments. They stay here until you send them.".to_owned(),
+                            cx,
+                        );
+                    }
+                }
+            })
+            .ok();
+        });
+        self.extras.attachment_saves.insert(held, task);
+    }
+
+    /// The draft kept on this client for chat `chat`, its attachments staged again when the
+    /// composer holds none for it: its words, for a composer that has none of the chat's own
+    /// or its machine's.
+    pub(super) fn restore_draft_attachments(&mut self, chat: &str, cx: &App) -> Option<String> {
+        if chat.is_empty() || self.attachments.contains_key(chat) {
+            return None;
+        }
+        let dir = self.state.read(cx).data_dir.clone()?;
+        match super::kept_attachments::load(&dir, chat) {
+            Ok(Some(kept)) if !kept.staged.is_empty() => {
+                let print = super::kept_attachments::fingerprint(&kept.text, &kept.staged);
+                self.extras.kept_attachments.insert(chat.to_owned(), print);
+                self.attachments.insert(chat.to_owned(), kept.staged);
+                Some(kept.text)
+            }
+            Ok(_) => None,
+            Err(err) => {
+                tracing::warn!(error = %err, "a draft kept here did not read");
+                None
+            }
+        }
     }
 
     /// The draft the chat's machine keeps for `chat`, taken when the composer holds none of its
@@ -437,6 +601,111 @@ mod tests {
             [serde_json::json!({ "chatId": "main", "text": "new words" })],
             "kept once, after 250 ms"
         );
+    }
+
+    /// A draft its machine could not keep says so once, naming what to expect, and not again
+    /// for the next failed keep.
+    /// slopty: a rewind into a chat that arrives later (a fresh one, before the first turn) puts
+    /// its prompt back as that chat's draft, and the chat it came from does not keep it.
+    #[gpui::test]
+    fn a_rewound_prompt_is_the_new_chats_draft(cx: &mut gpui::TestAppContext) {
+        let directory = tempfile::tempdir().unwrap();
+        cx.update(|cx| crate::settings::init(Default::default(), directory.path(), cx));
+        let chat = |id: &str| -> slopty_view_proto::Chat {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "deviceId": "local", "cwd": "/tmp/main",
+                "archived": false, "createdAt": chrono::Utc::now(),
+            }))
+            .unwrap()
+        };
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| state.chats = vec![chat("main")]);
+        let composer = cx.new(|cx| Composer::new(state.clone(), cx));
+        let select = |id: &str, cx: &mut gpui::TestAppContext| {
+            state.update(cx, |state, cx| {
+                state.selected_chat = Some(id.into());
+                cx.notify();
+            });
+            cx.run_until_parked();
+        };
+        let text = |cx: &mut gpui::TestAppContext| composer.read_with(cx, |c, cx| c.input.read(cx).text().to_string());
+        select("main", cx);
+        cx.update(|cx| put_back_rewound("fresh".into(), "Fix the flaky test".into(), cx));
+        // The shell put the prompt in the composer before the fresh chat arrived.
+        composer.update(cx, |c, cx| c.input.update(cx, |input, cx| input.set_text("Fix the flaky test", cx)));
+        state.update(cx, |state, _| state.chats.push(chat("fresh")));
+        select("fresh", cx);
+        assert_eq!(text(cx), "Fix the flaky test", "the fresh chat's draft");
+        select("main", cx);
+        assert_ne!(text(cx), "Fix the flaky test", "the chat it came from keeps none of it");
+        select("fresh", cx);
+        assert_eq!(text(cx), "Fix the flaky test", "and it stays the fresh chat's");
+        // On screen before its prompt came back, a branched chat takes it as it comes.
+        state.update(cx, |state, _| state.chats.push(chat("branch")));
+        select("branch", cx);
+        assert_eq!(text(cx), "");
+        cx.update(|cx| put_back_rewound("branch".into(), "Try the other way".into(), cx));
+        cx.run_until_parked();
+        assert_eq!(text(cx), "Try the other way", "the chat on screen takes it");
+    }
+
+    #[gpui::test]
+    fn a_draft_that_could_not_be_kept_says_so_once(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let _guard = runtime.enter();
+        let directory = tempfile::tempdir().unwrap();
+        cx.update(|cx| crate::settings::init(Default::default(), directory.path(), cx));
+        let (out, requests) = tokio::sync::mpsc::channel::<String>(256);
+        // The link is gone: every call fails.
+        drop(requests);
+        let (replies, inbound) = tokio::sync::mpsc::channel::<String>(256);
+        drop(replies);
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| {
+            state.chats = vec![
+                serde_json::from_value(serde_json::json!({
+                    "id": "main", "deviceId": "local", "cwd": "/tmp/main",
+                    "archived": false, "createdAt": chrono::Utc::now(),
+                }))
+                .unwrap(),
+            ];
+            state.set_test_engine(crate::state::EngineHandle::from_test_client(
+                slopty_view_rpc::RpcClient::new(out, inbound),
+            ));
+        });
+        let composer = cx.new(|cx| Composer::new(state.clone(), cx));
+        state.update(cx, |state, cx| {
+            state.selected_chat = Some("main".into());
+            cx.notify();
+        });
+        cx.run_until_parked();
+        for words in ["one", "two"] {
+            composer.update(cx, |composer, cx| composer.input.update(cx, |input, cx| input.set_text(words, cx)));
+            cx.executor().advance_clock(Duration::from_millis(300));
+            cx.run_until_parked();
+            runtime.block_on(async { tokio::task::yield_now().await });
+            cx.run_until_parked();
+        }
+        let said: Vec<String> = cx.update(|cx| {
+            crate::toast::messages(cx).iter().filter(|m| m.contains("Couldn't keep this draft")).map(|m| m.to_string()).collect()
+        });
+        assert_eq!(said, ["Couldn't keep this draft on its machine. It stays here until you send it."]);
+    }
+
+    /// Where ↑ has walked reads "History n/total", the newest prompt first; nothing outside a
+    /// walk or in another chat. While the agent works, the empty draft says Enter queues.
+    #[test]
+    fn the_footer_says_the_history_place_and_the_draft_how_to_queue() {
+        let prompts = vec!["newest".to_owned(), "older".to_owned(), "oldest".to_owned()];
+        let mut cursor = None;
+        assert_eq!(history_words(cursor.as_ref(), "c", 3), None);
+        step_history(&mut cursor, &prompts, "", "c", true);
+        step_history(&mut cursor, &prompts, "newest", "c", true);
+        assert_eq!(history_words(cursor.as_ref(), "c", 3).as_deref(), Some("History 2/3"));
+        assert_eq!(history_words(cursor.as_ref(), "other", 3), None);
+        assert_eq!(queue_hint(false, false), None);
+        let enter = crate::keys::combo_text("enter");
+        assert_eq!(queue_hint(true, false), Some(format!("Queue a message for after this turn  {enter}")));
     }
 
     fn said(id: &str, text: &str) -> SessionMessageEntry {

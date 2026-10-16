@@ -202,6 +202,8 @@ fn a_csv_shows_as_a_table_of_its_rows(cx: &mut gpui::TestAppContext) {
     assert!(find(&nodes, Role::Cell, "r9").is_some(), "the last record");
     assert!(find(&nodes, Role::Button, "Copy table").is_some());
     assert!(!nodes.values().any(|n| n.label.contains("more row")), "all ten show");
+    let group = nodes.values().find(|n| n.role == Role::Group && n.label.ends_with("latency.csv"));
+    assert_eq!(group.map(|n| n.value.as_str()), Some("live"), "drawn here, the card is live");
 }
 
 /// The header carries what the page's kind can do: a web page copies its picture, saves, moves
@@ -248,3 +250,24 @@ fn a_page_in_the_pane_leaves_a_line_in_its_card(cx: &mut gpui::TestAppContext) {
     assert!(pane.is_some(), "the pane's node, beside the card's");
     assert!(find(&nodes, Role::Button, "Back to the chat").is_some());
 }
+
+/// A page that could not be shown says why with Try again, which asks its host to open it
+/// afresh; a page whose call failed says why and offers no try, which could go no otherwise.
+#[gpui::test]
+fn a_failed_page_offers_try_again(cx: &mut gpui::TestAppContext) {
+    let stand = serve(cx, HostedPage { failed: Some("The page stopped".into()), ..hosted(None) });
+    let (view, cx) = open_card(cx, card(PageCard::HTML, "slopty-page:1/html", "Plot"));
+    let nodes = draw(cx);
+    assert!(find(&nodes, Role::Button, "Try again").is_some(), "the way to ask again");
+    let bounds = cx.debug_bounds("slopty-page:1/html-try-again").expect("Try again is drawn");
+    cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+    assert!(stand.borrow().acts.contains(&PageAct::Reload), "{:?}", stand.borrow().acts);
+
+    view.update(cx, |view, cx| {
+        view.card = Arc::new(PageCard { failed: true, ..(*view.card).clone() });
+        cx.notify();
+    });
+    let nodes = draw(cx);
+    assert!(find(&nodes, Role::Button, "Try again").is_none(), "a failed call is not tried again");
+}
+

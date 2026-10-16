@@ -291,9 +291,6 @@ impl WorkspaceView {
             methods::LIST_HARNESSES
             | methods::SET_HARNESS_ENABLED
             | methods::INSTALL_HARNESS
-            | methods::CANCEL_INSTALL
-            | methods::WATCH_HARNESS_UPDATES
-            | methods::CHECK_HARNESS_UPDATES
             | methods::GET_AGENT_SETTINGS
             | methods::SET_AGENT_SETTINGS => self.settings_call(method, &params, cx)?,
             methods::ADD_DEVICE => self.add_device(&params, cx),

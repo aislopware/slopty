@@ -4,12 +4,11 @@
 //! (`ThreadRequest::Sessions`, answered by `WorkerMsg::Sessions`), so a remote project reads
 //! exactly as a local one.
 //!
-//! **A folder's sessions** are two asks of its machine at once: Claude Code's own list of the
-//! sessions it kept there, newest first (every session, the TUI's and `claude -p`'s alike, by
-//! its transcript's name and time), and the person's past prompts there, from the history
-//! Claude Code keeps for its own ↑ recall. The list says which sessions there are and in what
-//! order; the prompts give each its title (the first prompt) and its last prompt. A session the
-//! person never typed into has no title, and the shell names it by its id.
+//! **A folder's sessions** are one ask of its machine: Claude Code's own list of the sessions it
+//! kept there, newest first (every session, the TUI's and `claude -p`'s alike, by its
+//! transcript's name and time), each with its title, its last prompt and its branch as the
+//! machine read them. A session the person never typed into has no title, and the shell names
+//! it by its id.
 //!
 //! **A search** is one ask: the sessions whose prompts hold every word, best first, each with
 //! the prompt that matched and where the words are in it; in one folder or every folder of the
@@ -50,10 +49,6 @@ pub mod calls {
 /// The fact a session's branch is said by, when its machine says it.
 pub const BRANCH: &str = "branch";
 
-/// How many more of the person's prompts are asked for than sessions listed: a session's title
-/// comes from them, and a folder's prompted sessions run close to its listed ones.
-const TITLE_SLACK: u32 = 64;
-
 /// The most sessions one call lists.
 const MOST: u32 = 200;
 
@@ -93,44 +88,12 @@ struct Answered {
     key: WorkerKey,
     /// The sessions, in the order to show them, at most one more than asked.
     sessions: Vec<PastSession>,
-    /// The sessions the person's prompts name there, for their titles; empty for a search.
-    titles: Vec<PastSession>,
     /// It lists a folder's sessions, newest first, rather than ranking what words found.
     listing: bool,
     /// Why there are none, in words, when the machine could not say.
     absent: Option<String>,
     /// Why some may be missing, in words.
     cut: Option<String>,
-}
-
-/// `listed`'s sessions with what `prompted` says of each: its title (the first prompt the
-/// person typed in it) and its last prompt, where the prompts name it.
-fn titled(listed: Vec<PastSession>, prompted: &[PastSession]) -> Vec<PastSession> {
-    let by_id: HashMap<&str, &PastSession> = prompted
-        .iter()
-        .filter(|p| p.agent.is(AgentId::CLAUDE_CODE))
-        .map(|p| (p.native.as_str(), p))
-        .collect();
-    listed
-        .into_iter()
-        .map(|mut session| {
-            if let Some(said) = by_id.get(session.native.as_str()) {
-                if session.title.as_deref().is_none_or(|t| t.trim().is_empty()) {
-                    session.title.clone_from(&said.title);
-                }
-                if session.prompts.is_empty() {
-                    session.prompts.clone_from(&said.prompts);
-                }
-                if session.thread.is_none() {
-                    session.thread = said.thread;
-                }
-                for (fact, value) in &said.facts {
-                    session.facts.entry(fact.clone()).or_insert_with(|| value.clone());
-                }
-            }
-            session
-        })
-        .collect()
 }
 
 /// Whether a session can be opened: the machine keeps a thread of it, or Claude Code can take it
@@ -280,39 +243,24 @@ impl WorkspaceView {
         }
         let mut asks = Vec::with_capacity(places.asked.len());
         for (key, cwd) in places.asked {
-            // A folder with no words is listed by Claude Code, and titled by the prompts.
+            // A folder with no words is listed by Claude Code, newest first.
             let listing = query.is_empty() && cwd.is_some();
-            let main = self.past_ask(
-                key,
-                Some(claude()),
-                cwd.clone(),
-                query.clone(),
-                limit.saturating_add(1),
-            );
-            let titles = listing.then(|| {
-                self.past_ask(key, None, cwd, String::new(), limit.saturating_add(TITLE_SLACK))
-            });
-            asks.push((key, main, titles, listing));
+            let main =
+                self.past_ask(key, Some(claude()), cwd, query.clone(), limit.saturating_add(1));
+            asks.push((key, main, listing));
         }
         let failed = places.failed;
         cx.spawn(async move |this, cx| {
             let mut answered = Vec::with_capacity(asks.len());
             let mut silent = Vec::new();
-            for (key, main, titles, listing) in asks {
+            for (key, main, listing) in asks {
                 let Some(main) = within(cx, main).await else {
                     silent.push(key);
                     continue;
                 };
-                let titles = match titles {
-                    Some(titles) => {
-                        within(cx, titles).await.map(|t| t.sessions).unwrap_or_default()
-                    }
-                    None => Vec::new(),
-                };
                 answered.push(Answered {
                     key,
                     sessions: main.sessions,
-                    titles,
                     listing,
                     absent: main.absent,
                     cut: main.cut,
@@ -363,7 +311,7 @@ impl WorkspaceView {
                 }));
             }
             cut = cut.or(answer.cut);
-            let mut sessions = titled(answer.sessions, &answer.titles);
+            let mut sessions = answer.sessions;
             sessions.retain(openable);
             more |= sessions.len() > most;
             sessions.truncate(most);
@@ -490,8 +438,6 @@ impl WorkspaceView {
 mod tests {
     use std::collections::BTreeMap;
 
-    use slopty_proto::thread::wire::PromptHit;
-
     use super::*;
 
     fn session(native: &str, title: Option<&str>) -> PastSession {
@@ -506,44 +452,6 @@ mod tests {
             facts: BTreeMap::new(),
             prompts: Vec::new(),
         }
-    }
-
-    fn hit(text: &str) -> PromptHit {
-        PromptHit {
-            text: text.to_owned(),
-            spans: Vec::new(),
-            cut_before: false,
-            cut_after: false,
-            at_ms: None,
-        }
-    }
-
-    /// A listed session takes its title and last prompt from the person's prompts; one nobody
-    /// typed into keeps none, and another agent's prompts name nothing.
-    #[test]
-    fn listed_sessions_are_titled_by_their_prompts() {
-        let listed = vec![session("a", None), session("b", None), session("c", None)];
-        let mut said = session("a", Some("Fix the build"));
-        said.prompts = vec![hit("and now the tests")];
-        said.facts.insert(BRANCH.to_owned(), "main".to_owned());
-        let mut codex = session("b", Some("not Claude's"));
-        codex.agent = AgentId::named(AgentId::CODEX);
-        let titled = titled(listed, &[said, codex]);
-        assert_eq!(titled[0].title.as_deref(), Some("Fix the build"));
-        assert_eq!(titled[0].prompts[0].text, "and now the tests");
-        assert_eq!(titled[0].facts.get(BRANCH).map(String::as_str), Some("main"));
-        assert_eq!(titled[1].title, None, "another agent's prompt titles nothing");
-        assert_eq!(titled[2].title, None);
-        let order: Vec<&str> = titled.iter().map(|s| s.native.as_str()).collect();
-        assert_eq!(order, ["a", "b", "c"], "the listing's order stands");
-    }
-
-    /// A title the machine's own listing gave stands over the first prompt.
-    #[test]
-    fn a_listed_title_stands() {
-        let listed = vec![session("a", Some("Named in Claude Code"))];
-        let titled = titled(listed, &[session("a", Some("first prompt"))]);
-        assert_eq!(titled[0].title.as_deref(), Some("Named in Claude Code"));
     }
 
     /// A session whose record is gone and that no thread keeps cannot be opened.

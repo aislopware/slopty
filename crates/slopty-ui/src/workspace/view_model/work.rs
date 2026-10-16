@@ -365,6 +365,13 @@ impl WorkspaceView {
         let Some((key, thread, (turn, prompt))) = found else {
             return Task::ready(Err(RpcError::Failed("That message is not here".to_owned())));
         };
+        // slopty: the branch goes by the conversation's name, not "New chat".
+        let title = self
+            .held_hub(key)
+            .and_then(|held| {
+                held.read(cx).threads().rows().rows.get(&thread).map(|row| row.title.clone())
+            })
+            .filter(|title| !title.trim().is_empty());
         let hub = self.thread_hub(key, cx);
         let rewound = code.then(|| {
             let id = hub.update(cx, |hub, cx| hub.intent(thread, Intent::Rewind { turn }, cx));
@@ -390,6 +397,22 @@ impl WorkspaceView {
             {
                 fields.insert("chatId".to_owned(), branch.into());
                 undo.branch_chat_id = Some(branch.to_owned());
+                // slopty: the branch keeps the conversation's name, and the words taken back as
+                // its draft on its machine, which any device opening it finds.
+                if let Ok(branched) = branch.parse::<ThreadId>() {
+                    let draft = prompt.clone();
+                    let _gone = this.update(cx, |this, cx| {
+                        let hub = this.thread_hub(key, cx);
+                        hub.update(cx, |hub, cx| {
+                            if let Some(title) = title {
+                                hub.intent(branched, Intent::Name { title }, cx);
+                            }
+                            if !draft.is_empty() {
+                                hub.intent(branched, Intent::Draft { text: draft }, cx);
+                            }
+                        });
+                    });
+                }
             }
             if undo.branch_chat_id.is_some() || undo.tree.is_some() {
                 fields.insert("undo".to_owned(), serde_json::to_value(&undo).unwrap_or_default());

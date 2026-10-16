@@ -28,6 +28,11 @@ const APPROVAL: &str = "approval";
 const CANCEL: &str = "cancel";
 /// The id an answer of the choice beside an agent's questions goes under (`aside`).
 const ASIDE_ID: &str = "choice";
+/// The id an answer that skips an agent's questions goes under: the view model sends it as the
+/// request's plain decline (`slopty_ui::view_model::transcript::SKIP`).
+pub(crate) const SKIP_ID: &str = "skip";
+/// The kind of a request that asks an agent's questions.
+pub(crate) const QUESTION: &str = "question";
 /// Where a question's notes box is kept among the card's inputs, before the question's id.
 const NOTES: &str = "notes:";
 /// The most of a dialog's payload the card lists.
@@ -334,7 +339,9 @@ const URL_BROWSER_CHARS: usize = 8_000;
 /// reorder what the person reads, or its browser-ready form (each shell metacharacter escaped)
 /// is too long to hand over safely.
 pub(crate) fn url_caution(url: &str) -> Option<&'static str> {
-    if url.chars().any(|c| approval::hidden(c) || matches!(c, '\n' | '\r' | '\u{2028}' | '\u{2029}' | '\u{2800}')) {
+    // slopty: the view model shows each hidden character as its code (`[U+202E]`), which no
+    // address can hold as it stands.
+    if url.contains("[U+") || url.chars().any(|c| matches!(c, '\n' | '\r' | '\u{2028}' | '\u{2029}' | '\u{2800}')) {
         return Some("This URL cannot be shown exactly as it would open, so opening it is disabled. Decline to continue.");
     }
     let escaped = url.chars().map(|c| match c {
@@ -618,7 +625,7 @@ impl Composer {
     /// escalated it.
     pub(super) fn card_reason(question: &UserInputQuestion, theme: &Theme) -> Option<AnyElement> {
         let reason = question.reason.as_deref().map(str::trim).filter(|r| !r.is_empty())?;
-        let words = approval::visible_escapes(reason);
+        let words = reason.to_owned();
         Some(
             div()
                 .id("wizard-reason")
@@ -644,7 +651,7 @@ impl Composer {
             return None;
         }
         let shown = question.option_previews.get(at).map(|p| p.trim()).filter(|p| !p.is_empty());
-        let label = question.options.get(at).map(|l| approval::visible_escapes(l)).unwrap_or_default();
+        let label = question.options.get(at).cloned().unwrap_or_default();
         // slopty: the pane's words fade at the edges they scroll past, inside its box.
         let words = div()
             .id("wizard-preview")
@@ -659,7 +666,7 @@ impl Composer {
             .text_size(crate::typography::ui_rems(11.5))
             .line_height(px(17.0))
             .text_color(if shown.is_some() { theme.text } else { theme.text_muted })
-            .child(SharedString::from(shown.map_or_else(|| "No preview available".to_owned(), approval::visible_escapes)));
+            .child(SharedString::from(shown.map_or_else(|| "No preview available".to_owned(), str::to_owned)));
         Some(
             div()
                 .flex_1()
@@ -675,7 +682,7 @@ impl Composer {
     pub(super) fn card_header_chips(&mut self, question: &UserInputQuestion, theme: &Theme) -> Vec<AnyElement> {
         let mut chips = Vec::new();
         if let Some(child) = question.sent_by.as_deref().filter(|c| !c.trim().is_empty()) {
-            let words = format!("Sent by {}", approval::visible_escapes(child));
+            let words = format!("Sent by {child}");
             chips.push(
                 div()
                     .id("wizard-sent-by")
@@ -784,18 +791,7 @@ impl Composer {
         // slopty: "Chat about this", beside an agent's questions.
         let aside = question.aside.clone().filter(|_| !revising);
         if revise.is_some() || allow.is_some() || edit.is_some() || aside.is_some() {
-            let link = |id: &'static str, words: SharedString| {
-                div()
-                    .id(id)
-                    .role(Role::Button)
-                    .aria_label(words.clone())
-                    .px(px(4.0))
-                    .text_size(crate::typography::ui_rems(12.5))
-                    .text_color(theme.text_muted)
-                    .cursor_pointer()
-                    .hover(|s| s.text_color(theme.text))
-                    .child(words)
-            };
+            let link = |id: &'static str, words: SharedString| card_link(id, words, theme.text_muted, theme);
             extras.push(
                 div()
                     .mt(px(8.0))
@@ -924,19 +920,14 @@ impl Composer {
                         .truncate()
                         .font_family(theme.font_mono.clone())
                         .text_color(theme.text)
-                        .child(SharedString::from(approval::visible_escapes(&offer.rule))),
+                        .child(SharedString::from(offer.rule.clone())),
                 )
                 .child(
-                    div()
-                        .id("wizard-rule-edit")
-                        .role(Role::Button)
+                    card_link("wizard-rule-edit", "Edit rule…".into(), theme.accent, theme)
                         .aria_label("Edit rule")
+                        .text_size(crate::typography::ui_rems(12.0))
                         .flex_none()
-                        .cursor_pointer()
-                        .text_color(theme.accent)
-                        .hover(|s| s.opacity(0.8))
-                        .on_click(cx.listener(|this, _, _, cx| this.edit_rule(cx)))
-                        .child("Edit rule…"),
+                        .on_click(cx.listener(|this, _, _, cx| this.edit_rule(cx))),
                 )
                 .into_any_element();
         };
@@ -1001,6 +992,9 @@ impl Composer {
                             ))
                             .on_hover(crate::motion::hover_listener(format!("wizard-rule-scope-option-{ix}")))
                             .cursor_pointer()
+                            // slopty: a tab stop with the shared ring; ↩ or Space picks it.
+                            .tab_index(0)
+                            .map(|el| crate::surface_chrome::focus_ring(el, theme))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if let Some(edit) = this.card.rule.as_mut() {
                                     edit.scope.clone_from(&id);
@@ -1016,16 +1010,14 @@ impl Composer {
                     .justify_end()
                     .gap(px(6.0))
                     .child(
-                        crate::popover::btn_ghost(theme, "Cancel", "wizard-rule-cancel")
-                            .id("wizard-rule-cancel")
+                        card_button(crate::popover::btn_ghost(theme, "Cancel", "wizard-rule-cancel"), "wizard-rule-cancel", theme)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.card.rule = None;
                                 cx.notify();
                             })),
                     )
                     .child(
-                        crate::popover::btn_primary(theme, "Allow with rule")
-                            .id("wizard-allow-with-rule")
+                        card_button(crate::popover::btn_primary(theme, "Allow with rule"), "wizard-allow-with-rule", theme)
                             .role(Role::Button)
                             .aria_label("Allow with rule")
                             .on_click(cx.listener(|this, _, _, cx| this.allow_with_rule(cx))),
@@ -1041,7 +1033,7 @@ impl Composer {
         // not opened with a click, as the TUI's card refuses it.
         let caution = url_caution(url);
         let opens = (url.starts_with("https://") || url.starts_with("http://")) && caution.is_none();
-        let shown = approval::visible_escapes(url);
+        let shown = url.to_owned();
         let url = url.to_owned();
         let page = div()
             .id("wizard-open-page")
@@ -1054,7 +1046,11 @@ impl Composer {
             .gap(px(6.0))
             .text_size(crate::typography::ui_rems(12.5))
             .text_color(theme.accent)
-            .when(opens, |el| el.cursor_pointer().on_click(move |_, _, cx| cx.open_url(&url)))
+            // slopty: a tab stop with the shared ring when it opens.
+            .when(opens, |el| {
+                crate::surface_chrome::focus_ring(el.cursor_pointer().tab_index(0).rounded(px(Theme::CONTROL_RADIUS)), theme)
+                    .on_click(move |_, _, cx| cx.open_url(&url))
+            })
             .child(crate::icons::icon(crate::icons::GLOBAL).size(px(13.0)).text_color(theme.accent))
             .child(SharedString::from(format!("Open {host}")))
             .child(div().text_color(theme.text_faint).child("· then Done"));
@@ -1219,6 +1215,9 @@ impl Composer {
                     ))
                     .on_hover(crate::motion::hover_listener(format!("wizard-form-{field_ix}-{ix}")))
                     .cursor_pointer()
+                    // slopty: a tab stop with the shared ring; ↩ or Space picks it.
+                    .tab_index(0)
+                    .map(|el| crate::surface_chrome::focus_ring(el, theme))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         let picks = this.card.picks.entry(name.clone()).or_default();
                         match picks.iter().position(|p| *p == value) {
@@ -1244,15 +1243,13 @@ impl Composer {
             .justify_end()
             .gap(px(6.0))
             .child(
-                crate::popover::btn_ghost(theme, "Dismiss", "wizard-dialog-dismiss")
-                    .id("wizard-dialog-dismiss")
+                card_button(crate::popover::btn_ghost(theme, "Dismiss", "wizard-dialog-dismiss"), "wizard-dialog-dismiss", theme)
                     .role(Role::Button)
                     .aria_label("Dismiss")
                     .on_click(cx.listener(|this, _, _, cx| this.answer_page_with(CANCEL.to_owned(), cx))),
             )
             .child(
-                crate::popover::btn_primary(theme, "OK")
-                    .id("wizard-dialog-ok")
+                card_button(crate::popover::btn_primary(theme, "OK"), "wizard-dialog-ok", theme)
                     .role(Role::Button)
                     .aria_label("OK")
                     .px(px(16.0))
@@ -1287,10 +1284,36 @@ fn render_facts(facts: &[(String, String)], theme: &Theme) -> AnyElement {
                         .flex_1()
                         .min_w_0()
                         .text_color(theme.text_muted)
-                        .child(SharedString::from(approval::visible_escapes(words))),
+                        .child(SharedString::from(words.clone())),
                 )
         }))
         .into_any_element()
+}
+
+/// slopty: a card's button (`popover::btn_ghost`, `btn_primary`) as a tab stop with the shared
+/// focus ring.
+pub(super) fn card_button(button: gpui::Div, id: &'static str, theme: &Theme) -> gpui::Stateful<gpui::Div> {
+    crate::surface_chrome::focus_ring(button.id(id).tab_index(0).px(px(12.0)).py(px(6.0)), theme)
+}
+
+/// slopty: one of the card's word buttons ("Revise…", "Edit plan…", "Edit rule…"): a tab stop
+/// with the shared focus ring, its words easing from `rest` to the text colour on hover.
+fn card_link(id: &'static str, words: SharedString, rest: gpui::Hsla, theme: &Theme) -> gpui::Stateful<gpui::Div> {
+    let fade: SharedString = format!("{id}-hover").into();
+    let text = if rest == theme.accent { theme.accent.opacity(0.8) } else { theme.text };
+    let link = div()
+        .id(id)
+        .role(Role::Button)
+        .aria_label(words.clone())
+        .px(px(4.0))
+        .rounded(px(Theme::CONTROL_RADIUS))
+        .text_size(crate::typography::ui_rems(12.5))
+        .text_color(crate::motion::hover_blend(&fade, rest, text))
+        .on_hover(crate::motion::hover_listener(fade))
+        .cursor_pointer()
+        .tab_index(0)
+        .child(words);
+    crate::surface_chrome::focus_ring(link, theme)
 }
 
 /// What a rewind's answer offers to undo, whenever it has an undo (a branch to delete, a folder
@@ -1391,6 +1414,16 @@ mod tests {
         assert!(classifier_escalated("Auto mode classifier requires confirmation for this command."));
         assert!(classifier_escalated("Classifier risky-ops requires confirmation for this tool."));
         assert!(!classifier_escalated("Permission rule Bash(rm:*) requires confirmation"));
+    }
+
+    /// An address the view model had to escape, or one that breaks a line, does not open with
+    /// a click; a plain one does.
+    #[test]
+    fn a_url_with_hidden_characters_does_not_open() {
+        assert_eq!(url_caution("https://example.com/a?b=c"), None);
+        assert!(url_caution("https://example.com/[U+202E]gpj.exe").is_some(), "escaped by the view model");
+        assert!(url_caution("https://example.com/\nnext").is_some());
+        assert!(url_caution(&format!("https://example.com/{}", "%".repeat(2_000))).is_some(), "too long");
     }
 
     /// The countdown says how long is left, rounded up, and nothing once past.

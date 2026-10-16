@@ -3741,3 +3741,16 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `ctl::tests::an_agents_ask_of_the_window_crosses_the_socket`; `slopty-tools` `ui::tests`
     and `tools::tests::the_window_tools_reach_the_window_through_their_carrier`; `slopty-cli`
     `ui::tests`.
+- ⏳ **A side question (`/btw`) goes through Claude Code's own `side_question` door (2026-10-17,
+  lane C2).** Claude Code answers a side question from the conversation so far, without tools,
+  without entering the conversation and without interrupting the turn under way
+  (`interactive-mode.md`, "Side questions with /btw"). A driven session takes it as a stream-json
+  control request, the one the Agent SDK's `askSideQuestion` sends and Claude desktop uses:
+  `{"subtype":"side_question","question":…,"history":[{"question":…,"response":…}]}`, answered
+  with `{"response":…|null,"synthetic":bool}` and timed out by Claude Code after 11 minutes
+  (CHANGELOG). It is a published door, so Slopty uses it and never fakes one by sending `/btw`
+  as a prompt. Slopty's own Aside (`Intent::Aside`) stays what it is: a fork of the whole
+  thread with tools, for going on with the work beside it. Left: the worker's intent carrying
+  the question and its answer (`slopty-agent`'s driven Claude, lane W), then the composer's
+  `/btw` routing to it with its answer shown in a dismissible card above the composer, the
+  newest twenty exchanges kept as Claude Code keeps them.

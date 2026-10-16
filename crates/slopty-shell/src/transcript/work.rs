@@ -210,12 +210,18 @@ impl ChipFacts {
                 // The words link to the task the call became: its tray row.
                 (Some(task_row), Some(chat)) => {
                     let (task_row, chat) = (task_row.clone(), chat.clone());
+                    let fade = format!("{part_id}-task");
                     trail.child(
-                        text.id(SharedString::from(format!("{part_id}-task")))
+                        text.id(SharedString::from(fade.clone()))
                             .role(gpui::Role::Link)
                             .aria_label(SharedString::from(format!("{words}, in the background tray")))
                             .cursor_pointer()
-                            .hover(|s| s.text_color(theme.text_muted))
+                            // slopty: a faded hover, and a tab stop.
+                            .text_color(crate::motion::hover_blend(&fade, tint, theme.text_muted))
+                            .on_hover(crate::motion::hover_listener(fade.clone()))
+                            .tab_index(0)
+                            .rounded(px(4.0))
+                            .map(|el| crate::surface_chrome::focus_ring(el, theme))
                             .on_click(move |_, _, cx| {
                                 cx.stop_propagation();
                                 reveal_work(&chat, &task_row, cx);
@@ -248,6 +254,12 @@ impl ChipFacts {
                     .cursor_pointer()
                     .opacity(0.0)
                     .group_hover("tool-header", |s| s.opacity(1.0))
+                    // slopty: a tab stop, shown while it has the keyboard.
+                    .tab_index(0)
+                    .focus_visible({
+                        let ring = crate::surface_chrome::ring(theme, crate::surface_chrome::RING_OFFSET);
+                        move |s| s.opacity(1.0).outline_ring(ring)
+                    })
                     // slopty: the faded hover, at the control strength.
                     .bg(crate::motion::hover_blend(
                         &format!("{part_id}-background"),
@@ -439,8 +451,12 @@ impl Transcript {
             .gap(px(Theme::SPACE_SM))
             .cursor_pointer()
             .text_size(px(super::TOOL_TEXT_SIZE))
-            .text_color(theme.text_muted)
-            .hover(|s| s.text_color(theme.text))
+            // slopty: a faded hover, and a tab stop.
+            .text_color(crate::motion::hover_blend(&format!("{}-task", row.id), theme.text_muted, theme.text))
+            .on_hover(crate::motion::hover_listener(format!("{}-task", row.id)))
+            .tab_index(0)
+            .rounded(px(4.0))
+            .map(|el| crate::surface_chrome::focus_ring(el, theme))
             .on_click(cx.listener(move |_, _, _, cx| {
                 if let Some(chat) = &chat {
                     reveal_work(chat, &tray_row, cx);
@@ -608,6 +624,8 @@ fn disclosure(
         .cursor_pointer()
         .bg(crate::motion::hover_blend(&fade, gpui::transparent_black(), crate::theme::ink(0.08)))
         .on_hover(crate::motion::hover_listener(fade.clone()))
+        .tab_index(0) // slopty: a tab stop.
+        .map(|el| crate::surface_chrome::focus_ring(el, theme))
         .hint(if open { "Hide details" } else { "Show details" })
         .on_click(on_click)
         .child(

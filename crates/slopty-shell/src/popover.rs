@@ -1014,33 +1014,17 @@ pub fn menu_row_nav(
 
 /// Small uppercase section heading inside a floating menu (slopty
 /// `MenuHeading`): `px-2 pb-1 pt-1.5 text-[10px] font-medium uppercase
-/// tracking-[0.1em] text-muted-foreground/60`. gpui has no letter-spacing at
-/// the pinned rev; the tracking is approximated with hair spaces.
+/// tracking-[0.1em] text-muted-foreground/60`, its tracking laid out exactly
+/// (`typography::tracked_caps`).
 pub fn menu_heading(theme: &Theme, label: &str) -> gpui::Div {
     let theme = &theme.for_popup();
     div()
         .px(px(8.0))
         .pb(px(4.0))
         .pt(px(6.0))
-        .text_size(crate::typography::ui_rems(10.0))
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(theme.text_muted)
-        .child(SharedString::from(tracked_upper(label)))
-}
-
-/// Uppercase + hair-space tracking (see [`menu_heading`]).
-pub fn tracked_upper(label: &str) -> String {
-    let upper = label.to_uppercase();
-    let mut out = String::with_capacity(upper.len() * 2);
-    let mut first = true;
-    for ch in upper.chars() {
-        if !first {
-            out.push('\u{200A}'); // hair space ≈ 0.1em tracking
-        }
-        out.push(ch);
-        first = false;
-    }
-    out
+        .child(crate::typography::tracked_caps(label, 10.0, 0.1))
 }
 
 /// Hairline divider between menu sections (slopty `MenuSeparator`:
@@ -2400,16 +2384,6 @@ mod tests {
         assert_eq!(classify_key("p", false, true), MenuKey::Up);
         assert_eq!(classify_key("n", false, false), MenuKey::Other);
         assert_eq!(classify_key("p", true, false), MenuKey::Other);
-    }
-
-    #[test]
-    fn tracked_upper_spaces_letters() {
-        assert_eq!(tracked_upper("ab"), "A\u{200A}B");
-        assert_eq!(
-            tracked_upper("Question"),
-            "Q\u{200A}U\u{200A}E\u{200A}S\u{200A}T\u{200A}I\u{200A}O\u{200A}N"
-        );
-        assert_eq!(tracked_upper(""), "");
     }
 
     #[test]

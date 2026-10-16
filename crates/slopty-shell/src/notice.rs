@@ -123,6 +123,9 @@ pub fn notice_chip(
                     .cursor_pointer()
                     .bg(crate::motion::hover_blend(&hover, gpui::transparent_black(), accent.opacity(0.12)))
                     .on_hover(crate::motion::hover_listener(hover))
+                    // slopty: a tab stop with the shell's ring.
+                    .tab_index(0)
+                    .map(|el| crate::surface_chrome::focus_ring(el, theme))
                     // The composer chip dismisses on click; copying must
                     // not take the notice with it.
                     .on_click(move |_, _, cx| {

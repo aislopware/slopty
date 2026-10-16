@@ -390,6 +390,9 @@ pub enum PageAct {
     Width(f32),
     /// Its row left the transcript: let its web view go, its picture and state kept.
     Unmount,
+    /// slopty: open it afresh, the person's Try again: its web view and what failed are let go,
+    /// and it is read again from what showed it.
+    Reload,
     /// slopty: draw page `index` (from 0) of a PDF `width` points wide, for the card or the pane.
     Draw {
         /// The page.

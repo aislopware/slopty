@@ -142,6 +142,7 @@ fn model(
         description: (!description.is_empty()).then(|| description.into()),
         reasoning_levels: ladder.to_vec(),
         options,
+        recommended: false,
     }
 }
 

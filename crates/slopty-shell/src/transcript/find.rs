@@ -33,7 +33,7 @@ gpui::actions!(
 /// The open find of one transcript.
 #[derive(Default)]
 pub(crate) struct FindState {
-    open: bool,
+    pub(super) open: bool,
     input: Option<Entity<ComposerInput>>,
     _events: Option<Subscription>,
     /// The words the hits were counted for.
@@ -124,7 +124,7 @@ struct FindActions;
 
 impl Global for FindActions {}
 
-fn with_target(cx: &mut App, act: impl FnOnce(&mut Transcript, &mut Window, &mut Context<Transcript>)) {
+fn with_target(cx: &mut App, act: impl FnOnce(&mut Transcript, &mut Window, &mut Context<Transcript>) + 'static) {
     let Some((target, window)) = cx
         .try_global::<FindTarget>()
         .and_then(|target| Some((target.0.upgrade()?, target.1)))
@@ -134,8 +134,12 @@ fn with_target(cx: &mut App, act: impl FnOnce(&mut Transcript, &mut Window, &mut
     let Some(window) = window.or_else(|| cx.active_window()) else {
         return;
     };
-    let _ = window.update(cx, |_, window, cx| {
-        target.update(cx, |transcript, cx| act(transcript, window, cx));
+    // slopty: a key the window dispatches reaches this while the window is being updated, which
+    // cannot be updated again inside itself: the transcript acts once the dispatch is done.
+    cx.defer(move |cx| {
+        let _ = window.update(cx, |_, window, cx| {
+            target.update(cx, |transcript, cx| act(transcript, window, cx));
+        });
     });
 }
 
@@ -313,6 +317,11 @@ impl Transcript {
         );
     }
 
+    /// Whether find is open, its card over the transcript's top right.
+    pub(super) fn finding(&self) -> bool {
+        self.find.open
+    }
+
     /// The find card over the transcript's top right, while find is open.
     pub(super) fn render_find_bar(&mut self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         self.note_find_window(window, cx);
@@ -435,5 +444,39 @@ mod tests {
         assert_eq!(state.locate(4), None);
         state.total = 0;
         assert_eq!(state.tally().as_deref(), Some("No results"));
+    }
+    /// ⌘F reaches the window's transcript from a key the window dispatches, the keyboard
+    /// elsewhere and the window not the key one: find opens and takes the keyboard.
+    #[gpui::test]
+    fn find_opens_from_the_windows_keys_key_or_not(cx: &mut gpui::TestAppContext) {
+        use gpui::prelude::*;
+        struct Fixture(Entity<Transcript>, gpui::FocusHandle);
+        impl gpui::Render for Fixture {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                gpui::div().size_full().track_focus(&self.1).child(self.0.clone())
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(crate::theme::Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            cx.set_reduce_motion(true);
+        });
+        let state = cx.new(|_| crate::state::AppState::new());
+        let transcript = cx.new(|cx| Transcript::new(state, cx));
+        let (fixture, cx) =
+            cx.add_window_view(|_, cx| Fixture(transcript.clone(), cx.focus_handle()));
+        let elsewhere = fixture.read_with(cx, |fixture, _| fixture.1.clone());
+        cx.update(|window, cx| window.focus(&elsewhere, cx));
+        cx.run_until_parked();
+        cx.deactivate_window();
+        cx.update(|window, cx| window.dispatch_action(Box::new(FindInThread), cx));
+        cx.run_until_parked();
+        assert!(transcript.read_with(cx, |this, _| this.finding()), "find opened");
+        let keyboard = cx.update(|window, cx| {
+            transcript.read(cx).find.input.as_ref().is_some_and(|input| input.focus_handle(cx).is_focused(window))
+        });
+        assert!(keyboard, "and has the keyboard");
     }
 }

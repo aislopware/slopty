@@ -255,15 +255,10 @@ impl Render for PagePaneView {
             live::page_act(&self.page, PageAct::Engage, cx);
         }
         let body: AnyElement = match hosted.as_ref() {
-            Some(live::HostedPage { failed: Some(why), .. }) => div()
-                .size_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_size(crate::typography::ui_rems(12.0))
-                .text_color(theme.text_muted)
-                .child(why.clone())
-                .into_any_element(),
+            // slopty: why, and Try again.
+            Some(live::HostedPage { failed: Some(why), .. }) => {
+                super::failed_body(&format!("{}-pane", self.page), why.clone(), true, &self.page, &theme)
+            }
             Some(live::HostedPage { doc: Some(PageDoc::Pdf(pdf)), .. }) => {
                 self.pdf_pages(pdf.pages, cx)
             }
@@ -283,28 +278,19 @@ impl Render for PagePaneView {
                     .object_fit(ObjectFit::Contain)
                     .into_any_element()
             }
-            _ => div()
-                .size_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_size(crate::typography::ui_rems(12.0))
-                .text_color(theme.text_faint)
-                .child(SharedString::from("Loading the page…"))
-                .into_any_element(),
+            // slopty: the surfaces' loading anatomy.
+            _ => live::chrome::loading("Loading the page…", &theme, cx.entity_id(), cx).into_any_element(),
         };
-        let back = super::card_action(
-            SharedString::from(format!("{}-pane-back", self.page)),
-            "Back to the chat",
+        let back = live::chrome::icon_button(
+            format!("{}-pane-back", self.page),
             crate::icons::ALT_ARROW_LEFT,
-            false,
-            false,
+            "Back to the chat",
             &theme,
-            Rc::new({
-                let (page, title, chat) = (self.page.clone(), self.title.to_string(), self.chat.clone());
-                move |_: &mut Window, cx: &mut App| ask_pane(&chat, &page, &title, false, cx)
-            }),
-        );
+        )
+        .on_click({
+            let (page, title, chat) = (self.page.clone(), self.title.to_string(), self.chat.clone());
+            move |_, _, cx| ask_pane(&chat, &page, &title, false, cx)
+        });
         let probe = self.bounds.clone();
         div()
             .id(SharedString::from(format!("{}-pane", self.page)))

@@ -160,6 +160,7 @@ impl Entry {
             description: None,
             reasoning_levels: efforts,
             options,
+            recommended: false,
         }
     }
 }
@@ -211,6 +212,7 @@ pub(super) fn claude_menu(version: &str, menu: &[String], also: Option<&str>) ->
                 description: None,
                 reasoning_levels: Vec::new(),
                 options: Vec::new(),
+                recommended: false,
             }),
         }
     }

@@ -1,14 +1,17 @@
 // slopty: Slopty's own file (not in zeron).
 //! slopty: the footer under the composer, always there (the TUI's footer row): the person's
 //! status line with its colours, what the agent's mods put there, the goal it works towards
-//! ("/goal active (5h)"), the background counts ("3 commands · 1 monitor", which open the
-//! Background tray), and the permission mode ("Bypass permissions on", amber when nothing is
-//! asked), which ⇧Tab cycles in the agent's order and a click picks from a menu.
+//! ("/goal active (5h)"), and the permission mode ("Bypass permissions on", amber when nothing
+//! is asked), which ⇧Tab cycles in the agent's order and a click picks from a menu. The
+//! background counts are the Background tray's, right above it, so the footer does not repeat
+//! them.
 //!
 //! The words are the view model's (`slopty_view_doc::dock`); what ticks (the goal's age) is
 //! ticked here from the times it carries.
 
-use gpui::AnyElement;
+use std::time::Instant;
+
+use gpui::{AnyElement, KeyDownEvent, KeyUpEvent};
 use slopty_view_doc::calls;
 use slopty_view_doc::dock::{ChatDock, GoalLine, ModeChip, StatusSpan};
 use slopty_view_doc::work::duration_words;
@@ -32,6 +35,90 @@ pub(crate) struct FooterState {
     pub menu: crate::popover::Popup<FooterMenu>,
     /// The mode asked for and not yet confirmed by the dock.
     pub pending_mode: Option<String>,
+    /// The open mode menu's keyboard.
+    pub(crate) keys: MenuKeys,
+}
+
+/// slopty: an open footer menu's keyboard, as the shared menu's (`live::menu`): ↑ ↓ walk the
+/// rows round, Home and End go to the ends, letters go to the row they start, ↩ and Space
+/// choose on their release, Esc closes. Opened from the keyboard, the current row starts marked.
+#[derive(Default)]
+pub(crate) struct MenuKeys {
+    focus: Option<FocusHandle>,
+    /// The marked row.
+    pub(crate) at: Option<usize>,
+    armed: bool,
+    typed: String,
+    typed_at: Option<Instant>,
+}
+
+impl MenuKeys {
+    /// Start over for a menu just opened: the row `at` marked (from the keyboard), or none.
+    fn reset(&mut self, at: Option<usize>) {
+        self.at = at;
+        self.armed = false;
+        self.typed.clear();
+        self.typed_at = None;
+    }
+
+    /// A key down on the open menu of `menu`: what it does.
+    pub(crate) fn key(&mut self, menu: &crate::live::menu::Menu, key: &str, typed: Option<&str>, held: &gpui::Modifiers, now: Instant) -> MenuKey {
+        let to = match key {
+            "escape" => return MenuKey::Close,
+            "enter" | "space" if !held.modified() => {
+                self.armed = true;
+                return MenuKey::Held;
+            }
+            "down" => menu.step(self.at, 1),
+            "up" => menu.step(self.at, -1),
+            "home" => menu.step(None, 1),
+            "end" => menu.step(None, -1),
+            _ => {
+                let letter = typed
+                    .filter(|t| !t.trim().is_empty())
+                    .filter(|_| !held.platform && !held.control && !held.alt && !held.function);
+                let Some(letter) = letter else { return MenuKey::Ignored };
+                if self.typed_at.is_none_or(|then| now.saturating_duration_since(then) > crate::live::menu::TYPING) {
+                    self.typed.clear();
+                }
+                self.typed.push_str(&letter.to_lowercase());
+                self.typed_at = Some(now);
+                menu.typed_to(self.at, &self.typed)
+            }
+        };
+        if let Some(to) = to {
+            self.at = Some(to);
+        }
+        MenuKey::Held
+    }
+
+    /// ↩ or Space released: the row to choose, when its press was on the menu.
+    pub(crate) fn release(&mut self, key: &str, held: &gpui::Modifiers) -> Option<usize> {
+        if !matches!(key, "enter" | "space") || held.modified() {
+            return None;
+        }
+        std::mem::take(&mut self.armed).then_some(self.at).flatten()
+    }
+}
+
+/// What a key did on an open footer menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MenuKey {
+    /// The menu's: nothing else takes it.
+    Held,
+    /// Esc: the menu closes with nothing chosen.
+    Close,
+    /// Not the menu's.
+    Ignored,
+}
+
+/// The mode menu's rows as the shared menu's, for its keyboard.
+fn mode_menu(chip: &ModeChip) -> crate::live::menu::Menu {
+    let mut menu = crate::live::menu::Menu::new();
+    for choice in &chip.choices {
+        menu.push(crate::live::menu::MenuItem::new(choice.id.clone(), choice.label.clone(), |_, _| {}));
+    }
+    menu
 }
 
 /// How a goal reads in the footer at `now`: "/goal active (5h)", its age's most significant
@@ -127,20 +214,102 @@ impl Composer {
         cx.notify();
     }
 
-    fn toggle_footer_menu(&mut self, menu: FooterMenu, cx: &mut Context<Self>) {
+    /// Open or close `menu`; opened from the keyboard (`keyed`), its current row starts marked,
+    /// and it takes the keyboard either way.
+    pub(super) fn toggle_footer_menu(&mut self, menu: FooterMenu, keyed: bool, window: &mut Window, cx: &mut Context<Self>) {
         if self.footer.menu.take_press_was_open() || self.footer.menu.as_open() == Some(&menu) {
-            self.close_footer_menu(cx);
+            self.close_footer_menu(window, cx);
             return;
         }
         self.footer.menu.open(menu);
+        // slopty: the menu takes the keyboard, its current row marked when opened from it.
+        let current = self.dock.chat.as_deref().and_then(|chat| self.dock.dock_of(chat)).and_then(|dock| {
+            let chip = dock.mode.as_ref()?;
+            let id = self.footer.pending_mode.as_deref().unwrap_or(&chip.id);
+            chip.choices.iter().position(|choice| choice.id == id)
+        });
+        self.footer.keys.reset(if keyed { current.or(Some(0)) } else { None });
+        let focus = self.footer.keys.focus.get_or_insert_with(|| cx.focus_handle()).clone();
+        window.defer(cx, move |window, cx| window.focus(&focus, cx));
         cx.notify();
     }
 
-    fn close_footer_menu(&mut self, cx: &mut Context<Self>) {
+    /// Close the open footer menu; the keyboard goes back to the composer when the menu had it.
+    fn close_footer_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.footer.menu.begin_close() {
             crate::popover::reap_popup(cx, |this: &mut Self| &mut this.footer.menu);
         }
+        if self.footer.keys.focus.as_ref().is_some_and(|focus| focus.is_focused(window)) {
+            window.focus(&self.input.focus_handle(cx), cx);
+        }
         cx.notify();
+    }
+
+    /// The open footer menu's rows as the shared menu's, for its keyboard.
+    fn open_footer_menu(&self) -> Option<crate::live::menu::Menu> {
+        match self.footer.menu.as_open()? {
+            FooterMenu::Mode => {
+                let chip = self.dock.chat.as_deref().and_then(|chat| self.dock.dock_of(chat))?.mode.as_ref()?;
+                Some(mode_menu(chip))
+            }
+            FooterMenu::Goal => {
+                let mut menu = crate::live::menu::Menu::new();
+                menu.push(crate::live::menu::MenuItem::new("clear", "Clear goal", |_, _| {}));
+                Some(menu)
+            }
+        }
+    }
+
+    /// A key on the open footer menu.
+    fn footer_menu_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(menu) = self.open_footer_menu() else { return };
+        let now = cx.background_executor().now();
+        let stroke = &ev.keystroke;
+        // A letter's own key stands for its character where the event carries none.
+        let typed = stroke.key_char.as_deref().or_else(|| (stroke.key.chars().count() == 1).then_some(stroke.key.as_str()));
+        match self.footer.keys.key(&menu, &stroke.key, typed, &stroke.modifiers, now) {
+            MenuKey::Held => cx.stop_propagation(),
+            MenuKey::Close => {
+                cx.stop_propagation();
+                self.close_footer_menu(window, cx);
+            }
+            MenuKey::Ignored => {}
+        }
+        cx.notify();
+    }
+
+    /// ↩ or Space released on the open footer menu: choose the marked row.
+    fn footer_menu_key_up(&mut self, ev: &KeyUpEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(at) = self.footer.keys.release(&ev.keystroke.key, &ev.keystroke.modifiers) else { return };
+        cx.stop_propagation();
+        match self.footer.menu.as_open().copied() {
+            Some(FooterMenu::Mode) => {
+                let id = self
+                    .dock
+                    .chat
+                    .as_deref()
+                    .and_then(|chat| self.dock.dock_of(chat))
+                    .and_then(|dock| dock.mode.as_ref()?.choices.get(at).map(|choice| choice.id.clone()));
+                self.close_footer_menu(window, cx);
+                if let Some(id) = id {
+                    self.set_mode(id, cx);
+                }
+            }
+            Some(FooterMenu::Goal) => {
+                self.close_footer_menu(window, cx);
+                self.dock_call(calls::CLEAR_GOAL, serde_json::json!({}), "Couldn't clear the goal", cx);
+            }
+            None => {}
+        }
+    }
+
+    /// The open footer menu's card takes the keyboard: its focus and its keys.
+    fn keyed_card(&self, card: gpui::Div, cx: &mut Context<Self>) -> gpui::Div {
+        let card = match self.footer.keys.focus.as_ref() {
+            Some(focus) => card.track_focus(focus),
+            None => card,
+        };
+        card.on_key_down(cx.listener(Self::footer_menu_key)).on_key_up(cx.listener(Self::footer_menu_key_up))
     }
 
     /// The footer's segments for the selected chat, or `None` with nothing to say.
@@ -163,6 +332,25 @@ impl Composer {
         }
         let now = chrono::Utc::now().timestamp_millis();
         let mut segments: Vec<AnyElement> = Vec::new();
+        // slopty: where ↑ has walked to among the chat's prompts.
+        if self.extras.history.is_some() {
+            let total = super::history::prompts(&self.state.read(cx).transcript).len();
+            if let Some(words) = super::history::history_words(self.extras.history.as_ref(), &self.current_key, total) {
+                segments.push(
+                    div()
+                        .id("dock-history")
+                        .role(Role::Status)
+                        .aria_label(SharedString::from(words.clone()))
+                        .flex_none()
+                        .px(px(4.0))
+                        .text_size(crate::typography::ui_rems(11.0))
+                        .text_color(theme.text_faint)
+                        .font_features(crate::typography::tabular())
+                        .child(SharedString::from(words))
+                        .into_any_element(),
+                );
+            }
+        }
         if !dock.status_line.is_empty() {
             segments.push(status_line(&dock.status_line, theme));
         }
@@ -190,9 +378,6 @@ impl Composer {
         }
         if let Some(goal) = &dock.goal {
             segments.push(self.goal_segment(goal, now, theme, cx));
-        }
-        if dock.background.total() > 0 || dock.background.needs_you > 0 {
-            segments.push(self.background_segment(&dock, theme, cx));
         }
         if let Some(chip) = &dock.mode {
             segments.push(self.mode_segment(chip, dock.can.set_mode, theme, cx));
@@ -237,6 +422,8 @@ impl Composer {
             // slopty: a goal that is set is chosen, not news: the text colour, not the accent.
             .text_color(theme.text)
             .cursor_pointer()
+            .tab_index(0)
+            .map(|el| crate::surface_chrome::focus_ring(el, theme))
             .bg(if open {
                 crate::theme::ink(0.05)
             } else {
@@ -253,14 +440,20 @@ impl Composer {
                     this.footer.menu.note_trigger_press_matching(|m| *m == FooterMenu::Goal)
                 }),
             )
-            .on_click(cx.listener(|this, _, _, cx| this.toggle_footer_menu(FooterMenu::Goal, cx)))
+            .on_click(cx.listener(|this, ev: &gpui::ClickEvent, window, cx| {
+                this.toggle_footer_menu(FooterMenu::Goal, ev.is_keyboard(), window, cx)
+            }))
             .child(goal_glyph(theme))
             .child(SharedString::from(words));
         if self.footer.menu.get() != Some(&FooterMenu::Goal) {
             return chip.into_any_element();
         }
         let popup = theme.for_popup();
-        let mut card = crate::popover::popover_card(&popup)
+        let mut card = self
+            .keyed_card(crate::popover::popover_card(&popup), cx)
+            .id("dock-goal-card")
+            .role(Role::Menu)
+            .aria_label("Goal")
             .w(px(300.0))
             .flex()
             .flex_col()
@@ -279,64 +472,32 @@ impl Composer {
         let card = card
             .child(
                 div().px(px(4.0)).pb(px(4.0)).pt(px(2.0)).child(
-                    crate::popover::menu_row(&popup, false, "dock-goal-clear")
+                    crate::popover::menu_row_nav(&popup, false, self.footer.keys.at == Some(0), "dock-goal-clear")
                         .id("dock-goal-clear")
                         .role(Role::Button)
                         .aria_label("Clear goal")
+                        .when(self.footer.keys.at == Some(0), |el| el.aria_active_descendant())
+                        .on_mouse_move(cx.listener(|this, _, _, cx| {
+                            if this.footer.keys.at != Some(0) {
+                                this.footer.keys.at = Some(0);
+                                cx.notify();
+                            }
+                        }))
                         .child(div().flex_1().child("Clear goal"))
                         .child(crate::popover::kbd_hint(&popup, "/goal clear"))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.close_footer_menu(cx);
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.close_footer_menu(window, cx);
                             this.dock_call(calls::CLEAR_GOAL, serde_json::json!({}), "Couldn't clear the goal", cx);
                         })),
                 ),
             )
-            .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_footer_menu(cx)));
+            .on_mouse_down_out(cx.listener(|this, _, window, cx| this.close_footer_menu(window, cx)));
         chip.child(crate::popover::anchored_menu_above_end(
             "dock-goal-menu",
             card.into_any_element(),
             self.footer.menu.closing_since(),
         ))
         .into_any_element()
-    }
-
-    /// "3 commands · 1 monitor": a click opens the Background tray.
-    fn background_segment(&self, dock: &ChatDock, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let needs = dock.background.needs_you;
-        let mut words = if dock.background_words.is_empty() {
-            dock.background.summary()
-        } else {
-            dock.background_words.clone()
-        };
-        if needs > 0 {
-            words = if words.is_empty() { format!("{needs} needs you") } else { format!("{words} · {needs} needs you") };
-        }
-        div()
-            .id("dock-background")
-            .role(Role::Button)
-            .aria_label(SharedString::from(words.clone()))
-            .aria_description("Opens the Background tray")
-            .flex_none()
-            .h(px(SEGMENT_HEIGHT))
-            .px(px(6.0))
-            .flex()
-            .items_center()
-            .gap(px(5.0))
-            .rounded(px(Theme::CONTROL_RADIUS))
-            .text_size(crate::typography::ui_rems(11.0))
-            .text_color(if needs > 0 { theme.warning } else { theme.text_muted })
-            .cursor_pointer()
-            .bg(motion::hover_blend("dock-background-hover", gpui::transparent_black(), crate::theme::ink(0.05)))
-            .on_hover(motion::hover_listener("dock-background-hover"))
-            .action_hint(
-                SharedString::from(words.clone()),
-                Keys::Action(Box::new(crate::background_tray::FocusBackgroundTray)),
-                cx,
-            )
-            .on_click(cx.listener(|this, _, window, cx| this.focus_background_tray(window, cx)))
-            .child(crate::icons::icon(crate::icons::LIST).size(px(12.0)).text_color(theme.text_faint))
-            .child(SharedString::from(words))
-            .into_any_element()
     }
 
     /// The permission mode: its words, quiet for the recommended default, amber when nothing is
@@ -385,6 +546,10 @@ impl Composer {
         let rest = wash.unwrap_or(gpui::transparent_black());
         let segment = segment
             .cursor_pointer()
+            // slopty: a tab stop with the shared ring; ↩ or Space opens the menu keyed.
+            .tab_index(0)
+            .map(|el| crate::surface_chrome::focus_ring(el, theme))
+            .aria_expanded(open)
             .bg(if open {
                 crate::theme::ink(0.05)
             } else {
@@ -399,30 +564,45 @@ impl Composer {
                     this.footer.menu.note_trigger_press_matching(|m| *m == FooterMenu::Mode)
                 }),
             )
-            .on_click(cx.listener(|this, _, _, cx| this.toggle_footer_menu(FooterMenu::Mode, cx)));
+            .on_click(cx.listener(|this, ev: &gpui::ClickEvent, window, cx| {
+                this.toggle_footer_menu(FooterMenu::Mode, ev.is_keyboard(), window, cx)
+            }));
         if !open {
             return segment.into_any_element();
         }
         let popup = theme.for_popup();
         let current = self.footer.pending_mode.clone().unwrap_or_else(|| chip.id.clone());
-        let mut card = crate::popover::popover_card(&popup)
+        let mut card = self
+            .keyed_card(crate::popover::popover_card(&popup), cx)
+            .id("dock-mode-card")
+            .role(Role::Menu)
+            .aria_label("Mode")
             .w(px(300.0))
             .flex()
             .flex_col()
             .child(crate::popover::menu_heading(&popup, "Mode"));
-        for choice in &chip.choices {
+        for (ix, choice) in chip.choices.iter().enumerate() {
             let selected = choice.id == current;
+            let marked = self.footer.keys.at == Some(ix);
             let id = choice.id.clone();
             let row_id = SharedString::from(format!("dock-mode-{}", choice.id));
             card = card.child(
-                crate::popover::menu_row(&popup, selected, row_id.clone())
+                // slopty: the keyboard's row washed as the shared menu's.
+                crate::popover::menu_row_nav(&popup, selected, marked, row_id.clone())
                     .id(row_id)
-                    .role(Role::MenuItem)
+                    .role(Role::MenuItemRadio)
                     .aria_label(SharedString::from(choice.label.clone()))
-                    .aria_selected(selected)
+                    .aria_toggled(if selected { gpui::Toggled::True } else { gpui::Toggled::False })
+                    .when(marked, |el| el.aria_active_descendant())
                     .items_start()
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.close_footer_menu(cx);
+                    .on_mouse_move(cx.listener(move |this, _, _, cx| {
+                        if this.footer.keys.at != Some(ix) {
+                            this.footer.keys.at = Some(ix);
+                            cx.notify();
+                        }
+                    }))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.close_footer_menu(window, cx);
                         this.set_mode(id.clone(), cx);
                     }))
                     .child(
@@ -469,7 +649,7 @@ impl Composer {
                     &format!("{} cycles", crate::keys::combo_text("shift-tab")),
                 )),
         );
-        let card = card.on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_footer_menu(cx)));
+        let card = card.on_mouse_down_out(cx.listener(|this, _, window, cx| this.close_footer_menu(window, cx)));
         segment
             .child(crate::popover::anchored_menu_above_end(
                 "dock-mode-menu",

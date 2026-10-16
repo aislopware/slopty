@@ -350,6 +350,12 @@ impl Transcript {
                 .justify_center()
                 .cursor_pointer()
                 .opacity(shown)
+                // slopty: a tab stop, shown while it has the keyboard.
+                .tab_index(0)
+                .focus_visible({
+                    let ring = crate::surface_chrome::ring(theme, crate::surface_chrome::RING_OFFSET);
+                    move |s| s.opacity(1.0).outline_ring(ring)
+                })
                 .bg(crate::motion::hover_blend(&fade, gpui::transparent_black(), crate::theme::wash(0.11)))
                 .on_hover(crate::motion::hover_listener(fade))
                 .tooltip(crate::settings::widgets::text_tooltip(label))

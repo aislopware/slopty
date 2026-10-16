@@ -636,6 +636,9 @@ impl Transcript {
                 .flex()
                 .items_center()
                 .cursor_pointer()
+                // slopty: a tab stop with the shared ring.
+                .tab_index(0)
+                .map(|el| crate::surface_chrome::focus_ring(el, theme))
                 .text_size(crate::typography::ui_rems(12.0))
                 // slopty: the faded hover, at the control strength.
                 .text_color(crate::motion::mix(theme.text_muted, theme.text, crate::motion::hover_t(&fade)))
@@ -677,11 +680,26 @@ impl Transcript {
                 })),
             );
         }
+        // slopty: the error's words and its detail, to paste where help is asked (T51).
+        let copy_key = format!("{}-copy-error", row.id);
+        let copied = crate::motion::copied(&copy_key, cx);
+        let copy_text = match detail {
+            Some(detail) => format!("{message}\n\n{detail}"),
+            None => message.to_string(),
+        };
+        actions = actions.child(
+            quiet(copy_key.clone(), if copied { "Copied" } else { "Copy error" }).on_click(move |_, _, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(copy_text.clone()));
+                crate::motion::copy_feedback(copy_key.clone(), cx);
+            }),
+        );
+        // slopty: a long detail scrolls in its box rather than being cut (T51).
         let detail_block = detail.filter(|_| open).map(|detail| {
             div()
+                .id(SharedString::from(format!("{}-detail", row.id)))
                 .w_full()
                 .max_h(px(240.0))
-                .overflow_hidden()
+                .overflow_y_scroll()
                 .rounded(px(8.0))
                 .bg(crate::theme::ink(0.04))
                 .px(px(10.0))
@@ -745,6 +763,9 @@ impl Transcript {
             .items_center()
             .gap(px(6.0))
             .cursor_pointer()
+            // slopty: a tab stop with the shared ring.
+            .tab_index(0)
+            .map(|el| crate::surface_chrome::focus_ring(el, theme))
             .text_size(crate::typography::ui_rems(12.0))
             .text_color(crate::motion::mix(theme.text_muted, theme.text, crate::motion::hover_t(&fade)))
             .bg(crate::motion::hover_blend(&fade, gpui::transparent_black(), crate::theme::wash(0.11)))
@@ -816,6 +837,9 @@ impl Transcript {
                     .items_center()
                     .justify_center()
                     .cursor_pointer()
+                    // slopty: a tab stop with the shared ring.
+                    .tab_index(0)
+                    .map(|el| crate::surface_chrome::focus_ring(el, theme))
                     .bg(crate::motion::hover_blend(&plan_copy_hover, gpui::transparent_black(), crate::theme::ink(0.08)))
                     .on_hover(crate::motion::hover_listener(plan_copy_hover.clone()))
                     .tooltip(crate::settings::widgets::text_tooltip(if copied { "Copied" } else { "Copy plan" }))
@@ -874,6 +898,9 @@ impl Transcript {
                     .items_center()
                     .gap(px(6.0))
                     .cursor_pointer()
+                    // slopty: a tab stop with the shared ring.
+                    .tab_index(0)
+                    .map(|el| crate::surface_chrome::focus_ring(el, theme))
                     .text_size(crate::typography::ui_rems(12.0))
                     // slopty: the faded hover, at the control strength.
                     .text_color(crate::motion::mix(

@@ -1476,6 +1476,30 @@ fn an_approval_shows_bidi_overrides_as_visible_escapes() {
     );
 }
 
+/// Every word a request's card shows reaches the shell escaped: its reason, its address, its
+/// rule and a dialog's payload, names and words, so the shell draws them as they come.
+#[test]
+fn a_cards_every_shown_word_comes_escaped() {
+    let mut state = fixtures::thread("tools");
+    let mut approval = approval_of(&mut state, "git status");
+    approval.reason = Some("rule \u{202E}x".to_owned());
+    approval.url = Some("https://example.com/\u{200B}a".to_owned());
+    approval.options[0].scope = Some("Bash(git \u{202E}status:*)".to_owned());
+    let asked = asked_of(&mut state, approval.clone());
+    assert_eq!(asked.reason.as_deref(), Some("rule [U+202E]x"));
+    assert_eq!(asked.url.as_deref(), Some("https://example.com/[U+200B]a"));
+    assert_eq!(asked.rule.map(|rule| rule.rule).as_deref(), Some("Bash(git [U+202E]status:*)"));
+
+    let mut dialog = approval_of(&mut state, "git status");
+    dialog.kind = "dialog:notice".to_owned();
+    dialog.schema_json = Some(r#"{"na\u202eme":"wo\u200brd","list":["a\u202eb"]}"#.to_owned());
+    let asked = asked_of(&mut state, dialog);
+    let payload: serde_json::Value =
+        serde_json::from_str(asked.schema_json.as_deref().unwrap_or("null")).unwrap_or_default();
+    assert_eq!(payload["na[U+202E]me"], "wo[U+200B]rd");
+    assert_eq!(payload["list"][0], "a[U+202E]b");
+}
+
 /// An approval of an edit carries the change it would make.
 #[test]
 fn an_edit_approval_shows_its_diff() {
@@ -1702,6 +1726,21 @@ fn a_plan_is_edited_and_questions_are_talked_over() {
     assert_eq!(
         transcript::answer(&questions, &[picked("choice", "Chat about this")]),
         Ok(("clarify".to_owned(), None))
+    );
+    // Skipped, the questions go as the plain decline; with none to go as, they can't be.
+    let skip = slopty_view_proto::UserInputAnswer {
+        question_id: transcript::SKIP.to_owned(),
+        labels: Vec::new(),
+        notes: None,
+    };
+    assert_eq!(
+        transcript::answer(&questions, std::slice::from_ref(&skip)),
+        Ok(("deny".to_owned(), None))
+    );
+    questions.options.clear();
+    assert_eq!(
+        transcript::answer(&questions, &[skip]),
+        Err("These questions can't be skipped".to_owned())
     );
 
     let mut said_no = approval_of(&mut state, "ls");

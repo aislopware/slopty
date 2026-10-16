@@ -421,6 +421,9 @@ pub struct RepoRef {
     /// Path of the linked worktree this branch is checked out in, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_path: Option<String>,
+    /// `origin`'s default branch (`origin/HEAD`), which the picker tags "default".
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub default: bool,
 }
 
 // slopty: no History surface (ruled out).

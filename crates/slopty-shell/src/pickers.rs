@@ -1300,7 +1300,9 @@ impl Pickers {
     ) -> Option<crate::settings::widgets::Standing> {
         let models = self.models.get(&harness)?.ready()?;
         let is_default = default_model(models).is_some_and(|first| first.id == model);
-        crate::settings::widgets::Standing::of(is_default, false)
+        // slopty: the agent's own default is the one recommended (`Model::recommended`).
+        let recommended = models.iter().any(|row| row.id == model && row.recommended);
+        crate::settings::widgets::Standing::of(is_default, recommended)
     }
 
     fn effective_reasoning(&self, cx: &App) -> Option<ReasoningLevel> {
@@ -2481,6 +2483,7 @@ impl Pickers {
                             ),
                             reasoning_levels: vec![],
                             options: vec![],
+                            recommended: false,
                         },
                     },
                 );
@@ -4284,10 +4287,13 @@ impl Pickers {
                                         selected.as_deref() == Some(row.name.as_str());
                                     // Right-aligned muted tag (t3code `text-[10px]
                                     // text-muted-foreground/45`): current beats worktree.
+                                    // slopty: else `origin`'s default branch.
                                     let tag: Option<&'static str> = if row.current {
                                         Some("current")
                                     } else if row.worktree_path.is_some() {
                                         Some("worktree")
+                                    } else if row.default {
+                                        Some("default")
                                     } else {
                                         None
                                     };
@@ -6833,6 +6839,29 @@ mod tests {
         (state, pickers)
     }
 
+    /// slopty: the model a new chat starts on is the "Default" and the agent's own default the
+    /// "Recommended", one row both when they are the same.
+    #[gpui::test]
+    fn the_agents_default_model_is_recommended(cx: &mut gpui::TestAppContext) {
+        use crate::settings::widgets::Standing;
+        cx.update(|cx| {
+            cx.set_global(Theme::dark());
+            let (_, pickers) = side_chat_picker(true, cx);
+            pickers.update(cx, |pickers, _| {
+                let mut opus = bare_model("opus", "Opus");
+                opus.recommended = true;
+                let sonnet = bare_model("sonnet", "Sonnet");
+                let standing = |pickers: &Pickers, id: &str| pickers.model_standing(HarnessId::CLAUDE_CODE, id);
+                pickers.models.insert(HarnessId::CLAUDE_CODE, Loadable::Ready(vec![opus.clone(), sonnet.clone()]));
+                assert_eq!(standing(pickers, "opus"), Some(Standing::DefaultRecommended));
+                assert_eq!(standing(pickers, "sonnet"), None);
+                pickers.models.insert(HarnessId::CLAUDE_CODE, Loadable::Ready(vec![sonnet, opus]));
+                assert_eq!(standing(pickers, "sonnet"), Some(Standing::Default));
+                assert_eq!(standing(pickers, "opus"), Some(Standing::Recommended));
+            });
+        });
+    }
+
     #[gpui::test]
     fn unsaved_side_chat_can_pick_another_harness_before_catalog_load(
         cx: &mut gpui::TestAppContext,
@@ -7635,6 +7664,7 @@ mod tests {
             name: name.into(),
             current,
             worktree_path: worktree.map(str::to_string),
+            default: false,
         }
     }
 
@@ -7908,6 +7938,7 @@ mod tests {
             description: None,
             reasoning_levels: Vec::new(),
             options: Vec::new(),
+            recommended: false,
         }
     }
 
@@ -10023,6 +10054,7 @@ mod tests {
                 description: None,
                 reasoning_levels: vec![],
                 options: vec![],
+                recommended: false,
             },
             Model {
                 id: "fast".into(),
@@ -10030,6 +10062,7 @@ mod tests {
                 description: None,
                 reasoning_levels: vec![],
                 options: vec![],
+                recommended: false,
             },
         ];
         assert_eq!(default_model(&models).map(|m| &*m.id), Some("flagship"));

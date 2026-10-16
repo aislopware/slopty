@@ -507,6 +507,10 @@ impl WorkspaceView {
             self.page_draw(key, index, width, cx);
             return;
         }
+        if act == PageAct::Reload {
+            self.page_forget(key, cx);
+            return;
+        }
         let Some(page) = self.view_model.pages.shown.get_mut(key) else { return };
         let Some(host) = self.view_model.pages.hosts.get(&page.window).cloned() else { return };
         let Some(id) = page.id else {
@@ -527,8 +531,23 @@ impl WorkspaceView {
                 page.native = None;
                 host.unmount(id)
             }
-            PageAct::Draw { .. } => Vec::new(),
+            PageAct::Draw { .. } | PageAct::Reload => Vec::new(),
         };
+        self.page_changed(key, cx);
+    }
+
+    /// Let page `key` go, its web view closed and what failed forgotten: the next draw of its
+    /// card opens it afresh from what showed it.
+    fn page_forget(&mut self, key: &str, cx: &mut Context<Self>) {
+        let pages = &mut self.view_model.pages;
+        if let Some(page) = pages.shown.remove(key)
+            && let (Some(id), Some(host)) = (page.id, pages.hosts.get(&page.window))
+        {
+            host.close(id);
+        }
+        if let Some(state) = pages.states.get(key) {
+            state.send_modify(|s| s.failed = None);
+        }
         self.page_changed(key, cx);
     }
 

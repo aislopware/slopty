@@ -39,10 +39,18 @@ const fn ignorable(c: char) -> bool {
     )
 }
 
+/// Whether `c` is a noncharacter: one Unicode keeps for a program's own use, which no text
+/// should carry.
+const fn noncharacter(c: char) -> bool {
+    let u = c as u32;
+    matches!(u, 0xfdd0..=0xfdef) || (u & 0xfffe) == 0xfffe
+}
+
 /// Whether `c` is hidden or moves text: a control other than a line break or a tab, a bidi
-/// character, or a default-ignorable one.
-const fn hidden(c: char) -> bool {
-    (c.is_control() && c != '\n' && c != '\t') || bidi(c) || ignorable(c)
+/// character, a default-ignorable one or a noncharacter.
+#[must_use]
+pub const fn hidden(c: char) -> bool {
+    (c.is_control() && c != '\n' && c != '\t') || bidi(c) || ignorable(c) || noncharacter(c)
 }
 
 /// `text` with every hidden character (a control, a bidi or a default-ignorable one) shown as
@@ -128,6 +136,9 @@ mod tests {
         assert_eq!(escaped("a\u{200B}b\u{1b}[2J"), "a[U+200B]b[U+001B][2J");
         assert_eq!(escaped("cargo test\n\tok"), "cargo test\n\tok");
         assert_eq!(escaped("héllo"), "héllo");
+        assert_eq!(escaped("a\u{FEFF}b\u{0007}c"), "a[U+FEFF]b[U+0007]c");
+        assert_eq!(escaped("x\u{FDD0}y\u{FFFF}"), "x[U+FDD0]y[U+FFFF]", "noncharacters");
+        assert_eq!(escaped("plain é 日本"), "plain é 日本");
     }
 
     /// A line keeps what is seen, one space between words, and is cut by what the eye counts.

@@ -791,3 +791,51 @@ fn clicking_an_image_chip_opens_the_picture_full_size(cx: &mut gpui::TestAppCont
         })
         .unwrap();
 }
+
+// slopty: a draft keeps its attachments on this client.
+/// An image pasted into a chat's draft is kept on this client with it: a composer opened on the
+/// chat later, as after a restart, has it back with its chip and the words around it; with the
+/// chip gone, nothing is kept.
+#[gpui::test]
+fn a_drafts_attachments_are_kept_for_the_next_composer(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    cx.update(|cx| {
+        gpui_base::init(cx);
+        cx.set_global(Theme::dark());
+        crate::app_menus::init(cx);
+        crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+    });
+    let data = dir.path().to_path_buf();
+    let open = |cx: &mut gpui::TestAppContext| {
+        let data = data.clone();
+        cx.add_window(move |_, cx| {
+            let state = cx.new(|_| {
+                let mut state = AppState::new();
+                state.selected_chat = Some("chat".into());
+                state.data_dir = Some(data);
+                state
+            });
+            Composer::new(state, cx)
+        })
+    };
+    let first = open(cx);
+    paste_images(&first, cx, 1);
+    cx.executor().advance_clock(Duration::from_secs(1));
+    cx.run_until_parked();
+
+    let second = open(cx);
+    let kept = second
+        .read_with(cx, |composer, _| composer.staged().iter().map(|att| (att.image().is_some(), att.mention)).collect::<Vec<_>>())
+        .unwrap();
+    assert_eq!(kept, [(true, Some(1))], "the image is back, its chip's number with it");
+    assert_eq!(text(&second, cx), text(&first, cx), "and the words that name it");
+
+    first
+        .update(cx, |composer, _, cx| composer.input.update(cx, |input, cx| input.set_text("", cx)))
+        .unwrap();
+    cx.run_until_parked();
+    cx.executor().advance_clock(Duration::from_secs(1));
+    cx.run_until_parked();
+    let third = open(cx);
+    assert!(staged_names(&third, cx).is_empty(), "a draft with none keeps none");
+}

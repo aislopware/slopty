@@ -316,3 +316,27 @@ fn display_formulas_typeset_once_settled(cx: &mut gpui::TestAppContext) {
     let nodes = draw(cx);
     assert!(nodes.values().all(|node| node.role != Role::Math), "the tail keeps text");
 }
+
+/// slopty: a failed turn's card offers its error to copy, the agent's words with its detail, and
+/// the detail opens in a box that scrolls (T51).
+#[gpui::test]
+fn an_error_card_copies_its_error_and_scrolls_its_detail(cx: &mut gpui::TestAppContext) {
+    let detail = (1..=40).map(|n| format!("trace line {n}")).collect::<Vec<_>>().join("\n");
+    let failed = MessagePart::Error {
+        id: "error".into(),
+        message: "The turn failed".into(),
+        detail: Some(detail.clone()),
+        retry: true,
+    };
+    let (_, cx) = open(cx, entry(MessageStatus::Complete, vec![failed]));
+    let nodes = draw(cx);
+    let copy = find(&nodes, Role::Button, "Copy error").expect("Copy error").clone();
+    cx.simulate_click(copy.center, gpui::Modifiers::default());
+    draw(cx);
+    let copied = cx.read_from_clipboard().and_then(|item| item.text());
+    assert_eq!(copied.as_deref(), Some(format!("The turn failed\n\n{detail}").as_str()));
+    let details = find(&nodes, Role::Button, "View details").expect("View details").clone();
+    cx.simulate_click(details.center, gpui::Modifiers::default());
+    let nodes = draw(cx);
+    assert!(find(&nodes, Role::Button, "Hide details").is_some(), "the detail opened");
+}

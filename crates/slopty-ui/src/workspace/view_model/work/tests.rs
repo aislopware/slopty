@@ -247,6 +247,7 @@ fn a_subagents_request_is_asked_and_answered_in_its_parent(cx: &mut gpui::TestAp
 fn a_rewind_goes_back_to_before_the_message(cx: &mut gpui::TestAppContext) {
     let mut state = fixtures::empty();
     state.meta.caps = vec![Cap::named(Cap::REWIND), Cap::named(Cap::FORK)];
+    state.meta.title = "Speed up the build".into();
     state.items = vec![Item {
         id: ItemId("u2".into()),
         turn: TurnId(2),
@@ -295,6 +296,12 @@ fn a_rewind_goes_back_to_before_the_message(cx: &mut gpui::TestAppContext) {
     assert_eq!(answer["undo"]["chatId"], thread.to_string());
     assert_eq!(answer["undo"]["branchChatId"], branched.to_string());
     assert_eq!(answer["undo"]["tree"], "before-rewind");
+    // The branch goes by the conversation's name, the words taken back its draft.
+    let sent = intents(&mut rx);
+    let to_branch: Vec<&Intent> =
+        sent.iter().filter(|(to, ..)| *to == branched).map(|(_, _, i)| i).collect();
+    assert!(to_branch.contains(&&Intent::Name { title: "Speed up the build".into() }), "{sent:?}");
+    assert!(to_branch.contains(&&Intent::Draft { text: "make it faster".into() }), "{sent:?}");
     let undo = serde_json::json!({ "undo": answer["undo"].clone() });
     let mut undone = workspace
         .update(cx, |v, cx| v.view_work_call(calls::UNDO_REWIND, &undo, cx))

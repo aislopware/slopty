@@ -65,6 +65,7 @@ mod extras;
 mod md_images;
 mod pages;
 mod rewind;
+mod sticky; // slopty: the prompt a long turn answers, held at the top.
 mod subagents;
 #[cfg(test)]
 mod surface_tests; // slopty: the transcript's own rows, read by assistive tech.
@@ -2226,14 +2227,21 @@ pub fn tool_group_summary(tools: &[ToolItem]) -> String {
         .with(|forbidden| assert!(!forbidden.get(), "tool summary formatting ran on UI thread"));
     // slopty: directory listings are counted apart from commands, as the TUI's group line
     // counts them ("listed 2 directories").
+    // A listing that failed listed nothing: it counts as the failed command it was.
+    let listing = |t: &ToolItem| lists_directory(&t.call) && !t.is_error;
     let listed = tools
         .iter()
-        .filter(|t| t.kind == ToolItemKind::Call && lists_directory(&t.call))
+        .filter(|t| t.kind == ToolItemKind::Call && listing(t))
+        .count();
+    // slopty: what failed counts every call, a listing too, and is said last ("· 1 failed").
+    let failed = tools
+        .iter()
+        .filter(|t| t.kind == ToolItemKind::Call && t.is_error && !denied(t))
         .count();
     let pairs: Vec<(ToolCall, bool)> = tools
         .iter()
-        .filter(|t| t.kind == ToolItemKind::Call && !lists_directory(&t.call))
-        .map(|t| (t.call.clone(), t.is_error && !denied(t)))
+        .filter(|t| t.kind == ToolItemKind::Call && !listing(t))
+        .map(|t| (t.call.clone(), false))
         .collect();
     let thoughts = tools
         .iter()
@@ -2260,6 +2268,7 @@ pub fn tool_group_summary(tools: &[ToolItem]) -> String {
             format!("listed {listed} {}", if listed == 1 { "directory" } else { "directories" })
         }))
         .chain(landed_words(tools))
+        .chain((failed > 0).then(|| format!("{failed} failed")))
         .filter(|segment| !segment.is_empty())
         .collect::<Vec<_>>()
         .join(" · ");
@@ -6193,12 +6202,17 @@ impl Transcript {
         cx: &mut Context<Self>,
     ) -> Vec<ChipOverlay> {
         use crate::attachments::AttachmentSnapshot;
-        if mentions.iter().all(|span| span.upload.is_none()) {
+        // slopty: a chip naming a chat is live too (`chat_chip_overlay`).
+        if mentions.iter().all(|span| span.upload.is_none() && span.kind != crate::composer::ChipKind::Chat) {
             return Vec::new();
         }
         let device_ids = self.attachment_device_ids(cx);
         let mut overlays = Vec::new();
         for (ix, span) in mentions.iter().enumerate() {
+            if span.kind == crate::composer::ChipKind::Chat {
+                overlays.push(self.chat_chip_overlay(span, cx));
+                continue;
+            }
             let Some(upload) = &span.upload else {
                 continue;
             };
@@ -6237,14 +6251,62 @@ impl Transcript {
                 }
             }
             if open.is_some() || status.is_some() {
+                let label = format!(
+                    "Preview {}",
+                    crate::attachments::attachment_display_name(
+                        upload.rsplit(['/', '\\']).next().unwrap_or(upload),
+                    )
+                );
                 overlays.push(ChipOverlay {
                     range: span.range.clone(),
                     open,
+                    label: label.into(),
+                    tip: None,
                     status,
                 });
             }
         }
         overlays
+    }
+
+    /// slopty: open what a sent chip's click target names: its chat, or its image full size.
+    fn open_chip(&mut self, target: &SharedString, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(chat) = target.strip_prefix(CHAT_TARGET) {
+            let chat = chat.to_owned();
+            self.state.update(cx, |state, cx| state.select_chat(Some(chat), cx));
+            return;
+        }
+        self.open_chip_image(target, window, cx);
+    }
+
+    /// slopty: a sent chip naming a chat, live as zeron's and t3code's thread links are: a click
+    /// opens the chat, and its tooltip names the chat as it is called now, the chip keeping the
+    /// title it was sent with. A chat gone from this client says so and opens nothing.
+    fn chat_chip_overlay(&self, span: &crate::composer::SentMentionSpan, cx: &gpui::App) -> ChipOverlay {
+        let chat = self
+            .state
+            .read(cx)
+            .chats
+            .iter()
+            .find(|chat| *chat.id == *span.path);
+        let (open, label, tip): (Option<SharedString>, SharedString, SharedString) = match chat {
+            Some(chat) => {
+                let title = single_line(chat.title.as_deref().unwrap_or("New chat"));
+                (
+                    Some(format!("{CHAT_TARGET}{}", chat.id).into()),
+                    format!("Open {title}").into(),
+                    title.into(),
+                )
+            }
+            None => (None, CHAT_GONE.into(), CHAT_GONE.into()),
+        };
+        ChipOverlay {
+            range: span.range.clone(),
+            open,
+            label,
+            tip: Some(tip),
+            status: None,
+        }
     }
 
     // ---- tool-call image previews + the image context menu ----
@@ -6700,7 +6762,7 @@ impl Transcript {
                 cx.entity_id(),
                 chip_overlays,
                 Rc::new(cx.listener(|this, path: &SharedString, window, cx| {
-                    this.open_chip_image(path, window, cx);
+                    this.open_chip(path, window, cx); // slopty: a chat chip opens its chat
                 })),
             ));
         // Height motion uses the same ease-out curve as sidebars, tool folds,
@@ -7874,6 +7936,7 @@ impl Transcript {
                         crate::theme::ink(0.08),
                     ))
                     .on_hover(motion::hover_listener(fade_key))
+                    .map(|el| strip_control(el, &theme)) // slopty: a tab stop.
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.copy_message(entry_id.clone(), text.clone(), cx)
                     }))
@@ -9182,14 +9245,28 @@ fn user_bubble_text(
     .into_any_element()
 }
 
+/// slopty: a hover strip's control: a tab stop whose hairline takes the accent from the
+/// keyboard, so focus never changes its size.
+pub(super) fn strip_control<E: InteractiveElement + Styled>(el: E, theme: &Theme) -> E {
+    crate::surface_chrome::focus_ring(el.tab_index(0), theme)
+}
+
 /// The upload status painted in a sent chip's icon well.
 const CHIP_STATUS_SIZE: f32 = 14.0;
+
+/// slopty: what a chat chip's click target opens: the chat whose id follows.
+const CHAT_TARGET: &str = "slopty-open-chat:";
+/// slopty: what a chip naming a chat no longer here says.
+const CHAT_GONE: &str = "Chat no longer available";
 
 /// One sent chip's extras, laid over its pill: a status in place of its icon
 /// and, for a loaded image, a click target opening it full size.
 struct ChipOverlay {
     range: Range<usize>,
     open: Option<SharedString>,
+    /// slopty: what its click target is called, and its tooltip.
+    label: SharedString,
+    tip: Option<SharedString>,
     status: Option<AnyElement>,
 }
 
@@ -9267,31 +9344,32 @@ impl gpui::Element for ChipOverlays {
                 );
                 targets.push(well);
             }
-            let Some(path) = overlay.open.clone() else {
+            // slopty: a chip with a tooltip and nothing to open still gets a target.
+            if overlay.open.is_none() && overlay.tip.is_none() {
                 continue;
-            };
+            }
             for (part, rect) in rects.into_iter().enumerate() {
                 let open = self.open.clone();
-                let path = path.clone();
+                let path = overlay.open.clone();
                 let mut target = div()
                     .id(SharedString::from(format!("{}-{index}-{part}", self.id)))
                     .w(rect.size.width)
                     .h(rect.size.height)
-                    .cursor_pointer()
-                    .role(gpui::Role::Button)
-                    .aria_label(format!(
-                        "Preview {}",
-                        crate::attachments::attachment_display_name(
-                            path.rsplit(['/', '\\']).next().unwrap_or(&path),
-                        )
-                    ))
-                    .on_click(move |event, window, cx| {
-                        // A drag that selects text across the chip is not a click.
-                        if event.click_count() == 1
-                            && crate::markdown::selection::selected_text().is_none()
-                        {
-                            open(&path, window, cx);
-                        }
+                    .aria_label(overlay.label.clone())
+                    .when_some(overlay.tip.clone(), |el, tip| {
+                        el.tooltip(crate::settings::widgets::text_tooltip(tip))
+                    })
+                    .when_some(path, |el, path| {
+                        el.cursor_pointer()
+                            .role(gpui::Role::Button)
+                            .on_click(move |event, window, cx| {
+                                // A drag that selects text across the chip is not a click.
+                                if event.click_count() == 1
+                                    && crate::markdown::selection::selected_text().is_none()
+                                {
+                                    open(&path, window, cx);
+                                }
+                            })
                     })
                     .into_any_element();
                 target.prepaint_as_root(
@@ -10780,6 +10858,9 @@ impl Render for Transcript {
             .child(crate::markdown::find::frame_reset(cx.entity_id().as_u64()))
             .child(content)
             .child(rail);
+        // slopty: the held prompt's card defers its paint above the top fade; added before the
+        // menus, which defer theirs too, so they open over it.
+        let root = root.children(self.render_sticky_prompt(window, cx));
         let root = root.children(self.render_image_menu(cx));
         let root = root.children(self.render_rewind_menu(cx)); // slopty
         let root = root.children(self.render_context_menu(cx)); // slopty
@@ -15805,6 +15886,82 @@ mod tests {
         });
     }
 
+    /// slopty: a sent chip naming a chat is live: its tooltip names the chat as it is called now
+    /// and a click opens it; a chip naming a chat gone from here says so and opens nothing.
+    #[gpui::test]
+    fn sent_chat_chips_open_their_chat(cx: &mut gpui::TestAppContext) {
+        use slopty_view_proto::chat_mentions::chat_mention_link;
+        struct Fixture(Entity<Transcript>);
+        impl Render for Fixture {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().child(self.0.clone())
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        });
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| {
+            let chat: slopty_view_proto::Chat = serde_json::from_value(serde_json::json!({
+                "id": "c1",
+                "deviceId": "dev",
+                "archived": false,
+                "createdAt": chrono::Utc::now(),
+                "title": "Renamed  since",
+            }))
+            .unwrap();
+            state.apply_chats(vec![chat]);
+        });
+        let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+        let raw = format!(
+            "see {} and {}",
+            chat_mention_link("c1", "Old title").unwrap(),
+            chat_mention_link("gone1", "Gone").unwrap()
+        );
+        let mut entry = assistant("u6", MessageStatus::Complete, vec![]);
+        entry.role = MessageRole::User;
+        entry.status = None;
+        entry.parts = vec![text_part("t0", &raw)];
+        let rows = rows_for_entry(&entry, true, false, &mut parse);
+        let RowKind::User { mentions, .. } = &rows[0].kind else {
+            panic!("expected a user row");
+        };
+        let mentions = mentions.clone();
+        let target = transcript.update(cx, |transcript, cx| {
+            let overlays = transcript.chip_overlays(&"u6".into(), &mentions, &Theme::dark(), cx);
+            let shown: Vec<_> = overlays
+                .iter()
+                .map(|overlay| {
+                    (
+                        overlay.open.as_ref().map(ToString::to_string),
+                        overlay.label.to_string(),
+                        overlay.tip.as_ref().map(ToString::to_string),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                shown,
+                [
+                    (
+                        Some(format!("{CHAT_TARGET}c1")),
+                        "Open Renamed since".to_owned(),
+                        Some("Renamed since".to_owned())
+                    ),
+                    (None, CHAT_GONE.to_owned(), Some(CHAT_GONE.to_owned())),
+                ]
+            );
+            overlays[0].open.clone().unwrap()
+        });
+        let (_fixture, cx) = cx.add_window_view(|_, _| Fixture(transcript.clone()));
+        cx.update(|window, cx| {
+            transcript.update(cx, |transcript, cx| transcript.open_chip(&target, window, cx));
+        });
+        assert_eq!(state.read_with(cx, |state, _| state.selected_chat.clone()).as_deref(), Some("c1"));
+    }
+
     /// A sent message with image, file-attachment and workspace-file chips
     /// reads as chips in the bubble; only attachments without a chip stay in
     /// the strip above.
@@ -16143,6 +16300,10 @@ mod tests {
         let mut failing = exec("boom");
         failing.is_error = true;
         assert_eq!(tool_group_summary(&[failing]), "Ran 1 command · 1 failed");
+        // slopty: a failed listing listed nothing: a failed command, the failure said last.
+        let mut gone = exec("ls missing");
+        gone.is_error = true;
+        assert_eq!(tool_group_summary(&[exec("ls src"), exec("make"), gone]), "Ran 2 commands · listed 1 directory · 1 failed");
         // slopty: the person's own Deny is no failure.
         let mut denied = exec("rm -rf build");
         denied.is_error = true;

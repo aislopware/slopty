@@ -244,8 +244,8 @@ fn a_reveal_opens_the_tray_at_its_row(cx: &mut TestAppContext) {
     assert_eq!(marked.selected, Some(true));
 }
 
-/// The footer says the mode, the background counts and the goal; a mode switch that cannot go
-/// goes back to the mode the agent is in.
+/// The footer says the mode and the goal, and leaves the background counts to the tray above
+/// it; a mode switch that cannot go goes back to the mode the agent is in.
 #[gpui::test]
 fn the_footer_says_mode_background_and_goal(cx: &mut TestAppContext) {
     let dock = ChatDock {
@@ -263,7 +263,7 @@ fn the_footer_says_mode_background_and_goal(cx: &mut TestAppContext) {
     let (composer, _, cx) = open(cx, dock, None);
     let nodes = draw(cx);
     assert!(find(&nodes, Role::Button, "Mode: Default").is_some(), "{:?}", labels(&nodes, Role::Button));
-    assert!(find(&nodes, Role::Button, "2 commands").is_some());
+    assert!(find(&nodes, Role::Button, "2 commands").is_none(), "the tray counts them, not the footer");
     let goal = find(&nodes, Role::Button, "/goal active (5h)").expect("the goal shows");
     assert!(goal.description.contains("all tests pass"));
 
@@ -271,6 +271,59 @@ fn the_footer_says_mode_background_and_goal(cx: &mut TestAppContext) {
     assert!(cycled, "⇧Tab takes the next mode");
     let nodes = draw(cx);
     assert!(find(&nodes, Role::Button, "Mode: Default").is_some(), "a switch that failed went back");
+    let failure = composer.read_with(cx, |composer, _| composer.failure().cloned());
+    assert_eq!(failure.as_deref(), Some("Couldn't switch the mode while Slopty is offline. Try again once it reconnects."));
+}
+
+/// The mode menu takes the keyboard as the shared menu does: opened from it, the current mode
+/// is marked; ↑ ↓, letters, Home and End move the mark; Esc gives the keyboard back to the
+/// composer; ↩ chooses on its release.
+#[gpui::test]
+fn the_mode_menu_walks_by_keys(cx: &mut TestAppContext) {
+    let dock = ChatDock { mode: Some(modes("default")), can: can(), ..ChatDock::default() };
+    let (composer, _, cx) = open(cx, dock, None);
+    draw(cx);
+    let key = |cx: &mut VisualTestContext, key: &str| {
+        cx.update(|window, cx| {
+            for event in [
+                gpui::PlatformInput::KeyDown(gpui::KeyDownEvent {
+                    keystroke: gpui::Keystroke::parse(key).unwrap(),
+                    is_held: false,
+                    prefer_character_input: false,
+                }),
+                gpui::PlatformInput::KeyUp(gpui::KeyUpEvent { keystroke: gpui::Keystroke::parse(key).unwrap() }),
+            ] {
+                window.dispatch_event(event, cx);
+            }
+        });
+        cx.run_until_parked();
+    };
+    let at = |cx: &mut VisualTestContext| composer.read_with(cx, |composer, _| composer.footer.keys.at);
+    composer.update_in(cx, |composer, window, cx| composer.toggle_footer_menu(footer::FooterMenu::Mode, true, window, cx));
+    let nodes = draw(cx);
+    assert_eq!(labels(&nodes, Role::MenuItemRadio), ["Default", "Plan", "Bypass"]);
+    assert_eq!(at(cx), Some(0), "opened from the keyboard on the current mode");
+    key(cx, "down");
+    assert_eq!(at(cx), Some(1));
+    key(cx, "b");
+    assert_eq!(at(cx), Some(2), "a letter goes to the row it starts");
+    key(cx, "home");
+    assert_eq!(at(cx), Some(0));
+    key(cx, "end");
+    assert_eq!(at(cx), Some(2));
+    key(cx, "escape");
+    let open = composer.read_with(cx, |composer, _| composer.footer.menu.as_open().is_some());
+    assert!(!open, "Esc closes it");
+    let back = composer.update_in(cx, |composer, window, cx| composer.input.focus_handle(cx).is_focused(window));
+    assert!(back, "the keyboard is the composer's again");
+
+    composer.update_in(cx, |composer, window, cx| composer.toggle_footer_menu(footer::FooterMenu::Mode, true, window, cx));
+    draw(cx);
+    key(cx, "p");
+    assert_eq!(at(cx), Some(1));
+    key(cx, "enter");
+    let open = composer.read_with(cx, |composer, _| composer.footer.menu.as_open().is_some());
+    assert!(!open, "↩ chose and closed it");
     let failure = composer.read_with(cx, |composer, _| composer.failure().cloned());
     assert_eq!(failure.as_deref(), Some("Couldn't switch the mode while Slopty is offline. Try again once it reconnects."));
 }
@@ -303,6 +356,7 @@ fn a_question_shows_its_options_meaning_and_folds(cx: &mut TestAppContext) {
     assert!(find(&nodes, Role::Note, "Sent by reviewer").is_some());
     assert!(find(&nodes, Role::Note, "Permission rule Bash(rm:*) requires confirmation").is_some());
     assert!(nodes.iter().any(|n| n.role == Role::Timer && n.label.starts_with("Declines by itself in")));
+    assert!(find(&nodes, Role::Button, "Skip").is_some(), "an agent's questions may be skipped");
 
     composer.update(cx, |composer, cx| composer.fold_question(cx));
     let nodes = draw(cx);
@@ -336,6 +390,7 @@ fn a_form_says_what_it_still_needs(cx: &mut TestAppContext) {
     assert!(find(&nodes, Role::Form, "Form").is_some());
     assert!(find(&nodes, Role::Group, "Name *").is_some());
     assert!(find(&nodes, Role::RadioButton, "Yes").is_some());
+    assert!(find(&nodes, Role::Button, "Skip").is_none(), "a form is no agent's question to skip");
     composer.update(cx, |composer, cx| composer.send_form(cx));
     let nodes = draw(cx);
     assert!(find(&nodes, Role::Alert, "Fill in Name").is_some());
@@ -593,4 +648,44 @@ fn an_option_shows_its_preview_beside_it(cx: &mut TestAppContext) {
     );
     let nodes = draw(cx);
     assert!(find(&nodes, Role::Region, "Preview of Grid").is_some(), "{:?}", labels(&nodes, Role::Region));
+}
+
+/// Keys typed into the composer after another chat comes on screen land in its draft: given
+/// the keyboard while drawn from the last frame, the input still takes the window's text.
+#[gpui::test]
+fn keys_land_in_the_draft_after_a_chat_switch(cx: &mut TestAppContext) {
+    let (composer, state, cx) = open(cx, ChatDock { can: can(), ..ChatDock::default() }, None);
+    draw(cx);
+    // Drawn as a frame is, from the last one where nothing changed.
+    let frame = |cx: &mut VisualTestContext| {
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+    };
+    let elsewhere = composer.read_with(cx, |composer, _| composer.preview_focus.clone());
+    cx.update(|window, cx| window.focus(&elsewhere, cx));
+    frame(cx);
+    state.update(cx, |state, cx| {
+        let mut other = state.chats[0].clone();
+        other.id = "other".into();
+        other.title = Some("Other".into());
+        state.chats.push(other);
+        state.selected_chat = Some("other".into());
+        cx.notify();
+    });
+    frame(cx);
+    let input = composer.read_with(cx, |composer, cx| composer.input.focus_handle(cx));
+    cx.update(|window, cx| window.focus(&input, cx));
+    frame(cx);
+    cx.update(|window, cx| {
+        for ch in "half a thought".chars() {
+            let keystroke = gpui::Keystroke {
+                modifiers: gpui::Modifiers::default(),
+                key: ch.to_string(),
+                key_char: Some(ch.to_string()),
+            };
+            window.dispatch_keystroke(keystroke, cx);
+        }
+    });
+    let text = composer.read_with(cx, |composer, cx| composer.input.read(cx).text().to_owned());
+    assert_eq!(text, "half a thought");
 }
