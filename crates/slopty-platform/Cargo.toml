@@ -33,6 +33,8 @@ objc2-game-controller.workspace = true
 objc2-audio-toolbox.workspace = true
 # A pushed note: the phone's key, the seal it opens, and the notice inside (`notify::pushed`).
 slopty-push.workspace = true
+# A page's MCP Apps bridge, JSON-RPC (`web::page`).
+serde_json.workspace = true
 slopty-core.workspace = true
 thiserror.workspace = true
 block2.workspace = true
@@ -167,6 +169,16 @@ objc2-web-kit = { workspace = true, features = [
     "WKWebView",
     "WKWebViewConfiguration",
     "WKWebsiteDataStore",
+    # A page inline in a transcript (`web::page`): its scheme, rule list, relay and world.
+    "WKContentRuleList",
+    "WKContentRuleListStore",
+    "WKContentWorld",
+    "WKFrameInfo",
+    "WKScriptMessage",
+    "WKScriptMessageHandlerWithReply",
+    "WKURLSchemeHandler",
+    "WKUserContentController",
+    "WKUserScript",
 ] }
 # Each worker's home in Finder, the app's half (`files`): the domains, their switch-on, and
 # the directory the extension reads.
@@ -185,7 +197,6 @@ objc2-service-management = { workspace = true, features = [
     "objc2",
     "objc2-foundation",
 ] }
-serde_json.workspace = true
 slopty-core.workspace = true
 thiserror.workspace = true
 
@@ -253,6 +264,16 @@ objc2-web-kit = { workspace = true, features = [
     "WKSnapshotConfiguration",
     "WKWebViewConfiguration",
     "WKWebsiteDataStore",
+    # A page inline in a transcript (`web::page`): its scheme, rule list, relay and world.
+    "WKContentRuleList",
+    "WKContentRuleListStore",
+    "WKContentWorld",
+    "WKFrameInfo",
+    "WKScriptMessage",
+    "WKScriptMessageHandlerWithReply",
+    "WKURLSchemeHandler",
+    "WKUserContentController",
+    "WKUserScript",
 ] }
 
 # The app `tests/curtain.rs` reads the curtain's shield through: a magenta window under the

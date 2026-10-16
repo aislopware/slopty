@@ -69,9 +69,11 @@ fn request(id: &str) -> Action {
         proposed: None,
         schema_json: None,
         url: None,
+        reason: None,
         state: RequestState::Open,
         opened_ms: WallMs::ZERO,
         until_ms: None,
+        needs_presence: false,
     }))
 }
 
@@ -453,7 +455,12 @@ fn older_turns_are_paged_once_until_every_turn_is_held() {
         "{asked:?}"
     );
     assert!(threads.page(thread, 50).is_none(), "once while it is on its way");
-    let page = Page { turns: vec![turn(1), turn(2)], items: Vec::new(), older: false };
+    let page = Page {
+        turns: vec![turn(1), turn(2)],
+        items: Vec::new(),
+        older: false,
+        calls: BTreeMap::new(),
+    };
     assert_eq!(threads.frame(thread, ThreadFrame::Page(page)).0, Changed::Thread);
     assert!(!threads.older(thread), "every turn held");
     assert!(threads.page(thread, 50).is_none(), "nothing more to ask");

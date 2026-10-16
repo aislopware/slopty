@@ -47,7 +47,8 @@ slopty-pty.workspace = true
 slopty-settings.workspace = true
 # The server machine's Tailscale peer relay pref (`relay`).
 slopty-tailnet.workspace = true
-slopty-tools.workspace = true
+# `show_visual` checks its script here, where the agent runs (`slopty mcp`).
+slopty-tools = { workspace = true, features = [ "visual" ] }
 tokio = { workspace = true, features = [ "io-std" ] }
 tracing.workspace = true
 tracing-subscriber.workspace = true

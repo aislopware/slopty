@@ -1208,7 +1208,7 @@ pub async fn uninstall_worker(session: &Session) -> io::Result<Vec<(Job, bool)>>
 /// machine (their layout, caches, settings), so the purge names the worker's paths rather than
 /// taking the directory. `apps/slopty-worker/tests/purge.rs` runs the real daemons on an empty
 /// one and fails when they leave anything this list does not name.
-pub const WORKER_STATE: [&str; 21] = [
+pub const WORKER_STATE: [&str; 22] = [
     "worker-id",
     "input-source",
     "caps-lock",
@@ -1216,6 +1216,7 @@ pub const WORKER_STATE: [&str; 21] = [
     "session.key",
     "sessions",
     "threads",
+    "media",
     "snapshots",
     "presence",
     "claude-mod",

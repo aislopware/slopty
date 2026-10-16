@@ -148,6 +148,101 @@ pub(super) fn proposed_change(diff: &slopty_view_proto::ToolDiff, theme: &Theme)
 }
 
 impl Composer {
+    /// Whether a question's panel holds the composer now (open, not folded to its strip).
+    pub(crate) fn wizard_open(&self) -> bool {
+        self.wizard.as_ref().is_some_and(|wizard| !wizard.folded)
+    }
+
+    /// Fold the open question to its strip and give the composer back, the words typed for it
+    /// kept for when it opens again.
+    pub(super) fn fold_question(&mut self, cx: &mut Context<Self>) {
+        let typed = self.input.read(cx).text().to_string();
+        let Some(wizard) = self.wizard.as_mut().filter(|wizard| !wizard.folded) else { return };
+        wizard.set_typed(typed);
+        wizard.folded = true;
+        let draft = self.drafts.get(&self.current_key).cloned().unwrap_or_default();
+        self.input.update(cx, |input, cx| {
+            input.set_text(draft, cx);
+            input.set_placeholder("Do anything…", cx);
+            input.set_key_context(MESSAGE_COMPOSER_CONTEXT, cx);
+        });
+        self.focus_pending = true;
+        self.on_input_edited(cx);
+        cx.notify();
+    }
+
+    /// Open the folded question again, the composer's words kept as its draft.
+    pub(super) fn unfold_question(&mut self, cx: &mut Context<Self>) {
+        let draft = self.input.read(cx).text().to_string();
+        let Some(wizard) = self.wizard.as_mut().filter(|wizard| wizard.folded) else { return };
+        wizard.folded = false;
+        let typed = wizard.typed.get(wizard.page).cloned().unwrap_or_default();
+        self.drafts.insert(self.current_key.clone(), draft);
+        self.reset_mention(None, cx);
+        self.reset_slash(None, cx);
+        self.input.update(cx, |input, cx| {
+            input.set_text(typed, cx);
+            input.set_placeholder("Type your own answer, or pick an option above", cx);
+            input.set_key_context(message_input_context(true), cx);
+        });
+        self.focus_pending = true;
+        cx.notify();
+    }
+
+    /// A folded question's strip over the composer: what it asks, and Answer to open it.
+    pub(super) fn render_folded_question(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let wizard = self.wizard.as_ref().filter(|wizard| wizard.folded)?;
+        let question = wizard.current()?;
+        let ask = question
+            .question
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .map_or_else(|| question.header.clone(), str::to_owned);
+        let words = match question.sent_by.as_deref().filter(|c| !c.trim().is_empty()) {
+            Some(child) => visible_escapes(&format!("{child} · {}: {ask}", question.header)),
+            None => visible_escapes(&format!("{}: {ask}", question.header)),
+        };
+        Some(
+            div()
+                .id("question-strip")
+                .role(Role::Button)
+                .aria_label(SharedString::from(format!("Asks: {words}")))
+                .aria_description("Opens the question again")
+                .mx(px(QUEUE_SIDE_INSET))
+                .h(px(32.0))
+                .px(px(12.0))
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .rounded(px(crate::queue::PANEL_RADIUS))
+                .border_1()
+                .border_color(theme.warning.opacity(0.3))
+                .bg(theme.warning.opacity(0.06))
+                .cursor_pointer()
+                .hover(|s| s.bg(theme.warning.opacity(0.1)))
+                .on_click(cx.listener(|this, _, _, cx| this.unfold_question(cx)))
+                .child(div().flex_none().size(px(6.0)).rounded_full().bg(theme.warning))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(12.5))
+                        .text_color(theme.text)
+                        .child(SharedString::from(words)),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_size(px(11.5))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(theme.warning)
+                        .child("Answer"),
+                )
+                .into_any_element(),
+        )
+    }
+
     /// Mark the open approval read through once its gated body has been scrolled to its end (or
     /// fits whole); then its allow takes a click.
     pub(super) fn note_read_through(&mut self) -> bool {

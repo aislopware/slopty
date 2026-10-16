@@ -259,7 +259,7 @@ fn heard(
     let Some(name) = name else { return Ok(()) };
     let path = dir.join(name);
     let is_dir = flags.contains(ReadFlags::ISDIR);
-    match repo.heard(&path, Some(is_dir)) {
+    match repo.heard(&path, Some(is_dir), || true) {
         Said::Moved if is_dir && flags.intersects(MADE) => {
             if path.starts_with(&place.git) || path.starts_with(&place.common) {
                 inner.cover(all_dirs(&path, &NOT_STATUS))

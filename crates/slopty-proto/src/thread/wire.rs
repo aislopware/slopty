@@ -105,6 +105,19 @@ pub enum ThreadRequest {
         /// The most sessions to list.
         limit: u32,
     },
+    /// What a page shown in `thread` asks of its MCP App ([`crate::visual::AppAsk`]): the
+    /// worker passes it through the thread's agent (Claude Code's `mcp_read_resource` and
+    /// `mcp_call` with `result_not_for_model`, Codex's `mcpServer/resource/read` and
+    /// `mcpServer/tool/call`) and answers on the thread's stream with [`ThreadFrame::App`]
+    /// under the same `id`. It never dials a server itself, and asks only of a followed thread.
+    App {
+        /// The thread.
+        thread: ThreadId,
+        /// The client's number for the ask, which the answer carries.
+        id: u64,
+        /// What the page asks.
+        ask: crate::visual::AppAsk,
+    },
 }
 
 /// A thread to start.
@@ -356,6 +369,58 @@ pub enum Intent {
         /// The choice ([`OptionChoice::id`](super::OptionChoice::id)).
         choice: String,
     },
+    /// Stop one piece of the agent's background work, by its id
+    /// ([`BackgroundTask::id`](super::BackgroundTask::id)): a command, a monitor, a loop, a
+    /// subagent ([`Cap::STOP_TASK`]). The one stop verb for background work; "stop all" is one
+    /// per running task. Its notice comes back as the task's row when the agent says it stopped.
+    StopTask {
+        /// The task.
+        task: String,
+    },
+    /// Move a call that blocks the turn into the background, where it goes on and the turn goes
+    /// on past it: the one started by `item`, or every one when `None` (the TUI's Ctrl+B)
+    /// ([`Cap::BACKGROUND`]).
+    Background {
+        /// The call.
+        item: Option<ItemId>,
+    },
+    /// Run `command` in the thread's folder on its machine, as the TUI's `!` does
+    /// ([`Cap::SHELL`]): while it runs it is a call of its own in the thread (kind
+    /// [`kind::EXEC`](super::kind::EXEC), its output streaming), and once it ends the command and
+    /// its output go to the agent as the person's next message, which the agent answers unless
+    /// its settings say it takes them without a reply.
+    Shell {
+        /// The command line, for the person's shell.
+        command: String,
+    },
+    /// Put the files back as they were before turn `turn` began, through the agent's own
+    /// checkpoints ([`Cap::REWIND`]). The conversation is branched there by
+    /// [`Intent::Fork`] with `after` the turn before, so "restore code and conversation" is the
+    /// two; what was put back comes as a [`Notice::REWOUND`](super::Notice::REWOUND) row.
+    Rewind {
+        /// The turn whose start the files go back to.
+        turn: TurnId,
+    },
+    /// Undo the last rewind: the thread's folder put back as it was just before it
+    /// ([`ThreadState::rewound`](super::ThreadState::rewound)), named by the tree the worker
+    /// took then, so an undo of an older rewind is refused ([`Cap::REWIND`]).
+    Unrewind {
+        /// The folder before the rewind ([`Rewound::tree`](super::Rewound::tree)).
+        tree: TreeRef,
+    },
+    /// Add or remove one of the agent's permission rules, in the settings file of its scope
+    /// ([`Cap::RULES`]); the rules as the agent then lists them come back as
+    /// [`Action::RulesSet`].
+    Rule(super::RuleChange),
+    /// The person acted in a mod's surface ([`Cap::SURFACES`]).
+    Surface {
+        /// The surface ([`Surface::id`](super::Surface::id)).
+        surface: String,
+        /// The element acted on, by its id in the surface's tree; empty for the surface itself.
+        element: String,
+        /// What they did.
+        event: super::SurfaceEvent,
+    },
 }
 
 /// A file's change as a review showed it, or some of its hunks.
@@ -411,6 +476,12 @@ impl Intent {
             Self::Fork { .. } | Self::Aside | Self::KeepAside => Cap::FORK,
             Self::Keep(_) | Self::Revert(_) => Cap::SNAPSHOTS,
             Self::Review { .. } => Cap::REVIEW,
+            Self::StopTask { .. } => Cap::STOP_TASK,
+            Self::Background { .. } => Cap::BACKGROUND,
+            Self::Shell { .. } => Cap::SHELL,
+            Self::Rewind { .. } | Self::Unrewind { .. } => Cap::REWIND,
+            Self::Rule(_) => Cap::RULES,
+            Self::Surface { .. } => Cap::SURFACES,
         })
     }
 
@@ -501,6 +572,13 @@ pub enum ThreadFrame {
     },
     /// What changed over a scope, asked for by [`ThreadRequest::Review`].
     Review(Box<Review>),
+    /// The agent's answer to a page's ask ([`ThreadRequest::App`]), by the ask's `id`.
+    App {
+        /// The ask's number.
+        id: u64,
+        /// What came of it.
+        answer: crate::visual::AppAnswer,
+    },
 }
 
 /// The span of work a review covers: a diff between two trees of the working tree.
@@ -680,6 +758,9 @@ pub struct Page {
     pub items: Vec<Item>,
     /// There are turns before these.
     pub older: bool,
+    /// What the agent said of their calls beside them
+    /// ([`ThreadState::calls`](super::ThreadState::calls)).
+    pub calls: BTreeMap<ItemId, super::CallNote>,
 }
 
 /// The most of a text one [`Expanded::Text`] carries, in chars: the rest is cut.
@@ -923,6 +1004,10 @@ pub struct RequestCard {
     pub buttons: Vec<NoteChoice>,
     /// When it opened.
     pub opened_ms: WallMs,
+    /// Only the person at its card answers it ([`super::Request::needs_presence`]): a note
+    /// offers no answer of it.
+    #[serde(default)]
+    pub needs_presence: bool,
 }
 
 /// An answer a note offers as a button of its own: one of the options of a question that asks
@@ -941,9 +1026,13 @@ impl NoteChoice {
 
     /// The buttons of `request`: one per option of a question that asks one thing, takes one
     /// answer and offers at most [`Self::MAX`], each answering with that option alone, as the
-    /// question's own dialog would. None for anything else, which is opened or replied to.
+    /// question's own dialog would. None for anything else, which is opened or replied to, and
+    /// none for a request only the person at its card answers.
     #[must_use]
     pub fn of(request: &super::Request) -> Vec<Self> {
+        if request.needs_presence {
+            return Vec::new();
+        }
         let [question] = request.questions.as_slice() else { return Vec::new() };
         if request.kind != super::Request::QUESTION
             || question.multi_select
@@ -969,11 +1058,13 @@ impl NoteChoice {
 
 impl RequestCard {
     /// Whether it is a yes or no that "Allow" and "Deny" answer whole, where it is shown: an
-    /// approval offering a plain allow and a deny ([`super::once`]). A note's buttons, on the
-    /// phone or in the app, answer only such a request.
+    /// approval offering a plain allow and a deny ([`super::once`]), which does not need the
+    /// person at its card. A note's buttons, on the phone or in the app, answer only such a
+    /// request.
     #[must_use]
     pub fn answerable(&self) -> bool {
-        self.kind == super::Request::APPROVAL
+        !self.needs_presence
+            && self.kind == super::Request::APPROVAL
             && super::once(&self.options, true).is_some()
             && super::once(&self.options, false).is_some()
     }

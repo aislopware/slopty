@@ -38,9 +38,14 @@ pub mod attention;
 pub mod detail;
 mod reduce;
 pub mod wire;
+pub mod work;
 
 pub use detail::{Clipped, ContentRef, Image, Patch, ToolDetail};
 pub use reduce::{RESOLVED_KEPT, TableState, ThreadState};
+pub use work::{
+    Activity, AgentNote, CallNote, ContextCategory, ContextUsage, Goal, Rewound, Rule, RuleChange,
+    Rules, SubagentKind, Surface, SurfaceEvent, TaskNote, TaskUsage,
+};
 
 macro_rules! uuid_id {
     ($(#[$doc:meta])* $name:ident) => {
@@ -236,6 +241,8 @@ pub struct Cap(pub String);
 impl Cap {
     /// Requests are answered through Slopty ([`wire::Intent::Answer`]).
     pub const APPROVALS: &'static str = "approvals";
+    /// [`wire::Intent::Background`]: a call that blocks its turn goes on in the background.
+    pub const BACKGROUND: &'static str = "background";
     /// [`wire::Intent::End`]: the agent's process is ended, its background work with it, and
     /// its conversation kept to be taken up again.
     pub const END: &'static str = "end";
@@ -249,6 +256,10 @@ impl Cap {
     /// [`wire::Intent::Review`]: the agent reviews a change through its own door (Claude Code's
     /// `/code-review`, Codex's `review/start`).
     pub const REVIEW: &'static str = "review";
+    /// [`wire::Intent::Rewind`]: the files put back as they were before a turn.
+    pub const REWIND: &'static str = "rewind";
+    /// [`wire::Intent::Rule`]: the agent's permission rules changed in its own settings.
+    pub const RULES: &'static str = "rules";
     /// [`wire::Intent::Send`] with a delivery the worker keeps ([`Delivery::is_kept`]): it holds
     /// the message until its moment, or the person's word for a draft.
     pub const SCHEDULE: &'static str = "schedule";
@@ -260,10 +271,17 @@ impl Cap {
     pub const SET_MODEL: &'static str = "set-model";
     /// [`wire::Intent::SetOption`].
     pub const SET_OPTION: &'static str = "set-option";
+    /// [`wire::Intent::Shell`]: a command run on the agent's machine, its output given the agent
+    /// as the TUI's `!` gives it.
+    pub const SHELL: &'static str = "shell";
     /// The worker snapshots the working tree at each turn edge ([`Action::Snapshot`]).
     pub const SNAPSHOTS: &'static str = "snapshots";
     /// [`wire::Intent::Send`] with [`Delivery::Steer`]: a message taken mid-turn.
     pub const STEER: &'static str = "steer";
+    /// [`wire::Intent::StopTask`]: one piece of background work stopped.
+    pub const STOP_TASK: &'static str = "stop-task";
+    /// [`wire::Intent::Surface`]: the person acts in a mod's surface.
+    pub const SURFACES: &'static str = "surfaces";
 
     /// The capability named `name`.
     #[must_use]
@@ -698,6 +716,9 @@ pub enum ItemBody {
         /// Entered rather than left.
         entered: bool,
     },
+    /// A background task's notice, a quiet row linked to its task: an agent finished or waits on
+    /// its own work, a command exited, a monitor's event.
+    Task(Box<TaskNote>),
     /// A record the adapter does not know yet, kept as it came so it is never dropped. A
     /// client shows it as a quiet row.
     Extra {
@@ -739,7 +760,8 @@ pub struct Compaction {
 pub struct Notice {
     /// Open: [`Notice::API_ERROR`], [`Notice::COMMAND`], [`Notice::DECLINED`], [`Notice::INFO`],
     /// [`Notice::HOOK`], [`Notice::INTERRUPTED`], [`Notice::LIMIT`], [`Notice::REPORT`],
-    /// [`Notice::REWOUND`].
+    /// [`Notice::REWOUND`], [`Notice::ALLOWED`], [`Notice::FALLBACK`], [`Notice::GOAL`],
+    /// [`Notice::MEMORY`], [`Notice::MODE`], [`Notice::STOPPED`], [`Notice::TURN`].
     pub kind: String,
     /// What it says.
     pub text: Clipped,
@@ -759,6 +781,8 @@ pub struct Retry {
 }
 
 impl Notice {
+    /// The person allowed calls, and the agent tries them again: "Allowed cargo test".
+    pub const ALLOWED: &'static str = "allowed";
     /// The API failed, or a request is being retried.
     pub const API_ERROR: &'static str = "api-error";
     /// What a command printed.
@@ -766,6 +790,10 @@ impl Notice {
     /// The agent's own judge of risk (Claude Code's auto mode) turned a call down, with no
     /// person asked.
     pub const DECLINED: &'static str = "declined";
+    /// The turn went on with another model, or the model refused and another took over.
+    pub const FALLBACK: &'static str = "fallback";
+    /// The goal's check said it is met, not yet, or cannot be: "Goal achieved (5m · 3 turns)".
+    pub const GOAL: &'static str = "goal";
     /// A hook failed, blocked a call or stopped the turn.
     pub const HOOK: &'static str = "hook";
     /// Something the agent wanted to say.
@@ -774,11 +802,22 @@ impl Notice {
     pub const INTERRUPTED: &'static str = "interrupted";
     /// The agent stopped on a usage limit: its words, and the turn says when it resets.
     pub const LIMIT: &'static str = "limit";
+    /// The agent saved or recalled memories: "Saved 2 memories", "Recalled 3 memories".
+    pub const MEMORY: &'static str = "memory";
+    /// The agent's permission mode changed without the person switching it: a plan approved
+    /// with a mode, plan mode entered or left ("Switched to accept edits").
+    pub const MODE: &'static str = "mode";
     /// Slopty's own reports handed to the agent with a turn (`slopty-server`'s deliveries, in
     /// their `<slopty-reports>` frame), kept as they were framed.
     pub const REPORT: &'static str = "report";
     /// The person went back to an earlier message; what came after it is gone.
     pub const REWOUND: &'static str = "rewound";
+    /// Background agents were stopped at once, named ("2 background agents were stopped: …"),
+    /// or "All background agents stopped" when none is known by name.
+    pub const STOPPED: &'static str = "stopped";
+    /// The turn's own footer, when the agent says more than its times: "Waiting for 2 background
+    /// agents to finish", "3 background tasks still running".
+    pub const TURN: &'static str = "turn";
 
     /// A notice of `kind` saying `text`, with no retry.
     #[must_use]
@@ -894,7 +933,8 @@ pub struct Request {
     /// The call it is about, when it is about one.
     pub item: Option<ItemId>,
     /// What it asks. Open: [`Request::APPROVAL`], [`Request::QUESTION`], [`Request::PLAN`],
-    /// [`Request::ELICITATION`], [`Request::RETRY`].
+    /// [`Request::ELICITATION`], [`Request::RETRY`], and a dialog of the agent's own,
+    /// [`Request::DIALOG`] followed by its kind ([`Request::dialog_kind`]).
     pub kind: String,
     /// What it asks, in a line ("Run cargo test?").
     pub title: String,
@@ -906,23 +946,53 @@ pub struct Request {
     pub questions: Vec<detail::Question>,
     /// The change it would make, for an approval of an edit.
     pub proposed: Option<Patch>,
-    /// For a form: its JSON schema.
+    /// For a form: its JSON schema, its properties in the order the server listed them. For a
+    /// dialog ([`Request::DIALOG`]): its payload, as JSON, as the agent sent it.
     pub schema_json: Option<String>,
     /// For a form the person fills in elsewhere: where.
     pub url: Option<String>,
+    /// Why the agent asks, in its own words, when it says: the classifier, the rule, the hook or
+    /// the safety check that wanted the person's word ("Permission rule `Bash(rm:*)` requires
+    /// confirmation for this command.").
+    pub reason: Option<String>,
     /// How it stands.
     pub state: RequestState,
     /// When it opened.
     pub opened_ms: WallMs,
     /// When the worker stops holding it and gives it back to the agent's own prompt.
     pub until_ms: Option<WallMs>,
+    /// Only the person at its card answers it: the agent says one-tap answers must not be
+    /// offered (Claude Code's `requires_user_interaction`). A notification's buttons, an API
+    /// call (the CLI, a note's verdict through the server), another agent and any rule Slopty
+    /// would add with it are refused; the card says so ([`Request::NEEDS_PRESENCE`]).
+    #[serde(default)]
+    pub needs_presence: bool,
 }
 
 impl Request {
     /// May the agent do something.
     pub const APPROVAL: &'static str = "approval";
-    /// A form to fill in.
+    /// The choice that dismisses a dialog or a form without an answer.
+    pub const CANCEL: &'static str = "cancel";
+    /// The choice that turns a form down.
+    pub const DECLINE: &'static str = "decline";
+    /// How a dialog of the agent's own begins its kind: `dialog:goal_proposal`,
+    /// `dialog:sandbox_network_access`, `dialog:refusal_fallback_prompt`. Its payload is
+    /// [`Request::schema_json`], its offered answers [`Request::options`] for a kind the adapter
+    /// knows. Any dialog is answered by a [`Choice::id`], or by a JSON object as the dialog's
+    /// result, or dismissed by [`Request::CANCEL`]: a kind no client knows is shown from its
+    /// payload and still answered, never refused unseen.
+    pub const DIALOG: &'static str = "dialog:";
+    /// A form to fill in (an MCP server's elicitation): its message is [`Request::text`], its
+    /// server [`Request::title`], its schema [`Request::schema_json`], or the page to fill it in
+    /// at [`Request::url`]. Answered with the filled-in object as JSON, [`Request::DECLINE`] or
+    /// [`Request::CANCEL`].
     pub const ELICITATION: &'static str = "elicitation";
+    /// What a card that only the person at it answers says ([`Request::needs_presence`]).
+    pub const NEEDS_PRESENCE: &'static str = "Needs you at the card";
+    /// Why an answer from anywhere but the card is refused ([`Request::needs_presence`]).
+    pub const NEEDS_PRESENCE_REFUSED: &'static str =
+        "Needs you at the card: the agent takes this answer only from its card in Slopty";
     /// A plan to approve.
     pub const PLAN: &'static str = "plan";
     /// Questions for the person.
@@ -936,14 +1006,22 @@ impl Request {
     pub const fn is_open(&self) -> bool {
         matches!(self.state, RequestState::Open)
     }
+
+    /// The kind of the agent's own dialog this is ([`Request::DIALOG`]), when it is one.
+    #[must_use]
+    pub fn dialog_kind(&self) -> Option<&str> {
+        self.kind.strip_prefix(Self::DIALOG).filter(|kind| !kind.is_empty())
+    }
 }
 
-/// The choice of `options` that allows (`allow`) or denies the call once and no more: the plain
-/// allow; the plain deny ([`plain_deny`]).
+/// The choice of `options` that allows (`allow`) or denies the call once and no more.
+///
+/// The plain allow neither reaches beyond this once nor stops the turn (a plan's "clear context"
+/// does); the plain deny is [`plain_deny`].
 #[must_use]
 pub fn once(options: &[Choice], allow: bool) -> Option<&Choice> {
     if allow {
-        options.iter().find(|c| c.effect == Effect::Allow && c.scope.is_none())
+        options.iter().find(|c| c.effect == Effect::Allow && c.scope.is_none() && !c.stops)
     } else {
         plain_deny(options)
     }
@@ -1155,11 +1233,15 @@ pub struct Step {
 pub struct BackgroundTask {
     /// Its id, as the agent knows it.
     pub id: String,
-    /// What kind of work it is. Open: [`BackgroundTask::SHELL`], [`BackgroundTask::AGENT`].
+    /// What kind of work it is. Open: [`BackgroundTask::SHELL`], [`BackgroundTask::AGENT`],
+    /// [`BackgroundTask::MONITOR`], [`BackgroundTask::WORKFLOW`], [`BackgroundTask::MCP`],
+    /// [`BackgroundTask::REMOTE`], [`BackgroundTask::TEAMMATE`], else the agent's own word.
     pub kind: String,
     /// What it is.
     pub title: String,
-    /// Open, as the agent says: `running`, `completed`, `failed`, `killed`.
+    /// Open, as the agent says: [`BackgroundTask::RUNNING`], [`BackgroundTask::COMPLETED`],
+    /// [`BackgroundTask::FAILED`], [`BackgroundTask::KILLED`], [`BackgroundTask::WAITING`],
+    /// [`BackgroundTask::PENDING`], [`BackgroundTask::PAUSED`].
     pub state: String,
     /// The call that started it.
     pub item: Option<ItemId>,
@@ -1169,6 +1251,30 @@ pub struct BackgroundTask {
     pub started_ms: WallMs,
     /// When it ended, once it has and the agent says when.
     pub ended_ms: Option<WallMs>,
+    /// A subagent's kind (`general-purpose`), the agents list's first word.
+    pub agent_type: Option<String>,
+    /// What it is doing now, in a phrase: an agent's own progress summary, else its last tool
+    /// ("Running full check"); the agents list's middle.
+    pub step: Option<String>,
+    /// Its figures so far: tokens, tool uses, how long it has run.
+    pub usage: Option<TaskUsage>,
+    /// The task that started it, for one a subagent started.
+    pub parent: Option<String>,
+    /// The thread of a subagent's run, where Slopty keeps one.
+    pub child: Option<ThreadId>,
+    /// Housekeeping of the agent's own (a memory pass), which a tray folds away.
+    pub ambient: bool,
+    /// Whether the turn waits on it rather than goes on beside it.
+    pub awaited: bool,
+    /// Whether it runs in the background, past its call, rather than blocking it.
+    pub backgrounded: bool,
+    /// How it ended, in the agent's words ("finished", "is waiting on its own background work",
+    /// "failed: out of memory", "was stopped by user", "exit code 2").
+    pub outcome: Option<String>,
+    /// A monitor's or a command's time limit, in ms, when it has one.
+    pub timeout_ms: Option<u64>,
+    /// A monitor that watches until it is stopped.
+    pub persistent: bool,
 }
 
 impl BackgroundTask {
@@ -1180,15 +1286,65 @@ impl BackgroundTask {
     pub const FAILED: &'static str = "failed";
     /// It was stopped.
     pub const KILLED: &'static str = "killed";
+    /// An MCP server's long task.
+    pub const MCP: &'static str = "mcp";
+    /// A watch that wakes the agent on each event (Claude Code's `Monitor`).
+    pub const MONITOR: &'static str = "monitor";
+    /// Paused.
+    pub const PAUSED: &'static str = "paused";
+    /// Not started yet.
+    pub const PENDING: &'static str = "pending";
+    /// An agent running elsewhere (a cloud session).
+    pub const REMOTE: &'static str = "remote";
     /// It runs.
     pub const RUNNING: &'static str = "running";
     /// A command left running.
     pub const SHELL: &'static str = "shell";
+    /// A teammate of an agent team.
+    pub const TEAMMATE: &'static str = "teammate";
+    /// An agent that stopped with work of its own still running: it may go on by itself.
+    pub const WAITING: &'static str = "waiting";
+    /// A dynamic workflow.
+    pub const WORKFLOW: &'static str = "workflow";
 
     /// Whether it still runs.
     #[must_use]
     pub fn is_running(&self) -> bool {
         self.state == Self::RUNNING
+    }
+
+    /// Whether it is still at work in any way: running, pending, paused, or waiting on work of
+    /// its own.
+    #[must_use]
+    pub fn is_live(&self) -> bool {
+        matches!(self.state.as_str(), Self::RUNNING | Self::PENDING | Self::PAUSED | Self::WAITING)
+    }
+
+    /// Task `id` of `kind` named `title`, running in the background since `started_ms`, with
+    /// nothing else known yet.
+    #[must_use]
+    pub fn new(id: &str, kind: &str, title: &str, started_ms: WallMs) -> Self {
+        Self {
+            id: id.to_owned(),
+            kind: kind.to_owned(),
+            title: title.to_owned(),
+            state: Self::RUNNING.to_owned(),
+            item: None,
+            output: None,
+            started_ms,
+            ended_ms: None,
+            agent_type: None,
+            step: None,
+            usage: None,
+            parent: None,
+            child: None,
+            ambient: false,
+            awaited: false,
+            backgrounded: true,
+            outcome: None,
+            timeout_ms: None,
+            persistent: false,
+        }
     }
 }
 
@@ -1348,6 +1504,48 @@ pub enum Action {
         message: IntentId,
         /// The words as the person wrote them.
         words: String,
+    },
+    /// What the agent says of one call beside the call ([`CallNote`]): its running time, the
+    /// task it became, the words it ended with. Replaces the note held for the item.
+    CallNoted {
+        /// The call.
+        item: ItemId,
+        /// The note.
+        note: CallNote,
+    },
+    /// The end of what a background task printed, as the agent last read it.
+    TaskOutput {
+        /// The task ([`BackgroundTask::id`]).
+        task: String,
+        /// Its output's tail.
+        output: Clipped,
+    },
+    /// The turn under way, as the spinner line shows it; `None` once no turn runs.
+    ActivitySet(Option<Activity>),
+    /// The goal the agent works towards; `None` once it is cleared or met.
+    GoalSet(Option<Goal>),
+    /// A passing notification, in place of any of its key.
+    Notified(AgentNote),
+    /// The prompt the agent guesses the person sends next; `None` once it no longer holds.
+    Suggested(Option<String>),
+    /// The agent's permission rules, as it lists them.
+    RulesSet(Rules),
+    /// The person's own status line, run on the worker as the agent's TUI runs it: its text,
+    /// ANSI colours kept; `None` when there is none.
+    StatusLine(Option<String>),
+    /// The folder as it was before the last rewind, which [`wire::Intent::Unrewind`] puts back;
+    /// `None` once it was put back, or nothing can be.
+    Rewound(Option<Rewound>),
+    /// The kinds of subagent the agent offers.
+    AgentsSet(Vec<SubagentKind>),
+    /// The context window by category.
+    ContextSet(ContextUsage),
+    /// A mod's surface shows, in place of any of its id.
+    SurfaceSet(Surface),
+    /// A mod's surface went.
+    SurfaceGone {
+        /// Its id.
+        id: String,
     },
     /// The worker last heard the thread's agent alive at this moment, by its own clock, while a
     /// turn was under way ([`wire::ThreadRow::lease_ms`]): the agent's own word (Claude Code's

@@ -24,6 +24,8 @@ exclude = [
     "crates/slopty-view-doc/Cargo.toml",
     "crates/slopty-view-proto/Cargo.toml",
     "crates/slopty-view-rpc/Cargo.toml",
+    "crates/slopty-visual/Cargo.toml",
+    "crates/slopty-visual-gpu/Cargo.toml",
 ]
 
 [formatting]

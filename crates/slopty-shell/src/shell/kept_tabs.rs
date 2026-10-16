@@ -57,7 +57,8 @@ impl Shell {
                 let (screen, title) = self.screen_surface_chosen(id, cx)?;
                 SavedSurface::Screen { screen, title }
             }
-            RightSurface::Picker | RightSurface::Subagent(_) => return None,
+            // slopty: a mod's pane lives while its mod keeps it, not across launches.
+            RightSurface::ModPane(_) | RightSurface::Page(_) | RightSurface::Picker => return None,
         })
     }
 

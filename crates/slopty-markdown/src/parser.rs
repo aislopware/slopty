@@ -38,6 +38,17 @@ pub struct InlineStyle {
     pub file_label: Option<String>,
     pub image: Option<InlineImage>,
     pub task: Option<TaskMarker>,
+    // slopty: TeX math (`$…$`, `$$…$$`); the run's text is its source.
+    pub math: Option<Math>,
+}
+
+// slopty: TeX math in a run, typeset by the host (`slopty-math`); the run's text is the TeX
+// source, so copy, find and a host that draws no math all see what was written.
+/// How a run of TeX math is set: in the line (`$…$`) or on its own (`$$…$$`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Math {
+    Inline,
+    Display,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -133,7 +144,11 @@ impl BlockTree {
 // ---------------------------------------------------------------------------
 
 fn options() -> Options {
-    Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS
+    // slopty: math events (`$…$`, `$$…$$`), which a currency amount does not open.
+    Options::ENABLE_TABLES
+        | Options::ENABLE_STRIKETHROUGH
+        | Options::ENABLE_TASKLISTS
+        | Options::ENABLE_MATH
 }
 
 /// Parse a whole source into a [`BlockTree`].
@@ -728,6 +743,17 @@ fn parse_inline_event(cur: &mut Cursor, runs: &mut Vec<InlineRun>, style: &Inlin
             );
         }
         Event::FootnoteReference(t) => push(runs, format!("[{t}]"), style.clone()),
+        // slopty: math runs carry their TeX.
+        Event::InlineMath(t) => {
+            let mut s = style.clone();
+            s.math = Some(Math::Inline);
+            push(runs, t.into_string(), s);
+        }
+        Event::DisplayMath(t) => {
+            let mut s = style.clone();
+            s.math = Some(Math::Display);
+            push(runs, t.into_string(), s);
+        }
         Event::Start(tag) => {
             let mut inner = style.clone();
             match tag {
@@ -774,7 +800,8 @@ fn parse_inline_event(cur: &mut Cursor, runs: &mut Vec<InlineRun>, style: &Inlin
 fn autolink_runs(runs: Vec<InlineRun>) -> Vec<InlineRun> {
     let mut out = Vec::with_capacity(runs.len());
     for run in runs {
-        if run.style.link.is_some() || run.style.code {
+        // slopty: nor is TeX autolinked.
+        if run.style.link.is_some() || run.style.code || run.style.math.is_some() {
             out.push(run);
         } else {
             push_text_autolinked(&mut out, &run.text, &run.style);
@@ -866,7 +893,12 @@ fn merge_runs(runs: Vec<InlineRun>) -> Vec<InlineRun> {
     let mut out: Vec<InlineRun> = Vec::with_capacity(runs.len());
     for run in runs {
         match out.last_mut() {
-            Some(last) if last.style == run.style && run.style.image.is_none() => {
+            // slopty: each formula stays its own run.
+            Some(last)
+                if last.style == run.style
+                    && run.style.image.is_none()
+                    && run.style.math.is_none() =>
+            {
                 last.text.push_str(&run.text)
             }
             _ => out.push(run),
@@ -1732,5 +1764,51 @@ mod image_model_tests {
         assert_eq!(images[1].source, "b.png");
         assert!(images[1].alt.is_empty());
         assert_eq!(runs.first().unwrap().text, "Before ");
+    }
+}
+
+// slopty: TeX math runs.
+#[cfg(test)]
+mod math_tests {
+    use super::*;
+
+    fn runs(source: &str) -> Vec<InlineRun> {
+        match &parse_full(source).blocks[0].block {
+            Block::Paragraph { runs } => runs.clone(),
+            other => panic!("a paragraph: {other:?}"),
+        }
+    }
+
+    fn math(runs: &[InlineRun]) -> Vec<(Math, &str)> {
+        runs.iter().filter_map(|r| r.style.math.map(|m| (m, r.text.as_str()))).collect()
+    }
+
+    /// `$…$` is a formula in the line and `$$…$$` one on its own, each run its TeX source.
+    #[test]
+    fn tex_is_a_run_of_its_own() {
+        let found = runs("Euler: $e^{i\\pi} + 1 = 0$ and $a$$b$.");
+        assert_eq!(math(&found), [(Math::Inline, "e^{i\\pi} + 1 = 0"), (Math::Inline, "a"), (Math::Inline, "b")]);
+        let shown = runs("$$\\frac{a}{b}$$");
+        assert_eq!(math(&shown), [(Math::Display, "\\frac{a}{b}")]);
+        assert_eq!(shown.len(), 1, "the formula alone");
+    }
+
+    /// Money is not math, nor is a formula still streaming in, nor TeX in code.
+    #[test]
+    fn money_code_and_an_open_formula_stay_text() {
+        assert!(math(&runs("It costs $5 and $10 a month.")).is_empty());
+        assert!(math(&runs("$$\\frac{a}")).is_empty(), "no closing `$$` yet");
+        assert!(math(&runs("`$x$` in code")).is_empty());
+    }
+
+    /// Streaming a formula in, the canonical tree settles on the full parse's.
+    #[test]
+    fn a_streamed_formula_settles_as_a_full_parse() {
+        let source = "Area: $\\pi r^2$.\n\n$$\\int_0^1 x\\,dx$$\n";
+        let mut parser = IncrementalParser::new();
+        for chunk in source.as_bytes().chunks(3) {
+            parser.append(std::str::from_utf8(chunk).unwrap());
+        }
+        assert_eq!(parser.tree(), &parse_full(source));
     }
 }

@@ -58,6 +58,16 @@ use slopty_syntax::LanguageId as Lang;
 
 // slopty: Slopty's own rows, and find in thread.
 mod extras;
+// slopty: background work in the transcript (task notices, notices, a call's facts) and a
+// subagent's card, which opens in place.
+mod md_images;
+mod pages;
+mod rewind;
+mod subagents;
+#[cfg(test)]
+mod surface_tests; // slopty: the transcript's own rows, read by assistive tech.
+pub mod work;
+pub use work::{WorkReveal, reveal_work};
 pub(crate) mod find;
 pub use extras::serve_terminal_runs;
 pub use find::{FindInThread, FindNext, FindPrevious};
@@ -390,6 +400,8 @@ pub struct ToolItem {
     /// Image files the call read, wrote or printed (as reported; relative
     /// paths resolve against the chat cwd). Expanding the chip previews them.
     pub images: Arc<[SharedString]>,
+    // slopty: what the call says beyond zeron's chip, in the TUI's words (`transcript/work.rs`).
+    pub facts: Option<Arc<slopty_view_doc::ToolFacts>>,
 }
 
 /// Subagent spawn chips — [`ToolCall::is_subagent_spawn`], the shared genus
@@ -411,8 +423,15 @@ fn is_agent_tool(item: &ToolItem) -> bool {
 
 /// A chip renders as the spawn LINK (whole-card click → subagent tab) only
 /// when an agent call has actually been bound to its doc.
+// slopty: the subagent's card (`transcript/subagents.rs`), once its run is known: bound to its
+// chat, or with its progress from the view model.
 fn is_spawn_link(item: &ToolItem) -> bool {
-    is_agent_call(&item.call) && item.subagent_ref.is_some()
+    is_agent_call(&item.call)
+        && (item.subagent_ref.is_some()
+            || item
+                .facts
+                .as_ref()
+                .is_some_and(|facts| facts.subagent_progress.is_some()))
 }
 
 /// Ordinary tool groups fold behind a summary header; agent/spawn chips
@@ -740,6 +759,7 @@ fn thought_item(part_id: &str, tree: &BlockTree, live: bool) -> ToolItem {
         subagent_tail: None,
         kind: ToolItemKind::Thought,
         images: Arc::new([]),
+        facts: None,
     }
 }
 
@@ -1032,7 +1052,12 @@ pub enum RowKind {
         name: String,
         mime_type: String,
     },
-    // slopty: no agent visuals.
+    /// An agent's `show_visual` script, rendered inline by [`crate::visuals`].
+    Visual {
+        owner: String,
+        path: String,
+        title: String,
+    },
     User {
         /// Visible prompt (attachment-ref trailer already stripped). When the
         /// prompt carries file mentions this is the *projected* display text —
@@ -1110,6 +1135,18 @@ pub enum RowKind {
     },
     TurnChanges {
         files: Arc<Vec<extras::TurnFile>>,
+    },
+    // slopty: a background task's notice and a quiet notice of the agent's (`transcript/work.rs`),
+    // and a page shown inline (`crate::page`).
+    TaskNote {
+        task: Arc<slopty_view_doc::TaskRow>,
+    },
+    Notice {
+        note: Arc<slopty_view_doc::NoteRow>,
+    },
+    Page {
+        owner: String,
+        card: Arc<slopty_view_doc::PageCard>,
     },
 }
 
@@ -1268,6 +1305,10 @@ fn tool_fingerprint(tools: &[ToolItem], auto_open: bool) -> u64 {
         );
         if let Some(tail) = &t.subagent_tail {
             acc.extend_from_slice(tail.as_bytes());
+        }
+        // slopty: facts change in place (a timer, a step, a result line).
+        if let Some(facts) = &t.facts {
+            work::hash_into(&mut acc, facts.as_ref());
         }
     }
     acc.push(auto_open as u8);
@@ -1490,6 +1531,7 @@ pub fn rows_for_entry(
                 subagent_ref,
                 subagent_status,
                 subagent_tail,
+                facts,
                 ..
             } => {
                 let item = ToolItem {
@@ -1508,6 +1550,7 @@ pub fn rows_for_entry(
                     subagent_tail: subagent_tail.clone().map(SharedString::from),
                     kind: ToolItemKind::Call,
                     images: crate::tool_images::image_paths(call, output.as_deref()),
+                    facts: facts.as_deref().cloned().map(Arc::new), // slopty: its facts.
                 };
                 if compact {
                     // Compact mode keeps ONE group for the whole turn —
@@ -1658,7 +1701,28 @@ pub fn rows_for_entry(
                             },
                         });
                     }
-                    // slopty: no agent visuals.
+                    MessagePart::Visual {
+                        id: part_id,
+                        path,
+                        title,
+                    } => {
+                        rows.push(Row {
+                            id: format!("{}#{}", entry.id, part_id).into(),
+                            version: fnv1a(
+                                format!("{}\0{path}\0{title}", entry.device_id).as_bytes(),
+                            ),
+                            turn_start: false,
+                            entry_id: entry_id.clone(),
+                            timestamp: None,
+                            copy_text: None,
+                            compact_fold: None,
+                            kind: RowKind::Visual {
+                                owner: entry.device_id.clone(),
+                                path: path.clone(),
+                                title: title.clone(),
+                            },
+                        });
+                    }
                     MessagePart::Input {
                         id: part_id,
                         questions,
@@ -1737,6 +1801,16 @@ pub fn rows_for_entry(
                     // slopty: a quiet divider.
                     MessagePart::Marker { id: part_id, text } => {
                         rows.push(extras::marker_row(&entry.id, part_id, text));
+                    }
+                    // slopty: a task's notice, a quiet notice, a page shown inline.
+                    MessagePart::Task { id: part_id, task } => {
+                        rows.push(work::task_row(&entry.id, part_id, task));
+                    }
+                    MessagePart::Note { id: part_id, note } => {
+                        rows.push(work::notice_row(&entry.id, part_id, note));
+                    }
+                    MessagePart::Page { id: part_id, card } => {
+                        rows.push(crate::page::page_row(entry, part_id, card));
                     }
                     // Tools and thoughts are grouped by the outer arms;
                     // nothing reaches here.
@@ -3381,6 +3455,8 @@ pub struct Transcript {
     diagrams: Rc<RefCell<MermaidCache>>,
     /// The media handler over `diagrams`, built once and shared by every row.
     diagram_media: Option<render::MediaUi>,
+    // slopty: the images a reply's markdown names (`transcript/md_images.rs`).
+    md_images: Rc<RefCell<md_images::MdImages>>,
     /// The single serialized diagram render loop, while requests remain.
     diagram_worker: Option<Task<()>>,
     /// Prepared diagram shown in the lightbox: its natural size frames the
@@ -3395,7 +3471,15 @@ pub struct Transcript {
     /// In-flight ReadAttachmentChunk loads, keyed by device, path and validation
     /// policy; results land in the global attachment cache.
     attachment_loads: HashMap<crate::attachments::AttachmentKey, Task<()>>,
-    // slopty: no agent visuals.
+    /// Inline `show_visual` visuals, keyed by row id.
+    visuals: HashMap<SharedString, Entity<crate::visuals::VisualFrame>>,
+    // slopty: background work's rows, subagents' cards, and pages shown inline, keyed by row id.
+    work: work::WorkState,
+    subagents: subagents::SubagentsState,
+    // slopty: going back to before a person's message.
+    rewind: rewind::RewindState,
+    pages: HashMap<SharedString, Entity<crate::page::PageCardView>>,
+    fences: crate::page::FenceCards, // slopty: chart fences' cards (M)
     /// Scheduled retry wake-ups for errored sources (the 2s→15s ladder).
     attachment_retries: HashMap<(String, String), Task<()>>,
     // slopty: Slopty's own rows' state, and find in thread.
@@ -3427,15 +3511,17 @@ enum BlobFetch {
 /// Shell-facing events (the transcript itself hosts no surfaces).
 #[derive(Debug, Clone)]
 pub enum TranscriptEvent {
-    /// A spawn chip's "Open subagent" affordance: open the subagent's
-    /// transcript as a right-pane tab. `chat_id` is the doc the chip lives
-    /// in (the frozen blob is keyed `{chat_id}/{doc_id}`); `frozen` means
-    /// the subagent finished — try the blob before watching the doc.
-    OpenSubagent {
-        chat_id: String,
-        doc_id: String,
-        title: String,
-        frozen: bool,
+    // slopty: a subagent's card drills in; it no longer opens a right-pane tab.
+    /// A subagent card's Open: the session view shows the subagent's run, `chat_id`, with a
+    /// breadcrumb back to its parent (`docs/decisions/ui.md`, "Subagents live in their parent's
+    /// chat").
+    OpenSubagent { chat_id: String },
+    /// A rewind in chat `from` went back to before a message: its words return to the composer
+    /// as a draft, in the branched chat when the conversation was branched (`chat_id`).
+    Rewound {
+        from: String,
+        chat_id: Option<String>,
+        prompt: String,
     },
 }
 
@@ -3528,6 +3614,8 @@ impl Transcript {
 
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         Self::install_find(cx); // slopty: find's keys reach the main transcript.
+        // slopty: S2's Background tray scrolls the main transcript to a row's call.
+        cx.observe_global::<crate::background_tray::CallReveal>(Self::on_call_reveal).detach();
         Self::build(state, None, true, cx)
     }
 
@@ -3580,6 +3668,9 @@ impl Transcript {
         });
         let observe = cx.observe(&state, |this: &mut Self, _, cx| this.sync(cx));
         cx.on_release(|this: &mut Self, cx| {
+            // slopty: children open in place stop being watched with their card.
+            let state = this.state.clone();
+            this.subagents.close_all(&state, cx);
             this.close_diagram_zoom(cx);
             crate::image_media::release_media(this.diagrams.borrow_mut().drain(), cx);
             this.tool_images.clear(cx);
@@ -3689,6 +3780,7 @@ impl Transcript {
             attachment_preview_return_focus: None,
             diagrams: Rc::default(),
             diagram_media: None,
+            md_images: Rc::default(),
             diagram_worker: None,
             diagram_zoom: None,
             tool_images: Default::default(),
@@ -3696,7 +3788,12 @@ impl Transcript {
             image_menu_focus: cx.focus_handle(),
             image_copy: None,
             attachment_loads: HashMap::new(),
-            // slopty: no agent visuals.
+            visuals: HashMap::new(),
+            work: Default::default(),      // slopty: background work,
+            rewind: Default::default(),
+            subagents: Default::default(), // subagents' cards,
+            pages: HashMap::new(),         // and pages.
+            fences: Default::default(),    // slopty: and chart fences.
             attachment_retries: HashMap::new(),
             extras: Default::default(), // slopty: Slopty's own rows.
             find: Default::default(),
@@ -4774,6 +4871,11 @@ impl Transcript {
             self.veil_attach_pending = true;
         }
         if attached {
+            // slopty: another chat's cards; the children this one opened close.
+            let state = self.state.clone();
+            self.subagents.close_all(&state, cx);
+            self.pages.clear();
+            self.fences.borrow_mut().clear(); // slopty: chart fences too (M)
             // Read the incoming snapshot before inserting the outgoing one:
             // a full bounded cache may evict its oldest entry, which can be
             // exactly the chat the user is reopening.
@@ -4793,6 +4895,7 @@ impl Transcript {
             self.chat_id = selected;
             self.rows.clear();
             self.tool_images.clear(cx);
+            self.md_images.borrow_mut().clear(); // slopty
             self.row_cache.clear();
             self.live_parsers.clear();
             self.tree_cache.clear();
@@ -6037,7 +6140,13 @@ impl Transcript {
         let live: HashSet<&str> = self
             .rows
             .iter()
-            .filter(|row| matches!(row.kind, RowKind::ToolGroup { .. }))
+            // slopty: and markdown rows, which hold the images they name.
+            .filter(|row| {
+                matches!(
+                    row.kind,
+                    RowKind::ToolGroup { .. } | RowKind::Markdown { .. } | RowKind::LiveMarkdown { .. }
+                )
+            })
             .map(|row| row.id.as_ref())
             .collect();
         self.tool_images
@@ -6054,6 +6163,7 @@ impl Transcript {
     ) -> AnyElement {
         use crate::tool_images::Thumb;
         let devices: Rc<[String]> = self.image_host(cx).0.into_iter().collect();
+        let image_count = images.len();
         let frames = images.into_iter().enumerate().map(|(ix, (path, thumb))| {
             let name = SharedString::from(file_badge_name(&path).to_owned());
             let width = match &thumb {
@@ -6076,6 +6186,7 @@ impl Transcript {
                 .border_1()
                 .border_color(crate::theme::hairline(0.07))
                 .bg(crate::theme::ink(0.035))
+                .role(gpui::Role::Image) // slopty: a picture to assistive tech.
                 .aria_label(name.clone())
                 .on_mouse_down(
                     gpui::MouseButton::Right,
@@ -6128,6 +6239,12 @@ impl Transcript {
             .child(
                 div()
                     .id(SharedString::from(format!("{chip}-images")))
+                    // slopty: a call's pictures read as one gallery.
+                    .when(image_count > 1, |strip| {
+                        strip
+                            .role(gpui::Role::Group)
+                            .aria_label(SharedString::from(format!("{image_count} images")))
+                    })
                     .h(px(TOOL_IMAGE_HEIGHT + 2.0 * TOOL_IMAGE_PAD))
                     .py(px(TOOL_IMAGE_PAD))
                     .when(!collapses, |strip| strip.px(px(TOOL_IMAGE_PAD)))
@@ -6510,8 +6627,14 @@ impl Transcript {
     fn diagram_media(&mut self, cx: &Context<Self>) -> render::MediaUi {
         let cache = self.diagrams.clone();
         let owner = cx.weak_entity();
+        let images = self.md_images.clone();
+        let chart = self.chart_media(cx); // slopty: chart fences draw as pages (M)
         let media = self.diagram_media.get_or_insert_with(|| render::MediaUi {
-            image: None,
+            chart: None,
+            // slopty: a reply's images draw, read from the chat's folder.
+            image: Some(Rc::new(move |image, id, theme| {
+                md_images::element(&images, image, id, theme)
+            })),
             diagram: Some(Rc::new(move |code, id, _theme| {
                 let lookup = cache.borrow_mut().request(code, &id);
                 match lookup {
@@ -6550,6 +6673,7 @@ impl Transcript {
                 }
             })),
         });
+        media.chart = Some(chart); // slopty:
         media.clone()
     }
 
@@ -6761,7 +6885,51 @@ impl Transcript {
         }
     }
 
-    // slopty: no agent visuals.
+    fn render_visual(
+        &mut self,
+        row_id: &SharedString,
+        owner: &str,
+        path: &str,
+        title: &str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let link_ui = self.link_ui(cx);
+        let frame = match self.visuals.get(row_id) {
+            Some(frame) => frame.clone(),
+            None => {
+                let state = self.state.read(cx);
+                let engine = state.engine().cloned();
+                // Relay-forward only for a genuinely remote owner.
+                let target =
+                    (state.local_device_id.as_deref() != Some(owner)).then(|| owner.to_owned());
+                let frame = cx.new(|cx| {
+                    crate::visuals::VisualFrame::new(
+                        row_id.clone(),
+                        title.to_owned(),
+                        path.to_owned(),
+                        engine,
+                        target,
+                        cx,
+                    )
+                });
+                // A visual whose tree changes shape (a tab switch, a load)
+                // resizes its row, like a diagram finishing.
+                let id = row_id.clone();
+                cx.subscribe(
+                    &frame,
+                    move |this, _, _: &crate::visuals::VisualLayoutChanged, cx| {
+                        this.diagram_layout_changed(std::slice::from_ref(&id), cx);
+                    },
+                )
+                .detach();
+                self.visuals.insert(row_id.clone(), frame.clone());
+                frame
+            }
+        };
+        frame.update(cx, |frame, _| frame.set_link_ui(link_ui));
+        div().w_full().child(frame).into_any_element()
+    }
+
     /// The right-aligned thumbnail strip above a user bubble.
     fn render_user_attachments(
         &mut self,
@@ -7068,6 +7236,16 @@ impl Transcript {
         } else {
             flavour_word(seed, elapsed_secs)
         };
+        // slopty: S2's live line from the chat's dock: its phrase, tokens, thinking, retry.
+        if !sending
+            && !queued
+            && self.doc_override.is_none()
+            && let Some(chat) = self.chat_id.clone()
+            && let Some(line) =
+                crate::composer::working_line(&chat, word, turn, elapsed_secs, cx.entity_id(), cx)
+        {
+            return Some(line);
+        }
         let theme = Theme::of(cx).clone();
         Some(
             div()
@@ -7411,7 +7589,9 @@ impl Transcript {
                 name,
                 mime_type,
             } => self.render_generated_image(&row.id, owner, path, name, mime_type, cx),
-            // slopty: no agent visuals.
+            RowKind::Visual { owner, path, title } => {
+                self.render_visual(&row.id, owner, path, title, cx)
+            }
             RowKind::ErrorChip { message } => error_chip(message.clone(), &theme),
             RowKind::ForkMarker { source_title, .. } => fork_marker(source_title.clone(), &theme),
             // slopty: Slopty's own rows.
@@ -7420,11 +7600,17 @@ impl Transcript {
             | RowKind::PlanHeader { .. }
             | RowKind::PlanFold { .. }
             | RowKind::TurnChanges { .. } => self.render_extra_row(&row, &theme, cx),
+            RowKind::TaskNote { task } => self.render_task_note(&row, task, &theme, cx),
+            RowKind::Notice { note } => self.render_notice(&row, note, &theme, cx),
+            RowKind::Page { owner, card } => self.render_page(&row, owner, card, window, cx),
         };
         // slopty: a plan's rows draw as one card.
         let (inner, top_gap) = self.plan_card_segment(ix, inner, top_gap, &theme);
         // Diagram fences this row just requested start rendering after layout.
         self.ensure_diagram_worker(cx);
+        // slopty: and the images it showed are held, read when new.
+        let markdown = matches!(row.kind, RowKind::Markdown { .. } | RowKind::LiveMarkdown { .. });
+        self.hold_md_images(&row.id, markdown, cx);
 
         // Hover-revealed metadata strip: a RESERVED 32px lane under the
         // entry's last row. Timestamp, copy action, and copied feedback only
@@ -7439,6 +7625,7 @@ impl Transcript {
         let copied_message = self.copied_message.as_ref() == Some(&row.entry_id);
         let copy_text = row.copy_text.clone();
         let copy_entry_id = row.entry_id.clone();
+        let rewind_message = row.entry_id.clone();
         let strip = row.timestamp.map(|ms| {
             let timestamp = div()
                 .text_size(crate::typography::ui_rems(12.0))
@@ -7484,6 +7671,12 @@ impl Transcript {
                 .gap(px(Theme::SPACE_SM));
             // slopty: a time the agent never said (0) shows none; the copy action stays.
             let metadata = metadata.when(ms > 0, |el| el.child(timestamp)).children(copy);
+            // slopty: a person's message can be gone back to (`transcript/rewind.rs`).
+            let metadata = metadata.children(
+                is_user_row
+                    .then(|| self.rewind_action(&rewind_message, &theme, cx))
+                    .flatten(),
+            );
             div()
                 .h(px(Theme::SPACE_SM + Theme::SPACE_MD * 2.0))
                 .pt(px(Theme::SPACE_SM))
@@ -7793,6 +7986,13 @@ impl Transcript {
     ) -> AnyElement {
         let mut fold = self.folds.get(row_id).copied().unwrap_or_default();
         let file_opener = self.tool_file_opener(cx);
+        // slopty: what calls say beyond zeron's chip; a running timer draws again each second.
+        let chip_facts = self.chip_facts(cx);
+        if tools.iter().any(|tool| {
+            !tool.resolved && tool.facts.as_ref().is_some_and(|facts| facts.timer.is_some())
+        }) {
+            self.tick_soon(cx);
+        }
         // Agent/spawn chips never fold: they are their own row, always open,
         // no "Called N tools" header — a running subagent stays visible.
         // Compact mode is the exception: EVERYTHING sits under the one work
@@ -8240,31 +8440,16 @@ impl Transcript {
                 let continuation_reveal =
                     tool_connector_continuation(connector_progress.get(ix + 1).copied());
                 let row_height = row_heights[ix];
-                // Spawn chips are LINKS, not accordions: the click opens the
-                // subagent's transcript as a right-pane tab (the shell hosts
-                // the surface — the chip only announces which doc it indexes).
-                if let Some(doc_id) = tool.subagent_ref.clone().filter(|_| is_spawn_link(tool)) {
-                    let chat_id = self.chat_id.clone().unwrap_or_default();
-                    let title = subagent_tab_title(&tool.call);
-                    let frozen = matches!(
-                        tool.subagent_status,
-                        Some(SubagentStatus::Done) | Some(SubagentStatus::Failed)
-                    );
-                    return subagent_chip(
-                        tool,
-                        SharedString::from(format!("{row_id}#s{ix}")),
-                        cx.listener(move |_, _, _, cx| {
-                            cx.emit(TranscriptEvent::OpenSubagent {
-                                chat_id: chat_id.clone(),
-                                doc_id: doc_id.to_string(),
-                                title: title.to_string(),
-                                frozen,
-                            });
-                        }),
-                        collapses,
-                        theme,
-                        cx.entity_id(),
-                        cx,
+                // slopty: a spawn is its subagent's card, which opens in place and drills in
+                // (`transcript/subagents.rs`); the newest running one of the turn under way
+                // opens itself.
+                if is_spawn_link(tool) {
+                    let frontier = auto_open
+                        && tools[ix + 1..]
+                            .iter()
+                            .all(|later| !is_spawn_link(later) || !subagents::Card::of(later).running);
+                    return self.render_subagent_card(
+                        row_id, ix, tool, frontier, collapses, theme, cx,
                     );
                 }
                 let detail = details[ix].clone();
@@ -8280,6 +8465,7 @@ impl Transcript {
                             connector_reveal,
                             continuation_reveal,
                             file_opener.as_ref(),
+                            Some(&chip_facts),
                             theme,
                             cx.entity_id(),
                             cx,
@@ -8341,6 +8527,7 @@ impl Transcript {
                                 tool,
                                 open,
                                 file_opener.as_ref(),
+                                Some(&chip_facts),
                                 theme,
                                 cx.entity_id(),
                                 cx,
@@ -9286,9 +9473,7 @@ fn note_chip_detail(tool: &ToolItem) -> String {
 enum ChipTrail {
     /// Expand/collapse chevron — flipped while the detail body is open.
     Chevron { open: bool },
-    /// Top-right "opens elsewhere" arrow — the spawn chip's link to its
-    /// subagent tab.
-    OpenArrow,
+    // slopty: no open-arrow; a subagent's card has its own (`transcript/subagents.rs`).
 }
 
 /// Opens a tool chip's file in the files panel through the transcript's
@@ -9330,6 +9515,7 @@ fn chip_header_row(
     tool: &ToolItem,
     trail: Option<ChipTrail>,
     file_opener: Option<&ToolFileOpener>,
+    facts: Option<&work::ChipFacts>,
     theme: &Theme,
     view: gpui::EntityId,
     cx: &mut gpui::App,
@@ -9339,6 +9525,14 @@ fn chip_header_row(
         ToolItemKind::Note => ("Wrote", note_chip_detail(tool)),
         ToolItemKind::Call => tool_chip_content(&tool.call),
     };
+    // slopty: a call zeron draws as `Tool · {name}` says itself in the TUI's words.
+    let (label, detail) = match tool.facts.as_ref().and_then(|facts| facts.title.as_deref()) {
+        Some(title) if tool.kind == ToolItemKind::Call => (title.to_owned(), String::new()),
+        _ => (label.to_owned(), detail),
+    };
+    let facts_trail = facts.zip(tool.facts.as_deref()).and_then(|(chip, facts)| {
+        chip.trail(&tool.part_id, facts, tool.resolved, theme)
+    });
     let activity = !is_agent_tool(tool);
     let file_path = match &tool.call {
         ToolCall::ReadFile { path }
@@ -9532,6 +9726,7 @@ fn chip_header_row(
                     }
                 }),
         )
+        .children(facts_trail) // slopty: its result, timer, task and "Run in background".
         .when_some(tool.call.subagent_model(), |row, model| {
             // Which model the child runs on, when the spawn named one.
             //
@@ -9602,11 +9797,6 @@ fn chip_header_row(
                         })
                     }),
                 ),
-                ChipTrail::OpenArrow => tile.child(
-                    crate::icons::icon(crate::icons::ARROW_UP_RIGHT)
-                        .size(px(11.0))
-                        .text_color(theme.text_muted.opacity(0.8)),
-                ),
             })
         })
 }
@@ -9616,6 +9806,7 @@ fn chip_header(
     tool: &ToolItem,
     open: bool,
     file_opener: Option<&ToolFileOpener>,
+    facts: Option<&work::ChipFacts>,
     theme: &Theme,
     view: gpui::EntityId,
     cx: &mut gpui::App,
@@ -9624,6 +9815,7 @@ fn chip_header(
         tool,
         Some(ChipTrail::Chevron { open }),
         file_opener,
+        facts,
         theme,
         view,
         cx,
@@ -9820,6 +10012,7 @@ fn tool_chip(
     connector_reveal: f32,
     continuation_reveal: f32,
     file_opener: Option<&ToolFileOpener>,
+    facts: Option<&work::ChipFacts>,
     theme: &Theme,
     view: gpui::EntityId,
     cx: &mut gpui::App,
@@ -9867,73 +10060,7 @@ fn tool_chip(
                         .top(px(4.0 * (1.0 - content_reveal)))
                         .opacity(content_reveal)
                 })
-                .child(chip_header_row(tool, None, file_opener, theme, view, cx)),
-        )
-        .into_any_element()
-}
-
-/// A spawn chip: same card as [`tool_chip`], but the WHOLE card is the
-/// "open the subagent tab" click (open-arrow tile in the trailing slot).
-/// No accordion — an inline body would only repeat the subagent's own
-/// transcript. The group guide rail is omitted for agent-only rows (no
-/// collapse header for it to hang from).
-fn subagent_chip(
-    tool: &ToolItem,
-    id: SharedString,
-    on_open: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
-    rail: bool,
-    theme: &Theme,
-    view: gpui::EntityId,
-    cx: &mut gpui::App,
-) -> AnyElement {
-    div()
-        .h(px(CHIP_HEIGHT))
-        .w_full()
-        .flex_none()
-        .flex()
-        .flex_row()
-        .items_center()
-        .when(rail, |row| {
-            row.child(
-                div()
-                    .ml(px(12.0))
-                    .h_full()
-                    .w(px(1.0))
-                    .flex_none()
-                    .bg(crate::theme::ink(0.08)),
-            )
-        })
-        .child(
-            div()
-                .id(id)
-                // slopty: the chip reads as a link to its subagent, named as it shows.
-                .role(gpui::Role::Link)
-                .aria_label({
-                    let (label, detail) = slopty_view_proto::view::tool_chip_content(&tool.call);
-                    SharedString::from(format!("{label} {detail}").trim().to_owned())
-                })
-                .when(rail, |el| el.ml(px(12.0)))
-                .h(px(CHIP_CARD_HEIGHT))
-                .min_w_0()
-                .flex_1()
-                .flex()
-                .items_center()
-                .overflow_hidden()
-                .rounded(px(9.0))
-                .border_1()
-                .border_color(crate::theme::hairline(0.07))
-                .bg(crate::theme::ink(0.03))
-                .cursor_pointer()
-                .hover(|s| s.bg(crate::theme::ink(0.05)))
-                .on_click(on_open)
-                .child(chip_header_row(
-                    tool,
-                    Some(ChipTrail::OpenArrow),
-                    None,
-                    theme,
-                    view,
-                    cx,
-                )),
+                .child(chip_header_row(tool, None, file_opener, facts, theme, view, cx)),
         )
         .into_any_element()
 }
@@ -9992,7 +10119,12 @@ fn entry_fingerprint(entry: &SessionMessageEntry, pending: bool) -> u64 {
                 acc.push(0);
             }
         }
-        // slopty: no agent visuals.
+        if let MessagePart::Visual { path, title, .. } = part {
+            for field in [path, title] {
+                acc.extend_from_slice(field.as_bytes());
+                acc.push(0);
+            }
+        }
         if let MessagePart::Input { resolved, .. } = part {
             acc.push(0x10 | *resolved as u8);
         }
@@ -10003,6 +10135,11 @@ fn entry_fingerprint(entry: &SessionMessageEntry, pending: bool) -> u64 {
                 acc.extend_from_slice(message.as_bytes());
             }
             MessagePart::Marker { text, .. } => acc.extend_from_slice(text.as_bytes()),
+            // slopty: facts, a task's notice, a notice and a page change in place.
+            MessagePart::Tool { facts: Some(facts), .. } => work::hash_into(&mut acc, facts),
+            MessagePart::Task { task, .. } => work::hash_into(&mut acc, task),
+            MessagePart::Note { note, .. } => work::hash_into(&mut acc, note),
+            MessagePart::Page { card, .. } => work::hash_into(&mut acc, card),
             _ => {}
         }
     }
@@ -10011,6 +10148,10 @@ fn entry_fingerprint(entry: &SessionMessageEntry, pending: bool) -> u64 {
 
 impl Render for Transcript {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // slopty: a subagent's card sizes its child by the window, and drills in on a phone's.
+        self.subagents.window = window.viewport_size();
+        self.watch_rewind(cx);
+        self.md_images.borrow_mut().folder = self.image_host(cx).1;
         if record_view_frame("transcript") {
             tracing::warn!(
                 distance = self.distance_from_bottom(),
@@ -10254,6 +10395,7 @@ impl Render for Transcript {
             .child(content)
             .child(rail);
         let root = root.children(self.render_image_menu(cx));
+        let root = root.children(self.render_rewind_menu(cx)); // slopty
         // slopty: find in thread, over the transcript's top right, and a selection's Quote.
         let root = root.children(self.render_find_bar(cx));
         let root = root.children(self.render_quote_offer(cx));
@@ -12692,6 +12834,7 @@ mod tests {
             subagent_ref: None,
             subagent_status: None,
             subagent_tail: None,
+            facts: None,
         }
     }
 
@@ -12814,6 +12957,7 @@ mod tests {
             subagent_ref: Some(format!("chat--sub--{id}")),
             subagent_status: Some(SubagentStatus::Running),
             subagent_tail: None,
+            facts: None,
         }
     }
 
@@ -15521,6 +15665,7 @@ mod tests {
             subagent_tail: None,
             kind: ToolItemKind::Call,
             images: Arc::new([]),
+            facts: None,
         };
         let edit = |p: &str| ToolItem {
             part_id: "fixture".into(),
@@ -15541,6 +15686,7 @@ mod tests {
             subagent_tail: None,
             kind: ToolItemKind::Call,
             images: Arc::new([]),
+            facts: None,
         };
         let tools = vec![
             exec("ls"),
@@ -15577,6 +15723,7 @@ mod tests {
                 subagent_tail: None,
                 kind: ToolItemKind::Call,
                 images: Arc::new([]),
+                facts: None,
             },
             ToolItem {
                 part_id: "fixture".into(),
@@ -15595,6 +15742,7 @@ mod tests {
                 subagent_tail: None,
                 kind: ToolItemKind::Call,
                 images: Arc::new([]),
+                facts: None,
             },
             ToolItem {
                 part_id: "fixture".into(),
@@ -15611,6 +15759,7 @@ mod tests {
                 subagent_tail: None,
                 kind: ToolItemKind::Call,
                 images: Arc::new([]),
+                facts: None,
             },
         ];
         assert_eq!(tool_group_summary(&tools), "Read 1 file · searched 2 times");
@@ -15754,6 +15903,7 @@ mod tests {
         let read = |path: &str| ToolItem {
             part_id: "fixture".into(),
             images: Default::default(),
+            facts: None,
             call: ToolCall::ReadFile { path: path.into() },
             is_error: false,
             resolved: true,
@@ -15787,6 +15937,7 @@ mod tests {
                             &self.tool,
                             false,
                             Some(&self.opener),
+                            None,
                             &theme,
                             cx.entity_id(),
                             cx,

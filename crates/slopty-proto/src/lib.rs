@@ -60,6 +60,7 @@ pub mod tailnet;
 pub mod terminal;
 pub mod thread;
 pub mod transfer;
+pub mod visual;
 pub mod wire;
 
 use serde::{Deserialize, Serialize};

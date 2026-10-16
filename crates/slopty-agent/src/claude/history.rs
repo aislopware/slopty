@@ -69,6 +69,8 @@ pub enum End {
 /// the one option a Claude Code model has ([`Model::options`]).
 pub const FAST: &str = "fast";
 
+pub use cards::{PLAN_CLEAR, clear_mode};
+
 /// The words a thread waits with while it is compacted.
 pub const COMPACTING_TEXT: &str = "Compacting the conversation";
 
@@ -184,6 +186,9 @@ fn ask_subject<'a>(tool: &str, line: &'a str) -> &'a str {
 /// What an agent stopped on its plan's usage limit waits on ([`Wait::LIMIT`]).
 pub const LIMIT_TEXT: &str = "Hit its usage limit";
 
+/// What a subagent that stopped with background work of its own still running waits on.
+pub const WAITING_TEXT: &str = "Waiting on its own background work";
+
 /// The thread of Claude Code session `native`.
 #[must_use]
 pub fn thread_of(native: &str) -> ThreadId {
@@ -288,6 +293,13 @@ impl Mapped {
     /// when the call starts none now; whether the list changed.
     fn set_task(&mut self, call: &str, task: Option<BackgroundTask>) -> bool {
         let at = self.tasks.iter().position(|t| t.item.as_ref().is_some_and(|i| i.0 == call));
+        // What the engine said of the task live is kept under what the transcript says of it.
+        let task = task.map(|mut task| {
+            if let Some(had) = at.and_then(|at| self.tasks.get(at)) {
+                merge_live(had, &mut task);
+            }
+            task
+        });
         match (at, task) {
             (Some(at), Some(task)) => match self.tasks.get_mut(at) {
                 Some(have) if *have != task => {
@@ -306,6 +318,33 @@ impl Mapped {
             }
             (None, None) => false,
         }
+    }
+
+    /// A task's notice tells its task how it stands; whether the list changed. A monitor's
+    /// event leaves it running.
+    fn note_task(&mut self, note: &conv::TaskNotice, at: WallMs) -> bool {
+        let Some(task) = self.tasks.iter_mut().find(|t| t.id == note.task_id) else {
+            return false;
+        };
+        let before = task.clone();
+        let state = match note.status.as_str() {
+            "failed" => Some(BackgroundTask::FAILED),
+            "killed" => Some(BackgroundTask::KILLED),
+            "waiting" => Some(BackgroundTask::WAITING),
+            "completed" | "expired" => Some(BackgroundTask::COMPLETED),
+            _ => None,
+        };
+        if let Some(state) = state {
+            state.clone_into(&mut task.state);
+            task.outcome = Some(outcome_of(&note.summary)).filter(|o| !o.is_empty());
+            if state != BackgroundTask::WAITING && !at.is_zero() {
+                task.ended_ms = task.ended_ms.or(Some(at));
+            }
+        }
+        if let Some(usage) = task_usage(note.usage) {
+            task.usage = Some(usage);
+        }
+        *task != before
     }
 
     fn changed(&self, turn: TurnId) -> Changed {
@@ -331,6 +370,8 @@ struct Spawn {
     at_ms: WallMs,
     /// How it ended, once it did, and when.
     end: Option<(SubagentEnd, WallMs)>,
+    /// It stopped with background work of its own still running, and may go on by itself.
+    waiting: bool,
 }
 
 impl Spawn {
@@ -348,7 +389,7 @@ impl Spawn {
             .map(|ms| WallMs::from_millis(entry.at_ms.as_millis().saturating_add(ms)));
         let at_ms = ran.or_else(|| call.result.as_ref().map(|r| r.at_ms)).unwrap_or(entry.at_ms);
         let end = match agent.status {
-            conv::AgentRun::Running => None,
+            conv::AgentRun::Running | conv::AgentRun::Waiting => None,
             conv::AgentRun::Completed => Some(SubagentEnd::Completed),
             conv::AgentRun::Killed => Some(SubagentEnd::Stopped),
             conv::AgentRun::Failed => {
@@ -367,6 +408,7 @@ impl Spawn {
             title: agent.description.clone().unwrap_or_default(),
             at_ms: entry.at_ms,
             end: end.map(|end| (end, at_ms)),
+            waiting: agent.status == conv::AgentRun::Waiting,
         }
     }
 }
@@ -469,6 +511,13 @@ pub struct History {
     /// The main thread's request being tried again ([`Self::retrying`]): its one row, as it
     /// stands.
     retry: Option<Item>,
+    /// The MCP Apps the session's servers offer, by server (as its tools are named) and tool
+    /// ([`Self::set_apps`]).
+    apps: HashMap<(String, String), slopty_proto::visual::McpApp>,
+    /// Notices said so far, so two in one millisecond are two rows.
+    notices: u64,
+    /// The resources each task's result linked, by the task, for its row.
+    task_links: HashMap<String, Vec<slopty_proto::visual::ResourceLink>>,
 }
 
 impl History {
@@ -528,6 +577,9 @@ impl History {
             limited: None,
             last_at: WallMs::ZERO,
             retry: None,
+            apps: HashMap::new(),
+            notices: 0,
+            task_links: HashMap::new(),
         };
         history.meta.caps = history.caps_with(caps);
         history.out.push(Out::Begin(Box::new(history.meta.clone())));
@@ -641,6 +693,192 @@ impl History {
         self.waiting_on = (tasks > 0 || crons > 0).then_some(Waiting { tasks, crons, named });
         self.rewait();
         self.drain()
+    }
+
+    /// A task the engine says it started, in the session's list: in place of the one its call
+    /// started, else of its id, else after the others.
+    pub fn task_started(&mut self, task: BackgroundTask) -> Vec<Out> {
+        let id = self.meta.id;
+        let Some(mapped) = self.threads.get_mut(&conv::ThreadId::Main) else {
+            return self.drain();
+        };
+        let at = mapped
+            .tasks
+            .iter()
+            .position(|t| t.id == task.id || (task.item.is_some() && t.item == task.item));
+        let changed = if let Some(had) = at.and_then(|at| mapped.tasks.get_mut(at)) {
+            let before = had.clone();
+            let mut merged = task;
+            // What the transcript said already stands; the engine adds what it alone knows.
+            merged.state.clone_from(&had.state);
+            merged.output.clone_from(&had.output);
+            merged.ended_ms = had.ended_ms;
+            merged.started_ms = had.started_ms.min(merged.started_ms);
+            merged.title = if had.title.is_empty() { merged.title } else { had.title.clone() };
+            merge_live(&before, &mut merged);
+            *had = merged;
+            *had != before
+        } else {
+            mapped.tasks.push(task);
+            true
+        };
+        if changed {
+            let tasks = mapped.tasks.clone();
+            self.push(id, Action::TasksSet(tasks));
+        }
+        self.drain()
+    }
+
+    /// Change task `task` as `change` says, when the session lists it; tell the list again
+    /// when that changed it.
+    pub fn task_changed(
+        &mut self,
+        task: &str,
+        change: impl FnOnce(&mut BackgroundTask),
+    ) -> Vec<Out> {
+        let id = self.meta.id;
+        let Some(mapped) = self.threads.get_mut(&conv::ThreadId::Main) else {
+            return self.drain();
+        };
+        if let Some(had) = mapped.tasks.iter_mut().find(|t| t.id == task) {
+            let before = had.clone();
+            change(had);
+            if *had != before {
+                let tasks = mapped.tasks.clone();
+                self.push(id, Action::TasksSet(tasks));
+            }
+        }
+        self.drain()
+    }
+
+    /// The tasks the engine says run now, by id: one listed running that is not among them
+    /// ended at `now`, however its notice says it did once that comes.
+    pub fn tasks_live(&mut self, live: &[String], now: WallMs) -> Vec<Out> {
+        let id = self.meta.id;
+        let Some(mapped) = self.threads.get_mut(&conv::ThreadId::Main) else {
+            return self.drain();
+        };
+        let mut changed = false;
+        for task in &mut mapped.tasks {
+            // A subagent waiting on its own work is not in the engine's list, and still waits.
+            let gone = task.is_live()
+                && task.state != BackgroundTask::WAITING
+                && task.backgrounded
+                && !live.contains(&task.id);
+            if gone {
+                BackgroundTask::COMPLETED.clone_into(&mut task.state);
+                task.ended_ms = task.ended_ms.or(Some(now));
+                changed = true;
+            }
+        }
+        if changed {
+            let tasks = mapped.tasks.clone();
+            self.push(id, Action::TasksSet(tasks));
+        }
+        self.drain()
+    }
+
+    /// The resources task `task`'s result linked, for the row it ends with.
+    pub fn task_links(&mut self, task: &str, links: Vec<slopty_proto::visual::ResourceLink>) {
+        if !links.is_empty() {
+            self.task_links.insert(task.to_owned(), links);
+        }
+    }
+
+    /// Call `call` says how it goes, `note`: on the thread it is in.
+    pub fn call_noted(&mut self, call: &str, note: thread::CallNote) -> Vec<Out> {
+        let thread = self
+            .threads
+            .values()
+            .find(|m| m.calls.contains_key(call) || m.items.contains_key(call))
+            .map(|m| m.id);
+        if let Some(thread) = thread {
+            self.push(thread, Action::CallNoted { item: ItemId(call.to_owned()), note });
+        }
+        self.drain()
+    }
+
+    /// Whether call `call` runs still, as far as the record says.
+    #[must_use]
+    pub fn call_open(&self, call: &str) -> bool {
+        self.threads.values().any(|m| m.calls.contains_key(call))
+    }
+
+    /// A request of the agent's own beside its permissions (a dialog, a form): open now.
+    pub fn asked(&mut self, request: Request) -> Vec<Out> {
+        self.open.retain(|r| r.id != request.id);
+        self.open.push(request.clone());
+        self.push(self.meta.id, Action::RequestOpened(Box::new(request)));
+        self.drain()
+    }
+
+    /// Request `id` stands as `state` now.
+    pub fn resolved(&mut self, id: &AskId, state: RequestState) -> Vec<Out> {
+        if self.open.iter().any(|r| r.id == *id) {
+            self.open.retain(|r| r.id != *id);
+            self.push(self.meta.id, Action::RequestResolved { id: id.clone(), state });
+        }
+        self.drain()
+    }
+
+    /// The MCP Apps the session's servers offer now, by server (as the session names its
+    /// tools, `mcp__<server>__<tool>`) and tool: a call of one shows its page from then on.
+    pub fn set_apps(&mut self, apps: HashMap<(String, String), slopty_proto::visual::McpApp>) {
+        self.apps = apps;
+    }
+
+    /// The record that began turn `turn` of the session's own thread: its prompt's record id.
+    #[must_use]
+    pub fn prompt_of(&self, turn: TurnId) -> Option<String> {
+        let mapped = self.threads.get(&conv::ThreadId::Main)?;
+        let (id, _) = mapped.prompts.iter().find(|(_, t)| **t == turn)?;
+        Some(id.split_once(':').map_or(id.as_str(), |(record, _)| record).to_owned())
+    }
+
+    /// `shown` with its paths made the worker's own: a relative path is under the session's
+    /// folder.
+    fn rooted(&self, shown: &detail::ToolDetail) -> detail::ToolDetail {
+        let cwd = std::path::Path::new(&self.meta.cwd);
+        let rooted = |path: &str| {
+            if std::path::Path::new(path).is_absolute() || path.starts_with("~/") {
+                path.to_owned()
+            } else {
+                cwd.join(path).to_string_lossy().into_owned()
+            }
+        };
+        match shown.clone() {
+            detail::ToolDetail::Visual(mut visual) => {
+                for path in visual.assets.values_mut() {
+                    *path = rooted(path);
+                }
+                detail::ToolDetail::Visual(visual)
+            }
+            detail::ToolDetail::Page(mut page) => {
+                if let slopty_proto::visual::PageSource::File(file) = &mut page.source {
+                    *file = rooted(file);
+                }
+                detail::ToolDetail::Page(page)
+            }
+            other => other,
+        }
+    }
+
+    /// Any action on the session's own thread, told as it is.
+    pub fn tell(&mut self, action: Action) -> Vec<Out> {
+        self.push(self.meta.id, action);
+        self.drain()
+    }
+
+    /// The session's list of tasks as it stands.
+    #[must_use]
+    pub fn tasks_now(&self) -> &[BackgroundTask] {
+        self.threads.get(&conv::ThreadId::Main).map_or(&[], |m| m.tasks.as_slice())
+    }
+
+    /// The turn entries go to now in the session's own thread.
+    #[must_use]
+    pub fn turn_now(&self) -> TurnId {
+        self.threads.get(&conv::ThreadId::Main).map_or(TurnId::BEFORE, |m| m.turn)
     }
 
     /// A stop under way, worded as far as it went, or `None` once it ended: the thread waits on
@@ -942,8 +1180,9 @@ impl History {
     /// there that the transcript does not say (a setting Claude Code refused).
     pub fn notice(&mut self, kind: &str, text: &str, now: WallMs) -> Vec<Out> {
         let turn = self.threads.get(&conv::ThreadId::Main).map_or(TurnId::BEFORE, |m| m.turn);
+        self.notices = self.notices.saturating_add(1);
         let item = Item {
-            id: ItemId(format!("{kind}-{}", now.as_millis())),
+            id: ItemId(format!("{kind}-{}-{}", now.as_millis(), self.notices)),
             turn,
             at_ms: now,
             body: ItemBody::Notice(Notice::new(kind, Clipped::whole(text))),
@@ -1398,7 +1637,11 @@ impl History {
             mapped.background.insert(entry.id.clone(), item.clone());
         }
         let task = task_of(entry, &item);
-        if mapped.set_task(&entry.id, task) {
+        let mut tasks_changed = mapped.set_task(&entry.id, task);
+        if let Body::Task(note) = &entry.body {
+            tasks_changed |= mapped.note_task(note, entry.at_ms);
+        }
+        if tasks_changed {
             actions.push(Action::TasksSet(mapped.tasks.clone()));
         }
         let open = matches!(&item.body, ItemBody::Tool(call) if !call.state.is_final());
@@ -1474,7 +1717,14 @@ impl History {
                 .and_then(|spawn| spawn.end.clone())
                 .or_else(|| before.map(|started| (SubagentEnd::Stopped, started)));
             let mut actions = Vec::new();
+            let waiting = spawn.is_some_and(|spawn| spawn.waiting);
             let status = match end {
+                None if waiting => Status {
+                    phase: Phase::Waiting,
+                    wait: Some(Wait { kind: Wait::TASK.to_owned(), text: WAITING_TEXT.to_owned() }),
+                    liveness: Liveness::Live,
+                    since_ms: wall,
+                },
                 None => {
                     let began = mapped.turns.values().map(|t| t.started_ms).min();
                     let since_ms = began.unwrap_or(wall);
@@ -1496,8 +1746,11 @@ impl History {
                     Status { phase, wait: None, liveness, since_ms: at_ms }
                 }
             };
-            let same =
-                |told: &Status| told.phase == status.phase && told.liveness == status.liveness;
+            let same = |told: &Status| {
+                told.phase == status.phase
+                    && told.liveness == status.liveness
+                    && told.wait == status.wait
+            };
             if !mapped.told.as_ref().is_some_and(same) {
                 mapped.told = Some(status.clone());
                 actions.push(Action::Status(status));
@@ -1760,6 +2013,18 @@ impl History {
                     in_ms: Some(r.in_ms),
                 }),
             }),
+            Body::Task(note) => ItemBody::Task(Box::new(thread::TaskNote {
+                task: note.task_id.clone(),
+                kind: task_kind(&note.kind).to_owned(),
+                status: note.status.clone(),
+                title: note.title.clone(),
+                summary: note.summary.clone(),
+                body: note.body.as_ref().map(clip),
+                call: note.call.clone().map(ItemId),
+                usage: task_usage(note.usage),
+                exit_code: note.exit_code,
+                links: self.task_links.get(&note.task_id).cloned().unwrap_or_default(),
+            })),
             Body::Rewound { dropped } => ItemBody::Notice(Notice::new(
                 Notice::REWOUND,
                 Clipped::whole(&format!(
@@ -1850,6 +2115,8 @@ impl History {
                         exit_code: b.exit_code,
                         stderr: b.stderr.as_ref().map(clip),
                         duration_ms: None,
+                        edits: b.edits.clone(),
+                        interpretation: b.interpretation.clone(),
                     })),
                 )
             }
@@ -1939,14 +2206,51 @@ impl History {
             ),
             conv::ToolDetail::Mcp(m) => {
                 input = clip(&m.input);
-                (
-                    kind::MCP,
-                    format!("{}: {}", m.server, m.tool),
-                    Some(detail::ToolDetail::Mcp(detail::McpDetail {
+                // A tool whose descriptor names a UI resource is an MCP App: its page.
+                let shown = match self.apps.get(&(m.server.clone(), m.tool.clone())) {
+                    Some(app) => detail::ToolDetail::Page(slopty_proto::visual::PageDetail {
+                        title: m.tool.clone(),
+                        source: slopty_proto::visual::PageSource::App(
+                            slopty_proto::visual::McpApp {
+                                result: m.result.clone(),
+                                ..app.clone()
+                            },
+                        ),
+                    }),
+                    None => detail::ToolDetail::Mcp(detail::McpDetail {
                         server: m.server.clone(),
                         tool: m.tool.clone(),
+                        structured: m.structured.clone(),
+                        links: m.links.clone(),
+                    }),
+                };
+                (kind::MCP, format!("{}: {}", m.server, m.tool), Some(shown))
+            }
+            // A visual shows once its call worked: Slopty's server checked its script then.
+            conv::ToolDetail::Shown(shown)
+                if matches!(shown.as_ref(), detail::ToolDetail::Visual(_))
+                    && call.result.as_ref().is_none_or(|r| r.status != ResultStatus::Ok) =>
+            {
+                let tool = slopty_proto::visual::SHOW_VISUAL;
+                (
+                    kind::MCP,
+                    format!("{}: {tool}", crate::mcp::MCP_SERVER_NAME),
+                    Some(detail::ToolDetail::Mcp(detail::McpDetail {
+                        server: crate::mcp::MCP_SERVER_NAME.to_owned(),
+                        tool: tool.to_owned(),
+                        structured: None,
+                        links: Vec::new(),
                     })),
                 )
+            }
+            conv::ToolDetail::Shown(shown) => {
+                let title = match shown.as_ref() {
+                    detail::ToolDetail::Visual(v) => v.title.clone(),
+                    detail::ToolDetail::Page(p) => p.title.clone(),
+                    _ => call.name.clone(),
+                };
+                let title = if title.is_empty() { call.name.clone() } else { title };
+                (kind::MCP, title, Some(self.rooted(shown)))
             }
             conv::ToolDetail::Other { input: raw } => {
                 input = clip(raw);
@@ -2014,13 +2318,14 @@ fn task_of(entry: &conv::Entry, item: &Item) -> Option<BackgroundTask> {
         conv::ToolDetail::Agent(a) if a.background => {
             let state = match a.status {
                 conv::AgentRun::Running => BackgroundTask::RUNNING,
+                conv::AgentRun::Waiting => BackgroundTask::WAITING,
                 conv::AgentRun::Completed => BackgroundTask::COMPLETED,
                 conv::AgentRun::Failed => BackgroundTask::FAILED,
                 conv::AgentRun::Killed => BackgroundTask::KILLED,
             };
             let ended = a
                 .duration_ms
-                .filter(|_| state != BackgroundTask::RUNNING)
+                .filter(|_| state != BackgroundTask::RUNNING && state != BackgroundTask::WAITING)
                 .map(|ms| WallMs::from_millis(entry.at_ms.as_millis().saturating_add(ms)));
             let id = a.agent_id.clone().unwrap_or_else(|| entry.id.clone());
             (id, BackgroundTask::AGENT, state, ended)
@@ -2028,15 +2333,67 @@ fn task_of(entry: &conv::Entry, item: &Item) -> Option<BackgroundTask> {
         _ => return None,
     };
     Some(BackgroundTask {
-        id,
-        kind: kind.to_owned(),
-        title: mapped.title.clone(),
         state: state.to_owned(),
         item: Some(item.id.clone()),
         output: mapped.output.clone().filter(|_| kind == BackgroundTask::SHELL),
-        started_ms: entry.at_ms,
         ended_ms,
+        ..BackgroundTask::new(&id, kind, &mapped.title, entry.at_ms)
     })
+}
+
+/// `task`, as the transcript says it, with what the engine said of it live (`had`) where the
+/// transcript says nothing: its figures, its step, its kind of agent, its links.
+fn merge_live(had: &BackgroundTask, task: &mut BackgroundTask) {
+    task.agent_type = task.agent_type.take().or_else(|| had.agent_type.clone());
+    task.step = task.step.take().or_else(|| had.step.clone());
+    task.usage = task.usage.or(had.usage);
+    task.parent = task.parent.take().or_else(|| had.parent.clone());
+    task.child = task.child.or(had.child);
+    task.outcome = task.outcome.take().or_else(|| had.outcome.clone());
+    task.timeout_ms = task.timeout_ms.or(had.timeout_ms);
+    task.ambient |= had.ambient;
+    task.awaited |= had.awaited;
+    task.persistent |= had.persistent;
+    if had.kind != BackgroundTask::SHELL && task.kind == BackgroundTask::SHELL {
+        task.kind.clone_from(&had.kind);
+    }
+    // The call's own id stands in for a task id the transcript does not give yet.
+    let standing_in = task.item.as_ref().is_some_and(|item| item.0 == task.id);
+    if standing_in && !had.id.is_empty() && task.id != had.id && task.item == had.item {
+        task.id.clone_from(&had.id);
+    }
+}
+
+/// A task notice's kind in the thread's words ([`BackgroundTask::kind`]).
+fn task_kind(kind: &str) -> &str {
+    match kind {
+        "agent" => BackgroundTask::AGENT,
+        "shell" => BackgroundTask::SHELL,
+        "monitor" => BackgroundTask::MONITOR,
+        "remote" => BackgroundTask::REMOTE,
+        other => other,
+    }
+}
+
+/// A notice's figures, when it gives any.
+fn task_usage(usage: (Option<u64>, Option<u64>, Option<u64>)) -> Option<thread::TaskUsage> {
+    let (tokens, tool_uses, duration_ms) = usage;
+    (tokens.is_some() || tool_uses.is_some() || duration_ms.is_some()).then(|| thread::TaskUsage {
+        tokens: tokens.unwrap_or(0),
+        tool_uses: tool_uses.unwrap_or(0),
+        duration_ms: duration_ms.unwrap_or(0),
+    })
+}
+
+/// What a notice's words say of how its task ended, past the task's quoted name: "finished",
+/// "is waiting on its own background work", "failed: out of memory".
+fn outcome_of(summary: &str) -> String {
+    summary
+        .split_once('"')
+        .and_then(|(_, rest)| rest.split_once('"'))
+        .map_or(summary, |(_, after)| after)
+        .trim()
+        .to_owned()
 }
 
 /// The lines an entry changed: an edit's or a write's diff.
@@ -2111,6 +2468,7 @@ fn question(q: &conv::QuestionDetail) -> detail::QuestionDetail {
                     .map(|o| detail::Offered {
                         label: o.label.clone(),
                         description: o.description.clone(),
+                        preview: o.preview.clone(),
                     })
                     .collect(),
                 multi_select: q.multi_select,
@@ -2176,17 +2534,6 @@ fn grants(prompt: &PermissionPrompt) -> Option<String> {
         .chain(others.into_iter().filter(|o| !o.is_empty()))
         .collect();
     (!parts.is_empty()).then(|| parts.join("; "))
-}
-
-/// The mode a plan's approval may switch to, as [`mode_words`] says it ("edits" for
-/// `acceptEdits`): the first `setMode` the request suggests, other than plan mode itself.
-fn plan_mode(prompt: &PermissionPrompt) -> Option<String> {
-    prompt.suggestions.iter().find_map(|s| match &s.grant {
-        Grant::Mode { mode } if mode.trim() != "plan" => {
-            Some(mode_words(mode)).filter(|said| !said.is_empty())
-        }
-        _ => None,
-    })
 }
 
 /// A permission mode as what it lets through: `acceptEdits` is "edits", as Claude Code's
@@ -2256,21 +2603,6 @@ fn words(name: &str) -> String {
     out
 }
 
-/// The title of a yes or no on a call: the file an edit or a write is to, by its name ("Allow
-/// edit of `lib.rs`?"), else the tool ("Allow Bash?").
-fn approval_title(prompt: &PermissionPrompt) -> String {
-    let named = |path: &str| path.rsplit('/').find(|p| !p.is_empty()).unwrap_or(path).to_owned();
-    match &prompt.detail {
-        conv::ToolDetail::Edit(e) if !e.path.is_empty() => {
-            format!("Allow edit of {}?", named(&e.path))
-        }
-        conv::ToolDetail::Write(w) if !w.path.is_empty() => {
-            format!("Allow write of {}?", named(&w.path))
-        }
-        _ => format!("Allow {}?", prompt.tool),
-    }
-}
-
 /// A held permission prompt as a request, with the answers Claude Code takes.
 fn request(prompt: &PermissionPrompt) -> Request {
     let thread = conv::ThreadId::Main;
@@ -2289,19 +2621,16 @@ fn request(prompt: &PermissionPrompt) -> Request {
                 q.questions.first().map_or_else(|| "A question".to_owned(), |q| q.text.clone());
             (Request::QUESTION, title, vec![deny], question(q).questions, None)
         }
+        // Claude Code's own plan dialog, in its words: approve with a clear context, in the mode
+        // its request suggests (carried back as "Always allow" carries its suggestions), with
+        // edits still asked about, or keep planning.
         conv::ToolDetail::Plan { .. } => {
-            let allow = choice("allow", "Approve the plan", Effect::Allow, None, false);
-            // Claude Code's own plan dialog offers to accept edits from then on: the mode
-            // its request suggests, carried back as "Always allow" carries its suggestions.
-            let and_then = plan_mode(prompt).map(|mode| {
-                let label = match mode.as_str() {
-                    "edits" => "Approve, and accept edits".to_owned(),
-                    mode => format!("Approve, and switch to {mode}"),
-                };
-                choice("always", &label, Effect::Allow, grants(prompt), false)
-            });
-            let options = [Some(allow), and_then, Some(deny)].into_iter().flatten().collect();
-            (Request::PLAN, "Approve the plan?".to_owned(), options, Vec::new(), None)
+            let options = cards::plan_options(prompt, grants(prompt));
+            (Request::PLAN, "Ready to code?".to_owned(), options, Vec::new(), None)
+        }
+        _ if prompt.tool == "EnterPlanMode" => {
+            let (title, _) = cards::approval(prompt);
+            (Request::APPROVAL, title, cards::enter_plan_options(), Vec::new(), None)
         }
         detail => {
             let mut options = vec![choice("allow", "Allow", Effect::Allow, None, false)];
@@ -2320,13 +2649,14 @@ fn request(prompt: &PermissionPrompt) -> Request {
                 conv::ToolDetail::Write(w) => Some(w.patch.clone()),
                 _ => None,
             };
-            (Request::APPROVAL, approval_title(prompt), options, Vec::new(), proposed)
+            (Request::APPROVAL, cards::approval(prompt).0, options, Vec::new(), proposed)
         }
     };
+    // What the card asks under its title, in the TUI's words; a plan is its own text.
     let text = match &prompt.detail {
-        conv::ToolDetail::Bash(b) => Some(clipped(&thread, &b.command)),
         conv::ToolDetail::Plan { plan } => Some(clipped(&thread, plan)),
-        _ => None,
+        conv::ToolDetail::Bash(b) if prompt.input.is_null() => Some(clipped(&thread, &b.command)),
+        _ => cards::approval(prompt).1.map(|text| Clipped::whole(&text)),
     };
     Request {
         id: AskId(prompt.ask.to_string()),
@@ -2339,9 +2669,11 @@ fn request(prompt: &PermissionPrompt) -> Request {
         proposed,
         schema_json: None,
         url: None,
+        reason: prompt.reason.clone(),
         state: RequestState::Open,
         opened_ms: prompt.asked_ms,
         until_ms: None,
+        needs_presence: prompt.needs_presence,
     }
 }
 
@@ -2399,6 +2731,8 @@ pub fn replay(records: &[serde_json::Value]) -> ThreadState {
     }
     state
 }
+
+mod cards;
 
 #[cfg(test)]
 mod tests;

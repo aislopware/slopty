@@ -18,20 +18,27 @@
 //!   exited and resumable: its next message starts Claude Code again on the session (`--resume`),
 //!   the thread read again from the transcript first, so the session has one writer.
 //! - **Once.** A start is acted on once per intent id.
+//! - **Beside the conversation** ([`settings`]): a `!` command runs in the chat's folder and goes
+//!   to Claude Code as the person's message, a permission rule is written into its scope's file,
+//!   and the person's status line command runs as the TUI runs it.
+//! - **A fork at a turn** keeps the conversation through that turn: Claude Code resumes the session
+//!   at that turn's last record into a new one (`--resume-session-at`).
 
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use slopty_agent::claude::driven::{ARGS_FACT, CUSTODY_FACT, Driven};
+use slopty_agent::claude::driven::{ARGS_FACT, CUSTODY_FACT, Driven, Ran};
 use slopty_agent::claude::history::Out;
 use slopty_agent::claude::{self as agent, Session};
 use slopty_core::{SessionId, WallMs};
 use slopty_proto::thread::wire::{Expanded, Intent, Outcome, Start};
 use slopty_proto::thread::{
-    Action, AgentId, Answerer, AskId, ContentRef, Delivery, Drive, Fork, IntentId, Liveness, Phase,
-    RequestState, ThreadId, ThreadMeta, ThreadState, TurnId,
+    Action, AgentId, Answerer, AskId, ContentRef, Delivery, Drive, Fork, IntentId, ItemId,
+    Liveness, Phase, Request, RequestState, RuleChange, SurfaceEvent, ThreadId, ThreadMeta,
+    ThreadState, TurnId,
 };
+use slopty_proto::visual::{AppAnswer, AppAsk};
 use slopty_pty::SpawnSpec;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -43,6 +50,7 @@ use crate::facts::Installed;
 
 pub mod custody;
 mod driven;
+pub mod settings;
 
 /// Where a thread's task says its Claude Code has gone, or the worker has, with the asks it did
 /// not take.
@@ -81,6 +89,12 @@ enum Ask {
         content: ContentRef,
         reply: oneshot::Sender<Expanded>,
     },
+    /// A page's ask of its MCP App, through the thread's Claude Code.
+    App {
+        thread: ThreadId,
+        ask: AppAsk,
+        reply: oneshot::Sender<AppAnswer>,
+    },
 }
 
 /// What a client asks of one thread.
@@ -112,9 +126,43 @@ enum ThreadAsk {
         before: Option<IntentId>,
     },
     Interrupt,
-    /// Stop subagent `agent`'s run.
+    /// Stop one background task: a command, a monitor, a subagent's run.
     StopTask {
-        agent: String,
+        task: String,
+    },
+    /// Move call `item`, or every blocking one, to the background.
+    Background {
+        item: Option<String>,
+    },
+    /// Run `!` command `command` for intent `intent`, then hand it over.
+    Shell {
+        command: String,
+        intent: IntentId,
+    },
+    /// What `!` command `intent` did, for Claude Code; answered unless `quiet`.
+    ShellDone {
+        ran: Ran,
+        intent: IntentId,
+        quiet: bool,
+    },
+    /// Put the files back to before turn `turn`.
+    Rewind {
+        turn: TurnId,
+    },
+    /// Write a permission rule into its scope's file, then list the rules again.
+    Rule {
+        change: RuleChange,
+    },
+    /// The person acted in a mod's surface.
+    Surface {
+        surface: String,
+        element: String,
+        event: SurfaceEvent,
+    },
+    /// A page's ask of its MCP App.
+    App {
+        ask: AppAsk,
+        reply: oneshot::Sender<AppAnswer>,
     },
     Answer {
         ask: AskId,
@@ -143,9 +191,9 @@ enum ThreadAsk {
 #[derive(Clone, Debug)]
 pub struct Claude(mpsc::UnboundedSender<Ask>);
 
-/// Where a [`Claude`]'s asks wait for [`spawn`].
+/// Where a [`Claude`]'s asks wait for [`spawn`], and where its own go back in.
 #[derive(Debug)]
-pub struct Asks(mpsc::UnboundedReceiver<Ask>);
+pub struct Asks(mpsc::UnboundedReceiver<Ask>, mpsc::UnboundedSender<Ask>);
 
 /// Where the driven Claude Codes run and keep what they keep.
 #[derive(Clone, Debug)]
@@ -165,7 +213,7 @@ impl Claude {
     #[must_use]
     pub fn channel() -> (Self, Asks) {
         let (tx, rx) = mpsc::unbounded_channel();
-        (Self(tx), Asks(rx))
+        (Self(tx.clone()), Asks(rx, tx))
     }
 
     async fn asked(&self, ask: impl FnOnce(oneshot::Sender<Outcome>) -> Ask) -> Outcome {
@@ -211,6 +259,17 @@ impl Claude {
             return Expanded::Gone;
         }
         body.await.unwrap_or(Expanded::Gone)
+    }
+
+    /// What a page shown in `thread` asks of its MCP App (`resources/read`, `tools/call`),
+    /// through the session's Claude Code (`mcp_read_resource`, `mcp_call`): refused while it does
+    /// not run.
+    pub async fn app(&self, thread: ThreadId, ask: AppAsk) -> AppAnswer {
+        let (reply, answer) = oneshot::channel();
+        if self.0.send(Ask::App { thread, ask, reply }).is_err() {
+            return AppAnswer::Refused("Claude Code threads are not served here".to_owned());
+        }
+        answer.await.unwrap_or_else(|_| AppAnswer::Refused("Claude Code did not answer".to_owned()))
     }
 
     /// Hand Slopty's reports, worded `text`, to `thread`'s Claude Code: a message of their own,
@@ -280,9 +339,55 @@ impl Claude {
                         return refused("This subagent's session is not known");
                     };
                     thread = parent.thread;
-                    ThreadAsk::StopTask { agent: state.meta.native.clone() }
+                    ThreadAsk::StopTask { task: state.meta.native.clone() }
                 } else {
                     ThreadAsk::Interrupt
+                }
+            }
+            Intent::StopTask { task } => {
+                if !state.tasks.iter().any(|t| t.id == *task && t.is_live()) {
+                    return refused(&format!("There is no running task {task}"));
+                }
+                if let Some(parent) = state.meta.parent.as_ref().filter(|_| subagent) {
+                    thread = parent.thread;
+                }
+                ThreadAsk::StopTask { task: task.clone() }
+            }
+            Intent::Background { item } => {
+                if let Some(item) = item
+                    && !state.items.iter().any(|i| i.id == *item)
+                {
+                    return refused(&format!("There is no call {}", item.0));
+                }
+                ThreadAsk::Background { item: item.as_ref().map(|i| i.0.clone()) }
+            }
+            Intent::Shell { .. } if subagent => return refused("A subagent takes no command"),
+            Intent::Shell { command } => {
+                if command.trim().is_empty() {
+                    return refused("There is no command to run");
+                }
+                ThreadAsk::Shell { command: command.clone(), intent: id }
+            }
+            Intent::Rewind { turn } => {
+                if !state.turns.iter().any(|t| t.id == *turn && t.input.is_some()) {
+                    return refused(&format!("There is no turn {} to go back to", turn.0));
+                }
+                ThreadAsk::Rewind { turn: *turn }
+            }
+            Intent::Rule(change) => {
+                if let Err(why) = settings::checked(change) {
+                    return refused(&why);
+                }
+                ThreadAsk::Rule { change: change.clone() }
+            }
+            Intent::Surface { surface, element, event } => {
+                if !state.surfaces.iter().any(|s| s.id == *surface) {
+                    return refused(&format!("There is no surface {surface}"));
+                }
+                ThreadAsk::Surface {
+                    surface: surface.clone(),
+                    element: element.clone(),
+                    event: event.clone(),
                 }
             }
             Intent::Answer { ask, choice, message } => {
@@ -297,7 +402,13 @@ impl Claude {
                     }
                 }
                 let offered = request.options.iter().any(|o| o.id == *choice);
-                if !offered && request.questions.is_empty() {
+                // A dialog or a form also takes its result as a JSON object, or is put away.
+                let form = request.kind == Request::ELICITATION
+                    || request.kind.starts_with(Request::DIALOG);
+                let filled =
+                    serde_json::from_str::<serde_json::Value>(choice).is_ok_and(|v| v.is_object());
+                let put_away = [Request::CANCEL, Request::DECLINE].contains(&choice.as_str());
+                if !offered && request.questions.is_empty() && !(form && (filled || put_away)) {
                     return refused(&format!("There is no answer {choice}"));
                 }
                 ThreadAsk::Answer {
@@ -353,10 +464,12 @@ impl Claude {
                 | ThreadAsk::Edit { .. }
                 | ThreadAsk::Promote { .. }
                 | ThreadAsk::Move { .. }
+                | ThreadAsk::Rule { .. }
         );
         let takes_up = matches!(
             asked,
             ThreadAsk::Send { .. }
+                | ThreadAsk::Shell { .. }
                 | ThreadAsk::SetModel { .. }
                 | ThreadAsk::SetMode { .. }
                 | ThreadAsk::SetEffort { .. }
@@ -382,7 +495,7 @@ pub fn is_claude(state: &ThreadState) -> bool {
 ///
 /// First every thread an earlier worker left with Claude Code in ptyd's custody is taken up
 /// again; one whose Claude Code ptyd no longer holds is left exited and resumable.
-pub fn spawn(host: Host, place: Place, Asks(mut asks): Asks) -> JoinHandle<()> {
+pub fn spawn(host: Host, place: Place, Asks(mut asks, again): Asks) -> JoinHandle<()> {
     tokio::spawn(async move {
         let (ended_tx, mut ended) = mpsc::unbounded_channel();
         let custody = Custody::new(place.ptyd.clone());
@@ -393,13 +506,15 @@ pub fn spawn(host: Host, place: Place, Asks(mut asks): Asks) -> JoinHandle<()> {
             launcher: None,
             running: HashMap::new(),
             ended: ended_tx,
+            again,
         };
         served.take_up().await;
         loop {
             tokio::select! {
                 ask = asks.recv() => match ask {
                     Some(Ask::Start { id, start, seated, reply }) => {
-                        let outcome = served.begin(id, &start, seated.map(|s| *s)).await;
+                        let outcome =
+                            Box::pin(served.begin(id, &start, seated.map(|s| *s))).await;
                         let _gone = reply.send(outcome);
                     }
                     Some(Ask::Fork { thread, id, after, reply }) => {
@@ -414,6 +529,7 @@ pub fn spawn(host: Host, place: Place, Asks(mut asks): Asks) -> JoinHandle<()> {
                         let _gone = done.send(());
                     }
                     Some(Ask::Expand { thread, content, reply }) => served.expand(thread, content, reply),
+                    Some(Ask::App { thread, ask, reply }) => served.app(thread, ask, reply),
                     None => return,
                 },
                 Some((thread, left)) = ended.recv() => {
@@ -440,6 +556,8 @@ struct Served {
     running: HashMap<ThreadId, mpsc::UnboundedSender<ThreadAsk>>,
     /// Told by a task when its Claude Code has gone.
     ended: Ended,
+    /// Where what the served threads do on their own comes back in (a `!` command that ended).
+    again: mpsc::UnboundedSender<Ask>,
 }
 
 impl Served {
@@ -601,9 +719,9 @@ impl Served {
         outcome
     }
 
-    /// Branch a new thread off the whole of `from`'s session for intent `id`, once: Claude Code,
-    /// run for the new thread on a session of the intent's id, resumes `from`'s into it
-    /// (`--fork-session`).
+    /// Branch a new thread off `from`'s session for intent `id`, once: Claude Code, run for the
+    /// new thread on a session of the intent's id, resumes `from`'s into it (`--fork-session`),
+    /// all of it, or through turn `after` (`--resume-session-at` that turn's last record).
     async fn fork(&mut self, from: ThreadId, id: IntentId, after: Option<TurnId>) -> Outcome {
         if let Some(outcome) = self.host.started(id) {
             return outcome;
@@ -611,10 +729,22 @@ impl Served {
         let Some((state, _)) = self.host.state(from).filter(|(s, _)| is_claude(s)) else {
             return self.host.record_start(id, refused("There is no such Claude Code thread here"));
         };
+        let last = state.last_turn().map(|t| t.id);
+        // A turn before the last: the record the next turn's prompt follows is that turn's last.
+        let at = match after.filter(|after| Some(*after) != last) {
+            Some(after) => {
+                let records = self.records(&state.meta).await;
+                match resume_at(&state, after, &records) {
+                    Ok(at) => Some(at),
+                    Err(why) => return self.host.record_start(id, refused(&why)),
+                }
+            }
+            None => None,
+        };
         let native = id.to_string();
         let mut begun = None;
         let outcome = self.host.start(id, || {
-            let turn = crate::thread::fork::whole(&state, after, "Claude Code")?;
+            let turn = if at.is_some() { after } else { last };
             // Claude Code writes the conversation with its first message: before it there is none.
             if turn.is_none() {
                 return Err("There is nothing to fork yet".to_owned());
@@ -632,7 +762,7 @@ impl Served {
         };
         let thread = *thread;
         take(&self.host, outs);
-        let session = Session::Fork(state.meta.native.clone(), native);
+        let session = Session::Fork { from: state.meta.native.clone(), id: native, at };
         self.run(thread, driven, session, Vec::new()).await;
         outcome
     }
@@ -642,6 +772,7 @@ impl Served {
     /// already answered.
     async fn route(&mut self, thread: ThreadId, asks: Vec<ThreadAsk>) {
         let mut left = Vec::new();
+        let asks = self.beside(thread, asks);
         for ask in asks {
             let Some(task) = self.running.get(&thread) else {
                 left.push(ask);
@@ -664,7 +795,13 @@ impl Served {
         let mut shown = None;
         for ask in left {
             match ask {
-                ThreadAsk::Send { .. } | ThreadAsk::Report { .. } => sends.push(ask),
+                ThreadAsk::Send { .. } | ThreadAsk::Report { .. } | ThreadAsk::ShellDone { .. } => {
+                    sends.push(ask);
+                }
+                ThreadAsk::App { reply, .. } => {
+                    let _gone =
+                        reply.send(AppAnswer::Refused("Claude Code is not running".to_owned()));
+                }
                 ThreadAsk::Withdraw { intent } => shown = queue.withdraw(intent).or(shown),
                 ThreadAsk::Edit { intent, text, attachments } => {
                     shown = queue.edit(intent, &text, attachments, ()).or(shown);
@@ -789,11 +926,85 @@ impl Served {
             }
         };
         let stderr = self.place.data_dir.join("claude").join(format!("{session}.log"));
-        let task =
-            Task::new(self.host.clone(), thread, driven, self.custody.clone(), session, stderr);
+        let task = Task::new(
+            self.host.clone(),
+            thread,
+            driven,
+            self.custody.clone(),
+            (session, stderr, self.place.home.clone()),
+        );
         let (tx, rx) = mpsc::unbounded_channel();
         tokio::spawn(task.serve(socket, taken.backlog, first, rx, self.ended.clone()));
         self.running.insert(thread, tx);
+    }
+
+    /// What of `asks` the worker does itself beside Claude Code: a `!` command runs on a task of
+    /// its own and comes back by [`Self::again`] once it ended; a rule is written into its
+    /// scope's file, then the rules listed again where Claude Code runs. The rest goes on.
+    fn beside(&self, thread: ThreadId, asks: Vec<ThreadAsk>) -> Vec<ThreadAsk> {
+        let mut rest = Vec::new();
+        for ask in asks {
+            match ask {
+                ThreadAsk::Shell { command, intent } => self.shell(thread, command, intent),
+                ThreadAsk::Rule { change } => {
+                    let Some((state, _)) = self.host.state(thread) else { continue };
+                    let cwd = PathBuf::from(&state.meta.cwd);
+                    if let Err(why) = settings::change_rule(&self.place.home, &cwd, &change) {
+                        tracing::warn!(%thread, "a permission rule was not written: {why}");
+                        let now = WallMs::now();
+                        let notice = slopty_proto::thread::Item {
+                            id: ItemId(format!("rule-{}", now.as_millis())),
+                            turn: state.last_turn().map_or(TurnId::BEFORE, |t| t.id),
+                            at_ms: now,
+                            body: slopty_proto::thread::ItemBody::Notice(
+                                slopty_proto::thread::Notice::new(
+                                    slopty_proto::thread::Notice::INFO,
+                                    slopty_proto::thread::Clipped::whole(&format!(
+                                        "The rule was not written: {why}"
+                                    )),
+                                ),
+                            ),
+                        };
+                        self.host.apply(thread, vec![Action::ItemCompleted(notice)]);
+                        continue;
+                    }
+                    rest.push(ThreadAsk::Rule { change });
+                }
+                other => rest.push(other),
+            }
+        }
+        rest
+    }
+
+    /// Run `!` command `command` of `thread` for intent `intent` on a task of its own; what it
+    /// did comes back as [`ThreadAsk::ShellDone`].
+    fn shell(&self, thread: ThreadId, command: String, intent: IntentId) {
+        let Some((state, _)) = self.host.state(thread) else { return };
+        let (host, again, home) = (self.host.clone(), self.again.clone(), self.place.home.clone());
+        let cwd = PathBuf::from(&state.meta.cwd);
+        tokio::spawn(async move {
+            let ran = settings::run_shell(&host, thread, &cwd, &command, intent).await;
+            let quiet = !settings::answers_bang(&home, &cwd);
+            let ask = ThreadAsk::ShellDone { ran, intent, quiet };
+            let _gone = again.send(Ask::Thread { thread, ask });
+        });
+    }
+
+    /// A page's ask of its app, to the session's Claude Code where it runs.
+    fn app(&self, thread: ThreadId, ask: AppAsk, reply: oneshot::Sender<AppAnswer>) {
+        let root = root_of(&self.host, thread).map_or(thread, |meta| meta.id);
+        match self.running.get(&root) {
+            Some(task) => {
+                if let Err(mpsc::error::SendError(ThreadAsk::App { reply, .. })) =
+                    task.send(ThreadAsk::App { ask, reply })
+                {
+                    let _gone = reply.send(AppAnswer::Refused("Claude Code ended".to_owned()));
+                }
+            }
+            None => {
+                let _gone = reply.send(AppAnswer::Refused("Claude Code is not running".to_owned()));
+            }
+        }
     }
 
     /// Answer `reply` with the whole of `content`, clipped in `thread`, read from its session's
@@ -810,6 +1021,32 @@ impl Served {
             let _gone = reply.send(body);
         }));
     }
+}
+
+/// The last record of turn `after` of `state`, as `records` (its session's) hold it: the one the
+/// next turn's prompt follows.
+fn resume_at(
+    state: &ThreadState,
+    after: TurnId,
+    records: &[serde_json::Value],
+) -> Result<String, String> {
+    if !state.turns.iter().any(|t| t.id == after) {
+        return Err(format!("There is no turn {} to fork from", after.0));
+    }
+    let next = state
+        .turns
+        .iter()
+        .filter(|t| t.id > after)
+        .min_by_key(|t| t.id)
+        .and_then(|t| t.input.as_ref())
+        .ok_or("The turn after it is not known")?;
+    let prompt = next.0.split_once(':').map_or(next.0.as_str(), |(record, _)| record);
+    records
+        .iter()
+        .find(|r| r.get("uuid").and_then(serde_json::Value::as_str) == Some(prompt))
+        .and_then(|r| r.get("parentUuid").and_then(serde_json::Value::as_str))
+        .map(str::to_owned)
+        .ok_or_else(|| "That turn's place in the session is not in its transcript".to_owned())
 }
 
 /// The session thread `thread` is (or is a subagent of).

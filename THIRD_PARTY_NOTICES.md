@@ -8,7 +8,8 @@ from the works below each keep their own licence.
 Every file whose first line reads `// Derived from zeron (MIT, github.com/zeronsh/zeron @
 <commit>)` is based on zeron at that commit; so are the other files of
 `crates/slopty-shell`, `slopty-view-proto`, `slopty-view-doc`, `slopty-view-rpc`,
-`slopty-shell-theme`, `slopty-syntax`, `slopty-markdown` and `slopty-veil`.
+`slopty-shell-theme`, `slopty-syntax`, `slopty-markdown`, `slopty-veil`, `slopty-visual` and
+`slopty-visual-gpu`.
 
 ```text
 MIT License
@@ -83,3 +84,17 @@ GPUI fork, under the Apache License 2.0 like GPUI itself; gpui-fast keeps the no
 `vendor/gpui_tokio` is Zed's bridge between GPUI and Tokio (github.com/zed-industries/zed,
 `crates/gpui_tokio`), under the Apache License 2.0, whose text is in
 `vendor/gpui_tokio/LICENSE-APACHE`.
+
+## Vega, Vega-Lite, vega-embed, vega-interpreter and plotly.js
+
+`crates/slopty-platform/assets/page-libs/` holds these libraries' npm builds byte for byte; a
+page loads them from its own origin (`slopty_platform::web::page::libs`). Each licence's full
+text is in `crates/slopty-platform/assets/page-libs/licenses/`.
+
+| File | Package and version | Licence | Copyright |
+| --- | --- | --- | --- |
+| `vega.min.js` | vega 6.4.0 | BSD-3-Clause | 2015-2023 University of Washington Interactive Data Lab |
+| `vega-lite.min.js` | vega-lite 6.5.0 | BSD-3-Clause | 2015 University of Washington Interactive Data Lab |
+| `vega-embed.min.js` | vega-embed 7.3.0 | BSD-3-Clause | 2015 University of Washington Interactive Data Lab |
+| `vega-interpreter.js` | vega-interpreter 2.3.2 | BSD-3-Clause | 2015-2023 University of Washington Interactive Data Lab |
+| `plotly-cartesian.min.js` | plotly.js-cartesian-dist-min 4.1.2 | MIT | 2016-2024 Plotly Technologies Inc. |

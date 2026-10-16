@@ -223,6 +223,8 @@ pub enum Body {
     },
     /// A line from Claude Code itself.
     Note(Note),
+    /// A background task's notice.
+    Task(Box<TaskNotice>),
     /// The person went back to an earlier prompt (an edited prompt, a rewind): what came after
     /// it on the old branch is gone from the thread, and the new branch goes on from here.
     Rewound {
@@ -410,6 +412,10 @@ pub enum ToolDetail {
     },
     /// A tool an MCP server provides (`mcp__<server>__<tool>`).
     Mcp(McpDetail),
+    /// Slopty's own `show_visual` or `show_page` (`mcp__slopty__…`): the visual or page it
+    /// shows, read from its whole input ([`crate::shown::shown`]); its paths as the call gave
+    /// them, made absolute against the session's folder where the thread is mapped.
+    Shown(Box<slopty_proto::thread::ToolDetail>),
     /// Any other tool: its input, clipped.
     Other {
         /// The input as JSON.
@@ -487,6 +493,13 @@ pub struct BashDetail {
     pub output_file: Option<String>,
     /// When a background command finished, by Claude Code's notice of it.
     pub finished_ms: Option<WallMs>,
+    /// The files it changed in its repository, as Claude Code took them (`bashEditDiff`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edits: Option<slopty_proto::thread::detail::ShellEdits>,
+    /// What its exit code means, where Claude Code says (`returnCodeInterpretation`): "No
+    /// matches found" for grep's 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interpretation: Option<String>,
 }
 
 /// Where a shell command stands.
@@ -573,6 +586,34 @@ pub enum AgentRun {
     Failed,
     /// Stopped.
     Killed,
+    /// It stopped with background work of its own still running: what it said may be interim,
+    /// and it may go on, and notify again, by itself.
+    Waiting,
+}
+
+/// A background task's notice as a row of its own (`<task-notification>`): a subagent that
+/// finished or waits on its own work, a command that exited, a monitor's event.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskNotice {
+    /// The task.
+    pub task_id: String,
+    /// The call that started it, when the notice names one (a monitor's events name none).
+    pub call: Option<String>,
+    /// What kind of task: `agent`, `shell`, `monitor`, `remote`, or `task` when the notice does
+    /// not say.
+    pub kind: String,
+    /// `completed`, `failed`, `killed`, `waiting`, `event` or `expired`.
+    pub status: String,
+    /// The task's description, as its summary quotes it.
+    pub title: String,
+    /// The row's words, as the TUI words them.
+    pub summary: String,
+    /// What opens under the row: a monitor's event, an agent's result.
+    pub body: Option<Clipped>,
+    /// Tokens, tool uses and run time, when it says.
+    pub usage: (Option<u64>, Option<u64>, Option<u64>),
+    /// A command's exit code, when its summary gives one.
+    pub exit_code: Option<i32>,
 }
 
 /// `TaskCreate`.
@@ -641,6 +682,10 @@ pub struct Choice {
     pub label: String,
     /// What picking it means, when the model said.
     pub description: Option<String>,
+    /// What it would look like (`options[].preview`): markdown or code to compare before
+    /// picking, when the model gave one.
+    #[serde(default)]
+    pub preview: Option<String>,
 }
 
 /// One answer.
@@ -661,6 +706,16 @@ pub struct McpDetail {
     pub tool: String,
     /// The input as JSON.
     pub input: Clipped,
+    /// Its result's `structuredContent`, as JSON, once it came with one.
+    #[serde(default)]
+    pub structured: Option<slopty_proto::thread::Clipped>,
+    /// The resources its result links or embeds (`resourceLinks`), in its order.
+    #[serde(default)]
+    pub links: Vec<slopty_proto::visual::ResourceLink>,
+    /// Its result as MCP spells it (`content`, `structuredContent`, `_meta`), as JSON, for an
+    /// MCP App's page ([`slopty_proto::visual::McpApp::result`]); `None` until it came.
+    #[serde(default)]
+    pub result: Option<slopty_proto::thread::Clipped>,
 }
 
 /// What a subagent's thread knows of the call that started it (its file's `agent_metadata`).
@@ -945,6 +1000,8 @@ pub enum PermissionEvent {
 /// A permission Claude Code asks for before running a tool.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct PermissionPrompt {
+    /// Why Claude Code asks, in its TUI's words, when it says.
+    pub reason: Option<String>,
     /// Names the prompt in answers, unique in its session.
     pub ask: u64,
     /// The tool's name as the model called it.
@@ -960,6 +1017,25 @@ pub struct PermissionPrompt {
     pub mode: Option<String>,
     /// When Claude Code asked, by the worker's clock.
     pub asked_ms: WallMs,
+    /// The call's input, as the model wrote it: what the card's title and question are worded
+    /// from (a command's description, a skill's name, an MCP tool's parameters).
+    #[serde(default)]
+    pub input: serde_json::Value,
+    /// Whether the file a write would make is there already, when the worker looked: the card
+    /// says "Create file" or "Overwrite file", as the TUI's does.
+    #[serde(default)]
+    pub exists: Option<bool>,
+    /// How much of the context window is used, in percent, when known: a plan's "Yes, clear
+    /// context (42% used) …" says it.
+    #[serde(default)]
+    pub context_used: Option<u32>,
+    /// The mode plan mode was entered from, when known: a plan approved with the context cleared
+    /// goes on in it (bypass permissions, auto mode), else with edits accepted.
+    #[serde(default)]
+    pub before_plan: Option<String>,
+    /// Only the person at the card may answer it (Claude Code's `requires_user_interaction`).
+    #[serde(default)]
+    pub needs_presence: bool,
 }
 
 /// One permission update "allow always" applies.

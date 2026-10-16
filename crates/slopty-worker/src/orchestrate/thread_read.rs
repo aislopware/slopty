@@ -119,6 +119,7 @@ fn entry(body: &ItemBody, view: ThreadView, cut: &mut bool) -> Option<ReadEntry>
         | ItemBody::Reasoning(_)
         | ItemBody::Compaction(_)
         | ItemBody::Review { .. }
+        | ItemBody::Task(_)
         | ItemBody::Extra { .. } => None,
     }
 }

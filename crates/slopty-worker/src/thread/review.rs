@@ -100,6 +100,15 @@ impl Snapshots {
                     if self.host.update(thread, |s| (vec![], begun(s, turn))) != Some(false) {
                         continue;
                     }
+                    // A turn begun after a rewind works on the folder as it is: the rewind is not
+                    // undone over its work. (A turn told late is not one.)
+                    let _cleared = self.host.update(thread, |s| {
+                        let started = s.turns.iter().find(|t| t.id == turn).map(|t| t.started_ms);
+                        let after =
+                            s.rewound.as_ref().zip(started).is_some_and(|(r, at)| at > r.at_ms);
+                        let gone = after.then_some(Action::Rewound(None));
+                        (gone.into_iter().collect(), ())
+                    });
                     let tree = match armed.take() {
                         Some(tree) => Some(tree),
                         None => self.take(thread, &repo).await,
@@ -218,6 +227,9 @@ impl Snapshots {
     /// that comes while the first is under way gets nothing (the first one's answer answers
     /// it). `None` for any other intent, and for that repeat.
     pub async fn pick(&self, thread: ThreadId, id: IntentId, intent: &Intent) -> Option<Outcome> {
+        if let Intent::Unrewind { tree } = intent {
+            return self.unrewind(thread, id, tree).await;
+        }
         let (Intent::Keep(pick) | Intent::Revert(pick)) = intent else { return None };
         if let Some(outcome) = self.host.outcome(thread, id) {
             return Some(outcome);
@@ -251,6 +263,112 @@ impl Snapshots {
         let recorded = self.host.intent(thread, id, |_state| (outcome, Vec::new()));
         self.picking.lock().remove(&id);
         recorded
+    }
+}
+
+impl Snapshots {
+    /// The folder of `thread` now, taken and kept before its files are put back to before a
+    /// turn, so the rewind can be undone ([`Intent::Unrewind`]); `None` outside git.
+    pub async fn before_rewind(&self, thread: ThreadId) -> Option<TreeRef> {
+        let repo = self.repo(thread)?;
+        let tree = self.take(thread, &repo).await?;
+        if let Err(e) = repo.hold(thread, REWOUND_REF, &tree).await {
+            tracing::warn!(%thread, "the folder before a rewind was not kept: {e}");
+            return None;
+        }
+        Some(tree)
+    }
+
+    /// Put `thread`'s folder back as `tree`, the one taken before its last rewind, once, for
+    /// intent `id`; one that is not the last rewind's is refused.
+    async fn unrewind(&self, thread: ThreadId, id: IntentId, tree: &TreeRef) -> Option<Outcome> {
+        if let Some(outcome) = self.host.outcome(thread, id) {
+            return Some(outcome);
+        }
+        if !self.picking.lock().insert(id) {
+            return None;
+        }
+        let refused = |reason: &str| Outcome::Refused { reason: reason.to_owned() };
+        let last = self.host.update(thread, |s| (vec![], s.rewound.clone()));
+        let outcome = match (last, self.repo(thread)) {
+            (None, _) => refused("The thread is gone"),
+            (Some(None), _) => refused("There is no rewind to undo"),
+            (Some(Some(last)), _) if last.tree != *tree => {
+                refused("That rewind is not the last one, so it cannot be undone")
+            }
+            (_, None) => refused(NOT_IN_GIT),
+            (Some(Some(_)), Some(repo)) => {
+                let lock = self.lock(thread);
+                let held = lock.lock().await;
+                match restore(&repo, tree).await {
+                    Ok(()) => {
+                        self.host.apply(thread, vec![Action::Rewound(None)]);
+                        drop(held);
+                        if let Some(now) = self.take(thread, &repo).await {
+                            self.judge(thread, &repo, &now).await;
+                        }
+                        Outcome::Done
+                    }
+                    Err(e) => refused(&e.0),
+                }
+            }
+        };
+        let recorded = self.host.intent(thread, id, |_state| (outcome, Vec::new()));
+        self.picking.lock().remove(&id);
+        recorded
+    }
+}
+
+/// The ref the folder before a thread's last rewind is kept under.
+const REWOUND_REF: &str = "rewound";
+
+/// The working tree of `repo` made `tree` again: each file that differs written as `tree` has
+/// it, one `tree` lacks taken away. Files git ignores are left as they are.
+async fn restore(repo: &Repo, tree: &TreeRef) -> Result<(), Failed> {
+    let now = repo.take().await?;
+    for file in repo.changes(&now, tree).await? {
+        if let Some(was) = file.old_path.as_deref().filter(|was| *was != file.path) {
+            remove(&within(&repo.root, was)?).await?;
+        }
+        let path = within(&repo.root, &file.path)?;
+        let Some(blob) = file.to.as_deref() else {
+            remove(&path).await?;
+            continue;
+        };
+        let bytes = repo.object(blob).await?;
+        if let Some(dir) = path.parent() {
+            tokio::fs::create_dir_all(dir)
+                .await
+                .map_err(|e| Failed(format!("{}: {e}", file.path)))?;
+        }
+        tokio::fs::write(&path, bytes).await.map_err(|e| Failed(format!("{}: {e}", file.path)))?;
+        if let Some(modes) = file.modes {
+            let mode = std::os::unix::fs::PermissionsExt::from_mode(modes.to & 0o777);
+            tokio::fs::set_permissions(&path, mode)
+                .await
+                .map_err(|e| Failed(format!("{}: {e}", file.path)))?;
+        }
+    }
+    Ok(())
+}
+
+/// `path` of the repository at `root`, refused when it would climb out.
+fn within(root: &Path, path: &str) -> Result<PathBuf, Failed> {
+    let relative = Path::new(path);
+    let plain = relative.components().all(|c| matches!(c, std::path::Component::Normal(_)));
+    if !plain || path.is_empty() {
+        return Err(Failed(format!("{path} is not a path in the repository")));
+    }
+    Ok(root.join(relative))
+}
+
+/// The file at `path` gone; one already gone is fine.
+async fn remove(path: &Path) -> Result<(), Failed> {
+    match tokio::fs::remove_file(path).await {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            Err(Failed(format!("{}: {e}", path.display())))
+        }
+        _ => Ok(()),
     }
 }
 

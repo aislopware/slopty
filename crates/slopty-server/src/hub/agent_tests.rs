@@ -205,6 +205,32 @@ async fn a_child_s_rest_reaches_its_parent_and_ends_a_wait() {
     assert!(text.contains("waits on the person: Run rm?"), "{text}");
 }
 
+/// No agent answers a request, its own child's least of all, and one only the person at its
+/// card answers (Claude Code's `requires_user_interaction`) waits for them there: the worker
+/// is never asked.
+#[tokio::test]
+async fn no_agent_answers_a_request_that_needs_the_person_at_its_card() {
+    let mut fleet = Fleet::new();
+    let mut child = asking(
+        started_by(row(Phase::NeedsYou, 2_000, Some(SessionId::new())), &fleet.parent),
+        "Run rm -rf build?",
+    );
+    child.requests[0].needs_presence = true;
+    fleet.lease.handle(snapshot(vec![fleet.parent.clone(), child.clone()]));
+    let answer = Verb::AnswerRequest {
+        of: ThreadOf::Thread(child.id),
+        ask: child.requests[0].id.clone(),
+        choice: "allow".to_owned(),
+        message: None,
+    };
+    let refused = fleet.parent_says(answer).await;
+    assert!(matches!(refused, Outcome::Error { code: ErrorCode::Forbidden, .. }), "{refused:?}");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), fleet.request()).await.is_err(),
+        "the worker is never asked"
+    );
+}
+
 /// An agent tells only its own tree and stops only itself and what it started; the person
 /// stops anything, deepest first.
 #[tokio::test]

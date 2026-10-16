@@ -298,6 +298,16 @@ fn queue_hidden_attachments_label(labels: &[String], shown: usize) -> Option<Str
 /// workspace paths and chats dropped on it reach the conversation's drop zone
 /// beneath (and land in this composer); otherwise it keeps clicks and hover
 /// from falling through to the transcript behind it.
+// slopty: a stop is the person's word to halt: what was queued waits until they send again
+// (`slopty_proto::thread::Pending::STOPPED`, the reason the view model's held row carries).
+/// The reason a queued row carries while it waits on the person's stop.
+pub(crate) const STOPPED_HOLD: &str = "Held since you stopped the turn";
+
+/// Whether `item` waits on the person's stop rather than on something else.
+pub(crate) fn stopped_hold(item: &QueuedMessage) -> bool {
+    matches!(&item.delivery_gate, Some(QueueDeliveryGate::Held { reason }) if reason == STOPPED_HOLD)
+}
+
 pub(crate) fn queue_panel_surface(theme: &Theme, dragging: bool) -> gpui::Div {
     div()
         .when(!dragging, |el| el.occlude())
@@ -473,8 +483,11 @@ impl Composer {
             lifted,
         );
 
+        // slopty: "Paused" over a queue its person's stop holds, with Resume and Clear all.
+        let paused = self.queue_paused_header(&items, &theme, cx);
         let panel = queue_panel_surface(&theme, cx.has_active_drag())
             .debug_selector(|| "message-queue-panel".into())
+            .children(paused)
             .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()))
             // The complete glass surface is a drop target, including its
             // padding.
@@ -555,7 +568,8 @@ impl Composer {
         });
         let being_edited = editing.as_deref() == Some(item.id.as_str());
         let being_removed = self.queue_removing.contains(&item.id);
-        let delivery_blocked = item.delivery_gate.is_some();
+        // slopty: a row held by the person's stop is still theirs to send, edit or drop.
+        let delivery_blocked = item.delivery_gate.is_some() && !stopped_hold(item);
         let interaction_blocked = delivery_blocked || being_removed;
         let (text, chips) = match &item.delivery_gate {
             Some(QueueDeliveryGate::Editing {
@@ -568,7 +582,7 @@ impl Composer {
                 (SharedString::from("Needs review"), Vec::new())
             }
             // slopty: what holds the message on its machine.
-            Some(QueueDeliveryGate::Held { reason }) if !being_edited => {
+            Some(QueueDeliveryGate::Held { reason }) if !being_edited && reason != STOPPED_HOLD => {
                 (SharedString::from(reason.clone()), Vec::new())
             }
             _ => queue_row_text(&item.text, &item.attachments),
@@ -1413,6 +1427,71 @@ impl Composer {
             "Couldn't send that message",
             cx,
         );
+    }
+
+    // slopty: Orca's "Paused since you stopped" header (`.research/tui-presentation-2026-10-16.md`
+    // §1.9): Resume sends the first held message, the rest following in order; Clear all drops
+    // them.
+    /// The queue's "Paused" header while the person's stop holds its messages.
+    fn queue_paused_header(
+        &self,
+        items: &[QueuedMessage],
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let held: Vec<String> =
+            items.iter().filter(|item| stopped_hold(item)).map(|item| item.id.clone()).collect();
+        let first = held.first()?.clone();
+        let words = format!("Paused · {} held since you stopped", held.len());
+        let action = |id: &'static str, label: &'static str| {
+            div()
+                .id(id)
+                .role(gpui::Role::Button)
+                .aria_label(label)
+                .flex_none()
+                .h(px(22.0))
+                .px(px(8.0))
+                .flex()
+                .items_center()
+                .rounded(px(5.0))
+                .text_size(px(11.5))
+                .text_color(theme.text_muted)
+                .cursor_pointer()
+                .hover(|s| s.bg(theme.element_hover).text_color(theme.text))
+                .child(label)
+        };
+        Some(
+            div()
+                .id("message-queue-paused")
+                .role(gpui::Role::Status)
+                .aria_label(SharedString::from(words.clone()))
+                .h(px(28.0))
+                .px(px(8.0))
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(icons::icon(icons::STOP).size(px(11.0)).text_color(theme.warning))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(12.0))
+                        .text_color(theme.text_muted)
+                        .child(SharedString::from(words)),
+                )
+                .child(action("message-queue-resume", "Resume").on_click(cx.listener(
+                    move |this, _, _, cx| this.send_queued_now(first.clone(), cx),
+                )))
+                .child(action("message-queue-clear", "Clear all").on_click(cx.listener(
+                    move |this, _, _, cx| {
+                        for id in &held {
+                            this.remove_queued(id.clone(), cx);
+                        }
+                    },
+                )))
+                .into_any_element(),
+        )
     }
 
     /// Execute the same resolved action advertised on the row. Both pointer

@@ -481,7 +481,26 @@ pub const SUBAGENT_INPUT_KEEP: [&str; 5] = [
     "subagent_type",
 ];
 
-// slopty: no agent visuals.
+/// Bounds on an agent's inline visual ([`AgentEvent::Visual`]): a Luau
+/// script Slopty runs in a sandbox and renders natively.
+pub const VISUAL_MAX_BYTES: usize = 256 * 1024;
+pub const VISUAL_MAX_TITLE_CHARS: usize = 200;
+/// Files a visual may ship with (models, textures, environment maps).
+pub const VISUAL_MAX_ASSETS: usize = 16;
+pub const VISUAL_MAX_ASSET_BYTES: usize = 8 * 1024 * 1024;
+pub const VISUAL_MAX_TOTAL_ASSET_BYTES: usize = 10 * 1024 * 1024;
+
+// slopty: no engine WebSocket frame to fit; the script rides the agent's own tool call.
+
+/// Whether `name` can name a visual's asset: a plain file name.
+pub fn valid_visual_asset_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && !name.starts_with('.')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+}
 
 /// Where one checklist item stands. Claude's TodoWrite, OpenCode and ACP plans
 /// distinguish the item being worked on from those still waiting; Codex and
@@ -615,6 +634,63 @@ pub struct UserInputQuestion {
     /// The change an edit's approval would make.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proposed: Option<ToolDiff>,
+    // slopty: what the dock draws a request's card by (`docs/decisions/ui.md`).
+    /// What each of `options` says under it, by the same index; empty for one that says
+    /// nothing, and no entries at all when none says anything.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub option_descriptions: Vec<String>,
+    /// The request's kind, as the thread names it: `approval`, `plan`, `question`,
+    /// `elicitation`, `retry`, `dialog:<kind>`, or one Slopty does not know (a generic card).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub kind: String,
+    /// A form's JSON Schema, for an elicitation: its answer is a JSON object of it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_json: Option<String>,
+    /// An address to open, for an elicitation that asks the person to go somewhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// Who asks, when a chat an agent started under this one does: "Sent by reviewer". Its
+    /// answer, sent on this chat, goes to that chat's request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sent_by: Option<String>,
+    /// The rule the agent suggests for allowing its like from now on, for "Allow with rule".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule: Option<RuleOffer>,
+    /// When the agent stops waiting and answers no by itself, in ms since the epoch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until_ms: Option<i64>,
+    /// Why the agent asks, in its own words, when it says: the rule, the hook or the check that
+    /// wanted the person's word.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// What each of `options` would look like, by the same index (markdown or code), shown in a
+    /// pane beside the options; empty when none has one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub option_previews: Vec<String>,
+    /// Which of `options` allows the call once, where the agent takes the person's words with an
+    /// allow ("Allow, and say what's next…"): its answer's labels are that option's and the
+    /// words.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_option: Option<usize>,
+    /// Only the person at this card answers it, never a note's button, an API call or another
+    /// agent (Claude Code's `requires_user_interaction`): the card says "Needs you at the card".
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub needs_presence: bool,
+}
+
+// slopty: "Allow with rule" (`slopty.AllowWithRule`).
+/// A rule an approval offers to allow its like from now on.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuleOffer {
+    /// The index in `options` of the choice that allows it always.
+    pub option: usize,
+    /// The rule, in the agent's words (`Bash(cargo test:*)`).
+    pub rule: String,
+    /// The scope it goes to unless the person picks another (a `RuleScope` id: `local`,
+    /// `project`, `user`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -660,7 +736,17 @@ pub enum AgentEvent {
         name: String,
         mime_type: String,
     },
-    // slopty: no agent visuals.
+    /// An agent-authored visual shown inline in the reply: a Luau script
+    /// that builds native UI (`slopty-visual`). The engine emits it when the
+    /// agent calls Slopty's `show_visual` MCP tool; `path` is the stored
+    /// script on the host device.
+    // slopty: the view model emits it from the thread's `show_visual` call; `path` names the
+    // script in that thread (`slopty_ui::view_model::transcript::visual_path`).
+    Visual {
+        id: String,
+        path: String,
+        title: String,
+    },
     ReasoningDelta {
         text: String,
     },

@@ -87,9 +87,11 @@ fn request(id: &str) -> Request {
         proposed: None,
         schema_json: None,
         url: None,
+        reason: None,
         state: RequestState::Open,
         opened_ms: WallMs::ZERO,
         until_ms: None,
+        needs_presence: false,
     }
 }
 
@@ -394,7 +396,7 @@ fn one_answer_answers_every_question() {
         header: None,
         options: labels
             .iter()
-            .map(|l| Offered { label: (*l).to_owned(), description: None })
+            .map(|l| Offered { label: (*l).to_owned(), description: None, preview: None })
             .collect(),
         multi_select,
     };
@@ -564,4 +566,104 @@ fn a_content_ref_names_a_blob() {
     assert_eq!(blob.blob_id(), Some(id));
     assert_eq!(ContentRef("r1#2".to_owned()).blob_id(), None, "a transcript's part");
     assert_eq!(ContentRef("blob:".to_owned()).blob_id(), None, "no id");
+}
+
+fn note(key: &str, text: &str) -> AgentNote {
+    AgentNote {
+        key: key.to_owned(),
+        text: text.to_owned(),
+        priority: "low".to_owned(),
+        color: None,
+        at_ms: WallMs::ZERO,
+        until_ms: None,
+    }
+}
+
+/// A notification takes the place of one of its key, and only the newest are kept.
+#[test]
+fn notifications_keep_one_per_key_and_the_newest() {
+    let mut actions = vec![Action::Notified(note("mcp", "1 MCP server failed"))];
+    actions.push(Action::Notified(note("mcp", "2 MCP servers failed")));
+    for n in 0..AgentNote::KEPT {
+        actions.push(Action::Notified(note(&format!("k{n}"), "x")));
+    }
+    let state = run(&actions);
+    assert_eq!(state.notes.len(), AgentNote::KEPT);
+    assert!(state.notes.iter().all(|n| n.key != "mcp"), "the oldest went: {:?}", state.notes);
+    let state = run(&[
+        Action::Notified(note("mcp", "1 MCP server failed")),
+        Action::Notified(note("ctx", "Context low")),
+        Action::Notified(note("mcp", "2 MCP servers failed")),
+    ]);
+    let words: Vec<&str> = state.notes.iter().map(|n| n.text.as_str()).collect();
+    assert_eq!(words, ["Context low", "2 MCP servers failed"]);
+}
+
+/// A call's note lands only on a call the state holds, goes with it, and travels with the
+/// window and the page it is in; a task's output lands on that task alone.
+#[test]
+fn call_notes_follow_their_calls() {
+    let said = CallNote { said: Some("exit code 2".to_owned()), ..CallNote::default() };
+    let noted = |id: &str| Action::CallNoted { item: ItemId(id.to_owned()), note: said.clone() };
+    let mut state = run(&[
+        Action::TurnStarted(turn(1)),
+        Action::ItemStarted(tool("t1", ToolState::Completed)),
+        noted("t1"),
+        noted("nowhere"),
+        Action::TasksSet(vec![BackgroundTask::new(
+            "b1",
+            BackgroundTask::SHELL,
+            "dev",
+            WallMs::ZERO,
+        )]),
+        Action::TaskOutput { task: "b1".to_owned(), output: Clipped::whole("ready") },
+        Action::TaskOutput { task: "b9".to_owned(), output: Clipped::whole("nobody") },
+    ]);
+    assert_eq!(state.calls.keys().map(|k| k.0.as_str()).collect::<Vec<_>>(), ["t1"]);
+    assert_eq!(
+        state.tasks.first().and_then(|t| t.output.as_ref()).map(|o| o.text.as_str()),
+        Some("ready")
+    );
+    let page = state.page(TurnId(2), 5);
+    assert_eq!(page.calls.len(), 1, "the page carries its calls' notes");
+    let mut fresh = ThreadState::new(meta());
+    fresh.prepend(&page);
+    assert_eq!(fresh.calls.get(&ItemId("t1".to_owned())), Some(&said));
+    state.apply(&Action::ItemRemoved { item: ItemId("t1".to_owned()) });
+    assert!(state.calls.is_empty(), "{:?}", state.calls);
+}
+
+/// A surface is set in place by its id and goes by it.
+#[test]
+fn surfaces_replace_by_id_and_go() {
+    let surface = |id: &str, text: &str| Surface {
+        id: id.to_owned(),
+        kind: Surface::STATUS.to_owned(),
+        plugin: "p".to_owned(),
+        title: None,
+        text: Some(text.to_owned()),
+        tree: String::new(),
+        until_ms: None,
+    };
+    let state = run(&[
+        Action::SurfaceSet(surface("a", "one")),
+        Action::SurfaceSet(surface("b", "two")),
+        Action::SurfaceSet(surface("a", "three")),
+        Action::SurfaceGone { id: "b".to_owned() },
+    ]);
+    assert_eq!(state.surfaces, [surface("a", "three")]);
+}
+
+/// A dialog's kind is read from its request's kind; an item's asset names its item and name,
+/// and nothing else reads as one.
+#[test]
+fn dialogs_and_item_assets_read_back() {
+    let mut dialog = request("d1");
+    dialog.kind = format!("{}goal_proposal", Request::DIALOG);
+    assert_eq!(dialog.dialog_kind(), Some("goal_proposal"));
+    assert_eq!(request("r").dialog_kind(), None);
+    let asset = ContentRef::item_asset("toolu_1", "models/a.glb");
+    assert_eq!(asset.item_asset_of(), Some(("toolu_1", "models/a.glb")));
+    assert_eq!(ContentRef("item-asset:toolu_1".to_owned()).item_asset_of(), None);
+    assert_eq!(ContentRef::blob("abc").item_asset_of(), None);
 }

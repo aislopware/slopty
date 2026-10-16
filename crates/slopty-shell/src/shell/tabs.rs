@@ -542,8 +542,8 @@ impl Shell {
                                 )
                                 .role(gpui::Role::Button)
                                 .aria_label(files_panel_label)
-                                // slopty: no running-subagents mark; they are rows under
-                                // their agent in the sidebar, not in this panel.
+                                // slopty: no running-subagents mark; a subagent lives in its
+                                // parent's chat, not in this panel.
                                 .when(self.files_panel_open(cx) && fit.files, |button| {
                                     button.bg(crate::theme::wash(0.09))
                                 }),

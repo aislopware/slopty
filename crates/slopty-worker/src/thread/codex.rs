@@ -66,6 +66,7 @@ use std::time::Duration;
 use futures_util::{SinkExt as _, StreamExt as _};
 use serde_json::Value;
 use slopty_agent::attach::Attached;
+use slopty_agent::codex::apps;
 use slopty_agent::codex::daemon::{self, Daemon};
 use slopty_agent::codex::protocol::{self as p, Method, RequestId, ServerNotification};
 use slopty_agent::codex::rpc::{self, Incoming};
@@ -77,6 +78,7 @@ use slopty_proto::thread::{
     Action, AgentId, Answerer, AskId, Delivery, Drive, Fork, IntentId, ItemBody, Link, Pending,
     PendingState, Phase, ThreadId, ThreadState, TurnId, TurnState,
 };
+use slopty_proto::visual::{AppAnswer, AppAsk};
 use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -240,6 +242,12 @@ enum Ask {
         thread: ThreadId,
         setting: Setting,
     },
+    /// What a page shown in the thread asks of its MCP App.
+    App {
+        thread: ThreadId,
+        ask: AppAsk,
+        reply: oneshot::Sender<AppAnswer>,
+    },
 }
 
 impl Ask {
@@ -256,6 +264,7 @@ impl Ask {
             | Self::Fork { thread, .. }
             | Self::Review { thread, .. }
             | Self::Set { thread, .. }
+            | Self::App { thread, .. }
             | Self::Wake { thread } => Some(*thread),
             // A thread let go is not taken up again to be closed.
             Self::Start { .. } | Self::Sessions { .. } | Self::Close { .. } => None,
@@ -400,6 +409,16 @@ impl Codex {
             return Err("Codex threads are not served here".to_owned());
         }
         listed.await.unwrap_or_else(|_| Err("the Codex threads stopped".to_owned()))
+    }
+
+    /// What a page shown in `thread` asks of its MCP App, through Codex's own
+    /// `mcpServer/resource/read` and `mcpServer/tool/call`.
+    pub async fn app(&self, thread: ThreadId, ask: AppAsk) -> AppAnswer {
+        let (reply, answer) = oneshot::channel();
+        if self.0.send(Ask::App { thread, ask, reply }).is_err() {
+            return AppAnswer::Refused("Codex threads are not served here".to_owned());
+        }
+        answer.await.unwrap_or_else(|_| AppAnswer::Refused("the Codex threads stopped".to_owned()))
     }
 
     /// Take back the message `intent` queued in `thread`.
@@ -729,6 +748,9 @@ pub fn spawn(
                         Some(Ask::Sessions { reply, .. }) => {
                             let _gone = reply.send(Err(NOT_RUNNING.to_owned()));
                         }
+                        Some(Ask::App { reply, .. }) => {
+                            let _gone = reply.send(AppAnswer::Refused(NOT_RUNNING.to_owned()));
+                        }
                         Some(_) => {}
                         None => return,
                     },
@@ -818,6 +840,15 @@ enum Waiting {
     /// The threads of a folder, for whoever asked.
     List {
         reply: oneshot::Sender<Result<Vec<PastSession>, String>>,
+    },
+    /// A page's read of its app's resource `uri`, for whoever asked.
+    AppRead {
+        uri: String,
+        reply: oneshot::Sender<AppAnswer>,
+    },
+    /// A page's call of its app's tool, for whoever asked.
+    AppCall {
+        reply: oneshot::Sender<AppAnswer>,
     },
     /// Codex thread `native`, let go.
     Unsubscribe {
@@ -1012,10 +1043,7 @@ impl Session {
         hear: &mut mpsc::UnboundedReceiver<Said>,
     ) -> Ended {
         let init = p::InitializeParams {
-            capabilities: Some(p::InitializeCapabilities {
-                experimental_api: Some(true),
-                ..p::InitializeCapabilities::default()
-            }),
+            capabilities: Some(apps::capabilities()),
             client_info: p::ClientInfo {
                 name: CLIENT.to_owned(),
                 title: Some("Slopty".to_owned()),
@@ -1403,6 +1431,23 @@ impl Session {
             }
             (Waiting::List { reply }, Err(e)) => {
                 let _gone = reply.send(Err(format!("Codex did not list its threads: {e}")));
+            }
+            (Waiting::AppRead { uri, reply }, Ok(result)) => {
+                let answer = match rpc::response::<p::McpResourceReadParams>(result) {
+                    Ok(said) => apps::read(&uri, &said),
+                    Err(e) => AppAnswer::Refused(format!("Codex's answer did not read: {e}")),
+                };
+                let _gone = reply.send(answer);
+            }
+            (Waiting::AppCall { reply }, Ok(result)) => {
+                let answer = match rpc::response::<p::McpServerToolCallParams>(result) {
+                    Ok(said) => apps::called(said),
+                    Err(e) => AppAnswer::Refused(format!("Codex's answer did not read: {e}")),
+                };
+                let _gone = reply.send(answer);
+            }
+            (Waiting::AppRead { reply, .. } | Waiting::AppCall { reply }, Err(e)) => {
+                let _gone = reply.send(AppAnswer::Refused(format!("Codex said: {e}")));
             }
             (Waiting::Unsubscribe { native }, Ok(_)) => {
                 tracing::debug!(%native, "a rested Codex thread is let go");
@@ -2030,6 +2075,26 @@ impl Session {
             Ask::Sessions { cwd, limit, reply } => {
                 let params = slopty_agent::codex::shared::list(&cwd, limit);
                 self.request(&params, Waiting::List { reply }).await
+            }
+            Ask::App { thread, ask, reply } => {
+                let Some(native) = self.native.get(&thread).cloned() else {
+                    let why = "Codex does not hold this thread".to_owned();
+                    let _gone = reply.send(AppAnswer::Refused(why));
+                    return Ok(());
+                };
+                match apps::request(&native, ask) {
+                    Ok(apps::Request::Read(params)) => {
+                        let uri = params.uri.clone();
+                        self.request(&params, Waiting::AppRead { uri, reply }).await
+                    }
+                    Ok(apps::Request::Call(params)) => {
+                        self.request(&params, Waiting::AppCall { reply }).await
+                    }
+                    Err(why) => {
+                        let _gone = reply.send(AppAnswer::Refused(why));
+                        Ok(())
+                    }
+                }
             }
             Ask::Start { id, start, seated, reply } => {
                 if let Some(first) = self.host.started(id) {

@@ -198,7 +198,7 @@ impl Composer {
     /// ↑ on the composer's first line, ↓ on its last: walk the chat's earlier prompts while the
     /// composer is empty or still shows one. Whether it took the key.
     pub(super) fn walk_history(&mut self, older: bool, cx: &mut Context<Self>) -> bool {
-        if self.wizard.is_some()
+        if self.wizard_open()
             || self.editing_queued.is_some()
             || self.mention.token.is_some()
             || self.slash.token.is_some()
@@ -234,7 +234,7 @@ impl Composer {
     /// canvas are no draft.
     pub(super) fn schedule_draft_save(&mut self, cx: &mut Context<Self>) {
         let chat = self.current_key.clone();
-        if chat.is_empty() || self.wizard.is_some() || self.editing_queued.is_some() {
+        if chat.is_empty() || self.wizard_open() || self.editing_queued.is_some() {
             return;
         }
         // A chat no machine holds yet (an unsaved side chat) keeps its draft here.

@@ -120,7 +120,7 @@ pub fn clue(call: &ToolCall) -> Option<Clue> {
     let input = serde_json::from_str::<Value>(&call.input.text).ok();
     let output = call.output.as_ref().map_or("", |o| o.text.as_str());
     match &call.detail {
-        Some(ToolDetail::Mcp(McpDetail { server, tool })) => {
+        Some(ToolDetail::Mcp(McpDetail { server, tool, .. })) => {
             mcp_clue(server, tool, input.as_ref(), output)
         }
         Some(ToolDetail::Exec(ExecDetail { command, .. })) => exec_clue(&command.text),

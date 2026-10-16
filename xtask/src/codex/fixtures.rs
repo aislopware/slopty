@@ -15,6 +15,12 @@
 //! answers them as Slopty's Codex adapter does, and the canned model answers once the answers come
 //! back as the tool's output.
 //!
+//! A third (`media.jsonl`) has one client declare itself an MCP Apps host and run a turn in
+//! which the canned model calls an app's tool on the stand-in MCP Apps server
+//! (`slopty-stub-mcp-apps`) and views a picture in the folder; the client then reads
+//! the app's page and calls its app-only tool through Codex (`mcpServer/resource/read`,
+//! `mcpServer/tool/call`), as a page shown in Slopty does.
+//!
 //! Every frame either client sent or heard is kept in the order the recorder saw it, one JSON
 //! line each (`{"client", "dir", "msg"}`), scrubbed: the scratch paths become `/work`,
 //! `/codex-home` and `/home/user`, every UUID a stable placeholder numbered in order of
@@ -22,6 +28,7 @@
 //! model, never a person's conversation.
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::io::{BufReader, Write as _};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -60,6 +67,18 @@ const PLAN: &str = "Plan a notes file.";
 const ASK_CALL: &str = "call-q";
 /// What the canned model answers once the answers came back.
 const PLANNED: &str = "Split it is.";
+/// What the person asks for in the media turn.
+const MEDIA: &str = "Show the echo app, then look at dot.png.";
+/// The canned model's calls in it: the app's tool, the picture viewed.
+const ECHO_CALL: &str = "call-echo";
+const VIEW_CALL: &str = "call-view";
+/// The picture viewed: a 1 × 1 PNG.
+const DOT: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+/// What the canned model answers once the picture is made.
+const SHOWN: &str = "Shown.";
+/// The stand-in MCP Apps server's name in the config, and its page.
+const APPS: &str = "apps";
+const APP_PAGE: &str = "ui://apps/echo";
 /// How long the recorder waits on any one step before it gives up.
 const PATIENCE: Duration = Duration::from_secs(60);
 /// How long the recorder listens for what a client is not sent, before saying it was not.
@@ -74,10 +93,11 @@ struct Scratch {
 }
 
 impl Scratch {
-    fn fresh() -> Result<Self> {
+    fn fresh(suffix: &str) -> Result<Self> {
         // Outside the repository: Codex reads the `AGENTS.md` files and the git state above
         // its working directory, and a fixture must hold neither.
-        let root = std::env::temp_dir().join(format!("slopty-codex-fixtures-{}", super::VERSION));
+        let root =
+            std::env::temp_dir().join(format!("slopty-codex-fixtures-{}{suffix}", super::VERSION));
         if root.exists() {
             std::fs::remove_dir_all(&root)?;
         }
@@ -106,22 +126,36 @@ impl Scratch {
 
 pub fn record() -> Result<()> {
     let codex = super::official()?;
-    let scratch = Scratch::fresh()?;
-    let api = CannedApi::start(&scratch.root.join("api.jsonl"), &scratch.work)?;
-    write_config(&scratch.codex_home, api.port)?;
-    let mut server = AppServer::start(&codex, &scratch)?;
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    // The approval and the question with no MCP server, as a person's Codex has none.
+    let plain = Scratch::fresh("")?;
+    let api = CannedApi::start(&plain.root.join("api.jsonl"), &plain.work)?;
+    write_config(&plain.codex_home, api.port, None)?;
+    let mut server = AppServer::start(&codex, &plain)?;
     let recorded = runtime.block_on(async {
-        let approval = approval(&scratch).await?;
-        let question = question(&scratch).await?;
-        anyhow::Ok([("approval.jsonl", approval), ("question.jsonl", question)])
+        let approval = approval(&plain).await?;
+        let question = question(&plain).await?;
+        anyhow::Ok(vec![("approval.jsonl", approval, &plain), ("question.jsonl", question, &plain)])
     });
     server.stop();
-    let recorded = recorded?;
+    let mut recorded = recorded?;
+    // The media turn on an app-server of its own, with the stand-in MCP Apps server.
+    let shown = Scratch::fresh("-media")?;
+    let api = CannedApi::start(&shown.root.join("api.jsonl"), &shown.work)?;
+    let apps = (stub_mcp_apps()?, shown.root.join("mcp.jsonl"));
+    write_config(&shown.codex_home, api.port, Some((&apps.0, &apps.1)))?;
+    std::fs::write(shown.work.join("dot.png"), data_encoding::BASE64.decode(DOT.as_bytes())?)?;
+    let mut server = AppServer::start(&codex, &shown)?;
+    let media = runtime.block_on(media(&shown));
+    server.stop();
+    recorded.push(("media.jsonl", media?, &shown));
     let dir = repo_root()?.join(FIXTURES).into_std_path_buf();
     std::fs::create_dir_all(&dir)?;
-    println!("the run's API requests and app-server log are in {}", scratch.root.display());
-    for (name, lines) in recorded {
+    for (name, lines, scratch) in recorded {
+        println!(
+            "{name}: the run's API requests and app-server log are in {}",
+            scratch.root.display()
+        );
         let paths = vec![
             (host()?, "host"),
             (scratch.work.display().to_string(), "/work"),
@@ -143,20 +177,26 @@ pub fn record() -> Result<()> {
     Ok(())
 }
 
+/// The stand-in MCP Apps server, built from this checkout.
+fn stub_mcp_apps() -> Result<PathBuf> {
+    let sh = xshell::Shell::new()?;
+    sh.change_dir(repo_root()?);
+    xshell::cmd!(sh, "cargo build -p slopty-testkit --bin slopty-stub-mcp-apps").run()?;
+    Ok(crate::tools::target_dir(&sh)?.join("debug/slopty-stub-mcp-apps").into_std_path_buf())
+}
+
 /// The scratch `CODEX_HOME`'s config: the canned model as a custom provider, a read-only
-/// sandbox, and an approval policy that asks before a command leaves it.
-fn write_config(codex_home: &Path, port: u16) -> Result<()> {
-    let config = format!(
+/// sandbox, and an approval policy that asks before a command leaves it; with `apps`, the
+/// stand-in MCP Apps server as `apps`, its tools approved, logging what it is sent to its log,
+/// and MCP Apps' UI on.
+fn write_config(codex_home: &Path, port: u16, apps: Option<(&Path, &Path)>) -> Result<()> {
+    let mut config = format!(
         r#"model = "mock-model"
 approval_policy = "on-request"
 sandbox_mode = "read-only"
 model_provider = "mock_provider"
 check_for_update_on_startup = false
-
-# Nothing is fetched from the network: no plugin marketplace, no connectors.
-[features]
-plugins = false
-apps = false
+suppress_unstable_features_warning = true
 
 [model_providers.mock_provider]
 name = "Canned Responses API"
@@ -167,6 +207,22 @@ stream_max_retries = 0
 supports_websockets = false
 "#
     );
+    // Nothing is fetched from the network: no plugin marketplace, no connectors.
+    config.push_str("\n[features]\nplugins = false\napps = false\n");
+    if let Some((apps, log)) = apps {
+        write!(
+            config,
+            r#"enable_mcp_apps = true
+
+[mcp_servers.{APPS}]
+command = "{apps}"
+args = ["--log", "{log}"]
+default_tools_approval_mode = "approve"
+"#,
+            apps = apps.display(),
+            log = log.display(),
+        )?;
+    }
     std::fs::write(codex_home.join("config.toml"), config)?;
     Ok(())
 }
@@ -263,6 +319,16 @@ fn answer(body: &Value, work: &Path) -> Result<Vec<Value>> {
     let ran = last.and_then(|item| item.get("type")) == Some(&json!("function_call_output"));
     let answered = ran && last.and_then(|item| item.get("call_id")) == Some(&json!(ASK_CALL));
     let asked = last.is_some_and(|item| item.to_string().contains(PROMPT));
+    let output_of =
+        |call: &str| ran && last.and_then(|item| item.get("call_id")) == Some(&json!(call));
+    let media = last.is_some_and(|item| item.to_string().contains(MEDIA));
+    let offered: Vec<String> = body
+        .get("tools")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|tool| tool.get("name").and_then(Value::as_str).map(str::to_owned))
+        .collect();
     let planning = last.is_some_and(|item| item.to_string().contains(PLAN));
     let created = json!({ "type": "response.created", "response": { "id": "resp-1" } });
     let completed = json!({
@@ -287,7 +353,49 @@ fn answer(body: &Value, work: &Path) -> Result<Vec<Value>> {
             "content": [{ "type": "output_text", "text": text }],
         })
     };
-    let item = if answered {
+    let call = |id: &str, name: &str, arguments: Value| json!({ "type": "function_call", "call_id": id, "name": name, "arguments": arguments.to_string() });
+    let viewed = output_of(VIEW_CALL)
+        || (output_of(ECHO_CALL) && !offered.iter().any(|t| t == "view_image"));
+    // Codex offers no image generation to a model it does not know, so the turn ends here.
+    if viewed {
+        let said = json!({ "type": "response.output_item.done", "item": say("msg-5", SHOWN) });
+        return Ok(vec![created, said, completed]);
+    }
+    let item = if output_of(ECHO_CALL) {
+        call(VIEW_CALL, "view_image", json!({ "path": work.join("dot.png") }))
+    } else if media {
+        // Codex offers an MCP server's tools in a namespace of its own, `mcp__<server>`.
+        let namespace = body
+            .get("tools")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .find(|tool| {
+                tool.get("tools").and_then(Value::as_array).is_some_and(|nested| {
+                    nested.iter().any(|t| t.get("name") == Some(&json!("echo")))
+                })
+            })
+            .and_then(|tool| tool.get("name").and_then(Value::as_str));
+        let Some(namespace) = namespace else {
+            bail!("the request offers no echo tool: {offered:?}");
+        };
+        // An app-only tool (`visibility: ["app"]`) is the page's alone: a Codex that offers it
+        // to the model is not recorded (docs/decisions/agents.md, MCP Apps).
+        let app_only =
+            body.get("tools").and_then(Value::as_array).into_iter().flatten().any(|tool| {
+                tool.get("tools").and_then(Value::as_array).is_some_and(|nested| {
+                    nested.iter().any(|t| t.get("name") == Some(&json!("refresh")))
+                }) || tool.get("name") == Some(&json!("refresh"))
+            });
+        if app_only {
+            bail!("Codex offered the model the app-only tool `refresh`: {offered:?}");
+        }
+        let mut echo = call(ECHO_CALL, "echo", json!({ "text": "hi" }));
+        if let Some(fields) = echo.as_object_mut() {
+            fields.insert("namespace".to_owned(), json!(namespace));
+        }
+        echo
+    } else if answered {
         say("msg-3", PLANNED)
     } else if ran {
         say("msg-2", ANSWER)
@@ -397,6 +505,45 @@ async fn question(scratch: &Scratch) -> Result<Vec<Value>> {
     pair.a.close(None).await?;
     pair.b.close(None).await?;
     // Only the client that asked is kept: the second one only listened.
+    pair.lines.retain(|line| line.get("client") == Some(&json!("a")));
+    Ok(pair.lines)
+}
+
+/// One client, an MCP Apps host, in a turn that shows an app and views a picture;
+/// then the page's read of its UI and its call of the app-only tool, through Codex.
+async fn media(scratch: &Scratch) -> Result<Vec<Value>> {
+    let socket = scratch.socket();
+    listening(&socket).await?;
+    let mut pair = Pair::connect(&socket).await?;
+    let host = json!({
+        "experimentalApi": true,
+        "extensions": { "io.modelcontextprotocol/ui": { "mimeTypes": ["text/html;profile=mcp-app"] } },
+    });
+    let params =
+        json!({ "clientInfo": { "name": "slopty", "version": "1.0.0" }, "capabilities": host });
+    let id = pair.request(Who::A, "initialize", params).await?;
+    pair.answer(Who::A, id).await?;
+    pair.send(Who::A, json!({ "method": "initialized" })).await?;
+    let start = json!({ "cwd": scratch.work, "approvalPolicy": "never", "sandbox": "read-only" });
+    let id = pair.request(Who::A, "thread/start", start).await?;
+    let started = pair.answer(Who::A, id).await?;
+    let thread = started.pointer("/result/thread/id").and_then(Value::as_str);
+    let thread = thread.context("thread/start named no thread")?.to_owned();
+    let input = json!([{ "type": "text", "text": MEDIA, "text_elements": [] }]);
+    let id =
+        pair.request(Who::A, "turn/start", json!({ "threadId": thread, "input": input })).await?;
+    pair.answer(Who::A, id).await?;
+    let done = |msg: &Value| msg.get("method") == Some(&json!("turn/completed"));
+    pair.until("the media turn's end", |_, msg| done(msg)).await?;
+    let read = json!({ "server": APPS, "uri": APP_PAGE, "threadId": thread });
+    let id = pair.request(Who::A, "mcpServer/resource/read", read).await?;
+    pair.answer(Who::A, id).await?;
+    let call = json!({ "server": APPS, "threadId": thread, "tool": "refresh", "arguments": {} });
+    let id = pair.request(Who::A, "mcpServer/tool/call", call).await?;
+    pair.answer(Who::A, id).await?;
+    pair.settle(QUIET).await?;
+    pair.a.close(None).await?;
+    pair.b.close(None).await?;
     pair.lines.retain(|line| line.get("client") == Some(&json!("a")));
     Ok(pair.lines)
 }

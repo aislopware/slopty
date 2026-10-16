@@ -22,6 +22,7 @@ use slopty_proto::thread::{
     AgentId, Answerer, Cap, ContentRef, Cursor, Delivery, Drive, IntentId, Liveness, Phase,
     ThreadId, ThreadState, TreeRef, TurnId,
 };
+use slopty_proto::visual::{AppAnswer, AppAsk};
 use slopty_worker::manager::Worker;
 use slopty_worker::orchestrate::{self, Failure};
 use slopty_worker::repo::worktrees;
@@ -267,6 +268,7 @@ enum Command {
     Page { before: TurnId, turns: u32 },
     Expand { content: ContentRef },
     Review { scope: ReviewScope },
+    App { id: u64, ask: AppAsk },
 }
 
 impl Following {
@@ -330,11 +332,14 @@ impl Following {
             ThreadRequest::Review { thread, scope } => {
                 self.command(at, thread, Command::Review { scope });
             }
+            ThreadRequest::App { thread, id, ask } => {
+                self.command(at, thread, Command::App { id, ask });
+            }
             // Git takes its time: a keep or a revert is answered from a task of its own.
             ThreadRequest::Intent {
                 id,
                 thread,
-                intent: intent @ (Intent::Keep(_) | Intent::Revert(_)),
+                intent: intent @ (Intent::Keep(_) | Intent::Revert(_) | Intent::Unrewind { .. }),
             } => {
                 let (snapshots, out) = (threads.snapshots, at.out.clone());
                 at.tasks.spawn(async move {
@@ -342,6 +347,26 @@ impl Following {
                         let _gone =
                             out.send(WorkerMsg::IntentDone(IntentDone { id, outcome })).await;
                     }
+                });
+            }
+            // The folder is taken first, so the rewind can be undone: on a task of its own.
+            ThreadRequest::Intent { id, thread, intent: intent @ Intent::Rewind { turn } } => {
+                let (client, out) = (at.client, at.out.clone());
+                at.tasks.spawn(async move {
+                    let before = match threads.host.outcome(thread, id) {
+                        Some(_) => None,
+                        None => threads.snapshots.before_rewind(thread).await,
+                    };
+                    let outcome = act_as(client, &threads, thread, id, &intent);
+                    if let (Outcome::Done, Some(tree)) = (&outcome, before) {
+                        let at_ms = slopty_core::WallMs::now();
+                        let rewound = slopty_proto::thread::Rewound { turn, tree, at_ms };
+                        threads.host.apply(
+                            thread,
+                            vec![slopty_proto::thread::Action::Rewound(Some(rewound))],
+                        );
+                    }
+                    let _gone = out.send(WorkerMsg::IntentDone(IntentDone { id, outcome })).await;
                 });
             }
             // An agent's own review names the change as commits first: on a task of its own.
@@ -807,6 +832,9 @@ fn decide(
     if intent.needs().is_some_and(|needs| !state.meta.can(needs)) {
         return (intent.unsupported(), Vec::new());
     }
+    if let Some(refusal) = unattended(client, state, intent) {
+        return (refusal, Vec::new());
+    }
     let by = answerer(client);
     let outcome = if codex::is_shared(state) {
         shared(client, &threads.codex, state, id, intent)
@@ -820,6 +848,18 @@ fn decide(
         refused(format!("{} threads are not driven here", state.meta.agent.0))
     };
     (outcome, Vec::new())
+}
+
+/// The refusal of an answer to a request only the person at its card may answer
+/// ([`slopty_proto::thread::Request::needs_presence`]) when it comes from no client: from
+/// orchestration's verbs, a notification's action, a page or a schedule, none with the person
+/// at the card. A client's answer is its card's, the person's own click or key.
+fn unattended(client: ClientId, state: &ThreadState, intent: &Intent) -> Option<Outcome> {
+    let Intent::Answer { ask, .. } = intent else { return None };
+    let present = client != ClientId::nil();
+    let needs = state.requests.iter().any(|r| r.id == *ask && r.is_open() && r.needs_presence);
+    (needs && !present)
+        .then(|| refused(slopty_proto::thread::Request::NEEDS_PRESENCE_REFUSED.to_owned()))
 }
 
 /// What comes of `intent` on a Codex thread: it goes to the app-server as the Codex TUI's own
@@ -1078,6 +1118,16 @@ async fn stream(
                     let body = threads.expand(thread, content.clone()).await;
                     ThreadFrame::Expanded { content, body }
                 }
+                // A page's ask waits on the agent: on a task of its own, so the thread's frames
+                // go on meanwhile.
+                Some(Command::App { id, ask }) => {
+                    let (asked, done) = (threads.clone(), slow_tx.clone());
+                    tokio::spawn(async move {
+                        let answer = asked.app(thread, ask).await;
+                        let _gone = done.send(ThreadFrame::App { id, answer });
+                    });
+                    continue;
+                }
                 // A review runs git for a while: on a task of its own, so the thread's frames
                 // go on meanwhile.
                 Some(Command::Review { scope }) => {
@@ -1117,10 +1167,33 @@ impl Threads {
     /// The whole of `content`, clipped in `thread`, from the adapter that made it.
     async fn expand(&self, thread: ThreadId, content: ContentRef) -> Expanded {
         match self.host.state(thread) {
+            // A visual's or a page's file, by its item and name, whichever agent showed it.
+            Some((state, _)) if content.item_asset_of().is_some() => {
+                slopty_worker::thread::assets::read(&state, &content).await
+            }
             Some((state, _)) if claude::is_claude(&state) => {
                 self.claude.expand(thread, content).await
             }
-            _ => Expanded::Gone,
+            // Every other agent's pictures are kept by the worker (`slopty_agent::media`).
+            Some(_) => slopty_agent::media::read(&content).map_or(Expanded::Gone, Expanded::Bytes),
+            None => Expanded::Gone,
+        }
+    }
+
+    /// What a page shown in `thread` asks of its MCP App, through the agent that holds the
+    /// connection: Codex's `mcpServer/resource/read` and `mcpServer/tool/call`, Claude Code's
+    /// `mcp_read_resource` and `mcp_call`. An agent with no such door refuses.
+    async fn app(&self, thread: ThreadId, ask: AppAsk) -> AppAnswer {
+        if let AppAsk::Read { uri, .. } = &ask
+            && !slopty_proto::visual::is_ui_uri(uri)
+        {
+            return AppAnswer::Refused(format!("{uri} is no app's page (ui://)"));
+        }
+        match self.host.state(thread) {
+            Some((state, _)) if codex::is_shared(&state) => self.codex.app(thread, ask).await,
+            Some((state, _)) if claude::is_claude(&state) => self.claude.app(thread, ask).await,
+            Some(_) => AppAnswer::Refused("this agent has no door to its MCP servers".to_owned()),
+            None => AppAnswer::Refused("the thread is gone".to_owned()),
         }
     }
 }
@@ -1257,6 +1330,52 @@ mod tests {
     /// A thread of no agent's in particular, as a test starts it.
     fn a_thread() -> ThreadState {
         slopty_agent::claude::history::replay(&[])
+    }
+
+    /// A thread asking `ask`, which only the person at its card answers when `present`.
+    fn asking(ask: &str, present: bool) -> ThreadState {
+        let mut state = a_thread();
+        state.requests.push(slopty_proto::thread::Request {
+            id: slopty_proto::thread::AskId(ask.to_owned()),
+            item: None,
+            kind: slopty_proto::thread::Request::APPROVAL.to_owned(),
+            title: "Run rm -rf build?".to_owned(),
+            text: None,
+            options: Vec::new(),
+            questions: Vec::new(),
+            proposed: None,
+            schema_json: None,
+            url: None,
+            reason: None,
+            state: slopty_proto::thread::RequestState::Open,
+            opened_ms: slopty_core::WallMs::ZERO,
+            until_ms: None,
+            needs_presence: present,
+        });
+        state
+    }
+
+    /// An answer from no client, orchestration's verbs (the CLI, an agent's tool, a note's
+    /// verdict through the server), is refused for a request only the person at its card
+    /// answers; a client's, the card's own, goes on to its agent, as does any answer to a
+    /// request that needs no one at its card.
+    #[test]
+    fn only_the_card_answers_a_request_that_needs_the_person_at_it() {
+        let answer = |ask: &str| Intent::Answer {
+            ask: slopty_proto::thread::AskId(ask.to_owned()),
+            choice: "allow".to_owned(),
+            message: None,
+        };
+        let present = asking("a", true);
+        assert_eq!(
+            unattended(ClientId::nil(), &present, &answer("a")),
+            Some(refused(slopty_proto::thread::Request::NEEDS_PRESENCE_REFUSED.to_owned())),
+            "an answer from orchestration"
+        );
+        assert_eq!(unattended(ClientId::new(), &present, &answer("a")), None, "the card's own");
+        assert_eq!(unattended(ClientId::nil(), &present, &answer("b")), None, "another request");
+        assert_eq!(unattended(ClientId::nil(), &asking("a", false), &answer("a")), None);
+        assert_eq!(unattended(ClientId::nil(), &present, &Intent::Interrupt), None);
     }
 
     /// Only a live driven thread's turn ends with the daemon: Claude Code goes on in ptyd's

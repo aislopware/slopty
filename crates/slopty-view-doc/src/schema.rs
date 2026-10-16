@@ -124,6 +124,13 @@ struct DocPartJson {
     /// One-line live tail of the subagent's output (additive).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     subagent_tail: Option<String>,
+    // slopty: a call's facts, and the whole of a task, page or note part.
+    /// A tool's facts (additive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    facts: Option<serde_json::Value>,
+    /// The body of a `task`, `page` or `note` part (additive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    body: Option<serde_json::Value>,
 }
 
 /// App parts → doc part json (mirror of `toDocParts`).
@@ -143,7 +150,14 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             mime_type: Some(mime_type.clone()),
             ..Default::default()
         },
-        // slopty: no agent visuals.
+        // The script path and title ride `path` and `name`.
+        MessagePart::Visual { id, path, title } => DocPartJson {
+            id: id.clone(),
+            kind: "visual".into(),
+            path: Some(path.clone()),
+            name: Some(title.clone()),
+            ..Default::default()
+        },
         MessagePart::Text { id, text } => DocPartJson {
             id: id.clone(),
             kind: "text".into(),
@@ -170,6 +184,7 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             subagent_ref,
             subagent_status,
             subagent_tail,
+            facts,
         } => DocPartJson {
             id: id.clone(),
             kind: "tool".into(),
@@ -193,6 +208,7 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
                 .to_owned()
             }),
             subagent_tail: subagent_tail.clone(),
+            facts: facts.as_ref().map(serde_json::to_value).transpose()?,
             ..Default::default()
         },
         MessagePart::Input {
@@ -221,6 +237,25 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             text: Some(text.clone()),
             ..Default::default()
         },
+        // slopty: a task's notice, a page, a quiet note ride whole in `body`.
+        MessagePart::Task { id, task } => DocPartJson {
+            id: id.clone(),
+            kind: "task".into(),
+            body: Some(serde_json::to_value(task)?),
+            ..Default::default()
+        },
+        MessagePart::Page { id, card } => DocPartJson {
+            id: id.clone(),
+            kind: "page".into(),
+            body: Some(serde_json::to_value(card)?),
+            ..Default::default()
+        },
+        MessagePart::Note { id, note } => DocPartJson {
+            id: id.clone(),
+            kind: "note".into(),
+            body: Some(serde_json::to_value(note)?),
+            ..Default::default()
+        },
         MessagePart::Fork {
             id,
             source_chat_id,
@@ -239,7 +274,19 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
 fn from_doc_part(p: DocPartJson) -> MessagePart {
     match p.kind.as_str() {
         "image" => image_part(p.id, p.path, p.name, p.mime_type),
-        // slopty: no agent visuals.
+        "visual" => match p.path.filter(|path| !path.is_empty()) {
+            Some(path) => MessagePart::Visual {
+                id: p.id,
+                path,
+                title: p.name.unwrap_or_default(),
+            },
+            None => MessagePart::Error {
+                id: p.id,
+                message: "Visual unavailable".into(),
+                detail: None, // slopty: one error grammar.
+                retry: false,
+            },
+        },
         "tool" => match p.call.and_then(|c| serde_json::from_value(c).ok()) {
             Some(call) => MessagePart::Tool {
                 id: p.id,
@@ -260,6 +307,7 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
                     _ => None,
                 }),
                 subagent_tail: p.subagent_tail,
+                facts: p.facts.and_then(|f| serde_json::from_value(f).ok()),
             },
             None => MessagePart::Text {
                 id: p.id,
@@ -289,6 +337,19 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
         "reasoning" => MessagePart::Reasoning {
             id: p.id,
             text: p.reasoning.unwrap_or_default(),
+        },
+        // slopty: a task's notice, a page, a quiet note.
+        "task" => match p.body.and_then(|b| serde_json::from_value(b).ok()) {
+            Some(task) => MessagePart::Task { id: p.id, task },
+            None => MessagePart::Text { id: p.id, text: String::new() },
+        },
+        "page" => match p.body.and_then(|b| serde_json::from_value(b).ok()) {
+            Some(card) => MessagePart::Page { id: p.id, card },
+            None => MessagePart::Text { id: p.id, text: String::new() },
+        },
+        "note" => match p.body.and_then(|b| serde_json::from_value(b).ok()) {
+            Some(note) => MessagePart::Note { id: p.id, note },
+            None => MessagePart::Text { id: p.id, text: String::new() },
         },
         "fork" => MessagePart::Fork {
             id: p.id,
@@ -494,6 +555,7 @@ fn salvage_part(part: &serde_json::Value, entry_id: &str, ix: usize) -> Option<M
             subagent_ref: None,
             subagent_status: None,
             subagent_tail: None,
+            facts: None,
         });
     }
     if let Some(message) = obj.get("message").and_then(|x| x.as_str()) {

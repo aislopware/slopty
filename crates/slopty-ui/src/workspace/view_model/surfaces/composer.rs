@@ -166,6 +166,9 @@ pub(super) fn model_options(options: &[slopty_proto::thread::OptionOffer]) -> Ve
 /// `Start::mode`, never sent as an option.
 pub(in crate::workspace) const MODE_OPTION: &str = "mode";
 
+/// The option the model chip reads ultracode by: `on` while Claude Code applies it.
+pub(in crate::workspace) const ULTRACODE_OPTION: &str = "ultracode";
+
 /// An agent's `modes` as the picker's option, on `default` (the mode a start that asks for
 /// none begins in) where it is one of them, else the first; none where it offers no modes.
 fn mode_option(modes: &[slopty_proto::thread::Mode], default: Option<&str>) -> Option<ModelOption> {
@@ -565,6 +568,20 @@ impl WorkspaceView {
                 if let Some(mode) = row.meters.mode.clone().filter(|m| !m.trim().is_empty()) {
                     options.insert(MODE_OPTION.to_owned(), serde_json::Value::String(mode));
                 }
+                // slopty: Claude Code's fast mode and ultracode as they stand (fast mode may be
+                // cooling down after its limit), which the model chip shows.
+                for (fact, option) in [
+                    (slopty_agent::claude::driven::FAST_FACT, slopty_agent::claude::FAST),
+                    (slopty_agent::claude::driven::ULTRACODE_FACT, ULTRACODE_OPTION),
+                    (
+                        slopty_agent::claude::driven::THINKING_FACT,
+                        slopty_agent::claude::driven::THINKING,
+                    ),
+                ] {
+                    if let Some(value) = row.facts.get(fact) {
+                        options.insert(option.to_owned(), serde_json::Value::String(value.clone()));
+                    }
+                }
                 options
             },
             sandbox: SandboxLevel::WorkspaceWrite,
@@ -838,6 +855,14 @@ impl WorkspaceView {
             let offset = params.get("offset").and_then(serde_json::Value::as_u64).unwrap_or(0);
             let offset = usize::try_from(offset).unwrap_or(usize::MAX);
             return self.view_image_chunk(path, offset, cx);
+        }
+        // So is a visual a call of a thread's showed: its script and its files.
+        if let Some(path) =
+            param(params, "path").filter(|path| path.starts_with(transcript::VISUAL_SCHEME))
+        {
+            let offset = params.get("offset").and_then(serde_json::Value::as_u64).unwrap_or(0);
+            let offset = usize::try_from(offset).unwrap_or(usize::MAX);
+            return self.view_visual_chunk(path, offset, cx);
         }
         let (Some(key), Some(path)) = (self.composer_worker(params), param(params, "path")) else {
             return Task::ready(Err(RpcError::BadParams("a machine and path".to_owned())));

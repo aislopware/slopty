@@ -40,8 +40,8 @@ use slopty_proto::thread::detail::{
 };
 use slopty_proto::thread::{
     self, Action, AgentId, Answerer, AskId, Cap, Changed, Clipped, Compaction, Drive, Effect,
-    Effort, IntentId, Item, ItemBody, ItemId, Liveness, Meters, Model, Notice, PartKey, Pending,
-    Phase, Request as Ask, RequestState, Retry, Status, ThreadId, ThreadMeta, ThreadState,
+    Effort, Image, IntentId, Item, ItemBody, ItemId, Liveness, Meters, Model, Notice, PartKey,
+    Pending, Phase, Request as Ask, RequestState, Retry, Status, ThreadId, ThreadMeta, ThreadState,
     ToolCall, ToolDetail, ToolState, Turn, TurnId, TurnState, UserMessage, Wait, kind,
 };
 
@@ -892,9 +892,13 @@ impl Driven {
                     self.meta.title = title_of(&text);
                     actions.push(Action::Meta(Box::new(self.meta.clone())));
                 }
+                let images = match content {
+                    rpc::UserContent::Blocks(blocks) => pictures(blocks),
+                    rpc::UserContent::Text(_) => Vec::new(),
+                };
                 let body = ItemBody::User(UserMessage {
                     text: Clipped::head(&text, PROSE, None),
-                    images: Vec::new(),
+                    images,
                     command: None,
                     intent,
                 });
@@ -933,7 +937,23 @@ impl Driven {
                             actions.extend(self.call_input(id, name, arguments, now));
                             continue;
                         }
-                        Content::Image { .. } | Content::Other => continue,
+                        // The model's own picture: a row of its own, with its pictures.
+                        Content::Image { .. } => {
+                            let call = ToolCall {
+                                name: "image".to_owned(),
+                                kind: kind::OTHER.to_owned(),
+                                title: "Image".to_owned(),
+                                input: Clipped::whole(""),
+                                state: ToolState::Completed,
+                                output: None,
+                                images: pictures(std::slice::from_ref(block)),
+                                detail: None,
+                                child: None,
+                                ended_ms: Some(now),
+                            };
+                            tool(call)
+                        }
+                        Content::Other => continue,
                     };
                     let item = Item { id: block_id(number, index), turn, at_ms: now, body };
                     actions.push(Action::ItemCompleted(item));
@@ -1019,9 +1039,11 @@ impl Driven {
             proposed: None,
             schema_json: None,
             url: None,
+            reason: None,
             state: RequestState::Open,
             opened_ms: now,
             until_ms: until,
+            needs_presence: false,
         };
         vec![Action::RequestOpened(Box::new(request)), self.status(now)]
     }
@@ -1055,9 +1077,11 @@ impl Driven {
             proposed: None,
             schema_json: None,
             url: None,
+            reason: None,
             state: RequestState::Open,
             opened_ms: now,
             until_ms: None,
+            needs_presence: false,
         };
         let mut actions = vec![Action::RequestOpened(Box::new(request))];
         actions.extend(self.call_state(&gate.call, ToolState::Pending { ask }, None, now));
@@ -1120,10 +1144,16 @@ impl Driven {
     fn call_output(&mut self, id: &str, output: &ToolOutput, now: WallMs) -> Vec<Action> {
         let Some((turn, call)) = self.calls.get_mut(id) else { return Vec::new() };
         let text = rpc::text_of(&output.content);
-        if text.is_empty() {
+        let images = pictures(&output.content);
+        if text.is_empty() && images.is_empty() {
             return Vec::new();
         }
-        call.output = Some(Clipped::tail(&text, OUTPUT, None));
+        if !text.is_empty() {
+            call.output = Some(Clipped::tail(&text, OUTPUT, None));
+        }
+        if !images.is_empty() {
+            call.images = images;
+        }
         let item =
             Item { id: ItemId(id.to_owned()), turn: *turn, at_ms: now, body: tool(call.clone()) };
         vec![Action::ItemUpdated(item)]
@@ -1150,6 +1180,13 @@ impl Driven {
         actions.extend(self.withdraw(|open| open.call() == Some(id)));
         let text = rpc::text_of(&result.content);
         let output = (!text.is_empty()).then(|| Clipped::tail(&text, OUTPUT, None));
+        // The pictures a tool returned (a `read` of an image, an extension's screenshot).
+        let images = pictures(&result.content);
+        if let Some((_, call)) = self.calls.get_mut(id)
+            && !images.is_empty()
+        {
+            call.images = images;
+        }
         match self.calls.get_mut(id).and_then(|(_, call)| call.detail.as_mut()) {
             Some(ToolDetail::Exec(exec)) => {
                 exec.exit_code = result
@@ -1260,6 +1297,17 @@ fn ask_title(ask: &GateAsk) -> String {
     format!("{}?", call.title)
 }
 
+/// The pictures among `blocks`, kept ([`crate::media`]).
+fn pictures(blocks: &[Content]) -> Vec<Image> {
+    blocks
+        .iter()
+        .filter_map(|block| match block {
+            Content::Image { data, mime_type } => crate::media::keep_base64(data, Some(mime_type)),
+            _ => None,
+        })
+        .collect()
+}
+
 /// A call of pi's tool `name` with `arguments`, typed for the built-in tools.
 fn tool_call(name: &str, arguments: &Value, state: ToolState) -> ToolCall {
     let text = |key: &str| arguments.get(key).and_then(Value::as_str).map(str::to_owned);
@@ -1278,6 +1326,8 @@ fn tool_call(name: &str, arguments: &Value, state: ToolState) -> ToolCall {
                 exit_code: None,
                 stderr: None,
                 duration_ms: None,
+                edits: None,
+                interpretation: None,
             };
             let title = if command.is_empty() {
                 "Run a command".to_owned()

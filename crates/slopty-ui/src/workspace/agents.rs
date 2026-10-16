@@ -227,6 +227,7 @@ mod tests {
             options: Vec::new(),
             buttons: Vec::new(),
             opened_ms: WallMs::ZERO,
+            needs_presence: false,
         };
         ThreadStand { asks: Some(card), ..at(Phase::NeedsYou, wait) }
     }

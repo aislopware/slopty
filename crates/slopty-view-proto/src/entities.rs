@@ -254,12 +254,14 @@ pub struct Chat {
     pub room_gen: Option<u32>,
     /// The chat this one hangs off: the conversation a side chat was forked
     /// from, or the chat whose agent spawned this one through the Slopty MCP
-    /// server. Children stay out of the main sidebar and list under their
-    /// parent instead. Absent for top-level chats; a dangling id (parent
-    /// deleted) is tolerated rather than cascaded.
+    /// server. Children stay out of the main sidebar: a subagent lives in its
+    /// parent's chat, a side chat in the explorer. Absent for top-level chats;
+    /// a dangling id (parent deleted) is tolerated rather than cascaded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_chat_id: Option<String>,
-    // slopty: a subagent lists under its agent in the sidebar; a side chat in the explorer.
+    // slopty: a subagent lives in its parent's chat (its inline card, the Background tray, a
+    // drill-in; `docs/decisions/ui.md`, "Subagents live in their parent's chat"); a side chat in
+    // the explorer.
     /// A subagent its parent's agent started, not a side chat the person opened.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub subagent: bool,

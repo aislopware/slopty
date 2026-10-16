@@ -845,6 +845,10 @@ pub struct Pickers {
     /// [`ModelRowsKey`]: a 7k-model catalog rebuilt+ranked on every
     /// keystroke, arrow press AND render was the picker's open/scroll lag.
     model_rows_cache: std::cell::RefCell<Option<(ModelRowsKey, std::sync::Arc<Vec<ModelRowData>>)>>,
+    // slopty: the chat's permission mode has its own chip in the footer under the composer
+    // (`composer/footer.rs`); the pill's own chip then stands down.
+    /// The footer shows the chat's mode.
+    pub(crate) mode_in_footer: bool,
     /// Bumped on every catalog/favorites mutation; invalidates the cache.
     catalog_rev: u64,
     /// Hover/drag state of the floating menu scrollbar. One instance serves
@@ -1094,6 +1098,7 @@ impl Pickers {
             active: 0,
             model_scroll: gpui::UniformListScrollHandle::new(),
             model_rows_cache: std::cell::RefCell::new(None),
+            mode_in_footer: false,
             catalog_rev: 0,
             menu_bar: popover::MenuScrollbarState::default(),
             menu_scroll: gpui::ScrollHandle::new(),
@@ -6469,6 +6474,20 @@ impl Render for Pickers {
                     .and_then(|e| e.labels.get(e.selected).cloned())
                     .map(|label| (label, None))
             });
+        // slopty: what the agent says its model runs with beyond the picks: ultracode on (the
+        // TUI's prompt-border mark) after the effort, and fast mode cooling down after its limit.
+        let running = self.resolved(cx).model_options;
+        let said = |option: &str| running.get(option).and_then(|v| v.as_str()).map(str::to_owned);
+        let ultracode = self.title.is_none() && said("ultracode").as_deref() == Some("on");
+        let cooling = self.title.is_none() && said("fast").as_deref() == Some("cooldown");
+        let chip_suffix = if ultracode {
+            Some(match chip_suffix {
+                Some((effort, tint)) => (SharedString::from(format!("{effort} · Ultracode")), tint),
+                None => (SharedString::from("Ultracode"), None),
+            })
+        } else {
+            chip_suffix
+        };
         let fast = self.selected_model(cx).is_some_and(|model| {
             model.options.iter().any(|option| {
                 fast_mode_values(option).is_some_and(|(on, _)| {
@@ -6486,7 +6505,7 @@ impl Render for Pickers {
             &model_label,
             chip_suffix.as_ref().map(|(text, _)| text),
             chip_label_loading,
-            fast,
+            fast || cooling, // slopty: a cooling bolt takes the same room.
             cx,
         );
         let model_chip = self
@@ -6510,6 +6529,21 @@ impl Render for Pickers {
                             .text_color(theme.accent),
                     ),
                 ))
+            })
+            // slopty: fast mode cooling down after its limit: the bolt rests, faint, and says so.
+            .when(cooling && !fast, |chip| {
+                chip.child(
+                    div()
+                        .id("composer-fast-cooling")
+                        .role(gpui::Role::Image)
+                        .aria_label("Fast mode cooling down")
+                        .flex_none()
+                        .child(
+                            crate::icons::icon(crate::icons::FAST_TIER_BOLD)
+                                .size(px(13.0))
+                                .text_color(theme.text_faint),
+                        ),
+                )
             });
         let model_chip = model_chip.w(px(chip_width));
         // Both presentations align to the chip's trailing edge beside Send.
@@ -6541,6 +6575,9 @@ impl Pickers {
     /// The chosen mode as a chip that opens the model menu at its Mode choices; `None` where the
     /// model offers no modes.
     fn mode_chip(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.mode_in_footer {
+            return None;
+        }
         let label = self.mode_label(cx)?;
         let id: SharedString = format!("picker-mode-{}", cx.entity_id()).into();
         Some(

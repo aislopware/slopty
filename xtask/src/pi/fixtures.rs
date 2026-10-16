@@ -13,7 +13,11 @@
 //! 3. a prompt whose command is denied, with the person's reason;
 //! 4. a prompt whose command is interrupted while the gate waits;
 //!
-//! then the session's entries and stats. Every record each way is kept in the order the recorder
+//! then the session's entries and stats, into `gate.jsonl`. A second process, in a session of its
+//! own with the canned model taking pictures, records `media.jsonl`: a prompt with a picture
+//! beside its words, and the model's `read` of a picture in the folder, whose result is it.
+//!
+//! Every record each way is kept in the order the recorder
 //! saw it, one JSON line each (`{"dir": "in" | "out", "msg"}`, `in` being what went to pi), then
 //! scrubbed: the scratch paths become `/work`, `/pi-agent`, `/home/user` and `/scratch`, the
 //! canned model's address `http://canned`, every
@@ -52,6 +56,12 @@ const AGAIN: &str = "Remove it again.";
 const REASON: &str = "Keep the file.";
 /// The session's id, as the worker gives pi the id of the intent that started the thread.
 const SESSION: &str = "5e55105e-0000-4000-8000-000000000001";
+/// The media session's.
+const MEDIA_SESSION: &str = "5e55105e-0000-4000-8000-000000000002";
+/// What the person asks in it, with a picture.
+const LOOK: &str = "Look at dot.png.";
+/// The picture looked at, and sent with the prompt: a 1 × 1 PNG.
+const DOT: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
 /// How long the recorder waits on any one step before it gives up.
 const PATIENCE: Duration = Duration::from_secs(60);
 
@@ -92,7 +102,7 @@ pub fn record() -> Result<()> {
     let pi = super::official()?;
     let scratch = Scratch::fresh()?;
     let api = CannedApi::start(&scratch.root.join("api.jsonl"))?;
-    write_models(&scratch.agent, api.port)?;
+    write_models(&scratch.agent, api.port, false)?;
     let gate = scratch.root.join("gate.ts");
     std::fs::copy(repo_root()?.join(GATE), &gate).context("copy the gate")?;
     let mut rpc = Rpc::start(&pi, &scratch, &gate, SESSION)?;
@@ -108,6 +118,15 @@ pub fn record() -> Result<()> {
     scripted?;
     finished?;
     ensure!(scratch.work.join("made-by-pi").is_file(), "the allowed command did not run");
+
+    // The media session: a model that takes pictures, a picture in the folder.
+    write_models(&scratch.agent, api.port, true)?;
+    std::fs::write(scratch.work.join("dot.png"), data_encoding::BASE64.decode(DOT.as_bytes())?)?;
+    let mut rpc = Rpc::start(&pi, &scratch, &gate, MEDIA_SESSION)?;
+    let looked = media(&mut rpc);
+    let (media_lines, finished) = rpc.finish();
+    looked?;
+    finished?;
     let paths = vec![
         (host()?, "host"),
         (format!("http://127.0.0.1:{}", api.port), "http://canned"),
@@ -120,20 +139,22 @@ pub fn record() -> Result<()> {
         (scratch.root.display().to_string(), "/scratch"),
     ];
     let mut scrub = Scrub::new(paths, &DATED);
-    let entries = entry_ids(&lines);
-    let mut out = String::new();
-    for line in lines {
-        let line = unraced(renamed(unprompted(line), &entries));
-        out.push_str(&serde_json::to_string(&scrub.value(line))?);
-        out.push('\n');
-    }
     let dir = repo_root()?.join(FIXTURES).into_std_path_buf();
     std::fs::create_dir_all(&dir)?;
-    let path = dir.join("gate.jsonl");
-    std::fs::write(&path, out).with_context(|| path.display().to_string())?;
+    for (name, lines) in [("gate.jsonl", lines), ("media.jsonl", media_lines)] {
+        let entries = entry_ids(&lines);
+        let mut out = String::new();
+        for line in lines {
+            let line = unraced(renamed(unprompted(line), &entries));
+            out.push_str(&serde_json::to_string(&scrub.value(line))?);
+            out.push('\n');
+        }
+        let path = dir.join(name);
+        std::fs::write(&path, out).with_context(|| path.display().to_string())?;
+        println!("wrote {} from pi {}", path.display(), super::VERSION);
+    }
     let recorded = json!({ "pi": super::VERSION });
     std::fs::write(dir.join("recorded.json"), format!("{}\n", serde_json::to_string(&recorded)?))?;
-    println!("wrote {} from pi {}", path.display(), super::VERSION);
     Ok(())
 }
 
@@ -163,6 +184,24 @@ fn script(rpc: &mut Rpc) -> Result<()> {
 
     rpc.command("entries", json!({ "type": "get_entries" }))?;
     rpc.command("stats", json!({ "type": "get_session_stats" }))?;
+    Ok(())
+}
+
+/// The media session: a picture sent with the words, and the model's `read` of one, allowed
+/// should the gate ask; then the session's entries.
+fn media(rpc: &mut Rpc) -> Result<()> {
+    rpc.command("state", json!({ "type": "get_state" }))?;
+    let picture = json!({ "type": "image", "data": DOT, "mimeType": "image/png" });
+    rpc.send(json!({ "id": "look", "type": "prompt", "message": LOOK, "images": [picture] }))?;
+    loop {
+        let msg = rpc.until(|msg| settled(msg) || is_gate(msg))?;
+        if settled(&msg) {
+            break;
+        }
+        let ask = asked(&msg)?;
+        rpc.send(json!({ "type": "extension_ui_response", "id": ask, "value": "allow" }))?;
+    }
+    rpc.command("entries", json!({ "type": "get_entries" }))?;
     Ok(())
 }
 
@@ -334,8 +373,10 @@ impl Drop for Rpc {
     }
 }
 
-/// The scratch `models.json`: the canned model as a provider of its own.
-fn write_models(agent: &Path, port: u16) -> Result<()> {
+/// The scratch `models.json`: the canned model as a provider of its own, taking pictures too
+/// when `pictures`.
+fn write_models(agent: &Path, port: u16, pictures: bool) -> Result<()> {
+    let input = if pictures { json!(["text", "image"]) } else { json!(["text"]) };
     let models = json!({ "providers": { PROVIDER: {
         "baseUrl": format!("http://127.0.0.1:{port}"),
         "api": "anthropic-messages",
@@ -344,7 +385,7 @@ fn write_models(agent: &Path, port: u16) -> Result<()> {
             "id": MODEL,
             "name": "Canned",
             "reasoning": true,
-            "input": ["text"],
+            "input": input,
             "contextWindow": 200_000,
             "maxTokens": 8192,
         }],
@@ -414,10 +455,16 @@ fn answer(body: &Value) -> (Vec<Block>, &'static str) {
     let results: Vec<&Value> = parts.iter().filter(|p| field(p, "type") == "tool_result").collect();
     let failed = results.iter().any(|r| field(r, "is_error") == true);
     let touch: &[&str] = &[r#"{"command""#, r#": "touch made-by-pi"}"#];
+    let read: &[&str] = &[r#"{"path""#, r#": "dot.png"}"#];
+    let read_back = results.iter().any(|r| r.to_string().contains("toolu_pi4"));
     let remove: &[&str] = &[r#"{"command""#, r#": "rm made-by-pi"}"#];
     if !tools {
         // pi's own side requests, if any.
         (vec![Block::Text(&["Fake", " title"])], "end_turn")
+    } else if read_back {
+        (vec![Block::Text(&["A ", "dot."])], "end_turn")
+    } else if text.contains(LOOK) {
+        (vec![Block::Tool { id: "toolu_pi4", name: "read", input: read }], "tool_use")
     } else if text.contains(STEER) {
         (vec![Block::Text(&["Made it", ", and done."])], "end_turn")
     } else if !results.is_empty() && failed {

@@ -12114,6 +12114,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   restarts (`UiSettings::files_chats_open`), closed at first. Tests: `slopty-shell`
   `shell::sidebar_subagents::tests`,
   `files::sections::tests::chats_section_starts_closed_and_says_its_toggles`.
+  (Superseded 2026-10-16 by **Subagents live in their parent's chat**.)
 - ✅ **A request of choices is one click (2026-10-15).** Every open request reached the shell as an
   agent's question, with a field to type in: Claude Code's "Trust this folder" read as
   AskUserQuestion, and typed words failed. A request that offers choices and asks no questions
@@ -12345,3 +12346,401 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   needs no stage of its own. Before the first frame the body is that same ground, so nothing
   changes colour when the picture arrives. Tests: `slopty-ui`
   `screen::tests::a_letterbox_is_the_pane_in_both_appearances`.
+- ✅ **Agent visuals adopted: zeron #900 is out of `[skip]` (2026-10-16).** An agent shows a
+  chart, table, dashboard, simulation or 3D view inline by calling `show_visual` with a Luau
+  script. The shell draws the script's `ui.*` tree with its own elements, type scale and theme,
+  as zeron does: a visual scrolls, clips, frosts under the composer, takes input like any row,
+  and runs on the iPhone and iPad unchanged, because their app is GPUI too. zeron tried HTML
+  first and chose native; HTML pages stay a separate surface (the page host).
+  - **Why the skip is lifted.** The skip's premise was that Slopty has no engine MCP server to
+    carry `show_visual`. Slopty hands every agent its own MCP server (`slopty mcp`), and the
+    call sits in the agent's own record with its whole input. So Slopty needs neither zeron's
+    `PublishVisual` upload nor a second store, and resume, other devices and replay come with
+    the record.
+  - **The path.** The worker decodes the call into `ToolDetail::Visual`. The view model emits
+    zeron's `visual` part after the call once it completed (a script that failed the check
+    leaves only the call). The shell reads the script with `ReadAttachmentChunk` at
+    `slopty-visual:{thread}/{item}-visual.luau`, answered from the thread: the call's input,
+    or its whole by `Expand` when the worker clipped it. The script's files (glTF, PNG, JPEG,
+    WebP, HDR) are read beside it, through the worker's `Expand` of
+    `ContentRef::item_asset(item, name)`, since `ReadFile` gives no bytes for a binary file.
+  - **What moved.** `xtask/zeron.toml` maps `crates/visual` to `crates/slopty-visual` (the
+    GPUI-free sandbox and its `check()`) and `crates/visual-gpu` to `crates/slopty-visual-gpu`.
+    `crates/ui/src/visuals.rs` lands in `crates/slopty-shell/src/visuals.rs`. The shell,
+    view-protocol and document hunks once cut as `// slopty: no agent visuals` are restored.
+    wgpu and naga are the workspace's, at the revision gpui-fast pins for `gpui_wgpu` (30), so
+    the graph holds one of each. Luau (mlua 0.12.2's vendored `luau0-src`) builds for
+    `aarch64-apple-ios` and `-ios-sim` at the project's deployment target and runs in the
+    simulator, with no patch.
+  - **Slopty's edits, marked `// slopty:`.** A visual's tabs are a tab list to assistive
+    technology, with the selected tab marked. A canvas or scene draw that fails (past its 60 ms
+    budget, or an error) at a tree generation is neither drawn again nor animated until the
+    tree renders anew. zeron's copy asked for the next animation frame before the draw, so a
+    runaway animated draw cost the main thread 60 ms on every frame. Now it costs one frame,
+    and later frames stay under 16 ms (`docs/MEASUREMENTS.md`).
+  - Tests: `slopty-shell` `visuals::tests::{a_tab_switches_the_series_the_chart_paints,
+    a_draw_past_its_budget_stops_and_costs_the_main_thread_one_frame}`; `slopty-visual-gpu`
+    `model::{a_model_renders_one_image_of_the_asked_size_in_software,
+    a_model_renders_on_the_gpu_when_there_is_one}`; `slopty-ui`
+    `view_model::tests::a_shown_visual_follows_its_call_by_a_path_of_its_own`; zeron's own
+    `slopty-visual` tests.
+
+- ✅ **Math typeset with RaTeX (2026-10-16).** Markdown reads `$…$` and `$$…$$` as math
+  (pulldown-cmark's `ENABLE_MATH`), as runs of their own that are never merged or autolinked.
+  Money, code and a formula still open while it streams stay text, and a streamed formula
+  settles equal to a full parse.
+  - **RaTeX renders the math.** It is pure Rust (KaTeX's layout and fonts), and
+    `slopty-math` turns TeX into a self-contained SVG with its glyphs as paths. Its size and
+    baseline are in pixels at the asked font size, in the asked colour, so the client draws
+    it as an image with no font of its own. A formula is at most 8 KiB, and a malformed one
+    says why, to be shown as its source.
+  - **What was not chosen.** MathJax and KaTeX need a JavaScript engine. A TeX distribution
+    is far too large for the phones. RaTeX has neither problem.
+  - Tests: `slopty-markdown`
+    `parser::math_tests::{tex_is_a_run_of_its_own, money_code_and_an_open_formula_stay_text,
+    a_streamed_formula_settles_as_a_full_parse}`; `slopty-math`
+    `{a_fraction_is_taller_than_a_letter_and_self_contained, a_malformed_formula_says_why,
+    typesetting_is_deterministic}`.
+
+- ✅ **The view model says the TUI's facts once, for every surface (2026-10-16).** What Claude
+  Code's TUI shows beyond a chip reaches the shell as view-doc shapes of Slopty's own
+  (`slopty-view-doc` `part_kinds`, `work`, `dock`, `rules`, `page_card`, `calls`). The view
+  model fills them from the thread (`slopty_ui::view_model::{facts, work}`). The shell draws
+  the words as they come, so a phone and a Mac say the same line.
+  - **A call's facts.** A tool part carries its line in the TUI's words, what came of it ("Read
+    120 lines", "Found 12 lines across 3 files", "exit code 2"), a timer while it runs, the tray
+    row of the task it became, whether it can go to the background, and a subagent's progress
+    on its spawn card. The agent's own words for how a call ended win over Slopty's.
+  - **Notices are rows of their own.** A background task's notice is a row linked to its tray
+    row and its call. A notice that is no failure (allowed, memory, fallback, goal) is a quiet
+    row. A request tried again counts down while it is the turn's last word, then reads as
+    recovered or given up. Any other notice keeps the one error grammar.
+  - **The tray.** It lists the thread's tasks beside the chats an agent started under it,
+    with the ids `task:{id}` and `chat:{chatId}` the shell reveals and stops them by. Rows
+    that need the person come first, then live rows by when they began, then the last 8 that
+    ended. A row's own work follows it. A shell task's noun is "command", the TUI's word, not
+    "shell". A monitor pulses, since each event wakes the agent. A dev server left running does
+    not. The header counts live, non-ambient work only.
+  - **Hidden tools.** `ToolSearch` and `ListAgents` show no chip, as in the TUI. They are
+    housekeeping, and a chip for each was noise.
+  - **The dock.** It holds the activity line, the goal, the agent's notes, its status line with
+    its ANSI colours, the mode chip and the context card. The mode chip is loud for bypass and
+    don't-ask modes and quiet for the default. The context card keeps the agent's categories
+    and the last turn's tokens. Those go here, not on each message, because a field per message
+    would have touched every transcript literal of zeron's.
+  - **Asked where the person looks.** A request from a chat an agent started is asked in its
+    parent's chat, its header naming the child, and the answer goes to the child's thread. Its
+    thread is held open only while it asks.
+  - **Acts through the agent's door.** Stopping a row, moving a call to the background, a `!`
+    command, rewinding, a rule and a mod's surface event are each an intent the worker answers.
+    A control the agent cannot do is not offered (`DockCan`), and one asked anyway says why it
+    failed. Rewinding to a message answers with its words for the composer and the branched
+    chat.
+  - Tests: `slopty-ui` `view_model::work::tests`, `view_model::facts::tests`,
+    `workspace::view_model::work::tests`; `slopty-view-doc` `work`, `dock`, `rules` and
+    `page_card` tests.
+
+- ✅ **A page never answers for the person (2026-10-16).** An inline page (an MCP App's view, a
+  `show_page`, an `.html` file) runs in each window's `PageHost`. Slopty-ui hosts it, and the
+  shell's card places it (`slopty_shell::live::serve_pages`). Everything it would do for the
+  person waits on them.
+  - **Words and context go to the draft.** What a page would say, and the context it offers
+    for the next turn, go into the chat's draft. They are visible there, and the person sends,
+    edits or drops them.
+  - **Tool calls need two acts.** A tool call needs the person's click in the page, then their
+    Allow on the card, every time. MCP Apps has no read-only annotation that Slopty could trust
+    to skip it.
+  - **Links, network and resources.** A link opens only from a click. The network an app
+    declares is reached only once the person grants it. A page reads only its own `ui://`
+    resources.
+  - **Through the agent.** Its document and files are read through its thread: a file's beside
+    its folder on the worker, an app's through the agent's own door (`ThreadRequest::App`).
+    Slopty never dials an MCP server.
+  - Tests: `slopty-ui` `workspace::view_model::pages::tests`.
+
+- ✅ **Subagents live in their parent's chat (2026-10-16).** The person directs the agent, and its
+  subagents are its work: rows under it in the sidebar and a right-pane tab put that work in two
+  places away from the conversation that asked for it (`.research/tui-presentation-2026-10-16.md`
+  §3). A subagent now lives where its spawn call sits.
+  - **The card.** The spawn call is a card in the transcript: its title, its kind and model, the
+    step it is on ("Reading parser.rs"), its figures and how long it has run, settling to its
+    outcome; an amber line when it needs the person. A click opens its run in place, a child
+    transcript of a bounded height (40% of the window, 160 to 480 points) that follows its end;
+    Escape folds it. The newest running card opens by itself while its turn runs, and folds when
+    it ends unless the person opened it. Hover offers Stop (the tray row's stop) and Open.
+  - **The drill-in.** Open, ⌘↩ on the card, or a card on a phone shows the subagent's run as the
+    session view, under a breadcrumb "parent › subagent" that leads back, as ⌘[ and Escape do. A
+    subagent of one of its parent's calls takes no messages, so a bar stands in the composer's
+    place: "Runs inside {parent} · Stop".
+  - **The tray.** Every subagent, finished or not, is a row of the chat's Background tray. A
+    background task's row in the transcript links to its tray row by id
+    (`slopty_shell::transcript::reveal_work`, `WorkReveal`), which the tray observes.
+  - **Deleted.** The sidebar's subagent rows, "N finished" folds, and the right pane's subagent
+    tab with its jump pill.
+  - Tests: `slopty-shell` `transcript::surface_tests::a_subagent_card_opens_in_place_and_drills_in`,
+    `transcript::surface_tests::work_rows_link_to_the_tray`,
+    `shell::navigation_tests::a_drilled_in_subagent_leads_back_to_its_parent`,
+    `transcript::subagents::tests`.
+
+- ✅ **A reply's images and formulas draw in the transcript (2026-10-16).** zeron leaves
+  `![alt](path)` and math as text in a reply.
+  - **Images.** A path resolves in the chat's folder, as T3 Code does: relative to it, or
+    absolute inside it. It is read through the chat's machine like a tool's pictures and kept
+    while its row is in the transcript. A path that leaves the folder is refused and never read.
+    A web address is not fetched (the transcript names it), since an agent's reply should not
+    make the app reach the network. Two or more images with only space between them make a
+    gallery of tiles; a call's pictures read as one gallery too. Each image is an a11y image
+    labelled with its alt text, its value saying "loading", "missing", "refused" or "remote".
+  - **Formulas.** A settled `$$…$$` is typeset by RaTeX (`slopty-math`, **Math typeset with
+    RaTeX**) and drawn at the text's size and colour, labelled with its TeX; one that does not
+    parse shows its source, the value "error" saying so. The streaming tail draws none, so a
+    half-written formula stays text. A `$…$` in a line keeps its source, set like inline code,
+    because GPUI's text runs carry no images. At most 512 formulas are kept typeset, beyond which a
+    new one shows its source, so GPUI's image cache stays bounded.
+  - **Mermaid through merman.** Diagrams move from `mermaid-rs-renderer` to merman 0.9, which
+    follows Mermaid 12 and is Zed's choice. Its labels are measured with the bundled Geist faces
+    that usvg sets them in, so a long label wraps inside its node (the case zed#65192 fixed).
+    HTML labels go through merman's resvg-safe pipeline as wrapped SVG text, and Slopty's
+    palette is Mermaid's `base` theme.
+  - Tests: `slopty-shell` `transcript::surface_tests::{markdown_images_say_how_they_stand,
+    display_formulas_typeset_once_settled}`, `transcript::md_images::tests`,
+    `markdown::math::tests`, `markdown::mermaid::tests::long_labels_stay_inside_their_nodes`.
+
+- ✅ **Rewinding starts from the person's message (2026-10-16).** A user message's hover strip
+  offers "Rewind…" when the chat's agent can go back (`DockCan`), dimmed while a turn runs. Its
+  menu takes back the code and the conversation, the conversation only or the code only, as
+  Claude Desktop offers. The message's words return to the composer as a draft, in the branched
+  chat when the conversation was branched. Nothing is sent for the person. Test: `slopty-shell`
+  `transcript::rewind::tests::the_menu_offers_what_the_agent_can_take_back`.
+
+- ✅ **A rewind can be undone, a page moved, saved or copied (2026-10-16).**
+  - **Undoing a rewind.** A rewind that branched the conversation answers with what undoes
+    it (`RewindUndo`). `slopty.UndoRewind` deletes the branch and shows the chat it came from,
+    which the rewind never changed. A rewind of the files alone offers no undo, because Claude
+    Code's checkpoints only go back.
+  - **Pages.** A page moves to the right pane and back with its web view and state kept
+    (`slopty.MovePage`). It saves to its chat's folder through the workspace's own write, named
+    by its title and call (`slopty.SavePage`). Its last picture copies as a PNG
+    (`slopty.CopyPageImage`).
+  - **A compaction's row.** A compaction is a quiet row whose summary opens under it.
+  - Tests: `slopty-ui` `workspace::view_model::work::tests::a_rewind_goes_back_to_before_the_message`,
+    `workspace::view_model::pages::tests`,
+    `view_model::tests::a_compaction_shows_while_it_runs_and_leaves_a_marker`.
+
+- ✅ **A stop leaves a quiet "Interrupted" row; a command keeps its mark (2026-10-16).**
+  - **Stops.** This supersedes the rule that a stop leaves no mark of its own. A turn the
+    person stopped ends on a quiet "Interrupted" row, as the TUI's does, so the person sees
+    where the turn ended. The TUI's prompt after it is left out, because the composer already
+    says what to do.
+  - **Command marks.** A person's row keeps what the TUI's keeps: a slash command reads
+    `/name args`, a skill run as one reads `Skill(name)`, and a shell command reads `! command`.
+    Words the shell sent stay as the person wrote them.
+  - Tests: `slopty-ui` `view_model::tests::{a_notice_reads_by_its_kind,
+    a_users_command_keeps_its_mark}`.
+
+- ✅ **The dock around the composer says what the TUI says, quietly (2026-10-16).** Everything
+  around the composer reads the chat's dock and work (`slopty.WatchDock`, `slopty.WatchWork`,
+  `slopty_view_doc::{dock, work}`). What needs the person stands out in amber; the rest is
+  faint.
+  - **The Background tray.** It sits over the composer, between the checklist and the queue, in
+    the queue's frosted anatomy. Its header says "Background · 1 needs you · 2 commands" and
+    folds it; ⌥B opens it and gives it the keyboard (↑/↓, ↩ opens, ⌘. stops, Escape goes back).
+    The main row comes first, then what needs the person, then every subagent, command,
+    monitor, workflow, MCP task, loop and wakeup in the agent's order. Each row gives its kind,
+    its step, its time and its tokens. Ended rows fold under "Finished". ✕ stops a row
+    (`slopty.StopWork`) and "Stop all" stops them all (`slopty.StopAllWork`). A row's click
+    scrolls the transcript to the call that started it and opens a subagent's card
+    (`background_tray::CallReveal`). A transcript row's link opens the tray at its row
+    (`WorkReveal`). The tray opens by itself while something needs the person, until the person
+    folds it.
+  - **The footer.** It always sits under the composer, right-aligned.
+    - The agent's status line, its ANSI and hex colours kept.
+    - Mods' status segments.
+    - "◎ /goal active (5h)": hover gives the condition and its progress, and the card offers
+      Clear goal (`slopty.ClearGoal`).
+    - The background counts: a click opens the tray.
+    - The permission mode: amber washed for bypass. A click lists the agent's modes with what
+      each means, and ⇧Tab cycles them (`slopty.SetMode`). The pill's own mode chip stands down
+      while the footer has the dock's mode.
+  - **The live line.** The transcript's working line, drawn from the dock (a hook in
+    `render_working_trailer`), gives the agent's own words: its summary, the hook it runs, or the
+    task in progress. Then come the elapsed time, "↓ N tokens", and the thinking words ("still
+    thinking", "thinking with high effort", "thought for 4s"), with "Next: {task}" under it. A
+    retry takes the line over in amber, "API error · Retrying in 5s · attempt 2/10", with the
+    status page to check under it.
+  - **A request's card, by its kind** (`composer/request_card.rs`). It is zeron's question
+    panel, with what the kind needs added to it:
+    - Each option says what it means under it.
+    - A request from a chat an agent started under this one says "Sent by {child}" and is
+      answered here, on this chat.
+    - The time left before the agent declines by itself counts down, amber in its last 30 s.
+    - Why the agent asks (the rule, hook or check behind it) is a quiet line under the
+      question, in the danger colour when the auto-mode classifier escalated it.
+    - An approval that offers a rule shows "Always allows `Bash(cargo test:*)`" with "Edit
+      rule…", where the rule (in mono) and its scope can be changed before "Allow with rule"
+      (`slopty.AllowWithRule`).
+    - A plan offers "Revise…", and an approval offers "Say what to do instead…": the person's
+      words go back as the deny's reason and the agent goes on planning.
+    - An MCP server's form is drawn from its schema: text, numbers, yes/no and choices. Its
+      limits (required, lengths, email, range) are checked and named in the TUI's words before
+      anything is sent. A form filled in elsewhere offers "Open {host}", then Done.
+    - A dialog of the agent's own (a goal proposal included) shows its payload's facts by name
+      beside the options the adapter gave it. A kind Slopty does not know still shows, and it
+      takes OK or Dismiss: it is never refused unseen.
+    - Escape folds any request to an amber strip over the composer, which it gives back.
+      "Answer" opens the request again with the words typed for it.
+  - **The quiet lines over the composer.** They say what the agent waits on once its turn has
+    ended, its passing notes (a note that wants attention also comes as a toast), the newest
+    log line of each mod, a mod's band (its element tree in the shell's own components, an
+    unknown node by its words), and the prompt the agent guesses comes next. Tab takes that
+    prompt and ✕ sets it aside. A mod's pane is a right-pane tab, added to its chat's pane and
+    never opened unasked.
+  - **`!` runs a command.** A draft that starts with `!` turns the composer to shell mode (mono,
+    a "Shell" chip). Its command runs on the chat's machine and its output goes to the agent
+    (`slopty.RunShell`), with a live chip while it runs.
+  - **The rest.**
+    - The context card breaks the window down by category, says how far auto-compaction is
+      and what the last turn cost, and offers "Compact now".
+    - `@` offers the session's agents after the files, inserting `@agent-{name}`.
+    - Messages a stop held say "Paused · N held since you stopped", with Resume and Clear all.
+    - A rewind that has an undo (a branch, or a folder to restore) offers "Undo rewind" as a
+      toast (`slopty.UndoRewind`); the worker's refusal is an error toast.
+    - Settings → Permissions lists an agent's rules for a folder on a machine by behaviour and
+      by where each comes from. It removes one and adds one to a scope the agent writes
+      (`slopty.WatchRules`, `slopty.ChangeRule`).
+  - **Failures.** A call that fails takes back what the composer showed at once (a row's
+    "stopping", a mode switched ahead) and says why in the failure chip.
+  - **TUI rows left out, and why.** Key hints and chords (the GUI has the buttons). Spinner
+    flavour colours and the stall tint (the dock carries no stall time). The prompt-box border
+    marks (`ultracode`, fast mode, which belong to the model picker). Usage-credit consent and
+    API spend (Slopty never touches a credential or a payment). "No goal set" (no segment says
+    it).
+  - Tests: `slopty-shell` `composer::dock_tests` (tray, reveal, footer, question,
+    form, dialog, revise, `@` agents, suggestion, `!`, queue pause, mod band),
+    `composer::request_card::tests`, `composer::activity::tests`, `composer::footer::tests`,
+    `background_tray::tests`, `settings::permissions::tests`.
+
+- ✅ **A command's edits, a hook's word, why an agent asks, and a code rewind undone (2026-10-16).**
+  Supersedes "A rewind of the files alone offers no undo" above: the worker now takes the
+  folder before a rewind.
+  - **A command's edits.** The files a command changed (Claude Code's `bashEditDiff`) are drawn
+    with the parts the transcript already has for an edit. Each file is an edit's chip after
+    the command's, or a write's for a new file, with its counts and its diff by its own ref
+    (`{chat}/{call}:edit:{n}.diff`). The shell needs no code of its own for them. What the agent
+    says of the rest (more files, a diff it could not take, a git step that moved the tree,
+    another command at the same time) is one quiet `edits` row.
+  - **A hook's word.** It is a row in the turn, as the TUI keeps it. What a hook printed reads
+    quiet; a hook that failed, blocked a call or stopped the turn warns.
+  - **Why an agent asks.** A request's question carries the agent's reason in its own words
+    (`UserInputQuestion.reason`): the rule, the hook or the check that wanted the person.
+  - **A code rewind undone.** A rewind of the files answers with the folder the worker took
+    before it (`RewindUndo.tree`). `slopty.UndoRewind` puts that folder back
+    (`Intent::Unrewind`) and deletes a branch when there was one. Only the last rewind undoes,
+    since the worker refuses an older tree. A rewind whose folder the worker could not take
+    still has no undo.
+  - Tests: `slopty-ui` `view_model::tests::a_commands_edits_are_chips_under_it`,
+    `view_model::tests::an_approval_says_why_it_asks`,
+    `view_model::facts::tests::a_hook_says_its_word_in_the_turn`,
+    `workspace::view_model::work::tests::a_rewind_goes_back_to_before_the_message`,
+    `workspace::view_model::work::tests::a_code_rewind_undoes_by_its_folder`.
+
+- ✅ **A page's card carries its own actions; charts, PDFs and tables draw; math sits on the
+  line (2026-10-16).** Builds on "A page never answers for the person" and "A rewind can be
+  undone, a page moved, saved or copied" above.
+  - **The card's actions.** The header shows them on hover, in the code block's icon chrome
+    (22 pt, hover wash, tooltip, a check for 1.5 s once done). Each is a button node with its
+    name:
+    - a web page: Copy image, Save, Open in pane, Expand;
+    - a chart fence: Copy image, Copy source, Open in pane, Expand;
+    - a PDF: Copy image (its first page) and Open in pane;
+    - a table: Copy table (tab-separated, as a spreadsheet pastes it) and Open in pane.
+  - **Open in pane.** It moves the same web view into a right-pane tab (`RightSurface::Page`),
+    laid out to fill it, its document and state kept: the page's `performance.timeOrigin` stays
+    and the host counts one load. The card keeps one quiet line, "Shown in the pane", with
+    Bring back. Closing the tab brings the page back too. A tab of a page is not kept across
+    launches, since its web view is not.
+  - **Chart fences.** A ```` ```vega-lite ````, ```` ```vega ```` or ```` ```plotly ```` fence
+    holding a chart's JSON is a page card of its own: `slopty-fence:{row}-chart-{n}`. Its page
+    loads Vega 6.4, Vega-Lite 6.5 and vega-embed 7.3, or plotly.js 4.1 (cartesian), from the
+    page's own origin under `.slopty/lib/`. The app vendors them byte for byte, so a chart draws
+    offline and reaches no CDN. Any page may load them the same way.
+    - The page's policy has no `'unsafe-eval'`, so Vega evaluates expressions with
+      vega-interpreter, not `Function`.
+    - A chart draws in the shell's theme: its surface, text and hairlines, and the six chart
+      colours of `show_visual`, given to every page as MCP Apps' CSS variables.
+    - JSON that does not read says so on the card; any other fence stays code.
+    - Why not native: Vega-Lite and Plotly are what agents write. Re-implementing their
+      grammars in the shell would draw a subset; `show_visual` stays the native path.
+  - **PDFs and tables.** A PDF the agent shows (`show_page` with a `.pdf` file) is drawn by
+    PDFKit in the app, off the UI thread, each page at the width it shows on a 2× display.
+    - The card fits its first page whole within the inline cap, an image node "page 1 of N".
+      The pane shows every page, each drawn as it scrolls into view.
+    - A `.csv` or `.tsv` file is read as RFC 4180 says and shown in the markdown table's
+      chrome: a table node, a row node per record and a cell per field. The card shows 12
+      records and names the rest, and the pane shows them all (at most 10,000).
+    - Why native, not a web view: a PDF in WebKit brings its own toolbar and scroll, a seam in
+      the transcript. A table in a web view could not take the markdown table's type and
+      hairlines.
+  - **A file page follows its file.** The view model asks each worker to watch the files its
+    pages show (`ClientMsg::WatchFiles`, the whole set). A change the worker sends unasked
+    reloads the page once its burst ends: 100 ms after the last change, or 400 ms after the
+    first at the latest. A thousand writes reload it once, within 500 ms. A web page loads
+    afresh, its last picture standing until the new one draws; a PDF keeps its pictures until
+    each page is drawn again.
+  - **Inline math is typeset (supersedes "set like inline code" in "Math typeset with
+    RaTeX").** A `$…$` formula is typeset in text style at the body's size. It is drawn in
+    place of its TeX through gpui-fast's inline boxes (`StyledText::with_inline_boxes`,
+    aislopware/gpui-fast#35):
+    - the line shows one box as wide as the formula, its baseline on the line's;
+    - the line keeps its height;
+    - the TeX stays the text, so selecting and copying give the TeX;
+    - a math node labelled with the TeX reads it to assistive technologies, its bounds the
+      formula's box (placed once the text has its lines);
+    - it typesets at its block's size, so a heading's formula is the heading's size.
+    A formula that does not typeset stays its source, set like code.
+  - Tests: `slopty-shell` `page::card_tests`, `page::doc::tests`, `page::fence::tests`,
+    `markdown::math::tests::{a_formula_in_the_line_sits_on_its_baseline,
+    a_headings_formula_is_set_at_its_size}`; `slopty-ui`
+    `workspace::view_model::pages::tests::{a_burst_of_writes_reloads_once,
+    a_files_kind_is_its_extension, the_shell_and_the_libraries_name_the_same_charts}`;
+    `slopty-platform` `main_thread::{a_vega_lite_fence_draws_offline,
+    a_plotly_fence_draws_offline, a_page_moved_to_the_pane_keeps_its_document}`,
+    `pdf::tests`, `web::page::libs::tests`.
+- ✅ **What the TUI folds and adds around a turn, and the rest of its words (2026-10-16).**
+  - **Task notices fold.** Three or more background tasks that completed one after another read
+    as the first two, then "+N more tasks completed", whose rows open under it. Background
+    agents stopped together are one row naming them, or give way to Claude Code's own row that
+    names them. A failure is never folded.
+  - **The done line.** A finished turn ends on a quiet "Worked for 1m 5s · done 3:42 PM": the
+    TUI's line with its plain verb, in the person's time. What the turn leaves running takes its
+    place ("Waiting for 2 background agents to finish") or follows it ("· 3 background tasks
+    still running"). A subagent's run has none; its parent's turn says when it ended.
+  - **Goal rows.** The check's first line is the row, its tone from its words (achieved green,
+    not yet or paused quiet, could not red); the condition and reason open under it.
+  - **A call's outcome.** A call the person turned down reads quiet, in the TUI's words ("User
+    rejected update to main.rs", "Tool use rejected"). A command whose exit code Claude Code
+    explains says that ("No matches found"), not a failure. A created file says "Wrote 12
+    lines"; "Shell cwd was reset to /w" is lifted from standard error.
+  - **Request cards.** An approval whose agent takes words with its allow (Claude Code, Codex)
+    offers "Allow, and say what's next…" beside "Say what to do instead…": the allow goes with
+    the words, which the agent takes as its next message. A question's option previews show in
+    a mono pane beside the options, following the pointer, else the focused or picked one;
+    "No preview available" where an option has none.
+  - **Needs you at the card.** A request only the person at its card answers (Claude Code's
+    `requires_user_interaction`) shows a quiet "Needs you at the card" chip with a lock in the
+    card's header, the same as "Sent by". Its options take a click or a key as usual, but no
+    rule is offered (`docs/decisions/agents.md`).
+  - **The model chip.** It says ultracode beside the effort ("High · Ultracode") and draws the
+    fast bolt faint while fast mode cools down ("Fast mode cooling down"). Thinking on and off
+    sits among the model's options where the model allows it.
+  - **Errors.** An agent that is not signed in says so where it runs ("The agent is not signed
+    in on mac. Sign it in there, then try again."), its own words behind it; Slopty never signs
+    in for it.
+  - **The catalog.** `.research/tui-strings-2026-10-16.md` ends with the sweep's tally: every
+    useful row closed, partial, missing or judged noise, with its reason.
+  - Tests: `slopty-ui` `view_model::folds::tests`, `view_model::facts::tests::a_calls_result_reads_as_the_tuis`,
+    `view_model::tests::{an_allow_takes_words_and_options_carry_previews,
+    a_goal_row_opens_its_reason_and_a_turn_ends_on_its_done_line, a_signed_out_agent_says_so}`,
+    `view_model::work::tests`; `slopty-shell` `composer::dock_tests::{an_allow_takes_words_beside_it,
+    an_option_shows_its_preview_beside_it}`,
+    `composer::request_card::tests::allow_with_words_stands_where_the_agent_takes_them`.

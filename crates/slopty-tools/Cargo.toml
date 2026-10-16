@@ -10,6 +10,15 @@ description = "Slopty orchestration tools: one contract for the verbs (names, ha
 [lints]
 workspace = true
 
+[features]
+# Runs `show_visual`'s script in the visuals' sandbox before it is shown: what `slopty mcp` on a
+# worker builds with. The server never runs a script, so it does without Luau.
+visual = [ "dep:slopty-visual" ]
+
+[package.metadata.cargo-shear]
+# Itself, as a dev-dependency only to turn `visual` on for its tests.
+ignored = [ "slopty-tools" ]
+
 [dependencies]
 blake3.workspace = true
 data-encoding.workspace = true
@@ -19,11 +28,14 @@ serde.workspace = true
 serde_json.workspace = true
 slopty-core.workspace = true
 slopty-proto.workspace = true
+slopty-visual = { path = "../slopty-visual", optional = true }
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+# The tests run `show_visual`'s scripts in the sandbox, as `slopty mcp` does.
+slopty-tools = { path = ".", features = [ "visual" ] }
 insta = { workspace = true, features = [ "json" ] }
 parking_lot.workspace = true
 tempfile.workspace = true

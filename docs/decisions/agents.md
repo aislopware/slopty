@@ -3306,3 +3306,257 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   `compose::a_message_the_transcript_shows_leaves_the_list_untyped`,
   `threads::a_message_caught_being_typed_waits_for_its_transcripts_word`,
   `threads::what_the_worker_owns_outlives_a_read_again`.
+
+- ✅ **Pictures, visuals, pages and MCP Apps through each agent's own doors (2026-10-16).**
+  - **Pictures are kept by their digest.** A picture Codex viewed (`imageView`) or made
+    (`imageGeneration`), an image block in an MCP result, an ACP agent's image and resource
+    blocks, and pi's tool and message images are each kept once on the worker, by the BLAKE3 of
+    their bytes. They live in `<data>/media`, at most 512 MiB, and the picture used longest ago
+    goes first. Each is described as an `Image` at `media:<digest>`, and a client's `Expand`
+    of one is answered from there (`slopty_agent::media`). Claude Code's pictures stay in its
+    transcript. The other agents keep theirs where only they read them, or name a file that
+    may change, so the worker keeps a copy. A thread read again keeps its pictures again.
+  - **An MCP result keeps everything it said.** Its text, its pictures, its `resource_link`s
+    and embedded resources, and its `structuredContent` all stay on the call's `McpDetail`.
+    An audio block and any block MCP adds later stay as the JSON they came as
+    (`slopty_agent::shown`).
+  - **`show_visual` and `show_page` are tools on Slopty's own MCP server (`slopty mcp`).** A
+    call's whole input is in the agent's own record, so the decoder turns a call that passed
+    into a `ToolDetail::Visual` or `ToolDetail::Page`, and nothing is stored twice. The tool
+    runs the script once in the sandbox (`slopty_visual::check`), and a failure goes back to
+    the model as "the script failed at line N", so it fixes the script itself. A page that
+    loads anything from the network is refused before it is shown, naming what it loads.
+    Luau runs only where the tool runs (the `visual` feature of `slopty-tools`, which
+    `slopty-cli` turns on). The server's Linux build never compiles it.
+  - **MCP Apps are relayed through the agent, never dialled.** Slopty declares the
+    `io.modelcontextprotocol/ui` extension at Codex's `initialize`, so Codex passes it on and
+    the servers offer their apps. A call whose tool names a `ui://` resource
+    (`mcpAppResourceUri`, or `mcpAppUi` when Codex fills it) becomes a page of kind
+    `PageSource::App`, with the call's whole result for the page.
+  - **A page reads and calls its app with `ThreadRequest::App`.** The worker turns this into
+    Codex's `mcpServer/resource/read` (only for `ui://` URIs) or `mcpServer/tool/call` in the
+    thread's own session, and answers with `ThreadFrame::App`. Codex holds the connection,
+    its approvals and its credentials, so Slopty touches none of them. An agent with no door
+    to its MCP servers (ACP agents, pi) is refused in words.
+  - **Proving the relay end to end.** The stand-in `slopty-stub-mcp-apps` (testkit) records
+    whether its host declared the extension. Codex's recording (`cargo xtask codex fixtures`,
+    `media.jsonl`) shows the app's call, the page read back with its `_meta.ui`, and an
+    app-only tool called through the relay. The recording stops if Codex offers the model the
+    app-only tool (`visibility: ["app"]`); 0.162.1 keeps it off the model's list.
+  - Tests: `slopty-agent` `codex.rs`
+    `{a_recorded_media_turn_shows_its_app_and_its_pictures,
+    a_made_picture_and_an_apps_display_mode_are_kept,
+    slopty_s_show_visual_is_a_visual_once_it_passed}`; `acp.rs`
+    `{pictures_reach_the_thread_by_their_digest,
+    an_agents_picture_and_resources_in_its_message_are_kept}`; `pi.rs`
+    `{pictures_reach_the_thread_by_their_digest, the_models_own_picture_is_a_row_of_its_own}`;
+    `media::tests`, `shown::tests`, `codex::apps::tests`; `slopty-tools` `show::tests`.
+
+- ✅ **Claude Code's doors beside messages, as its TUI has them (2026-10-16).**
+  - **Its own work is the thread's tasks.** `task_started`, `task_progress`, `task_updated`,
+    `task_notification` and `background_tasks_changed` (which replaces the list whole) keep
+    each task's kind, step, figures, parent and timeout. A notice with no call (a monitor, a
+    scheduled prompt) is a task row of its own. The notice rebuilt for the decoder keeps its
+    duration and tokens. A turn that ends with background agents still at work says "Waiting
+    for N background agents to finish", as the TUI's footer does. Those agents stay live tasks
+    and are never shown as completed. A task is stopped by its own id (`stop_task`), and a
+    blocking call is moved to the background (`background_tasks`, the TUI's Ctrl+B).
+  - **What it says beside the conversation is shown in the TUI's words.** `tool_progress`
+    becomes the call's note, at most every 10 s. A `notification` is a passing note.
+    `active_goal` is the goal, with the TUI's "Goal achieved" line. `prompt_suggestion` is the
+    suggestion. The system rows it derives become notices in its words: memories saved or
+    recalled, agents stopped, a permission retried, a fallback model, a hook that failed or
+    stopped the turn, a plugin installed, long instructions, a scheduled task, a local
+    command's output. A denied call says who denied it.
+  - **Rows not shown, and why.** `hook_started` and `hook_progress` pass too quickly to read.
+    `files_persisted`, `post_turn_summary`, `control_request_progress`, `session_metadata`,
+    `mirror_error` and `transcript_mirror` are Claude Code's own bookkeeping or its cloud's.
+    `system/thinking` repeats the thinking block. `tool_use_summary` repeats the calls Slopty
+    already groups. `autocompact_state` is already covered by the context's categories.
+    `elicitation_complete` needs no row, because Claude Code withdraws the form itself.
+  - **Its dialogs are requests, and every one is shown.** `initialize` declares 21 dialog kinds
+    (`supportedDialogKinds`). It leaves out the permission prompts, which come as
+    `can_use_tool`, and `local_jsx`, which carries no data. It also leaves out the elicitation
+    dialogs, which come as `elicitation`. A dialog is a request of kind `dialog:<kind>`, its
+    payload as it came. It is answered by an option, by a JSON object as its result, or by
+    `cancel`. An MCP server's form is an `elicitation` request with its schema, its fields in
+    the server's order. It is answered with what the person filled in, `decline` or `cancel`.
+    `initialize` also asks for nested subagent calls, progress summaries and a stop
+    affordance for each task.
+  - **The drive runs as the desktop app does.** The drive adds `--forward-subagent-text`,
+    `--include-hook-events` and `--prompt-suggestions`, plus
+    `CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS`, `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING` and
+    `CLAUDE_CODE_MCP_APPS_HOST`.
+  - **`!` runs on the worker.** The command runs in the thread's folder for at most 10
+    minutes, with 30 000 characters of output kept. While it runs it is a call of its own,
+    and it is then handed to Claude Code as the person's message (`<bash-input>`,
+    `<bash-stdout>`). With `respondToBashCommands` off it goes with `shouldQuery: false`.
+    Claude Code 2.1.301 never echoes that message, so the thread takes it in as sent.
+  - **Rewinding uses Claude Code's own checkpoints.** `rewind_files` puts back the files
+    changed since the turn's message and says how many it put back. A message with no
+    checkpoint says why not. Slopty never takes a dry run: the person sees the result.
+    Branching the conversation at a turn is `--resume-session-at` that turn's last record,
+    with `--fork-session`.
+  - **Permission rules come from Claude Code and go into the files.** The rules shown are what
+    `list_permission_rules` answers: their source, whether they can be edited, and whether
+    they apply. A change is written into its scope's settings file (the person's, the
+    project's or the local one) by an atomic rewrite. Only the list for its behaviour changes,
+    but the JSON is rewritten with its keys in alphabetical order (`serde_json` keeps no
+    order). The rules are then listed again.
+  - **The person's status line runs on the worker.** It runs from their own settings, as
+    Claude Code runs it: with Claude Code's documented JSON on stdin, 300 ms after the thread
+    changes, one run at a time, for at most 5 s. Its words keep their colour.
+  - **A plan approved "with the context cleared" is one verb.** Slopty denies the plan with an
+    interrupt, as the TUI does. It then sets accept-edits, sends `/clear`, and sends
+    "Implement the following plan:" with the plan.
+  - **MCP Apps.** `mcp_status` names the tools whose `_meta.ui` points at a `ui://` resource
+    (it is asked again whenever `init` reports a server's status changed). A call of one is
+    its app's page, and the call's result fills the page. A page's read goes as
+    `mcp_read_resource`, and its call as `mcp_call` with `result_not_for_model`, so the
+    result reaches the page and never the model. Claude Code holds the connection, and asks
+    still waiting when it ends are refused.
+  - **Mods' surfaces.** Slopty attaches as a `desktop` surface (`ui_attach`) and draws the pane
+    roster and the band above the prompt (`ui_panes`, `ui_render`). Each element that can be
+    pressed or edited gets an id, `<plugin>:<handle>`, which the person's act names
+    (`ui_press`, `ui_input`, `ui_select`, `ui_close`). A surface is drawn again after each act
+    and on `ui_invalidate`. Toasts, status segments and log lines are shown as they are
+    pushed. A Claude Code with no mods refuses these asks, and Slopty says nothing.
+  - **Proof.** `cargo xtask fixtures claude-stream` records `doors.jsonl` from the official
+    2.1.301 build against the canned API. It covers `mcp_status` with the app's
+    `_meta.ui.resourceUri`, a page read and a refused read, two `mcp_call`s for the page, the
+    rules as `cliArg` lists them, `background_tasks` with nothing to move, `ui_attach` and
+    `ui_panes`, a background command stopped by its task id (`task_updated` killed, notice
+    `stopped`), a `shouldQuery: false` message that is answered at once with no echo and no
+    API call, and `rewind_files` answered with `canRewind` or refused. The stand-in
+    (`slopty_testkit::claude_stream::doors`) scripts every one of these messages and controls,
+    failures included.
+  - Tests: `slopty-agent` `claude::driven::tests::{recorded_doors_answer_as_claude_code_did,
+    a_turn_left_waiting_on_its_background_agent_says_so}`; `slopty-worker` `claude.rs`
+    `{a_background_command_is_stopped_by_its_task_id,
+    a_blocking_call_goes_to_the_background_and_the_turn_ends,
+    what_claude_code_says_beside_the_conversation_is_the_threads,
+    a_dialog_and_a_form_are_answered_on_their_ids, a_bang_commands_output_reaches_claude_code,
+    files_go_back_before_a_turn_and_a_fork_shares_the_turns_before,
+    the_persons_status_line_is_the_threads,
+    a_permission_rule_goes_into_its_file_and_back_as_listed,
+    a_mods_surfaces_are_drawn_and_acted_in,
+    a_plan_approved_with_the_context_cleared_runs_from_a_clear_context,
+    a_visual_claude_code_shows_is_the_threads_once_checked}`, `thread::claude::settings::tests`,
+    `thread::assets::tests`; `slopty-workerd` `threads.rs`
+    `a_claude_code_page_asks_its_app_through_claude_code`.
+- ✅ **A code rewind can be undone; a command's edits and why Claude Code asks are shown (2026-10-16).**
+  - **Undoing a rewind.** Before `rewind_files`, the worker records the folder's tree as a
+    private snapshot (`refs/slopty/threads/<thread>/rewound`) and sets
+    `ThreadState::rewound` (`turn`, `tree`, `at_ms`). `Intent::Unrewind { tree }` (needs
+    `Cap::REWIND`) puts that tree back: removed files return, files the rewind brought back are
+    removed, and modes are set. It names the tree it undoes, so an undo from a stale view is
+    refused, and so is an undo when nothing is rewound. The undo is offered until a turn
+    begins after the rewind. Undoing a rewind on top of new work would throw that work away,
+    so the snapshot stays as the record and the offer ends. Claude Code's checkpoints only go
+    backwards, which is why Slopty keeps the forward tree itself.
+  - **A command's edits.** Claude Code's `tool_use_result.bashEditDiff` becomes
+    `ExecDetail::edits` (`ShellEdits`): each file's patch, with created or deleted marked, how
+    many more there were, and whether the diff was unavailable, skipped or shared. The review
+    shows which files a shell command changed, as it does for Edit. `moves_tree` marks a git
+    step that may move the whole tree (checkout, reset, rebase, switch, stash, merge, pull,
+    also after `-C`, env assignments or `&&`), so the review knows the diff is not the whole
+    story.
+  - **Why it asks.** The permission request's `decision_reason_type`, `decision_reason`,
+    `matched_ask_rule` and `decision_reason_rule_source` become `Request::reason`, written as
+    the TUI writes it. It names the auto-mode classifier and its reason, the ask rule that
+    overrides auto mode, the permission rule and the settings it came from, or the hook. The
+    dock shows it above the choices.
+  - **Hooks stay quiet.** `hook_started`, `hook_progress` and a hook that succeeds silently
+    show nothing. A hook's output, timeout, blocking error or failure is one HOOK notice in
+    the TUI's words.
+  - Tests: `slopty-workerd` `threads.rs` `a_rewind_of_the_files_is_undone`; `slopty-agent`
+    `conversation::tests::the_files_a_command_changed_are_its_calls`,
+    `claude::driven::tests::why_claude_code_asks_is_said_as_its_tui_says_it`; `slopty-worker`
+    `claude.rs` `a_message_is_delivered_and_a_permission_answered_by_its_id` (reason and
+    edits).
+- ✅ **Claude Code's cards, modes and settings in its TUI's words (2026-10-16).**
+  - **Permission cards.** Each card's title and question are the TUI's for its tool: "Bash
+    command" with the command and what it is for, "Edit file" ("Do you want to make this edit
+    to main.rs?"), "Create file", "Overwrite file" or "Write file" by whether the file is there
+    (the worker's one look at the disk), "Edit notebook", "Read file", "Fetch" with the URL,
+    `Use skill "x"?`, "Enter plan mode?", and `{server} - {tool} (MCP)` with its parameters.
+    Past 4,000 characters the parameters are not shown, and the card says how many characters
+    there are and to deny unless expected. A request whose "always allow" Claude Code holds back
+    (`suppress_always_allow_rule`) offers none. An ask a plugin's run raised names it under why
+    it asks ("Plugin deploy").
+  - **Plans (ruling P9).** A plan offers the TUI's choices in its order: "Yes, clear context (42%
+    used) and auto-accept edits" first, then the mode the request suggests ("Yes, auto-accept
+    edits", "Yes, and use auto mode", "Yes, and bypass permissions"), "Yes, manually approve
+    edits" and "No, keep planning". The clear keeps bypass permissions or auto mode when plan
+    mode was entered from them, else accepts edits; its choice id is `clear`, or `clear:<mode>`.
+    It is one verb: the plan's call is turned down, the mode set, `/clear` sent, then
+    "Implement the following plan:" and the plan. Entering plan mode asks "Yes, enter plan mode"
+    or "No, start implementing now".
+  - **Allow, and say what's next.** The TUI's "Yes, and tell Claude what to do next" is an allow
+    with the person's words: the call goes ahead, then the words go into the turn under way as
+    a steer, the way a message sent while it works goes. Claude Code's allow carries no message,
+    so a second door is the only honest one.
+  - **Mode marks.** A mode Claude Code changed itself (a plan approved with a mode, plan mode
+    entered or left) is a quiet transcript row, "Switched to accept edits". The person's own
+    switch is not marked, since the footer says it. Plan mode in a session begun in bypass
+    permissions says it will ask before almost nothing, in the TUI's words. A refused switch
+    says "Couldn't switch to auto mode: {error}".
+  - **Model, effort, fast mode and thinking.** `get_settings` is asked after `initialize` and
+    after each model or effort change; `applied.ultracode` where `ultracodeAvailable` becomes
+    the fact `claude-ultracode`. `fast_mode_state` from `initialize` and every result is the
+    fact `claude-fast` (`on`, `off`, `cooldown`). Its moves are passing notes in the TUI's words
+    ("Fast limit reached and temporarily disabled", "Fast limit reset · now using fast mode",
+    "Using standard speed · {Claude Code's reason}"). Thinking is offered off only where the
+    model says it can be (`supportsThinkingOff`), through `set_max_thinking_tokens`, with "Thinking
+    on" or "Thinking off" as its note. Failures say "Model switch failed: {error}" and "Effort
+    setting unavailable right now · nothing changed: {error}".
+  - **Rows the TUI derives.** A turn that ends with work running says what it waits on, one
+    line: "Waiting for 2 background agents to finish · 1 background task still running".
+    `agents_killed` names the agents stopped together ("2 background agents were stopped:
+    \"Survey\", \"Review\""). A goal reads "Goal not yet met… continuing" with its reason, "Goal
+    achieved (5m · 3 turns)" with its condition, and "Goal paused · usage limit reached ·
+    continues automatically when it resets"; a goal the person cleared (`/goal clear`) is no
+    achievement, and Claude Code says it was cleared itself. A failed compaction says why
+    ("Could not compact · conversation too long · /clear to start fresh"). A request with no
+    answer at all says how long it waited. An MCP server that fails or wants authentication,
+    a usage limit nearly used up, usage credits drawn on, and a settings file Claude Code skipped
+    for its errors are passing notes.
+  - **Parked agents: not applicable.** The TUI's "interrupted by the user and parked" happens
+    only in its interactive session. Under `-p` an interrupt stops background agents
+    (`agents_killed`), so Slopty says they were stopped, never parked.
+  - **Proto.** `Offered::preview` (a question option's preview), `Notice::MODE`,
+    `ExecDetail::interpretation` (Claude Code's `returnCodeInterpretation`: grep's exit 1 is "No
+    matches found", no failure), and `once()` never picks a choice that stops the turn.
+  - Tests: `slopty-agent` `claude::driven::tests::{a_plan_reads_as_the_tuis_dialog_and_its_clear_keeps_the_mode,
+    an_allow_with_words_goes_ahead_then_says_them, the_model_says_how_it_stands,
+    a_turns_leftovers_stops_and_goal_say_what_the_tui_says, a_held_back_always_allow_is_not_offered,
+    a_failed_compaction_says_why, an_mcp_server_that_drops_says_so,
+    a_request_with_no_answer_says_how_long_it_waited,
+    a_limit_nearly_used_and_credits_drawn_say_so, a_plugins_ask_names_the_plugin}`,
+    `claude::history::cards::tests`,
+    `claude::driven::model::tests`.
+- ✅ **A request only the person at its card answers (2026-10-16).** Claude Code marks a
+  permission request `requires_user_interaction` when one-tap answers must not be offered. The
+  adapter keeps it as `Request::needs_presence` (and `RequestCard::needs_presence` in the table),
+  and offers no "always allow" with it. Only the person's own click or key on the card answers
+  it; every other path is refused:
+  - a note's buttons: none are offered (`RequestCard::answerable` is false and
+    `NoteChoice::of` is empty), so neither a phone push nor the Mac's note shows them, and a tap
+    that comes anyway says "Needs you at the card" and leaves the request waiting;
+  - an answer from no client, meaning orchestration's `answer_request` from the CLI or the
+    tools, or a note's verdict through the server: the worker refuses it with "Needs you at the
+    card: the agent takes this answer only from its card in Slopty";
+  - another agent: the hub already refuses any agent's `answer_request`;
+  - a rule: "Allow with rule" is refused for it, and none is offered;
+  - a page: pages have no answer route.
+
+  Slopty has no auto-allow of its own by rule or mode. Claude Code's own modes decide before it
+  asks. The card carries a quiet "Needs you at the card" chip.
+  - Tests: `slopty-agent` `claude::driven::tests::a_request_needing_the_person_is_held_for_the_card`;
+    `slopty-proto` `units::{a_notes_buttons_answer_only_a_plain_yes_or_no,
+    a_small_question_is_answered_by_its_options}`; `slopty-workerd` `threads::tests::only_the_card_answers_a_request_that_needs_the_person_at_it`;
+    `slopty-server` `hub::agent_tests::no_agent_answers_a_request_that_needs_the_person_at_its_card`;
+    `slopty-ui` `workspace::approvals::tests::a_note_answers_nothing_that_needs_the_person_at_the_card`,
+    `workspace::view_model::work::tests::no_rule_allows_what_needs_the_person_at_the_card`,
+    `view_model::tests::a_request_needing_the_person_reaches_its_card_as_one`; `slopty-shell`
+    `composer::dock_tests::a_card_says_it_needs_the_person_at_it`.

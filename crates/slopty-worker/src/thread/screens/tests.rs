@@ -22,7 +22,12 @@ fn call(name: &str, detail: Option<ToolDetail>, input: &str, output: Option<&str
 
 /// A call of MCP server `server`'s `tool`, as Codex and Claude Code both give it.
 fn mcp(server: &str, tool: &str, input: &str, output: Option<&str>) -> ToolCall {
-    let detail = ToolDetail::Mcp(McpDetail { server: server.to_owned(), tool: tool.to_owned() });
+    let detail = ToolDetail::Mcp(McpDetail {
+        server: server.to_owned(),
+        tool: tool.to_owned(),
+        structured: None,
+        links: Vec::new(),
+    });
     call(&format!("mcp__{server}__{tool}"), Some(detail), input, output)
 }
 
@@ -37,6 +42,8 @@ fn exec(command: &str) -> ToolCall {
         exit_code: Some(0),
         stderr: None,
         duration_ms: None,
+        edits: None,
+        interpretation: None,
     });
     ToolCall { kind: kind::EXEC.to_owned(), ..call("Bash", Some(detail), "{}", None) }
 }

@@ -1,0 +1,21 @@
+[package]
+name = "slopty-math"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "TeX math typeset to a self-contained SVG with RaTeX, for the transcript to draw as an image; GPUI-free"
+
+[lints]
+workspace = true
+
+[dependencies]
+# KaTeX-compatible TeX in pure Rust (MIT): parse, lay out, then SVG with the KaTeX fonts' glyphs
+# as paths, so the SVG draws the same wherever it goes, with no font or JavaScript
+# (docs/decisions/ui.md, "Math typeset with RaTeX").
+ratex-layout = "0.1.15"
+ratex-parser = "0.1.15"
+ratex-svg = { version = "0.1.15", features = [ "embed-fonts" ] }
+ratex-types = "0.1.15"
+thiserror.workspace = true

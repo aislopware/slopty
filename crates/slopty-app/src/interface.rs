@@ -100,6 +100,25 @@ fn host_live_views(view: &Entity<WorkspaceView>, cx: &mut App) {
         move |id, cx| screens.upgrade()?.update(cx, |v, cx| v.hosted_screen(id, cx)).map(hosted),
         move |id, changed, cx| watch(&watched.upgrade()?, id, changed, cx),
     );
+    // A page an agent shows inline is hosted by the workspace, its card drawn by the shell.
+    #[cfg(target_vendor = "apple")]
+    {
+        let (pages, acts, watches) = (view.downgrade(), view.downgrade(), view.downgrade());
+        slopty_shell::live::serve_pages(
+            cx,
+            move |key, window, cx| {
+                pages.upgrade()?.update(cx, |v, cx| v.hosted_page(key, window, cx))
+            },
+            move |key, act, cx| {
+                if let Some(view) = acts.upgrade() {
+                    view.update(cx, |v, cx| v.page_act(key, act, cx));
+                }
+            },
+            move |key, changed, cx| {
+                Some(watches.upgrade()?.update(cx, |v, _| v.page_watch(key, changed)))
+            },
+        );
+    }
     // A transcript's Run types its line into the chat's terminal: run, or left at the prompt.
     let typed = view.downgrade();
     slopty_shell::live::serve_runs(cx, move |id, line, enter, cx| {

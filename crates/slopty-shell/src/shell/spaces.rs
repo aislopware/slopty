@@ -5247,7 +5247,7 @@ impl Shell {
                     self.settings.sidebar_compact,
                     self.settings.sidebar_show_project_label,
                     row.reason,
-                ) + self.sidebar_subagents(&row.chat.id, now, cx).height() // slopty: in its slot
+                )
             })
             .collect();
         let visible_pinned_ids = std::sync::Arc::new(
@@ -5462,8 +5462,6 @@ impl Shell {
                     .sidebar_show_harness
                     .then(|| chat.config.as_ref().map(|c| c.harness))
                     .flatten();
-                // slopty: its subagents ride in its slot, under it.
-                let subagents = self.sidebar_subagents(&chat.id, now, cx);
                 let height = sidebar_row_height(
                     self.settings.sidebar_compact,
                     self.settings.sidebar_show_project_label,
@@ -5473,7 +5471,7 @@ impl Shell {
                     self.settings.sidebar_compact,
                     self.settings.sidebar_show_project_label,
                     reason,
-                ) + subagents.height();
+                );
                 // Only rows a jump slot can reach wear a chip; row 10 onward
                 // keeps its time-ago.
                 let jump_slot = visible_slots.get(&chat.id).copied();
@@ -5539,8 +5537,6 @@ impl Shell {
                     theme,
                     cx,
                 );
-                let element =
-                    self.with_sidebar_subagents(element, &chat.id, &subagents, now, theme, cx); // slopty
                 // slopty: on a phone, swipe to pin or archive, press long for its menu.
                 let element = self.compact_session_row(element, &chat.id, false, cx);
                 // The source slot shrinks when its vacancy moves across sections.

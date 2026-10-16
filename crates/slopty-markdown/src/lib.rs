@@ -10,4 +10,7 @@
 pub mod mend;
 pub mod parser;
 
-pub use parser::{Block, BlockTree, IncrementalParser, InlineRun, InlineStyle, TopBlock, parse_full};
+// slopty: `Math`, the TeX runs.
+pub use parser::{
+    Block, BlockTree, IncrementalParser, InlineRun, InlineStyle, Math, TopBlock, parse_full,
+};

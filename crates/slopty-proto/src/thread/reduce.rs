@@ -8,9 +8,10 @@ use slopty_core::WallMs;
 
 use super::wire::{Draft, Page, PullSeen, RequestCard, TableFrame, ThreadRow, TurnEnded};
 use super::{
-    Action, AgentScreen, BackgroundTask, Changed, Clipped, Command, Cursor, Edge, IntentId, Item,
-    ItemBody, ItemId, Meters, PartKey, Pending, Plan, Request, Status, ThreadId, ThreadMeta,
-    ToolState, Turn, TurnId, TurnState,
+    Action, Activity, AgentNote, AgentScreen, BackgroundTask, CallNote, Changed, Clipped, Command,
+    ContextUsage, Cursor, Edge, Goal, IntentId, Item, ItemBody, ItemId, Meters, PartKey, Pending,
+    Plan, Request, Rules, Status, SubagentKind, Surface, ThreadId, ThreadMeta, ToolState, Turn,
+    TurnId, TurnState,
 };
 
 /// Settled requests a thread keeps, newest last, so a client that comes back still sees who
@@ -62,6 +63,30 @@ pub struct ThreadState {
     pub said: BTreeMap<IntentId, String>,
     /// When the worker last heard its agent alive during a turn ([`Action::Lease`]).
     pub lease_ms: Option<WallMs>,
+    /// What the agent says of its calls beside them, by call ([`Action::CallNoted`]): only for
+    /// calls this state holds.
+    pub calls: BTreeMap<ItemId, CallNote>,
+    /// The turn under way, as the spinner line shows it ([`Action::ActivitySet`]).
+    pub activity: Option<Activity>,
+    /// The goal it works towards ([`Action::GoalSet`]).
+    pub goal: Option<Goal>,
+    /// Its passing notifications, one per key, newest last, at most [`AgentNote::KEPT`]
+    /// ([`Action::Notified`]); a client hides one past its `until_ms`.
+    pub notes: Vec<AgentNote>,
+    /// The prompt the agent guesses the person sends next ([`Action::Suggested`]).
+    pub suggestion: Option<String>,
+    /// Its agent's permission rules, once read ([`Action::RulesSet`]).
+    pub rules: Option<Rules>,
+    /// The person's own status line, as run for it ([`Action::StatusLine`]).
+    pub status_line: Option<String>,
+    /// The folder before its last rewind, while it can be put back ([`Action::Rewound`]).
+    pub rewound: Option<super::Rewound>,
+    /// The kinds of subagent its agent offers ([`Action::AgentsSet`]).
+    pub agents: Vec<SubagentKind>,
+    /// Its context by category, once read ([`Action::ContextSet`]).
+    pub context: Option<ContextUsage>,
+    /// What its agent's mods draw, in the order they came ([`Action::SurfaceSet`]).
+    pub surfaces: Vec<Surface>,
 }
 
 impl ThreadState {
@@ -88,6 +113,17 @@ impl ThreadState {
             named: String::new(),
             said: BTreeMap::new(),
             lease_ms: None,
+            calls: BTreeMap::new(),
+            activity: None,
+            goal: None,
+            notes: Vec::new(),
+            suggestion: None,
+            rules: None,
+            status_line: None,
+            rewound: None,
+            agents: Vec::new(),
+            context: None,
+            surfaces: Vec::new(),
         }
     }
 
@@ -125,6 +161,7 @@ impl ThreadState {
                 if let Some(at) = self.item_index(item) {
                     self.items.remove(at);
                 }
+                self.calls.remove(item);
             }
             Action::RequestOpened(request) => {
                 match self.requests.iter_mut().find(|r| r.id == request.id) {
@@ -148,6 +185,7 @@ impl ThreadState {
                 let kept = |turn: TurnId| after.is_some_and(|last| turn <= last);
                 self.turns.retain(|t| kept(t.id));
                 self.items.retain(|i| kept(i.turn));
+                self.keep_calls();
             }
             Action::Snapshot { turn, edge, tree } => {
                 if let Some(t) = self.turn_mut(*turn) {
@@ -172,7 +210,44 @@ impl ThreadState {
             Action::Lease(at) => {
                 self.lease_ms = Some(self.lease_ms.map_or(*at, |had| had.max(*at)));
             }
+            Action::CallNoted { item, note } => {
+                if self.item_index(item).is_some() {
+                    self.calls.insert(item.clone(), note.clone());
+                }
+            }
+            Action::TaskOutput { task, output } => {
+                if let Some(have) = self.tasks.iter_mut().find(|t| t.id == *task) {
+                    have.output = Some(output.clone());
+                }
+            }
+            Action::ActivitySet(activity) => self.activity.clone_from(activity),
+            Action::GoalSet(goal) => self.goal.clone_from(goal),
+            Action::Notified(note) => {
+                self.notes.retain(|n| n.key != note.key);
+                self.notes.push(note.clone());
+                let over = self.notes.len().saturating_sub(AgentNote::KEPT);
+                self.notes.drain(..over);
+            }
+            Action::Suggested(suggestion) => self.suggestion.clone_from(suggestion),
+            Action::RulesSet(rules) => self.rules = Some(rules.clone()),
+            Action::StatusLine(line) => self.status_line.clone_from(line),
+            Action::Rewound(rewound) => self.rewound.clone_from(rewound),
+            Action::AgentsSet(agents) => self.agents.clone_from(agents),
+            Action::ContextSet(context) => self.context = Some(context.clone()),
+            Action::SurfaceSet(surface) => {
+                match self.surfaces.iter_mut().find(|s| s.id == surface.id) {
+                    Some(have) => *have = surface.clone(),
+                    None => self.surfaces.push(surface.clone()),
+                }
+            }
+            Action::SurfaceGone { id } => self.surfaces.retain(|s| s.id != *id),
         }
+    }
+
+    /// The call notes of calls this state no longer holds go.
+    fn keep_calls(&mut self) {
+        let held: std::collections::BTreeSet<&ItemId> = self.items.iter().map(|i| &i.id).collect();
+        self.calls.retain(|id, _| held.contains(id));
     }
 
     /// Put older turns in front of what this state holds.
@@ -188,6 +263,9 @@ impl ThreadState {
             .collect();
         turns.append(&mut self.turns);
         items.append(&mut self.items);
+        for (id, note) in &page.calls {
+            self.calls.entry(id.clone()).or_insert_with(|| note.clone());
+        }
         self.turns = turns;
         self.items = items;
         self.older = page.older;
@@ -205,6 +283,7 @@ impl ThreadState {
         let mut out = self.clone();
         out.turns = self.turns.iter().skip(skip).cloned().collect();
         out.items = self.items.iter().filter(|i| i.turn >= from).cloned().collect();
+        out.keep_calls();
         out.older = true;
         out
     }
@@ -221,9 +300,15 @@ impl ThreadState {
         } else {
             taken.first().map_or(before, |t| t.id)
         };
-        let items =
+        let items: Vec<Item> =
             self.items.iter().filter(|i| i.turn >= from && i.turn < before).cloned().collect();
-        Page { turns: taken, items, older: skip > 0 || self.older }
+        let calls = self
+            .calls
+            .iter()
+            .filter(|(id, _)| items.iter().any(|i| i.id == **id))
+            .map(|(id, note)| (id.clone(), note.clone()))
+            .collect();
+        Page { turns: taken, items, older: skip > 0 || self.older, calls }
     }
 
     /// The item `id`.
@@ -286,6 +371,7 @@ impl ThreadState {
                     options: r.options.clone(),
                     buttons: super::wire::NoteChoice::of(r),
                     opened_ms: r.opened_ms,
+                    needs_presence: r.needs_presence,
                 })
                 .collect(),
             last_line: self.last_line(),

@@ -119,8 +119,9 @@ fn a_background_command_finishes_on_its_notice() {
     });
     let changes = c.ingest(&MAIN, &notice);
     assert!(
-        matches!(changes.as_slice(), [Change::Upsert { entry, .. }] if entry.id == "t1"),
-        "{changes:?}"
+        matches!(changes.as_slice(), [Change::Upsert { entry: row, .. }, Change::Upsert { entry, .. }]
+            if row.id == "task:b1:1" && entry.id == "t1"),
+        "the notice's own row, then its call: {changes:?}"
     );
     let ToolDetail::Bash(bash) = &tool(&c, &MAIN, "t1").detail else { panic!("bash") };
     assert_eq!((bash.status, bash.exit_code), (ShellStatus::Failed, Some(1)));
@@ -131,7 +132,8 @@ fn a_background_command_finishes_on_its_notice() {
     c.ingest(&MAIN, &user("n2", Some("n1"), &json!(killed)));
     let ToolDetail::Bash(bash) = &tool(&c, &MAIN, "t1").detail else { panic!("bash") };
     assert_eq!(bash.status, ShellStatus::Killed);
-    assert_eq!(c.entries(&MAIN).len(), 1, "a notice is not a prompt");
+    let ids: Vec<&str> = c.entries(&MAIN).iter().map(|e| e.id.as_str()).collect();
+    assert_eq!(ids, ["t1", "task:b1:1", "task:b1:2"], "a notice is a task's row, not a prompt");
 }
 
 /// Sidechain records go to their agent's thread whether they come from the main file or the
@@ -723,7 +725,11 @@ fn a_background_command_is_finished_by_its_queued_notice() {
         "timestamp": "2026-09-27T03:16:25.000Z",
     });
     let changes = c.ingest(&MAIN, &queued);
-    assert!(matches!(changes.as_slice(), [Change::Upsert { entry, .. }] if entry.id == "t1"));
+    assert!(
+        matches!(changes.as_slice(), [Change::Upsert { entry: row, .. }, Change::Upsert { entry, .. }]
+            if row.id == "task:b1:1" && entry.id == "t1"),
+        "{changes:?}"
+    );
     let ToolDetail::Bash(bash) = &tool(&c, &MAIN, "t1").detail else { panic!("bash") };
     assert_eq!(bash.status, ShellStatus::Done);
     assert_eq!(bash.finished_ms, parse_ms("2026-09-27T03:16:25.000Z"));
@@ -861,4 +867,50 @@ fn a_notebook_edit_is_an_edit_of_its_cell() {
         (asked.path.as_str(), lines(&asked)),
         ("/work/nb.ipynb", vec!["+print(2)".to_owned()])
     );
+}
+
+/// What a Bash command changed in its repository (`bashEditDiff`) is the call's: each file with
+/// its hunks, the files past them counted, and the notes on how far the list holds; a git step
+/// that can move the tree is told apart from edits.
+#[test]
+fn the_files_a_command_changed_are_its_calls() {
+    let mut c = Conversation::default();
+    let input = json!({"command": "git stash pop && sed -i s/a/b/ x.rs"});
+    c.ingest(&MAIN, &call("a1", None, "t1", "Bash", &input));
+    let structured = json!({
+        "stdout": "", "stderr": "",
+        "bashEditDiff": {
+            "changedFiles": ["/w/x.rs", "/w/y.rs", "/w/z.png"],
+            "files": [
+                { "filePath": "/w/x.rs", "hunks": [{
+                    "oldStart": 3, "oldLines": 1, "newStart": 3, "newLines": 1,
+                    "lines": ["-let a = 1;", "+let b = 1;"],
+                }] },
+                { "filePath": "/w/y.rs", "deleted": true, "hunks": [] },
+            ],
+            "moreFiles": 1, "shared": true, "unavailable": true,
+        },
+    });
+    c.ingest(&MAIN, &result("u1", Some("a1"), "t1", "", &structured));
+    let ToolDetail::Bash(bash) = &tool(&c, &MAIN, "t1").detail else { panic!("bash") };
+    let edits = bash.edits.as_ref().expect("the files it changed");
+    let shown: Vec<(&str, bool, u32, u32)> = edits
+        .files
+        .iter()
+        .map(|f| (f.path.as_str(), f.deleted, f.patch.added, f.patch.removed))
+        .collect();
+    assert_eq!(shown, [("/w/x.rs", false, 1, 1), ("/w/y.rs", true, 0, 0)]);
+    assert_eq!(
+        (edits.more, edits.shared, edits.unavailable, edits.skipped),
+        (1, true, true, false)
+    );
+    assert!(edits.moves_tree, "`git stash pop` can move the tree");
+
+    let plain = json!({"command": "git -C sub status && echo checkout"});
+    c.ingest(&MAIN, &call("a2", Some("u1"), "t2", "Bash", &plain));
+    let skipped = json!({ "stdout": "", "bashEditDiff": { "files": [], "skipped": true } });
+    c.ingest(&MAIN, &result("u2", Some("a2"), "t2", "", &skipped));
+    let ToolDetail::Bash(bash) = &tool(&c, &MAIN, "t2").detail else { panic!("bash") };
+    let edits = bash.edits.as_ref().expect("the note");
+    assert!(edits.skipped && !edits.moves_tree, "{edits:?}");
 }

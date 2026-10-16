@@ -1,5 +1,5 @@
-//! Slopty's own live views inside the shell's chrome: a shell's terminal and a remote window or
-//! desktop.
+//! Slopty's own live views inside the shell's chrome: a shell's terminal, a remote window or
+//! desktop, and a page an agent shows inline ([`serve_pages`]).
 //!
 //! What the shell shows of these is no data a view model can carry: they are views Slopty's
 //! workspace keeps, each with its session's link, its prediction and its picture path. The app
@@ -345,6 +345,110 @@ pub fn serve_runs(cx: &mut App, run: impl Fn(&str, &str, bool, &mut App) -> bool
 pub fn run_line(id: &str, line: &str, enter: bool, cx: &mut App) -> bool {
     let Some(Runs(run)) = cx.try_global::<Runs>().cloned() else { return false };
     run(id, line, enter, cx)
+}
+
+/// How a page an agent shows inline stands in the app's page host.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PagePresence {
+    /// No web view: its place, or its last picture, stands for it.
+    Cold,
+    /// A web view not placed: its last picture stands for it.
+    Warm,
+    /// Placed, taking the pointer and the keyboard.
+    Live,
+}
+
+/// A page an agent shows inline, as the app hosts it (`slopty_platform::web::page`): the card
+/// is the shell's (`crate::page`), the web view the app's, handed over by the page's key
+/// (`slopty_view_doc::PageCard::page`).
+#[derive(Clone)]
+pub struct HostedPage {
+    /// How it stands.
+    pub presence: PagePresence,
+    /// This window's host of the page's native view, while one is mounted: placed while live.
+    pub native: Option<gpui::composition::NativeHost>,
+    /// Its last picture, drawn while it is not live.
+    pub snapshot: Option<std::sync::Arc<gpui::RenderImage>>,
+    /// The height it asked for, within the inline cap, once it said.
+    pub height: Option<f32>,
+    /// Why it cannot be shown, when it cannot.
+    pub failed: Option<SharedString>,
+    /// slopty: a file the app draws itself rather than in a web view (a PDF's pages, a CSV's
+    /// table): the card draws this, and the page has no web view.
+    pub doc: Option<crate::page::PageDoc>,
+}
+
+/// What the card asks of a page's host.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PageAct {
+    /// The person engages it (a pointer over it, the keyboard in it): make it live, within the
+    /// window's cap of live pages.
+    Engage,
+    /// Back to its picture: the person left it, or it scrolled under the composer's frost.
+    Rest,
+    /// Its card is this wide, in points.
+    Width(f32),
+    /// Its row left the transcript: let its web view go, its picture and state kept.
+    Unmount,
+    /// slopty: draw page `index` (from 0) of a PDF `width` points wide, for the card or the pane.
+    Draw {
+        /// The page.
+        index: usize,
+        /// Its width, in points.
+        width: f32,
+    },
+}
+
+type PageFn = dyn Fn(&str, &mut gpui::Window, &mut App) -> Option<HostedPage>;
+type PageActFn = dyn Fn(&str, PageAct, &mut App);
+
+/// How the app hosts pages.
+#[derive(Clone)]
+struct Pages {
+    page: Rc<PageFn>,
+    act: Rc<PageActFn>,
+    watch: Rc<WatchFn>,
+}
+
+impl Global for Pages {}
+
+/// Serve inline pages: `page` gives the page of a key as it stands in a window, `act` takes what
+/// its card asks, `watch` calls back when how it stands changes (a picture taken, a height
+/// asked, live or not).
+pub fn serve_pages(
+    cx: &mut App,
+    page: impl Fn(&str, &mut gpui::Window, &mut App) -> Option<HostedPage> + 'static,
+    act: impl Fn(&str, PageAct, &mut App) + 'static,
+    watch: impl Fn(&str, Box<dyn FnMut(&mut App)>, &mut App) -> Option<Subscription> + 'static,
+) {
+    cx.set_global(Pages {
+        page: Rc::new(page),
+        act: Rc::new(act),
+        watch: Rc::new(watch),
+    });
+}
+
+/// The page `key` as it stands in `window`; `None` with no host, or none for that key.
+pub fn page(key: &str, window: &mut gpui::Window, cx: &mut App) -> Option<HostedPage> {
+    let host = cx.try_global::<Pages>()?.page.clone();
+    host(key, window, cx)
+}
+
+/// Ask the host of page `key` for `act`; nothing with no host.
+pub fn page_act(key: &str, act: PageAct, cx: &mut App) {
+    if let Some(host) = cx.try_global::<Pages>().map(|pages| pages.act.clone()) {
+        host(key, act, cx);
+    }
+}
+
+/// Call `changed` whenever how page `key` stands changes.
+pub fn watch_page(
+    key: &str,
+    changed: Box<dyn FnMut(&mut App)>,
+    cx: &mut App,
+) -> Option<Subscription> {
+    let host = cx.try_global::<Pages>()?.watch.clone();
+    host(key, changed, cx)
 }
 
 /// The shell's way into a chat's draft: Slopty's terminals hand it a block or a selection.

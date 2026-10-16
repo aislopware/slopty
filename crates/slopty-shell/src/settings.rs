@@ -29,6 +29,7 @@ pub mod harnesses;
 // slopty: the code a phone or iPad scans for the server.
 pub mod invite;
 pub mod notifications;
+pub mod permissions; // slopty: an agent's permission rules (S2)
 pub mod shortcuts;
 // slopty: no thread naming: an agent's thread is titled by the agent.
 pub mod wallpaper;

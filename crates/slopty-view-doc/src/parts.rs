@@ -135,7 +135,14 @@ pub enum MessagePart {
         name: String,
         mime_type: String,
     },
-    // slopty: no agent visuals.
+    /// An agent-authored visual (`show_visual`): a Luau script stored on the
+    /// host at `path`, rendered natively. Old desktop builds' unknown-kind
+    /// fallback yields an empty text part (invisible); iOS drops unknown kinds.
+    Visual {
+        id: String,
+        path: String,
+        title: String,
+    },
     /// Model thinking. Carries its body in a dedicated doc field (`reasoning`,
     /// never `text`) so pre-reasoning desktop builds — whose unknown-kind
     /// fallback renders `text` as prose — degrade to an invisible empty text
@@ -193,6 +200,11 @@ pub enum MessagePart {
         /// its tagged text deltas (capped; display-only).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         subagent_tail: Option<String>,
+        // slopty: what the call says beyond zeron's chip, in the TUI's words.
+        /// The call's facts: its line in the TUI's words, what came of it, its timer, the tray
+        /// row of the task it became, and a subagent's progress on its spawn card.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        facts: Option<Box<crate::part_kinds::ToolFacts>>,
     },
     #[serde(rename_all = "camelCase")]
     Input {
@@ -226,6 +238,27 @@ pub enum MessagePart {
     /// chat's own. Written once by the fork RPC; renders as a labeled
     /// divider. Old desktop builds' unknown-kind fallback yields an empty
     /// text part (invisible); iOS drops unknown kinds.
+    // slopty: a background task's notice, a page shown inline, a quiet notice row.
+    /// A background task's notice, a quiet row linked to its task's tray row
+    /// ([`crate::part_kinds::TaskRow::row`], `task:{id}`): an agent finished or waits on its
+    /// own work, a command exited, a monitor's event. Its part id is the thread item's.
+    Task {
+        id: String,
+        task: Box<crate::part_kinds::TaskRow>,
+    },
+    /// A page shown inline by the call before it: `show_page`, an MCP App's UI, an `.html` or
+    /// `.svg` file. Its part id is `{call part id}:page`; the app hosts its view by
+    /// [`crate::page_card::PageCard::page`].
+    Page {
+        id: String,
+        card: Box<crate::page_card::PageCard>,
+    },
+    /// A quiet row of the agent's own that is no failure: "Allowed cargo test", "Saved 2
+    /// memories", a hook's word, a request tried again with its countdown.
+    Note {
+        id: String,
+        note: Box<crate::part_kinds::NoteRow>,
+    },
     #[serde(rename_all = "camelCase")]
     Fork {
         id: String,
@@ -242,12 +275,15 @@ impl MessagePart {
         match self {
             MessagePart::Text { id, .. }
             | MessagePart::Image { id, .. }
-            // slopty: no agent visuals.
+            | MessagePart::Visual { id, .. }
             | MessagePart::Reasoning { id, .. }
             | MessagePart::Tool { id, .. }
             | MessagePart::Input { id, .. }
             | MessagePart::Error { id, .. }
             | MessagePart::Marker { id, .. } // slopty: dividers.
+            | MessagePart::Task { id, .. }
+            | MessagePart::Page { id, .. }
+            | MessagePart::Note { id, .. }
             | MessagePart::Fork { id, .. } => id,
         }
     }
@@ -280,11 +316,18 @@ impl MessagePart {
                 name,
                 mime_type,
             } => id.len() + path.len() + name.len() + mime_type.len(),
-            // slopty: no agent visuals.
+            MessagePart::Visual { id, path, title } => id.len() + path.len() + title.len(),
             MessagePart::Error {
                 message, detail, ..
             } => message.len() + detail.as_ref().map_or(0, String::len), // slopty: its detail.
             MessagePart::Marker { text, .. } => text.len(), // slopty: dividers.
+            MessagePart::Task { task, .. } => {
+                task.text.len() + task.title.len() + task.body.as_ref().map_or(0, String::len)
+            }
+            MessagePart::Page { card, .. } => serde_json::to_vec(card).map_or(0, |v| v.len()),
+            MessagePart::Note { note, .. } => {
+                note.text.len() + note.detail.as_ref().map_or(0, String::len)
+            }
             MessagePart::Fork {
                 source_chat_id,
                 source_title,
@@ -341,7 +384,18 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                 out.push(image);
             }
         }
-        // slopty: no agent visuals.
+        AgentEvent::Visual { id, path, title } => {
+            let visual = MessagePart::Visual {
+                id: id.clone(),
+                path: path.clone(),
+                title: title.clone(),
+            };
+            if let Some(existing) = out.iter_mut().find(|p| p.id() == id) {
+                *existing = visual;
+            } else {
+                out.push(visual);
+            }
+        }
         AgentEvent::ReasoningDelta { text } => {
             // Empty deltas are liveness heartbeats (redacted thinking) — the
             // engine drops them before the fold, but stay tolerant here too.
@@ -381,6 +435,7 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                     subagent_ref: None,
                     subagent_status: None,
                     subagent_tail: None,
+                    facts: None,
                 });
             }
         }
@@ -1013,6 +1068,7 @@ mod tests {
                 subagent_ref: None,
                 subagent_status: None,
                 subagent_tail: None,
+                facts: None,
             },
         ];
         let chunks = split_parts(&parts);

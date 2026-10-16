@@ -73,6 +73,8 @@ mod screens {
                 detail: Some(ToolDetail::Mcp(McpDetail {
                     server: "computer-use".to_owned(),
                     tool: "app_click".to_owned(),
+                    structured: None,
+                    links: Vec::new(),
                 })),
                 child: None,
                 ended_ms: None,

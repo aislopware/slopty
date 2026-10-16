@@ -221,6 +221,22 @@ expression: "decode(\"tools\").snapshot()"
             text: ~
             at_ms: 1792130307123
             images: []
+    - id: "task:b00000001:1"
+      at_ms: 1792130308157
+      body:
+        Task:
+          task_id: b00000001
+          call: toolu_09
+          kind: shell
+          status: completed
+          title: Sleep one second then echo a marker in background
+          summary: "Background command \"Sleep one second then echo a marker in background\" completed (exit code 0)"
+          body: ~
+          usage:
+            - ~
+            - ~
+            - ~
+          exit_code: 0
     - id: toolu_10
       at_ms: 1792130308816
       body:

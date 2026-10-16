@@ -151,6 +151,18 @@ impl Method for GetAccountTokenUsageParams {
     const METHOD: &'static str = "account/usage/read";
 }
 
+impl Method for McpResourceReadParams {
+    type Response = McpResourceReadResponse;
+
+    const METHOD: &'static str = "mcpServer/resource/read";
+}
+
+impl Method for McpServerToolCallParams {
+    type Response = McpServerToolCallResponse;
+
+    const METHOD: &'static str = "mcpServer/tool/call";
+}
+
 impl Method for CommandExecutionRequestApprovalParams {
     type Response = CommandExecutionRequestApprovalResponse;
 
@@ -2436,6 +2448,48 @@ pub struct McpElicitationUntitledSingleSelectEnumSchema {
     pub r#type: McpElicitationStringType,
 }
 
+/// `McpResourceReadParams`, as Codex's schema names it.
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
+pub struct McpResourceReadParams {
+    /// `connectorId`.
+    #[serde(rename = "connectorId", default, skip_serializing_if = "Option::is_none")]
+    pub connector_id: Option<String>,
+    /// Originating MCP tool call used to select the resource's app.
+    #[serde(rename = "originCallId", default, skip_serializing_if = "Option::is_none")]
+    pub origin_call_id: Option<String>,
+    /// `server`.
+    pub server: String,
+    /// Explicit hosted `app/account`. Omit to retain legacy resource discovery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<McpResourceReadTarget>,
+    /// `threadId`.
+    #[serde(rename = "threadId", default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    /// `uri`.
+    pub uri: String,
+}
+
+/// `McpResourceReadResponse`, as Codex's schema names it.
+#[derive(Clone, PartialEq, Eq, Default, Debug, Serialize, Deserialize)]
+pub struct McpResourceReadResponse {
+    /// `contents`.
+    pub contents: Vec<ResourceContent>,
+    /// Originating call when the server applied app-specific resource scoping.
+    #[serde(rename = "originCallId", default, skip_serializing_if = "Option::is_none")]
+    pub origin_call_id: Option<String>,
+}
+
+/// `McpResourceReadTarget`, as Codex's schema names it.
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
+pub struct McpResourceReadTarget {
+    /// `connectorId`.
+    #[serde(rename = "connectorId")]
+    pub connector_id: String,
+    /// Null explicitly requests no-auth access, subject to the app's resource policy.
+    #[serde(rename = "linkId", default, skip_serializing_if = "Option::is_none")]
+    pub link_id: Option<String>,
+}
+
 /// `McpServerElicitationAction`, as Codex's schema names it.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum McpServerElicitationAction {
@@ -2597,6 +2651,40 @@ pub struct McpServerStatusUpdatedNotification {
     /// `threadId`.
     #[serde(rename = "threadId", default, skip_serializing_if = "Option::is_none")]
     pub thread_id: Option<String>,
+}
+
+/// `McpServerToolCallParams`, as Codex's schema names it.
+#[derive(Clone, PartialEq, Eq, Default, Debug, Serialize, Deserialize)]
+pub struct McpServerToolCallParams {
+    /// `_meta`.
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<serde_json::Value>,
+    /// `arguments`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<serde_json::Value>,
+    /// `server`.
+    pub server: String,
+    /// `threadId`.
+    #[serde(rename = "threadId")]
+    pub thread_id: String,
+    /// `tool`.
+    pub tool: String,
+}
+
+/// `McpServerToolCallResponse`, as Codex's schema names it.
+#[derive(Clone, PartialEq, Eq, Default, Debug, Serialize, Deserialize)]
+pub struct McpServerToolCallResponse {
+    /// `_meta`.
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<serde_json::Value>,
+    /// `content`.
+    pub content: Vec<serde_json::Value>,
+    /// `isError`.
+    #[serde(rename = "isError", default, skip_serializing_if = "Option::is_none")]
+    pub is_error: Option<bool>,
+    /// `structuredContent`.
+    #[serde(rename = "structuredContent", default, skip_serializing_if = "Option::is_none")]
+    pub structured_content: Option<serde_json::Value>,
 }
 
 /// `McpToolCallAppContext`, as Codex's schema names it.
@@ -3380,6 +3468,46 @@ pub struct RequestPermissionProfile {
     /// `network`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network: Option<AdditionalNetworkPermissions>,
+}
+
+/// Contents returned when reading a resource from an MCP server.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ResourceContent {
+    /// `Variant0`.
+    Variant0(ResourceContentVariant0),
+    /// `Variant1`.
+    Variant1(ResourceContentVariant1),
+}
+
+/// `ResourceContentVariant0`, as Codex's schema names it.
+#[derive(Clone, PartialEq, Eq, Default, Debug, Serialize, Deserialize)]
+pub struct ResourceContentVariant0 {
+    /// `_meta`.
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<serde_json::Value>,
+    /// `mimeType`.
+    #[serde(rename = "mimeType", default, skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    /// `text`.
+    pub text: String,
+    /// The URI of this resource.
+    pub uri: String,
+}
+
+/// `ResourceContentVariant1`, as Codex's schema names it.
+#[derive(Clone, PartialEq, Eq, Default, Debug, Serialize, Deserialize)]
+pub struct ResourceContentVariant1 {
+    /// `_meta`.
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<serde_json::Value>,
+    /// `blob`.
+    pub blob: String,
+    /// `mimeType`.
+    #[serde(rename = "mimeType", default, skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    /// The URI of this resource.
+    pub uri: String,
 }
 
 /// `ResponseItem`, as Codex's schema names it.

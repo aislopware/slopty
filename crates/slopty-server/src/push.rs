@@ -501,6 +501,7 @@ mod tests {
                     .map(|n| Offered {
                         label: format!("{n} {}", "é".repeat(400)),
                         description: None,
+                        preview: None,
                     })
                     .collect(),
                 multi_select: false,
@@ -508,9 +509,11 @@ mod tests {
             proposed: None,
             schema_json: None,
             url: None,
+            reason: None,
             state: RequestState::Open,
             opened_ms: slopty_core::WallMs::ZERO,
             until_ms: None,
+            needs_presence: false,
         };
         let buttons = NoteChoice::of(&request);
         assert_eq!(buttons.len(), NoteChoice::MAX);

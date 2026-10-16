@@ -17017,3 +17017,130 @@ output.
 ```
 cargo test -p slopty-terminal --release --lib lines_below_cost -- --ignored --nocapture
 ```
+
+## 2026-10-16 — an agent visual's draw past its budget
+
+The question: how much main-thread time does an animated `show_visual` canvas cost, once its
+draw runs past the 60 ms per-frame budget (`slopty_visual`'s `DRAW_BUDGET`)? Canvases draw on
+the main thread at prepaint. zeron's copy asked for the next animation frame before the draw, so
+a draw stopped by the budget ran again on every frame.
+
+The setup: mac-studio, the test profile (the shell at opt-level 0, `slopty-visual` at 3),
+headless GPUI. One `VisualFrame` holds an animated canvas whose draw never returns. The tree
+renders anew once, then 30 frames follow, each a notify of the visual, the effects it flushes
+and a draw.
+
+| | the frame that stops the draw | each of the 30 frames after |
+| --- | --- | --- |
+| zeron's copy | not measured on its own | 120.3–120.9 ms (the draw runs, and is stopped, twice a frame) |
+| a stopped draw is not run again until the tree renders anew | 60.4 ms | worst 0.31 ms |
+
+A runaway draw now costs the main thread one frame of its budget, and the frames after it stay
+far under 16 ms. The visual shows the error line until the tree renders anew. A script that is
+slow from its first frame never reaches the transcript at all, because `check()` runs every draw
+once under the same budget before the visual is shown.
+
+```
+cargo test -p slopty-shell --lib visuals::tests::a_draw_past_its_budget -- --nocapture
+```
+
+## 2026-10-16 — a page inline: its snapshot and its process
+
+`slopty_platform::web::page` on real `WKWebView`s (`docs/decisions/platform.md`, "Pages run in a
+sandbox of their own"). mac-studio (M1 Max), macOS 27, debug build, no window (pages laid out
+offscreen, so snapshots are at 1x), load average 10 to 17 from other lanes' builds.
+
+Snapshot, BGRA, from the ask to the pixels (`takeSnapshot` to `CGImage`, drawn into a BGRA
+premultiplied bitmap; no PNG), a 600 × 300 pt page, 20 takes a run:
+
+| run | p50 | p90 | max |
+| --- | --- | --- | --- |
+| 1 | 0.32 ms | 0.60 ms | 0.61 ms |
+| 2 | 0.41 ms | 0.52 ms | 0.95 ms |
+| 3 | 0.47 ms | 0.73 ms | 0.81 ms |
+
+Memory: eight pages mounted at once (the cap), each in a `WebContent` process of its own (eight
+distinct pids, from the private `_webProcessIdentifier`), physical footprint per process
+(`ri_phys_footprint`, what Activity Monitor and jetsam count) with a small page loaded:
+
+| run | min | median | max | eight together |
+| --- | --- | --- | --- | --- |
+| 1 | 11.9 MB | 11.9 MB | 12.1 MB | 95.6 MB |
+| 2 | 11.7 MB | 12.0 MB | 12.2 MB | 95.3 MB |
+| 3 | 11.8 MB | 12.0 MB | 12.1 MB | 95.8 MB |
+
+So the mounted cap holds pages to under 100 MB of their own processes, the research's figure
+(`.research/inline-visuals-2026-10-16.md` §3.3, ~10–14 MB a page), plus WebKit's shared GPU and
+network processes, which are not counted here. A snapshot costs well under a millisecond at 1x,
+less than the research's 2.1 ms median for a 700 × 500 pt page drawn in a window at 2x; the
+e2e's measurement in a window (phase 2) is the one to hold the warm swap to.
+
+```sh
+# after a check built it (SLOPTY_LANE=X cargo xtask remote -p slopty-platform), from the lane's
+# target dir:
+target/local/X/target/debug/deps/main_thread-<hash> a_page_takes_the_theme_and_its_height_is_capped
+target/local/X/target/debug/deps/main_thread-<hash> pages_are_capped_and_each_has_its_own_process
+```
+
+## 2026-10-16 — chart fences, a file page's reload, a formula in the line
+
+`docs/decisions/ui.md`, "A page's card carries its own actions; charts, PDFs and tables draw;
+math sits on the line". mac-studio (M1 Max), macOS 27, debug build, load average 10 to 15 from
+other lanes' builds.
+
+The vendored chart libraries, as the app carries them (`crates/slopty-platform/assets/page-libs/`):
+
+| file | bytes |
+| --- | --- |
+| `vega.min.js` (vega 6.4.0) | 521,123 |
+| `vega-lite.min.js` (vega-lite 6.5.0) | 257,954 |
+| `vega-embed.min.js` (vega-embed 7.3.0) | 60,298 |
+| `vega-interpreter.js` (vega-interpreter 2.3.2) | 9,132 |
+| `plotly-cartesian.min.js` (plotly.js-cartesian-dist-min 4.1.2) | 1,507,990 |
+
+A Vega-Lite chart's page loads 848,507 bytes from its own origin, and a Plotly chart's
+1,507,990. The libraries are served from the app's binary, so nothing reaches the network.
+
+A fence's page from mount to drawn: a new `WebContent` process, its document, the libraries
+parsed, the chart drawn and its report back. Seven bars for Vega-Lite; a five-point scatter and
+a three-bar trace for Plotly.
+
+| run | Vega-Lite | Plotly |
+| --- | --- | --- |
+| 1 | 347 ms | — |
+| 2 | 340 ms | — |
+| 3 | 323 ms | — |
+| 4 | 543 ms | 405 ms |
+| 5 | 399 ms | 404 ms |
+| 6 | 393 ms | 419 ms |
+
+Runs 1 to 3 ran at a load of about 10, and 4 to 6 at about 15. The card shows its reserved
+place, then the picture, so this is the wait before a chart first shows. Moving a page to the
+pane and back keeps its document: the same `performance.timeOrigin`, and one view load.
+
+A file page's reload under a burst of writes: a thousand changes over 50 ms reload it once,
+150 ms after the first. That is 100 ms after the last, and within the 500 ms asked. Written
+every 50 ms for 2 s, it reloads every 400 ms. Both are proved on the burst logic itself, with
+the clock stepped.
+
+A formula in the line, `\frac{a}{b}` in text style at 14 px:
+
+- 8.5 × 14.6 px, its baseline 9.74 px below its top, painted with its baseline on the line's
+  (within 0.01 px);
+- the line 22.0 px tall with it, as without it;
+- its math node's bounds 25.0–33.5 × 10.5–25.0 px, inside its box 25.2–33.7 × 10.4–24.9 px
+  (device-pixel rounding, within 0.5 px), not at the paragraph's corner.
+
+The same formula in a 24 px heading: 24.97 px tall, against the body's 14.57 px × 24/14 =
+24.97 px.
+
+These run on the test platform's text system; the line height is set, so it holds on the
+real one too.
+
+```sh
+# after a check built them (SLOPTY_LANE=M cargo xtask remote …), from the lane's tree:
+target/local/M/target/debug/deps/main_thread-<hash> a_vega_lite_fence_draws_offline
+target/local/M/target/debug/deps/main_thread-<hash> a_plotly_fence_draws_offline
+cargo test -p slopty-ui --lib -- pages::tests::a_burst_of_writes_reloads_once --nocapture
+cargo test -p slopty-shell --lib -- markdown::math::tests --nocapture
+```

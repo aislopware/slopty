@@ -104,6 +104,23 @@ pub(in crate::workspace) fn answerable(card: &RequestCard) -> bool {
     card.answerable()
 }
 
+/// What a note's `pressed` answers `card` with: Allow and Deny its plain allow or deny while
+/// it is a yes or no they answer whole, a pick its own choice while it offers that pick. None
+/// for a request only the person at its card answers ([`RequestCard::needs_presence`]): a
+/// note's button is not the card.
+#[must_use]
+pub(in crate::workspace) fn tapped_choice(card: &RequestCard, pressed: Pressed) -> Option<String> {
+    if card.needs_presence {
+        return None;
+    }
+    match pressed {
+        Pressed::Allow | Pressed::Deny => {
+            answerable(card).then(|| pressed.choice(&card.options, &card.buttons))?
+        }
+        Pressed::Pick(_) => pressed.choice(&card.options, &card.buttons),
+    }
+}
+
 impl Approvals {
     /// Whether a note's verdict waits for its request.
     pub(in crate::workspace) const fn taps_waiting(&self) -> bool {
@@ -125,12 +142,7 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) -> Option<IntentId> {
         let open = self.thread_request(thread).filter(|a| a.id == *ask);
-        let choice = open.and_then(|a| match pressed {
-            Pressed::Allow | Pressed::Deny => {
-                answerable(a).then(|| pressed.choice(&a.options, &a.buttons))?
-            }
-            Pressed::Pick(_) => pressed.choice(&a.options, &a.buttons),
-        });
+        let choice = open.and_then(|a| tapped_choice(a, *pressed));
         let Some(choice) = choice else {
             tracing::debug!(%thread, ask = ask.0, "a request no longer open here");
             return None;
@@ -234,6 +246,14 @@ impl WorkspaceView {
                 About::Session(_) => None,
                 About::Thread(thread) => Some(thread),
             };
+            // A request only the person at its card answers takes no note's button: said so,
+            // and it waits for them at the card.
+            if let Some(thread) = thread
+                && self.thread_request(thread).is_some_and(|a| a.id == tap.ask && a.needs_presence)
+            {
+                Self::unanswered(tap.route, slopty_proto::thread::Request::NEEDS_PRESENCE, cx);
+                continue;
+            }
             if let Some(thread) = thread
                 && let Some(id) =
                     self.answer_pressed(tap.route.worker, thread, &tap.ask, &tap.pressed, cx)
@@ -437,3 +457,47 @@ impl WorkspaceView {
 }
 
 impl WorkspaceView {}
+
+#[cfg(test)]
+mod tests {
+    use slopty_core::WallMs;
+    use slopty_proto::thread::wire::NoteChoice;
+    use slopty_proto::thread::{Choice, Effect, Request};
+
+    use super::*;
+
+    /// A yes or no with a note's pick, needing the person at its card when `present`.
+    fn card(present: bool) -> RequestCard {
+        let choice = |id: &str, effect| Choice {
+            id: id.to_owned(),
+            label: id.to_owned(),
+            effect,
+            scope: None,
+            stops: false,
+        };
+        RequestCard {
+            id: AskId("a".to_owned()),
+            item: None,
+            kind: Request::APPROVAL.to_owned(),
+            title: "Run rm -rf build?".to_owned(),
+            options: vec![choice("allow", Effect::Allow), choice("deny", Effect::Deny)],
+            buttons: vec![NoteChoice { label: "Yes".to_owned(), choice: "allow".to_owned() }],
+            opened_ms: WallMs::ZERO,
+            needs_presence: present,
+        }
+    }
+
+    /// A note's Allow, Deny and pick answer a request as it offers them, and none answers one
+    /// that only the person at its card answers: a note's button is not the card.
+    #[test]
+    fn a_note_answers_nothing_that_needs_the_person_at_the_card() {
+        let open = card(false);
+        assert_eq!(tapped_choice(&open, Pressed::Allow).as_deref(), Some("allow"));
+        assert_eq!(tapped_choice(&open, Pressed::Deny).as_deref(), Some("deny"));
+        assert_eq!(tapped_choice(&open, Pressed::Pick(0)).as_deref(), Some("allow"));
+        let present = card(true);
+        for pressed in [Pressed::Allow, Pressed::Deny, Pressed::Pick(0)] {
+            assert_eq!(tapped_choice(&present, pressed), None, "{pressed:?}");
+        }
+    }
+}

@@ -85,7 +85,6 @@ mod session_info;
 mod side_chats;
 mod sidebar_pins;
 mod sidebar_sections;
-mod sidebar_subagents; // slopty: an agent's subagents under its sidebar row
 mod sidebar_status; // slopty: status groups, reasons and the hover card
 mod search_warm;
 pub(crate) mod spaces;
@@ -94,10 +93,13 @@ use side_chats::SideChatTab;
 mod tabs;
 mod live_surfaces; // slopty: remote window and desktop surfaces
 mod kept_tabs; // slopty: the pane's tabs kept across launches
+mod mod_panes; // slopty: a mod's pane as a tab (S2)
+mod page_panes; // slopty: a page an agent showed, as a tab (M)
 mod compact; // slopty: the phone's anatomy
 mod chrome_keys; // slopty: find, history, tab and picker keys, and undoing an archive
 mod closed_tabs; // slopty: the right pane's closed tabs, opened again
 mod open_in; // slopty: a chat's folder in the person's editor
+mod subagent_drill; // slopty: a subagent drilled into from its card
 mod terminal_runs; // slopty: a transcript's Run in the chat's own shell terminal
 // slopty: voice removed.
 
@@ -555,16 +557,19 @@ pub enum SettingsSection {
     #[default]
     General,
     Archived,
+    /// slopty: an agent's permission rules, by folder (S2).
+    Permissions,
 }
 
 impl SettingsSection {
     /// Sections shown in Settings. `Agents` is a legacy Accounts route alias.
-    pub const ALL: [SettingsSection; 8] = [ // slopty: voice and appshots removed.
+    pub const ALL: [SettingsSection; 9] = [ // slopty: voice and appshots removed.
         SettingsSection::General,
         SettingsSection::Appearance,
         SettingsSection::Notifications,
         SettingsSection::Shortcuts,
         SettingsSection::Harnesses,
+        SettingsSection::Permissions, // slopty: S2
         SettingsSection::Devices,
         SettingsSection::Files,
         SettingsSection::Archived,
@@ -608,6 +613,7 @@ impl SettingsSection {
             SettingsSection::Shortcuts => "shortcuts",
             SettingsSection::General => "general",
             SettingsSection::Archived => "archived",
+            SettingsSection::Permissions => "permissions", // slopty: S2
         }
     }
 
@@ -623,6 +629,7 @@ impl SettingsSection {
             "shortcuts" => SettingsSection::Shortcuts,
             "general" | "conversations" => SettingsSection::General,
             "archived" => SettingsSection::Archived,
+            "permissions" => SettingsSection::Permissions, // slopty: S2
             _ => return None,
         })
     }
@@ -646,6 +653,7 @@ impl SettingsSection {
             SettingsSection::Shortcuts => "Shortcuts",
             SettingsSection::General => "General",
             SettingsSection::Archived => "Archived sessions",
+            SettingsSection::Permissions => "Permissions", // slopty: S2
         }
     }
 }
@@ -701,8 +709,10 @@ fn right_pane_takeover_width(viewport: f32, sidebar: f32) -> f32 {
 }
 
 /// One right-pane surface tab: a workspace browser, an individual workspace
-/// file editor, a Git diff or history page, an embedded terminal, or a
-/// subagent transcript. `Picker` is the empty surface chooser.
+/// file editor, a Git diff or history page, or an embedded terminal. `Picker` is the empty
+/// surface chooser.
+// slopty: no subagent tab: a subagent lives in its parent's chat (`docs/decisions/ui.md`,
+// "Subagents live in their parent's chat").
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RightSurface {
     #[default]
@@ -711,11 +721,10 @@ pub enum RightSurface {
     Browser(u64),
     Diff(u64),
     Terminal(u64),
-    /// A subagent's transcript, read-only (per-subagent viz) — the handle
-    /// keys [`Shell::subagent_tabs`].
-    Subagent(u64),
     SideChat(u64),
     Screen(u64), // slopty: a remote window or desktop (`live_surfaces`)
+    ModPane(u64), // slopty: a mod's pane (`mod_panes`)
+    Page(u64), // slopty: a page an agent showed (`page_panes`)
 }
 
 // slopty: what a remote window tab's chip wears: the window glyph for a window (its choice's id
@@ -1653,19 +1662,6 @@ fn sidebar_server_identity(
 
 // slopty: no accounts, sync or sign-in.
 
-/// One right-pane subagent tab: the doc it shows, its strip title, and the
-/// read-only transcript entity whose drop tears the view down.
-struct SubagentTab {
-    doc_id: String,
-    harness: Option<slopty_view_proto::HarnessId>,
-    title: SharedString,
-    transcript: Entity<Transcript>,
-    /// Keeps a frozen-blob fetch alive (it falls back to a live doc watch).
-    _fetch: Option<Task<()>>,
-    /// Spawn chips INSIDE the subagent transcript open their own tabs.
-    _events: Subscription,
-}
-
 /// Sidebar render identity lets transcript/caret frames reuse its GPUI scene.
 /// State and event handlers stay on Shell. Explicit Shell notifications still
 /// invalidate the sidebar, including selection, menus, theme and navigation.
@@ -1781,10 +1777,6 @@ pub struct Shell {
     /// Event hookups for [`Self::diffs`] (History rows opening commit tabs).
     diff_subs: std::collections::HashMap<u64, Subscription>,
     diff_seq: u64,
-    /// Subagent transcript surfaces by id — each tab a read-only
-    /// [`Transcript`] pinned to its subagent doc.
-    subagent_tabs: std::collections::HashMap<u64, SubagentTab>,
-    subagent_seq: u64,
     side_chats: std::collections::HashMap<u64, SideChatTab>,
     side_chat_seq: u64,
     side_chat_creating: bool,
@@ -1815,6 +1807,7 @@ pub struct Shell {
     // slopty: no pull-request pages.
     devices_page: Option<Entity<DevicesPage>>,
     archived_page: Option<Entity<ArchivedPage>>,
+    permissions_page: Option<Entity<crate::settings::permissions::PermissionsPage>>, // slopty: S2
     appearance_page: Option<Entity<AppearancePage>>,
     files_settings_page: Option<Entity<FilesSettingsPage>>,
     notifications_page: Option<Entity<NotificationsPage>>,
@@ -1871,8 +1864,6 @@ pub struct Shell {
     sidebar_view_trigger_focus: gpui::FocusHandle,
     /// Current pinned-row metrics shared by hit testing and displacement animations.
     sidebar_pinned_heights: Vec<f32>,
-    /// slopty: the agents whose finished subagents are unfolded in the sidebar.
-    sidebar_finished_subagents: std::collections::HashSet<String>,
     project_icons: project_icon::ProjectIcons,
     /// Hovered row whose status is replaced by the archive control.
     chat_status_hover: Option<String>,
@@ -2077,6 +2068,9 @@ pub struct Shell {
     _composer_events: Subscription,
     /// The primary transcript's spawn-chip events (subagent tabs).
     _transcript_events: Subscription,
+    // slopty: the bar in a subagent's composer place takes Escape; focused once on drilling in.
+    drill_focus: gpui::FocusHandle,
+    drill_focus_pending: bool,
     _transcript_invalidation: Subscription,
 }
 
@@ -2086,6 +2080,10 @@ impl Shell {
             this.on_state_changed(&state, cx);
             cx.notify();
         });
+        // slopty: a mod's pane the composer asks for becomes a tab (S2).
+        cx.observe_global::<crate::composer::PaneAsk>(Self::on_pane_ask).detach();
+        // slopty: a page a card moves into the pane becomes a tab (M).
+        cx.observe_global::<crate::page::PagePaneAsk>(Self::on_page_pane_ask).detach();
         // A reopened window reuses AppState, so the engine may already be
         // ready. Only show the boot splash while it is actually connecting.
         let splash = match &state.read(cx).connection {
@@ -2257,8 +2255,6 @@ impl Shell {
             pending_exit: None,
             diff_subs: std::collections::HashMap::new(),
             diff_seq: 0,
-            subagent_tabs: std::collections::HashMap::new(),
-            subagent_seq: 0,
             side_chats: std::collections::HashMap::new(),
             side_chat_seq: 0,
             side_chat_creating: false,
@@ -2285,6 +2281,7 @@ impl Shell {
             // slopty: no pull-request pages.
             devices_page: None,
             archived_page: None,
+            permissions_page: None, // slopty: S2
             appearance_page: None,
             files_settings_page: None,
             notifications_page: None,
@@ -2322,7 +2319,6 @@ impl Shell {
             sidebar_view_menu: popover::Popup::default(),
             sidebar_view_trigger_focus: cx.focus_handle().tab_stop(true),
             sidebar_pinned_heights: Vec::new(),
-            sidebar_finished_subagents: Default::default(), // slopty: subagents
             project_icons: Default::default(),
             chat_status_hover: None,
             chat_hover_resync: false,
@@ -2421,6 +2417,8 @@ impl Shell {
             _state_observation: observation,
             _composer_events: composer_events,
             _transcript_events: transcript_events,
+            drill_focus: cx.focus_handle(), // slopty: a subagent's bar.
+            drill_focus_pending: false,
             _transcript_invalidation: transcript_invalidation,
         }
     }
@@ -3076,10 +3074,6 @@ impl Shell {
                         .unwrap_or_else(|| "Side chat".into());
                     (*surface, title.into(), false, None)
                 }),
-                RightSurface::Subagent(id) => self
-                    .subagent_tabs
-                    .get(id)
-                    .map(|tab| (*surface, tab.title.clone(), false, None)),
                 RightSurface::Browser(id) => self.browsers.get(id).map(|browser| {
                     let browser = browser.read(cx);
                     (
@@ -3090,6 +3084,8 @@ impl Shell {
                     )
                 }),
                 RightSurface::Screen(id) => self.screen_surface_row(*id, cx), // slopty:
+                RightSurface::ModPane(id) => self.mod_pane_row(*id, cx), // slopty:
+                RightSurface::Page(id) => self.page_pane_row(*id, cx), // slopty:
                 RightSurface::Picker => None,
             })
             .collect()
@@ -3141,8 +3137,9 @@ impl Shell {
             | RightSurface::Diff(_)
             | RightSurface::Terminal(_)
             | RightSurface::SideChat(_)
-            | RightSurface::Subagent(_)
             | RightSurface::Screen(_) // slopty:
+            | RightSurface::ModPane(_) // slopty:
+            | RightSurface::Page(_) // slopty:
             | RightSurface::Browser(_) => {
                 return None;
             }
@@ -3238,13 +3235,6 @@ impl Shell {
     }
 
     fn set_right_active(&mut self, surface: RightSurface, cx: &mut Context<Self>) {
-        if let RightSurface::Subagent(id) = surface
-            && let Some(tab) = self.subagent_tabs.get(&id)
-        {
-            let doc_id = tab.doc_id.clone();
-            self.state
-                .update(cx, |state, cx| state.focus_subagent_sync(&doc_id, cx));
-        }
         if self.resolved_right_active(cx) != surface {
             self.suspend_file_images(cx);
         }
@@ -3284,8 +3274,10 @@ impl Shell {
                     });
                 }
             }
-            RightSurface::Subagent(_) | RightSurface::Browser(_) => {}
+            RightSurface::Browser(_) => {}
             RightSurface::Screen(id) => self.focus_screen_surface(id, cx), // slopty:
+            RightSurface::ModPane(_) => {} // slopty:
+            RightSurface::Page(_) => {} // slopty:
             RightSurface::Picker => {}
         }
         self.sync_explorer_selection(cx);
@@ -3904,169 +3896,35 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         match event {
-            TranscriptEvent::OpenSubagent {
-                chat_id,
-                doc_id,
-                title,
-                frozen,
-            } => {
-                self.add_subagent_surface(
-                    chat_id.clone(),
-                    doc_id.clone(),
-                    title.clone(),
-                    *frozen,
-                    cx,
-                );
+            // slopty: a subagent's card drills in: the session view shows its run.
+            TranscriptEvent::OpenSubagent { chat_id } => {
+                self.open_chat(chat_id.clone(), cx);
+                self.drill_focus_pending = true;
+            }
+            // slopty: a rewind's message returns to its chat's composer as a draft; a branched
+            // conversation opens in the session view, its composer filled once the switch has
+            // loaded that chat's draft.
+            TranscriptEvent::Rewound { from, chat_id, prompt } => {
+                let composer = if let Some(chat_id) = chat_id {
+                    self.open_chat(chat_id.clone(), cx);
+                    Some(self.composer.clone())
+                } else if *from == self.active_chat {
+                    Some(self.composer.clone())
+                } else {
+                    self.side_chats
+                        .values()
+                        .find(|side| side.state.read(cx).selected_chat.as_ref() == Some(from))
+                        .map(|side| side.composer.clone())
+                };
+                if let Some(composer) = composer {
+                    let prompt = prompt.clone();
+                    cx.defer(move |cx| {
+                        let input = composer.read(cx).input.clone();
+                        input.update(cx, |input, cx| input.set_text(prompt, cx));
+                    });
+                }
             }
         }
-    }
-
-    /// A spawn chip's "Open subagent": focus the existing tab for that doc,
-    /// or open one. `frozen` (subagent done/failed) tries the uploaded
-    /// transcript blob first and falls back to the live doc watch; running
-    /// subagents watch the doc directly.
-    fn add_subagent_surface(
-        &mut self,
-        chat_id: String,
-        doc_id: String,
-        title: String,
-        frozen: bool,
-        cx: &mut Context<Self>,
-    ) {
-        // The chip lives in the conversation column — the pane it opens into
-        // may still be closed.
-        self.set_surfaces_open(true, cx);
-        if let Some((&id, _)) = self
-            .subagent_tabs
-            .iter()
-            .find(|(_, tab)| tab.doc_id == doc_id)
-        {
-            self.set_right_active(RightSurface::Subagent(id), cx);
-            return;
-        }
-        self.subagent_seq += 1;
-        let id = self.subagent_seq;
-        let harness = self
-            .state
-            .read(cx)
-            .chats
-            .iter()
-            .find(|chat| chat.id == chat_id)
-            .and_then(|chat| chat.config.as_ref().map(|config| config.harness))
-            .or_else(|| {
-                self.side_chats.values().find_map(|tab| {
-                    tab.state
-                        .read(cx)
-                        .selected_chat_row()
-                        .filter(|chat| chat.id == chat_id)
-                        .and_then(|chat| chat.config.as_ref().map(|config| config.harness))
-                })
-            })
-            .or_else(|| {
-                // Nested spawn chips identify their parent subagent doc.
-                self.subagent_tabs
-                    .values()
-                    .find(|tab| tab.doc_id == chat_id)
-                    .and_then(|tab| tab.harness)
-            });
-        // A live subagent follows its streaming end (main-transcript feel);
-        // a frozen one reads top-down.
-        let transcript =
-            cx.new(|cx| Transcript::for_doc(self.state.clone(), doc_id.clone(), !frozen, cx));
-        let links = Self::session_links(Some(self.active_chat.clone()), cx);
-        transcript.update(cx, |transcript, _| {
-            transcript.set_workspace_link_handler(links)
-        });
-        let events = cx.subscribe(&transcript, Self::on_transcript_event);
-        let fetch = if frozen {
-            self.spawn_subagent_snapshot_fetch(&chat_id, &doc_id, cx)
-        } else {
-            self.state
-                .update(cx, |s, cx| s.watch_subagent_doc(doc_id.clone(), cx));
-            None
-        };
-        self.subagent_tabs.insert(
-            id,
-            SubagentTab {
-                doc_id,
-                harness,
-                title: title.into(),
-                transcript,
-                _fetch: fetch,
-                _events: events,
-            },
-        );
-        let key = self.panel_key(cx);
-        self.right_tabs
-            .entry(key)
-            .or_default()
-            .push(RightSurface::Subagent(id));
-        self.set_right_active(RightSurface::Subagent(id), cx);
-    }
-
-    /// Fetch a finished subagent's frozen transcript blob
-    /// (`{chat_id}/{doc_id}`); on ANY failure fall back to watching the doc
-    /// — the blob upload is best-effort engine-side.
-    fn spawn_subagent_snapshot_fetch(
-        &self,
-        chat_id: &str,
-        doc_id: &str,
-        cx: &mut Context<Self>,
-    ) -> Option<Task<()>> {
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            self.state
-                .update(cx, |s, cx| s.watch_subagent_doc(doc_id.to_string(), cx));
-            return None;
-        };
-        // Copied spawn chips retain their original subagent doc namespace.
-        let source_chat = doc_id
-            .split_once("--sub--")
-            .map(|(source, _)| source)
-            .unwrap_or(chat_id);
-        let blob_ref = format!("{source_chat}/{doc_id}");
-        let state = self.state.clone();
-        let doc_id = doc_id.to_string();
-        Some(cx.spawn(async move |_, cx| {
-            let reply = crate::attachments::call_with_timeout(
-                &engine,
-                cx.background_executor(),
-                methods::FETCH_TOOL_BLOB,
-                serde_json::json!({ "blobRef": blob_ref }),
-                Duration::from_secs(20),
-            )
-            .await;
-            let snapshot = cx
-                .background_executor()
-                .spawn(async move {
-                    let value = reply.ok()?;
-                    let entries: Vec<slopty_view_doc::SessionMessageEntry> =
-                        serde_json::from_str(value.get("text")?.as_str()?).ok()?;
-                    let update = slopty_view_doc::TranscriptUpdate {
-                        replay_baseline: Some(slopty_view_doc::TranscriptBaseline::capture(&entries)),
-                        frame: slopty_view_doc::TranscriptFrame::Reset { reset: entries },
-                        context_usage: None,
-                        limits: Vec::new(), // slopty: new field.
-                        limit_resets_at: None, // slopty: new field.
-                    };
-                    let prepared = crate::transcript::TranscriptPreparation::default()
-                        .prepare(&update)
-                        .ok()?;
-                    let slopty_view_doc::TranscriptFrame::Reset { reset } = update.frame else {
-                        unreachable!()
-                    };
-                    Some((reset, prepared))
-                })
-                .await;
-            state.update(cx, |s, cx| {
-                match snapshot {
-                    Some((entries, prepared)) => {
-                        s.set_prepared_subagent_snapshot(doc_id, entries, prepared);
-                    }
-                    None => s.watch_subagent_doc(doc_id, cx),
-                }
-                cx.notify();
-            });
-        }))
     }
 
     /// Snapshot the displayed order before closing tabs mutates it.
@@ -4159,15 +4017,9 @@ impl Shell {
                     self.side_chats.remove(&id);
                 }
             }
-            RightSurface::Subagent(id) => {
-                // Unwatch drops the watch task — that cancels the engine-side
-                // watch and unpins the subagent doc from the engine LRU.
-                if let Some(tab) = self.subagent_tabs.remove(&id) {
-                    self.state
-                        .update(cx, |s, _| s.unwatch_subagent_doc(&tab.doc_id));
-                }
-            }
             RightSurface::Screen(id) => self.close_screen_surface(id, cx), // slopty:
+            RightSurface::ModPane(id) => self.close_mod_pane(id, cx), // slopty:
+            RightSurface::Page(id) => self.close_page_pane(id, cx), // slopty:
             RightSurface::Picker => {}
         }
         self.close_empty_right_pane(&key, cx);
@@ -5309,6 +5161,15 @@ impl Shell {
                     None => Empty.into_any_element(),
                 }
             }
+            // slopty: S2's Permissions page.
+            SettingsSection::Permissions => self
+                .permissions_page
+                .get_or_insert_with(|| {
+                    let state = self.state.clone();
+                    cx.new(|cx| crate::settings::permissions::PermissionsPage::new(state, cx))
+                })
+                .clone()
+                .into_any_element(),
         }
     }
 
@@ -6801,6 +6662,7 @@ impl Shell {
             SettingsSection::Shortcuts => icons::KEYBOARD,
             SettingsSection::General => icons::SETTINGS,
             SettingsSection::Archived => icons::ARCHIVE_MINIMALISTIC,
+            SettingsSection::Permissions => icons::LOCK, // slopty: S2
         };
         settings::widgets::scroll_faded(
             "settings-nav-scroll",
@@ -9358,6 +9220,17 @@ impl Shell {
             .relative()
             .left(px(-session_reserve / 2.0))
             .child(self.render_status_strip(composer_width, cx));
+        // slopty: a subagent drilled into: a breadcrumb back, and for one that takes no
+        // messages a slim bar in the composer's place.
+        let drill = has_selection.then(|| self.subagent_drill(cx)).flatten();
+        let drill_bar = drill
+            .as_ref()
+            .filter(|drill| drill.in_parent)
+            .map(|drill| self.render_drill_bar(&drill.clone(), composer_width, window, cx));
+        let drill_bar_shown = drill_bar.is_some();
+        let drill_breadcrumb = drill
+            .as_ref()
+            .map(|drill| self.render_drill_breadcrumb(&drill.clone(), cx));
         let session_card = self.render_session_info(
             session_docked,
             session_reveal,
@@ -9431,6 +9304,7 @@ impl Shell {
                 },
             )
             .children(session_card)
+            .children(drill_breadcrumb) // slopty: a subagent's way back.
             .when_some(harness_update_card, |column, chip| {
                 // Home notices stay anchored to the window bottom, behind the
                 // dock. Clip paint and hitboxes at the same measured terminal
@@ -9499,7 +9373,8 @@ impl Shell {
                     )
                     // slopty: voice removed.
                     .child(status)
-                    .when(has_spaces || no_project /* slopty: appshots removed */, |el| {
+                    .children(drill_bar) // slopty: a subagent that takes no messages.
+                    .when(!drill_bar_shown && (has_spaces || no_project /* slopty: appshots removed */), |el| {
                         let composer_opacity = self.composer_dock.borrow().opacity();
                         el.child(
                             crate::composer_dock::docked_composer(
@@ -9866,43 +9741,9 @@ impl Shell {
                     panel.into_any_element()
                 }
                 RightSurface::SideChat(id) => self.render_side_chat(id, cx),
-                RightSurface::Subagent(id) if self.subagent_tabs.contains_key(&id) => {
-                    let transcript = self
-                        .subagent_tabs
-                        .get(&id)
-                        .expect("checked")
-                        .transcript
-                        .clone();
-                    // The pane hosts its own jump pill: the conversation
-                    // overlay's is bound to the PRIMARY transcript, and this
-                    // one anchors to the pane (no composer stack to clear).
-                    let pill = transcript.read(cx).jump_button_shown().then(|| {
-                        div()
-                            .absolute()
-                            .bottom(px(16.0))
-                            .left_0()
-                            .right_0()
-                            .flex()
-                            .justify_center()
-                            .child(self.jump_pill(
-                                "subagent-jump-to-bottom",
-                                "subagent-jump-pill",
-                                transcript.clone(),
-                                cx,
-                            ))
-                    });
-                    // Read-only surface: the transcript fills the pane — no
-                    // composer, no status strip.
-                    div()
-                        .size_full()
-                        .relative()
-                        .flex()
-                        .flex_col()
-                        .child(div().flex_1().min_h_0().child(transcript))
-                        .children(pill)
-                        .into_any_element()
-                }
                 RightSurface::Screen(id) => self.render_screen_surface(id, cx), // slopty:
+                RightSurface::ModPane(id) => self.render_mod_pane(id, cx), // slopty:
+                RightSurface::Page(id) => self.render_page_pane(id, cx), // slopty:
                 _ => self.render_surface_picker(cx),
             }
         } else {
@@ -10136,9 +9977,6 @@ impl Shell {
                         .selected_chat_row()
                         .and_then(|chat| chat.config.as_ref().map(|config| config.harness))
                 }),
-                RightSurface::Subagent(id) => {
-                    self.subagent_tabs.get(&id).and_then(|tab| tab.harness)
-                }
                 _ => None,
             }
             .map(crate::pickers::harness_brand_icon);
@@ -10146,7 +9984,6 @@ impl Shell {
                 RightSurface::File(_) => icons::DOCUMENT,
                 RightSurface::Diff(_) => icons::LIST, // slopty: no History surface (ruled out).
                 RightSurface::SideChat(_) => icons::CHAT_ROUND_LINE,
-                RightSurface::Subagent(_) => icons::BOT,
                 RightSurface::Terminal(_) => icons::TERMINAL,
                 RightSurface::Browser(_) => icons::GLOBE,
                 // slopty: a window's chip wears the window glyph its picker row wore; a desktop,
@@ -10154,6 +9991,8 @@ impl Shell {
                 RightSurface::Screen(id) => screen_chip_glyph(
                     self.screen_surface_chosen(id, cx).map(|(id, _)| id).as_deref(),
                 ),
+                RightSurface::ModPane(_) => icons::WIDGET, // slopty:
+                RightSurface::Page(_) => icons::GLOBAL, // slopty:
                 RightSurface::Picker => icons::PLUS,
             };
             // Working chats and subagents swap their harness icon for the
@@ -10177,13 +10016,6 @@ impl Shell {
                     .browsers
                     .get(&id)
                     .is_some_and(|b| b.read(cx).page.loading),
-                RightSurface::Subagent(id) => self.subagent_tabs.get(&id).is_some_and(|tab| {
-                    self.state
-                        .read(cx)
-                        .sub_transcript(&tab.doc_id)
-                        .last()
-                        .is_some_and(|e| e.status == Some(slopty_view_doc::MessageStatus::Streaming))
-                }),
                 _ => false,
             };
             let ghost_title = title.clone();
@@ -13836,26 +13668,7 @@ mod exit_regressions {
                 shell.state.update(cx, |state, _| {
                     state.selected_chat = Some("first-session".into())
                 });
-                shell.add_subagent_surface(
-                    "first-session".into(),
-                    "child-doc".into(),
-                    "Child".into(),
-                    true,
-                    cx,
-                );
-                let child = shell
-                    .subagent_tabs
-                    .values()
-                    .next()
-                    .unwrap()
-                    .transcript
-                    .clone();
-                let ui = child
-                    .update(cx, |transcript, cx| transcript.link_ui(cx))
-                    .unwrap();
-                assert_eq!(ui.source_session.as_deref(), Some("first-session"));
                 activation.action = LinkAction::Internal;
-                activation.source_session = ui.source_session;
                 assert_eq!(
                     shell.activate_session_link(&activation, window, cx),
                     LinkOutcome::Internal
@@ -14498,7 +14311,7 @@ mod right_tab_mouse_regressions {
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
         });
-        let (host, cx) = cx.add_window_view(|_, cx| {
+        let (host, cx) = cx.add_window_view(|window, cx| {
             let shell = cx.new(|cx| {
                 let state = cx.new(|_| AppState::new());
                 let mut shell = Shell::new(
@@ -14511,8 +14324,9 @@ mod right_tab_mouse_regressions {
                     cx,
                 );
                 shell.active_chat = "parent".into();
-                for id in ["first", "second"] {
-                    shell.add_subagent_surface("parent".into(), id.into(), id.into(), false, cx);
+                // slopty: two diff tabs stand for any two surfaces (no subagent tab).
+                for _ in 0..2 {
+                    shell.add_diff_surface(window, cx);
                 }
                 shell
             });
@@ -14593,7 +14407,7 @@ mod right_tab_mouse_regressions {
     }
 
     #[gpui::test]
-    fn subagent_close_press_does_not_start_parent_drag(cx: &mut TestAppContext) {
+    fn surface_close_press_does_not_start_parent_drag(cx: &mut TestAppContext) {
         let (shell, cx) = setup(cx);
         let start = cx.debug_bounds("right-surface-close-0").unwrap().center();
         let end = start + gpui::point(px(6.), px(0.));
@@ -14602,9 +14416,9 @@ mod right_tab_mouse_regressions {
         cx.update(|_, cx| assert!(!cx.has_active_drag(), "close press started a tab drag"));
         cx.simulate_mouse_up(end, MouseButton::Left, gpui::Modifiers::default());
         shell.read_with(cx, |shell, cx| {
-            assert!(!shell.subagent_tabs.contains_key(&1));
-            assert!(shell.subagent_tabs.contains_key(&2));
-            assert_eq!(shell.resolved_right_active(cx), RightSurface::Subagent(2));
+            assert!(!shell.diffs.contains_key(&1));
+            assert!(shell.diffs.contains_key(&2));
+            assert_eq!(shell.resolved_right_active(cx), RightSurface::Diff(2));
         });
     }
 
@@ -14623,10 +14437,12 @@ mod right_tab_mouse_regressions {
     #[gpui::test]
     fn tab_strip_scrolls_over_chips_inside_titlebar(cx: &mut TestAppContext) {
         let (shell, cx) = setup(cx);
-        shell.update(cx, |shell, cx| {
-            for id in ["third", "fourth", "fifth", "sixth"] {
-                shell.add_subagent_surface("parent".into(), id.into(), id.into(), false, cx);
-            }
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                for _ in 0..4 {
+                    shell.add_diff_surface(window, cx);
+                }
+            })
         });
         cx.update(|window, cx| window.draw(cx).clear(cx));
         let start = cx.debug_bounds("right-surface-tab-0").unwrap().center();
@@ -14651,12 +14467,12 @@ mod right_tab_mouse_regressions {
     }
 
     #[gpui::test]
-    fn subagent_tab_body_still_selects_drags_and_middle_closes(cx: &mut TestAppContext) {
+    fn surface_tab_body_still_selects_drags_and_middle_closes(cx: &mut TestAppContext) {
         let (shell, cx) = setup(cx);
         let start = cx.debug_bounds("right-surface-tab-0").unwrap().center();
         cx.simulate_click(start, gpui::Modifiers::default());
         shell.read_with(cx, |shell, cx| {
-            assert_eq!(shell.resolved_right_active(cx), RightSurface::Subagent(1));
+            assert_eq!(shell.resolved_right_active(cx), RightSurface::Diff(1));
         });
         cx.simulate_mouse_down(start, MouseButton::Left, gpui::Modifiers::default());
         cx.simulate_mouse_move(
@@ -14669,14 +14485,14 @@ mod right_tab_mouse_regressions {
         cx.simulate_mouse_down(start, MouseButton::Middle, gpui::Modifiers::default());
         cx.simulate_mouse_up(start, MouseButton::Middle, gpui::Modifiers::default());
         shell.read_with(cx, |shell, _| {
-            assert!(!shell.subagent_tabs.contains_key(&1));
-            assert!(shell.subagent_tabs.contains_key(&2));
+            assert!(!shell.diffs.contains_key(&1));
+            assert!(shell.diffs.contains_key(&2));
         });
     }
 
     #[cfg(target_os = "windows")]
     #[gpui::test]
-    fn subagent_tab_click_jitter_selects_without_starting_a_drag(cx: &mut TestAppContext) {
+    fn surface_tab_click_jitter_selects_without_starting_a_drag(cx: &mut TestAppContext) {
         let (shell, cx) = setup(cx);
         let start = cx.debug_bounds("right-surface-tab-0").unwrap().center();
         // Sub-threshold pointer jitter (the Windows drag rectangle is 4px,
@@ -14695,7 +14511,7 @@ mod right_tab_mouse_regressions {
         cx.simulate_mouse_up(end, MouseButton::Left, gpui::Modifiers::default());
 
         shell.read_with(cx, |shell, cx| {
-            assert_eq!(shell.resolved_right_active(cx), RightSurface::Subagent(1));
+            assert_eq!(shell.resolved_right_active(cx), RightSurface::Diff(1));
         });
     }
 
@@ -14727,7 +14543,7 @@ mod right_tab_mouse_regressions {
             let tabs = shell.right_tabs.get(&key).expect("panel has surface tabs");
             assert_eq!(
                 tabs,
-                &vec![RightSurface::Subagent(2), RightSurface::Subagent(1)],
+                &vec![RightSurface::Diff(2), RightSurface::Diff(1)],
                 "tab drag did not reorder the strip"
             );
         });
@@ -15083,6 +14899,7 @@ mod settings_modal_regressions {
             ("settings/files", SettingsSection::Files),
             // slopty: voice and appshots removed.
             ("settings/archived", SettingsSection::Archived),
+            ("settings/permissions", SettingsSection::Permissions), // slopty: S2
         ] {
             assert_eq!(
                 settings_open_route(route, remembered),

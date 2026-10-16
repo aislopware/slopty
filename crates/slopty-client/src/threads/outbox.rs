@@ -86,7 +86,14 @@ impl Sent {
             | Intent::Name { .. }
             | Intent::Said { .. }
             | Intent::End
-            | Intent::SetOption { .. } => self.outcome.is_some(),
+            | Intent::SetOption { .. }
+            | Intent::StopTask { .. }
+            | Intent::Background { .. }
+            | Intent::Shell { .. }
+            | Intent::Rewind { .. }
+            | Intent::Unrewind { .. }
+            | Intent::Rule(_)
+            | Intent::Surface { .. } => self.outcome.is_some(),
         }
     }
 

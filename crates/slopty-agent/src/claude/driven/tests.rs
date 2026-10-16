@@ -120,7 +120,7 @@ fn a_recorded_session_is_a_thread() {
     }
     assert_eq!(sent.len(), 4);
     let answer: Value = serde_json::from_str(&answered.expect("an answer")).expect("JSON");
-    assert_eq!(answer["response"]["request_id"], json!("00000000-0000-4000-8000-000000000041"));
+    assert_eq!(answer["response"]["request_id"], json!("00000000-0000-4000-8000-000000000045"));
     assert_eq!(answer["response"]["response"]["behavior"], json!("allow"));
     assert_eq!(answer["response"]["response"]["updatedInput"]["command"], json!("touch made.txt"));
 
@@ -418,4 +418,614 @@ fn a_request_tried_again_is_one_row_until_it_goes_through_or_gives_up() {
     ));
     let thread = host.main(&driven);
     assert_eq!(retries(thread), (Vec::new(), 1), "left as the error: {:#?}", thread.items);
+}
+
+/// The request id of the last control request the codec wrote, and its subtype.
+fn last_control(driven: &mut Driven) -> Vec<(String, String)> {
+    driven
+        .take_writes()
+        .iter()
+        .filter_map(|w| serde_json::from_str::<Value>(w).ok())
+        .filter(|w| w["type"] == "control_request")
+        .map(|w| {
+            let id = w["request_id"].as_str().unwrap_or_default().to_owned();
+            (w["request"]["subtype"].as_str().unwrap_or_default().to_owned(), id)
+        })
+        .collect()
+}
+
+/// The codec's request just written, as the recording names it: `named`.
+fn asked(driven: &mut Driven, ids: &mut BTreeMap<String, String>, named: &str) {
+    let (_, id) = last_control(driven).pop().expect("a control request");
+    ids.insert(named.to_owned(), id);
+}
+
+/// The words of every notice in `thread`, by kind.
+fn notices(thread: &ThreadState) -> Vec<(String, String)> {
+    thread
+        .items
+        .iter()
+        .filter_map(|i| match &i.body {
+            ItemBody::Notice(n) => Some((n.kind.clone(), n.text.text.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Claude Code 2.1.301's doors beside messages, as it answered them: an MCP App's page and tools
+/// reach the page whole and a read it refuses says why; the permission rules are the thread's;
+/// a background command stopped by its task id ends killed; a `!` command's output it takes in
+/// without a turn is the person's item with its output; files put back say how many, and a
+/// message with no checkpoint says why not.
+#[test]
+fn recorded_doors_answer_as_claude_code_did() {
+    use slopty_proto::visual::{AppAnswer, AppAsk, AppBody};
+    let (mut driven, mut host) = driven();
+    let mut ids: BTreeMap<String, String> = BTreeMap::new();
+    let first = driven.take_writes();
+    assert!(first.iter().any(|w| w.contains("supportedDialogKinds")), "{first:?}");
+    let mut queued = 0;
+    let mut turn_one = None;
+    for mut line in recorded("doors") {
+        if line["type"] == "command_lifecycle" && line["state"] == "queued" {
+            queued += 1;
+            let id = sent_as(&line);
+            let outs = if queued == 1 {
+                driven.send("scenario:background start it", &[], id, at(10))
+            } else {
+                let ran = Ran {
+                    command: "pwd".to_owned(),
+                    stdout: "/work".to_owned(),
+                    stderr: String::new(),
+                };
+                driven.shell(&ran, id, false, at(20))
+            };
+            host.take(outs);
+            drop(driven.take_writes());
+        }
+        if line["type"] == "control_response" {
+            let named = line["response"]["request_id"].as_str().unwrap_or_default().to_owned();
+            match named.as_str() {
+                "r1" => {
+                    let ask = AppAsk::Read {
+                        server: "apps".to_owned(),
+                        uri: "ui://apps/echo".to_owned(),
+                    };
+                    driven.app(1, &ask);
+                    asked(&mut driven, &mut ids, "r1");
+                }
+                "r2" => {
+                    let ask = AppAsk::Read {
+                        server: "apps".to_owned(),
+                        uri: "ui://apps/none".to_owned(),
+                    };
+                    driven.app(2, &ask);
+                    asked(&mut driven, &mut ids, "r2");
+                }
+                "t1" | "t2" => {
+                    let (tool, arguments) = if named == "t1" {
+                        ("echo", r#"{"text":"hi"}"#)
+                    } else {
+                        ("refresh", "{}")
+                    };
+                    let ask = AppAsk::Call {
+                        server: "apps".to_owned(),
+                        tool: tool.to_owned(),
+                        arguments: arguments.to_owned(),
+                    };
+                    driven.app(if named == "t1" { 3 } else { 4 }, &ask);
+                    asked(&mut driven, &mut ids, &named);
+                }
+                "b1" => {
+                    driven.background(None);
+                    asked(&mut driven, &mut ids, "b1");
+                }
+                "k1" => {
+                    driven.stop_task("b00000001");
+                    asked(&mut driven, &mut ids, "k1");
+                }
+                "w1" | "w2" => {
+                    let turn = turn_one.expect("the first turn");
+                    host.take(driven.rewind(turn, at(30)));
+                    asked(&mut driven, &mut ids, &named);
+                }
+                "s1" if ids.contains_key("s1") => {
+                    // Asked again while the server connected: as `init` names it connected.
+                    driven.control(Control::McpStatus, &json!({ "subtype": "mcp_status" }));
+                    asked(&mut driven, &mut ids, "s1");
+                }
+                _ => {}
+            }
+            if let Some(id) = ids.get(&named) {
+                line["response"]["request_id"] = json!(id);
+            }
+        }
+        host.take(driven.incoming(&line, at(1_000)));
+        if line["type"] == "control_response" && line["response"]["request_id"] == "slopty-1" {
+            // What `initialize` asks after it, by the recording's names.
+            for (subtype, id) in last_control(&mut driven) {
+                let named = match subtype.as_str() {
+                    "list_permission_rules" => "l1",
+                    "mcp_status" => "s1",
+                    "ui_attach" => "u1",
+                    "ui_panes" => "u2",
+                    _ => continue,
+                };
+                ids.insert(named.to_owned(), id);
+            }
+        }
+        if turn_one.is_none() {
+            turn_one = host.main(&driven).turns.first().map(|t| t.id);
+        }
+    }
+    let mut answers = driven.take_app_answers();
+    answers.sort_by_key(|(n, _)| *n);
+    let [(1, page), (2, missing), (3, echo), (4, refresh)] = answers.as_slice() else {
+        panic!("every ask answered once: {answers:?}")
+    };
+    let AppAnswer::Resource { uri, mime_type, body: AppBody::Text(html), meta } = page else {
+        panic!("{page:?}")
+    };
+    assert_eq!(
+        (uri.as_str(), mime_type.as_deref()),
+        ("ui://apps/echo", Some("text/html;profile=mcp-app"))
+    );
+    assert!(html.contains("<p id=\"echo\">") && meta.contains("csp"), "{html} {meta}");
+    assert!(
+        matches!(missing, AppAnswer::Refused(why) if why.contains("no resource")),
+        "{missing:?}"
+    );
+    let AppAnswer::Called { result } = echo else { panic!("{echo:?}") };
+    let result: Value = serde_json::from_str(result).expect("JSON");
+    assert_eq!(result["structuredContent"], json!({ "echo": "hi", "hostUi": true }));
+    assert!(matches!(refresh, AppAnswer::Called { result } if result.contains("refreshed 1")));
+
+    let thread = host.main(&driven);
+    let rules = thread.rules.as_ref().expect("the rules listed");
+    assert_eq!(rules.rules.len(), 1, "{rules:?}");
+    let rule = &rules.rules[0];
+    assert_eq!(
+        (rule.behavior.as_str(), rule.text.as_str(), rule.source.as_str(), rule.editable),
+        ("allow", "Bash(echo:*)", "cliArg", false)
+    );
+    assert_eq!(rule.description.as_deref(), Some("Any Bash command starting with echo"));
+    let task = thread.tasks.iter().find(|t| t.id == "b00000001").expect("the background command");
+    assert_eq!((task.kind.as_str(), task.state.as_str()), ("shell", "killed"), "{task:?}");
+    let bang = thread
+        .items
+        .iter()
+        .find_map(|i| match &i.body {
+            ItemBody::User(user) if user.command.as_deref() == Some("!") => Some(user),
+            _ => None,
+        })
+        .expect("the `!` command, the person's");
+    assert_eq!(bang.text.text, "pwd");
+    assert!(thread.pending.is_empty(), "{:?}", thread.pending);
+    let said = notices(thread);
+    assert!(
+        said.iter().any(|(k, t)| k == Notice::REWOUND && t == "Put back 0 files (+0 −0)"),
+        "{said:?}"
+    );
+    assert!(
+        said.iter().any(|(k, t)| k == Notice::INFO && t.contains("No file checkpoint found")),
+        "{said:?}"
+    );
+    assert!(thread.turns.iter().all(|t| t.state != TurnState::Active), "{:#?}", thread.turns);
+    assert_eq!(thread.status.phase, Phase::Done);
+}
+
+/// A turn that ends with a background subagent still at work says it waits on it, as the TUI's
+/// footer does, and the subagent stays a live task until its notice finishes it.
+#[test]
+fn a_turn_left_waiting_on_its_background_agent_says_so() {
+    let (mut driven, mut host) = driven();
+    let stream = [
+        (json!({ "type": "system", "subtype": "init", "session_id": SESSION, "model": "claude-opus-5-5" })),
+        (json!({
+            "type": "assistant", "uuid": "a1", "session_id": SESSION, "parent_tool_use_id": null,
+            "message": { "id": "m1", "role": "assistant", "content": [{
+                "type": "tool_use", "id": "t1", "name": "Agent",
+                "input": { "description": "Survey", "prompt": "look", "run_in_background": true },
+            }] },
+        })),
+        (json!({
+            "type": "system", "subtype": "task_started", "session_id": SESSION, "task_id": "x1",
+            "tool_use_id": "t1", "description": "Survey", "task_type": "local_agent",
+            "subagent_type": "general-purpose", "is_backgrounded": true,
+        })),
+        (json!({
+            "type": "user", "uuid": "u1", "session_id": SESSION, "parent_tool_use_id": null,
+            "message": { "role": "user", "content": [{
+                "type": "tool_result", "tool_use_id": "t1", "content": "Async agent launched",
+            }] },
+            "tool_use_result": { "isAsync": true, "status": "async_launched", "agentId": "x1" },
+        })),
+        (json!({ "type": "result", "subtype": "success", "is_error": false, "result": "ok", "session_id": SESSION })),
+    ];
+    for message in &stream {
+        host.take(driven.incoming(message, at(100)));
+    }
+    let thread = host.main(&driven);
+    let said = notices(thread);
+    assert!(
+        said.iter()
+            .any(|(k, t)| k == Notice::TURN && t == "Waiting for 1 background agent to finish"),
+        "{said:?}"
+    );
+    let task = thread.tasks.iter().find(|t| t.id == "x1").expect("the subagent's task");
+    assert!(task.is_live() && task.backgrounded, "{task:?}");
+    assert!(thread.turns.iter().all(|t| t.state != TurnState::Active), "{:#?}", thread.turns);
+
+    let done = json!({
+        "type": "system", "subtype": "task_notification", "session_id": SESSION, "task_id": "x1",
+        "tool_use_id": "t1", "status": "completed", "summary": "Found it",
+        "usage": { "total_tokens": 1200, "tool_uses": 3, "duration_ms": 4000 },
+    });
+    host.take(driven.incoming(&done, at(200)));
+    let thread = host.main(&driven);
+    let task = thread.tasks.iter().find(|t| t.id == "x1").expect("the subagent's task");
+    assert_eq!(task.state, "completed", "{task:?}");
+    assert_eq!(task.usage.map(|u| u.tokens), Some(1200), "{task:?}");
+}
+
+/// Why Claude Code asks is the request's, in its TUI's words: a classifier, an ask rule (one
+/// that overrides auto mode said so), a hook, or its own words for anything else.
+#[test]
+fn why_claude_code_asks_is_said_as_its_tui_says_it() {
+    let reason = |fields: Value, tool: &str, mode: Option<&str>| asks::reason(&fields, tool, mode);
+    assert_eq!(
+        reason(
+            json!({ "decision_reason_type": "classifier", "decision_reason": "Deletes files" }),
+            "Bash",
+            Some("auto")
+        )
+        .as_deref(),
+        Some("Auto mode classifier requires confirmation for this command.\nDeletes files")
+    );
+    assert_eq!(
+        reason(
+            json!({ "decision_reason_type": "rule", "matched_ask_rule": "Bash(rm:*)" }),
+            "Bash",
+            Some("auto")
+        )
+        .as_deref(),
+        Some("Ask rule Bash(rm:*) overrides auto mode for this command.")
+    );
+    assert_eq!(
+        reason(json!({ "decision_reason_type": "rule", "matched_ask_rule": "Write", "decision_reason_rule_source": "projectSettings" }), "Write", Some("default")).as_deref(),
+        Some("Permission rule Write from projectSettings requires confirmation for this tool.")
+    );
+    assert_eq!(
+        reason(json!({ "decision_reason_type": "hook", "decision_reason_hook_event": "PreToolUse:Bash", "decision_reason": "on main" }), "Bash", None).as_deref(),
+        Some("Hook PreToolUse:Bash requires confirmation for this command: on main")
+    );
+    assert_eq!(
+        reason(json!({ "decision_reason_type": "workingDir", "decision_reason": "Outside the folder" }), "Read", None).as_deref(),
+        Some("Outside the folder")
+    );
+    assert_eq!(reason(json!({}), "Bash", None), None, "it says nothing");
+}
+
+/// Every line `driven` wrote since last asked, as JSON.
+fn written(driven: &mut Driven) -> Vec<Value> {
+    driven.take_writes().iter().filter_map(|w| serde_json::from_str(w).ok()).collect()
+}
+
+/// A `can_use_tool` ask of `tool` with `input`, as Claude Code sends it.
+fn can_use(id: &str, tool: &str, input: &Value, suggestions: &Value) -> Value {
+    json!({
+        "type": "control_request", "request_id": id,
+        "request": {
+            "subtype": "can_use_tool", "tool_name": tool, "input": input,
+            "tool_use_id": format!("tu-{id}"), "permission_suggestions": suggestions,
+        },
+    })
+}
+
+/// A plan reads as the TUI's dialog: plan mode entered from bypass permissions is marked in the
+/// transcript, the plan offers "Yes, clear context and bypass permissions" first, and that one
+/// verb turns the plan's call down, keeps bypass permissions (marked once), clears the context and
+/// sends the plan. Plan mode itself is asked for in the TUI's words, and in a session begun in
+/// bypass permissions says it will ask before almost nothing.
+#[test]
+fn a_plan_reads_as_the_tuis_dialog_and_its_clear_keeps_the_mode() {
+    let (mut driven, mut host) = driven();
+    let status = |mode: &str| json!({ "type": "system", "subtype": "status", "permissionMode": mode, "session_id": SESSION });
+    host.take(driven.incoming(&status("bypassPermissions"), at(10)));
+    host.take(driven.incoming(&can_use("e1", "EnterPlanMode", &json!({}), &json!([])), at(20)));
+    let enter = host.main(&driven).requests.last().expect("plan mode asked").clone();
+    assert_eq!(enter.title, "Enter plan mode?");
+    let labels: Vec<&str> = enter.options.iter().map(|c| c.label.as_str()).collect();
+    assert_eq!(labels, ["Yes, enter plan mode", "No, start implementing now"]);
+    let by = || Answerer { client: None, name: "test".to_owned() };
+    host.take(driven.answer(&enter.id, "allow", None, by(), at(30)).expect("taken").outs);
+    host.take(driven.incoming(&status("plan"), at(40)));
+    let suggest = json!([{ "type": "setMode", "mode": "acceptEdits", "destination": "session" }]);
+    let plan = can_use("p1", "ExitPlanMode", &json!({ "plan": "1. Write it" }), &suggest);
+    host.take(driven.incoming(&plan, at(50)));
+    let asked = host.main(&driven).requests.last().expect("the plan").clone();
+    let options: Vec<(&str, &str)> =
+        asked.options.iter().map(|c| (c.id.as_str(), c.label.as_str())).collect();
+    assert_eq!(
+        options,
+        [
+            ("clear:bypassPermissions", "Yes, clear context and bypass permissions"),
+            ("always", "Yes, auto-accept edits"),
+            ("allow", "Yes, manually approve edits"),
+            ("deny", "No, keep planning"),
+        ]
+    );
+    let _before = driven.take_writes();
+    let done = driven.answer(&asked.id, "clear:bypassPermissions", None, by(), at(60));
+    host.take(done.expect("taken").outs);
+    let lines = written(&mut driven);
+    assert_eq!(lines[0]["response"]["response"]["behavior"], "deny");
+    let mode = lines.iter().find(|l| l["request"]["subtype"] == "set_permission_mode");
+    assert_eq!(mode.expect("the mode")["request"]["mode"], "bypassPermissions");
+    let said: Vec<String> = lines.iter().map(ToString::to_string).collect();
+    let clear = said.iter().position(|l| l.contains("\"/clear\"")).expect("the clear");
+    let carried = said.iter().position(|l| l.contains("Implement the following plan")).unwrap();
+    assert!(clear < carried, "{said:#?}");
+    host.take(driven.incoming(&status("bypassPermissions"), at(70)));
+    let marks: Vec<String> = notices(host.main(&driven))
+        .into_iter()
+        .filter(|(kind, _)| kind == Notice::MODE)
+        .map(|(_, text)| text)
+        .collect();
+    assert_eq!(
+        marks,
+        [
+            "Switched to plan mode",
+            "Session was started with bypass permissions, so plan mode won't ask before most \
+             edits or commands. Start a new session without bypass permissions for prompts in \
+             plan mode.",
+            "Switched to bypass permissions",
+        ]
+    );
+}
+
+/// A command's card is the TUI's ("Bash command", the command and what it is for), and "Yes, and
+/// tell Claude what to do next" is one answer: the call goes ahead, then the words go in.
+#[test]
+fn an_allow_with_words_goes_ahead_then_says_them() {
+    let (mut driven, mut host) = driven();
+    let input = json!({ "command": "cargo test", "description": "Run the tests" });
+    host.take(driven.incoming(&can_use("b1", "Bash", &input, &json!([])), at(10)));
+    let asked = host.main(&driven).requests.last().expect("the ask").clone();
+    assert_eq!(asked.title, "Bash command");
+    assert_eq!(asked.text.as_ref().map(|t| t.text.as_str()), Some("cargo test\n\nRun the tests"));
+    let _before = driven.take_writes();
+    let by = Answerer { client: None, name: "test".to_owned() };
+    let done = driven.answer(&asked.id, "allow", Some("then commit"), by, at(20));
+    host.take(done.expect("taken").outs);
+    let lines = written(&mut driven);
+    assert_eq!(lines[0]["response"]["response"]["behavior"], "allow");
+    assert_eq!(lines[1]["type"], "user");
+    assert_eq!(lines[1]["message"]["content"][0]["text"], "then commit");
+    // A deny's words stay its reason, never a message.
+    host.take(
+        driven.incoming(&can_use("b2", "Bash", &json!({ "command": "ls" }), &json!([])), at(30)),
+    );
+    let asked = host.main(&driven).requests.last().expect("the ask").clone();
+    let by = Answerer { client: None, name: "test".to_owned() };
+    host.take(driven.answer(&asked.id, "deny", Some("no"), by, at(40)).expect("taken").outs);
+    assert!(written(&mut driven).iter().all(|l| l["type"] != "user"));
+}
+
+/// Fast mode says how it stands (cooling down after its limit, back on), a model switch that
+/// failed says why in the TUI's words, and whether ultracode applies is a fact of the thread.
+#[test]
+fn the_model_says_how_it_stands() {
+    let (mut driven, mut host) = driven();
+    let result = |fast: &str| {
+        json!({ "type": "result", "subtype": "success", "is_error": false, "result": "ok",
+                "session_id": SESSION, "fast_mode_state": fast })
+    };
+    for (n, fast) in ["on", "cooldown", "on"].iter().enumerate() {
+        let n = u64::try_from(n).expect("few");
+        host.take(driven.incoming(&result(fast), at(100 * n)));
+    }
+    let thread = host.main(&driven);
+    let notes: Vec<&str> = thread.notes.iter().map(|n| n.text.as_str()).collect();
+    assert!(notes.contains(&"Fast limit reset · now using fast mode"), "{notes:?}");
+    assert_eq!(thread.meta.facts.get(FAST_FACT).map(String::as_str), Some("on"));
+    drop(driven.take_writes());
+    driven.set_model("haiku");
+    let (_, id) = last_control(&mut driven).pop().expect("the switch");
+    let refused = json!({ "type": "control_response",
+        "response": { "subtype": "error", "request_id": id, "error": "not allowed" } });
+    host.take(driven.incoming(&refused, at(500)));
+    let said = notices(host.main(&driven));
+    assert!(said.iter().any(|(_, t)| t == "Model switch failed: not allowed"), "{said:?}");
+    driven.ask_settings();
+    let (_, id) = last_control(&mut driven).pop().expect("the settings");
+    let settings = json!({ "type": "control_response", "response": { "subtype": "success",
+        "request_id": id, "response": {
+            "applied": { "ultracode": true, "ultracodeAvailable": true },
+            "errors": [{ "file": "/w/.claude/settings.json", "path": "", "message": "Invalid JSON" }] } } });
+    host.take(driven.incoming(&settings, at(600)));
+    assert_eq!(host.main(&driven).meta.facts.get(ULTRACODE_FACT).map(String::as_str), Some("on"));
+    let notes: Vec<&str> = host.main(&driven).notes.iter().map(|n| n.text.as_str()).collect();
+    assert!(notes.contains(&"/w/.claude/settings.json was skipped: Invalid JSON"), "{notes:?}");
+}
+
+/// The rows the TUI derives around a turn: what it leaves running ("Waiting for 2 background
+/// agents to finish · 1 background task still running"), background agents stopped together by
+/// name, a goal not yet met with its reason, paused on the usage limit, and cleared by the person
+/// with no "achieved".
+#[test]
+fn a_turns_leftovers_stops_and_goal_say_what_the_tui_says() {
+    let (mut driven, mut host) = driven();
+    let started = |id: &str, kind: &str, what: &str| {
+        json!({ "type": "system", "subtype": "task_started", "session_id": SESSION, "task_id": id,
+                "description": what, "task_type": kind, "is_backgrounded": true })
+    };
+    for message in [
+        started("x1", "local_agent", "Survey"),
+        started("x2", "local_agent", "Review"),
+        started("s1", "local_bash", "npm run dev"),
+        json!({ "type": "result", "subtype": "success", "is_error": false, "result": "ok", "session_id": SESSION }),
+        json!({ "type": "system", "subtype": "agents_killed", "session_id": SESSION }),
+    ] {
+        host.take(driven.incoming(&message, at(100)));
+    }
+    let said = notices(host.main(&driven));
+    assert!(
+        said.contains(&(
+            Notice::TURN.to_owned(),
+            "Waiting for 2 background agents to finish · 1 background task still running"
+                .to_owned()
+        )),
+        "{said:?}"
+    );
+    assert!(
+        said.contains(&(
+            Notice::STOPPED.to_owned(),
+            "2 background agents were stopped: \"Survey\", \"Review\"".to_owned()
+        )),
+        "{said:?}"
+    );
+    let goal = |iterations: u64, reason: Option<&str>| {
+        json!({ "type": "active_goal", "value": { "condition": "tests pass", "set_at": 1,
+                "iterations": iterations, "tokens_at_start": 0, "last_reason": reason } })
+    };
+    host.take(driven.incoming(&goal(0, None), at(200)));
+    host.take(driven.incoming(&goal(1, Some("2 tests fail")), at(300)));
+    let limited = json!({ "type": "rate_limit_event", "session_id": SESSION, "rate_limit_info": {
+        "status": "rejected", "resetsAt": 1_900_000_000, "rateLimitType": "five_hour" } });
+    host.take(driven.incoming(&limited, at(400)));
+    host.take(driven.send("/goal clear", &[], intent(9), at(500)));
+    host.take(driven.incoming(&json!({ "type": "active_goal", "value": null }), at(600)));
+    let goals: Vec<String> = notices(host.main(&driven))
+        .into_iter()
+        .filter(|(kind, _)| kind == Notice::GOAL)
+        .map(|(_, text)| text)
+        .collect();
+    assert_eq!(
+        goals,
+        [
+            "Goal not yet met… continuing\nReason: 2 tests fail",
+            "Goal paused · usage limit reached · continues automatically when it resets",
+        ]
+    );
+}
+
+/// A request whose "always allow" Claude Code holds back (`suppress_always_allow_rule`) offers
+/// none, though it suggests rules; one that does not, offers it.
+#[test]
+fn a_held_back_always_allow_is_not_offered() {
+    let (mut driven, mut host) = driven();
+    let rule = json!([{ "type": "addRules", "rules": [{ "toolName": "Bash", "ruleContent": "ls" }],
+                        "behavior": "allow", "destination": "localSettings" }]);
+    host.take(driven.incoming(&can_use("a1", "Bash", &json!({ "command": "ls" }), &rule), at(10)));
+    let ids = |host: &Host, driven: &Driven| -> Vec<String> {
+        let asked = host.main(driven).requests.last().expect("the ask");
+        asked.options.iter().map(|c| c.id.clone()).collect()
+    };
+    assert!(ids(&host, &driven).contains(&"always".to_owned()));
+    let mut held = can_use("a2", "Bash", &json!({ "command": "ls" }), &rule);
+    held["request"]["suppress_always_allow_rule"] = json!(true);
+    host.take(driven.incoming(&held, at(20)));
+    assert!(!ids(&host, &driven).contains(&"always".to_owned()), "{:?}", ids(&host, &driven));
+}
+
+/// A request Claude Code says only the person may answer (`requires_user_interaction`) is
+/// held as one only the person at its card answers, with no rule to allow its like again; one
+/// that does not say so is not.
+#[test]
+fn a_request_needing_the_person_is_held_for_the_card() {
+    let (mut driven, mut host) = driven();
+    let rule = json!([{ "type": "addRules", "rules": [{ "toolName": "Bash", "ruleContent": "rm" }],
+                        "behavior": "allow", "destination": "localSettings" }]);
+    let input = json!({ "command": "rm -rf build" });
+    host.take(driven.incoming(&can_use("a1", "Bash", &input, &rule), at(10)));
+    let asked = host.main(&driven).requests.last().expect("the ask").clone();
+    assert!(!asked.needs_presence);
+    let mut present = can_use("a2", "Bash", &input, &rule);
+    present["request"]["requires_user_interaction"] = json!(true);
+    host.take(driven.incoming(&present, at(20)));
+    let asked = host.main(&driven).requests.last().expect("the ask").clone();
+    assert!(asked.needs_presence, "{asked:?}");
+    assert!(asked.options.iter().all(|c| c.id != "always"), "{:?}", asked.options);
+}
+
+/// A compaction that failed says why, in the TUI's short words for its known causes.
+#[test]
+fn a_failed_compaction_says_why() {
+    let (mut driven, mut host) = driven();
+    let status = |error: &str| {
+        json!({ "type": "system", "subtype": "status", "status": null, "session_id": SESSION,
+                "compact_result": "failed", "compact_error": error })
+    };
+    host.take(driven.incoming(
+        &status("Compaction failed · conversation could not be reduced below the context limit"),
+        at(10),
+    ));
+    host.take(driven.incoming(&status("Error during compaction: boom"), at(20)));
+    let said: Vec<String> = notices(host.main(&driven)).into_iter().map(|(_, t)| t).collect();
+    assert_eq!(
+        said,
+        [
+            "Could not compact · conversation too long · /clear to start fresh",
+            "Could not compact · Error during compaction: boom",
+        ]
+    );
+}
+
+/// An MCP server that fails or wants authentication is a passing note in the TUI's words; one
+/// that stays as it was says nothing again.
+#[test]
+fn an_mcp_server_that_drops_says_so() {
+    let (mut driven, mut host) = driven();
+    let init = |github: &str, linear: &str| {
+        json!({ "type": "system", "subtype": "init", "session_id": SESSION, "mcp_servers": [
+            { "name": "github", "status": github }, { "name": "linear", "status": linear } ] })
+    };
+    host.take(driven.incoming(&init("connected", "needs-auth"), at(10)));
+    host.take(driven.incoming(&init("failed", "needs-auth"), at(20)));
+    host.take(driven.incoming(&init("failed", "needs-auth"), at(30)));
+    let notes: Vec<&str> = host.main(&driven).notes.iter().map(|n| n.text.as_str()).collect();
+    assert_eq!(
+        notes,
+        ["MCP server \"linear\" needs authentication", "MCP server \"github\" disconnected"]
+    );
+}
+
+/// A request that got no answer at all is tried again saying how long it waited.
+#[test]
+fn a_request_with_no_answer_says_how_long_it_waited() {
+    let (mut driven, mut host) = driven();
+    let retry = json!({ "type": "system", "subtype": "api_retry", "session_id": SESSION,
+        "attempt": 2, "max_retries": 10, "retry_delay_ms": 5000,
+        "no_response": { "waited_ms": 90_000, "retry_wait_ms": 120_000 } });
+    host.take(driven.incoming(&retry, at(10)));
+    let said = notices(host.main(&driven));
+    assert!(said.iter().any(|(_, t)| t == "No response from the API after 1m 30s"), "{said:?}");
+}
+
+/// A usage limit nearly used up says so once, and drawing on usage credits says so when it
+/// begins, as the TUI's notifications do.
+#[test]
+fn a_limit_nearly_used_and_credits_drawn_say_so() {
+    let (mut driven, mut host) = driven();
+    let event = |status: &str, credits: bool| {
+        json!({ "type": "rate_limit_event", "session_id": SESSION, "rate_limit_info": {
+            "status": status, "rateLimitType": "seven_day", "utilization": 0.8,
+            "resetsAt": 1_900_000_000, "isUsingOverage": credits } })
+    };
+    host.take(driven.incoming(&event("allowed_warning", false), at(10)));
+    host.take(driven.incoming(&event("allowed_warning", true), at(20)));
+    let notes: Vec<&str> = host.main(&driven).notes.iter().map(|n| n.text.as_str()).collect();
+    assert_eq!(notes, ["You've used 80% of your weekly limit", "Now using usage credits"]);
+}
+
+/// An ask a plugin's run raised names the plugin under why it asks, as the TUI's dialog does.
+#[test]
+fn a_plugins_ask_names_the_plugin() {
+    let (mut driven, mut host) = driven();
+    let mut ask = can_use("p1", "Bash", &json!({ "command": "ls" }), &json!([]));
+    ask["request"]["plugin"] = json!("deploy");
+    host.take(driven.incoming(&ask, at(10)));
+    let asked = host.main(&driven).requests.last().expect("the ask").clone();
+    assert_eq!(asked.reason.as_deref(), Some("Plugin deploy"));
 }

@@ -177,6 +177,8 @@ impl Shard {
                 // The shell and the GPUI-tokio bridge it runs on.
                 "slopty-shell",
                 "gpui_tokio",
+                // The agent visuals' GPU renderer, which only the shell builds.
+                "slopty-visual-gpu",
             ],
             Self::Worker => &[
                 "slopty-workerd",
@@ -221,6 +223,9 @@ impl Shard {
                 "slopty-syntax",
                 "slopty-markdown",
                 "slopty-veil",
+                // The agent visuals' Luau sandbox, GPUI-free, and the maths typesetter.
+                "slopty-visual",
+                "slopty-math",
                 // Here, not with the UI: the UI's shard is the critical path and CPU-bound on its
                 // three cores, which xtask's build took 38 s of, and the rest has the most slack
                 // since its pure crates went to Linux (.research/ui-test-compile-2026-10-11.md).
@@ -1070,7 +1075,7 @@ fn rust_sources(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
 pub const BINS_FRESH: &str = "SLOPTY_BINS_FRESH";
 
 /// `slopty_testkit::bins::NAMES`, each with the package that builds it.
-const SPAWNED_BINS: [(&str, &str); 9] = [
+const SPAWNED_BINS: [(&str, &str); 10] = [
     ("slopty-ptyd", "slopty-ptyd"),
     ("slopty-worker", "slopty-workerd"),
     ("slopty-server", "slopty-serverd"),
@@ -1079,6 +1084,7 @@ const SPAWNED_BINS: [(&str, &str); 9] = [
     ("slopty-stub-managed-claude", "slopty-testkit"),
     ("slopty-stub-pi", "slopty-testkit"),
     ("slopty-stub-acp", "slopty-testkit"),
+    ("slopty-stub-mcp-apps", "slopty-testkit"),
     ("slopty-stub-window", "slopty-testkit"),
 ];
 

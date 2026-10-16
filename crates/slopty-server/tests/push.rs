@@ -263,6 +263,7 @@ mod tests {
             options: vec![choice("yes", Effect::Allow), choice("no", Effect::Deny)],
             buttons: Vec::new(),
             opened_ms: WallMs::from_millis(2_000),
+            needs_presence: false,
         });
         // Once the working row is ranked, so the next is a climb and not a first sight.
         while server.hub().ladder().threads.is_empty() {

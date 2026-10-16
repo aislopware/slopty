@@ -84,6 +84,9 @@ allow-git = [
     "https://github.com/zed-industries/font-kit",
     # gpui's `test-support` (dev-dependency of slopty-ui) pins proptest to a git revision.
     "https://github.com/proptest-rs/proptest",
+    # wgpu and naga at the revision gpui-fast pins for `gpui_wgpu`, so slopty-visual(-gpu) share
+    # one of each with it (`Cargo.toml`, "wgpu").
+    "https://github.com/gfx-rs/wgpu",
 ]
 
 [sources.allow-org]

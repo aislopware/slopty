@@ -21,12 +21,14 @@ mod golden_thread {
         Setup, Start, TableFrame, ThreadFrame, ThreadRequest,
     };
     use slopty_proto::thread::{
-        Action, AgentId, AgentScreen, Answerer, AskId, BackgroundTask, Cap, Changed, Choice,
-        Clipped, Command, Compaction, ContentRef, Cursor, Delivery, Drive, Edge, Effect, Effort,
-        Fork, Image, IntentId, Item, ItemBody, ItemId, Limit, Link, Liveness, Meters, Mode, Model,
-        Notice, PartKey, Patch, Pending, PendingState, Phase, Plan, Request, RequestState, Retry,
-        Status, Step, ThreadId, ThreadMeta, ThreadState, ToolCall, ToolDetail, ToolState, TreeRef,
-        Turn, TurnId, TurnState, Usage, UserMessage, Wait, kind,
+        Action, Activity, AgentId, AgentNote, AgentScreen, Answerer, AskId, BackgroundTask,
+        CallNote, Cap, Changed, Choice, Clipped, Command, Compaction, ContentRef, ContextCategory,
+        ContextUsage, Cursor, Delivery, Drive, Edge, Effect, Effort, Fork, Goal, Image, IntentId,
+        Item, ItemBody, ItemId, Limit, Link, Liveness, Meters, Mode, Model, Notice, PartKey, Patch,
+        Pending, PendingState, Phase, Plan, Request, RequestState, Retry, Rule, RuleChange, Rules,
+        Status, Step, SubagentKind, Surface, SurfaceEvent, TaskNote, TaskUsage, ThreadId,
+        ThreadMeta, ThreadState, ToolCall, ToolDetail, ToolState, TreeRef, Turn, TurnId, TurnState,
+        Usage, UserMessage, Wait, kind,
     };
     use uuid::Uuid;
 
@@ -215,9 +217,11 @@ mod golden_thread {
             proposed: Some(patch()),
             schema_json: None,
             url: None,
+            reason: None,
             state: RequestState::Open,
             opened_ms: ms(1_700),
             until_ms: Some(ms(61_700)),
+            needs_presence: false,
         }
     }
 
@@ -483,6 +487,10 @@ mod golden_thread {
                 turns: vec![turn()],
                 items: vec![item("a1", ItemBody::Text(clip("Done.")))],
                 older: true,
+                calls: BTreeMap::from([(
+                    ItemId("toolu_1".to_owned()),
+                    CallNote { elapsed_ms: Some(12_000), at_ms: ms(9), ..CallNote::default() },
+                )]),
             }),
         );
         snap(
@@ -607,14 +615,14 @@ mod golden_thread {
             })),
             Action::PlanSet(None),
             Action::TasksSet(vec![BackgroundTask {
-                id: "b1".to_owned(),
-                kind: BackgroundTask::SHELL.to_owned(),
-                title: "cargo watch".to_owned(),
-                state: BackgroundTask::RUNNING.to_owned(),
                 item: Some(ItemId("toolu_3".to_owned())),
                 output: Some(clip("watching")),
-                started_ms: WallMs::from_millis(1_727_000_000_000),
-                ended_ms: None,
+                ..BackgroundTask::new(
+                    "b1",
+                    BackgroundTask::SHELL,
+                    "cargo watch",
+                    WallMs::from_millis(1_727_000_000_000),
+                )
             }]),
             Action::MetersSet(meters()),
             Action::CommandsSet(vec![Command {
@@ -713,6 +721,8 @@ mod golden_thread {
                 exit_code: Some(101),
                 stderr: Some(clip("error")),
                 duration_ms: Some(1_200),
+                edits: None,
+                interpretation: None,
             }),
             ToolDetail::Fetch(FetchDetail {
                 url: "https://example.com".to_owned(),
@@ -742,7 +752,11 @@ mod golden_thread {
                 questions: vec![Question {
                     text: "Which?".to_owned(),
                     header: Some("Pick".to_owned()),
-                    options: vec![Offered { label: "A".to_owned(), description: None }],
+                    options: vec![Offered {
+                        label: "A".to_owned(),
+                        description: None,
+                        preview: None,
+                    }],
                     multi_select: false,
                 }],
                 answers: vec![Answer { question: "Which?".to_owned(), answer: "A".to_owned() }],
@@ -759,6 +773,8 @@ mod golden_thread {
             ToolDetail::Mcp(McpDetail {
                 server: "github".to_owned(),
                 tool: "create_issue".to_owned(),
+                structured: None,
+                links: Vec::new(),
             }),
         ];
         let items: Vec<Item> = details
@@ -771,7 +787,146 @@ mod golden_thread {
                 item("toolu_9", ItemBody::Tool(Box::new(c)))
             })
             .collect();
-        snap("frame_tool_details", &ThreadFrame::Page(Page { turns: vec![], items, older: false }));
+        snap(
+            "frame_tool_details",
+            &ThreadFrame::Page(Page { turns: vec![], items, older: false, calls: BTreeMap::new() }),
+        );
+    }
+
+    /// The work an agent does beside its turn: task rows, call timers, the goal, notices,
+    /// rules, its agents, context categories and the surfaces a mod draws, plus the verbs.
+    #[test]
+    fn work() {
+        let send = |intent_: Intent| ThreadRequest::Intent {
+            id: intent(),
+            thread: thread(),
+            intent: intent_,
+        };
+        snap("intent_stop_task", &send(Intent::StopTask { task: "b1".to_owned() }));
+        snap(
+            "intent_background",
+            &send(Intent::Background { item: Some(ItemId("toolu_3".to_owned())) }),
+        );
+        snap("intent_shell", &send(Intent::Shell { command: "pwd".to_owned() }));
+        snap("intent_rewind", &send(Intent::Rewind { turn: TurnId(2) }));
+        snap(
+            "intent_rule",
+            &send(Intent::Rule(RuleChange {
+                add: true,
+                behavior: Rule::ALLOW.to_owned(),
+                rule: "Bash(cargo test:*)".to_owned(),
+                scope: Rule::LOCAL.to_owned(),
+            })),
+        );
+        snap(
+            "intent_surface",
+            &send(Intent::Surface {
+                surface: "deploy".to_owned(),
+                element: "go".to_owned(),
+                event: SurfaceEvent::Input("prod".to_owned()),
+            }),
+        );
+        let actions = vec![
+            Action::ItemCompleted(item(
+                "task:b1:1",
+                ItemBody::Task(Box::new(TaskNote {
+                    task: "b1".to_owned(),
+                    kind: BackgroundTask::AGENT.to_owned(),
+                    status: TaskNote::COMPLETED.to_owned(),
+                    title: "Explore the codec".to_owned(),
+                    summary: "Agent \"Explore the codec\" completed".to_owned(),
+                    body: Some(clip("Found it.")),
+                    call: Some(ItemId("toolu_3".to_owned())),
+                    usage: Some(TaskUsage { tokens: 12_400, tool_uses: 7, duration_ms: 64_000 }),
+                    exit_code: None,
+                    links: Vec::new(),
+                })),
+            )),
+            Action::CallNoted {
+                item: ItemId("toolu_3".to_owned()),
+                note: CallNote {
+                    elapsed_ms: Some(30_000),
+                    at_ms: ms(30),
+                    task: Some("b1".to_owned()),
+                    retry: Some(Retry { attempt: 1, max: None, in_ms: Some(500) }),
+                    said: Some("Reading files".to_owned()),
+                },
+            },
+            Action::TaskOutput { task: "b1".to_owned(), output: clip("ok\n") },
+            Action::ActivitySet(Some(Activity {
+                tokens: 2_100,
+                thinking_since: Some(ms(40)),
+                thought_ms: Some(3_000),
+                phrase: Some("Pondering".to_owned()),
+            })),
+            Action::ActivitySet(None),
+            Action::GoalSet(Some(Goal {
+                condition: "all tests pass".to_owned(),
+                iterations: 2,
+                set_ms: ms(1),
+                tokens_at_start: 100,
+                last_reason: Some("2 failing".to_owned()),
+            })),
+            Action::GoalSet(None),
+            Action::Notified(AgentNote {
+                key: "update".to_owned(),
+                text: "Update ready".to_owned(),
+                priority: "low".to_owned(),
+                color: Some("warning".to_owned()),
+                at_ms: ms(50),
+                until_ms: Some(ms(8_050)),
+            }),
+            Action::Suggested(Some("run the tests".to_owned())),
+            Action::Suggested(None),
+            Action::RulesSet(Rules {
+                rules: vec![Rule {
+                    behavior: Rule::DENY.to_owned(),
+                    text: "Bash(rm:*)".to_owned(),
+                    source: Rule::PROJECT.to_owned(),
+                    description: None,
+                    editable: true,
+                    in_effect: true,
+                }],
+                directories: vec!["/srv/shared".to_owned()],
+            }),
+            Action::StatusLine(Some("main ✓ 42%".to_owned())),
+            Action::StatusLine(None),
+            Action::AgentsSet(vec![SubagentKind {
+                name: "Explore".to_owned(),
+                description: "Searches the code".to_owned(),
+                model: Some("haiku".to_owned()),
+            }]),
+            Action::ContextSet(ContextUsage {
+                categories: vec![
+                    ContextCategory {
+                        name: "Messages".to_owned(),
+                        tokens: 40_000,
+                        free: false,
+                        color: Some("purple".to_owned()),
+                    },
+                    ContextCategory {
+                        name: "Free space".to_owned(),
+                        tokens: 160_000,
+                        free: true,
+                        color: None,
+                    },
+                ],
+                tokens: 40_000,
+                window: 200_000,
+                auto_compact_bp: Some(9_200),
+            }),
+            Action::SurfaceSet(Surface {
+                id: "deploy".to_owned(),
+                kind: Surface::PANE.to_owned(),
+                plugin: "ship".to_owned(),
+                title: Some("Deploy".to_owned()),
+                text: None,
+                tree: "{\"type\":\"button\",\"id\":\"go\"}".to_owned(),
+                until_ms: None,
+            }),
+            Action::SurfaceGone { id: "deploy".to_owned() },
+        ];
+        snap("frame_work", &ThreadFrame::Actions { epoch: 1, first: 40, next: 60, actions });
     }
 
     /// A review asked for, sent, and a change kept and put back.

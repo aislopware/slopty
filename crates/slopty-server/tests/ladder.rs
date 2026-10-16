@@ -214,6 +214,7 @@ mod tests {
             options: Vec::new(),
             buttons: Vec::new(),
             opened_ms: WallMs::from_millis(2_000),
+            needs_presence: false,
         });
         let delta = |rows| TableFrame::Delta { cursor: Cursor::default(), rows, removed: vec![] };
         link.tx.send(&ToServer::Threads(delta(vec![asking.clone()]))).await.unwrap();

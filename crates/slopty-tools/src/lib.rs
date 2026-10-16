@@ -10,6 +10,7 @@
 //! * [`view`]: the answers as JSON for scripts and models, and as text for a person.
 //! * [`tools`]: the MCP tools, their schemas, and a call run end to end.
 //! * [`mcp`]: those tools as an MCP server over any [`Dispatch`].
+//! * [`show`]: what an agent shows the person inline, a visual or a page, checked first.
 
 #![forbid(unsafe_code)]
 #![warn(unreachable_pub)]
@@ -22,6 +23,7 @@ pub mod bulk;
 pub mod mcp;
 pub mod ops;
 pub mod resolve;
+pub mod show;
 pub mod tools;
 pub mod view;
 

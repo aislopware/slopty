@@ -13,7 +13,9 @@
 //!    answer writes a file, allowed once; a prompt whose command is rejected; a prompt whose
 //!    command is cancelled while it is asked about;
 //! 2. `load.jsonl`, a second process: the session loaded again, replayed by the agent, and one more
-//!    prompt.
+//!    prompt;
+//! 3. `media.jsonl`, a third process: a new session, a prompt with a picture beside its words, and
+//!    the agent's `read` of a picture in the folder, whose result is that picture.
 //!
 //! Every message each way is kept in the order the recorder saw it, one JSON line each
 //! (`{"dir": "in" | "out", "msg"}`, `in` being what went to the agent), then scrubbed: the scratch
@@ -33,6 +35,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail, ensure};
+use data_encoding::BASE64;
 use serde_json::{Value, json};
 
 use crate::canned::{Block, request, sse};
@@ -50,6 +53,9 @@ const MAKE: &str = "Make a file called made-by-acp.";
 const REMOVE: &str = "Remove it.";
 const AGAIN: &str = "Remove it again.";
 const HELLO_AGAIN: &str = "Say hello again.";
+const LOOK: &str = "Look at dot.png.";
+/// The picture looked at, and sent with the prompt: a 1 × 1 PNG.
+const DOT: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
 /// The file the allowed call writes.
 const MADE: &str = "made-by-acp";
 /// `OpenCode`'s ids, each a prefix and 26 letters and digits that begin with the time.
@@ -120,6 +126,14 @@ pub fn record() -> Result<()> {
     finished?;
     ensure!(scratch.work.join(MADE).is_file(), "a refused call removed {MADE}");
 
+    std::fs::write(scratch.work.join("dot.png"), BASE64.decode(DOT.as_bytes())?)?;
+    let mut acp = Acp::start(&opencode, &scratch, "opencode-media.stderr")?;
+    let looked = media(&mut acp, &scratch.work);
+    let (media, finished) = acp.finish();
+    keep(&scratch.root.join("media.raw.jsonl"), &media)?;
+    looked?;
+    finished?;
+
     let work = scratch.work.display().to_string();
     let paths = vec![
         (host()?, "host"),
@@ -135,7 +149,7 @@ pub fn record() -> Result<()> {
     let mut ids = HashMap::new();
     let dir = repo_root()?.join(FIXTURES).into_std_path_buf();
     std::fs::create_dir_all(&dir)?;
-    for (name, lines) in [("turns.jsonl", turns), ("load.jsonl", load)] {
+    for (name, lines) in [("turns.jsonl", turns), ("load.jsonl", load), ("media.jsonl", media)] {
         let mut out = String::new();
         for line in lines {
             let line = scrub.value(renamed(line, &mut ids));
@@ -174,6 +188,27 @@ fn load(acp: &mut Acp, work: &Path, session: &str) -> Result<()> {
     acp.call("session/load", &load, Choice::Unasked)?;
     session.clone_into(&mut acp.session);
     acp.prompt(HELLO_AGAIN, Choice::Unasked)?;
+    Ok(())
+}
+
+/// The third process: a picture sent with the person's words, and one the agent reads.
+fn media(acp: &mut Acp, work: &Path) -> Result<()> {
+    let agent = acp.call("initialize", &initialize(), Choice::Unasked)?;
+    let pictures =
+        agent.pointer("/agentCapabilities/promptCapabilities/image") == Some(&json!(true));
+    ensure!(pictures, "OpenCode takes no pictures in a prompt: {agent}");
+    let new = json!({ "cwd": work.display().to_string(), "mcpServers": [] });
+    let opened = acp.call("session/new", &new, Choice::Unasked)?;
+    let session =
+        field(&opened, "sessionId").as_str().context("a new session with no id")?.to_owned();
+    acp.session.clone_from(&session);
+    let prompt = json!({ "sessionId": acp.session, "prompt": [
+        { "type": "text", "text": LOOK },
+        // As Slopty's adapter sends a picture: its bytes, and the file they came from.
+        { "type": "image", "data": DOT, "mimeType": "image/png",
+          "uri": format!("file://{}", work.join("dot.png").display()) },
+    ] });
+    acp.call("session/prompt", &prompt, Choice::Unasked)?;
     Ok(())
 }
 
@@ -472,6 +507,11 @@ fn answer(body: &Value) -> (Vec<Block>, &'static str) {
     if !tools {
         // OpenCode's own side requests: a session's title.
         (vec![Block::Text(&["A greeting"])], "end_turn")
+    } else if text.contains(LOOK) {
+        let read: &[&str] = &[r#"{"filePath": "dot.png"}"#];
+        (vec![Block::Tool { id: "toolu_4", name: "read", input: read }], "tool_use")
+    } else if result == Some("toolu_4") {
+        (vec![Block::Text(&["A ", "dot."])], "end_turn")
     } else if text.contains(HELLO_AGAIN) {
         (vec![Block::Text(&["Hello", " again."])], "end_turn")
     } else if text.contains(HELLO) {

@@ -861,6 +861,10 @@ async fn run(
     let transfers = Arc::new(slopty_worker::xfer::Transfers::new(
         args.drop_dir.clone().unwrap_or_else(slopty_worker::xfer::Transfers::default_drop_root),
     ));
+    // The pictures agents other than Claude Code returned, kept for a client to ask for.
+    if let Err(e) = slopty_agent::media::set_dir(&data_dir.join("media")) {
+        tracing::warn!("pictures will not be kept: {e}");
+    }
     let (threads, adapters) =
         threads::open(&data_dir.join("threads"), &data_dir.join("snapshots"), worker.clone())
             .unzip();

@@ -288,5 +288,70 @@ expression: tools
       "type": "object"
     },
     "name": "branch_bring"
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`show_visual`.",
+      "properties": {
+        "assets": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "Files the script uses, by the name it uses them: `{ \"prism.glb\": \"models/prism.glb\" }`.\nPaths are on this machine, relative to your working directory. glTF models (.glb, or\n.gltf with everything embedded), PNG, JPEG, WebP and Radiance .hdr images; at most 16\nfiles, 8 MB each, 10 MB together.",
+          "type": "object"
+        },
+        "script": {
+          "description": "The Luau visual script: setup at the top level, ending with `return function() return\nui.column { ... } end`.",
+          "type": "string"
+        },
+        "title": {
+          "description": "A short name for the visual.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "script",
+        "title"
+      ],
+      "title": "ShowVisualArgs",
+      "type": "object"
+    },
+    "name": "show_visual"
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`show_page`.",
+      "properties": {
+        "file": {
+          "description": "An `.html`, `.htm` or `.svg` file on this machine, relative to your working directory:\nshown as it is, its relative files (`./data.csv`) beside it, and shown again when it\nchanges. A `.pdf`, `.csv` or `.tsv` file shows natively: a PDF's pages, a table. Give\nthis or `html`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "html": {
+          "description": "The page: an HTML document or fragment, or an SVG that starts with `<svg`. Give this or\n`file`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "description": "A short name for the page.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "title"
+      ],
+      "title": "ShowPageArgs",
+      "type": "object"
+    },
+    "name": "show_page"
   }
 ]

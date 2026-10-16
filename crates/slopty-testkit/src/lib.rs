@@ -20,14 +20,15 @@
 //!   network loss is met: packets stop, and both ends keep running.
 //! - [`replay`]: a recorded Claude Code turn, made the stand-in `claude`'s own (`STUB_REPLAY`).
 //!
-//! And four doubles, binaries, so tests start agents without spending anyone's plan:
+//! And five doubles, binaries, so tests start agents without spending anyone's plan:
 //! `slopty-stub-claude`, a stand-in for `claude` driven over stream-json ([`claude_stream`]),
 //! which calls Slopty's tools through the `slopty mcp` it is handed and records what it was given;
 //! `slopty-stub-managed-claude`, a stand-in for a managed launcher in `claude`'s place, which
 //! answers `--managed-help` and runs the stand-in `claude` as its child, as such a launcher does;
 //! `slopty-stub-pi`, a stand-in for `pi --mode rpc` that replays a recording of pi's RPC mode
 //! against what it is sent; and `slopty-stub-acp`, a stand-in for any ACP agent that replays a
-//! recording of an ACP session the same way.
+//! recording of an ACP session the same way; and `slopty-stub-mcp-apps`, an MCP server with one
+//! MCP App (its page, a tool for the model and the app, and a read-only one for the app alone).
 
 #![warn(unreachable_pub)]
 #![allow(

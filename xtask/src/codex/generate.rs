@@ -13,7 +13,7 @@ use anyhow::{Context as _, Result, bail, ensure};
 use serde_json::{Map, Value};
 
 /// The requests Slopty sends.
-const CLIENT_REQUESTS: [&str; 20] = [
+const CLIENT_REQUESTS: [&str; 22] = [
     "initialize",
     "thread/start",
     "thread/resume",
@@ -34,6 +34,9 @@ const CLIENT_REQUESTS: [&str; 20] = [
     "review/start",
     "model/list",
     "account/usage/read",
+    // A page's MCP App reads its UI and calls its tools through Codex (`mcpAppUi`).
+    "mcpServer/resource/read",
+    "mcpServer/tool/call",
 ];
 
 /// The requests the app-server sends that Slopty answers: approvals and questions.

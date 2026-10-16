@@ -178,8 +178,22 @@ struct Notice {
     result: Option<String>,
     /// A subagent's figures, from its `<usage>`: tokens, tool uses, how long it ran.
     usage: (Option<u64>, Option<u64>, Option<u64>),
+    /// A monitor's event, from its `<event>`.
+    event: Option<String>,
     /// When the record carrying it was written.
     at_ms: WallMs,
+}
+
+/// The words a subagent's notice says when it stopped with background work of its own still
+/// running (Claude Code 2.1.301): its result may be interim.
+const WAITING_WORDS: &str = "is waiting on its own background work";
+
+impl Notice {
+    /// Whether it says a subagent waits on work of its own rather than finished.
+    fn waits(&self) -> bool {
+        self.status.as_deref() == Some("completed")
+            && self.summary.as_deref().is_some_and(|s| s.contains(WAITING_WORDS))
+    }
 }
 
 /// The changes one read makes, an entry updated twice kept once at its first place.
@@ -238,6 +252,10 @@ pub struct Conversation {
     pending: HashMap<String, Vec<Pending>>,
     /// Calls that run in the background and write their output to a file, oldest first.
     background: Vec<(ThreadId, String)>,
+    /// The task notices made rows already, by what they say, and how many each task has had:
+    /// the same notice read twice (its queueing and its delivery) is one row.
+    task_rows: std::collections::HashSet<(String, String, String, String)>,
+    task_counts: HashMap<String, u32>,
 }
 
 impl Conversation {
@@ -354,6 +372,7 @@ impl Conversation {
                 && let Some(mut notice) = str_at(record, "content").and_then(parse_notice)
             {
                 notice.at_ms = str_at(record, "timestamp").and_then(parse_ms).unwrap_or_default();
+                self.task_row(source, None, &notice, batch);
                 self.notice(notice, batch);
             }
             return;
@@ -410,6 +429,7 @@ impl Conversation {
                         attachment.and_then(|a| str_at(a, "prompt")).and_then(parse_notice)
                 {
                     notice.at_ms = at_ms;
+                    self.task_row(&thread, Some(made_at), &notice, batch);
                     self.notice(notice, batch);
                 }
             }
@@ -474,6 +494,7 @@ impl Conversation {
                 })
             } else if let Some(mut notice) = parse_notice(text) {
                 notice.at_ms = ctx.at_ms;
+                self.task_row(ctx.thread, Some(ctx.made_at), &notice, batch);
                 self.notice(notice, batch);
                 continue;
             } else if let Some(name) = tag(text, "command-name") {
@@ -925,6 +946,7 @@ impl Conversation {
             }
             ToolDetail::Agent(agent) => {
                 agent.status = match notice.status.as_deref() {
+                    Some("completed") if notice.waits() => AgentRun::Waiting,
                     Some("completed") => AgentRun::Completed,
                     Some("failed") => AgentRun::Failed,
                     Some("killed" | "stopped") => AgentRun::Killed,
@@ -936,7 +958,10 @@ impl Conversation {
                 let (tokens, tool_uses, duration) = notice.usage;
                 agent.tokens = agent.tokens.or(tokens);
                 agent.tool_uses = agent.tool_uses.or(tool_uses);
-                let ran = at.filter(|_| agent.status != AgentRun::Running && !started.is_zero());
+                let ran = at.filter(|_| {
+                    !matches!(agent.status, AgentRun::Running | AgentRun::Waiting)
+                        && !started.is_zero()
+                });
                 agent.duration_ms = agent
                     .duration_ms
                     .or(duration)
@@ -950,6 +975,44 @@ impl Conversation {
         let entry = entry.clone();
         batch.upsert(&thread, entry);
         self.note_background(&thread, &id);
+    }
+
+    /// A task's notice as a row of its own in `thread`, made at chain position `made_at` (the
+    /// end of the chain for a notice no record of the chain carries): every notice, with a call
+    /// or without one, once.
+    fn task_row(
+        &mut self,
+        thread: &ThreadId,
+        made_at: Option<usize>,
+        notice: &Notice,
+        batch: &mut Batch,
+    ) {
+        let Some(task) = notice.task_id.clone().filter(|t| !t.is_empty()) else { return };
+        let key = (
+            task.clone(),
+            notice.status.clone().unwrap_or_default(),
+            notice.summary.clone().unwrap_or_default(),
+            notice.event.clone().unwrap_or_default(),
+        );
+        if !self.task_rows.insert(key) {
+            return;
+        }
+        let n = self.task_counts.entry(task.clone()).or_insert(0);
+        *n = n.saturating_add(1);
+        let id = format!("task:{task}:{n}");
+        let called = notice.tool_use_id.as_deref().and_then(|call| {
+            let t = self.threads.get(self.calls.get(call)?)?;
+            match &t.entries.get(*t.index.get(call)?)?.body {
+                Body::Tool(call) => Some((call.name.clone(), call.detail.clone())),
+                _ => None,
+            }
+        });
+        let row = task_notice(&task, notice, called.as_ref());
+        let made_at = made_at.unwrap_or_else(|| {
+            self.threads.get(thread).map_or(0, |t| t.chain.len().saturating_sub(1))
+        });
+        let ctx = Ctx { thread, uuid: &id, at_ms: notice.at_ms, made_at };
+        self.add(&ctx, id.clone(), Body::Task(Box::new(row)), batch);
     }
 
     /// Remember a background command with an output file, for [`Self::background`].
@@ -1146,6 +1209,8 @@ fn detail(name: &str, input: &Value, at: Option<(&str, &str)>) -> ToolDetail {
             stderr: None,
             output_file: None,
             finished_ms: None,
+            edits: None,
+            interpretation: None,
         }),
         "WebFetch" => ToolDetail::WebFetch(WebFetchDetail {
             url: text("url").unwrap_or_default(),
@@ -1219,12 +1284,21 @@ fn detail(name: &str, input: &Value, at: Option<(&str, &str)>) -> ToolDetail {
             ),
         },
         _ => {
+            // Slopty's own visual or page, read whole from the call's input.
+            if let Some(shown) =
+                crate::shown::named(name).and_then(|tool| crate::shown::shown(tool, input, ""))
+            {
+                return ToolDetail::Shown(Box::new(shown));
+            }
             let json = Clipped::head(&input.to_string(), OUTPUT, None);
             match name.strip_prefix("mcp__").and_then(|rest| rest.split_once("__")) {
                 Some((server, tool)) => ToolDetail::Mcp(McpDetail {
                     server: server.to_owned(),
                     tool: tool.to_owned(),
                     input: json,
+                    structured: None,
+                    links: Vec::new(),
+                    result: None,
                 }),
                 None => ToolDetail::Other { input: json },
             }
@@ -1244,7 +1318,11 @@ fn question(q: &Value) -> Question {
                     .filter_map(|o| {
                         let label =
                             string_at(o, "label").or_else(|| o.as_str().map(str::to_owned))?;
-                        Some(Choice { label, description: string_at(o, "description") })
+                        Some(Choice {
+                            label,
+                            description: string_at(o, "description"),
+                            preview: string_at(o, "preview").filter(|p| !p.trim().is_empty()),
+                        })
                     })
                     .collect()
             })
@@ -1315,11 +1393,18 @@ fn apply_result(
             };
             bash.stdout = out("stdout", Part::Stdout);
             bash.stderr = out("stderr", Part::Stderr);
+            bash.edits = result
+                .and_then(|r| r.get("bashEditDiff"))
+                .filter(|d| d.is_object())
+                .map(|d| shell_edits(d, &bash.command.text));
             if let Some(task) = result.and_then(|r| string_at(r, "backgroundTaskId")) {
                 bash.task_id = Some(task);
                 bash.background = true;
                 bash.output_file = bash.output_file.take().or_else(|| output_file_in(text));
             }
+            bash.interpretation = result
+                .and_then(|r| string_at(r, "returnCodeInterpretation"))
+                .filter(|i| !i.trim().is_empty());
             let interrupted = result.is_some_and(|r| bool_at(r, "interrupted"));
             let exit = text.strip_prefix("Exit code ").and_then(|rest| {
                 rest.split(|c: char| !c.is_ascii_digit() && c != '-').next()?.parse::<i32>().ok()
@@ -1422,16 +1507,55 @@ fn apply_result(
                 .unwrap_or_default();
             !question.answers.is_empty()
         }
-        ToolDetail::Plan { .. } | ToolDetail::Mcp(_) | ToolDetail::Other { .. } => false,
+        ToolDetail::Mcp(mcp) => {
+            // What the server returned beside the text the model read: its structured content,
+            // the resources it links, and the whole of it for an app's page.
+            let Some(result) = result else { return false };
+            mcp.structured = crate::shown::structured(field("structuredContent"));
+            mcp.links = field("resourceLinks")
+                .and_then(Value::as_array)
+                .map(|links| crate::shown::mcp_content(links).links)
+                .unwrap_or_default();
+            let mut spelled = serde_json::Map::new();
+            for key in ["content", "structuredContent", "_meta"] {
+                if let Some(value) = result.get(key) {
+                    spelled.insert(key.to_owned(), value.clone());
+                }
+            }
+            if !spelled.contains_key("content") {
+                let said = serde_json::json!([{ "type": "text", "text": text }]);
+                spelled.insert("content".to_owned(), said);
+            }
+            if status == ResultStatus::Error {
+                spelled.insert("isError".to_owned(), Value::Bool(true));
+            }
+            let spelled = Value::Object(spelled).to_string();
+            mcp.result =
+                Some(slopty_proto::thread::Clipped::head(&spelled, crate::shown::RESULT, None));
+            false
+        }
+        ToolDetail::Plan { .. } | ToolDetail::Shown(_) | ToolDetail::Other { .. } => false,
     }
 }
 
 /// The diff in a result's `structuredPatch`, each hunk headed as git heads it from the file as
 /// it was (`originalFile`).
 fn patch(result: &Value, thread: &ThreadId, uuid: &str) -> Patch {
+    let Some(hunks) = result.get("structuredPatch").and_then(Value::as_array) else {
+        return Patch::default();
+    };
+    let mut out = hunks_patch(hunks, &original_lines(result));
+    if out.clipped_lines > 0 {
+        let whole = TextRef { record: uuid.to_owned(), part: Part::Patch };
+        out.full = Some(crate::claude::history::content_ref(thread, &whole));
+    }
+    out
+}
+
+/// `hunks` in `structuredPatch`'s shape as a patch, each headed from the lines of `original`
+/// above it, at most [`PATCH_LINES`] lines of them kept.
+fn hunks_patch(hunks: &[Value], original: &[&str]) -> Patch {
     let mut out = Patch::default();
-    let Some(hunks) = result.get("structuredPatch").and_then(Value::as_array) else { return out };
-    let original = original_lines(result);
     let mut kept = 0_usize;
     for hunk in hunks {
         let lines: Vec<&str> = hunk
@@ -1458,16 +1582,65 @@ fn patch(result: &Value, thread: &ThreadId, uuid: &str) -> Patch {
                 old_lines: at("oldLines"),
                 new_start: at("newStart"),
                 new_lines: at("newLines"),
-                heading: heading_above(&original, hunk),
+                heading: heading_above(original, hunk),
                 lines: shown,
             });
         }
     }
-    if out.clipped_lines > 0 {
-        let whole = TextRef { record: uuid.to_owned(), part: Part::Patch };
-        out.full = Some(crate::claude::history::content_ref(thread, &whole));
-    }
     out
+}
+
+/// The files a Bash command changed, as Claude Code took them while it ran (`bashEditDiff`), for
+/// command `command`.
+fn shell_edits(diff: &Value, command: &str) -> slopty_proto::thread::detail::ShellEdits {
+    let files = diff
+        .get("files")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|file| {
+            let hunks = file.get("hunks").and_then(Value::as_array).map_or(&[][..], Vec::as_slice);
+            Some(slopty_proto::thread::detail::ShellEdit {
+                path: str_at(file, "filePath")?.to_owned(),
+                created: bool_at(file, "created"),
+                deleted: bool_at(file, "deleted"),
+                patch: hunks_patch(hunks, &[]),
+            })
+        })
+        .collect();
+    slopty_proto::thread::detail::ShellEdits {
+        files,
+        more: u32::try_from(u64_at(diff, "moreFiles").unwrap_or(0)).unwrap_or(u32::MAX),
+        unavailable: bool_at(diff, "unavailable"),
+        skipped: bool_at(diff, "skipped"),
+        shared: bool_at(diff, "shared"),
+        moves_tree: moves_tree(command),
+    }
+}
+
+/// Whether `command` has a git step that can move the working tree: what changed while it ran
+/// may be that step's, not edits.
+fn moves_tree(command: &str) -> bool {
+    const MOVES: [&str; 7] = ["checkout", "reset", "rebase", "switch", "stash", "merge", "pull"];
+    command.split(['&', '|', ';', '\n', '(', ')']).any(|step| {
+        let mut words = step.split_whitespace().skip_while(|w| w.contains('='));
+        if words.next().is_none_or(|w| w != "git" && !w.ends_with("/git")) {
+            return false;
+        }
+        // Past git's own options (`-C dir`, `-c key=value`, `--no-pager`) to its subcommand.
+        let mut rest = words;
+        while let Some(word) = rest.next() {
+            if word == "-C" || word == "-c" {
+                rest.next();
+                continue;
+            }
+            if word.starts_with('-') {
+                continue;
+            }
+            return MOVES.contains(&word);
+        }
+        false
+    })
 }
 
 /// The file an edit result changed, as it was, by line (`originalFile`; empty when unsaid).
@@ -1552,8 +1725,63 @@ fn parse_notice(text: &str) -> Option<Notice> {
         summary: field("summary"),
         result: field("result"),
         usage: usage_in(body),
+        event: tag(body, "event").map(|v| v.trim().to_owned()),
         at_ms: WallMs::ZERO,
     })
+}
+
+/// The row a task's `notice` makes, its call `called` (its tool's name and detail) when known:
+/// its kind, its words as Claude Code's TUI says them, and what opens under it.
+fn task_notice(task: &str, notice: &Notice, called: Option<&(String, ToolDetail)>) -> TaskNotice {
+    let summary = notice.summary.clone().unwrap_or_default();
+    let kind = match called {
+        Some((name, _)) if name == "Monitor" => "monitor",
+        Some((_, ToolDetail::Bash(_))) => "shell",
+        Some((_, ToolDetail::Agent(_))) => "agent",
+        _ if summary.starts_with("Agent ") => "agent",
+        _ if summary.starts_with("Background command") => "shell",
+        _ if summary.starts_with("Monitor") => "monitor",
+        _ if summary.starts_with("Remote task") => "remote",
+        _ => "task",
+    };
+    let quoted = summary.split_once('"').and_then(|(_, rest)| rest.split_once('"')).map(|(q, _)| q);
+    let event = notice.event.as_deref().map(str::trim).filter(|e| !e.is_empty());
+    let expired = event.is_some_and(|e| e.contains("Monitor expired after"));
+    let status = match notice.status.as_deref() {
+        _ if notice.waits() => "waiting",
+        _ if expired => "expired",
+        _ if event.is_some() => "event",
+        Some("failed") => "failed",
+        Some("killed" | "stopped") => "killed",
+        _ => "completed",
+    };
+    // A monitor's event reads by its first line, the monitor's description beside it.
+    let words = match event {
+        Some(event) if kind == "monitor" || summary.starts_with("Monitor event") => {
+            let headline: String = event
+                .lines()
+                .map(str::trim)
+                .find(|l| !l.is_empty())
+                .unwrap_or_default()
+                .chars()
+                .take(500)
+                .collect();
+            format!("Monitor event: {headline}")
+        }
+        _ => summary.clone(),
+    };
+    let body = event.map(str::to_owned).or_else(|| notice.result.clone()).filter(|b| !b.is_empty());
+    TaskNotice {
+        task_id: task.to_owned(),
+        call: notice.tool_use_id.clone().filter(|c| !c.is_empty()),
+        kind: kind.to_owned(),
+        status: status.to_owned(),
+        title: quoted.unwrap_or_default().to_owned(),
+        summary: words,
+        body: body.map(|b| Clipped::head(&b, OUTPUT, None)),
+        usage: notice.usage,
+        exit_code: exit_code_in_summary(&summary),
+    }
 }
 
 /// Where a background command writes, as its result says it: "Output is being written to:

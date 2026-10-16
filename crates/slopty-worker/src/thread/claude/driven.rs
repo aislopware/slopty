@@ -7,20 +7,24 @@
 //! ([`super::custody`]); a stop Claude Code does not acknowledge in time, or the end of the
 //! agent, closes its session there.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use slopty_agent::claude::driven::{Answered, Driven};
 use slopty_agent::claude::history::Out;
 use slopty_core::{SessionId, WallMs};
-use slopty_proto::thread::{Delivery, ThreadId, ThreadState};
+use slopty_proto::thread::{Action, Delivery, ThreadId, ThreadState};
+use slopty_proto::visual::AppAnswer;
 use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::UnixStream;
 use tokio::net::unix::WriteHalf;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use super::custody::Custody;
-use super::{Ended, ThreadAsk};
+use super::{Ended, ThreadAsk, settings};
 use crate::thread::Host;
 
 /// How long Claude Code has, once its stdout closed, to be reported gone with its status.
@@ -39,6 +43,14 @@ pub(super) struct Task {
     session: SessionId,
     /// Where its standard error goes.
     stderr: PathBuf,
+    /// The home Claude Code keeps its settings and sessions under.
+    home: PathBuf,
+    /// The pages' asks of their MCP Apps under way, by number, and the next number.
+    apps: (HashMap<u64, oneshot::Sender<AppAnswer>>, u64),
+    /// When the person's status line runs again, if it is due.
+    status_due: Option<tokio::time::Instant>,
+    /// Whether a status line command still runs: the next waits for it.
+    status_busy: Arc<AtomicBool>,
 }
 
 /// How a task ended.
@@ -51,16 +63,26 @@ enum End {
 
 impl Task {
     /// The task of `thread`'s Claude Code, session `session` in ptyd, its standard error going
-    /// to `stderr`.
-    pub(super) const fn new(
+    /// to `stderr`, its settings under `home`.
+    pub(super) fn new(
         host: Host,
         thread: ThreadId,
         driven: Driven,
         custody: Custody,
-        session: SessionId,
-        stderr: PathBuf,
+        (session, stderr, home): (SessionId, PathBuf, PathBuf),
     ) -> Self {
-        Self { host, thread, driven, custody, session, stderr }
+        Self {
+            host,
+            thread,
+            driven,
+            custody,
+            session,
+            stderr,
+            home,
+            apps: (HashMap::new(), 0),
+            status_due: Some(tokio::time::Instant::now()),
+            status_busy: Arc::new(AtomicBool::new(false)),
+        }
     }
 
     /// Serve the thread over `socket`, starting with `backlog`, what Claude Code wrote while no
@@ -89,7 +111,7 @@ impl Task {
         for ask in first {
             self.ask(ask, &mut write).await;
         }
-        let mut status = None;
+        let mut exit_status = None;
         let mut reaped_at = None;
         let end = loop {
             // A Claude Code reported gone whose socket a child of its own keeps open is not
@@ -111,7 +133,15 @@ impl Task {
                     None => std::future::pending().await,
                 }
             };
+            let status_due = self.status_due;
+            let status = async {
+                match status_due {
+                    Some(at) => tokio::time::sleep_until(at).await,
+                    None => std::future::pending().await,
+                }
+            };
             tokio::select! {
+                () = status => self.status_line(),
                 line = lines.next_segment() => match line {
                     Ok(Some(line)) => {
                         let outs = self.driven.line(&line, WallMs::now());
@@ -144,7 +174,7 @@ impl Task {
                     if let Ok((session, exit)) = exit && session == self.session {
                         // Gone: no stamp after this, whatever its output still holds.
                         lease.stop();
-                        status = Some(exit.status);
+                        exit_status = Some(exit.status);
                         reaped_at = Some(
                             tokio::time::Instant::now()
                                 .checked_add(REAPED)
@@ -171,6 +201,7 @@ impl Task {
         if let Some(mut out) = write.take() {
             let _ended = out.shutdown().await;
         }
+        let mut status = exit_status;
         if status.is_none() {
             let reaped = async {
                 loop {
@@ -190,6 +221,10 @@ impl Task {
         let mut outs = self.driven.exited(why.as_deref(), WallMs::now());
         outs.extend(self.driven.fact(slopty_agent::claude::driven::CUSTODY_FACT, None));
         self.take(outs);
+        self.answer_apps();
+        for (_app, reply) in self.apps.0.drain() {
+            let _gone = reply.send(AppAnswer::Refused("Claude Code ended".to_owned()));
+        }
         let _gone = ended.send((self.thread, left));
     }
 
@@ -203,9 +238,52 @@ impl Task {
         )
     }
 
-    /// Put `outs` into the host.
-    fn take(&self, outs: Vec<Out>) {
+    /// Put `outs` into the host; the status line runs again a moment after anything changed.
+    fn take(&mut self, outs: Vec<Out>) {
+        if !outs.is_empty() && self.status_due.is_none() {
+            self.status_due = tokio::time::Instant::now().checked_add(settings::STATUS_EVERY);
+        }
         super::take(&self.host, outs);
+        self.answer_apps();
+    }
+
+    /// Give the pages what their MCP Apps answered.
+    fn answer_apps(&mut self) {
+        for (app, answer) in self.driven.take_app_answers() {
+            if let Some(reply) = self.apps.0.remove(&app) {
+                let _gone = reply.send(answer);
+            }
+        }
+    }
+
+    /// Run the person's status line command, if they set one, on the thread as it is now, on a
+    /// task of its own; its line goes into the thread when it changed. One runs at a time.
+    fn status_line(&mut self) {
+        self.status_due = None;
+        let Some((state, _)) = self.host.state(self.thread) else { return };
+        let cwd = PathBuf::from(&state.meta.cwd);
+        let Some(command) = settings::status_command(&self.home, &cwd) else {
+            if state.status_line.is_some() {
+                self.host.apply(self.thread, vec![Action::StatusLine(None)]);
+            }
+            return;
+        };
+        if self.status_busy.swap(true, Ordering::AcqRel) {
+            // The one running sees an older thread: run again after it.
+            self.status_due = tokio::time::Instant::now().checked_add(settings::STATUS_EVERY);
+            return;
+        }
+        let transcript =
+            slopty_agent::claude::sessions::transcript(&self.home, &cwd, &state.meta.native);
+        let input = settings::status_input(&state, &transcript);
+        let (host, thread, busy) = (self.host.clone(), self.thread, Arc::clone(&self.status_busy));
+        tokio::spawn(async move {
+            let line = settings::status_line(&command, &input, &cwd).await;
+            busy.store(false, Ordering::Release);
+            if host.state(thread).is_some_and(|(s, _)| s.status_line != line) {
+                host.apply(thread, vec![Action::StatusLine(line)]);
+            }
+        });
     }
 
     /// Write what the codec has for Claude Code.
@@ -271,7 +349,33 @@ impl Task {
                 let outs = self.driven.interrupt(now);
                 self.take(outs);
             }
-            ThreadAsk::StopTask { agent } => self.driven.stop_task(&agent),
+            ThreadAsk::StopTask { task } => self.driven.stop_task(&task),
+            ThreadAsk::Background { item } => self.driven.background(item.as_deref()),
+            ThreadAsk::ShellDone { ran, intent, quiet } => {
+                let outs = self.driven.shell(&ran, intent, !quiet, now);
+                self.take(outs);
+            }
+            ThreadAsk::Rewind { turn } => {
+                let outs = self.driven.rewind(turn, now);
+                self.take(outs);
+            }
+            // Written into its file by now: what Claude Code holds is read again.
+            ThreadAsk::Rule { .. } => self.driven.list_rules(),
+            ThreadAsk::Surface { surface, element, event } => {
+                match self.driven.surface(&surface, &element, &event) {
+                    Some(outs) => self.take(outs),
+                    None => {
+                        tracing::debug!(thread = %self.thread, surface, element, "no such element");
+                    }
+                }
+            }
+            ThreadAsk::App { ask, reply } => {
+                let app = self.apps.1;
+                self.apps.1 = app.wrapping_add(1);
+                self.apps.0.insert(app, reply);
+                self.driven.app(app, &ask);
+            }
+
             ThreadAsk::Answer { ask, choice, message, by } => {
                 let answered = self.driven.answer(&ask, &choice, message.as_deref(), by, now);
                 match answered {
@@ -289,8 +393,9 @@ impl Task {
                     tracing::debug!(thread = %self.thread, option, choice, "an option Claude Code does not take");
                 }
             }
-            // Handled by the serving loop.
-            ThreadAsk::Close => {}
+            // Handled by the serving loop; a `!` command, by the worker before it comes here as
+            // [`ThreadAsk::ShellDone`].
+            ThreadAsk::Close | ThreadAsk::Shell { .. } => {}
         }
         self.flush(write).await;
         self.next(write).await;

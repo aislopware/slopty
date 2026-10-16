@@ -880,5 +880,99 @@ mod tests {
             assert_eq!((next.intent, next.text.as_str()), (later, "Then tidy up."));
             assert!(matches!(shown.as_slice(), [Action::PendingSet(p)] if p.is_empty()));
         }
+
+        /// A 1 × 1 PNG, the picture the media recording sends and reads back.
+        const DOT: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+
+        /// A picture sent with a message goes as pi's image and comes back on the message; a
+        /// `read` of a picture carries it on the call. Both are kept by the digest of their
+        /// bytes, and read back whole from it.
+        #[test]
+        fn pictures_reach_the_thread_by_their_digest() {
+            let media = super::fixture("media.jsonl");
+            let session = "00000000-0000-7000-8000-000000000002";
+            let (mut driven, begun) = Driven::new(session, "1.0.0", "/work", WallMs::ZERO);
+            let mut state = ThreadState::new(driven.meta().clone());
+            for action in &begun {
+                state.apply(action);
+            }
+            let bytes = data_encoding::BASE64.decode(DOT.as_bytes()).unwrap();
+            let digest = blake3::hash(&bytes).to_hex().to_string();
+            let mut prompted = 0_u32;
+            for line in media.lines() {
+                let line: serde_json::Value = serde_json::from_str(line).unwrap();
+                if line["dir"] == "in" {
+                    let request: Request = serde_json::from_value(line["msg"].clone()).unwrap();
+                    if let Command::Prompt { message, images, .. } = &request.command {
+                        let picture = slopty_agent::attach::Attached::Picture {
+                            path: "/work/dot.png".to_owned(),
+                            media_type: "image/png",
+                            bytes: bytes.clone(),
+                        };
+                        let sent = driven.send(message, &[picture], IntentId::new());
+                        let Command::Prompt { images: went, .. } = sent else { panic!() };
+                        assert_eq!(&went, images, "the picture goes as the recording's image");
+                        prompted = prompted.saturating_add(1);
+                    }
+                    continue;
+                }
+                let record = rpc::record(line["msg"].to_string().as_bytes()).unwrap();
+                for action in driven.incoming(&record, WallMs::ZERO) {
+                    state.apply(&action);
+                }
+            }
+            assert_eq!(prompted, 1);
+            let user: Vec<_> = state
+                .items
+                .iter()
+                .filter_map(|i| match &i.body {
+                    ItemBody::User(m) => Some(m.images.clone()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(user.len(), 1, "one message");
+            let read = state
+                .items
+                .iter()
+                .find_map(|i| match &i.body {
+                    ItemBody::Tool(call) if i.id.0 == "toolu_pi4" => Some(call.clone()),
+                    _ => None,
+                })
+                .expect("the read");
+            assert_eq!(read.state, ToolState::Completed);
+            assert!(read.output.as_ref().is_some_and(|o| o.text.contains("Read image file")));
+            for images in [&user[0], &read.images] {
+                assert_eq!(images.len(), 1, "{images:?}");
+                let image = &images[0];
+                assert_eq!(image.digest, digest);
+                assert_eq!((image.width, image.height), (1, 1));
+                assert_eq!(image.media_type, "image/png");
+                assert_eq!(slopty_agent::media::read(&image.at), Some(bytes.clone()));
+            }
+        }
+
+        /// A picture the model wrote into its answer is a row of its own, its picture on it.
+        #[test]
+        fn the_models_own_picture_is_a_row_of_its_own() {
+            let (mut driven, _) = Driven::new(SESSION, "1.0.0", "/work", WallMs::ZERO);
+            let said = format!(
+                r#"{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"Here:"}},{{"type":"image","data":"{DOT}","mimeType":"image/png"}}],"api":"anthropic-messages","provider":"canned","model":"canned-1","usage":{{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}}}},"stopReason":"stop","timestamp":0}}}}"#
+            );
+            let record = rpc::record(said.as_bytes()).unwrap();
+            let calls: Vec<_> = driven
+                .incoming(&record, WallMs::ZERO)
+                .into_iter()
+                .filter_map(|a| match a {
+                    Action::ItemCompleted(item) => match item.body {
+                        ItemBody::Tool(call) => Some(call),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(calls.len(), 1, "{calls:?}");
+            assert_eq!((calls[0].name.as_str(), calls[0].images.len()), ("image", 1));
+            assert_eq!(calls[0].state, ToolState::Completed);
+        }
     }
 }

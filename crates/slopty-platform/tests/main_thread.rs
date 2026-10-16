@@ -1,8 +1,9 @@
 //! What only the main thread can see (macOS): a download's progress as Finder sees it
 //! (`slopty_platform::continued`), a browser page's Web Inspector (`slopty_platform::web`), a
-//! self-test window's size on a screen too short for it (`slopty_platform::asked_size`), and
-//! what a keyboard layout's keys type (`slopty_platform::input_source`, which `HIToolbox` asks
-//! of the main thread).
+//! self-test window's size on a screen too short for it (`slopty_platform::asked_size`), what a
+//! keyboard layout's keys type (`slopty_platform::input_source`, which `HIToolbox` asks of the
+//! main thread), and a sandboxed page's own report of what it could reach
+//! (`slopty_platform::web::page`, a real `WKWebView` each).
 //!
 //! Finder subscribes to the progress published for a file URL, and Foundation hands the publish
 //! to a subscriber on its main thread; a `WKWebView` is made only there. libtest never gives a
@@ -29,7 +30,7 @@ mod mac {
     use slopty_platform::web::WebView;
 
     /// Every test, by name.
-    pub const TESTS: [(&str, fn()); 6] = [
+    pub const TESTS: [(&str, fn()); 15] = [
         (
             "a_download_shows_on_its_file_and_finders_cancel_ends_it",
             a_download_shows_on_its_file_and_finders_cancel_ends_it,
@@ -48,6 +49,30 @@ mod mac {
             a_layout_names_the_key_each_character_is_on,
         ),
         ("a_keyboard_is_heard_as_it_comes_and_goes", a_keyboard_is_heard_as_it_comes_and_goes),
+        (
+            "a_page_reaches_no_network_and_no_other_page",
+            pages::a_page_reaches_no_network_and_no_other_page,
+        ),
+        (
+            "a_page_takes_the_theme_and_its_height_is_capped",
+            pages::a_page_takes_the_theme_and_its_height_is_capped,
+        ),
+        ("a_page_cannot_navigate_away", pages::a_page_cannot_navigate_away),
+        (
+            "a_page_reaches_the_network_only_once_granted",
+            pages::a_page_reaches_the_network_only_once_granted,
+        ),
+        ("a_views_requests_wait_for_the_app", pages::a_views_requests_wait_for_the_app),
+        (
+            "pages_are_capped_and_each_has_its_own_process",
+            pages::pages_are_capped_and_each_has_its_own_process,
+        ),
+        ("a_vega_lite_fence_draws_offline", pages::a_vega_lite_fence_draws_offline),
+        ("a_plotly_fence_draws_offline", pages::a_plotly_fence_draws_offline),
+        (
+            "a_page_moved_to_the_pane_keeps_its_document",
+            pages::a_page_moved_to_the_pane_keeps_its_document,
+        ),
     ];
 
     /// The first keyboard connecting is heard as attached and the last going as gone, on the
@@ -294,6 +319,568 @@ mod mac {
         objc2::rc::autoreleasepool(|_| drop(page));
         until("WebKit lets the store go", || gone.borrow().is_some());
         assert_eq!(gone.borrow_mut().take(), Some(Ok(())), "the store goes with its last page");
+    }
+
+    /// Pages inline in a transcript (`slopty_platform::web::page`): each test opens real
+    /// `WKWebView`s, and each page reports its own facts through MCP Apps' bridge, as a log
+    /// (`notifications/message`) the host hands the test.
+    mod pages {
+        use std::cell::RefCell;
+        use std::io::{Read as _, Write as _};
+        use std::rc::Rc;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::{Duration, Instant};
+
+        use serde_json::{Value, json};
+        use slopty_platform::web::page::{
+            Ask, Declined, Device, HostConfig, MOUNTED_CAP, Network, Notice, PageEvent, PageHost,
+            PageId, PageSpec, Presence, Refusal, Theme,
+        };
+
+        use super::until;
+
+        type Events = Rc<RefCell<Vec<(PageId, PageEvent)>>>;
+
+        /// The theme's background, which a page must compute as its own.
+        const BACKGROUND: &str = "#101418";
+
+        /// What every page reports through: a log of `data`.
+        const REPORT: &str = "const report = (data) => parent.postMessage({ jsonrpc: '2.0', \
+            method: 'notifications/message', params: { level: 'info', data } }, '*');";
+
+        /// What a page makes requests with, and the handshake.
+        const REQUESTS: &str = "let asked = 0; const waiting = new Map(); \
+            window.addEventListener('message', (event) => { const m = event.data; \
+              if (m && m.id !== undefined && !m.method && waiting.has(m.id)) { \
+                waiting.get(m.id)(m); waiting.delete(m.id); } }); \
+            const request = (method, params) => new Promise((resolve) => { asked += 1; \
+              waiting.set(asked, resolve); \
+              parent.postMessage({ jsonrpc: '2.0', id: asked, method, params }, '*'); }); \
+            const handshake = () => request('ui/initialize', { protocolVersion: '2026-01-26', \
+              appCapabilities: {}, appInfo: { name: 'test', version: '1' } }).then((answer) => { \
+              parent.postMessage({ jsonrpc: '2.0', method: 'ui/notifications/initialized' }, '*'); \
+              return answer; });";
+
+        fn host(device: Device, events: &Events) -> PageHost {
+            let into = Rc::clone(events);
+            let config = HostConfig {
+                device,
+                theme: Theme {
+                    dark: true,
+                    variables: vec![
+                        ("--color-background-primary".to_owned(), BACKGROUND.to_owned()),
+                        ("--color-text-primary".to_owned(), "#e8eaed".to_owned()),
+                    ],
+                },
+                viewport: 1000.0,
+                locale: "en-GB".to_owned(),
+            };
+            PageHost::new(config, move |page, event| into.borrow_mut().push((page, event))).unwrap()
+        }
+
+        fn page(title: &str, script: &str) -> PageSpec {
+            PageSpec {
+                title: title.to_owned(),
+                html: format!(
+                    "<!doctype html><html><head><meta charset=\"utf-8\"></head><body>\
+                     <p>{title}</p><script>{REPORT}{REQUESTS}{script}</script></body></html>"
+                ),
+                server: true,
+                resources: None,
+            }
+        }
+
+        /// What `page` logged under `key`, the last time it did.
+        fn logged(events: &Events, page: PageId, key: &str) -> Option<Value> {
+            events.borrow().iter().rev().find_map(|(of, event)| match event {
+                PageEvent::Log { data, .. } if *of == page => data.get(key).cloned(),
+                _ => None,
+            })
+        }
+
+        fn count(events: &Events, page: PageId, which: impl Fn(&PageEvent) -> bool) -> usize {
+            events.borrow().iter().filter(|(of, event)| *of == page && which(event)).count()
+        }
+
+        /// Run the run loop for `ms` milliseconds, for what must not happen to have had its
+        /// chance.
+        fn settle(ms: u64) {
+            let deadline = Instant::now().checked_add(Duration::from_millis(ms)).unwrap();
+            until("a moment", || Instant::now() >= deadline);
+        }
+
+        /// A page's fetch and web socket both fail, an image from the web has no width, and a
+        /// fetch of another page's origin fails: nothing outside its own origin is reached.
+        pub(super) fn a_page_reaches_no_network_and_no_other_page() {
+            let events: Events = Rc::default();
+            let host = host(Device::Mac, &events);
+            let other = host.open(page("other", ""));
+            let script = format!(
+                "let ok = 0, failed = 0, left = 2; \
+                 const settle = (good) => {{ if (good) ok += 1; else failed += 1; left -= 1; \
+                   if (left === 0) report({{ network: {{ ok, failed }} }}); }}; \
+                 fetch('https://example.com/').then(() => settle(true), () => settle(false)); \
+                 try {{ const socket = new WebSocket('wss://example.com/'); \
+                   socket.onopen = () => settle(true); socket.onerror = () => settle(false); }} \
+                 catch (_) {{ settle(false); }} \
+                 fetch('{}/x').then(() => report({{ other: 'reached' }}), \
+                   () => report({{ other: 'failed' }})); \
+                 window.addEventListener('load', () => report({{ naturalWidth: \
+                   document.getElementById('far').naturalWidth }}));",
+                other.origin()
+            );
+            let mut spec = page("network", &script);
+            spec.html =
+                spec.html.replace("<p>", "<img id=\"far\" src=\"https://example.com/x.png\"><p>");
+            let one = host.open(spec);
+            let _changes = host.mount(other);
+            let _changes = host.mount(one);
+            until("the page reports", || {
+                ["network", "other", "naturalWidth"]
+                    .iter()
+                    .all(|k| logged(&events, one, k).is_some())
+            });
+            assert_eq!(
+                logged(&events, one, "network"),
+                Some(json!({ "ok": 0, "failed": 2 })),
+                "two failed, none reached"
+            );
+            assert_eq!(
+                logged(&events, one, "other"),
+                Some(json!("failed")),
+                "another page's origin"
+            );
+            assert_eq!(
+                logged(&events, one, "naturalWidth"),
+                Some(json!(0)),
+                "an image from the web"
+            );
+        }
+
+        /// The view's handshake carries the theme and the inline display mode, the theme's
+        /// variable is the view's own computed value, and a height asked for is capped: 5000 to
+        /// the cap, 300 kept. Each new height brings a snapshot, BGRA, its time measured.
+        #[expect(clippy::print_stdout, reason = "the snapshot's time, for MEASUREMENTS.md")]
+        pub(super) fn a_page_takes_the_theme_and_its_height_is_capped() {
+            let events: Events = Rc::default();
+            let host = host(Device::Mac, &events);
+            assert!((host.cap() - 720.0).abs() < 1e-9, "0.8 of 1000 is past 720");
+            let sized = |height: u32| {
+                format!(
+                    "handshake().then((answer) => {{ const context = answer.result.hostContext; \
+                     report({{ handshake: {{ theme: context.theme, displayMode: context.displayMode, \
+                       maxHeight: context.containerDimensions.maxHeight }}, \
+                       css: getComputedStyle(document.documentElement) \
+                         .getPropertyValue('--color-background-primary').trim() }}); \
+                     parent.postMessage({{ jsonrpc: '2.0', method: 'ui/notifications/size-changed', \
+                       params: {{ width: 600, height: {height} }} }}, '*'); }});"
+                )
+            };
+            let tall = host.open(page("tall", &sized(5000)));
+            let short = host.open(page("short", &sized(300)));
+            let _changes = host.mount(tall);
+            let _changes = host.mount(short);
+            let resized = |page: PageId| {
+                events.borrow().iter().find_map(|(of, event)| match event {
+                    PageEvent::Resized { asked, height } if *of == page => Some((*asked, *height)),
+                    _ => None,
+                })
+            };
+            until("both pages resize", || resized(tall).is_some() && resized(short).is_some());
+            for page in [tall, short] {
+                assert_eq!(
+                    logged(&events, page, "handshake"),
+                    Some(json!({ "theme": "dark", "displayMode": "inline", "maxHeight": 720 })),
+                    "the host's context"
+                );
+                assert_eq!(
+                    logged(&events, page, "css"),
+                    Some(json!(BACKGROUND)),
+                    "the theme's hex"
+                );
+            }
+            let (asked, height) = resized(tall).unwrap();
+            assert!(
+                (asked - 5000.0).abs() < 1e-9 && (height - 720.0).abs() < 1e-9,
+                "{asked} → {height}"
+            );
+            let (asked, height) = resized(short).unwrap();
+            assert!(
+                (asked - 300.0).abs() < 1e-9 && (height - 300.0).abs() < 1e-9,
+                "{asked} → {height}"
+            );
+            assert!(host.height(short).is_some_and(|h| (h - 300.0).abs() < 1e-9), "300 kept");
+
+            until("a snapshot of the short page", || host.last_snapshot(short).is_some());
+            let mut took = Vec::new();
+            for _round in 0..20 {
+                let before = count(&events, short, |e| matches!(e, PageEvent::Snapshot(_)));
+                assert!(host.snapshot(short), "mounted");
+                until("the snapshot", || {
+                    count(&events, short, |e| matches!(e, PageEvent::Snapshot(_))) > before
+                });
+                let snapshot = host.last_snapshot(short).unwrap();
+                let pixels = usize::try_from(snapshot.width)
+                    .unwrap()
+                    .saturating_mul(usize::try_from(snapshot.height).unwrap());
+                assert!(pixels > 0, "{snapshot:?}");
+                assert_eq!(snapshot.bgra.len(), pixels.saturating_mul(4), "four bytes a pixel");
+                took.push(snapshot.took);
+            }
+            took.sort();
+            let snapshot = host.last_snapshot(short).unwrap();
+            println!(
+                "page snapshot {}x{} px: p50 {:?}, p90 {:?}, max {:?} over {} takes",
+                snapshot.width,
+                snapshot.height,
+                took.get(took.len() / 2).copied().unwrap_or_default(),
+                took.get(took.len().saturating_mul(9) / 10).copied().unwrap_or_default(),
+                took.last().unwrap(),
+                took.len()
+            );
+        }
+
+        /// A view sending its own frame to the web is refused: the host counts one refused
+        /// navigation, and the view's document never loads a second time.
+        pub(super) fn a_page_cannot_navigate_away() {
+            let events: Events = Rc::default();
+            let host = host(Device::Mac, &events);
+            let script = "window.addEventListener('load', () => setTimeout(() => { \
+                location = 'https://example.com/away'; }, 50));";
+            let one = host.open(page("leaving", script));
+            let _changes = host.mount(one);
+            until("the navigation is refused", || {
+                host.facts(one).is_some_and(|f| f.navigations_refused >= 1)
+            });
+            settle(500);
+            let facts = host.facts(one).unwrap();
+            assert_eq!(facts.navigations_refused, 1, "{facts:?}");
+            assert_eq!(facts.view_loads, 1, "the view loaded once: {facts:?}");
+            let refused = count(
+                &events,
+                one,
+                |e| matches!(e, PageEvent::Refused(Refusal::Navigation { url }) if url.starts_with("https://example.com")),
+            );
+            assert_eq!(refused, 1, "one refusal, named for where it went");
+        }
+
+        /// A page fetching from a server on this Mac fails until the app grants it that origin;
+        /// then it reaches it, once, and a page granted nothing still does not.
+        pub(super) fn a_page_reaches_the_network_only_once_granted() {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let hits = Arc::new(AtomicUsize::new(0));
+            let served = Arc::clone(&hits);
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    let Ok(mut stream) = stream else { return };
+                    served.fetch_add(1, Ordering::Relaxed);
+                    let mut asked = [0_u8; 4096];
+                    let _read = stream.read(&mut asked);
+                    let said = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\
+                        Access-Control-Allow-Origin: *\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi";
+                    let _wrote = stream.write_all(said.as_bytes());
+                }
+            });
+            let events: Events = Rc::default();
+            let host = host(Device::Mac, &events);
+            let script = format!(
+                "fetch('http://127.0.0.1:{port}/x').then((r) => r.text()) \
+                 .then((text) => report({{ fetched: text }}), () => report({{ fetched: 'failed' }}));"
+            );
+            let granted = host.open(page("granted", &script));
+            let closed = host.open(page("closed", &script));
+            let _changes = host.mount(granted);
+            until("the first fetch", || logged(&events, granted, "fetched").is_some());
+            assert_eq!(
+                logged(&events, granted, "fetched"),
+                Some(json!("failed")),
+                "before the grant"
+            );
+            assert_eq!(hits.load(Ordering::Relaxed), 0, "nothing reached the server");
+
+            let network = Network {
+                connect: vec![format!("http://127.0.0.1:{port}")],
+                resources: Vec::new(),
+            };
+            host.set_network(granted, &network).unwrap();
+            until("the grant", || {
+                count(&events, granted, |e| matches!(e, PageEvent::NetworkSet(1))) == 1
+            });
+            until("the fetch once granted", || {
+                logged(&events, granted, "fetched") == Some(json!("hi"))
+            });
+            assert_eq!(hits.load(Ordering::Relaxed), 1, "one fetch reached the server");
+
+            let _changes = host.mount(closed);
+            until("the other page's fetch", || logged(&events, closed, "fetched").is_some());
+            assert_eq!(
+                logged(&events, closed, "fetched"),
+                Some(json!("failed")),
+                "granted nothing"
+            );
+            assert_eq!(hits.load(Ordering::Relaxed), 1, "a grant is one page's");
+            assert!(
+                host.set_network(
+                    closed,
+                    &Network { connect: vec!["file:///etc".to_owned()], resources: Vec::new() }
+                )
+                .is_err(),
+                "a file is no origin"
+            );
+        }
+
+        /// What would act for the person (a tool call, a message, context for the model) reaches
+        /// the app unanswered; the view hears only what the app answers. A method off the
+        /// allowlist is refused at once, and a notice sent before the handshake waits for it.
+        pub(super) fn a_views_requests_wait_for_the_app() {
+            let events: Events = Rc::default();
+            let host = host(Device::Mac, &events);
+            let script = "window.addEventListener('message', (event) => { \
+                  if (event.data && event.data.method === 'ui/notifications/tool-input') \
+                    report({ toolInput: event.data.params }); }); \
+                handshake().then(() => { \
+                  request('tools/call', { name: 'echo', arguments: { v: 2 } }) \
+                    .then((answer) => report({ called: answer.result })); \
+                  request('ui/message', { role: 'user', content: [{ type: 'text', text: 'hi' }] }) \
+                    .then((answer) => report({ message: answer.error.code })); \
+                  request('ui/update-model-context', { content: [{ type: 'text', text: 'ctx' }] }); \
+                  request('sampling/createMessage', {}).then((answer) => report({ refused: answer.error.code })); \
+                });";
+            let one = host.open(page("asking", script));
+            let _changes = host.mount(one);
+            assert!(
+                host.notify(one, &Notice::Input(json!({ "arguments": { "v": 1 } }))),
+                "mounted"
+            );
+            let asks = || {
+                events
+                    .borrow()
+                    .iter()
+                    .filter_map(|(of, event)| match event {
+                        PageEvent::Asked(request) if *of == one => Some(request.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            };
+            until("three asks and a refusal", || {
+                asks().len() == 3 && logged(&events, one, "refused").is_some()
+            });
+            assert_eq!(logged(&events, one, "refused"), Some(json!(-32601)), "method not found");
+            assert_eq!(host.facts(one).unwrap().methods_refused, 1, "counted");
+            assert_eq!(
+                logged(&events, one, "toolInput"),
+                Some(json!({ "arguments": { "v": 1 } })),
+                "held for the handshake"
+            );
+            let asked = asks();
+            assert!(asked.iter().all(|r| !r.activated), "no one acted in the page");
+            let call = asked.iter().find(|r| matches!(&r.ask, Ask::CallTool { name, arguments } if name == "echo" && *arguments == json!({ "v": 2 }))).unwrap();
+            let message = asked.iter().find(|r| matches!(&r.ask, Ask::Message { .. })).unwrap();
+            assert!(
+                asked.iter().any(|r| matches!(&r.ask, Ask::UpdateContext { .. })),
+                "context for the model"
+            );
+            settle(300);
+            assert_eq!(logged(&events, one, "called"), None, "the host answered nothing itself");
+
+            let result = json!({ "content": [{ "type": "text", "text": "2" }] });
+            assert!(host.answer(one, &call.id, Ok(result.clone())), "the call waits");
+            assert!(!host.answer(one, &call.id, Ok(json!({}))), "answered once");
+            assert!(
+                host.answer(one, &message.id, Err(Declined::by_the_person())),
+                "the message waits"
+            );
+            until("the view hears its answers", || {
+                logged(&events, one, "called").is_some()
+                    && logged(&events, one, "message").is_some()
+            });
+            assert_eq!(logged(&events, one, "called"), Some(result), "the app's answer");
+            assert_eq!(logged(&events, one, "message"), Some(json!(-32000)), "declined");
+        }
+
+        /// At most eight pages are mounted and three live on a Mac, and each mounted page runs
+        /// in a process of its own, whose memory is measured.
+        #[expect(clippy::print_stdout, reason = "each page's memory, for MEASUREMENTS.md")]
+        pub(super) fn pages_are_capped_and_each_has_its_own_process() {
+            let events: Events = Rc::default();
+            let host = host(Device::Mac, &events);
+            let all: Vec<PageId> =
+                (0..9).map(|n| host.open(page(&format!("page {n}"), ""))).collect();
+            for page in &all {
+                let _changes = host.mount(*page);
+            }
+            assert_eq!(host.count(Presence::Warm), MOUNTED_CAP, "eight mounted");
+            assert_eq!(
+                host.presence(*all.first().unwrap()),
+                Some(Presence::Cold),
+                "the first cooled"
+            );
+            for page in all.iter().skip(4) {
+                let _changes = host.engage(*page);
+            }
+            assert_eq!(host.count(Presence::Live), 3, "three live on a Mac");
+            assert_eq!(host.count(Presence::Warm), MOUNTED_CAP.saturating_sub(3), "the rest warm");
+            let mounted: Vec<PageId> =
+                all.iter().copied().filter(|p| host.view(*p).is_some()).collect();
+            assert_eq!(mounted.len(), MOUNTED_CAP, "a view each");
+            until("every mounted page's view loads", || {
+                mounted.iter().all(|p| host.facts(*p).is_some_and(|f| f.view_loads == 1))
+            });
+            let mut pids: Vec<i32> = mounted.iter().filter_map(|p| host.process(*p)).collect();
+            assert_eq!(pids.len(), MOUNTED_CAP, "each page has a process");
+            let mut footprints: Vec<f64> = pids
+                .iter()
+                .filter_map(|pid| slopty_testkit::process::usage(*pid))
+                .map(|usage| {
+                    #[expect(clippy::cast_precision_loss, reason = "a process's bytes, in MB")]
+                    let mb = usage.footprint as f64 / 1_048_576.0;
+                    mb
+                })
+                .collect();
+            pids.sort_unstable();
+            pids.dedup();
+            assert_eq!(pids.len(), MOUNTED_CAP, "no two pages share a process");
+            footprints.sort_by(f64::total_cmp);
+            let total: f64 = footprints.iter().sum();
+            println!(
+                "page WebContent footprint over {} pages: min {:.1} MB, median {:.1} MB, max {:.1} MB, total {total:.1} MB",
+                footprints.len(),
+                footprints.first().unwrap(),
+                footprints.get(footprints.len() / 2).copied().unwrap_or_default(),
+                footprints.last().unwrap(),
+            );
+            let gone = *mounted.first().unwrap();
+            let _changes = host.unmount(gone);
+            assert!(host.view(gone).is_none() && host.process(gone).is_none(), "unmounted");
+        }
+
+        /// A fence's chart page, its libraries served from its own origin as the app serves
+        /// them, and every file it asked for.
+        fn chart(
+            host: &PageHost,
+            chart: slopty_platform::web::page::libs::Chart,
+            source: &str,
+        ) -> (PageId, Rc<RefCell<Vec<String>>>) {
+            use slopty_platform::web::page::libs;
+            let asked: Rc<RefCell<Vec<String>>> = Rc::default();
+            let seen = Rc::clone(&asked);
+            let resources: slopty_platform::web::page::Resources =
+                Rc::new(move |path: &str, responder: slopty_platform::web::page::Responder| {
+                    seen.borrow_mut().push(path.to_owned());
+                    responder.answer(libs::lib(path));
+                });
+            let html = libs::fence_document(chart, source).unwrap();
+            let id = host.open(PageSpec {
+                title: "Chart".to_owned(),
+                html,
+                server: false,
+                resources: Some(resources),
+            });
+            (id, asked)
+        }
+
+        /// A `vega-lite` fence draws from the vendored libraries alone: its view holds the
+        /// source's rows (`view.data('source').length`), the page reaches nothing outside its
+        /// own origin (no load blocked, nothing refused), every file it asked for is a library
+        /// under `.slopty/lib/`, and it asks for its own height.
+        #[expect(clippy::print_stdout, reason = "the time to draw, for MEASUREMENTS.md")]
+        pub(super) fn a_vega_lite_fence_draws_offline() {
+            use slopty_platform::web::page::libs::{Chart, PREFIX};
+            let events: Events = Rc::default();
+            let host = host(Device::Mac, &events);
+            let rows: Vec<Value> =
+                (10..17).map(|n| json!({ "region": format!("r{n}"), "p99": n })).collect();
+            let spec = json!({
+                "$schema": "https://vega.github.io/schema/vega-lite/v6.json",
+                "datasets": { "source": rows },
+                "data": { "name": "source" },
+                "mark": "bar",
+                "encoding": {
+                    "x": { "field": "region", "type": "nominal" },
+                    "y": { "field": "p99", "type": "quantitative" },
+                },
+            });
+            let (one, asked) = chart(&host, Chart::VegaLite, &spec.to_string());
+            let started = Instant::now();
+            let _changes = host.mount(one);
+            until("the chart reports", || logged(&events, one, "chart").is_some());
+            println!("MEASURE vega-lite fence → drawn: {:?}", started.elapsed());
+            assert_eq!(logged(&events, one, "error"), None, "drawn");
+            let data = logged(&events, one, "data").unwrap();
+            assert_eq!(data.get("source"), Some(&json!(7)), "view.data('source').length: {data}");
+            let facts = host.facts(one).unwrap();
+            assert_eq!(facts.blocked, 0, "no load blocked: {facts:?}");
+            let refused = count(&events, one, |e| matches!(e, PageEvent::Refused(_)));
+            assert_eq!(refused, 0, "nothing refused");
+            let asked = asked.borrow();
+            assert_eq!(asked.len(), 4, "four libraries: {asked:?}");
+            assert!(asked.iter().all(|path| path.starts_with(PREFIX)), "{asked:?}");
+            until("its height", || {
+                count(&events, one, |e| matches!(e, PageEvent::Resized { .. })) > 0
+            });
+        }
+
+        /// A `plotly` fence draws from the vendored library alone: each trace has its points,
+        /// and the page reaches nothing outside its own origin.
+        #[expect(clippy::print_stdout, reason = "the time to draw, for MEASUREMENTS.md")]
+        pub(super) fn a_plotly_fence_draws_offline() {
+            use slopty_platform::web::page::libs::Chart;
+            let events: Events = Rc::default();
+            let host = host(Device::Mac, &events);
+            let figure = json!({
+                "data": [
+                    { "type": "scatter", "x": [1, 2, 3, 4, 5], "y": [2, 3, 5, 7, 11] },
+                    { "type": "bar", "x": ["a", "b", "c"], "y": [3, 1, 2] },
+                ],
+                "layout": { "title": { "text": "Primes" } },
+            });
+            let (one, asked) = chart(&host, Chart::Plotly, &figure.to_string());
+            let started = Instant::now();
+            let _changes = host.mount(one);
+            until("the chart reports", || logged(&events, one, "chart").is_some());
+            println!("MEASURE plotly fence → drawn: {:?}", started.elapsed());
+            assert_eq!(logged(&events, one, "error"), None, "drawn");
+            assert_eq!(logged(&events, one, "traces"), Some(json!([5, 3])), "each trace's points");
+            assert_eq!(host.facts(one).unwrap().blocked, 0, "no load blocked");
+            let refused = count(&events, one, |e| matches!(e, PageEvent::Refused(_)));
+            assert_eq!(refused, 0, "nothing refused");
+            assert_eq!(
+                *asked.borrow(),
+                [".slopty/lib/plotly-cartesian.min.js"],
+                "the library alone"
+            );
+        }
+
+        /// A page moved to the pane is the same document: shown full there and given the
+        /// pane's width, its `performance.timeOrigin` is the one it loaded with, and its view
+        /// loaded once.
+        pub(super) fn a_page_moved_to_the_pane_keeps_its_document() {
+            let events: Events = Rc::default();
+            let host = host(Device::Mac, &events);
+            let script = "window.addEventListener('message', (event) => { \
+                  const m = event.data; \
+                  if (m && m.method === 'ui/notifications/host-context-changed' \
+                      && m.params.displayMode) \
+                    report({ moved: { origin: performance.timeOrigin, mode: m.params.displayMode } }); }); \
+                handshake().then(() => report({ loaded: performance.timeOrigin }));";
+            let one = host.open(page("moving", script));
+            let _changes = host.mount(one);
+            let _changes = host.engage(one);
+            until("it loads", || logged(&events, one, "loaded").is_some());
+            let loaded = logged(&events, one, "loaded").unwrap();
+            host.set_display_mode(one, "fullscreen");
+            host.resize(one, 900.0);
+            until("it hears the move", || logged(&events, one, "moved").is_some());
+            let moved = logged(&events, one, "moved").unwrap();
+            assert_eq!(moved.get("mode"), Some(&json!("fullscreen")), "shown full");
+            assert_eq!(moved.get("origin"), Some(&loaded), "the same document");
+            assert_eq!(host.facts(one).unwrap().view_loads, 1, "loaded once");
+            host.set_display_mode(one, "inline");
+            settle(200);
+            assert_eq!(host.facts(one).unwrap().view_loads, 1, "and back, still once");
+        }
     }
 }
 

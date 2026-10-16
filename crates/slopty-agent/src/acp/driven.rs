@@ -32,10 +32,10 @@ use slopty_proto::thread::detail::{
 };
 use slopty_proto::thread::wire::PastSession;
 use slopty_proto::thread::{
-    self, Action, Answerer, AskId, Cap, Changed, Clipped, Command, Drive, Effect, Effort, IntentId,
-    Item, ItemBody, ItemId, Liveness, Meters, Mode, Model, Notice, PartKey, Pending, Phase, Plan,
-    RequestState, Status, Step, ThreadId, ThreadMeta, ThreadState, ToolCall, ToolDetail, ToolState,
-    Turn, TurnId, TurnState, UserMessage, Wait, kind,
+    self, Action, Answerer, AskId, Cap, Changed, Clipped, Command, Drive, Effect, Effort, Image,
+    IntentId, Item, ItemBody, ItemId, Liveness, Meters, Mode, Model, Notice, PartKey, Pending,
+    Phase, Plan, RequestState, Status, Step, ThreadId, ThreadMeta, ThreadState, ToolCall,
+    ToolDetail, ToolState, Turn, TurnId, TurnState, UserMessage, Wait, kind,
 };
 
 use super::rpc;
@@ -170,6 +170,8 @@ struct Open {
     id: ItemId,
     part: Part,
     text: String,
+    /// Pictures in the person's message, as a history replays it.
+    images: Vec<Image>,
     message: Option<String>,
 }
 
@@ -570,7 +572,16 @@ impl Session {
         let mut actions = self.close(now);
         actions.extend(self.open_turn(now));
         let id = self.next_item();
-        actions.extend(self.user_message(&id, text, Some(intent), now));
+        let images = attached
+            .iter()
+            .filter_map(|file| match file {
+                Attached::Picture { media_type, bytes, .. } => {
+                    crate::media::keep(bytes, Some(media_type))
+                }
+                Attached::File { .. } => None,
+            })
+            .collect();
+        actions.extend(self.user_message(&id, text, images, Some(intent), now));
         self.running = true;
         self.cancelling = false;
         actions.push(self.status(now));
@@ -714,9 +725,11 @@ impl Session {
             proposed: None,
             schema_json: None,
             url: None,
+            reason: None,
             state: RequestState::Open,
             opened_ms: now,
             until_ms: None,
+            needs_presence: false,
         };
         actions.push(Action::RequestOpened(Box::new(card)));
         actions.extend(self.call_state(&call, ToolState::Pending { ask }, now));
@@ -952,6 +965,7 @@ impl Session {
         &mut self,
         id: &ItemId,
         text: &str,
+        images: Vec<Image>,
         intent: Option<IntentId>,
         now: WallMs,
     ) -> Vec<Action> {
@@ -968,7 +982,7 @@ impl Session {
         }
         let body = ItemBody::User(UserMessage {
             text: Clipped::head(text, PROSE, None),
-            images: Vec::new(),
+            images,
             command: None,
             intent,
         });
@@ -988,17 +1002,33 @@ impl Session {
         if part == Part::User && !self.replaying {
             return Vec::new();
         }
-        let text = match &chunk.content {
-            ContentBlock::Text(text) => text.text.clone(),
+        let (text, images) = match &chunk.content {
+            ContentBlock::Text(text) => (text.text.clone(), Vec::new()),
             ContentBlock::ResourceLink(link) => {
-                format!("[{}]({})", link.title.as_deref().unwrap_or(&link.name), link.uri)
+                let text =
+                    format!("[{}]({})", link.title.as_deref().unwrap_or(&link.name), link.uri);
+                (text, Vec::new())
             }
             other => {
                 let json = serde_json::to_value(other).unwrap_or(Value::Null);
-                let kind = json.get("type").and_then(Value::as_str).unwrap_or("content").to_owned();
-                let mut actions = self.close(now);
-                actions.extend(self.extra(&kind, &json, now));
-                return actions;
+                let read = crate::shown::mcp_content(std::slice::from_ref(&json));
+                if read.images.is_empty() && read.links.is_empty() {
+                    let kind =
+                        json.get("type").and_then(Value::as_str).unwrap_or("content").to_owned();
+                    let mut actions = self.close(now);
+                    actions.extend(self.extra(&kind, &json, now));
+                    return actions;
+                }
+                // The agent's own picture is a row of its own; the person's goes with their
+                // message.
+                if part != Part::User && !read.images.is_empty() {
+                    let mut actions = self.close(now);
+                    actions.extend(self.pictures(read.images, now));
+                    return actions;
+                }
+                let links = read.links.iter().map(|l| format!("[{}]({})", l.name, l.uri));
+                let text = std::iter::once(read.text).chain(links).filter(|t| !t.is_empty());
+                (text.collect::<Vec<_>>().join("\n"), read.images)
             }
         };
         let message = chunk.message_id.as_ref().map(|m| m.0.to_string());
@@ -1022,9 +1052,10 @@ impl Session {
                     body,
                 }));
             }
-            self.open = Some(Open { id, part, text: String::new(), message });
+            self.open = Some(Open { id, part, text: String::new(), images: Vec::new(), message });
         }
         if let Some(open) = self.open.as_mut() {
+            open.images.extend(images);
             open.text.push_str(&text);
             if part != Part::User && !self.replaying && !text.is_empty() {
                 actions.push(Action::Append { item: open.id.clone(), part: PartKey::Body, text });
@@ -1037,10 +1068,29 @@ impl Session {
     fn close(&mut self, now: WallMs) -> Vec<Action> {
         let Some(open) = self.open.take() else { return Vec::new() };
         if open.part == Part::User {
-            return self.user_message(&open.id, &open.text, None, now);
+            return self.user_message(&open.id, &open.text, open.images, None, now);
         }
         let body = body_of(open.part, &open.text);
         vec![Action::ItemCompleted(Item { id: open.id, turn: self.turn(), at_ms: now, body })]
+    }
+
+    /// Pictures the agent showed in its message, as a row of their own.
+    fn pictures(&mut self, images: Vec<Image>, now: WallMs) -> Vec<Action> {
+        let id = self.next_item();
+        let count = images.len();
+        let call = ToolCall {
+            name: "image".to_owned(),
+            kind: kind::OTHER.to_owned(),
+            title: if count == 1 { "Image".to_owned() } else { format!("{count} images") },
+            input: Clipped::whole(""),
+            state: ToolState::Completed,
+            output: None,
+            images,
+            detail: None,
+            child: None,
+            ended_ms: Some(now),
+        };
+        vec![Action::ItemCompleted(Item { id, turn: self.turn(), at_ms: now, body: tool(call) })]
     }
 
     fn tool_call(&mut self, call: &acp::ToolCall, now: WallMs) -> Vec<Action> {
@@ -1112,7 +1162,7 @@ impl Session {
     fn told(&mut self, id: &str, raw: Told, now: WallMs) -> Vec<Action> {
         let turn = self.turn();
         let wanted = self.state_of(id, raw.status);
-        let mut call = shown(&raw);
+        let mut call = shown(&raw, &self.meta.cwd);
         let started =
             self.calls.get(id).map(|(turn, _, old)| (*turn, old.state.clone(), old.ended_ms));
         let started_at = started.as_ref().map(|(turn, ..)| *turn);
@@ -1133,6 +1183,18 @@ impl Session {
         } else {
             call.state = wanted;
             finish(&mut call, now);
+        }
+        // Slopty's own visual shows once its check passed; a page from its start; neither
+        // when the call failed.
+        let held_back = match &call.detail {
+            Some(ToolDetail::Visual(_)) => call.state != ToolState::Completed,
+            Some(ToolDetail::Page(_)) => {
+                call.state.is_final() && call.state != ToolState::Completed
+            }
+            _ => false,
+        };
+        if held_back {
+            call.detail = None;
         }
         let turn = started_at.unwrap_or(turn);
         let item = Item { id: ItemId(id.to_owned()), turn, at_ms: now, body: tool(call.clone()) };
@@ -1458,8 +1520,9 @@ fn select_offers(option: &acp::SessionConfigOption, value: &str) -> bool {
     select_choices(option).iter().any(|(id, _)| id == value)
 }
 
-/// A call as the thread shows it, from what the agent last told of it; its state apart.
-fn shown(raw: &Told) -> ToolCall {
+/// A call as the thread shows it, from what the agent last told of it; its state apart. Its
+/// paths are made whole against `cwd`.
+fn shown(raw: &Told, cwd: &str) -> ToolCall {
     let input = raw.raw_input.as_ref().filter(|v| !v.is_null());
     let text =
         |key: &str| input.and_then(|i| i.get(key)).and_then(Value::as_str).map(str::to_owned);
@@ -1474,6 +1537,12 @@ fn shown(raw: &Told) -> ToolCall {
         acp::ToolCallContent::Diff(diff) => Some(diff),
         _ => None,
     });
+    let showing = [raw.name.as_deref(), Some(raw.title.as_str())]
+        .into_iter()
+        .flatten()
+        .find_map(crate::shown::named)
+        .zip(input)
+        .and_then(|(tool, input)| crate::shown::shown(tool, input, cwd));
     let (kind, detail) = match (raw.kind, diff) {
         (_, Some(diff)) => {
             let path = diff.path.to_string_lossy().into_owned();
@@ -1491,6 +1560,8 @@ fn shown(raw: &Told) -> ToolCall {
                 (kind::EDIT, Some(ToolDetail::Edit(edit)))
             }
         }
+        // Slopty's own `show_visual` or `show_page`, by the name the agent gives it.
+        (_, None) if showing.is_some() => (kind::MCP, showing),
         (acp::ToolKind::Execute, None) => {
             let command = input.and_then(|i| i.get("command")).map_or_else(
                 || raw.title.clone(),
@@ -1512,6 +1583,8 @@ fn shown(raw: &Told) -> ToolCall {
                 exit_code: None,
                 stderr: None,
                 duration_ms: None,
+                edits: None,
+                interpretation: None,
             };
             (kind::EXEC, Some(ToolDetail::Exec(exec)))
         }
@@ -1549,14 +1622,21 @@ fn shown(raw: &Told) -> ToolCall {
         (acp::ToolKind::SwitchMode, None) => ("switch-mode", None),
         _ => (kind::OTHER, None),
     };
+    // The blocks are MCP's: text, pictures, links and resources, read as any MCP result's.
+    let mut images = Vec::new();
     let output = raw
         .content
         .iter()
         .filter_map(|c| match c {
-            acp::ToolCallContent::Content(content) => match &content.content {
-                ContentBlock::Text(text) => Some(text.text.clone()),
-                _ => None,
-            },
+            acp::ToolCallContent::Content(content) => {
+                let json = serde_json::to_value(&content.content).unwrap_or(Value::Null);
+                let read = crate::shown::mcp_content(std::slice::from_ref(&json));
+                images.extend(read.images);
+                let links = read.links.iter().map(|l| format!("[{}]({})", l.name, l.uri));
+                let text: Vec<String> =
+                    std::iter::once(read.text).chain(links).filter(|t| !t.is_empty()).collect();
+                (!text.is_empty()).then(|| text.join("\n"))
+            }
             acp::ToolCallContent::Terminal(terminal) => {
                 Some(format!("(terminal {})", terminal.terminal_id.0))
             }
@@ -1588,7 +1668,7 @@ fn shown(raw: &Told) -> ToolCall {
         input: Clipped::head(&input, OUTPUT, None),
         state: ToolState::Streaming,
         output: (!output.is_empty()).then(|| Clipped::tail(&output, OUTPUT, None)),
-        images: Vec::new(),
+        images,
         detail,
         child: None,
         ended_ms: None,

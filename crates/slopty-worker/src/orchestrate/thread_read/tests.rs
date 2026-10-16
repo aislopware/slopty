@@ -232,9 +232,11 @@ fn a_read_says_what_it_skipped_and_offers_the_open_requests() {
         proposed: None,
         schema_json: None,
         url: None,
+        reason: None,
         state,
         opened_ms: WallMs::ZERO,
         until_ms: None,
+        needs_presence: false,
     };
     s.requests = vec![ask("1", RequestState::Withdrawn), ask("2", RequestState::Open)];
     let asking = read(&s, WorkerId::new(), ThreadView::Messages, None);
@@ -252,6 +254,7 @@ fn a_read_says_what_it_skipped_and_offers_the_open_requests() {
             .map(|label| slopty_proto::thread::detail::Offered {
                 label: label.to_owned(),
                 description: None,
+                preview: None,
             })
             .to_vec(),
         multi_select: false,

@@ -74,6 +74,7 @@ pub(in crate::hub) fn asking(mut row: ThreadRow, title: &str) -> ThreadRow {
         options: Vec::new(),
         buttons: Vec::new(),
         opened_ms: row.status.since_ms,
+        needs_presence: false,
     });
     row
 }

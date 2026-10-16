@@ -1,8 +1,8 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
 //! The explorer's footer: a collapsible section docked under the file
 //! tree — **Chats** (the side chats hanging off the active chat: forks and
-//! asides), open or closed as the person last left it. Subagents list under
-//! their agent in the sidebar instead. Rows borrow the left sidebar's compact
+//! asides), open or closed as the person last left it. Subagents live in
+//! their parent's chat instead (`docs/decisions/ui.md`). Rows borrow the left sidebar's compact
 //! session row — 29px, status glyph, title, time — minus the harness, project and device icons, which
 //! say nothing here (every row shares the parent's context). Clicking a row
 //! opens it in the right pane's surface host; the Chats header carries "+"

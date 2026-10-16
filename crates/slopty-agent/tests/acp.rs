@@ -102,6 +102,23 @@ mod tests {
         }
     }
 
+    /// The pictures a prompt sent, as the worker read them from their files.
+    fn pictures_in(prompt: &Value) -> Vec<slopty_agent::attach::Attached> {
+        prompt
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|block| block["type"] == "image")
+            .map(|block| slopty_agent::attach::Attached::Picture {
+                path: block["uri"].as_str().unwrap().strip_prefix("file://").unwrap().to_owned(),
+                media_type: "image/png",
+                bytes: data_encoding::BASE64
+                    .decode(block["data"].as_str().unwrap().as_bytes())
+                    .unwrap(),
+            })
+            .collect()
+    }
+
     /// The fixture replayed through the codec, as the worker drives it: what went to the agent
     /// is asked of the codec and must be the very message that went, what came back is heard by
     /// it, and the thread is what the reducer makes of every action.
@@ -143,8 +160,9 @@ mod tests {
                     Some("session/prompt") => {
                         sends = sends.saturating_add(1);
                         let text = msg["params"]["prompt"][0]["text"].as_str().unwrap();
+                        let attached = pictures_in(&msg["params"]["prompt"]);
                         let (prompt, actions) =
-                            session.prompt(text, &[], intent(sends), WallMs::ZERO);
+                            session.prompt(text, &attached, intent(sends), WallMs::ZERO);
                         apply(&mut state, actions);
                         serde_json::to_value(prompt).unwrap()
                     }
@@ -404,4 +422,89 @@ mod tests {
         let said = driven::said(&error);
         assert!(said.contains("Slopty signs no agent in"), "{said}");
     }
+
+    /// The recorded media session: the picture sent with the person's words is on their
+    /// message, the picture the agent's `read` returned is on its call, each described by the
+    /// BLAKE3 of its bytes and read back whole from where it is kept.
+    #[test]
+    fn pictures_reach_the_thread_by_their_digest() {
+        let dot = data_encoding::BASE64.decode(DOT.as_bytes()).unwrap();
+        let digest = blake3::hash(&dot).to_hex().to_string();
+        let state = replayed("media.jsonl", false);
+        let user = state
+            .items
+            .iter()
+            .find_map(|i| match &i.body {
+                ItemBody::User(message) => Some(message),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(user.images.len(), 1, "the picture sent with the words");
+        assert_eq!(user.images[0].digest, digest);
+        let read = state.items.iter().find(|i| i.id.0 == "toolu_4").unwrap();
+        let ItemBody::Tool(call) = &read.body else { panic!("a call: {read:?}") };
+        assert_eq!(call.state, ToolState::Completed);
+        assert_eq!(call.images.len(), 1, "the picture the read returned");
+        assert_eq!(call.images[0].digest, digest);
+        assert_eq!((call.images[0].width, call.images[0].height), (1, 1));
+        assert_eq!(call.images[0].media_type, "image/png");
+        assert!(call.output.as_ref().is_some_and(|o| o.text.contains("Image read successfully")));
+        let bytes = slopty_agent::media::read(&call.images[0].at).unwrap();
+        assert_eq!(blake3::hash(&bytes).to_hex().to_string(), digest);
+    }
+
+    /// An agent's own picture in its message is a row of its own, and an embedded resource's
+    /// text and a link stay in its words.
+    #[test]
+    fn an_agents_picture_and_resources_in_its_message_are_kept() {
+        let agent = slopty_agent::acp::agent_id("opencode");
+        let (mut session, _) =
+            Session::new(agent, driven::thread_of(intent(9)), "/work", WallMs::ZERO);
+        let mut state = ThreadState::new(session.meta().clone());
+        let (_, actions) = session.prompt("Draw.", &[], intent(1), WallMs::ZERO);
+        for action in &actions {
+            state.apply(action);
+        }
+        let chunk = |content: Value| {
+            serde_json::json!({ "sessionId": SESSION, "update": {
+                "sessionUpdate": "agent_message_chunk", "content": content } })
+        };
+        for content in [
+            serde_json::json!({ "type": "text", "text": "Here:" }),
+            serde_json::json!({ "type": "image", "data": DOT, "mimeType": "image/png" }),
+            serde_json::json!({ "type": "resource", "resource": {
+                "uri": "file:///work/notes.md", "text": "notes" } }),
+        ] {
+            for action in &session.update(&chunk(content), WallMs::ZERO) {
+                state.apply(action);
+            }
+        }
+        for action in
+            &session.prompted(Ok(&serde_json::json!({ "stopReason": "end_turn" })), WallMs::ZERO)
+        {
+            state.apply(action);
+        }
+        let shown: Vec<String> = state
+            .items
+            .iter()
+            .map(|i| match &i.body {
+                ItemBody::Text(text) => format!("text: {}", text.text),
+                ItemBody::Tool(call) => format!("{}: {} images", call.title, call.images.len()),
+                ItemBody::User(_) => "user".to_owned(),
+                other => format!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                "user",
+                "text: Here:",
+                "Image: 1 images",
+                "text: notes\n[file:///work/notes.md](file:///work/notes.md)"
+            ]
+        );
+    }
+
+    /// A 1 × 1 PNG: what the media session sends and reads.
+    const DOT: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
 }

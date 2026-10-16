@@ -12,8 +12,9 @@
 //!
 //! The turn is chosen by the prompt's first word, after an optional `scenario:` prefix:
 //!
-//! - `bash <cmd>`: a `Bash` tool call, asked about with `can_use_tool`; allowed it says `ran
-//!   <cmd>`, denied its result is the deny message, as an error.
+//! - `bash <cmd>`: a `Bash` tool call, asked about with `can_use_tool` as an ask rule wants
+//!   (`decision_reason_type: rule`); allowed it says `ran <cmd>` with the file it made
+//!   (`bashEditDiff`), denied its result is the deny message, as an error.
 //! - `ask`: an `AskUserQuestion` (`Which color?`, Red or Blue) asked about with `can_use_tool`; the
 //!   `answers` of an allow come back in its result.
 //! - `agent`: an `Agent` call whose subagent (`task_started`, a message of its own with
@@ -28,11 +29,11 @@
 //! - `/compact`: compaction (`status: compacting`, `compact_boundary`), a local command.
 //! - any other `/<name>`: a local command's output.
 //! - a prompt `STUB_TURNS` (`{"<prompt>": [{"name": …, "arguments": …}, …], …}`) names: those tools
-//!   called in order through the `slopty` MCP server its `--mcp-config` names, over stdio, as
-//!   Claude Code starts it (the stand-in's environment is the server's), each an
-//!   `mcp__slopty__<name>` call with its result, then `Done: <prompt>`. In a call's arguments,
-//!   `{started}` is the agent the turn's last `agent_start` answered. Every result goes to the
-//!   record's `mcp`.
+//!   called in order through the `slopty` MCP server its `--mcp-config` (or the folder's
+//!   `.mcp.json`) names, over stdio, as Claude Code starts it (the stand-in's environment is the
+//!   server's), each an `mcp__slopty__<name>` call with its result, then `Done: <prompt>`. In a
+//!   call's arguments, `{started}` is the agent the turn's last `agent_start` answered. Every
+//!   result goes to the record's `mcp`.
 //! - a prompt `STUB_REPLAY` names: a recorded Claude Code turn played as its own
 //!   ([`crate::replay`]). `STUB_REPLAY` is a conversation fixture of `slopty-agent` by name
 //!   (`tools`, `permission`, …) or folder, played for any prompt, or an object naming one for each
@@ -40,17 +41,25 @@
 //!   them, a subagent's under the `Agent` call that started it, each recorded permission request is
 //!   a `can_use_tool` the turn waits on, and every record goes to the conversation's file (a
 //!   subagent's to its own beside it). `STUB_REPLAY_GAP_MS` (20 by default) paces its steps.
+//! - `background <cmd>`, `wait <secs>`, `monitor`, `signals`, `dialog <kind>`, `elicit`, `write
+//!   <path> <words>` and `plan`: the doors beside messages (`doors`).
 //! - anything else: a thinking block, then `Done: <prompt>`; for a batch of Slopty's reports
 //!   (`<slopty-reports>`), `Done: <its last line>`.
 //!
+//! A user message with `shouldQuery: false` (a `!` command's output not to be answered) is kept
+//! and never echoed, and its result comes at once, with no turn.
+//!
 //! Control requests: `interrupt` (answered after `STUB_SLOW_INTERRUPT_MS`, 0 by default; it ends
 //! the turn under way as Claude Code does), `set_model`, `set_permission_mode`,
-//! `apply_flag_settings` (`effortLevel`, `fastMode`, shown in the next `init`), `stop_task`,
-//! `get_context_usage`; any other subtype is answered with an error.
+//! `apply_flag_settings` (`effortLevel`, `fastMode`, shown in the next `init`), `stop_task` (a
+//! subagent or a background command), `get_context_usage`, and the doors' (`background_tasks`,
+//! `rewind_files`, `list_permission_rules`, `mcp_status`, `mcp_read_resource`, `mcp_call`,
+//! `ui_*`); any other subtype is answered with an error.
 //!
 //! The conversation goes where Claude Code keeps it, `~/.claude/projects/<cwd with every
 //! character but letters and digits made '-'>/<session>.jsonl`, so `--resume <id>` (with
-//! `--fork-session`, into a new one) goes on from it; a `--resume` of a session with no file ends
+//! `--fork-session`, into a new one, through `--resume-session-at`'s record when given) goes on
+//! from it; a `--resume` of a session with no file ends
 //! at once with an error result and exit status 1. With `CLAUDE_CODE_SDK_READS_SESSION_STATE` or
 //! `CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS` set it says `session_state_changed`.
 //!
@@ -76,6 +85,8 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value, json};
+
+mod doors;
 
 /// What it says its version is.
 pub const VERSION: &str = "2.1.301-stub";
@@ -211,6 +222,10 @@ struct Stub {
     tool_turns: Value,
     /// Every tool result, in order.
     mcp: Vec<Value>,
+    /// Every dialog asked and not yet answered, by request id.
+    dialogs: BTreeMap<String, Value>,
+    /// What the doors beside messages keep.
+    doors: doors::Doors,
 }
 
 impl Stub {
@@ -222,6 +237,7 @@ impl Stub {
         let project = home.join(".claude").join("projects").join(escaped(&cwd));
         let resume = flag(args, "--resume");
         let fork = args.iter().any(|a| a == "--fork-session");
+        let resume_at = flag(args, "--resume-session-at");
         let session = match (&resume, fork) {
             (Some(id), false) => id.clone(),
             _ => flag(args, "--session-id").unwrap_or_else(uuid),
@@ -239,6 +255,11 @@ impl Stub {
                 });
                 drop(writeln!(out, "{failed}"));
                 return Err(ExitCode::FAILURE);
+            };
+            // A fork through a record keeps the conversation up to it, and no further.
+            let text = match (&resume_at, fork) {
+                (Some(at), true) => through(&text, at),
+                _ => text,
             };
             last = text
                 .lines()
@@ -263,6 +284,7 @@ impl Stub {
             drop(tx.send(Heard::End));
         }));
         let set = |name: &str| std::env::var_os(name).is_some();
+        let configs = mcp_configs(args, &cwd);
         let stub = Self {
             args: args.to_vec(),
             heard,
@@ -291,12 +313,14 @@ impl Stub {
             turns: 0,
             record: knob("STUB_RECORD", args).map(PathBuf::from),
             received: Vec::new(),
-            mcp_configs: mcp_configs(args),
+            mcp_configs: configs,
             tool_turns: std::env::var("STUB_TURNS")
                 .ok()
                 .and_then(|text| serde_json::from_str(&text).ok())
                 .unwrap_or(Value::Null),
             mcp: Vec::new(),
+            dialogs: BTreeMap::new(),
+            doors: doors::Doors::new(),
         };
         stub.save();
         if set("STUB_MALFORMED") {
@@ -462,13 +486,17 @@ impl Stub {
                 }
                 reply(&id, None);
             }
-            Some("stop_task") => match (&mut self.task, field("task_id")) {
-                (Some((task, stopped)), Some(named)) if *task == named => {
+            Some("stop_task") => {
+                let named = field("task_id").unwrap_or_default();
+                if let Some((task, stopped)) = &mut self.task
+                    && *task == named
+                {
                     *stopped = true;
                     reply(&id, None);
+                } else if !self.stop_running(&id, &named) {
+                    refuse(&id, "No running task with that id");
                 }
-                _ => refuse(&id, "No running task with that id"),
-            },
+            }
             Some("get_context_usage") => reply(
                 &id,
                 Some(json!({
@@ -478,9 +506,10 @@ impl Stub {
                         { "name": "Free space", "tokens": 198_638, "kind": "free" },
                     ],
                     "totalTokens": 1362, "maxTokens": 200_000, "rawMaxTokens": 200_000,
-                    "percentage": 1,
+                    "percentage": 1, "autoCompactThreshold": 167_000, "isAutoCompactEnabled": true,
                 })),
             ),
+            Some(other) if self.door(&id, other, &request) => {}
             Some(other) => refuse(&id, &format!("Unsupported control request: {other}")),
             None => refuse(&id, "A control request names no subtype"),
         }
@@ -521,7 +550,7 @@ impl Stub {
             "response": {
                 "subtype": "success", "request_id": id, "response": response,
                 "pending_permission_requests": self.asked.values().collect::<Vec<_>>(),
-                "pending_user_dialog_requests": [],
+                "pending_user_dialog_requests": self.dialogs.values().collect::<Vec<_>>(),
             },
         }));
     }
@@ -559,28 +588,12 @@ impl Stub {
         tool_use: &str,
         extra: &Value,
     ) -> Result<Value, Cut> {
-        let id = uuid();
         let mut request = json!({
             "subtype": "can_use_tool", "tool_name": tool, "display_name": tool,
             "input": input, "tool_use_id": tool_use,
         });
         merge(&mut request, extra);
-        let asked = json!({ "type": "control_request", "request_id": id, "request": request });
-        self.asked.insert(id.clone(), asked.clone());
-        self.state("requires_action");
-        say(&asked);
-        loop {
-            if let Some(answer) = self.answers.remove(&id) {
-                self.state("running");
-                return Ok(answer);
-            }
-            if let Err(cut) = self.pause(self.gap) {
-                if self.asked.remove(&id).is_some() {
-                    say(&json!({ "type": "control_cancel_request", "request_id": id }));
-                }
-                return Err(cut);
-            }
-        }
+        self.request(&request, false)
     }
 
     /// One assistant message of one content block, streamed first when asked to.
@@ -634,7 +647,13 @@ impl Stub {
 
     /// A user record carrying a tool's result.
     fn tool_result(&mut self, tool_use: &str, content: &str, error: bool) {
-        let record = json!({
+        self.tool_result_with(tool_use, content, error, &Value::Null);
+    }
+
+    /// A user record carrying a tool's result, and what the tool said of it besides the text
+    /// (`tool_use_result` as streamed, `toolUseResult` as kept), when it says anything.
+    fn tool_result_with(&mut self, tool_use: &str, content: &str, error: bool, structured: &Value) {
+        let mut record = json!({
             "type": "user",
             "message": { "role": "user", "content": [{
                 "tool_use_id": tool_use, "type": "tool_result", "content": content, "is_error": error,
@@ -642,7 +661,14 @@ impl Stub {
             "parent_tool_use_id": null, "session_id": self.session, "uuid": uuid(),
             "timestamp": timestamp(),
         });
-        say(&record);
+        if structured.is_null() {
+            say(&record);
+        } else {
+            let mut streamed = record.clone();
+            merge(&mut streamed, &json!({ "tool_use_result": structured }));
+            say(&streamed);
+            merge(&mut record, &json!({ "toolUseResult": structured }));
+        }
         self.keep(&record);
         self.system("status", &json!({ "status": "requesting" }));
     }
@@ -661,6 +687,11 @@ impl Stub {
     /// Run one user message's turn.
     fn turn(&mut self, message: &Value) {
         let id = message.get("uuid").and_then(Value::as_str).map_or_else(uuid, str::to_owned);
+        self.doors.prompted(id.clone());
+        if message.get("shouldQuery") == Some(&Value::Bool(false)) {
+            self.taken_in(message, &id);
+            return;
+        }
         let text = prompt(message);
         self.running = true;
         self.turns = self.turns.saturating_add(1);
@@ -778,6 +809,14 @@ impl Stub {
             "agent" => self.agent(),
             "slow" => self.slow(rest.parse().unwrap_or(10)),
             "retry" => self.retried(rest.parse().unwrap_or(3), &body),
+            "background" => self.background_command(&rest),
+            "wait" => self.waited(rest.parse().unwrap_or(10)),
+            "monitor" => self.monitor(),
+            "signals" => self.signals(),
+            "dialog" => self.dialog(&rest),
+            "elicit" => self.elicit(),
+            "write" => self.write_file(&rest),
+            "plan" => self.plan(),
             "limit" => {
                 let reset = std::env::var("STUB_LIMIT_RESET_S").ok().and_then(|s| s.parse().ok());
                 self.limited_until = Some(now.saturating_add(reset.unwrap_or(3)));
@@ -962,6 +1001,9 @@ impl Stub {
         );
         let extra = json!({
             "description": "Run a command",
+            "decision_reason_type": "rule",
+            "matched_ask_rule": "Bash",
+            "decision_reason_rule_source": "localSettings",
             "permission_suggestions": [{
                 "type": "addRules", "rules": [{ "toolName": "Bash", "ruleContent": command }],
                 "behavior": "allow", "destination": "localSettings",
@@ -970,7 +1012,20 @@ impl Stub {
         let answer = self.ask("Bash", &input, &tool_use, &extra)?;
         let (allowed, message) = verdict(&answer);
         if allowed {
-            self.tool_result(&tool_use, &format!("ran {command}"), false);
+            // What it changed in the folder, as Claude Code takes it while a command runs.
+            let made = std::path::Path::new(&self.cwd).join("made");
+            let structured = json!({
+                "stdout": format!("ran {command}"), "stderr": "", "interrupted": false,
+                "bashEditDiff": {
+                    "changedFiles": [made],
+                    "files": [{ "filePath": made, "created": true, "hunks": [{
+                        "oldStart": 0, "oldLines": 0, "newStart": 1, "newLines": 1,
+                        "lines": ["+made"],
+                    }] }],
+                    "moreFiles": 0,
+                },
+            });
+            self.tool_result_with(&tool_use, &format!("ran {command}"), false, &structured);
         } else {
             self.tool_result(&tool_use, &message, true);
         }
@@ -1149,6 +1204,23 @@ impl Stub {
     }
 }
 
+/// The lines of conversation `text` up to the record `at`, that one too; all of them when no
+/// record is `at`.
+fn through(text: &str, at: &str) -> String {
+    let mut kept = String::new();
+    for line in text.lines() {
+        kept.push_str(line);
+        kept.push('\n');
+        let id = serde_json::from_str::<Value>(line)
+            .ok()
+            .and_then(|record| record.get("uuid").and_then(Value::as_str).map(str::to_owned));
+        if id.as_deref() == Some(at) {
+            return kept;
+        }
+    }
+    text.to_owned()
+}
+
 /// The recording `STUB_REPLAY` names for `prompt`, if any ([`Stub::replayed`]).
 fn replay_of(prompt: &str) -> Option<String> {
     let named = std::env::var("STUB_REPLAY").ok()?;
@@ -1219,8 +1291,8 @@ fn append(at: &std::path::Path, line: &str) {
     }
 }
 
-/// The `--mcp-config` documents in `args`.
-fn mcp_configs(args: &[String]) -> Vec<Value> {
+/// The `--mcp-config` documents in `args`, then the project's own (`.mcp.json` in `cwd`).
+fn mcp_configs(args: &[String], cwd: &str) -> Vec<Value> {
     let mut docs = Vec::new();
     let mut words = args.iter();
     while let Some(word) = words.next() {
@@ -1232,6 +1304,10 @@ fn mcp_configs(args: &[String]) -> Vec<Value> {
         if let Some(doc) = value.and_then(|v| serde_json::from_str::<Value>(&v).ok()) {
             docs.push(doc);
         }
+    }
+    let project = std::fs::read_to_string(std::path::Path::new(cwd).join(".mcp.json"));
+    if let Some(doc) = project.ok().and_then(|text| serde_json::from_str::<Value>(&text).ok()) {
+        docs.push(doc);
     }
     docs
 }

@@ -22,20 +22,26 @@ doctest = false
 aho-corasick = { version = "1" }
 anstyle = { version = "1" }
 arrayvec = { version = "0.7", default-features = false, features = ["std"] }
+bit-set = { version = "0.8" }
+bit-vec = { version = "0.8" }
 bitflags = { version = "2", default-features = false, features = ["serde", "std"] }
 bstr = { version = "1" }
-bytemuck = { version = "1", default-features = false, features = ["aarch64_simd", "extern_crate_alloc", "wasm_simd"] }
+bytemuck = { version = "1", default-features = false, features = ["aarch64_simd", "derive", "extern_crate_alloc", "min_const_generics", "wasm_simd"] }
 byteorder = { version = "1" }
 bytes = { version = "1", features = ["serde"] }
 chacha20 = { version = "0.10", default-features = false, features = ["rng", "xchacha"] }
 chrono = { version = "0.4", features = ["serde"] }
+codespan-reporting = { version = "0.13", default-features = false, features = ["termcolor"] }
 collections = { git = "https://github.com/aislopware/gpui-fast.git", default-features = false, features = ["test-support"] }
 crossbeam-utils = { version = "0.8" }
 crypto-common = { version = "0.2", default-features = false, features = ["rand_core"] }
 ctutils = { version = "0.4", default-features = false, features = ["subtle"] }
 derive_more = { version = "2", features = ["add", "add_assign", "debug", "deref", "deref_mut", "display", "from", "from_str", "mul", "mul_assign", "not"] }
 digest = { version = "0.11", features = ["alloc", "mac", "oid"] }
+either = { version = "1", features = ["use_std"] }
+fastrand = { version = "2" }
 fixedbitset = { version = "0.5", default-features = false, features = ["std"] }
+foldhash = { version = "0.2" }
 fontdb = { version = "0.23" }
 form_urlencoded = { version = "1" }
 futures-channel = { version = "0.3", features = ["sink"] }
@@ -46,6 +52,9 @@ futures-util = { version = "0.3", default-features = false, features = ["async-a
 getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 gpui = { git = "https://github.com/aislopware/gpui-fast.git", features = ["profiler", "test-support"] }
 gpui_platform = { git = "https://github.com/aislopware/gpui-fast.git", features = ["font-kit", "test-support"] }
+granit-parser = { version = "1" }
+half = { version = "2", features = ["num-traits"] }
+hashbrown = { version = "0.17" }
 http_client = { git = "https://github.com/aislopware/gpui-fast.git", default-features = false, features = ["test-support"] }
 hybrid-array = { version = "0.4", default-features = false, features = ["alloc", "subtle", "zeroize"] }
 hyper = { version = "1", features = ["client", "http1", "http2", "server"] }
@@ -56,32 +65,44 @@ image = { version = "0.25", default-features = false, features = ["dds", "exr", 
 indexmap = { version = "2", features = ["serde"] }
 insta = { version = "1", features = ["json", "redactions", "yaml"] }
 litemap = { version = "0.8", default-features = false, features = ["alloc"] }
+lock_api = { version = "0.4", features = ["arc_lock"] }
 log = { version = "0.4", default-features = false, features = ["serde", "std"] }
 memchr = { version = "2" }
+naga = { git = "https://github.com/gfx-rs/wgpu", rev = "3b3506ea31154edc04de64debda0e780cba2639c", features = ["glsl-in", "termcolor", "wgsl-out"] }
+naga-types = { git = "https://github.com/gfx-rs/wgpu", rev = "3b3506ea31154edc04de64debda0e780cba2639c", default-features = false, features = ["std"] }
 num-traits = { version = "0.2", features = ["i128", "libm"] }
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["CFArray", "CFBase", "CFCGTypes", "CFData", "CFDate", "CFDictionary", "CFMachPort", "CFNumber", "CFRunLoop", "CFString", "CFTimeZone", "CFURL", "std"] }
 objc2-core-graphics = { version = "0.3", default-features = false, features = ["CGBase", "CGColorSpace", "CGDataProvider", "CGDirectDisplay", "CGError", "CGEvent", "CGEventSource", "CGEventTypes", "CGGeometry", "CGImage", "CGRemoteOperation", "CGWindow", "CGWindowLevel", "libc", "std"] }
 once_cell = { version = "1" }
+parking_lot = { version = "0.12", features = ["arc_lock"] }
+phf = { version = "0.13", features = ["macros"] }
+phf_shared-582f2526e08bb6a0 = { package = "phf_shared", version = "0.14", default-features = false, features = ["std"] }
+phf_shared-594e8ee84c453af0 = { package = "phf_shared", version = "0.13" }
+phf_shared-a6292c17cd707f01 = { package = "phf_shared", version = "0.11" }
 potential_utf = { version = "0.1", default-features = false, features = ["alloc", "zerovec"] }
 ppv-lite86 = { version = "0.2", default-features = false, features = ["simd", "std"] }
+profiling = { version = "1" }
 rand = { version = "0.9", default-features = false, features = ["small_rng", "thread_rng"] }
 rand_chacha = { version = "0.9", default-features = false, features = ["std"] }
+raw-window-handle = { version = "0.6", default-features = false, features = ["std"] }
 regex-automata = { version = "0.4" }
 regex-syntax = { version = "0.8" }
 rmcp = { version = "3", default-features = false, features = ["macros", "server", "transport-io"] }
+rust-embed = { version = "8", default-features = false, features = ["debug-embed", "include-exclude"] }
 rust-embed-utils = { version = "8", default-features = false, features = ["debug-embed", "include-exclude"] }
 rust-i18n-support = { version = "4", default-features = false, features = ["codegen"] }
 rustix = { version = "1", features = ["event", "net", "pipe", "process", "pty", "stdio", "system", "termios"] }
 schemars = { version = "1", features = ["chrono04", "indexmap2", "uuid1"] }
 serde = { version = "1", features = ["alloc", "derive", "rc"] }
 serde_core = { version = "1", features = ["alloc", "rc"] }
-serde_json = { version = "1", features = ["alloc", "preserve_order", "raw_value"] }
+serde_json = { version = "1", features = ["float_roundtrip", "preserve_order", "raw_value"] }
 sha2 = { version = "0.11" }
 similar = { version = "2", features = ["inline", "unicode"] }
 slab = { version = "0.4" }
+slotmap = { version = "1" }
 smallvec = { version = "1", default-features = false, features = ["const_new", "union"] }
 socket2 = { version = "0.6", default-features = false, features = ["all"] }
-stable_deref_trait = { version = "1", default-features = false, features = ["alloc"] }
+stable_deref_trait = { version = "1" }
 subtle = { version = "2", default-features = false, features = ["const-generics", "i128"] }
 tinystr = { version = "0.8", default-features = false, features = ["alloc", "zerovec"] }
 tokio = { version = "1", features = ["full", "test-util"] }
@@ -91,6 +112,7 @@ toml_datetime = { version = "1", features = ["serde"] }
 toml_parser = { version = "1" }
 tracing = { version = "0.1" }
 tracing-core = { version = "0.1" }
+ttf-parser = { version = "0.25", features = ["gvar-alloc", "no-std-float"] }
 typenum = { version = "1", default-features = false, features = ["const-generics"] }
 ucd-trie = { version = "0.1" }
 usvg = { version = "0.46" }
@@ -108,29 +130,40 @@ zerovec = { version = "0.11", default-features = false, features = ["alloc", "de
 aho-corasick = { version = "1" }
 anstyle = { version = "1" }
 bstr = { version = "1" }
+cc = { version = "1", default-features = false, features = ["parallel"] }
 crossbeam-utils = { version = "0.8" }
 crypto-common = { version = "0.2", default-features = false, features = ["rand_core"] }
 ctutils = { version = "0.4", default-features = false, features = ["subtle"] }
 derive_more-impl = { version = "2", features = ["add", "add_assign", "debug", "deref", "deref_mut", "display", "from", "from_str", "mul", "mul_assign", "not"] }
 digest = { version = "0.11", features = ["alloc", "mac", "oid"] }
+either = { version = "1", features = ["use_std"] }
+fastrand = { version = "2" }
+foldhash = { version = "0.2" }
+granit-parser = { version = "1" }
+hashbrown = { version = "0.17" }
 hybrid-array = { version = "0.4", default-features = false, features = ["alloc", "subtle", "zeroize"] }
 indexmap = { version = "2", features = ["serde"] }
 log = { version = "0.4", default-features = false, features = ["serde", "std"] }
 memchr = { version = "2" }
 num-traits = { version = "0.2", features = ["i128", "libm"] }
 once_cell = { version = "1" }
+phf = { version = "0.13", features = ["macros"] }
+phf_shared-582f2526e08bb6a0 = { package = "phf_shared", version = "0.14", default-features = false, features = ["std"] }
+phf_shared-594e8ee84c453af0 = { package = "phf_shared", version = "0.13" }
+phf_shared-a6292c17cd707f01 = { package = "phf_shared", version = "0.11" }
 proc-macro2 = { version = "1", features = ["span-locations"] }
 quote = { version = "1" }
 regex-automata = { version = "0.4" }
 regex-syntax = { version = "0.8" }
+rust-embed-impl = { version = "8", default-features = false, features = ["debug-embed", "include-exclude"] }
 rust-embed-utils = { version = "8", default-features = false, features = ["debug-embed", "include-exclude"] }
 rust-i18n-support = { version = "4", default-features = false, features = ["codegen"] }
 serde = { version = "1", features = ["alloc", "derive", "rc"] }
 serde_core = { version = "1", features = ["alloc", "rc"] }
-serde_json = { version = "1", features = ["alloc", "preserve_order", "raw_value"] }
+serde_json = { version = "1", features = ["float_roundtrip", "preserve_order", "raw_value"] }
 sha2 = { version = "0.11" }
 smallvec = { version = "1", default-features = false, features = ["const_new", "union"] }
-stable_deref_trait = { version = "1", default-features = false, features = ["alloc"] }
+stable_deref_trait = { version = "1" }
 subtle = { version = "2", default-features = false, features = ["const-generics", "i128"] }
 syn-7b89eefb6aaa9bf3 = { package = "syn", version = "3", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
 syn-f595c2ba2a3f28df = { package = "syn", version = "2", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
@@ -148,13 +181,13 @@ concurrent-queue = { version = "2" }
 dispatch2 = { version = "0.3" }
 errno = { version = "0.3" }
 event-listener = { version = "5" }
-foldhash = { version = "0.2" }
 futures-lite = { version = "2" }
 gpui_apple = { git = "https://github.com/aislopware/gpui-fast.git", features = ["font-kit", "runtime_shaders", "test-support"] }
 gpui_macos = { git = "https://github.com/aislopware/gpui-fast.git", default-features = false, features = ["font-kit", "runtime_shaders", "test-support"] }
 gpui_platform = { git = "https://github.com/aislopware/gpui-fast.git", default-features = false, features = ["runtime_shaders", "wayland", "x11"] }
 libc = { version = "0.2" }
 miniz_oxide = { version = "0.8", features = ["simd"] }
+naga = { git = "https://github.com/gfx-rs/wgpu", rev = "3b3506ea31154edc04de64debda0e780cba2639c", default-features = false, features = ["msl-out", "wgsl-in"] }
 noq = { version = "1", default-features = false, features = ["fast-apple-datapath", "runtime-tokio"] }
 noq-udp = { path = "../vendor/noq-udp", default-features = false, features = ["fast-apple-datapath", "tracing"] }
 notify = { version = "8" }
@@ -168,14 +201,14 @@ objc2-core-text = { version = "0.3", default-features = false, features = ["CTFo
 objc2-core-video = { version = "0.3", default-features = false, features = ["CVBase", "CVBuffer", "CVHostTime", "CVImageBuffer", "CVMetalTexture", "CVMetalTextureCache", "CVPixelBuffer", "CVPixelBufferIOSurface", "CVPixelBufferPool", "CVReturn", "objc2", "objc2-core-graphics", "objc2-metal", "std"] }
 objc2-file-provider = { version = "0.3", default-features = false, features = ["Extension", "NSFileProviderDomain", "NSFileProviderEnumerating", "NSFileProviderError", "NSFileProviderItem", "NSFileProviderModifyItemOptions", "NSFileProviderReplicatedExtension", "NSFileProviderRequest", "block2", "objc2-uniform-type-identifiers", "std"] }
 objc2-foundation = { version = "0.3" }
-objc2-quartz-core = { version = "0.3", default-features = false, features = ["CADisplayLink", "CALayer", "CAMediaTiming", "CAMediaTimingFunction", "CAMetalLayer", "CAOpenGLLayer", "CATransaction", "std"] }
+objc2-metal = { version = "0.3", default-features = false, features = ["MTLAccelerationStructureCommandEncoder", "MTLAccelerationStructureTypes", "MTLBlitCommandEncoder", "MTLBlitPass", "MTLBuffer", "MTLCaptureManager", "MTLCaptureScope", "MTLCommandBuffer", "MTLCommandEncoder", "MTLCommandQueue", "MTLComputeCommandEncoder", "MTLComputePass", "MTLComputePipeline", "MTLCounters", "MTLDepthStencil", "MTLDevice", "MTLDrawable", "MTLEvent", "MTLPipeline", "MTLPixelFormat", "MTLRenderCommandEncoder", "MTLRenderPass", "MTLRenderPipeline", "MTLResidencySet", "MTLSampler", "MTLStageInputOutputDescriptor", "MTLTexture", "MTLTypes", "MTLVertexDescriptor", "block2", "std"] }
+objc2-quartz-core = { version = "0.3", default-features = false, features = ["CADisplayLink", "CALayer", "CAMediaTiming", "CAMediaTimingFunction", "CAMetalLayer", "CAOpenGLLayer", "CATransaction", "objc2-core-foundation", "objc2-core-graphics", "objc2-metal", "std"] }
 objc2-security = { version = "0.3", default-features = false, features = ["CSCommon", "SecBase", "SecCode", "SecItem", "SecTrust", "objc2", "std"] }
 objc2-uniform-type-identifiers = { version = "0.3", default-features = false, features = ["UTCoreTypes", "UTType", "std"] }
 objc2-user-notifications = { version = "0.3", default-features = false, features = ["UNNotification", "UNNotificationAction", "UNNotificationCategory", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationSettings", "UNNotificationSound", "UNNotificationTrigger", "UNUserNotificationCenter", "block2", "std"] }
 objc2-video-toolbox = { version = "0.3", default-features = false, features = ["VTBase", "VTCompressionProperties", "VTCompressionSession", "VTDecompressionProperties", "VTDecompressionSession", "VTErrors", "VTSession", "VTVideoEncoderList", "objc2-core-media", "objc2-core-video", "std"] }
 objc2-web-kit = { version = "0.3" }
-raw-window-handle = { version = "0.6", default-features = false, features = ["std"] }
-rust-embed = { version = "8", default-features = false, features = ["debug-embed", "include-exclude", "interpolate-folder-path"] }
+rust-embed = { version = "8", default-features = false, features = ["interpolate-folder-path"] }
 rustix = { version = "1", default-features = false, features = ["time"] }
 semver = { version = "1", features = ["serde"] }
 time = { version = "0.3", features = ["formatting", "macros", "parsing"] }
@@ -184,13 +217,12 @@ time = { version = "0.3", features = ["formatting", "macros", "parsing"] }
 bitflags = { version = "2", default-features = false, features = ["serde", "std"] }
 block2 = { version = "0.6" }
 errno = { version = "0.3" }
-foldhash = { version = "0.2" }
 getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 libc = { version = "0.2" }
 objc2 = { version = "0.6", features = ["disable-encoding-assertions", "exception"] }
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["CFArray", "CFAttributedString", "CFBase", "CFByteOrder", "CFCGTypes", "CFCalendar", "CFCharacterSet", "CFData", "CFDate", "CFDictionary", "CFError", "CFFileSecurity", "CFLocale", "CFMachPort", "CFMessagePort", "CFNotificationCenter", "CFNumber", "CFPlugInCOM", "CFRunLoop", "CFSet", "CFStream", "CFString", "CFTimeZone", "CFURL", "CFUUID", "objc2", "std"] }
 objc2-foundation = { version = "0.3" }
-rust-embed-impl = { version = "8", default-features = false, features = ["debug-embed", "include-exclude", "interpolate-folder-path"] }
+rust-embed-impl = { version = "8", default-features = false, features = ["interpolate-folder-path"] }
 rustix = { version = "1", features = ["event", "net", "pipe", "process", "pty", "stdio", "system", "termios", "time"] }
 semver = { version = "1", features = ["serde"] }
 
@@ -206,16 +238,19 @@ gpui_ios = { git = "https://github.com/aislopware/gpui-fast.git", features = ["r
 libc = { version = "0.2" }
 miniz_oxide = { version = "0.8", features = ["simd"] }
 mio = { version = "1", features = ["net", "os-ext"] }
+naga = { git = "https://github.com/gfx-rs/wgpu", rev = "3b3506ea31154edc04de64debda0e780cba2639c", default-features = false, features = ["msl-out", "wgsl-in"] }
 notify = { version = "8" }
 objc2 = { version = "0.6" }
 objc2-core-audio-types = { version = "0.3", default-features = false, features = ["CoreAudioBaseTypes", "objc2", "std"] }
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["CFAttributedString", "CFByteOrder", "CFCalendar", "CFCharacterSet", "CFError", "CFFileSecurity", "CFLocale", "CFMessagePort", "CFSet", "CFStream", "objc2"] }
-objc2-core-graphics = { version = "0.3", default-features = false, features = ["CGBitmapContext", "CGContext", "CGPath", "objc2"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["CGBitmapContext", "CGColor", "CGContext", "CGPath", "objc2"] }
 objc2-core-video = { version = "0.3", default-features = false, features = ["CVBase", "CVBuffer", "CVImageBuffer", "CVMetalTexture", "CVMetalTextureCache", "CVPixelBuffer", "CVPixelBufferIOSurface", "CVPixelBufferPool", "CVReturn", "objc2", "objc2-core-graphics", "objc2-metal", "std"] }
-objc2-foundation = { version = "0.3", default-features = false, features = ["FoundationErrors", "NSArray", "NSAttributedString", "NSBundle", "NSCalendar", "NSCoder", "NSData", "NSDate", "NSDictionary", "NSDistributedNotificationCenter", "NSEnumerator", "NSError", "NSExtensionContext", "NSExtensionRequestHandling", "NSFileManager", "NSGeometry", "NSIndexSet", "NSItemProvider", "NSNotification", "NSNull", "NSObjCRuntime", "NSObject", "NSOperation", "NSProcessInfo", "NSProgress", "NSRange", "NSRunLoop", "NSSet", "NSString", "NSThread", "NSURL", "NSURLAuthenticationChallenge", "NSURLCredential", "NSURLRequest", "NSURLResponse", "NSURLSession", "NSUUID", "NSUndoManager", "NSUserActivity", "NSValue", "block2", "objc2-core-foundation", "std"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["FoundationErrors", "NSArray", "NSAttributedString", "NSBundle", "NSCalendar", "NSCoder", "NSData", "NSDate", "NSDictionary", "NSDistributedNotificationCenter", "NSEnumerator", "NSError", "NSExtensionContext", "NSExtensionRequestHandling", "NSFileManager", "NSGeometry", "NSIndexSet", "NSItemProvider", "NSKeyValueObserving", "NSNotification", "NSNull", "NSObjCRuntime", "NSObject", "NSOperation", "NSProcessInfo", "NSProgress", "NSRange", "NSRunLoop", "NSSet", "NSString", "NSThread", "NSURL", "NSURLAuthenticationChallenge", "NSURLCredential", "NSURLRequest", "NSURLResponse", "NSURLSession", "NSUUID", "NSUndoManager", "NSUserActivity", "NSValue", "block2", "objc2-core-foundation", "std"] }
+objc2-metal = { version = "0.3", default-features = false, features = ["MTLAccelerationStructureCommandEncoder", "MTLAccelerationStructureTypes", "MTLBlitCommandEncoder", "MTLBlitPass", "MTLBuffer", "MTLCaptureManager", "MTLCaptureScope", "MTLCommandBuffer", "MTLCommandEncoder", "MTLCommandQueue", "MTLComputeCommandEncoder", "MTLComputePass", "MTLComputePipeline", "MTLCounters", "MTLDepthStencil", "MTLDevice", "MTLDrawable", "MTLEvent", "MTLPipeline", "MTLPixelFormat", "MTLRenderCommandEncoder", "MTLRenderPass", "MTLRenderPipeline", "MTLResidencySet", "MTLSampler", "MTLStageInputOutputDescriptor", "MTLTexture", "MTLTypes", "MTLVertexDescriptor", "block2", "std"] }
+objc2-quartz-core = { version = "0.3", default-features = false, features = ["CALayer", "CAMetalLayer", "CATransaction", "objc2-core-foundation", "objc2-core-graphics", "objc2-metal", "std"] }
 objc2-ui-kit = { version = "0.3", default-features = false, features = ["UIAccessibility", "UIAccessibilityConstants", "UIAccessibilityElement", "UIApplication", "UIButtonConfiguration", "UIColor", "UICommand", "UIControl", "UIDocumentPickerViewController", "UIDragInteraction", "UIDragItem", "UIDragPreviewParameters", "UIDragSession", "UIDropInteraction", "UIFeedbackGenerator", "UIImage", "UIImageView", "UIInteraction", "UIKeyCommand", "UIMainMenuSystem", "UIMenu", "UIMenuBuilder", "UIMenuElement", "UIMenuSystem", "UINotificationFeedbackGenerator", "UIOpenURLContext", "UIPasteConfiguration", "UIPasteConfigurationSupporting", "UIPasteControl", "UIPasteboard", "UIPreviewParameters", "UIResponder", "UIScene", "UISceneOptions", "UISceneSession", "UIScreen", "UITargetedDragPreview", "UITargetedPreview", "UIView", "UIViewController", "UIWindow", "UIWindowScene", "block2", "objc2-core-foundation", "std"] }
 objc2-user-notifications = { version = "0.3", default-features = false, features = ["UNNotification", "UNNotificationAction", "UNNotificationCategory", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationServiceExtension", "UNNotificationSettings", "UNNotificationSound", "UNNotificationTrigger", "UNUserNotificationCenter", "block2", "std"] }
-rust-embed = { version = "8", default-features = false, features = ["debug-embed", "include-exclude", "interpolate-folder-path"] }
+rust-embed = { version = "8", default-features = false, features = ["interpolate-folder-path"] }
 rustix = { version = "1", default-features = false, features = ["time"] }
 uuid = { version = "1", default-features = false, features = ["v5"] }
 
@@ -224,7 +259,7 @@ bitflags = { version = "2", default-features = false, features = ["serde", "std"
 errno = { version = "0.3" }
 getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 libc = { version = "0.2" }
-rust-embed-impl = { version = "8", default-features = false, features = ["debug-embed", "include-exclude", "interpolate-folder-path"] }
+rust-embed-impl = { version = "8", default-features = false, features = ["interpolate-folder-path"] }
 rustix = { version = "1", features = ["event", "net", "pipe", "process", "pty", "stdio", "system", "termios", "time"] }
 
 [target.aarch64-apple-ios-sim.dependencies]
@@ -239,16 +274,19 @@ gpui_ios = { git = "https://github.com/aislopware/gpui-fast.git", features = ["r
 libc = { version = "0.2" }
 miniz_oxide = { version = "0.8", features = ["simd"] }
 mio = { version = "1", features = ["net", "os-ext"] }
+naga = { git = "https://github.com/gfx-rs/wgpu", rev = "3b3506ea31154edc04de64debda0e780cba2639c", default-features = false, features = ["msl-out", "wgsl-in"] }
 notify = { version = "8" }
 objc2 = { version = "0.6" }
 objc2-core-audio-types = { version = "0.3", default-features = false, features = ["CoreAudioBaseTypes", "objc2", "std"] }
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["CFAttributedString", "CFByteOrder", "CFCalendar", "CFCharacterSet", "CFError", "CFFileSecurity", "CFLocale", "CFMessagePort", "CFSet", "CFStream", "objc2"] }
-objc2-core-graphics = { version = "0.3", default-features = false, features = ["CGBitmapContext", "CGContext", "CGPath", "objc2"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["CGBitmapContext", "CGColor", "CGContext", "CGPath", "objc2"] }
 objc2-core-video = { version = "0.3", default-features = false, features = ["CVBase", "CVBuffer", "CVImageBuffer", "CVMetalTexture", "CVMetalTextureCache", "CVPixelBuffer", "CVPixelBufferIOSurface", "CVPixelBufferPool", "CVReturn", "objc2", "objc2-core-graphics", "objc2-metal", "std"] }
-objc2-foundation = { version = "0.3", default-features = false, features = ["FoundationErrors", "NSArray", "NSAttributedString", "NSBundle", "NSCalendar", "NSCoder", "NSData", "NSDate", "NSDictionary", "NSDistributedNotificationCenter", "NSEnumerator", "NSError", "NSExtensionContext", "NSExtensionRequestHandling", "NSFileManager", "NSGeometry", "NSIndexSet", "NSItemProvider", "NSNotification", "NSNull", "NSObjCRuntime", "NSObject", "NSOperation", "NSProcessInfo", "NSProgress", "NSRange", "NSRunLoop", "NSSet", "NSString", "NSThread", "NSURL", "NSURLAuthenticationChallenge", "NSURLCredential", "NSURLRequest", "NSURLResponse", "NSURLSession", "NSUUID", "NSUndoManager", "NSUserActivity", "NSValue", "block2", "objc2-core-foundation", "std"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["FoundationErrors", "NSArray", "NSAttributedString", "NSBundle", "NSCalendar", "NSCoder", "NSData", "NSDate", "NSDictionary", "NSDistributedNotificationCenter", "NSEnumerator", "NSError", "NSExtensionContext", "NSExtensionRequestHandling", "NSFileManager", "NSGeometry", "NSIndexSet", "NSItemProvider", "NSKeyValueObserving", "NSNotification", "NSNull", "NSObjCRuntime", "NSObject", "NSOperation", "NSProcessInfo", "NSProgress", "NSRange", "NSRunLoop", "NSSet", "NSString", "NSThread", "NSURL", "NSURLAuthenticationChallenge", "NSURLCredential", "NSURLRequest", "NSURLResponse", "NSURLSession", "NSUUID", "NSUndoManager", "NSUserActivity", "NSValue", "block2", "objc2-core-foundation", "std"] }
+objc2-metal = { version = "0.3", default-features = false, features = ["MTLAccelerationStructureCommandEncoder", "MTLAccelerationStructureTypes", "MTLBlitCommandEncoder", "MTLBlitPass", "MTLBuffer", "MTLCaptureManager", "MTLCaptureScope", "MTLCommandBuffer", "MTLCommandEncoder", "MTLCommandQueue", "MTLComputeCommandEncoder", "MTLComputePass", "MTLComputePipeline", "MTLCounters", "MTLDepthStencil", "MTLDevice", "MTLDrawable", "MTLEvent", "MTLPipeline", "MTLPixelFormat", "MTLRenderCommandEncoder", "MTLRenderPass", "MTLRenderPipeline", "MTLResidencySet", "MTLSampler", "MTLStageInputOutputDescriptor", "MTLTexture", "MTLTypes", "MTLVertexDescriptor", "block2", "std"] }
+objc2-quartz-core = { version = "0.3", default-features = false, features = ["CALayer", "CAMetalLayer", "CATransaction", "objc2-core-foundation", "objc2-core-graphics", "objc2-metal", "std"] }
 objc2-ui-kit = { version = "0.3", default-features = false, features = ["UIAccessibility", "UIAccessibilityConstants", "UIAccessibilityElement", "UIApplication", "UIButtonConfiguration", "UIColor", "UICommand", "UIControl", "UIDocumentPickerViewController", "UIDragInteraction", "UIDragItem", "UIDragPreviewParameters", "UIDragSession", "UIDropInteraction", "UIFeedbackGenerator", "UIImage", "UIImageView", "UIInteraction", "UIKeyCommand", "UIMainMenuSystem", "UIMenu", "UIMenuBuilder", "UIMenuElement", "UIMenuSystem", "UINotificationFeedbackGenerator", "UIOpenURLContext", "UIPasteConfiguration", "UIPasteConfigurationSupporting", "UIPasteControl", "UIPasteboard", "UIPreviewParameters", "UIResponder", "UIScene", "UISceneOptions", "UISceneSession", "UIScreen", "UITargetedDragPreview", "UITargetedPreview", "UIView", "UIViewController", "UIWindow", "UIWindowScene", "block2", "objc2-core-foundation", "std"] }
 objc2-user-notifications = { version = "0.3", default-features = false, features = ["UNNotification", "UNNotificationAction", "UNNotificationCategory", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationServiceExtension", "UNNotificationSettings", "UNNotificationSound", "UNNotificationTrigger", "UNUserNotificationCenter", "block2", "std"] }
-rust-embed = { version = "8", default-features = false, features = ["debug-embed", "include-exclude", "interpolate-folder-path"] }
+rust-embed = { version = "8", default-features = false, features = ["interpolate-folder-path"] }
 rustix = { version = "1", default-features = false, features = ["time"] }
 uuid = { version = "1", default-features = false, features = ["v5"] }
 
@@ -257,7 +295,7 @@ bitflags = { version = "2", default-features = false, features = ["serde", "std"
 errno = { version = "0.3" }
 getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 libc = { version = "0.2" }
-rust-embed-impl = { version = "8", default-features = false, features = ["debug-embed", "include-exclude", "interpolate-folder-path"] }
+rust-embed-impl = { version = "8", default-features = false, features = ["interpolate-folder-path"] }
 rustix = { version = "1", features = ["event", "net", "pipe", "process", "pty", "stdio", "system", "termios", "time"] }
 
 ### END HAKARI SECTION

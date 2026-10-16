@@ -161,7 +161,7 @@ fn fields(schema: &McpElicitationSchema) -> Vec<Field> {
 }
 
 fn offered(label: &str) -> Offered {
-    Offered { label: label.to_owned(), description: None }
+    Offered { label: label.to_owned(), description: None, preview: None }
 }
 
 /// A field's title, description and kind.

@@ -30,6 +30,18 @@ use super::veil::{RowVeil, apply_veil, slice_spans};
 
 /// Gap between markdown blocks inside one message (slopty mdBlockGap).
 pub const MD_BLOCK_GAP: f32 = 12.0;
+// slopty: a gallery's tiles, for two or more images in a row.
+/// A gallery tile's width; its image keeps its aspect within it.
+pub const GALLERY_TILE: f32 = 220.0;
+const GALLERY_GAP: f32 = 8.0;
+/// The id part of an image drawn as a gallery tile (`{row}-gallery-{ix}-{run}`), for an image
+/// handler to size it to its tile.
+pub const GALLERY_ID: &str = "gallery";
+
+/// An image handler's element id names a gallery tile.
+pub fn in_gallery(id: &str) -> bool {
+    id.contains("-gallery-")
+}
 /// Body text size / line height (slopty: 14px / 22px).
 pub const MD_TEXT_SIZE: f32 = 14.0;
 pub const MD_LINE_HEIGHT: f32 = 22.0;
@@ -111,8 +123,14 @@ pub struct TaskUi {
     pub toggle: Option<Rc<dyn Fn(&super::parser::TaskMarker, &mut Window, &mut gpui::App)>>,
 }
 
+/// slopty: a chart fence's page card for its language, code and frame id; `None` when the
+/// language names no chart.
+pub type ChartFn = dyn Fn(&str, &str, SharedString, &Theme) -> Option<AnyElement>;
+
 #[derive(Clone)]
 pub struct MediaUi {
+    /// slopty: chart fences (```` ```vega-lite ````, ```` ```plotly ````) draw as page cards.
+    pub chart: Option<Rc<ChartFn>>,
     pub diagram: Option<Rc<dyn Fn(&str, SharedString, &Theme) -> DiagramView>>,
     /// `None` keeps inline images in their ordinary text rendering.
     pub image: Option<Rc<dyn Fn(&super::parser::InlineImage, SharedString, &Theme) -> AnyElement>>,
@@ -993,6 +1011,11 @@ pub struct FlatText {
     /// Reserved slots after resolved file links — displayed-text
     /// coordinates. Each slot paints the trailing open glyph.
     pub file_glyphs: Vec<Range<usize>>,
+    /// slopty: formulas in the line that typeset, by their TeX's displayed range: each draws
+    /// as a box in place of its TeX (`markdown/math.rs`).
+    pub math: Vec<(Range<usize>, SharedString)>,
+    /// slopty: the size the formulas typeset at: the block's text size.
+    pub math_size: f32,
 }
 
 /// Inline-code tint: a text-safe use of the selected accent identity.
@@ -1028,6 +1051,7 @@ fn flatten_runs_weighted(runs: &[InlineRun], theme: &Theme, base_weight: FontWei
     let mut out: Vec<TextRun> = Vec::with_capacity(runs.len());
     let mut links: Vec<(Range<usize>, String)> = Vec::new();
     let mut code_ranges: Vec<Range<usize>> = Vec::new();
+    let mut math: Vec<(Range<usize>, SharedString)> = Vec::new();
     // A run may stand for a longer source text than it shows (a file link
     // labeled by its file name). The source is only kept when some run does.
     let relabeled = runs.iter().any(|run| run.style.file_label.is_some());
@@ -1047,7 +1071,15 @@ fn flatten_runs_weighted(runs: &[InlineRun], theme: &Theme, base_weight: FontWei
                 omissions.push((source_start..source.len(), start..text.len()));
             }
         }
-        let mut f = if run.style.code {
+        // slopty: a formula in the line typesets in place of its TeX, set in the body's face so
+        // the line keeps its metrics; one that does not typeset reads as code.
+        let typeset = run.style.math == Some(super::parser::Math::Inline)
+            && super::math::inline_formula(&run.text, MD_TEXT_SIZE, theme.text).is_some();
+        if typeset {
+            math.push((start..text.len(), run.text.clone().into()));
+        }
+        let code = run.style.code || (run.style.math.is_some() && !typeset);
+        let mut f = if code {
             font(theme.font_mono.clone())
         } else {
             font(theme.font_sans.clone())
@@ -1068,12 +1100,12 @@ fn flatten_runs_weighted(runs: &[InlineRun], theme: &Theme, base_weight: FontWei
         let is_link = run.style.link.is_some();
         // Inline code uses the spectrum's code tone; everything else
         // stays the monochrome foreground.
-        let color = if run.style.code {
+        let color = if code {
             inline_code_text(theme)
         } else {
             theme.text
         };
-        if run.style.code {
+        if code {
             // Merge adjacent code runs into one wash box (like links below).
             match code_ranges.last_mut() {
                 Some(range) if range.end == start => range.end = text.len(),
@@ -1128,6 +1160,8 @@ fn flatten_runs_weighted(runs: &[InlineRun], theme: &Theme, base_weight: FontWei
         links,
         code_ranges,
         file_glyphs: Vec::new(),
+        math,
+        math_size: MD_TEXT_SIZE,
     }
 }
 
@@ -1212,9 +1246,74 @@ pub(super) fn flat_text_presented_element(
         }
         None => flat.runs.clone(),
     };
-    let styled = StyledText::new(flat.text.clone()).with_runs(text_runs);
+    // slopty: each formula in the line is a box as wide as it typesets, in place of its TeX.
+    let formulas: Vec<(Range<usize>, super::math::InlineFormula)> = flat
+        .math
+        .iter()
+        .filter_map(|(range, tex)| {
+            let formula = super::math::inline_formula(tex, flat.math_size, theme.text)?;
+            Some((range.clone(), formula))
+        })
+        .collect();
+    let styled = StyledText::new(flat.text.clone())
+        .with_runs(text_runs)
+        .with_inline_boxes(formulas.iter().map(|(range, formula)| gpui::InlineBox {
+            range: range.clone(),
+            width: px(formula.width),
+        }));
     let layout = styled.layout().clone();
     let text_el = styled.into_any_element();
+    // slopty: each formula in the line is a math node labelled with its TeX, for assistive
+    // technologies (its glyphs are the box's picture, which they cannot read), laid out over the
+    // formula once the text has its lines: placed as roots in the text's prepaint order, so each
+    // node's bounds are the formula's box.
+    let math_layout = layout.clone();
+    let math_nodes: Vec<(Range<usize>, SharedString, super::math::InlineFormula, SharedString)> =
+        formulas
+            .iter()
+            .enumerate()
+            .map(|(n, (range, formula))| {
+                let tex = flat.text.get(range.clone()).unwrap_or_default().to_owned();
+                let id = format!("{}-math-inline-{ix}-{n}", opts.row_key);
+                (range.clone(), tex.into(), formula.clone(), id.into())
+            })
+            .collect();
+    let math_nodes = (!math_nodes.is_empty()).then(|| {
+        canvas(
+            move |_, window, cx| {
+                let mut placed = Vec::new();
+                for (range, tex, formula, id) in &math_nodes {
+                    let Some(baseline) = math_layout.baseline_for_index(range.start) else {
+                        continue;
+                    };
+                    let bounds = super::math::inline_bounds(formula, baseline);
+                    let mut node = div()
+                        .id(id.clone())
+                        .role(gpui::Role::Math)
+                        .aria_label(tex.clone())
+                        .w(bounds.size.width)
+                        .h(bounds.size.height)
+                        .into_any_element();
+                    node.prepaint_as_root(
+                        bounds.origin,
+                        bounds.size.map(gpui::AvailableSpace::Definite),
+                        window,
+                        cx,
+                    );
+                    placed.push(node);
+                }
+                placed
+            },
+            |_, placed, window, cx| {
+                for mut node in placed {
+                    node.paint(window, cx);
+                }
+            },
+        )
+        .absolute()
+        .size_full()
+    });
+
     let link_layout = layout.clone();
     // Underlay canvas: inline-code washes + the selection wash, painted
     // BEFORE the text (earlier sibling ⇒ underneath), reading glyph geometry
@@ -1235,7 +1334,7 @@ pub(super) fn flat_text_presented_element(
     let sel_wash = selection_wash(theme);
     let underlay = canvas(
         |bounds, window, _| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal),
-        move |_, hitbox, window, _| {
+        move |_, hitbox, window, cx| {
             let surface = PAINTING_SURFACE.with(Cell::get);
             for range in &code_ranges {
                 for rect in range_rects(&layout, range, INLINE_CODE_PAD_X, INLINE_CODE_INSET_Y) {
@@ -1263,6 +1362,23 @@ pub(super) fn flat_text_presented_element(
                         BorderStyle::default(),
                     ));
                 }
+            }
+            // slopty: formulas in the line, on the line's baseline where their TeX was.
+            for (range, formula) in &formulas {
+                let Some(baseline) = layout.baseline_for_index(range.start) else { continue };
+                #[cfg(test)]
+                super::math::PAINTED.with(|painted| {
+                    let line = layout.baseline_for_index(0);
+                    let bounds = super::math::inline_bounds(formula, baseline);
+                    painted.borrow_mut().push((range.clone(), bounds, baseline, line));
+                });
+                let Some(picture) =
+                    super::math::inline_picture(formula, window.scale_factor(), cx)
+                else {
+                    continue;
+                };
+                let bounds = super::math::inline_bounds(formula, baseline);
+                let _ = window.paint_image(bounds, bounds, Default::default(), picture, 0, false);
             }
             // slopty: find in thread washes its matches here too.
             super::find::paint(window, surface, &sel_key, &flat_text, &layout, &|range| {
@@ -1298,6 +1414,7 @@ pub(super) fn flat_text_presented_element(
     let child = selectable_text_wrap()
         .child(underlay)
         .child(text_el)
+        .children(math_nodes)
         .into_any_element();
     if flat.links.is_empty() {
         return child;
@@ -1839,7 +1956,7 @@ fn range_rects_with_positions(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn text_element(
+pub(super) fn text_element(
     runs: &[InlineRun],
     size: f32,
     line_height: f32,
@@ -1849,33 +1966,107 @@ fn text_element(
     opts: &RenderOptions,
     theme: &Theme,
 ) -> AnyElement {
+    // slopty: a formula on its own draws typeset where media draws (`markdown/math.rs`).
+    if opts.media.is_some()
+        && let Some(at) = runs
+            .iter()
+            .position(|run| run.style.math == Some(super::parser::Math::Display))
+    {
+        let mut elements = Vec::new();
+        if runs[..at].iter().any(|run| !run.text.trim().is_empty()) {
+            elements.push(text_element(
+                &runs[..at],
+                size,
+                line_height,
+                bold_default,
+                top_ix,
+                ix.wrapping_mul(4099).wrapping_add(at + 2000),
+                opts,
+                theme,
+            ));
+        }
+        elements.push(super::math::display_formula(
+            &runs[at].text,
+            format!("{}-math-{ix}-{at}", opts.row_key).into(),
+            size,
+            theme,
+        ));
+        if runs[at + 1..].iter().any(|run| !run.text.trim().is_empty()) {
+            elements.push(text_element(
+                &runs[at + 1..],
+                size,
+                line_height,
+                bold_default,
+                top_ix,
+                ix.wrapping_mul(4099).wrapping_add(at + 3000),
+                opts,
+                theme,
+            ));
+        }
+        return div().flex().flex_col().children(elements).into_any_element();
+    }
     if let Some(image_ui) = opts.media.as_ref().and_then(|media| media.image.as_ref()) {
         if runs.iter().any(|run| run.style.image.is_some()) {
-            let mut elements = Vec::new();
+            // slopty: images with nothing but space between them make one gallery.
+            let mut groups: Vec<(usize, Vec<usize>)> = Vec::new();
             let mut start = 0;
             for (index, run) in runs.iter().enumerate() {
-                if let Some(image) = &run.style.image {
-                    if start < index {
-                        elements.push(text_element(
-                            &runs[start..index],
-                            size,
-                            line_height,
-                            bold_default,
-                            top_ix,
-                            ix.wrapping_mul(4099).wrapping_add(start + 1000),
-                            opts,
-                            theme,
-                        ));
-                    }
-                    elements.push(image_ui(
-                        image,
-                        format!("{}-image-{ix}-{index}", opts.row_key).into(),
+                if run.style.image.is_none() {
+                    continue;
+                }
+                let joins = runs[start..index].iter().all(|run| run.text.trim().is_empty());
+                match groups.last_mut() {
+                    Some((_, images)) if joins => images.push(index),
+                    _ => groups.push((start, vec![index])),
+                }
+                start = index + 1;
+            }
+            let mut elements = Vec::new();
+            for (text_start, images) in groups {
+                let first = images[0];
+                if runs[text_start..first].iter().any(|run| !run.text.trim().is_empty()) {
+                    elements.push(text_element(
+                        &runs[text_start..first],
+                        size,
+                        line_height,
+                        bold_default,
+                        top_ix,
+                        ix.wrapping_mul(4099).wrapping_add(text_start + 1000),
+                        opts,
                         theme,
                     ));
-                    start = index + 1;
+                }
+                let image_at = |index: usize, kind: &str| {
+                    let Some(image) = &runs[index].style.image else {
+                        return gpui::Empty.into_any_element();
+                    };
+                    image_ui(image, format!("{}-{kind}-{ix}-{index}", opts.row_key).into(), theme)
+                };
+                if let [only] = images[..] {
+                    elements.push(image_at(only, "image"));
+                } else {
+                    let count = images.len();
+                    elements.push(
+                        div()
+                            .id(SharedString::from(format!("{}-gallery-{ix}-{first}", opts.row_key)))
+                            .role(gpui::Role::Group)
+                            .aria_label(SharedString::from(format!("{count} images")))
+                            .flex()
+                            .flex_row()
+                            .flex_wrap()
+                            .items_start()
+                            .gap(px(GALLERY_GAP))
+                            .children(images.into_iter().map(|index| {
+                                div()
+                                    .flex_none()
+                                    .w(px(GALLERY_TILE))
+                                    .child(image_at(index, GALLERY_ID))
+                            }))
+                            .into_any_element(),
+                    );
                 }
             }
-            if start < runs.len() {
+            if start < runs.len() && runs[start..].iter().any(|run| !run.text.trim().is_empty()) {
                 elements.push(text_element(
                     &runs[start..],
                     size,
@@ -1927,6 +2118,12 @@ fn text_element(
         FontWeight::NORMAL
     };
     let flat = flatten_cached(runs, weight, top_ix, ix, opts, theme);
+    // slopty: a heading's formulas typeset at the heading's size.
+    let flat = if !flat.math.is_empty() && flat.math_size != size {
+        Rc::new(FlatText { math_size: size, ..(*flat).clone() })
+    } else {
+        flat
+    };
     let inner = flat_text_element(&flat, ix, opts, theme);
     let direct_file = opts
         .workspace_root
@@ -2061,6 +2258,13 @@ fn render_code_block(
     theme: &Theme,
     highlight: CodeHighlight,
 ) -> AnyElement {
+    // slopty: a chart fence draws as its page card.
+    if let Some(language) = language
+        && let Some(chart) = opts.media.as_ref().and_then(|media| media.chart.as_ref())
+        && let Some(card) = chart(language, code, format!("{}-chart-{ix}", opts.row_key).into(), theme)
+    {
+        return card;
+    }
     if language.is_some_and(|l| l.eq_ignore_ascii_case("mermaid")) {
         if let Some(handler) = opts.media.as_ref().and_then(|media| media.diagram.as_ref()) {
             let frame_id: SharedString = format!("{}-mermaid-{ix}", opts.row_key).into();
@@ -3927,6 +4131,8 @@ mod tests {
                     links: Vec::new(),
                     code_ranges: Vec::new(),
                     file_glyphs: Vec::new(),
+                    math: Vec::new(),
+                    math_size: MD_TEXT_SIZE,
                 }),
             );
             cache.code.insert(
@@ -3972,6 +4178,8 @@ mod tests {
                 links: Vec::new(),
                 code_ranges: Vec::new(),
                 file_glyphs: Vec::new(),
+                math: Vec::new(),
+                math_size: MD_TEXT_SIZE,
             }),
         );
         cache.sync_generation(10);

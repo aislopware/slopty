@@ -1478,3 +1478,73 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `workspace::tests::attention::a_goal_met_note_offers_its_pull_request` and
     `workspace::tests::approvals::a_goal_met_notes_open_pull_request_lands_its_goal`
     (slopty-ui).
+
+- ✅ **Pages run in a sandbox of their own** (2026-10-16, `.research/inline-visuals-2026-10-16.md`
+  §3.2, §4 and item 3). HTML an agent made (an MCP App's view, `show_page`, an `.html` or `.svg`
+  file) shows inline in a `WKWebView` that `slopty_platform::web::page` keeps, on macOS and iOS
+  alike. The app owns a `PageHost` per window and hands a live page's view to a GPUI native host,
+  as the browser tile does; the shell reaches it through `live::Host` in phase 2.
+  - **What a page may reach.** Each page has its own origin, `slopty-page://<id>`, served by a
+    scheme handler that answers that host alone, in a non-persistent data store of its own: no
+    cookies, no storage, nothing shared with another page or the browser tile. The host document
+    comes with a policy (`default-src 'none'`; scripts and styles inline or from its own origin;
+    images, fonts and media from its own origin, `data:` and `blob:`; `connect-src` its own origin;
+    no objects, workers, forms or base; frames are the delegate's, below) that the view's frame inherits, and a content rule
+    list blocks every `http(s)` and `ws(s)` load besides, one rule each since the rule language
+    has no alternation. A page fetching the web and opening a web socket reports two failures and
+    no success, an image from the web has no width, and a fetch of another page's origin fails.
+  - **The view sits in a sandboxed frame.** The trusted host document has no script of its own
+    and holds the view in a `sandbox="allow-scripts"` `srcdoc` frame: an opaque origin, no
+    top-level navigation, no pop-ups, forms, downloads or permissions. The camera, the microphone
+    and motion are denied as well, and a pop-up is refused. Frames are the navigation delegate's
+    (`frame-src *`): it lets through the host's own load of the page and the view's
+    `about:srcdoc`, and refuses and counts every other navigation. A policy's `frame-src 'none'`
+    would refuse them too, but it leaves the view's frame blank where the delegate's cancel leaves
+    the view as it was (tried on a real `WKWebView`: blocked by the policy, the frame loaded a
+    second time, empty). Measured: the view's `location = 'https://…'` counts one refused
+    navigation, and the view's document loads once. The policy still reports what it blocks to
+    the scheme handler, which counts it.
+  - **The bridge is MCP Apps' own, behind an allowlist.** The host document's script runs in a
+    content world of its own (`slopty-page`), which the view cannot reach, and relays what the
+    view posts to its parent through a `WKScriptMessageHandlerWithReply`, stamped with whether the
+    person had just acted in the page. The host answers the handshake (`ui/initialize`, with the
+    theme, its CSS variables, the display mode, the container's width and height cap, the locale
+    and the platform) and `ping`, and reads `size-changed` and the view's logs. A tool call, a
+    message, context for the model, a link, a display mode and a resource read reach the app
+    unanswered, as `PageEvent::Asked`: only the app answers them, once the person has decided
+    (`docs/decisions/agents.md`, a page never answers for the person). Any other method is
+    refused with "method not found" and counted. Notices for the view wait for its
+    `initialized`, as the spec asks.
+  - **Height.** A page's height is what it asks for, clamped to 80 points at least and to
+    `min(720, 0.8 × viewport)` at most: 5000 asked gives the cap, 300 gives 300.
+  - **Notices outlive a reload.** The tool call's notices (input, partial input, result,
+    cancel; the last of each) reach the view once it finishes its handshake, and again after a
+    reload (a grant reloads the page). The host's context changes reach only a view that has
+    finished its handshake; one that has not gets the whole context with it.
+  - **Live, warm and cold.** A page is cold (no web view; its last snapshot stands in), warm (a
+    web view GPUI does not place; GPUI draws its snapshot, which frosts, fades and clips like any
+    image) or live (placed, taking the pointer and keys). At most three pages are live on a Mac,
+    two on an iPad and one on an iPhone, and at most eight are mounted per window; the page used
+    least lately gives way. A page going warm takes its snapshot first, and a new height or a
+    loaded view takes one too. Snapshots are BGRA, premultiplied, straight from the `CGImage`
+    into a bitmap context, ready for a GPUI image, with no PNG on the way.
+  - **Network is the person's grant, per page.** `PageHost::set_network` names the origins one
+    page may reach (MCP Apps' `connectDomains` and `resourceDomains`): the page gets a rule list
+    of its own that lets exactly those through, its policy names them, and it reloads. A page
+    granted a server on this Mac reaches it once; a page beside it granted nothing still fails.
+  - **Private API, declared once.** `-[WKWebView _webProcessIdentifier]` names each page's
+    `WebContent` process, for its memory and for the count of processes; a test checks the
+    selector is still there.
+  - **Files beside a page.** The view's requests for its own origin's other paths reach the
+    app's `Resources` callback with the path under the page's folder (never `..`, `.` or an empty
+    part, refused here), answered once with bytes or not found. The app backs it with the worker's
+    read of the page's folder (`ContentRef::item_asset`), so the host stays agent-agnostic.
+  - **gpui-fast.** A `native_view` element with an id is a node of the accessibility tree where
+    the native shows, a group named by its host's label unless the element names itself
+    (aislopware/gpui-fast#34, `a4cc94a7`), so a live page's card is found by its node in tests and by
+    VoiceOver. The id stays the element's: a host may be placed by two elements in a frame.
+  - Tests: `tests/main_thread.rs` (`a_page_reaches_no_network_and_no_other_page`,
+    `a_page_takes_the_theme_and_its_height_is_capped`, `a_page_cannot_navigate_away`,
+    `a_page_reaches_the_network_only_once_granted`, `a_views_requests_wait_for_the_app`,
+    `pages_are_capped_and_each_has_its_own_process`) and the unit tests of `web::page`'s
+    `stage`, `sandbox`, `bridge` and `view` (slopty-platform).

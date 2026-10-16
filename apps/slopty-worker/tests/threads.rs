@@ -163,6 +163,7 @@ mod threads {
         Expanded(Expanded),
         Review(Box<slopty_proto::thread::wire::Review>),
         Actions { epoch: u64, first: u64, next: u64 },
+        App(u64, slopty_proto::visual::AppAnswer),
     }
 
     /// One client: its link, and its copies of the table and of one thread, kept from nothing
@@ -262,6 +263,7 @@ mod threads {
                 }
                 ThreadFrame::Expanded { body, .. } => self.got.push(Got::Expanded(body)),
                 ThreadFrame::Review(review) => self.got.push(Got::Review(review)),
+                ThreadFrame::App { id, answer } => self.got.push(Got::App(id, answer)),
             }
         }
 
@@ -894,7 +896,8 @@ mod threads {
         let state = a.state();
         assert_eq!(state.status.liveness, slopty_proto::thread::Liveness::Live);
         assert!(state.turns.is_empty(), "nothing sent: {:?}", state.turns);
-        assert_eq!(heard_lines(&recorded(&record).await, "user"), Vec::<serde_json::Value>::new());
+        let heard = heard_lines(&recorded(&record).await, "user");
+        assert!(heard.is_empty(), "nothing sent: {heard:?}");
     }
 
     /// A folder's past Claude Code sessions are listed from the names and times of the
@@ -1082,5 +1085,225 @@ mod threads {
             _ => None,
         })
         .await
+    }
+
+    /// An ACP agent's picture reaches the client by its digest: the stand-in replays `opencode`
+    /// reading a PNG (`crates/slopty-agent/tests/fixtures/acp/media.jsonl`), the call carries
+    /// the picture, and the client's `Expand` of it brings back the very bytes. A page's ask
+    /// of that thread's agent, which has no door to its MCP servers, is refused in words.
+    #[tokio::test]
+    async fn an_acp_agents_picture_comes_back_whole_by_its_digest() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let (programs, work) = (root.join("programs"), root.join("work"));
+        for made in [&programs, &work] {
+            std::fs::create_dir_all(made).unwrap();
+        }
+        std::os::unix::fs::symlink(bin("slopty-stub-acp"), programs.join("opencode")).unwrap();
+        // The recording's prompt carried the picture; this one sends the words alone, so the
+        // stand-in is given the recording with its prompt as this one goes.
+        let recorded = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../crates/slopty-agent/tests/fixtures/acp/media.jsonl"),
+        )
+        .unwrap();
+        let mut fixture = String::new();
+        for line in recorded.lines() {
+            let mut line: serde_json::Value = serde_json::from_str(line).unwrap();
+            if line["msg"]["method"] == "session/prompt" {
+                line["msg"]["params"]["prompt"] =
+                    serde_json::json!([{ "type": "text", "text": "Look at dot.png." }]);
+            }
+            fixture.push_str(&line.to_string());
+            fixture.push('\n');
+        }
+        let fixture_at = root.join("media.jsonl");
+        std::fs::write(&fixture_at, fixture).unwrap();
+        let config =
+            serde_json::json!({ "fixture": fixture_at, "record": root.join("record.json") });
+        std::fs::write(programs.join("stub-acp.json"), config.to_string()).unwrap();
+        let env = [("PATH", slopty_testkit::env::path_with(&programs))];
+        let daemons = daemons_with(&root, &env).await;
+        let mut a = Client::connect(&daemons, ClientId::new()).await;
+
+        let mut start = claude_in(&work, Some("Look at dot.png."));
+        start.agent = AgentId::named("acp:opencode");
+        let thread = started(&mut a, start).await;
+        a.follow(thread).await;
+        let pictured = |c: &Client| {
+            c.thread.as_ref().and_then(|s| {
+                s.items.iter().find_map(|i| match &i.body {
+                    ItemBody::Tool(call) if !call.images.is_empty() => Some(call.images.clone()),
+                    _ => None,
+                })
+            })
+        };
+        a.until(|c| pictured(c).is_some()).await;
+        let images = pictured(&a).unwrap();
+        assert_eq!(images.len(), 1, "{images:?}");
+        let image = &images[0];
+        a.send(ThreadRequest::Expand { thread, content: image.at.clone() }).await;
+        a.until(|c| c.got.iter().any(|g| matches!(g, Got::Expanded(_)))).await;
+        let bytes = a
+            .got
+            .iter()
+            .find_map(|g| match g {
+                Got::Expanded(Expanded::Bytes(bytes)) => Some(bytes.clone()),
+                _ => None,
+            })
+            .expect("the picture's bytes");
+        assert_eq!(blake3::hash(&bytes).to_hex().to_string(), image.digest);
+        assert_eq!(u64::try_from(bytes.len()).unwrap(), image.bytes);
+        let kept = root.join("data/media").join(&image.digest);
+        assert!(kept.is_file(), "kept in the worker's data, by its digest");
+
+        let ask = slopty_proto::visual::AppAsk::Read {
+            server: "apps".to_owned(),
+            uri: "ui://apps/echo".to_owned(),
+        };
+        a.send(ThreadRequest::App { thread, id: 7, ask }).await;
+        a.until(|c| c.got.iter().any(|g| matches!(g, Got::App(7, _)))).await;
+        let refused = a.got.iter().any(|g| {
+            matches!(g, Got::App(7, slopty_proto::visual::AppAnswer::Refused(why)) if !why.is_empty())
+        });
+        assert!(refused, "{:?}", a.got.last());
+    }
+
+    /// A page of a Claude Code thread asks its MCP App through Claude Code, which holds the
+    /// connection: the app's page is read (`mcp_read_resource`) and its tool called for the page
+    /// alone (`mcp_call` with `result_not_for_model`), each answer whole; a page Claude Code's
+    /// server does not have is refused with why, and a URI that is no app's page never reaches
+    /// Claude Code.
+    #[tokio::test]
+    async fn a_claude_code_page_asks_its_app_through_claude_code() {
+        use slopty_proto::visual::{AppAnswer, AppAsk, AppBody};
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let work = root.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let log = root.join("apps.log");
+        let servers = serde_json::json!({ "mcpServers": { "apps": {
+            "command": bin("slopty-stub-mcp-apps"), "args": ["--log", log],
+        } } });
+        std::fs::write(work.join(".mcp.json"), servers.to_string()).unwrap();
+        let (daemons, record) = with_claude(&root).await;
+        let mut a = Client::connect(&daemons, ClientId::new()).await;
+        let thread = started(&mut a, claude_in(&work, Some("Say hello."))).await;
+        a.follow(thread).await;
+        a.until(turns_done(1)).await;
+
+        let asks = [
+            (1, AppAsk::Read { server: "apps".to_owned(), uri: "ui://apps/echo".to_owned() }),
+            (
+                2,
+                AppAsk::Call {
+                    server: "apps".to_owned(),
+                    tool: "echo".to_owned(),
+                    arguments: r#"{"text":"hi"}"#.to_owned(),
+                },
+            ),
+            (3, AppAsk::Read { server: "apps".to_owned(), uri: "ui://apps/none".to_owned() }),
+            (4, AppAsk::Read { server: "apps".to_owned(), uri: "https://example.com/".to_owned() }),
+        ];
+        for (id, ask) in asks {
+            a.send(ThreadRequest::App { thread, id, ask }).await;
+        }
+        a.until(|c| {
+            (1..=4).all(|n| c.got.iter().any(|g| matches!(g, Got::App(id, _) if *id == n)))
+        })
+        .await;
+        let answer = |n: u64| {
+            a.got
+                .iter()
+                .find_map(|g| match g {
+                    Got::App(id, answer) if *id == n => Some(answer.clone()),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let AppAnswer::Resource { uri, mime_type, body: AppBody::Text(html), .. } = answer(1)
+        else {
+            panic!("{:?}", answer(1))
+        };
+        assert_eq!(uri, "ui://apps/echo");
+        assert_eq!(mime_type.as_deref(), Some("text/html;profile=mcp-app"));
+        assert!(html.contains("echo"), "{html}");
+        let AppAnswer::Called { result } = answer(2) else { panic!("{:?}", answer(2)) };
+        let result: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(result["structuredContent"]["echo"], "hi", "{result}");
+        assert!(matches!(answer(3), AppAnswer::Refused(why) if why.contains("no resource")));
+        assert!(matches!(answer(4), AppAnswer::Refused(why) if why.contains("ui://")));
+
+        let seen = recorded(&record).await;
+        let calls = heard_lines(&seen, "mcp_call");
+        assert_eq!(calls.len(), 1, "{calls:#?}");
+        assert_eq!(calls[0]["request"]["tool"], "mcp__apps__echo");
+        assert_eq!(calls[0]["request"]["result_not_for_model"], true);
+        let reads = heard_lines(&seen, "mcp_read_resource");
+        assert_eq!(reads.len(), 2, "the page that is no app's never went: {reads:#?}");
+        let logged = std::fs::read_to_string(&log).unwrap();
+        assert!(!logged.contains("example.com"), "{logged}");
+    }
+
+    /// A rewind of the files can be undone: the worker takes the folder before Claude Code puts
+    /// the files back (`rewind_files`), so the file a later turn wrote, gone with the rewind,
+    /// comes back with the undo. An undo once done, or of a tree that is not the last rewind's,
+    /// is refused.
+    #[tokio::test]
+    async fn a_rewind_of_the_files_is_undone() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let work = root.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        for args in
+            [&["init", "-q", "-b", "main"][..], &["commit", "-q", "--allow-empty", "-m", "c0"]]
+        {
+            let done = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&work)
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .status()
+                .unwrap();
+            assert!(done.success(), "git {args:?}");
+        }
+        let (daemons, _record) = with_claude(&root).await;
+        let mut a = Client::connect(&daemons, ClientId::new()).await;
+        let thread = started(&mut a, claude_in(&work, Some("write a.txt one"))).await;
+        a.follow(thread).await;
+        a.until(turns_done(1)).await;
+        let send = Intent::Send {
+            text: "write b.txt two".to_owned(),
+            delivery: slopty_proto::thread::Delivery::Steer,
+            attachments: Vec::new(),
+        };
+        assert_eq!(a.intent(IntentId::new(), thread, send).await, Outcome::Done);
+        a.until(turns_done(2)).await;
+        let (a_txt, b_txt) = (work.join("a.txt"), work.join("b.txt"));
+        assert_eq!(std::fs::read_to_string(&b_txt).unwrap(), "two\n");
+        let second = a.state().turns[1].id;
+
+        let rewind = Intent::Rewind { turn: second };
+        assert_eq!(a.intent(IntentId::new(), thread, rewind).await, Outcome::Done);
+        a.until(|c| c.thread.as_ref().is_some_and(|s| s.rewound.is_some())).await;
+        let rewound = a.state().rewound.clone().unwrap();
+        assert_eq!(rewound.turn, second);
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while b_txt.exists() {
+            assert!(std::time::Instant::now() < deadline, "b.txt put back");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(std::fs::read_to_string(&a_txt).unwrap(), "one\n", "turn 1's file stays");
+
+        let stale = Intent::Unrewind { tree: slopty_proto::thread::TreeRef("0".repeat(40)) };
+        assert!(matches!(a.intent(IntentId::new(), thread, stale).await, Outcome::Refused { .. }));
+        let undo = Intent::Unrewind { tree: rewound.tree.clone() };
+        assert_eq!(a.intent(IntentId::new(), thread, undo.clone()).await, Outcome::Done);
+        assert_eq!(std::fs::read_to_string(&b_txt).unwrap(), "two\n", "back with the undo");
+        a.until(|c| c.thread.as_ref().is_some_and(|s| s.rewound.is_none())).await;
+        let again = a.intent(IntentId::new(), thread, undo).await;
+        assert!(matches!(again, Outcome::Refused { .. }), "{again:?}");
     }
 }

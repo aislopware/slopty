@@ -45,6 +45,7 @@ use objc2_web_kit::{
 mod ios;
 #[cfg(target_os = "macos")]
 mod macos;
+pub mod page;
 
 #[cfg(target_os = "ios")]
 pub use ios::WebView;

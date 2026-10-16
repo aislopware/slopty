@@ -6,6 +6,7 @@ use slopty_view_rpc::{RpcError, memory_client, methods};
 
 use super::{Ask, ViewModel, rows, transcript};
 use crate::conversation::thread::fixtures;
+use crate::view_model::transcript::shown_call;
 
 /// A worker as the shell's device: `linked` whether this client reaches it now.
 fn device(
@@ -207,6 +208,35 @@ async fn a_transcript_watch_follows_and_lets_go() {
     assert_eq!(feed.followed(), Vec::<String>::new());
 }
 
+/// slopty: a chat's tray is watched as its transcript is: the watch follows the chat, says the
+/// tray once it is published and again only when it changed, and lets the chat go when it closes;
+/// a watch with no chat is refused.
+#[tokio::test]
+async fn a_tray_watch_follows_its_chat() {
+    let (view_model, feed, mut asks) = ViewModel::new("me".to_owned());
+    let client = memory_client(view_model);
+    let params = serde_json::json!({ "chatId": "c" });
+    let calls = slopty_view_doc::calls::WATCH_WORK;
+    let mut watch = client.subscribe_scoped(calls, params).await.expect("the watch");
+    assert!(matches!(asks.recv().await, Some(Ask::Follow(chat)) if chat == "c"));
+    let mut views = super::ChatViews::default();
+    views.work.summary = "1 command".to_owned();
+    feed.chat_views("c", views.clone());
+    let value = watch.recv().await.expect("the tray");
+    assert_eq!(value["summary"], "1 command");
+    views.dock.goal = None;
+    feed.chat_views("c", views);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), watch.recv()).await.is_err(),
+        "nothing changed in the tray"
+    );
+    drop(watch);
+    assert!(matches!(asks.recv().await, Some(Ask::Unfollow(chat)) if chat == "c"));
+    let (bare, _feed, _asks) = ViewModel::new("me".to_owned());
+    let refused = slopty_view_rpc::RpcService::handle(&*bare, calls, serde_json::json!({})).await;
+    assert!(matches!(refused, Err(RpcError::BadParams(_))));
+}
+
 /// Any other call goes to the workspace, whose answer comes back.
 #[tokio::test]
 async fn other_calls_go_to_the_workspace() {
@@ -307,9 +337,11 @@ fn request(
         proposed: None,
         schema_json: None,
         url: None,
+        reason: None,
         state: RequestState::Open,
         opened_ms: slopty_core::WallMs::from_millis(1),
         until_ms: None,
+        needs_presence: false,
     }
 }
 
@@ -469,8 +501,8 @@ fn the_shell_is_told_what_slopty_answers() {
     );
 }
 
-/// A stop leaves no mark of its own (the answer says it was stopped); what a command printed
-/// or the agent said reads as words; a failure stays red.
+/// A stop is a quiet "Interrupted" row where the turn ended; what a command printed or the
+/// agent said reads as words; a failure stays red.
 #[test]
 fn a_notice_reads_by_its_kind() {
     use slopty_proto::thread::detail::Clipped;
@@ -485,10 +517,58 @@ fn a_notice_reads_by_its_kind() {
     }
     let entries = transcript::entries(&state, &transcript::Look::new("w"));
     let part = |id: &str| entries.iter().flat_map(|e| &e.parts).find(|p| p.id() == id).cloned();
-    assert!(part(&ids[0]).is_none(), "a stop: no mark");
+    assert!(
+        matches!(part(&ids[0]), Some(MessagePart::Note { note, .. }) if note.text == "Interrupted"),
+        "a stop: where the turn ended"
+    );
     assert!(matches!(part(&ids[1]), Some(MessagePart::Text { .. })));
     assert!(matches!(part(&ids[2]), Some(MessagePart::Text { .. })));
     assert!(matches!(part(&ids[3]), Some(MessagePart::Error { .. })));
+}
+
+/// A slash command reads `/name args`, a skill run as one `Skill(name)`, a shell command
+/// `! command`, as the TUI's rows say them; words the shell sent stay the person's own.
+#[test]
+fn a_users_command_keeps_its_mark() {
+    use slopty_proto::thread::detail::Clipped;
+    use slopty_proto::thread::{Command, ItemBody};
+    let mut state = fixtures::thread("tools");
+    state.commands = vec![Command {
+        name: "review".to_owned(),
+        description: String::new(),
+        argument_hint: None,
+        source: "user".to_owned(),
+        skill: true,
+    }];
+    let last = state.items.last().cloned().expect("an item");
+    let mut ids = Vec::new();
+    for (n, (command, words)) in
+        [("/compact", "focus on tests"), ("!", "ls -la"), ("review", "")].into_iter().enumerate()
+    {
+        let id = format!("u-mark-{n}");
+        state.items.push(slopty_proto::thread::Item {
+            id: slopty_proto::thread::ItemId(id.clone()),
+            turn: last.turn,
+            at_ms: last.at_ms,
+            body: ItemBody::User(slopty_proto::thread::UserMessage {
+                text: Clipped::whole(words),
+                images: Vec::new(),
+                command: Some(command.to_owned()),
+                intent: None,
+            }),
+        });
+        ids.push(id);
+    }
+    let entries = transcript::entries(&state, &transcript::Look::new("w"));
+    let said = |id: &str| {
+        entries.iter().flat_map(|e| &e.parts).find_map(|p| match p {
+            MessagePart::Text { id: at, text } if *at == format!("{id}:text") => Some(text.clone()),
+            _ => None,
+        })
+    };
+    assert_eq!(said(&ids[0]).as_deref(), Some("/compact focus on tests"));
+    assert_eq!(said(&ids[1]).as_deref(), Some("! ls -la"));
+    assert_eq!(said(&ids[2]).as_deref(), Some("Skill(review)"));
 }
 
 /// A file written shows what was written, and a long output can be fetched whole.
@@ -498,11 +578,7 @@ fn a_write_shows_its_content_and_a_long_output_its_way_in() {
     use slopty_proto::thread::{ItemBody, ToolDetail};
     let mut state = fixtures::thread("tools");
     let thread = state.meta.id;
-    let item = state
-        .items
-        .iter_mut()
-        .find(|item| matches!(item.body, ItemBody::Tool(_)))
-        .expect("a tool call");
+    let item = state.items.iter_mut().find(|item| shown_call(&item.body)).expect("a tool call");
     let id = item.id.0.clone();
     if let ItemBody::Tool(call) = &mut item.body {
         call.detail = Some(ToolDetail::Write(WriteDetail {
@@ -616,11 +692,7 @@ fn an_edit_offers_its_diff_by_its_ref() {
     use slopty_proto::thread::{ItemBody, ToolDetail};
     let mut state = fixtures::thread("tools");
     let thread = state.meta.id;
-    let item = state
-        .items
-        .iter_mut()
-        .find(|item| matches!(item.body, ItemBody::Tool(_)))
-        .expect("a tool call");
+    let item = state.items.iter_mut().find(|item| shown_call(&item.body)).expect("a tool call");
     let id = item.id.0.clone();
     let ItemBody::Tool(call) = &mut item.body else { panic!("a tool call") };
     let hunk = Hunk {
@@ -650,6 +722,103 @@ fn an_edit_offers_its_diff_by_its_ref() {
     let whole = "--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1 +1 @@\n-a\n+b\n";
     let diff = transcript::tool_diff(&call, Some(whole)).expect("from the whole");
     assert_eq!((diff.old_text.as_deref(), diff.new_text.as_str()), (Some("a\n"), "b\n"));
+}
+
+/// The files a command changed are an edit's chips under it, each with its diff by its own ref,
+/// and what the agent says of the rest is a quiet row.
+#[test]
+fn a_commands_edits_are_chips_under_it() {
+    use slopty_proto::thread::detail::{Hunk, Patch, ShellEdit, ShellEdits};
+    use slopty_proto::thread::{ItemBody, ToolDetail};
+    use slopty_view_proto::ToolCall;
+    let mut state = fixtures::thread("tools");
+    let thread = state.meta.id;
+    let item = state
+        .items
+        .iter_mut()
+        .find(|item| {
+            matches!(&item.body, ItemBody::Tool(call) if matches!(call.detail, Some(ToolDetail::Exec(_))))
+        })
+        .expect("a command call");
+    let id = item.id.0.clone();
+    let ItemBody::Tool(call) = &mut item.body else { panic!("a tool call") };
+    let Some(ToolDetail::Exec(exec)) = &mut call.detail else { panic!("a command") };
+    let hunk = Hunk {
+        old_start: 1,
+        old_lines: 1,
+        new_start: 1,
+        new_lines: 1,
+        heading: None,
+        lines: vec!["-version = 1".into(), "+version = 2".into()],
+    };
+    let patch = |hunks: Vec<Hunk>, added: u32, removed: u32| Patch {
+        hunks,
+        added,
+        removed,
+        clipped_lines: 0,
+        full: None,
+    };
+    let edit = ShellEdit {
+        path: "Cargo.toml".into(),
+        created: false,
+        deleted: false,
+        patch: patch(vec![hunk], 1, 1),
+    };
+    let made = ShellEdit {
+        path: "NOTES.md".into(),
+        created: true,
+        deleted: false,
+        patch: patch(Vec::new(), 4, 0),
+    };
+    exec.edits = Some(ShellEdits {
+        files: vec![edit.clone(), made],
+        more: 3,
+        unavailable: false,
+        skipped: false,
+        shared: true,
+        moves_tree: false,
+    });
+    let entries = transcript::entries(&state, &transcript::Look::new("w"));
+    let parts: Vec<&MessagePart> = entries
+        .iter()
+        .flat_map(|e| &e.parts)
+        .skip_while(|part| part.id() != id)
+        .skip(1)
+        .take(3)
+        .collect();
+    let [
+        MessagePart::Tool {
+            id: first,
+            call: ToolCall::EditFile { path, .. },
+            diff_ref,
+            diff_stats,
+            ..
+        },
+        MessagePart::Tool {
+            call: ToolCall::WriteFile { path: written, .. }, diff_ref: none, ..
+        },
+        MessagePart::Note { note, .. },
+    ] = parts.as_slice()
+    else {
+        panic!("two edits and a row after the command: {parts:?}");
+    };
+    assert_eq!(path, "Cargo.toml");
+    assert_eq!(diff_ref.as_deref(), Some(format!("{thread}/{first}.diff").as_str()));
+    let stats = diff_stats.as_ref().and_then(|s| s.first()).expect("its counts");
+    assert_eq!((stats.additions, stats.deletions), (1, 1));
+    assert_eq!(written, "NOTES.md");
+    assert!(none.is_none(), "no lines came, nothing to fetch");
+    assert_eq!(note.kind, "edits");
+    assert_eq!(note.text, "3 more files changed");
+    assert!(note.detail.as_deref().is_some_and(|d| d.contains("at the same time")), "{note:?}");
+    // Its diff, by the ref the chip names.
+    assert_eq!(transcript::shell_edit_of(first), Some((id.as_str(), 0)));
+    let diff = transcript::shell_edit_diff(&edit, None).expect("its diff");
+    assert_eq!(
+        (diff.old_text.as_deref(), diff.new_text.as_str()),
+        (Some("version = 1\n"), "version = 2\n")
+    );
+    assert_eq!(transcript::shell_edit_of("plain"), None);
 }
 
 /// The agent's task list is the shell's checklist: a change to a task names it, a task call shows
@@ -702,11 +871,7 @@ fn a_task_list_is_the_shells_checklist() {
         ]],
         "a plan no call wrote"
     );
-    let item = state
-        .items
-        .iter_mut()
-        .find(|item| matches!(item.body, ItemBody::Tool(_)))
-        .expect("a tool call");
+    let item = state.items.iter_mut().find(|item| shown_call(&item.body)).expect("a tool call");
     let ItemBody::Tool(call) = &mut item.body else { panic!("a tool call") };
     call.kind = slopty_proto::thread::kind::TASKS.to_owned();
     call.detail = Some(ToolDetail::Tasks { steps: vec![step("Test", "pending")], whole: false });
@@ -766,11 +931,7 @@ fn pictures_go_by_paths_of_their_own() {
     if let ItemBody::User(message) = &mut user.body {
         message.images = vec![picture(1)];
     }
-    let tool = state
-        .items
-        .iter_mut()
-        .find(|item| matches!(item.body, ItemBody::Tool(_)))
-        .expect("a tool call");
+    let tool = state.items.iter_mut().find(|item| shown_call(&item.body)).expect("a tool call");
     let tool_id = tool.id.0.clone();
     if let ItemBody::Tool(call) = &mut tool.body {
         call.images = vec![picture(2)];
@@ -786,6 +947,69 @@ fn pictures_go_by_paths_of_their_own() {
     });
     let path = transcript::image_path(thread, &tool_id, 0, &picture(2));
     assert_eq!(part, Some((path, "image/png".to_owned())));
+}
+
+/// A visual a call showed is a part after the call once the call completed, going by a path of
+/// its own beside which the shell reads its files; a call that failed (its script did not pass
+/// the check) or is still running shows none.
+#[test]
+fn a_shown_visual_follows_its_call_by_a_path_of_its_own() {
+    use std::collections::BTreeMap;
+
+    use slopty_proto::thread::detail::Clipped;
+    use slopty_proto::thread::{ItemBody, ToolDetail, ToolState};
+    use slopty_proto::visual::VisualDetail;
+    use transcript::VisualRead;
+    let mut state = fixtures::thread("tools");
+    let thread = state.meta.id;
+    let tool = state.items.iter_mut().find(|item| shown_call(&item.body)).expect("a tool call");
+    let id = tool.id.0.clone();
+    let set = |state: &mut slopty_proto::thread::ThreadState, to: ToolState| {
+        let tool = state.items.iter_mut().find(|item| item.id.0 == id).expect("the call");
+        if let ItemBody::Tool(call) = &mut tool.body {
+            call.state = to;
+            call.detail = Some(ToolDetail::Visual(VisualDetail {
+                title: "Latency by region".to_owned(),
+                script: Clipped::whole("return ui.text \"hi\""),
+                assets: BTreeMap::from([("prism.glb".to_owned(), "/w/prism.glb".to_owned())]),
+            }));
+        }
+    };
+    let visuals = |state: &slopty_proto::thread::ThreadState| -> Vec<(String, String, String)> {
+        transcript::entries(state, &transcript::Look::new("w"))
+            .iter()
+            .flat_map(|e| &e.parts)
+            .filter_map(|part| match part {
+                MessagePart::Visual { id, path, title } => {
+                    Some((id.clone(), path.clone(), title.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    for not_shown in [ToolState::Running, ToolState::Failed] {
+        set(&mut state, not_shown.clone());
+        assert!(visuals(&state).is_empty(), "{not_shown:?}");
+    }
+    set(&mut state, ToolState::Completed);
+    let path = transcript::visual_path(thread, &id);
+    assert_eq!(
+        visuals(&state),
+        [(format!("{id}:visual"), path.clone(), "Latency by region".to_owned())]
+    );
+    // The shell reads the script there, and its files beside it.
+    let stem = path.strip_suffix("-visual.luau").expect("the shell's script suffix");
+    assert_eq!(transcript::visual_of(&path), Some((thread, id.as_str(), VisualRead::Script)));
+    assert_eq!(
+        transcript::visual_of(&format!("{stem}-assets.json")),
+        Some((thread, id.as_str(), VisualRead::Assets))
+    );
+    assert_eq!(
+        transcript::visual_of(&format!("{stem}-asset-prism.glb")),
+        Some((thread, id.as_str(), VisualRead::Asset("prism.glb")))
+    );
+    assert_eq!(transcript::visual_of("slopty-visual:nope"), None);
+    assert_eq!(transcript::visual_of(&format!("{stem}.txt")), None);
 }
 
 /// While older turns are on their way the latest go as the opening tail, and the whole
@@ -977,7 +1201,7 @@ fn a_plan_reads_as_markdown_and_asks_only_its_choices() {
     let call = state
         .items
         .iter()
-        .find(|item| matches!(item.body, slopty_proto::thread::ItemBody::Tool(_)))
+        .find(|item| shown_call(&item.body))
         .map(|item| item.id.clone())
         .expect("a call");
     let mut plan = request(
@@ -1069,7 +1293,8 @@ fn a_fork_shows_where_it_was_cut() {
     assert!(!plain.iter().any(|e| matches!(&*e.parts, [MessagePart::Fork { .. }])));
 }
 
-/// A compaction leaves a divider saying what it did, and a thread compacting says so.
+/// A compaction leaves a row saying what it did, its summary under it, and a thread compacting
+/// says so.
 #[test]
 fn a_compaction_shows_while_it_runs_and_leaves_a_marker() {
     use slopty_proto::thread::{Compaction, ItemBody, Phase, Wait};
@@ -1079,15 +1304,16 @@ fn a_compaction_shows_while_it_runs_and_leaves_a_marker() {
         trigger: Some("auto".to_owned()),
         before_tokens: Some(143_200),
         after_tokens: Some(12_000),
-        summary: None,
+        summary: Some(slopty_proto::thread::detail::Clipped::whole("Fixed the build.")),
     });
     let id = last.id.0.clone();
     let entries = transcript::entries(&state, &transcript::Look::new("w"));
-    let marker = entries.iter().find(|e| e.id == id).expect("its divider");
+    let marker = entries.iter().find(|e| e.id == id).expect("its row");
     assert_eq!(marker.role, MessageRole::System);
     assert!(matches!(
         &*marker.parts,
-        [MessagePart::Marker { text, .. }] if text == "Compacted · 143k tokens → summary"
+        [MessagePart::Note { note, .. }] if note.text == "Compacted · 143k tokens → summary"
+            && note.detail.as_deref() == Some("Fixed the build.")
     ));
     let mut row = state.row(slopty_core::WallMs::ZERO);
     row.status.phase = Phase::Working;
@@ -1163,6 +1389,30 @@ fn a_long_command_defaults_to_deny_and_ignores_enter() {
     state.meters.mode = Some("plan".to_owned());
     let approval = approval_of(&mut state, "git status");
     assert!(asked_of(&mut state, approval).click_only, "in plan mode: a click");
+}
+
+/// A request only the person at its card answers is served to the card as one: the card says
+/// "Needs you at the card".
+#[test]
+fn a_request_needing_the_person_reaches_its_card_as_one() {
+    let mut state = fixtures::thread("tools");
+    let approval = approval_of(&mut state, "git status");
+    assert!(!asked_of(&mut state, approval).needs_presence);
+    let mut approval = approval_of(&mut state, "git status");
+    approval.needs_presence = true;
+    assert!(asked_of(&mut state, approval).needs_presence);
+}
+
+/// An approval says why the agent asks, in its words.
+#[test]
+fn an_approval_says_why_it_asks() {
+    let mut state = fixtures::thread("tools");
+    let mut approval = approval_of(&mut state, "rm -rf target");
+    approval.reason = Some("Permission rule `Bash(rm:*)` requires confirmation".to_owned());
+    let asked = asked_of(&mut state, approval);
+    assert_eq!(asked.reason.as_deref(), Some("Permission rule `Bash(rm:*)` requires confirmation"));
+    let approval = approval_of(&mut state, "git status");
+    assert_eq!(asked_of(&mut state, approval).reason, None);
 }
 
 /// An approval shows a bidi override or a zero-width character as its code, and its answer
@@ -1262,4 +1512,100 @@ async fn a_files_way_up_is_watched_by_its_upload() {
     let read: Vec<slopty_view_proto::TransferProgress> =
         serde_json::from_value(watch.recv().await.expect("a frame")).expect("transfers");
     assert_eq!(read, vec![going(1_000_000)]);
+}
+
+/// Claude Code's "Yes, and tell Claude what to do next": an approval says which choice takes the
+/// person's words beside it, and the pick with words goes back as that allow and the words; a
+/// question's option previews ride beside its options.
+#[test]
+fn an_allow_takes_words_and_options_carry_previews() {
+    use slopty_proto::thread::Effect;
+    use slopty_proto::thread::detail::{Offered, Question};
+    let mut state = fixtures::thread("tools");
+    let approval = request(
+        slopty_proto::thread::Request::APPROVAL,
+        &[("allow", "Yes", Effect::Allow), ("deny", "No", Effect::Deny)],
+    );
+    state.requests.push(approval.clone());
+    let mut entries = transcript::entries(&state, &transcript::Look::new("w"));
+    transcript::asks(&state, "w", &mut entries);
+    let (_, questions) = served(&entries).expect("the panel serves it");
+    assert_eq!(questions[0].allow_option, Some(0));
+    let with_words = slopty_view_proto::UserInputAnswer {
+        question_id: questions[0].id.clone(),
+        labels: vec!["Yes".to_owned(), "then commit".to_owned()],
+    };
+    assert_eq!(
+        transcript::answer(&approval, &[with_words]),
+        Ok(("allow".to_owned(), Some("then commit".to_owned())))
+    );
+
+    let mut asked = request(slopty_proto::thread::Request::QUESTION, &[]);
+    let offered = |label: &str, preview: Option<&str>| Offered {
+        label: label.to_owned(),
+        description: None,
+        preview: preview.map(str::to_owned),
+    };
+    asked.questions = vec![Question {
+        header: Some("Layout".to_owned()),
+        text: "Which layout?".to_owned(),
+        options: vec![offered("Grid", Some("[ ][ ]\n[ ][ ]")), offered("List", None)],
+        multi_select: false,
+    }];
+    state.requests = vec![asked];
+    let mut entries = Vec::new();
+    transcript::asks(&state, "w", &mut entries);
+    let (_, questions) = served(&entries).expect("the panel serves it");
+    assert_eq!(questions[0].option_previews, ["[ ][ ]\n[ ][ ]", ""]);
+    assert_eq!(questions[0].allow_option, None, "a question has no allow");
+}
+
+/// A goal's check is one row, what it checked opening under it; a finished turn ends on the
+/// TUI's done line with its plain verb.
+#[test]
+fn a_goal_row_opens_its_reason_and_a_turn_ends_on_its_done_line() {
+    use slopty_proto::thread::detail::Clipped;
+    use slopty_proto::thread::{ItemBody, Notice};
+    let mut state = fixtures::thread("tools");
+    let last = state.items.len().saturating_sub(1);
+    let id = state.items[last].id.0.clone();
+    state.items[last].body = ItemBody::Notice(Notice::new(
+        Notice::GOAL,
+        Clipped::whole("Goal not yet met… continuing\nReason: 2 tests fail"),
+    ));
+    let entries = transcript::entries(&state, &transcript::Look::new("w"));
+    let part = entries.iter().flat_map(|e| &e.parts).find(|p| p.id() == id).cloned();
+    let Some(MessagePart::Note { note, .. }) = part else { panic!("the goal's row: {part:?}") };
+    assert_eq!(note.text, "Goal not yet met… continuing");
+    assert_eq!(note.detail.as_deref(), Some("Reason: 2 tests fail"));
+    assert_eq!(note.tone, slopty_view_doc::NoteLine::INFO);
+
+    let done: Vec<&str> = entries
+        .iter()
+        .flat_map(|e| &e.parts)
+        .filter_map(|p| match p {
+            MessagePart::Note { note, .. } if note.kind == crate::view_model::folds::DONE => {
+                Some(note.text.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(!done.is_empty() && done.iter().all(|d| d.starts_with("Worked for ")), "{done:?}");
+}
+
+/// An agent that is not signed in says so where it runs, its own words behind it; any other
+/// failure of the model's service stays the general one.
+#[test]
+fn a_signed_out_agent_says_so() {
+    use slopty_proto::thread::Notice;
+    let (words, detail) = transcript::error_words(
+        Notice::API_ERROR,
+        "Not logged in · Please run /login",
+        Some("mac"),
+        None,
+    );
+    assert_eq!(words, "The agent is not signed in on mac. Sign it in there, then try again.");
+    assert_eq!(detail.as_deref(), Some("Not logged in · Please run /login"));
+    let (words, _) = transcript::error_words(Notice::API_ERROR, "Overloaded", None, None);
+    assert_eq!(words, "The model's service returned an error. Try again.");
 }

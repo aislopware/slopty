@@ -181,6 +181,8 @@ pub fn truncate(
             .collect(),
         code_ranges: flat.code_ranges.iter().map(shown).collect(),
         file_glyphs: flat.file_glyphs.iter().map(shown).collect(),
+        math: flat.math.iter().map(|(r, tex)| (shown(r), tex.clone())).collect(), // slopty:
+        math_size: flat.math_size,
         original: Some(OriginalText {
             text: flat
                 .original
@@ -325,6 +327,8 @@ fn with_file_link_glyphs(flat: &FlatText, opts: &RenderOptions) -> FlatText {
             .collect(),
         code_ranges: flat.code_ranges.iter().map(&map_range).collect(),
         file_glyphs: glyphs,
+        math: flat.math.iter().map(|(r, tex)| (map_range(r), tex.clone())).collect(), // slopty:
+        math_size: flat.math_size,
         original: Some(OriginalText {
             text: flat
                 .original

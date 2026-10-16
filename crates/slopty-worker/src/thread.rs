@@ -15,6 +15,7 @@
 //! calls by [`screens`].
 
 pub mod acp;
+pub mod assets;
 pub mod attach;
 pub mod claude;
 pub mod codex;

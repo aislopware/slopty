@@ -35,11 +35,16 @@ pub const EFFORT_FLAG: &str = "--effort";
 /// The flag the model is given with.
 pub const MODEL_FLAG: &str = "--model";
 
+/// The flag that has a resume keep the conversation only up to a message, by its record's id.
+pub const RESUME_AT_FLAG: &str = "--resume-session-at";
+
 /// The flags every driven Claude Code runs with.
 ///
 /// A run that prints, reading and writing stream-json, asking about tool calls over the same
-/// stream, echoing the messages it takes, and streaming what the model writes as it writes it.
-pub const DRIVEN: [&str; 9] = [
+/// stream, echoing the messages it takes, and streaming what the model writes as it writes it;
+/// with everything its TUI sees besides: what its subagents write, its hooks as they run, and
+/// the prompt it suggests next.
+pub const DRIVEN: [&str; 12] = [
     "-p",
     "--output-format",
     "stream-json",
@@ -49,16 +54,24 @@ pub const DRIVEN: [&str; 9] = [
     "--permission-prompt-tool=stdio",
     "--replay-user-messages",
     "--include-partial-messages",
+    "--forward-subagent-text",
+    "--include-hook-events",
+    "--prompt-suggestions",
 ];
 
 /// What Claude Code runs with besides the person's own environment, as the desktop app runs it.
 ///
 /// Its output is flushed at once, MCP servers connect without holding the first turn, and its
-/// questions to the person are asked over the stream.
-pub const ENV: [(&str, &str); 3] = [
+/// questions to the person are asked over the stream; it says itself when it is idle, running
+/// or waiting on the person, keeps checkpoints of the files it changes so they can be put back,
+/// and hosts MCP Apps (its servers' `ui://` pages are shown by Slopty).
+pub const ENV: [(&str, &str); 6] = [
     ("CLAUDE_CODE_EAGER_FLUSH", "1"),
     ("MCP_CONNECTION_NONBLOCKING", "true"),
     ("CLAUDE_CODE_ENABLE_ASK_USER_QUESTION_TOOL", "true"),
+    ("CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS", "1"),
+    ("CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING", "1"),
+    ("CLAUDE_CODE_MCP_APPS_HOST", "1"),
 ];
 
 /// How a driven run reaches its session.
@@ -68,8 +81,16 @@ pub enum Session {
     New(String),
     /// This session, taken up again.
     Resume(String),
-    /// A new session under the second id, branched off the whole of the first.
-    Fork(String, String),
+    /// A new session under `id`, branched off session `from`: the whole of it, or up to and
+    /// including the record `at`.
+    Fork {
+        /// The session branched off.
+        from: String,
+        /// The new session.
+        id: String,
+        /// The last record the branch keeps, when not the whole.
+        at: Option<String>,
+    },
 }
 
 impl Session {
@@ -77,7 +98,7 @@ impl Session {
     #[must_use]
     pub fn id(&self) -> &str {
         match self {
-            Self::New(id) | Self::Resume(id) | Self::Fork(_, id) => id,
+            Self::New(id) | Self::Resume(id) | Self::Fork { id, .. } => id,
         }
     }
 }
@@ -90,13 +111,18 @@ pub fn args(session: &Session, kept: &[String]) -> Vec<String> {
     match session {
         Session::New(id) => args.extend([SESSION_ID_FLAG.to_owned(), id.clone()]),
         Session::Resume(id) => args.extend([RESUME_FLAG.to_owned(), id.clone()]),
-        Session::Fork(from, id) => args.extend([
-            RESUME_FLAG.to_owned(),
-            from.clone(),
-            FORK_SESSION_FLAG.to_owned(),
-            SESSION_ID_FLAG.to_owned(),
-            id.clone(),
-        ]),
+        Session::Fork { from, id, at } => {
+            args.extend([
+                RESUME_FLAG.to_owned(),
+                from.clone(),
+                FORK_SESSION_FLAG.to_owned(),
+                SESSION_ID_FLAG.to_owned(),
+                id.clone(),
+            ]);
+            if let Some(at) = at {
+                args.extend([RESUME_AT_FLAG.to_owned(), at.clone()]);
+            }
+        }
     }
     args.extend(kept.iter().cloned());
     args
@@ -163,8 +189,14 @@ mod tests {
         assert!(run.contains(&"--permission-prompt-tool=stdio".to_owned()));
         assert!(run.windows(2).any(|w| w == ["--session-id", "s1"]));
         assert!(run.ends_with(&["--model=opus".to_owned(), "--permission-mode=plan".to_owned()]));
-        let fork = args(&Session::Fork("a".to_owned(), "b".to_owned()), &[]);
+        for flag in ["--forward-subagent-text", "--include-hook-events", "--prompt-suggestions"] {
+            assert!(run.contains(&flag.to_owned()), "{flag}");
+        }
+        let fork = args(&Session::Fork { from: "a".to_owned(), id: "b".to_owned(), at: None }, &[]);
         assert!(fork.ends_with(&words(&["--resume", "a", "--fork-session", "--session-id", "b"])));
+        let at = Some("u7".to_owned());
+        let fork = args(&Session::Fork { from: "a".to_owned(), id: "b".to_owned(), at }, &[]);
+        assert!(fork.ends_with(&words(&["--session-id", "b", "--resume-session-at", "u7"])));
     }
 
     fn words(w: &[&str]) -> Vec<String> {

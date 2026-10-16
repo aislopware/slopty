@@ -138,8 +138,9 @@ mod units {
         assert_eq!(WorkerMsg::Search(failed).kind(), "Search");
     }
 
-    /// A note's Allow and Deny answer only an approval offering a plain allow and a deny; the
-    /// deny they send is the plain one, else the first.
+    /// A note's Allow and Deny answer only an approval offering a plain allow and a deny, and
+    /// not one only the person at its card answers; the deny they send is the plain one, else
+    /// the first.
     #[test]
     fn a_notes_buttons_answer_only_a_plain_yes_or_no() {
         use slopty_core::WallMs;
@@ -160,6 +161,7 @@ mod units {
             options,
             buttons: Vec::new(),
             opened_ms: WallMs::ZERO,
+            needs_presence: false,
         };
         let always = choice("always", Effect::Allow, Some("this session"), false);
         let yes = choice("yes", Effect::Allow, None, false);
@@ -175,13 +177,15 @@ mod units {
             "else the first"
         );
         assert!(!card(Request::APPROVAL, vec![always, stop]).answerable(), "no plain allow");
+        let present = RequestCard { needs_presence: true, ..ask.clone() };
+        assert!(!present.answerable(), "only the person at its card answers it");
         assert!(!card(Request::QUESTION, ask.options).answerable(), "a question");
     }
 
     /// A question that asks one thing, takes one answer and offers at most four is answered from
     /// a note by its options, each sending what the question's own dialog would for it; one
-    /// that offers more, takes several or asks more than one thing, and any other request,
-    /// offers none.
+    /// that offers more, takes several or asks more than one thing, one only the person at its
+    /// card answers, and any other request, offers none.
     #[test]
     fn a_small_question_is_answered_by_its_options() {
         use slopty_core::WallMs;
@@ -193,7 +197,7 @@ mod units {
             header: None,
             options: labels
                 .iter()
-                .map(|l| Offered { label: (*l).to_owned(), description: None })
+                .map(|l| Offered { label: (*l).to_owned(), description: None, preview: None })
                 .collect(),
             multi_select,
         };
@@ -208,9 +212,11 @@ mod units {
             proposed: None,
             schema_json: None,
             url: None,
+            reason: None,
             state: RequestState::Open,
             opened_ms: WallMs::ZERO,
             until_ms: None,
+            needs_presence: false,
         };
         let which = question("Which database?", &["Postgres", "SQLite"], false);
         let buttons = NoteChoice::of(&request(Request::QUESTION, vec![which.clone()]));
@@ -220,6 +226,9 @@ mod units {
         );
         let answered = Answer::read(std::slice::from_ref(&which), &buttons[1].choice).unwrap();
         assert_eq!(answered[0].answer, "SQLite", "it answers as the dialog would");
+        let mut present = request(Request::QUESTION, vec![which.clone()]);
+        present.needs_presence = true;
+        assert!(NoteChoice::of(&present).is_empty(), "only the person at its card answers it");
 
         let five = question("Which?", &["a", "b", "c", "d", "e"], false);
         let several = question("Which?", &["a", "b"], true);

@@ -20,6 +20,8 @@ slopty-view-doc = { path = "../slopty-view-doc" }
 slopty-view-rpc = { path = "../slopty-view-rpc" }
 slopty-syntax = { path = "../slopty-syntax" }
 slopty-shell-theme = { path = "../slopty-shell-theme" }
+slopty-visual = { path = "../slopty-visual" }
+slopty-visual-gpu = { path = "../slopty-visual-gpu" }
 gpui.workspace = true
 gpui_platform.workspace = true
 gpui_tokio.workspace = true
@@ -31,10 +33,14 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 pulldown-cmark = "0.12"
 slopty-markdown = { path = "../slopty-markdown" }
+# slopty: TeX math typeset with RaTeX, drawn as an image (`markdown/math.rs`).
+slopty-math = { path = "../slopty-math" }
 base64 = "0.22"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff", "ico"] }
 usvg = "0.46"
-mermaid-rs-renderer = { version = "=0.3.1", default-features = false }
+# Mermaid's successor renderer (follows Mermaid 12; Zed's choice): every diagram kind, SVG out,
+# the cytoscape layouts Zed uses; no ELK, no export or font discovery (GPUI measures text).
+merman = { version = "0.9", default-features = false, features = ["all-diagrams", "layout-cytoscape", "svg"] }
 unicode-segmentation = "1"
 unicode-width = "0.2"
 fontdb = "0.23"

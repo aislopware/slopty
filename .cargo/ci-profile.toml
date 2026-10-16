@@ -78,6 +78,9 @@ opt-level = 0
 [profile.dev.package.glib-macros]
 opt-level = 0
 
+[profile.dev.package.gltf-derive]
+opt-level = 0
+
 [profile.dev.package.gpui-component-macros]
 opt-level = 0
 
@@ -118,6 +121,9 @@ opt-level = 0
 opt-level = 0
 
 [profile.dev.package.num_enum_derive]
+opt-level = 0
+
+[profile.dev.package.palette_derive]
 opt-level = 0
 
 [profile.dev.package.paste]

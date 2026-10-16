@@ -121,7 +121,9 @@ impl Mirror {
                 }
                 None => Took::Aside,
             },
-            ThreadFrame::Expanded { .. } | ThreadFrame::Review(_) => Took::Aside,
+            ThreadFrame::Expanded { .. } | ThreadFrame::Review(_) | ThreadFrame::App { .. } => {
+                Took::Aside
+            }
         }
     }
 }

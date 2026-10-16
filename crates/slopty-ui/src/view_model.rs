@@ -13,10 +13,13 @@
 //! - a **chat** is a thread, and its **session** is the thread's live status;
 //! - a **subagent** is a thread's child, nested under its parent with the running count.
 
+pub mod facts;
+pub mod folds;
 pub mod live;
 pub mod rows;
 pub mod text;
 pub mod transcript;
+pub mod work;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -27,7 +30,8 @@ use futures::stream::BoxStream;
 use parking_lot::Mutex;
 use serde::Serialize;
 use slopty_view_doc::{
-    QueuedMessage, SessionMessageEntry, TranscriptBaseline, TranscriptFrame, TranscriptUpdate,
+    ChatDock, PermissionRules, QueuedMessage, SessionMessageEntry, TranscriptBaseline,
+    TranscriptFrame, TranscriptUpdate, WorkTray, calls,
 };
 use slopty_view_proto::{
     AgentUsageWindow, Chat, ChatConnectivity, Connectivity, ConnectivityState, Device, EngineInfo,
@@ -124,11 +128,50 @@ enum Local {
     Known(Option<String>),
 }
 
-/// One followed chat's transcript and how many watches are open on it.
+/// One followed chat's transcript, the rest of what its thread says (slopty: its tray, dock
+/// and rules), and how many watches are open on any of it: the thread stays open while one is.
 #[derive(Debug)]
 struct Followed {
     said: watch::Sender<Option<Arc<Transcript>>>,
+    work: watch::Sender<Option<Arc<WorkTray>>>,
+    dock: watch::Sender<Option<Arc<ChatDock>>>,
+    rules: watch::Sender<Option<Arc<PermissionRules>>>,
     watches: usize,
+}
+
+impl Followed {
+    fn new() -> Self {
+        Self {
+            said: watch::Sender::new(None),
+            work: watch::Sender::new(None),
+            dock: watch::Sender::new(None),
+            rules: watch::Sender::new(None),
+            watches: 0,
+        }
+    }
+}
+
+/// slopty: what a followed chat's thread says beside its transcript, as the workspace publishes
+/// it ([`Feed::chat_views`]).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ChatViews {
+    /// Its background work.
+    pub work: WorkTray,
+    /// Its dock: activity, goal, notes, the status line, the mode, the context card.
+    pub dock: ChatDock,
+    /// Its agent's permission rules.
+    pub rules: PermissionRules,
+}
+
+/// Replace a followed chat's value, waking its watches only when it changed.
+fn publish_value<T: PartialEq>(sender: &watch::Sender<Option<Arc<T>>>, value: T) {
+    sender.send_if_modified(|now| {
+        if now.as_deref() == Some(&value) {
+            return false;
+        }
+        *now = Some(Arc::new(value));
+        true
+    });
 }
 
 /// A chat's transcript as the workspace says it.
@@ -312,6 +355,20 @@ impl Feed {
         });
     }
 
+    /// slopty: what `chat`'s thread says beside its transcript; nothing while no watch is open
+    /// on the chat.
+    pub fn chat_views(&self, chat: &str, views: ChatViews) {
+        let senders = self
+            .transcripts
+            .lock()
+            .get(chat)
+            .map(|f| (f.work.clone(), f.dock.clone(), f.rules.clone()));
+        let Some((work, dock, rules)) = senders else { return };
+        publish_value(&work, views.work);
+        publish_value(&dock, views.dock);
+        publish_value(&rules, views.rules);
+    }
+
     /// The chats whose queue is watched: the workspace publishes their waiting messages.
     #[must_use]
     pub fn queued(&self) -> Vec<String> {
@@ -340,12 +397,16 @@ impl Feed {
         &self,
         chat: &str,
     ) -> (watch::Receiver<Option<Arc<Transcript>>>, bool) {
+        self.follow(chat, |followed| followed.said.subscribe())
+    }
+
+    /// A watch opened on something of `chat`'s, read by `pick`: what it reads, and whether it is
+    /// the chat's first watch.
+    fn follow<R>(&self, chat: &str, pick: impl FnOnce(&Followed) -> R) -> (R, bool) {
         let mut transcripts = self.transcripts.lock();
-        let transcript = transcripts
-            .entry(chat.to_owned())
-            .or_insert_with(|| Followed { said: watch::Sender::new(None), watches: 0 });
-        transcript.watches = transcript.watches.saturating_add(1);
-        let watching = (transcript.said.subscribe(), transcript.watches == 1);
+        let followed = transcripts.entry(chat.to_owned()).or_insert_with(Followed::new);
+        followed.watches = followed.watches.saturating_add(1);
+        let watching = (pick(followed), followed.watches == 1);
         drop(transcripts);
         watching
     }
@@ -467,6 +528,62 @@ impl ViewModel {
         let closing = Closing { chat, feed: Arc::clone(&self.feed), asks: self.asks.clone() };
         Ok(RpcReply::Stream(transcript_frames(entries, closing)))
     }
+
+    /// slopty: a watch of what `chat`'s thread says beside its transcript, read by `pick`: the
+    /// thread is followed while it is open, as a transcript's watch follows it.
+    fn chat_watch<T>(
+        &self,
+        chat: String,
+        pick: impl FnOnce(&Followed) -> watch::Receiver<Option<Arc<T>>>,
+    ) -> RpcReply
+    where
+        T: Serialize + Send + Sync + 'static,
+    {
+        let (rx, first) = self.feed.follow(&chat, pick);
+        let ask = if first { Ask::Follow(chat.clone()) } else { Ask::Republish };
+        let _sent = self.asks.send(ask);
+        let closing = Closing { chat, feed: Arc::clone(&self.feed), asks: self.asks.clone() };
+        let frames =
+            futures::stream::unfold((rx, closing, true), async |(mut rx, closing, first)| {
+                if !first {
+                    rx.changed().await.ok()?;
+                }
+                let value = rx.wait_for(Option::is_some).await.ok()?.clone()?;
+                Some((serde_json::to_value(&*value).ok()?, (rx, closing, false)))
+            });
+        RpcReply::Stream(frames.boxed())
+    }
+
+    /// slopty: `WatchRules`: a chat's rules, or those of the newest thread on a machine (in a
+    /// folder) whose agent reads them, which the workspace picks.
+    async fn rules(&self, params: serde_json::Value) -> Result<RpcReply, RpcError> {
+        let chat = if let Some(chat) = chat_param(&params) {
+            chat
+        } else {
+            let picked = if let RpcReply::Value(value) = self.ask(RULES_CHAT, params).await? {
+                value
+            } else {
+                serde_json::Value::Null
+            };
+            chat_param(&picked).ok_or_else(|| {
+                RpcError::Failed("No chat on that machine reads permission rules".to_owned())
+            })?
+        };
+        Ok(self.chat_watch(chat, |followed| followed.rules.subscribe()))
+    }
+}
+
+/// slopty: the workspace's own call naming the chat whose rules `WatchRules` reads for
+/// `{ deviceId, cwd? }`: `{ chatId }`.
+pub(crate) const RULES_CHAT: &str = "slopty.rulesChat";
+
+/// The `chatId` a call names.
+fn chat_param(params: &serde_json::Value) -> Option<String> {
+    params
+        .get("chatId")
+        .and_then(serde_json::Value::as_str)
+        .filter(|chat| !chat.is_empty())
+        .map(str::to_owned)
 }
 
 /// The workspace is gone: the app is closing.
@@ -732,6 +849,17 @@ impl RpcService for ViewModel {
                 Ok(RpcReply::Stream(list_frames(self.feed.transfers.subscribe())))
             }
             methods::AUTH_STATUS => still(&serde_json::json!({ "_tag": "SignedOut" })),
+            // slopty: a chat's tray, dock and rules, followed as its transcript is.
+            calls::WATCH_WORK | calls::WATCH_DOCK => {
+                let chat = chat_param(&params)
+                    .ok_or_else(|| RpcError::BadParams("chatId is required".to_owned()))?;
+                Ok(if method == calls::WATCH_WORK {
+                    self.chat_watch(chat, |followed| followed.work.subscribe())
+                } else {
+                    self.chat_watch(chat, |followed| followed.dock.subscribe())
+                })
+            }
+            calls::WATCH_RULES => self.rules(params).await,
             _ => self.ask(method, params).await,
         }
     }

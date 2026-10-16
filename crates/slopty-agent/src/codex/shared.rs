@@ -50,6 +50,7 @@ use serde_json::Value;
 use slopty_core::WallMs;
 use slopty_proto::thread::detail::{
     AgentDetail, Answer, Clip, EditDetail, ExecDetail, ExecStatus, McpDetail, Offered, Question,
+    ReadDetail,
 };
 use slopty_proto::thread::wire::PastSession;
 use slopty_proto::thread::{
@@ -59,6 +60,7 @@ use slopty_proto::thread::{
     Retry, Status, Step, ThreadId, ThreadMeta, ToolCall, ToolDetail, ToolState, Turn, TurnId,
     TurnState, Usage, UserMessage, Wait, kind,
 };
+use slopty_proto::visual::{McpApp, PageDetail, PageSource};
 
 use super::form::Form;
 use super::protocol::{
@@ -963,9 +965,11 @@ impl Shared {
             proposed: None,
             schema_json: None,
             url: None,
+            reason: None,
             state: RequestState::Open,
             opened_ms: now,
             until_ms: None,
+            needs_presence: false,
         };
         let mut actions = vec![Action::RequestOpened(Box::new(request))];
         if let Some(item) = &open_item {
@@ -1195,14 +1199,13 @@ impl Shared {
             .map(|terminal| {
                 let began = self.tasks.iter().find(|t| t.id == terminal.process_id);
                 BackgroundTask {
-                    id: terminal.process_id.clone(),
-                    kind: BackgroundTask::SHELL.to_owned(),
-                    title: terminal.command.clone(),
-                    state: BackgroundTask::RUNNING.to_owned(),
                     item: Some(ItemId(terminal.item_id.clone())),
-                    output: None,
-                    started_ms: began.map_or(now, |t| t.started_ms),
-                    ended_ms: None,
+                    ..BackgroundTask::new(
+                        &terminal.process_id,
+                        BackgroundTask::SHELL,
+                        &terminal.command,
+                        began.map_or(now, |t| t.started_ms),
+                    )
                 }
             })
             .collect();
@@ -1524,6 +1527,8 @@ impl Shared {
                     exit_code: *exit_code,
                     stderr: None,
                     duration_ms: duration_ms.and_then(|d| u64::try_from(d).ok()),
+                    edits: None,
+                    interpretation: None,
                 };
                 let call = ToolCall {
                     name: "commandExecution".to_owned(),
@@ -1574,17 +1579,69 @@ impl Shared {
                 (id, ItemBody::Tool(Box::new(call)))
             }
             ThreadItem::McpToolCall {
-                arguments, error, id, result, server, status, tool, ..
+                arguments,
+                error,
+                id,
+                mcp_app_resource_uri,
+                mcp_app_ui,
+                result,
+                server,
+                status,
+                tool,
+                ..
             } => {
                 let state = self.pending(id).unwrap_or(match status {
                     p::McpToolCallStatus::InProgress => ToolState::Running,
                     p::McpToolCallStatus::Completed => ToolState::Completed,
                     p::McpToolCallStatus::Failed => ToolState::Failed,
                 });
-                let output = match (result, error) {
+                let read = result.as_ref().map(|r| crate::shown::mcp_content(&r.content));
+                let output = match (&read, error) {
                     (_, Some(error)) => Some(error.message.clone()),
-                    (Some(result), None) => serde_json::to_string(&result.content).ok(),
+                    (Some(read), None) => Some(read.text.clone()),
                     (None, None) => None,
+                };
+                let structured = crate::shown::structured(
+                    result.as_ref().and_then(|r| r.structured_content.as_ref()),
+                );
+                let (images, links) = read.map(|r| (r.images, r.links)).unwrap_or_default();
+                let mcp = ToolDetail::Mcp(McpDetail {
+                    server: server.clone(),
+                    tool: tool.clone(),
+                    structured,
+                    links,
+                });
+                let failed = matches!(state, ToolState::Failed) || error.is_some();
+                let resource_uri = mcp_app_ui
+                    .as_ref()
+                    .map(|ui| ui.resource_uri.clone())
+                    .or_else(|| mcp_app_resource_uri.clone())
+                    .filter(|uri| slopty_proto::visual::is_ui_uri(uri));
+                let detail = match (crate::shown::slopty_tool(server, tool), resource_uri) {
+                    // Slopty's own visual shows once its check passed; a page from its start.
+                    (Some(showing), _) if !failed => {
+                        let checked = showing != slopty_proto::visual::SHOW_VISUAL
+                            || matches!(state, ToolState::Completed);
+                        checked
+                            .then(|| crate::shown::shown(showing, arguments, &self.meta.cwd))
+                            .flatten()
+                            .unwrap_or(mcp)
+                    }
+                    (_, Some(resource_uri)) => ToolDetail::Page(PageDetail {
+                        title: tool.clone(),
+                        source: PageSource::App(McpApp {
+                            server: server.clone(),
+                            tool: tool.clone(),
+                            resource_uri,
+                            display_mode: mcp_app_ui
+                                .as_ref()
+                                .map(|ui| wire(&ui.preferred_model_display_mode)),
+                            result: result
+                                .as_ref()
+                                .map(|r| Clipped::head(&wire_json(r), crate::shown::RESULT, None)),
+                        }),
+                    }),
+                    _ => mcp,
                 };
                 let call = ToolCall {
                     name: format!("{server}.{tool}"),
@@ -1593,11 +1650,74 @@ impl Shared {
                     input: Clipped::head(&arguments.to_string(), OUTPUT, None),
                     state,
                     output: output.as_deref().map(|o| Clipped::head(o, OUTPUT, None)),
-                    images: Vec::new(),
-                    detail: Some(ToolDetail::Mcp(McpDetail {
-                        server: server.clone(),
-                        tool: tool.clone(),
+                    images,
+                    detail: Some(detail),
+                    child: None,
+                    ended_ms: None,
+                };
+                (id, ItemBody::Tool(Box::new(call)))
+            }
+            // A picture the model looked at: Codex keeps only its path, so it is read now.
+            ThreadItem::ImageView { id, path } => {
+                let call = ToolCall {
+                    name: "imageView".to_owned(),
+                    kind: kind::READ.to_owned(),
+                    title: format!("View {path}"),
+                    input: Clipped::whole(&serde_json::json!({ "path": path }).to_string()),
+                    state: ToolState::Completed,
+                    output: None,
+                    images: crate::media::keep_file(path).into_iter().collect(),
+                    detail: Some(ToolDetail::Read(ReadDetail {
+                        path: path.clone(),
+                        offset: None,
+                        limit: None,
+                        lines: None,
+                        total_lines: None,
                     })),
+                    child: None,
+                    ended_ms: None,
+                };
+                (id, ItemBody::Tool(Box::new(call)))
+            }
+            // A picture the model made: from the file Codex saved it to, else its own base64.
+            ThreadItem::ImageGeneration {
+                failure,
+                id,
+                result,
+                revised_prompt,
+                saved_path,
+                status,
+                ..
+            } => {
+                let state = match (failure, status.as_str()) {
+                    (Some(_), _) | (None, "failed") => ToolState::Failed,
+                    (None, "completed") => ToolState::Completed,
+                    (None, _) if result.is_empty() => ToolState::Running,
+                    (None, _) => ToolState::Completed,
+                };
+                let image = saved_path
+                    .as_deref()
+                    .and_then(crate::media::keep_file)
+                    .or_else(|| crate::media::keep_base64(result, Some("image/png")));
+                let prompt = revised_prompt.as_deref().unwrap_or_default();
+                let call = ToolCall {
+                    name: "imageGeneration".to_owned(),
+                    kind: kind::OTHER.to_owned(),
+                    title: if prompt.is_empty() {
+                        "Make an image".to_owned()
+                    } else {
+                        prompt.to_owned()
+                    },
+                    input: Clipped::whole(
+                        &serde_json::json!({ "prompt": prompt, "savedPath": saved_path })
+                            .to_string(),
+                    ),
+                    state,
+                    output: failure
+                        .as_ref()
+                        .map(|f| Clipped::whole(&serde_json::to_string(f).unwrap_or_default())),
+                    images: image.into_iter().collect(),
+                    detail: None,
                     child: None,
                     ended_ms: None,
                 };
@@ -1973,6 +2093,11 @@ fn mcp_said(updated: &p::McpServerStatusUpdatedNotification) -> Option<String> {
 }
 
 /// `value`'s name on the wire: a string enum's value.
+/// `value` as the JSON Codex sent it.
+fn wire_json<T: serde::Serialize>(value: &T) -> String {
+    serde_json::to_string(value).unwrap_or_default()
+}
+
 fn wire<T: serde::Serialize>(value: &T) -> String {
     match serde_json::to_value(value) {
         Ok(Value::String(name)) => name,
@@ -2092,6 +2217,7 @@ fn question(asked: &p::ToolRequestUserInputQuestion) -> Question {
     let options = asked.options.iter().flatten().map(|o| Offered {
         label: o.label.clone(),
         description: Some(o.description.clone()).filter(|d| !d.is_empty()),
+        preview: None,
     });
     Question {
         text: asked.question.clone(),

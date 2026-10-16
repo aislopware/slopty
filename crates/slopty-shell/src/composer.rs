@@ -46,6 +46,17 @@ use crate::theme::Theme;
 mod approval;
 mod history;
 mod notices;
+// slopty: the dock around the composer: the chat's dock and work watched, the footer, the turn's
+// live line, its mods' surfaces.
+mod activity;
+mod dock;
+mod footer;
+mod surfaces;
+mod request_card; // slopty: a request's card by its kind.
+pub use activity::working_line;
+pub use dock::{DockCache, chat_dock};
+pub use surfaces::{ModPane, PaneAsk};
+pub use request_card::offer_undo_rewind;
 pub(crate) use history::insert_quote;
 mod chip;
 pub use chip::ChipKind;
@@ -696,6 +707,15 @@ pub struct Wizard {
     // body has been scrolled through.
     focused: Option<usize>,
     read_through: bool,
+    // slopty: Escape folds the panel to a strip over the composer, which it gives back.
+    /// The panel is folded to its strip; the composer is the person's again.
+    pub folded: bool,
+    // slopty: "Revise…": words go instead of a choice (a plan's, an approval's deny reason).
+    /// Words of one's own go instead of a choice.
+    pub revising: bool,
+    // slopty: "Allow, and say what's next…": the words go with this allow instead.
+    /// The allow the revision's words go with, by its option's index.
+    pub revise_allow: Option<usize>,
 }
 
 impl Wizard {
@@ -714,6 +734,9 @@ impl Wizard {
             typed,
             focused,
             read_through: false,
+            folded: false,
+            revising: false,
+            revise_allow: None,
         }
     }
 
@@ -855,10 +878,15 @@ impl Wizard {
                 let typed = self
                     .typed
                     .get(ix)
-                    .filter(|_| !q.choices_only) // slopty: no words of one's own
+                    // slopty: no words of one's own, unless revising.
+                    .filter(|_| !q.choices_only || self.revising)
                     .map(|s| if q.multiline { s.as_str() } else { s.trim() })
                     .unwrap_or("");
-                let labels = if !typed.is_empty() || q.multiline {
+                // slopty: an allow with the words beside it.
+                let allow = self.revise_allow.filter(|_| self.revising && q.choices_only);
+                let labels = if let Some(label) = allow.and_then(|ix| q.options.get(ix)).filter(|_| !typed.is_empty()) {
+                    vec![label.clone(), typed.to_string()]
+                } else if !typed.is_empty() || q.multiline {
                     vec![typed.to_string()]
                 } else {
                     self.picked
@@ -1843,6 +1871,7 @@ pub fn init(cx: &mut App, send_behavior: ComposerSendBehavior) {
     // slopty: ⌥↑ edits the newest queued message, ⌘⇧↵ steers the oldest, ⌘⇧↑/↓ step the
     // new session's machine.
     message_bindings.extend(history::bindings(MESSAGE_COMPOSER_CONTEXT));
+    crate::background_tray::init(cx); // slopty: ⌥B focuses the Background tray.
     cx.bind_keys(palette_bindings);
     cx.bind_keys(generic_bindings);
     cx.bind_keys(message_bindings);
@@ -2015,6 +2044,9 @@ pub struct ComposerInput {
     /// Created once when Waiting promotes; retaining this entity preserves
     /// GPUI's global animation state across prepaint frames.
     mention_tooltip_view: Option<Entity<MentionPathTooltip>>,
+    // slopty: a `!` draft runs on the chat's machine and is set in the mono face.
+    /// The draft is a shell command.
+    pub(crate) mono: bool,
 }
 
 impl ComposerInput {
@@ -2100,6 +2132,7 @@ impl ComposerInput {
             mention_tooltip_popup: None,
             mention_tooltip_task: None,
             mention_tooltip_view: None,
+            mono: false,
         }
     }
 
@@ -5033,7 +5066,8 @@ impl Render for ComposerInput {
             .text_size(crate::typography::ui_rems(self.text_size))
             .line_height(crate::typography::ui_rems(self.configured_line_height))
             .text_color(text_color)
-            .font_family(theme.font_sans.clone())
+            // slopty: a `!` draft is a command, set in the mono face.
+            .font_family(if self.mono { theme.font_mono.clone() } else { theme.font_sans.clone() })
             .child({
                 let input = cx.entity();
                 let ascent = self.max_ascent;
@@ -5857,6 +5891,12 @@ pub struct Composer {
     side_chat: bool,
     // slopty: prompt history, saved drafts, the approval's scroll and the notices' clocks.
     extras: history::Extras,
+    // slopty: the chat's dock and work, the footer's menus, the Background tray, mod surfaces.
+    pub(crate) dock: dock::DockFeed,
+    footer: footer::FooterState,
+    pub(crate) tray: crate::background_tray::TrayState,
+    surfaces: surfaces::SurfaceState,
+    card: request_card::CardState,
     _picker_focus: Subscription,
     _input_events: Subscription,
     // slopty: dictation removed.
@@ -6012,6 +6052,9 @@ impl Composer {
         .detach();
         // slopty: dictation removed.
         Self::serve_quotes(cx); // slopty: a quote from the transcript finds this composer.
+        // slopty: a card or a notice in the transcript opens the Background tray at its row.
+        cx.observe_global::<crate::transcript::WorkReveal>(|this, cx| this.on_work_reveal(cx))
+            .detach();
         let current_key = state.read(cx).selected_chat.clone().unwrap_or_default();
         let mut composer = Self {
             state,
@@ -6095,6 +6138,11 @@ impl Composer {
             account_usage,
             side_chat: false,
             extras: Default::default(),
+            dock: Default::default(),
+            footer: Default::default(),
+            tray: Default::default(),
+            surfaces: Default::default(),
+            card: Default::default(),
             _picker_focus: picker_focus,
             _input_events: input_events,
             // slopty: dictation removed.
@@ -6144,7 +6192,7 @@ impl Composer {
     }
 
     pub(crate) fn can_edit_queue_in_composer(&self) -> bool {
-        !self.sending && self.wizard.is_none()
+        !self.sending && !self.wizard_open()
     }
 
     // ---- attachment staging (use-attachments.ts) ----
@@ -6462,7 +6510,7 @@ impl Composer {
     /// gone leaves the draft (kept for undo), and one whose chip came back
     /// returns. Attachments the prompt never mentions are left alone.
     fn reconcile_attachment_mentions(&mut self, cx: &mut Context<Self>) {
-        if self.wizard.is_none() && !self.queue_edit_finishing {
+        if !self.wizard_open() && !self.queue_edit_finishing {
             let mentioned = slopty_view_proto::attachment_mentions::attachment_mention_indices(
                 self.input.read(cx).text(),
             );
@@ -6990,7 +7038,7 @@ impl Composer {
 
     fn on_input_edited(&mut self, cx: &mut Context<Self>) {
         self.reconcile_attachment_mentions(cx);
-        if self.wizard.is_some() {
+        if self.wizard_open() {
             if self.mention.token.is_some() || self.mention_task.is_some() {
                 self.reset_mention(None, cx);
             }
@@ -7051,7 +7099,10 @@ impl Composer {
         self.mention.token = token.clone();
         if !refining {
             self.mention.results.clear();
-            self.mention.active = (!self.mention_attachment_matches().is_empty()).then_some(0);
+            // slopty: the session's agents count as rows to start on too.
+            self.mention.active = (!self.mention_attachment_matches().is_empty()
+                || !self.mention_agent_matches().is_empty())
+            .then_some(0);
             // Fresh open: the row stack restarts at the top.
             crate::popover::reset_menu_scroll(&self.mention_scroll, &mut self.popup_bar);
         }
@@ -7134,7 +7185,9 @@ impl Composer {
     }
 
     fn move_mention(&mut self, delta: isize, cx: &mut Context<Self>) {
-        let rows = self.mention_attachment_matches().len() + self.mention.results.len();
+        let rows = self.mention_attachment_matches().len()
+            + self.mention.results.len()
+            + self.mention_agent_matches().len(); // slopty: the session's agents after files
         self.mention.active = crate::popover::menu_step(self.mention.active, rows, delta);
         if let Some(active) = self.mention.active {
             // Keep the keyboard cursor visible in the scrolled row stack.
@@ -7191,6 +7244,14 @@ impl Composer {
         rows
     }
 
+    // slopty: the session's agent kinds the `@` query names, after the files.
+    fn mention_agent_matches(&self) -> Vec<slopty_view_doc::dock::SubagentKindRow> {
+        let Some(token) = self.mention.token.as_ref() else {
+            return Vec::new();
+        };
+        dock::agent_matches(self.dock.dock.as_deref(), &token.query)
+    }
+
     fn accept_mention(&mut self, cx: &mut Context<Self>) {
         let Some(token) = self.mention.token.clone() else {
             return;
@@ -7211,6 +7272,15 @@ impl Composer {
             let (path, is_dir) = (result.path.clone(), result.is_dir);
             self.input.update(cx, |input, cx| {
                 input.replace_mention(token.range, &path, is_dir, cx)
+            });
+        } else if let Some(agent) = self
+            .mention_agent_matches()
+            .get(active - rows.len() - self.mention.results.len())
+        {
+            // slopty: an agent row writes the agent's own `@agent-{name}` mention.
+            let mention = dock::agent_mention(&agent.name);
+            self.input.update(cx, |input, cx| {
+                input.replace_plain_token(token.range, &mention, cx)
             });
         } else {
             return;
@@ -7237,7 +7307,12 @@ impl Composer {
             )
             .on_mouse_down_out(cx.listener(|this, _, _, cx| this.dismiss_mention(cx)));
         let attachment_rows = self.mention_attachment_matches();
-        if self.mention.loading && self.mention.results.is_empty() && attachment_rows.is_empty() {
+        let agent_rows = self.mention_agent_matches(); // slopty: the session's agents
+        if self.mention.loading
+            && self.mention.results.is_empty()
+            && attachment_rows.is_empty()
+            && agent_rows.is_empty()
+        {
             card = card.child(crate::popover::skeleton_rows(
                 "file-mention-loading",
                 theme,
@@ -7249,7 +7324,7 @@ impl Composer {
             .mention
             .error
             .clone()
-            .filter(|_| attachment_rows.is_empty())
+            .filter(|_| attachment_rows.is_empty() && agent_rows.is_empty())
         {
             card = card.child(
                 div()
@@ -7259,7 +7334,10 @@ impl Composer {
                     .text_color(theme.danger_muted)
                     .child(error),
             );
-        } else if self.mention.results.is_empty() && attachment_rows.is_empty() {
+        } else if self.mention.results.is_empty()
+            && attachment_rows.is_empty()
+            && agent_rows.is_empty()
+        {
             card = card.child(
                 div()
                     .px(px(12.0))
@@ -7349,6 +7427,38 @@ impl Composer {
                             .into_any_element(),
                             name.into(),
                             directory.into(),
+                        ))
+                        .into_any_element(),
+                );
+            }
+            // slopty: the session's agent kinds after the files, each with what it is for.
+            let file_count = attachment_count + self.mention.results.len();
+            for (agent_ix, agent) in agent_rows.iter().enumerate() {
+                let ix = file_count + agent_ix;
+                let selected = self.mention.active == Some(ix);
+                let detail = match &agent.model {
+                    Some(model) => format!("{} · {model}", agent.description),
+                    None => agent.description.clone(),
+                };
+                rows.push(
+                    crate::popover::menu_row(theme, selected, format!("agent-mention-result-{ix}"))
+                        .id(("agent-mention-result", ix))
+                        .role(Role::ListBoxOption)
+                        .aria_label(SharedString::from(format!("Agent {}", agent.name)))
+                        .aria_selected(selected)
+                        .aria_description(SharedString::from(detail.clone()))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.mention.active = Some(ix);
+                            this.accept_mention(cx);
+                        }))
+                        .child(crate::popover::completion_row_content(
+                            theme,
+                            crate::icons::icon(crate::icons::BOT)
+                                .size(px(16.0))
+                                .text_color(theme.text_muted)
+                                .into_any_element(),
+                            SharedString::from(dock::agent_mention(&agent.name)),
+                            detail.into(),
                         ))
                         .into_any_element(),
                 );
@@ -7892,7 +8002,7 @@ impl Composer {
             self.launching_new_chat = false;
             // A question temporarily borrows the editor. Its answer must never
             // replace the ordinary chat draft saved when the panel opened.
-            if self.wizard.is_none() {
+            if !self.wizard_open() {
                 let old_text = self.input.read(cx).text().to_string();
                 if old_text.is_empty() {
                     self.drafts.remove(&self.current_key);
@@ -7968,7 +8078,7 @@ impl Composer {
                     .is_some_and(|w| w.request_id == request_id);
                 if !same {
                     // slopty: dictation removed.
-                    if self.wizard.is_none() {
+                    if !self.wizard_open() {
                         self.drafts.insert(
                             self.current_key.clone(),
                             self.input.read(cx).text().to_string(),
@@ -8005,8 +8115,14 @@ impl Composer {
                         || (!transcript.is_empty()
                             && !self.answered_requests.contains(&wizard.request_id));
                     if released {
+                        let folded = wizard.folded; // slopty: the composer was already the person's.
                         self.wizard = None;
                         self.advance_task = None;
+                        if folded {
+                            self.on_input_edited(cx);
+                            cx.notify();
+                            return;
+                        }
                         let draft = self
                             .drafts
                             .get(&self.current_key)
@@ -8020,7 +8136,7 @@ impl Composer {
                 }
             }
         }
-        let input_context = message_input_context(self.wizard.is_some());
+        let input_context = message_input_context(self.wizard_open());
         self.input
             .update(cx, |input, cx| input.set_key_context(input_context, cx));
         self.on_input_edited(cx);
@@ -8114,9 +8230,9 @@ impl Composer {
         if self.commit_queue_edit(cx) {
             return;
         }
-        if self.wizard.is_some() {
+        if self.wizard_open() {
             // slopty: a click-only page takes no Enter.
-            if self.wizard.as_ref().and_then(Wizard::current).is_some_and(|q| q.click_only) {
+            if self.wizard.as_ref().is_some_and(|w| !w.revising && w.current().is_some_and(|q| q.click_only)) {
                 return;
             }
             // Enter inside the panel's free-text input submits the page.
@@ -8130,6 +8246,18 @@ impl Composer {
         // Leading indentation distinguishes literal Markdown from native commands
         // and skill invocations. Only the empty-content check may trim the draft.
         let text = self.input.read(cx).text().to_string();
+        // slopty: `!` runs the command on the chat's machine; its output goes to the agent.
+        if self.shell_mode(cx) {
+            if let Some(command) = dock::shell_command(&text).map(str::to_owned)
+                && self.staged().is_empty()
+                && self.run_shell(command, cx)
+            {
+                self.input.update(cx, |input, cx| input.set_text("", cx));
+                self.drafts.remove(&self.current_key);
+                self.on_input_edited(cx);
+            }
+            return;
+        }
         if let Some(action) = self
             .slash_cache
             .get(&self.slash.context)
@@ -9084,26 +9212,35 @@ impl Composer {
         let Some(wizard) = self.wizard.as_mut() else {
             return;
         };
+        // slopty: a revision goes only with its words.
+        if wizard.revising && text.trim().is_empty() {
+            return;
+        }
         wizard.set_typed(text);
         match wizard.advance() {
             WizardStep::Done(answers) => self.wizard_finish(answers, cx),
             _ => {
                 let text = wizard.typed.get(wizard.page).cloned().unwrap_or_default();
                 self.input.update(cx, |input, cx| input.set_text(text, cx));
+                self.card.preview = None; // slopty: a new page previews its own options.
                 cx.notify();
             }
         }
     }
 
-    fn wizard_back(&mut self, cx: &mut Context<Self>) {
+    // slopty: whether there was a page to go back to.
+    fn wizard_back(&mut self, cx: &mut Context<Self>) -> bool {
         let text = self.input.read(cx).text().to_string();
         if let Some(wizard) = self.wizard.as_mut() {
             wizard.set_typed(text);
-            wizard.back();
+            let went = wizard.back();
             let text = wizard.typed.get(wizard.page).cloned().unwrap_or_default();
             self.input.update(cx, |input, cx| input.set_text(text, cx));
+            self.card.preview = None; // slopty: a new page previews its own options.
             cx.notify();
+            return went;
         }
+        false
     }
 
     /// Submit RespondInput and retire the panel.
@@ -9207,8 +9344,13 @@ impl Composer {
             cx.notify();
             cx.stop_propagation();
         } else if key == "escape" {
-            if wizard_escape_goes_back(key, input_focused, input_empty) {
-                self.wizard_back(cx);
+            // slopty: Escape leaves a revision or a rule's edit first; on the first page it
+            // folds the panel to its strip.
+            if !self.card_escape(cx)
+                && wizard_escape_goes_back(key, input_focused, input_empty)
+                && !self.wizard_back(cx)
+            {
+                self.fold_question(cx);
             }
             cx.stop_propagation();
         }
@@ -9276,7 +9418,29 @@ impl Composer {
         let click_only = question.click_only;
         let keys_pick = question.choices_only && !click_only;
 
+        // slopty: what the card adds by the request's kind (`composer/request_card.rs`).
+        let header_chips = self.card_header_chips(&question, &theme);
+        let extras = self.render_card_extras(&wizard.request_id, &question, plan, &theme, cx);
+        let revising = wizard.revising;
+        let takes_words =
+            (!question.choices_only || revising) && !request_card::takes_no_words(&question);
+        let descriptions = question.option_descriptions.clone(); // slopty
+        // slopty: the option whose preview shows: the one the pointer is over, else the keyboard's,
+        // else the one picked.
+        let previews = question.option_previews.iter().any(|p| !p.trim().is_empty());
+        let preview_at = self
+            .card
+            .preview
+            .or(focused)
+            .or_else(|| (0..question.options.len()).find(|ix| wizard.is_picked(*ix)))
+            .unwrap_or(0);
+        let preview = Self::render_previews(&question, preview_at, &theme);
         let options = question.options.iter().enumerate().map(|(ix, label)| {
+            // slopty: what the option means, under it.
+            let description = descriptions
+                .get(ix)
+                .filter(|d| !d.trim().is_empty())
+                .map(|d| approval::visible_escapes(d));
             // Selection reads on the row only while no typed override exists
             // (typed answers win — slopty question-panel.tsx `isSel`).
             let picked = wizard.is_picked(ix) && typed_empty;
@@ -9293,6 +9457,7 @@ impl Composer {
                 } else {
                     label.clone()
                 }))
+                .when_some(description.clone(), |el, d| el.aria_description(SharedString::from(d)))
                 .when(blocked, |el| el.opacity(0.4).cursor_default())
                 .flex()
                 .flex_row()
@@ -9318,6 +9483,15 @@ impl Composer {
                     )
                 })
                 .on_hover(motion::hover_listener(format!("wizard-option-{ix}")))
+                // slopty: the preview pane follows the pointer.
+                .when(previews, |el| {
+                    el.on_mouse_move(cx.listener(move |this, _: &gpui::MouseMoveEvent, _, cx| {
+                        if this.card.preview != Some(ix) {
+                            this.card.preview = Some(ix);
+                            cx.notify();
+                        }
+                    }))
+                })
                 .when(!blocked, |el| el.cursor_pointer())
                 .on_click(cx.listener(move |this, _, _, cx| this.wizard_select(ix, cx)))
                 .child(
@@ -9331,7 +9505,19 @@ impl Composer {
                         } else {
                             theme.text.opacity(0.9)
                         })
-                        .child(SharedString::from(label.clone())),
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.0))
+                        .child(SharedString::from(label.clone()))
+                        .when_some(description, |el, d| {
+                            el.child(
+                                div()
+                                    .text_size(crate::typography::ui_rems(12.0))
+                                    .font_weight(gpui::FontWeight::NORMAL)
+                                    .text_color(theme.text_muted)
+                                    .child(SharedString::from(d)),
+                            )
+                        }),
                 )
                 // slopty: a click-only page shows no digits it would not take.
                 .when(ix < 9 && !click_only, |el| {
@@ -9435,7 +9621,8 @@ impl Composer {
                                         .text_color(theme.text_muted.opacity(0.6))
                                         .child(SharedString::from(counter)),
                                 )
-                            }),
+                            })
+                            .children(header_chips), // slopty
                     )
                     // slopty: a request its title says whole asks no line more. A read-gated
                     // body scrolls in place, and an edit shows its change.
@@ -9464,6 +9651,8 @@ impl Composer {
                             el.child(div().mt(px(6.0)).child(text))
                         }
                     })
+                    // slopty: why the agent asks, under the question.
+                    .children(Self::card_reason(&question, &theme))
                     .when_some(question.proposed.clone().filter(|_| !plan), |el, diff| {
                         el.child(approval::proposed_change(&diff, &theme))
                     })
@@ -9476,13 +9665,24 @@ impl Composer {
                                 .child(SharedString::from("Select one or more options.")),
                         )
                     })
+                    // slopty: the options, with their previews' pane beside them when they have any.
                     .child(
                         div()
                             .mt(px(12.0))
                             .flex()
-                            .flex_col()
-                            .gap(px(4.0))
-                            .children(options),
+                            .flex_row()
+                            .items_start()
+                            .gap(px(12.0))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(4.0))
+                                    .children(options),
+                            )
+                            .children(preview),
                     )
                     // slopty: why the allow is held back.
                     .when(gate_holds, |el| {
@@ -9498,10 +9698,11 @@ impl Composer {
                                 .child(SharedString::from(approval::READ_GATE_NOTE)),
                         )
                     })
+                    .children(extras) // slopty
                     // Free-text override over a hairline (shares the composer
                     // input entity).
-                    // slopty: a choice-only request takes a click, never words.
-                    .when(!question.choices_only, |el| {
+                    // slopty: a choice-only request takes a click, never words, unless revised.
+                    .when(takes_words, |el| {
                         el.child(
                             div()
                                 .mt(px(12.0))
@@ -9523,20 +9724,28 @@ impl Composer {
                     .px(px(16.0))
                     .pb(px(16.0))
                     .pt(px(4.0))
-                    .child(if page > 0 {
+                    .child(if revising {
+                        // slopty: a revision goes back to the choices.
+                        crate::popover::btn_ghost(&theme, "Back to choices", "wizard-unrevise")
+                            .id("wizard-unrevise")
+                            .on_click(cx.listener(|this, _, _, cx| this.card_escape_revision(cx)))
+                            .into_any_element()
+                    } else if page > 0 {
                         crate::popover::btn_ghost(&theme, "Back", "wizard-back")
                             .id("wizard-back")
-                            .on_click(cx.listener(|this, _, _, cx| this.wizard_back(cx)))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.wizard_back(cx);
+                            }))
                             .into_any_element()
                     } else {
                         gpui::Empty.into_any_element()
                     })
-                    // slopty: a choice-only request goes on its click.
-                    .when(!question.choices_only, |el| {
+                    // slopty: a choice-only request goes on its click; a revision is sent.
+                    .when(takes_words, |el| {
                         el.child(
                             crate::popover::btn_primary(
                                 &theme,
-                                if last { "Submit" } else { "Next" },
+                                if revising { "Send" } else if last { "Submit" } else { "Next" },
                             )
                             .id("wizard-submit")
                             .px(px(16.0))
@@ -9674,7 +9883,10 @@ impl Render for Composer {
             window.focus(&focus, cx);
         }
         let theme = Theme::of(cx).clone();
-        let wizard_active = self.wizard.is_some();
+        self.sync_dock(cx); // slopty: the selected chat's dock and work, watched.
+        self.dock_tick(cx); // slopty: what the dock or a request draws ticks.
+        // slopty: a question folded to its strip frees the composer.
+        let wizard_active = self.wizard.as_ref().is_some_and(|wizard| !wizard.folded);
         if self.mention.token.is_some()
             && (wizard_active || !self.input.focus_handle(cx).is_focused(window))
         {
@@ -9688,10 +9900,21 @@ impl Render for Composer {
         let mode = self.button_mode(cx);
         // Shape the current draft before sizing the pill. Waiting for the child
         // layout leaves the parent using the previous edit's height.
+        // slopty: a `!` draft is a command for the chat's machine: shell mode.
+        let shell_mode = self.shell_mode(cx);
         self.input.update(cx, |input, cx| {
+            if input.mono != shell_mode {
+                input.mono = shell_mode;
+                input.needs_measure = true;
+                cx.notify();
+            }
             if input.needs_measure && input.last_width > 0.0 {
                 let mut style = window.text_style();
-                style.font_family = theme.font_sans.clone();
+                style.font_family = if input.mono {
+                    theme.font_mono.clone()
+                } else {
+                    theme.font_sans.clone()
+                };
                 style.font_size = crate::typography::ui_rems(INPUT_TEXT_SIZE).into();
                 style.color = if input.content.is_empty() {
                     theme.text_faint
@@ -9844,6 +10067,15 @@ impl Render for Composer {
         // slopty: the footer's context card asks the same catalog as the `/` menu.
         let catalog = self.state.read(cx).selected_chat.is_some().then(|| self.catalog_params(cx));
         self.account_usage.update(cx, |usage, _| usage.set_catalog(catalog));
+        // slopty: the context card's breakdown, from the chat's dock.
+        let breakdown = self
+            .state
+            .read(cx)
+            .selected_chat
+            .as_deref()
+            .and_then(|chat| self.dock.dock_of(chat))
+            .and_then(|dock| dock.context.clone());
+        self.account_usage.update(cx, |usage, cx| usage.set_breakdown(breakdown, cx));
         // slopty: a chat's notice names its machine and when it was last heard, after a grace,
         // with Retry and Wake; a usage limit says when it lifts.
         let road = self
@@ -9933,13 +10165,29 @@ impl Render for Composer {
                 self.staged().len() /* slopty: appshots removed */,
                 self.staged_comments(cx).len(),
             );
+        // slopty: the dock's quiet lines (what the agent waits on, its notes, a `!` command, the
+        // prompt suggestion), a folded question's strip, and the bands its mods draw.
+        let dock_lines = self.render_dock_lines(&theme, cx);
+        let folded = self.render_folded_question(&theme, cx);
+        let bands = self.render_mod_bands(&theme, window, cx);
+        let container = container.children(dock_lines).children(folded).children(bands);
         // The checklist tray stacks above the queue (or directly above the
         // composer), one step narrower than what follows it.
         let has_queue = !self.state.read(cx).queue.is_empty();
+        // slopty: the Background tray sits between the checklist and the queue.
+        let tray = self.render_background_tray(
+            QUEUE_SIDE_INSET * if has_queue { 2.0 } else { 1.0 },
+            window,
+            cx,
+        );
+        let trays_below = usize::from(has_queue) + usize::from(tray.is_some());
         let container = container.when_some(
-            self.render_todo_panel(has_queue, window, cx),
+            self.render_todo_panel(trays_below, window, cx),
             |el, panel| el.child(motion::fade_quick("composer-todo", div().child(panel))),
         );
+        let container = container.when_some(tray, |el, tray| {
+            el.child(motion::fade_quick("composer-background-tray", div().child(tray)))
+        });
         let container = container.when_some(
             self.render_queue_panel(show_queue_latest_shortcut, window, cx),
             |el, panel| {
@@ -9981,7 +10229,36 @@ impl Render for Composer {
             }))
             .on_action(cx.listener(|this, _: &history::NextMachine, window, cx| {
                 this.step_machine(true, window, cx)
-            }));
+            }))
+            // slopty: Tab takes the prompt suggestion, ⇧Tab cycles the permission mode, ⌥B
+            // focuses the Background tray; each only where nothing in the draft took the key.
+            .on_action(cx.listener(|this, _: &MentionTab, _, cx| {
+                if !this.take_suggestion(cx) {
+                    cx.propagate();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &OutdentList, _, cx| {
+                if !this.cycle_mode(cx) {
+                    cx.propagate();
+                }
+            }))
+            .on_action(cx.listener(
+                |this, _: &crate::background_tray::FocusBackgroundTray, window, cx| {
+                    this.focus_background_tray(window, cx)
+                },
+            ));
+        // slopty: Escape leaves shell mode, the command's words kept.
+        let container = container.when(shell_mode, |el| {
+            el.on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                if event.keystroke.key == "escape"
+                    && this.mention.token.is_none()
+                    && this.slash.token.is_none()
+                    && this.leave_shell_mode(cx)
+                {
+                    cx.stop_propagation();
+                }
+            }))
+        });
         let container = container.when(self.editing_queued.is_some(), |el| {
             el.on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
                 if event.keystroke.key == "escape"
@@ -10163,6 +10440,7 @@ impl Render for Composer {
         });
 
         let send_button = self.render_send_button(mode, cx);
+        let shell_tag = shell_mode.then(|| self.render_shell_tag(&theme, cx)); // slopty
         // slopty: dictation removed.
         let attach_action = cx.entity().downgrade();
         let attach_hover_key: SharedString = format!("composer-attach-{}", cx.entity_id()).into();
@@ -10335,7 +10613,8 @@ impl Render for Composer {
                                 .flex_row()
                                 .items_center()
                                 .gap(px(ACTION_UTILITY_GAP))
-                                .child(attach),
+                                .child(attach)
+                                .children(shell_tag), // slopty: shell mode.
                         )
                         .child(model_picker)
                         .child(
@@ -10388,7 +10667,8 @@ impl Render for Composer {
                                 .flex()
                                 .items_center()
                                 .gap(px(ACTION_UTILITY_GAP))
-                                .child(attach),
+                                .child(attach)
+                                .children(shell_tag), // slopty: shell mode.
                         )
                         .child(
                             div()
@@ -10530,6 +10810,9 @@ impl Render for Composer {
                 self.pickers
                     .update(cx, |pickers, cx| pickers.render_footer(cx))
             });
+            let dock_footer = (session_chrome_opacity > 0.0)
+                .then(|| self.render_dock_footer(&theme, cx))
+                .flatten();
             // slopty: no agent accounts: Slopty never touches a credential.
             container.child(
                 div()
@@ -10561,6 +10844,9 @@ impl Render for Composer {
                                 .items_center()
                                 .opacity(session_chrome_opacity)
                                 .child(div().flex_1().min_w_0().children(footer.flatten()))
+                                // slopty: the status line, mods' segments, the goal, the
+                                // background counts and the permission mode.
+                                .children(dock_footer)
                                 .child(
                                     // The footer row's own 4px gap: the PR badge
                                     // ends flush with the row, so the rings keep
@@ -10610,6 +10896,9 @@ mod modal_selection_tests;
 
 #[cfg(test)]
 mod attachment_chip_tests;
+
+#[cfg(test)]
+mod dock_tests; // slopty: the dock's surfaces, by their accessibility tree.
 
 #[cfg(test)]
 mod tests {
@@ -14123,6 +14412,7 @@ mod tests {
             read_gate: false, // slopty: new field.
             deny_option: None, // slopty: new field.
             proposed: None, // slopty: new field.
+            ..Default::default() // slopty: the dock's request fields.
         }
     }
 

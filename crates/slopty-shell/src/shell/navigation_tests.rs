@@ -101,9 +101,6 @@ fn setup(cx: &mut TestAppContext) -> (Entity<Shell>, &mut VisualTestContext) {
             });
             shell.active_chat = "parent".into();
             shell.reduced_motion = true;
-            for doc in ["first", "second"] {
-                shell.add_subagent_surface("parent".into(), doc.into(), doc.into(), false, cx);
-            }
             shell
                 .composer
                 .update(cx, |composer, _| composer.focus_pending = false);
@@ -115,6 +112,17 @@ fn setup(cx: &mut TestAppContext) -> (Entity<Shell>, &mut VisualTestContext) {
         }
     });
     let shell = host.read_with(cx, |host, _| host.shell.clone());
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    // slopty: two diff tabs stand for any two surfaces (no subagent tab), opened once the
+    // selection has settled the panes' owner.
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.set_surfaces_open(true, cx);
+            for _ in 0..2 {
+                shell.add_diff_surface(window, cx);
+            }
+        });
+    });
     cx.update(|window, cx| window.draw(cx).clear(cx));
     (shell, cx)
 }
@@ -142,24 +150,26 @@ fn assert_surface(shell: &Entity<Shell>, cx: &mut VisualTestContext, surface: Ri
 }
 
 #[gpui::test]
-fn repeated_keys_stay_in_read_only_pane_and_follow_reordering(cx: &mut TestAppContext) {
+fn repeated_keys_stay_in_the_right_pane_and_follow_reordering(cx: &mut TestAppContext) {
     let (shell, cx) = setup(cx);
     let tab = cx.debug_bounds("right-surface-tab-0").unwrap().center();
     cx.simulate_click(tab, gpui::Modifiers::default());
     for expected in [2, 1, 2, 1] {
         press(cx, true);
-        assert_surface(&shell, cx, RightSurface::Subagent(expected));
+        assert_surface(&shell, cx, RightSurface::Diff(expected));
     }
-    shell.update(cx, |shell, cx| {
-        shell.add_subagent_surface("parent".into(), "third".into(), "Third".into(), false, cx);
-        shell.reorder_right_tabs(2, 0, cx);
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.add_diff_surface(window, cx);
+            shell.reorder_right_tabs(2, 0, cx);
+        })
     });
     press(cx, true);
-    assert_surface(&shell, cx, RightSurface::Subagent(1));
+    assert_surface(&shell, cx, RightSurface::Diff(1));
     press(cx, false);
-    assert_surface(&shell, cx, RightSurface::Subagent(3));
+    assert_surface(&shell, cx, RightSurface::Diff(3));
     press(cx, false);
-    assert_surface(&shell, cx, RightSurface::Subagent(2));
+    assert_surface(&shell, cx, RightSurface::Diff(2));
 }
 
 #[gpui::test]
@@ -209,13 +219,13 @@ fn side_chat_to_diff_retains_right_focus_and_custom_bindings(cx: &mut TestAppCon
     });
     cx.simulate_keystrokes("alt-down");
     cx.update(|window, cx| window.draw(cx).clear(cx));
-    assert_surface(&shell, cx, RightSurface::Diff(1));
+    assert_surface(&shell, cx, RightSurface::Diff(3));
     cx.simulate_keystrokes("alt-down");
     cx.update(|window, cx| window.draw(cx).clear(cx));
-    assert_surface(&shell, cx, RightSurface::Subagent(1));
+    assert_surface(&shell, cx, RightSurface::Diff(1));
     cx.simulate_keystrokes("alt-up");
     cx.update(|window, cx| window.draw(cx).clear(cx));
-    assert_surface(&shell, cx, RightSurface::Diff(1));
+    assert_surface(&shell, cx, RightSurface::Diff(3));
     cx.update(|window, cx| {
         shell.update(cx, |shell, cx| {
             shell.activate_right_surface(RightSurface::SideChat(1), window, cx);
@@ -229,10 +239,10 @@ fn side_chat_to_diff_retains_right_focus_and_custom_bindings(cx: &mut TestAppCon
     });
     cx.update(|window, cx| window.draw(cx).clear(cx));
     // Closing returns to the most recently visited tab, then cycles in strip order.
-    assert_surface(&shell, cx, RightSurface::Diff(1));
+    assert_surface(&shell, cx, RightSurface::Diff(3));
     cx.simulate_keystrokes("alt-down");
     cx.update(|window, cx| window.draw(cx).clear(cx));
-    assert_surface(&shell, cx, RightSurface::Subagent(1));
+    assert_surface(&shell, cx, RightSurface::Diff(1));
 }
 
 #[gpui::test]
@@ -242,14 +252,14 @@ fn closing_active_and_last_tabs_recovers_the_correct_pane(cx: &mut TestAppContex
     cx.simulate_click(tab, gpui::Modifiers::default());
     cx.update(|window, cx| {
         shell.update(cx, |shell, cx| {
-            shell.close_right_surface(RightSurface::Subagent(1), window, cx);
+            shell.close_right_surface(RightSurface::Diff(1), window, cx);
         })
     });
     press(cx, true);
-    assert_surface(&shell, cx, RightSurface::Subagent(2));
+    assert_surface(&shell, cx, RightSurface::Diff(2));
     cx.update(|window, cx| {
         shell.update(cx, |shell, cx| {
-            shell.close_right_surface(RightSurface::Subagent(2), window, cx);
+            shell.close_right_surface(RightSurface::Diff(2), window, cx);
             assert!(!shell.right_pane_open(cx));
             assert!(shell.composer.focus_handle(cx).is_focused(window));
         })
@@ -282,7 +292,7 @@ fn modal_and_picker_block_navigation_in_both_panes(cx: &mut TestAppContext) {
                 shell.state.read(cx).selected_chat.as_deref(),
                 Some("parent")
             );
-            assert_eq!(shell.resolved_right_active(cx), RightSurface::Subagent(2));
+            assert_eq!(shell.resolved_right_active(cx), RightSurface::Diff(2));
             shell.delete_confirm = None;
         });
     }
@@ -299,7 +309,7 @@ fn modal_and_picker_block_navigation_in_both_panes(cx: &mut TestAppContext) {
             shell.state.read(cx).selected_chat.as_deref(),
             Some("parent")
         );
-        assert_eq!(shell.resolved_right_active(cx), RightSurface::Subagent(2));
+        assert_eq!(shell.resolved_right_active(cx), RightSurface::Diff(2));
     });
 }
 
@@ -326,7 +336,7 @@ fn hiding_reopening_and_expanding_preserve_navigation_boundaries(cx: &mut TestAp
     cx.simulate_click(tab, gpui::Modifiers::default());
     shell.update(cx, |shell, cx| shell.toggle_right_pane_expand(cx));
     press(cx, true);
-    assert_surface(&shell, cx, RightSurface::Subagent(2));
+    assert_surface(&shell, cx, RightSurface::Diff(2));
     shell.update(cx, |shell, cx| shell.set_surfaces_open(false, cx));
     cx.update(|window, cx| window.draw(cx).clear(cx));
     cx.update(|window, cx| {
@@ -362,7 +372,7 @@ fn embedded_terminal_and_browser_focus_route_to_right_tabs(cx: &mut TestAppConte
         assert!(terminal.focus_handle().is_focused(window));
     });
     press(cx, true);
-    assert_surface(&shell, cx, RightSurface::Subagent(1));
+    assert_surface(&shell, cx, RightSurface::Diff(1));
     cx.update(|window, cx| {
         shell.update(cx, |shell, cx| {
             shell.add_browser_surface(None, window, cx);
@@ -370,7 +380,7 @@ fn embedded_terminal_and_browser_focus_route_to_right_tabs(cx: &mut TestAppConte
     });
     cx.update(|window, cx| window.draw(cx).clear(cx));
     press(cx, true);
-    assert_surface(&shell, cx, RightSurface::Subagent(1));
+    assert_surface(&shell, cx, RightSurface::Diff(1));
     // Exercise the GPUI target the native browser bridge focuses before it
     // redispatches a shortcut (the native OS event itself needs platform QA).
     cx.update(|window, cx| {
@@ -381,7 +391,7 @@ fn embedded_terminal_and_browser_focus_route_to_right_tabs(cx: &mut TestAppConte
     });
     cx.update(|window, cx| window.draw(cx).clear(cx));
     press(cx, true);
-    assert_surface(&shell, cx, RightSurface::Subagent(1));
+    assert_surface(&shell, cx, RightSurface::Diff(1));
 }
 
 #[gpui::test]
@@ -421,23 +431,24 @@ fn each_session_cycles_only_its_own_tabs(cx: &mut TestAppContext) {
     cx.update(|window, cx| window.draw(cx).clear(cx));
     cx.update(|window, cx| {
         shell.update(cx, |shell, cx| {
-            shell.add_subagent_surface("other".into(), "third".into(), "Third".into(), false, cx);
-            shell.activate_right_surface(RightSurface::Subagent(3), window, cx);
+            shell.set_surfaces_open(true, cx);
+            shell.add_diff_surface(window, cx);
+            shell.activate_right_surface(RightSurface::Diff(3), window, cx);
         })
     });
     press(cx, true);
     shell.read_with(cx, |shell, cx| {
         assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("other"));
-        assert_eq!(shell.resolved_right_active(cx), RightSurface::Subagent(3));
+        assert_eq!(shell.resolved_right_active(cx), RightSurface::Diff(3));
     });
     shell.update(cx, |shell, cx| shell.open_chat("parent".into(), cx));
     cx.update(|window, cx| window.draw(cx).clear(cx));
     let tab = cx.debug_bounds("right-surface-tab-0").unwrap().center();
     cx.simulate_click(tab, gpui::Modifiers::default());
     press(cx, true);
-    assert_surface(&shell, cx, RightSurface::Subagent(2));
+    assert_surface(&shell, cx, RightSurface::Diff(2));
     press(cx, true);
-    assert_surface(&shell, cx, RightSurface::Subagent(1));
+    assert_surface(&shell, cx, RightSurface::Diff(1));
 }
 
 /// Settles a transcript selection and seeds the clipboard with a sentinel, so
@@ -548,8 +559,8 @@ fn a_closed_tab_comes_back_with_its_key(cx: &mut TestAppContext) {
     cx.update(|_, cx| {
         let shell = shell.read(cx);
         let key = shell.panel_key(cx);
-        assert!(shell.right_tabs[&key].contains(&RightSurface::Diff(2)), "the diff is back");
-        assert_eq!(shell.resolved_right_active(cx), RightSurface::Diff(2), "in front");
+        assert!(shell.right_tabs[&key].contains(&RightSurface::Diff(4)), "the diff is back");
+        assert_eq!(shell.resolved_right_active(cx), RightSurface::Diff(4), "in front");
         assert!(shell.right_pane_open(cx));
         assert!(shell.closed_tabs.is_empty());
     });
@@ -628,4 +639,54 @@ fn an_archive_is_undone_from_its_toast_or_cmd_z(cx: &mut TestAppContext) {
     cx.simulate_keystrokes(&platform_combo("mod-z"));
     cx.run_until_parked();
     assert!(requests.try_recv().is_err());
+}
+
+// slopty: a subagent drilled into from its card.
+/// A subagent of a call shows "parent › subagent" over its run and, for the composer, the bar
+/// that says it runs inside its parent; Escape there goes back to the parent.
+#[gpui::test]
+fn a_drilled_in_subagent_leads_back_to_its_parent(cx: &mut TestAppContext) {
+    let (shell, cx) = setup(cx);
+    shell.update(cx, |shell, cx| {
+        shell.state.update(cx, |state, _| {
+            state.chats.push(
+                serde_json::from_value(serde_json::json!({
+                    "id": "child", "title": "Count lines", "parentChatId": "parent",
+                    "subagent": true, "inParent": true, "deviceId": "local",
+                    "archived": false, "createdAt": Utc::now(),
+                }))
+                .unwrap(),
+            );
+        });
+        shell.open_chat("child".into(), cx);
+        shell.drill_focus_pending = true;
+    });
+    let labels = |cx: &mut VisualTestContext| {
+        cx.update(|window, cx| {
+            window.set_a11y_active(true);
+            window.refresh();
+            window.draw(cx).clear(cx);
+            let update = window.a11y_tree().expect("a tree");
+            update
+                .nodes
+                .iter()
+                .map(|(_, node)| (node.role(), node.label().unwrap_or_default().to_owned()))
+                .collect::<Vec<_>>()
+        })
+    };
+    let nodes = labels(cx);
+    use gpui::accesskit::Role as A11y;
+    assert!(
+        nodes.contains(&(A11y::Navigation, "parent › Count lines".to_owned())),
+        "the breadcrumb: {nodes:?}"
+    );
+    assert!(nodes.contains(&(A11y::Status, "Runs inside parent".to_owned())), "the bar");
+    assert!(nodes.contains(&(A11y::Link, "Back to parent".to_owned())));
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    shell.read_with(cx, |shell, cx| {
+        assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("parent"));
+    });
+    let nodes = labels(cx);
+    assert!(!nodes.contains(&(A11y::Status, "Runs inside parent".to_owned())), "back home");
 }

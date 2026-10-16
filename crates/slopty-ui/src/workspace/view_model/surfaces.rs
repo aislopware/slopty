@@ -332,7 +332,13 @@ impl WorkspaceView {
                 true
             }
             WorkerMsg::File { path, read } => {
-                for tx in surfaces.reads.remove(&(key, path.clone())).unwrap_or_default() {
+                let asked = surfaces.reads.remove(&(key, path.clone())).unwrap_or_default();
+                // slopty: a file nobody asked for changed; a page showing it reloads (M).
+                #[cfg(target_vendor = "apple")]
+                if asked.is_empty() {
+                    self.view_model.pages.file_changed(key, path, read);
+                }
+                for tx in asked {
                     let _gone = tx.send(read.clone());
                 }
                 false
@@ -475,8 +481,12 @@ impl WorkspaceView {
         rx
     }
 
-    /// Read the file `path` on `key`.
-    fn surface_read(&mut self, key: WorkerKey, path: String) -> oneshot::Receiver<FileRead> {
+    /// Read the file `path` on `key` (slopty: a page reads its changed file again (M)).
+    pub(super) fn surface_read(
+        &mut self,
+        key: WorkerKey,
+        path: String,
+    ) -> oneshot::Receiver<FileRead> {
         let (tx, rx) = oneshot::channel();
         if self.surface_send(key, ClientMsg::ReadFile { path: path.clone() }) {
             self.view_model.surfaces.reads.entry((key, path)).or_default().push(tx);

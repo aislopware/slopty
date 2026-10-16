@@ -19,6 +19,11 @@ provenance = "// Derived from zeron (MIT, github.com/zeronsh/zeron @ {base}), se
 "crates/syntax" = "crates/slopty-syntax"
 "crates/markdown" = "crates/slopty-markdown"
 "crates/veil" = "crates/slopty-veil"
+# Agent visuals (#900): the Luau sandbox and its GPU renderer. The shell draws them from
+# `crates/ui/src/visuals.rs`; Slopty's own MCP server carries `show_visual`
+# (docs/decisions/ui.md, "Agent visuals adopted").
+"crates/visual" = "crates/slopty-visual"
+"crates/visual-gpu" = "crates/slopty-visual-gpu"
 "scripts/fixtures/markdown-preview" = "crates/slopty-shell/fixtures/markdown-preview"
 # Excerpts of the engine and the agent drivers: the types and helpers the shell reads.
 "crates/engine/src/registry.rs" = "crates/slopty-shell/src/catalog/registry.rs"
@@ -201,12 +206,6 @@ paths = [
     "crates/ui/build.rs",
     # zeron's mark: the shell draws Slopty's (`crates/slopty-shell/assets/icons/slopty-logo.svg`).
     "crates/ui/assets/icons/zeron-logo.svg",
-    # Agent visuals (#900): a Luau sandbox (mlua) and a wgpu renderer of their own, fed by the
-    # engine's `show_visual` MCP tool and `PublishVisual` upload; Slopty drives agents through
-    # their published doors and has no engine MCP server to carry them.
-    "crates/visual/",
-    "crates/visual-gpu/",
-    "crates/ui/src/visuals.rs",
     # The repository's own files: Slopty has its own.
     "Cargo.toml",
     "Cargo.lock",

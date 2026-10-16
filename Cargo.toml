@@ -418,6 +418,11 @@ gpui-kit = { git = "https://github.com/aislopware/gpui-kit.git", default-feature
     "component",
     "assets",
 ] }
+# Agent visuals (`slopty-visual`, `slopty-visual-gpu`): scenes and shaders drawn offscreen. The
+# revision gpui-fast pins for `gpui_wgpu` (zed #65649), so the graph holds one wgpu and one naga;
+# it moves with gpui-fast.
+wgpu = { git = "https://github.com/gfx-rs/wgpu", rev = "3b3506ea31154edc04de64debda0e780cba2639c" }
+naga = { git = "https://github.com/gfx-rs/wgpu", rev = "3b3506ea31154edc04de64debda0e780cba2639c" }
 
 # terminal engine
 libghostty-vt = { git = "https://github.com/aislopware/libghostty-rs.git", features = [
@@ -692,6 +697,20 @@ opt-level = 1
 
 [profile.test.package.slopty-e2e]
 opt-level = 1
+
+# Agent visuals rasterise scenes in software every frame the camera moves, and their tests run
+# scripts, scenes and shaders: optimised in every profile, as zeron builds them.
+[profile.dev.package.slopty-visual]
+opt-level = 3
+
+[profile.dev.package.slopty-visual-gpu]
+opt-level = 3
+
+[profile.test.package.slopty-visual]
+opt-level = 3
+
+[profile.test.package.slopty-visual-gpu]
+opt-level = 3
 
 [profile.release]
 opt-level = 3

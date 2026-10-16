@@ -20,7 +20,9 @@
 //! (`inotify`). A burst of events is one report: a repository is reported once its events have
 //! been quiet for [`QUIET`], or after [`HOLD`] of steady changes, and two reports of one are
 //! [`HOLD`] apart at least. It is also reported once when its watch is up, since what changed
-//! before then is not known.
+//! before then is not known. So an event `FSEvents` hands a new stream late, for a path that
+//! last changed before the watch began starting (fseventsd numbers a write only once it reads
+//! it, and it lags under load), is no report: the one at the watch's start covered it.
 //!
 //! Where events cannot say everything (a network or FUSE volume, `FSEvents` refusing a stream,
 //! inotify past its watches, [`Limits::watches`] or the kernel's, another system), the repository
@@ -359,12 +361,13 @@ impl Repo {
     }
 
     /// The file system says something happened at `path` (a folder when `dir` says so): the
-    /// repository is touched when git reports on it.
-    fn heard(&self, path: &Path, dir: Option<bool>) -> Said {
+    /// repository is touched when git reports on it and `news` holds, asked only then.
+    fn heard(&self, path: &Path, dir: Option<bool>, news: impl FnOnce() -> bool) -> Said {
         let said = self.said(path, dir);
-        if said != Said::Nothing {
-            self.heard.touch(&self.place.top, false);
+        if said == Said::Nothing || !news() {
+            return Said::Nothing;
         }
+        self.heard.touch(&self.place.top, false);
         said
     }
 

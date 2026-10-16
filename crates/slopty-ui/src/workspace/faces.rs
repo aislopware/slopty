@@ -248,6 +248,12 @@ impl WorkspaceView {
         frame: ThreadFrame,
         cx: &mut Context<Self>,
     ) {
+        // slopty: an agent's answer to what an inline page asked of its app goes to the page.
+        #[cfg(target_vendor = "apple")]
+        if let ThreadFrame::App { id, answer } = frame {
+            self.page_app_answer(id, answer, cx);
+            return;
+        }
         let hub = self.thread_hub(key, cx);
         hub.update(cx, |hub, cx| hub.frame(thread, frame, cx));
     }

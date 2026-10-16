@@ -27,8 +27,17 @@
 //! - **Waits.** Compacting, the plan's usage limit (messages are held until it resets, then go), a
 //!   stop under way, and a turn that shows no progress for [`STALL`] are said as waits; a gap
 //!   between ticks longer than [`WAKE_GAP`] is a machine waking, never a stall.
+//! - **The work beside the conversation** (`work`): every background task Claude Code says it
+//!   started, how it goes and how it ended, each call's timer, the spinner's figures, its
+//!   notifications, the goal, the next prompt it suggests, and the rows its TUI derives (allowed
+//!   commands, saved memories, a fallback model, hooks that failed).
+//! - **Its own asks** (`asks`): every dialog kind it has and every MCP form, each a request of the
+//!   thread answered by the person, never for them.
+//! - **Its doors** (`doors`): an MCP App's resource read and tool called for its page, the
+//!   permission rules, the context's categories, a call moved to the background, files put back, a
+//!   `!` command's output handed over, and the surfaces its mods draw.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -40,26 +49,44 @@ use slopty_proto::thread::{
 
 use super::history::{End, History, Out};
 use crate::attach::Attached;
+use crate::conversation::output::Outputs;
 use crate::conversation::{
     self as conv, Conversation, Live, LiveId, LiveKind, PermissionEvent, PermissionPrompt, Settled,
     Verdict,
 };
 use crate::queue::Queue;
 
+mod asks;
+mod doors;
+mod model;
+mod work;
+
+pub use asks::DIALOG_KINDS;
+pub use doors::{Ran, SURFACE_CLIENT};
+pub use model::THINKING_FACT;
+use model::{mode_words, switched_to};
+pub use work::{PROGRESS_EVERY, TAIL_EVERY};
+
 /// What a driven Claude Code can do through Slopty.
-pub const CAPS: [&str; 12] = [
+pub const CAPS: [&str; 18] = [
     Cap::APPROVALS,
+    Cap::BACKGROUND,
     Cap::END,
     Cap::FORK,
     Cap::INTERRUPT,
     Cap::QUEUE,
+    Cap::REWIND,
+    Cap::RULES,
     Cap::SCHEDULE,
     Cap::SET_EFFORT,
     Cap::SET_MODE,
     Cap::SET_MODEL,
     Cap::SET_OPTION,
+    Cap::SHELL,
     Cap::SNAPSHOTS,
     Cap::STEER,
+    Cap::STOP_TASK,
+    Cap::SURFACES,
 ];
 
 /// How long a message may go unacknowledged before it is sent again, and then before it is held
@@ -89,8 +116,16 @@ pub const ARGS_FACT: &str = "claude-args";
 /// The fact that names the ptyd session holding the thread's Claude Code, while one does.
 pub const CUSTODY_FACT: &str = "claude-custody";
 
-/// The fact that keeps the fast mode chosen for the thread ([`super::FAST`]).
+/// The fact that keeps the thread's fast mode as Claude Code says it stands ([`super::FAST`]):
+/// `on`, `off`, or `cooldown` while a fast limit holds it back.
 pub const FAST_FACT: &str = "claude-fast";
+
+/// The fact that says whether ultracode (Claude Code's standing workflow orchestration) is on for
+/// the thread: `on` or `off`, and absent where the session cannot have it.
+pub const ULTRACODE_FACT: &str = "claude-ultracode";
+
+/// The option a model whose thinking can be turned off offers ([`Model::options`]).
+pub const THINKING: &str = "thinking";
 
 /// The words a thread's stop is said with while it is under way.
 pub const STOPPING_TEXT: &str = "Stopping";
@@ -119,8 +154,24 @@ enum Control {
     SetMode(String),
     Effort(String),
     Fast(bool),
+    /// Thinking turned on or off (`set_max_thinking_tokens`).
+    Thinking(bool),
+    /// The settings as they apply, for ultracode (`get_settings`).
+    Settings,
     StopTask,
     ContextUsage,
+    /// A call, or every blocking one, moved to the background.
+    Background(Option<String>),
+    /// The permission rules listed.
+    Rules,
+    /// The MCP servers and their tools, for the apps among them.
+    McpStatus,
+    /// A page's ask of its app, by its number.
+    App(u64),
+    /// The files put back to before turn `turn`.
+    Rewind(slopty_proto::thread::TurnId),
+    /// One of the asks a mod's surfaces make.
+    Ui(doors::Ui),
 }
 
 /// A message given to Claude Code and not yet acknowledged.
@@ -138,7 +189,7 @@ struct Sent {
     again: bool,
 }
 
-/// A permission Claude Code asks for, open.
+/// A permission, a dialog or a form Claude Code asks for, open.
 #[derive(Clone, Debug)]
 struct Asked {
     /// The control request's id, which the answer names.
@@ -146,6 +197,8 @@ struct Asked {
     tool: String,
     input: Value,
     suggestions: Value,
+    /// What kind of ask it is.
+    form: asks::Form,
 }
 
 /// What a client's answer to a request comes to.
@@ -205,6 +258,36 @@ pub struct Driven {
     last_echo: Option<String>,
     /// A compaction was said, and its summary is still to come.
     compacted: bool,
+    /// Each call's tool and input, by the call, as the model wrote it.
+    calls: HashMap<String, (String, Value)>,
+    /// When each running call was last noted ([`work::PROGRESS_EVERY`]).
+    noted: HashMap<String, WallMs>,
+    /// The spinner's figures as last told, and when.
+    activity: work::Spin,
+    /// The goal as last told.
+    goal: Option<slopty_proto::thread::Goal>,
+    /// The tails of the background commands, read for their output ([`work::TAIL_EVERY`]).
+    outputs: Outputs,
+    tailed: Option<WallMs>,
+    /// The answers to pages' asks of their apps, not taken yet.
+    app_answers: Vec<(u64, slopty_proto::visual::AppAnswer)>,
+    /// The MCP servers' statuses as last seen, so a change asks for their tools again.
+    servers: String,
+    /// The surfaces the session's mods draw, and the elements in them.
+    surfaces: doors::Surfaces,
+    /// The control requests whose refusal goes unsaid (a surface Claude Code does not have).
+    quiet: HashSet<String>,
+    /// The mode plan mode was entered from, which a plan approved with a clear context keeps.
+    before_plan: Option<String>,
+    /// The session began in bypass permissions, where plan mode asks before almost nothing.
+    started_bypass: bool,
+    /// The notes said once a session (a usage limit's warning, a settings file's error), and
+    /// whether usage credits are drawn on.
+    said_once: (HashSet<String>, bool),
+    /// The person asked for the goal to be cleared: its end is no achievement.
+    goal_clearing: bool,
+    /// Fast mode as Claude Code last said it stands, and whether the person turned it on.
+    fast: (Option<String>, bool),
 }
 
 impl Driven {
@@ -275,6 +358,21 @@ impl Driven {
             held: Vec::new(),
             last_echo: None,
             compacted: false,
+            calls: HashMap::new(),
+            noted: HashMap::new(),
+            activity: work::Spin::default(),
+            goal: None,
+            outputs: Outputs::default(),
+            tailed: None,
+            app_answers: Vec::new(),
+            servers: String::new(),
+            surfaces: doors::Surfaces::default(),
+            quiet: HashSet::new(),
+            before_plan: None,
+            started_bypass: false,
+            said_once: (HashSet::new(), false),
+            goal_clearing: false,
+            fast: (None, false),
         }
     }
 
@@ -350,16 +448,28 @@ impl Driven {
 
     /// The `initialize` request, which goes first to every Claude Code this drives, and again to
     /// one the worker comes back to.
+    ///
+    /// It declares what Slopty shows: every dialog kind ([`DIALOG_KINDS`]), the tool calls of
+    /// subagents other subagents start, each subagent's progress summary, and a stop for each
+    /// background task.
     pub fn initialize(&mut self) {
-        self.control(Control::Initialize, &json!({ "subtype": "initialize" }));
+        let request = json!({
+            "subtype": "initialize",
+            "supportedDialogKinds": DIALOG_KINDS,
+            "forwardNestedSubagentToolCalls": true,
+            "agentProgressSummaries": true,
+            "perTaskStopAffordance": true,
+        });
+        self.control(Control::Initialize, &request);
     }
 
-    fn control(&mut self, control: Control, request: &Value) {
+    fn control(&mut self, control: Control, request: &Value) -> String {
         self.next = self.next.saturating_add(1);
         let id = format!("slopty-{}", self.next);
         let line = json!({ "type": "control_request", "request_id": id, "request": request });
-        self.controls.insert(id, control);
+        self.controls.insert(id.clone(), control);
         self.writes.push(line.to_string());
+        id
     }
 
     /// What the thread's pending list shows: what is on its way, then what is held.
@@ -381,6 +491,11 @@ impl Driven {
         intent: IntentId,
         now: WallMs,
     ) -> Vec<Out> {
+        // Claude Code says a goal cleared this way itself ("Goal cleared: …"): its end is no
+        // achievement.
+        if text.trim() == "/goal clear" {
+            self.goal_clearing = true;
+        }
         if self.limit_until.is_some() {
             let paths = attached.iter().map(|a| a.path().to_owned()).collect();
             let _shown = self.queued.hold(intent, text, paths, (), false);
@@ -418,18 +533,37 @@ impl Driven {
     }
 
     fn give(&mut self, uuid: String, pending: Pending, content: &Value, now: WallMs) -> Vec<Out> {
-        let line = json!({
+        self.give_as(uuid, pending, content, true, now)
+    }
+
+    /// Give `content` as the person's message `uuid`: one Claude Code answers when `query`, else
+    /// one it only takes into the conversation, answered with the next that asks.
+    fn give_as(
+        &mut self,
+        uuid: String,
+        pending: Pending,
+        content: &Value,
+        query: bool,
+        now: WallMs,
+    ) -> Vec<Out> {
+        let mut message = json!({
             "type": "user",
             "message": { "role": "user", "content": content },
             "parent_tool_use_id": null,
             "session_id": self.history.meta().native,
             "uuid": uuid,
-        })
-        .to_string();
+        });
+        if !query && let Some(fields) = message.as_object_mut() {
+            fields.insert("shouldQuery".to_owned(), Value::Bool(false));
+        }
+        let line = message.to_string();
         self.writes.push(line.clone());
         self.sends.push_back(Sent { uuid, pending, line, at: now, again: false });
         self.stopped = false;
-        self.shown()
+        // What it suggested goes once the person says anything.
+        let mut outs = self.unsuggest();
+        outs.extend(self.shown());
+        outs
     }
 
     /// The message sent as `uuid` reached Claude Code.
@@ -507,12 +641,26 @@ impl Driven {
 
     /// Set option `option` of the model to `choice`; `false` for one Claude Code does not offer.
     pub fn set_option(&mut self, option: &str, choice: &str) -> bool {
-        if option != super::FAST || !matches!(choice, "on" | "off") {
+        if !matches!(choice, "on" | "off") {
             return false;
         }
         let on = choice == "on";
-        let request = json!({ "subtype": "apply_flag_settings", "settings": { "fastMode": on } });
-        self.control(Control::Fast(on), &request);
+        match option {
+            super::FAST => {
+                self.fast.1 = on;
+                let request =
+                    json!({ "subtype": "apply_flag_settings", "settings": { "fastMode": on } });
+                self.control(Control::Fast(on), &request);
+            }
+            // Off is no thinking budget at all; on gives the model its own again.
+            THINKING => {
+                let budget = if on { Value::Null } else { json!(0) };
+                let request =
+                    json!({ "subtype": "set_max_thinking_tokens", "max_thinking_tokens": budget });
+                self.control(Control::Thinking(on), &request);
+            }
+            _ => return false,
+        }
         true
     }
 
@@ -522,6 +670,12 @@ impl Driven {
         let Some(asked) = ask.0.parse::<u64>().ok().and_then(|n| self.asks.get(&n)) else {
             return false;
         };
+        if !matches!(asked.form, asks::Form::Tool) {
+            return asks::result_of(&asked.form, choice).is_some();
+        }
+        if super::history::clear_mode(choice).is_some() {
+            return asked.tool == "ExitPlanMode";
+        }
         let verdict = super::history::verdict(choice, None);
         match verdict {
             Some(Verdict::Answer { .. }) => asked.tool == "AskUserQuestion",
@@ -538,13 +692,19 @@ impl Driven {
         choice: &str,
         message: Option<&str>,
         by: Answerer,
-        _now: WallMs,
+        now: WallMs,
     ) -> Option<Answered> {
         if !self.takes(ask, choice) {
             return None;
         }
         let number = ask.0.parse::<u64>().ok()?;
         let asked = self.asks.remove(&number)?;
+        if !matches!(asked.form, asks::Form::Tool) {
+            return Some(self.answer_ask(ask, &asked, choice, by));
+        }
+        if super::history::clear_mode(choice).is_some() {
+            return Some(self.plan_cleared(ask, &asked, choice, by, now));
+        }
         let verdict = super::history::verdict(choice, message)?;
         let decision = crate::permission::decision(&verdict, &asked.input, &asked.suggestions);
         let response = crate::permission::result(&decision);
@@ -553,11 +713,56 @@ impl Driven {
             "response": { "subtype": "success", "request_id": asked.request, "response": response },
         });
         self.writes.push(line.to_string());
+        // "Yes, and tell Claude what to do next": the call goes ahead, and the person's words
+        // go into the turn, which Claude Code takes at its next step.
+        let next = matches!(verdict, Verdict::Allow | Verdict::AllowAlways)
+            .then(|| message.map(str::trim).filter(|m| !m.is_empty()).map(str::to_owned))
+            .flatten();
         let settled = Settled::Answered { verdict, by };
         let mut outs =
             self.history.permission(&PermissionEvent::Settled { ask: number, outcome: settled });
+        if let Some(next) = next {
+            outs.extend(self.send(&next, &[], IntentId::new(), now));
+        }
         outs.extend(self.status_now(WallMs::now()));
         Some(Answered { outs })
+    }
+
+    /// The plan approved with a clear context, as the TUI's "Yes, clear context" does it: the
+    /// plan's call is turned down and the turn stopped, the mode `choice` names holds from then
+    /// on (edits accepted, auto mode or bypass permissions), the context is cleared (`/clear`),
+    /// and the plan goes as the next message.
+    fn plan_cleared(
+        &mut self,
+        ask: &AskId,
+        asked: &Asked,
+        choice: &str,
+        by: Answerer,
+        now: WallMs,
+    ) -> Answered {
+        let mode = super::history::clear_mode(choice).unwrap_or("acceptEdits").to_owned();
+        let mode = mode.as_str();
+        let line = json!({
+            "type": "control_response",
+            "response": { "subtype": "success", "request_id": asked.request, "response": {
+                "behavior": "deny",
+                "message": "The person approved the plan and cleared the context to carry it out.",
+                "interrupt": true,
+            } },
+        });
+        self.writes.push(line.to_string());
+        let state = slopty_proto::thread::RequestState::Answered { by, choice: choice.to_owned() };
+        let mut outs = self.history.resolved(ask, state);
+        self.set_mode(mode);
+        outs.extend(self.history.notice(Notice::MODE, &switched_to(mode), now));
+        let plan = str_at(&asked.input, "plan").unwrap_or_default();
+        let next = format!("Implement the following plan:\n\n{plan}");
+        for text in ["/clear", next.as_str()] {
+            let intent = IntentId::new();
+            outs.extend(self.send(text, &[], intent, now));
+        }
+        outs.extend(self.status_now(now));
+        Answered { outs }
     }
 
     /// A line Claude Code wrote, heard at `now`. A line that is no JSON is passed over.
@@ -577,6 +782,9 @@ impl Driven {
         }
         let kind = str_at(message, "type").unwrap_or_default();
         outs.extend(match kind {
+            "tool_progress" => self.tool_progress(message, now),
+            "prompt_suggestion" => self.suggested(message),
+            "active_goal" => self.goal(message, now),
             "control_response" => self.response(message, now),
             "control_request" => self.request(message, now),
             "control_cancel_request" => self.cancelled(message, now),
@@ -613,44 +821,90 @@ impl Driven {
         let said = response.get("response").cloned().unwrap_or(Value::Null);
         if !ok {
             let error = str_at(response, "error").unwrap_or("no reason given").to_owned();
+            if self.quiet.remove(id) {
+                return self.unanswered(&control, &error);
+            }
             return self.refused(&control, &error, now);
         }
+        self.quiet.remove(id);
         match control {
             Control::Initialize => self.initialized(response, &said, now),
             Control::Interrupt => {
                 self.interrupting = None;
                 Vec::new()
             }
-            Control::SetModel(model) => self.meters(|m| {
-                m.model = Some(super::model_label(&model));
-                m.model_id = Some(model);
-            }),
-            Control::SetMode(mode) => self.meters(|m| m.mode = Some(mode)),
-            Control::Effort(effort) => self.meters(|m| m.effort = Some(effort)),
-            Control::Fast(on) => self.history.fact(FAST_FACT, Some(if on { "on" } else { "off" })),
-            Control::StopTask => Vec::new(),
-            Control::ContextUsage => {
-                let used = u64_at(&said, "totalTokens");
-                let window = u64_at(&said, "maxTokens");
+            Control::SetModel(model) => {
+                self.ask_settings();
                 self.meters(|m| {
-                    m.context_tokens = used.or(m.context_tokens);
-                    m.context_window = window.or(m.context_window);
+                    m.model = Some(super::model_label(&model));
+                    m.model_id = Some(model);
                 })
             }
+            Control::SetMode(mode) => self.mode_now(mode, false, now),
+            Control::Effort(effort) => {
+                self.ask_settings();
+                self.meters(|m| m.effort = Some(effort))
+            }
+            Control::Fast(on) => self.fast_now(if on { "on" } else { "off" }, None, now),
+            Control::Thinking(on) => {
+                let mut outs =
+                    self.history.fact(THINKING_FACT, Some(if on { "on" } else { "off" }));
+                outs.extend(self.passing(
+                    "thinking",
+                    if on { "Thinking on" } else { "Thinking off" },
+                    now,
+                ));
+                outs
+            }
+            Control::Settings => self.settings_read(&said, now),
+            Control::StopTask => Vec::new(),
+            Control::ContextUsage => self.context_used(&said),
+            Control::Background(call) => self.backgrounded(call.as_deref(), &said, now),
+            Control::Rules => self.rules_listed(&said),
+            Control::McpStatus => self.servers_listed(&said),
+            Control::App(app) => {
+                self.app_answered(app, &said);
+                Vec::new()
+            }
+            Control::Rewind(turn) => self.rewound(turn, &said, now),
+            Control::Ui(ui) => self.ui_answered(&ui, &said, now),
         }
     }
 
     /// Claude Code refused `control`, saying `error`.
     fn refused(&mut self, control: &Control, error: &str, now: WallMs) -> Vec<Out> {
+        // A switch that failed is said as the TUI says it.
+        let said = match control {
+            Control::SetModel(_) => Some(format!("Model switch failed: {error}")),
+            Control::SetMode(mode) => {
+                Some(format!("Couldn't switch to {}: {error}", mode_words(mode)))
+            }
+            Control::Effort(_) => {
+                Some(format!("Effort setting unavailable right now · nothing changed: {error}"))
+            }
+            Control::Fast(_) => Some(format!("Fast mode is not available: {error}")),
+            Control::Thinking(_) => Some(format!("Thinking could not be changed: {error}")),
+            _ => None,
+        };
+        if let Some(said) = said {
+            return self.history.notice(Notice::INFO, &said, now);
+        }
         let what = match control {
             Control::Initialize => "to start",
             Control::Interrupt => "to stop",
-            Control::SetModel(_) => "the model",
-            Control::SetMode(_) => "the permission mode",
-            Control::Effort(_) => "the effort",
-            Control::Fast(_) => "fast mode",
-            Control::StopTask => "to stop the subagent",
-            Control::ContextUsage => return Vec::new(),
+            Control::SetModel(_)
+            | Control::SetMode(_)
+            | Control::Effort(_)
+            | Control::Fast(_)
+            | Control::Thinking(_) => "the switch",
+            Control::StopTask => "to stop the task",
+            Control::Background(_) => "to move the call to the background",
+            Control::Rewind(_) => "to put the files back",
+            Control::Rules => "to list its permission rules",
+            Control::McpStatus => "to list its MCP servers",
+            Control::App(_) | Control::Ui(_) | Control::ContextUsage | Control::Settings => {
+                return self.unanswered(control, error);
+            }
         };
         if *control == Control::Interrupt {
             self.interrupting = None;
@@ -689,11 +943,13 @@ impl Driven {
                     let id = str_at(m, "value")?.to_owned();
                     let label = str_at(m, "displayName")
                         .map_or_else(|| super::model_label(&id), str::to_owned);
-                    let options = if bool_at(m, "supportsFastMode") {
-                        vec![fast_offer()]
-                    } else {
-                        Vec::new()
-                    };
+                    let mut options = Vec::new();
+                    if bool_at(m, "supportsFastMode") {
+                        options.push(fast_offer());
+                    }
+                    if bool_at(m, "supportsThinkingOff") {
+                        options.push(thinking_offer());
+                    }
                     Some(Model { id, label, options })
                 })
                 .collect();
@@ -727,13 +983,16 @@ impl Driven {
             outs.extend(self.history.listed(listed));
         }
         if let Some(mode) = str_at(said, "current_permission_mode") {
-            let mode = mode.to_owned();
-            outs.extend(self.meters(|m| m.mode = Some(mode)));
+            outs.extend(self.mode_now(mode.to_owned(), false, now));
         }
-        if let Some(fast) = str_at(said, "fast_mode_state") {
-            let on = if fast == "on" { "on" } else { "off" };
-            outs.extend(self.history.fact(FAST_FACT, Some(on)));
+        outs.extend(self.fast_said(said, now));
+        if let Some(agents) = said.get("agents").and_then(Value::as_array) {
+            outs.extend(self.agents_listed(agents));
         }
+        // What only a question answers: its rules, its servers' apps, the surfaces its mods
+        // draw, and whether ultracode applies.
+        self.after_initialize();
+        self.ask_settings();
         // What it still asks: each again, those this side knew of already kept.
         let pending = response
             .get("pending_permission_requests")
@@ -762,6 +1021,11 @@ impl Driven {
     fn request(&mut self, message: &Value, now: WallMs) -> Vec<Out> {
         let Some(id) = str_at(message, "request_id").map(str::to_owned) else { return Vec::new() };
         let request = message.get("request").cloned().unwrap_or(Value::Null);
+        match str_at(&request, "subtype") {
+            Some("request_user_dialog") => return self.dialog(&id, &request, now),
+            Some("elicitation") => return self.elicitation(&id, &request, now),
+            _ => {}
+        }
         if str_at(&request, "subtype") != Some("can_use_tool") {
             // Nothing else is answered for the person: Claude Code is told this host takes none.
             let subtype = str_at(&request, "subtype").unwrap_or("this").to_owned();
@@ -784,16 +1048,35 @@ impl Driven {
         let tool = str_at(&request, "tool_name").unwrap_or_default().to_owned();
         let input = request.get("input").cloned().unwrap_or_else(|| json!({}));
         let suggestions = request.get("permission_suggestions").cloned().unwrap_or(Value::Null);
+        let meters = self.history.meters_now();
+        let context_used =
+            meters.context_tokens.zip(meters.context_window).and_then(|(used, of)| {
+                u32::try_from(used.saturating_mul(100).checked_div(of)?.min(100)).ok()
+            });
+        let needs_presence = bool_at(&request, "requires_user_interaction");
         let prompt = PermissionPrompt {
+            needs_presence,
+            reason: asked_by(asks::reason(&request, &tool, meters.mode.as_deref()), &request),
             ask: number,
             call: str_at(&request, "tool_use_id").map(str::to_owned),
             detail: conv::proposed(&tool, &input),
             tool: tool.clone(),
-            suggestions: crate::permission::suggestions(&suggestions),
-            mode: self.history.meters_now().mode.clone(),
+            // A request whose "always allow" Claude Code holds back offers none, and so does one
+            // only the person at the card answers: no rule answers it again without them.
+            suggestions: if bool_at(&request, "suppress_always_allow_rule") || needs_presence {
+                Vec::new()
+            } else {
+                crate::permission::suggestions(&suggestions)
+            },
+            mode: meters.mode.clone(),
             asked_ms: now,
+            exists: written_exists(&tool, &input),
+            context_used,
+            before_plan: self.before_plan(),
+            input: input.clone(),
         };
-        self.asks.insert(number, Asked { request: id, tool, input, suggestions });
+        let form = asks::Form::Tool;
+        self.asks.insert(number, Asked { request: id, tool, input, suggestions, form });
         let mut outs = self.history.permission(&PermissionEvent::Asked(Box::new(prompt)));
         outs.extend(self.status_now(now));
         outs
@@ -804,12 +1087,23 @@ impl Driven {
         let Some((&number, _)) = self.asks.iter().find(|(_, a)| a.request == id) else {
             return Vec::new();
         };
-        self.asks.remove(&number);
-        let mut outs = self
-            .history
-            .permission(&PermissionEvent::Settled { ask: number, outcome: Settled::Withdrawn });
+        let mut outs = self.withdraw(number);
         outs.extend(self.status_now(now));
         outs
+    }
+
+    /// Ask `number` is no longer asked.
+    fn withdraw(&mut self, number: u64) -> Vec<Out> {
+        let Some(asked) = self.asks.remove(&number) else { return Vec::new() };
+        match asked.form {
+            asks::Form::Tool => self
+                .history
+                .permission(&PermissionEvent::Settled { ask: number, outcome: Settled::Withdrawn }),
+            _ => self.history.resolved(
+                &AskId(number.to_string()),
+                slopty_proto::thread::RequestState::Withdrawn,
+            ),
+        }
     }
 
     fn lifecycle(&mut self, message: &Value, now: WallMs) -> Vec<Out> {
@@ -834,7 +1128,7 @@ impl Driven {
     fn system(&mut self, message: &Value, now: WallMs) -> Vec<Out> {
         match str_at(message, "subtype").unwrap_or_default() {
             "init" => {
-                let mut outs = Vec::new();
+                let mut outs = self.servers_seen(message, now);
                 if let Some(model) = str_at(message, "model").map(str::to_owned) {
                     outs.extend(self.meters(|m| {
                         m.model = Some(super::model_label(&model));
@@ -842,7 +1136,7 @@ impl Driven {
                     }));
                 }
                 if let Some(mode) = str_at(message, "permissionMode").map(str::to_owned) {
-                    outs.extend(self.meters(|m| m.mode = Some(mode)));
+                    outs.extend(self.mode_now(mode, true, now));
                 }
                 if let Some(version) = str_at(message, "claude_code_version") {
                     outs.extend(self.history.version(version));
@@ -852,10 +1146,18 @@ impl Driven {
             "status" => {
                 let mut outs = Vec::new();
                 if let Some(mode) = str_at(message, "permissionMode").map(str::to_owned) {
-                    outs.extend(self.meters(|m| m.mode = Some(mode)));
+                    outs.extend(self.mode_now(mode, true, now));
                 }
                 let compacting = str_at(message, "status") == Some("compacting");
                 outs.extend(self.history.compacting(compacting));
+                if str_at(message, "compact_result") == Some("failed") {
+                    let why = str_at(message, "compact_error").map(compact_failed);
+                    let said = why.map_or_else(
+                        || "Could not compact".to_owned(),
+                        |why| format!("Could not compact · {why}"),
+                    );
+                    outs.extend(self.history.notice(Notice::INFO, &said, now));
+                }
                 if !self.running && str_at(message, "status") == Some("requesting") {
                     self.running = true;
                     outs.extend(self.history.working(now));
@@ -886,47 +1188,42 @@ impl Driven {
                     .map(str::to_owned)
                     .or_else(|| u64_at(message, "error_status").map(|status| status.to_string()));
                 let text = kind.map_or_else(|| said.to_owned(), |kind| format!("{kind}: {said}"));
+                // No answer at all, as the TUI says it: how long it waited.
+                let text = match message.get("no_response").and_then(|n| u64_at(n, "waited_ms")) {
+                    Some(waited) => {
+                        format!("No response from the API after {}", work::span(waited.max(1_000)))
+                    }
+                    None => text,
+                };
                 self.history.retrying(&text, retry, now)
             }
-            "task_started" => {
-                if let (Some(task), Some(call)) =
-                    (str_at(message, "task_id"), str_at(message, "tool_use_id"))
-                {
-                    self.agents.insert(call.to_owned(), task.to_owned());
-                }
-                Vec::new()
+            "task_started" => self.task_started(message, now),
+            "task_progress" => self.task_progress(message, now),
+            "task_updated" => self.task_updated(message, now),
+            "task_notification" => self.task_notification(message, now),
+            "background_tasks_changed" => self.tasks_changed(message, now),
+            "task_summary" => self.phrase(message, now),
+            "thinking_tokens" => self.thinking(message, now),
+            "notification" => self.notification(message, now),
+            "permission_denied" => self.denied(message, now),
+            "commands_changed" => {
+                let listed = message
+                    .get("commands")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|c| {
+                        serde_json::from_value::<crate::commands::Listed>(c.clone()).ok()
+                    })
+                    .collect();
+                self.history.listed(listed)
             }
-            "task_notification" => {
-                // As the transcript records it, so the decoder settles the subagent's run.
-                let field = |name: &str| str_at(message, name).unwrap_or_default();
-                let content = format!(
-                    "<task-notification>\n<task-id>{}</task-id>\n<tool-use-id>{}</tool-use-id>\n\
-                     <output-file>{}</output-file>\n<status>{}</status>\n<summary>{}</summary>\n\
-                     </task-notification>",
-                    field("task_id"),
-                    field("tool_use_id"),
-                    field("output_file"),
-                    field("status"),
-                    field("summary"),
-                );
-                let record = json!({
-                    "type": "queue-operation",
-                    "operation": "enqueue",
-                    "timestamp": stamp(now),
-                    "content": content,
-                });
-                let changes = self.decoder.ingest(&conv::ThreadId::Main, &record);
-                self.history.transcript(&changes, &[])
+            // A page's form is done: Claude Code withdraws its request itself.
+            "elicitation_complete" => Vec::new(),
+            "ui_toast" | "ui_status" | "ui_log" | "ui_panes" | "ui_invalidate" => {
+                self.ui_pushed(message, now)
             }
-            "background_tasks_changed" => {
-                let tasks = message.get("tasks").and_then(Value::as_array);
-                let count = tasks.map_or(0, Vec::len);
-                let named = tasks
-                    .and_then(|t| t.first())
-                    .and_then(|t| str_at(t, "description"))
-                    .map(str::to_owned);
-                self.history.background(u32::try_from(count).unwrap_or(u32::MAX), 0, named)
-            }
+            subtype if work::derived(subtype) => self.derived_row(subtype, message, now),
             "compact_boundary" => {
                 let meta = message.get("compact_metadata");
                 let record = json!({
@@ -1032,6 +1329,7 @@ impl Driven {
         }
         if str_at(message, "type") == Some("assistant") {
             self.settle(&record);
+            self.note_calls(&record);
         }
         let changes = self.decoder.ingest(&conv::ThreadId::Main, &record);
         outs.extend(self.history.transcript(&changes, &[]));
@@ -1063,6 +1361,13 @@ impl Driven {
     fn stream(&mut self, message: &Value, now: WallMs) -> Vec<Out> {
         let Some(event) = message.get("event") else { return Vec::new() };
         let parent = str_at(message, "parent_tool_use_id").map(str::to_owned);
+        let mut outs = if parent.is_none() { self.spin(event, now) } else { Vec::new() };
+        outs.extend(self.streamed(event, parent, now));
+        outs
+    }
+
+    /// What the model writes, as live blocks.
+    fn streamed(&mut self, event: &Value, parent: Option<String>, now: WallMs) -> Vec<Out> {
         let thread = match parent.as_ref().and_then(|call| self.agents.get(call)) {
             Some(agent) => conv::ThreadId::Agent(agent.clone()),
             None if parent.is_some() => return Vec::new(),
@@ -1138,15 +1443,51 @@ impl Driven {
         .to_owned();
         let used = info.get("utilization").and_then(Value::as_f64);
         let rejected = str_at(info, "status") == Some("rejected");
+        let said = self.limit_said(info, used, now);
         let used_bp = if rejected { 10_000 } else { used.map_or(0, basis_points) };
         let mut outs = self.meters(|m| {
             m.limits.retain(|l| l.name != name);
             m.limits.push(slopty_proto::thread::Limit { name, used_bp, resets_ms: resets });
         });
+        outs.extend(said);
         if rejected {
+            let first = self.limit_until.is_none();
             self.limit_until = resets.or(Some(now));
             outs.extend(self.history.limited(self.limit_until));
+            if first {
+                outs.extend(self.goal_paused(now));
+            }
         }
+        outs
+    }
+
+    /// What a usage limit's report says in passing, as the TUI's notifications do: a limit
+    /// nearly used up ("You've used 80% of your weekly limit"), once a limit, and usage credits
+    /// drawn on from now ("Now using usage credits").
+    fn limit_said(&mut self, info: &Value, used: Option<f64>, now: WallMs) -> Vec<Out> {
+        let mut outs = Vec::new();
+        let kind = str_at(info, "rateLimitType").unwrap_or_default();
+        if str_at(info, "status") == Some("allowed_warning")
+            && self.said_once.0.insert(format!("limit:{kind}"))
+        {
+            let limit = match kind {
+                "five_hour" => "5-hour limit",
+                "seven_day" => "weekly limit",
+                "seven_day_opus" => "Opus weekly limit",
+                "seven_day_sonnet" => "Sonnet weekly limit",
+                _ => "usage limit",
+            };
+            let words = match used.map(basis_points) {
+                Some(bp) if bp > 0 => format!("You've used {}% of your {limit}", bp / 100),
+                _ => format!("Approaching your {limit}"),
+            };
+            outs.extend(self.passing(&format!("limit-{kind}"), &words, now));
+        }
+        let credits = bool_at(info, "isUsingOverage");
+        if credits && !self.said_once.1 {
+            outs.extend(self.passing("credits", "Now using usage credits", now));
+        }
+        self.said_once.1 = credits;
         outs
     }
 
@@ -1154,6 +1495,7 @@ impl Driven {
         // Whatever waited for an echo that never came goes before the turn ends.
         self.awaiting_echo = None;
         let mut outs = self.release_held(now);
+        outs.extend(self.turn_over(now));
         let was_running = self.running;
         self.running = false;
         self.interrupting = None;
@@ -1172,6 +1514,7 @@ impl Driven {
         if was_running || str_at(message, "local_command").is_none() {
             outs.extend(self.history.ended(&end, now));
         }
+        outs.extend(self.fast_said(message, now));
         if let Some(model_usage) = message.get("modelUsage").and_then(Value::as_object) {
             let window = model_usage.values().filter_map(|u| u64_at(u, "contextWindow")).max();
             if window.is_some() {
@@ -1179,6 +1522,7 @@ impl Driven {
             }
         }
         self.control(Control::ContextUsage, &json!({ "subtype": "get_context_usage" }));
+        outs.extend(self.waiting_on_agents(now));
         outs.extend(self.status_now(now));
         outs
     }
@@ -1192,8 +1536,15 @@ impl Driven {
             return Vec::new();
         }
         let (phase, wait) = if let Some(asked) = self.asks.values().next() {
-            let kind = if asked.tool == "AskUserQuestion" { "question" } else { "permission" };
-            let text = super::history::asks_for(&asked.tool, &asked.input);
+            let (kind, text) = match &asked.form {
+                asks::Form::Tool if asked.tool == "AskUserQuestion" => {
+                    ("question", super::history::asks_for(&asked.tool, &asked.input))
+                }
+                asks::Form::Tool => {
+                    ("permission", super::history::asks_for(&asked.tool, &asked.input))
+                }
+                form => ("question", form.waits_with()),
+            };
             (Phase::NeedsYou, Some(Wait { kind: kind.to_owned(), text }))
         } else if self.running {
             (Phase::Working, None)
@@ -1220,7 +1571,8 @@ impl Driven {
             self.sends.iter().filter(|s| !s.line.is_empty()).map(|s| after(s.at, DELIVERY)).min();
         let limit = self.limit_until.map(|at| after(at, LIMIT_SLACK));
         let stall = self.running.then(|| after(self.looked.unwrap_or(self.heard), TICK));
-        [interrupt, delivery, limit, stall].into_iter().flatten().min()
+        let tail = self.tails_due().map(|at| after(at, TAIL_EVERY));
+        [interrupt, delivery, limit, stall, tail].into_iter().flatten().min()
     }
 
     /// Time has come to `now`. Whether the process is to be ended: a stop went unacknowledged.
@@ -1254,6 +1606,9 @@ impl Driven {
             self.limit_until = None;
             outs.extend(self.history.limited(None));
             outs.extend(self.released());
+        }
+        if self.tails_due().is_some_and(|at| past(at, TAIL_EVERY)) {
+            outs.extend(self.tails(now));
         }
         if self.running {
             let looked = self.looked.unwrap_or(self.heard);
@@ -1303,12 +1658,11 @@ impl Driven {
     /// which starts Claude Code again on the session.
     pub fn exited(&mut self, why: Option<&str>, now: WallMs) -> Vec<Out> {
         let mut outs = Vec::new();
-        for (number, _) in std::mem::take(&mut self.asks) {
-            outs.extend(self.history.permission(&PermissionEvent::Settled {
-                ask: number,
-                outcome: Settled::Withdrawn,
-            }));
+        let numbers: Vec<u64> = self.asks.keys().copied().collect();
+        for number in numbers {
+            outs.extend(self.withdraw(number));
         }
+        outs.extend(self.doors_gone(now));
         for sent in &mut self.sends {
             sent.line.clear();
             sent.pending.state = PendingState::Held { reason: Pending::UNKNOWN.to_owned() };
@@ -1347,6 +1701,19 @@ fn fast_offer() -> OptionOffer {
     }
 }
 
+/// Thinking, as a model whose thinking can be turned off offers it.
+fn thinking_offer() -> OptionOffer {
+    OptionOffer {
+        id: THINKING.to_owned(),
+        label: "Thinking".to_owned(),
+        choices: vec![
+            OptionChoice { id: "off".to_owned(), label: "Off".to_owned() },
+            OptionChoice { id: "on".to_owned(), label: "On".to_owned() },
+        ],
+        default: "on".to_owned(),
+    }
+}
+
 /// A user message's content: the words, and each picture as an image block; any other file by
 /// its path in the words.
 fn content_of(text: &str, attached: &[Attached]) -> Value {
@@ -1362,6 +1729,42 @@ fn content_of(text: &str, attached: &[Attached]) -> Value {
         .collect();
     blocks.push(json!({ "type": "text", "text": words }));
     Value::Array(blocks)
+}
+
+/// Why Claude Code asks, with the plugin whose run asks it named under it, as the TUI's dialog
+/// names it ("Plugin deploy", or "From a plugin" when its name was not kept).
+fn asked_by(reason: Option<String>, request: &Value) -> Option<String> {
+    let plugin = request.get("plugin").and_then(Value::as_str).map(str::trim);
+    let asker = plugin.map(|name| {
+        if name.is_empty() { "From a plugin".to_owned() } else { format!("Plugin {name}") }
+    });
+    match (reason, asker) {
+        (Some(reason), Some(asker)) => Some(format!("{reason}\n{asker}")),
+        (reason, asker) => reason.or(asker),
+    }
+}
+
+/// Why a compaction failed, as the TUI says it: its two known causes in short words, anything
+/// else as Claude Code said it.
+fn compact_failed(error: &str) -> String {
+    if error.contains("could not be reduced below the context limit") {
+        "conversation too long · /clear to start fresh".to_owned()
+    } else if error.contains("attached media exceeds size limits") {
+        "attached media too large · /clear to start fresh".to_owned()
+    } else {
+        error.trim().to_owned()
+    }
+}
+
+/// Whether the file a `Write` call names is there already: the one look at the disk this module
+/// makes, so the card can say "Create file" or "Overwrite file" as the TUI's does. `None` for
+/// any other call, or a path that cannot be looked at.
+fn written_exists(tool: &str, input: &Value) -> Option<bool> {
+    if tool != "Write" {
+        return None;
+    }
+    let path = str_at(input, "file_path").filter(|p| p.starts_with('/'))?;
+    std::path::Path::new(path).try_exists().ok()
 }
 
 /// A share (`0.0..=1.0`) in basis points.

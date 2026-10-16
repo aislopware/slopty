@@ -168,6 +168,8 @@ pub struct AccountUsage {
     catalog: Option<serde_json::Value>,
     compactable: std::collections::HashMap<String, bool>,
     catalog_task: Option<gpui::Task<()>>,
+    // slopty: the chat's context by category, from its dock (`composer/dock.rs`).
+    breakdown: Option<slopty_view_doc::dock::ContextBreakdown>,
     _state: Subscription,
 }
 
@@ -187,6 +189,16 @@ impl AccountUsage {
             catalog: None,
             compactable: std::collections::HashMap::new(),
             catalog_task: None,
+            breakdown: None,
+        }
+    }
+
+    // slopty: the composer hands the chat's breakdown over each render; cheap.
+    /// The chat's context by category, when its agent counted it.
+    pub fn set_breakdown(&mut self, breakdown: Option<slopty_view_doc::dock::ContextBreakdown>, cx: &mut Context<Self>) {
+        if self.breakdown != breakdown {
+            self.breakdown = breakdown;
+            cx.notify();
         }
     }
 
@@ -239,7 +251,7 @@ impl AccountUsage {
         cx: &mut Context<Self>,
     ) -> gpui::Div {
         let theme = Theme::of(cx).for_popup();
-        let card = crate::context_usage::card(context, &theme);
+        let card = crate::context_usage::card(context, self.breakdown.as_ref(), &theme);
         if !self.compactable() {
             return card;
         }
@@ -248,8 +260,8 @@ impl AccountUsage {
                 popover::menu_row(&theme, false, "context-usage-compact")
                     .id("context-usage-compact")
                     .role(gpui::Role::Button)
-                    .aria_label("Compact")
-                    .child(div().flex_1().child(SharedString::from("Compact")))
+                    .aria_label("Compact now")
+                    .child(div().flex_1().child(SharedString::from("Compact now")))
                     .child(popover::kbd_hint(&theme, "/compact"))
                     .on_click(cx.listener(|usage, _, _, cx| {
                         usage.dismiss(cx);
@@ -341,7 +353,15 @@ impl FooterCard {
 impl Render for AccountUsage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
-        let context = self.state.read(cx).context_usage;
+        let mut context = self.state.read(cx).context_usage;
+        // slopty: the agent's own count, when it made one, is the ring's.
+        if let Some(breakdown) = self.breakdown.as_ref().filter(|b| b.window > 0) {
+            context = Some(slopty_view_proto::ContextUsage {
+                tokens: Some(breakdown.tokens),
+                window: Some(breakdown.window),
+            });
+        }
+        let urgent = self.breakdown.as_ref().is_some_and(|b| b.urgent);
         // slopty: the plan-usage ring reads the agent's own windows; no accounts.
         let windows = self.state.read(cx).usage_limits.clone();
         let usage = used_fraction(&windows).map(|fraction| {
@@ -366,11 +386,14 @@ impl Render for AccountUsage {
             )
         });
         let context = crate::context_usage::has_window(context).then(|| {
-            let chip = crate::context_usage::chip(
+            let mut chip = crate::context_usage::chip(
                 context,
                 self.popup.get() == Some(&FooterCard::Context),
                 &theme,
             );
+            if urgent {
+                chip = chip.text_color(theme.danger); // slopty: nearly full, nothing to compact it.
+            }
             self.trigger(
                 chip,
                 FooterCard::Context,

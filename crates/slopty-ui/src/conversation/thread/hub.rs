@@ -580,6 +580,13 @@ pub fn refused_words(intent: &Intent, why: &str) -> String {
         Intent::Said { .. } => "Couldn't keep the message's own words".to_owned(),
         Intent::End => "Couldn't end the agent".to_owned(),
         Intent::SetOption { option, choice } => format!("Couldn't set {option} to {choice}"),
+        Intent::StopTask { .. } => "Couldn't stop it".to_owned(),
+        Intent::Background { .. } => "Couldn't move it to the background".to_owned(),
+        Intent::Shell { .. } => "The command didn't run".to_owned(),
+        Intent::Rewind { .. } => "Couldn't put the files back".to_owned(),
+        Intent::Unrewind { .. } => "Couldn't undo the rewind".to_owned(),
+        Intent::Rule(_) => "Couldn't change the rule".to_owned(),
+        Intent::Surface { .. } => "The mod didn't take it".to_owned(),
     };
     format!("{what}: {why}")
 }

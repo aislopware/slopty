@@ -23,6 +23,7 @@ use slopty_proto::orchestration::{ErrorCode, IdempotencyKey, Outcome, ThreadView
 
 use crate::ops::{self, AgentWanted};
 use crate::resolve::Resolver;
+use crate::show::{self, ShowPageArgs, ShowVisualArgs};
 use crate::{Dispatch, ToolError, view};
 
 /// What the model reads before any tool description.
@@ -33,8 +34,9 @@ parent; when it comes to rest or needs the person, you hear it through your hook
 sends an agent words, agent_read reads its thread, agent_wait waits for agents to come to \
 rest, agent_stop ends one with the agents under it, and agents lists every agent with its \
 parent. branch_bring copies a branch from a clone on one machine to a clone on another. \
-Requests an agent asks are the person's to answer. Everything else is the `slopty` command: \
-`slopty --help` lists it.";
+Requests an agent asks are the person's to answer. show_visual shows the person a native \
+visual (a chart, table, dashboard, diagram, simulation or 3D view) inline, and show_page a web \
+page, each above your reply. Everything else is the `slopty` command: `slopty --help` lists it.";
 
 /// How often a long wait with a progress sink reports that it is still waiting.
 pub const PROGRESS_EVERY: Duration = Duration::from_secs(10);
@@ -269,6 +271,8 @@ pub fn list() -> Vec<Tool> {
              `to`, as `name`. Returns the `branch` it landed as and its `head` commit.",
             Kind::Write,
         ),
+        tool::<ShowVisualArgs>("show_visual", show::SHOW_VISUAL_DESCRIPTION, Kind::Read),
+        tool::<ShowPageArgs>("show_page", show::SHOW_PAGE_DESCRIPTION, Kind::Read),
     ]
 }
 
@@ -394,8 +398,17 @@ async fn run<D: Dispatch>(
             let (branch, head) = ops::branch_bring(&mut res, from, to, key).await?;
             Ok(json!({ "branch": branch, "head": head }))
         }
+        "show_visual" => show::visual(args(arguments)?, &here()?),
+        "show_page" => show::page(args(arguments)?, &here()?),
         other => Err(ToolError::invalid(format!("no tool is called {other}"))),
     }
+}
+
+/// Where the agent works: the folder it started its MCP server in, which its paths are
+/// relative to.
+fn here() -> Result<std::path::PathBuf, ToolError> {
+    std::env::current_dir()
+        .map_err(|e| ToolError::new(ErrorCode::Failed, format!("no working folder: {e}")))
 }
 
 /// Run `wait`, telling `progress` every [`PROGRESS_EVERY`] how long it has waited, so a client
@@ -548,7 +561,8 @@ mod tests {
         (result.is_error == Some(true), text)
     }
 
-    /// The tools are the eight primitives and nothing else: the rest is the `slopty` command.
+    /// The tools are the eight primitives and the two that show the person something, and
+    /// nothing else: the rest is the `slopty` command.
     #[test]
     fn every_tool_has_a_schema_a_description_and_a_hint() {
         let tools = list();
@@ -564,6 +578,8 @@ mod tests {
                 "agent_stop",
                 "agents",
                 "branch_bring",
+                "show_visual",
+                "show_page",
             ]
         );
         for t in &tools {

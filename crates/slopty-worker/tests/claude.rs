@@ -289,6 +289,12 @@ mod claude {
 
         let state = rig.until(thread, "the ask", asking).await;
         assert_eq!(state.meta.native, id.to_string(), "named by the start");
+        let why = state.open_requests().next().unwrap().reason.clone();
+        assert_eq!(
+            why.as_deref(),
+            Some("Permission rule Bash from localSettings requires confirmation for this command."),
+            "why it asks, in the TUI's words"
+        );
         let record = rig.record();
         let argv: Vec<&str> =
             record["argv"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
@@ -316,6 +322,17 @@ mod claude {
         assert_eq!(rig.answer(&claude, thread, "allow"), Outcome::Done);
         let state = rig.until(thread, "the turn", turn_ended(1, TurnState::Complete)).await;
         assert!(state.open_requests().next().is_none());
+        let edits = state.items.iter().find_map(|i| match &i.body {
+            slopty_proto::thread::ItemBody::Tool(call) => match &call.detail {
+                Some(slopty_proto::thread::detail::ToolDetail::Exec(e)) => e.edits.clone(),
+                _ => None,
+            },
+            _ => None,
+        });
+        let edits = edits.expect("what the command changed");
+        let made = &edits.files[0];
+        assert!(made.path.ends_with("/made") && made.created, "{made:?}");
+        assert_eq!((made.patch.added, made.patch.removed, edits.moves_tree), (1, 0, false));
         let record = rig.record();
         let answers = heard(&record, "control_response");
         let asked = record["received"].as_array().unwrap().len();
@@ -645,5 +662,498 @@ mod claude {
             .filter(|i| matches!(&i.body, ItemBody::Notice(n) if n.kind == Notice::API_ERROR))
             .count();
         assert_eq!(left, 0, "{:#?}", state.items);
+    }
+
+    /// The words of every notice `state` holds.
+    fn notices(state: &ThreadState) -> Vec<String> {
+        state
+            .items
+            .iter()
+            .filter_map(|i| match &i.body {
+                slopty_proto::thread::ItemBody::Notice(n) => Some(n.text.text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Whether `intent` was refused, before Claude Code heard of it.
+    fn refused(outcome: &Outcome) -> bool {
+        matches!(outcome, Outcome::Refused { reason } if !reason.is_empty())
+    }
+
+    /// A background command is the thread's task under Claude Code's task id, and stopping it
+    /// names that id to Claude Code (`stop_task`), which ends it killed; a task that is not
+    /// running is refused before Claude Code hears of it.
+    #[tokio::test]
+    async fn a_background_command_is_stopped_by_its_task_id() {
+        let rig = Rig::new(&[]).await;
+        let (claude, _served) = rig.serve();
+        let thread = rig.started(&claude, "background sleep 30").await;
+        let task = "b00000001";
+        let running = move |s: &ThreadState| s.tasks.iter().any(|t| t.id == task && t.is_live());
+        let state = rig
+            .until(thread, "the command running in the background", |s| {
+                turn_ended(1, TurnState::Complete)(s) && running(s)
+            })
+            .await;
+        let found = state.tasks.iter().find(|t| t.id == task).unwrap();
+        assert_eq!((found.kind.as_str(), found.backgrounded), ("shell", true), "{found:?}");
+        assert_eq!(found.item.as_ref().map(|i| i.0.as_str()), Some("toolu_bg1"));
+
+        let nothing = Intent::StopTask { task: "b404".to_owned() };
+        assert!(refused(&rig.intent(&claude, thread, &nothing)));
+        let stop = Intent::StopTask { task: task.to_owned() };
+        assert_eq!(rig.intent(&claude, thread, &stop), Outcome::Done);
+        let state = rig
+            .until(thread, "the command stopped", |s| {
+                s.tasks.iter().any(|t| t.id == task && t.state == "killed")
+            })
+            .await;
+        let record = rig.record();
+        let stops = heard(&record, "stop_task");
+        assert_eq!(stops.len(), 1, "{stops:#?}");
+        assert_eq!(stops[0]["request"]["task_id"], task);
+        assert!(state.turns.iter().all(|t| t.state != TurnState::Active), "{:#?}", state.turns);
+    }
+
+    /// A call that blocks the turn says how long it has run as it runs, and moving it to the
+    /// background (`background_tasks`) lets the turn end while it goes on as a task; a call the
+    /// thread does not hold is refused.
+    #[tokio::test]
+    async fn a_blocking_call_goes_to_the_background_and_the_turn_ends() {
+        let rig = Rig::new(&[]).await;
+        let (claude, _served) = rig.serve();
+        let thread = rig.started(&claude, "wait 20").await;
+        let call = slopty_proto::thread::ItemId("toolu_w1".to_owned());
+        let noted = call.clone();
+        let state = rig
+            .until(thread, "the call's progress", move |s| {
+                s.calls.get(&noted).is_some_and(|n| n.elapsed_ms.is_some())
+            })
+            .await;
+        assert_eq!(state.status.phase, slopty_proto::thread::Phase::Working, "{:?}", state.status);
+        let elsewhere = Intent::Background { item: Some(slopty_proto::thread::ItemId("x".into())) };
+        assert!(refused(&rig.intent(&claude, thread, &elsewhere)));
+        let moved = Intent::Background { item: None };
+        assert_eq!(rig.intent(&claude, thread, &moved), Outcome::Done);
+        let state = rig
+            .until(thread, "the turn past the call", |s| {
+                turn_ended(1, TurnState::Complete)(s)
+                    && s.tasks.iter().any(|t| t.item.as_ref() == Some(&call) && t.is_live())
+            })
+            .await;
+        let said = state.items.iter().any(|i| {
+            matches!(&i.body, slopty_proto::thread::ItemBody::Text(t)
+                if t.text == "Done: it went on in the background.")
+        });
+        assert!(said, "{:#?}", state.items);
+        assert_eq!(heard(&rig.record(), "background_tasks").len(), 1);
+    }
+
+    /// Work no call started is a task row of its own; what Claude Code says beside the
+    /// conversation is the thread's: a notification, the goal, the rows it derives (memories,
+    /// a permission retried, a fallback model, a hook that failed, long instructions) and the
+    /// prompt it suggests next.
+    #[tokio::test]
+    async fn what_claude_code_says_beside_the_conversation_is_the_threads() {
+        let rig = Rig::new(&[]).await;
+        let (claude, _served) = rig.serve();
+        let thread = rig.started(&claude, "monitor").await;
+        let state =
+            rig.until(thread, "the monitor's turn", turn_ended(1, TurnState::Complete)).await;
+        let row = state
+            .items
+            .iter()
+            .find_map(|i| match &i.body {
+                slopty_proto::thread::ItemBody::Task(note) if note.task == "m00000001" => {
+                    Some(note.clone())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("the monitor's own row: {:#?}", state.items));
+        assert_eq!((row.call.as_ref(), row.status.as_str()), (None, "completed"), "{row:?}");
+        assert!(row.summary.contains("stream ended"), "{row:?}");
+
+        rig.send(&claude, thread, "signals");
+        let state = rig
+            .until(thread, "the signals", |s| {
+                turn_ended(2, TurnState::Complete)(s) && s.suggestion.is_some()
+            })
+            .await;
+        assert_eq!(state.suggestion.as_deref(), Some("Run the tests"));
+        assert_eq!(state.goal.as_ref().map(|g| g.condition.as_str()), Some("the tests pass"));
+        let note = state.notes.iter().find(|n| n.key == "stub-heads-up").expect("the notification");
+        assert_eq!(
+            (note.text.as_str(), note.priority.as_str()),
+            ("Heads up from the stand-in", "high")
+        );
+        assert!(note.until_ms.is_some(), "it passes");
+        let said = notices(&state);
+        for row in [
+            "Saved 2 memories",
+            "Allowed npm test",
+            "Switched to claude-sonnet-5-5",
+            "PreToolUse hook failed: lint failed",
+            "The instruction files are long: 50000 characters, over 40000",
+        ] {
+            assert!(said.iter().any(|s| s == row), "{row} in {said:#?}");
+        }
+    }
+
+    /// A dialog Claude Code raises is a request answered on its id with the option the person
+    /// took, and an MCP server's form is answered with what they filled in; Claude Code takes
+    /// each answer as given.
+    #[tokio::test]
+    async fn a_dialog_and_a_form_are_answered_on_their_ids() {
+        let rig = Rig::new(&[]).await;
+        let (claude, _served) = rig.serve();
+        let thread = rig.started(&claude, "dialog goal_proposal").await;
+        let state = rig.until(thread, "the dialog", asking).await;
+        let request = state.open_requests().next().unwrap();
+        assert_eq!(request.kind, "dialog:goal_proposal");
+        let ids: Vec<&str> = request.options.iter().map(|o| o.id.as_str()).collect();
+        assert_eq!(ids, ["yes", "no"], "the payload's own options");
+        assert!(refused(&rig.answer(&claude, thread, "maybe")), "an answer it does not offer");
+        assert_eq!(rig.answer(&claude, thread, "yes"), Outcome::Done);
+        let state =
+            rig.until(thread, "the dialog's turn", turn_ended(1, TurnState::Complete)).await;
+        let texts = |s: &ThreadState| -> Vec<String> {
+            s.items
+                .iter()
+                .filter_map(|i| match &i.body {
+                    slopty_proto::thread::ItemBody::Text(t) => Some(t.text.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert!(texts(&state).contains(&r#"Dialog goal_proposal: completed "yes""#.to_owned()));
+
+        rig.send(&claude, thread, "elicit");
+        let state = rig.until(thread, "the form", asking).await;
+        let form = state.open_requests().next().unwrap();
+        assert_eq!(form.kind, slopty_proto::thread::Request::ELICITATION);
+        assert!(form.schema_json.as_deref().is_some_and(|s| s.contains("ticket")), "{form:?}");
+        assert_eq!(rig.answer(&claude, thread, r#"{"ticket":"T-1"}"#), Outcome::Done);
+        let state = rig.until(thread, "the form's turn", turn_ended(2, TurnState::Complete)).await;
+        assert!(
+            texts(&state).contains(&r#"Elicitation: accept {"ticket":"T-1"}"#.to_owned()),
+            "{:?}",
+            texts(&state)
+        );
+        let record = rig.record();
+        let answers = heard(&record, "control_response");
+        assert_eq!(answers.len(), 2, "{answers:#?}");
+        assert_eq!(answers[0]["response"]["response"]["behavior"], "completed");
+        assert_eq!(answers[1]["response"]["response"]["action"], "accept");
+    }
+
+    /// A `!` command runs in the thread's folder and its output reaches Claude Code as the
+    /// person's message, answered; with `respondToBashCommands` off it is taken in without a
+    /// turn (`shouldQuery: false`), the command and its output still the thread's.
+    #[tokio::test]
+    async fn a_bang_commands_output_reaches_claude_code() {
+        let rig = Rig::new(&[]).await;
+        let (claude, _served) = rig.serve();
+        let thread = rig.started(&claude, "hello").await;
+        rig.until(thread, "the first turn", turn_ended(1, TurnState::Complete)).await;
+        assert!(refused(&rig.intent(&claude, thread, &Intent::Shell { command: " ".to_owned() })));
+        let pwd = Intent::Shell { command: "pwd".to_owned() };
+        assert_eq!(rig.intent(&claude, thread, &pwd), Outcome::Done);
+        rig.until(thread, "the answered command", turn_ended(2, TurnState::Complete)).await;
+        let record = rig.record();
+        let sent = heard(&record, "user");
+        let last = sent.last().unwrap();
+        let output = last["message"]["content"][1]["text"].as_str().unwrap();
+        let work = rig.work.to_string_lossy();
+        assert!(output.contains(&format!("<bash-stdout>{work}")), "{output}");
+        assert!(last.get("shouldQuery").is_none(), "answered: {last}");
+
+        let project = rig.work.join(".claude");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("settings.json"), r#"{"respondToBashCommands":false}"#)
+            .unwrap();
+        let echo = Intent::Shell { command: "echo taken in".to_owned() };
+        assert_eq!(rig.intent(&claude, thread, &echo), Outcome::Done);
+        let record = rig
+            .record_once("the command taken in", |r| {
+                r["received"]
+                    .as_array()
+                    .is_some_and(|l| l.iter().any(|l| l["shouldQuery"] == false))
+            })
+            .await;
+        let quiet = heard(&record, "user").into_iter().find(|l| l["shouldQuery"] == false).unwrap();
+        assert!(quiet.to_string().contains("taken in"), "{quiet}");
+        let state = rig
+            .until(thread, "the command, the person's", |s| {
+                s.items.iter().any(|i| {
+                    matches!(&i.body, slopty_proto::thread::ItemBody::User(u)
+                        if u.command.as_deref() == Some("!") && u.text.text == "echo taken in")
+                }) && s.status.phase != slopty_proto::thread::Phase::Working
+            })
+            .await;
+        assert!(state.pending.is_empty(), "{:?}", state.pending);
+        assert!(
+            !state.items.iter().any(|i| i.id.0.starts_with("bang-")),
+            "the running command's own row is gone once it ran"
+        );
+    }
+
+    /// Putting the files back to before a turn goes through Claude Code's checkpoints
+    /// (`rewind_files`) and says what it put back; a fork through the first turn shares that
+    /// turn alone (`--resume-session-at`), and a turn that is not there is refused.
+    #[tokio::test]
+    async fn files_go_back_before_a_turn_and_a_fork_shares_the_turns_before() {
+        let rig = Rig::new(&[]).await;
+        let (claude, _served) = rig.serve();
+        let thread = rig.started(&claude, "write a.txt one").await;
+        let file = rig.work.join("a.txt");
+        rig.until(thread, "the first write", turn_ended(1, TurnState::Complete)).await;
+        rig.send(&claude, thread, "write a.txt two");
+        let state = rig.until(thread, "the second write", turn_ended(2, TurnState::Complete)).await;
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "two\n");
+        let (first, second) = (state.turns[0].id, state.turns[1].id);
+
+        let gone = Intent::Rewind { turn: slopty_proto::thread::TurnId(99) };
+        assert!(refused(&rig.intent(&claude, thread, &gone)));
+        assert_eq!(rig.intent(&claude, thread, &Intent::Rewind { turn: second }), Outcome::Done);
+        rig.until(thread, "the second put back", |s| {
+            notices(s).iter().any(|n| n == "Put back 1 file (+1 −1)")
+        })
+        .await;
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "one\n");
+        let record = rig.record();
+        let rewinds = heard(&record, "rewind_files");
+        let prompt = state.turns[1].input.as_ref().unwrap().0.clone();
+        assert_eq!(rewinds[0]["request"]["user_message_id"], prompt.as_str());
+
+        let forked = claude.fork(thread, IntentId::new(), Some(first)).await;
+        let Outcome::Started { thread: fork } = forked else { panic!("{forked:?}") };
+        let fork_state = rig.host.state(fork).unwrap().0;
+        assert_eq!(
+            fork_state.meta.forked_from.as_ref().map(|f| (f.thread, f.turn)),
+            Some((thread, Some(first)))
+        );
+        let record = rig
+            .record_once("the fork's Claude Code", |r| {
+                r["argv"].as_array().is_some_and(|a| a.iter().any(|w| w == "--resume-session-at"))
+            })
+            .await;
+        let argv: Vec<&str> =
+            record["argv"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
+        assert!(argv.contains(&"--fork-session"), "{argv:?}");
+        let transcript = slopty_agent::claude::sessions::transcript(
+            &rig.home,
+            &rig.work,
+            &fork_state.meta.native,
+        );
+        let kept = std::fs::read_to_string(&transcript).unwrap();
+        assert!(kept.contains("write a.txt one") && !kept.contains("write a.txt two"), "{kept}");
+    }
+
+    /// The person's status line command runs on the thread as Claude Code's TUI runs it, its
+    /// words the thread's.
+    #[tokio::test]
+    async fn the_persons_status_line_is_the_threads() {
+        let rig = Rig::new(&[]).await;
+        let claude_dir = rig.home.join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let line = serde_json::json!({ "statusLine": {
+            "type": "command",
+            "command": "cat > /dev/null; printf 'in %s' \"$(basename \"$PWD\")\"",
+        } });
+        std::fs::write(claude_dir.join("settings.json"), line.to_string()).unwrap();
+        let (claude, _served) = rig.serve();
+        let thread = rig.started(&claude, "hello").await;
+        let state = rig
+            .until(thread, "the status line", |s| s.status_line.as_deref() == Some("in work"))
+            .await;
+        assert_eq!(state.status_line.as_deref(), Some("in work"));
+    }
+
+    /// A permission rule is written into its scope's file, every other setting kept, and the
+    /// rules Claude Code then lists are the thread's; removed, it is gone from both. A scope
+    /// Claude Code does not write is refused.
+    #[tokio::test]
+    async fn a_permission_rule_goes_into_its_file_and_back_as_listed() {
+        use slopty_proto::thread::{Rule, RuleChange};
+        let rig = Rig::new(&[]).await;
+        let local = rig.work.join(".claude/settings.local.json");
+        std::fs::create_dir_all(local.parent().unwrap()).unwrap();
+        std::fs::write(&local, r#"{"env":{"A":"1"}}"#).unwrap();
+        let (claude, _served) = rig.serve();
+        let thread = rig.started(&claude, "hello").await;
+        let state = rig.until(thread, "the rules listed", |s| s.rules.is_some()).await;
+        assert_eq!(state.rules.as_ref().unwrap().rules, Vec::new());
+        assert_eq!(state.surfaces, Vec::new(), "no mod draws here");
+        let rule = "Bash(cargo test:*)";
+        let change = |add: bool, scope: &str| {
+            Intent::Rule(RuleChange {
+                add,
+                behavior: Rule::ALLOW.to_owned(),
+                rule: rule.to_owned(),
+                scope: scope.to_owned(),
+            })
+        };
+        assert!(refused(&rig.intent(&claude, thread, &change(true, "policySettings"))));
+        assert_eq!(rig.intent(&claude, thread, &change(true, Rule::LOCAL)), Outcome::Done);
+        let state = rig
+            .until(thread, "the rule listed", |s| {
+                s.rules.as_ref().is_some_and(|r| r.rules.iter().any(|r| r.text == rule))
+            })
+            .await;
+        let listed = state.rules.unwrap().rules.into_iter().find(|r| r.text == rule).unwrap();
+        assert_eq!((listed.source.as_str(), listed.behavior.as_str()), (Rule::LOCAL, Rule::ALLOW));
+        let doc: Value = serde_json::from_str(&std::fs::read_to_string(&local).unwrap()).unwrap();
+        assert_eq!(doc["env"]["A"], "1", "the rest kept");
+        assert_eq!(rig.intent(&claude, thread, &change(false, Rule::LOCAL)), Outcome::Done);
+        rig.until(thread, "the rule gone", |s| {
+            s.rules.as_ref().is_some_and(|r| !r.rules.iter().any(|r| r.text == rule))
+        })
+        .await;
+    }
+
+    /// A mod's pane and band are the thread's surfaces, each element the person can act in
+    /// named; pressing its button reaches the mod (`ui_press`), whose toast and status come
+    /// and whose pane is drawn again; closing the pane takes it away. A surface that is not
+    /// there is refused.
+    #[tokio::test]
+    async fn a_mods_surfaces_are_drawn_and_acted_in() {
+        use slopty_proto::thread::{Surface, SurfaceEvent};
+        let rig = Rig::new(&[("STUB_UI", "1")]).await;
+        let (claude, _served) = rig.serve();
+        let thread = rig.started(&claude, "hello").await;
+        let has = |s: &ThreadState, id: &str| s.surfaces.iter().any(|x| x.id == id);
+        let state = rig
+            .until(thread, "the pane and the band", |s| has(s, "deploy") && has(s, "above-prompt"))
+            .await;
+        let pane = state.surfaces.iter().find(|s| s.id == "deploy").unwrap();
+        assert_eq!((pane.kind.as_str(), pane.title.as_deref()), (Surface::PANE, Some("Deploy")));
+        assert!(pane.tree.contains(r#""id":"ship:1""#), "{}", pane.tree);
+        let act = |surface: &str, element: &str, event: SurfaceEvent| Intent::Surface {
+            surface: surface.to_owned(),
+            element: element.to_owned(),
+            event,
+        };
+        assert!(refused(&rig.intent(&claude, thread, &act("nope", "", SurfaceEvent::Press))));
+        assert_eq!(
+            rig.intent(&claude, thread, &act("deploy", "ship:1", SurfaceEvent::Press)),
+            Outcome::Done
+        );
+        let state = rig
+            .until(thread, "the mod's answer", |s| {
+                s.surfaces
+                    .iter()
+                    .any(|x| x.kind == Surface::TOAST && x.text.as_deref() == Some("Shipped"))
+                    && s.surfaces.iter().any(|x| x.id == "status:ship")
+                    && s.surfaces
+                        .iter()
+                        .any(|x| x.id == "deploy" && x.tree.contains("Deploy: shipped"))
+            })
+            .await;
+        let status = state.surfaces.iter().find(|s| s.id == "status:ship").unwrap();
+        assert_eq!(status.text.as_deref(), Some("shipped"));
+        let record = rig.record();
+        let presses = heard(&record, "ui_press");
+        assert_eq!((presses.len(), &presses[0]["request"]["handle"]), (1, &serde_json::json!(1)));
+        assert_eq!(
+            rig.intent(&claude, thread, &act("deploy", "", SurfaceEvent::Close)),
+            Outcome::Done
+        );
+        rig.until(thread, "the pane gone", |s| !has(s, "deploy")).await;
+    }
+
+    /// Approving a plan with the context cleared is one verb: the plan's ask is denied as
+    /// Claude Code's own "clear context" does, the mode becomes accept-edits, the context is
+    /// cleared (`/clear`) and the plan goes as the next message.
+    #[tokio::test]
+    async fn a_plan_approved_with_the_context_cleared_runs_from_a_clear_context() {
+        let rig = Rig::new(&[]).await;
+        let (claude, _served) = rig.serve();
+        let thread = rig.started(&claude, "plan").await;
+        let state = rig.until(thread, "the plan", asking).await;
+        let plan = state.open_requests().next().unwrap();
+        assert!(plan.options.iter().any(|o| o.id == "clear"), "{:?}", plan.options);
+        assert_eq!(rig.answer(&claude, thread, "clear"), Outcome::Done);
+        let record = rig
+            .record_once("the plan sent after the clear", |r| {
+                heard(r, "user")
+                    .iter()
+                    .any(|l| l.to_string().contains("Implement the following plan"))
+            })
+            .await;
+        let words: Vec<String> = heard(&record, "user").iter().map(ToString::to_string).collect();
+        let clear = words.iter().position(|w| w.contains("\"/clear\"")).expect("the clear");
+        let carried =
+            words.iter().position(|w| w.contains("Implement the following plan")).unwrap();
+        assert!(clear < carried, "{words:#?}");
+        assert!(words[carried].contains("1. Write the file"), "{}", words[carried]);
+        let modes = heard(&record, "set_permission_mode");
+        assert_eq!(modes.last().unwrap()["request"]["mode"], "acceptEdits");
+        let answer = heard(&record, "control_response");
+        assert_eq!(answer[0]["response"]["response"]["behavior"], "deny");
+        assert_eq!(answer[0]["response"]["response"]["interrupt"], true);
+        rig.until(thread, "the plan carried out", |s| {
+            s.items.iter().any(|i| {
+                matches!(&i.body, slopty_proto::thread::ItemBody::Text(t)
+                if t.text.starts_with("Done: Implement the following plan"))
+            })
+        })
+        .await;
+    }
+
+    /// A stand-in for `slopty mcp` answering one `show_visual` as its check does: a script that
+    /// says `broken` is turned down with its line, any other is shown.
+    const CHECKER: &str = r#"#!/bin/sh
+read -r line
+case "$line" in
+*broken*) echo '{"jsonrpc":"2.0","id":1,"result":{"isError":true,"content":[{"type":"text","text":"line 1: broken is not defined"}]}}' ;;
+*) echo '{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"{\"shown\":\"Hello\"}"}]}}' ;;
+esac
+"#;
+
+    /// Slopty's own `show_visual` called by Claude Code is the thread's visual once the call
+    /// came back checked; one the check turned down stays a call, with why. The stand-in calls
+    /// it through the folder's `slopty` server (`STUB_TURNS`), here a script that checks a
+    /// visual as `slopty mcp` does and turns down a script that says `broken`.
+    #[tokio::test]
+    async fn a_visual_claude_code_shows_is_the_threads_once_checked() {
+        let script = r#"ui.text("hello")"#;
+        let turns = serde_json::json!({
+            "show it": [{ "name": "show_visual", "arguments": { "title": "Hello", "script": script } }],
+            "show broken": [{ "name": "show_visual", "arguments": { "title": "Bad", "script": "broken" } }],
+        });
+        let turns = turns.to_string();
+        let rig = Rig::new(&[("STUB_TURNS", turns.as_str())]).await;
+        let server = rig.programs.join("slopty-mcp-check");
+        std::fs::write(&server, CHECKER).unwrap();
+        std::fs::set_permissions(&server, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        let config =
+            serde_json::json!({ "mcpServers": { "slopty": { "command": server, "args": [] } } });
+        std::fs::write(rig.work.join(".mcp.json"), config.to_string()).unwrap();
+        let (claude, _served) = rig.serve();
+        let thread = rig.started(&claude, "show it").await;
+        let state = rig.until(thread, "the visual", turn_ended(1, TurnState::Complete)).await;
+        let visual = state.items.iter().find_map(|i| match &i.body {
+            slopty_proto::thread::ItemBody::Tool(call) => match &call.detail {
+                Some(slopty_proto::thread::detail::ToolDetail::Visual(v)) => Some(v.clone()),
+                _ => None,
+            },
+            _ => None,
+        });
+        let visual = visual.unwrap_or_else(|| panic!("the visual: {:#?}", state.items));
+        assert_eq!((visual.title.as_str(), visual.script.text.as_str()), ("Hello", script));
+
+        rig.send(&claude, thread, "show broken");
+        let state = rig.until(thread, "the turned down", turn_ended(2, TurnState::Complete)).await;
+        let visuals = state
+            .items
+            .iter()
+            .filter(|i| {
+                matches!(&i.body, slopty_proto::thread::ItemBody::Tool(call)
+                if matches!(call.detail, Some(slopty_proto::thread::detail::ToolDetail::Visual(_))))
+            })
+            .count();
+        assert_eq!(visuals, 1, "the turned-down one is no visual: {:#?}", state.items);
     }
 }

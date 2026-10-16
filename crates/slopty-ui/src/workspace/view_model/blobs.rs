@@ -1,6 +1,7 @@
 //! What the shell fetches of a thread beyond its transcript: a tool call's whole output, an edit's
-//! whole diff, and the pictures of its messages and calls, each read through the thread's link
-//! to its whole ([`slopty_proto::thread::wire::ThreadRequest::Expand`]) when the worker cut it.
+//! whole diff, the pictures of its messages and calls, and the visuals its calls showed, each read
+//! through the thread's link to its whole ([`slopty_proto::thread::wire::ThreadRequest::Expand`])
+//! when the worker cut it.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -8,12 +9,13 @@ use std::time::{Duration, Instant};
 use base64::Engine as _;
 use gpui::{AppContext as _, Context, Task};
 use slopty_client::WorkerKey;
+use slopty_proto::thread::detail::ShellEdit;
 use slopty_proto::thread::wire::Expanded;
 use slopty_proto::thread::{ContentRef, ItemBody, ThreadId, ToolCall, ToolDetail};
 use slopty_view_rpc::{RpcError, RpcReply};
 
 use super::param;
-use crate::view_model::transcript;
+use crate::view_model::transcript::{self, VisualRead};
 use crate::workspace::WorkspaceView;
 
 /// How long a whole may take to come from its worker.
@@ -45,8 +47,9 @@ fn text_of(whole: Option<&Arc<Expanded>>) -> Option<String> {
 
 impl WorkspaceView {
     /// `FetchToolBlob`: a tool call's whole output (`{thread}/{item}`), or an edit's diff
-    /// (`{thread}/{item}.diff`) as the shell draws one ([`transcript::tool_diff`]), each whole
-    /// once its worker sent what it had cut.
+    /// (`{thread}/{item}.diff`) as the shell draws one ([`transcript::tool_diff`]), or a file's
+    /// a command changed (`{thread}/{item}:edit:{n}.diff`), each whole once its worker sent
+    /// what it had cut.
     pub(super) fn view_tool_blob(
         &self,
         params: &serde_json::Value,
@@ -60,6 +63,25 @@ impl WorkspaceView {
         let Some((key, thread)) = self.chat_thread(chat, cx) else {
             return Task::ready(Err(missing()));
         };
+        // slopty: a file a command changed, drawn as an edit's chip under the command's.
+        if diff && let Some((item, n)) = transcript::shell_edit_of(item) {
+            let Some(edit) =
+                self.view_tool_call(key, thread, item, cx).and_then(|call| match call.detail {
+                    Some(ToolDetail::Exec(exec)) => exec.edits?.files.into_iter().nth(n),
+                    _ => None,
+                })
+            else {
+                return Task::ready(Err(missing()));
+            };
+            let Some(full) = edit.patch.full.clone() else {
+                return Task::ready(edit_blob(&edit, None));
+            };
+            let whole = Self::view_whole(key, thread, full, cx);
+            return cx.background_spawn(async move {
+                let whole = text_of(whole.await.as_ref());
+                edit_blob(&edit, whole.as_deref())
+            });
+        }
         let Some(call) = self.view_tool_call(key, thread, item, cx) else {
             return Task::ready(Err(missing()));
         };
@@ -88,7 +110,7 @@ impl WorkspaceView {
     }
 
     /// The tool call `item` of `thread` on `key`, as its state here holds it.
-    fn view_tool_call(
+    pub(super) fn view_tool_call(
         &self,
         key: WorkerKey,
         thread: ThreadId,
@@ -167,18 +189,65 @@ impl WorkspaceView {
         cx.background_spawn(async move {
             let whole = whole.await.ok_or_else(gone)?;
             let Expanded::Bytes(bytes) = whole.as_ref() else { return Err(gone()) };
-            let size = bytes.len();
-            let start = offset.min(size);
-            let end = start.saturating_add(IMAGE_CHUNK).min(size);
-            let data = base64::engine::general_purpose::STANDARD
-                .encode(bytes.get(start..end).unwrap_or_default());
-            Ok(RpcReply::Value(serde_json::json!({
-                "name": name,
-                "mimeType": image.media_type,
-                "data": data,
-                "nextOffset": end,
-                "done": end == size,
-            })))
+            Ok(chunk(&name, &image.media_type, bytes, offset))
+        })
+    }
+
+    /// `ReadAttachmentChunk` for a visual a call of a thread showed ([`transcript::visual_path`]):
+    /// its script, the names of its files, or one of its files, from `offset`, in base64. The
+    /// script is the call's own input (whole once its worker sent what it cut); a file is read on
+    /// the worker by the path the call named ([`ContentRef::item_asset`]).
+    pub(super) fn view_visual_chunk(
+        &self,
+        path: &str,
+        offset: usize,
+        cx: &Context<Self>,
+    ) -> Task<Result<RpcReply, RpcError>> {
+        let gone = || RpcError::Failed("That visual is not here".to_owned());
+        let Some((thread, item, read)) = transcript::visual_of(path) else {
+            return Task::ready(Err(gone()));
+        };
+        let Some(key) = self.worker_of_thread(thread, cx) else {
+            return Task::ready(Err(gone()));
+        };
+        let Some(call) = self.view_tool_call(key, thread, item, cx) else {
+            return Task::ready(Err(gone()));
+        };
+        let Some(ToolDetail::Visual(visual)) = call.detail else {
+            return Task::ready(Err(gone()));
+        };
+        let name = path.rsplit('/').next().unwrap_or_default().to_owned();
+        let bytes: Task<Option<Vec<u8>>> = match read {
+            VisualRead::Script => match visual.script.full.clone() {
+                Some(full) => {
+                    let whole = Self::view_whole(key, thread, full, cx);
+                    cx.background_spawn(async move {
+                        text_of(whole.await.as_ref()).map(String::into_bytes)
+                    })
+                }
+                None => Task::ready(Some(visual.script.text.into_bytes())),
+            },
+            VisualRead::Assets => {
+                let names: Vec<&String> = visual.assets.keys().collect();
+                Task::ready(serde_json::to_vec(&names).ok())
+            }
+            VisualRead::Asset(asset) => {
+                if !visual.assets.contains_key(asset) {
+                    return Task::ready(Err(gone()));
+                }
+                let content = ContentRef::item_asset(item, asset);
+                let whole = Self::view_whole(key, thread, content, cx);
+                cx.background_spawn(async move {
+                    match whole.await?.as_ref() {
+                        Expanded::Bytes(bytes) => Some(bytes.clone()),
+                        Expanded::Text(_) | Expanded::Gone => None,
+                    }
+                })
+            }
+        };
+        cx.background_spawn(async move {
+            let bytes = bytes.await.ok_or_else(gone)?;
+            Ok(chunk(&name, "application/octet-stream", &bytes, offset))
         })
     }
 }
@@ -190,4 +259,30 @@ fn diff_blob(call: &ToolCall, whole: Option<&str>) -> Result<RpcReply, RpcError>
         .ok_or_else(missing)?;
     let text = serde_json::to_string(&diff).map_err(|e| RpcError::Failed(e.to_string()))?;
     Ok(blob(&text))
+}
+
+/// The diff of a file a command changed as the shell's blob, from `whole` when its hunks were
+/// cut and it came.
+fn edit_blob(edit: &ShellEdit, whole: Option<&str>) -> Result<RpcReply, RpcError> {
+    let diff = transcript::shell_edit_diff(edit, whole)
+        .or_else(|| transcript::shell_edit_diff(edit, None))
+        .ok_or_else(missing)?;
+    let text = serde_json::to_string(&diff).map_err(|e| RpcError::Failed(e.to_string()))?;
+    Ok(blob(&text))
+}
+
+/// One chunk of a read back: `bytes` from `offset`, at most [`IMAGE_CHUNK`] of them, in base64.
+fn chunk(name: &str, mime: &str, bytes: &[u8], offset: usize) -> RpcReply {
+    let size = bytes.len();
+    let start = offset.min(size);
+    let end = start.saturating_add(IMAGE_CHUNK).min(size);
+    let data =
+        base64::engine::general_purpose::STANDARD.encode(bytes.get(start..end).unwrap_or_default());
+    RpcReply::Value(serde_json::json!({
+        "name": name,
+        "mimeType": mime,
+        "data": data,
+        "nextOffset": end,
+        "done": end == size,
+    }))
 }

@@ -2082,3 +2082,17 @@ more full-window layer.
   - Checks: the fork's gpui and gpui_apple tests (928), clippy, the compat check and the iOS
     simulator check; gpui-kit's workspace clippy, story, recipe and shell tests; libghostty-vt
     built and tested on a runner against the merged ghostty.
+- ✅ **gpui-kit `9bbe99bc` (2026-10-16): upstream #3534 and #3531.** gpui-kit is rebased onto
+  `2963d6d8` (2 upstream commits) with no conflict, and its workspace clippy, story, recipe and
+  shell tests pass on a runner.
+  - #3534 (`gpui-shell` takes a `Background` in `bg`, plus a shadow style) reaches only the lock:
+    Slopty builds no `gpui-shell`.
+  - #3531 marks a disabled Base control (Button, Link, Switch, Radio, Toggle, Checkbox, Select,
+    Tab, DatePicker, TimeField, Slider) disabled on its accessibility node, through a wrapper
+    that adds no layout node, focus stop or node of its own. A disabled slider also stops taking
+    Increment and Decrement from assistive technology. Wherever Slopty draws a disabled Base
+    control, VoiceOver now hears it as unavailable rather than as usable. Layout and painting are
+    unchanged, and so is Slopty's test tree (`slopty_kit::a11y::Node` carries no disabled
+    flag), so no golden or tree test moves.
+  - The old head `914ea1ab` stays fetchable on the fork's `keep/914ea1ab` for checks of commits
+    that still pin it.

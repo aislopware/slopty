@@ -87,6 +87,8 @@ mod tests {
                 call!(p::CommandExecutionRequestApprovalParams);
             }
             "item/tool/requestUserInput" => call!(p::ToolRequestUserInputParams),
+            "mcpServer/resource/read" => call!(p::McpResourceReadParams),
+            "mcpServer/tool/call" => call!(p::McpServerToolCallParams),
             other => panic!("no types named for {other}"),
         }
     }
@@ -97,8 +99,10 @@ mod tests {
     fn every_frame_the_app_server_sent_reads() {
         let mut unnamed = BTreeSet::new();
         let mut read = 0;
-        let lines: Vec<Line> =
-            [approval(), fixture("question.jsonl")].into_iter().flatten().collect();
+        let lines: Vec<Line> = [approval(), fixture("question.jsonl"), fixture("media.jsonl")]
+            .into_iter()
+            .flatten()
+            .collect();
         for line in lines.iter().filter(|line| !line.sent) {
             match rpc::read(&line.msg.to_string()).unwrap() {
                 Incoming::UnknownNotification { method } => {
@@ -119,8 +123,10 @@ mod tests {
     /// them, and the approval and the answer to it.
     #[test]
     fn what_both_sides_sent_reads_back() {
-        let lines: Vec<Line> =
-            [approval(), fixture("question.jsonl")].into_iter().flatten().collect();
+        let lines: Vec<Line> = [approval(), fixture("question.jsonl"), fixture("media.jsonl")]
+            .into_iter()
+            .flatten()
+            .collect();
         let mut asked: HashMap<(String, String), (String, Value)> = HashMap::new();
         let mut checked = BTreeSet::new();
         for line in &lines {
@@ -145,7 +151,8 @@ mod tests {
         }
         let want = ["initialize", "thread/start", "thread/resume", "turn/start"];
         let asks = ["item/commandExecution/requestApproval", "item/tool/requestUserInput"];
-        let want = want.into_iter().chain(asks);
+        let apps = ["mcpServer/resource/read", "mcpServer/tool/call"];
+        let want = want.into_iter().chain(asks).chain(apps);
         assert_eq!(checked, want.map(str::to_owned).collect());
     }
 
@@ -1430,5 +1437,151 @@ mod tests {
         assert_eq!(answered[0], json!({"action": "accept", "content": {"notify": true}}));
         assert_eq!(answered[1]["action"], "decline");
         assert!(answered[1].get("content").is_none_or(Value::is_null));
+    }
+    /// The recorded media turn, as the client that ran it saw it, with `/work` at `work`: the
+    /// thread its `thread/start` brought back, then every notification it heard.
+    fn media_turn(work: &std::path::Path) -> ThreadState {
+        let work = work.to_str().unwrap();
+        let mut shared: Option<Shared> = None;
+        let mut state: Option<ThreadState> = None;
+        for line in fixture("media.jsonl").into_iter().filter(|l| !l.sent) {
+            let text = line.msg.to_string().replace("\"/work", &format!("\"{work}"));
+            let actions = match rpc::read(&text).unwrap() {
+                Incoming::Answer { outcome: Ok(result), .. } if result.get("thread").is_some() => {
+                    let thread: p::Thread =
+                        serde_json::from_value(result["thread"].clone()).unwrap();
+                    let (begun, actions) = Shared::new(&thread);
+                    state = Some(ThreadState::new(begun.meta().clone()));
+                    shared = Some(begun);
+                    actions
+                }
+                Incoming::Notification { note, .. } => match shared.as_mut() {
+                    Some(shared) => shared.notification(&note, WallMs::from_millis(1)),
+                    None => Vec::new(),
+                },
+                _ => Vec::new(),
+            };
+            if let Some(state) = state.as_mut() {
+                for action in &actions {
+                    state.apply(action);
+                }
+            }
+        }
+        state.unwrap()
+    }
+
+    fn call_of<'a>(state: &'a ThreadState, id: &str) -> &'a slopty_proto::thread::ToolCall {
+        let item = state.items.iter().find(|i| i.id.0 == id).unwrap();
+        let ItemBody::Tool(call) = &item.body else { panic!("a call: {item:?}") };
+        call
+    }
+
+    /// The recorded media turn: the app's call is its page, with the picture its result held
+    /// and the result kept for the page; the picture the model viewed is read from its file;
+    /// each picture is described by the BLAKE3 of its bytes, and comes back whole from where
+    /// it is.
+    #[test]
+    fn a_recorded_media_turn_shows_its_app_and_its_pictures() {
+        use slopty_proto::visual::{McpApp, PageSource};
+
+        let dot = data_encoding::BASE64.decode(DOT.as_bytes()).unwrap();
+        let work = tempfile::tempdir().unwrap();
+        std::fs::write(work.path().join("dot.png"), &dot).unwrap();
+        let state = media_turn(work.path());
+        let digest = blake3::hash(&dot).to_hex().to_string();
+
+        let echo = call_of(&state, "call-echo");
+        assert_eq!(echo.state, ToolState::Completed);
+        assert_eq!(echo.output.as_ref().map(|o| o.text.as_str()), Some("echo: hi"));
+        assert_eq!(echo.images.len(), 1, "the picture the app's result held");
+        assert_eq!(echo.images[0].digest, digest);
+        assert_eq!((echo.images[0].width, echo.images[0].height), (1, 1));
+        let Some(ToolDetail::Page(page)) = &echo.detail else { panic!("{:?}", echo.detail) };
+        let PageSource::App(McpApp { server, tool, resource_uri, result, .. }) = &page.source
+        else {
+            panic!("{page:?}")
+        };
+        assert_eq!((server.as_str(), tool.as_str()), ("apps", "echo"));
+        assert_eq!(resource_uri, "ui://apps/echo");
+        let result: Value = serde_json::from_str(&result.as_ref().unwrap().text).unwrap();
+        assert_eq!(result["structuredContent"], json!({ "echo": "hi", "hostUi": true }));
+
+        let viewed = call_of(&state, "call-view");
+        assert_eq!(viewed.images.len(), 1, "read from the file it names");
+        assert_eq!(viewed.images[0].digest, digest);
+        let bytes = slopty_agent::media::read(&viewed.images[0].at).unwrap();
+        assert_eq!(blake3::hash(&bytes).to_hex().to_string(), digest);
+    }
+
+    /// A 1 × 1 PNG: what the stand-in MCP Apps server returns and the media turn views.
+    const DOT: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+
+    /// The thread begun from the question fixture, and `item` completed in a turn of it.
+    fn completed(item: &Value) -> ThreadState {
+        let (mut shared, mut state) = begun();
+        let turn = recorded_note("question.jsonl", "turn/started");
+        hear(&mut shared, &mut state, "turn/started", &turn);
+        let done = json!({"item": item, "completedAtMs": 2, "threadId": turn["threadId"],
+            "turnId": turn["turn"]["id"]});
+        hear(&mut shared, &mut state, "item/completed", &done);
+        state
+    }
+
+    /// A picture the model made is kept from Codex's own base64 when it saved no file; a
+    /// failed one has none. An app's display mode comes from `mcpAppUi`.
+    #[test]
+    fn a_made_picture_and_an_apps_display_mode_are_kept() {
+        let made =
+            completed(&json!({"type": "imageGeneration", "id": "ig-1", "status": "completed",
+            "result": DOT, "revisedPrompt": "A dot."}));
+        let made = call_of(&made, "ig-1");
+        let dot = data_encoding::BASE64.decode(DOT.as_bytes()).unwrap();
+        assert_eq!(made.images.len(), 1);
+        assert_eq!(made.images[0].digest, blake3::hash(&dot).to_hex().to_string());
+        assert_eq!(made.title, "A dot.");
+        let failed =
+            completed(&json!({"type": "imageGeneration", "id": "ig-2", "status": "failed",
+            "result": ""}));
+        let failed = call_of(&failed, "ig-2");
+        assert_eq!((failed.state.clone(), failed.images.len()), (ToolState::Failed, 0));
+        let missing = completed(&json!({"type": "imageView", "id": "v-1",
+            "path": "/nowhere/missing.png"}));
+        assert_eq!(call_of(&missing, "v-1").images.len(), 0, "a missing file shows no picture");
+
+        let app = completed(&json!({"type": "mcpToolCall", "id": "m-1", "server": "charts",
+            "tool": "plot", "arguments": {}, "status": "completed",
+            "mcpAppUi": {"resourceUri": "ui://charts/plot", "preferredModelDisplayMode": "fullscreen"},
+            "result": {"content": [{"type": "resource_link", "uri": "file:///a.csv", "name": "a.csv"}],
+                       "structuredContent": {"n": 2}}}));
+        let Some(ToolDetail::Page(page)) = &call_of(&app, "m-1").detail else { panic!() };
+        let slopty_proto::visual::PageSource::App(app) = &page.source else { panic!() };
+        assert_eq!(app.resource_uri, "ui://charts/plot");
+        assert_eq!(app.display_mode.as_deref(), Some("fullscreen"));
+        let plain = completed(&json!({"type": "mcpToolCall", "id": "m-2", "server": "charts",
+            "tool": "rows", "arguments": {}, "status": "completed",
+            "result": {"content": [{"type": "resource_link", "uri": "file:///a.csv", "name": "a.csv"}],
+                       "structuredContent": {"n": 2}}}));
+        let Some(ToolDetail::Mcp(mcp)) = &call_of(&plain, "m-2").detail else { panic!() };
+        assert_eq!(mcp.structured.as_ref().map(|s| s.text.as_str()), Some(r#"{"n":2}"#));
+        assert_eq!(mcp.links.len(), 1);
+        assert_eq!(mcp.links[0].uri, "file:///a.csv");
+    }
+
+    /// Slopty's own `show_visual` shows its script once its check passed, its assets the
+    /// worker's own paths; a failed one (a script error) shows none.
+    #[test]
+    fn slopty_s_show_visual_is_a_visual_once_it_passed() {
+        let script = "return function() return ui.text \"hi\" end";
+        let call = |id: &str, status: &str| {
+            json!({"type": "mcpToolCall", "id": id, "server": "slopty", "tool": "show_visual",
+                "arguments": {"script": script, "title": "Hi", "assets": {"a.png": "a.png"}},
+                "status": status, "result": {"content": [{"type": "text", "text": "shown"}]}})
+        };
+        let shown = completed(&call("v-1", "completed"));
+        let Some(ToolDetail::Visual(visual)) = &call_of(&shown, "v-1").detail else { panic!() };
+        assert_eq!((visual.title.as_str(), visual.script.text.as_str()), ("Hi", script));
+        assert_eq!(visual.assets["a.png"], "/work/a.png");
+        let failed = completed(&call("v-2", "failed"));
+        assert!(matches!(call_of(&failed, "v-2").detail, Some(ToolDetail::Mcp(_))));
     }
 }

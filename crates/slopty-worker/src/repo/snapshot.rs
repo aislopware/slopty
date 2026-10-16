@@ -248,6 +248,16 @@ impl Repo {
         Ok(())
     }
 
+    /// Keep `tree` alive under `thread`'s ref `name`, one of its own apart from its turns'
+    /// (`rewound`: the folder before its last rewind).
+    ///
+    /// # Errors
+    ///
+    /// When git fails.
+    pub async fn hold(&self, thread: ThreadId, name: &str, tree: &TreeRef) -> Result<(), Failed> {
+        self.pin(thread, name, tree).await
+    }
+
     /// Keep `tree` alive under `thread`'s ref `name`.
     async fn pin(&self, thread: ThreadId, name: &str, tree: &TreeRef) -> Result<(), Failed> {
         let message = format!("slopty: thread {thread} {name}");

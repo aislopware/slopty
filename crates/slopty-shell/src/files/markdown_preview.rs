@@ -1118,6 +1118,7 @@ impl MarkdownPreview {
                 let image_allowed = self.image_allowed.clone();
                 let diagram_allowed = self.diagram_allowed.clone();
                 opts.media = Some(render::MediaUi {
+                    chart: None, // slopty: a chart fence is the transcript's (M)
                     diagram: Some(Rc::new(move |code, id, theme| {
                         let state = diagrams.get(code);
                         let allowed = diagram_allowed.contains(code);

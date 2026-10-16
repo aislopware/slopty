@@ -119,7 +119,11 @@ exit at start, a slow stop, a usage limit). It also calls Slopty's tools through
 `slopty mcp` it is handed, as a script names them per prompt (`STUB_TURNS`), and plays a recorded
 Claude Code turn of the conversation fixtures over the stream as its own (`STUB_REPLAY`,
 `slopty_testkit::replay`). `crates/slopty-worker/tests/claude.rs` proves the drive one behaviour
-per test against it and a real ptyd. A fixture no recording can reach,
+per test against it and a real ptyd. An agent's MCP App is played by `slopty-stub-mcp-apps`, an
+MCP server over stdio with one app tool, one app-only tool and the app's `ui://` page. Its tool
+list shows the UI only to a host that declared the extension, and `--log` keeps what it was
+sent. Codex's `media.jsonl` is recorded with it, and the recording stops if Codex offers the
+model the app-only tool. A fixture no recording can reach,
 such as an agent asking to be signed in, is written to the schema by hand, and its test says so.
 
 ## Where the gate runs

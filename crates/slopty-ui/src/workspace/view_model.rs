@@ -32,7 +32,10 @@ use crate::view_model::{Ask, Feed, Pull, Transcript, rows, transcript};
 mod blobs;
 #[cfg(test)]
 mod delivery_tests;
+#[cfg(target_vendor = "apple")]
+mod pages;
 mod surfaces;
+mod work;
 
 pub use surfaces::{
     AddAnswer, AddChoice, AddDevice, AddFailure, AddFix, AddKind, AddMark, AddProgress, AddStep,
@@ -196,6 +199,12 @@ pub(super) struct Bridge {
     interrupts: HashMap<IntentId, tokio::sync::oneshot::Sender<Result<RpcReply, RpcError>>>,
     /// Whether the aliases were read back from where they are kept.
     aliases_read: bool,
+    /// slopty: the threads of chats started under a followed chat, held open while they ask
+    /// the person something, so it is asked in the followed chat ([`work`]).
+    asking: BTreeSet<(WorkerKey, ThreadId)>,
+    /// slopty: the pages agents show inline, hosted per window ([`pages`]).
+    #[cfg(target_vendor = "apple")]
+    pages: pages::Pages,
 }
 
 impl std::fmt::Debug for Bridge {
@@ -509,6 +518,7 @@ impl WorkspaceView {
         self.settle_configs(cx);
         self.probe_projects(cx);
         self.view_fetch_followed(cx);
+        self.view_open_asking(cx);
         let Some(feed) = self.view_model.feed.clone() else { return };
         let now = Utc::now();
         let devices =
@@ -665,6 +675,10 @@ impl WorkspaceView {
         // its whole history, and the real one, once it comes, as live arrivals. A chat with no
         // thread had its empty transcript when followed.
         for chat in feed.followed() {
+            // slopty: its tray, dock and rules beside it.
+            if let Some(views) = self.view_chat_views(&chat, cx) {
+                feed.chat_views(&chat, views);
+            }
             if let Some(said) = self.view_transcript(&chat, cx) {
                 feed.transcript(&chat, said);
             } else if let Some(refused) = self.view_model.refused.get(&chat) {
@@ -802,7 +816,7 @@ impl WorkspaceView {
         let running = |child| {
             self.hubs()
                 .find_map(|(_, hub)| hub.read(cx).threads().rows().rows.get(&child))
-                .map(rows::running)
+                .map(|row| transcript::ChildRun::of(row, self.chat_id(child)))
         };
         let host = self.workers.get(&key).map(|worker| worker.name.clone()).unwrap_or_default();
         // The chat a forked thread came from, for its seam: its id and its title.
@@ -818,6 +832,7 @@ impl WorkspaceView {
             .host(&host)
             .source(source)
             .children(running)
+            .chats(|thread| self.chat_id(thread))
             .named(|intent| named.get(&intent).cloned())
             .said(|intent| said.get(&intent).or_else(|| state.said.get(&intent)).cloned())
             .whole(|content| match hub.whole(content)?.as_ref() {
@@ -832,6 +847,8 @@ impl WorkspaceView {
             .is_some_and(|row| rows::running(row) || row.status.phase == Phase::NeedsYou);
         transcript::settle(&mut entries, live);
         transcript::asks(state, &device, &mut entries);
+        // slopty: what the chats an agent started under this one ask, asked here.
+        transcript::child_asks(&self.view_asking_children(thread, cx), &device, &mut entries);
         // What the worker last turned down, until the thread moves past it.
         let last = state.items.last().map_or(0, |item| item.at_ms.as_millis());
         // The marks the app keeps by itself (seen, a draft) are no act of the person's.
@@ -900,6 +917,10 @@ impl WorkspaceView {
                     Some(self.view_interrupt(&params, cx))
                 } else if method == methods::FETCH_TOOL_BLOB {
                     Some(self.view_tool_blob(&params, cx))
+                } else if let Some(answer) = self.view_work_call(&method, &params, cx) {
+                    Some(answer)
+                } else if let Some(answer) = self.view_page_call(&method, &params, cx) {
+                    Some(answer)
                 } else {
                     self.view_surface_call(&method, &params, cx)
                 };
@@ -914,6 +935,29 @@ impl WorkspaceView {
                 let _gone = reply.send(answer);
             }
         }
+    }
+
+    /// slopty: a call on an inline page ([`pages`]).
+    #[cfg(target_vendor = "apple")]
+    fn view_page_call(
+        &mut self,
+        method: &str,
+        params: &serde_json::Value,
+        cx: &mut Context<Self>,
+    ) -> Option<Task<Result<RpcReply, RpcError>>> {
+        self.page_call(method, params, cx)
+    }
+
+    /// slopty: no inline pages here: no call on one is answered.
+    #[cfg(not(target_vendor = "apple"))]
+    #[expect(clippy::unused_self, reason = "pages are hosted on Apple platforms only")]
+    fn view_page_call(
+        &mut self,
+        _method: &str,
+        _params: &serde_json::Value,
+        _cx: &mut Context<Self>,
+    ) -> Option<Task<Result<RpcReply, RpcError>>> {
+        None
     }
 
     /// Follow the thread `chat` shows; a minted chat shows nothing until it has one.
@@ -1378,10 +1422,15 @@ impl WorkspaceView {
                     .and_then(slopty_client::threads::Mirror::state);
                 let request = state
                     .and_then(|state| state.requests.iter().find(|r| r.id.0 == request_id))
-                    .filter(|request| request.is_open())
-                    .ok_or_else(|| {
-                        RpcError::Failed("It no longer waits on an answer".to_owned())
-                    })?;
+                    .filter(|request| request.is_open());
+                // slopty: a request of a chat started under this one goes back to that chat.
+                let Some(request) = request else {
+                    return self
+                        .view_child_answer(thread, &request_id, &answers, cx)
+                        .unwrap_or_else(|| {
+                            Err(RpcError::Failed("It no longer waits on an answer".to_owned()))
+                        });
+                };
                 let (choice, message) =
                     transcript::answer(request, &answers).map_err(RpcError::Failed)?;
                 (Intent::Answer { ask: request.id.clone(), choice, message }, None, None)
@@ -1719,6 +1768,11 @@ impl WorkspaceView {
             Outcome::Unsupported { cap } => {
                 Err(RpcError::Failed(format!("Its agent cannot {}", cap.0)))
             }
+            // slopty: a branched thread is said as the chat the shell knows it by.
+            Outcome::Started { thread } => Ok(RpcReply::Value(serde_json::json!({
+                "commandId": done.id.to_string(),
+                "chatId": self.chat_id(*thread),
+            }))),
             _ => Ok(RpcReply::Value(serde_json::json!({ "commandId": done.id.to_string() }))),
         };
         let _gone = reply.send(answer);
@@ -1774,6 +1828,7 @@ mod tests {
 
     use super::agent_of;
     use crate::conversation::thread::fixtures;
+    use crate::view_model::transcript::shown_call;
     use crate::workspace::WorkspaceView;
     use crate::workspace::rig::{KEY, link, mac};
 
@@ -2510,11 +2565,7 @@ mod tests {
         let mut state = fixtures::thread("tools");
         let whole = "out\n".repeat(1000);
         let full = ContentRef("t1:out".to_owned());
-        let item = state
-            .items
-            .iter_mut()
-            .find(|item| matches!(item.body, ItemBody::Tool(_)))
-            .expect("a tool call");
+        let item = state.items.iter_mut().find(|item| shown_call(&item.body)).expect("a tool call");
         let id = item.id.0.clone();
         if let ItemBody::Tool(call) = &mut item.body {
             let clip = Clip { lines: 40, chars: 32_000 };
@@ -2552,11 +2603,7 @@ mod tests {
             height: 1,
             at: at.clone(),
         };
-        let item = state
-            .items
-            .iter_mut()
-            .find(|item| matches!(item.body, ItemBody::Tool(_)))
-            .expect("a tool call");
+        let item = state.items.iter_mut().find(|item| shown_call(&item.body)).expect("a tool call");
         let id = item.id.0.clone();
         if let ItemBody::Tool(call) = &mut item.body {
             call.images = vec![image.clone()];
@@ -2619,11 +2666,7 @@ mod tests {
         let mut state = fixtures::thread("tools");
         let mut child = fixtures::empty();
         child.status.phase = Phase::Working;
-        let item = state
-            .items
-            .iter_mut()
-            .find(|item| matches!(item.body, ItemBody::Tool(_)))
-            .expect("a tool call");
+        let item = state.items.iter_mut().find(|item| shown_call(&item.body)).expect("a tool call");
         if let ItemBody::Tool(call) = &mut item.body {
             call.detail = Some(ToolDetail::Agent(AgentDetail {
                 agent_type: None,

@@ -17,6 +17,27 @@ pub struct ContentRef(pub String);
 impl ContentRef {
     /// How a blob is named: `blob:` and its object id.
     const BLOB: &'static str = "blob:";
+    /// How an item's asset is named: `item-asset:`, the item's id, `/`, the asset's name.
+    const ITEM_ASSET: &'static str = "item-asset:";
+
+    /// Asset `name` of item `item`, read whole by [`super::wire::ThreadRequest::Expand`] as
+    /// bytes: for a visual ([`crate::visual::VisualDetail`]) the file its `assets` map names
+    /// `name`; for a page from a file ([`crate::visual::PageSource::File`]) `name` as a path
+    /// under the page file's folder. Anything else, or a file past the cap the worker keeps,
+    /// is answered [`super::wire::Expanded::Gone`].
+    #[must_use]
+    pub fn item_asset(item: &str, name: &str) -> Self {
+        Self(format!("{}{item}/{name}", Self::ITEM_ASSET))
+    }
+
+    /// The item and the asset name this names, when it names an item's asset
+    /// ([`Self::item_asset`]). An item's id holds no `/`; the name may.
+    #[must_use]
+    pub fn item_asset_of(&self) -> Option<(&str, &str)> {
+        let rest = self.0.strip_prefix(Self::ITEM_ASSET)?;
+        let (item, name) = rest.split_once('/')?;
+        (!item.is_empty() && !name.is_empty()).then_some((item, name))
+    }
 
     /// The blob `id` of the thread's repository, a side of a file a review showed
     /// ([`FileDiff::from`](super::wire::FileDiff::from),
@@ -264,6 +285,11 @@ pub enum ToolDetail {
     },
     /// An MCP server's tool.
     Mcp(McpDetail),
+    /// A native visual Slopty's `show_visual` shows ([`crate::visual::SHOW_VISUAL`]).
+    Visual(crate::visual::VisualDetail),
+    /// A page shown inline: Slopty's `show_page` ([`crate::visual::SHOW_PAGE`]), or an MCP
+    /// App's UI ([`crate::visual::PageSource::App`]).
+    Page(crate::visual::PageDetail),
 }
 
 /// An edit in place.
@@ -345,6 +371,49 @@ pub struct ExecDetail {
     pub stderr: Option<Clipped>,
     /// How long it ran.
     pub duration_ms: Option<u64>,
+    /// The files it changed in its repository, when the agent says (Claude Code's
+    /// `bashEditDiff`).
+    pub edits: Option<ShellEdits>,
+    /// What its exit code means where the agent says, which is no failure: grep's 1 is "No
+    /// matches found", diff's 1 "Files differ" (Claude Code's `returnCodeInterpretation`).
+    #[serde(default)]
+    pub interpretation: Option<String>,
+}
+
+/// The files a command changed in its repository, as the agent took them while it ran.
+///
+/// The list is the agent's best effort: it can miss a change, list one another process made, or
+/// stop at its limits, and says which of those it knows of.
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ShellEdits {
+    /// The files shown with their diff, a few at most.
+    pub files: Vec<ShellEdit>,
+    /// How many more files changed, shown with no diff.
+    pub more: u32,
+    /// The diff is incomplete, or could not be taken.
+    pub unavailable: bool,
+    /// The command moves the working tree (a `git checkout`, a `git stash`), so no diff was
+    /// taken.
+    pub skipped: bool,
+    /// Another command ran in the same repository at the same time, so a change listed may be
+    /// that one's.
+    pub shared: bool,
+    /// A git step in the command can move the working tree (checkout, reset, rebase, switch,
+    /// stash, merge, pull), so a change listed may be that step's rather than an edit.
+    pub moves_tree: bool,
+}
+
+/// One file a command changed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShellEdit {
+    /// Its path, as the agent gave it.
+    pub path: String,
+    /// The command made it.
+    pub created: bool,
+    /// The command removed it.
+    pub deleted: bool,
+    /// What changed in it.
+    pub patch: Patch,
 }
 
 /// How a command stands. A background command outlives its call, so this is apart from the
@@ -444,6 +513,10 @@ pub struct Offered {
     pub label: String,
     /// What it means.
     pub description: Option<String>,
+    /// What it would look like, for the person to compare before picking: markdown or code
+    /// (Claude Code's `options[].preview`), shown in a pane beside the options.
+    #[serde(default)]
+    pub preview: Option<String>,
 }
 
 /// A question's answer.
@@ -522,4 +595,8 @@ pub struct McpDetail {
     pub server: String,
     /// The tool.
     pub tool: String,
+    /// Its result's `structuredContent`, as JSON, when it returned one.
+    pub structured: Option<Clipped>,
+    /// The resources its result linked (`resource_link`) or embedded, in its order.
+    pub links: Vec<crate::visual::ResourceLink>,
 }

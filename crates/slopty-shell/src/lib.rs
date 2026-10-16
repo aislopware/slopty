@@ -19,6 +19,7 @@ mod account_usage;
 pub mod app_menus;
 pub mod appearance;
 pub mod attachments;
+pub mod background_tray; // slopty: a chat's background work, above its composer
 pub mod badges;
 pub mod browser;
 pub mod change_requests;
@@ -52,6 +53,7 @@ mod new_thread_background_mask;
 mod notice;
 pub mod notify;
 pub mod overscroll;
+pub mod page; // slopty: a page an agent shows inline, as its card
 pub mod pickers;
 pub mod popover;
 pub mod project_actions;
@@ -73,6 +75,7 @@ pub mod theme_library;
 pub mod toast;
 pub mod transcript;
 pub mod typography;
+pub mod visuals;
 mod workspace_links;
 
 use std::path::PathBuf;

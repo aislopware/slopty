@@ -276,10 +276,11 @@ const SIDE_INSET: f32 = 16.0;
 
 impl Composer {
     /// The checklist tray, or `None` when the chat has no todo (or the user
-    /// dismissed a finished one). `below_queue`: a queue tray follows.
+    /// dismissed a finished one). `trays_below`: how many trays follow it (the Background
+    /// tray, the queue); it steps in once more for each. // slopty: the Background tray.
     pub(crate) fn render_todo_panel(
         &mut self,
-        below_queue: bool,
+        trays_below: usize,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
@@ -354,11 +355,7 @@ impl Composer {
             surface
         };
 
-        let inset = if below_queue {
-            SIDE_INSET * 2.0
-        } else {
-            SIDE_INSET
-        };
+        let inset = SIDE_INSET * (1 + trays_below) as f32;
         Some(
             div()
                 .mx(px(inset))
@@ -735,6 +732,7 @@ mod tests {
             subagent_ref: None,
             subagent_status: None,
             subagent_tail: None,
+            facts: None,
         }
     }
 
@@ -991,6 +989,7 @@ mod composer_tests {
                 subagent_ref: None,
                 subagent_status: None,
                 subagent_tail: None,
+                facts: None,
             }],
             created_at: 0,
             device_id: "d".into(),
@@ -1059,7 +1058,7 @@ mod composer_tests {
     fn rendered(handle: &gpui::WindowHandle<Composer>, cx: &mut gpui::TestAppContext) -> bool {
         handle
             .update(cx, |composer, window, cx| {
-                composer.render_todo_panel(false, window, cx).is_some()
+                composer.render_todo_panel(0, window, cx).is_some()
             })
             .unwrap()
     }
