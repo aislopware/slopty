@@ -249,17 +249,21 @@ mod piped {
         let program = PathBuf::from(env!("CARGO_BIN_EXE_slopty-ptyd"));
         asker.succeed(program).await.expect("no answer: the new build runs");
         drop(client);
-        let (mut back, _exits) = tokio::time::timeout(Duration::from_secs(10), async {
+        // The old build may still take a connection while it hands over, then close it: only an
+        // answered list is the new build.
+        let (back, list) = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
-                if let Ok(connected) = PtydClient::connect(&daemon.socket).await {
-                    break connected;
+                if let Ok((mut connected, exits)) = PtydClient::connect(&daemon.socket).await
+                    && let Ok(list) = connected.list().await
+                {
+                    break ((connected, exits), list);
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
         .await
-        .expect("the new build listens");
-        let list = back.list().await.unwrap();
+        .expect("the new build answers");
+        let (mut back, _exits) = back;
         let info = list.iter().find(|s| s.id == id).expect("handed over");
         assert!(info.piped && info.exited.is_none() && info.pid == pid, "{info:?}");
         let attached = back.attach(id).await.unwrap();
