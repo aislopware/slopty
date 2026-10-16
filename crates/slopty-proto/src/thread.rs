@@ -797,6 +797,9 @@ impl Notice {
     /// The agent's own judge of risk (Claude Code's auto mode) turned a call down, with no
     /// person asked.
     pub const DECLINED: &'static str = "declined";
+    /// The agent ended on its own, nobody having asked: what kind of end it was in plain words,
+    /// with the one thing to do next (Claude Code's out of memory, killed, crashed, signed out…).
+    pub const ENDED: &'static str = "ended";
     /// The turn went on with another model, or the model refused and another took over.
     pub const FALLBACK: &'static str = "fallback";
     /// The goal's check said it is met, not yet, or cannot be: "Goal achieved (5m · 3 turns)".

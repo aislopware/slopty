@@ -7,8 +7,8 @@
 //! ended it; then its exit code with its last line.
 
 /// The notice kind of an end of Claude Code's that nobody asked for: a failure the chat draws in
-/// the words given here. Open, as every notice kind is (`slopty_proto::thread::Notice`).
-pub const ENDED: &str = "ended";
+/// the words given here.
+pub const ENDED: &str = slopty_proto::thread::Notice::ENDED;
 
 /// What kind of end it was.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
