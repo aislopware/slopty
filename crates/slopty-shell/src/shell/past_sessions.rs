@@ -80,6 +80,8 @@ const GAP: f32 = 2.0;
 const BODY_INSET: f32 = 2.0;
 /// The width of a row's time slot, which "Opening…" and "Running" take without moving the title.
 const TIME_SLOT: f32 = 64.0;
+/// History's clock, which its rows' words start past.
+const HISTORY_ICON: f32 = 13.0;
 
 /// A prompt as the machine found it: its words, where the asked words are in it, and whether
 /// it was cut.
@@ -510,12 +512,13 @@ impl Shell {
                 cx.stop_propagation();
                 this.toggle_history(&toggle, cx);
             }))
-            .child(icon(icons::CLOCK_CIRCLE).size(px(13.0)).flex_none())
+            .child(icon(icons::CLOCK_CIRCLE).size(px(HISTORY_ICON)).flex_none().text_color(theme.text_faint))
             .child(div().flex_1().min_w_0().truncate().child(HISTORY))
             .child(
                 icon(icons::ALT_ARROW_RIGHT)
                     .size(px(12.0))
                     .flex_none()
+                    .text_color(theme.text_faint)
                     .when(open, |chevron| {
                         chevron.with_transformation(gpui::Transformation::rotate(
                             gpui::percentage(0.25),
@@ -539,24 +542,7 @@ impl Shell {
         let mut body = div().w_full().flex().flex_col().pt(px(BODY_INSET)).gap(px(GAP));
         let Some(listed) = history.load.listed() else {
             let line = match &history.load {
-                Load::Failed(why) => {
-                    let retry = key.to_owned();
-                    state_line(theme, "history-failed", why.clone(), true)
-                        .tooltip(crate::settings::widgets::text_tooltip(format!(
-                            "{why}\nClick to try again"
-                        )))
-                        .cursor_pointer()
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.load_history(&retry, cx);
-                            cx.notify();
-                        }))
-                        .child(
-                            div()
-                                .flex_none()
-                                .text_color(theme.text_muted)
-                                .child("Try again"),
-                        )
-                }
+                Load::Failed(why) => self.failure_line(key, "history-failed", why.clone(), theme, cx),
                 _ => state_line(theme, "history-loading", "Reading Claude Code\u{2019}s sessions\u{2026}".into(), false)
                     .child(crate::loaders::mini_mono_spinner(
                         format!("history-spinner-{key}"),
@@ -573,18 +559,18 @@ impl Shell {
         // A machine that failed beside the rows the others listed.
         let partial = (!rows.is_empty()).then(|| listed.failures.first().map(|f| f.words.clone())).flatten();
         if rows.is_empty() {
-            let words = match listed.failures.first() {
-                Some(failure) => failure.words.clone(),
-                None => "No past Claude Code sessions here".to_owned(),
+            let line = match listed.failures.first() {
+                Some(failure) => self.failure_line(key, "history-empty", failure.words.clone(), theme, cx),
+                None => state_line(theme, "history-empty", "No past Claude Code sessions here".to_owned(), false),
             };
-            body = body.child(state_line(theme, "history-empty", words, false));
+            body = body.child(line);
         }
         for row in rows {
             let element = self.render_history_row(&row, key == EVERY_PROJECT, now, theme, cx);
             body = body.child(element);
         }
         if let Some(words) = partial {
-            body = body.child(state_line(theme, "history-partial", words, true));
+            body = body.child(self.failure_line(key, "history-partial", words, theme, cx));
         }
         if has_more {
             let page = key.to_owned();
@@ -605,6 +591,28 @@ impl Shell {
             );
         }
         body.into_any_element()
+    }
+
+    /// Why History of `key` is missing sessions, in the machine's words, with Try again: a
+    /// click asks once more.
+    fn failure_line(
+        &self,
+        key: &str,
+        id: &'static str,
+        why: String,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let retry = key.to_owned();
+        state_line(theme, id, why.clone(), true)
+            .tooltip(crate::settings::widgets::text_tooltip(format!("{why}\nClick to try again")))
+            .cursor_pointer()
+            .hover(|s| s.bg(theme.glass_hover()))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.load_history(&retry, cx);
+                cx.notify();
+            }))
+            .child(div().flex_none().text_color(theme.text_muted).child("Try again"))
     }
 
     /// One past session in History: its title, how long ago (or that it is opening, or held
@@ -667,7 +675,7 @@ impl Shell {
                     el.child(div().flex_none().max_w(px(120.0)).truncate().child(SharedString::from(project)))
                 })
                 .when_some(row.branch.clone(), |el, branch| {
-                    el.child(icon(icons::GIT_BRANCH).size(px(11.0)).flex_none())
+                    el.child(icon(icons::GIT_BRANCH).size(px(11.0)).flex_none().text_color(theme.text_faint))
                         .child(div().min_w_0().truncate().child(SharedString::from(branch)))
                 })
         });
@@ -684,7 +692,9 @@ impl Shell {
             .flex_col()
             .justify_center()
             .gap(px(2.0))
-            .px(px(Theme::SPACE_SM))
+            // Under History's words, past its clock: the rows read as History's own.
+            .pl(px(Theme::SPACE_SM + HISTORY_ICON + 8.0))
+            .pr(px(Theme::SPACE_SM))
             .rounded(px(6.0))
             .cursor_pointer()
             .role(gpui::Role::Button)
@@ -1143,9 +1153,8 @@ fn picker_row(
     theme: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
     let label = row.label();
-    let prompt = row.prompt.as_ref().filter(|p| {
-        crate::transcript::single_line(&p.text) != label || !p.spans.is_empty()
-    });
+    // The prompt that matched is its own line unless it is the title, already lit above.
+    let prompt = row.prompt.as_ref().filter(|p| crate::transcript::single_line(&p.text) != label);
     let prompt_line = prompt.map(|p| prompt_text(p, theme));
     let mut place: Vec<String> = Vec::new();
     if every && let Some(cwd) = row.cwd.as_deref() {
@@ -1182,7 +1191,7 @@ fn picker_row(
         .role(gpui::Role::Button)
         .aria_label(SharedString::from(format!(
             "{label}{}, {corner}",
-            row.prompt.as_ref().map(|p| format!(", {}", p.text)).unwrap_or_default()
+            prompt.map(|p| format!(", {}", p.text)).unwrap_or_default()
         )))
         .min_h(px(44.0))
         .py(px(5.0))

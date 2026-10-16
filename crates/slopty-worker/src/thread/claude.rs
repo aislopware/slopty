@@ -190,7 +190,7 @@ enum ThreadAsk {
 
 /// Where clients' asks go to the driven Claude Code threads. Cheap to clone.
 ///
-/// A stop and an end go straight to the running thread's task ([`Running`]): the served loop
+/// A stop and an end go straight to the running thread's task (`Running`): the served loop
 /// may be busy starting another thread (finding the install takes up to seconds), and a stop
 /// must not wait behind it.
 #[derive(Clone, Debug)]

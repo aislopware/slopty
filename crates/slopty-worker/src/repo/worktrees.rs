@@ -429,7 +429,7 @@ async fn set_up(
     Ok(())
 }
 
-/// The main checkout of the repository `cwd` is in ([`clone_of`]), resolved: the clone whose
+/// The main checkout of the repository `cwd` is in (`clone_of`), resolved: the clone whose
 /// agents' worktrees [`sweep`] looks over. `None` for a folder in no repository.
 #[must_use]
 pub fn main_checkout(cwd: &Path) -> Option<PathBuf> {
