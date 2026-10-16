@@ -15,7 +15,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyTooltip, App, BorderStyle, Bounds, ClipboardEntry, ClipboardItem, Context, CursorStyle,
+    AnyElement, AnyTooltip, App, BorderStyle, Bounds, ClipboardEntry, ClipboardItem, Context, CursorStyle,
     DispatchPhase, ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle,
     Focusable, GlobalElementId, KeyBinding, KeyDownEvent, LayoutId, // slopty: dictation removed.
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit,
@@ -39,6 +39,7 @@ use crate::motion;
 use crate::notice::{NoticeChipIcon, notice_chip};
 use crate::pickers::Pickers;
 use crate::settings::{ComposerSendBehavior, platform_combo};
+use crate::settings::widgets::{ActionHint as _, Keys}; // slopty: tooltips name their key.
 use crate::state::{AppState, Indicator};
 use crate::theme::Theme;
 
@@ -54,6 +55,7 @@ mod footer;
 mod surfaces;
 mod request_card; // slopty: a request's card by its kind.
 pub use activity::working_line;
+pub(crate) use footer::ansi_color; // slopty: a code fence's terminal colours.
 pub use dock::{DockCache, chat_dock};
 pub use surfaces::{ModPane, PaneAsk};
 pub use request_card::offer_undo_rewind;
@@ -70,6 +72,27 @@ pub(crate) use chip::{expand_context_chips, quote_link}; // slopty: quotes and t
 // ---------------------------------------------------------------------------
 // Constants + pure decision logic
 // ---------------------------------------------------------------------------
+
+/// slopty: a send with no engine to take it: what failed and what to do.
+const ENGINE_OFFLINE: &str = "Couldn't send while Slopty is offline. Try again once it reconnects.";
+
+/// slopty: a section of the composer's stack (a failure, the dock's lines, a folded question,
+/// mod bands, the trays) that grows into its height and shrinks out of it
+/// ([`motion::reveal_height`]), so the composer and the transcript over it slide rather than
+/// jump. The column's gap rides inside the section, so a closed one takes no room at all.
+fn stack_section(key: &'static str, section: Option<AnyElement>) -> AnyElement {
+    let open = section.is_some();
+    div()
+        .flex_none()
+        .w_full()
+        .mt(px(-Theme::SPACE_SM))
+        .child(motion::reveal_height(
+            key,
+            open,
+            div().pt(px(Theme::SPACE_SM)).children(section),
+        ))
+        .into_any_element()
+}
 
 /// Expanded-mode textarea vertical padding: `pt-4 pb-1` (slopty composer.tsx
 /// line 578) = 16 + 4.
@@ -562,25 +585,6 @@ pub const APPSHOT_PREVIEW_HEIGHT: f32 = 148.0;
 pub const APPSHOT_IMAGE_MAX_WIDTH: f32 = 320.0;
 pub const APPSHOT_IMAGE_MAX_HEIGHT: f32 = 132.0;
 pub const APPSHOT_TILE_HEIGHT: f32 = 192.0;
-
-struct AppshotActionTooltip(SharedString);
-
-impl Render for AppshotActionTooltip {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::of(cx);
-        div()
-            .px(px(8.0))
-            .py(px(6.0))
-            .rounded(px(6.0))
-            .border_1()
-            .border_color(theme.border_strong)
-            .bg(theme.surface_raised)
-            .shadow_md()
-            .text_size(px(11.0))
-            .text_color(theme.text)
-            .child(self.0.clone())
-    }
-}
 
 // slopty: appshots removed.
 pub fn send_button_mode(run_live: bool, has_text: bool) -> SendButtonMode {
@@ -1784,6 +1788,12 @@ pub fn init(cx: &mut App, send_behavior: ComposerSendBehavior) {
     ));
 
     let mut message_bindings = input_bindings(MESSAGE_COMPOSER_CONTEXT);
+    // slopty: ⌃B, Claude Code's key, moves the newest running call to the background.
+    message_bindings.push(KeyBinding::new(
+        "ctrl-b",
+        crate::transcript::work::BackgroundRunningCall,
+        Some(MESSAGE_COMPOSER_CONTEXT),
+    ));
     for binding in message_enter_bindings(send_behavior, &platform_combo("mod-enter")) {
         match binding.action {
             MessageEnterBindingAction::Submit => message_bindings.push(KeyBinding::new(
@@ -6718,10 +6728,9 @@ impl Composer {
                                 cx.stop_propagation();
                                 this.remove_attachment(&remove_id, cx);
                             }))
-                            .tooltip(move |_, cx| {
-                                cx.new(|_| AppshotActionTooltip(remove_label.clone()))
-                                    .into()
-                            })
+                            // slopty: the house tooltip and a name.
+                            .role(Role::Button)
+                            .hint(remove_label)
                             .child(
                                 crate::icons::icon(crate::icons::CLOSE_CIRCLE)
                                     .size(px(14.0))
@@ -6769,7 +6778,7 @@ impl Composer {
                         .w_full()
                         .truncate()
                         .text_center()
-                        .text_size(px(10.0))
+                        .text_size(crate::typography::ui_rems(10.0))
                         .text_color(theme.text_muted)
                         .child(SharedString::from(att.name.clone())),
                 )
@@ -7921,7 +7930,7 @@ impl Composer {
 
     /// The popup whose rows a scrollbar drag is moving — the tokens are
     /// mutually exclusive, so at most one exists.
-    fn active_popup_scroll(&self) -> Option<gpui::ScrollHandle> {
+    pub(crate) fn active_popup_scroll(&self) -> Option<gpui::ScrollHandle> {
         if self.slash.token.is_some() {
             Some(self.slash_scroll.clone())
         } else if self.mention.token.is_some() {
@@ -7931,7 +7940,13 @@ impl Composer {
         }
     }
 
-    fn on_popup_list_hover(
+    // slopty: the list the composer's one rail follows: an open `/` or `@` list, else the
+    // Background tray's.
+    fn rail_list_scroll(&self) -> gpui::ScrollHandle {
+        self.active_popup_scroll().unwrap_or_else(|| self.tray.scroll.clone())
+    }
+
+    pub(crate) fn on_popup_list_hover(
         &mut self,
         hovered: &bool,
         _window: &mut Window,
@@ -8209,21 +8224,29 @@ impl Composer {
     /// New chats need a runnable agent, but may target the device's home
     /// directory without a project. Existing chats carry their own run config.
     fn send_blocked(&self, cx: &App) -> bool {
+        self.send_blocked_reason(cx).is_some()
+    }
+
+    /// slopty: why Send cannot act now, in the words its tooltip says; `None` when it can.
+    fn send_blocked_reason(&self, cx: &App) -> Option<&'static str> {
         if self.queue_edit_finishing {
-            return true;
+            return Some("Saving the queued message first");
         }
         let state = self.state.read(cx);
         if state.review_comment_flush_pending(&self.current_key) {
-            return true;
+            return Some("Adding your review comments first");
         }
         if state.selected_chat.is_some() {
-            return false;
+            return None;
         }
         // New-chat canvas: needs a runnable agent. The
         // no-agents check only fires once the catalog is loaded — offline
         // and still-loading states must not block (the harness resolves from
         // the remembered default and the engine reports real failures).
-        self.pickers.read(cx).no_agents_available()
+        self.pickers
+            .read(cx)
+            .no_agents_available()
+            .then_some("No agent can run on this machine yet")
     }
 
     fn button_mode(&self, cx: &App) -> SendButtonMode {
@@ -8345,7 +8368,8 @@ impl Composer {
             return;
         }
         let Some(engine) = self.state.read(cx).engine().cloned() else {
-            self.failure = Some("Engine not connected".into());
+            // slopty: what failed and what to do, no internals.
+            self.failure = Some(ENGINE_OFFLINE.into());
             self.failure_key = None; // global — meaningful on every chat
             cx.notify();
             return;
@@ -8935,12 +8959,12 @@ impl Composer {
                         .client()
                         .call(methods::QUEUE_MESSAGE, params)
                         .await
-                        .map_err(|e| format!("Send failed: {e}"))?;
+                        .map_err(|e| format!("Couldn't send your message: {e}"))?;
                     let queue_id = reply
                         .get("id")
                         .and_then(serde_json::Value::as_str)
                         .filter(|id| !id.is_empty())
-                        .ok_or_else(|| "Send failed: queue did not return an id".to_string())?;
+                        .ok_or_else(|| "Couldn't send your message: the queue gave it no id".to_string())?;
                     return Ok(Some(queue_id.to_string()));
                 }
 
@@ -8966,7 +8990,7 @@ impl Composer {
                     message_id: message_id.clone(),
                 };
                 let command = serde_json::to_value(&command)
-                    .map_err(|e| format!("Send failed: {e}"))?;
+                    .map_err(|e| format!("Couldn't send your message: {e}"))?;
                 let mut params = serde_json::json!({ "chatId": chat_id, "command": command });
                 if !transfers.is_empty() {
                     params["transfers"] = serde_json::Value::Array(transfers);
@@ -8981,7 +9005,7 @@ impl Composer {
                     std::time::Duration::from_secs(30),
                 )
                 .await
-                .map_err(|e| format!("Send failed: {e}"))?;
+                .map_err(|e| format!("Couldn't send your message: {e}"))?;
                 if expects_setup_handoff
                     && let Some(command_id) = queued
                         .get("commandId")
@@ -9169,7 +9193,7 @@ impl Composer {
             if let Err(err) = result {
                 this.update(cx, |composer, cx| {
                     composer.interrupting.remove(&task_chat_id);
-                    composer.failure = Some(format!("Stop failed: {err}").into());
+                    composer.failure = Some(format!("Couldn't stop the agent: {err}").into());
                     composer.failure_key = Some(failure_chat);
                     cx.notify();
                 })
@@ -9314,7 +9338,7 @@ impl Composer {
             let result = engine.client().call(methods::QUEUE_COMMAND, params).await;
             if let Err(err) = result {
                 this.update(cx, |composer, cx| {
-                    composer.failure = Some(format!("Answer failed: {err}").into());
+                    composer.failure = Some(format!("Couldn't send your answer: {err}. It is back for you to try again.").into());
                     composer.failure_key = Some(failure_chat);
                     // The answer never left this device — put the panel back.
                     composer.answered_requests.remove(&request_id);
@@ -9477,7 +9501,8 @@ impl Composer {
             .or(focused)
             .or_else(|| (0..question.options.len()).find(|ix| wizard.is_picked(*ix)))
             .unwrap_or(0);
-        let preview = Self::render_previews(&question, preview_at, &theme);
+        let preview = Self::render_previews(&question, preview_at, &self.card.preview_scroll, &theme);
+        let proposed_scroll = self.card.proposed_scroll.clone(); // slopty
         let options = question.options.iter().enumerate().map(|(ix, label)| {
             // slopty: what the option means, under it.
             let description = descriptions
@@ -9501,7 +9526,8 @@ impl Composer {
                     label.clone()
                 }))
                 .when_some(description.clone(), |el, d| el.aria_description(SharedString::from(d)))
-                .when(blocked, |el| el.opacity(0.4).cursor_default())
+                // slopty: one dimming for what cannot act now; it says it is disabled.
+                .when(blocked, |el| el.opacity(crate::theme::DISABLED_OPACITY).cursor_default().aria_disabled(true))
                 .flex()
                 .flex_row()
                 .items_center()
@@ -9697,7 +9723,7 @@ impl Composer {
                     // slopty: why the agent asks, under the question.
                     .children(Self::card_reason(&question, &theme))
                     .when_some(question.proposed.clone().filter(|_| !plan), |el, diff| {
-                        el.child(approval::proposed_change(&diff, &theme))
+                        el.child(approval::proposed_change(&diff, &proposed_scroll, &theme))
                     })
                     .when(question.multi_select, |el| {
                         el.child(
@@ -9792,7 +9818,9 @@ impl Composer {
                             )
                             .id("wizard-submit")
                             .px(px(16.0))
-                            .when(!can_advance, |el| el.opacity(0.4))
+                            .when(!can_advance, |el| {
+                                el.opacity(crate::theme::DISABLED_OPACITY).cursor_default().aria_disabled(true)
+                            })
                             .on_click(cx.listener(|this, _, _, cx| this.wizard_advance(cx))),
                         )
                     }),
@@ -9806,7 +9834,7 @@ impl Composer {
         mode: SendButtonMode,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let theme = Theme::of(cx);
+        let theme = Theme::of(cx).clone();
         // Slopty composer-actions.tsx: a size-7 filled circle — up-arrow to
         // send/queue, a dark rounded square on the same light circle to stop.
         match mode {
@@ -9814,7 +9842,6 @@ impl Composer {
             SendButtonMode::Stop if self.stopping(cx) => div()
                 .id("composer-stopping")
                 .role(Role::Button)
-                .aria_label("Stopping…")
                 .size(px(28.0))
                 .flex_none()
                 .rounded_full()
@@ -9822,7 +9849,7 @@ impl Composer {
                 .flex()
                 .items_center()
                 .justify_center()
-                .tooltip(crate::settings::widgets::text_tooltip("Stopping…"))
+                .hint("Stopping…")
                 .child(crate::loaders::mini_mono_spinner(
                     "composer-stopping",
                     3.0,
@@ -9831,37 +9858,65 @@ impl Composer {
                     cx,
                 ))
                 .into_any_element(),
-            SendButtonMode::Stop => div()
-                .id("composer-stop")
-                .size(px(28.0))
-                .flex_none()
-                .rounded_full()
-                .bg(theme.text)
+            SendButtonMode::Stop => {
+                // slopty: Escape stops only when the setting says so; the hint names it then.
+                let escape = crate::settings::current(cx).escape_stops_active_agent;
+                let stop = crate::surface_chrome::focus_ring(
+                    div()
+                        .id("composer-stop")
+                        .role(Role::Button)
+                        .tab_index(0)
+                        .size(px(28.0))
+                        .flex_none()
+                        .rounded_full()
+                        .bg(theme.text),
+                    &theme,
+                )
                 .flex()
                 .items_center()
                 .justify_center()
                 .cursor_pointer()
                 .hover(|s| s.opacity(0.85))
                 .on_click(cx.listener(|this, _, _, cx| this.interrupt_selected(cx)))
-                .tooltip(crate::settings::widgets::text_tooltip("Stop"))
-                .child(div().size(px(11.0)).rounded(px(3.0)).bg(theme.bg))
-                .into_any_element(),
+                .child(div().size(px(11.0)).rounded(px(3.0)).bg(theme.bg));
+                if escape {
+                    stop.action_hint("Stop", Keys::Fixed("escape"), cx).into_any_element()
+                } else {
+                    stop.hint("Stop").into_any_element()
+                }
+            }
             SendButtonMode::Send | SendButtonMode::Queue => {
                 // Share the submission guard with Enter, including pending
                 // edits and the new-session runnable-agent check.
-                let blocked = self.send_blocked(cx);
-                send_circle("composer-send", blocked, theme)
-                    .when(!blocked, |el| {
-                        el.on_click(cx.listener(|this, _, _, cx| this.on_submit(cx)))
-                    })
-                    .tooltip(crate::settings::widgets::text_tooltip(
-                        if mode == SendButtonMode::Queue {
-                            "Queue message"
-                        } else {
-                            "Send message"
-                        },
+                // slopty: a blocked or empty Send dims and says why.
+                let reason = self.send_blocked_reason(cx).or_else(|| {
+                    (!composer_has_content(
+                        self.input.read(cx).text(),
+                        self.staged().len(),
+                        self.staged_comments(cx).len(),
                     ))
-                    .into_any_element()
+                    .then_some("Write a message to send")
+                });
+                let label = if mode == SendButtonMode::Queue { "Queue message" } else { "Send message" };
+                // The key the send-behaviour setting sends with: ⏎, or ⌘⏎.
+                let action: Box<dyn gpui::Action> = match crate::settings::current(cx).composer_send_behavior {
+                    ComposerSendBehavior::Enter => Box::new(Submit),
+                    ComposerSendBehavior::ModEnter => Box::new(ModifiedSubmit),
+                };
+                let focus = self.input.read(cx).focus_handle.clone();
+                let send = send_circle("composer-send", reason.is_some(), &theme).role(Role::Button);
+                match reason {
+                    Some(reason) => send
+                        .aria_label(label)
+                        .aria_disabled(true)
+                        .tooltip(crate::settings::widgets::detail_tooltip(label, reason, None))
+                        .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
+                        .into_any_element(),
+                    None => crate::surface_chrome::focus_ring(send.tab_index(0), &theme)
+                        .on_click(cx.listener(|this, _, _, cx| this.on_submit(cx)))
+                        .action_hint(label, Keys::ActionIn(action, focus), cx)
+                        .into_any_element(),
+                }
             }
         }
     }
@@ -9885,7 +9940,8 @@ pub(crate) fn send_circle(
         .flex()
         .items_center()
         .justify_center()
-        .when(blocked, |el| el.opacity(0.35))
+        // slopty: one dimming for what cannot act now.
+        .when(blocked, |el| el.opacity(crate::theme::DISABLED_OPACITY).cursor_default())
         .when(!blocked, |el| {
             el.cursor_pointer().hover(|s| s.opacity(0.85))
         })
@@ -9905,7 +9961,7 @@ impl crate::popover::ScrollRailHost for Composer {
     }
 
     fn rail_scroll(&self) -> Option<gpui::ScrollHandle> {
-        self.active_popup_scroll()
+        Some(self.rail_list_scroll()) // slopty: the tray's when no popup list is open.
     }
 }
 
@@ -10077,36 +10133,6 @@ impl Render for Composer {
         let expanded = self.expanded_mode;
 
         let failure = self.visible_failure();
-        // Composer honesty: when the target's delivery path is degraded, say
-        // UP FRONT that a send will queue (a durable local write delivered on
-        // reconnect) instead of letting the button imply instant delivery.
-        let queue_notice: Option<(SharedString, bool)> = {
-            use slopty_view_proto::ConnectivityState as S;
-            let state = self.state.read(cx);
-            let degraded = match state.selected_chat.as_deref() {
-                Some(id) => state.chat_delivery_degraded(id),
-                None => {
-                    // New-chat canvas: judge by the picked target device.
-                    let remote_target = state
-                        .effective_device_id()
-                        .is_some_and(|id| state.local_device_id.as_deref() != Some(id.as_str()));
-                    remote_target
-                        && (matches!(state.connectivity.state, S::Offline | S::Reconnecting)
-                            || state
-                                .effective_device_id()
-                                .is_some_and(|id| !state.device_online(&id, chrono::Utc::now())))
-                }
-            };
-            let offline = state.connectivity.state == S::Offline;
-            degraded.then(|| {
-                let text: SharedString = if offline {
-                    "Offline — messages will send when you're back online.".into()
-                } else {
-                    "Messages will send once the connection recovers.".into()
-                };
-                (text, offline)
-            })
-        };
         // slopty: the footer's context card asks the same catalog as the `/` menu.
         let catalog = self.state.read(cx).selected_chat.is_some().then(|| self.catalog_params(cx));
         self.account_usage.update(cx, |usage, _| usage.set_catalog(catalog));
@@ -10119,14 +10145,8 @@ impl Render for Composer {
             .and_then(|chat| self.dock.dock_of(chat))
             .and_then(|dock| dock.context.clone());
         self.account_usage.update(cx, |usage, cx| usage.set_breakdown(breakdown, cx));
-        // slopty: a chat's notice names its machine and when it was last heard, after a grace,
-        // with Retry and Wake; a usage limit says when it lifts.
-        let road = self
-            .road_notice(cx)
-            .map(|notice| self.render_road_notice(notice, &theme, cx));
-        let queue_notice = queue_notice.filter(|_| self.state.read(cx).selected_chat.is_none());
-        let limit = self.limit_notice(cx).map(|words| self.render_limit_notice(words, &theme));
-        let stopped = self.stopped_notice(cx).map(|words| self.render_limit_notice(words, &theme));
+        // slopty: the road, limit, queued-send and stop notices draw in the shell's reserved
+        // status strip under the composer (`status_line`), so none moves the composer.
         // The shell owns the width and its route animation. A route-dependent
         // cap here would cut a wide composer before its return glide finishes.
         let container = div()
@@ -10138,12 +10158,12 @@ impl Render for Composer {
             .gap(px(Theme::SPACE_SM))
             .px(px(Theme::SPACE_LG))
             .pb(px(Theme::SPACE_LG))
-            .when_some(failure, |el, message| {
+            .child({
                 // Amber with "Warning" for the offline-ish case (engine not
                 // connected), red with "Error" for send/run failures. Click
                 // dismisses.
-                let offline = message.as_ref() == "Engine not connected";
-                el.child(
+                let chip = failure.map(|message| {
+                let offline = message.as_ref() == ENGINE_OFFLINE;
                     notice_chip(
                         &theme,
                         offline,
@@ -10159,38 +10179,12 @@ impl Render for Composer {
                         this.failure = None;
                         this.failure_key = None;
                         cx.notify();
-                    })),
-                )
-            })
-            .when_some(queue_notice, |el, (notice, offline)| {
-                // Not a warning box (v0.2.12 feedback: the amber Notice read
-                // as an error and flashed on every blip — pre-grace). One
-                // quiet caption line, amber dot only for hard offline; it
-                // clears itself the moment the path heals.
-                let dot = if offline {
-                    theme.warning
-                } else {
-                    theme.text_faint
-                };
-                el.child(crate::motion::fade_in(
-                    "composer-queue-notice",
-                    div()
-                        .id("composer-queue-notice")
-                        .mx(px(8.0))
-                        .mt(px(6.0))
-                        .flex()
-                        .items_center()
-                        .gap(px(6.0))
-                        .text_size(px(11.0))
-                        .line_height(px(14.0))
-                        .text_color(theme.text_faint)
-                        .child(div().size(px(5.0)).rounded_full().bg(dot))
-                        .child(div().min_w_0().truncate().child(notice)),
-                ))
-            })
-            .children(road)
-            .children(limit)
-            .children(stopped);
+                    }))
+                    .into_any_element()
+                });
+                // slopty: grows into its room (`stack_section`).
+                stack_section("composer-failure-section", chip)
+            });
 
         if wizard_active {
             let wizard = self.render_wizard(cx);
@@ -10219,7 +10213,16 @@ impl Render for Composer {
         let dock_lines = self.render_dock_lines(&theme, cx);
         let folded = self.render_folded_question(&theme, cx);
         let bands = self.render_mod_bands(&theme, window, cx);
-        let container = container.children(dock_lines).children(folded).children(bands);
+        // slopty: each grows into its room and shrinks out of it (`stack_section`).
+        let lines = |lines: Vec<AnyElement>| {
+            (!lines.is_empty()).then(|| {
+                div().flex().flex_col().gap(px(Theme::SPACE_SM)).children(lines).into_any_element()
+            })
+        };
+        let container = container
+            .child(stack_section("composer-dock-lines", lines(dock_lines)))
+            .child(stack_section("composer-folded-question", folded))
+            .child(stack_section("composer-mod-bands", lines(bands)));
         // The checklist tray stacks above the queue (or directly above the
         // composer), one step narrower than what follows it.
         let has_queue = !self.state.read(cx).queue.is_empty();
@@ -10230,27 +10233,28 @@ impl Render for Composer {
             cx,
         );
         let trays_below = usize::from(has_queue) + usize::from(tray.is_some());
-        let container = container.when_some(
-            self.render_todo_panel(trays_below, window, cx),
-            |el, panel| el.child(motion::fade_quick("composer-todo", div().child(panel))),
-        );
-        let container = container.when_some(tray, |el, tray| {
-            el.child(motion::fade_quick("composer-background-tray", div().child(tray)))
+        let todo = self
+            .render_todo_panel(trays_below, window, cx)
+            .map(|panel| motion::fade_quick("composer-todo", div().child(panel)).into_any_element());
+        let tray = tray.map(|tray| {
+            motion::fade_quick("composer-background-tray", div().child(tray)).into_any_element()
         });
-        let container = container.when_some(
-            self.render_queue_panel(show_queue_latest_shortcut, window, cx),
-            |el, panel| {
-                el.child(motion::fade_quick(
-                    "composer-queue",
-                    div()
-                        .mx(px(QUEUE_SIDE_INSET))
-                        // Cancel the column gap, then tuck the tray one pixel
-                        // behind the composer painted after it.
-                        .mb(px(-(Theme::SPACE_SM + QUEUE_COMPOSER_OVERLAP)))
-                        .child(panel),
-                ))
-            },
-        );
+        let queue = self.render_queue_panel(show_queue_latest_shortcut, window, cx).map(|panel| {
+            motion::fade_quick(
+                "composer-queue",
+                div()
+                    .mx(px(QUEUE_SIDE_INSET))
+                    // Cancel the column gap, then tuck the tray one pixel
+                    // behind the composer painted after it.
+                    .mb(px(-(Theme::SPACE_SM + QUEUE_COMPOSER_OVERLAP)))
+                    .child(panel),
+            )
+            .into_any_element()
+        });
+        let container = container
+            .child(stack_section("composer-todo-section", todo))
+            .child(stack_section("composer-background-section", tray))
+            .child(stack_section("composer-queue-section", queue));
         // Escape backs out of a queue-row edit (the row keeps its old text).
         // Bound here rather than in the input: the input's own Escape belongs
         // to the mention/slash popups, which outrank this while they're open.
@@ -10497,8 +10501,7 @@ impl Render for Composer {
         // `<input type=file accept="image/*" multiple>`); paste/drop also feed
         // the same strip. The leading utility group owns the spacing between
         // this button and the model picker.
-        let attach = div()
-            .id("composer-attach")
+        let attach = crate::surface_chrome::focus_ring(div().id("composer-attach"), &theme)
             .size(px(28.0))
             .flex_none()
             .flex()
@@ -10516,10 +10519,8 @@ impl Render for Composer {
             .relative()
             // slopty: dictation removed.
             .role(Role::Button)
-            .aria_label("Attach images")
             .tab_index(0)
-            .focus_visible(|style| style.border_1().border_color(theme.accent))
-            .tooltip(crate::settings::widgets::text_tooltip("Attach images"))
+            .hint("Attach images")
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.open_file_picker(cx);
             }))
@@ -11781,7 +11782,7 @@ mod tests {
             composer.on_submit(cx);
             // With no engine attached, reaching the normal send error proves
             // Enter dispatched instead of silently stopping at the UI gate.
-            assert_eq!(composer.failure.as_deref(), Some("Engine not connected"));
+            assert_eq!(composer.failure.as_deref(), Some(ENGINE_OFFLINE));
             composer.queue_edit_finishing = true;
             assert!(
                 composer.send_blocked(cx),
@@ -15582,6 +15583,80 @@ mod tests {
         let t = vec![entry(Some(MessageStatus::Streaming), vec![resolved])];
         assert!(input_request_resolved(&t, "r1"));
         assert!(!input_request_resolved(&t, "other"));
+    }
+
+    /// slopty: the status line under the composer says one thing at a time in the shell's
+    /// reserved strip: nothing at rest, "Stopped" once a stop came to rest on the chat shown, a
+    /// usage limit over it, and nothing for a chat not shown.
+    #[gpui::test]
+    fn the_status_line_says_one_notice_at_a_time(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::dark()));
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| state.selected_chat = Some("c1".into()));
+        let composer = cx.new(|cx| Composer::new(state.clone(), cx));
+        composer.update(cx, |composer, cx| {
+            assert!(composer.status_line(cx).is_none(), "nothing at rest");
+            composer.note_stopped("other".into(), cx);
+            assert!(composer.stopped_notice(cx).is_none(), "another chat's stop says nothing here");
+            composer.note_stopped("c1".into(), cx);
+            assert_eq!(composer.stopped_notice(cx).as_deref(), Some("Stopped"));
+            assert!(composer.status_line(cx).is_some());
+        });
+        state.update(cx, |state, _| {
+            state.limit_resets_at = Some(chrono::Utc::now() + chrono::TimeDelta::minutes(30));
+        });
+        composer.update(cx, |composer, cx| {
+            assert!(composer.limit_notice(cx).is_some(), "the limit is said, over the stop");
+            assert!(composer.status_line(cx).is_some());
+        });
+    }
+
+    // slopty: a stalled turn is said with its machine and its last call, until the person keeps
+    // waiting through it; a new stall is said again.
+    #[gpui::test]
+    fn a_stall_names_its_machine_and_can_be_waited_through(cx: &mut gpui::TestAppContext) {
+        use slopty_view_proto::{Session, SessionStatus, SessionWait};
+        cx.update(|cx| cx.set_global(Theme::dark()));
+        let state = cx.new(|_| AppState::new());
+        let stall = |said: &str| Session {
+            last_completed_turn: None,
+            chat_id: "c1".into(),
+            device_id: "box".into(),
+            status: SessionStatus::Working,
+            started_at: None,
+            updated_at: chrono::Utc::now(),
+            running_subagents: 0,
+            status_since: None,
+            waiting_on: Some(SessionWait { kind: "stalled".into(), summary: Some(said.to_owned()) }),
+        };
+        state.update(cx, |state, _| {
+            state.selected_chat = Some("c1".into());
+            state.devices = vec![serde_json::from_value(serde_json::json!({
+                "id": "box", "name": "studio", "platform": "macos", "lastSeenAt": null,
+            }))
+            .unwrap()];
+            state.sessions = vec![stall("No progress for a while · last: Bash(cargo test)")];
+        });
+        let composer = cx.new(|cx| Composer::new(state.clone(), cx));
+        composer.update(cx, |composer, cx| {
+            let notice = composer.stall_notice(cx).expect("the stall is said");
+            assert_eq!(notice.text, "No progress on studio for a while · last: Bash(cargo test)");
+            composer.keep_waiting(&notice, cx);
+            assert!(composer.stall_notice(cx).is_none(), "kept waiting through");
+        });
+        state.update(cx, |state, _| {
+            state.sessions = vec![stall("No progress for a while · last: Read(src/lib.rs)")];
+        });
+        composer.update(cx, |composer, cx| {
+            assert!(composer.stall_notice(cx).is_some(), "another stall is said again");
+        });
+        state.update(cx, |state, _| state.sessions[0].waiting_on = None);
+        composer.update(cx, |composer, cx| {
+            assert!(composer.stall_notice(cx).is_none(), "progress ends it");
+            assert!(composer.extras.stall_kept.is_none());
+        });
+        assert_eq!(notices::stall_words("box", None), "No progress on box for a while");
+        assert_eq!(notices::stall_words("box", Some("Hung on a hook")), "box: Hung on a hook");
     }
 }
 

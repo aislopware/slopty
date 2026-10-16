@@ -204,6 +204,9 @@ pub fn tray(
             can_stop: live && row.caps.iter().any(|cap| cap.0 == Cap::INTERRUPT),
         });
     }
+    // One row per piece of work: a task the thread names twice (its start and its stream) is
+    // counted once, as the tray lists it once.
+    let rows = distinct(rows);
     let counts = counts(&rows);
     let ordered = order(&rows);
     WorkTray {
@@ -213,6 +216,18 @@ pub fn tray(
         counts,
         rows: ordered,
     }
+}
+
+/// `rows` with one row per id, the last word on each kept where the first stood.
+fn distinct(rows: Vec<WorkRow>) -> Vec<WorkRow> {
+    let mut out: Vec<WorkRow> = Vec::with_capacity(rows.len());
+    for row in rows {
+        match out.iter_mut().find(|kept| kept.id == row.id) {
+            Some(kept) => *kept = row,
+            None => out.push(row),
+        }
+    }
+    out
 }
 
 /// The live rows by kind, housekeeping left out.
@@ -399,10 +414,12 @@ fn mode_chip(state: &ThreadState) -> Option<ModeChip> {
         .map_or_else(|| humane(&id), |mode| mode.label.clone());
     // The recommended default says its name quietly; only a mode the person chose that asks less,
     // or plans, stands out.
+    // Don't ask refuses what was not allowed beforehand: the safer side, so it is quiet; only
+    // a mode that asks nothing and lets everything through is loud.
     let tone = match id.as_str() {
-        "bypassPermissions" | "dontAsk" => ModeChip::DANGER,
+        "bypassPermissions" => ModeChip::DANGER,
         "plan" => ModeChip::PLAN,
-        "acceptEdits" => ModeChip::ACCEPT,
+        "dontAsk" | "acceptEdits" => ModeChip::ACCEPT,
         _ => ModeChip::QUIET,
     };
     let words = if tone == ModeChip::QUIET { String::new() } else { format!("{label} on") };

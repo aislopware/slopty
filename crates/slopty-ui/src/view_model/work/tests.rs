@@ -83,6 +83,35 @@ fn tasks_reach_the_tray_by_kind() {
     assert!(tray.can_stop_all);
 }
 
+/// A command the thread names twice (its start, then its stream) is one row and one in the
+/// header's count: the header never says "2 commands" over one running.
+#[test]
+fn a_task_named_twice_counts_once() {
+    let mut state = thread_with(&[Cap::STOP_TASK]);
+    let first = task("b1", BackgroundTask::SHELL, 10);
+    let mut again = task("b1", BackgroundTask::SHELL, 10);
+    again.title = "sleep 600".to_owned();
+    state.tasks = vec![first, again];
+    let tray = tray(&state, &[], &chat_of);
+    assert_eq!(tray.summary, "1 command");
+    assert_eq!(tray.rows.len(), 1);
+    assert_eq!(tray.rows[0].title, "sleep 600", "the last word on it");
+}
+
+/// Don't ask refuses what was not allowed beforehand: quiet on the chip, never amber.
+#[test]
+fn dont_ask_is_not_loud() {
+    let mut state = thread_with(&[Cap::SET_MODE]);
+    state.meta.modes = ["auto", "dontAsk"]
+        .iter()
+        .map(|id| Mode { id: (*id).to_owned(), label: super::humane(id), description: None })
+        .collect();
+    state.meters = Meters { mode: Some("dontAsk".to_owned()), ..Meters::default() };
+    let counts = tray(&state, &[], &chat_of).counts;
+    let chip = dock(&state, &counts, 0).mode.expect("a chip");
+    assert_ne!(chip.tone, ModeChip::DANGER);
+}
+
 /// Without the agent's stop, nothing in the tray offers one.
 #[test]
 fn work_an_agent_cannot_stop_offers_no_stop() {

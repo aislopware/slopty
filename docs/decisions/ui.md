@@ -12874,3 +12874,155 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   targets. Tests: `slopty-app`
   `tests::forgetting_a_worker_is_a_success_and_a_refusal_a_failure`; `slopty-shell`
   `live::chrome::tests::a_float_s_controls_are_touch_targets`.
+- ✅ **Tooltips name the action and its key (2026-10-17).** This reverses the 2026-10-03 ruling
+  that kept keys in the palette and left a button's tooltip naming the action only; the person
+  asked to see the key where the button is. A tooltip reads the action in sentence case, then
+  its key in the muted key voice 8 px after it ("Show files panel ⌘E"), as Claude desktop draws
+  them. The key is read from the live keymap through the action (`keys::for_action`, Zed's
+  `for_action_in` order: the focused context, then the window, then any context-free
+  binding), so a rebind shows at once and a cleared binding leaves the label alone. One
+  formatter writes every key in Slopty's chrome (`keys.rs`): Mac glyphs in ⌃⌥⇧⌘ order with no
+  separators, ⏎ ⌫ ⇥ ␣ and arrows, "Esc" as a word, words off the Mac; Settings → Shortcuts, the
+  palette and menus read the same. The accessible name stays the bare action and the key goes
+  to `aria-keyshortcuts` ("Meta+E"). Tooltips wait 350 ms, then sit centred 4 px under the
+  control they name, or above it where the window has no room (a control with content under it
+  asks for above), and 8 px inside the window's edges, never flush against the frame and never
+  at the pointer, which covered their first words. Once one has shown,
+  the next shows at once while one is up or hid under 400 ms ago, so running the pointer along
+  a toolbar reads every button (Base UI's and Radix's delay groups). Both are gpui-fast's
+  (`TooltipPlacement`, `Window::set_tooltip_placement`, `TOOLTIP_WARM_FOR`); its
+  `aria_disabled` lets a dimmed control say it is disabled. Every tooltip is one `Tooltip`
+  node, its words the label and its key the value. Menus show keys on their rows
+  (`popover::kbd_hint`), only where the key would do the same thing (⇧⌘A on the open chat's
+  Archive, ⌘W on the tab in front). The menu bar and the palette offer one table of window
+  commands (`app_menus::window_commands`), named once. Tests: `slopty-shell`
+  `settings::widgets::hint_tests`, `keys::tests`,
+  `app_menus::tests::the_menu_bar_names_the_palette_commands_in_title_case`,
+  `shell::command_palette::tests::the_palette_holds_the_menu_bars_commands`; e2e
+  `the_files_toggles_tooltip_names_its_key_under_it` (goldens `tooltip-files-toggle`); gpui-fast
+  `fast::tests::focus_tooltip::{an_anchored_hover_tooltip_sits_under_its_control,
+  the_next_tooltip_shows_at_once_while_warm}`, `fast::tests::a11y::a_disabled_control_says_so`.
+- ✅ **A loud hue means notice this; the default is quiet (2026-10-17).** A status hue is spent
+  only where the person should look. Working is the neutral `busy` tone (no accent pulse);
+  online draws no mark; offline is `WIFI_OFF` in `text_muted`; queued is muted with the clock
+  glyph; a seen Done is a muted check. Amber stays for what needs the person, red for what
+  failed or may be lost ("Changes could not be saved" is `danger`). The Claude mark is muted at
+  rest. A disabled control is drawn at one opacity, `theme::DISABLED_OPACITY` (0.38), and keeps
+  its name and tooltip.
+  In the conversation: the footer's mode reads in the text colour, red with its lock only when
+  every ask is let through (bypass); Don't ask is quiet, as it refuses what was not allowed. A
+  finished background task is a muted check, a stopped one faint; a stall in the working line
+  turns amber, never red. The model picker's favourite star and Fast bolt are the text colour,
+  and a goal chip is plain text. A blocked Send dims and says why in its tooltip ("Write a
+  message to send"). Tests: `slopty-ui` `view_model::work::tests::dont_ask_is_not_loud`.
+- ✅ **Every choice marks its default and the recommended one (2026-10-17).** A menu row or
+  select option says "Default", "Recommended" or "Default · Recommended" in the quiet key voice
+  after its label (`settings::widgets::Standing`, `standing_note`, `SelectOption::standing`).
+  Triggers show the concrete value and stay quiet at the default. A settings row offers
+  "Reset" only when its value differs from the default (`reset_action`, Zed's rule), and a page's
+  "Restore defaults" is dimmed when nothing differs.
+  The composer's pickers mark the catalog's first model "Default", the checkout picker's Local,
+  and the mode menu's recommended mode. The effort slider marks the default step with a tick
+  under it, its readout saying "Default" there. Claude Code's `default` model alias is not
+  resolved to the model it names, so no model is marked "Recommended" yet.
+- ✅ **⌘W closes the tab (2026-10-17).** ⌘W is `app_menus::CloseTab`: the focused terminal panel
+  closes its tab, else the side pane closes the surface in front, else the window closes, through
+  the unsaved-file gate. ⇧⌘W closes the window. The File and Window menus list Close Tab, and
+  the tab menus list "Reopen closed tab ⇧⌘T". The terminal panel's tabs get the same right-click
+  menu as the side pane's (close this, others, left, right; `TabCloseAction`). Tests:
+  `slopty-shell` `app_menus::tests`.
+- ✅ **The chat holds still across Stop and a turn's end (2026-10-17).** Stop, a turn's end, an
+  offline notice or a queue line never move what the person reads. The composer's notices
+  (offline, a limit, a queued message, "Stopped") live in the shell's reserved status strip
+  above the composer (`composer::status_line`), one at a time, not in the composer's own
+  height. The transcript's last row holds its working line, then its time strip, in one lane
+  that never shrinks while the row stays last. The sections stacked on the composer (a failure,
+  a question, the tray, the queue) open and close by height (`motion::reveal_height`), so the
+  composer rises, never jumps. A code block's Copy keeps its size: the glyph turns to a check
+  and the tooltip says "Copied". Tests: `slopty-e2e` app
+  `conversation::{stop_and_a_turns_end_leave_the_chat_still,
+  code_copies_in_place_and_ansi_draws_in_colour}` (goldens `composer-stop-no-shift`,
+  `code-copy-no-shift`).
+- ✅ **Terminal output in a code block keeps its colours (2026-10-17).** A fence marked `ansi`,
+  or any fence holding a real escape byte, is drawn as the terminal would draw it. Its SGR runs
+  (bold, dim, italic, underline, inverse, the 16 colours from the terminal theme, 256 and true
+  colour) style the text. Other control sequences are dropped. An `ansi` fence also reads the
+  escapes agents spell out (`\x1b[`, `\033[`, `\e[`); any other fence shows them as written.
+  Copy and Run take the plain text. Code blocks fall back to the bundled symbol face, then
+  Menlo, then the emoji face, as the terminal does, so a prompt's glyphs draw. Tests:
+  `slopty-shell` `markdown::ansi::tests`.
+- ✅ **Math is set at KaTeX's em (2026-10-17).** A formula is typeset at 1.21 times the text's
+  size, as KaTeX does: Computer Modern's letters are smaller for their em than Geist's, so at
+  the text's own em an inline formula read about a fifth small beside its words. Tests:
+  `slopty-shell` `markdown::math::tests::a_formula_is_set_at_katexs_em`.
+- ✅ **An ask is named by its kind (2026-10-17).** The chip a request leaves in the transcript
+  says what kind it was ("Question", "Approval", "Confirm", "Form", "Plan") beside the ask
+  itself. Only an agent's own questions read "Awaiting your answer…" until answered. A dialog
+  of Claude Code's own is headed "Confirm" on its card, with its title leading its words, so
+  the head never repeats the question. A subagent's card says the time it ran once, in its
+  figures; its outcome is the word. A file whose lines were never counted shows no "+0 −0",
+  and a new file written whole counts its lines as added. Tests: `slopty-ui`
+  `view_model::tests::a_dialog_is_headed_by_its_kind_not_its_title`; `slopty-shell`
+  `transcript::tests::an_ask_chip_names_its_kind_and_shows_the_ask`.
+- ✅ **A stalled turn says where and after what, with Keep waiting and Stop (2026-10-17).** When
+  the worker says a turn made no progress for a while, the composer's status line says so
+  naming the machine and the call it last made ("No progress on studio for a while · last:
+  Bash(cargo test)"), with Keep waiting (quiet until that stall ends; a new one is said again)
+  and Stop. Slopty never stops it on its own. Test: `slopty-shell`
+  `composer::tests::a_stall_names_its_machine_and_can_be_waited_through`.
+- ✅ **A Claude Code too old to drive is a banner, not an error (2026-10-17).** The worker's
+  refusal of a Claude Code older than the one Slopty drives, whether it refused the start or
+  the run, reads as a warning banner in the chat naming the machine and both versions, with
+  the command that updates it to copy; the worker's words stay intact through the view model
+  so the shell can read the versions. Tests: `slopty-shell`
+  `transcript::extras::tests::a_claude_code_too_old_is_a_banner_naming_both_versions`;
+  `slopty-ui` `view_model::tests::a_claude_code_too_old_stays_in_the_workers_words`.
+- ✅ **The side pane's surfaces name their keys and take the Mac's (2026-10-17).** The files
+  surface binds its toggles in its own key context (`Files`): ⇧⌘. shows hidden files (Finder's),
+  ⇧⌘V toggles the Markdown preview and ⌥Z word wrap (VS Code's). Its tree (`FileTree`) deletes
+  with ⌘⌫ through the same confirm and copies the full path with ⌥⌘C (Zed's macOS keys); F2 and
+  fn-⌫ stay. The tree's menu names each row's key, carries no tooltip on its rows ("Copy full
+  path" says it), and a copy confirms with a toast, since the menu closes on it. The diff's
+  file tree toggles with ⇧⌘Y (Claude desktop's `toggleDiffFileList`); its find is the shared
+  find card, its steps naming ⌘G and ⇧⌘G and dimming with no match. The browser's Back,
+  Forward and Reload name the keys the browser binds, resolved in its context, and Go names ⏎.
+  Every pane tooltip is the shell's one chip. Tests: `slopty-shell`
+  `files::context_menu::tests::the_trees_keys_copy_and_delete_and_its_menu_names_them`,
+  `files::explorer_tests::the_hidden_files_key_toggles_and_its_button_names_it`,
+  `changes::tests::the_tree_key_toggles_the_changed_files`.
+- ✅ **Settings mark every default, and Reset shows only off it (2026-10-17).** Appearance marks
+  System, the Slopty themes, the theme's own accent ("Theme default · Default" in its tooltip),
+  Geist and Geist Mono and their sizes, no background effect and the system's motion. Glass's
+  default names what it resolves to ("Default · Frosted"). The conversation width draws a tick
+  at its default under the track. Each row whose value differs (a theme, the accent, glass, a
+  font's family or size, the width, a toggle) offers Reset, which puts the default back; the
+  mode cards are named for assistive tech. Files marks its 900 ms autosave delay and resets each
+  row. Notifications, all on by default, resets each preference and the page restores them all.
+  The skill-completion switches reset to the agent's default. On the Providers page the autonomy
+  choices take the composer's mode names (Auto, Bypass permissions, Manual): Auto is "Default ·
+  Recommended", and Bypass permissions says "Asks nothing", its note amber while chosen; each
+  agent off its default (on when installed) resets. An agent's mark rests in `text_muted`, and a
+  done step in Add device is a muted check. Every disabled control in Settings uses
+  `DISABLED_OPACITY`. A permission rule's subtitle says where the rule comes from, not the rule
+  again; the agent's reading of it is the rule's tooltip. Tests: `slopty-shell`
+  `settings::files::tests::a_row_offers_reset_only_off_its_default`,
+  `settings::notifications::tests::restore_defaults_turns_every_preference_back_on`,
+  `settings::harnesses::tests::autonomy_names_its_default_and_what_full_costs`,
+  `settings::appearance::tests::each_font_slot_knows_its_default`; e2e
+  `changes_files_and_settings_show_the_threads_work` (golden `settings-appearance-defaults`).
+- ✅ **In the panes, information is quiet and a failure offers the way on (2026-10-17).** A
+  large file shown in part, a partial diff and paused file updates read in `text_muted` on a
+  faint ink with the info glyph; amber stays on the prompts that ask for a decision (a reload
+  over edits, a save conflict). A failed read says "Couldn't open this file" or "Couldn't load
+  this diff", the reason under it in quieter words, with Try again and Copy error, whose glyph
+  turns to a check while copied. Errors across the panes, Settings and the app say "Couldn't
+  <verb> <object>", and retries say "Try again". A load waits 200 ms before it says so
+  (`loaders::pending`): the file, its Markdown preview, an image, a folder in the tree. Empty
+  lists say "No matching …" for a filter and "No … yet" or "No …" for an empty list. Side chats'
+  and archived chats' relative times move on each minute in tabular figures, with the date and
+  time on hover. The file editor selects in the theme's selection colour. A mark under 24 px
+  (a comment's ×, the browser's Go) gets a 24 px target around it, and a copied device ID keeps
+  its words and size. Tests: `slopty-shell`
+  `files::sections::tests::a_relative_time_reads_in_full_on_hover`,
+  `files::editor_adapter::tests::the_editor_selects_in_the_themes_selection_colour`,
+  `settings::devices::tests::copying_an_id_marks_it_copied_for_the_span`.

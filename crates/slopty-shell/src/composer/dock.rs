@@ -264,7 +264,9 @@ impl Composer {
         let engine = self.state.read(cx).engine().cloned();
         let (Some(chat), Some(engine)) = (chat, engine) else {
             undo(self);
-            self.failure = Some(format!("{failed}: engine not connected").into());
+            // slopty: what failed and what to do, no internals.
+            self.failure =
+                Some(format!("{failed} while Slopty is offline. Try again once it reconnects.").into());
             self.failure_key = self.dock.chat.clone();
             cx.notify();
             return;
@@ -347,7 +349,7 @@ impl Composer {
             .selected_chat_row()
             .and_then(|chat| chat.cwd.clone())
             .map_or_else(|| "the chat's folder".to_owned(), |cwd| cwd.rsplit('/').next().unwrap_or(&cwd).to_owned());
-        let tip = format!("Runs in {place} on the chat's machine; its output goes to the agent. Escape leaves shell mode.");
+        let tip = format!("Runs in {place} on the chat's machine; its output goes to the agent.");
         div()
             .id("composer-shell-tag")
             .role(Role::Status)
@@ -361,10 +363,16 @@ impl Composer {
             .gap(px(5.0))
             .rounded(px(Theme::CONTROL_RADIUS))
             .bg(theme.accent.opacity(0.12))
-            .text_size(px(11.5))
+            .text_size(crate::typography::ui_rems(11.5))
             .font_family(theme.font_mono.clone())
             .text_color(theme.accent)
-            .tooltip(crate::settings::widgets::text_tooltip(tip))
+            // slopty: the tag's name and its way out (Esc), what it does a quieter line.
+            .tooltip(crate::settings::widgets::detail_tooltip(
+                "Shell mode",
+                tip,
+                Some(Keys::Fixed("escape")),
+            ))
+            .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
             .child(crate::icons::icon(crate::icons::TERMINAL).size(px(12.0)).text_color(theme.accent))
             .child("Shell")
             .into_any_element()
@@ -481,8 +489,8 @@ impl Composer {
             .flex()
             .items_center()
             .gap(px(6.0))
-            .text_size(px(11.0))
-            .line_height(px(14.0))
+            .text_size(crate::typography::ui_rems(11.0))
+            .line_height(crate::typography::ui_rems(14.0))
             .child(match run.outcome {
                 None => crate::loaders::mini_mono_spinner(
                     "dock-shell-spinner",
@@ -492,9 +500,10 @@ impl Composer {
                     cx,
                 )
                 .into_any_element(),
+                // slopty: done is routine: a muted check, no green.
                 Some(Ok(())) => crate::icons::icon(crate::icons::CHECK)
                     .size(px(10.0))
-                    .text_color(theme.success)
+                    .text_color(theme.text_muted)
                     .into_any_element(),
                 Some(Err(_)) => div().flex_none().size(px(5.0)).rounded_full().bg(theme.danger).into_any_element(),
             })
@@ -533,8 +542,8 @@ fn caption_line(
         .flex()
         .items_center()
         .gap(px(6.0))
-        .text_size(px(11.0))
-        .line_height(px(14.0))
+        .text_size(crate::typography::ui_rems(11.0))
+        .line_height(crate::typography::ui_rems(14.0))
         .text_color(theme.text_faint)
         .child(div().flex_none().size(px(5.0)).rounded_full().bg(dot))
         .when_some(from, |el, from| {

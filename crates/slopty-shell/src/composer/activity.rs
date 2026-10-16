@@ -26,7 +26,7 @@ pub struct ActivityWords {
     pub figures: Vec<String>,
     /// Under it: "Next: {task}", or the retry's hint.
     pub below: Option<String>,
-    /// How far the reply's silence has reddened the line, 0 to 1 (the TUI's stall tint).
+    /// How far the reply's silence has warmed the line, 0 to 1 (the TUI's stall tint).
     pub stall: f32,
 }
 
@@ -48,7 +48,10 @@ pub fn activity_words(line: &ActivityLine, word: &str, elapsed_secs: i64, now: i
         .started_at
         .and_then(|at| u64::try_from(now.saturating_sub(at)).ok())
         .unwrap_or_else(|| u64::try_from(elapsed_secs.max(0)).unwrap_or(0) * 1_000);
-    let mut figures = vec![duration_words(elapsed_ms)];
+    // slopty: the timer pads its seconds, so in tabular figures it holds its width.
+    let mut figures = vec![crate::transcript::ticking_elapsed(
+        i64::try_from(elapsed_ms / 1_000).unwrap_or(i64::MAX),
+    )];
     if line.tokens > 0 {
         figures.push(format!("↓ {} tokens", tokens_short(line.tokens)));
     }
@@ -103,12 +106,14 @@ pub fn working_line(
             .id("working-line")
             .role(gpui::Role::Status)
             .aria_label(SharedString::from(spoken))
-            .pt(px(Theme::SPACE_LG))
+            // slopty: the last row's lane (`transcript::ROW_LANE_HEIGHT`): its first line is the
+            // strip's 24 px row, so the strip takes its place at the turn's end in the same room.
+            .pt(px(Theme::SPACE_SM))
             .flex()
             .flex_col()
-            .gap(px(2.0))
             .child(
                 div()
+                    .h(px(Theme::SPACE_MD * 2.0))
                     .flex()
                     .flex_row()
                     .items_center()
@@ -122,12 +127,14 @@ pub fn working_line(
                     .child(
                         div()
                             .min_w_0()
+                            .truncate()
                             .text_size(crate::typography::ui_rems(12.0))
-                            // slopty: a silent reply reddens the words, as the TUI's spinner.
+                            // slopty: a silent reply warms the words, as the TUI's spinner; a
+                            // slow model is no failure, so amber at most.
                             .text_color(if words.retrying {
                                 theme.warning
                             } else if words.stall > 0.0 {
-                                crate::theme::mix(theme.text_muted, theme.danger, words.stall)
+                                crate::theme::mix(theme.text_muted, theme.warning, words.stall)
                             } else {
                                 theme.text_muted
                             })
@@ -144,6 +151,7 @@ pub fn working_line(
                                 .relative()
                                 .top(px(1.0))
                                 .text_color(theme.text_faint)
+                                .font_features(crate::typography::tabular())
                                 .child(SharedString::from(figures)),
                         )
                     }),
@@ -181,7 +189,7 @@ mod tests {
         };
         let words = activity_words(&line, "Cogitating", 0, 65_000);
         assert_eq!(words.lead, "Running full check");
-        assert_eq!(words.figures, ["1m 5s", "↓ 2.3k tokens", "thinking more"]);
+        assert_eq!(words.figures, ["1m 05s", "↓ 2.3k tokens", "thinking more"]);
         assert_eq!(words.below.as_deref(), Some("Next: Write the docs"));
         let early = activity_words(&line, "x", 0, 42_000);
         assert_eq!(early.figures.last().map(String::as_str), Some("thinking with high effort"));
@@ -191,10 +199,10 @@ mod tests {
         assert_eq!(words.figures, ["7s", "thought for 4s"]);
     }
 
-    /// A reply silent past 10 s reddens the line, fully at 20 s; past 30 s it says the API
+    /// A reply silent past 10 s warms the line, fully at 20 s; past 30 s it says the API
     /// has not answered. A turn with no reply under way never does.
     #[test]
-    fn a_silent_reply_reddens_then_says_so() {
+    fn a_silent_reply_warms_then_says_so() {
         let line = ActivityLine { quiet_since: Some(0), ..ActivityLine::default() };
         assert!(activity_words(&line, "x", 0, 9_000).stall.abs() < f32::EPSILON);
         let half = activity_words(&line, "x", 0, 15_000).stall;

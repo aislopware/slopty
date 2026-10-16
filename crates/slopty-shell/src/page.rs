@@ -84,23 +84,25 @@ pub(crate) fn card_action(
         .id(id)
         .role(gpui::Role::Button)
         .aria_label(label)
-        .size(px(22.0))
+        // slopty: the code block's header anatomy: 24 pt, glyph 12, the control hover.
+        .size(px(24.0))
         .rounded(px(6.0))
         .flex()
         .items_center()
         .justify_center()
         .cursor_pointer()
         .when(quiet && !done, |el| el.opacity(0.0).group_hover("page-card", |s| s.opacity(1.0)))
-        .bg(crate::motion::hover_blend(&fade_key, gpui::transparent_black(), crate::theme::ink(0.08)))
+        .bg(crate::motion::hover_blend(&fade_key, gpui::transparent_black(), crate::theme::wash(0.11)))
         .on_hover(crate::motion::hover_listener(fade_key))
         .on_click(move |_, window, cx| {
             cx.stop_propagation();
             handler(window, cx);
         })
         .tooltip(crate::settings::widgets::text_tooltip(label))
+        .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
         .child(
             crate::icons::icon(if done { crate::icons::CHECK } else { icon })
-                .size(px(13.0))
+                .size(px(12.0))
                 .text_color(theme.text_muted),
         )
         .into_any_element()
@@ -499,7 +501,7 @@ impl PageCardView {
             .flex_row()
             .items_center()
             .gap(px(Theme::SPACE_SM))
-            .text_size(px(12.0))
+            .text_size(crate::typography::ui_rems(12.0))
             .text_color(theme.text_muted)
             .child(crate::icons::icon(crate::icons::SPLIT_COLUMNS).size(px(13.0)).text_color(theme.text_faint))
             .child(div().flex_1().min_w_0().truncate().child(SharedString::from("Shown in the pane")))
@@ -515,8 +517,13 @@ impl PageCardView {
                     .items_center()
                     .cursor_pointer()
                     .text_color(theme.text)
-                    .bg(crate::theme::ink(0.06))
-                    .hover(|s| s.bg(crate::theme::ink(0.1)))
+                    // slopty: the faded hover.
+                    .bg(crate::motion::hover_blend(
+                        &format!("{}-bring-back", self.card.page),
+                        crate::theme::ink(0.06),
+                        crate::theme::ink(0.1),
+                    ))
+                    .on_hover(crate::motion::hover_listener(format!("{}-bring-back", self.card.page)))
                     .on_click(cx.listener(|this, _, _, cx| this.move_to_pane(false, cx)))
                     .child(SharedString::from("Bring back")),
             )
@@ -608,7 +615,7 @@ impl Render for PageCardView {
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_size(px(12.0))
+                .text_size(crate::typography::ui_rems(12.0))
                 .text_color(theme.text_muted)
                 .child(why.clone())
                 .into_any_element(),
@@ -634,7 +641,7 @@ impl Render for PageCardView {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .text_size(px(12.0))
+                    .text_size(crate::typography::ui_rems(12.0))
                     .text_color(theme.text_faint)
                     .child(SharedString::from(if self.card.streaming {
                         "Writing the page…"
@@ -697,7 +704,7 @@ impl Render for PageCardView {
                     .children(doc::more_rows_words(table, PageTable::INLINE_ROWS).map(|words| {
                         div()
                             .pt(px(Theme::SPACE_XS))
-                            .text_size(px(12.0))
+                            .text_size(crate::typography::ui_rems(12.0))
                             .text_color(theme.text_faint)
                             .child(SharedString::from(words))
                     }))
@@ -710,11 +717,12 @@ impl Render for PageCardView {
             .relative()
             .w_full()
             .h(px(height))
-            .rounded(px(8.0))
+            // slopty: the transcript's one card corner and hairline.
+            .rounded(px(crate::transcript::TRANSCRIPT_CARD_RADIUS))
             .overflow_hidden()
             .bg(theme.bg)
             .border_1()
-            .border_color(crate::theme::hairline(0.07))
+            .border_color(theme.border)
             .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                 if *hovered {
                     this.engage(cx);
@@ -748,7 +756,7 @@ impl Render for PageCardView {
             .flex_row()
             .items_center()
             .gap(px(6.0))
-            .text_size(px(12.0))
+            .text_size(crate::typography::ui_rems(12.0))
             .text_color(theme.text_muted)
             .child(
                 div()
@@ -823,7 +831,7 @@ impl Render for PageCardView {
         for tool in state.iter().flat_map(|state| state.called.iter()) {
             asks = asks.child(
                 div()
-                    .text_size(px(11.5))
+                    .text_size(crate::typography::ui_rems(11.5))
                     .text_color(theme.text_faint)
                     .child(SharedString::from(format!("Page called {tool}"))),
             );
@@ -873,10 +881,15 @@ fn ask_line(
             .flex()
             .items_center()
             .cursor_pointer()
-            .text_size(px(12.0))
+            .text_size(crate::typography::ui_rems(12.0))
             .text_color(theme.text)
-            .bg(crate::theme::ink(0.06))
-            .hover(|s| s.bg(crate::theme::ink(0.1)))
+            // slopty: the faded hover.
+            .bg(crate::motion::hover_blend(
+                &format!("{id}-{text}-hover"),
+                crate::theme::ink(0.06),
+                crate::theme::ink(0.1),
+            ))
+            .on_hover(crate::motion::hover_listener(format!("{id}-{text}-hover")))
             .on_click(move |event, window, cx| on_click(event, window, cx))
             .child(SharedString::from(text))
     });
@@ -902,7 +915,7 @@ fn ask_line(
                         .min_w_0()
                         .flex_1()
                         .truncate()
-                        .text_size(px(12.0))
+                        .text_size(crate::typography::ui_rems(12.0))
                         .text_color(tint)
                         .child(SharedString::from(words)),
                 )
@@ -930,6 +943,50 @@ mod card_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // slopty: Slopty's own conversation surfaces follow the font-size setting (`ui_rems`); only
+    // code, diffs, tool output and terminal text keep px. Each file lists the px sizes it may
+    // keep, so a new chrome size in px fails here.
+    #[test]
+    fn slopty_surfaces_size_their_words_by_the_setting() {
+        let allowed: &[(&str, &str, usize)] = &[
+            ("background_tray.rs", include_str!("background_tray.rs"), 0),
+            ("context_usage.rs", include_str!("context_usage.rs"), 0),
+            ("account_usage.rs", include_str!("account_usage.rs"), 0),
+            ("running_pill.rs", include_str!("running_pill.rs"), 0),
+            ("notice.rs", include_str!("notice.rs"), 0),
+            ("toast.rs", include_str!("toast.rs"), 0),
+            ("queue.rs", include_str!("queue.rs"), 0),
+            ("visuals.rs", include_str!("visuals.rs"), 0),
+            ("todo_panel.rs", include_str!("todo_panel.rs"), 0),
+            ("attachments.rs", include_str!("attachments.rs"), 0),
+            ("image_media.rs", include_str!("image_media.rs"), 0),
+            ("page/pane.rs", include_str!("page/pane.rs"), 0),
+            ("composer/footer.rs", include_str!("composer/footer.rs"), 0),
+            ("composer/notices.rs", include_str!("composer/notices.rs"), 0),
+            ("composer/request_card.rs", include_str!("composer/request_card.rs"), 0),
+            ("composer/approval.rs", include_str!("composer/approval.rs"), 0),
+            ("composer/dock.rs", include_str!("composer/dock.rs"), 0),
+            ("composer/activity.rs", include_str!("composer/activity.rs"), 0),
+            // A mod's code block.
+            ("composer/surfaces.rs", include_str!("composer/surfaces.rs"), 1),
+            // A page's console lines.
+            ("page.rs", include_str!("page.rs"), 1),
+            // A file's path in a comment, twice.
+            ("comment_ui.rs", include_str!("comment_ui.rs"), 2),
+            // An error's raw words, a turn's diff counts, a terminal run's output.
+            ("transcript/extras.rs", include_str!("transcript/extras.rs"), 3),
+            // A call's output, twice, and its raw detail.
+            ("transcript/work.rs", include_str!("transcript/work.rs"), 3),
+            // A subagent's call label, in the tool rows' size.
+            ("transcript/subagents.rs", include_str!("transcript/subagents.rs"), 1),
+        ];
+        let needle = concat!("text_size(", "px(");
+        for (file, text, most) in allowed {
+            let found = text.matches(needle).count();
+            assert!(found <= *most, "{file}: {found} px text sizes, {most} allowed; use ui_rems");
+        }
+    }
 
     /// A card's value says how its page stands: its picture at rest, live while engaged.
     #[test]

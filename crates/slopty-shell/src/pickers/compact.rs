@@ -72,6 +72,8 @@ const EFFORT_OPTION_IDS: [&str; 3] = ["effort", "reasoning", "reasoning_effort"]
 pub(super) struct CompactEffort {
     pub labels: Vec<SharedString>,
     pub selected: usize,
+    /// slopty: the model's default stop, which the slider marks.
+    pub default: Option<usize>,
     stops: EffortStops,
 }
 
@@ -165,6 +167,10 @@ impl Pickers {
                 .selected_model(cx)
                 .is_some_and(|model| model.id == row.model.id);
         let favorite = self.defaults.is_favorite(row.harness, &row.model.id);
+        let standing = self
+            .model_standing(row.harness, &row.model.id)
+            .map(|standing| crate::settings::widgets::standing_note(&theme, standing));
+        let star_hover: SharedString = format!("model-star-{ix}-{}", cx.entity_id()).into();
         let (icon, tint) = harness_brand_icon(row.harness);
         let harness = row.harness;
         let model = row.model.id.clone();
@@ -179,15 +185,12 @@ impl Pickers {
             .filter(|d| row.ambiguous && !d.is_empty())
             .map(|d| SharedString::from(d.to_owned()));
         let hovered = self.active == ix;
-        let details: SharedString = match row.model.description.as_deref() {
-            Some(description) => format!(
-                "{} · {}\n{}",
-                row.model.label, row.harness_name, description
-            )
-            .into(),
-            None => format!("{} · {}", row.model.label, row.harness_name).into(),
+        let title: SharedString = format!("{} · {}", row.model.label, row.harness_name).into();
+        let description = row.model.description.clone();
+        let accessible_name: SharedString = match &description {
+            Some(description) => format!("{title}\n{description}").into(),
+            None => title.clone(),
         };
-        let accessible_name = details.clone();
         let favorite_hint: SharedString = format!(
             "{} {} {}",
             if favorite { "Remove" } else { "Add" },
@@ -199,15 +202,19 @@ impl Pickers {
             }
         )
         .into();
-        let favorite_tooltip: SharedString =
-            format!("{}\n⌘⇧F on the highlighted model", favorite_hint).into();
         let item = div()
             .id(("model-row", ix))
             .role(gpui::Role::ListBoxOption)
             .aria_label(accessible_name)
             .aria_selected(selected)
-            .tooltip(move |_, cx| cx.new(|_| PickerHint(details.clone())).into())
-            .tooltip_show_delay(std::time::Duration::from_millis(500))
+            // slopty: the house tooltip: the row's name, its description a quieter line.
+            .map(|el| match description {
+                Some(description) => {
+                    el.tooltip(crate::settings::widgets::detail_tooltip(title, description, None))
+                }
+                None => el.tooltip(crate::settings::widgets::text_tooltip(title)),
+            })
+            .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
             .h(px(COMPACT_ROW_HEIGHT))
             .pl(px(8.0))
             .pr(px(4.0))
@@ -266,20 +273,21 @@ impl Pickers {
                                 .text_color(theme.text_muted)
                                 .child(attribution),
                         )
-                    }),
+                    })
+                    // slopty: the agent's default model says so.
+                    .children(standing),
             )
             .child(
                 div()
                     .id(("model-star", ix))
                     .role(gpui::Role::Button)
-                    .aria_label(favorite_hint)
                     .aria_toggled(if favorite {
                         gpui::Toggled::True
                     } else {
                         gpui::Toggled::False
                     })
-                    .aria_keyshortcuts("Meta+Shift+F")
-                    .tooltip(move |_, cx| cx.new(|_| PickerHint(favorite_tooltip.clone())).into())
+                    // slopty: ⇧⌘F stars the highlighted model; the hint names the key.
+                    .action_hint(favorite_hint, Keys::Fixed("mod-shift-f"), cx)
                     .size(px(24.0))
                     .rounded(px(6.0))
                     .flex()
@@ -287,7 +295,8 @@ impl Pickers {
                     .justify_center()
                     // Quiet until the row is hovered or the model is starred.
                     .when(!favorite && !hovered, |el| el.opacity(0.0))
-                    .hover(|s| s.bg(crate::theme::ink(0.08)))
+                    .bg(motion::hover_blend(&star_hover, gpui::transparent_black(), crate::theme::ink(0.08)))
+                    .on_hover(motion::hover_listener(star_hover.clone()))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
                         this.toggle_model_favorite(harness, &model, cx);
@@ -298,9 +307,10 @@ impl Pickers {
                         } else {
                             crate::icons::STAR
                         })
-                        .size(px(13.0))
+                        .size(px(12.0))
+                        // slopty: a starred model is chosen, not news: the text colour.
                         .text_color(if favorite {
-                            theme.accent
+                            theme.text
                         } else {
                             theme.text_muted
                         }),
@@ -465,12 +475,11 @@ impl Pickers {
                                 (icon, tint, name.into())
                             }
                         };
-                    let hint = name.clone();
                     div()
                         .id(SharedString::from(format!("compact-group-{start}")))
                         .role(gpui::Role::Button)
+                        .hint(name.clone())
                         .aria_label(SharedString::from(format!("Jump to {name}")))
-                        .tooltip(move |_, cx| cx.new(|_| PickerHint(hint.clone())).into())
                         // A row-height square with the rows' corners, so the
                         // strip sits on the card's grid like the list below.
                         .flex_none()
@@ -521,7 +530,7 @@ impl Pickers {
                 div()
                     .id("compact-model-back")
                     .role(gpui::Role::Button)
-                    .aria_label("Back")
+                    .action_hint("Back", Keys::Fixed("left"), cx)
                     .flex_none()
                     .size(px(COMPACT_ROW_HEIGHT))
                     .rounded(px(popover::MENU_ITEM_RADIUS))
@@ -529,7 +538,8 @@ impl Pickers {
                     .items_center()
                     .justify_center()
                     .cursor_pointer()
-                    .hover(|s| s.bg(crate::theme::ink(0.05)))
+                    .bg(motion::hover_blend("compact-model-back-hover", gpui::transparent_black(), crate::theme::ink(0.05)))
+                    .on_hover(motion::hover_listener("compact-model-back-hover"))
                     .on_click(cx.listener(|this, _, _, cx| this.show_compact_panel(cx)))
                     .child(
                         crate::icons::icon(crate::icons::ALT_ARROW_LEFT)
@@ -588,9 +598,11 @@ impl Pickers {
         let levels = self.trait_ladder(cx);
         if !levels.is_empty() {
             let current = self.effective_reasoning(cx);
+            let default = default_reasoning(&levels);
             return Some(CompactEffort {
                 labels: levels.iter().map(|l| reasoning_label(*l).into()).collect(),
                 selected: levels.iter().position(|l| Some(*l) == current).unwrap_or(0),
+                default: levels.iter().position(|l| Some(*l) == default),
                 stops: EffortStops::Reasoning(levels),
             });
         }
@@ -615,6 +627,7 @@ impl Pickers {
                 .iter()
                 .position(|c| c.id == current)
                 .unwrap_or(0),
+            default: option.choices.iter().position(|c| c.id == option.default_choice),
             stops: EffortStops::Option {
                 id: option.id.clone(),
                 choices: option.choices.iter().map(|c| c.id.clone()).collect(),
@@ -836,9 +849,10 @@ impl Pickers {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = Theme::of(cx).for_popup();
-        let (levels, selected) = self
+        let (levels, selected, default_stop) = self
             .compact_effort(cx)
-            .map_or((Vec::new(), 0), |e| (e.labels, e.selected));
+            .map_or((Vec::new(), 0, None), |e| (e.labels, e.selected, e.default));
+        let at_default = default_stop == Some(selected);
         let name = self.model_name(cx);
         let label = Self::compact_title_text(&name);
         let name_element: AnyElement = if name == ModelName::Loading {
@@ -922,15 +936,27 @@ impl Pickers {
                 // rolls between values like the composer chips.
                 el.child(
                     div()
-                        .text_size(crate::typography::ui_rems(14.0))
-                        .line_height(px(17.0))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(theme.text)
-                        .child(crate::roll_text::roll_text(
-                            format!("compact-effort-title-{}", cx.entity_id()),
-                            effort.clone(),
-                            reduced,
-                        )),
+                        .flex()
+                        .items_baseline()
+                        .child(
+                            div()
+                                .text_size(crate::typography::ui_rems(14.0))
+                                .line_height(px(17.0))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(theme.text)
+                                .child(crate::roll_text::roll_text(
+                                    format!("compact-effort-title-{}", cx.entity_id()),
+                                    effort.clone(),
+                                    reduced,
+                                )),
+                        )
+                        // slopty: the readout says when the effort is the model's default.
+                        .when(at_default, |el| {
+                            el.child(crate::settings::widgets::standing_note(
+                                &theme,
+                                crate::settings::widgets::Standing::Default,
+                            ))
+                        }),
                 )
             })
             .child(
@@ -985,25 +1011,13 @@ impl Pickers {
                 div()
                     .id("compact-fast")
                     .role(gpui::Role::Button)
-                    .aria_label("Fast mode")
                     .aria_toggled(if fast {
                         gpui::Toggled::True
                     } else {
                         gpui::Toggled::False
                     })
-                    .tooltip(move |_, cx| {
-                        cx.new(|_| {
-                            PickerHint(
-                                if fast {
-                                    "Fast mode on · Turn off"
-                                } else {
-                                    "Fast mode off · Turn on"
-                                }
-                                .into(),
-                            )
-                        })
-                        .into()
-                    })
+                    .hint(if fast { "Fast mode on · Turn off" } else { "Fast mode off · Turn on" })
+                    .aria_label("Fast mode")
                     // Bare like the model button beside it: a plate only on
                     // hover. The glyph's colour is the state, and the
                     // slider's fill carries the accent.
@@ -1022,9 +1036,11 @@ impl Pickers {
                         this.pick_option(option.clone(), choice.clone(), default, cx);
                     }))
                     .child({
+                        // slopty: fast mode on is chosen, not news: the solid bolt in the text
+                        // colour, not the accent.
                         let color = motion::mix(
                             motion::mix(theme.text_muted, theme.text, fast_hover),
-                            theme.accent,
+                            theme.text,
                             fast_t,
                         );
                         // On fills the bolt: the solid twin fades in over the
@@ -1102,7 +1118,11 @@ impl Pickers {
                 .id("compact-effort-slider")
                 .role(gpui::Role::Slider)
                 .aria_label("Reasoning effort")
-                .aria_value(effort.clone())
+                .aria_value(if at_default {
+                    SharedString::from(format!("{effort}, default"))
+                } else {
+                    effort.clone()
+                })
                 .aria_numeric_value(selected as f64)
                 .aria_min_numeric_value(0.0)
                 .aria_max_numeric_value(levels.len().saturating_sub(1) as f64)
@@ -1172,6 +1192,31 @@ impl Pickers {
                     &theme,
                     1.0,
                 ))
+                // slopty: a quiet tick under the model's default stop.
+                .when_some(
+                    default_stop.filter(|_| levels.len() > 1),
+                    |el, stop| {
+                        let at = stop as f32 / (levels.len() - 1) as f32;
+                        el.child(
+                            div()
+                                .absolute()
+                                .left(px(THUMB_INSET))
+                                .right(px(THUMB_INSET))
+                                .top(px(RAIL_TOP + RAIL_HEIGHT + 1.0))
+                                .h(px(2.0))
+                                .child(
+                                    div()
+                                        .debug_selector(|| "effort-default-tick".into())
+                                        .absolute()
+                                        .left(gpui::relative(at))
+                                        .ml(px(-1.0))
+                                        .size(px(2.0))
+                                        .rounded_full()
+                                        .bg(theme.text_faint),
+                                ),
+                        )
+                    },
+                )
                 // A contained glow: it must not wash over the option rows.
                 .child(effort_fill(
                     &theme,
@@ -1470,17 +1515,3 @@ mod tests {
     }
 }
 
-struct PickerHint(SharedString);
-impl Render for PickerHint {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::of(cx).for_popup();
-        let card = popover::popover_card(&theme)
-            .max_w(px(320.0))
-            .p(px(8.0))
-            .text_size(crate::typography::ui_rems(12.0))
-            .line_height(px(17.0))
-            .text_color(theme.text)
-            .child(self.0.clone());
-        crate::frost::frosted(popover::CARD_RADIUS, crate::frost::MENU_BLUR, card)
-    }
-}

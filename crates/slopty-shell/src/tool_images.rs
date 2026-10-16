@@ -174,7 +174,10 @@ pub(crate) struct ImageKey {
 /// What a frame paints for one key.
 #[derive(Clone)]
 pub(crate) enum Thumb {
-    Loading,
+    /// slopty: its shape once its first bytes said it, so its room can be the final one.
+    Loading {
+        aspect: Option<f32>,
+    },
     Ready {
         image: Arc<RenderImage>,
         aspect: f32,
@@ -184,7 +187,7 @@ pub(crate) enum Thumb {
 
 enum State {
     /// The read/decode task; dropping it cancels the load.
-    Loading(#[allow(dead_code)] Task<()>),
+    Loading(#[allow(dead_code)] Task<()>, Option<f32>),
     Ready {
         image: Arc<RenderImage>,
         aspect: f32,
@@ -247,7 +250,7 @@ impl ToolImages {
                 let entry = self.entries.get_mut(key).expect("inserted above");
                 entry.release_at = None;
                 match &mut entry.state {
-                    State::Loading(_) => Thumb::Loading,
+                    State::Loading(_, aspect) => Thumb::Loading { aspect: *aspect },
                     State::Ready {
                         image,
                         aspect,
@@ -379,12 +382,26 @@ impl ToolImages {
         let task_key = key.clone();
         let task = cx.spawn(async move |view, cx| {
             let executor = cx.background_executor().clone();
-            let raw = crate::attachments::read_attachment_bytes(
+            // slopty: its size from its first bytes, while the rest arrives.
+            let (sized_view, mut sized_cx, sized_key) = (view.clone(), cx.clone(), task_key.clone());
+            let raw = crate::attachments::read_attachment_bytes_with(
                 &engine,
                 &executor,
                 target.as_deref(),
                 &task_key.path,
                 None,
+                move |head| {
+                    let Some((width, height)) = crate::image_media::header_size(head) else {
+                        return;
+                    };
+                    let aspect = width as f32 / height as f32;
+                    sized_view
+                        .update(&mut sized_cx, |view, cx| {
+                            get(view).sized(&sized_key, aspect);
+                            cx.notify();
+                        })
+                        .ok();
+                },
             )
             .await;
             let decoded = match raw {
@@ -404,10 +421,17 @@ impl ToolImages {
         self.entries.insert(
             key,
             Entry {
-                state: State::Loading(task),
+                state: State::Loading(task, None),
                 release_at: None,
             },
         );
+    }
+
+    /// slopty: a load's first bytes said its shape.
+    fn sized(&mut self, key: &ImageKey, aspect: f32) {
+        if let Some(Entry { state: State::Loading(_, shape), .. }) = self.entries.get_mut(key) {
+            *shape = Some(aspect);
+        }
     }
 
     fn finish(
@@ -420,7 +444,7 @@ impl ToolImages {
         let Some(entry) = self.entries.get_mut(&key) else {
             return;
         };
-        if !matches!(entry.state, State::Loading(_)) {
+        if !matches!(entry.state, State::Loading(..)) {
             return;
         }
         entry.state = match decoded {
@@ -751,7 +775,7 @@ mod tests {
             host.images.entries.insert(
                 key.clone(),
                 Entry {
-                    state: State::Loading(Task::ready(())),
+                    state: State::Loading(Task::ready(()), None),
                     release_at: None,
                 },
             );
@@ -870,7 +894,7 @@ mod tests {
             host.images.entries.insert(
                 key.clone(),
                 Entry {
-                    state: State::Loading(Task::ready(())),
+                    state: State::Loading(Task::ready(()), None),
                     release_at: None,
                 },
             );

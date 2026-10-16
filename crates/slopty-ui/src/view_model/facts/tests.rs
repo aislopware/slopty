@@ -74,7 +74,7 @@ fn a_calls_result_reads_as_the_tuis() {
     assert_eq!(
         result_of(&call("WebFetch", "fetch", Some(ToolDetail::Fetch(fetch)), done.clone()))
             .as_deref(),
-        Some("Received 12.3KB (200 OK)")
+        Some("Received 12.3\u{a0}KB (200 OK)")
     );
     let exec = |code: Option<i32>, status: ExecStatus, background: bool| ExecDetail {
         command: Clipped::whole("cargo test"),
@@ -122,6 +122,7 @@ fn a_calls_result_reads_as_the_tuis() {
     let facts = tool_facts("t1", &no, &fixtures::empty(), None).expect("facts");
     assert_eq!(facts.result.as_deref(), Some("User rejected update to main.rs"));
     assert!(!facts.failed, "the person's own no reads quiet");
+    assert!(facts.rejected, "it says it was turned down, for the chip's quiet header");
     assert_eq!(
         result_of(&call("Bash", "exec", None, ToolState::Rejected)).as_deref(),
         Some("Tool use rejected")
@@ -258,7 +259,8 @@ fn a_subagent_card_follows_its_run() {
     let done = call("Agent", "agent", Some(ToolDetail::Agent(ended)), ToolState::Completed);
     let settled = progress(&state, None, &done);
     assert_eq!(settled.state, SubagentProgress::DONE);
-    assert_eq!(settled.outcome.as_deref(), Some("Done · 2m 5s"));
+    assert_eq!(settled.outcome.as_deref(), Some("Done"), "the time is the figures' to say");
+    assert_eq!(settled.duration_ms, Some(125_000));
     assert_eq!(settled.figures, "3 tools · 9k tokens");
     assert!(!settled.running && settled.step.is_none());
 }

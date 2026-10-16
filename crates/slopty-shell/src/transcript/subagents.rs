@@ -331,25 +331,32 @@ impl Transcript {
             ),
             _ => None,
         };
+        // slopty: the card's hover, faded; its quiet controls fade in with it, each a 24 pt
+        // target drawn in an 18 pt footprint.
+        let card_fade = format!("{key}-card-hover");
+        let shown = crate::motion::hover_t(&card_fade);
         let quiet = |id: String, label: &'static str, glyph: &'static str| {
+            let fade = format!("{id}-hover");
             div()
                 .id(SharedString::from(id))
                 .role(gpui::Role::Button)
                 .aria_label(label)
-                .size(px(18.0))
+                .size(px(24.0))
+                .m(px(-3.0))
                 .flex_none()
-                .rounded(px(5.0))
+                .rounded(px(6.0))
                 .flex()
                 .items_center()
                 .justify_center()
                 .cursor_pointer()
-                .opacity(0.0)
-                .group_hover("subagent-card", |s| s.opacity(1.0))
-                .hover(|s| s.bg(crate::theme::ink(0.08)))
+                .opacity(shown)
+                .bg(crate::motion::hover_blend(&fade, gpui::transparent_black(), crate::theme::wash(0.11)))
+                .on_hover(crate::motion::hover_listener(fade))
                 .tooltip(crate::settings::widgets::text_tooltip(label))
+                .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
                 .child(
                     crate::icons::icon(glyph)
-                        .size(px(11.0))
+                        .size(px(12.0))
                         .text_color(theme.text_muted),
                 )
         };
@@ -434,7 +441,7 @@ impl Transcript {
                         .flex_none()
                         .max_w(px(200.0))
                         .truncate()
-                        .text_size(px(11.0))
+                        .text_size(crate::typography::ui_rems(11.0))
                         .text_color(theme.text_faint)
                         .child(kind),
                 )
@@ -455,7 +462,7 @@ impl Transcript {
                 .pl(px(Theme::SPACE_SM + 18.0 + Theme::SPACE_SM))
                 .pr(px(Theme::SPACE_SM))
                 .pb(px(2.0))
-                .text_size(px(11.5))
+                .text_size(crate::typography::ui_rems(11.5))
                 .child(
                     div()
                         .min_w_0()
@@ -489,7 +496,7 @@ impl Transcript {
                 .pr(px(Theme::SPACE_SM))
                 .pb(px(Theme::SPACE_XS))
                 .truncate()
-                .text_size(px(11.5))
+                .text_size(crate::typography::ui_rems(11.5))
                 .text_color(theme.warning)
                 .child(SharedString::from(format!("Needs you · {ask}")))
         });
@@ -530,18 +537,18 @@ impl Transcript {
             .flex()
             .flex_col()
             .overflow_hidden()
-            .rounded(px(9.0))
+            .rounded(px(super::TRANSCRIPT_CARD_RADIUS))
             .border_1()
             .border_color(if card.needs_you.is_some() {
                 theme.warning.opacity(0.35)
             } else {
-                crate::theme::hairline(0.07)
+                theme.border
             })
-            .bg(crate::theme::ink(0.03))
             .text_size(px(super::TOOL_LABEL_SIZE))
             .line_height(px(super::TOOL_LABEL_LINE_HEIGHT))
             .cursor_pointer()
-            .hover(|s| s.bg(crate::theme::ink(0.05)))
+            .bg(crate::motion::hover_blend(&card_fade, crate::theme::ink(0.03), crate::theme::ink(0.05)))
+            .on_hover(crate::motion::hover_listener(card_fade))
             .on_click(cx.listener({
                 let key = toggle_key.clone();
                 let chat = card.chat.clone();

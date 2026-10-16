@@ -3,7 +3,7 @@
 //! transcript converged on (slopty composer.tsx `Notice` / chat-view.tsx
 //! `ErrorChip`).
 
-use gpui::{AnyElement, Div, FontWeight, SharedString, div, prelude::*, px};
+use gpui::{AnyElement, App, Div, FontWeight, Hsla, SharedString, Window, div, prelude::*, px};
 
 use crate::theme::Theme;
 
@@ -58,7 +58,8 @@ pub fn notice_chip(
             .py(px(8.0))
     };
     let chip = if tile {
-        frame(10.0).text_size(px(12.0))
+        // slopty: chrome follows the font-size setting.
+        frame(10.0).text_size(crate::typography::ui_rems(12.0))
     } else {
         frame(12.0)
             .text_size(crate::typography::ui_rems(12.0))
@@ -101,17 +102,27 @@ pub fn notice_chip(
                     .child(label),
             )
             .child(div().flex_1())
-            .child(
+            .child({
+                // slopty: the copy swaps to a check for the house's span and says "Copied",
+                // keeping its size; a 24 px target drawn as before (its pad taken back).
+                let key = copy_key(&copy_message);
+                let hover = SharedString::from(format!("{key}-hover"));
+                let tip_key = key.clone();
+                let click_key = key.clone();
                 div()
-                    .id("notice-copy")
+                    .id(SharedString::from(key.clone()))
+                    .role(gpui::Role::Button)
+                    .aria_label("Copy message")
                     .flex_none()
-                    .size(px(20.0))
+                    .size(px(24.0))
+                    .m(px(-2.0))
                     .rounded(px(6.0))
                     .flex()
                     .items_center()
                     .justify_center()
                     .cursor_pointer()
-                    .hover(move |s| s.bg(accent.opacity(0.12)))
+                    .bg(crate::motion::hover_blend(&hover, gpui::transparent_black(), accent.opacity(0.12)))
+                    .on_hover(crate::motion::hover_listener(hover))
                     // The composer chip dismisses on click; copying must
                     // not take the notice with it.
                     .on_click(move |_, _, cx| {
@@ -119,14 +130,15 @@ pub fn notice_chip(
                         cx.write_to_clipboard(gpui::ClipboardItem::new_string(
                             copy_message.to_string(),
                         ));
+                        crate::motion::copy_feedback(click_key.clone(), cx);
                     })
-                    .tooltip(crate::settings::widgets::text_tooltip("Copy message"))
-                    .child(
-                        crate::icons::icon(crate::icons::COPY)
-                            .size(px(12.0))
-                            .text_color(muted.opacity(0.8)),
-                    ),
-            ),
+                    .tooltip(move |window, cx| {
+                        let words = if crate::motion::copied(&tip_key, cx) { "Copied" } else { "Copy message" };
+                        crate::settings::widgets::text_tooltip(words)(window, cx)
+                    })
+                    .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
+                    .child(CopyGlyph { key: key.into(), color: muted.opacity(0.8) })
+            }),
     )
     .child(
         div()
@@ -135,4 +147,27 @@ pub fn notice_chip(
             .when(tile, |message| message.text_color(theme.text.opacity(0.8)))
             .child(message),
     )
+}
+
+/// slopty: the copy span's key for a notice's words.
+fn copy_key(message: &str) -> String {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    message.hash(&mut hasher);
+    format!("notice-copy-{:x}", hasher.finish())
+}
+
+/// slopty: a copy control's glyph, the check while its span runs.
+#[derive(IntoElement)]
+struct CopyGlyph {
+    key: SharedString,
+    color: Hsla,
+}
+
+impl RenderOnce for CopyGlyph {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        crate::icons::icon(crate::motion::copy_icon(&self.key, cx))
+            .size(px(12.0))
+            .text_color(self.color)
+    }
 }

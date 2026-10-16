@@ -215,7 +215,7 @@ impl PagePaneView {
             .children(doc::more_rows_words(table, table.rows.len()).map(|words| {
                 div()
                     .py(px(Theme::SPACE_SM))
-                    .text_size(px(12.0))
+                    .text_size(crate::typography::ui_rems(12.0))
                     .text_color(theme.text_faint)
                     .child(SharedString::from(words))
             }))
@@ -260,7 +260,7 @@ impl Render for PagePaneView {
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_size(px(12.0))
+                .text_size(crate::typography::ui_rems(12.0))
                 .text_color(theme.text_muted)
                 .child(why.clone())
                 .into_any_element(),
@@ -288,7 +288,7 @@ impl Render for PagePaneView {
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_size(px(12.0))
+                .text_size(crate::typography::ui_rems(12.0))
                 .text_color(theme.text_faint)
                 .child(SharedString::from("Loading the page…"))
                 .into_any_element(),
@@ -325,7 +325,7 @@ impl Render for PagePaneView {
                     .flex_row()
                     .items_center()
                     .gap(px(6.0))
-                    .text_size(px(12.0))
+                    .text_size(crate::typography::ui_rems(12.0))
                     .text_color(theme.text_muted)
                     .child(
                         div()

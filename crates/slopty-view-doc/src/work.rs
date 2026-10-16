@@ -154,12 +154,12 @@ pub struct WorkRow {
 impl WorkRow {
     /// A command left running in the background.
     pub const COMMAND: &'static str = "command";
-    /// An agent running elsewhere (a cloud session).
-    pub const REMOTE: &'static str = "remote";
     /// An MCP server's long task.
     pub const MCP: &'static str = "mcp";
     /// A watch that wakes the agent on each event.
     pub const MONITOR: &'static str = "monitor";
+    /// An agent running elsewhere (a cloud session).
+    pub const REMOTE: &'static str = "remote";
     /// A subagent: Claude Code's own, or an agent another started through Slopty.
     pub const SUBAGENT: &'static str = "subagent";
     /// A teammate of an agent team.
@@ -235,11 +235,7 @@ pub fn tokens_short(tokens: u64) -> String {
     if tokens >= 1_000_000 {
         let tenths = tokens.saturating_add(50_000) / 100_000;
         let (whole, part) = (tenths / 10, tenths % 10);
-        if part == 0 {
-            format!("{whole}M")
-        } else {
-            format!("{whole}.{part}M")
-        }
+        if part == 0 { format!("{whole}M") } else { format!("{whole}.{part}M") }
     } else if tokens >= 1_000 {
         let tenths = tokens.saturating_add(50) / 100;
         let (whole, part) = (tenths / 10, tenths % 10);
@@ -251,6 +247,22 @@ pub fn tokens_short(tokens: u64) -> String {
     } else {
         tokens.to_string()
     }
+}
+
+/// A size in bytes as Slopty says it everywhere, the unit after a no-break space so the two never
+/// part at a line's end: `512 B`, `12.3 KB`, `1.4 MB`, `2.0 GB` (1024 a step).
+#[must_use]
+pub fn bytes_short(bytes: u64) -> String {
+    const NBSP: char = '\u{a0}';
+    let tenths = |unit: u64| bytes.saturating_mul(10) / unit;
+    let (unit, name) = match bytes {
+        b if b >= 1 << 30 => (1 << 30, "GB"),
+        b if b >= 1 << 20 => (1 << 20, "MB"),
+        b if b >= 1 << 10 => (1 << 10, "KB"),
+        _ => return format!("{bytes}{NBSP}B"),
+    };
+    let t = tenths(unit);
+    format!("{}.{}{NBSP}{name}", t / 10, t % 10)
 }
 
 /// A span of time as the TUI says it, its two most significant units: `45s`, `2m 5s`,
@@ -294,6 +306,9 @@ mod tests {
         assert_eq!(tokens_short(2_340), "2.3k");
         assert_eq!(tokens_short(290_500), "291k");
         assert_eq!(tokens_short(1_200_000), "1.2M");
+        assert_eq!(bytes_short(512), "512\u{a0}B");
+        assert_eq!(bytes_short(12_595), "12.2\u{a0}KB");
+        assert_eq!(bytes_short(1_468_006), "1.3\u{a0}MB");
         assert_eq!(duration_words(45_000), "45s");
         assert_eq!(duration_words(125_000), "2m 5s");
         assert_eq!(duration_words(6_710_000), "1h 51m");

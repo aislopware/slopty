@@ -28,6 +28,7 @@ use slopty_view_doc::work::{WorkRow, WorkTray, duration_words, tokens_short};
 use crate::composer::{Composer, QUEUE_COMPOSER_OVERLAP};
 use crate::icons::{self, icon};
 use crate::motion;
+use crate::settings::widgets::ActionHint as _; // slopty: tooltips name their key.
 use crate::theme::Theme;
 
 actions!(background_tray, [
@@ -45,7 +46,8 @@ const ROW_RADIUS: f32 = crate::queue::ROW_RADIUS;
 const TEXT_SIZE: f32 = 12.5;
 const SUB_SIZE: f32 = 11.5;
 const GLYPH_SLOT: f32 = 14.0;
-const ACTION_SIZE: f32 = 22.0;
+/// slopty: a row control's hit target (the house's 24 minimum).
+const ACTION_SIZE: f32 = 24.0;
 /// How far a row a subagent started steps in under its parent.
 const DEPTH_STEP: f32 = 14.0;
 /// How long a row a reveal opened at stays marked.
@@ -100,7 +102,7 @@ pub(crate) struct TrayState {
     /// The keyboard's row, by id.
     active: Option<String>,
     pub(crate) focus: Option<FocusHandle>,
-    scroll: gpui::ScrollHandle,
+    pub(crate) scroll: gpui::ScrollHandle, // slopty: the composer's rail follows it.
     /// The last reveal taken.
     seen: u64,
     mark_task: Option<gpui::Task<()>>,
@@ -181,7 +183,12 @@ pub(crate) fn row_elapsed(row: &WorkRow, now: i64) -> Option<String> {
     } else {
         u64::try_from(row.ended_at?.saturating_sub(row.started_at)).ok()?
     };
-    Some(duration_words(ms))
+    // slopty: a live row's timer pads its seconds, so it holds its width as it counts.
+    Some(if row.live {
+        crate::transcript::ticking_elapsed(i64::try_from(ms / 1_000).unwrap_or(i64::MAX))
+    } else {
+        duration_words(ms)
+    })
 }
 
 /// A row's right-hand figures at `now`: "2m 5s · 12 tool uses · 41k tokens".
@@ -467,7 +474,23 @@ impl Composer {
                     .child(list),
             )
             .fade_overflow_y(&self.tray.scroll);
-            surface = surface.child(div().mt(px(2.0)).pb(px(6.0)).child(rows));
+            // slopty: the house's floating rail over a long list (the composer's one rail serves
+            // the tray while no `/` or `@` list is open).
+            let rail = self
+                .active_popup_scroll()
+                .is_none()
+                .then(|| crate::popover::rail(self, "background-tray-scrollbar", &theme, cx))
+                .flatten();
+            surface = surface.child(
+                div()
+                    .id("background-tray-list")
+                    .relative()
+                    .mt(px(2.0))
+                    .pb(px(6.0))
+                    .on_hover(cx.listener(Self::on_popup_list_hover))
+                    .child(rows)
+                    .children(rail),
+            );
         }
         Some(
             div()
@@ -499,11 +522,12 @@ impl Composer {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let accent = theme.accent;
         let needs = tray.counts.needs_you > 0;
         let words = header_words(tray);
         let wakes = tray.rows.iter().any(|row| row.live && row.wakes);
-        let dot_color = if needs { theme.warning } else if wakes { theme.accent } else { theme.text_faint };
+        // slopty: working is no news: a muted pulse; amber only for what needs the person.
+        let dot_color = if needs { theme.warning } else if wakes { theme.text_muted } else { theme.text_faint };
+        let toggle_hover: SharedString = "background-tray-toggle-hover".into();
         let label = if open { "Collapse background work" } else { "Expand background work" };
         let toggle_chat = chat.to_owned();
         let toggle = div()
@@ -521,8 +545,10 @@ impl Composer {
             .items_center()
             .gap(px(8.0))
             .cursor_pointer()
-            .hover(|s| s.bg(theme.element_hover))
-            .focus_visible(move |s| s.bg(accent.opacity(0.14)))
+            .bg(motion::hover_blend(&toggle_hover, gpui::transparent_black(), crate::theme::ink(0.05)))
+            .on_hover(motion::hover_listener(toggle_hover))
+            .tab_index(0)
+            .map(|el| crate::surface_chrome::focus_ring(el, theme))
             .on_click(cx.listener(move |this, _, _, cx| this.toggle_tray(toggle_chat.clone(), open, cx)))
             .child(
                 div()
@@ -535,7 +561,7 @@ impl Composer {
             .child(
                 div()
                     .flex_none()
-                    .text_size(px(TEXT_SIZE))
+                    .text_size(crate::typography::ui_rems(TEXT_SIZE))
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(theme.text)
                     .child("Background"),
@@ -545,13 +571,13 @@ impl Composer {
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .text_size(px(TEXT_SIZE))
+                    .text_size(crate::typography::ui_rems(TEXT_SIZE))
                     .text_color(if needs { theme.warning } else { theme.text_faint })
                     .child(SharedString::from(words)),
             )
             .child(
                 icon(if open { icons::ALT_ARROW_DOWN } else { icons::ALT_ARROW_UP })
-                    .size(px(13.0))
+                    .size(px(12.0))
                     .text_color(theme.text_muted.opacity(0.7)),
             );
         let stop_all = (open && tray.can_stop_all).then(|| {
@@ -566,12 +592,12 @@ impl Composer {
                 .px(px(8.0))
                 .flex()
                 .items_center()
-                .rounded(px(5.0))
-                .text_size(px(SUB_SIZE))
+                .rounded(px(6.0))
+                .text_size(crate::typography::ui_rems(SUB_SIZE))
                 .text_color(motion::hover_blend(&key, theme.text_muted, theme.text))
                 .when(!stopping, |el| {
                     el.cursor_pointer()
-                        .hover(|s| s.bg(theme.element_hover))
+                        .bg(motion::hover_blend(&key, gpui::transparent_black(), crate::theme::wash(0.11)))
                         .on_click(cx.listener(|this, _, _, cx| this.stop_all(cx)))
                 })
                 .on_hover(motion::hover_listener(key))
@@ -610,10 +636,11 @@ impl Composer {
             .flex()
             .items_center()
             .gap(px(8.0))
-            .text_size(px(TEXT_SIZE))
+            .text_size(crate::typography::ui_rems(TEXT_SIZE))
+            // slopty: the main agent at work: a muted pulse, not the accent.
             .child(div().w(px(GLYPH_SLOT)).flex_none().flex().justify_center().child(state_dot(
                 "background-tray-main-dot",
-                theme.accent,
+                theme.text_muted,
                 true,
             )))
             .child(div().flex_none().font_weight(gpui::FontWeight::MEDIUM).text_color(theme.text).child("main"))
@@ -625,7 +652,14 @@ impl Composer {
                     .text_color(theme.text_muted)
                     .child(SharedString::from(step)),
             )
-            .child(div().flex_none().text_size(px(SUB_SIZE)).text_color(theme.text_faint).child(SharedString::from(figures)))
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(crate::typography::ui_rems(SUB_SIZE))
+                    .font_features(crate::typography::tabular())
+                    .text_color(theme.text_faint)
+                    .child(SharedString::from(figures)),
+            )
             .into_any_element()
     }
 
@@ -667,12 +701,14 @@ impl Composer {
         let glyph: AnyElement = if needs {
             state_dot(format!("background-row-dot-{id}"), theme.warning, false)
         } else if row.live {
-            state_dot(format!("background-row-dot-{id}"), if row.wakes { theme.accent } else { theme.text_muted }, row.wakes && row.state != "paused")
+            // slopty: work under way is no news (a muted pulse); done a muted check; a stop or an
+            // expiry is faint; only a failure is loud.
+            state_dot(format!("background-row-dot-{id}"), theme.text_muted, row.wakes && row.state != "paused")
         } else {
             match row.state.as_str() {
-                "completed" => icon(icons::CHECK).size(px(11.0)).text_color(theme.success).into_any_element(),
+                "completed" => icon(icons::CHECK).size(px(11.0)).text_color(theme.text_muted).into_any_element(),
                 "failed" => state_dot(format!("background-row-dot-{id}"), theme.danger, false),
-                _ => state_dot(format!("background-row-dot-{id}"), theme.warning, false),
+                _ => state_dot(format!("background-row-dot-{id}"), theme.text_faint, false),
             }
         };
         let state_color = if needs {
@@ -690,24 +726,25 @@ impl Composer {
             div()
                 .id(stop_key.clone())
                 .role(gpui::Role::Button)
-                .aria_label(if stopping { "Stopping…" } else { "Stop" })
                 .flex_none()
                 .size(px(ACTION_SIZE))
                 .flex()
                 .items_center()
                 .justify_center()
-                .rounded(px(5.0))
+                .rounded(px(6.0))
                 .opacity(if active || stopping { 1.0 } else { motion::hover_t(&key) })
                 .when(!stopping, |el| {
                     el.cursor_pointer()
-                        .hover(|s| s.bg(theme.element_hover))
+                        .bg(motion::hover_blend(&stop_key, gpui::transparent_black(), crate::theme::wash(0.11)))
+                        .on_hover(motion::hover_listener(stop_key.clone()))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             cx.stop_propagation();
                             this.stop_row(stop_id.clone(), cx)
                         }))
                 })
-                .tooltip(crate::settings::widgets::text_tooltip("Stop"))
-                .child(icon(icons::CLOSE).size(px(10.0)).text_color(theme.text_muted))
+                .hint(if stopping { "Stopping…" } else { "Stop" })
+                // slopty: Stop draws the composer's stop square, not a close cross.
+                .child(div().size(px(7.0)).rounded(px(2.0)).bg(theme.text_muted))
         });
         let bg = if marked || active {
             crate::theme::card_selected_bg()
@@ -718,30 +755,31 @@ impl Composer {
         let detail_open = self.tray.detail.as_deref() == Some(row.id.as_str());
         let detail = detail_open.then(|| row_detail(row, now, theme));
         let detail_id = row.id.clone();
+        let details_key: SharedString = format!("background-row-details-hover-{id}").into();
         let details = div()
             .id(SharedString::from(format!("background-row-details-{id}")))
             .role(gpui::Role::Button)
-            .aria_label(if detail_open { "Hide details" } else { "Details" })
             .aria_expanded(detail_open)
             .flex_none()
             .size(px(ACTION_SIZE))
             .flex()
             .items_center()
             .justify_center()
-            .rounded(px(5.0))
+            .rounded(px(6.0))
             .opacity(if active || detail_open { 1.0 } else { motion::hover_t(&key) })
             .cursor_pointer()
-            .hover(|s| s.bg(theme.element_hover))
+            .bg(motion::hover_blend(&details_key, gpui::transparent_black(), crate::theme::wash(0.11)))
+            .on_hover(motion::hover_listener(details_key.clone()))
             .on_click(cx.listener(move |this, _, _, cx| {
                 cx.stop_propagation();
                 let open = this.tray.detail.as_deref() == Some(detail_id.as_str());
                 this.tray.detail = (!open).then(|| detail_id.clone());
                 cx.notify();
             }))
-            .tooltip(crate::settings::widgets::text_tooltip("Details"))
+            .hint(if detail_open { "Hide details" } else { "Show details" })
             .child(
                 icon(if detail_open { icons::ALT_ARROW_DOWN } else { icons::ALT_ARROW_RIGHT })
-                    .size(px(10.0))
+                    .size(px(12.0))
                     .text_color(theme.text_muted),
             );
         let line = div()
@@ -783,7 +821,7 @@ impl Composer {
                             .flex()
                             .items_center()
                             .gap(px(6.0))
-                            .text_size(px(TEXT_SIZE))
+                            .text_size(crate::typography::ui_rems(TEXT_SIZE))
                             .child(icon(kind_icon(&row.kind)).size(px(12.0)).flex_none().text_color(theme.text_faint))
                             .when_some(lead, |el, lead| {
                                 el.child(
@@ -809,7 +847,7 @@ impl Composer {
                                 el.child(
                                     div()
                                         .flex_none()
-                                        .text_size(px(SUB_SIZE))
+                                        .text_size(crate::typography::ui_rems(SUB_SIZE))
                                         .text_color(state_color)
                                         .child(SharedString::from(state.clone())),
                                 )
@@ -817,7 +855,8 @@ impl Composer {
                             .child(
                                 div()
                                     .flex_none()
-                                    .text_size(px(SUB_SIZE))
+                                    .text_size(crate::typography::ui_rems(SUB_SIZE))
+                                    .font_features(crate::typography::tabular())
                                     .text_color(theme.text_faint)
                                     .child(SharedString::from(figures)),
                             ),
@@ -827,8 +866,8 @@ impl Composer {
                             div()
                                 .min_w_0()
                                 .truncate()
-                                .text_size(px(SUB_SIZE))
-                                .line_height(px(16.0))
+                                .text_size(crate::typography::ui_rems(SUB_SIZE))
+                                .line_height(crate::typography::ui_rems(16.0))
                                 .when(output, |el| el.font_family(theme.font_mono.clone()))
                                 .text_color(if needs { theme.warning } else { theme.text_faint })
                                 .child(SharedString::from(words)),
@@ -847,7 +886,7 @@ impl Composer {
     /// "Finished · N": the rows that ended, folded.
     fn tray_finished_fold(&self, count: usize, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let open = self.tray.finished_open;
-        let accent = theme.accent;
+        let hover: SharedString = "background-tray-finished-hover".into();
         div()
             .id("background-tray-finished")
             .role(gpui::Role::Button)
@@ -860,8 +899,10 @@ impl Composer {
             .items_center()
             .gap(px(8.0))
             .cursor_pointer()
-            .hover(|s| s.bg(theme.element_hover))
-            .focus_visible(move |s| s.bg(accent.opacity(0.14)))
+            .bg(motion::hover_blend(&hover, gpui::transparent_black(), crate::theme::ink(0.05)))
+            .on_hover(motion::hover_listener(hover))
+            .tab_index(0)
+            .map(|el| crate::surface_chrome::focus_ring(el, theme))
             .on_click(cx.listener(|this, _, _, cx| {
                 this.tray.finished_open = !this.tray.finished_open;
                 cx.notify();
@@ -876,7 +917,7 @@ impl Composer {
             )
             .child(
                 div()
-                    .text_size(px(SUB_SIZE))
+                    .text_size(crate::typography::ui_rems(SUB_SIZE))
                     .text_color(theme.text_faint)
                     .child(SharedString::from(format!("Finished · {count}"))),
             )
@@ -955,7 +996,7 @@ fn row_detail(row: &WorkRow, now: i64, theme: &Theme) -> AnyElement {
         .flex()
         .flex_col()
         .gap(px(2.0))
-        .text_size(px(SUB_SIZE))
+        .text_size(crate::typography::ui_rems(SUB_SIZE))
         .text_color(theme.text_muted)
         .child(div().font_weight(gpui::FontWeight::MEDIUM).text_color(theme.text).child(SharedString::from(title)))
         .children(facts.into_iter().map(|fact| div().min_w_0().truncate().child(SharedString::from(fact))))
@@ -993,7 +1034,7 @@ fn tray_section(name: &str, count: usize, theme: &Theme) -> AnyElement {
         .px(px(ROW_PAD_X))
         .flex()
         .items_end()
-        .text_size(px(SUB_SIZE))
+        .text_size(crate::typography::ui_rems(SUB_SIZE))
         .text_color(theme.text_faint)
         .child(words)
         .into_any_element()
@@ -1118,7 +1159,8 @@ mod tests {
         let mut live = row("task:a", WorkRow::SUBAGENT, true);
         live.started_at = 1_000;
         live.figures = "12 tool uses · 41k tokens".into();
-        assert_eq!(row_figures(&live, 126_000), "2m 5s · 12 tool uses · 41k tokens");
+        // slopty: a ticking time keeps its width: two-digit seconds.
+        assert_eq!(row_figures(&live, 126_000), "2m 05s · 12 tool uses · 41k tokens");
         let mut ended = row("task:b", WorkRow::COMMAND, false);
         ended.duration_ms = Some(45_000);
         assert_eq!(row_figures(&ended, 999_999), "45s");

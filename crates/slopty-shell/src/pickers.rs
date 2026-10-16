@@ -53,6 +53,7 @@ use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::motion;
 use crate::popover::{self, Loadable, MenuKey};
 use crate::settings::composer::ComposerDefaults;
+use crate::settings::widgets::{ActionHint as _, Keys}; // slopty: tooltips name their key.
 use crate::state::{AppState, EngineHandle};
 use crate::theme::Theme;
 
@@ -128,8 +129,8 @@ pub enum CheckoutPlan {
     CurrentCheckout { branch: Option<String> },
     /// Reuse the picked ref's existing worktree (a cwd override; no git).
     ReuseWorktree { path: String, branch: String },
-    /// `CreateWorktree` off `base` on send (slopty mints a `slopty/<name>`
-    /// branch). `base: None` = refs never loaded — send falls back to the
+    /// `CreateWorktree` off `base` on send (its branch is `worktree-<name>`).
+    /// `base: None` = refs never loaded — send falls back to the
     /// space folder rather than failing.
     NewWorktree { base: Option<String> },
 }
@@ -175,6 +176,29 @@ fn selected_catalog_model<'a>(models: &'a [Model], selected: Option<&str>) -> Op
         Some(id) => models.iter().find(|model| model.id == id),
         None => default_model(models),
     }
+}
+
+/// slopty: a picker trigger's tooltip names what it picks and the key that opens it (the
+/// model picker ⌘/, the branch picker ⌥⌘B, as the keymap has them now); its accessible name
+/// stays what it shows.
+fn trigger_hint(
+    el: gpui::Stateful<gpui::Div>,
+    kind: PickerKind,
+    shown: SharedString,
+    cx: &App,
+) -> gpui::Stateful<gpui::Div> {
+    let (what, action) = match kind {
+        PickerKind::HarnessModel => ("Model", Some("shell::OpenModelPicker")),
+        PickerKind::Branch => ("Branch", Some("shell::OpenBranchPicker")),
+        PickerKind::Checkout => ("Checkout", None),
+        PickerKind::Space => ("Project", None),
+        PickerKind::Device => ("Device", None),
+    };
+    let el = match action.and_then(|name| cx.build_action(name, None).ok()) {
+        Some(action) => el.action_hint(what, Keys::Action(action), cx),
+        None => el.hint(what),
+    };
+    if shown.is_empty() { el } else { el.aria_label(shown) }
 }
 
 /// A model's default reasoning: X-High when the ladder offers it (slopty
@@ -1265,6 +1289,18 @@ impl Pickers {
                     .or(self.defaults.reasoning),
             }
         })
+    }
+
+    /// slopty: whether a model row is its agent's default (the catalog's first row), as its
+    /// row's note says it.
+    pub(super) fn model_standing(
+        &self,
+        harness: HarnessId,
+        model: &str,
+    ) -> Option<crate::settings::widgets::Standing> {
+        let models = self.models.get(&harness)?.ready()?;
+        let is_default = default_model(models).is_some_and(|first| first.id == model);
+        crate::settings::widgets::Standing::of(is_default, false)
     }
 
     fn effective_reasoning(&self, cx: &App) -> Option<ReasoningLevel> {
@@ -2981,7 +3017,8 @@ impl Pickers {
                                         crate::icons::icon(crate::icons::WIFI_OFF)
                                             .size(px(12.0))
                                             .flex_none()
-                                            .text_color(theme.warning.opacity(0.8)),
+                                            // slopty: offline is quiet; amber is for a stuck send.
+                                            .text_color(theme.text_muted),
                                     )
                                 })
                             },
@@ -3533,6 +3570,7 @@ impl Pickers {
                 }),
             )
             .on_click(cx.listener(move |this, _, window, cx| this.toggle(kind, window, cx)))
+            .map(|el| trigger_hint(el, kind, label.clone(), cx))
             .when(icon_loading, |el| {
                 el.child(div().flex_none().child(crate::loaders::mini_glyph_spinner(
                     "picker-chip-loader",
@@ -3648,6 +3686,7 @@ impl Pickers {
                 }),
             )
             .on_click(cx.listener(move |this, _, window, cx| this.toggle(kind, window, cx)))
+            .map(|el| trigger_hint(el, kind, label.clone(), cx))
             .child(
                 crate::icons::icon(icon_path)
                     .size(px(12.0))
@@ -3753,7 +3792,8 @@ impl Pickers {
                 &theme,
                 cx,
             )
-            .when(offline, |el| el.text_color(theme.warning.opacity(0.8)));
+            // slopty: offline is quiet; amber is for a stuck send.
+            .when(offline, |el| el.text_color(theme.text_muted));
         let project_chip = self.footer_chip(
             PickerKind::Space,
             "picker-project",
@@ -4386,6 +4426,11 @@ impl Pickers {
                                 .truncate()
                                 .child(SharedString::from(label)),
                         )
+                        // slopty: the choice a new chat starts on says so.
+                        .children(
+                            crate::settings::widgets::Standing::of(kind == CheckoutKind::Local, false)
+                                .map(|standing| crate::settings::widgets::standing_note(&theme, standing)),
+                        )
                     }),
             )
             .into_any_element()
@@ -4781,6 +4826,9 @@ impl Pickers {
             })
             .map(|d| SharedString::from(d.to_owned()));
         let compact = self.model_rail == ModelRail::Harness;
+        let standing = self
+            .model_standing(row.harness, &row.model.id)
+            .map(|standing| crate::settings::widgets::standing_note(&theme, standing));
         let mut el = div()
             .id(("model-row", ix))
             .px(px(8.0))
@@ -4842,6 +4890,7 @@ impl Pickers {
                             .child(attribution),
                     )
                 })
+                .children(standing)
                 .into_any_element()
         } else {
             div()
@@ -4853,11 +4902,18 @@ impl Pickers {
                 .child(
                     div()
                         .w_full()
-                        .truncate()
-                        .text_size(crate::typography::ui_rems(12.5))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(theme.text)
-                        .child(label),
+                        .flex()
+                        .items_baseline()
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(crate::typography::ui_rems(12.5))
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(theme.text)
+                                .child(label),
+                        )
+                        .children(standing),
                 )
                 .child(
                     // Harness identity subline (t3 `showProvider`), plus
@@ -4985,6 +5041,7 @@ impl Pickers {
                 ));
             }
         }
+        let star_hover: SharedString = format!("model-star-full-{ix}-{}", cx.entity_id()).into();
         el = el.child(
             div()
                 .id(("model-star", ix))
@@ -4996,7 +5053,8 @@ impl Pickers {
                 .items_center()
                 .justify_center()
                 .cursor_pointer()
-                .hover(|s| s.bg(crate::theme::ink(0.08)))
+                .bg(motion::hover_blend(&star_hover, gpui::transparent_black(), crate::theme::ink(0.08)))
+                .on_hover(motion::hover_listener(star_hover))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     cx.stop_propagation();
                     this.toggle_model_favorite(harness, &star_model, cx);
@@ -5008,8 +5066,9 @@ impl Pickers {
                         crate::icons::STAR
                     })
                     .size(px(13.0))
+                    // slopty: a starred model is chosen, not news: the text colour.
                     .text_color(if is_fav {
-                        theme.warning
+                        theme.text
                     } else {
                         theme.text_muted
                     }),
@@ -5609,7 +5668,11 @@ impl Pickers {
                                     }))
                                     .child(SharedString::from(choice.label))
                                     .child(div().flex_1())
-                                    .when(choice.default, |el| el.child(default_badge(&theme)))
+                                    // slopty: every choice marks its default, in the house's words.
+                                    .children(
+                                        crate::settings::widgets::Standing::of(choice.default, false)
+                                            .map(|standing| crate::settings::widgets::standing_note(&theme, standing)),
+                                    )
                                     .when(
                                         choice.selected,
                                         |el| {
@@ -5825,9 +5888,6 @@ impl popover::ScrollRailHost for Pickers {
     }
 }
 
-/// The "Default" marker beside a section's default choice: a ghost badge —
-/// bare muted text, no border or fill (user request; t3code draws an outline
-/// pill here).
 /// Reasoning plus each offered option, with the current picks marked.
 fn build_setting_groups(
     levels: Vec<ReasoningLevel>,
@@ -5880,18 +5940,6 @@ fn build_setting_groups(
     groups
 }
 
-fn default_badge(theme: &Theme) -> gpui::Div {
-    div()
-        .flex_none()
-        .text_size(crate::typography::ui_rems(10.0))
-        .font_weight(gpui::FontWeight::SEMIBOLD)
-        .text_color(theme.for_popup().text_muted)
-        .child(SharedString::from("Default"))
-}
-
-/// Brand mark + optional tint for a harness (the Claude mark keeps its brand
-/// orange even on the monochrome surface; the mock harness scripts
-/// Claude-flavoured runs, so it wears the Claude mark).
 /// The 2px underline marking the viewed top tab: sits on the tab row's
 /// bottom hairline (the tab is 32px tall inside a 40px row, so -4px lands
 /// exactly on the border), rounded like a capsule.
@@ -6108,12 +6156,14 @@ pub(crate) fn normalize_model_rows(harness: HarnessId, models: Vec<Model>) -> Ve
         .collect()
 }
 
+/// Brand mark + optional tint for a harness (the mock harness scripts Claude-flavoured runs, so
+/// it wears the Claude mark).
 pub(crate) fn harness_brand_icon(harness: HarnessId) -> (&'static str, Option<gpui::Hsla>) {
     match harness {
-        HarnessId::CLAUDE_CODE | HarnessId::MOCK => (
-            crate::icons::CLAUDE_MARK,
-            Some(crate::icons::claude_brand()),
-        ),
+        // slopty: the Claude mark is quiet at rest like every other mark; the brand's clay is
+        // for a chat that works, if anywhere (`docs/decisions/ui.md`, "A loud hue means notice
+        // this").
+        HarnessId::CLAUDE_CODE | HarnessId::MOCK => (crate::icons::CLAUDE_MARK, None),
         HarnessId::CODEX => (crate::icons::OPENAI_MARK, None),
         HarnessId::CURSOR => (crate::icons::CURSOR_MARK, None),
         // Cognition's mark (the Devin product icon), monochrome.
@@ -6453,14 +6503,11 @@ impl Render for Pickers {
             Some(harness) => harness_brand_icon(harness),
             None if self.title.is_some() => (crate::icons::CHAT_ROUND_LINE, Some(theme.text_muted)),
             None if no_agents => (crate::icons::TERMINAL, Some(theme.text_muted)),
-            None => (
-                crate::icons::CLAUDE_MARK,
-                Some(crate::icons::claude_brand()),
-            ),
+            None => (crate::icons::CLAUDE_MARK, Some(theme.text_muted)),
         };
         // The chip names the model and its effort only; the other options
-        // (context, fast mode, ...) live in the popover. The effort always
-        // reads in the muted second tone, default or not (user request).
+        // (context, fast mode, ...) live in the popover. The effort reads in the
+        // muted second tone, a step fainter at the model's default.
         let effort = self.effective_reasoning(cx);
         // Render the open popover's body first (mutable borrow), then the
         // chips. Branch/Checkout render in the composer FOOTER row (see
@@ -6488,9 +6535,15 @@ impl Render for Pickers {
         // brand icon + model name, then the effort as the chip's muted second
         // tone — the ladder's level, else an effort option's choice (Cursor).
         // None for the title picker (titles always run at minimal reasoning).
+        // slopty: at the model's default the effort steps back to `text_faint`: a trigger is
+        // quiet at the default.
+        let effort_default = default_reasoning(&self.trait_ladder(cx));
         let chip_suffix = effort
             .filter(|_| self.title.is_none())
-            .map(|level| (SharedString::from(reasoning_label(level)), None))
+            .map(|level| {
+                let tint = (Some(level) == effort_default).then_some(theme.text_faint);
+                (SharedString::from(reasoning_label(level)), tint)
+            })
             .or_else(|| {
                 self.title
                     .is_none()
@@ -6551,7 +6604,8 @@ impl Render for Pickers {
                     div().flex_none().child(
                         crate::icons::icon(crate::icons::FAST_TIER_BOLD)
                             .size(px(13.0))
-                            .text_color(theme.accent),
+                            // slopty: fast mode is chosen, not news: the text colour.
+                            .text_color(theme.text),
                     ),
                 ))
             })

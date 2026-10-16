@@ -502,21 +502,10 @@ fn own_entry(
 /// A compaction as its divider says it: how many tokens became the summary, when the agent said.
 fn compacted(compaction: &Compaction) -> String {
     match compaction.before_tokens {
-        Some(tokens) => format!("Compacted · {} tokens → summary", tokens_short(tokens)),
+        Some(tokens) => {
+            format!("Compacted · {} tokens → summary", slopty_view_doc::tokens_short(tokens))
+        }
         None => "Compacted · context → summary".to_owned(),
-    }
-}
-
-/// A count of tokens as a person reads it: `950`, `14k`, `1.2M`.
-fn tokens_short(tokens: u64) -> String {
-    if tokens >= 1_000_000 {
-        let tenths = tokens.saturating_add(50_000) / 100_000;
-        let (whole, part) = (tenths / 10, tenths % 10);
-        if part == 0 { format!("{whole}M") } else { format!("{whole}.{part}M") }
-    } else if tokens >= 1_000 {
-        format!("{}k", tokens.saturating_add(500) / 1_000)
-    } else {
-        tokens.to_string()
     }
 }
 
@@ -691,6 +680,11 @@ pub fn error_words(
     retrying: Option<&slopty_proto::thread::Retry>,
 ) -> (String, Option<String>) {
     let on = host.map(|host| format!(" on {host}")).unwrap_or_default();
+    // A Claude Code too old to drive keeps the worker's words, which the shell draws as a
+    // banner naming the machine and both versions.
+    if slopty_shell::transcript::claude_too_old(raw).is_some() {
+        return (raw.trim().to_owned(), None);
+    }
     // slopty: where the agent's own first line says what happened and what to do, in the TUI's
     // words (a spend limit, a sign-in its organization refuses, a start it refused, a context
     // that no longer fits), that line leads, its machine after it.
@@ -1048,6 +1042,7 @@ fn header(request: &Request) -> String {
         Request::PLAN => "Plan",
         Request::QUESTION => "Question",
         Request::ELICITATION => "Form",
+        kind if kind.starts_with(Request::DIALOG) => "Confirm",
         _ => "Input",
     }
     .to_owned()
@@ -1235,6 +1230,12 @@ fn input(request: &Request, state: &ThreadState) -> MessagePart {
         let carded = request.kind == Request::PLAN && plan_text(request).is_some();
         let (header, question) = if carded {
             ("Plan ready".to_owned(), String::new())
+        } else if request.kind.starts_with(Request::DIALOG) && !title.is_empty() {
+            // A dialog's title is its ask, not its kind: the card is headed by the kind, and the
+            // title leads the words, so the head never repeats the question.
+            let question =
+                if text.is_empty() { title.to_owned() } else { format!("{title}\n\n{text}") };
+            (header(request), question)
         } else {
             (if title.is_empty() { header(request) } else { title.to_owned() }, text.to_owned())
         };
@@ -1512,6 +1513,10 @@ fn notice_part(id: String, notice: &Notice, look: &Look<'_>) -> Option<MessagePa
     let text = look.words(&notice.text);
     match notice.kind.as_str() {
         Notice::INTERRUPTED => None,
+        // A Claude Code too old to drive is said as a notice; the shell draws it as a banner.
+        Notice::INFO if slopty_shell::transcript::claude_too_old(&text).is_some() => {
+            Some(MessagePart::Error { id, message: text, detail: None, retry: false })
+        }
         Notice::INFO | Notice::COMMAND | Notice::REWOUND => Some(MessagePart::Text { id, text }),
         kind => {
             let (message, detail) = error_words(kind, &text, look.host, notice.retry.as_ref());
@@ -1561,9 +1566,17 @@ fn tool(
             }
         }
         (Some(ToolDetail::Write(write)), _) => {
+            // A file written whole with no diff said (a new file's, before its result) added
+            // every line it wrote, never "+0 −0".
+            let unsaid = write.patch.added == 0 && write.patch.removed == 0;
+            let added = if unsaid && write.created != Some(false) {
+                write.lines
+            } else {
+                write.patch.added
+            };
             diff_stats = Some(vec![ToolDiffStat {
                 path: write.path.clone(),
-                additions: u64::from(write.patch.added),
+                additions: u64::from(added),
                 deletions: u64::from(write.patch.removed),
             }]);
             slopty_view_proto::ToolCall::WriteFile {

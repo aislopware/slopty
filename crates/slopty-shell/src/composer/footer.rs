@@ -180,9 +180,10 @@ impl Composer {
                     .max_w(px(200.0))
                     .truncate()
                     .px(px(4.0))
-                    .text_size(px(11.0))
+                    .text_size(crate::typography::ui_rems(11.0))
                     .text_color(theme.text_faint)
                     .tooltip(crate::settings::widgets::text_tooltip(surface.plugin.clone()))
+                    .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
                     .child(SharedString::from(words))
                     .into_any_element(),
             );
@@ -218,6 +219,7 @@ impl Composer {
         let words = goal_words(goal, now);
         let details = goal_details(goal, now).join("\n");
         let open = self.footer.menu.get() == Some(&FooterMenu::Goal);
+        let hover: SharedString = "dock-goal-hover".into();
         let chip = div()
             .id("dock-goal")
             .role(Role::Button)
@@ -231,12 +233,20 @@ impl Composer {
             .items_center()
             .gap(px(5.0))
             .rounded(px(Theme::CONTROL_RADIUS))
-            .text_size(px(11.0))
-            .text_color(theme.accent)
+            .text_size(crate::typography::ui_rems(11.0))
+            // slopty: a goal that is set is chosen, not news: the text colour, not the accent.
+            .text_color(theme.text)
             .cursor_pointer()
-            .when(open, |el| el.bg(crate::theme::ink(0.05)))
-            .hover(|s| s.bg(crate::theme::ink(0.05)))
-            .when(!open, |el| el.tooltip(crate::settings::widgets::text_tooltip(details)))
+            .bg(if open {
+                crate::theme::ink(0.05)
+            } else {
+                motion::hover_blend(&hover, gpui::transparent_black(), crate::theme::ink(0.05))
+            })
+            .on_hover(motion::hover_listener(hover))
+            .when(!open, |el| {
+                el.tooltip(crate::settings::widgets::text_tooltip(details))
+                    .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
+            })
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _, _| {
@@ -260,8 +270,8 @@ impl Composer {
                 div()
                     .px(px(8.0))
                     .pb(px(4.0))
-                    .text_size(px(12.0))
-                    .line_height(px(17.0))
+                    .text_size(crate::typography::ui_rems(12.0))
+                    .line_height(crate::typography::ui_rems(17.0))
                     .text_color(if ix == 0 { popup.text } else { popup.text_muted })
                     .child(SharedString::from(line)),
             );
@@ -313,10 +323,16 @@ impl Composer {
             .items_center()
             .gap(px(5.0))
             .rounded(px(Theme::CONTROL_RADIUS))
-            .text_size(px(11.0))
+            .text_size(crate::typography::ui_rems(11.0))
             .text_color(if needs > 0 { theme.warning } else { theme.text_muted })
             .cursor_pointer()
-            .hover(|s| s.bg(crate::theme::ink(0.05)))
+            .bg(motion::hover_blend("dock-background-hover", gpui::transparent_black(), crate::theme::ink(0.05)))
+            .on_hover(motion::hover_listener("dock-background-hover"))
+            .action_hint(
+                SharedString::from(words.clone()),
+                Keys::Action(Box::new(crate::background_tray::FocusBackgroundTray)),
+                cx,
+            )
             .on_click(cx.listener(|this, _, window, cx| this.focus_background_tray(window, cx)))
             .child(crate::icons::icon(crate::icons::LIST).size(px(12.0)).text_color(theme.text_faint))
             .child(SharedString::from(words))
@@ -335,19 +351,20 @@ impl Composer {
             Some(choice) => format!("{}…", choice.label),
             None => mode_words(chip),
         };
+        // slopty: loud only when nothing is asked; plan mode is chosen, not news (the text colour,
+        // not the accent); the recommended default is quiet and wears no lock.
         let (color, wash) = match chip.tone.as_str() {
             ModeChip::DANGER => (theme.warning, Some(theme.warning.opacity(0.12))),
-            ModeChip::PLAN => (theme.accent, None),
+            ModeChip::PLAN => (theme.text, None),
             ModeChip::ACCEPT => (theme.text_muted, None),
             _ => (theme.text_faint, None),
         };
+        let lock = chip.tone == ModeChip::DANGER;
         let open = self.footer.menu.get() == Some(&FooterMenu::Mode);
         let switchable = can_switch && chip.choices.len() > 1;
         let segment = div()
             .id("dock-mode")
             .role(Role::Button)
-            .aria_label(SharedString::from(format!("Mode: {words}")))
-            .when(switchable, |el| el.aria_description("⇧Tab cycles the mode"))
             .relative()
             .flex_none()
             .h(px(SEGMENT_HEIGHT))
@@ -356,20 +373,26 @@ impl Composer {
             .items_center()
             .gap(px(5.0))
             .rounded(px(Theme::CONTROL_RADIUS))
-            .text_size(px(11.0))
+            .text_size(crate::typography::ui_rems(11.0))
             .font_weight(if wash.is_some() { gpui::FontWeight::MEDIUM } else { gpui::FontWeight::NORMAL })
             .text_color(color)
-            .when_some(wash, |el, wash| el.bg(wash))
-            .when(open, |el| el.bg(crate::theme::ink(0.05)))
-            .child(crate::icons::icon(crate::icons::LOCK).size(px(12.0)).text_color(color))
-            .child(SharedString::from(words));
+            .when(lock, |el| el.child(crate::icons::icon(crate::icons::LOCK).size(px(12.0)).text_color(color)))
+            .child(SharedString::from(words.clone()));
+        let aria = SharedString::from(format!("Mode: {words}"));
         if !switchable {
-            return segment.into_any_element();
+            return segment.aria_label(aria).when_some(wash, |el, wash| el.bg(wash)).into_any_element();
         }
+        let rest = wash.unwrap_or(gpui::transparent_black());
         let segment = segment
             .cursor_pointer()
-            .hover(|s| s.bg(crate::theme::ink(0.05)))
-            .tooltip(crate::settings::widgets::text_tooltip("Mode · ⇧Tab"))
+            .bg(if open {
+                crate::theme::ink(0.05)
+            } else {
+                motion::hover_blend("dock-mode-hover", rest, crate::theme::ink(0.05))
+            })
+            .on_hover(motion::hover_listener("dock-mode-hover"))
+            .action_hint("Mode", Keys::Fixed("shift-tab"), cx)
+            .aria_label(aria)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _, _| {
@@ -415,20 +438,16 @@ impl Composer {
                                     .gap(px(6.0))
                                     .child(SharedString::from(choice.label.clone()))
                                     // slopty: the agent's own default, which it recommends.
-                                    .when(choice.recommended, |el| {
-                                        el.child(
-                                            div()
-                                                .text_size(px(11.0))
-                                                .text_color(popup.text_faint)
-                                                .child("Default · Recommended"),
-                                        )
-                                    }),
+                                    .children(
+                                        crate::settings::widgets::Standing::of(choice.recommended, choice.recommended)
+                                            .map(|standing| crate::settings::widgets::standing_note(&popup, standing).ml_0()),
+                                    ),
                             )
                             .when_some(choice.description.clone(), |el, description| {
                                 el.child(
                                     div()
-                                        .text_size(px(11.5))
-                                        .line_height(px(15.0))
+                                        .text_size(crate::typography::ui_rems(11.5))
+                                        .line_height(crate::typography::ui_rems(15.0))
                                         .text_color(popup.text_muted)
                                         .child(SharedString::from(description)),
                                 )
@@ -445,7 +464,10 @@ impl Composer {
                 .py(px(4.0))
                 .flex()
                 .justify_end()
-                .child(crate::popover::kbd_hint(&popup, "⇧Tab cycles")),
+                .child(crate::popover::kbd_hint(
+                    &popup,
+                    &format!("{} cycles", crate::keys::combo_text("shift-tab")),
+                )),
         );
         let card = card.on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_footer_menu(cx)));
         segment
@@ -465,11 +487,11 @@ fn goal_glyph(theme: &Theme) -> AnyElement {
         .size(px(10.0))
         .rounded_full()
         .border_1()
-        .border_color(theme.accent)
+        .border_color(theme.text)
         .flex()
         .items_center()
         .justify_center()
-        .child(div().size(px(4.0)).rounded_full().bg(theme.accent))
+        .child(div().size(px(4.0)).rounded_full().bg(theme.text))
         .into_any_element()
 }
 
@@ -488,8 +510,9 @@ fn status_line(spans: &[StatusSpan], theme: &Theme) -> AnyElement {
         .px(px(4.0))
         .flex()
         .items_center()
-        .text_size(px(11.0))
-        .tooltip(crate::settings::widgets::text_tooltip(text));
+        .text_size(crate::typography::ui_rems(11.0))
+        .tooltip(crate::settings::widgets::text_tooltip(text))
+        .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY);
     for span in spans {
         let words = span.text.replace('\n', " · ");
         if words.is_empty() {

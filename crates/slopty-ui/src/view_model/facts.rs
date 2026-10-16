@@ -15,7 +15,7 @@ use slopty_proto::thread::{
 use slopty_proto::visual::{PageDetail, PageSource};
 use slopty_view_doc::{
     LinkRow, NoteLine, NoteRow, PageCard, RetryLine, SubagentProgress, TaskRow, ToolFacts,
-    ToolTimer, duration_words, tokens_short,
+    ToolTimer, bytes_short, duration_words, tokens_short,
 };
 
 use super::transcript::at;
@@ -312,20 +312,6 @@ const fn reason(code: u64) -> &'static str {
     }
 }
 
-/// A size in bytes as the TUI says it: `512B`, `12.3KB`, `1.4MB`.
-fn bytes_words(bytes: u64) -> String {
-    let tenths = |unit: u64| bytes.saturating_mul(10).checked_div(unit).unwrap_or(0);
-    if bytes >= 1 << 20 {
-        let t = tenths(1 << 20);
-        format!("{}.{}MB", t / 10, t % 10)
-    } else if bytes >= 1 << 10 {
-        let t = tenths(1 << 10);
-        format!("{}.{}KB", t / 10, t % 10)
-    } else {
-        format!("{bytes}B")
-    }
-}
-
 /// `n` `one`, or `n` of the plural.
 fn count(n: u64, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
@@ -406,7 +392,7 @@ fn result(call: &ToolCall, task: Option<&BackgroundTask>) -> Option<(String, boo
         }
         Some(ToolDetail::Fetch(fetch)) if finished => {
             let code = fetch.code?;
-            let size = fetch.bytes.map(|b| format!("{} ", bytes_words(b))).unwrap_or_default();
+            let size = fetch.bytes.map(|b| format!("{} ", bytes_short(b))).unwrap_or_default();
             let words = reason(code);
             let status =
                 if words.is_empty() { code.to_string() } else { format!("{code} {words}") };
@@ -562,7 +548,8 @@ pub fn tool_facts(
     let (mut result_line, mut failed) = result(call, task).unzip();
     // How it ended in the agent's own words, where its state alone does not say.
     if let Some(said) = note.and_then(|n| n.said.clone()).filter(|s| !s.trim().is_empty()) {
-        failed = Some(matches!(call.state, ToolState::Failed | ToolState::Rejected));
+        // The person's own no is not a failure, whatever words it ended with.
+        failed = Some(call.state == ToolState::Failed);
         result_line = Some(said);
     }
     let running = matches!(call.state, ToolState::Running | ToolState::Pending { .. });
@@ -596,6 +583,7 @@ pub fn tool_facts(
         title: note.and_then(|n| n.title.clone()).or_else(|| title(call, input.as_ref())),
         result: result_line,
         failed: failed.unwrap_or(false),
+        rejected: call.state == ToolState::Rejected,
         timer,
         task_row: task_id.as_deref().map(task_row),
         backgroundable,
@@ -792,10 +780,8 @@ fn progress(
     };
     let running = matches!(state_now, SubagentProgress::RUNNING | SubagentProgress::NEEDS_YOU);
     let outcome = match state_now {
-        SubagentProgress::DONE => Some(match duration_ms {
-            Some(ms) => format!("Done · {}", duration_words(ms)),
-            None => "Done".to_owned(),
-        }),
+        // The time it ran is the card's figures' to say, once: the outcome is the word.
+        SubagentProgress::DONE => Some("Done".to_owned()),
         SubagentProgress::FAILED => Some(match task.and_then(|t| t.outcome.as_deref()) {
             Some(why) => format!("Failed: {why}"),
             None => "Failed".to_owned(),

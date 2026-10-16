@@ -42,7 +42,9 @@ pub fn usage_level(fraction: f32) -> UsageLevel {
 
 pub fn usage_color(level: UsageLevel, theme: &Theme) -> Hsla {
     match level {
-        UsageLevel::Normal => theme.accent,
+        // slopty: use at a normal rate is quiet, as the context ring beside it; only nearing a
+        // limit takes a hue.
+        UsageLevel::Normal => theme.text_muted,
         UsageLevel::Warn => theme.warning,
         UsageLevel::Critical => theme.danger,
     }
@@ -430,6 +432,10 @@ mod tests {
         assert_eq!(usage_level(0.74), UsageLevel::Normal);
         assert_eq!(usage_level(0.75), UsageLevel::Warn);
         assert_eq!(usage_level(0.9), UsageLevel::Critical);
+        // slopty: normal use is quiet, as the context ring is.
+        let theme = Theme::dark();
+        assert_eq!(usage_color(UsageLevel::Normal, &theme), theme.text_muted);
+        assert_eq!(usage_color(UsageLevel::Warn, &theme), theme.warning);
     }
 
     #[test]

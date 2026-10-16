@@ -33,6 +33,9 @@ pub(crate) fn render_comment_adder<T: 'static>(
         .cursor_pointer()
         .role(gpui::Role::Button)
         .aria_label("Add comment")
+        // slopty: the gutter's + names what it does.
+        .tooltip(crate::settings::widgets::text_tooltip("Add comment"))
+        .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(cx.listener(move |this, _, window, cx| {
             cx.stop_propagation();
@@ -112,17 +115,22 @@ pub(crate) fn render_comment_card<T: 'static>(
                         .child(
                             div()
                                 .id(SharedString::from(format!("cmt-remove-{}", comment.id)))
+                                .role(gpui::Role::Button)
+                                .aria_label("Remove comment")
                                 .flex_none()
-                                .size(px(16.0))
+                                // slopty: a 24 pt target in the 16 pt footprint.
+                                .size(px(24.0))
+                                .m(px(-4.0))
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .rounded(px(4.0))
+                                .rounded(px(6.0))
                                 .cursor_pointer()
                                 .opacity(0.0)
                                 .group_hover(group, |s| s.opacity(1.0))
                                 .on_click(cx.listener(move |this, _, _, cx| remove(this, &id, cx)))
                                 .tooltip(crate::settings::widgets::text_tooltip("Remove comment"))
+                                .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
                                 .child(
                                     crate::icons::icon(crate::icons::CLOSE_CIRCLE)
                                         .size(px(12.0))
@@ -137,7 +145,7 @@ pub(crate) fn render_comment_card<T: 'static>(
                         // Height is analytic, so an over-long body clips
                         // inside the card rather than past the fold height.
                         .overflow_hidden()
-                        .text_size(px(12.0))
+                        .text_size(crate::typography::ui_rems(12.0))
                         .line_height(px(comments::CARD_LINE_HEIGHT))
                         .text_color(theme.text_dim)
                         .child(SharedString::from(comment.body.clone())),
@@ -157,11 +165,13 @@ pub(crate) fn render_comment_edit<T: 'static>(
     div()
         .id(SharedString::from(format!("cmt-edit-{id}")))
         .flex_none()
-        .size(px(16.0))
+        // slopty: a 24 pt target in the 16 pt footprint.
+        .size(px(24.0))
+        .m(px(-4.0))
         .flex()
         .items_center()
         .justify_center()
-        .rounded(px(4.0))
+        .rounded(px(6.0))
         .cursor_pointer()
         .role(gpui::Role::Button)
         .aria_label("Edit comment")
@@ -173,6 +183,7 @@ pub(crate) fn render_comment_edit<T: 'static>(
             edit(this, &id, window, cx);
         }))
         .tooltip(crate::settings::widgets::text_tooltip("Edit comment"))
+        .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
         .child(
             crate::icons::icon(crate::icons::PEN)
                 .size(px(12.0))
@@ -259,7 +270,7 @@ pub(crate) fn render_comment_draft<T: 'static>(
                         .h(px(46.0))
                         .flex_none()
                         .overflow_hidden()
-                        .text_size(px(12.0))
+                        .text_size(crate::typography::ui_rems(12.0))
                         .child(input.into_any_element()),
                 )
                 .child(
@@ -302,7 +313,7 @@ fn comment_action(
         .flex()
         .items_center()
         .rounded(px(6.0))
-        .text_size(px(11.0))
+        .text_size(crate::typography::ui_rems(11.0))
         .font_weight(gpui::FontWeight::MEDIUM)
         .cursor_pointer()
         .when(primary, |el| el.bg(theme.solid).text_color(theme.on_solid))

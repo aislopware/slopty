@@ -1,7 +1,8 @@
 // slopty: Slopty's own file, beside zeron's composer notices.
 //! What the composer says above itself about the chat's road: its machine out of reach, named
 //! and with when it was last heard (after a grace, so a blip says nothing), with Retry and Wake;
-//! and a usage limit holding the agent, with when it lifts.
+//! a turn that made no progress for a while, on which machine and after which call, with Keep
+//! waiting and Stop; and a usage limit holding the agent, with when it lifts.
 use chrono::{DateTime, Utc};
 use gpui::AnyElement;
 
@@ -22,6 +23,33 @@ pub(super) struct RoadNotice {
     pub(super) chat: String,
     /// The machine, and its wake action when it lists one.
     pub(super) wake: Option<(String, String)>,
+}
+
+/// What a chat's session waits on while its turn makes no progress (the worker's `stalled`).
+pub(super) const STALLED: &str = "stalled";
+
+/// How the worker begins a stall's words, before the call it last made.
+const STALLED_TEXT: &str = "No progress for a while";
+
+/// The stall notice of a chat.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct StallNotice {
+    pub(super) text: String,
+    pub(super) chat: String,
+    /// What the worker said of it, which keeping waiting is keyed by.
+    pub(super) said: Option<String>,
+}
+
+/// The words of a stall on the machine `host`, from what the worker said of it (`said`): "No
+/// progress on studio for a while · last: Bash(cargo test)".
+pub(super) fn stall_words(host: &str, said: Option<&str>) -> String {
+    match said.map(str::trim).filter(|said| !said.is_empty()) {
+        Some(said) => match said.strip_prefix(STALLED_TEXT) {
+            Some(rest) => format!("No progress on {host} for a while{rest}"),
+            None => format!("{host}: {said}"),
+        },
+        None => format!("No progress on {host} for a while"),
+    }
 }
 
 /// When a machine was last heard, in words: "just now", "2 min ago", "3 h ago", "2 d ago".
@@ -112,6 +140,47 @@ impl Composer {
         Some(RoadNotice { text, offline, chat, wake })
     }
 
+    /// The stall notice: the selected chat's turn made no progress for a while, unless the
+    /// person chose to keep waiting through this very stall.
+    pub(super) fn stall_notice(&mut self, cx: &App) -> Option<StallNotice> {
+        let (chat, said, host) = {
+            let state = self.state.read(cx);
+            let chat = state.selected_chat.clone()?;
+            let now = Utc::now();
+            let wait = state
+                .session_for(&chat)
+                .filter(|s| {
+                    now.signed_duration_since(s.updated_at).num_milliseconds()
+                        <= crate::state::SESSION_STALE_MS
+                })
+                .and_then(|s| s.waiting_on.as_ref().map(|wait| (s, wait)))
+                .filter(|(_, wait)| wait.kind == STALLED);
+            let Some((session, wait)) = wait else {
+                // The stall is over: a new one is said again.
+                if self.extras.stall_kept.as_ref().is_some_and(|(kept, _)| *kept == chat) {
+                    self.extras.stall_kept = None;
+                }
+                return None;
+            };
+            let host = state
+                .devices
+                .iter()
+                .find(|d| d.id == session.device_id)
+                .map_or_else(|| "its machine".to_owned(), |d| d.name.clone());
+            (chat, wait.summary.clone(), host)
+        };
+        if self.extras.stall_kept.as_ref().is_some_and(|kept| kept.0 == chat && kept.1 == said) {
+            return None;
+        }
+        Some(StallNotice { text: stall_words(&host, said.as_deref()), chat, said })
+    }
+
+    /// Keep waiting through `notice`'s stall: the composer stops saying it until it ends.
+    pub(super) fn keep_waiting(&mut self, notice: &StallNotice, cx: &mut Context<Self>) {
+        self.extras.stall_kept = Some((notice.chat.clone(), notice.said.clone()));
+        cx.notify();
+    }
+
     /// The limit notice's words while a usage limit holds the agent; redrawn when it lifts.
     pub(super) fn limit_notice(&mut self, cx: &mut Context<Self>) -> Option<String> {
         let resets_at = self.state.read(cx).limit_resets_at;
@@ -189,77 +258,166 @@ impl Composer {
         }));
     }
 
-    /// One quiet caption line above the composer: a dot, the words, and its text actions.
-    pub(super) fn render_road_notice(
+    /// The new-chat canvas's word on its target: a send will wait for the connection.
+    pub(super) fn queue_notice(&self, cx: &App) -> Option<(SharedString, bool)> {
+        use slopty_view_proto::ConnectivityState as S;
+        let state = self.state.read(cx);
+        if state.selected_chat.is_some() {
+            return None;
+        }
+        // New-chat canvas: judge by the picked target device.
+        let remote_target = state
+            .effective_device_id()
+            .is_some_and(|id| state.local_device_id.as_deref() != Some(id.as_str()));
+        let degraded = remote_target
+            && (matches!(state.connectivity.state, S::Offline | S::Reconnecting)
+                || state
+                    .effective_device_id()
+                    .is_some_and(|id| !state.device_online(&id, Utc::now())));
+        let offline = state.connectivity.state == S::Offline;
+        degraded.then(|| {
+            let text: SharedString = if offline {
+                "Offline — messages will send when you're back online.".into()
+            } else {
+                "Messages will send once the connection recovers.".into()
+            };
+            (text, offline)
+        })
+    }
+
+    /// slopty: the one line the composer says about its chat, drawn in the shell's reserved
+    /// status strip under the composer (`Theme::STATUS_STRIP_HEIGHT`), so a notice arriving or
+    /// leaving never moves the composer or the transcript. One at a time, the most pressing
+    /// first: the road out of reach, a usage limit, the new chat's queued send, a fresh stop.
+    /// Each enters with a quick fade keyed by its kind, so a change of notice cross-fades.
+    pub fn status_line(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let theme = Theme::of(cx).clone();
+        if let Some(notice) = self.road_notice(cx) {
+            return Some(self.render_road_notice(notice, &theme, cx));
+        }
+        if let Some(notice) = self.stall_notice(cx) {
+            return Some(self.render_stall_notice(notice, &theme, cx));
+        }
+        if let Some(words) = self.limit_notice(cx) {
+            let mark = status_dot(theme.warning);
+            let id = "composer-limit-notice";
+            return Some(status_in(id, status_words(id, mark, words.into(), &theme)));
+        }
+        if let Some((text, offline)) = self.queue_notice(cx) {
+            let mark = if offline { offline_mark(&theme) } else { status_dot(theme.text_faint) };
+            let id = "composer-queue-notice";
+            return Some(status_in(id, status_words(id, mark, text, &theme)));
+        }
+        // A stop the person asked for is no warning: a faint dot.
+        let words = self.stopped_notice(cx)?;
+        let mark = status_dot(theme.text_faint);
+        let id = "composer-stopped-notice";
+        Some(status_in(id, status_words(id, mark, words.into(), &theme)))
+    }
+
+    /// The stall notice: its mark, the words, Keep waiting, and Stop while no stop is asked.
+    fn render_stall_notice(
+        &self,
+        notice: StallNotice,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let stopping = self.is_interrupting(&notice.chat);
+        let id = "composer-stall-notice";
+        let kept = notice.clone();
+        let chat = notice.chat.clone();
+        let line = status_words(id, status_dot(theme.warning), notice.text.into(), theme)
+            .child(notice_action("composer-stall-keep", "Keep waiting", theme).on_click(cx.listener(
+                move |this, _, _, cx| this.keep_waiting(&kept, cx),
+            )))
+            .when(!stopping, |el| {
+                el.child(notice_action("composer-stall-stop", "Stop", theme).on_click(cx.listener(
+                    move |this, _, _, cx| this.interrupt_chat(chat.clone(), cx),
+                )))
+            });
+        status_in(id, line)
+    }
+
+    /// The road notice: its mark, the words, and its text actions.
+    fn render_road_notice(
         &self,
         notice: RoadNotice,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let dot = if notice.offline { theme.warning } else { theme.text_faint };
-        let action = |id: &'static str, label: &'static str| {
-            div()
-                .id(id)
-                .role(Role::Button)
-                .aria_label(label)
-                .flex_none()
-                .cursor_pointer()
-                .text_color(theme.text_muted)
-                .hover(|s| s.text_color(theme.text))
-                .child(SharedString::from(label))
-        };
+        let mark = if notice.offline { offline_mark(theme) } else { status_dot(theme.text_faint) };
+        let action = |id: &'static str, label: &'static str| notice_action(id, label, theme);
         let chat = notice.chat.clone();
-        crate::motion::fade_in(
-            "composer-road-notice",
-            div()
-                .id("composer-road-notice")
-                .role(Role::Status)
-                .aria_label(SharedString::from(notice.text.clone()))
-                .mx(px(8.0))
-                .mt(px(6.0))
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .text_size(px(11.0))
-                .line_height(px(14.0))
-                .text_color(theme.text_faint)
-                .child(div().flex_none().size(px(5.0)).rounded_full().bg(dot))
-                .child(div().min_w_0().truncate().child(SharedString::from(notice.text)))
-                .when(!notice.offline, |el| {
-                    el.child(action("composer-road-retry", "Retry").on_click(cx.listener(
-                        move |this, _, _, cx| this.retry_road(chat.clone(), cx),
-                    )))
-                })
-                .when_some(notice.wake, |el, (device, wake)| {
-                    el.child(action("composer-road-wake", "Wake").on_click(cx.listener(
-                        move |this, _, _, cx| this.wake_machine(device.clone(), wake.clone(), cx),
-                    )))
-                }),
-        )
-        .into_any_element()
+        let id = "composer-road-notice";
+        let line = status_words(id, mark, notice.text.into(), theme)
+            .when(!notice.offline, |el| {
+                el.child(action("composer-road-retry", "Try again").on_click(cx.listener(
+                    move |this, _, _, cx| this.retry_road(chat.clone(), cx),
+                )))
+            })
+            .when_some(notice.wake, |el, (device, wake)| {
+                el.child(action("composer-road-wake", "Wake").on_click(cx.listener(
+                    move |this, _, _, cx| this.wake_machine(device.clone(), wake.clone(), cx),
+                )))
+            });
+        status_in(id, line)
     }
+}
 
-    /// The limit notice: an amber dot and when the limit lifts.
-    pub(super) fn render_limit_notice(&self, words: String, theme: &Theme) -> AnyElement {
-        crate::motion::fade_in(
-            "composer-limit-notice",
-            div()
-                .id("composer-limit-notice")
-                .role(Role::Status)
-                .aria_label(SharedString::from(words.clone()))
-                .mx(px(8.0))
-                .mt(px(6.0))
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .text_size(px(11.0))
-                .line_height(px(14.0))
-                .text_color(theme.text_faint)
-                .child(div().flex_none().size(px(5.0)).rounded_full().bg(theme.warning))
-                .child(div().min_w_0().truncate().child(SharedString::from(words))),
-        )
+/// A status line's text action.
+fn notice_action(id: &'static str, label: &'static str, theme: &Theme) -> gpui::Stateful<gpui::Div> {
+    let fade: SharedString = format!("{id}-hover").into();
+    div()
+        .id(id)
+        .role(Role::Button)
+        .aria_label(label)
+        .flex_none()
+        .cursor_pointer()
+        .text_color(crate::motion::hover_blend(&fade, theme.text_muted, theme.text))
+        .on_hover(crate::motion::hover_listener(fade))
+        .child(SharedString::from(label))
+}
+
+/// A status line's dot.
+fn status_dot(color: gpui::Hsla) -> AnyElement {
+    div().flex_none().size(px(5.0)).rounded_full().bg(color).into_any_element()
+}
+
+/// This Mac offline: the offline glyph, quiet (amber is for a send that is stuck).
+fn offline_mark(theme: &Theme) -> AnyElement {
+    crate::icons::icon(crate::icons::WIFI_OFF)
+        .flex_none()
+        .size(px(12.0))
+        .text_color(theme.text_muted)
         .into_any_element()
-    }
+}
+
+/// A status line entering with a quick fade, keyed by its kind.
+fn status_in(id: &'static str, line: gpui::Stateful<gpui::Div>) -> AnyElement {
+    crate::motion::fade_quick(SharedString::from(format!("{id}-in")), line).into_any_element()
+}
+
+/// One status line: its mark and words on the strip's single row.
+fn status_words(
+    id: &'static str,
+    mark: AnyElement,
+    words: SharedString,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .debug_selector(move || id.to_owned())
+        .role(Role::Status)
+        .aria_label(words.clone())
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .text_size(crate::typography::ui_rems(11.0))
+        .text_color(theme.text_faint)
+        .child(mark)
+        .child(div().min_w_0().truncate().child(words))
 }
 
 #[cfg(test)]

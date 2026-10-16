@@ -40,6 +40,8 @@ pub const MAX_ATTACHMENT_BYTES: u64 = 24 * 1024 * 1024;
 pub const UPLOAD_CHUNK_B64_CHARS: usize = 680_000;
 /// state.ts `MAX_ATTACHMENT_READ_CHUNKS` — bounds the read-back loop.
 const MAX_READ_CHUNKS: usize = 1_000;
+/// slopty: how much of a file's first chunk a head reader sees, as base64 (64 KiB of bytes).
+const HEAD_B64: usize = 64 * 1024 / 3 * 4;
 
 // ---------------------------------------------------------------------------
 // Text transport (message-attachments.ts)
@@ -638,6 +640,20 @@ pub(crate) async fn read_attachment_bytes(
     path: &str,
     expected_raster_mime: Option<&str>,
 ) -> Option<(String, String, Vec<u8>)> {
+    read_attachment_bytes_with(engine, executor, target_device_id, path, expected_raster_mime, |_| {})
+        .await
+}
+
+/// slopty: [`read_attachment_bytes`], handing `head` the file's first bytes as soon as its first
+/// chunk is in (a preview reads its size from them while the rest arrives).
+pub(crate) async fn read_attachment_bytes_with(
+    engine: &EngineHandle,
+    executor: &BackgroundExecutor,
+    target_device_id: Option<&str>,
+    path: &str,
+    expected_raster_mime: Option<&str>,
+    mut head: impl FnMut(&[u8]),
+) -> Option<(String, String, Vec<u8>)> {
     let mut name = String::new();
     let mut mime = String::new();
     let mut b64 = String::new();
@@ -665,6 +681,13 @@ pub(crate) async fn read_attachment_bytes(
         let data = chunk.get("data")?.as_str()?;
         if b64.len().saturating_add(data.len()) > (MAX_ATTACHMENT_BYTES as usize).div_ceil(3) * 4 {
             return None;
+        }
+        if offset == 0 {
+            // At most 64 KiB of the first chunk, cut on a base64 quantum.
+            let cut = data.len().min(HEAD_B64) / 4 * 4;
+            if let Ok(first) = BASE64.decode(&data.as_bytes()[..cut]) {
+                head(&first);
+            }
         }
         b64.push_str(data);
         done = chunk.get("done")?.as_bool()?;
@@ -1215,10 +1238,8 @@ pub(crate) fn lightbox_with_size(
             window,
             cx,
         ),
-        None => div()
-            .text_color(ink(0.6))
-            .child("Loading image…")
-            .into_any_element(),
+        // slopty: the house's pending line, shown only past its grace.
+        None => crate::loaders::pending("attachment-preview-load", "Loading image…").into_any_element(),
     };
     let on_close = std::rc::Rc::new(on_close);
     let close_on_key = on_close.clone();

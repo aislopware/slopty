@@ -109,8 +109,6 @@ struct Toast {
     action: Option<Action>,
     // slopty: something still under way: `Some(None)` spins, `Some(Some(f))` fills a ring to f.
     progress: Option<Option<f32>>,
-    // slopty: an error's words were copied from it.
-    copied: bool,
     created: Instant,
     /// Countdown left, and when it last resumed (`None` while paused).
     remaining: Duration,
@@ -209,7 +207,6 @@ fn push_for(
             message,
             action,
             progress: None,
-            copied: false,
             created: now,
             remaining: lasts,
             resumed: (!hovered).then_some(now),
@@ -396,9 +393,10 @@ fn copy_error(id: u64, cx: &mut App) {
     else {
         return;
     };
-    toast.copied = true;
     let words = toast.message.to_string();
     cx.write_to_clipboard(gpui::ClipboardItem::new_string(words));
+    // slopty: the house's copy span: the check for a while, then the copy glyph again.
+    crate::motion::copy_feedback(copy_key(id), cx);
     cx.refresh_windows();
 }
 
@@ -555,6 +553,18 @@ pub fn render_toaster(window: &mut Window, cx: &mut App) -> Option<AnyElement> {
     let reduced = cx.reduce_motion();
     let active = window.is_window_active();
     let theme = Theme::of(cx).for_popup();
+    // slopty: which errors are in their "Copied" span, read before the store is borrowed.
+    let copied_ids: Vec<u64> = cx
+        .try_global::<ToastStore>()
+        .map(|store| {
+            store
+                .toasts
+                .iter()
+                .map(|toast| toast.id)
+                .filter(|id| crate::motion::copied(&copy_key(*id), cx))
+                .collect()
+        })
+        .unwrap_or_default();
     let animating = {
         let store = cx.try_global::<ToastStore>()?;
         if store.toasts.is_empty() {
@@ -682,7 +692,7 @@ pub fn render_toaster(window: &mut Window, cx: &mut App) -> Option<AnyElement> {
         let kind = toast.kind;
         let message = toast.message.clone();
         let progress = toast.progress;
-        let copied = toast.copied;
+        let copied = copied_ids.contains(&id);
         // slopty: its button, after the words: sonner's small action (24 tall, 12 px, a quiet
         // fill), its overhang taken back so the toast keeps the height of its line.
         let action = toast.action.clone().map(|action| {
@@ -693,6 +703,9 @@ pub fn render_toaster(window: &mut Window, cx: &mut App) -> Option<AnyElement> {
                 label.clone(),
             )
             .id(("toast-action", id as usize))
+            // slopty: the button says its name to assistive tech, not only on screen.
+            .role(gpui::Role::Button)
+            .aria_label(label.clone())
             .debug_selector(move || format!("toast-action-{label}"))
             .flex_none()
             .min_h(px(ACTION_HEIGHT))
@@ -731,7 +744,7 @@ pub fn render_toaster(window: &mut Window, cx: &mut App) -> Option<AnyElement> {
             .child(
                 // Measure the natural height for the stack's layout.
                 gpui::canvas(
-                    move |bounds, _, cx| {
+                    move |bounds, window, cx| {
                         let height = f32::from(bounds.size.height);
                         if let Some(store) = cx.try_global::<ToastStore>()
                             && store
@@ -748,7 +761,10 @@ pub fn render_toaster(window: &mut Window, cx: &mut App) -> Option<AnyElement> {
                             {
                                 toast.height = height;
                             }
-                            cx.refresh_windows();
+                            // slopty: a refresh asked while the frame draws is dropped, and the
+                            // retained stack then kept its first guess (52 tall, 16 px low): lay
+                            // it out again on the next frame instead.
+                            window.on_next_frame(|window, _| window.refresh());
                         }
                     },
                     |_, _, _, _| {},
@@ -862,6 +878,11 @@ pub fn render_toaster(window: &mut Window, cx: &mut App) -> Option<AnyElement> {
     )
 }
 
+/// The copy span's key for toast `id`.
+fn copy_key(id: u64) -> String {
+    format!("toast-copy-{id}")
+}
+
 // slopty: an error's words are one click from the clipboard (zeron's icon control, 24/6/14).
 fn error_copy_button(id: u64, copied: bool, theme: &Theme) -> impl IntoElement {
     let (glyph, label) = if copied {
@@ -871,6 +892,7 @@ fn error_copy_button(id: u64, copied: bool, theme: &Theme) -> impl IntoElement {
     };
     let rest = theme.ink(0.0);
     let hover = theme.ink(0.05);
+    let fade = SharedString::from(format!("toast-copy-hover-{id}"));
     div()
         .id(("toast-copy", id as usize))
         .debug_selector(move || format!("toast-copy-{id}"))
@@ -882,12 +904,13 @@ fn error_copy_button(id: u64, copied: bool, theme: &Theme) -> impl IntoElement {
         .flex()
         .items_center()
         .justify_center()
-        .bg(rest)
-        .hover(move |style| style.bg(hover))
+        .bg(crate::motion::hover_blend(&fade, rest, hover))
+        .on_hover(crate::motion::hover_listener(fade.clone()))
         .cursor_pointer()
         .text_color(theme.text_muted)
         .child(crate::icons::icon(glyph).size(px(14.0)))
         .tooltip(crate::settings::widgets::text_tooltip(label))
+        .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(move |_, _, cx| {
             cx.stop_propagation();
@@ -930,7 +953,6 @@ mod tests {
             message: message.to_owned().into(),
             action: None,
             progress: None,
-            copied: false,
             created: now,
             remaining: DURATION,
             resumed: Some(now),
@@ -1101,7 +1123,7 @@ mod tests {
         let copied = cx.read_from_clipboard().and_then(|item| item.text());
         assert_eq!(copied.as_deref(), Some("studio: permission denied (publickey)"));
         cx.update(|_, cx| {
-            assert!(cx.global::<ToastStore>().toasts[1].copied);
+            assert!(crate::motion::copied(&copy_key(ids[1]), cx));
             assert_eq!(shown(cx)[1].0, ToastKind::Error);
         });
     }

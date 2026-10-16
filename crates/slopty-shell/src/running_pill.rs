@@ -148,7 +148,8 @@ fn shape_count(
         len: label.len(),
         font: gpui::Font {
             family: family.clone(),
-            features: gpui::FontFeatures::default(),
+            // slopty: a count that ticks keeps its width (tabular figures).
+            features: crate::typography::tabular(),
             fallbacks: None,
             weight,
             style: gpui::FontStyle::Normal,

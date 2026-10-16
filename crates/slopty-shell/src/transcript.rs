@@ -53,10 +53,12 @@ use crate::motion::{self, AnimationExt as _};
 use crate::notice::{NoticeChipIcon::Tile, notice_chip};
 use crate::state::AppState;
 use crate::syntax_cache::{DocumentHighlightKey, SyntaxHighlightCache};
+use crate::settings::widgets::ActionHint as _; // slopty: tooltips name their key.
 use crate::theme::Theme;
 use slopty_syntax::LanguageId as Lang;
 
 // slopty: Slopty's own rows, and find in thread.
+mod context_menu; // slopty: right-click menus in the chat.
 mod extras;
 // slopty: background work in the transcript (task notices, notices, a call's facts) and a
 // subagent's card, which opens in place.
@@ -69,7 +71,7 @@ mod surface_tests; // slopty: the transcript's own rows, read by assistive tech.
 pub mod work;
 pub use work::{WorkReveal, reveal_work};
 pub(crate) mod find;
-pub use extras::serve_terminal_runs;
+pub use extras::{claude_too_old, serve_terminal_runs};
 pub use find::{FindInThread, FindNext, FindPrevious};
 
 // ---------------------------------------------------------------------------
@@ -123,6 +125,17 @@ const ACTIVITY_TRUNK_X: f32 = 12.5;
 const ACTIVITY_BEND_RADIUS: f32 = 6.0;
 const ACTIVITY_BRANCH_END_X: f32 = 28.0;
 const ACTIVITY_ICON_LEFT: f32 = 32.0;
+/// slopty: every bordered card in the transcript's column (code, files, subagents, pages,
+/// images, requests) shares one corner and the theme's hairline.
+pub(crate) const TRANSCRIPT_CARD_RADIUS: f32 = 10.0;
+/// slopty: the copy span's key for entry `entry`'s message.
+fn copy_message_key(entry: &str) -> String {
+    format!("copy-message-{entry}")
+}
+
+/// slopty: the lane under an entry's last row: its hover strip (timestamp, copy) and, under the
+/// last row of a live turn, the working line in the same room.
+pub(crate) const ROW_LANE_HEIGHT: f32 = Theme::SPACE_SM + Theme::SPACE_MD * 2.0;
 const ACTIVITY_ICON_SIZE: f32 = 16.0;
 const TOOL_TEXT_SIZE: f32 = 12.0;
 const TOOL_LABEL_SIZE: f32 = TOOL_TEXT_SIZE;
@@ -1163,6 +1176,8 @@ pub enum RowKind {
         compact_shell: bool,
     },
     InputChip {
+        /// slopty: what kind of ask it was: "Question", "Approval", "Confirm", "Form", "Plan".
+        label: SharedString,
         /// First question's header (chat-view.tsx `InputChip`: the resolved
         /// chip shows it; unresolved shows "Awaiting your answer…" — which
         /// stays TRUE even across a run death: the composer keeps the panel
@@ -1182,6 +1197,11 @@ pub enum RowKind {
     },
     // slopty: Slopty's own rows (`transcript/extras.rs`): an error that says what the agent
     // said and can be tried again, a quiet divider, a plan's card, what a turn changed.
+    /// A Claude Code too old to drive: the machine's version and the least one Slopty drives.
+    UpdateNeeded {
+        least: SharedString,
+        have: SharedString,
+    },
     ErrorCard {
         message: SharedString,
         detail: Option<SharedString>,
@@ -1806,19 +1826,15 @@ pub fn rows_for_entry(
                         resolved,
                         ..
                     } => {
-                        // Model-generated header onto the one-line chip.
-                        let header: SharedString = single_line(
-                            &questions
-                                .first()
-                                .map(|q| q.header.clone())
-                                .unwrap_or_else(|| "Question".to_string()),
-                        )
-                        .into();
+                        // slopty: the chip names what was asked by its kind, and shows the ask.
+                        let (label, header) = input_chip_words(questions);
                         rows.push(Row {
                             id: format!("{}#{}", entry.id, part_id).into(),
-                            version: fnv1a(header.as_bytes()) << 1 | *resolved as u64,
+                            version: fnv1a(format!("{label}\0{header}").as_bytes()) << 1
+                                | *resolved as u64,
                             turn_start: false,
                             kind: RowKind::InputChip {
+                                label,
                                 header,
                                 resolved: *resolved,
                             },
@@ -1827,6 +1843,17 @@ pub fn rows_for_entry(
                             copy_text: None,
                             compact_fold: None,
                         });
+                    }
+                    // slopty: a Claude Code too old to drive is a banner naming its machine.
+                    MessagePart::Error {
+                        id: part_id,
+                        message,
+                        detail,
+                        ..
+                    } if extras::too_old_of(message, detail.as_deref()).is_some() => {
+                        if let Some(row) = extras::update_needed_row(&entry.id, part_id, message, detail.as_deref()) {
+                            rows.push(row);
+                        }
                     }
                     // slopty: an error with the agent's own words or a retry is a card.
                     MessagePart::Error {
@@ -2206,7 +2233,7 @@ pub fn tool_group_summary(tools: &[ToolItem]) -> String {
     let pairs: Vec<(ToolCall, bool)> = tools
         .iter()
         .filter(|t| t.kind == ToolItemKind::Call && !lists_directory(&t.call))
-        .map(|t| (t.call.clone(), t.is_error))
+        .map(|t| (t.call.clone(), t.is_error && !denied(t)))
         .collect();
     let thoughts = tools
         .iter()
@@ -2224,7 +2251,7 @@ pub fn tool_group_summary(tools: &[ToolItem]) -> String {
         slopty_view_proto::view::tool_group_summary(&pairs)
     };
     // slopty: the TUI's group parts past the shared summary: an edit's line totals ("edited 2
-    // files +12 -3"), directories listed, and what commands landed ("committed 1a2b3c4 ·
+    // files +12 −3"), directories listed, and what commands landed ("committed 1a2b3c4 ·
     // pushed to main").
     let base = with_line_totals(base, tools);
     let base = [base]
@@ -2295,7 +2322,7 @@ fn with_line_totals(base: String, tools: &[ToolItem]) -> String {
     base.split(" · ")
         .map(|segment| {
             if segment.to_ascii_lowercase().starts_with("edited ") {
-                format!("{segment} +{added} -{removed}")
+                format!("{segment} +{added} −{removed}")
             } else {
                 segment.to_owned()
             }
@@ -2513,14 +2540,6 @@ fn blob_detail(text: &str, is_diff: bool) -> Option<ToolDetail> {
     })
 }
 
-/// Compact byte size for the fetch affordance label ("812 B", "12 KB").
-fn format_kb(bytes: u64) -> String {
-    if bytes < 1024 {
-        format!("{bytes} B")
-    } else {
-        format!("{} KB", bytes.div_ceil(1024))
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Working indicator flavour (pure; rendered by the shell strip)
@@ -2589,6 +2608,21 @@ pub fn format_elapsed(secs: i64) -> String {
         format!("{}h {}m", secs / 3_600, (secs % 3_600) / 60)
     } else {
         format!("{}d {}h", secs / 86_400, (secs % 86_400) / 3_600)
+    }
+}
+
+/// slopty: a timer that ticks: [`format_elapsed`] with its second unit padded ("1m 05s",
+/// "1h 05m"), so in tabular figures the line holds its width as it counts.
+pub fn ticking_elapsed(secs: i64) -> String {
+    let secs = secs.max(0);
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3_600 {
+        format!("{}m {:02}s", secs / 60, secs % 60)
+    } else if secs < 86_400 {
+        format!("{}h {:02}m", secs / 3_600, (secs % 3_600) / 60)
+    } else {
+        format!("{}d {:02}h", secs / 86_400, (secs % 86_400) / 3_600)
     }
 }
 
@@ -3589,6 +3623,12 @@ pub struct Transcript {
     /// clear the reveal when the old row's leave event arrives after the new
     /// row's enter (enter/leave order across rows is not guaranteed).
     hovered_entry: Option<(SharedString, SharedString)>,
+    // slopty: on touch, the entry a long press showed the strip of (no hover there).
+    pressed_entry: Option<SharedString>,
+    /// slopty: the last row's lane (its working line, then its timestamp strip) and the
+    /// tallest that lane has drawn while it stayed last: the lane never shrinks under it, so
+    /// a Stop or a turn's end swaps the working line for the strip without moving a row.
+    last_lane: Option<(SharedString, Rc<Cell<f32>>)>,
     /// Code block showing "Copied" feedback: `(row id, block ix)`, cleared by
     /// the companion task after ~1.2s.
     copied_code: Option<(SharedString, usize)>,
@@ -3598,9 +3638,6 @@ pub struct Transcript {
     /// rerenders keep their local scroll position without leaking state for
     /// blocks no longer present in the selected chat.
     code_fences: HashMap<SharedString, render::CodeFenceRuntime>,
-    /// Entry whose hover action is showing transient copied-check feedback.
-    copied_message: Option<SharedString>,
-    copied_message_clear: Option<Task<()>>,
     /// Transcript attachment being viewed full-size (click a user thumbnail).
     attachment_preview: Option<crate::attachments::PreviewImage>,
     /// Focused while the lightbox is open so Escape reaches it.
@@ -3635,6 +3672,8 @@ pub struct Transcript {
     subagents: subagents::SubagentsState,
     // slopty: going back to before a person's message.
     rewind: rewind::RewindState,
+    // slopty: the right-click menu.
+    context_menu: context_menu::ContextMenuState,
     pages: HashMap<SharedString, Entity<crate::page::PageCardView>>,
     fences: crate::page::FenceCards, // slopty: chart fences' cards (M)
     /// Scheduled retry wake-ups for errored sources (the 2s→15s ladder).
@@ -3928,11 +3967,11 @@ impl Transcript {
             page_viewport: gpui::Bounds::default(),
             rail_hover: None,
             hovered_entry: None,
+            pressed_entry: None,
+            last_lane: None,
             copied_code: None,
             copied_clear: None,
             code_fences: HashMap::new(),
-            copied_message: None,
-            copied_message_clear: None,
             attachment_preview: None,
             attachment_preview_focus: cx.focus_handle(),
             attachment_preview_return_focus: None,
@@ -3949,6 +3988,7 @@ impl Transcript {
             visuals: HashMap::new(),
             work: Default::default(),      // slopty: background work,
             rewind: Default::default(),
+            context_menu: Default::default(),
             subagents: Default::default(), // subagents' cards,
             pages: HashMap::new(),         // and pages.
             fences: Default::default(),    // slopty: and chart fences.
@@ -5071,8 +5111,6 @@ impl Transcript {
             self.veils.clear();
             self.render_cache.borrow_mut().clear();
             self.highlights.entries.clear();
-            self.copied_message = None;
-            self.copied_message_clear = None;
             self.list.reset(0);
             self.pending_viewport = None;
             self.viewport_generation = self.viewport_generation.wrapping_add(1);
@@ -6369,7 +6407,7 @@ impl Transcript {
                         .rounded(px(7.0))
                         .object_fit(ObjectFit::Contain),
                 ),
-                Thumb::Loading => frame
+                Thumb::Loading { .. } => frame
                     .text_size(px(TOOL_TEXT_SIZE))
                     .text_color(theme.text_faint)
                     .child("Loading image…"),
@@ -7314,7 +7352,9 @@ impl Transcript {
                         .flex_row()
                         .items_center()
                         .gap(px(Theme::SPACE_SM))
-                        .pt(px(Theme::SPACE_LG))
+                        // slopty: the row lane's anatomy (`ROW_LANE_HEIGHT`).
+                        .pt(px(Theme::SPACE_SM))
+                        .h(px(ROW_LANE_HEIGHT))
                         .text_size(crate::typography::ui_rems(12.0))
                         .text_color(theme.danger)
                         .cursor_pointer()
@@ -7415,24 +7455,34 @@ impl Transcript {
                 .flex_row()
                 .items_center()
                 .gap(px(Theme::SPACE_SM))
-                .pt(px(Theme::SPACE_LG))
+                // slopty: the row lane's anatomy (`ROW_LANE_HEIGHT`).
+                .pt(px(Theme::SPACE_SM))
+                .h(px(ROW_LANE_HEIGHT))
                 .text_size(crate::typography::ui_rems(11.0))
-                .child(crate::loaders::gradient_spinner(
-                    "working-indicator",
-                    &theme,
-                    2.5,
-                    cx.entity_id(),
-                    cx,
-                ))
+                // slopty: a queued send waits quietly, under the clock glyph (no amber).
+                .child(if queued {
+                    crate::icons::icon(crate::icons::CLOCK_CIRCLE)
+                        .flex_none()
+                        .size(px(12.0))
+                        .text_color(theme.text_muted)
+                        .into_any_element()
+                } else {
+                    crate::loaders::gradient_spinner(
+                        "working-indicator",
+                        &theme,
+                        2.5,
+                        cx.entity_id(),
+                        cx,
+                    )
+                    .into_any_element()
+                })
                 .child(
                     // The flavour word rotates every 7s; roll it as it turns.
                     div()
+                        .min_w_0()
+                        .truncate()
                         .text_size(crate::typography::ui_rems(12.0))
-                        .text_color(if queued {
-                            theme.warning
-                        } else {
-                            theme.text_muted
-                        })
+                        .text_color(theme.text_muted)
                         .child(crate::roll_text::roll_text(
                             format!("working-word-{}-{turn}", cx.entity_id()),
                             SharedString::from(if queued {
@@ -7448,12 +7498,14 @@ impl Transcript {
                     // (the unit suffix holds).
                     el.child(
                         div()
+                            .flex_none()
                             .relative()
                             .top(px(1.0))
                             .text_color(theme.text_faint)
+                            .font_features(crate::typography::tabular())
                             .child(crate::roll_text::roll_text(
                                 format!("working-timer-{}-{turn}", cx.entity_id()),
-                                SharedString::from(format_elapsed(elapsed_secs)),
+                                SharedString::from(ticking_elapsed(elapsed_secs)),
                                 cx.reduce_motion(),
                             )),
                     )
@@ -7559,9 +7611,15 @@ impl Transcript {
                     // item can't shrink, `justify_end` pushes the overflow off the
                     // left edge, and long prompts render as one clipped line
                     // instead of wrapping inside the 80% column cap.
+                    // slopty: the person's own words are in the accessibility tree, as the
+                    // agent's are: the bubble is a labelled group.
+                    let spoken = text.clone();
                     column = column.child(
                         div().w_full().flex().justify_end().child(
                             div()
+                                .id(SharedString::from(format!("{}-said", row.id)))
+                                .role(gpui::Role::Group)
+                                .aria_label(spoken)
                                 .min_w_0()
                                 .max_w(px(self.content_width * 0.8))
                                 .bg(crate::theme::user_bubble_bg())
@@ -7599,6 +7657,7 @@ impl Transcript {
                     workspace_root: workspace_root.clone(),
                     code,
                     run: self.run_ui(cx), // slopty: Run in terminal.
+                    code_menu: Some(self.code_menu_ui(cx)),
                 };
                 let highlight = self.code_highlight_for(&row.id, &tree, Some(*block_ix), cx);
                 render::render_block(
@@ -7670,6 +7729,7 @@ impl Transcript {
                     workspace_root: workspace_root.clone(),
                     code,
                     run: self.run_ui(cx), // slopty: Run in terminal.
+                    code_menu: Some(self.code_menu_ui(cx)),
                 };
                 if seed_history && let Some(veil) = &veil {
                     let historical = &self.historical_markdown[&row.id];
@@ -7738,8 +7798,8 @@ impl Transcript {
                 &theme,
                 cx,
             ),
-            RowKind::InputChip { header, resolved } => {
-                input_chip(header.clone(), *resolved, &theme)
+            RowKind::InputChip { label, header, resolved } => {
+                input_chip(label.clone(), header.clone(), *resolved, &theme)
             }
             RowKind::GeneratedImage {
                 owner,
@@ -7754,6 +7814,7 @@ impl Transcript {
             RowKind::ForkMarker { source_title, .. } => fork_marker(source_title.clone(), &theme),
             // slopty: Slopty's own rows.
             RowKind::ErrorCard { .. }
+            | RowKind::UpdateNeeded { .. }
             | RowKind::Marker { .. }
             | RowKind::PlanHeader { .. }
             | RowKind::PlanFold { .. }
@@ -7779,8 +7840,13 @@ impl Transcript {
         let hovered = self
             .hovered_entry
             .as_ref()
-            .is_some_and(|(_, entry)| entry == &row.entry_id);
-        let copied_message = self.copied_message.as_ref() == Some(&row.entry_id);
+            .is_some_and(|(_, entry)| entry == &row.entry_id)
+            // slopty: touch has no hover: the last row's strip shows, and a long press shows
+            // any entry's.
+            || (TOUCH && (is_last || self.pressed_entry.as_ref() == Some(&row.entry_id)));
+        // slopty: the house's copy span (`motion::copy_feedback`).
+        let copied_message =
+            motion::copied(&copy_message_key(&row.entry_id), cx);
         let copy_text = row.copy_text.clone();
         let copy_entry_id = row.entry_id.clone();
         let rewind_message = row.entry_id.clone();
@@ -7811,7 +7877,9 @@ impl Transcript {
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.copy_message(entry_id.clone(), text.clone(), cx)
                     }))
-                    .tooltip(crate::settings::widgets::text_tooltip("Copy message"))
+                    // slopty: keeps its size; its tooltip says "Copied" for the span; a role.
+                    .role(gpui::Role::Button)
+                    .hint(if copied_message { "Copied" } else { "Copy message" })
                     .child(
                         crate::icons::icon(if copied_message {
                             crate::icons::CHECK
@@ -7836,7 +7904,7 @@ impl Transcript {
                     .flatten(),
             );
             div()
-                .h(px(Theme::SPACE_SM + Theme::SPACE_MD * 2.0))
+                .h(px(ROW_LANE_HEIGHT))
                 .pt(px(Theme::SPACE_SM))
                 .w_full()
                 .flex()
@@ -7855,11 +7923,21 @@ impl Transcript {
                         metadata,
                     ))
                 })
+                .into_any_element()
         });
+        // slopty: the last row's lane holds its working line, then its strip: one lane that
+        // never shrinks while the row stays last, so Stop and a turn's end move nothing.
+        let lane = if is_last {
+            self.last_row_lane(&row.id, trailer.or(strip), cx.entity_id())
+        } else {
+            strip
+        };
         let entry_id = row.entry_id.clone();
         let row_id = row.id.clone();
+        let pressed = TOUCH.then(|| long_press_shows(row.entry_id.clone(), cx.weak_entity()));
         let outer = div()
             .id(row.id.clone())
+            .children(pressed)
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                 if *hovered {
                     let next = Some((row_id.clone(), entry_id.clone()));
@@ -7900,8 +7978,7 @@ impl Transcript {
                     .max_w(px(self.content_width))
                     .min_w_0()
                     .child(inner)
-                    .children(strip)
-                    .children(trailer),
+                    .children(lane),
             );
         let Some(work_id) = row.compact_fold.clone() else {
             return outer.into_any_element();
@@ -7977,21 +8054,55 @@ impl Transcript {
             .into_any_element()
     }
 
+    /// slopty: the last row's lane: `body` (its working line or its strip) at no less than the
+    /// tallest the lane has drawn while this row was last.
+    /// A lane that grew asks its view to draw again, so what is drawn always reads the floor
+    /// it holds (a retained frame never keeps an older one).
+    fn last_row_lane(
+        &mut self,
+        row_id: &SharedString,
+        body: Option<AnyElement>,
+        owner: gpui::EntityId,
+    ) -> Option<AnyElement> {
+        let floor = match &self.last_lane {
+            Some((id, floor)) if id == row_id => floor.clone(),
+            _ => {
+                let floor = Rc::new(Cell::new(ROW_LANE_HEIGHT));
+                self.last_lane = Some((row_id.clone(), floor.clone()));
+                floor
+            }
+        };
+        let body = body?;
+        let probe = floor.clone();
+        Some(
+            div()
+                .relative()
+                .w_full()
+                .min_h(px(floor.get()))
+                .child(body)
+                .child(
+                    canvas(
+                        move |bounds, window, _| {
+                            let height = f32::from(bounds.size.height);
+                            if height > probe.get() + 0.5 {
+                                probe.set(height);
+                                window.on_next_frame(move |_, cx| cx.notify(owner));
+                            }
+                        },
+                        |_, _, _, _| (),
+                    )
+                    .absolute()
+                    .inset_0(),
+                )
+                .into_any_element(),
+        )
+    }
+
     fn copy_message(&mut self, entry_id: SharedString, text: SharedString, cx: &mut Context<Self>) {
         cx.stop_propagation();
         cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
-        self.copied_message = Some(entry_id);
-        self.copied_message_clear = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(Duration::from_millis(1200))
-                .await;
-            this.update(cx, |this, cx| {
-                this.copied_message = None;
-                this.copied_message_clear = None;
-                cx.notify();
-            })
-            .ok();
-        }));
+        // slopty: the house's copy span; its end redraws what read it (a global read).
+        motion::copy_feedback(copy_message_key(&entry_id), cx);
         cx.notify();
     }
 
@@ -8014,9 +8125,8 @@ impl Transcript {
                     .update(cx, |this, cx| {
                         this.copied_code = Some((row_key, ix));
                         this.copied_clear = Some(cx.spawn(async move |this, cx| {
-                            cx.background_executor()
-                                .timer(Duration::from_millis(1200))
-                                .await;
+                            // slopty: the house's copy span.
+                            cx.background_executor().timer(motion::COPIED_FOR).await;
                             this.update(cx, |this, cx| {
                                 this.copied_code = None;
                                 this.copied_clear = None;
@@ -8308,7 +8418,8 @@ impl Transcript {
                             format!("Couldn't load full {what} — tap to retry")
                         }
                         None => match bytes {
-                            Some(b) => format!("Show full {what} ({})", format_kb(b)),
+                            // slopty: one size formatter ("12.3 KB").
+                            Some(b) => format!("Show full {what} ({})", slopty_view_doc::bytes_short(b)),
                             None => format!("Show full {what}"),
                         },
                     };
@@ -9325,8 +9436,8 @@ fn fork_marker(source_title: SharedString, theme: &Theme) -> AnyElement {
 /// ChatRoundLine, the medium "Question" label, then the truncating value —
 /// the first question's header once resolved, "Awaiting your answer…" while
 /// pending. Neutral tones throughout; resolution never recolors the chip.
-fn input_chip(header: SharedString, resolved: bool, theme: &Theme) -> AnyElement {
-    let value: SharedString = if resolved {
+fn input_chip(label: SharedString, header: SharedString, resolved: bool, theme: &Theme) -> AnyElement {
+    let value: SharedString = if resolved || label.as_ref() != QUESTION_CHIP {
         header
     } else {
         "Awaiting your answer…".into()
@@ -9368,7 +9479,7 @@ fn input_chip(header: SharedString, resolved: bool, theme: &Theme) -> AnyElement
                         .flex_none()
                         .font_weight(gpui::FontWeight::MEDIUM)
                         .text_color(theme.text_muted)
-                        .child(SharedString::from("Question")),
+                        .child(label),
                 )
                 .child(
                     div()
@@ -9380,6 +9491,37 @@ fn input_chip(header: SharedString, resolved: bool, theme: &Theme) -> AnyElement
                 ),
         )
         .into_any_element()
+}
+
+/// slopty: the chip's label for an agent's own questions.
+const QUESTION_CHIP: &str = "Question";
+
+/// slopty: an ask's chip words: its kind's label, and what it shows beside it. An agent's
+/// questions show their header once answered ("Awaiting your answer…" before); any other ask
+/// (an approval, a dialog, a form) shows the ask itself, its title or its first line, so a dialog
+/// never reads as a question nobody can see.
+fn input_chip_words(questions: &[slopty_view_proto::UserInputQuestion]) -> (SharedString, SharedString) {
+    let Some(first) = questions.first() else {
+        return (QUESTION_CHIP.into(), QUESTION_CHIP.into());
+    };
+    let kind = first.kind.as_str();
+    let label = match kind {
+        "approval" | "retry" => "Approval",
+        "plan" => "Plan",
+        "elicitation" => "Form",
+        k if k.starts_with("dialog:") => "Confirm",
+        _ => QUESTION_CHIP,
+    };
+    let header = first.header.trim();
+    let asked = first.question.lines().map(str::trim).find(|line| !line.is_empty());
+    let value = if label == QUESTION_CHIP {
+        if header.is_empty() { QUESTION_CHIP } else { header }
+    } else if header.is_empty() || header.eq_ignore_ascii_case(label) {
+        asked.unwrap_or(label)
+    } else {
+        header
+    };
+    (label.into(), single_line(value).into())
 }
 
 /// A small glyph standing in for the tool's icon (slopty uses an icon set; a
@@ -9488,18 +9630,21 @@ fn detail_body(
                             .flex_1()
                             .child(selectable(stat_ix, path, runs)),
                     )
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_color(theme.success)
-                            .child(SharedString::from(format!("+{}", stat.additions))),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_color(theme.danger)
-                            .child(SharedString::from(format!("−{}", stat.deletions))),
-                    )
+                    // slopty: a file whose lines were never counted says no "+0 −0".
+                    .when(stat.additions + stat.deletions > 0, |line| {
+                        line.child(
+                            div()
+                                .flex_none()
+                                .text_color(theme.success)
+                                .child(SharedString::from(format!("+{}", stat.additions))),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_color(theme.danger)
+                                .child(SharedString::from(format!("−{}", stat.deletions))),
+                        )
+                    })
             }))
             .into_any_element(),
         ToolDetail::Output {
@@ -9749,7 +9894,8 @@ fn chip_header_row(
         .map(|(path, opener)| (path.to_owned(), opener.clone()));
     let running = tool.subagent_ref.is_some()
         && matches!(tool.subagent_status, Some(SubagentStatus::Running));
-    let failed = tool.is_error
+    // slopty: the person's own Deny ended the call; it did not fail, so it reads quiet.
+    let failed = (tool.is_error && !denied(tool))
         || (tool.subagent_ref.is_some()
             && matches!(tool.subagent_status, Some(SubagentStatus::Failed)));
     // Text resolves its color during layout, so group-hover text needs stable
@@ -10101,6 +10247,40 @@ fn reveal_tool_row(row: AnyElement, height: f32, progress: f32) -> AnyElement {
         .into_any_element()
 }
 
+/// slopty: a touch screen, where nothing hovers.
+const TOUCH: bool = cfg!(target_os = "ios");
+
+/// slopty: on touch, a long press on a row shows its entry's strip (its time, Copy, Rewind),
+/// which a pointer's hover shows elsewhere.
+fn long_press_shows(entry: SharedString, view: gpui::WeakEntity<Transcript>) -> AnyElement {
+    canvas(
+        |_, _, _| (),
+        move |bounds, _, window, _| {
+            let (entry, view) = (entry.clone(), view.clone());
+            window.on_mouse_event(move |event: &gpui::LongPressEvent, phase, _, cx| {
+                if phase.bubble()
+                    && event.phase == gpui::TouchPhase::Started
+                    && bounds.contains(&event.start_position)
+                {
+                    view.update(cx, |this, cx| {
+                        this.pressed_entry = Some(entry.clone());
+                        cx.notify();
+                    })
+                    .ok();
+                }
+            });
+        },
+    )
+    .absolute()
+    .inset_0()
+    .into_any_element()
+}
+
+/// slopty: whether the person turned the call down (their own Deny): an end, not a failure.
+fn denied(tool: &ToolItem) -> bool {
+    tool.facts.as_ref().is_some_and(|facts| facts.rejected)
+}
+
 /// BoardUI-style task tree with Slopty's tool glyph restored at each branch tip.
 /// The previous row draws the first leg of a new arrival to its lower boundary;
 /// this row then continues down, rounds the elbow, and finally reveals the icon.
@@ -10115,7 +10295,7 @@ fn activity_rail(
     theme: &Theme,
 ) -> gpui::Div {
     let color = theme.hairline(0.12);
-    let tint = if tool.is_error {
+    let tint = if tool.is_error && !denied(tool) {
         theme.danger
     } else {
         theme.text_muted
@@ -10582,6 +10762,8 @@ impl Render for Transcript {
             .on_mouse_move(cx.listener(Self::on_selection_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_selection_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_selection_mouse_up))
+            // slopty: a right-click on selected text opens its menu.
+            .on_mouse_down(MouseButton::Right, cx.listener(Self::on_context_click))
             // slopty: the list's wheel step, before its deferred scroll decision.
             .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, _, _| {
                 this.wheel_travel += f32::from(event.delta.pixel_delta(px(20.0)).y);
@@ -10600,8 +10782,9 @@ impl Render for Transcript {
             .child(rail);
         let root = root.children(self.render_image_menu(cx));
         let root = root.children(self.render_rewind_menu(cx)); // slopty
+        let root = root.children(self.render_context_menu(cx)); // slopty
         // slopty: find in thread, over the transcript's top right, and a selection's Quote.
-        let root = root.children(self.render_find_bar(cx));
+        let root = root.children(self.render_find_bar(window, cx));
         let root = root.children(self.render_quote_offer(cx));
         // Full-size viewer for a clicked user-bubble thumbnail
         // (AttachmentPreviewDialog: bare lightbox, click closes).
@@ -15950,7 +16133,7 @@ mod tests {
         ];
         assert_eq!(
             tool_group_summary(&tools),
-            "Ran 2 commands · edited 2 files +12 -3 · listed 1 directory · committed 1a2b3c4 · \
+            "Ran 2 commands · edited 2 files +12 −3 · listed 1 directory · committed 1a2b3c4 · \
              pushed to main"
         );
         // Distinct-path dedupe: editing one file twice counts once.
@@ -15960,6 +16143,14 @@ mod tests {
         let mut failing = exec("boom");
         failing.is_error = true;
         assert_eq!(tool_group_summary(&[failing]), "Ran 1 command · 1 failed");
+        // slopty: the person's own Deny is no failure.
+        let mut denied = exec("rm -rf build");
+        denied.is_error = true;
+        denied.facts = Some(std::sync::Arc::new(slopty_view_doc::ToolFacts {
+            rejected: true,
+            ..slopty_view_doc::ToolFacts::default()
+        }));
+        assert_eq!(tool_group_summary(&[denied]), "Ran 1 command");
         // Reads / searches / misc.
         let tools = vec![
             ToolItem {
@@ -16409,6 +16600,34 @@ mod tests {
         assert_eq!(single_line("\n\n"), "");
     }
 
+    /// slopty: a dialog's chip names it a confirm and shows its ask; an agent's question keeps
+    /// its header (the "Awaiting your answer…" is the chip's while it is open).
+    #[test]
+    fn an_ask_chip_names_its_kind_and_shows_the_ask() {
+        let dialog = slopty_view_proto::UserInputQuestion {
+            kind: "dialog:remote_callout".into(),
+            header: "Confirm".into(),
+            question: "Enable Remote Control?\n\nContinue from your phone.".into(),
+            ..Default::default()
+        };
+        let (label, value) = input_chip_words(&[dialog]);
+        assert_eq!((label.as_ref(), value.as_ref()), ("Confirm", "Enable Remote Control?"));
+        let asked = slopty_view_proto::UserInputQuestion {
+            kind: "question".into(),
+            header: "Scope".into(),
+            question: "Which tests?".into(),
+            ..Default::default()
+        };
+        let (label, value) = input_chip_words(&[asked]);
+        assert_eq!((label.as_ref(), value.as_ref()), ("Question", "Scope"));
+        let approval = slopty_view_proto::UserInputQuestion {
+            kind: "approval".into(),
+            header: "Run cargo test?".into(),
+            ..Default::default()
+        };
+        assert_eq!(input_chip_words(&[approval]).1.as_ref(), "Run cargo test?");
+    }
+
     #[test]
     fn chips_height_is_analytic() {
         assert_eq!(chips_height(0), 0.0);
@@ -16548,6 +16767,15 @@ mod tests {
         ] {
             assert_eq!(format_elapsed(secs), expected, "elapsed seconds: {secs}");
         }
+    }
+
+    /// slopty: a live timer pads its second unit, so it holds its width as it counts.
+    #[test]
+    fn a_ticking_timer_pads_its_second_unit() {
+        assert_eq!(ticking_elapsed(9), "9s");
+        assert_eq!(ticking_elapsed(65), "1m 05s");
+        assert_eq!(ticking_elapsed(3_900), "1h 05m");
+        assert_eq!(ticking_elapsed(90_000), "1d 01h");
     }
 
     #[test]

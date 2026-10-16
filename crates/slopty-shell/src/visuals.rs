@@ -40,7 +40,9 @@ pub struct VisualLayoutChanged;
 enum Load {
     Loading,
     Ready,
-    Failed(SharedString),
+    // slopty: what went wrong in the runtime's words, for "Copy error"; none when the visual's
+    // files never came.
+    Failed(Option<SharedString>),
 }
 
 /// One inline visual in a transcript.
@@ -236,14 +238,14 @@ impl VisualFrame {
                     let _ = this.update(cx, |this, cx| match script {
                         Some(script) => this.start(&script, assets, cx),
                         None => {
-                            this.load = Load::Failed("Visual unavailable".into());
+                            this.load = Load::Failed(None);
                             cx.notify();
                         }
                     });
                 }));
                 Load::Loading
             }
-            None => Load::Failed("Visual unavailable".into()),
+            None => Load::Failed(None),
         };
         Self {
             id,
@@ -289,7 +291,7 @@ impl VisualFrame {
             }
             Err(error) => {
                 tracing::warn!(visual = %self.id, %error, "visual script failed to load");
-                self.load = Load::Failed(format!("Visual failed: {error}").into());
+                self.load = Load::Failed(Some(error.to_string().into()));
                 cx.notify();
             }
         }
@@ -518,13 +520,25 @@ impl Render for VisualFrame {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
         let body = match (&self.load, self.tree.clone()) {
-            (Load::Failed(message), _) => status_line(message.clone(), theme.text_muted),
+            // slopty: "Couldn't …" in the house's voice; the runtime's words behind Copy error.
+            (Load::Failed(None), _) => {
+                status_line("Couldn't load this visual.".into(), theme.text_muted)
+            }
+            (Load::Failed(Some(detail)), _) => failure_line(
+                self.element_id("load-error"),
+                crate::motion::copied(&self.element_id("load-error"), cx),
+                "Couldn't draw this visual.",
+                detail.clone(),
+                theme.text_muted,
+                &theme,
+            ),
             (Load::Ready, Some(tree)) => {
                 let palette = Palette::new(&theme);
                 let root = self.id.to_string();
                 self.node(&tree, &root, &theme, &palette, window, cx)
             }
-            _ => status_line("Loading visual…".into(), theme.text_faint),
+            // slopty: the house's pending line, after its grace.
+            _ => crate::loaders::pending(format!("{}-load", self.id), "Loading visual…").into_any_element(),
         };
         let error = self
             .error
@@ -540,12 +554,52 @@ impl Render for VisualFrame {
             .aria_label(self.title.clone())
             .child(body)
             .when_some(error, |el, error| {
-                el.child(status_line(
-                    format!("Visual error: {error}").into(),
+                el.child(failure_line(
+                    self.element_id("draw-error"),
+                    crate::motion::copied(&self.element_id("draw-error"), cx),
+                    "Couldn't draw part of this visual.",
+                    error,
                     theme.danger,
+                    &theme,
                 ))
             })
     }
+}
+
+// slopty: a failure in words, its raw detail one click away, never printed raw in the chat.
+// `copied` says the detail was just copied (`motion::copied` of `id`).
+fn failure_line(
+    id: SharedString,
+    copied: bool,
+    words: &'static str,
+    detail: SharedString,
+    color: Hsla,
+    theme: &Theme,
+) -> AnyElement {
+    use crate::settings::widgets::ActionHint as _;
+    let key = id.clone();
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
+        .child(status_line(words.into(), color))
+        .child(
+            div()
+                .id(id)
+                .role(gpui::Role::Button)
+                .text_size(crate::typography::ui_rems(12.0))
+                .text_color(theme.text_muted)
+                .cursor_pointer()
+                .hover(|s| s.text_color(theme.text))
+                .hint(if copied { "Copied" } else { "Copy error" })
+                .on_click(move |_, _, cx| {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(detail.to_string()));
+                    crate::motion::copy_feedback(key.clone(), cx);
+                })
+                .child(if copied { "Copied" } else { "Copy error" }),
+        )
+        .into_any_element()
 }
 
 fn status_line(message: SharedString, color: Hsla) -> AnyElement {

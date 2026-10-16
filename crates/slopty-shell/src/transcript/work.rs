@@ -16,6 +16,7 @@ use serde::Serialize;
 use slopty_view_doc::{NoteLine, NoteRow, TaskRow, ToolFacts, ToolTimer};
 
 use super::{Row, RowKind, Transcript, fnv1a};
+use crate::settings::widgets::ActionHint as _;
 use crate::theme::Theme;
 
 /// The height of a task notice's or a notice's line.
@@ -137,13 +138,13 @@ pub fn notice_words(note: &NoteRow, now: i64) -> String {
     }
 }
 
-/// The colour of a task's dot: done green, failed red, stopped amber, else by its tone, as the
-/// TUI colours its `●`.
+/// The colour of a task's dot: a failure red; done muted, stopped or expired faint (slopty:
+/// routine ends wear no status hue); else by its tone.
 fn task_tint(task: &TaskRow, theme: &Theme) -> gpui::Hsla {
     match task.status.as_str() {
-        "completed" => theme.success,
+        "completed" => theme.text_muted,
         "failed" => theme.danger,
-        "killed" | "expired" => theme.warning,
+        "killed" | "expired" => theme.text_faint,
         _ => tone_tint(&task.tone, theme),
     }
 }
@@ -200,7 +201,9 @@ impl ChipFacts {
                 .flex_none()
                 .max_w(px(260.0))
                 .truncate()
-                .text_size(px(11.0))
+                .text_size(crate::typography::ui_rems(11.0))
+                // slopty: a timer that ticks holds its width.
+                .font_features(crate::typography::tabular())
                 .text_color(tint)
                 .child(SharedString::from(words.clone()));
             trail = match (&facts.task_row, &self.chat_id) {
@@ -240,13 +243,29 @@ impl ChipFacts {
                     .rounded(px(Theme::CONTROL_RADIUS))
                     .flex()
                     .items_center()
-                    .text_size(px(11.0))
+                    .text_size(crate::typography::ui_rems(11.0))
                     .text_color(theme.text_muted)
                     .cursor_pointer()
                     .opacity(0.0)
                     .group_hover("tool-header", |s| s.opacity(1.0))
-                    .hover(|s| s.bg(crate::theme::ink(0.08)).text_color(theme.text))
-                    .tooltip(crate::settings::widgets::text_tooltip("Run in background (⌃B)"))
+                    // slopty: the faded hover, at the control strength.
+                    .bg(crate::motion::hover_blend(
+                        &format!("{part_id}-background"),
+                        gpui::transparent_black(),
+                        crate::theme::wash(0.11),
+                    ))
+                    .text_color(crate::motion::mix(
+                        theme.text_muted,
+                        theme.text,
+                        crate::motion::hover_t(&format!("{part_id}-background")),
+                    ))
+                    .on_hover(crate::motion::hover_listener(format!("{part_id}-background")))
+                    // slopty: ⌃B moves the newest running call there (`BackgroundRunningCall`).
+                    .tooltip(crate::settings::widgets::action_tooltip(
+                        "Run in background",
+                        crate::settings::widgets::Keys::Action(Box::new(BackgroundRunningCall)),
+                    ))
+                    .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
                     .on_click(move |_, _, cx| {
                         cx.stop_propagation();
                         let chat = chat.clone();
@@ -261,7 +280,48 @@ impl ChipFacts {
     }
 }
 
+gpui::actions!(
+    transcript,
+    [
+        /// ⌃B, Claude Code's own key: the newest running call that can go on in the
+        /// background goes there, the turn going on past it.
+        BackgroundRunningCall
+    ]
+);
+
 impl Transcript {
+    /// slopty: ⌃B: move the newest running call that can go to the background there. Whether
+    /// there was one.
+    pub(crate) fn background_latest(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(chat) = self.work_chat() else {
+            return false;
+        };
+        let part = {
+            let state = self.state.read(cx);
+            let entries = match &self.doc_override {
+                Some(doc) => state.sub_transcript(doc),
+                None => state.transcript.as_slice(),
+            };
+            entries
+                .iter()
+                .rev()
+                .flat_map(|entry| entry.parts.iter().rev())
+                .find_map(|part| match part {
+                    slopty_view_doc::MessagePart::Tool { id, resolved: false, facts: Some(facts), .. }
+                        if facts.backgroundable && !self.work.backgrounding.contains(id) =>
+                    {
+                        Some(id.clone())
+                    }
+                    _ => None,
+                })
+        };
+        let Some(part) = part else {
+            return false;
+        };
+        self.background_call(chat, part, cx);
+        true
+    }
+
     /// The chat this transcript shows, which the dock's calls name.
     pub(crate) fn work_chat(&self) -> Option<String> {
         self.doc_override.clone().or_else(|| self.chat_id.clone())
@@ -531,19 +591,24 @@ fn disclosure(
     theme: &Theme,
     on_click: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
 ) -> AnyElement {
+    let fade = SharedString::from(format!("{id}-hover"));
     div()
         .id(SharedString::from(id))
         .role(gpui::Role::Button)
-        .aria_label(if open { "Hide details" } else { "Show details" })
         .aria_expanded(open)
-        .size(px(18.0))
+        // slopty: a 24 px target drawn at 18 (its pad taken back), a faded hover, and its
+        // words on hover too.
+        .size(px(24.0))
+        .m(px(-3.0))
         .flex_none()
-        .rounded(px(5.0))
+        .rounded(px(6.0))
         .flex()
         .items_center()
         .justify_center()
         .cursor_pointer()
-        .hover(|s| s.bg(crate::theme::ink(0.08)))
+        .bg(crate::motion::hover_blend(&fade, gpui::transparent_black(), crate::theme::ink(0.08)))
+        .on_hover(crate::motion::hover_listener(fade.clone()))
+        .hint(if open { "Hide details" } else { "Show details" })
         .on_click(on_click)
         .child(
             crate::icons::icon(if open {

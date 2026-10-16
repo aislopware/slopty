@@ -29,7 +29,6 @@ const MAX_HEIGHT: f32 = 360.0;
 const MAX_WIDTH: f32 = 560.0;
 /// The room an image takes while it loads.
 const PLACEHOLDER_HEIGHT: f32 = 120.0;
-const RADIUS: f32 = 8.0;
 
 /// What the transcript's image handler and the transcript share.
 #[derive(Default)]
@@ -143,33 +142,19 @@ pub(super) fn element(
                         .w_full()
                         .max_w(px(widest))
                         .aspect_ratio(aspect)
-                        .rounded(px(RADIUS))
+                        // slopty: the transcript's one card corner and hairline.
+                        .rounded(px(crate::transcript::TRANSCRIPT_CARD_RADIUS))
                         .overflow_hidden()
                         .border_1()
-                        .border_color(crate::theme::hairline(0.07))
+                        .border_color(theme.border)
                         .child(img(image).size_full().object_fit(gpui::ObjectFit::Contain))
                         .into_any_element();
                 }
                 Some(Thumb::Failed) => ("missing", format!("{label} — not found")),
-                Some(Thumb::Loading) | None => {
-                    return div()
-                        .id(id)
-                        .role(gpui::Role::Image)
-                        .aria_label(label)
-                        .aria_value("loading")
-                        .when(tile, |el| el.w_full())
-                        .when(!tile, |el| el.w(px(PLACEHOLDER_HEIGHT * 4.0 / 3.0)))
-                        .h(px(PLACEHOLDER_HEIGHT))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(RADIUS))
-                        .bg(crate::theme::ink(0.035))
-                        .text_size(crate::typography::ui_rems(12.0))
-                        .text_color(theme.text_faint)
-                        .child("Loading image…")
-                        .into_any_element();
+                Some(Thumb::Loading { aspect }) => {
+                    return placeholder(id, label, tile, aspect, theme);
                 }
+                None => return placeholder(id, label, tile, None, theme),
             }
         }
     };
@@ -180,6 +165,45 @@ pub(super) fn element(
         .aria_value(value)
         .text_color(theme.text_muted)
         .child(words)
+        .into_any_element()
+}
+
+/// slopty: an image's room while it loads: its final box once its first bytes said its shape
+/// (so nothing under it moves when it arrives), else 4:3.
+fn placeholder(
+    id: SharedString,
+    label: SharedString,
+    tile: bool,
+    aspect: Option<f32>,
+    theme: &Theme,
+) -> AnyElement {
+    let id_key = id.clone();
+    let base = div()
+        .id(id)
+        .role(gpui::Role::Image)
+        .aria_label(label)
+        .aria_value("loading");
+    let sized = match aspect {
+        Some(aspect) => {
+            let aspect = aspect.max(0.05);
+            let widest =
+                if tile { render::GALLERY_TILE } else { (MAX_HEIGHT * aspect).min(MAX_WIDTH) };
+            base.w_full().max_w(px(widest)).aspect_ratio(aspect)
+        }
+        None => base
+            .when(tile, |el| el.w_full())
+            .when(!tile, |el| el.w(px(PLACEHOLDER_HEIGHT * 4.0 / 3.0)))
+            .h(px(PLACEHOLDER_HEIGHT)),
+    };
+    sized
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(crate::transcript::TRANSCRIPT_CARD_RADIUS))
+        .border_1()
+        .border_color(theme.border)
+        .bg(crate::theme::ink(0.035))
+        .child(crate::loaders::pending(format!("{id_key}-load"), "Loading image…"))
         .into_any_element()
 }
 
@@ -218,7 +242,7 @@ impl Transcript {
             changed |= match &thumb {
                 Thumb::Ready { .. } => !was_ready,
                 Thumb::Failed => !was_failed,
-                Thumb::Loading => false,
+                Thumb::Loading { .. } => false,
             };
             shared.thumbs.insert(path, thumb);
         }

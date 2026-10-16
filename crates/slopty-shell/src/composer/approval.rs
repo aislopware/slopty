@@ -85,7 +85,11 @@ pub(crate) fn open_requests(transcript: &[SessionMessageEntry]) -> usize {
 
 /// The change an edit's approval would make, as the changes pane draws a file, with a label
 /// that says it in words for the accessibility tree.
-pub(super) fn proposed_change(diff: &slopty_view_proto::ToolDiff, theme: &Theme) -> AnyElement {
+pub(super) fn proposed_change(
+    diff: &slopty_view_proto::ToolDiff,
+    scroll: &gpui::ScrollHandle,
+    theme: &Theme,
+) -> AnyElement {
     let mut file = crate::transcript::diff_to_file(diff);
     crate::changes::truncate_file_lines(&mut file, PROPOSED_MAX_LINES);
     let lines: Vec<String> = file
@@ -137,13 +141,16 @@ pub(super) fn proposed_change(diff: &slopty_view_proto::ToolDiff, theme: &Theme)
                         .child(SharedString::from(format!("−{}", file.deletions))),
                 ),
         )
-        .child(
+        // slopty: the change fades at the edges it scrolls past.
+        .child(crate::popover::faded_menu_list(
+            scroll,
             div()
                 .id("approval-proposed-change-body")
                 .max_h(px(220.0))
                 .overflow_y_scroll()
+                .track_scroll(scroll)
                 .child(crate::changes::render_file_body_with_syntax(&file, None, theme)),
-        )
+        ))
         .into_any_element()
 }
 
@@ -217,9 +224,10 @@ impl Composer {
                 .rounded(px(crate::queue::PANEL_RADIUS))
                 .border_1()
                 .border_color(theme.warning.opacity(0.3))
-                .bg(theme.warning.opacity(0.06))
+                // slopty: the faded hover.
+                .bg(crate::motion::hover_blend("question-strip", theme.warning.opacity(0.06), theme.warning.opacity(0.1)))
+                .on_hover(crate::motion::hover_listener("question-strip"))
                 .cursor_pointer()
-                .hover(|s| s.bg(theme.warning.opacity(0.1)))
                 .on_click(cx.listener(|this, _, _, cx| this.unfold_question(cx)))
                 .child(div().flex_none().size(px(6.0)).rounded_full().bg(theme.warning))
                 .child(
@@ -227,14 +235,14 @@ impl Composer {
                         .flex_1()
                         .min_w_0()
                         .truncate()
-                        .text_size(px(12.5))
+                        .text_size(crate::typography::ui_rems(12.5))
                         .text_color(theme.text)
                         .child(SharedString::from(words)),
                 )
                 .child(
                     div()
                         .flex_none()
-                        .text_size(px(11.5))
+                        .text_size(crate::typography::ui_rems(11.5))
                         .font_weight(gpui::FontWeight::MEDIUM)
                         .text_color(theme.warning)
                         .child("Answer"),

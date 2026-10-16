@@ -31,6 +31,11 @@ const KEPT: usize = 512;
 /// Room above and below a display formula.
 const DISPLAY_PAD: f32 = 4.0;
 
+/// slopty: the math face's em over the text's, as KaTeX sets it (`.katex { font-size: 1.21em }`):
+/// Computer Modern's letters are smaller for their em than the prose face's, so math at the
+/// text's own em reads a fifth smaller than the words around it.
+pub(crate) const MATH_EM: f32 = 1.21;
+
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct Key {
     tex: String,
@@ -102,7 +107,7 @@ pub(crate) fn inline_formula(tex: &str, size: f32, color: gpui::Hsla) -> Option<
         if kept.len() >= KEPT {
             return None;
         }
-        let options = slopty_math::Options { display: false, font_size: size, color: rgba };
+        let options = slopty_math::Options { display: false, font_size: size * MATH_EM, color: rgba };
         let id = kept.len() as u64;
         let formula = slopty_math::render(&key.tex, &options)
             .ok()
@@ -165,7 +170,7 @@ fn typeset(tex: &str, size: f32, color: gpui::Hsla) -> Option<Typeset> {
         }
         let options = slopty_math::Options {
             display: true,
-            font_size: size,
+            font_size: size * MATH_EM,
             color: rgba,
         };
         let typeset = match slopty_math::render(tex, &options) {
@@ -226,7 +231,10 @@ pub(crate) fn display_formula(
                         Some(Typeset::Failed(why)) => Some(why),
                         _ => None,
                     },
-                    |el, why| el.tooltip(crate::settings::widgets::text_tooltip(why)),
+                    |el, why| {
+                        el.tooltip(crate::settings::widgets::text_tooltip(why))
+                            .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
+                    },
                 )
                 .w_full()
                 .py(px(DISPLAY_PAD))
@@ -423,5 +431,21 @@ mod tests {
         assert!(height > 22.0, "taller than a 22 px line: {height}");
         assert!(width > 0.0);
         assert!(matches!(typeset(r"\nosuchcommand{x}", 14.0, gpui::black()), Some(Typeset::Failed(_))));
+    }
+
+    /// slopty: a formula in 14 px prose is set at KaTeX's 1.21 em, so its letters match the
+    /// words': an `x` in the line is as tall as the text's em says, not a fifth short.
+    #[test]
+    fn a_formula_is_set_at_katexs_em() {
+        let plain = slopty_math::render("x", &slopty_math::Options {
+            display: false,
+            font_size: 14.0,
+            color: [0.0, 0.0, 0.0, 1.0],
+        })
+        .unwrap_or_else(|e| panic!("{e}"));
+        let set = inline_formula("x", 14.0, gpui::black()).expect("x typesets");
+        let ratio = set.height / plain.height;
+        assert!((ratio - MATH_EM).abs() < 0.01, "set at {ratio} of the text's em");
+        println!("MEASURE inline x: {:.2} px tall at 14 px prose (was {:.2})", set.height, plain.height);
     }
 }

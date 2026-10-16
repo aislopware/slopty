@@ -14,6 +14,8 @@ use gpui::{
 use super::{Row, RowKind, Transcript, fnv1a};
 use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::markdown::find as paint;
+use crate::popover;
+use crate::settings::widgets::{ActionHint as _, Keys};
 use crate::theme::Theme;
 
 gpui::actions!(
@@ -111,8 +113,9 @@ fn rows_signature(rows: &[Row]) -> u64 {
     fnv1a(&key)
 }
 
-/// The window's main transcript, for find's keys pressed where no view takes them.
-struct FindTarget(WeakEntity<Transcript>);
+/// The window's main transcript, for find's keys pressed where no view takes them, and the
+/// window it draws in.
+struct FindTarget(WeakEntity<Transcript>, Option<gpui::AnyWindowHandle>);
 
 impl Global for FindTarget {}
 
@@ -122,10 +125,13 @@ struct FindActions;
 impl Global for FindActions {}
 
 fn with_target(cx: &mut App, act: impl FnOnce(&mut Transcript, &mut Window, &mut Context<Transcript>)) {
-    let Some(target) = cx.try_global::<FindTarget>().and_then(|target| target.0.upgrade()) else {
+    let Some((target, window)) = cx
+        .try_global::<FindTarget>()
+        .and_then(|target| Some((target.0.upgrade()?, target.1)))
+    else {
         return;
     };
-    let Some(window) = cx.active_window() else {
+    let Some(window) = window.or_else(|| cx.active_window()) else {
         return;
     };
     let _ = window.update(cx, |_, window, cx| {
@@ -136,7 +142,7 @@ fn with_target(cx: &mut App, act: impl FnOnce(&mut Transcript, &mut Window, &mut
 impl Transcript {
     /// Make this the transcript find's keys reach, and register them once.
     pub(super) fn install_find(cx: &mut Context<Self>) {
-        cx.set_global(FindTarget(cx.weak_entity()));
+        cx.set_global(FindTarget(cx.weak_entity(), None));
         if cx.has_global::<FindActions>() {
             return;
         }
@@ -149,6 +155,12 @@ impl Transcript {
         app.on_action(|_: &FindPrevious, cx| {
             with_target(cx, |this, window, cx| this.find_step(-1, window, cx))
         });
+        // slopty: ⌃B backgrounds the newest running call (bound with the composer's keys).
+        app.on_action(|_: &super::work::BackgroundRunningCall, cx| {
+            with_target(cx, |this, _, cx| {
+                this.background_latest(cx);
+            })
+        });
     }
 
     /// Whether find is open, and its tally.
@@ -160,7 +172,7 @@ impl Transcript {
     pub(crate) fn open_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.find.input.is_none() {
             let input = cx.new(|cx| {
-                ComposerInput::new("Find in thread", cx)
+                ComposerInput::new("Find in chat", cx)
                     .with_single_line()
                     .with_accessibility_role(gpui::Role::SearchInput)
                     .with_text_metrics(12.5, 18.0)
@@ -302,7 +314,8 @@ impl Transcript {
     }
 
     /// The find card over the transcript's top right, while find is open.
-    pub(super) fn render_find_bar(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(super) fn render_find_bar(&mut self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        self.note_find_window(window, cx);
         if !self.find.open {
             return None;
         }
@@ -311,98 +324,66 @@ impl Transcript {
         let theme = Theme::of(cx).clone();
         let tally = self.find.tally();
         let has = self.find.total > 0;
-        let icon_button = |id: &'static str, icon: &'static str, tip: &'static str| {
-            div()
-                .id(id)
-                .role(gpui::Role::Button)
-                .aria_label(tip)
-                .flex_none()
-                .size(px(24.0))
-                .rounded(px(6.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .when(has || id == "find-close", |el| {
-                    el.cursor_pointer().hover(|s| s.bg(crate::theme::ink(0.08)))
-                })
-                .tooltip(crate::settings::widgets::text_tooltip(tip))
-                .child(
-                    crate::icons::icon(icon)
-                        .size(px(14.0))
-                        .text_color(if has || id == "find-close" {
-                            theme.text_muted
-                        } else {
-                            theme.text_faint
-                        }),
-                )
-        };
         let top = if self.doc_override.is_some() {
             Theme::SPACE_SM
         } else {
             Theme::TITLEBAR_HEIGHT + Theme::SPACE_SM
         };
+        // slopty: the house's find card (the diff's and the terminal's anatomy): its steps name
+        // their keys, a step with nowhere to go dims, and it enters as a menu does.
+        let card = popover::find_card(&theme)
+            .id("find-in-thread")
+            .role(gpui::Role::Search)
+            .aria_label("Find in chat")
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                if event.keystroke.key == "escape" {
+                    cx.stop_propagation();
+                    this.close_find(window, cx);
+                }
+            }))
+            .child(div().flex_1().min_w_0().child(input))
+            .children(tally.map(|tally| popover::find_tally(&theme, tally)))
+            .child(
+                popover::find_step("find-previous", crate::icons::ALT_ARROW_UP, has, &theme)
+                    .action_hint("Previous match", Keys::Action(Box::new(FindPrevious)), cx)
+                    .when(has, |el| {
+                        el.on_click(cx.listener(|this, _, window, cx| this.find_step(-1, window, cx)))
+                    }),
+            )
+            .child(
+                popover::find_step("find-next", crate::icons::ALT_ARROW_DOWN, has, &theme)
+                    .action_hint("Next match", Keys::Action(Box::new(FindNext)), cx)
+                    .when(has, |el| {
+                        el.on_click(cx.listener(|this, _, window, cx| this.find_step(1, window, cx)))
+                    }),
+            )
+            .child(
+                popover::find_step("find-close", crate::icons::CLOSE, true, &theme)
+                    .action_hint("Close find", Keys::Fixed("escape"), cx)
+                    .on_click(cx.listener(|this, _, window, cx| this.close_find(window, cx))),
+            );
         Some(
             div()
                 .absolute()
                 .top(px(top))
                 .right(px(Theme::SPACE_LG + self.right_reserve))
-                .child(
-                    crate::popover::popover_card_flush(&theme)
-                        .id("find-in-thread")
-                        .role(gpui::Role::Search)
-                        .aria_label("Find in thread")
-                        .w(px(340.0))
-                        .h(px(40.0))
-                        .px(px(10.0))
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(6.0))
-                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
-                            if event.keystroke.key == "escape" {
-                                cx.stop_propagation();
-                                this.close_find(window, cx);
-                            }
-                        }))
-                        .child(
-                            crate::icons::icon(crate::icons::MAGNIFER)
-                                .size(px(14.0))
-                                .flex_none()
-                                .text_color(theme.text_muted),
-                        )
-                        .child(div().flex_1().min_w_0().child(input))
-                        .children(tally.map(|tally| {
-                            div()
-                                .id("find-tally")
-                                .role(gpui::Role::Status)
-                                .aria_label(SharedString::from(tally.clone()))
-                                .flex_none()
-                                .text_size(crate::typography::ui_rems(12.0))
-                                .text_color(theme.text_faint)
-                                .child(SharedString::from(tally))
-                        }))
-                        .child(
-                            icon_button("find-previous", crate::icons::ALT_ARROW_UP, "Previous match")
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.find_step(-1, window, cx)
-                                })),
-                        )
-                        .child(
-                            icon_button("find-next", crate::icons::ALT_ARROW_DOWN, "Next match")
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.find_step(1, window, cx)
-                                })),
-                        )
-                        .child(
-                            icon_button("find-close", crate::icons::CLOSE, "Close")
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.close_find(window, cx)
-                                })),
-                        ),
-                )
+                .child(popover::find_card_in("find-in-thread-in", card))
                 .into_any_element(),
         )
+    }
+
+    /// slopty: find's keys go to the window this transcript draws in, whether or not that
+    /// window is the key one (`cx.active_window()` is `None` then, and ⌘F did nothing).
+    fn note_find_window(&self, window: &Window, cx: &mut Context<Self>) {
+        let handle = window.window_handle();
+        let me = cx.entity_id();
+        let stale = cx.try_global::<FindTarget>().is_some_and(|target| {
+            target.0.entity_id() == me && target.1 != Some(handle)
+        });
+        if stale {
+            cx.global_mut::<FindTarget>().1 = Some(handle);
+        }
     }
 }
 

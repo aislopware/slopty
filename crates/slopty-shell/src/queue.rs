@@ -20,7 +20,7 @@ use slopty_view_rpc::methods;
 use crate::composer::{Composer, QUEUE_COMPOSER_OVERLAP};
 use crate::icons::{self, icon};
 use crate::motion::{self, AnimationExt as _, TAB_SLIDE};
-use crate::settings::shortcuts::modifier_send_label;
+use crate::settings::widgets; // slopty: the house tooltip and its key.
 use crate::terminal::panel::{drop_index, slide_offset};
 use crate::theme::Theme;
 
@@ -50,27 +50,6 @@ fn queue_mutation_acknowledged(method: &str, reply: &serde_json::Value) -> bool 
         _ => return true,
     };
     reply.get(field).and_then(serde_json::Value::as_bool) == Some(true)
-}
-
-struct QueueActionTooltip {
-    label: SharedString,
-}
-
-impl Render for QueueActionTooltip {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::of(cx);
-        let card = div()
-            .px(px(8.0))
-            .py(px(5.0))
-            .rounded(px(6.0))
-            .border_1()
-            .border_color(theme.border)
-            .bg(crate::popover::surface_bg(theme))
-            .text_size(px(10.5))
-            .text_color(theme.text_muted)
-            .child(self.label.clone());
-        crate::frost::frosted(6.0, crate::frost::MENU_BLUR, card)
-    }
 }
 
 /// Compact, borderless rows inside the queue's single glass surface. Rows
@@ -142,6 +121,11 @@ fn queue_latest_shortcut_visible(
     action_available: bool,
 ) -> bool {
     index.checked_add(1) == Some(count) && reveal_requested && action_available
+}
+
+/// slopty: a queue key by its action's name, as its row's tooltip names it.
+fn queue_keys(action: &str, cx: &gpui::App) -> Option<widgets::Keys> {
+    cx.build_action(action, None).ok().map(widgets::Keys::Action)
 }
 
 // slopty: one of the queue's keys: its glyphs, then what it does.
@@ -536,8 +520,12 @@ impl Composer {
                         .flex()
                         .items_center()
                         .gap(px(12.0))
-                        .child(queue_key_hint(&theme, "⌥↑", "Edit last"))
-                        .child(queue_key_hint(&theme, "⌘⇧↵", "Steer first")),
+                        .child(queue_key_hint(&theme, &crate::keys::combo_text("alt-up"), "Edit last"))
+                        .child(queue_key_hint(
+                            &theme,
+                            &crate::keys::combo_text("mod-shift-enter"),
+                            "Steer first",
+                        )),
                 )
             });
         Some(crate::frost::frosted(PANEL_RADIUS, crate::frost::MENU_BLUR, panel).into_any_element())
@@ -595,6 +583,8 @@ impl Composer {
             "Edit",
             icons::PEN,
             !being_removed,
+            // slopty: ⌥↑ edits the newest queued message: its row names the key.
+            (ix + 1 == count).then(|| queue_keys("composer::EditLatestQueued", cx)).flatten(),
             theme,
             cx.listener(move |this, _, _, cx| {
                 this.begin_queue_edit(edit_id.clone(), cx);
@@ -611,6 +601,7 @@ impl Composer {
             },
             icons::TRASH_BIN_MINIMALISTIC,
             !being_removed,
+            None,
             theme,
             cx.listener(move |this, _, _, cx| {
                 this.remove_queued(drop_id.clone(), cx);
@@ -634,6 +625,14 @@ impl Composer {
                 show_latest_shortcut,
                 resolved_primary.is_some() && !being_removed,
             ),
+            // slopty: ⌘⏎ on an empty draft acts on the newest row, ⇧⌘⏎ steers the oldest in.
+            if ix + 1 == count {
+                queue_keys("composer::ModifiedSubmit", cx)
+            } else if ix == 0 && primary_action == QueuePrimaryAction::Steer {
+                queue_keys("composer::SteerOldestQueued", cx)
+            } else {
+                None
+            },
             theme,
             cx.listener(move |this, _, _, cx| {
                 this.activate_queued_primary(primary_id.clone(), primary_action, cx);
@@ -645,6 +644,7 @@ impl Composer {
             "Save to queue",
             icons::QUEUE_CHECK,
             !self.queue_edit_finishing,
+            None,
             theme,
             cx.listener(|this, _, _, cx| {
                 this.commit_queue_edit(cx);
@@ -656,6 +656,7 @@ impl Composer {
             "Cancel",
             icons::QUEUE_CLOSE,
             !self.queue_edit_finishing,
+            Some(widgets::Keys::Fixed("escape")),
             theme,
             cx.listener(|this, _, _, cx| {
                 this.cancel_queue_edit(cx);
@@ -674,7 +675,7 @@ impl Composer {
             .rounded(px(4.0))
             .cursor_pointer()
             .when(interaction_blocked, |el| {
-                el.cursor(gpui::CursorStyle::Arrow).opacity(0.35)
+                el.cursor(gpui::CursorStyle::Arrow).opacity(crate::theme::DISABLED_OPACITY)
             })
             .child(
                 icon(icons::QUEUE_DRAG_HANDLE)
@@ -697,8 +698,11 @@ impl Composer {
             }))
             .rounded(px(ROW_RADIUS))
             .when(being_edited, |el| el.bg(crate::theme::ink(0.06)))
+            // slopty: the row hover fades in, at the house's row strength.
             .when(!being_edited && !being_removed, |el| {
-                el.hover(|s| s.bg(crate::theme::ink(0.04)))
+                let fade = SharedString::from(format!("{key}-row-hover"));
+                el.bg(motion::hover_blend(&fade, gpui::transparent_black(), crate::theme::ink(0.05)))
+                    .on_hover(motion::hover_listener(fade))
             })
             .when(being_removed, |el| el.opacity(0.55))
             .cursor(gpui::CursorStyle::Arrow)
@@ -728,7 +732,7 @@ impl Composer {
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .text_size(px(QUEUE_TEXT_SIZE))
+                    .text_size(crate::typography::ui_rems(QUEUE_TEXT_SIZE))
                     .line_height(px(line_height))
                     .text_color(theme.text.opacity(0.9))
                     .child(crate::composer::chip_text(text, chips, theme));
@@ -760,16 +764,11 @@ impl Composer {
                             .justify_center()
                             .rounded(px(ROW_CONTROL_RADIUS))
                             .bg(crate::theme::ink(0.06))
-                            .text_size(px(11.0))
+                            .text_size(crate::typography::ui_rems(11.0))
                             .text_color(theme.text_muted)
                             .aria_label(format!("{hidden}; edit message to view all"))
-                            .tooltip(move |_, cx| {
-                                cx.new(|_| QueueActionTooltip {
-                                    label: hidden.clone(),
-                                })
-                                .into()
-                            })
-                            .tooltip_show_delay(std::time::Duration::from_millis(350))
+                            .tooltip(widgets::text_tooltip(hidden.clone()))
+                            .tooltip_show_delay(widgets::TOOLTIP_DELAY)
                             .child(format!("+{remaining}")),
                     )
                 })
@@ -780,7 +779,7 @@ impl Composer {
                     div()
                         .flex_1()
                         .min_w_0()
-                        .text_size(px(QUEUE_TEXT_SIZE))
+                        .text_size(crate::typography::ui_rems(QUEUE_TEXT_SIZE))
                         .text_color(theme.text_muted)
                         .child(if self.queue_edit_finishing {
                             "Saving…"
@@ -989,7 +988,7 @@ impl Composer {
                     );
                 } else {
                     this.show_appshot_error(
-                        "Could not load the image. Try opening it again.".into(),
+                        "Couldn't load the image. Try opening it again.".into(),
                         cx,
                     );
                 }
@@ -1032,16 +1031,8 @@ impl Composer {
             .border_color(crate::theme::hairline(0.1))
             .bg(crate::theme::ink(0.035))
             .overflow_hidden()
-            .tooltip({
-                let label = label.clone();
-                move |_, cx| {
-                    cx.new(|_| QueueActionTooltip {
-                        label: label.clone(),
-                    })
-                    .into()
-                }
-            })
-            .tooltip_show_delay(std::time::Duration::from_millis(350));
+            .tooltip(widgets::text_tooltip(label.clone()))
+            .tooltip_show_delay(widgets::TOOLTIP_DELAY);
         // A file that is not an image has no thumbnail to load: its icon stands in.
         if !attachments::is_image_path(path) {
             return frame
@@ -1122,12 +1113,14 @@ impl Composer {
         label: &'static str,
         glyph: &'static str,
         enabled: bool,
+        keys: Option<widgets::Keys>,
         theme: &Theme,
         on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
     ) -> AnyElement {
         let own = SharedString::from(format!("{key}-{slot}-grp"));
-        let accent = theme.accent;
-        div()
+        let fade = SharedString::from(format!("{key}-{slot}-hover"));
+        let hover = motion::hover_t(&fade);
+        let button = div()
             .id(SharedString::from(format!("{key}-{slot}")))
             .group(own.clone())
             .role(gpui::Role::Button)
@@ -1137,29 +1130,31 @@ impl Composer {
             .flex()
             .items_center()
             .justify_center()
-            .rounded(px(ROW_CONTROL_RADIUS))
-            .opacity(0.72)
-            .when(enabled, |el| {
-                el.cursor_pointer()
-                    .hover(|s| s.opacity(1.0).bg(crate::theme::ink(0.07)))
-                    .tab_index(0)
-                    .focus_visible(move |s| s.bg(accent.opacity(0.18)).text_color(accent))
-                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(move |event, window, cx| {
-                        cx.stop_propagation();
-                        on_click(event, window, cx);
-                    })
-            })
-            .when(!enabled, |el| {
-                el.cursor(gpui::CursorStyle::Arrow).opacity(0.45)
-            })
-            .tooltip(move |_, cx| {
-                cx.new(|_| QueueActionTooltip {
-                    label: label.into(),
+            .rounded(px(ROW_CONTROL_RADIUS));
+        // slopty: one dimming for what cannot act now; a faded hover; the shell's focus ring.
+        let button = if enabled {
+            crate::surface_chrome::focus_ring(button.tab_index(0), theme)
+                .opacity(0.72 + 0.28 * hover)
+                .cursor_pointer()
+                .bg(motion::hover_blend(&fade, gpui::transparent_black(), crate::theme::ink(0.07)))
+                .on_hover(motion::hover_listener(fade))
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(move |event, window, cx| {
+                    cx.stop_propagation();
+                    on_click(event, window, cx);
                 })
-                .into()
-            })
-            .tooltip_show_delay(std::time::Duration::from_millis(350))
+        } else {
+            button
+                .cursor_default()
+                .aria_disabled(true)
+                .opacity(crate::theme::DISABLED_OPACITY)
+        };
+        let button = match keys {
+            Some(keys) => button.tooltip(widgets::action_tooltip(label, keys)),
+            None => button.tooltip(widgets::text_tooltip(label)),
+        };
+        button
+            .tooltip_show_delay(widgets::TOOLTIP_DELAY)
             .child(
                 icon(glyph)
                     .size(px(QUEUE_ICON_SIZE))
@@ -1176,6 +1171,7 @@ impl Composer {
         action: QueuePrimaryAction,
         enabled: bool,
         show_shortcut: bool,
+        keys: Option<widgets::Keys>,
         theme: &Theme,
         on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
     ) -> AnyElement {
@@ -1184,8 +1180,9 @@ impl Composer {
         } else {
             "Waiting for provider capabilities"
         };
-        let accent = theme.accent;
         let compact = self.queue_preview_limit() == 1;
+        let fade = SharedString::from(format!("{key}-primary-hover"));
+        let lit = motion::hover_t(&fade);
         div()
             .id(SharedString::from(format!("{key}-primary")))
             .role(gpui::Role::Button)
@@ -1199,38 +1196,35 @@ impl Composer {
             .items_center()
             .justify_center()
             .rounded(px(ROW_CONTROL_RADIUS))
-            .text_size(px(11.5))
+            .text_size(crate::typography::ui_rems(11.5))
             .text_color(theme.text_muted)
             .when(enabled, |el| {
-                el.cursor_pointer()
-                    .tab_index(0)
-                    .hover(|s| s.bg(crate::theme::ink(0.07)).text_color(theme.text))
-                    .focus_visible(move |s| s.bg(accent.opacity(0.18)).text_color(accent))
+                crate::surface_chrome::focus_ring(el.tab_index(0), theme)
+                    .cursor_pointer()
+                    .bg(motion::hover_blend(&fade, gpui::transparent_black(), crate::theme::ink(0.07)))
+                    .text_color(motion::mix(theme.text_muted, theme.text, lit))
+                    .on_hover(motion::hover_listener(fade))
                     .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(move |event, window, cx| {
                         cx.stop_propagation();
                         on_click(event, window, cx);
                     })
             })
-            .when(!enabled, |el| el.opacity(0.45))
-            .tooltip(move |_, cx| {
-                cx.new(|_| QueueActionTooltip {
-                    label: tooltip.into(),
-                })
-                .into()
+            .when(!enabled, |el| {
+                el.cursor_default()
+                    .aria_disabled(true)
+                    .opacity(crate::theme::DISABLED_OPACITY)
             })
-            .tooltip_show_delay(std::time::Duration::from_millis(350))
+            .map(|el| match keys {
+                Some(keys) => el.tooltip(widgets::action_tooltip(tooltip, keys)),
+                None => el.tooltip(widgets::text_tooltip(tooltip)),
+            })
+            .tooltip_show_delay(widgets::TOOLTIP_DELAY)
             .child(if show_shortcut {
+                // slopty: the key in the house's spelling ("⌘⏎").
                 div()
-                    .child(if compact {
-                        if cfg!(target_os = "macos") {
-                            "⌘↵"
-                        } else {
-                            "⌃↵"
-                        }
-                    } else {
-                        modifier_send_label(cfg!(target_os = "macos"))
-                    })
+                    .font_family(crate::popover::KEY_GLYPH_FONT)
+                    .child(crate::keys::combo_text("mod-enter"))
                     .into_any_element()
             } else if compact {
                 icon(icons::QUEUE_SEND)
@@ -1444,20 +1438,23 @@ impl Composer {
         let first = held.first()?.clone();
         let words = format!("Paused · {} held since you stopped", held.len());
         let action = |id: &'static str, label: &'static str| {
+            let fade = SharedString::from(format!("{id}-hover"));
+            let lit = motion::hover_t(&fade);
             div()
                 .id(id)
                 .role(gpui::Role::Button)
                 .aria_label(label)
                 .flex_none()
-                .h(px(22.0))
+                .h(px(24.0))
                 .px(px(8.0))
                 .flex()
                 .items_center()
-                .rounded(px(5.0))
-                .text_size(px(11.5))
-                .text_color(theme.text_muted)
+                .rounded(px(6.0))
+                .text_size(crate::typography::ui_rems(11.5))
+                .text_color(motion::mix(theme.text_muted, theme.text, lit))
                 .cursor_pointer()
-                .hover(|s| s.bg(theme.element_hover).text_color(theme.text))
+                .bg(motion::hover_blend(&fade, gpui::transparent_black(), crate::theme::wash(0.11)))
+                .on_hover(motion::hover_listener(fade))
                 .child(label)
         };
         Some(
@@ -1476,7 +1473,7 @@ impl Composer {
                         .flex_1()
                         .min_w_0()
                         .truncate()
-                        .text_size(px(12.0))
+                        .text_size(crate::typography::ui_rems(12.0))
                         .text_color(theme.text_muted)
                         .child(SharedString::from(words)),
                 )

@@ -54,11 +54,17 @@ pub(crate) fn ring_chip(
         .h(px(24.0))
         .px(px(6.0))
         .rounded(px(6.0))
-        .text_size(px(11.0))
+        .text_size(crate::typography::ui_rems(11.0))
         .text_color(text)
         .cursor_pointer()
-        .when(open, |s| s.bg(crate::theme::ink(0.05)))
-        .hover(|s| s.bg(crate::theme::ink(0.05)))
+        // slopty: the faded hover; a percent that changes keeps its width.
+        .bg(crate::motion::hover_blend(
+            id,
+            if open { crate::theme::ink(0.05) } else { gpui::transparent_black() },
+            crate::theme::ink(0.05),
+        ))
+        .on_hover(crate::motion::hover_listener(id))
+        .font_features(crate::typography::tabular())
         .child(ring(fraction, arc, theme))
         .child(SharedString::from(label))
 }
@@ -164,8 +170,8 @@ pub fn card(usage: Option<ContextUsage>, breakdown: Option<&ContextBreakdown>, t
             div()
                 .px(px(8.0))
                 .pb(px(6.0))
-                .text_size(px(12.0))
-                .line_height(px(19.0))
+                .text_size(crate::typography::ui_rems(12.0))
+                .line_height(crate::typography::ui_rems(19.0))
                 .whitespace_nowrap()
                 .text_color(theme.text_muted)
                 .child(SharedString::from(details(usage))),
@@ -195,7 +201,7 @@ fn breakdown_card(card: gpui::Div, breakdown: &ContextBreakdown, theme: &Theme) 
             .aria_label(SharedString::from(totals.clone()))
             .px(px(8.0))
             .pb(px(6.0))
-            .text_size(px(12.0))
+            .text_size(crate::typography::ui_rems(12.0))
             .text_color(theme.text_muted)
             .child(SharedString::from(totals)),
     );
@@ -243,6 +249,7 @@ fn breakdown_card(card: gpui::Div, breakdown: &ContextBreakdown, theme: &Theme) 
                         div()
                             .flex_none()
                             .text_color(theme.text_faint)
+                            .font_features(crate::typography::tabular()) // slopty
                             .child(SharedString::from(compact_tokens(slice.tokens))),
                     )
                     .child(
@@ -251,6 +258,7 @@ fn breakdown_card(card: gpui::Div, breakdown: &ContextBreakdown, theme: &Theme) 
                             .flex_none()
                             .text_right()
                             .text_color(theme.text_faint)
+                            .font_features(crate::typography::tabular()) // slopty
                             .child(SharedString::from(percent)),
                     ),
             );
@@ -265,7 +273,7 @@ fn breakdown_card(card: gpui::Div, breakdown: &ContextBreakdown, theme: &Theme) 
                 .px(px(8.0))
                 .pt(px(4.0))
                 .pb(px(2.0))
-                .text_size(px(11.5))
+                .text_size(crate::typography::ui_rems(11.5))
                 .text_color(if breakdown.urgent { theme.danger } else { theme.warning })
                 .child(SharedString::from(words)),
         );
@@ -274,9 +282,23 @@ fn breakdown_card(card: gpui::Div, breakdown: &ContextBreakdown, theme: &Theme) 
             div()
                 .px(px(8.0))
                 .pt(px(4.0))
-                .text_size(px(11.5))
+                .text_size(crate::typography::ui_rems(11.5))
                 .text_color(theme.text_faint)
                 .child(SharedString::from(format!("Compacts on its own at {at}%"))),
+        );
+    }
+    // slopty: the agent's MCP servers as its /status row counts them.
+    if let Some(servers) = breakdown.servers.clone() {
+        card = card.child(
+            div()
+                .id("context-card-servers")
+                .role(gpui::Role::Status)
+                .aria_label(SharedString::from(servers.clone()))
+                .px(px(8.0))
+                .pt(px(4.0))
+                .text_size(crate::typography::ui_rems(11.5))
+                .text_color(theme.text_faint)
+                .child(SharedString::from(servers)),
         );
     }
     if let Some(turn) = breakdown.last_turn {
@@ -289,7 +311,7 @@ fn breakdown_card(card: gpui::Div, breakdown: &ContextBreakdown, theme: &Theme) 
                 .px(px(8.0))
                 .pt(px(4.0))
                 .pb(px(4.0))
-                .text_size(px(11.5))
+                .text_size(crate::typography::ui_rems(11.5))
                 .text_color(theme.text_faint)
                 .child(SharedString::from(format!("Last turn · {words}"))),
         );
@@ -314,8 +336,17 @@ fn compact_tokens(tokens: u64) -> String {
 }
 
 /// The colours the categories take in turn: the theme's own, never ad hoc.
+// slopty: the breakdown's categories are a neutral ramp, not status hues: none of them asks
+// for the person's attention.
 fn slice_palette(theme: &Theme) -> [gpui::Hsla; 6] {
-    [theme.accent, theme.success, theme.warning, theme.text_muted, theme.accent.opacity(0.55), theme.text_faint]
+    [
+        theme.text.opacity(0.85),
+        theme.text.opacity(0.6),
+        theme.text.opacity(0.4),
+        theme.text.opacity(0.25),
+        theme.text_faint,
+        crate::theme::ink(0.12),
+    ]
 }
 
 #[cfg(test)]

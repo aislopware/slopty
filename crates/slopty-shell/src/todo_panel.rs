@@ -14,7 +14,6 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::ops::Range;
-use std::time::Duration;
 
 use gpui::{
     AnyElement, Context, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
@@ -384,7 +383,6 @@ impl Composer {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let accent = theme.accent;
         let label = if expanded {
             "Collapse todo list"
         } else {
@@ -416,9 +414,10 @@ impl Composer {
                 .items_center()
                 .gap(px(8.0))
                 .cursor_pointer()
-                .hover(|s| s.bg(theme.element_hover))
+                .bg(motion::hover_blend("todo-panel-toggle-hover", gpui::transparent_black(), crate::theme::ink(0.05)))
+                .on_hover(motion::hover_listener("todo-panel-toggle-hover"))
                 .tab_index(0)
-                .focus_visible(move |s| s.bg(accent.opacity(0.14)))
+                .map(|el| crate::surface_chrome::focus_ring(el, theme))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.todo_panels
                         .entry(toggle_chat.clone())
@@ -427,7 +426,7 @@ impl Composer {
                     cx.notify();
                 }))
                 .tooltip(crate::settings::widgets::text_tooltip(label))
-                .tooltip_show_delay(Duration::from_millis(350))
+                .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
                 .child(
                     icon(if summary.finished() {
                         icons::CHECK
@@ -435,11 +434,8 @@ impl Composer {
                         icons::CHECKLIST
                     })
                     .size(px(14.0))
-                    .text_color(if summary.finished() {
-                        theme.success
-                    } else {
-                        theme.text_muted
-                    }),
+                    // slopty: done is routine: muted, no green.
+                    .text_color(theme.text_muted),
                 )
                 .child(
                     div()
@@ -447,7 +443,7 @@ impl Composer {
                         .flex()
                         .items_baseline()
                         .gap(px(6.0))
-                        .text_size(px(TEXT_SIZE))
+                        .text_size(crate::typography::ui_rems(TEXT_SIZE))
                         .child(
                             div()
                                 .font_weight(gpui::FontWeight::MEDIUM)
@@ -467,7 +463,7 @@ impl Composer {
                                 .flex_1()
                                 .min_w_0()
                                 .truncate()
-                                .text_size(px(TEXT_SIZE))
+                                .text_size(crate::typography::ui_rems(TEXT_SIZE))
                                 .text_color(color)
                                 .child(text),
                         )
@@ -480,7 +476,7 @@ impl Composer {
                     } else {
                         icons::ALT_ARROW_UP
                     })
-                    .size(px(13.0))
+                    .size(px(12.0))
                     .text_color(theme.text_muted.opacity(0.7)),
                 );
 
@@ -502,11 +498,12 @@ impl Composer {
                         .flex()
                         .items_center()
                         .justify_center()
-                        .rounded(px(5.0))
+                        .rounded(px(6.0))
                         .cursor_pointer()
-                        .hover(|s| s.bg(theme.element_hover))
+                        .bg(motion::hover_blend("todo-panel-dismiss-hover", gpui::transparent_black(), crate::theme::wash(0.11)))
+                        .on_hover(motion::hover_listener("todo-panel-dismiss-hover"))
                         .tab_index(0)
-                        .focus_visible(move |s| s.bg(accent.opacity(0.18)))
+                        .map(|el| crate::surface_chrome::focus_ring(el, theme))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.todo_panels
                                 .entry(dismiss_chat.clone())
@@ -515,10 +512,10 @@ impl Composer {
                             cx.notify();
                         }))
                         .tooltip(crate::settings::widgets::text_tooltip("Dismiss"))
-                        .tooltip_show_delay(Duration::from_millis(350))
+                        .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
                         .child(
                             icon(icons::CLOSE)
-                                .size(px(11.0))
+                                .size(px(12.0))
                                 .text_color(theme.text_muted.opacity(0.8)),
                         ),
                 )
@@ -537,7 +534,6 @@ impl Composer {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let accent = theme.accent;
         let noun = match side {
             FoldSide::Earlier => "earlier",
             FoldSide::Later => "later",
@@ -554,6 +550,7 @@ impl Composer {
             _ => icons::ALT_ARROW_DOWN,
         };
         let chat_id = chat_id.to_owned();
+        let fold_hover = SharedString::from(format!("todo-fold-{noun}-hover"));
         div()
             .id(SharedString::from(format!("todo-fold-{noun}")))
             .role(gpui::Role::Button)
@@ -565,9 +562,10 @@ impl Composer {
             .items_center()
             .gap(px(8.0))
             .cursor_pointer()
-            .hover(|s| s.bg(theme.element_hover))
+            .bg(motion::hover_blend(&fold_hover, gpui::transparent_black(), crate::theme::ink(0.05)))
+            .on_hover(motion::hover_listener(fold_hover.clone()))
             .tab_index(0)
-            .focus_visible(move |s| s.bg(accent.opacity(0.14)))
+            .map(|el| crate::surface_chrome::focus_ring(el, theme))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.todo_panels
                     .entry(chat_id.clone())
@@ -585,7 +583,7 @@ impl Composer {
             )
             .child(
                 div()
-                    .text_size(px(11.5))
+                    .text_size(crate::typography::ui_rems(11.5))
                     .text_color(theme.text_faint)
                     .child(text),
             )
@@ -631,8 +629,8 @@ fn todo_item_row(
             div()
                 .flex_1()
                 .min_w_0()
-                .text_size(px(TEXT_SIZE))
-                .line_height(px(TEXT_LINE))
+                .text_size(crate::typography::ui_rems(TEXT_SIZE))
+                .line_height(crate::typography::ui_rems(TEXT_LINE))
                 .font_weight(weight)
                 .text_color(color)
                 .child(SharedString::from(item.text.clone())),
@@ -652,9 +650,11 @@ fn status_glyph(
     cx: &mut gpui::App,
 ) -> AnyElement {
     match status {
+        // slopty: done is routine (a muted check); the item under way is the text's own
+        // colour, not the accent.
         TodoStatus::Completed => icon(icons::CHECK)
             .size(px(12.0))
-            .text_color(theme.success)
+            .text_color(theme.text_muted)
             .into_any_element(),
         TodoStatus::InProgress if live => crate::loaders::mini_glyph_spinner(
             format!("todo-active-{ix}"),
@@ -668,11 +668,11 @@ fn status_glyph(
             .size(px(10.0))
             .rounded_full()
             .border_1()
-            .border_color(theme.accent)
+            .border_color(theme.text)
             .flex()
             .items_center()
             .justify_center()
-            .child(div().size(px(4.0)).rounded_full().bg(theme.accent))
+            .child(div().size(px(4.0)).rounded_full().bg(theme.text))
             .into_any_element(),
         TodoStatus::Pending => div()
             .size(px(10.0))

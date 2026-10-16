@@ -158,7 +158,7 @@ impl SurfaceState {
         if surface.tree.is_null() {
             let words = surface.text.clone().unwrap_or_default();
             return div()
-                .text_size(px(12.5))
+                .text_size(crate::typography::ui_rems(12.5))
                 .text_color(theme.text_muted)
                 .child(SharedString::from(words))
                 .into_any_element();
@@ -184,7 +184,7 @@ impl SurfaceState {
         }
         *budget -= 1;
         if let Some(text) = node.as_str() {
-            return div().text_size(px(12.5)).text_color(theme.text).child(SharedString::from(text.to_owned())).into_any_element();
+            return div().text_size(crate::typography::ui_rems(12.5)).text_color(theme.text).child(SharedString::from(text.to_owned())).into_any_element();
         }
         if let Some(items) = node.as_array() {
             let children: Vec<AnyElement> = items
@@ -234,8 +234,8 @@ impl SurfaceState {
                 let color = tone_color(prop_str(node, "tone").or(prop_str(node, "color")), theme);
                 let color = if prop_bool(node, "dim") { color.opacity(0.6) } else { color };
                 div()
-                    .text_size(px(if heading { 13.5 } else if prop_str(node, "size") == Some("small") { 11.5 } else { 12.5 }))
-                    .line_height(px(if heading { 19.0 } else { 17.0 }))
+                    .text_size(crate::typography::ui_rems(if heading { 13.5 } else if prop_str(node, "size") == Some("small") { 11.5 } else { 12.5 }))
+                    .line_height(crate::typography::ui_rems(if heading { 19.0 } else { 17.0 }))
                     .text_color(color)
                     .when(heading || prop_bool(node, "bold"), |el| el.font_weight(gpui::FontWeight::MEDIUM))
                     .when(prop_bool(node, "italic"), |el| el.italic())
@@ -260,8 +260,9 @@ impl SurfaceState {
                     .aria_label(SharedString::from(label))
                     .flex_none()
                     .py(px(4.0))
-                    .text_size(px(12.5))
-                    .when(disabled, |el| el.opacity(0.5).cursor_default())
+                    .text_size(crate::typography::ui_rems(12.5))
+                    // slopty: one dimming for what cannot act now.
+                    .when(disabled, |el| el.opacity(crate::theme::DISABLED_OPACITY).cursor_default().aria_disabled(true))
                     .when(!disabled, |el| {
                         el.on_click(move |_, _, cx| emit(&surface, &element, "press", None, cx))
                     })
@@ -299,7 +300,7 @@ impl SurfaceState {
                     .border_1()
                     .border_color(crate::theme::hairline(0.1))
                     .bg(crate::theme::ink(0.03))
-                    .when(!live, |el| el.opacity(0.5))
+                    .when(!live, |el| el.opacity(crate::theme::DISABLED_OPACITY))
                     .children(input)
                     .into_any_element()
             }
@@ -319,6 +320,7 @@ impl SurfaceState {
                         let selected = current.as_deref() == Some(value.as_str());
                         let (emit, surface, element) = (emit.clone(), surface.to_owned(), element.clone());
                         let option_key = SharedString::from(format!("{element_key}-{ix}"));
+                        let fade = SharedString::from(format!("{option_key}-hover"));
                         div()
                             .id(option_key)
                             .role(Role::RadioButton)
@@ -329,13 +331,19 @@ impl SurfaceState {
                             .flex()
                             .items_center()
                             .rounded(px(Theme::CONTROL_RADIUS))
-                            .text_size(px(12.0))
+                            .text_size(crate::typography::ui_rems(12.0))
                             .border_1()
                             .border_color(if selected { crate::theme::ink(0.16) } else { crate::theme::hairline(0.07) })
                             .bg(if selected { crate::theme::ink(0.09) } else { crate::theme::ink(0.025) })
                             .text_color(if selected { theme.text } else { theme.text_muted })
                             .when(!disabled, |el| {
-                                el.cursor_pointer().hover(|s| s.bg(crate::theme::ink(0.06))).on_click(
+                                // slopty: the faded hover, at the row strength.
+                                let rest = if selected { crate::theme::ink(0.09) } else { crate::theme::ink(0.025) };
+                                let lit = if selected { crate::theme::ink(0.09) } else { crate::theme::ink(0.05) };
+                                el.cursor_pointer()
+                                    .bg(crate::motion::hover_blend(&fade, rest, lit))
+                                    .on_hover(crate::motion::hover_listener(fade.clone()))
+                                    .on_click(
                                     move |_, _, cx| {
                                         emit(&surface, &element, "select", Some(serde_json::Value::String(value.clone())), cx)
                                     },
@@ -353,7 +361,7 @@ impl SurfaceState {
                     .id(element_key)
                     .role(Role::Link)
                     .aria_label(SharedString::from(label.clone()))
-                    .text_size(px(12.5))
+                    .text_size(crate::typography::ui_rems(12.5))
                     .text_color(theme.accent)
                     .cursor_pointer()
                     .hover(|s| s.underline())
@@ -422,7 +430,7 @@ impl SurfaceState {
                             .into_any_element()
                     }
                     None => div()
-                        .text_size(px(11.5))
+                        .text_size(crate::typography::ui_rems(11.5))
                         .text_color(theme.text_faint)
                         .child(SharedString::from(prop_str(node, "alt").unwrap_or("Image unavailable").to_owned()))
                         .into_any_element(),
@@ -437,7 +445,7 @@ impl SurfaceState {
                     .flex_col()
                     .gap(px(6.0))
                     .when(!words.is_empty(), |el| {
-                        el.child(div().text_size(px(12.5)).text_color(theme.text).child(SharedString::from(words)))
+                        el.child(div().text_size(crate::typography::ui_rems(12.5)).text_color(theme.text).child(SharedString::from(words)))
                     })
                     .children(kids)
                     .into_any_element()
@@ -511,7 +519,7 @@ impl Composer {
                         .flex()
                         .items_center()
                         .gap(px(8.0))
-                        .text_size(px(11.5))
+                        .text_size(crate::typography::ui_rems(11.5))
                         .child(div().flex_none().text_color(theme.text_faint).child(SharedString::from(surface.plugin.clone())))
                         .child(
                             div()
@@ -534,7 +542,13 @@ impl Composer {
                                 .justify_center()
                                 .rounded(px(5.0))
                                 .cursor_pointer()
-                                .hover(|s| s.bg(theme.element_hover))
+                                // slopty: the faded hover, at the control strength.
+                                .bg(crate::motion::hover_blend(
+                                    &format!("mod-band-close-{}", surface.id),
+                                    gpui::transparent_black(),
+                                    crate::theme::wash(0.11),
+                                ))
+                                .on_hover(crate::motion::hover_listener(format!("mod-band-close-{}", surface.id)))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     if live {
                                         close_emit(&close_id, "", "close", None, cx);
@@ -570,6 +584,18 @@ pub struct ModPane {
     title: SharedString,
     inner: SurfaceState,
     _dock: Subscription,
+    // slopty: the pane's scroll, its edge fades and floating rail (a settings page's shape).
+    scroll: crate::settings::widgets::PageScroll,
+}
+
+impl crate::popover::ScrollRailHost for ModPane {
+    fn rail_bar(&mut self) -> &mut crate::popover::MenuScrollbarState {
+        crate::popover::ScrollRailHost::rail_bar(&mut self.scroll)
+    }
+
+    fn rail_scroll(&self) -> Option<gpui::ScrollHandle> {
+        crate::popover::ScrollRailHost::rail_scroll(&self.scroll)
+    }
 }
 
 impl ModPane {
@@ -581,6 +607,7 @@ impl ModPane {
             title: ask.title.clone().into(),
             inner: SurfaceState::default(),
             _dock: cx.observe_global::<super::dock::DockCache>(|_, cx| cx.notify()),
+            scroll: crate::settings::widgets::PageScroll::default(),
         }
     }
 
@@ -607,21 +634,34 @@ impl Render for ModPane {
                 self.inner.render_tree(&surface, live, &emit, &theme, window, cx)
             }
             None => div()
-                .text_size(px(12.5))
+                .text_size(crate::typography::ui_rems(12.5))
                 .text_color(theme.text_faint)
                 .child(SharedString::from(format!("{} closed this pane.", self.title)))
                 .into_any_element(),
         };
-        div()
+        let page = div()
             .id("mod-pane")
             .role(Role::Group)
             .aria_label(self.title.clone())
             .size_full()
             .overflow_y_scroll()
+            .track_scroll(&self.scroll.scroll)
             .pt(px(Theme::TITLEBAR_HEIGHT + Theme::SPACE_LG))
             .px(px(Theme::SPACE_LG))
             .pb(px(Theme::SPACE_LG))
-            .child(body)
+            .child(body);
+        let rail = crate::popover::rail(self, "mod-pane-scrollbar", &theme, cx);
+        div()
+            .id("mod-pane-host")
+            .relative()
+            .size_full()
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                if this.scroll.set_list_hovered(*hovered) {
+                    cx.notify();
+                }
+            }))
+            .child(crate::edge_fade::edge_faded(12.0, true, true, page).fade_overflow_y(&self.scroll.scroll))
+            .children(rail)
     }
 }
 

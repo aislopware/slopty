@@ -66,6 +66,8 @@ pub(super) struct Extras {
     /// The chat whose stop was just confirmed, and when.
     pub(super) stopped: Option<(String, Instant)>,
     pub(super) stopped_task: Option<Task<()>>,
+    /// The stall the person chose to keep waiting through: its chat and what it said.
+    pub(super) stall_kept: Option<(String, Option<String>)>,
 }
 
 impl Default for Extras {
@@ -82,6 +84,7 @@ impl Default for Extras {
             gate_task: None,
             stopped: None,
             stopped_task: None,
+            stall_kept: None,
         }
     }
 }

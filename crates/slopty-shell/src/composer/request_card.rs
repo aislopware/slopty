@@ -415,6 +415,10 @@ pub(crate) struct CardState {
     pub(crate) preview: Option<usize>,
     /// What holds the card's option keys back while the person types.
     pub(crate) guard: KeyGuard,
+    // slopty: the preview pane's scroll, which its edge fades read.
+    pub(crate) preview_scroll: gpui::ScrollHandle,
+    // slopty: the proposed change's scroll, likewise.
+    pub(crate) proposed_scroll: gpui::ScrollHandle,
 }
 
 impl Composer {
@@ -596,7 +600,7 @@ impl Composer {
         cx.spawn(async move |this, cx| {
             if let Err(err) = engine.client().call(calls::ALLOW_WITH_RULE, params).await {
                 this.update(cx, |this, cx| {
-                    this.failure = Some(format!("Allow with rule failed: {err}").into());
+                    this.failure = Some(format!("Couldn't allow with the rule: {err}").into());
                     this.failure_key = Some(chat);
                     // It never took: the request shows again.
                     this.answered_requests.remove(&request_id);
@@ -630,30 +634,39 @@ impl Composer {
 
     /// The pane beside a question's options that shows what the option at `at` would look like
     /// (the TUI's preview pane), when any option has a preview.
-    pub(super) fn render_previews(question: &UserInputQuestion, at: usize, theme: &Theme) -> Option<AnyElement> {
+    pub(super) fn render_previews(
+        question: &UserInputQuestion,
+        at: usize,
+        scroll: &gpui::ScrollHandle,
+        theme: &Theme,
+    ) -> Option<AnyElement> {
         if question.option_previews.iter().all(|p| p.trim().is_empty()) {
             return None;
         }
         let shown = question.option_previews.get(at).map(|p| p.trim()).filter(|p| !p.is_empty());
         let label = question.options.get(at).map(|l| approval::visible_escapes(l)).unwrap_or_default();
+        // slopty: the pane's words fade at the edges they scroll past, inside its box.
+        let words = div()
+            .id("wizard-preview")
+            .role(Role::Region)
+            .aria_label(SharedString::from(format!("Preview of {label}")))
+            .max_h(px(280.0))
+            .overflow_y_scroll()
+            .track_scroll(scroll)
+            .px(px(12.0))
+            .py(px(10.0))
+            .font_family(theme.font_mono.clone())
+            .text_size(crate::typography::ui_rems(11.5))
+            .line_height(px(17.0))
+            .text_color(if shown.is_some() { theme.text } else { theme.text_muted })
+            .child(SharedString::from(shown.map_or_else(|| "No preview available".to_owned(), approval::visible_escapes)));
         Some(
             div()
-                .id("wizard-preview")
-                .role(Role::Region)
-                .aria_label(SharedString::from(format!("Preview of {label}")))
                 .flex_1()
                 .min_w_0()
-                .max_h(px(280.0))
-                .overflow_y_scroll()
                 .rounded(px(12.0))
                 .bg(crate::theme::ink(0.04))
-                .px(px(12.0))
-                .py(px(10.0))
-                .font_family(theme.font_mono.clone())
-                .text_size(crate::typography::ui_rems(11.5))
-                .line_height(px(17.0))
-                .text_color(if shown.is_some() { theme.text } else { theme.text_muted })
-                .child(SharedString::from(shown.map_or_else(|| "No preview available".to_owned(), approval::visible_escapes)))
+                .child(crate::popover::faded_menu_list(scroll, words))
                 .into_any_element(),
         )
     }
@@ -942,9 +955,9 @@ impl Composer {
             .flex()
             .flex_col()
             .gap(px(8.0))
-            .rounded(px(10.0))
+            .rounded(px(crate::transcript::TRANSCRIPT_CARD_RADIUS))
             .border_1()
-            .border_color(crate::theme::hairline(0.08))
+            .border_color(theme.border)
             .bg(crate::theme::ink(0.02))
             .child(
                 div()
@@ -980,9 +993,14 @@ impl Composer {
                             .rounded(px(Theme::CONTROL_RADIUS))
                             .text_size(crate::typography::ui_rems(12.0))
                             .text_color(if selected { theme.text } else { theme.text_muted })
-                            .bg(if selected { crate::theme::ink(0.09) } else { crate::theme::ink(0.03) })
+                            // slopty: the faded hover.
+                            .bg(crate::motion::hover_blend(
+                                &format!("wizard-rule-scope-option-{ix}"),
+                                if selected { crate::theme::ink(0.09) } else { crate::theme::ink(0.03) },
+                                if selected { crate::theme::ink(0.09) } else { crate::theme::ink(0.07) },
+                            ))
+                            .on_hover(crate::motion::hover_listener(format!("wizard-rule-scope-option-{ix}")))
                             .cursor_pointer()
-                            .hover(|s| s.bg(crate::theme::ink(0.07)))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if let Some(edit) = this.card.rule.as_mut() {
                                     edit.scope.clone_from(&id);
@@ -1193,9 +1211,14 @@ impl Composer {
                     .rounded(px(Theme::CONTROL_RADIUS))
                     .text_size(crate::typography::ui_rems(12.0))
                     .text_color(if selected { theme.text } else { theme.text_muted })
-                    .bg(if selected { crate::theme::ink(0.09) } else { crate::theme::ink(0.03) })
+                    // slopty: the faded hover.
+                    .bg(crate::motion::hover_blend(
+                        &format!("wizard-form-{field_ix}-{ix}"),
+                        if selected { crate::theme::ink(0.09) } else { crate::theme::ink(0.03) },
+                        if selected { crate::theme::ink(0.09) } else { crate::theme::ink(0.07) },
+                    ))
+                    .on_hover(crate::motion::hover_listener(format!("wizard-form-{field_ix}-{ix}")))
                     .cursor_pointer()
-                    .hover(|s| s.bg(crate::theme::ink(0.07)))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         let picks = this.card.picks.entry(name.clone()).or_default();
                         match picks.iter().position(|p| *p == value) {

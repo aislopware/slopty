@@ -29,6 +29,10 @@ pub struct ToolFacts {
     /// failure.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub failed: bool,
+    /// The person turned it down (their own Deny): it ended, not failed, so it reads quiet,
+    /// "Denied", never in the failure's colour.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub rejected: bool,
     /// How long it has run, while it runs: the TUI's "Running… (12s · timeout 2m)".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timer: Option<ToolTimer>,

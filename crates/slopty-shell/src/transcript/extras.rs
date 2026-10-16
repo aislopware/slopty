@@ -38,8 +38,6 @@ pub(super) struct ExtrasState {
     changes_open: HashSet<SharedString>,
     /// Error cards whose retry was asked for, until the thread moves past them.
     retried: HashSet<SharedString>,
-    /// The row whose copy action shows its check.
-    copied: Option<SharedString>,
     /// A selection's Quote: where the press ended, and the words.
     quote: Option<(gpui::Point<gpui::Pixels>, String)>,
 }
@@ -175,6 +173,53 @@ pub fn error_card_row(
     }
 }
 
+/// How the worker words a Claude Code too old to drive, after any words of what it refused.
+const TOO_OLD: &str = "Update Claude Code on this machine to ";
+
+/// The least version Slopty drives and the version the machine has, where `text` is the
+/// worker's refusal of a Claude Code too old to drive: "… to 2.1.301 or later: it is 2.0.14".
+#[must_use]
+pub fn claude_too_old(text: &str) -> Option<(String, String)> {
+    let (_, rest) = text.split_once(TOO_OLD)?;
+    let (least, have) = rest.split_once(" or later: it is ")?;
+    let have = have.lines().next().unwrap_or_default().trim().trim_end_matches('.');
+    let least = least.trim();
+    (!least.is_empty() && !have.is_empty()).then(|| (least.to_owned(), have.to_owned()))
+}
+
+/// [`claude_too_old`] of an error's words or of what the agent said behind them.
+pub(super) fn too_old_of(message: &str, detail: Option<&str>) -> Option<(String, String)> {
+    claude_too_old(message).or_else(|| detail.and_then(claude_too_old))
+}
+
+/// An error part refusing a Claude Code too old to drive, as its banner.
+pub(super) fn update_needed_row(
+    entry_id: &str,
+    part_id: &str,
+    message: &str,
+    detail: Option<&str>,
+) -> Option<Row> {
+    let (least, have) = too_old_of(message, detail)?;
+    Some(Row {
+        id: format!("{entry_id}#{part_id}").into(),
+        version: fnv1a(format!("{least}\0{have}").as_bytes()),
+        turn_start: false,
+        kind: RowKind::UpdateNeeded { least: least.into(), have: have.into() },
+        entry_id: entry_id.to_owned().into(),
+        timestamp: None,
+        copy_text: None,
+        compact_fold: None,
+    })
+}
+
+/// The words of the update banner: what the machine `host` has and what Slopty drives.
+pub(super) fn update_words(host: &str, least: &str, have: &str) -> String {
+    format!("Claude Code on {host} is {have}. Slopty drives {least} or later: update it there, then send again.")
+}
+
+/// What updates Claude Code where it runs.
+const UPDATE_COMMAND: &str = "claude update";
+
 /// A divider part as its row.
 pub fn marker_row(entry_id: &str, part_id: &str, text: &str) -> Row {
     let text = slopty_view_proto::view::single_line(text);
@@ -238,6 +283,15 @@ pub fn turn_files(entry: &SessionMessageEntry) -> Vec<TurnFile> {
             }
         })
         .collect()
+}
+
+/// slopty: a file's counts as words after its name (" +3 −1"), none when nothing was counted.
+fn counted(additions: u64, deletions: u64) -> String {
+    if additions + deletions == 0 {
+        String::new()
+    } else {
+        format!(" +{additions} −{deletions}")
+    }
 }
 
 /// The words of a turn-changes row: "3 files changed".
@@ -456,12 +510,17 @@ impl Transcript {
             .rounded_full()
             .border_1()
             .border_color(theme.border)
-            .bg(crate::popover::surface_bg(&theme))
+            // slopty: the faded hover.
+            .bg(crate::motion::mix(
+                crate::popover::surface_bg(&theme),
+                theme.text,
+                0.08 * crate::motion::hover_t("quote-selection"),
+            ))
+            .on_hover(crate::motion::hover_listener("quote-selection"))
             .shadow_md()
             .cursor_pointer()
             .text_size(crate::typography::ui_rems(12.5))
             .text_color(theme.text)
-            .hover(|s| s.bg(crate::theme::ink(0.08)))
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(move |this, _, window, cx| {
                 cx.stop_propagation();
@@ -525,7 +584,8 @@ impl Transcript {
     fn copy_extra(&mut self, row_id: SharedString, text: SharedString, cx: &mut Context<Self>) {
         cx.stop_propagation();
         cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
-        self.extras.copied = Some(row_id);
+        // slopty: the house's copy span: the check comes back off on its own.
+        crate::motion::copy_feedback(format!("copy-plan-{row_id}"), cx);
         cx.notify();
     }
 
@@ -542,6 +602,7 @@ impl Transcript {
                 detail,
                 retry,
             } => self.render_error_card(row, message, detail.as_ref(), *retry, theme, cx),
+            RowKind::UpdateNeeded { least, have } => self.render_update_needed(row, least, have, theme, cx),
             RowKind::Marker { text } => marker(text.clone(), theme),
             RowKind::PlanHeader { copy } => self.render_plan_header(row, copy, theme, cx),
             RowKind::PlanFold { fold, hidden_lines } => {
@@ -564,6 +625,7 @@ impl Transcript {
         let open = self.extras.details_open.contains(&row.id);
         let retried = self.extras.retried.contains(&row.id);
         let quiet = |id: String, label: &'static str| {
+            let fade = format!("{id}-hover");
             div()
                 .id(SharedString::from(id))
                 .role(gpui::Role::Button)
@@ -574,9 +636,11 @@ impl Transcript {
                 .flex()
                 .items_center()
                 .cursor_pointer()
-                .text_size(px(12.0))
-                .text_color(theme.text_muted)
-                .hover(|s| s.bg(crate::theme::ink(0.08)).text_color(theme.text))
+                .text_size(crate::typography::ui_rems(12.0))
+                // slopty: the faded hover, at the control strength.
+                .text_color(crate::motion::mix(theme.text_muted, theme.text, crate::motion::hover_t(&fade)))
+                .bg(crate::motion::hover_blend(&fade, gpui::transparent_black(), crate::theme::wash(0.11)))
+                .on_hover(crate::motion::hover_listener(fade))
                 .child(SharedString::from(label))
         };
         let mut actions = div().flex().flex_row().items_center().gap(px(2.0)).ml(px(-8.0));
@@ -588,7 +652,7 @@ impl Transcript {
                     .px(px(8.0))
                     .flex()
                     .items_center()
-                    .text_size(px(12.0))
+                    .text_size(crate::typography::ui_rems(12.0))
                     .text_color(theme.text_faint)
                     .child(SharedString::from("Trying again…"))
                     .into_any_element()
@@ -644,6 +708,68 @@ impl Transcript {
             .into_any_element()
     }
 
+    /// The name of the machine the chat runs on, else "this machine".
+    fn chat_host(&self, cx: &gpui::App) -> String {
+        let device = self.image_host(cx).0;
+        let state = self.state.read(cx);
+        device
+            .and_then(|id| state.devices.iter().find(|d| d.id == id))
+            .map_or_else(|| "this machine".to_owned(), |d| d.name.clone())
+    }
+
+    /// A Claude Code too old to drive: a banner naming its machine and both versions, with the
+    /// command that updates it to copy.
+    fn render_update_needed(
+        &mut self,
+        row: &Row,
+        least: &SharedString,
+        have: &SharedString,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let words = update_words(&self.chat_host(cx), least, have);
+        let key = format!("{}-update-copy", row.id);
+        let copied = crate::motion::copied(&key, cx);
+        let glyph = crate::motion::copy_icon(&key, cx);
+        let label = if copied { "Copied" } else { "Copy update command" };
+        let fade = format!("{key}-hover");
+        let copy = div()
+            .id(SharedString::from(key.clone()))
+            .role(gpui::Role::Button)
+            .aria_label(label)
+            .h(px(24.0))
+            .px(px(8.0))
+            .rounded(px(6.0))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(6.0))
+            .cursor_pointer()
+            .text_size(crate::typography::ui_rems(12.0))
+            .text_color(crate::motion::mix(theme.text_muted, theme.text, crate::motion::hover_t(&fade)))
+            .bg(crate::motion::hover_blend(&fade, gpui::transparent_black(), crate::theme::wash(0.11)))
+            .on_hover(crate::motion::hover_listener(fade))
+            .on_click(move |_, _, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(UPDATE_COMMAND.to_owned()));
+                crate::motion::copy_feedback(key.clone(), cx);
+            })
+            .child(crate::icons::icon(glyph).size(px(12.0)))
+            .child(SharedString::from(label));
+        div()
+            .id(SharedString::from(format!("{}-update", row.id)))
+            .role(gpui::Role::Alert)
+            .aria_label(SharedString::from(words.clone()))
+            .py(px(4.0))
+            .w_full()
+            .child(
+                notice_chip(theme, true, "Update needed", words, Tile)
+                    .overflow_hidden()
+                    .w_full()
+                    .child(div().flex().flex_row().items_center().ml(px(-8.0)).child(copy)),
+            )
+            .into_any_element()
+    }
+
     fn render_plan_header(
         &mut self,
         row: &Row,
@@ -651,7 +777,8 @@ impl Transcript {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let copied = self.extras.copied.as_ref() == Some(&row.id);
+        let copied = crate::motion::copied(&format!("copy-plan-{}", row.id), cx);
+        let plan_copy_hover = SharedString::from(format!("{}-copy-hover", row.id));
         let (id, text) = (row.id.clone(), copy.clone());
         // slopty: a plan the person sent to be carried out is headed as the TUI boxes it.
         let title = if row.id.contains("#plan:implement:") { "Plan to implement" } else { "Plan" };
@@ -689,8 +816,10 @@ impl Transcript {
                     .items_center()
                     .justify_center()
                     .cursor_pointer()
-                    .hover(|s| s.bg(crate::theme::ink(0.08)))
-                    .tooltip(crate::settings::widgets::text_tooltip("Copy plan"))
+                    .bg(crate::motion::hover_blend(&plan_copy_hover, gpui::transparent_black(), crate::theme::ink(0.08)))
+                    .on_hover(crate::motion::hover_listener(plan_copy_hover.clone()))
+                    .tooltip(crate::settings::widgets::text_tooltip(if copied { "Copied" } else { "Copy plan" }))
+                    .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.copy_extra(id.clone(), text.clone(), cx)
                     }))
@@ -745,9 +874,19 @@ impl Transcript {
                     .items_center()
                     .gap(px(6.0))
                     .cursor_pointer()
-                    .text_size(px(12.0))
-                    .text_color(theme.text_muted)
-                    .hover(|s| s.bg(crate::theme::ink(0.06)).text_color(theme.text))
+                    .text_size(crate::typography::ui_rems(12.0))
+                    // slopty: the faded hover, at the control strength.
+                    .text_color(crate::motion::mix(
+                        theme.text_muted,
+                        theme.text,
+                        crate::motion::hover_t(&format!("{fold}-toggle")),
+                    ))
+                    .bg(crate::motion::hover_blend(
+                        &format!("{fold}-toggle"),
+                        gpui::transparent_black(),
+                        crate::theme::wash(0.11),
+                    ))
+                    .on_hover(crate::motion::hover_listener(format!("{fold}-toggle")))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.toggle_plan_fold(fold.clone(), cx)
                     }))
@@ -783,8 +922,9 @@ impl Transcript {
         let (additions, deletions) = files
             .iter()
             .fold((0, 0), |(a, d), file| (a + file.additions, d + file.deletions));
+        // slopty: a file whose lines were never counted says nothing, not "+0 −0".
         let counts = |additions: u64, deletions: u64| {
-            div()
+            (additions + deletions > 0).then(|| div()
                 .flex()
                 .flex_row()
                 .gap(px(6.0))
@@ -799,7 +939,7 @@ impl Transcript {
                     div()
                         .text_color(theme.diff_del)
                         .child(SharedString::from(format!("−{deletions}"))),
-                )
+                ))
         };
         let toggle_id = row.id.clone();
         let entry_id = row.entry_id.clone();
@@ -807,8 +947,9 @@ impl Transcript {
             .id(SharedString::from(format!("{}-toggle", row.id)))
             .role(gpui::Role::Button)
             .aria_label(SharedString::from(format!(
-                "{} +{additions} −{deletions}",
-                turn_changes_label(files)
+                "{}{}",
+                turn_changes_label(files),
+                counted(additions, deletions)
             )))
             .aria_expanded(open)
             .w_full()
@@ -819,7 +960,13 @@ impl Transcript {
             .items_center()
             .gap(px(8.0))
             .cursor_pointer()
-            .hover(|s| s.bg(crate::theme::ink(0.04)))
+            // slopty: the faded hover, at the row strength.
+            .bg(crate::motion::hover_blend(
+                &format!("{}-toggle", row.id),
+                gpui::transparent_black(),
+                crate::theme::ink(0.05),
+            ))
+            .on_hover(crate::motion::hover_listener(format!("{}-toggle", row.id)))
             .on_click(cx.listener(move |this, _, _, cx| {
                 if !this.extras.changes_open.remove(&toggle_id) {
                     this.extras.changes_open.insert(toggle_id.clone());
@@ -837,7 +984,7 @@ impl Transcript {
                     .text_color(theme.text)
                     .child(SharedString::from(turn_changes_label(files))),
             )
-            .child(counts(additions, deletions))
+            .children(counts(additions, deletions))
             .child(div().flex_1())
             .child(
                 div()
@@ -849,9 +996,19 @@ impl Transcript {
                     .rounded(px(6.0))
                     .flex()
                     .items_center()
-                    .text_size(px(12.0))
-                    .text_color(theme.text_muted)
-                    .hover(|s| s.bg(crate::theme::ink(0.08)).text_color(theme.text))
+                    .text_size(crate::typography::ui_rems(12.0))
+                    // slopty: the faded hover, at the control strength.
+                    .text_color(crate::motion::mix(
+                        theme.text_muted,
+                        theme.text,
+                        crate::motion::hover_t(&format!("{}-open-diff", row.id)),
+                    ))
+                    .bg(crate::motion::hover_blend(
+                        &format!("{}-open-diff", row.id),
+                        gpui::transparent_black(),
+                        crate::theme::wash(0.11),
+                    ))
+                    .on_hover(crate::motion::hover_listener(format!("{}-open-diff", row.id)))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
                         this.open_turn_diff(entry_id.clone(), window, cx);
@@ -879,8 +1036,8 @@ impl Transcript {
                         .id(SharedString::from(format!("{}-file-{path}", row.id)))
                         .role(gpui::Role::ListItem)
                         .aria_label(SharedString::from(format!(
-                            "{path} +{} −{}",
-                            file.additions, file.deletions
+                            "{path}{}",
+                            counted(file.additions, file.deletions)
                         )))
                         .w_full()
                         .h(px(26.0))
@@ -895,11 +1052,11 @@ impl Transcript {
                                 .min_w_0()
                                 .flex_1()
                                 .truncate()
-                                .text_size(px(12.0))
+                                .text_size(crate::typography::ui_rems(12.0))
                                 .text_color(theme.text_muted)
                                 .child(SharedString::from(path)),
                         )
-                        .child(counts(file.additions, file.deletions))
+                        .children(counts(file.additions, file.deletions))
                 }))
         });
         div()
@@ -908,7 +1065,7 @@ impl Transcript {
             .child(
                 div()
                     .w_full()
-                    .rounded(px(10.0))
+                    .rounded(px(super::TRANSCRIPT_CARD_RADIUS))
                     .border_1()
                     .border_color(theme.border)
                     .bg(crate::theme::ink(0.02))
@@ -1130,6 +1287,35 @@ mod tests {
     }
 
     #[test]
+    fn a_claude_code_too_old_is_a_banner_naming_both_versions() {
+        let said = "Update Claude Code on this machine to 2.1.301 or later: it is 2.0.14";
+        assert_eq!(claude_too_old(said), Some(("2.1.301".to_owned(), "2.0.14".to_owned())));
+        // A refused start keeps the worker's words after its own.
+        let start = format!("It did not start: {said}");
+        assert_eq!(claude_too_old(&start), Some(("2.1.301".to_owned(), "2.0.14".to_owned())));
+        assert_eq!(too_old_of("The turn failed. Try again.", Some(said)).map(|v| v.1), Some("2.0.14".to_owned()));
+        for other in ["The turn failed. Try again.", "Update Claude Code on this machine to 2.1.301", ""] {
+            assert_eq!(claude_too_old(other), None, "{other}");
+        }
+        let turn = entry(
+            vec![MessagePart::Error { id: "refused:1".into(), message: start, detail: None, retry: false }],
+            MessageStatus::Complete,
+        );
+        let rows = super::super::rows_for_entry(&turn, false, false, &mut |_, text| {
+            Arc::new(crate::markdown::parser::parse_full(text))
+        });
+        assert!(
+            rows.iter().any(|row| matches!(&row.kind, RowKind::UpdateNeeded { least, have } if least == "2.1.301" && have == "2.0.14")),
+            "a banner, not a raw error"
+        );
+        assert!(!rows.iter().any(|row| matches!(row.kind, RowKind::ErrorChip { .. } | RowKind::ErrorCard { .. })));
+        assert_eq!(
+            update_words("studio", "2.1.301", "2.0.14"),
+            "Claude Code on studio is 2.0.14. Slopty drives 2.1.301 or later: update it there, then send again."
+        );
+    }
+
+    #[test]
     fn a_turn_sums_its_changes_by_file_in_the_order_touched() {
         let turn = entry(
             vec![
@@ -1160,6 +1346,9 @@ mod tests {
         assert_eq!(row.id.as_ref(), "a1#changes");
         assert_eq!(shown_path("/w/src/a.rs", Some("/w/")), "src/a.rs");
         assert_eq!(shown_path("/elsewhere/a.rs", Some("/w")), "/elsewhere/a.rs");
+        // slopty: an uncounted file says no "+0 −0".
+        assert_eq!(counted(0, 0), "");
+        assert_eq!(counted(3, 0), " +3 −0");
     }
 
     #[test]

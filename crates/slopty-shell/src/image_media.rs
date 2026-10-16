@@ -255,6 +255,15 @@ pub(crate) fn decode_raster_image(bytes: Vec<u8>, max_bytes: usize) -> Result<Me
     decode_raster_image_bounded(bytes, max_bytes, None)
 }
 
+/// slopty: a raster image's size from its first bytes (PNG's header, JPEG's frame, GIF's and
+/// WebP's), so a preview can take its final room before the pixels arrive. `None` when the
+/// bytes say no size.
+pub(crate) fn header_size(head: &[u8]) -> Option<(u32, u32)> {
+    let reader = image::ImageReader::new(Cursor::new(head)).with_guessed_format().ok()?;
+    let (width, height) = reader.into_dimensions().ok()?;
+    (width > 0 && height > 0).then_some((width, height))
+}
+
 /// Decoder bounds for every raster preview: 4096 px per side, 64 MiB of
 /// decoder allocation.
 pub(crate) fn raster_limits() -> image::Limits {
@@ -308,6 +317,19 @@ fn decode_raster_image_bounded(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// slopty: an image's first bytes say its shape, so its room is laid before it arrives; a
+    /// head too short to say, or not an image, says nothing.
+    #[test]
+    fn a_head_says_the_images_shape() {
+        let mut png = Vec::new();
+        image::RgbaImage::new(640, 360)
+            .write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        assert_eq!(header_size(&png[..64]), Some((640, 360)), "the header alone");
+        assert_eq!(header_size(&png[..8]), None, "too short to say");
+        assert_eq!(header_size(b"plain words, no image"), None);
+    }
 
     fn assert_svg_text_is_visible(family: &str) {
         let svg = format!(

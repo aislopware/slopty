@@ -441,6 +441,25 @@ fn a_request_of_choices_is_one_click_under_its_title() {
     assert!(!questions[0].choices_only, "a question takes words");
 }
 
+/// A dialog of the agent's own is headed by its kind, its title leading its words: the head never
+/// repeats the question ("GO AHEAD?" over "Go ahead with the change?").
+#[test]
+fn a_dialog_is_headed_by_its_kind_not_its_title() {
+    use slopty_proto::thread::Effect;
+    let mut state = fixtures::thread("tools");
+    state.items.clear();
+    state.turns.clear();
+    let mut dialog = request("dialog:remote_callout", &[("yes", "Yes", Effect::Answer)]);
+    dialog.title = "Go ahead?".to_owned();
+    dialog.text = Some(slopty_proto::thread::Clipped::whole("Go ahead with the change?"));
+    state.requests.push(dialog);
+    let mut entries = Vec::new();
+    transcript::asks(&state, "w", &mut entries);
+    let (_, questions) = served(&entries).expect("the panel serves it");
+    assert_eq!(questions[0].header, "Confirm");
+    assert_eq!(questions[0].question, "Go ahead?\n\nGo ahead with the change?");
+}
+
 /// A time the agent never said (a resumed session's history) is no time, not 1970.
 #[test]
 fn an_unknown_time_is_no_time() {
@@ -592,16 +611,19 @@ fn a_write_shows_its_content_and_a_long_output_its_way_in() {
         call.output = Some(Clipped::whole(&"a line of output\n".repeat(200)));
     }
     let entries = transcript::entries(&state, &transcript::Look::new("w"));
-    let (call, output_ref) = entries
+    let (call, output_ref, stats) = entries
         .iter()
         .flat_map(|e| &e.parts)
         .find_map(|p| match p {
-            MessagePart::Tool { id: at, call, output_ref, .. } if *at == id => {
-                Some((call.clone(), output_ref.clone()))
+            MessagePart::Tool { id: at, call, output_ref, diff_stats, .. } if *at == id => {
+                Some((call.clone(), output_ref.clone(), diff_stats.clone()))
             }
             _ => None,
         })
         .expect("the write");
+    // A new file with no diff said yet added the line it wrote: never "+0 −0".
+    let stat = stats.as_ref().and_then(|s| s.first()).expect("its counts");
+    assert_eq!((stat.additions, stat.deletions), (1, 0));
     assert!(matches!(
         call,
         slopty_view_proto::ToolCall::WriteFile { content: Some(content), .. } if content == "hello"
@@ -902,6 +924,32 @@ fn a_failed_turn_says_its_error_once_at_its_end() {
     last.body = ItemBody::Notice(Notice::new(Notice::API_ERROR, Clipped::whole("Overloaded")));
     let entries = transcript::entries(&state, &transcript::Look::new("w"));
     assert_eq!(errors(&entries).len(), 1, "the notice says it");
+}
+
+/// A Claude Code too old to drive keeps the worker's words as an error, said as a notice or as
+/// the turn's failure, for the shell to draw as a banner naming the machine.
+#[test]
+fn a_claude_code_too_old_stays_in_the_workers_words() {
+    use slopty_proto::thread::detail::Clipped;
+    use slopty_proto::thread::{ItemBody, Notice};
+    let said = "Update Claude Code on this machine to 2.1.301 or later: it is 2.0.14";
+    assert_eq!(
+        transcript::error_words("turn-failed", said, Some("studio"), None),
+        (said.to_owned(), None)
+    );
+    let mut state = fixtures::thread("tools");
+    let last = state.items.last_mut().expect("an item");
+    last.body = ItemBody::Notice(Notice::new(Notice::INFO, Clipped::whole(said)));
+    let entries = transcript::entries(&state, &transcript::Look::new("w"));
+    let errors: Vec<&str> = entries
+        .iter()
+        .flat_map(|e| &e.parts)
+        .filter_map(|p| match p {
+            MessagePart::Error { message, .. } => Some(message.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(errors, [said]);
 }
 
 /// Pictures go by paths of their own: a message's with its words, a call's as parts after it,

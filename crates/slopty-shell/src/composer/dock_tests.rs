@@ -218,7 +218,7 @@ fn the_tray_puts_what_needs_you_first_and_a_failed_stop_says_why(cx: &mut TestAp
         "a stop that never left is not shown as under way"
     );
     let failure = composer.read_with(cx, |composer, _| composer.failure().cloned());
-    assert_eq!(failure.as_deref(), Some("Couldn't stop it: engine not connected"));
+    assert_eq!(failure.as_deref(), Some("Couldn't stop it while Slopty is offline. Try again once it reconnects."));
 }
 
 /// A reveal from the transcript opens the tray at its row, an ended one included.
@@ -272,7 +272,7 @@ fn the_footer_says_mode_background_and_goal(cx: &mut TestAppContext) {
     let nodes = draw(cx);
     assert!(find(&nodes, Role::Button, "Mode: Default").is_some(), "a switch that failed went back");
     let failure = composer.read_with(cx, |composer, _| composer.failure().cloned());
-    assert_eq!(failure.as_deref(), Some("Couldn't switch the mode: engine not connected"));
+    assert_eq!(failure.as_deref(), Some("Couldn't switch the mode while Slopty is offline. Try again once it reconnects."));
 }
 
 /// A question says what each option means and who sent it, and folds to a strip that gives

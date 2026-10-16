@@ -23,6 +23,7 @@ use gpui::{
 };
 use slopty_syntax::{HighlightKind, HighlightSpan, HighlightedDocument};
 
+use crate::settings::widgets::ActionHint as _; // slopty: tooltips name their key.
 use crate::theme::Theme;
 
 use super::parser::{Block, BlockTree, InlineRun, TableAlign};
@@ -54,7 +55,9 @@ const CODE_LINE_HEIGHT_RATIO: f32 = CODE_LINE_HEIGHT / CODE_TEXT_SIZE;
 pub const CODE_PADDING_X: f32 = 12.0;
 pub const CODE_PADDING_Y: f32 = 10.0;
 const CODE_HEADER_HEIGHT: f32 = 28.0;
-const CODE_ACTION_SIZE: f32 = 22.0;
+// slopty: a header action is a 24 px target (the house's minimum) with a 12 px glyph.
+const CODE_ACTION_SIZE: f32 = 24.0;
+const CODE_ACTION_GLYPH: f32 = 12.0;
 const CODE_SCROLLBAR_HIT_HEIGHT: f32 = 10.0;
 
 // Table metrics — a port of mugen-markdown 0.6.2's `TableBlock` under slopty's
@@ -116,7 +119,21 @@ pub struct RenderOptions {
     // slopty: a one-line shell fence's Run, which hands the line to the chat's terminal.
     /// `None` offers no Run (previews, and a window whose shell takes no runs).
     pub run: Option<Rc<dyn Fn(String, &mut Window, &mut gpui::App)>>,
+    // slopty: a code block's right-click menu, its header's actions; `None` offers none.
+    pub code_menu: Option<Rc<MenuFn>>,
 }
+
+/// slopty: one choice of a right-click menu: its words, the key that does the same (in
+/// `keys::combo_text`'s spelling), and what it does.
+#[derive(Clone)]
+pub struct MenuChoice {
+    pub label: SharedString,
+    pub keys: Option<&'static str>,
+    pub act: Rc<dyn Fn(&mut Window, &mut gpui::App)>,
+}
+
+/// slopty: open the menu named `label` of `choices` at the pointer.
+pub type MenuFn = dyn Fn(&'static str, Vec<MenuChoice>, gpui::Point<gpui::Pixels>, &mut Window, &mut gpui::App);
 
 #[derive(Clone)]
 pub struct TaskUi {
@@ -398,26 +415,6 @@ impl Render for CodeScrollbarDragGhost {
     }
 }
 
-struct CodeBlockTooltip(SharedString);
-
-impl Render for CodeBlockTooltip {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::of(cx);
-        div()
-            .px(px(8.0))
-            .py(px(6.0))
-            .rounded(px(6.0))
-            .border_1()
-            .border_color(theme.border_strong)
-            .bg(theme.surface_raised)
-            .shadow_md()
-            .max_w(px(360.0))
-            .text_size(px(11.0))
-            .text_color(theme.text)
-            .child(self.0.clone())
-    }
-}
-
 impl RenderOptions {
     /// Options for a completed (non-streaming) row — no veil, no cache.
     pub fn settled(row_key: SharedString) -> Self {
@@ -433,6 +430,7 @@ impl RenderOptions {
             workspace_root: None,
             code: None,
             run: None, // slopty: no Run outside the transcript.
+            code_menu: None,
         }
     }
 }
@@ -609,11 +607,10 @@ pub fn render_block(
             highlight,
         ),
         Block::BlockQuote { children } => div()
-            // Accent-tinted quote: indigo rail + a whisper of the same hue
-            // behind it (the inline-code treatment, dialed down).
+            // slopty: a quote's rail is a neutral hairline with no wash: the accent means
+            // "notice this", and every answer is full of quotes.
             .border_l_2()
-            .border_color(theme.accent.opacity(0.6))
-            .bg(theme.accent.opacity(0.05))
+            .border_color(crate::theme::hairline(0.16))
             .rounded_tr(px(6.0))
             .rounded_br(px(6.0))
             .pl(px(12.0))
@@ -643,9 +640,9 @@ pub fn render_block(
             .flex_col()
             .gap(px(4.0))
             .children(items.iter().enumerate().map(|(item_ix, item)| {
-                // Accent markers (the inline-code hue): ordered numbers as
-                // tinted text, unordered as a REAL 5px disc — the glyph "•"
-                // reads too small at 14px.
+                // Quiet markers (slopty: no accent): ordered numbers as faint
+                // text, unordered as a REAL 5px disc — the glyph "•" reads too
+                // small at 14px.
                 let task = item
                     .first()
                     .and_then(|block| match block {
@@ -685,13 +682,14 @@ pub fn render_block(
                             .size(px(16.0))
                             .border_1()
                             .rounded(px(3.0))
+                            // slopty: a checked box is muted, not the accent.
                             .border_color(if task.checked {
-                                theme.accent
+                                theme.text_muted
                             } else {
                                 theme.border
                             })
                             .bg(if task.checked {
-                                theme.accent
+                                theme.text_muted
                             } else {
                                 gpui::transparent_black()
                             })
@@ -720,7 +718,9 @@ pub fn render_block(
                             .min_w(px(18.0))
                             .text_size(crate::typography::ui_rems(MD_TEXT_SIZE))
                             .line_height(crate::typography::ui_rems(MD_LINE_HEIGHT))
-                            .text_color(theme.accent)
+                            // slopty: list markers are quiet (no accent), in figures that line up.
+                            .text_color(theme.text_faint)
+                            .font_features(crate::typography::tabular())
                             .child(SharedString::from(format!("{}.", start + item_ix as u64)))
                             .into_any_element(),
                         None => div()
@@ -736,7 +736,7 @@ pub fn render_block(
                                     .w(px(5.0))
                                     .h(px(5.0))
                                     .rounded_full()
-                                    .bg(theme.accent),
+                                    .bg(theme.text_faint),
                             )
                             .into_any_element(),
                     }
@@ -2352,10 +2352,11 @@ fn code_icon_action(
             cx.stop_propagation();
             handler(window, cx);
         })
-        .tooltip(move |_, cx| cx.new(move |_| CodeBlockTooltip(label.into())).into())
+        // slopty: the house tooltip; one glyph size across the header.
+        .hint(label)
         .child(
             crate::icons::icon(icon_path)
-                .size(px(13.0))
+                .size(px(CODE_ACTION_GLYPH))
                 .text_color(theme.text_muted),
         )
         .into_any_element()
@@ -2369,14 +2370,13 @@ fn code_notice(id: SharedString, message: SharedString, theme: &Theme) -> AnyEle
         .flex()
         .items_center()
         .justify_center()
-        .tooltip(move |_, cx| {
-            let message = message.clone();
-            cx.new(move |_| CodeBlockTooltip(message)).into()
-        })
+        .tooltip(crate::settings::widgets::text_tooltip(message))
+        .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
+        // slopty: why a fence stays source is information, not a warning: no amber.
         .child(
-            crate::icons::icon(crate::icons::DANGER_TRIANGLE)
-                .size(px(13.0))
-                .text_color(theme.warning_muted),
+            crate::icons::icon(crate::icons::INFO_CIRCLE)
+                .size(px(CODE_ACTION_GLYPH))
+                .text_color(theme.text_muted),
         )
         .into_any_element()
 }
@@ -2392,15 +2392,17 @@ fn code_copy_button(
         let code_text: SharedString = code.to_string().into();
         let handler = copy.handler.clone();
         let fade_key = format!("{}-copy{ix}", opts.row_key);
+        // slopty: the copy keeps its size: COPY swaps to CHECK and its tooltip says "Copied",
+        // so Fit content and Run beside it never move under the pointer.
         div()
             .id(SharedString::from(fade_key.clone()))
-            .h(px(CODE_ACTION_SIZE))
-            .px(px(6.0))
-            .rounded(px(5.0))
+            .debug_selector(|| "code-copy".into())
+            .role(gpui::Role::Button)
+            .size(px(CODE_ACTION_SIZE))
+            .rounded(px(6.0))
             .flex()
-            .flex_row()
             .items_center()
-            .gap(px(4.0))
+            .justify_center()
             .cursor_pointer()
             .bg(crate::motion::hover_blend(
                 &fade_key,
@@ -2408,23 +2410,20 @@ fn code_copy_button(
                 crate::theme::ink(0.08),
             ))
             .on_hover(crate::motion::hover_listener(fade_key))
-            .text_size(px(10.5))
-            .text_color(theme.text_muted)
             .on_click(move |_, window, cx| {
                 cx.stop_propagation();
                 handler(ix, code_text.clone(), window, cx);
             })
-            .tooltip(|_, cx| cx.new(|_| CodeBlockTooltip("Copy code".into())).into())
+            .hint(if copied { "Copied" } else { "Copy code" })
             .child(
                 crate::icons::icon(if copied {
                     crate::icons::CHECK
                 } else {
                     crate::icons::COPY
                 })
-                .size(px(12.0))
-                .text_color(theme.text_muted),
+                .size(px(CODE_ACTION_GLYPH))
+                .text_color(if copied { theme.text } else { theme.text_muted }),
             )
-            .when(copied, |el| el.child(SharedString::from("Copied")))
             .into_any_element()
     })
 }
@@ -2453,7 +2452,7 @@ fn code_block_header(
             .child(
                 div()
                     .min_w_0()
-                    .text_size(px(11.0))
+                    .text_size(crate::typography::ui_rems(11.0))
                     .text_color(theme.text_muted)
                     .children(language.map(|lang| SharedString::from(lang.to_string()))),
             )
@@ -2556,33 +2555,39 @@ fn table_with_copy(
         let copied = copy.copied_ix == Some(TABLE_COPY_IX + ix * 2 + kind);
         let id: SharedString = format!("{group}-{kind}").into();
         let text: SharedString = text.into();
+        // slopty: the chip keeps its words and size; its glyph and tooltip say "Copied".
+        let fade = id.to_string();
         div()
             .id(id)
+            .role(gpui::Role::Button)
             .h(px(CODE_ACTION_SIZE))
             .px(px(6.0))
-            .rounded(px(5.0))
+            .rounded(px(6.0))
             .flex()
             .flex_row()
             .items_center()
             .gap(px(4.0))
             .cursor_pointer()
-            .hover(|s| s.bg(crate::theme::ink(0.08)))
-            .text_size(px(10.5))
+            .bg(crate::motion::hover_blend(&fade, gpui::transparent_black(), crate::theme::ink(0.08)))
+            .on_hover(crate::motion::hover_listener(fade))
+            .text_size(crate::typography::ui_rems(10.5))
             .text_color(theme.text_muted)
             .on_click(move |_, window, cx| {
                 cx.stop_propagation();
                 handler(TABLE_COPY_IX + ix * 2 + kind, text.clone(), window, cx);
             })
+            .hint(if copied { "Copied" } else { label })
+            .aria_label(format!("Copy as {label}"))
             .child(
                 crate::icons::icon(if copied {
                     crate::icons::CHECK
                 } else {
                     crate::icons::COPY
                 })
-                .size(px(12.0))
-                .text_color(theme.text_muted),
+                .size(px(CODE_ACTION_GLYPH))
+                .text_color(if copied { theme.text } else { theme.text_muted }),
             )
-            .child(SharedString::from(if copied { "Copied" } else { label }))
+            .child(SharedString::from(label))
     };
     div()
         .relative()
@@ -2608,6 +2613,17 @@ fn table_with_copy(
                 .child(button(1, "CSV", table_csv(header, rows))),
         )
         .into_any_element()
+}
+
+/// slopty: the faces a code fence falls back to, as the terminal's chain
+/// (`slopty_kit::fonts::terminal_fallbacks`, registered with CoreText at launch): the symbol face
+/// first (powerline, devicons, box drawing), then the platform's monospace and colour emoji.
+fn code_fallbacks() -> gpui::FontFallbacks {
+    gpui::FontFallbacks::from_fonts(vec![
+        "Symbols Nerd Font Mono".to_owned(),
+        "Menlo".to_owned(),
+        "Apple Color Emoji".to_owned(),
+    ])
 }
 
 /// Shared visual shell for ordinary code and generated diagram fences.
@@ -2667,7 +2683,15 @@ fn render_code_block_source_with_actions(
     highlight: CodeHighlight,
     mut extra_actions: Vec<AnyElement>,
 ) -> AnyElement {
-    let mono = font(theme.font_mono.clone());
+    // slopty: a prompt's powerline and Nerd glyphs draw from the bundled symbol face.
+    let mut mono = font(theme.font_mono.clone());
+    mono.fallbacks = Some(code_fallbacks());
+    // slopty: terminal output draws in its colours; what shows, copies and runs is its text.
+    let ansi = super::ansi::is_ansi_fence(language, code).then(|| super::ansi::parse(language, code));
+    let plain = ansi
+        .as_ref()
+        .map(|lines| lines.iter().map(|line| line.text.as_str()).collect::<Vec<_>>().join("\n"));
+    let code: &str = plain.as_deref().unwrap_or(code);
     // Per-line strings + runs through the cross-frame cache (validity: code
     // length + highlight slice identity — a fresh highlight Arc re-derives).
     let hl_key = highlight.map_or((0, 0), |h| (h.as_ptr() as usize, h.len()));
@@ -2676,6 +2700,12 @@ fn render_code_block_source_with_actions(
             .split('\n')
             .enumerate()
             .map(|(li, line)| {
+                if let Some(styled) = ansi.as_ref().and_then(|lines| lines.get(li)) {
+                    return (
+                        SharedString::from(line.to_string()),
+                        super::ansi::runs(styled, &mono, theme),
+                    );
+                }
                 let spans = highlight
                     .and_then(|h| h.get(li))
                     .map(|t| &t[..])
@@ -2741,22 +2771,10 @@ fn render_code_block_source_with_actions(
                 cx.stop_propagation();
                 toggle(window, cx);
             })
-            .tooltip(move |_, cx| {
-                cx.new(move |_| {
-                    CodeBlockTooltip(
-                        if fit_content {
-                            "Use horizontal scrolling"
-                        } else {
-                            "Fit content"
-                        }
-                        .into(),
-                    )
-                })
-                .into()
-            })
+            .hint(if fit_content { "Use horizontal scrolling" } else { "Fit content" })
             .child(
                 crate::icons::icon(crate::icons::WRAP_TEXT)
-                    .size(px(13.0))
+                    .size(px(CODE_ACTION_GLYPH))
                     .text_color(theme.text_muted),
             )
     });
@@ -2913,6 +2931,33 @@ fn render_code_block_source_with_actions(
         });
 
     let frame_body = div().w_full().relative().child(body).children(scrollbar);
+    // slopty: the header's actions again under a right-click.
+    let menu_choices = opts.code_menu.as_ref().map(|_| {
+        let mut choices = Vec::new();
+        if let Some(copy) = opts.copy.as_ref() {
+            let (handler, text) = (copy.handler.clone(), SharedString::from(code.to_owned()));
+            choices.push(MenuChoice {
+                label: "Copy code".into(),
+                keys: None,
+                act: Rc::new(move |window: &mut Window, cx: &mut gpui::App| handler(ix, text.clone(), window, cx)),
+            });
+        }
+        if let Some(ui) = code_ui.as_ref() {
+            choices.push(MenuChoice {
+                label: (if fit_content { "Use horizontal scrolling" } else { "Fit content" }).into(),
+                keys: None,
+                act: ui.toggle_fit.clone(),
+            });
+        }
+        if let (Some(run), Some(line)) = (opts.run.clone(), runnable_line(language, code)) {
+            choices.push(MenuChoice {
+                label: "Run in terminal".into(),
+                keys: None,
+                act: Rc::new(move |window: &mut Window, cx: &mut gpui::App| run(line.clone(), window, cx)),
+            });
+        }
+        choices
+    });
     let mut block = code_block_frame(
         format!("{}-code-frame{ix}", opts.row_key).into(),
         language,
@@ -2920,6 +2965,12 @@ fn render_code_block_source_with_actions(
         frame_body.into_any_element(),
         theme,
     );
+    if let (Some(menu), Some(choices)) = (opts.code_menu.clone(), menu_choices) {
+        block = block.on_mouse_down(gpui::MouseButton::Right, move |event, window, cx| {
+            cx.stop_propagation();
+            menu("Code block", choices.clone(), event.position, window, cx);
+        });
+    }
     if let Some(ui) = code_ui {
         let viewport_hover = ui.viewport_hover.clone();
         let drag_move = ui.drag_move.clone();

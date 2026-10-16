@@ -147,6 +147,7 @@ impl Transcript {
                 } else {
                     "Rewind…"
                 }))
+                .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
                 .child(
                     crate::icons::icon(crate::icons::RESTART)
                         .size(px(14.0))
