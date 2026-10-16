@@ -2204,6 +2204,10 @@ impl FilesSurface {
                                 .child(
                                     div()
                                         .id("files-retry-close-save")
+                                        .role(gpui::Role::Button)
+                                        .rounded(px(4.0))
+                                        // slopty: a keyboard stop with the shell's ring (M8).
+                                        .map(|el| crate::surface_chrome::key_stop(el, &theme))
                                         .when(self.target_change_pending, |button| button.hidden())
                                         .ml_auto()
                                         .cursor_pointer()
@@ -2217,6 +2221,10 @@ impl FilesSurface {
                                     banner.child(
                                         div()
                                             .id("files-keep-open")
+                                            .role(gpui::Role::Button)
+                                            .rounded(px(4.0))
+                                            // slopty: a keyboard stop with the shell's ring (M8).
+                                            .map(|el| crate::surface_chrome::key_stop(el, &theme))
                                             .cursor_pointer()
                                             .text_color(theme.text_muted)
                                             .child("Keep Open")
@@ -2228,6 +2236,10 @@ impl FilesSurface {
                                 .child(
                                     div()
                                         .id("files-discard-close-changes")
+                                        .role(gpui::Role::Button)
+                                        .rounded(px(4.0))
+                                        // slopty: a keyboard stop with the shell's ring (M8).
+                                        .map(|el| crate::surface_chrome::key_stop(el, &theme))
                                         .cursor_pointer()
                                         .text_color(theme.danger_muted)
                                         .child("Discard Changes")
@@ -2275,6 +2287,10 @@ impl FilesSurface {
                                             .child(
                                                 div()
                                                     .id("files-keep-external-edits")
+                                                    .role(gpui::Role::Button)
+                                                    .rounded(px(4.0))
+                                                    // slopty: a keyboard stop with the shell's ring (M8).
+                                                    .map(|el| crate::surface_chrome::key_stop(el, &theme))
                                                     .cursor_pointer()
                                                     .text_color(theme.text_muted)
                                                     .child("Keep Editing")
@@ -2285,6 +2301,10 @@ impl FilesSurface {
                                             .child(
                                                 div()
                                                     .id("files-reload-external")
+                                                    .role(gpui::Role::Button)
+                                                    .rounded(px(4.0))
+                                                    // slopty: a keyboard stop with the shell's ring (M8).
+                                                    .map(|el| crate::surface_chrome::key_stop(el, &theme))
                                                     .cursor_pointer()
                                                     .text_color(theme.text)
                                                     .child("Reload from Disk")
@@ -2298,6 +2318,10 @@ impl FilesSurface {
                                             .child(
                                                 div()
                                                     .id("files-cancel-reload")
+                                                    .role(gpui::Role::Button)
+                                                    .rounded(px(4.0))
+                                                    // slopty: a keyboard stop with the shell's ring (M8).
+                                                    .map(|el| crate::surface_chrome::key_stop(el, &theme))
                                                     .cursor_pointer()
                                                     .text_color(theme.text_muted)
                                                     .child("Cancel")
@@ -2308,6 +2332,10 @@ impl FilesSurface {
                                             .child(
                                                 div()
                                                     .id("files-confirm-reload")
+                                                    .role(gpui::Role::Button)
+                                                    .rounded(px(4.0))
+                                                    // slopty: a keyboard stop with the shell's ring (M8).
+                                                    .map(|el| crate::surface_chrome::key_stop(el, &theme))
                                                     .cursor_pointer()
                                                     .text_color(theme.text)
                                                     .child("Discard & Reload")
@@ -2464,6 +2492,7 @@ impl FilesSurface {
                         },
                         Box::new(super::ToggleMarkdownPreview),
                         keys_focus.clone(),
+                        theme,
                         cx,
                     )
                     .when(showing_markdown, |el| el.bg(crate::theme::wash(0.1)))
@@ -2500,9 +2529,8 @@ impl FilesSurface {
                                 .role(gpui::Role::Button)
                                 .aria_label("Save file")
                                 .hover(|style| style.bg(crate::theme::wash(0.14)))
-                                .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
-                                    window.prevent_default()
-                                })
+                                // slopty: a keyboard stop with the shell's ring (M8).
+                                .map(|el| crate::surface_chrome::key_stop(el, theme))
                                 .on_click(
                                     cx.listener(|this, _, _, cx| this.save_active_document(cx)),
                                 )
@@ -2526,7 +2554,7 @@ impl FilesSurface {
                 )
             })
             .child(
-                toolbar_button("files-reveal-active", "Reveal file in tree")
+                toolbar_button("files-reveal-active", "Reveal file in tree", theme)
                     .on_click(cx.listener(move |_, _, _, cx| {
                         cx.emit(FilesEvent::RevealFile(reveal_path.clone()));
                     }))
@@ -2538,7 +2566,7 @@ impl FilesSurface {
             )
             .when_some(system_path, |element, system_path| {
                 element.child(
-                    toolbar_button("files-open-with-system", "Open in default editor")
+                    toolbar_button("files-open-with-system", "Open in default editor", theme)
                         .on_click(move |_, _, cx| cx.open_with_system(&system_path))
                         .child(
                             icon(icons::ARROW_UP_RIGHT)
@@ -2557,6 +2585,7 @@ impl FilesSurface {
                     },
                     Box::new(super::ToggleWordWrap),
                     keys_focus,
+                    theme,
                     cx,
                 )
                 .when(self.preview.word_wrap(), |element| {
@@ -2902,7 +2931,7 @@ impl FilesSurface {
         let (card_left, card_width) = editor_comment_overlay_horizontal(&layout);
         let mut overlays = Vec::with_capacity(layout.rows.len() + 1);
         for row in &layout.rows {
-            let group: SharedString = format!("file-comment-gutter-{}-{}", path, row.line).into();
+            let reveal: SharedString = format!("file-comment-gutter-{}-{}", path, row.line).into();
             let cell = div()
                 .id(("file-comment-gutter", row.line as usize))
                 .absolute()
@@ -2920,6 +2949,9 @@ impl FilesSurface {
                         .cursor_pointer()
                         .role(gpui::Role::Button)
                         .aria_label(format!("Open comment on line {}", row.line))
+                        // slopty: a comment's mark is a keyboard stop; the empty lines' adders
+                        // are not, or Tab would walk every line (M8).
+                        .map(|el| crate::surface_chrome::key_stop(el, theme))
                         .hover(|style| style.bg(crate::theme::wash(0.08)))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.toggle_editor_comment(id.clone(), cx)
@@ -2935,19 +2967,19 @@ impl FilesSurface {
                 let target = path.to_string();
                 let line = row.line;
                 overlays.push(
-                    cell.group(group.clone())
-                        .cursor_pointer()
+                    cell.cursor_pointer()
                         .role(gpui::Role::Button)
                         .aria_label(format!("Comment on line {line}"))
                         .hover(|style| style.bg(theme.surface_card))
+                        // slopty: the adder fades in with the line's hover (M23).
+                        .on_hover(crate::motion::hover_listener(reveal.clone()))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.open_editor_comment_draft(target.clone(), line, window, cx)
                         }))
                         .child(
                             div()
                                 .size(px(comments::COMMENT_ADDER_SIZE))
-                                .opacity(0.0)
-                                .group_hover(group, |style| style.opacity(1.0))
+                                .opacity(crate::motion::hover_t(&reveal))
                                 .rounded(px(4.0))
                                 .bg(theme.solid)
                                 .flex()
@@ -3007,8 +3039,13 @@ impl FilesSurface {
     ) -> AnyElement {
         let theme = &theme.for_popup();
         let group: SharedString = format!("file-comment-card-{}", comment.id).into();
+        // slopty: the card's quiet controls fade in with its hover (M23).
+        let reveal: SharedString = format!("{group}-reveal").into();
+        let shown = crate::motion::hover_t(&reveal);
         let id = comment.id.clone();
         let card = crate::popover::popover_card_flush(theme)
+            .id(group.clone())
+            .on_hover(crate::motion::hover_listener(reveal))
             .group(group.clone())
             .absolute()
             .left(px(left))
@@ -3066,8 +3103,8 @@ impl FilesSurface {
                             .justify_center()
                             .rounded(px(4.0))
                             .cursor_pointer()
-                            .opacity(0.0)
-                            .group_hover(group, |style| style.opacity(1.0))
+                            .opacity(shown)
+                            .map(|el| crate::surface_chrome::key_stop_revealing(el, theme))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.remove_editor_comment(&id, cx)
                             }))
@@ -3340,6 +3377,9 @@ fn editor_comment_action(
         .text_size(px(11.0))
         .font_weight(gpui::FontWeight::MEDIUM)
         .cursor_pointer()
+        .role(gpui::Role::Button)
+        // slopty: a keyboard stop with the shell's ring (M8).
+        .map(|el| crate::surface_chrome::key_stop(el, theme))
         .when(primary, |element| {
             element.bg(theme.solid).text_color(theme.on_solid)
         })

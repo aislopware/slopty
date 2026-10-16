@@ -2190,7 +2190,7 @@ impl AppearancePage {
                 })
                 .tab_index(0)
                 .role(gpui::Role::Button)
-                .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
+                .map(|el| crate::surface_chrome::focus_ring_revealing(el, theme))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     if let Some(dialog) = this.import_dialog.as_mut() {
                         dialog.mode = value;
@@ -2276,7 +2276,7 @@ impl AppearancePage {
                             .flex_none()
                             .tab_index(0)
                             .role(gpui::Role::Button)
-                            .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
+                            .map(|el| crate::surface_chrome::focus_ring_revealing(el, theme))
                             .on_click(cx.listener(|this, _, _, cx| this.choose_import_source(cx))),
                     ),
             )
@@ -2393,9 +2393,7 @@ impl AppearancePage {
                                         })
                                         .tab_index(0)
                                         .role(gpui::Role::Button)
-                                        .focus_visible(|s| {
-                                            s.border_2().border_color(theme.accent).opacity(1.0)
-                                        })
+                                        .map(|el| crate::surface_chrome::focus_ring_revealing(el, theme))
                                         .on_click(cx.listener({
                                             let variant_id = variant_id.clone();
                                             move |this, _, _, cx| {
@@ -2439,9 +2437,7 @@ impl AppearancePage {
                                     )
                                     .tab_index(0)
                                     .role(gpui::Role::Button)
-                                    .focus_visible(|s| {
-                                        s.border_2().border_color(theme.accent).opacity(1.0)
-                                    })
+                                    .map(|el| crate::surface_chrome::focus_ring_revealing(el, theme))
                                     .on_click(cx.listener({
                                         let variant_id = variant_id.clone();
                                         move |this, _, _, cx| {
@@ -2565,7 +2561,7 @@ impl AppearancePage {
                     .cursor_pointer()
                     .hover(|style| style.bg(theme.surface_raised_hover))
                     .tab_index(0).role(gpui::Role::Button)
-.focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
+.map(|el| crate::surface_chrome::focus_ring_revealing(el, theme))
 .on_click(cx.listener(|this, _, _, cx| {
                         this.import_dialog = None;
                         cx.notify();
@@ -2593,7 +2589,7 @@ impl AppearancePage {
                     .px(px(13.0))
                     .tab_index(0)
                     .role(gpui::Role::Button)
-                    .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
+                    .map(|el| crate::surface_chrome::focus_ring_revealing(el, theme))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.import_dialog = None;
                         cx.notify();
@@ -2622,7 +2618,7 @@ impl AppearancePage {
                     button
                         .tab_index(0)
                         .role(gpui::Role::Button)
-                        .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
+                        .map(|el| crate::surface_chrome::focus_ring_revealing(el, theme))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if this
                                 .import_dialog
@@ -2890,7 +2886,7 @@ impl AppearancePage {
             ))
             .aria_numeric_value_step(f64::from(BACKGROUND_ZOOM_STEP * 100.0))
             .aria_value(format!("{:.0}%", draft.zoom * 100.0))
-            .focus_visible(|s| s.border_2().border_color(theme.accent))
+            .map(|el| crate::surface_chrome::focus_ring(el, theme))
             .relative()
             .w(px(168.0))
             .h(px(28.0))
@@ -2974,7 +2970,7 @@ impl AppearancePage {
                 compact_action(theme, "Reset", "new-thread-background-adjustment-reset")
                     .tab_index(0)
                     .role(gpui::Role::Button)
-                    .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
+                    .map(|el| crate::surface_chrome::focus_ring_revealing(el, theme))
                     .on_click(cx.listener(|this, _, _, cx| this.reset_background_adjustment(cx))),
             )
             .child(
@@ -2987,7 +2983,7 @@ impl AppearancePage {
                             .tab_index(0)
                             .role(gpui::Role::Button)
                             .aria_label("Zoom out")
-                            .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
+                            .map(|el| crate::surface_chrome::focus_ring_revealing(el, theme))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 let Some(dialog) = this.background_adjustment_dialog.as_ref()
                                 else {
@@ -3013,7 +3009,7 @@ impl AppearancePage {
                             .tab_index(0)
                             .role(gpui::Role::Button)
                             .aria_label("Zoom in")
-                            .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
+                            .map(|el| crate::surface_chrome::focus_ring_revealing(el, theme))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 let Some(dialog) = this.background_adjustment_dialog.as_ref()
                                 else {
@@ -3042,7 +3038,7 @@ impl AppearancePage {
                     .px(px(13.0))
                     .tab_index(0)
                     .role(gpui::Role::Button)
-                    .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
+                    .map(|el| crate::surface_chrome::focus_ring_revealing(el, theme))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.dismiss_background_adjustment(window, cx)
                     })),
@@ -3062,7 +3058,7 @@ impl AppearancePage {
                         button
                             .tab_index(0)
                             .role(gpui::Role::Button)
-                            .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
+                            .map(|el| crate::surface_chrome::focus_ring_revealing(el, theme))
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.apply_background_adjustment(window, cx)
                             }))
@@ -3099,7 +3095,7 @@ impl AppearancePage {
                     .tab_index(0)
                     .role(gpui::Role::Button)
                     .aria_label("Close background adjustment")
-                    .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
+                    .map(|el| crate::surface_chrome::focus_ring_revealing(el, theme))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.dismiss_background_adjustment(window, cx)
                     }))
@@ -3240,7 +3236,7 @@ impl AppearancePage {
                     .id("theme-review-close")
                     .tab_index(0)
                     .role(gpui::Role::Button)
-                    .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
+                    .map(|el| crate::surface_chrome::focus_ring_revealing(el, theme))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.review_entry = None;
                         cx.notify();
@@ -3314,9 +3310,7 @@ impl AppearancePage {
                             compact_action(theme, "Reload", format!("theme-reload-{id}"))
                                 .tab_index(0)
                                 .role(gpui::Role::Button)
-                                .focus_visible(|s| {
-                                    s.border_2().border_color(theme.accent).opacity(1.0)
-                                })
+                                .map(|el| crate::surface_chrome::focus_ring_revealing(el, theme))
                                 .on_click(cx.listener({
                                     let id = id.clone();
                                     move |_, _, _, cx| {
@@ -3330,7 +3324,7 @@ impl AppearancePage {
                         compact_action(theme, "Reveal", format!("theme-reveal-{id}"))
                             .tab_index(0)
                             .role(gpui::Role::Button)
-                            .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
+                            .map(|el| crate::surface_chrome::focus_ring_revealing(el, theme))
                             .on_click(cx.listener({
                                 let id = id.clone();
                                 move |this, _, _, cx| {
@@ -3345,7 +3339,7 @@ impl AppearancePage {
                         compact_action(theme, "Review", format!("theme-review-{id}"))
                             .tab_index(0)
                             .role(gpui::Role::Button)
-                            .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
+                            .map(|el| crate::surface_chrome::focus_ring_revealing(el, theme))
                             .on_click(cx.listener({
                                 let id = id.clone();
                                 move |this, _, _, cx| {
@@ -3362,7 +3356,7 @@ impl AppearancePage {
                         )
                         .tab_index(0)
                         .role(gpui::Role::Button)
-                        .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
+                        .map(|el| crate::surface_chrome::focus_ring_revealing(el, theme))
                         .on_click(cx.listener({
                             let id = id.clone();
                             move |this, _, _, cx| {
@@ -3378,9 +3372,7 @@ impl AppearancePage {
                             compact_action(theme, "Unlink", format!("theme-unlink-{id}"))
                                 .tab_index(0)
                                 .role(gpui::Role::Button)
-                                .focus_visible(|s| {
-                                    s.border_2().border_color(theme.accent).opacity(1.0)
-                                })
+                                .map(|el| crate::surface_chrome::focus_ring_revealing(el, theme))
                                 .on_click(cx.listener({
                                     let id = id.clone();
                                     move |this, _, _, cx| {
@@ -3397,7 +3389,7 @@ impl AppearancePage {
                             .text_color(theme.danger)
                             .tab_index(0)
                             .role(gpui::Role::Button)
-                            .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
+                            .map(|el| crate::surface_chrome::focus_ring_revealing(el, theme))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if let Err(error) = theme_library::remove(&id, cx) {
                                     this.library_error = Some(error.to_string().into());
@@ -3431,7 +3423,7 @@ impl AppearancePage {
                         .id("theme-library-add")
                         .tab_index(0)
                         .role(gpui::Role::Button)
-                        .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
+                        .map(|el| crate::surface_chrome::focus_ring_revealing(el, theme))
                         .on_click(cx.listener(|this, _, _, cx| this.open_import(cx))),
                 )
                 .into_any_element(),
@@ -3527,7 +3519,7 @@ impl Render for AppearancePage {
                 .role(gpui::Role::Button)
                 .aria_label(mode.label())
                 .aria_selected(selected)
-                .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
+                .map(|el| crate::surface_chrome::focus_ring_revealing(el, &theme))
                 .on_click(cx.listener(move |_, _, _, cx| {
                     appearance::set_mode(mode, cx);
                     cx.notify();
@@ -3581,7 +3573,7 @@ impl Render for AppearancePage {
                     .hint(accent_name(selection))
                     .tab_index(0)
                     .role(gpui::Role::Button)
-                    .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
+                    .map(|el| crate::surface_chrome::focus_ring_revealing(el, &theme))
                     .on_click(cx.listener(move |_, _, _, cx| {
                         appearance::set_accent(selection, cx);
                         cx.notify();
@@ -3688,7 +3680,7 @@ impl Render for AppearancePage {
                     .tab_index(0)
                     .role(gpui::Role::Switch)
                     .aria_label("Match wallpaper colors")
-                    .focus_visible(|s| s.border_2().border_color(theme.accent))
+                    .map(|el| crate::surface_chrome::focus_ring(el, &theme))
                     .cursor_pointer()
                     .aria_toggled(if match_wallpaper { gpui::Toggled::True } else { gpui::Toggled::False })
                     .on_click(cx.listener(move |_, _, _, cx| {
@@ -3797,9 +3789,7 @@ impl Render for AppearancePage {
                                         )
                                         .tab_index(0)
                                         .role(gpui::Role::Button)
-                                        .focus_visible(|s| {
-                                            s.border_2().border_color(theme.accent).opacity(1.0)
-                                        })
+                                        .map(|el| crate::surface_chrome::focus_ring_revealing(el, &theme))
                                         .on_click(
                                             cx.listener(|this, _, window, cx| {
                                                 this.open_background_adjustment(window, cx)
@@ -3815,9 +3805,7 @@ impl Render for AppearancePage {
                                     )
                                     .tab_index(0)
                                     .role(gpui::Role::Button)
-                                    .focus_visible(|s| {
-                                        s.border_2().border_color(theme.accent).opacity(1.0)
-                                    })
+                                    .map(|el| crate::surface_chrome::focus_ring_revealing(el, &theme))
                                     .on_click(cx.listener(
                                         |this, _, _, cx| this.choose_new_thread_background(cx),
                                     )),
@@ -3831,9 +3819,7 @@ impl Render for AppearancePage {
                                     .text_color(theme.danger)
                                     .tab_index(0)
                                     .role(gpui::Role::Button)
-                                    .focus_visible(|s| {
-                                        s.border_2().border_color(theme.accent).opacity(1.0)
-                                    })
+                                    .map(|el| crate::surface_chrome::focus_ring_revealing(el, &theme))
                                     .on_click(cx.listener(
                                         |this, _, _, cx| this.remove_new_thread_background(cx),
                                     )),
@@ -3848,9 +3834,7 @@ impl Render for AppearancePage {
                                 )
                                 .tab_index(0)
                                 .role(gpui::Role::Button)
-                                .focus_visible(|s| {
-                                    s.border_2().border_color(theme.accent).opacity(1.0)
-                                })
+                                .map(|el| crate::surface_chrome::focus_ring_revealing(el, &theme))
                                 .on_click(cx.listener(
                                     |this, _, _, cx| this.choose_new_thread_background(cx),
                                 )),
@@ -3892,7 +3876,7 @@ impl Render for AppearancePage {
                             compact_action(&theme, "Choose folder", "wallpaper-folder-choose")
                                 .tab_index(0)
                                 .role(gpui::Role::Button)
-                                .focus_visible(|s| s.border_2().border_color(theme.accent))
+                                .map(|el| crate::surface_chrome::focus_ring(el, &theme))
                                 .on_click(
                                     cx.listener(|this, _, _, cx| this.choose_wallpaper_folder(cx)),
                                 ),
@@ -3902,7 +3886,7 @@ impl Render for AppearancePage {
                                 compact_action(&theme, "Shuffle", "wallpaper-shuffle")
                                     .tab_index(0)
                                     .role(gpui::Role::Button)
-                                    .focus_visible(|s| s.border_2().border_color(theme.accent))
+                                    .map(|el| crate::surface_chrome::focus_ring(el, &theme))
                                     .on_click(
                                         cx.listener(|this, _, _, cx| this.random_wallpaper(cx)),
                                     ),
@@ -4067,7 +4051,7 @@ impl Render for AppearancePage {
                     .tab_index(0)
                     .role(gpui::Role::Switch)
                     .aria_label("Pause animations in background")
-                    .focus_visible(|s| s.border_2().border_color(theme.accent))
+                    .map(|el| crate::surface_chrome::focus_ring(el, &theme))
                     .cursor_pointer()
                     .aria_toggled(if pause_in_background {
                         gpui::Toggled::True

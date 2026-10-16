@@ -470,6 +470,8 @@ impl AddDeviceDialog {
                 .aria_label(choice.label())
                 .aria_selected(selected)
                 .tab_index(0)
+                // slopty: the shell's keyboard ring (M8).
+                .map(|el| crate::surface_chrome::focus_ring(el, theme))
                 .cursor_pointer()
                 .on_click(cx.listener(move |this, _, window, cx| this.choose(choice, window, cx)))
                 .child(choice.label()),
@@ -537,6 +539,8 @@ impl AddDeviceDialog {
             if node.ready {
                 row = row
                     .tab_index(0)
+                    // slopty: the shell's keyboard ring, inside the row (M8).
+                    .map(|el| crate::surface_chrome::focus_ring_inset(el, theme))
                     .role(gpui::Role::Button)
                     .aria_label(format!(
                         "{} {}",
@@ -612,6 +616,8 @@ impl AddDeviceDialog {
                     .id(("add-device-fix", ix))
                     .flex_none()
                     .tab_index(0)
+                    // slopty: the shell's keyboard ring (M8).
+                    .map(|el| crate::surface_chrome::focus_ring(el, theme))
                     .role(gpui::Role::Button)
                     .aria_label(fix.label)
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -666,6 +672,8 @@ impl AddDeviceDialog {
                     .id(("add-device-choose", ix))
                     .debug_selector(move || format!("add-device-choose-{ix}"))
                     .tab_index(0)
+                    // slopty: the shell's keyboard ring, inside the row (M8).
+                    .map(|el| crate::surface_chrome::focus_ring_inset(el, theme))
                     .role(gpui::Role::Button)
                     .aria_label(format!("Join {}", choose.name))
                     .child(popover::picker_icon_slot(
@@ -791,7 +799,7 @@ impl Render for AddDeviceDialog {
                     .tab_index(0)
                     .role(gpui::Role::Button)
                     .aria_label(label)
-                    .focus_visible(|s| s.border_2().border_color(theme.accent))
+                    .map(|el| crate::surface_chrome::focus_ring(el, &theme))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.serve = !serve;
                         this.progress = None;
@@ -883,7 +891,7 @@ impl Render for AddDeviceDialog {
                             .id("add-device-cancel")
                             .tab_index(0)
                             .role(gpui::Role::Button)
-                            .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
+                            .map(|el| crate::surface_chrome::focus_ring_revealing(el, &theme))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 if !running {
                                     return this.close(window, cx);
@@ -900,7 +908,7 @@ impl Render for AddDeviceDialog {
                             .tab_index(0)
                             .role(gpui::Role::Button)
                             .aria_label(label) // slopty: named in the accessibility tree.
-                            .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
+                            .map(|el| crate::surface_chrome::focus_ring_revealing(el, &theme))
                             .on_click(cx.listener(|this, _, window, cx| this.go(window, cx)))
                     })),
             )

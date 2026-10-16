@@ -385,7 +385,7 @@ impl Render for ArchivedPage {
                             .tab_index(0)
                             .role(gpui::Role::Button)
                             .aria_label("Unarchive") // slopty: named in the accessibility tree.
-                            .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
+                            .map(|el| crate::surface_chrome::focus_ring_revealing(el, &theme))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.unarchive(chat_id.clone(), cx);
                             }))
@@ -465,7 +465,7 @@ impl Render for ArchivedPage {
                         .when(page == 0, |el| {
                             el.opacity(crate::theme::DISABLED_OPACITY).cursor_default()
                         })
-                        .focus_visible(|s| s.border_2().border_color(theme.accent))
+                        .map(|el| crate::surface_chrome::focus_ring(el, &theme))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.page = this.page.saturating_sub(1);
                             this.scroll.reset();
@@ -488,7 +488,7 @@ impl Render for ArchivedPage {
                         .when((page + 1) * ARCHIVE_PAGE_SIZE >= count, |el| {
                             el.opacity(crate::theme::DISABLED_OPACITY).cursor_default()
                         })
-                        .focus_visible(|s| s.border_2().border_color(theme.accent))
+                        .map(|el| crate::surface_chrome::focus_ring(el, &theme))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.page = archive_page(count, this.page + 1);
                             this.scroll.reset();
@@ -508,7 +508,7 @@ impl Render for ArchivedPage {
                 .aria_disabled(deleting)
                 .tab_index(0)
                 .role(gpui::Role::Button)
-                .focus_visible(|s| s.border_2().border_color(theme.accent))
+                .map(|el| crate::surface_chrome::focus_ring(el, &theme))
                 .on_click(cx.listener(|this, _, _, cx| this.request_delete_all(cx)))
                 .child(
                     crate::icons::icon(crate::icons::TRASH_BIN_MINIMALISTIC)

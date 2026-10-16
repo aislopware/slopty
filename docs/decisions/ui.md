@@ -13063,3 +13063,44 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `transcript::sticky::tests::a_long_turns_prompt_holds_at_the_top`,
   `transcript::surface_tests::a_messages_copy_is_a_tab_stop`,
   `visuals::tests::a_visuals_tabs_answer_the_keyboard`.
+- ✅ **Every pane control is a keyboard stop with one ring (2026-10-17, M8, M23).** The ring
+  is paint, not a border: `surface_chrome::focus_ring` draws 2 px of the accent 2 px clear of
+  the control through gpui-fast's `outline_ring`, as Claude desktop's `outline: 2px solid;
+  outline-offset: 2px`, so focus moves nothing and a control at rest holds no transparent edge
+  for it. The 1 px insets that edge cost (a pane tab's `4.0 - 1.0`) are gone. A row that fills a
+  clipped list (a file tree's Try again and Load more, a side chat, a diff's file header, a
+  menu's row, the Completion switches' rows) wears it just inside its edge
+  (`focus_ring_inset`); a control shown only on hover shows while it has the keyboard
+  (`focus_ring_revealing`). Settings' 62 hand-drawn `border_2` rings, the shortcut chip's and
+  the select's held edges are that one ring. A switch is now the pill itself, its row's room
+  kept by a margin, so its ring hugs the track, and Notifications' switches are stops like the
+  others. In Files, Diff and the browser every clickable control is a stop (`key_stop`): Tab
+  reaches it, Enter or Space presses it, and a pointer press leaves the keyboard where it was,
+  so clicking a pane's button never takes it from the editor or the composer. The file tree is
+  one stop whose arrows walk its rows, and a file's per-line comment adders are not stops, or
+  Tab would walk every line; a comment's mark is. A browser control that cannot act is no stop.
+  The delete dialog's own keys move the same ring. Hover-revealed controls fade on the hover
+  curve instead of appearing (M23): a pane tab's ✕ over its unsaved dot, the Chats header's
+  New side chat and Fork, a file's comment adder and Remove comment, a Markdown block's comment
+  adder. Tests: `slopty-shell`
+  `surface_chrome::tests::{a_keyboard_stop_rings_clear_of_its_edge_and_moves_nothing,
+  an_inset_ring_sits_inside_the_edge, a_revealed_control_shows_while_it_has_the_keyboard,
+  a_stop_answers_its_keys_and_a_click_keeps_the_keyboard, a_tabs_close_fades_with_its_hover}`,
+  `settings::widgets::switch_tests::the_switch_ring_hugs_its_pill_and_its_row_keeps_its_height`;
+  e2e `a_tab_walks_the_files_pane_with_a_ring` (light and dark).
+- ✅ **Letter spacing is laid out, not shaped (2026-10-17, M47).** The study asked for a
+  `letter_spacing` in gpui-fast's text style, then 0.1 em on small-caps headings and −0.01 em on
+  titles at 16 to 20 px. Ruled out for the fork. The change touches five upstream files of zed's
+  text system (`style.rs`, `styled.rs`, `text_system.rs`, `text_system/line_layout.rs`,
+  `elements/text.rs`), adds a public field and builder against the fork's no-new-API rule, and,
+  carried per run, breaks every `TextRun` literal: 26 in the fork, 55 `FontRun` literals there,
+  26 in twelve Slopty files across four lanes, and each one zed adds at an import. What it buys
+  is small. Geist has no U+200A, so zeron's hair spaces between a heading's letters come from
+  SF's, 105/2048 = 0.05 em: half the 0.1 em, through a font fallback. Laying the letters out
+  gives the full 0.1 em with no fork change: `typography::tracked_caps` sets each capital as its
+  own run with the tracking as the gap. The hair spaces never reached VoiceOver, since plain
+  text has no node of its own (no golden's words hold one). The titles' −0.01 em is 0.2 px a
+  letter at 20 px, about 3 px over a fifteen-letter title, so titles stay untracked. If zed's
+  GPUI gains letter spacing, the fork takes it at the next import. Test: `slopty-shell`
+  `typography::tests::{tracked_caps_set_their_letters_a_tenth_of_an_em_apart,
+  tracked_letters_are_capitals_with_no_hair_space}`.

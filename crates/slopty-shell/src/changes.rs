@@ -3543,6 +3543,8 @@ impl Changes {
             .id(presentation.element_id(ix))
             .role(gpui::Role::Button)
             .aria_label(SharedString::from(header_label))
+            // slopty: a keyboard stop with the shell's ring, inside the list (M8).
+            .map(|el| crate::surface_chrome::key_stop_inset(el, theme))
             .w_full()
             .h(px(FILE_HEADER_HEIGHT))
             .when(
@@ -3628,6 +3630,8 @@ impl Changes {
             .child(
                 div()
                     .id(("diff-open-file", ix))
+                    // slopty: a keyboard stop with the shell's ring (M8).
+                    .map(|el| crate::surface_chrome::key_stop(el, theme))
                     .flex_none()
                     .size(px(crate::surface_chrome::CONTROL_SIZE))
                     .flex()
@@ -3758,9 +3762,8 @@ impl Changes {
                 }
             })
             .occlude()
-            .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
-                window.prevent_default()
-            })
+            // slopty: a keyboard stop with the shell's ring (M8).
+            .map(|el| crate::surface_chrome::key_stop(el, theme))
             .child(
                 crate::icons::icon(icon_path)
                     .size(px(crate::surface_chrome::ICON_SIZE))
@@ -3833,6 +3836,9 @@ impl Changes {
                 crate::theme::wash(0.14),
             ))
             .on_hover(motion::hover_listener("changes-scope-trigger"))
+            // slopty: a keyboard stop with the shell's ring (M8).
+            .tab_index(0)
+            .map(|el| crate::surface_chrome::focus_ring(el, &theme))
             .occlude()
             .on_mouse_down(
                 gpui::MouseButton::Left,
@@ -3937,6 +3943,8 @@ impl Changes {
                             format!("changes-scope-row-{ix}"),
                         )
                         .id(("changes-scope-row", ix))
+                        // slopty: a keyboard stop with the shell's ring, inside the menu (M8).
+                        .map(|el| crate::surface_chrome::key_stop_inset(el, theme))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.set_scope(scope, cx);
                             this.close_scope_menu(cx);
@@ -3992,6 +4000,9 @@ impl Changes {
                 crate::theme::wash(0.12),
             ))
             .on_hover(motion::hover_listener("changes-ref-trigger"))
+            // slopty: a keyboard stop with the shell's ring (M8).
+            .tab_index(0)
+            .map(|el| crate::surface_chrome::focus_ring(el, theme))
             .occlude()
             .on_mouse_down(
                 gpui::MouseButton::Left,

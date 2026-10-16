@@ -46,14 +46,68 @@ pub(crate) fn toolbar(theme: &Theme) -> Div {
         })
 }
 
-// slopty: one keyboard ring for every control: a transparent hairline at rest that takes the
-// accent when focused from the keyboard, so focus never changes a control's size.
+// slopty: one keyboard ring for every control (M8): 2 px of the accent drawn 2 px clear of the
+// control, as Claude desktop's `outline: 2px solid; outline-offset: 2px`. It is paint only, so
+// focus never moves a control or its neighbours, and a control at rest holds no edge for it.
+/// The ring's thickness.
+pub const RING_WIDTH: f32 = 2.0;
+/// The gap between a control's edge and its ring.
+pub const RING_OFFSET: f32 = 2.0;
+
+/// The shell's keyboard ring in `theme`'s accent, clear of the control by `offset`.
+#[must_use]
+pub fn ring(theme: &Theme, offset: f32) -> gpui::Outline {
+    gpui::Outline {
+        color: theme.accent,
+        width: px(RING_WIDTH),
+        offset: px(offset),
+    }
+}
+
 /// Gives `el` the shell's focus ring. The control also needs a `tab_index` to take focus.
 pub fn focus_ring<E: InteractiveElement + Styled>(el: E, theme: &Theme) -> E {
-    let accent = theme.accent;
-    el.border_1()
-        .border_color(gpui::transparent_black())
-        .focus_visible(move |style| style.border_color(accent))
+    let ring = ring(theme, RING_OFFSET);
+    el.focus_visible(move |style| style.outline_ring(ring))
+}
+
+/// [`focus_ring`] for a control shown only on hover: the keyboard shows it too.
+pub fn focus_ring_revealing<E: InteractiveElement + Styled>(el: E, theme: &Theme) -> E {
+    let ring = ring(theme, RING_OFFSET);
+    el.focus_visible(move |style| style.outline_ring(ring).opacity(1.0))
+}
+
+/// [`focus_ring`] drawn just inside the edge, for a row that fills a clipped list (a file
+/// tree's row, a list's entry), where a ring outside it would be cut off.
+pub fn focus_ring_inset<E: InteractiveElement + Styled>(el: E, theme: &Theme) -> E {
+    let ring = ring(theme, -RING_WIDTH);
+    el.focus_visible(move |style| style.outline_ring(ring))
+}
+
+// slopty: a pane's clickable control is a keyboard stop (M8). A pointer press leaves the
+// keyboard where it was, as a Mac's buttons do, so clicking a pane's button never takes the
+// keyboard from the editor or the composer.
+/// Makes the clickable `el` a keyboard stop: Tab reaches it, Enter or Space presses it, and
+/// [`focus_ring`] shows it. The caller gives it a role and a name.
+pub fn key_stop<E: InteractiveElement + Styled>(el: E, theme: &Theme) -> E {
+    focus_ring(el.tab_index(0), theme).on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
+        window.prevent_default();
+    })
+}
+
+/// [`key_stop`] for a control shown only on hover: the keyboard shows it too.
+pub fn key_stop_revealing<E: InteractiveElement + Styled>(el: E, theme: &Theme) -> E {
+    focus_ring_revealing(el.tab_index(0), theme).on_mouse_down(
+        gpui::MouseButton::Left,
+        |_, window, _| window.prevent_default(),
+    )
+}
+
+/// [`key_stop`] with [`focus_ring_inset`], for a row that fills a clipped list.
+pub fn key_stop_inset<E: InteractiveElement + Styled>(el: E, theme: &Theme) -> E {
+    focus_ring_inset(el.tab_index(0), theme).on_mouse_down(
+        gpui::MouseButton::Left,
+        |_, window, _| window.prevent_default(),
+    )
 }
 
 /// Neutral navigation chip shared by the right-panel strip and PR navigation.
@@ -139,17 +193,20 @@ pub(crate) fn tab_chip(
         dirty,
         leading,
     } = chip;
-    let group: gpui::SharedString = format!("{id}-{ix}").into();
-    let selector = group.clone();
+    let selector: gpui::SharedString = format!("{id}-{ix}").into();
     let close_fade = format!("{close_id}-{ix}-fade");
+    // slopty: the ✕ fades in with the tab's hover, the unsaved dot out (M23).
+    let tab_fade = format!("{id}-{ix}-reveal");
+    let shown = crate::motion::hover_t(&tab_fade);
     tab((id, ix), active, theme)
         .debug_selector(move || selector.to_string())
-        .group(group.clone())
+        .on_hover(crate::motion::hover_listener(tab_fade))
         .h(px(TAB_CHIP_HEIGHT))
         .w(px(TAB_CHIP_WIDTH))
         .flex_none()
-        // slopty: 4 from the edge, the focus ring's hairline included.
-        .px(px(4.0 - 1.0))
+        // slopty: 4 from the edge; the ring is drawn inside it, as the strip clips.
+        .px(px(4.0))
+        .map(|el| focus_ring_inset(el, theme))
         .rounded(px(CONTROL_RADIUS))
         .flex()
         .flex_row()
@@ -186,7 +243,7 @@ pub(crate) fn tab_chip(
         )
         .child(
             // Trailing slot: the unsaved dot normally, ✕ on tab hover — two
-            // stacked layers opacity-swapped by the group hover.
+            // stacked layers crossfaded by the tab's hover.
             div()
                 .id((close_id, ix))
                 .debug_selector(move || format!("{close_id}-{ix}"))
@@ -232,7 +289,7 @@ pub(crate) fn tab_chip(
                             .flex()
                             .items_center()
                             .justify_center()
-                            .group_hover(group.clone(), |s| s.opacity(0.0))
+                            .opacity(1.0 - shown)
                             .child(div().size(px(6.0)).rounded_full().bg(theme.text_muted)),
                     )
                 })
@@ -243,8 +300,7 @@ pub(crate) fn tab_chip(
                         .flex()
                         .items_center()
                         .justify_center()
-                        .opacity(0.0)
-                        .group_hover(group, |s| s.opacity(1.0))
+                        .opacity(shown)
                         .child(
                             crate::icons::icon(crate::icons::CLOSE)
                                 .size(px(12.0))
@@ -309,5 +365,236 @@ pub(crate) fn tab_strip_region(
             .into_any_element()
     } else {
         region.into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    use gpui::{
+        Background, Bounds, Context, Hsla, Modifiers, Pixels, Render, VisualTestContext, Window,
+        point,
+    };
+
+    use super::*;
+
+    /// Which ring a [`Stops`] window's first control wears.
+    #[derive(Clone, Copy)]
+    enum Wear {
+        Ring,
+        Inset,
+        Revealing,
+    }
+
+    /// Two 40 × 20 controls in a row, red and blue, the first a keyboard stop wearing `wear`;
+    /// a third, green, holds the keyboard first for the pointer test.
+    struct Stops {
+        wear: Wear,
+        presses: Rc<Cell<usize>>,
+        holder: gpui::FocusHandle,
+    }
+
+    const RED: Hsla = Hsla { h: 0.0, s: 1.0, l: 0.5, a: 1.0 };
+    const BLUE: Hsla = Hsla { h: 0.66, s: 1.0, l: 0.5, a: 1.0 };
+
+    impl Render for Stops {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let theme = Theme::dark();
+            let presses = self.presses.clone();
+            let first = div()
+                .id("first")
+                .w(px(40.0))
+                .h(px(20.0))
+                .rounded(px(6.0))
+                .bg(RED)
+                .on_click(move |_, _, _| presses.set(presses.get() + 1));
+            let first = match self.wear {
+                Wear::Ring => key_stop(first, &theme),
+                Wear::Inset => key_stop_inset(first, &theme),
+                Wear::Revealing => key_stop_revealing(first.opacity(0.0), &theme),
+            };
+            div()
+                .p(px(10.0))
+                .flex()
+                .gap(px(8.0))
+                .child(first)
+                .child(div().w(px(40.0)).h(px(20.0)).bg(BLUE))
+                .child(
+                    div()
+                        .id("holder")
+                        .track_focus(&self.holder)
+                        .size(px(10.0))
+                        .bg(gpui::green()),
+                )
+        }
+    }
+
+    /// A [`Stops`] window: its presses, the handle that holds the keyboard first, the window.
+    fn stops(
+        wear: Wear,
+        cx: &mut gpui::TestAppContext,
+    ) -> (Rc<Cell<usize>>, gpui::FocusHandle, &mut VisualTestContext) {
+        cx.update(|cx| cx.set_global(Theme::dark()));
+        let presses = Rc::new(Cell::new(0));
+        let (view, cx) = cx.add_window_view({
+            let presses = presses.clone();
+            move |_, cx| Stops { wear, presses, holder: cx.focus_handle() }
+        });
+        let holder = cx.update(|_, cx| view.read(cx).holder.clone());
+        (presses, holder, cx)
+    }
+
+    fn draw(cx: &mut VisualTestContext) -> (Vec<gpui::Quad>, f32) {
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear(cx);
+            (window.painted_quads(), window.scale_factor())
+        })
+    }
+
+    /// The quad painted in `fill`, in points.
+    fn filled(quads: &[gpui::Quad], fill: Hsla, scale: f32) -> Option<Bounds<Pixels>> {
+        quads.iter().find(|quad| quad.background == Background::from(fill)).map(|quad| {
+            let b = quad.bounds;
+            Bounds::new(
+                point(px(b.origin.x.0 / scale), px(b.origin.y.0 / scale)),
+                gpui::size(px(b.size.width.0 / scale), px(b.size.height.0 / scale)),
+            )
+        })
+    }
+
+    /// The ring the frame painted in the accent, in points, with its thickness.
+    fn ring(quads: &[gpui::Quad], scale: f32) -> Option<(Bounds<Pixels>, f32)> {
+        let accent = Theme::dark().accent;
+        quads.iter().find(|quad| quad.border_color == accent).map(|quad| {
+            let b = quad.bounds;
+            (
+                Bounds::new(
+                    point(px(b.origin.x.0 / scale), px(b.origin.y.0 / scale)),
+                    gpui::size(px(b.size.width.0 / scale), px(b.size.height.0 / scale)),
+                ),
+                quad.border_widths.top.0 / scale,
+            )
+        })
+    }
+
+    /// Focus the first stop from the keyboard, as Tab does.
+    fn tab_in(cx: &mut VisualTestContext) {
+        cx.simulate_keystrokes("a");
+        cx.update(|window, cx| window.focus_next(cx));
+    }
+
+    /// The keyboard ring is 2 px of the accent 2 px clear of the control, and drawing it moves
+    /// neither the control nor its neighbour (M8).
+    #[gpui::test]
+    fn a_keyboard_stop_rings_clear_of_its_edge_and_moves_nothing(cx: &mut gpui::TestAppContext) {
+        let (_, _, cx) = stops(Wear::Ring, cx);
+        let (quads, scale) = draw(cx);
+        assert!(ring(&quads, scale).is_none(), "no ring at rest");
+        let (red, blue) = (filled(&quads, RED, scale).unwrap(), filled(&quads, BLUE, scale).unwrap());
+        tab_in(cx);
+        let (quads, scale) = draw(cx);
+        let (ring, width) = ring(&quads, scale).expect("the keyboard rings the stop");
+        assert_eq!(ring, red.dilate(px(RING_OFFSET + RING_WIDTH)));
+        assert_eq!(width, RING_WIDTH);
+        assert_eq!(filled(&quads, RED, scale).unwrap(), red, "the control holds its place");
+        assert_eq!(filled(&quads, BLUE, scale).unwrap(), blue, "its neighbour holds its place");
+    }
+
+    /// A row's ring sits just inside its edge, where a list's clip cannot cut it.
+    #[gpui::test]
+    fn an_inset_ring_sits_inside_the_edge(cx: &mut gpui::TestAppContext) {
+        let (_, _, cx) = stops(Wear::Inset, cx);
+        let (quads, scale) = draw(cx);
+        let red = filled(&quads, RED, scale).unwrap();
+        tab_in(cx);
+        let (quads, scale) = draw(cx);
+        let (ring, width) = ring(&quads, scale).expect("the keyboard rings the row");
+        assert_eq!(ring, red);
+        assert_eq!(width, RING_WIDTH);
+    }
+
+    /// A control shown only on hover shows, ringed, while it has the keyboard.
+    #[gpui::test]
+    fn a_revealed_control_shows_while_it_has_the_keyboard(cx: &mut gpui::TestAppContext) {
+        let (_, _, cx) = stops(Wear::Revealing, cx);
+        let (quads, scale) = draw(cx);
+        assert!(filled(&quads, RED, scale).is_none(), "hidden at rest");
+        tab_in(cx);
+        let (quads, scale) = draw(cx);
+        assert!(filled(&quads, RED, scale).is_some(), "shown with the keyboard");
+        assert!(ring(&quads, scale).is_some(), "and ringed");
+    }
+
+    /// Enter and Space press a stop; a pointer press presses it too but leaves the keyboard
+    /// where it was.
+    #[gpui::test]
+    fn a_stop_answers_its_keys_and_a_click_keeps_the_keyboard(cx: &mut gpui::TestAppContext) {
+        let (presses, holder, cx) = stops(Wear::Ring, cx);
+        draw(cx);
+        tab_in(cx);
+        for key in ["enter", "space"] {
+            cx.simulate_keystrokes(key);
+            cx.simulate_event(gpui::KeyUpEvent {
+                keystroke: gpui::Keystroke::parse(key).unwrap(),
+            });
+        }
+        assert_eq!(presses.get(), 2, "Enter and Space each press once");
+
+        cx.update(|window, cx| window.focus(&holder, cx));
+        let (quads, scale) = draw(cx);
+        let red = filled(&quads, RED, scale).unwrap();
+        cx.simulate_click(red.center(), Modifiers::none());
+        assert_eq!(presses.get(), 3, "the pointer presses it");
+        assert!(
+            cx.update(|window, _| holder.is_focused(window)),
+            "the keyboard stays where it was"
+        );
+    }
+
+    struct Chip {
+        dirty: bool,
+    }
+
+    impl Render for Chip {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let theme = Theme::dark();
+            div().p(px(10.0)).child(tab_chip(
+                TabChip {
+                    id: "chip",
+                    close_id: "chip-close",
+                    ix: 0,
+                    active: false,
+                    title: "notes.md".into(),
+                    dirty: self.dirty,
+                    leading: div().into_any_element(),
+                },
+                &theme,
+                |_, _, _| {},
+            ))
+        }
+    }
+
+    /// A tab's ✕ fades in with its hover (M23): the unsaved dot it stands over fades out with
+    /// the same hover, so with motion reduced the dot is gone once the pointer is over the tab.
+    #[gpui::test]
+    fn a_tabs_close_fades_with_its_hover(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(Theme::dark());
+            cx.set_reduce_motion(true);
+        });
+        let (_, cx) = cx.add_window_view(|_, _| Chip { dirty: true });
+        let dot = Theme::dark().text_muted;
+        let (quads, scale) = draw(cx);
+        let shown = filled(&quads, dot, scale).expect("the unsaved dot at rest");
+        cx.simulate_mouse_move(
+            point(shown.center().x - px(40.0), shown.center().y),
+            None,
+            Modifiers::none(),
+        );
+        let (quads, scale) = draw(cx);
+        assert!(filled(&quads, dot, scale).is_none(), "the hover hands the slot to the ✕");
     }
 }

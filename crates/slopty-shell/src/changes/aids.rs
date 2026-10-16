@@ -266,6 +266,9 @@ impl Changes {
                 crate::theme::wash(0.12),
             ))
             .on_hover(motion::hover_listener("changes-turn-trigger"))
+            // slopty: a keyboard stop with the shell's ring (M8).
+            .tab_index(0)
+            .map(|el| crate::surface_chrome::focus_ring(el, theme))
             .occlude()
             .on_mouse_down(
                 gpui::MouseButton::Left,
@@ -337,6 +340,8 @@ impl Changes {
                 popover::picker_row(theme, picked.is_none(), false, "changes-turn-row-latest")
                     .id("changes-turn-row-latest")
                     .role(gpui::Role::MenuItem)
+                    // slopty: a keyboard stop with the shell's ring, inside the menu (M8).
+                    .map(|el| crate::surface_chrome::key_stop_inset(el, theme))
                     .aria_label("Latest turn")
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.pick_turn(None, cx);
@@ -351,6 +356,8 @@ impl Changes {
             popover::picker_row(theme, selected, false, format!("changes-turn-row-{ix}"))
                 .id(("changes-turn-row", ix))
                 .role(gpui::Role::MenuItem)
+                // slopty: a keyboard stop with the shell's ring, inside the menu (M8).
+                .map(|el| crate::surface_chrome::key_stop_inset(el, theme))
                 .aria_label(SharedString::from(turn.label.clone()))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.pick_turn(Some(id.clone()), cx);
@@ -612,7 +619,9 @@ impl Changes {
                             }
                         })
                         .when_some(file, |el, ix| {
-                            el.on_click(cx.listener(move |this, _, _, cx| this.scroll_to_file(ix, cx)))
+                            // slopty: a keyboard stop with the shell's ring, inside the tree (M8).
+                            el.map(|el| crate::surface_chrome::key_stop_inset(el, theme))
+                                .on_click(cx.listener(move |this, _, _, cx| this.scroll_to_file(ix, cx)))
                         })
                         .child(icon)
                         .child(
@@ -684,7 +693,8 @@ fn glyph_toggle(
             }
         })
         .occlude()
-        .on_mouse_down(gpui::MouseButton::Left, |_, window, _| window.prevent_default())
+        // slopty: a keyboard stop with the shell's ring (M8).
+        .map(|el| crate::surface_chrome::key_stop(el, theme))
         .hint(label)
         .child(
             div()

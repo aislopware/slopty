@@ -295,7 +295,7 @@ impl Render for DevicesPage {
                                 .tab_index(0)
                                 .role(gpui::Role::Button)
                                 .aria_label("Copy link")
-                                .focus_visible(|s| s.border_2().border_color(theme.accent))
+                                .map(|el| crate::surface_chrome::focus_ring(el, &theme))
                                 .on_click(cx.listener(move |_, _, _, cx| {
                                     cx.write_to_clipboard(ClipboardItem::new_string(link.clone()));
                                     crate::toast::success(cx, "Link copied");
@@ -308,7 +308,7 @@ impl Render for DevicesPage {
                                 .tab_index(0)
                                 .role(gpui::Role::Button)
                                 .aria_label("Done")
-                                .focus_visible(|s| s.border_2().border_color(theme.accent))
+                                .map(|el| crate::surface_chrome::focus_ring(el, &theme))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.inviting = false;
                                     cx.notify();
@@ -369,7 +369,7 @@ impl Render for DevicesPage {
                     .tab_index(0)
                     .role(gpui::Role::Button)
                     .aria_label(format!("{} {}", action.label, device.name))
-                    .focus_visible(|s| s.border_2().border_color(theme.accent))
+                    .map(|el| crate::surface_chrome::focus_ring(el, &theme))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.run_action(id.clone(), run.clone(), cx);
                     }))
@@ -411,7 +411,7 @@ impl Render for DevicesPage {
                             .tooltip(widgets::text_tooltip(if id_copied { "Copied" } else { "Copy this device's ID" }))
                             .tooltip_show_delay(widgets::TOOLTIP_DELAY)
                             .aria_label(format!("Copy device ID {}", device.id))
-                            .focus_visible(|s| s.border_2().border_color(theme.accent))
+                            .map(|el| crate::surface_chrome::focus_ring(el, &theme))
                             .on_click(cx.listener(
                                 move |this, _, _, cx| {
                                     this.copy_id(copy_id.clone(), cx);
@@ -458,7 +458,7 @@ impl Render for DevicesPage {
                         .tab_index(0)
                         .role(gpui::Role::Button)
                         .aria_label("Add device")
-                        .focus_visible(|s| s.border_2().border_color(theme.accent))
+                        .map(|el| crate::surface_chrome::focus_ring(el, &theme))
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.show_add_device(Choice::ThisMac, window, cx);
                         })),
@@ -505,7 +505,7 @@ impl Render for DevicesPage {
                             .tab_index(0)
                             .role(gpui::Role::Button)
                             .aria_label(format!("{} server", action.label))
-                            .focus_visible(|s| s.border_2().border_color(theme.accent))
+                            .map(|el| crate::surface_chrome::focus_ring(el, &theme))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.run_action("server".to_owned(), run.clone(), cx);
                             }))
@@ -519,7 +519,7 @@ impl Render for DevicesPage {
                                 .tab_index(0)
                                 .role(gpui::Role::Button)
                                 .aria_label("Connect a phone or iPad")
-                                .focus_visible(|s| s.border_2().border_color(theme.accent))
+                                .map(|el| crate::surface_chrome::focus_ring(el, &theme))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.inviting = true;
                                     cx.notify();
@@ -533,7 +533,7 @@ impl Render for DevicesPage {
                             .tab_index(0)
                             .role(gpui::Role::Button)
                             .aria_label(format!("{action} server"))
-                            .focus_visible(|s| s.border_2().border_color(theme.accent))
+                            .map(|el| crate::surface_chrome::focus_ring(el, &theme))
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.show_add_device(Choice::Server, window, cx);
                             })),

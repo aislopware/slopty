@@ -105,18 +105,24 @@ pub(super) fn toolbar_button_keyed(
     label: &'static str,
     action: Box<dyn gpui::Action>,
     focus: FocusHandle,
+    theme: &crate::theme::Theme,
     cx: &gpui::App,
 ) -> gpui::Stateful<gpui::Div> {
     use crate::settings::widgets::{ActionHint as _, Keys};
-    toolbar_button_frame(id).action_hint(label, Keys::ActionIn(action, focus), cx)
+    toolbar_button_frame(id, theme).action_hint(label, Keys::ActionIn(action, focus), cx)
 }
 
-pub(super) fn toolbar_button(id: &'static str, label: &'static str) -> gpui::Stateful<gpui::Div> {
+pub(super) fn toolbar_button(
+    id: &'static str,
+    label: &'static str,
+    theme: &crate::theme::Theme,
+) -> gpui::Stateful<gpui::Div> {
     use crate::settings::widgets::ActionHint as _;
-    toolbar_button_frame(id).hint(label)
+    toolbar_button_frame(id, theme).hint(label)
 }
 
-fn toolbar_button_frame(id: &'static str) -> gpui::Stateful<gpui::Div> {
+// slopty: a keyboard stop with the shell's ring; a press leaves the keyboard where it was (M8).
+fn toolbar_button_frame(id: &'static str, theme: &crate::theme::Theme) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
         .size(px(TOOLBAR_BUTTON_SIZE))
@@ -128,9 +134,7 @@ fn toolbar_button_frame(id: &'static str) -> gpui::Stateful<gpui::Div> {
         .cursor_pointer()
         .role(gpui::Role::Button)
         .occlude()
-        .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
-            window.prevent_default()
-        })
+        .map(|el| crate::surface_chrome::key_stop(el, theme))
         .hover(|style| style.bg(crate::theme::wash(0.14)))
 }
 
@@ -227,6 +231,8 @@ pub(super) fn state_button(
         .bg(crate::theme::wash(0.04))
         .hover(|style| style.bg(crate::theme::wash(0.09)))
         .cursor_pointer()
+        // slopty: a keyboard stop with the shell's ring (M8).
+        .map(|el| crate::surface_chrome::key_stop(el, theme))
         .flex()
         .flex_row()
         .items_center()
@@ -685,6 +691,8 @@ impl FilesSurface {
                                 .cursor_pointer()
                                 .role(gpui::Role::Button)
                                 .aria_label("Refresh workspace files now")
+                                // slopty: a keyboard stop with the shell's ring (M8).
+                                .map(|el| crate::surface_chrome::key_stop(el, theme))
                                 .text_color(theme.text_muted)
                                 .hover(|style| style.bg(crate::theme::wash(0.07)))
                                 .child("Refresh now")
@@ -860,7 +868,8 @@ impl FilesSurface {
             tree_list_rows: Vec::new(),
             tree_list_generation: 0,
             tree_bar: crate::popover::MenuScrollbarState::default(),
-            tree_focus: cx.focus_handle(),
+            // slopty: the tree is one keyboard stop; its arrows walk the rows (M8).
+            tree_focus: cx.focus_handle().tab_stop(true),
             search,
             search_restore_tree_focus: false,
             search_state: FileSearchState::default(),
@@ -1460,6 +1469,7 @@ impl FilesSurface {
                     },
                     Box::new(ToggleHiddenFiles),
                     self.tree_focus.clone(),
+                    theme,
                     cx,
                 )
                 .debug_selector(|| "files-toggle-ignored".into())

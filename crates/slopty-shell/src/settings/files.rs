@@ -162,7 +162,7 @@ impl Render for FilesSettingsPage {
                             } else {
                                 gpui::Toggled::False
                             })
-                            .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
+                            .map(|el| crate::surface_chrome::focus_ring_revealing(el, &theme))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.autosave_enabled = !this.autosave_enabled;
                                 cx.emit(FilesSettingsEvent::AutosaveChanged(this.autosave_enabled));
@@ -222,7 +222,7 @@ impl Render for FilesSettingsPage {
                             } else {
                                 gpui::Toggled::False
                             })
-                            .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
+                            .map(|el| crate::surface_chrome::focus_ring_revealing(el, &theme))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.word_wrap = !this.word_wrap;
                                 cx.emit(FilesSettingsEvent::WordWrapChanged(this.word_wrap));
@@ -260,7 +260,7 @@ impl Render for FilesSettingsPage {
                             } else {
                                 gpui::Toggled::False
                             })
-                            .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
+                            .map(|el| crate::surface_chrome::focus_ring_revealing(el, &theme))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.show_all_files = !this.show_all_files;
                                 cx.emit(FilesSettingsEvent::ShowAllFilesChanged(

@@ -621,7 +621,7 @@ pub fn badge(theme: &Theme, label: impl Into<SharedString>) -> gpui::Div {
 
 pub const SWITCH_WIDTH: f32 = 44.8;
 const SWITCH_HEIGHT: f32 = 28.8;
-const SWITCH_TRACK_HEIGHT: f32 = 20.8;
+pub(crate) const SWITCH_TRACK_HEIGHT: f32 = 20.8;
 const SWITCH_SIDE_INSET: f32 = 1.6;
 const SWITCH_THUMB_WIDTH: f32 = 24.0;
 const SWITCH_THUMB_HEIGHT: f32 = SWITCH_TRACK_HEIGHT - 2.0 * SWITCH_SIDE_INSET;
@@ -629,12 +629,17 @@ const SWITCH_MARK_SIZE: f32 = 7.2;
 
 /// A pill switch with the on/off marks nested beneath a sliding thumb.
 /// The caller owns activation and accessibility; only the thumb interpolates.
+/// The element is the pill itself, its row's room kept by a margin, so a
+/// focus ring on it hugs the track.
 pub fn toggle_switch(theme: &Theme, on: bool, key: impl Into<SharedString>) -> gpui::Div {
     let key: SharedString = key.into();
     div()
         .flex_none()
         .w(px(SWITCH_WIDTH))
-        .h(px(SWITCH_HEIGHT))
+        .h(px(SWITCH_TRACK_HEIGHT))
+        // slopty: the pill is the element, so the ring follows it (M8).
+        .my(px((SWITCH_HEIGHT - SWITCH_TRACK_HEIGHT) / 2.0))
+        .rounded_full()
         .child(SwitchVisual {
             theme: theme.clone(),
             on,
@@ -757,7 +762,7 @@ impl RenderOnce for SwitchVisual {
             + (SWITCH_WIDTH - SWITCH_THUMB_WIDTH - 2.0 * SWITCH_SIDE_INSET) * position;
         let track_element = div()
             .absolute()
-            .top(px((SWITCH_HEIGHT - SWITCH_TRACK_HEIGHT) / 2.0))
+            .top_0()
             .left_0()
             .w(px(SWITCH_WIDTH))
             .h(px(SWITCH_TRACK_HEIGHT))
@@ -817,7 +822,7 @@ impl RenderOnce for SwitchVisual {
             );
         let thumb_element = div()
             .absolute()
-            .top(px((SWITCH_HEIGHT - SWITCH_THUMB_HEIGHT) / 2.0))
+            .top(px(SWITCH_SIDE_INSET))
             .left(px(thumb_left))
             .w(px(SWITCH_THUMB_WIDTH))
             .h(px(SWITCH_THUMB_HEIGHT))
@@ -853,7 +858,7 @@ impl RenderOnce for SwitchVisual {
         div()
             .relative()
             .w(px(SWITCH_WIDTH))
-            .h(px(SWITCH_HEIGHT))
+            .h(px(SWITCH_TRACK_HEIGHT))
             .child(track_element)
             .child(thumb_element)
     }
@@ -966,6 +971,59 @@ mod switch_tests {
         assert_eq!(reverse.value(halfway + Duration::from_millis(180)), 0.0);
         assert_eq!(forward.value(now + Duration::from_millis(180)), 1.0);
     }
+
+    struct Switched;
+
+    impl gpui::Render for Switched {
+        fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+            let theme = Theme::dark();
+            div()
+                .flex()
+                .flex_col()
+                .items_start()
+                .p(px(10.0))
+                .child(
+                    toggle_switch(&theme, true, "ringed")
+                        .id("ringed")
+                        .tab_index(0)
+                        .map(|el| crate::surface_chrome::focus_ring(el, &theme)),
+                )
+                .child(div().w(px(10.0)).h(px(10.0)).bg(gpui::red()))
+        }
+    }
+
+    /// The switch is the pill, so the keyboard's ring hugs the track 2 px clear, and the row
+    /// keeps the switch's 28.8 pt (M8).
+    #[gpui::test]
+    fn the_switch_ring_hugs_its_pill_and_its_row_keeps_its_height(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::dark()));
+        let (_, cx) = cx.add_window_view(|_, _| Switched);
+        cx.simulate_keystrokes("a");
+        cx.update(|window, cx| window.focus_next(cx));
+        let (quads, scale) = cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear(cx);
+            (window.painted_quads(), window.scale_factor())
+        });
+        let points = |b: gpui::Bounds<gpui::ScaledPixels>| {
+            [b.origin.x.0 / scale, b.origin.y.0 / scale, b.size.width.0 / scale, b.size.height.0 / scale]
+        };
+        // Quads land on whole pixels, so 28.8 is drawn within half a pixel.
+        let accent = Theme::dark().accent;
+        let ring = quads.iter().find(|q| q.border_color == accent).map(|q| points(q.bounds));
+        let reach = crate::surface_chrome::RING_OFFSET + crate::surface_chrome::RING_WIDTH;
+        let [x, y, w, h] = ring.expect("the keyboard rings the switch");
+        assert!((w - (SWITCH_WIDTH + 2.0 * reach)).abs() <= 0.5, "width {w}");
+        assert!((h - (SWITCH_TRACK_HEIGHT + 2.0 * reach)).abs() <= 0.5, "height {h}");
+        let top = y + reach - (SWITCH_HEIGHT - SWITCH_TRACK_HEIGHT) / 2.0;
+        assert!((x + reach - 10.0).abs() <= 0.5 && (top - 10.0).abs() <= 0.5, "at {x} {y}");
+        let below = quads
+            .iter()
+            .find(|q| q.background == gpui::Background::from(gpui::red()))
+            .map(|q| points(q.bounds))
+            .unwrap();
+        assert!((below[1] - (10.0 + SWITCH_HEIGHT)).abs() <= 0.5, "the row keeps 28.8: {below:?}");
+    }
 }
 
 struct TabSelectionTravel {
@@ -1076,8 +1134,8 @@ pub(crate) fn select_fill(theme: &Theme, lifted: bool) -> gpui::Hsla {
 
 /// The trigger of every settings dropdown: a borderless filled pill. The
 /// caller adds the value ([`select_value`], after any leading glyph), then
-/// [`select_chevron`], plus its own listeners. The transparent edge is held
-/// for the focus ring, so focusing never shifts the label.
+/// [`select_chevron`], plus its own listeners. Its focus ring is paint only,
+/// so focusing never shifts the label.
 pub fn select_trigger(
     theme: &Theme,
     id: impl Into<SharedString>,
@@ -1086,7 +1144,6 @@ pub fn select_trigger(
     let id: SharedString = id.into();
     let hover_key: SharedString = format!("{id}-hover").into();
     let lifted = select_fill(theme, true);
-    let accent = theme.accent;
     div()
         .id(id)
         .relative()
@@ -1096,8 +1153,6 @@ pub fn select_trigger(
         .pl(px(10.0))
         .pr(px(8.0))
         .rounded(px(8.0))
-        .border_1()
-        .border_color(gpui::transparent_black())
         .bg(if open {
             lifted
         } else {
@@ -1114,7 +1169,7 @@ pub fn select_trigger(
         .tab_index(0)
         .role(gpui::Role::Button)
         .aria_expanded(open)
-        .focus_visible(move |s| s.border_color(accent))
+        .map(|el| crate::surface_chrome::focus_ring(el, theme))
 }
 
 /// The trigger's current value, truncating before the chevron.

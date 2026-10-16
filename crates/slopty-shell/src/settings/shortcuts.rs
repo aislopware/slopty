@@ -348,7 +348,7 @@ fn binding_control(
                     .aria_label(format!("Reset {} shortcut", id.label()))
                     .min_h(px(24.0))
                     .tab_index(0)
-                    .focus_visible(move |style| style.border_2().border_color(accent))
+                    .map(|el| crate::surface_chrome::focus_ring(el, theme))
                     .text_size(crate::typography::ui_rems(11.0))
                     .text_color(theme.text_muted)
                     .cursor_pointer()
@@ -371,11 +371,7 @@ fn binding_control(
                 .h(px(widgets::SELECT_HEIGHT))
                 .px(px(12.0))
                 .rounded(px(8.0))
-                // Same glass wash as the settings dropdowns; the
-                // transparent edge is held for the focus ring.
-                .border_1()
-                .border_color(gpui::transparent_black())
-                .focus_visible(move |style| style.border_color(accent))
+                .map(|el| crate::surface_chrome::focus_ring(el, theme))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -384,10 +380,16 @@ fn binding_control(
                 .cursor_pointer()
                 .map(|el| {
                     if is_recording {
+                        // slopty: recording draws its edge inside the chip, so the chip never grows.
                         el.bg(accent.opacity(0.16))
-                            .border_color(accent.opacity(0.55))
+                            .outline_ring(gpui::Outline {
+                                color: accent.opacity(0.55),
+                                width: px(1.0),
+                                offset: px(-1.0),
+                            })
                             .text_color(theme.text)
                     } else {
+                        // Same glass wash as the settings dropdowns.
                         let hover_key = format!("shortcut-combo-{ix}-hover");
                         el.bg(crate::motion::hover_blend(
                             &hover_key,
@@ -630,7 +632,7 @@ impl Render for ShortcutsPage {
                     } else {
                         gpui::Toggled::False
                     })
-                    .focus_visible(|s| s.border_2().border_color(theme.accent))
+                    .map(|el| crate::surface_chrome::focus_ring(el, &theme))
                     .cursor_pointer()
                     .on_click(cx.listener(move |_, _, _, cx| {
                         crate::settings::set_transcript_compact_mode(!compact_mode, cx);
@@ -664,7 +666,7 @@ impl Render for ShortcutsPage {
                     } else {
                         gpui::Toggled::False
                     })
-                    .focus_visible(|s| s.border_2().border_color(theme.accent))
+                    .map(|el| crate::surface_chrome::focus_ring(el, &theme))
                     .cursor_pointer()
                     .on_click(cx.listener(move |_, _, _, cx| {
                         set_compact_model_picker(!compact_model_picker, cx);
@@ -703,7 +705,7 @@ impl Render for ShortcutsPage {
                 } else {
                     gpui::Toggled::False
                 })
-                .focus_visible(|s| s.border_2().border_color(theme.accent))
+                .map(|el| crate::surface_chrome::focus_ring(el, &theme))
                 .cursor_pointer()
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.set_escape_stops_active_agent(!escape_stops_active_agent, cx);

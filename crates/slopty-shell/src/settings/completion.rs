@@ -99,7 +99,8 @@ impl HarnessesPage {
                 })
                 .tab_index(0)
                 .cursor_pointer()
-                .focus_visible(|s| s.border_2().border_color(theme.accent))
+                // slopty: the whole row is the stop, its ring inside its edge (M8).
+                .map(|el| crate::surface_chrome::focus_ring_inset(el, theme))
                 .on_click(
                     cx.listener(move |page, _, _, cx| page.toggle_completion(harness, dollar, cx)),
                 )

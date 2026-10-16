@@ -24,7 +24,7 @@ pub const CONTROL_RADIUS: f32 = crate::surface_chrome::CONTROL_RADIUS;
 pub const ICON_SIZE: f32 = crate::surface_chrome::ICON_SIZE;
 /// The room between a toolbar's controls.
 pub const CONTROL_GAP: f32 = crate::surface_chrome::CONTROL_GAP;
-/// The shell's keyboard focus ring (a hairline that takes the accent), for Slopty's own controls.
+/// The shell's keyboard focus ring (2 px of the accent, 2 px clear), for Slopty's own controls.
 pub use crate::surface_chrome::focus_ring;
 
 thread_local! {
@@ -139,7 +139,7 @@ pub fn button(
         .tab_index(0)
         .flex_none()
         .whitespace_nowrap()
-        .focus_visible(|style| style.border_2().border_color(theme.accent))
+        .map(|el| crate::surface_chrome::focus_ring(el, theme))
         // slopty: pressed reads a step deeper (M22).
         .map(|el| match tone {
             Tone::Ghost => el.active(|style| style.bg(crate::theme::ink(0.09))),

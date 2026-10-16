@@ -473,6 +473,8 @@ impl FilesSurface {
                 .items_center()
                 .gap(px(6.0))
                 .cursor_pointer()
+                // slopty: a keyboard stop with the shell's ring, inside the tree (M8).
+                .map(|el| crate::surface_chrome::key_stop_inset(el, &theme))
                 .hover(|style| style.bg(crate::theme::wash(0.055)))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     let cursor = this
@@ -512,6 +514,9 @@ impl FilesSurface {
                 .flex()
                 .items_center()
                 .cursor_pointer()
+                // slopty: a keyboard stop with the shell's ring, inside the tree (M8).
+                .map(|el| crate::surface_chrome::key_stop_inset(el, &theme))
+                .role(gpui::Role::Button)
                 .hover(|style| style.bg(crate::theme::wash(0.055)))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.load_directory(directory.clone(), Some(cursor.clone()), cx);

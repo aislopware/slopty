@@ -135,6 +135,31 @@ pub fn symbol_fallbacks() -> gpui::FontFallbacks {
 /// depend on the kit).
 pub const SYMBOLS_FAMILY: &str = "Symbols Nerd Font Mono";
 
+// slopty: tracking without hair spaces (M47; `docs/decisions/ui.md`, "Letter spacing is laid
+// out, not shaped"). Geist has no U+200A, so the hair spaces zeron sets between a heading's
+// letters come from SF's, 105/2048 = 0.05 em: half the 0.1 em they stand for, through a font
+// fallback. Here each letter is its own run, the tracking the gap between them.
+/// The letters [`tracked_caps`] sets, each its own run: `label` in capitals.
+pub fn tracked_letters(label: &str) -> Vec<SharedString> {
+    label
+        .to_uppercase()
+        .chars()
+        .map(|letter| SharedString::from(letter.to_string()))
+        .collect()
+}
+
+/// `label` in capitals at `size` (px at the 16 px baseline, as [`ui_rems`]), its letters
+/// `em` of the size apart: a small-caps heading's 0.1 em.
+pub fn tracked_caps(label: &str, size: f32, em: f32) -> gpui::Div {
+    use gpui::{ParentElement as _, Styled as _};
+    gpui::div()
+        .flex()
+        .flex_row()
+        .text_size(ui_rems(size))
+        .gap(ui_rems(size * em))
+        .children(tracked_letters(label))
+}
+
 // slopty: figures that tick or line up (a timer, a count, a percentage) keep one width.
 /// Tabular figures (OpenType `tnum`): a number that changes or sits over another does not shift.
 pub fn tabular() -> gpui::FontFeatures {
@@ -718,6 +743,46 @@ pub fn set_font_size(size: UiFontSize, window: &mut Window, cx: &mut App) -> boo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tracked_letters_are_capitals_with_no_hair_space() {
+        let letters = tracked_letters("Sessions");
+        assert_eq!(letters.concat(), "SESSIONS");
+        assert_eq!(letters.len(), 8);
+        assert!(letters.iter().all(|letter| !letter.contains('\u{200A}')));
+    }
+
+    struct Tracked(std::rc::Rc<std::cell::RefCell<Vec<gpui::Bounds<gpui::Pixels>>>>);
+
+    impl gpui::Render for Tracked {
+        fn render(
+            &mut self,
+            _window: &mut Window,
+            _cx: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            let seen = self.0.clone();
+            tracked_caps("Turns", 10.0, 0.1)
+                .on_children_prepainted(move |bounds, _, _| *seen.borrow_mut() = bounds)
+        }
+    }
+
+    /// A heading's letters stand the tracking apart, laid out rather than spaced by a glyph:
+    /// 0.1 em of 10 px is 1 px between each pair.
+    #[gpui::test]
+    fn tracked_caps_set_their_letters_a_tenth_of_an_em_apart(cx: &mut gpui::TestAppContext) {
+        let seen = std::rc::Rc::default();
+        let (_, cx) = cx.add_window_view({
+            let seen = std::rc::Rc::clone(&seen);
+            move |_, _| Tracked(seen)
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let bounds = seen.borrow().clone();
+        assert_eq!(bounds.len(), 5, "one run per letter: {bounds:?}");
+        for pair in bounds.windows(2) {
+            let gap = f32::from(pair[1].left() - pair[0].right());
+            assert!((gap - 1.0).abs() < 0.01, "1 px apart: {gap}");
+        }
+    }
 
     #[test]
     fn tabular_figures_turn_on_tnum() {

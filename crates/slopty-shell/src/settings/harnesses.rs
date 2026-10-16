@@ -876,7 +876,7 @@ impl HarnessesPage {
                                     // No hover slab (it stopped short of the
                                     // toggle and boxed the row); the chevron
                                     // lifts instead, like a list disclosure.
-                                    .focus_visible(|s| s.border_2().border_color(theme.accent))
+                                    .map(|el| crate::surface_chrome::focus_ring(el, &theme))
                                     .on_click(cx.listener(move |page, _, _, cx| {
                                         page.toggle_agent_details(harness, cx)
                                     }))
@@ -985,9 +985,7 @@ impl HarnessesPage {
                                 } else {
                                     gpui::Toggled::False
                                 })
-                                .focus_visible(|s| {
-                                    s.border_2().border_color(theme.accent).opacity(1.0)
-                                })
+                                .map(|el| crate::surface_chrome::focus_ring_revealing(el, &theme))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.toggle(harness, !enabled, cx);
                                 }))
@@ -1063,7 +1061,7 @@ impl Render for HarnessesPage {
                             .mt(px(8.0))
                             .tab_index(0)
                             .role(gpui::Role::Button)
-                            .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
+                            .map(|el| crate::surface_chrome::focus_ring_revealing(el, &theme))
                             .on_click(cx.listener(|page, _, _, cx| {
                                 page.load(cx);
                                 cx.notify();

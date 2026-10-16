@@ -44,8 +44,9 @@ const EMPTY_PAD: f32 = 10.0;
 /// Fade band under a section list's edges (the sidebar's treatment, scaled
 /// to the shorter lists).
 const LIST_FADE_BAND: f32 = 16.0;
-/// Hover group of a section header (reveals its actions).
-const HEADER_GROUP: &str = "files-section-header";
+// slopty: the header's hover, faded; its actions fade in with it (M23).
+/// Hover fade of a section header (reveals its actions).
+const HEADER_REVEAL: &str = "files-section-header-reveal";
 /// Rows a section shows before "Show more" pages it, and the page size —
 /// the sidebar's Archived shelf numbers.
 pub(super) const INITIAL_ROWS: usize = 10;
@@ -474,15 +475,14 @@ impl FilesSurface {
     /// chat, or a fork of it through its latest completed response.
     fn render_chats_header_actions(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         // Hidden until the header is hovered, like the sidebar's row menus:
-        // the caret is the resting state, the actions appear on approach.
+        // the caret is the resting state, the actions fade in on approach
+        // and show while one has the keyboard.
         div()
             .flex_none()
             .flex()
             .flex_row()
             .items_center()
             .gap(px(2.0))
-            .opacity(0.0)
-            .group_hover(HEADER_GROUP, |s| s.opacity(1.0))
             .child(
                 header_action(
                     "files-sections-new-chat",
@@ -548,8 +548,10 @@ impl FilesSurface {
                 section.key()
             )))
             .debug_selector(move || format!("files-section-{}", section.key())) // slopty: tests
-            .group(HEADER_GROUP)
+            .when(actions.is_some(), |el| el.on_hover(motion::hover_listener(HEADER_REVEAL)))
             .role(gpui::Role::Button)
+            // slopty: a keyboard stop with the shell's ring (M8).
+            .map(|el| crate::surface_chrome::key_stop(el, theme))
             .aria_label(SharedString::from(format!(
                 "{} {}",
                 if open { "Collapse" } else { "Expand" },
@@ -853,7 +855,9 @@ fn header_action(
         .justify_center()
         .cursor_pointer()
         .hover(|s| s.bg(crate::theme::wash(0.09)))
-        .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+        .opacity(motion::hover_t(HEADER_REVEAL))
+        // slopty: a keyboard stop, shown while it has the keyboard (M8).
+        .map(|el| crate::surface_chrome::key_stop_revealing(el, theme))
         .map(|el| match action {
             Some(action) => el
                 .aria_keyshortcuts(crate::keys::aria_combo(crate::shell::NEW_SIDE_CHAT_KEY))
@@ -888,6 +892,8 @@ fn show_more_row(
         .pr(px(Theme::SPACE_SM))
         .rounded(px(8.0))
         .cursor_pointer()
+        // slopty: a keyboard stop with the shell's ring, inside the list (M8).
+        .map(|el| crate::surface_chrome::key_stop_inset(el, theme))
         .text_size(crate::typography::ui_rems(12.0))
         .text_color(theme.text_muted.opacity(0.7))
         .hover(|s| s.bg(theme.glass_hover()).text_color(theme.text_muted))
@@ -919,7 +925,8 @@ fn pill_button(
         .gap(px(5.0))
         .text_size(px(11.5))
         .text_color(theme.text)
-        .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+        // slopty: a keyboard stop with the shell's ring (M8).
+        .map(|el| crate::surface_chrome::key_stop(el, theme))
         .child(icon(icon_path).size(px(12.0)).text_color(theme.text_muted))
         .child(label)
 }
@@ -991,6 +998,8 @@ fn compact_row(id: String, theme: &Theme) -> gpui::Stateful<gpui::Div> {
         .rounded(px(8.0))
         .px(px(Theme::SPACE_SM))
         .cursor_pointer()
+        // slopty: a keyboard stop with the shell's ring, inside the list (M8).
+        .map(|el| crate::surface_chrome::key_stop_inset(el, theme))
         .text_color(theme.text.opacity(0.8))
         .hover(|s| s.bg(theme.glass_hover()).text_color(theme.text))
 }

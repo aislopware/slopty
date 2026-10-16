@@ -53,13 +53,13 @@ fn is_switch_activation(key: &str, is_held: bool) -> bool {
 
 fn interactive_switch(
     element: gpui::Stateful<gpui::Div>,
-    accent: gpui::Hsla,
+    ring: gpui::Outline,
     preference: NotificationPreference,
     cx: &mut Context<NotificationsPage>,
 ) -> gpui::Stateful<gpui::Div> {
     element
         .tab_index(0)
-        .focus_visible(move |style| style.border_2().border_color(accent))
+        .focus_visible(move |style| style.outline_ring(ring))
         .cursor_pointer()
         .on_click(cx.listener(move |this, _, _, cx| {
             this.toggle(preference, cx);
@@ -182,7 +182,7 @@ impl popover::ScrollRailHost for NotificationsPage {
 impl Render for NotificationsPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).for_settings_surface();
-        let accent = theme.accent;
+        let ring = crate::surface_chrome::ring(&theme, crate::surface_chrome::RING_OFFSET);
         let sound = self.sound;
         let completion_sound = self.completion_sound;
         let input_sound = self.input_sound;
@@ -190,17 +190,12 @@ impl Render for NotificationsPage {
         let desktop = self.desktop;
         let any_changed = self.any_changed();
         let toggle = |id: &'static str, label: &'static str, enabled: bool, interactive: bool| {
-            // Keep the visual inside its 56×40 activation target.
-            // Disabled subordinate controls remain named switches in the
+            // slopty: the switch is the stop, so its ring hugs the pill; the margin keeps the
+            // row's 40 pt. Disabled subordinate controls remain named switches in the
             // accessibility tree, but have no focus or input handlers.
-            div()
+            widgets::toggle_switch(&theme, enabled, id)
                 .id(id)
-                .flex_none()
-                .w(px(widgets::SWITCH_WIDTH))
-                .h(px(40.0))
-                .flex()
-                .items_center()
-                .justify_center()
+                .my(px((40.0 - widgets::SWITCH_TRACK_HEIGHT) / 2.0))
                 .role(gpui::Role::Switch)
                 .aria_label(label)
                 .aria_toggled(if enabled {
@@ -211,7 +206,6 @@ impl Render for NotificationsPage {
                 .when(!interactive, |el| {
                     el.aria_description("Unavailable while its parent setting is off")
                 })
-                .child(widgets::toggle_switch(&theme, enabled, id))
         };
         let card = widgets::section_card(&theme)
             .mt_0()
@@ -235,7 +229,7 @@ impl Render for NotificationsPage {
                     ))
                     .child(interactive_switch(
                         toggle("notifications-sound-toggle", "Session sounds", sound, true),
-                        accent,
+                        ring,
                         NotificationPreference::Sound,
                         cx,
                     )),
@@ -271,7 +265,7 @@ impl Render for NotificationsPage {
                         .when(sound, |el| {
                             interactive_switch(
                                 el,
-                                accent,
+                                ring,
                                 NotificationPreference::CompletionSound,
                                 cx,
                             )
@@ -307,7 +301,7 @@ impl Render for NotificationsPage {
                             sound,
                         )
                         .when(sound, |el| {
-                            interactive_switch(el, accent, NotificationPreference::InputSound, cx)
+                            interactive_switch(el, ring, NotificationPreference::InputSound, cx)
                         }),
                     ),
             )
@@ -342,7 +336,7 @@ impl Render for NotificationsPage {
                         .when(sound, |el| {
                             interactive_switch(
                                 el,
-                                accent,
+                                ring,
                                 NotificationPreference::AttentionSound,
                                 cx,
                             )
@@ -376,7 +370,7 @@ impl Render for NotificationsPage {
                             desktop,
                             true,
                         ),
-                        accent,
+                        ring,
                         NotificationPreference::Desktop,
                         cx,
                     )),

@@ -327,7 +327,7 @@ impl PermissionsPage {
                         .aria_label(SharedString::from(format!("Remove {}", row.rule)))
                         .tab_index(0)
                         .when(busy, |el| el.opacity(crate::theme::DISABLED_OPACITY).cursor_default())
-                        .focus_visible(|s| s.border_2().border_color(theme.accent))
+                        .map(|el| crate::surface_chrome::focus_ring(el, theme))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.change(false, behavior.clone(), rule.clone(), scope.clone(), cx);
                         }))
@@ -394,7 +394,7 @@ impl PermissionsPage {
                         .aria_label("Add rule")
                         .aria_disabled(rules.scopes.is_empty())
                         .tab_index(0)
-                        .focus_visible(|s| s.border_2().border_color(theme.accent))
+                        .map(|el| crate::surface_chrome::focus_ring(el, theme))
                         .on_click(cx.listener(|this, _, _, cx| this.add_rule(cx)))
                         .child("Add"),
                     ),

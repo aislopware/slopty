@@ -1469,38 +1469,6 @@ pub fn platform_combo_on(mac: bool, combo: &str) -> String {
         .join("-")
 }
 
-/// Human-readable combo for the shortcuts table ("mod-s" → "Cmd+S"/"Ctrl+S").
-pub fn display_combo(combo: &str) -> String {
-    display_combo_on(cfg!(target_os = "macos"), combo)
-}
-
-/// [`display_combo`] for an explicit platform (see [`combo_from_keystroke_on`]).
-pub fn display_combo_on(mac: bool, combo: &str) -> String {
-    combo
-        .split('-')
-        .map(|part| match part {
-            "mod" => if mac { "Cmd" } else { "Ctrl" }.to_string(),
-            "alt" => if mac { "Opt" } else { "Alt" }.to_string(),
-            "shift" => "Shift".to_string(),
-            other => {
-                let mut chars = other.chars();
-                match chars.next() {
-                    Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-                    None => String::new(),
-                }
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("+")
-}
-
-// slopty: a stored combo reads as `keys::combo_text` writes it, everywhere; this name stays only
-// for the past-sessions picker until it calls that itself.
-/// A stored combo as Slopty writes a key ([`crate::keys::combo_text`]).
-pub fn badge_combo(combo: &str) -> String {
-    crate::keys::combo_text(combo).to_string()
-}
-
 impl UiSettings {
     pub fn sidebar_pins(&self, profile_key: &str) -> &[String] {
         self.sidebar_pinned_session_ids_by_profile
@@ -3437,22 +3405,9 @@ mod tests {
         };
         assert_eq!(platform_combo("mod-s"), format!("{primary}-s"));
         assert_eq!(platform_combo("alt-f4"), "alt-f4");
-        let display_primary = if cfg!(target_os = "macos") {
-            "Cmd"
-        } else {
-            "Ctrl"
-        };
-        assert_eq!(
-            display_combo("mod-shift-s"),
-            format!("{display_primary}+Shift+S")
-        );
-        assert_eq!(display_combo("f5"), "F5");
-        assert_eq!(display_combo_on(true, "mod-alt-up"), "Cmd+Opt+Up");
-        assert_eq!(display_combo_on(false, "mod-alt-up"), "Ctrl+Alt+Up");
         // Literal ctrl passes through untouched — the macOS spelling of
         // session cycling.
         assert_eq!(platform_combo("ctrl-shift-tab"), "ctrl-shift-tab");
-        assert_eq!(display_combo("ctrl-shift-tab"), "Ctrl+Shift+Tab");
     }
 
     #[test]

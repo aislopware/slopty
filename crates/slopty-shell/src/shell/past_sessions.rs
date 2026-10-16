@@ -37,7 +37,7 @@ use super::command_palette::{
 use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::icons::{self, icon};
 use crate::popover;
-use crate::settings::{ShortcutId, SidebarOrganization, badge_combo};
+use crate::settings::{ShortcutId, SidebarOrganization};
 use crate::state::format_time_ago;
 use crate::theme::Theme;
 
@@ -351,7 +351,8 @@ impl Shell {
             return None;
         }
         let open = self.past_sessions.groups.get(EVERY_PROJECT).is_some_and(|h| h.open);
-        let shortcut = badge_combo(self.settings.keymap.get(ShortcutId::ResumeSession));
+        // slopty: a key reads as everywhere else (`keys::combo_text`).
+        let shortcut = crate::keys::combo_text(self.settings.keymap.get(ShortcutId::ResumeSession));
         let chevron = icon(icons::ALT_ARROW_RIGHT)
             .size(px(12.0))
             .flex_none()
@@ -480,7 +481,8 @@ impl Shell {
     /// History's header and, while open, its rows.
     fn render_history(&mut self, key: &str, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let open = self.past_sessions.groups.get(key).is_some_and(|h| h.open);
-        let shortcut = badge_combo(self.settings.keymap.get(ShortcutId::ResumeSession));
+        // slopty: a key reads as everywhere else (`keys::combo_text`).
+        let shortcut = crate::keys::combo_text(self.settings.keymap.get(ShortcutId::ResumeSession));
         let toggle = key.to_owned();
         let header = div()
             .id(SharedString::from(format!("history-toggle-{key}")))
@@ -970,7 +972,8 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let theme = Theme::of(cx).for_popup();
-        let shortcut = badge_combo(self.settings.keymap.get(ShortcutId::ResumeSession));
+        // slopty: a key reads as everywhere else (`keys::combo_text`).
+        let shortcut = crate::keys::combo_text(self.settings.keymap.get(ShortcutId::ResumeSession));
         let now = chrono::Utc::now();
         let view = cx.entity_id();
         let opening = self.past_sessions.opening.as_ref().map(|(key, _)| key.clone());

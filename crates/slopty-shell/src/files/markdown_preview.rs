@@ -1185,6 +1185,7 @@ impl MarkdownPreview {
                                         super::toolbar_button(
                                             "markdown-image-link",
                                             "Open image link",
+                                            theme,
                                         )
                                         .on_click(move |_, window, cx| {
                                             render::activate_link(
@@ -1232,7 +1233,11 @@ impl MarkdownPreview {
                                     .child(text)
                                     .when(external, |el| {
                                         let link = image_link.clone();
-                                        el.cursor_pointer().on_click(move |_, window, cx| {
+                                        // slopty: a keyboard stop with the shell's ring (M8).
+                                        el.cursor_pointer()
+                                            .role(gpui::Role::Link)
+                                            .map(|el| crate::surface_chrome::key_stop(el, theme))
+                                            .on_click(move |_, window, cx| {
                                             render::activate_link(
                                                 render::LinkTarget::new(&target, &target),
                                                 render::LinkAction::Primary,
@@ -1249,7 +1254,9 @@ impl MarkdownPreview {
                 });
                 opts.link = Some(link.clone());
                 opts.copy = Some(self.copy_ui_for(&opts.row_key, cx));
-                let group: gpui::SharedString = format!("{}-comment-{ix}", self.scope).into();
+                // slopty: the block's hover, faded; its comment adder fades in with it (M23).
+                let reveal: gpui::SharedString = format!("{}-comment-{ix}", self.scope).into();
+                let shown = crate::motion::hover_t(&reveal);
                 let comment_line = self.block_lines.get(ix).copied().filter(|_| {
                     self.comment_owner.is_some()
                         && !self.truncated
@@ -1263,13 +1270,14 @@ impl MarkdownPreview {
                 let comment_source = self.parsed_source.clone();
                 Some(
                     div()
+                        .id(reveal.clone())
                         .w_full()
                         .flex()
                         .flex_col()
                         .pb(px(render::MD_BLOCK_GAP))
                         // Include the comment gutter so moving from the block to
-                        // its button never leaves the hover group.
-                        .group(group.clone())
+                        // its button never leaves the hover.
+                        .on_hover(crate::motion::hover_listener(reveal))
                         .child(
                             div().w_full().flex().justify_center().px(px(24.0)).child(
                                 div()
@@ -1283,8 +1291,7 @@ impl MarkdownPreview {
                                                 .absolute()
                                                 .left(px(-20.0))
                                                 .top(px(3.0))
-                                                .opacity(0.0)
-                                                .group_hover(group, |style| style.opacity(1.0))
+                                                .opacity(shown)
                                                 .child(crate::comment_ui::render_comment_adder(
                                                     format!("{}-comment-add-{ix}", self.scope)
                                                         .into(),

@@ -21,11 +21,15 @@ fn button(
     // tooltips. Disabled controls have neither a pointer cursor nor a handler.
     // slopty: the tooltip names the key the browser binds (⌘[ ⌘] ⇧⌘R), resolved in its context.
     match action {
-        Some(action) => crate::files::toolbar_button_keyed(id, label, action, focus.clone(), cx),
-        None => crate::files::toolbar_button(id, label),
+        Some(action) => {
+            crate::files::toolbar_button_keyed(id, label, action, focus.clone(), theme, cx)
+        }
+        None => crate::files::toolbar_button(id, label, theme),
     }
+        // slopty: a control that cannot act is no keyboard stop (M8).
         .when(!enabled, |el| {
             el.cursor_default()
+                .tab_stop(false)
                 .opacity(crate::theme::DISABLED_OPACITY)
         })
         .child(
@@ -226,7 +230,10 @@ impl BrowserSurface {
                             .role(gpui::Role::Button)
                             .aria_label(format!("Open {} preview", service.name))
                             .when(available, |el| {
+                                // slopty: the row's keyboard stop; the row itself is the
+                                // pointer's larger target for the same press (M8).
                                 el.cursor_pointer()
+                                    .map(|el| surface_chrome::key_stop(el, theme))
                                     .hover(|style| style.bg(crate::theme::ink(0.05)))
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         cx.stop_propagation();
@@ -278,6 +285,9 @@ impl BrowserSurface {
                 .cursor_pointer()
                 .role(gpui::Role::Button)
                 .aria_label("Enter a website address")
+                .rounded(px(4.0))
+                // slopty: a keyboard stop with the shell's ring (M8).
+                .map(|el| surface_chrome::key_stop(el, theme))
                 .on_click(cx.listener(|this, _, window, cx| this.focus_address(window, cx)))
                 .child("Or enter a website address"),
         );
@@ -385,6 +395,8 @@ impl BrowserSurface {
                                 "Enter an address"
                             })
                             .hover(|style| style.bg(crate::theme::wash(0.10)))
+                            // slopty: a keyboard stop with the shell's ring (M8).
+                            .map(|el| surface_chrome::key_stop(el, theme))
                             .flex()
                             .items_center()
                             .gap(px(8.0))
@@ -643,7 +655,8 @@ impl Render for BrowserSurface {
                         .cursor_pointer()
                         .role(gpui::Role::Button)
                         .group("browser-go")
-                        .on_mouse_down(MouseButton::Left, |_, w, _| w.prevent_default())
+                        // slopty: a keyboard stop with the shell's ring (M8).
+                        .map(|el| surface_chrome::key_stop(el, &theme))
                         .on_click(cx.listener(|this, _, w, cx| this.submit(w, cx)))
                         .action_hint(
                             "Go to address",

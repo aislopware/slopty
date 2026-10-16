@@ -364,8 +364,12 @@ impl FilesSurface {
                             .id("tree-delete-cancel")
                             .role(gpui::Role::Button)
                             .aria_label("Cancel")
+                            // slopty: the dialog's own keys move the shell's ring (M8).
                             .when(!dialog.confirm_focused, |el| {
-                                el.bg(crate::theme::wash(0.12))
+                                el.outline_ring(crate::surface_chrome::ring(
+                                    &theme,
+                                    crate::surface_chrome::RING_OFFSET,
+                                ))
                             })
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.dismiss_tree_delete(false, window, cx)
@@ -377,7 +381,10 @@ impl FilesSurface {
                             .role(gpui::Role::Button)
                             .aria_label("Delete")
                             .when(dialog.confirm_focused, |el| {
-                                el.border_1().border_color(theme.text)
+                                el.outline_ring(crate::surface_chrome::ring(
+                                    &theme,
+                                    crate::surface_chrome::RING_OFFSET,
+                                ))
                             })
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.dismiss_tree_delete(true, window, cx)
