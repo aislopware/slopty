@@ -5061,6 +5061,7 @@ impl Pickers {
             return div().into_any_element();
         };
         let settings = self.render_setting_rows(SettingScope::Card, cx);
+        let model_label = row.model.label.clone();
         let toggles: Vec<AnyElement> = self
             .card_groups(cx)
             .into_iter()
@@ -5069,15 +5070,29 @@ impl Pickers {
             .map(|(i, group)| {
                 let on = group.choices.iter().any(|c| c.selected && !c.default);
                 let label = SharedString::from(group.label.clone());
+                // slopty: what fast mode costs, under its switch, as the TUI's picker says it.
+                let cost = fast_mode_cost(&group.id, &model_label);
                 popover::menu_row_nav(&theme, false, false, format!("card-toggle-{i}"))
                     .id(("card-toggle", i))
-                    .h(px(30.0))
-                    .py(px(0.0))
+                    .when(cost.is_none(), |row| row.h(px(30.0)).py(px(0.0)))
+                    .when(cost.is_some(), |row| row.min_h(px(30.0)).py(px(5.0)))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.toggle_card_option(group.clone(), cx);
                         cx.stop_propagation();
                     }))
-                    .child(div().flex_1().child(label))
+                    .child(
+                        div().flex_1().flex().flex_col().gap(px(2.0)).child(label).when_some(
+                            cost,
+                            |col, cost| {
+                                col.child(
+                                    div()
+                                        .text_size(crate::typography::ui_rems(11.5))
+                                        .text_color(theme.text_muted)
+                                        .child(SharedString::from(cost)),
+                                )
+                            },
+                        ),
+                    )
                     .child(crate::settings::widgets::toggle_switch(
                         &theme,
                         on,
@@ -6223,6 +6238,16 @@ fn resizing_chip_text(
     .fade_right(true)
     .fade_scroll_x(&overflow)
     .into_any_element()
+}
+
+// slopty: what Claude Code's fast mode costs, in its picker's words.
+fn fast_mode_cost(setting: &ModelSetting, model: &str) -> Option<String> {
+    matches!(setting, ModelSetting::Option(id) if id == "fastMode" || id == "fast_mode").then(|| {
+        format!(
+            "High-speed mode for {model}. Draws from usage credits at a higher rate. Separate \
+             rate limits apply."
+        )
+    })
 }
 
 /// Fast mode's `(on, off)` choices, whatever form a harness gives it: a

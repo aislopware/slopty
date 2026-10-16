@@ -212,7 +212,11 @@ impl ThreadState {
             }
             Action::CallNoted { item, note } => {
                 if self.item_index(item).is_some() {
-                    self.calls.insert(item.clone(), note.clone());
+                    let note = match self.calls.get(item) {
+                        Some(had) => note.clone().over(had),
+                        None => note.clone(),
+                    };
+                    self.calls.insert(item.clone(), note);
                 }
             }
             Action::TaskOutput { task, output } => {

@@ -295,8 +295,32 @@ pub fn entries(state: &ThreadState, look: &Look<'_>) -> Vec<SessionMessageEntry>
                         marked(message.command.as_deref(), look.words(&message.text), state);
                     with_images(words, thread, &id, &message.images)
                 });
+                // slopty: a plan sent to be implemented reads as the plan's own card under the
+                // message, as the TUI boxes it ("Plan to implement").
+                let plan = text
+                    .strip_prefix(IMPLEMENT_PLAN)
+                    .map(str::trim)
+                    .filter(|plan| !plan.is_empty())
+                    .map(str::to_owned);
+                let text = if plan.is_some() {
+                    IMPLEMENT_PLAN.trim_end_matches(':').to_owned()
+                } else {
+                    text
+                };
                 let parts = vec![MessagePart::Text { id: format!("{shown}:text"), text }];
                 made.own(own_entry(shown, MessageRole::User, parts, at, device));
+                if let Some(plan) = plan {
+                    let part = MessagePart::Text { id: format!("plan:implement:{id}"), text: plan };
+                    let mut entry = own_entry(
+                        format!("plan-card:implement:{id}"),
+                        MessageRole::User,
+                        vec![part],
+                        at,
+                        device,
+                    );
+                    entry.status = Some(MessageStatus::Complete);
+                    made.own(entry);
+                }
             }
             // What Slopty handed the agent from the person and other agents: an agent's words
             // as from it, a child's news as a quiet line.
@@ -323,17 +347,29 @@ pub fn entries(state: &ThreadState, look: &Look<'_>) -> Vec<SessionMessageEntry>
             }
             body => {
                 let mut parts = Vec::new();
-                // The TUI shows nothing of some calls: tool discovery, the agents list.
                 if let ItemBody::Tool(call) = body
-                    && !HIDDEN_TOOLS.contains(&call.name.as_str())
+                    && let Some(ToolDetail::Tasks { steps, .. }) = &call.detail
                 {
-                    if let Some(ToolDetail::Tasks { steps, .. }) = &call.detail {
-                        for step in steps.iter().filter(|step| !step.text.is_empty()) {
-                            if let Some(task) = &step.id {
-                                named.insert(task, &step.text);
-                            }
+                    for step in steps.iter().filter(|step| !step.text.is_empty()) {
+                        if let Some(task) = &step.id {
+                            named.insert(task, &step.text);
                         }
                     }
+                }
+                // slopty: a message the agent sends the person (Claude Code's brief tools) is
+                // its words, as the TUI draws it with no call around it.
+                let brief = match body {
+                    ItemBody::Tool(call) => brief_words(call),
+                    _ => None,
+                };
+                // The TUI shows nothing of some calls: tool discovery, the agents list, and a
+                // task list's every change but the last, which is the list as it stands.
+                if let Some(text) = brief {
+                    parts.push(MessagePart::Text { id: format!("{id}:brief"), text });
+                } else if let ItemBody::Tool(call) = body
+                    && !HIDDEN_TOOLS.contains(&call.name.as_str())
+                    && (call.kind != kind::TASKS || Some(ix) == last_tasks)
+                {
                     // The last task list is the thread's own as it stands, whole.
                     let plan = (Some(ix) == last_tasks).then_some(state.plan.as_ref()).flatten();
                     let child = call.child.and_then(|child| (look.child_run)(child));
@@ -376,7 +412,10 @@ pub fn entries(state: &ThreadState, look: &Look<'_>) -> Vec<SessionMessageEntry>
                         note_row(notice, look.words(&notice.text), &id, item.turn, at, state)
                 {
                     parts.push(MessagePart::Note { id: id.clone(), note: Box::new(note) });
-                } else if let Some(part) = part(&id, body, look) {
+                } else if let Some(mut part) = part(&id, body, look) {
+                    if let MessagePart::Reasoning { thought_ms, .. } = &mut part {
+                        *thought_ms = thought_for(state, ix);
+                    }
                     parts.push(part);
                 }
                 for part in parts {
@@ -416,6 +455,7 @@ pub fn entries(state: &ThreadState, look: &Look<'_>) -> Vec<SessionMessageEntry>
     for entry in &mut out {
         if entry.role == MessageRole::Assistant {
             entry.parts = super::folds::fold_tasks(std::mem::take(&mut entry.parts));
+            super::folds::agent_groups(&mut entry.parts);
         }
     }
     super::folds::done_lines(state, &mut out, &turns, &chrono::Local);
@@ -651,6 +691,17 @@ pub fn error_words(
     retrying: Option<&slopty_proto::thread::Retry>,
 ) -> (String, Option<String>) {
     let on = host.map(|host| format!(" on {host}")).unwrap_or_default();
+    // slopty: where the agent's own first line says what happened and what to do, in the TUI's
+    // words (a spend limit, a sign-in its organization refuses, a start it refused, a context
+    // that no longer fits), that line leads, its machine after it.
+    if let Some(head) = agent_headline(raw).filter(|_| retrying.is_none()) {
+        let words = match host {
+            Some(host) => format!("{head} (on {host})"),
+            None => head.to_owned(),
+        };
+        let raw = raw.trim();
+        return (words, (raw != head).then(|| raw.to_owned()));
+    }
     let words = match kind {
         Notice::API_ERROR => match retrying {
             Some(retry) => {
@@ -682,6 +733,37 @@ pub fn error_words(
     };
     let raw = raw.trim();
     (words, (!raw.is_empty()).then(|| raw.to_owned()))
+}
+
+/// How Claude Code's own error lines begin where they say what happened and what to do, as its
+/// TUI shows them: spend and usage limits, an organization's sign-in policies, a cloud
+/// provider's credentials, a start it refused, a context that no longer fits.
+const AGENT_HEADLINES: &[&str] = &[
+    "Claude Code refused to start",
+    "Context limit reached",
+    "You've hit your",
+    "You're out of usage credits",
+    "Your org is out of usage",
+    "Your seat type doesn't include",
+    "This service is disabled for your org",
+    "Your usage allocation has been disabled",
+    "Your group's usage limit",
+    "API Error: Usage credits required",
+    "Your ANTHROPIC_API_KEY belongs to a disabled organization",
+    "Your organization has disabled",
+    "Could not refresh your login",
+    "AWS credentials expired or invalid",
+    "AWS authentication failed",
+    "Google Cloud credentials expired or invalid",
+    "Google Cloud authentication failed",
+    "Microsoft Foundry authentication failed",
+    "Gateway refused the request",
+];
+
+/// The agent's own first line, where it is one of [`AGENT_HEADLINES`].
+fn agent_headline(raw: &str) -> Option<&str> {
+    let first = raw.trim().lines().next()?.trim();
+    AGENT_HEADLINES.iter().any(|head| first.starts_with(head)).then_some(first)
 }
 
 /// Whether an agent's error says it is not signed in, or its key or login is refused: Claude
@@ -877,10 +959,48 @@ fn tail<'a>(
 /// agents. A chip for each was noise.
 const HIDDEN_TOOLS: [&str; 2] = ["ToolSearch", "ListAgents"];
 
+/// How a message that hands the agent a plan to carry out begins: the one Slopty sends after a
+/// plan approved with its context cleared, as Claude Code's TUI sends it.
+pub const IMPLEMENT_PLAN: &str = "Implement the following plan:";
+
+/// What a call of Claude Code's brief tools says to the person, as its words: the message, or
+/// a file's caption, then the files it attached.
+fn brief_words(call: &ToolCall) -> Option<String> {
+    if !matches!(call.name.as_str(), "SendUserMessage" | "SendUserFile") {
+        return None;
+    }
+    let input: serde_json::Value = serde_json::from_str(&call.input.text).ok()?;
+    let said = ["message", "caption", "text"]
+        .iter()
+        .find_map(|key| input.get(*key)?.as_str())
+        .map(str::trim)
+        .unwrap_or_default();
+    let files: Vec<String> = ["attachments", "files", "file_paths"]
+        .iter()
+        .filter_map(|key| input.get(*key)?.as_array())
+        .flatten()
+        .filter_map(|file| {
+            file.as_str().or_else(|| file.get("path")?.as_str()).map(|p| format!("- `{p}`"))
+        })
+        .chain(
+            input.get("file_path").and_then(serde_json::Value::as_str).map(|p| format!("- `{p}`")),
+        )
+        .collect();
+    let mut text = said.to_owned();
+    if !files.is_empty() {
+        if !text.is_empty() {
+            text.push_str("\n\n");
+        }
+        text.push_str(&files.join("\n"));
+    }
+    (!text.trim().is_empty()).then_some(text)
+}
+
 /// Whether `body` is a tool call the transcript shows a chip for: tests pick their call by it.
 #[cfg(test)]
 pub(crate) fn shown_call(body: &ItemBody) -> bool {
-    matches!(body, ItemBody::Tool(call) if !HIDDEN_TOOLS.contains(&call.name.as_str()))
+    matches!(body, ItemBody::Tool(call)
+        if !HIDDEN_TOOLS.contains(&call.name.as_str()) && call.kind != kind::TASKS)
 }
 
 /// What each of a question's options would look like, for the pane beside them; nothing when
@@ -1053,7 +1173,10 @@ fn gate(request: &Request, call: Option<&ToolCall>, mode: Option<&str>) -> Gate 
         _ => false,
     });
     let planning = mode.is_some_and(|mode| mode.eq_ignore_ascii_case("plan"));
-    let deny_first = long || unknown || risky;
+    // An agent that lists its deny first means "No" by default (Claude Code's `default_to_no`).
+    let said_no =
+        request.options.first().is_some_and(|c| c.effect == slopty_proto::thread::Effect::Deny);
+    let deny_first = long || unknown || risky || said_no;
     Gate { deny_first, click_only: deny_first || !safe || planning, long }
 }
 
@@ -1116,6 +1239,13 @@ fn input(request: &Request, state: &ThreadState) -> MessagePart {
             (if title.is_empty() { header(request) } else { title.to_owned() }, text.to_owned())
         };
         let gate = gate(request, call, state.meters.mode.as_deref());
+        // slopty: a Claude Code plan shown whole may be approved as the person edits it.
+        let edit_from = (request.kind == Request::PLAN
+            && state.meta.agent.is(slopty_proto::thread::AgentId::CLAUDE_CODE))
+        .then(|| request.text.as_ref().filter(|text| text.full.is_none()))
+        .flatten()
+        .map(|text| text.text.clone())
+        .filter(|text| !text.trim().is_empty());
         vec![UserInputQuestion {
             id: CHOICE.to_owned(),
             header: escaped(&header),
@@ -1131,10 +1261,17 @@ fn input(request: &Request, state: &ThreadState) -> MessagePart {
             deny_option: slopty_proto::thread::plain_deny(&request.options)
                 .and_then(|deny| request.options.iter().position(|c| c.id == deny.id)),
             // slopty: "Allow, and say what's next…" on an approval, where the agent takes it.
-            allow_option: (request.kind == Request::APPROVAL && takes_words_with_allow(state))
-                .then(|| slopty_proto::thread::once(&request.options, true))
-                .flatten()
-                .and_then(|allow| request.options.iter().position(|c| c.id == allow.id)),
+            allow_option: ((request.kind == Request::APPROVAL && takes_words_with_allow(state))
+                || edit_from.is_some())
+            .then(|| {
+                // A plan's edit goes with its manual approval, the TUI's after Ctrl+G.
+                let manual =
+                    request.options.iter().find(|c| c.id == "allow" && edit_from.is_some());
+                manual.or_else(|| slopty_proto::thread::once(&request.options, true))
+            })
+            .flatten()
+            .and_then(|allow| request.options.iter().position(|c| c.id == allow.id)),
+            edit_from,
             proposed: proposed(request, call),
             ..UserInputQuestion::default()
         }]
@@ -1167,6 +1304,17 @@ fn input(request: &Request, state: &ThreadState) -> MessagePart {
             })
             .collect()
     };
+    // slopty: a choice beside the questions that answers none of them ("Chat about this"), on
+    // each: any deny but the plain one.
+    if !request.questions.is_empty() {
+        let plain = slopty_proto::thread::plain_deny(&request.options).map(|c| c.id.clone());
+        let aside = request.options.iter().find(|c| {
+            c.effect == slopty_proto::thread::Effect::Deny && Some(&c.id) != plain.as_ref()
+        });
+        for question in &mut questions {
+            question.aside = aside.map(|aside| escaped(&aside.label));
+        }
+    }
     // slopty: what the dock draws the card by, on each of its questions.
     let rule = rule_offer(request);
     for question in &mut questions {
@@ -1200,6 +1348,14 @@ pub fn answer(
     answers: &[UserInputAnswer],
 ) -> Result<(String, Option<String>), String> {
     use slopty_proto::thread::detail::Answer;
+    // slopty: the choice beside the questions, picked alone.
+    let aside =
+        answers.iter().find(|a| a.question_id == CHOICE).and_then(|a| a.labels.first()).and_then(
+            |label| request.options.iter().find(|c| super::text::escaped(&c.label) == *label),
+        );
+    if let Some(aside) = aside.filter(|_| !request.questions.is_empty()) {
+        return Ok((aside.id.clone(), None));
+    }
     if !request.questions.is_empty() {
         let given: Vec<Answer> = request
             .questions
@@ -1224,7 +1380,21 @@ pub fn answer(
         if given.len() != request.questions.len() {
             return Err("Answer every question".to_owned());
         }
-        return Ok((Answer::choice(&request.questions, &given), None));
+        // slopty: the person's notes on the questions go beside the answers, by question text.
+        let notes: serde_json::Map<String, serde_json::Value> = request
+            .questions
+            .iter()
+            .enumerate()
+            .filter_map(|(ix, question)| {
+                let notes =
+                    answers.iter().find(|a| a.question_id == ix.to_string())?.notes.as_ref()?;
+                let notes = notes.trim();
+                (!notes.is_empty())
+                    .then(|| (question.text.clone(), serde_json::Value::String(notes.to_owned())))
+            })
+            .collect();
+        let notes = (!notes.is_empty()).then(|| serde_json::Value::Object(notes).to_string());
+        return Ok((Answer::choice(&request.questions, &given), notes));
     }
     let picked = answers
         .iter()
@@ -1295,13 +1465,35 @@ fn assistant(
     }
 }
 
+/// How long the model thought before the reasoning at `ix` of `state`'s items was written, as
+/// the TUI's "Thought for 12s": from the item before it in its turn (or the turn's start) to
+/// it, once something follows it or its turn ended; `None` while it may still go on, or where
+/// a time is unknown.
+fn thought_for(state: &ThreadState, ix: usize) -> Option<u64> {
+    let item = state.items.get(ix)?;
+    let turn = state.turns.iter().find(|turn| turn.id == item.turn)?;
+    let followed = state.items.get(ix.saturating_add(1)).is_some_and(|next| next.turn == item.turn);
+    if !followed && turn.state == TurnState::Active {
+        return None;
+    }
+    let before = ix
+        .checked_sub(1)
+        .and_then(|prev| state.items.get(prev))
+        .filter(|prev| prev.turn == item.turn)
+        .map_or(turn.started_ms, |prev| prev.at_ms);
+    let (from, to) = (before.as_millis(), item.at_ms.as_millis());
+    (from > 0 && to > from).then(|| to.saturating_sub(from))
+}
+
 /// An item of the agent's other than a tool call as a part of its answer; nothing for what the
 /// shell draws no part of.
 fn part(id: &str, body: &ItemBody, look: &Look<'_>) -> Option<MessagePart> {
     let id = id.to_owned();
     Some(match body {
         ItemBody::Text(text) => MessagePart::Text { id, text: look.words(text) },
-        ItemBody::Reasoning(text) => MessagePart::Reasoning { id, text: look.words(text) },
+        ItemBody::Reasoning(text) => {
+            MessagePart::Reasoning { id, text: look.words(text), thought_ms: None }
+        }
         ItemBody::Notice(notice) => return notice_part(id, notice, look),
         // The person's messages, calls and compactions are entries or parts of their own.
         ItemBody::Tool(_)

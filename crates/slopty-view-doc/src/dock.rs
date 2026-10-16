@@ -116,9 +116,37 @@ pub struct ActivityLine {
     /// The request being tried again, while it is: the line becomes the retry's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry: Option<RetryLine>,
+    /// Since when the model's reply, while one streams, has said nothing new: from
+    /// [`ActivityLine::STALL_MS`] the line reddens and, from [`ActivityLine::NO_ANSWER_MS`],
+    /// says the API has not answered, as the TUI's spinner does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quiet_since: Option<i64>,
 }
 
 impl ActivityLine {
+    /// Silence after which the TUI's spinner starts to redden.
+    pub const STALL_MS: u64 = 10_000;
+    /// Silence at which it is fully red.
+    pub const STALLED_MS: u64 = 20_000;
+    /// Silence after which the line says the API has not answered.
+    pub const NO_ANSWER_MS: u64 = 30_000;
+
+    /// How far the line has reddened at `now`: 0 before [`Self::STALL_MS`] of silence, 1 from
+    /// [`Self::STALLED_MS`].
+    #[must_use]
+    pub fn stall(&self, now: i64) -> f32 {
+        let Some(quiet) =
+            self.quiet_since.and_then(|since| u64::try_from(now.saturating_sub(since)).ok())
+        else {
+            return 0.0;
+        };
+        let span = Self::STALLED_MS.saturating_sub(Self::STALL_MS);
+        let into = quiet.saturating_sub(Self::STALL_MS).min(span);
+        // Hundredths of a second under 10 s: exact as f32.
+        let hundredths = |ms: u64| f32::from(u16::try_from(ms / 10).unwrap_or(u16::MAX));
+        hundredths(into) / hundredths(span).max(1.0)
+    }
+
     /// The thinking words after `elapsed_ms` of thinking, as the TUI moves through them:
     /// "thinking", "still thinking" (10 s), "thinking more" (20 s), "thinking some more" (30 s),
     /// "deep in thought" (45 s).
@@ -319,6 +347,10 @@ pub struct ContextBreakdown {
     /// What the last turn that ended took, by kind of token.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_turn: Option<TurnTokens>,
+    /// The agent's MCP servers as its `/status` row counts them: "MCP servers: 3 connected, 1
+    /// failed".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub servers: Option<String>,
 }
 
 /// The tokens one turn took, by kind.

@@ -46,6 +46,28 @@ pub struct ToolFacts {
     /// For a call that started a subagent: how it is getting on, for its card's step line.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_progress: Option<SubagentProgress>,
+    /// The chip's detail where it says a file's path shorter than zeron's whole path: inside the
+    /// chat's folder relative to it, else `~/…`, its middle cut to keep the file's name
+    /// (`src/…/view_model/facts.rs`), as the TUI's header shows a path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// What a command wrote to its standard error, apart from its output: drawn under the
+    /// output in the danger colour, as the TUI does. Claude Code's own notes in it (the
+    /// sandbox's report, "Shell cwd was reset to …") are left out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stderr: Option<String>,
+    /// The lines an edit or a write added and removed, which its group's line totals: "edited
+    /// 2 files +12 -3", as the TUI's group line counts them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changed: Option<[u64; 2]>,
+    /// What a command landed, as the TUI's group line says it: "committed 1a2b3c4", "pushed to
+    /// main", "rebased onto main", "created PR #12".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub landed: Option<String>,
+    /// For a thought riding a group: how long the model thought, which the group's line says
+    /// ("thought for 12s").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thought_ms: Option<u64>,
 }
 
 /// How long a call has run.

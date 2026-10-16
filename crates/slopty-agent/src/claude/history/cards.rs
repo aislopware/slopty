@@ -156,6 +156,11 @@ pub(super) fn approval(prompt: &PermissionPrompt) -> (String, Option<String>) {
             None => ("Tool use".to_owned(), format!("{tool}({})", params(input))),
         },
     };
+    let question = match &prompt.on_disk {
+        Some(seen) if question.trim().is_empty() => seen.clone(),
+        Some(seen) => format!("{question}\n\n{seen}"),
+        None => question,
+    };
     let question = Some(question).filter(|q| !q.trim().is_empty());
     (title, question)
 }
@@ -265,6 +270,8 @@ mod tests {
             exists: None,
             context_used: None,
             before_plan: None,
+            on_disk: None,
+            default_to_no: false,
         }
     }
 

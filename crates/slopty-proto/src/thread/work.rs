@@ -81,9 +81,13 @@ impl TaskNote {
 
 /// What the agent says of one call beside the call itself ([`super::Action::CallNoted`]).
 ///
-/// How long it has run, the background task it became, a retry of a subagent's request, and the
-/// words it ended with. The TUI's "Running… (12s)", "Running in the background", "Interrupted",
-/// "exit code 2", "Denied by auto mode classifier · reason".
+/// How long it has run, the background task it became, a retry of a subagent's request, the
+/// words it ended with, and its header where the agent's own UI words it better than its kind.
+/// The TUI's "Running… (12s)", "Running in the background", "Interrupted", "exit code 2",
+/// "Denied by auto mode classifier · reason", "Read report.pdf · pages 1-3".
+///
+/// A note leaves what it does not say as the last one said it: a running time said after the
+/// task keeps the task, and an ending said once stays.
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub struct CallNote {
     /// How long it had run when the agent last said, in ms; a client ticks on from there.
@@ -98,6 +102,24 @@ pub struct CallNote {
     /// "exit code 2", "Denied by auto mode classifier · rm is destructive", "Running in the
     /// background").
     pub said: Option<String>,
+    /// The call's header in the agent's own UI words, where they say more than its kind's
+    /// ("Read report.pdf · pages 1-3", "Update(src/lib.rs)", "Cron(*/5 * * * *: check CI)").
+    #[serde(default)]
+    pub title: Option<String>,
+}
+
+impl CallNote {
+    /// This note over `had`, the one said before it: what this one leaves unsaid stays as
+    /// `had` said it.
+    #[must_use]
+    pub fn over(self, had: &Self) -> Self {
+        Self {
+            task: self.task.or_else(|| had.task.clone()),
+            said: self.said.or_else(|| had.said.clone()),
+            title: self.title.or_else(|| had.title.clone()),
+            ..self
+        }
+    }
 }
 
 /// The turn under way as the TUI's spinner line shows it ([`super::Action::ActivitySet`]).
@@ -116,6 +138,11 @@ pub struct Activity {
     /// What it is doing, in a phrase: the agent's own summary of the turn, the hook it runs
     /// ("Running `PreToolUse` hook"), or the task in progress; `None` for the client's own verb.
     pub phrase: Option<String>,
+    /// Since when the model's reply, while one streams, has said nothing new: no token since.
+    /// `None` while no reply streams (a tool runs, the turn waits on the person). The TUI's
+    /// spinner reddens from 10 s of it and says the API has not answered.
+    #[serde(default)]
+    pub quiet_since: Option<WallMs>,
 }
 
 /// The goal the agent works towards until a check says it is met (Claude Code's `/goal`):

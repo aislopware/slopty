@@ -283,6 +283,11 @@ pub enum NoteKind {
     Hook,
     /// Slopty's reports handed to the agent (`<slopty-reports>`).
     Report,
+    /// What a command printed as its errors, drawn apart from its output.
+    CommandError,
+    /// A quiet line that is neither a failure nor the person's words: a prompt's origin, an
+    /// MCP server's update, a message from another session.
+    Quiet,
 }
 
 /// The API error that ended a turn, as Claude Code records it.
@@ -326,6 +331,10 @@ pub struct ToolCall {
     pub detail: ToolDetail,
     /// The result, once it arrived.
     pub result: Option<ToolResult>,
+    /// Its header as the TUI words it where that says more than its kind: "Read report.pdf ·
+    /// pages 1-3", "Create notes.md".
+    #[serde(default)]
+    pub title: Option<String>,
 }
 
 /// How a call ended.
@@ -340,6 +349,10 @@ pub struct ToolResult {
     pub at_ms: WallMs,
     /// Images it returned: a screenshot, a picture read from a file.
     pub images: Vec<Image>,
+    /// What came of it as the TUI's line under the call says it, from its structured result,
+    /// where its detail does not already say it: "Read PDF (1.2MB)", "Did 3 searches in 4s".
+    #[serde(default)]
+    pub said: Option<String>,
 }
 
 /// Most bytes of an image a worker sends; a larger one is described and never sent.
@@ -559,6 +572,9 @@ pub struct AgentDetail {
     pub agent_type: Option<String>,
     /// The short description the model gave it.
     pub description: Option<String>,
+    /// The name it was given, for an agent the others message by name (a teammate's).
+    #[serde(default)]
+    pub name: Option<String>,
     /// Its brief.
     pub prompt: Clipped,
     /// It runs in the background.
@@ -1036,6 +1052,14 @@ pub struct PermissionPrompt {
     /// Only the person at the card may answer it (Claude Code's `requires_user_interaction`).
     #[serde(default)]
     pub needs_presence: bool,
+    /// What the worker saw on disk where the call would write, in the TUI's words, when it is
+    /// worth saying: an existing file too large to preview, one whose contents cannot be shown
+    /// in full, a symlink whose target leaves the folder.
+    #[serde(default)]
+    pub on_disk: Option<String>,
+    /// Claude Code's card would start on "No" (`default_to_no`).
+    #[serde(default)]
+    pub default_to_no: bool,
 }
 
 /// One permission update "allow always" applies.

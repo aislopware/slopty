@@ -435,6 +435,10 @@ fn percent(part: u64, whole: u64) -> u8 {
 /// the agent compacts on its own, or before the window is full when it does not.
 const WARN_WITHIN: u8 = 20;
 
+/// The thread fact an agent keeps its MCP servers' counts in ("3 connected, 1 failed"), as its
+/// `/status` row says them.
+pub const SERVERS_FACT: &str = "mcp-servers";
+
 /// The context window, by category when the agent counted them.
 fn context(state: &ThreadState) -> Option<ContextBreakdown> {
     let (tokens, window, categories, auto) = match &state.context {
@@ -484,6 +488,7 @@ fn context(state: &ThreadState) -> Option<ContextBreakdown> {
         words,
         urgent,
         last_turn,
+        servers: state.meta.facts.get(SERVERS_FACT).map(|said| format!("MCP servers: {said}")),
     })
 }
 
@@ -528,6 +533,7 @@ pub fn dock(state: &ThreadState, counts: &WorkCounts, now_ms: i64) -> ChatDock {
             phrase: live.phrase.or(doing),
             next,
             retry: retrying(state),
+            quiet_since: live.quiet_since.map(at).filter(|ms| *ms > 0),
         }
     });
     let goal = state.goal.as_ref().map(|goal| GoalLine {

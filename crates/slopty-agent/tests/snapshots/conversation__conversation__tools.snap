@@ -37,6 +37,8 @@ expression: "decode(\"tools\").snapshot()"
               full: ~
             at_ms: 1792130298037
             images: []
+            said: ~
+          title: ~
     - id: toolu_02
       at_ms: 1792130299842
       body:
@@ -52,6 +54,8 @@ expression: "decode(\"tools\").snapshot()"
             text: ~
             at_ms: 1792130299872
             images: []
+            said: ~
+          title: ~
     - id: toolu_03
       at_ms: 1792130299983
       body:
@@ -67,6 +71,8 @@ expression: "decode(\"tools\").snapshot()"
             text: ~
             at_ms: 1792130300010
             images: []
+            said: ~
+          title: ~
     - id: toolu_04
       at_ms: 1792130301141
       body:
@@ -85,6 +91,8 @@ expression: "decode(\"tools\").snapshot()"
             text: ~
             at_ms: 1792130301163
             images: []
+            said: ~
+          title: ~
     - id: toolu_05
       at_ms: 1792130302409
       body:
@@ -105,6 +113,8 @@ expression: "decode(\"tools\").snapshot()"
               full: ~
             at_ms: 1792130302440
             images: []
+            said: ~
+          title: ~
     - id: toolu_06
       at_ms: 1792130302450
       body:
@@ -127,6 +137,8 @@ expression: "decode(\"tools\").snapshot()"
               full: ~
             at_ms: 1792130302486
             images: []
+            said: ~
+          title: ~
     - id: toolu_07
       at_ms: 1792130303881
       body:
@@ -157,6 +169,8 @@ expression: "decode(\"tools\").snapshot()"
             text: ~
             at_ms: 1792130304184
             images: []
+            said: ~
+          title: ~
     - id: toolu_08
       at_ms: 1792130305461
       body:
@@ -187,6 +201,8 @@ expression: "decode(\"tools\").snapshot()"
               full: ~
             at_ms: 1792130305514
             images: []
+            said: ~
+          title: ~
     - id: "00000000-0000-4000-8000-000000000049:0"
       at_ms: 1792130306859
       body:
@@ -221,6 +237,8 @@ expression: "decode(\"tools\").snapshot()"
             text: ~
             at_ms: 1792130307123
             images: []
+            said: ~
+          title: ~
     - id: "task:b00000001:1"
       at_ms: 1792130308157
       body:
@@ -258,6 +276,8 @@ expression: "decode(\"tools\").snapshot()"
             text: ~
             at_ms: 1792130308852
             images: []
+            said: ~
+          title: ~
     - id: "00000000-0000-4000-8000-000000000063:0"
       at_ms: 1792130311587
       body:
@@ -276,6 +296,7 @@ expression: "decode(\"tools\").snapshot()"
               agent_id: a0000000000000001
               agent_type: general-purpose
               description: Count lines
+              name: ~
               prompt:
                 text: "Count the lines in the file /work/main.rs. Use the Read tool to read the whole file and count its lines. Reply with just the number, nothing else."
                 lines: 1
@@ -296,6 +317,8 @@ expression: "decode(\"tools\").snapshot()"
             text: ~
             at_ms: 1792130316744
             images: []
+            said: ~
+          title: ~
     - id: toolu_12
       at_ms: 1792130318268
       body:
@@ -314,6 +337,8 @@ expression: "decode(\"tools\").snapshot()"
             text: ~
             at_ms: 1792130318297
             images: []
+            said: ~
+          title: ~
     - id: toolu_13
       at_ms: 1792130318400
       body:
@@ -332,6 +357,8 @@ expression: "decode(\"tools\").snapshot()"
             text: ~
             at_ms: 1792130318430
             images: []
+            said: ~
+          title: ~
     - id: "00000000-0000-4000-8000-000000000075:0"
       at_ms: 1792130319451
       body:
@@ -403,6 +430,8 @@ expression: "decode(\"tools\").snapshot()"
               full: ~
             at_ms: 1792130313457
             images: []
+            said: ~
+          title: ~
     - id: "00000000-0000-4000-8000-000000000096:0"
       at_ms: 1792130316687
       body:

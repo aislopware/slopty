@@ -672,6 +672,14 @@ pub struct UserInputQuestion {
     /// words.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_option: Option<usize>,
+    /// The words an edit of the request starts from, where its agent takes them back edited
+    /// with `allow_option` (a plan's own text, the TUI's Ctrl+G): "Edit plan…".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edit_from: Option<String>,
+    /// A choice beside an agent's questions that answers none of them, by its label (Claude
+    /// Code's "Chat about this"): picked, the answer is it alone under the `choice` id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aside: Option<String>,
     /// Only the person at this card answers it, never a note's button, an API call or another
     /// agent (Claude Code's `requires_user_interaction`): the card says "Needs you at the card".
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -698,6 +706,10 @@ pub struct RuleOffer {
 pub struct UserInputAnswer {
     pub question_id: String,
     pub labels: Vec<String>,
+    // slopty: the person's notes on a question whose options have previews (the TUI's "Add
+    // notes on this design…"), beside the answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -46,6 +46,8 @@ expression: "decode(\"interrupt\").snapshot()"
               full: ~
             at_ms: 1792130322679
             images: []
+            said: ~
+          title: ~
     - id: 00000000-0000-4000-8000-000000000019
       at_ms: 1792130322682
       body:

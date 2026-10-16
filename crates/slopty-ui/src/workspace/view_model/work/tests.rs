@@ -227,6 +227,7 @@ fn a_subagents_request_is_asked_and_answered_in_its_parent(cx: &mut gpui::TestAp
             answers: vec![slopty_view_proto::UserInputAnswer {
                 question_id: "choice".to_owned(),
                 labels: vec!["Yes".to_owned()],
+                notes: None,
             }],
         },
     });

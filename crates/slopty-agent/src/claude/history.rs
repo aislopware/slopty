@@ -221,6 +221,10 @@ pub fn verdict(choice: &str, message: Option<&str>) -> Option<Verdict> {
     }
 }
 
+/// The choice that answers an agent's questions with none of their answers, to talk them over
+/// first (the TUI's "Chat about this").
+pub const CLARIFY: &str = "clarify";
+
 /// The choice a verdict took, as [`verdict`] reads it.
 fn choice_of(verdict: &Verdict) -> String {
     match verdict {
@@ -267,6 +271,9 @@ struct Mapped {
     shown_as: HashMap<String, ItemId>,
     /// A subagent's status as last told ([`History::settle_subagents`]).
     told: Option<Status>,
+    /// What each call's header and line said in the TUI's words, as last noted: a call is noted
+    /// again only when they change.
+    worded: HashMap<String, (Option<String>, Option<String>)>,
 }
 
 impl Mapped {
@@ -286,6 +293,7 @@ impl Mapped {
             tasks: Vec::new(),
             shown_as: HashMap::new(),
             told: None,
+            worded: HashMap::new(),
         }
     }
 
@@ -1650,7 +1658,23 @@ impl History {
         } else {
             mapped.calls.remove(&entry.id);
         }
+        let item_id = item.id.clone();
         actions.push(if open { Action::ItemUpdated(item) } else { Action::ItemCompleted(item) });
+        // What the TUI says of the call beyond its kind: its header, its line under it.
+        if let Body::Tool(call) = &entry.body {
+            let worded = (call.title.clone(), call.result.as_ref().and_then(|r| r.said.clone()));
+            let had = mapped.worded.get(&entry.id);
+            if (worded.0.is_some() || worded.1.is_some()) && had != Some(&worded) {
+                mapped.worded.insert(entry.id.clone(), worded.clone());
+                let note = thread::CallNote {
+                    at_ms: entry.at_ms,
+                    title: worded.0,
+                    said: worded.1,
+                    ..thread::CallNote::default()
+                };
+                actions.push(Action::CallNoted { item: item_id, note });
+            }
+        }
         if had.unwrap_or_default() != changed
             && let Some(mut t) = mapped.turns.get(&turn).cloned()
         {
@@ -2004,6 +2028,8 @@ impl History {
                     NoteKind::Info => Notice::INFO,
                     NoteKind::Hook => Notice::HOOK,
                     NoteKind::Report => Notice::REPORT,
+                    NoteKind::CommandError => Notice::COMMAND_ERROR,
+                    NoteKind::Quiet => Notice::NOTE,
                 }
                 .to_owned(),
                 text: clip(&note.text),
@@ -2284,7 +2310,7 @@ fn kind_of_name(name: &str) -> &'static str {
         "Write" => kind::WRITE,
         "Read" => kind::READ,
         "Grep" | "Glob" => kind::SEARCH,
-        "Bash" => kind::EXEC,
+        "Bash" | "PowerShell" => kind::EXEC,
         "WebFetch" => kind::FETCH,
         "WebSearch" => kind::WEB_SEARCH,
         "Agent" | "Task" => kind::AGENT,
@@ -2619,7 +2645,9 @@ fn request(prompt: &PermissionPrompt) -> Request {
         conv::ToolDetail::Question(q) => {
             let title =
                 q.questions.first().map_or_else(|| "A question".to_owned(), |q| q.text.clone());
-            (Request::QUESTION, title, vec![deny], question(q).questions, None)
+            // "Chat about this": none of the answers, the questions talked over first.
+            let clarify = choice(CLARIFY, "Chat about this", Effect::Deny, None, false);
+            (Request::QUESTION, title, vec![deny, clarify], question(q).questions, None)
         }
         // Claude Code's own plan dialog, in its words: approve with a clear context, in the mode
         // its request suggests (carried back as "Always allow" carries its suggestions), with
@@ -2644,6 +2672,11 @@ fn request(prompt: &PermissionPrompt) -> Request {
                 ));
             }
             options.extend([deny, deny_stop]);
+            // A request Claude Code would start on "No" (`default_to_no`) lists its deny first,
+            // where the card's focus starts.
+            if prompt.default_to_no {
+                options.rotate_right(2);
+            }
             let proposed = match detail {
                 conv::ToolDetail::Edit(e) => Some(e.patch.clone()),
                 conv::ToolDetail::Write(w) => Some(w.patch.clone()),

@@ -310,6 +310,10 @@ pub fn step_words(call: &ToolCall) -> String {
         ToolCall::Exec { command } => format!("Running {command}"),
         ToolCall::ReadFile { path } => format!("Reading {}", file_name(path)),
         ToolCall::WriteFile { path, .. } => format!("Writing {}", file_name(path)),
+        // slopty: a notebook's cell, in the TUI's words.
+        ToolCall::EditFile { path, .. } if path.ends_with(".ipynb") => {
+            format!("Editing notebook {}", file_name(path))
+        }
         ToolCall::EditFile { path, .. } => format!("Editing {}", file_name(path)),
         ToolCall::ApplyPatch { path } => match path {
             Some(path) => format!("Patching {}", file_name(path)),
@@ -330,9 +334,18 @@ pub fn step_words(call: &ToolCall) -> String {
         ToolCall::WebSearch { query } => format!("Searching the web for {query}"),
         ToolCall::Todo { .. } => "Updating the plan".to_owned(),
         ToolCall::Mcp { server, tool, .. } => format!("Using {server} · {tool}"),
-        ToolCall::Unknown { name, .. } => match name.strip_prefix("Agent: ") {
+        ToolCall::Unknown { name, input } => match name.strip_prefix("Agent: ") {
             Some(description) => format!("Running an agent: {description}"),
             None if name == "Agent" => "Running an agent".to_owned(),
+            // slopty: a monitor says what it watches, as the TUI's spinner does.
+            None if name == "Monitor" => {
+                match input.as_ref().and_then(|i| i.get("description")?.as_str()) {
+                    Some(description) => format!("Monitoring: {description}"),
+                    None => "Monitoring".to_owned(),
+                }
+            }
+            // slopty: the advisor model reviewing the conversation, as the TUI's spinner says.
+            None if name == "advisor" => "Advising".to_owned(),
             None => format!("Using {name}"),
         },
     };
@@ -640,10 +653,12 @@ impl Transcript {
     ) -> AnyElement {
         let copied = self.extras.copied.as_ref() == Some(&row.id);
         let (id, text) = (row.id.clone(), copy.clone());
+        // slopty: a plan the person sent to be carried out is headed as the TUI boxes it.
+        let title = if row.id.contains("#plan:implement:") { "Plan to implement" } else { "Plan" };
         div()
             .id(SharedString::from(format!("{}-heading", row.id)))
             .role(gpui::Role::Heading)
-            .aria_label("Plan")
+            .aria_label(title)
             .w_full()
             .h(px(28.0))
             .flex()
@@ -660,7 +675,7 @@ impl Transcript {
                     .text_size(crate::typography::ui_rems(13.0))
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(theme.text)
-                    .child(SharedString::from("Plan")),
+                    .child(SharedString::from(title)),
             )
             .child(div().flex_1())
             .child(
@@ -987,6 +1002,7 @@ pub(super) fn command_body(
     let super::ToolDetail::Output {
         lines,
         truncated_by,
+        ..
     } = detail
     else {
         return None;
@@ -1153,6 +1169,7 @@ mod tests {
                 MessagePart::Reasoning {
                     id: "r".into(),
                     text: "**Checking the layout**\nmore".into(),
+                    thought_ms: None,
                 },
                 edit("t1", "/w/src/main.rs", 1, 0, false),
             ],
@@ -1165,6 +1182,7 @@ mod tests {
                 MessagePart::Reasoning {
                     id: "r".into(),
                     text: "\n**Checking the layout**\nmore".into(),
+                    thought_ms: None,
                 },
             ],
             MessageStatus::Streaming,

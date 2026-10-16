@@ -3,10 +3,13 @@
 //! when a chat an agent started under this one does ("Sent by reviewer", answered here), when
 //! the agent stops waiting, what each option means, "Allow with rule" with the rule and its
 //! scope editable, "Revise…" on a plan (and "Say what to do instead…" on an approval) to send
-//! words instead of a choice, "Allow, and say what's next…" to send them with the allow, the
+//! words instead of a choice, "Allow, and say what's next…" to send them with the allow, "Edit
+//! plan…" to approve a plan as edited, "Chat about this" beside an agent's questions, the
 //! options' previews in a pane beside them, an MCP server's form drawn from its schema (or the page to fill it
 //! in at), and a dialog of the agent's own shown from its payload, a kind Slopty does not know
 //! included, never refused unseen (`docs/decisions/ui.md`).
+
+use std::time::{Duration, Instant};
 
 use gpui::AnyElement;
 use serde_json::Value;
@@ -23,6 +26,10 @@ const PLAN: &str = "plan";
 const APPROVAL: &str = "approval";
 /// The answer that dismisses a dialog or a form without one.
 const CANCEL: &str = "cancel";
+/// The id an answer of the choice beside an agent's questions goes under (`aside`).
+const ASIDE_ID: &str = "choice";
+/// Where a question's notes box is kept among the card's inputs, before the question's id.
+const NOTES: &str = "notes:";
 /// The most of a dialog's payload the card lists.
 const MAX_FACTS: usize = 8;
 /// What a card only the person at it answers says (`slopty_proto::thread::Request::NEEDS_PRESENCE`).
@@ -320,6 +327,28 @@ pub(crate) fn takes_no_words(question: &UserInputQuestion) -> bool {
     question.kind.starts_with(DIALOG) && question.options.is_empty()
 }
 
+/// The longest a URL's browser-ready form may be for the card to open it (the TUI's `iZe`).
+const URL_BROWSER_CHARS: usize = 8_000;
+
+/// Why a form's URL is not opened with a click, in the TUI's words: it holds what would hide or
+/// reorder what the person reads, or its browser-ready form (each shell metacharacter escaped)
+/// is too long to hand over safely.
+pub(crate) fn url_caution(url: &str) -> Option<&'static str> {
+    if url.chars().any(|c| approval::hidden(c) || matches!(c, '\n' | '\r' | '\u{2028}' | '\u{2029}' | '\u{2800}')) {
+        return Some("This URL cannot be shown exactly as it would open, so opening it is disabled. Decline to continue.");
+    }
+    let escaped = url.chars().map(|c| match c {
+        '"' => 8,
+        '(' | ')' | '[' | ']' | '%' | '!' | '^' | '`' | '<' | '>' | '&' | '|' | ';' | ',' | ' ' | '*' | '?' => 4,
+        '\\' => 2,
+        _ => 1,
+    });
+    let browser = escaped.fold(16_usize, usize::saturating_add);
+    (browser > URL_BROWSER_CHARS).then_some(
+        "This URL’s browser-ready form is too long to hand to a browser safely, so one-click opening is disabled. The URL above is shown in full. Decline to continue.",
+    )
+}
+
 /// What "Revise…" says on `question`, when it offers it: a plan, or an approval that has a
 /// plain deny to carry the words.
 pub(crate) fn revise_words(question: &UserInputQuestion, plan: bool) -> Option<&'static str> {
@@ -342,6 +371,29 @@ pub(crate) fn allow_words(question: &UserInputQuestion) -> Option<&'static str> 
         .then_some("Allow, and say what's next…")
 }
 
+/// How long after the last keystroke, and after a card appears, its option keys wait: a key
+/// the person meant for the composer never answers a request that came as they typed
+/// (t3code's `COMPOSER_TYPING_IDLE_MS`).
+pub(crate) const KEYS_IDLE: Duration = Duration::from_millis(1_500);
+
+/// When the person last typed and when the card last appeared, which hold its option keys
+/// back for [`KEYS_IDLE`].
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct KeyGuard {
+    pub(crate) typed_at: Option<Instant>,
+    pub(crate) shown_at: Option<Instant>,
+}
+
+impl KeyGuard {
+    /// Whether an option key at `now` is held back.
+    pub(crate) fn holds(&self, now: Instant) -> bool {
+        [self.typed_at, self.shown_at]
+            .into_iter()
+            .flatten()
+            .any(|at| now.saturating_duration_since(at) < KEYS_IDLE)
+    }
+}
+
 /// An approval's "Allow with rule" while it is edited.
 pub(crate) struct RuleEdit {
     input: Entity<ComposerInput>,
@@ -361,6 +413,8 @@ pub(crate) struct CardState {
     error: Option<String>,
     /// The option the pointer is over, whose preview the pane shows.
     pub(crate) preview: Option<usize>,
+    /// What holds the card's option keys back while the person types.
+    pub(crate) guard: KeyGuard,
 }
 
 impl Composer {
@@ -369,7 +423,8 @@ impl Composer {
         if self.card.request.as_deref() != Some(request_id) {
             let scopes = std::mem::take(&mut self.card.scopes);
             let watch = self.card.scopes_watch.take();
-            self.card = CardState { request: Some(request_id.to_owned()), scopes, scopes_watch: watch, ..CardState::default() };
+            let guard = self.card.guard;
+            self.card = CardState { request: Some(request_id.to_owned()), scopes, scopes_watch: watch, guard, ..CardState::default() };
         }
     }
 
@@ -411,6 +466,16 @@ impl Composer {
     /// Start sending words with the allow at option `allow` ("Allow, and say what's next…").
     pub(super) fn set_allowing(&mut self, allow: usize, cx: &mut Context<Self>) {
         self.revise(true, Some(allow), cx);
+    }
+
+    /// Edit the plan in the composer, from `plan`, to approve it as edited with the allow at
+    /// `allow` (the TUI's Ctrl+G).
+    pub(super) fn set_editing_plan(&mut self, allow: usize, plan: String, cx: &mut Context<Self>) {
+        self.revise(true, Some(allow), cx);
+        self.input.update(cx, |input, cx| {
+            input.set_text(plan, cx);
+            input.set_placeholder("The plan as it should be, then send to approve it", cx);
+        });
     }
 
     /// Start or stop sending words: instead of a choice, or with the allow at `allow`.
@@ -694,14 +759,23 @@ impl Composer {
                 extras.push(self.render_dialog_answers(theme, cx));
             }
         }
+        // slopty: notes on a design whose options have previews (the TUI's "Add notes on this
+        // design…"), which go with the answer.
+        if !revising && !question.multi_select && question.option_previews.iter().any(|p| !p.trim().is_empty()) {
+            extras.push(self.render_notes(&question.id, theme, cx));
+        }
         let revise = revise_words(question, plan).filter(|_| !revising);
         let allow = allow_words(question).zip(question.allow_option).filter(|_| !revising);
-        if revise.is_some() || allow.is_some() {
-            let link = |id: &'static str, words: &'static str| {
+        // slopty: "Edit plan…", the TUI's Ctrl+G: the plan in the composer, approved as edited.
+        let edit = question.edit_from.clone().zip(question.allow_option).filter(|_| !revising);
+        // slopty: "Chat about this", beside an agent's questions.
+        let aside = question.aside.clone().filter(|_| !revising);
+        if revise.is_some() || allow.is_some() || edit.is_some() || aside.is_some() {
+            let link = |id: &'static str, words: SharedString| {
                 div()
                     .id(id)
                     .role(Role::Button)
-                    .aria_label(words)
+                    .aria_label(words.clone())
                     .px(px(4.0))
                     .text_size(crate::typography::ui_rems(12.5))
                     .text_color(theme.text_muted)
@@ -718,10 +792,19 @@ impl Composer {
                     .gap(px(12.0))
                     .when_some(allow, |row, (words, ix)| {
                         // slopty: the TUI's "Yes, and tell Claude what to do next".
-                        row.child(link("wizard-allow-say", words).on_click(cx.listener(move |this, _, _, cx| this.set_allowing(ix, cx))))
+                        row.child(link("wizard-allow-say", words.into()).on_click(cx.listener(move |this, _, _, cx| this.set_allowing(ix, cx))))
+                    })
+                    .when_some(edit, |row, (plan, ix)| {
+                        row.child(link("wizard-edit-plan", "Edit plan…".into()).on_click(cx.listener(move |this, _, _, cx| this.set_editing_plan(ix, plan.clone(), cx))))
+                    })
+                    .when_some(aside, |row, label| {
+                        row.child(link("wizard-aside", label.clone().into()).on_click(cx.listener(move |this, _, _, cx| {
+                            let answer = UserInputAnswer { question_id: ASIDE_ID.to_owned(), labels: vec![label.clone()], notes: None };
+                            this.wizard_finish(vec![answer], cx);
+                        })))
                     })
                     .when_some(revise, |row, words| {
-                        row.child(link("wizard-revise", words).on_click(cx.listener(|this, _, _, cx| this.set_revising(true, cx))))
+                        row.child(link("wizard-revise", words.into()).on_click(cx.listener(|this, _, _, cx| this.set_revising(true, cx))))
                     })
                     .into_any_element(),
             );
@@ -741,6 +824,68 @@ impl Composer {
             );
         }
         extras
+    }
+
+    /// "Notes:" and a box for the person's notes on the question `id`.
+    fn render_notes(&mut self, id: &str, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let input = self
+            .card
+            .inputs
+            .entry(format!("{NOTES}{id}"))
+            .or_insert_with(|| {
+                cx.new(|cx| {
+                    let mut input = ComposerInput::new("", cx).with_single_line();
+                    input.set_placeholder("Add notes on this design…", cx);
+                    input
+                })
+            })
+            .clone();
+        div()
+            .id("wizard-notes")
+            .role(Role::Group)
+            .aria_label("Notes")
+            .mt(px(8.0))
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(crate::typography::ui_rems(12.0))
+                    .text_color(theme.text_muted)
+                    .child("Notes:"),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h(px(28.0))
+                    .px(px(10.0))
+                    .flex()
+                    .items_center()
+                    .rounded(px(8.0))
+                    .border_1()
+                    .border_color(crate::theme::hairline(0.1))
+                    .bg(crate::theme::ink(0.03))
+                    .child(input),
+            )
+            .into_any_element()
+    }
+
+    /// `answers` with the card's notes on each question beside its answer.
+    pub(super) fn with_card_notes(&self, mut answers: Vec<UserInputAnswer>, cx: &App) -> Vec<UserInputAnswer> {
+        for answer in &mut answers {
+            let notes = self
+                .card
+                .inputs
+                .get(&format!("{NOTES}{}", answer.question_id))
+                .map(|input| input.read(cx).text().trim().to_owned())
+                .filter(|notes| !notes.is_empty());
+            if notes.is_some() {
+                answer.notes = notes;
+            }
+        }
+        answers
     }
 
     /// "Always allows `Bash(cargo test:*)` · Edit rule…", or the rule's edit: the rule in mono,
@@ -874,9 +1019,13 @@ impl Composer {
     /// A form filled in elsewhere: the page to open; Done once filled in.
     fn render_open_page(&self, url: &str, theme: &Theme) -> AnyElement {
         let host = url::Url::parse(url).ok().and_then(|u| u.host_str().map(str::to_owned)).unwrap_or_else(|| url.to_owned());
-        let opens = url.starts_with("https://") || url.starts_with("http://");
+        // slopty: a URL the card cannot show as it would open, or too long for a browser, is
+        // not opened with a click, as the TUI's card refuses it.
+        let caution = url_caution(url);
+        let opens = (url.starts_with("https://") || url.starts_with("http://")) && caution.is_none();
+        let shown = approval::visible_escapes(url);
         let url = url.to_owned();
-        div()
+        let page = div()
             .id("wizard-open-page")
             .role(Role::Link)
             .aria_label(SharedString::from(format!("Open {host}")))
@@ -890,7 +1039,33 @@ impl Composer {
             .when(opens, |el| el.cursor_pointer().on_click(move |_, _, cx| cx.open_url(&url)))
             .child(crate::icons::icon(crate::icons::GLOBAL).size(px(13.0)).text_color(theme.accent))
             .child(SharedString::from(format!("Open {host}")))
-            .child(div().text_color(theme.text_faint).child("· then Done"))
+            .child(div().text_color(theme.text_faint).child("· then Done"));
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .child(page)
+            // slopty: the whole address, as it would open, under its host.
+            .child(
+                div()
+                    .px(px(4.0))
+                    .text_size(crate::typography::ui_rems(11.5))
+                    .text_color(theme.text_muted)
+                    .font_family(theme.font_mono.clone())
+                    .child(SharedString::from(shown)),
+            )
+            .when_some(caution, |el, why| {
+                el.child(
+                    div()
+                        .id("wizard-url-caution")
+                        .role(Role::Alert)
+                        .aria_label(why)
+                        .px(px(4.0))
+                        .text_size(crate::typography::ui_rems(12.0))
+                        .text_color(theme.warning)
+                        .child(why),
+                )
+            })
             .into_any_element()
     }
 

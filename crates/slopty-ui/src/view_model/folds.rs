@@ -41,6 +41,56 @@ where
     }
 }
 
+/// The kind of the row over agents started together.
+pub const AGENTS: &str = "agents";
+
+/// Whether `part` is the card of a call that started a subagent; its kind when it says.
+fn spawn(part: &MessagePart) -> Option<(bool, Option<&str>)> {
+    match part {
+        MessagePart::Tool { call, resolved, facts, .. } if call.is_subagent_spawn() => {
+            let progress = facts.as_ref().and_then(|f| f.subagent_progress.as_ref());
+            let running = progress.map_or(!*resolved, |p| p.running);
+            Some((running, progress.and_then(|p| p.agent_type.as_deref())))
+        }
+        _ => None,
+    }
+}
+
+/// slopty: agents started together read under one row, as the TUI groups them: "Running 3
+/// Explore agents…" while any runs, "3 agents finished" once all are done. Each keeps its card.
+pub fn agent_groups(parts: &mut Vec<MessagePart>) {
+    let mut ix = 0;
+    while ix < parts.len() {
+        let run = parts.iter().skip(ix).map_while(spawn).count();
+        if run < 2 {
+            ix = ix.saturating_add(run.max(1));
+            continue;
+        }
+        let spawns: Vec<(bool, Option<&str>)> =
+            parts.iter().skip(ix).take(run).filter_map(spawn).collect();
+        let running = spawns.iter().any(|(running, _)| *running);
+        let kinds: Vec<Option<&str>> = spawns.iter().map(|(_, kind)| *kind).collect();
+        let noun = match kinds.first().copied().flatten() {
+            Some(kind) if kinds.iter().all(|k| *k == Some(kind)) => format!("{kind} agents"),
+            _ => "agents".to_owned(),
+        };
+        let text = if running {
+            format!("Running {run} {noun}…")
+        } else {
+            format!("{run} {noun} finished")
+        };
+        let first = parts.get(ix).map(|p| p.id().to_owned()).unwrap_or_default();
+        let note = NoteRow {
+            kind: AGENTS.to_owned(),
+            text,
+            tone: NoteLine::INFO.to_owned(),
+            ..NoteRow::default()
+        };
+        parts.insert(ix, MessagePart::Note { id: format!("{first}:agents"), note: Box::new(note) });
+        ix = ix.saturating_add(run).saturating_add(1);
+    }
+}
+
 /// A part that is one of a run of task notices, or the agent's own row naming the agents it
 /// stopped together.
 fn in_run(part: &MessagePart) -> bool {
@@ -299,5 +349,48 @@ mod tests {
         let ended = 1_782_920_520_000;
         assert_eq!(done_words(65_000, ended, &tz), "Worked for 1m 5s · done 3:42 PM");
         assert_eq!(done_words(200, ended, &tz), "Worked for 1s · done 3:42 PM");
+    }
+
+    fn spawn_card(id: &str, kind: &str, running: bool) -> MessagePart {
+        let progress = slopty_view_doc::SubagentProgress {
+            agent_type: Some(kind.to_owned()),
+            running,
+            ..slopty_view_doc::SubagentProgress::default()
+        };
+        MessagePart::Tool {
+            id: id.to_owned(),
+            call: slopty_view_proto::ToolCall::Unknown { name: "Agent".to_owned(), input: None },
+            is_error: false,
+            resolved: !running,
+            output: None,
+            diff: None,
+            output_ref: None,
+            output_bytes: None,
+            diff_ref: None,
+            diff_stats: None,
+            subagent_ref: None,
+            subagent_status: None,
+            subagent_tail: None,
+            facts: Some(Box::new(slopty_view_doc::ToolFacts {
+                subagent_progress: Some(progress),
+                ..slopty_view_doc::ToolFacts::default()
+            })),
+        }
+    }
+
+    /// Agents started together read under one row while any runs and once all are done, by
+    /// their kind when they share one; a lone agent has no row over it.
+    #[test]
+    fn agents_started_together_read_under_one_row() {
+        let mut parts = vec![spawn_card("a", "Explore", true), spawn_card("b", "Explore", false)];
+        agent_groups(&mut parts);
+        assert_eq!(said(&parts)[0], "agents: Running 2 Explore agents…");
+        assert_eq!(parts.len(), 3, "each keeps its card");
+        let mut parts = vec![spawn_card("a", "Explore", false), spawn_card("b", "Plan", false)];
+        agent_groups(&mut parts);
+        assert_eq!(said(&parts)[0], "agents: 2 agents finished");
+        let mut lone = vec![spawn_card("a", "Explore", true), row("t", "command", "running", "x")];
+        agent_groups(&mut lone);
+        assert_eq!(lone.len(), 2, "{:?}", said(&lone));
     }
 }

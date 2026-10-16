@@ -185,7 +185,7 @@ fn a_running_call_has_its_timer_and_task() {
     running.input = Clipped::whole(r#"{"command":"sleep 60","timeout":120000}"#);
     state.calls = BTreeMap::from([(
         ItemId("t1".into()),
-        CallNote { elapsed_ms: Some(12_000), at_ms: ms(5), task: None, retry: None, said: None },
+        CallNote { elapsed_ms: Some(12_000), at_ms: ms(5), ..CallNote::default() },
     )]);
     let facts = tool_facts("t1", &running, &state, None).expect("facts");
     let timer = facts.timer.expect("a timer");
@@ -380,4 +380,73 @@ fn a_shown_page_is_a_card_by_its_key() {
     assert_eq!(card.title, "plot");
     assert!(card.failed);
     assert_eq!(page_of("slopty-page:nope/t1"), None);
+}
+
+/// What a command landed reads as the TUI's group line says it: a commit's sha, where a push
+/// went, a rebase, a pull or merge request by its number; a dry run or a refused merge lands
+/// nothing.
+#[test]
+fn a_command_says_what_it_landed() {
+    use super::landed;
+    let commit = "[main 1a2b3c4] Fix the parser\n 1 file changed, 2 insertions(+)";
+    assert_eq!(landed("git commit -m 'Fix'", commit).as_deref(), Some("committed 1a2b3c4"));
+    assert_eq!(
+        landed("git -c user.name=x commit --amend --no-edit", commit).as_deref(),
+        Some("amended commit 1a2b3c4")
+    );
+    let push = "To github.com:o/r.git\n   9f8e7d6..1a2b3c4  main -> main";
+    assert_eq!(
+        landed("git commit -m x && git push", &format!("{commit}\n{push}")).as_deref(),
+        Some("committed 1a2b3c4 · pushed to main")
+    );
+    assert_eq!(landed("git push --dry-run", push), None);
+    assert_eq!(
+        landed("git rebase main", "Successfully rebased").as_deref(),
+        Some("rebased onto main")
+    );
+    assert_eq!(landed("git merge feature", "CONFLICT (content): x"), None);
+    let pr = "https://github.com/o/r/pull/12\n";
+    assert_eq!(landed("gh pr create --fill", pr).as_deref(), Some("created PR #12"));
+    assert_eq!(landed("gh pr merge 7 --auto", "").as_deref(), Some("enabled auto-merge on PR #7"));
+    assert_eq!(
+        landed("glab mr create", "https://gitlab.com/o/r/-/merge_requests/3").as_deref(),
+        Some("created MR !3")
+    );
+    assert_eq!(landed("git status", "On branch main"), None);
+}
+
+/// A path reads as the TUI's header shows it: relative inside the chat's folder, `~/` under a
+/// home, its middle cut past the budget keeping the file's name, hidden with a NUL in it; a
+/// command's errors leave Claude Code's own notes out; a lone `sed -i` substitution reads as
+/// an update of its file.
+#[test]
+fn paths_errors_and_seds_read_as_the_tuis() {
+    use super::{path_words, sed_edit, stderr_words};
+    assert_eq!(path_words("/w/src/main.rs", "/w"), "src/main.rs");
+    assert_eq!(path_words("/Users/ann/notes/todo.md", "/w"), "~/notes/todo.md");
+    assert_eq!(path_words("/etc/hosts", "/w"), "/etc/hosts");
+    let deep =
+        format!("/w/{}/facts.rs", ["crates", "slopty-ui", "src", "view_model"].repeat(3).join("/"));
+    let cut = path_words(&deep, "/w");
+    assert!(cut.chars().count() <= 48 && cut.ends_with("/facts.rs") && cut.contains('…'), "{cut}");
+    assert_eq!(path_words("/w/a\0b", "/w"), "Path hidden (unsupported characters)");
+    let exec = ExecDetail {
+        command: Clipped::whole("cargo build"),
+        description: None,
+        cwd: None,
+        background: false,
+        task: None,
+        status: ExecStatus::Failed,
+        exit_code: Some(1),
+        stderr: Some(Clipped::whole(
+            "error: boom\n<sandbox_violations>\nread /etc\n</sandbox_violations>\nShell cwd was reset to /w\n",
+        )),
+        duration_ms: None,
+        edits: None,
+        interpretation: None,
+    };
+    assert_eq!(stderr_words(&exec).as_deref(), Some("error: boom"));
+    assert_eq!(sed_edit("sed -i '' 's/a/b/' src/lib.rs").as_deref(), Some("Update(lib.rs)"));
+    assert_eq!(sed_edit("sed -i 's/a/b/;s/c/d/' src/lib.rs"), None);
+    assert_eq!(sed_edit("sed 's/a/b/' src/lib.rs"), None);
 }

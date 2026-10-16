@@ -187,11 +187,20 @@ fn try_text_append(prev: &SessionMessageEntry, next: &SessionMessageEntry) -> Op
         if p == n {
             continue;
         }
+        // slopty: a thought whose duration came is replaced, not appended to.
+        if let (
+            MessagePart::Reasoning { thought_ms: was, .. },
+            MessagePart::Reasoning { thought_ms: is, .. },
+        ) = (p, n)
+            && was != is
+        {
+            return None;
+        }
         let ((pid, pt), (nid, nt)) = match (p, n) {
             (MessagePart::Text { id: pid, text: pt }, MessagePart::Text { id: nid, text: nt })
             | (
-                MessagePart::Reasoning { id: pid, text: pt },
-                MessagePart::Reasoning { id: nid, text: nt },
+                MessagePart::Reasoning { id: pid, text: pt, .. },
+                MessagePart::Reasoning { id: nid, text: nt, .. },
             ) => ((pid, pt), (nid, nt)),
             _ => return None,
         };
@@ -322,7 +331,7 @@ pub fn apply_transcript_frame(
                     return Err(TranscriptDesync(format!("missing append entry {entry}")));
                 };
                 let tail = target.parts.iter_mut().find_map(|p| match p {
-                    MessagePart::Text { id, text } | MessagePart::Reasoning { id, text }
+                    MessagePart::Text { id, text } | MessagePart::Reasoning { id, text, .. }
                         if *id == part =>
                     {
                         Some(text)
@@ -433,11 +442,13 @@ mod tests {
         b0.parts = vec![MessagePart::Reasoning {
             id: "r0".into(),
             text: "thinking".into(),
+            thought_ms: None,
         }];
         let mut b1 = b0.clone();
         b1.parts = vec![MessagePart::Reasoning {
             id: "r0".into(),
             text: "thinking more".into(),
+            thought_ms: None,
         }];
         let frame = diff_transcript(std::slice::from_ref(&b0), std::slice::from_ref(&b1));
         match &frame {
@@ -566,6 +577,7 @@ mod context_update_tests {
         entry.parts.push(MessagePart::Reasoning {
             id: "new".into(),
             text: "live".into(),
+            thought_ms: None,
         });
         assert!(!baseline.covers(&entry));
         let historical = baseline.historical_entry(&entry).unwrap();

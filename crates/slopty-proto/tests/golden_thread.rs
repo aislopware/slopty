@@ -850,6 +850,7 @@ mod golden_thread {
                     task: Some("b1".to_owned()),
                     retry: Some(Retry { attempt: 1, max: None, in_ms: Some(500) }),
                     said: Some("Reading files".to_owned()),
+                    title: Some("Read report.pdf · pages 1-3".to_owned()),
                 },
             },
             Action::TaskOutput { task: "b1".to_owned(), output: clip("ok\n") },
@@ -858,6 +859,7 @@ mod golden_thread {
                 thinking_since: Some(ms(40)),
                 thought_ms: Some(3_000),
                 phrase: Some("Pondering".to_owned()),
+                quiet_since: Some(ms(41)),
             })),
             Action::ActivitySet(None),
             Action::GoalSet(Some(Goal {

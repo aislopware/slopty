@@ -80,6 +80,9 @@ struct DocPartJson {
     /// transcripts; on this field they degrade to an invisible empty part.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reasoning: Option<String>,
+    // slopty: how long the model thought (`kind: "reasoning"`, additive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    thought_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     call: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -164,10 +167,11 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             text: Some(text.clone()),
             ..Default::default()
         },
-        MessagePart::Reasoning { id, text } => DocPartJson {
+        MessagePart::Reasoning { id, text, thought_ms } => DocPartJson {
             id: id.clone(),
             kind: "reasoning".into(),
             reasoning: Some(text.clone()),
+            thought_ms: *thought_ms, // slopty
             ..Default::default()
         },
         MessagePart::Tool {
@@ -337,6 +341,7 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
         "reasoning" => MessagePart::Reasoning {
             id: p.id,
             text: p.reasoning.unwrap_or_default(),
+            thought_ms: p.thought_ms, // slopty
         },
         // slopty: a task's notice, a page, a quiet note.
         "task" => match p.body.and_then(|b| serde_json::from_value(b).ok()) {
@@ -520,6 +525,7 @@ fn salvage_part(part: &serde_json::Value, entry_id: &str, ix: usize) -> Option<M
         return Some(MessagePart::Reasoning {
             id,
             text: reasoning.to_owned(),
+            thought_ms: None, // slopty
         });
     }
     if let Some(text) = obj.get("text").and_then(|x| x.as_str()) {

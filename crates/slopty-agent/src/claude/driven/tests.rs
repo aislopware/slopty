@@ -812,6 +812,70 @@ fn an_allow_with_words_goes_ahead_then_says_them() {
     assert!(written(&mut driven).iter().all(|l| l["type"] != "user"));
 }
 
+/// A plan approved with words is approved as edited, as the TUI's Ctrl+G does: the plan in the
+/// answer's input is the person's, and no message follows.
+#[test]
+fn a_plan_approved_with_words_is_the_edited_plan() {
+    let (mut driven, mut host) = driven();
+    let input = json!({ "plan": "1. Do it" });
+    host.take(driven.incoming(&can_use("p1", "ExitPlanMode", &input, &json!([])), at(10)));
+    let asked = host.main(&driven).requests.last().expect("the ask").clone();
+    let _before = driven.take_writes();
+    let by = Answerer { client: None, name: "test".to_owned() };
+    let done = driven.answer(&asked.id, "allow", Some("1. Do it\n2. Test it"), by, at(20));
+    host.take(done.expect("taken").outs);
+    let lines = written(&mut driven);
+    assert_eq!(lines[0]["response"]["response"]["behavior"], "allow");
+    assert_eq!(lines[0]["response"]["response"]["updatedInput"]["plan"], "1. Do it\n2. Test it");
+    assert!(lines.iter().all(|l| l["type"] != "user"), "{lines:?}");
+}
+
+/// "Chat about this" answers an agent's questions with none of their answers: the call is
+/// turned down with the TUI's words that the person wants to talk them over, naming each.
+#[test]
+fn chat_about_this_talks_the_questions_over() {
+    let (mut driven, mut host) = driven();
+    let input = json!({ "questions": [{ "question": "Which database?", "header": "DB",
+        "multiSelect": false, "options": [{ "label": "Postgres", "description": "" }] }] });
+    host.take(driven.incoming(&can_use("q1", "AskUserQuestion", &input, &json!([])), at(10)));
+    let asked = host.main(&driven).requests.last().expect("the ask").clone();
+    assert!(asked.options.iter().any(|c| c.label == "Chat about this"), "{:?}", asked.options);
+    let _before = driven.take_writes();
+    let by = Answerer { client: None, name: "test".to_owned() };
+    host.take(driven.answer(&asked.id, "clarify", None, by, at(20)).expect("taken").outs);
+    let lines = written(&mut driven);
+    let response = &lines[0]["response"]["response"];
+    assert_eq!(response["behavior"], "deny");
+    let message = response["message"].as_str().unwrap_or_default();
+    assert!(message.starts_with("The user wants to clarify these questions."), "{message}");
+    assert!(message.contains("- \"Which database?\"\n  (No answer provided)"), "{message}");
+}
+
+/// An answer to a question whose options have previews carries what the TUI's dialog adds:
+/// the picked option's preview and the person's notes, by the question's text.
+#[test]
+fn an_answer_carries_its_preview_and_notes() {
+    let (mut driven, mut host) = driven();
+    let input = json!({ "questions": [{ "question": "Which layout?", "header": "Layout",
+        "multiSelect": false, "options": [
+            { "label": "Split", "description": "", "preview": "| a | b |" },
+            { "label": "Stack", "description": "", "preview": "a\nb" }] }] });
+    host.take(driven.incoming(&can_use("q1", "AskUserQuestion", &input, &json!([])), at(10)));
+    let asked = host.main(&driven).requests.last().expect("the ask").clone();
+    let _before = driven.take_writes();
+    let by = Answerer { client: None, name: "test".to_owned() };
+    let choice = json!([{ "question": "Which layout?", "answer": "Split" }]).to_string();
+    let notes = json!({ "Which layout?": "keep the gutter" }).to_string();
+    host.take(driven.answer(&asked.id, &choice, Some(&notes), by, at(20)).expect("taken").outs);
+    let lines = written(&mut driven);
+    let input = &lines[0]["response"]["response"]["updatedInput"];
+    assert_eq!(input["answers"]["Which layout?"], "Split");
+    assert_eq!(
+        input["annotations"]["Which layout?"],
+        json!({ "preview": "| a | b |", "notes": "keep the gutter" })
+    );
+}
+
 /// Fast mode says how it stands (cooling down after its limit, back on), a model switch that
 /// failed says why in the TUI's words, and whether ultracode applies is a fact of the thread.
 #[test]
@@ -947,6 +1011,143 @@ fn a_request_needing_the_person_is_held_for_the_card() {
     let asked = host.main(&driven).requests.last().expect("the ask").clone();
     assert!(asked.needs_presence, "{asked:?}");
     assert!(asked.options.iter().all(|c| c.id != "always"), "{:?}", asked.options);
+}
+
+/// A write the person cannot review says so, as the TUI's card does: an existing file that is
+/// not text offers no "always allow" (one-time only), a large one says it is not previewed, and
+/// a symlink whose target leaves the folder names the target; a plain new file says nothing.
+#[test]
+fn a_write_says_what_is_on_disk_where_it_lands() {
+    let dir = tempfile::tempdir().expect("a scratch folder");
+    let binary = dir.path().join("blob.bin");
+    std::fs::write(&binary, [0_u8, 159, 146, 150, 7]).expect("the binary file");
+    let large = dir.path().join("large.txt");
+    std::fs::write(&large, "x".repeat(300_000)).expect("the large file");
+    let link = dir.path().join("link.txt");
+    std::os::unix::fs::symlink(&large, &link).expect("the symlink");
+    let rule = json!([{ "type": "addRules", "rules": [{ "toolName": "Write" }],
+                        "behavior": "allow", "destination": "localSettings" }]);
+    let (mut driven, mut host) = driven();
+    let mut ask = |id: &str, path: &Path, at_ms: u64| {
+        let input = json!({ "file_path": path.display().to_string(), "content": "new" });
+        host.take(driven.incoming(&can_use(id, "Write", &input, &rule), at(at_ms)));
+        let asked = host.main(&driven).requests.last().expect("the ask").clone();
+        let text = asked.text.map(|t| t.text).unwrap_or_default();
+        (text, asked.options.iter().any(|c| c.id == "always"))
+    };
+    let (text, always) = ask("a1", &binary, 10);
+    assert!(text.contains("cannot be shown in full") && text.contains("one-time only"), "{text}");
+    assert!(!always, "an unreviewable overwrite offers no rule");
+    let (text, always) = ask("a2", &large, 20);
+    assert!(text.contains("Existing file is too large to preview"), "{text}");
+    assert!(always);
+    let (text, _) = ask("a3", &link, 30);
+    assert!(text.contains("(outside working directory) via a symlink"), "{text}");
+    let (text, always) = ask("a4", &dir.path().join("new.txt"), 40);
+    assert!(!text.contains("preview") && !text.contains("symlink"), "{text}");
+    assert!(always);
+}
+
+/// A turn begun with `text` and echoed, for a result to end.
+fn begun(driven: &mut Driven, host: &mut Host, text: &str, n: u32) {
+    host.take(driven.send(text, &[], intent(n), at(0)));
+    let uuid = message_id(intent(n));
+    host.take(driven.incoming(
+        &json!({"type": "user", "uuid": uuid, "isReplay": true, "session_id": SESSION,
+                "timestamp": "2027-01-15T08:00:00.000Z",
+                "message": {"role": "user", "content": [{"type": "text", "text": text}]}}),
+        at(1),
+    ));
+    host.take(driven.incoming(
+        &json!({"type": "command_lifecycle", "command_uuid": uuid, "state": "started"}),
+        at(1),
+    ));
+}
+
+/// The last turn's error, when it failed.
+fn failed_with(thread: &ThreadState) -> Option<String> {
+    match &thread.turns.last()?.state {
+        TurnState::Failed { error, .. } => Some(error.clone()),
+        _ => None,
+    }
+}
+
+/// A turn Claude Code would not start says why in words before what it printed, one that
+/// filled the context says so, and a call a hook deferred says the turn stopped there.
+#[test]
+fn a_turn_that_cannot_go_on_says_why() {
+    let (mut driven, mut host) = driven();
+    begun(&mut driven, &mut host, "hi", 1);
+    host.take(driven.incoming(
+        &json!({ "type": "result", "subtype": "error_during_execution", "is_error": true,
+                 "session_id": SESSION, "startup_failure_reason": "provider_not_allowed",
+                 "errors": ["provider blocked"] }),
+        at(10),
+    ));
+    let error = failed_with(host.main(&driven)).unwrap_or_default();
+    assert!(error.starts_with(STARTUP_REFUSED), "{error}");
+    assert!(error.contains("do not allow this API provider") && error.contains("provider blocked"));
+    begun(&mut driven, &mut host, "more", 2);
+    host.take(driven.incoming(
+        &json!({ "type": "result", "subtype": "success", "is_error": true, "session_id": SESSION,
+                 "terminal_reason": "prompt_too_long", "result": "Prompt is too long" }),
+        at(20),
+    ));
+    let error = failed_with(host.main(&driven)).unwrap_or_default();
+    assert!(error.starts_with(CONTEXT_FULL) && error.ends_with("Prompt is too long"), "{error}");
+    begun(&mut driven, &mut host, "go", 3);
+    host.take(driven.incoming(
+        &json!({ "type": "result", "subtype": "success", "is_error": false, "session_id": SESSION,
+                 "result": "", "deferred_tool_use": { "id": "t1", "name": "Bash", "input": {} } }),
+        at(30),
+    ));
+    let said = notices(host.main(&driven));
+    assert!(said.iter().any(|(k, t)| k == Notice::HOOK && t.starts_with("A hook deferred Bash")));
+}
+
+/// A hook that allowed a call says so; a hook that said nothing past success stays quiet; a
+/// message from another session held back says so.
+#[test]
+fn a_hooks_allow_and_a_held_message_say_so() {
+    let (mut driven, mut host) = driven();
+    let hook = |stdout: &str| {
+        json!({ "type": "system", "subtype": "hook_response", "hook_id": "h", "session_id": SESSION,
+                "hook_name": "PreToolUse:Bash", "hook_event": "PreToolUse", "output": "",
+                "stdout": stdout, "stderr": "", "exit_code": 0, "outcome": "success" })
+    };
+    let allow = json!({ "hookSpecificOutput": { "hookEventName": "PreToolUse",
+                                                "permissionDecision": "allow" } });
+    host.take(driven.incoming(&hook(&allow.to_string()), at(10)));
+    host.take(driven.incoming(&hook(""), at(20)));
+    host.take(driven.incoming(
+        &json!({ "type": "system", "subtype": "peer_message_hold", "session_id": SESSION,
+                 "from_name": "reviewer", "cause": "permission mode mismatch" }),
+        at(30),
+    ));
+    let said = notices(host.main(&driven));
+    assert_eq!(said[0], (Notice::ALLOWED.to_owned(), "Allowed by PreToolUse hook".to_owned()));
+    assert_eq!(said.len(), 2, "{said:?}");
+    assert!(said[1].1.contains("reviewer"), "{said:?}");
+}
+
+/// What `init` says went wrong (a plugin that did not load, a server config skipped) is said
+/// once, and the servers' standing is a fact of the thread.
+#[test]
+fn init_says_what_did_not_load_once() {
+    let (mut driven, mut host) = driven();
+    let init = json!({ "type": "system", "subtype": "init", "session_id": SESSION,
+        "plugin_errors": [{ "plugin": "lint", "message": "bad manifest" }],
+        "mcp_server_errors": [{ "name": "db", "message": "no command" }],
+        "mcp_servers": [{ "name": "github", "status": "connected" },
+                        { "name": "linear", "status": "failed" }] });
+    host.take(driven.incoming(&init, at(10)));
+    host.take(driven.incoming(&init, at(20)));
+    let thread = host.main(&driven);
+    let notes: Vec<&str> = thread.notes.iter().map(|n| n.text.as_str()).collect();
+    assert_eq!(notes.iter().filter(|n| n.contains("Failed to load plugin lint")).count(), 1);
+    assert!(notes.iter().any(|n| n.starts_with("MCP server \"db\" was skipped")), "{notes:?}");
+    let servers = thread.meta.facts.get("mcp-servers").map(String::as_str);
+    assert_eq!(servers, Some("1 connected, 1 failed"));
 }
 
 /// A compaction that failed says why, in the TUI's short words for its known causes.

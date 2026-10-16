@@ -787,6 +787,9 @@ impl Notice {
     pub const API_ERROR: &'static str = "api-error";
     /// What a command printed.
     pub const COMMAND: &'static str = "command";
+    /// What a command printed as its errors: a slash command's or a `!` command's standard
+    /// error, drawn apart from its output as the TUI draws it, in red.
+    pub const COMMAND_ERROR: &'static str = "command-error";
     /// The agent's own judge of risk (Claude Code's auto mode) turned a call down, with no
     /// person asked.
     pub const DECLINED: &'static str = "declined";
@@ -807,6 +810,10 @@ impl Notice {
     /// The agent's permission mode changed without the person switching it: a plan approved
     /// with a mode, plan mode entered or left ("Switched to accept edits").
     pub const MODE: &'static str = "mode";
+    /// A quiet line of the agent's that is neither a failure nor the person's words: a
+    /// prompt's origin ("Prompt from the deploy plugin"), an MCP server's update, a message
+    /// from another session. Its first line is the row, the rest opens under it.
+    pub const NOTE: &'static str = "note";
     /// Slopty's own reports handed to the agent with a turn (`slopty-server`'s deliveries, in
     /// their `<slopty-reports>` frame), kept as they were framed.
     pub const REPORT: &'static str = "report";

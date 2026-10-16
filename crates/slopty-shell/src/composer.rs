@@ -902,6 +902,7 @@ impl Wizard {
                 UserInputAnswer {
                     question_id: q.id.clone(),
                     labels,
+                    notes: None, // slopty: the card's notes join in `wizard_finish`.
                 }
             })
             .collect()
@@ -6022,6 +6023,10 @@ impl Composer {
             ComposerInputEvent::Submitted => this.on_submit(cx),
             ComposerInputEvent::ModifiedSubmitted => this.on_modified_submit(cx),
             ComposerInputEvent::Edited | ComposerInputEvent::CursorMoved => {
+                // slopty: typing holds a card's option keys back (`request_card::KeyGuard`).
+                if matches!(event, ComposerInputEvent::Edited) {
+                    this.card.guard.typed_at = Some(Instant::now());
+                }
                 this.on_input_edited(cx)
             }
             ComposerInputEvent::ViewportChanged => cx.notify(),
@@ -8113,6 +8118,8 @@ impl Composer {
                         .and_then(|q| q.prefill.clone())
                         .unwrap_or_default();
                     self.wizard = Some(Wizard::new(request_id, questions));
+                    // slopty: its option keys wait while the person may still be typing.
+                    self.card.guard.shown_at = Some(Instant::now());
                     self.input
                         .update(cx, |input, cx| input.set_text(prefill, cx));
                     self.advance_task = None;
@@ -9268,6 +9275,8 @@ impl Composer {
 
     /// Submit RespondInput and retire the panel.
     fn wizard_finish(&mut self, answers: Vec<UserInputAnswer>, cx: &mut Context<Self>) {
+        // slopty: the card's notes on each question go with its answer.
+        let answers = self.with_card_notes(answers, cx);
         let Some(wizard) = self.wizard.take() else {
             return;
         };
@@ -9334,6 +9343,16 @@ impl Composer {
         cx.notify();
     }
 
+    // slopty: option key `digit` at `now`: it picks only once the person has stopped typing and
+    // the card has been up a moment; whether it was taken.
+    fn wizard_digit(&mut self, digit: usize, now: Instant, cx: &mut Context<Self>) -> bool {
+        if self.card.guard.holds(now) {
+            return false;
+        }
+        self.wizard_select(digit.saturating_sub(1), cx);
+        true
+    }
+
     fn on_wizard_key(&mut self, event: &KeyDownEvent, window: &Window, cx: &mut Context<Self>) {
         // Keys bubbling out of the free-text input must not double-handle:
         // digits select options only while the input is empty, and Enter is the
@@ -9348,14 +9367,15 @@ impl Composer {
             && (1..=9).contains(&digit)
             && !event.keystroke.modifiers.modified()
         {
-            if !input_focused || input_empty {
-                self.wizard_select(digit - 1, cx);
+            // slopty: a key the person meant for the composer, typed as the card came or just
+            // after, goes on to the input rather than answering (`request_card::KeyGuard`).
+            if (!input_focused || input_empty) && self.wizard_digit(digit, Instant::now(), cx) {
                 // Consumed as a selection: stop the platform from also
                 // inserting the digit into the focused free-text input.
                 cx.stop_propagation();
             }
         } else if key == "enter" {
-            if !input_focused {
+            if !input_focused && !self.card.guard.holds(Instant::now()) {
                 self.wizard_enter(cx); // slopty: an approval's Enter follows its rules.
                 cx.stop_propagation();
             }
@@ -15178,6 +15198,46 @@ mod tests {
             panic!("expected Done on the click")
         };
         assert_eq!(answers[0].labels, vec!["Trust this folder"]);
+    }
+
+    // slopty: the typing guard (`request_card::KeyGuard`).
+    /// A digit typed as a request lands answers nothing, nor one typed just after a keystroke;
+    /// once the person has stopped typing and the card has been up, the key picks.
+    #[gpui::test]
+    fn a_key_typed_as_a_request_lands_answers_nothing(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| AppState::new());
+        let composer = cx.new(|cx| Composer::new(state.clone(), cx));
+        let mut approval = question("choice", &["Allow", "Deny"], false);
+        approval.choices_only = true;
+        state.update(cx, |s, _| {
+            s.selected_chat = Some("a".into());
+            s.transcript = vec![SessionMessageEntry {
+                id: "assistant".into(),
+                role: MessageRole::Assistant,
+                parts: vec![MessagePart::Input {
+                    id: "input".into(),
+                    request_id: "ask".into(),
+                    questions: vec![approval],
+                    resolved: false,
+                }],
+                created_at: 0,
+                device_id: "device".into(),
+                status: Some(slopty_view_doc::MessageStatus::Streaming),
+                continuation_of: None,
+                duration_ms: None,
+            }];
+        });
+        composer.update(cx, |c, cx| {
+            c.on_state_changed(cx);
+            let landed = c.card.guard.shown_at.expect("the card's time");
+            assert!(!c.wizard_digit(1, landed, cx), "typed as it landed");
+            assert!(!c.wizard_digit(1, landed + Duration::from_millis(1_400), cx));
+            assert!(c.wizard.is_some() && c.answered_requests.is_empty(), "nothing answered");
+            c.card.guard.typed_at = Some(landed + Duration::from_millis(1_000));
+            assert!(!c.wizard_digit(1, landed + Duration::from_millis(2_000), cx), "still typing");
+            assert!(c.wizard_digit(1, landed + Duration::from_millis(2_600), cx), "after the guard");
+            assert!(c.answered_requests.contains("ask"), "the key picked");
+        });
     }
 
     /// A question's prompt leaves the composer with its chat.

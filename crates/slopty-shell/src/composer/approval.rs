@@ -18,7 +18,7 @@ pub(super) const GATED_BODY_MAX_HEIGHT: f32 = 160.0;
 
 /// A character that would hide or reorder what the person reads: controls (but line breaks and
 /// tabs), bidi overrides and isolates, default-ignorables and noncharacters.
-fn hidden(c: char) -> bool {
+pub(crate) fn hidden(c: char) -> bool {
     let u = c as u32;
     (c.is_control() && c != '\n' && c != '\t')
         || matches!(

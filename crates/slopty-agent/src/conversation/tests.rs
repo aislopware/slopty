@@ -914,3 +914,80 @@ fn the_files_a_command_changed_are_its_calls() {
     let edits = bash.edits.as_ref().expect("the note");
     assert!(edits.skipped && !edits.moves_tree, "{edits:?}");
 }
+
+/// What Claude Code puts in the person's place reads as the TUI's rows, not as the person's
+/// prompt: a stop hook's feedback, a plugin's prompt says whose it is, a command's errors apart
+/// from what it printed, an MCP server's update, and another session's message with who sent it.
+#[test]
+fn what_claude_code_says_in_the_persons_place_is_its_own_row() {
+    let text = |uuid: &str, said: &str| user(uuid, None, &json!(said));
+    let mut plugin = text("u2", "review the diff");
+    plugin["origin"] = json!({ "kind": "plugin", "name": "reviewer" });
+    let jsonl = [
+        line(&text("u1", "Stop hook feedback:\nTests still fail")),
+        line(&plugin),
+        line(&text(
+            "u3",
+            "<local-command-stdout>built</local-command-stdout>\
+             <local-command-stderr>warning: unused</local-command-stderr>",
+        )),
+        line(&text(
+            "u4",
+            "<mcp-resource-update server=\"docs\" uri=\"file:///w/guide.md\">\
+             <reason>re-indexed</reason></mcp-resource-update>",
+        )),
+        line(&text(
+            "u5",
+            "<cross-session-message from=\"api\">The schema moved</cross-session-message>",
+        )),
+    ]
+    .concat();
+    let mut c = Conversation::default();
+    c.ingest_jsonl(&MAIN, &jsonl);
+    let rows: Vec<(String, String)> = c
+        .entries(&MAIN)
+        .iter()
+        .map(|e| match &e.body {
+            Body::Note(n) => (format!("{:?}", n.kind), n.text.text.clone()),
+            Body::Prompt(p) => ("Prompt".to_owned(), p.text.text.clone()),
+            other => (format!("{other:?}"), String::new()),
+        })
+        .collect();
+    let expected = [
+        ("Hook", "Stop hook feedback\nTests still fail"),
+        ("Quiet", "Prompt from the reviewer plugin"),
+        ("Prompt", "review the diff"),
+        ("Command", "built"),
+        ("CommandError", "warning: unused"),
+        ("Quiet", "↻ docs: guide.md · re-indexed"),
+        ("Quiet", "Message from another session · api\nThe schema moved"),
+    ];
+    let expected: Vec<(String, String)> =
+        expected.iter().map(|(k, t)| ((*k).to_owned(), (*t).to_owned())).collect();
+    assert_eq!(rows, expected);
+}
+
+/// A server tool's result in the answer settles its call: the advisor's review reads as the
+/// TUI's row, its advice under it, and one unavailable says why.
+#[test]
+fn the_advisors_review_settles_its_call() {
+    let blocks = json!([
+        { "type": "server_tool_use", "id": "s1", "name": "advisor", "input": {} },
+        { "type": "advisor_tool_result", "tool_use_id": "s1",
+          "content": { "type": "advisor_result", "text": "Check the null case first." } },
+        { "type": "server_tool_use", "id": "s2", "name": "advisor", "input": {} },
+        { "type": "advisor_tool_result", "tool_use_id": "s2",
+          "content": { "type": "advisor_tool_result_error", "error_code": "overloaded" } },
+    ]);
+    let mut c = Conversation::default();
+    c.ingest_jsonl(&MAIN, &line(&assistant("a1", None, &blocks)));
+    let reviewed = tool(&c, &MAIN, "s1").result.as_ref().expect("settled");
+    assert_eq!(
+        reviewed.said.as_deref(),
+        Some("Advisor has reviewed the conversation and will apply the feedback")
+    );
+    assert_eq!(reviewed.text.as_ref().map(|t| t.text.as_str()), Some("Check the null case first."));
+    let failed = tool(&c, &MAIN, "s2").result.as_ref().expect("settled");
+    assert_eq!(failed.said.as_deref(), Some("Advisor unavailable (overloaded)"));
+    assert_eq!(failed.status, ResultStatus::Error);
+}

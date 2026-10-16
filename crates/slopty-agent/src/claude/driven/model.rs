@@ -180,6 +180,16 @@ impl Driven {
             }
         }
         let Some(applied) = said.get("applied") else { return outs };
+        // The advisor rides every request: the TUI says so once, as it costs tokens.
+        if let Some(advisor) = str_at(applied, "advisor").filter(|a| !a.trim().is_empty())
+            && self.said_once.0.insert(format!("advisor:{advisor}"))
+        {
+            let words = format!(
+                "Advisor Tool (experimental) is on and may use more tokens · advising with {}",
+                crate::claude::model_label(advisor)
+            );
+            outs.extend(self.passing("advisor", &words, now));
+        }
         let on = bool_at(applied, "ultracode");
         let available = bool_at(applied, "ultracodeAvailable") || on;
         let value = available.then_some(if on { "on" } else { "off" });

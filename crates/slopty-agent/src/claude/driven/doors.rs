@@ -149,6 +149,29 @@ fn plugin_in(tree: &Value) -> Option<String> {
     }
 }
 
+/// The thread fact the MCP servers' counts are kept in, which the context card shows.
+const SERVERS_FACT: &str = "mcp-servers";
+
+/// The servers `init` lists, counted by status as the TUI's `/status` row counts them: "3
+/// connected, 1 pending, 1 failed"; `None` with none.
+fn servers_words(servers: &[Value]) -> Option<String> {
+    let mut counts: Vec<(&str, usize)> = Vec::new();
+    for server in servers {
+        let status = match str_at(server, "status").unwrap_or("pending") {
+            "needs-auth" => "need auth",
+            other => other,
+        };
+        match counts.iter_mut().find(|(s, _)| *s == status) {
+            Some((_, n)) => *n = n.saturating_add(1),
+            None => counts.push((status, 1)),
+        }
+    }
+    let order = ["connected", "pending", "need auth", "disabled", "failed"];
+    counts.sort_by_key(|(s, _)| order.iter().position(|o| o == s).unwrap_or(order.len()));
+    let words: Vec<String> = counts.iter().map(|(s, n)| format!("{n} {s}")).collect();
+    (!words.is_empty()).then(|| words.join(", "))
+}
+
 impl Driven {
     /// What only a question answers after `initialize`: the permission rules, the MCP servers'
     /// apps, and the surfaces the mods draw.
@@ -320,7 +343,7 @@ impl Driven {
         }
         self.servers = seen;
         self.control(Control::McpStatus, &json!({ "subtype": "mcp_status" }));
-        let mut outs = Vec::new();
+        let mut outs = self.history.fact(SERVERS_FACT, servers_words(servers).as_deref());
         for (name, said) in notes {
             let note = AgentNote {
                 key: format!("mcp:{name}"),
@@ -331,6 +354,42 @@ impl Driven {
                 until_ms: Some(WallMs::from_millis(now.as_millis().saturating_add(MCP_NOTE_MS))),
             };
             outs.extend(self.history.tell(Action::Notified(note)));
+        }
+        outs
+    }
+
+    /// What `init` says did not load: a plugin's errors, an MCP server's config skipped, a
+    /// server the organization's policy blocks. Each is a passing note, said once.
+    pub(super) fn init_problems(&mut self, init: &Value, now: WallMs) -> Vec<Out> {
+        let listed = |key: &str| -> Vec<&Value> {
+            init.get(key).and_then(Value::as_array).into_iter().flatten().collect()
+        };
+        let mut said = Vec::new();
+        for error in listed("plugin_errors") {
+            let plugin = str_at(error, "plugin").unwrap_or("a plugin");
+            let message = str_at(error, "message").unwrap_or("it did not load");
+            said.push(format!("Failed to load plugin {plugin}: {message}"));
+        }
+        for error in listed("mcp_server_errors") {
+            let name = str_at(error, "name").unwrap_or("an MCP server");
+            let message = str_at(error, "message").unwrap_or("its config does not read");
+            said.push(format!("MCP server \"{name}\" was skipped: {message}"));
+        }
+        let blocked: Vec<&str> = listed("mcp_servers")
+            .into_iter()
+            .filter(|s| str_at(s, "status").is_some_and(|status| status.contains("block")))
+            .filter_map(|s| str_at(s, "name"))
+            .collect();
+        if !blocked.is_empty() {
+            let noun = if blocked.len() == 1 { "server" } else { "servers" };
+            said.push(format!("MCP {noun} blocked by enterprise policy: {}", blocked.join(", ")));
+        }
+        let mut outs = Vec::new();
+        for words in said {
+            if self.said_once.0.insert(format!("init:{words}")) {
+                let key = format!("init-{}", self.said_once.0.len());
+                outs.extend(self.passing(&key, &words, now));
+            }
         }
         outs
     }

@@ -148,9 +148,13 @@ pub enum MessagePart {
     /// fallback renders `text` as prose — degrade to an invisible empty text
     /// part instead of leaking raw thinking into the transcript. iOS drops
     /// unknown kinds entirely.
+    #[serde(rename_all = "camelCase")]
     Reasoning {
         id: String,
         text: String,
+        // slopty: how long the model thought, once known, for its group's "thought for 12s".
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thought_ms: Option<u64>,
     },
     #[serde(rename_all = "camelCase")]
     Tool {
@@ -409,6 +413,7 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                 out.push(MessagePart::Reasoning {
                     id,
                     text: text.clone(),
+                    thought_ms: None,
                 });
             }
         }
@@ -731,9 +736,12 @@ pub fn split_parts(parts: &[MessagePart]) -> Vec<Vec<MessagePart>> {
     for part in parts {
         // Both text-bodied kinds chunk the same way; extended thinking can
         // exceed the cap just as easily as a long reply.
+        // slopty: a thought's duration stays on its first piece.
         let (id, text, reasoning) = match part {
-            MessagePart::Text { id, text } if text.len() > MSG_INLINE_MAX => (id, text, false),
-            MessagePart::Reasoning { id, text } if text.len() > MSG_INLINE_MAX => (id, text, true),
+            MessagePart::Text { id, text } if text.len() > MSG_INLINE_MAX => (id, text, None),
+            MessagePart::Reasoning { id, text, thought_ms } if text.len() > MSG_INLINE_MAX => {
+                (id, text, Some(*thought_ms))
+            }
             other => {
                 push_part(&mut chunks, &mut current_bytes, other.clone());
                 continue;
@@ -757,10 +765,11 @@ pub fn split_parts(parts: &[MessagePart]) -> Vec<Vec<MessagePart>> {
                 format!("{id}~{piece}")
             };
             let body = text[start..end].to_string();
-            let sub = if reasoning {
+            let sub = if let Some(thought_ms) = reasoning {
                 MessagePart::Reasoning {
                     id: sub_id,
                     text: body,
+                    thought_ms: thought_ms.filter(|_| piece == 0),
                 }
             } else {
                 MessagePart::Text {
@@ -811,7 +820,8 @@ mod tests {
             parts[0],
             MessagePart::Reasoning {
                 id: "r0".into(),
-                text: "let me think".into()
+                text: "let me think".into(),
+                thought_ms: None,
             }
         );
         // Text breaks the reasoning block; a later thought starts a new part.
@@ -825,7 +835,7 @@ mod tests {
         assert_eq!(parts.len(), 3);
         assert!(matches!(
             &parts[2],
-            MessagePart::Reasoning { id, text } if id == "r2" && text == "more"
+            MessagePart::Reasoning { id, text, .. } if id == "r2" && text == "more"
         ));
     }
 
@@ -835,6 +845,7 @@ mod tests {
         let parts = vec![MessagePart::Reasoning {
             id: "r0".into(),
             text: big,
+            thought_ms: None,
         }];
         let chunks = split_parts(&parts);
         let flat = join_continuations(chunks);

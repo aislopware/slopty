@@ -786,6 +786,9 @@ pub enum ToolDetail {
     Output {
         lines: Vec<SharedString>,
         truncated_by: usize,
+        /// slopty: the first of `lines` that is the command's standard error, drawn in the
+        /// danger colour after its output, as the TUI does.
+        stderr_from: Option<usize>,
     },
     /// A thought's markdown, pre-flattened into wrapped STYLED lines — one
     /// fixed-height row each, so the height stays analytic like `Output`
@@ -858,7 +861,14 @@ pub fn tool_detail(
         });
     }
     let output = output?;
-    let mut lines: Vec<SharedString> = output.lines().map(output_line).collect();
+    // slopty: a line of JSON reads pretty-printed, as the TUI's output does.
+    let mut lines: Vec<SharedString> = output
+        .lines()
+        .flat_map(|line| match pretty_json(line) {
+            Some(pretty) => pretty.lines().map(output_line).collect::<Vec<_>>(),
+            None => vec![output_line(line)],
+        })
+        .collect();
     // Trim trailing blank output lines so the block hugs its content.
     while lines.last().is_some_and(|l| l.trim().is_empty()) {
         lines.pop();
@@ -871,7 +881,60 @@ pub fn tool_detail(
     Some(ToolDetail::Output {
         lines,
         truncated_by,
+        stderr_from: None,
     })
+}
+
+/// Longest line of JSON an output pretty-prints, as the TUI's.
+const PRETTY_JSON_MAX_CHARS: usize = 10_000;
+
+/// slopty: `line` pretty-printed when it is one JSON object or array on its own, as the TUI
+/// shows a tool's JSON output.
+fn pretty_json(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    let framed = (trimmed.starts_with('{') && trimmed.ends_with('}'))
+        || (trimmed.starts_with('[') && trimmed.ends_with(']'));
+    if !framed || trimmed.len() > PRETTY_JSON_MAX_CHARS || trimmed.len() < 3 {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(trimmed).ok()?;
+    let pretty = serde_json::to_string_pretty(&value).ok()?;
+    (pretty.lines().count() > 1).then_some(pretty)
+}
+
+/// Lines of a command's standard error a chip shows under its output.
+const STDERR_MAX_LINES: usize = 10;
+
+/// slopty: `detail` with the command's standard error after its output, marked to draw in the
+/// danger colour; an output of standard error alone when there was no other.
+pub fn with_stderr(detail: Option<ToolDetail>, stderr: Option<&str>) -> Option<ToolDetail> {
+    let Some(stderr) = stderr.filter(|s| !s.trim().is_empty()) else { return detail };
+    let mut err: Vec<SharedString> = stderr.lines().map(output_line).collect();
+    let more = err.len().saturating_sub(STDERR_MAX_LINES);
+    err.truncate(STDERR_MAX_LINES);
+    if more > 0 {
+        err.push(SharedString::from(format!("… {more} more lines of standard error")));
+    }
+    match detail {
+        Some(ToolDetail::Output { mut lines, truncated_by, .. }) => {
+            let from = lines.len();
+            lines.extend(err);
+            Some(ToolDetail::Output { lines, truncated_by, stderr_from: Some(from) })
+        }
+        None => Some(ToolDetail::Output { lines: err, truncated_by: 0, stderr_from: Some(0) }),
+        other => other,
+    }
+}
+
+/// slopty: the URL a line of output names, when it names one: the TUI makes it a link.
+fn line_url(line: &str) -> Option<(usize, &str)> {
+    let start = line.find("https://").or_else(|| line.find("http://"))?;
+    let rest = line.get(start..)?;
+    let end = rest
+        .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>' | ')' | ']'))
+        .unwrap_or(rest.len());
+    let url = rest.get(..end)?.trim_end_matches(['.', ',', ';', ':']);
+    (url.len() > "https://".len()).then_some((start, url))
 }
 
 /// Chars kept per output line. Lines clip rather than wrap, but each one is
@@ -974,6 +1037,7 @@ pub fn call_block(call: &ToolCall) -> Option<ToolDetail> {
     Some(ToolDetail::Output {
         lines,
         truncated_by,
+        stderr_from: None,
     })
 }
 
@@ -1229,8 +1293,10 @@ fn tool_fingerprint(tools: &[ToolItem], auto_open: bool) -> u64 {
             Some(ToolDetail::Output {
                 lines,
                 truncated_by,
+                stderr_from,
             }) => {
                 acc.push(1);
+                acc.extend_from_slice(&(stderr_from.unwrap_or(usize::MAX) as u64).to_le_bytes());
                 acc.extend_from_slice(&(lines.len() as u32).to_le_bytes());
                 acc.extend_from_slice(&(*truncated_by as u32).to_le_bytes());
                 let bytes: usize = lines.iter().map(|l| l.len()).sum();
@@ -1282,6 +1348,7 @@ fn tool_fingerprint(tools: &[ToolItem], auto_open: bool) -> u64 {
         if let Some(ToolDetail::Output {
             lines,
             truncated_by,
+            ..
         }) = t.invocation.as_deref()
         {
             for line in lines {
@@ -1539,8 +1606,11 @@ pub fn rows_for_entry(
                     call: call.clone(),
                     is_error: *is_error,
                     resolved: *resolved,
-                    detail: tool_detail(output.as_deref(), diff.as_ref(), diff_stats.as_deref())
-                        .map(Arc::new),
+                    detail: with_stderr(
+                        tool_detail(output.as_deref(), diff.as_ref(), diff_stats.as_deref()),
+                        facts.as_deref().and_then(|facts| facts.stderr.as_deref()),
+                    )
+                    .map(Arc::new),
                     invocation: call_block(call).map(Arc::new),
                     output_ref: output_ref.clone().map(SharedString::from),
                     output_bytes: *output_bytes,
@@ -1575,7 +1645,7 @@ pub fn rows_for_entry(
             }
             // Thinking rides the SAME accordion as the tools around it
             // (user request) — a thought chip in the group, not its own row.
-            MessagePart::Reasoning { id: part_id, text } => {
+            MessagePart::Reasoning { id: part_id, text, thought_ms } => {
                 if text.trim().is_empty() {
                     continue;
                 }
@@ -1587,7 +1657,14 @@ pub fn rows_for_entry(
                 // streaming, hanging inline markers mended for display, the
                 // settled cache once complete.
                 let tree = parse(&format!("{}#{}", entry.id, part_id), text);
-                let item = thought_item(part_id, &tree, live);
+                let mut item = thought_item(part_id, &tree, live);
+                // slopty: how long it thought, for the group's line.
+                if let Some(ms) = *thought_ms {
+                    item.facts = Some(Arc::new(slopty_view_doc::ToolFacts {
+                        thought_ms: Some(ms),
+                        ..slopty_view_doc::ToolFacts::default()
+                    }));
+                }
                 if compact {
                     compact_group_pos.get_or_insert(rows.len());
                 } else if pending_group.first().is_some_and(is_agent_tool) {
@@ -2120,9 +2197,15 @@ pub fn tool_group_summary(tools: &[ToolItem]) -> String {
     #[cfg(test)]
     FORBID_ROW_PREPARATION
         .with(|forbidden| assert!(!forbidden.get(), "tool summary formatting ran on UI thread"));
+    // slopty: directory listings are counted apart from commands, as the TUI's group line
+    // counts them ("listed 2 directories").
+    let listed = tools
+        .iter()
+        .filter(|t| t.kind == ToolItemKind::Call && lists_directory(&t.call))
+        .count();
     let pairs: Vec<(ToolCall, bool)> = tools
         .iter()
-        .filter(|t| t.kind == ToolItemKind::Call)
+        .filter(|t| t.kind == ToolItemKind::Call && !lists_directory(&t.call))
         .map(|t| (t.call.clone(), t.is_error))
         .collect();
     let thoughts = tools
@@ -2140,13 +2223,35 @@ pub fn tool_group_summary(tools: &[ToolItem]) -> String {
     } else {
         slopty_view_proto::view::tool_group_summary(&pairs)
     };
+    // slopty: the TUI's group parts past the shared summary: an edit's line totals ("edited 2
+    // files +12 -3"), directories listed, and what commands landed ("committed 1a2b3c4 ·
+    // pushed to main").
+    let base = with_line_totals(base, tools);
+    let base = [base]
+        .into_iter()
+        .chain((listed > 0).then(|| {
+            format!("listed {listed} {}", if listed == 1 { "directory" } else { "directories" })
+        }))
+        .chain(landed_words(tools))
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ");
     // Thought and note chips ride the group (they are UI-synthesized, so the
     // shared view summary never sees them): name them on the collapsed line.
     let mut segments: Vec<String> = Vec::new();
-    match thoughts {
-        0 => {}
-        1 => segments.push("thought process".into()),
-        n => segments.push(format!("thought {n} times")),
+    // slopty: how long it thought, where each thought says, as the TUI's "Thought for 12s".
+    let thought_ms: Option<u64> = tools
+        .iter()
+        .filter(|t| t.kind == ToolItemKind::Thought)
+        .map(|t| t.facts.as_ref().and_then(|facts| facts.thought_ms))
+        .sum();
+    match (thoughts, thought_ms) {
+        (0, _) => {}
+        (_, Some(ms)) if ms >= 1_000 => {
+            segments.push(format!("thought for {}", slopty_view_doc::work::duration_words(ms)));
+        }
+        (1, _) => segments.push("thought process".into()),
+        (n, _) => segments.push(format!("thought {n} times")),
     }
     match notes {
         0 => {}
@@ -2163,6 +2268,53 @@ pub fn tool_group_summary(tools: &[ToolItem]) -> String {
         first.make_ascii_uppercase();
     }
     summary
+}
+
+// slopty: a call that only lists a directory, as the TUI's group line counts it.
+fn lists_directory(call: &ToolCall) -> bool {
+    match call {
+        ToolCall::Exec { command } => {
+            let first = command.split_whitespace().next().unwrap_or_default();
+            let lone = !command.contains(['|', ';', '&', '>']);
+            lone && matches!(first, "ls" | "tree" | "eza" | "exa" | "dir")
+        }
+        ToolCall::Unknown { name, .. } => name == "LS",
+        _ => false,
+    }
+}
+
+// slopty: the shared summary's "edited N files" with the lines its edits added and removed.
+fn with_line_totals(base: String, tools: &[ToolItem]) -> String {
+    let (added, removed) = tools
+        .iter()
+        .filter_map(|t| t.facts.as_ref().and_then(|facts| facts.changed))
+        .fold((0_u64, 0_u64), |(a, r), [add, rem]| (a.saturating_add(add), r.saturating_add(rem)));
+    if added == 0 && removed == 0 {
+        return base;
+    }
+    base.split(" · ")
+        .map(|segment| {
+            if segment.to_ascii_lowercase().starts_with("edited ") {
+                format!("{segment} +{added} -{removed}")
+            } else {
+                segment.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+// slopty: what the group's commands landed, each once, in order.
+fn landed_words(tools: &[ToolItem]) -> Vec<String> {
+    let mut said: Vec<String> = Vec::new();
+    for words in tools.iter().filter_map(|t| t.facts.as_ref().and_then(|facts| facts.landed.as_deref())) {
+        for word in words.split(" · ") {
+            if !said.iter().any(|s| s == word) {
+                said.push(word.to_owned());
+            }
+        }
+    }
+    said
 }
 
 fn tool_group_title(text: SharedString, shimmer_phase: Option<f32>, theme: &Theme) -> AnyElement {
@@ -2282,6 +2434,7 @@ pub fn detail_height(detail: &ToolDetail) -> f32 {
         ToolDetail::Output {
             lines,
             truncated_by,
+            ..
         } => {
             let rows = lines.len() + usize::from(*truncated_by > 0);
             rows as f32 * OUTPUT_LINE_HEIGHT + OUTPUT_BODY_PAD
@@ -2356,6 +2509,7 @@ fn blob_detail(text: &str, is_diff: bool) -> Option<ToolDetail> {
     Some(ToolDetail::Output {
         lines,
         truncated_by,
+        stderr_from: None,
     })
 }
 
@@ -9347,26 +9501,65 @@ fn detail_body(
         ToolDetail::Output {
             lines,
             truncated_by,
+            stderr_from,
         } => body
             .py(px(6.0))
             .font_family(theme.font_mono.clone())
             .text_size(px(TOOL_TEXT_SIZE))
             .children(lines.iter().enumerate().map(|(line_ix, line)| {
+                // slopty: standard error reads in the danger colour, as the TUI's.
+                let color = if stderr_from.is_some_and(|from| line_ix >= from) {
+                    theme.danger
+                } else {
+                    theme.text_faint
+                };
                 let row = div()
                     .h(px(OUTPUT_LINE_HEIGHT))
                     .w_full()
                     .min_w_0()
                     .flex()
                     .items_center()
-                    .text_color(theme.text_faint);
+                    .text_color(color);
                 if line.is_empty() {
-                    return row;
+                    return row.into_any_element();
                 }
-                row.child(selectable(
-                    line_ix,
-                    line.clone(),
-                    plain(line, theme.text_faint),
-                ))
+                // slopty: a URL in the output is a link, as the TUI makes it one.
+                let Some((start, url)) = line_url(line) else {
+                    return row
+                        .child(selectable(line_ix, line.clone(), plain(line, color)))
+                        .into_any_element();
+                };
+                let run = |len: usize, underline: Option<gpui::UnderlineStyle>| TextRun {
+                    len,
+                    font: gpui::font(theme.font_mono.clone()),
+                    color,
+                    background_color: None,
+                    underline,
+                    strikethrough: None,
+                };
+                let end = start.saturating_add(url.len());
+                let link = gpui::UnderlineStyle {
+                    thickness: px(1.0),
+                    color: Some(color),
+                    wavy: false,
+                };
+                let mut runs = vec![
+                    run(start, None),
+                    run(url.len(), Some(link)),
+                    run(line.len().saturating_sub(end), None),
+                ];
+                runs.retain(|run| run.len > 0);
+                let url = url.to_owned();
+                row.id(SharedString::from(format!("{selection_key}-link-{line_ix}")))
+                    .role(gpui::Role::Link)
+                    .aria_label(SharedString::from(url.clone()))
+                    .cursor_pointer()
+                    .on_click(move |_, _, cx| {
+                        cx.stop_propagation();
+                        cx.open_url(&url);
+                    })
+                    .child(selectable(line_ix, line.clone(), runs))
+                    .into_any_element()
             }))
             .when(*truncated_by > 0, |block| {
                 block.child(more_lines_row(*truncated_by, theme))
@@ -9529,6 +9722,11 @@ fn chip_header_row(
     let (label, detail) = match tool.facts.as_ref().and_then(|facts| facts.title.as_deref()) {
         Some(title) if tool.kind == ToolItemKind::Call => (title.to_owned(), String::new()),
         _ => (label.to_owned(), detail),
+    };
+    // slopty: a file's path as the TUI shows it: relative to the chat's folder, its middle cut.
+    let detail = match tool.facts.as_ref().and_then(|facts| facts.detail.as_deref()) {
+        Some(path) if tool.kind == ToolItemKind::Call && !detail.is_empty() => path.to_owned(),
+        _ => detail,
     };
     let facts_trail = facts.zip(tool.facts.as_deref()).and_then(|(chip, facts)| {
         chip.trail(&tool.part_id, facts, tool.resolved, theme)
@@ -11889,6 +12087,7 @@ mod tests {
         MessagePart::Reasoning {
             id: id.into(),
             text: text.into(),
+            thought_ms: None, // slopty
         }
     }
 
@@ -11960,6 +12159,7 @@ mod tests {
                         &ToolDetail::Output {
                             lines: vec!["cat /workspace/src/main.rs".into()],
                             truncated_by: 0,
+                            stderr_from: None,
                         },
                         None,
                         "probe",
@@ -12209,7 +12409,8 @@ mod tests {
             MessageStatus::Complete,
             vec![
                 reasoning_part("r0", "planning the first step"),
-                tool_part("t1", "ls"),
+                // slopty: a listing counts apart ("listed 1 directory"); a command here.
+                tool_part("t1", "cargo test"),
                 reasoning_part("r2", "now the second step"),
                 tool_part("t3", "pwd"),
             ],
@@ -12233,6 +12434,24 @@ mod tests {
         let summary = tool_group_summary(&tools);
         assert!(summary.starts_with("Thought 2 times"), "{summary}");
         assert!(summary.contains("2 commands"), "{summary}");
+        // slopty: a thought that says how long it took is named by it.
+        let timed = assistant(
+            "a2",
+            MessageStatus::Complete,
+            vec![
+                MessagePart::Reasoning {
+                    id: "r".into(),
+                    text: "planning".into(),
+                    thought_ms: Some(12_000),
+                },
+                tool_part("t", "cargo test"),
+            ],
+        );
+        let rows = rows_for_entry(&timed, false, false, &mut parse);
+        let RowKind::ToolGroup { tools, .. } = &rows[0].kind else {
+            panic!("expected a tool group");
+        };
+        assert_eq!(tool_group_summary(tools), "Thought for 12s · Ran 1 command");
 
         // A lone thought is still an accordion (with the group tween), named
         // plainly.
@@ -12307,7 +12526,8 @@ mod tests {
             MessageStatus::Complete,
             vec![
                 reasoning_part("r0", "thinking about it"),
-                tool_part("t1", "ls"),
+                // slopty: a listing counts apart ("listed 1 directory"); a command here.
+                tool_part("t1", "cargo test"),
                 text_part("n1", "checking the layout now"),
                 tool_part("t2", "pwd"),
                 text_part("r1", "All done — here is the answer."),
@@ -15620,6 +15840,7 @@ mod tests {
         let Some(ToolDetail::Output {
             lines,
             truncated_by,
+            ..
         }) = tool_detail(Some(&output), None, None)
         else {
             panic!("expected output detail");
@@ -15689,7 +15910,8 @@ mod tests {
             facts: None,
         };
         let tools = vec![
-            exec("ls"),
+            // slopty: a listing counts apart ("listed 1 directory"); a command here.
+            exec("git status"),
             exec("pwd"),
             exec("make"),
             edit("a.rs"),
@@ -15698,6 +15920,32 @@ mod tests {
         assert_eq!(
             tool_group_summary(&tools),
             "Ran 3 commands · edited 2 files"
+        );
+        // slopty: the TUI's parts past the shared summary: an edit's line totals, directories
+        // listed, and what commands landed, each once.
+        let with = |mut item: ToolItem, facts: slopty_view_doc::ToolFacts| {
+            item.facts = Some(Arc::new(facts));
+            item
+        };
+        let changed = |added, removed| slopty_view_doc::ToolFacts {
+            changed: Some([added, removed]),
+            ..slopty_view_doc::ToolFacts::default()
+        };
+        let landed = |words: &str| slopty_view_doc::ToolFacts {
+            landed: Some(words.to_owned()),
+            ..slopty_view_doc::ToolFacts::default()
+        };
+        let tools = vec![
+            with(edit("a.rs"), changed(10, 2)),
+            with(edit("b.rs"), changed(2, 1)),
+            exec("ls src"),
+            with(exec("git commit -m x"), landed("committed 1a2b3c4")),
+            with(exec("git push"), landed("committed 1a2b3c4 · pushed to main")),
+        ];
+        assert_eq!(
+            tool_group_summary(&tools),
+            "Ran 2 commands · edited 2 files +12 -3 · listed 1 directory · committed 1a2b3c4 · \
+             pushed to main"
         );
         // Distinct-path dedupe: editing one file twice counts once.
         let tools = vec![edit("a.rs"), edit("a.rs")];
@@ -16017,6 +16265,7 @@ mod tests {
         let Some(ToolDetail::Output {
             lines,
             truncated_by,
+            ..
         }) = call_block(&ToolCall::Exec {
             command: "set -e\ncargo test".into(),
         })

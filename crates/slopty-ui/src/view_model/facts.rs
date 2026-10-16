@@ -134,10 +134,130 @@ fn short(text: &str) -> String {
     super::text::line(text, 60)
 }
 
+/// The file a `sed -i` command edits in place with one substitution, as the TUI shows such a
+/// command: an edit of that file (`Update(src/lib.rs)`).
+fn sed_edit(command: &str) -> Option<String> {
+    let words: Vec<&str> = command.split_whitespace().collect();
+    let (first, rest) = words.split_first()?;
+    if *first != "sed" || command.contains(['|', ';', '&', '>', '<', '`', '$']) {
+        return None;
+    }
+    let mut in_place = false;
+    let mut script = None;
+    let mut files = Vec::new();
+    let mut args = rest.iter();
+    while let Some(arg) = args.next() {
+        match *arg {
+            // macOS's `-i ''` takes the empty suffix as its own word.
+            "-i" | "--in-place" => {
+                in_place = true;
+                if args.as_slice().first().is_some_and(|next| matches!(*next, "''" | "\"\"")) {
+                    args.next();
+                }
+            }
+            "-e" | "--expression" => script = args.next().copied(),
+            "-E" | "-r" | "--regexp-extended" => {}
+            flag if flag.starts_with("-i") || flag.starts_with("--in-place=") => in_place = true,
+            flag if flag.starts_with('-') => return None,
+            word if script.is_none() => script = Some(word),
+            file => files.push(file),
+        }
+    }
+    let script = script?.trim_matches(['\'', '"']);
+    let substitutions = script.split(';').filter(|s| !s.trim().is_empty()).count();
+    let one = script.starts_with('s') && substitutions == 1 && script.len() > 3;
+    match files.as_slice() {
+        [file] if in_place && one => {
+            let file = file.trim_matches(['\'', '"']);
+            Some(format!("Update({})", file.rsplit('/').next().unwrap_or(file)))
+        }
+        _ => None,
+    }
+}
+
 /// A call's line in the TUI's words, for the tools zeron draws as `Tool · {name}`.
 fn title(call: &ToolCall, input: Option<&serde_json::Value>) -> Option<String> {
     let arg = |keys: &[&str]| input_text(input, keys).map(|t| short(&t));
+    let command = match &call.detail {
+        Some(ToolDetail::Exec(exec)) => Some(exec.command.text.as_str()),
+        _ => None,
+    };
+    if let Some(edit) = command.and_then(sed_edit) {
+        return Some(edit);
+    }
     Some(match call.name.as_str() {
+        "PowerShell" => format!("PowerShell({})", short(command?)),
+        "SendFile" => {
+            let files = input.and_then(|i| i.get("files")).and_then(serde_json::Value::as_array);
+            let names: Vec<String> = files
+                .into_iter()
+                .flatten()
+                .filter_map(|f| f.as_str().or_else(|| f.get("path")?.as_str()))
+                .map(|f| f.rsplit('/').next().unwrap_or(f).to_owned())
+                .collect();
+            let to = arg(&["to"]).map(|to| format!(" → {to}")).unwrap_or_default();
+            format!("SendFile({}{to})", short(&names.join(", ")))
+        }
+        "PushNotification" => format!("PushNotification({})", arg(&["message"])?),
+        "Workflow" => {
+            let what = arg(&["scriptPath", "script_path", "name"]);
+            let script = arg(&["script"]);
+            match (what, script) {
+                (Some(what), Some(script)) => format!("Workflow({what} · {script})"),
+                (Some(one), None) | (None, Some(one)) => format!("Workflow({one})"),
+                (None, None) => "Workflow".to_owned(),
+            }
+        }
+        "ReportFindings" => {
+            let found = input
+                .and_then(|i| i.get("findings"))
+                .and_then(serde_json::Value::as_array)
+                .map_or(0, Vec::len);
+            let found = count(u64::try_from(found).unwrap_or(0), "finding", "findings");
+            match arg(&["level"]) {
+                Some(level) => format!("Code review({level} · {found})"),
+                None => format!("Code review({found})"),
+            }
+        }
+        "RemoteTrigger" => {
+            let parts: Vec<String> =
+                [arg(&["action"]), arg(&["trigger_id", "id"])].into_iter().flatten().collect();
+            format!("RemoteTrigger({})", parts.join(" "))
+        }
+        "FetchInboxMessage" => {
+            let id: String = arg(&["file_id", "id"])?.chars().take(13).collect();
+            format!("FetchInboxMessage(read {id})")
+        }
+        "propose_skills" => {
+            let proposals = input
+                .and_then(|i| i.get("proposals"))
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            let names: Vec<&str> = proposals
+                .iter()
+                .filter_map(|p| p.get("name").and_then(serde_json::Value::as_str))
+                .collect();
+            let n = count(u64::try_from(proposals.len()).unwrap_or(0), "skill", "skills");
+            format!("propose_skills(Propose {n}: {})", short(&names.join(", ")))
+        }
+        "ListMcpResourcesTool" => match arg(&["server"]) {
+            Some(server) => format!("listMcpResources({server})"),
+            None => "listMcpResources".to_owned(),
+        },
+        "ReadMcpResourceTool" | "ReadMcpResourceDirTool" => {
+            let verb = if call.name == "ReadMcpResourceTool" {
+                "readMcpResource"
+            } else {
+                "readMcpResourceDir"
+            };
+            let parts: Vec<String> =
+                [arg(&["server"]), arg(&["uri"])].into_iter().flatten().collect();
+            format!("{verb}({})", parts.join(", "))
+        }
+        "GetTask" => format!("GetTask({})", arg(&["taskId", "task_id"])?),
+        // The advisor model's review of the conversation (a server tool).
+        "advisor" => "Advisor".to_owned(),
         "Monitor" => format!("Monitor({})", arg(&["description", "command"])?),
         "SendMessage" => match arg(&["to", "recipient", "target"]) {
             Some(to) => format!("SendMessage → {to}"),
@@ -347,6 +467,79 @@ fn result(call: &ToolCall, task: Option<&BackgroundTask>) -> Option<(String, boo
     Some((line, false))
 }
 
+/// Characters a chip's path takes before its middle is cut.
+const PATH_CHARS: usize = 48;
+
+/// A path as the TUI's header shows it.
+///
+/// Inside the folder `cwd` relative to it, else under a home folder as `~/…`, else whole; past
+/// 48 characters its middle cut so the file's name stays (`crates/…/view_model/facts.rs`).
+#[must_use]
+pub fn path_words(path: &str, cwd: &str) -> String {
+    // A NUL byte hides what follows it in a terminal; the TUI says so instead.
+    if path.contains('\0') {
+        return "Path hidden (unsupported characters)".to_owned();
+    }
+    let cwd = cwd.trim_end_matches('/');
+    let relative = path
+        .strip_prefix(cwd)
+        .filter(|_| !cwd.is_empty())
+        .and_then(|rest| rest.strip_prefix('/'))
+        .filter(|rest| !rest.is_empty());
+    let homed = || {
+        let (root, rest) = ["/Users/", "/home/"]
+            .iter()
+            .find_map(|root| Some((*root, path.strip_prefix(root)?)))
+            .or_else(|| {
+                Some(("/root", path.strip_prefix("/root").filter(|r| r.starts_with('/'))?))
+            })?;
+        let rest = if root == "/root" { rest } else { rest.split_once('/').map(|(_, r)| r)? };
+        Some(format!("~/{}", rest.trim_start_matches('/')))
+    };
+    let words = relative.map(str::to_owned).or_else(homed).unwrap_or_else(|| path.to_owned());
+    middle_cut(&words, PATH_CHARS)
+}
+
+/// `path` cut in its middle to `max` characters, its last part kept whole where it fits.
+fn middle_cut(path: &str, max: usize) -> String {
+    let chars = path.chars().count();
+    if chars <= max {
+        return path.to_owned();
+    }
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let tail_chars = name.chars().count().saturating_add(1);
+    if tail_chars.saturating_add(4) > max {
+        // A name too long to keep whole: its start, then the cut.
+        let mut cut: String = path.chars().take(max.saturating_sub(1)).collect();
+        cut.push('…');
+        return cut;
+    }
+    let head: String =
+        path.chars().take(max.saturating_sub(tail_chars).saturating_sub(1)).collect();
+    format!("{head}…/{name}")
+}
+
+/// What a command wrote to its standard error, Claude Code's own notes in it left out: the
+/// sandbox's report and "Shell cwd was reset to …" (which is the call's line).
+fn stderr_words(exec: &slopty_proto::thread::detail::ExecDetail) -> Option<String> {
+    let text = &exec.stderr.as_ref()?.text;
+    let mut kept = String::with_capacity(text.len());
+    let mut rest = text.as_str();
+    while let Some(start) = rest.find("<sandbox_violations>") {
+        kept.push_str(rest.get(..start).unwrap_or_default());
+        rest = rest
+            .get(start..)
+            .and_then(|from| from.find("</sandbox_violations>").map(|end| (from, end)))
+            .and_then(|(from, end)| from.get(end.saturating_add("</sandbox_violations>".len())..))
+            .unwrap_or_default();
+    }
+    kept.push_str(rest);
+    let lines: Vec<&str> =
+        kept.lines().filter(|line| !line.trim().starts_with("Shell cwd was reset to ")).collect();
+    let words = lines.join("\n");
+    Some(words.trim_end().to_owned()).filter(|w| !w.trim().is_empty())
+}
+
 /// What `call` (item `item` of `state`) says beyond zeron's chip; `child` its subagent's run,
 /// where it started one. `None` when it says nothing more.
 #[must_use]
@@ -400,7 +593,7 @@ pub fn tool_facts(
     let spawn = matches!(call.detail, Some(ToolDetail::Agent(_))) || call.kind == kind::AGENT;
     let subagent_progress = spawn.then(|| progress(call, state, task, child));
     let facts = ToolFacts {
-        title: title(call, input.as_ref()),
+        title: note.and_then(|n| n.title.clone()).or_else(|| title(call, input.as_ref())),
         result: result_line,
         failed: failed.unwrap_or(false),
         timer,
@@ -408,8 +601,146 @@ pub fn tool_facts(
         backgroundable,
         retry,
         subagent_progress,
+        detail: file_path(call)
+            .map(|path| (path, path_words(path, &state.meta.cwd)))
+            .and_then(|(path, words)| (words != path).then_some(words)),
+        stderr: match &call.detail {
+            Some(ToolDetail::Exec(exec)) => stderr_words(exec),
+            _ => None,
+        },
+        changed: match &call.detail {
+            Some(ToolDetail::Edit(edit)) => Some(edit.patch.clone()),
+            Some(ToolDetail::Write(write)) => Some(write.patch.clone()),
+            _ => None,
+        }
+        .filter(|_| call.state == ToolState::Completed)
+        .map(|patch| [u64::from(patch.added), u64::from(patch.removed)])
+        .filter(|[added, removed]| added.saturating_add(*removed) > 0),
+        landed: match &call.detail {
+            Some(ToolDetail::Exec(exec)) if call.state == ToolState::Completed => {
+                landed(&exec.command.text, call.output.as_ref().map_or("", |out| out.text.as_str()))
+            }
+            _ => None,
+        },
+        thought_ms: None,
     };
     (facts != ToolFacts::default()).then_some(facts)
+}
+
+/// What `command` landed by what it printed (`output`), as the TUI's group line says it.
+///
+/// A commit's short sha ("committed 1a2b3c4", "amended commit …", "cherry-picked …"), where a push
+/// went ("pushed to main"), a merge or rebase ("merged feature", "rebased onto main"), and a
+/// pull or merge request the GitHub or GitLab CLI made or changed ("created PR #12", "merged MR
+/// !7"). A dry run lands nothing.
+pub fn landed(command: &str, output: &str) -> Option<String> {
+    let words: Vec<&str> = command.split_whitespace().collect();
+    if words.iter().any(|w| *w == "--dry-run" || *w == "-n") && words.contains(&"push") {
+        return None;
+    }
+    let mut said = Vec::new();
+    // The git subcommand after `git` and its `-c k=v` / `--opt=value` flags.
+    let git_verb = |verb: &str| {
+        words.windows(2).any(|pair| matches!(pair, ["git", v] if *v == verb))
+            || words.iter().position(|w| *w == "git").is_some_and(|at| {
+                words
+                    .iter()
+                    .skip(at.saturating_add(1))
+                    .find(|w| !w.starts_with('-') && !w.contains('='))
+                    .is_some_and(|w| *w == verb)
+            })
+    };
+    let committed = |kind: &str| {
+        output.lines().find_map(|line| {
+            let inner = line.trim().strip_prefix('[')?.split_once(']')?.0;
+            let sha = inner.split_whitespace().last()?;
+            (sha.len() >= 7 && sha.chars().all(|c| c.is_ascii_hexdigit()))
+                .then(|| format!("{kind} {sha}"))
+        })
+    };
+    if git_verb("commit") {
+        let kind = if words.contains(&"--amend") { "amended commit" } else { "committed" };
+        said.extend(committed(kind));
+    }
+    if git_verb("cherry-pick") {
+        said.extend(committed("cherry-picked"));
+    }
+    if git_verb("push") {
+        let to = output.lines().find_map(|line| {
+            let (_, dest) = line.split_once(" -> ")?;
+            let dest = dest.split_whitespace().next()?;
+            Some(dest.strip_prefix("refs/heads/").unwrap_or(dest).to_owned())
+        });
+        said.extend(to.map(|branch| format!("pushed to {branch}")));
+    }
+    let target = |verb: &str| {
+        let at = words.iter().position(|w| *w == verb)?;
+        words
+            .iter()
+            .skip(at.saturating_add(1))
+            .find(|w| !w.starts_with('-'))
+            .map(|w| (*w).to_owned())
+    };
+    let refused = |output: &str| output.contains("CONFLICT") || output.contains("error:");
+    if git_verb("merge") && !refused(output) {
+        said.extend(target("merge").map(|r| format!("merged {r}")));
+    }
+    if git_verb("rebase") && !refused(output) {
+        said.extend(target("rebase").map(|r| format!("rebased onto {r}")));
+    }
+    said.extend(request_landed(&words, output));
+    (!said.is_empty()).then(|| said.join(" · "))
+}
+
+/// A pull request (`gh pr …`) or merge request (`glab mr …`) a command made or changed, by its
+/// number from the command or the address it printed.
+fn request_landed(words: &[&str], output: &str) -> Option<String> {
+    let at = words.windows(2).position(|pair| matches!(pair, ["gh", "pr"] | ["glab", "mr"]))?;
+    let (mark, noun) = if words.get(at) == Some(&"glab") { ("!", "MR") } else { ("#", "PR") };
+    let verb = *words.get(at.saturating_add(2))?;
+    let rest = words.get(at.saturating_add(3)..).unwrap_or_default();
+    let flag = |name: &str| rest.contains(&name);
+    let action = match verb {
+        "create" => "created",
+        "edit" | "update" if flag("--ready") => "marked ready",
+        "edit" | "update" if flag("--draft") => "marked draft",
+        "edit" | "update" => "edited",
+        "merge" if flag("--disable-auto") => "disabled auto-merge on",
+        "merge" if flag("--auto") => "enabled auto-merge on",
+        "merge" => "merged",
+        "comment" | "note" => "commented on",
+        "close" => "closed",
+        "reopen" => "reopened",
+        "ready" if flag("--undo") => "marked draft",
+        "ready" => "marked ready",
+        _ => return None,
+    };
+    let printed = output.split_whitespace().find_map(|word| {
+        let (_, tail) = word
+            .split_once("/pull/")
+            .or_else(|| word.split_once("/merge_requests/"))
+            .or_else(|| word.split_once("/pull-requests/"))?;
+        let digits: String = tail.chars().take_while(char::is_ascii_digit).collect();
+        (!digits.is_empty()).then_some(digits)
+    });
+    let named = rest
+        .iter()
+        .find(|w| !w.is_empty() && w.chars().all(|c| c.is_ascii_digit()))
+        .map(|n| (*n).to_owned());
+    let number = printed.or(named)?;
+    Some(format!("{action} {noun} {mark}{number}"))
+}
+
+/// The file a call's chip names.
+fn file_path(call: &ToolCall) -> Option<&str> {
+    match &call.detail {
+        Some(ToolDetail::Read(read)) => Some(&read.path),
+        Some(ToolDetail::Edit(edit)) => Some(&edit.path),
+        Some(ToolDetail::Write(write)) => Some(&write.path),
+        _ => None,
+    }
+    .filter(|path| !path.is_empty())
+    .map(String::as_str)
 }
 
 /// A subagent's progress on its spawn card: its call's figures once it ended, its task's as it
@@ -522,11 +853,16 @@ pub fn task_part(
 ) -> TaskRow {
     let usage = note.usage;
     let duration = usage.map(|u| u.duration_ms).filter(|ms| *ms > 0);
-    let text = match duration {
-        Some(ms) if !note.summary.contains(" · ") => {
-            format!("{} · {}", note.summary, duration_words(ms))
+    // slopty: a teammate that ended reads as the TUI's row names it.
+    let summary = match (note.kind.as_str(), note.status.as_str()) {
+        (BackgroundTask::TEAMMATE, TaskNote::COMPLETED) if !note.title.trim().is_empty() => {
+            format!("Teammate @{} shut down gracefully", note.title.trim().trim_start_matches('@'))
         }
         _ => note.summary.clone(),
+    };
+    let text = match duration {
+        Some(ms) if !summary.contains(" · ") => format!("{summary} · {}", duration_words(ms)),
+        _ => summary,
     };
     let tone = match note.status.as_str() {
         TaskNote::FAILED => NoteLine::ERROR,
@@ -578,6 +914,18 @@ fn failed(state: &ThreadState, turn: TurnId) -> bool {
     state.turns.iter().any(|t| t.id == turn && matches!(t.state, TurnState::Failed { .. }))
 }
 
+/// `note` with its first line the row and the rest opening under it.
+fn split(mut note: NoteRow) -> NoteRow {
+    if let Some((line, more)) = note.text.split_once('\n') {
+        let more = more.trim();
+        if !more.is_empty() {
+            note.detail = Some(more.to_owned());
+        }
+        note.text = line.trim().to_owned();
+    }
+    note
+}
+
 /// A notice that is no failure as a quiet row, with `text` its words; `None` for one that is a
 /// failure, which reads in the one error grammar.
 #[must_use]
@@ -627,14 +975,19 @@ pub fn note_row(
         }
         Notice::FALLBACK => row(NoteLine::WARNING, text),
         // slopty: a hook's word, as the TUI keeps it in the turn: what it printed reads quiet,
-        // one that failed, blocked a call or stopped the turn warns.
+        // one that failed, blocked a call or stopped the turn warns. Its first line is the row;
+        // more of it (a stop hook's feedback) opens under it.
         Notice::HOOK => {
             let lower = text.to_lowercase();
-            let wrong = ["failed", "error", "stopped the turn", "timed out"]
+            let wrong = ["failed", "error", "stopped the turn", "timed out", "deferred"]
                 .iter()
                 .any(|word| lower.contains(word));
-            row(if wrong { NoteLine::WARNING } else { NoteLine::INFO }, text)
+            split(row(if wrong { NoteLine::WARNING } else { NoteLine::INFO }, text))
         }
+        // slopty: a prompt's origin, an MCP server's update, a message from another session.
+        Notice::NOTE => split(row(NoteLine::INFO, text)),
+        // slopty: what a command printed as its errors, in red as the TUI's.
+        Notice::COMMAND_ERROR => split(row(NoteLine::ERROR, text)),
         // slopty: the goal's check, its first line the row and the rest ("Goal: …", "Reason:
         // …") opening under it, as the TUI's verbose view adds them.
         Notice::GOAL => {

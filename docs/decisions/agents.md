@@ -3560,6 +3560,55 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `workspace::view_model::work::tests::no_rule_allows_what_needs_the_person_at_the_card`,
     `view_model::tests::a_request_needing_the_person_reaches_its_card_as_one`; `slopty-shell`
     `composer::dock_tests::a_card_says_it_needs_the_person_at_it`.
+- ✅ **The TUI's words from Claude Code's own doors, second round (2026-10-16).** What the TUI
+  says of a call, a request or the session now reaches Slopty, read only from what stream-json
+  and the control protocol carry:
+  - **Calls in the TUI's words.** A call's header and result line come from its input and its
+    `tool_use_result` (`conversation/said.rs`): "Read report.pdf · pages 1-3", "Create n.md",
+    "Read PDF (1.2MB)", "Did 3 searches in 2s", "Staged for your review…", "Cloud agent
+    launched", the scheduled and listed cron jobs, worktree switches, MCP resource reads, a
+    large MCP response warning, and more. A list the TUI draws under a call (a job list,
+    findings, notifications) is the call's output. A later note keeps what an earlier one said
+    and it leaves unsaid (`CallNote::over`).
+  - **Server tools settle.** A `*_tool_result` block in the answer settles its
+    `server_tool_use` call. The advisor's reads "Advisor has reviewed the conversation and will
+    apply the feedback", with its advice as the output, or says it declined or was unavailable.
+  - **Narration is text.** A thinking block whose signature names it narration (a protobuf
+    field path inside the base64 signature, read as the TUI reads it) is the answer's own
+    words, not a thought.
+  - **What Claude Code puts in the person's place** is its own row: a stop hook's feedback, a
+    plugin's prompt ("Prompt from the reviewer plugin"), a command's standard error apart from
+    its output, an MCP server's resource update, and another session's message with who sent
+    it.
+  - **Session words.** A turn Claude Code would not start says why (`startup_failure_reason`,
+    each of its reasons in words), a full context says so, and a call a hook deferred says the
+    turn stopped there. A hook that allowed a call says "Allowed by PreToolUse hook". `init`'s
+    plugin and MCP config errors and policy-blocked servers are said once, and the servers'
+    counts are a thread fact the context card shows. Agent descriptions past 15k tokens and a
+    prompt cache that expired between turns are passing notes.
+  - **Permission cards.** A write over a file the worker cannot show whole says so in the TUI's
+    words. Past 256 KiB it is "too large to preview". Contents that are not plain text make it
+    "one-time only", and that card offers no "always allow". A symlink whose target leaves the
+    folder names the target. A request Claude Code would start on "No" (`default_to_no`) lists
+    its deny first, and its card starts there and takes no key. A plan approved with words is
+    approved as edited (`updatedInput.plan`, the TUI's Ctrl+G). "Chat about this" turns the
+    questions down with the TUI's words that the person wants to talk them over. An answer
+    carries the picked option's preview and the person's notes as `annotations`.
+  - Judged noise, each with no door under `-p`: a model's deprecation (no field in
+    `list_models`), per-model context windows and "isn't recognized" (the TUI's own model
+    table), remote managed settings' fetch status (a blocking failure comes as
+    `startup_failure_reason`), a workflow's agent count (its agents have no tasks of their own),
+    a subagent's queued-message count and a task's sent-message count (TUI state), the plugin
+    file watcher's "Plugins changed", the retry countdown, and images in an answer (an
+    `Intent::Answer` carries words; a picture goes as the next message).
+  - Tests: `slopty-agent` `conversation::said::tests`,
+    `conversation::tests::{what_claude_code_says_in_the_persons_place_is_its_own_row,
+    the_advisors_review_settles_its_call}`,
+    `claude::driven::tests::{a_write_says_what_is_on_disk_where_it_lands,
+    a_plan_approved_with_words_is_the_edited_plan, chat_about_this_talks_the_questions_over,
+    an_answer_carries_its_preview_and_notes, a_turn_that_cannot_go_on_says_why,
+    a_hooks_allow_and_a_held_message_say_so, init_says_what_did_not_load_once}`;
+    `slopty-proto` `thread::tests::a_call_note_keeps_what_a_later_one_leaves_unsaid`.
 
 - ✅ **A listing never waits on a macOS prompt; bypass is a mode the person may pick (2026-10-16,
   night).** Opening a machine's home in New project hung for 30 s and then said "the machine did

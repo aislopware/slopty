@@ -43,6 +43,9 @@ pub const TAIL_EVERY: Duration = Duration::from_secs(5);
 /// How close together background agents ended for a stop of them all to name them.
 const STOPPED_TOGETHER: Duration = Duration::from_secs(5);
 
+/// Tokens of subagent descriptions past which the TUI warns they crowd every request.
+const AGENT_DESCRIPTION_TOKENS: usize = 15_000;
+
 /// How often the spinner's figures are told at most.
 const SPIN_EVERY: Duration = Duration::from_secs(1);
 
@@ -58,6 +61,8 @@ pub(super) struct Spin {
     thinking_since: Option<WallMs>,
     thought_ms: Option<u64>,
     phrase: Option<String>,
+    /// Since when the reply under way, while one streams, has said nothing new.
+    quiet_since: Option<WallMs>,
     told: Option<Activity>,
     told_at: Option<WallMs>,
     /// A suggestion shows.
@@ -71,6 +76,7 @@ impl Spin {
             thinking_since: self.thinking_since,
             thought_ms: self.thought_ms,
             phrase: self.phrase.clone(),
+            quiet_since: self.quiet_since,
         }
     }
 }
@@ -119,6 +125,7 @@ pub(super) fn derived(subtype: &str) -> bool {
             | "plugin_install"
             | "instruction_size_warning"
             | "scheduled_task_fire"
+            | "peer_message_hold"
     )
 }
 
@@ -180,6 +187,7 @@ impl Driven {
             task: str_at(message, "task_id").map(str::to_owned),
             retry,
             said: None,
+            title: None,
         };
         self.history.call_noted(call, note)
     }
@@ -409,6 +417,7 @@ impl Driven {
         let spin = &mut self.activity;
         let changed = match str_at(event, "type").unwrap_or_default() {
             "message_start" => {
+                spin.quiet_since = Some(now);
                 spin.base = spin.base.saturating_add(spin.current.max(spin.thinking_tokens));
                 spin.current = event
                     .pointer("/message/usage/output_tokens")
@@ -420,8 +429,16 @@ impl Driven {
             "message_delta" => {
                 let out = event.pointer("/usage/output_tokens").and_then(Value::as_u64);
                 spin.current = out.unwrap_or(spin.current);
+                spin.quiet_since = spin.quiet_since.map(|_| now);
                 false
             }
+            // A token came: the reply is not quiet.
+            "content_block_delta" => {
+                spin.quiet_since = spin.quiet_since.map(|_| now);
+                false
+            }
+            // The reply is whole: a tool may run now, which is no silence of the model's.
+            "message_stop" => spin.quiet_since.take().is_some(),
             "content_block_start" => {
                 let thinking = matches!(
                     event.pointer("/content_block/type").and_then(Value::as_str),
@@ -566,7 +583,13 @@ impl Driven {
                     Some(why) => format!("{head}: {why}"),
                     None => head,
                 };
+                let event = text("hook_event").unwrap_or(name);
                 match (text("outcome"), code) {
+                    // A hook that decided a call's permission says so, as the TUI's
+                    // "Allowed by PreToolUse hook" (a deny is said under the call it stopped).
+                    (Some("success") | None, Some(0) | None) if hook_allowed(message) => {
+                        Some((Notice::ALLOWED, format!("Allowed by {event} hook")))
+                    }
                     // It said nothing past success: quiet, as the TUI keeps it.
                     (Some("success") | None, Some(0) | None) => first("stdout")
                         .filter(|_| text("outcome") == Some("success"))
@@ -604,6 +627,30 @@ impl Driven {
                 }
                 _ => None,
             },
+            // A message from another session held before it reached the model: informational,
+            // as Claude Code takes no answer to it from a host.
+            "peer_message_hold" => {
+                let from = text("from_name").or_else(|| text("from")).unwrap_or("another session");
+                let cause = text("cause").unwrap_or_default();
+                let why = if cause.contains("mode") {
+                    "its permission mode does not match this session's"
+                } else if cause.contains("setting") || cause.contains("policy") {
+                    "managed settings hold messages from other sessions"
+                } else {
+                    cause
+                };
+                let words = match text("outcome").or_else(|| text("state")) {
+                    Some("delivered" | "released") => {
+                        format!("Delivered the held message from {from}")
+                    }
+                    Some("dropped" | "denied" | "declined" | "expired") => {
+                        format!("Dropped the held message from {from}")
+                    }
+                    _ if why.is_empty() => format!("Held a message from another session ({from})"),
+                    _ => format!("Held a message from another session ({from}): {why}"),
+                };
+                Some((Notice::INFO, words))
+            }
             "instruction_size_warning" => {
                 let total = u64_at(message, "total_chars").unwrap_or_default();
                 let limit = u64_at(message, "total_limit_chars").unwrap_or_default();
@@ -703,6 +750,29 @@ impl Driven {
         self.history.tell(Action::AgentsSet(kinds))
     }
 
+    /// The subagents' descriptions, which ride every request, past the TUI's limit: said once,
+    /// as its status notice says it.
+    pub(super) fn agents_too_long(&mut self, agents: &[Value], now: WallMs) -> Vec<Out> {
+        let chars: usize = agents
+            .iter()
+            .filter_map(|a| str_at(a, "description"))
+            .map(str::len)
+            .fold(0, usize::saturating_add);
+        // About four characters a token, as Claude Code estimates text it has not sent.
+        let tokens = chars / 4;
+        if tokens <= AGENT_DESCRIPTION_TOKENS || !self.said_once.0.insert("agents-long".to_owned())
+        {
+            return Vec::new();
+        }
+        let words = format!(
+            "Agent descriptions are over the {}k-token limit (~{}k tokens) · ask Claude to trim \
+             agent descriptions in .claude/agents/",
+            AGENT_DESCRIPTION_TOKENS / 1_000,
+            tokens / 1_000
+        );
+        self.passing("agents-long", &words, now)
+    }
+
     /// When the background commands' output was last read, while one runs.
     pub(super) fn tails_due(&self) -> Option<WallMs> {
         let running = self.history.tasks_now().iter().any(|t| {
@@ -721,6 +791,20 @@ impl Driven {
         }
         self.history.transcript(&[], &outputs)
     }
+}
+
+/// Whether a hook's answer (`hook_response`'s JSON `stdout` or `output`) allowed a call: a
+/// `PreToolUse` hook's `permissionDecision`, a `PermissionRequest` hook's `decision.behavior`.
+fn hook_allowed(message: &Value) -> bool {
+    ["stdout", "output"].iter().any(|key| {
+        let Some(said) = message.get(*key).and_then(Value::as_str) else { return false };
+        let Ok(said) = serde_json::from_str::<Value>(said.trim()) else { return false };
+        let specific = said.get("hookSpecificOutput");
+        let decided = specific
+            .and_then(|s| s.get("permissionDecision"))
+            .or_else(|| specific.and_then(|s| s.get("decision")).and_then(|d| d.get("behavior")));
+        decided.and_then(Value::as_str) == Some("allow")
+    })
 }
 
 #[cfg(test)]

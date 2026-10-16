@@ -91,6 +91,8 @@ pub(crate) struct TrayState {
     marked: Option<(String, Instant)>,
     /// The Finished fold is open.
     finished_open: bool,
+    /// The row whose details show under it, by id (the TUI's "Shell details").
+    detail: Option<String>,
     /// Rows asked to stop, until they stop.
     stopping: HashSet<String>,
     /// "Stop all" asked, until nothing is left to stop.
@@ -111,6 +113,7 @@ impl Default for TrayState {
             held: None,
             marked: None,
             finished_open: false,
+            detail: None,
             stopping: HashSet::new(),
             stopping_all: false,
             active: None,
@@ -127,9 +130,46 @@ impl Default for TrayState {
 pub(crate) fn split_rows(tray: &WorkTray) -> (Vec<&WorkRow>, Vec<&WorkRow>) {
     let (mut live, ended): (Vec<&WorkRow>, Vec<&WorkRow>) =
         tray.rows.iter().filter(|row| !row.ambient).partition(|row| row.live || row.needs_you.is_some());
-    // What needs the person sits first, the rest in the agent's order.
+    // What needs the person sits first, the rest in the agent's order; then each kind's rows
+    // together under its section, sections in the order they first come.
     live.sort_by_key(|row| row.needs_you.is_none());
+    let mut order: Vec<&'static str> = Vec::new();
+    for row in &live {
+        let name = section(&row.kind);
+        if !order.contains(&name) {
+            order.push(name);
+        }
+    }
+    live.sort_by_key(|row| order.iter().position(|name| *name == section(&row.kind)));
     (live, ended)
+}
+
+/// The section a row of `kind` sits under, as the TUI's tasks dialog heads them.
+pub(crate) fn section(kind: &str) -> &'static str {
+    match kind {
+        WorkRow::SUBAGENT | WorkRow::TEAMMATE => "Agents",
+        WorkRow::COMMAND => "Shells",
+        WorkRow::MONITOR => "Monitors",
+        WorkRow::MCP => "MCP tasks",
+        WorkRow::REMOTE => "Cloud agents",
+        WorkRow::WORKFLOW => "Dynamic workflows",
+        "wakeup" | "loop" | "cron" | "schedule" => "Scheduled",
+        _ => "Other",
+    }
+}
+
+/// The live rows' sections with their counts, in drawn order, when there is more than one:
+/// "Shells (2)", "Agents (1)".
+pub(crate) fn sections(live: &[&WorkRow]) -> Vec<(&'static str, usize)> {
+    let mut counted: Vec<(&'static str, usize)> = Vec::new();
+    for row in live {
+        let name = section(&row.kind);
+        match counted.iter_mut().find(|(n, _)| *n == name) {
+            Some((_, count)) => *count = count.saturating_add(1),
+            None => counted.push((name, 1)),
+        }
+    }
+    if counted.len() > 1 { counted } else { Vec::new() }
 }
 
 /// A row's time at `now`: a live row ticks from when it began, an ended one says how long it ran.
@@ -333,6 +373,12 @@ impl Composer {
                     self.open_row(&row, cx);
                 }
             }
+            // The keyboard row's details, open and closed.
+            "right" | "left" => {
+                if let Some(row) = at.map(|ix| rows[ix].clone()) {
+                    self.tray.detail = (key == "right").then_some(row.id);
+                }
+            }
             "." if cmd => {
                 if let Some(row) = at.map(|ix| rows[ix].clone()).filter(|row| row.can_stop && row.live) {
                     self.stop_row(row.id, cx);
@@ -389,7 +435,16 @@ impl Composer {
             if tray.main.working {
                 list = list.child(self.tray_main_row(&tray, now, &theme));
             }
+            let sections = sections(&live);
+            let mut heading = None;
             for row in &live {
+                let name = section(&row.kind);
+                if heading != Some(name)
+                    && let Some((_, count)) = sections.iter().find(|(n, _)| *n == name)
+                {
+                    heading = Some(name);
+                    list = list.child(tray_section(name, *count, &theme));
+                }
                 list = list.child(self.tray_row(row, now, focused, &theme, cx));
             }
             if !ended.is_empty() {
@@ -659,7 +714,37 @@ impl Composer {
         } else {
             motion::hover_blend(&key, crate::theme::wash(0.0), theme.element_hover)
         };
-        div()
+        // Its details, open under it, and the button that opens them.
+        let detail_open = self.tray.detail.as_deref() == Some(row.id.as_str());
+        let detail = detail_open.then(|| row_detail(row, now, theme));
+        let detail_id = row.id.clone();
+        let details = div()
+            .id(SharedString::from(format!("background-row-details-{id}")))
+            .role(gpui::Role::Button)
+            .aria_label(if detail_open { "Hide details" } else { "Details" })
+            .aria_expanded(detail_open)
+            .flex_none()
+            .size(px(ACTION_SIZE))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(5.0))
+            .opacity(if active || detail_open { 1.0 } else { motion::hover_t(&key) })
+            .cursor_pointer()
+            .hover(|s| s.bg(theme.element_hover))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                let open = this.tray.detail.as_deref() == Some(detail_id.as_str());
+                this.tray.detail = (!open).then(|| detail_id.clone());
+                cx.notify();
+            }))
+            .tooltip(crate::settings::widgets::text_tooltip("Details"))
+            .child(
+                icon(if detail_open { icons::ALT_ARROW_DOWN } else { icons::ALT_ARROW_RIGHT })
+                    .size(px(10.0))
+                    .text_color(theme.text_muted),
+            );
+        let line = div()
             .id(key.clone())
             .role(gpui::Role::ListItem)
             .aria_label(SharedString::from(label))
@@ -750,8 +835,13 @@ impl Composer {
                         )
                     }),
             )
+            .child(details)
             .children(stop)
-            .into_any_element()
+            .into_any_element();
+        match detail {
+            Some(detail) => div().flex().flex_col().child(line).child(detail).into_any_element(),
+            None => line,
+        }
     }
 
     /// "Finished · N": the rows that ended, folded.
@@ -792,6 +882,121 @@ impl Composer {
             )
             .into_any_element()
     }
+}
+
+/// The most output lines a row's details show, as the TUI's task detail does.
+const DETAIL_LINES: usize = 10;
+
+/// A row's details, as the TUI's task detail dialog words them: what it is, how it stands and
+/// for how long, what it runs, and the last lines it printed.
+pub(crate) fn detail_lines(row: &WorkRow, now: i64) -> (String, Vec<String>, Vec<String>) {
+    let title = match row.kind.as_str() {
+        WorkRow::COMMAND => "Shell details",
+        WorkRow::MONITOR => "Monitor details",
+        WorkRow::MCP => "MCP task",
+        WorkRow::SUBAGENT | WorkRow::TEAMMATE => "Agent details",
+        WorkRow::REMOTE => "Cloud agent",
+        WorkRow::WORKFLOW => "Workflow",
+        _ => "Details",
+    };
+    let mut facts = Vec::new();
+    let status = match row.outcome.as_deref().filter(|o| !o.trim().is_empty()) {
+        Some(outcome) if !row.live => format!("Status: {} · {outcome}", row.state_words),
+        _ => format!("Status: {}", row.state_words),
+    };
+    facts.push(status);
+    if let Some(elapsed) = row_elapsed(row, now) {
+        facts.push(if row.live { format!("Running for {elapsed}") } else { format!("Ran for {elapsed}") });
+    }
+    let what = match row.kind.as_str() {
+        WorkRow::COMMAND | WorkRow::MONITOR => "Command",
+        WorkRow::MCP => "Tool",
+        _ => "Task",
+    };
+    facts.push(format!("{what}: {}", row.title));
+    if let Some(step) = row.step.as_ref().filter(|s| !s.trim().is_empty()) {
+        facts.push(step.clone());
+    }
+    if !row.figures.is_empty() {
+        facts.push(row.figures.clone());
+    }
+    let printed: Vec<&str> = row.output.as_deref().map(|o| o.trim_end().lines().collect()).unwrap_or_default();
+    let output = if printed.is_empty() {
+        if matches!(row.kind.as_str(), WorkRow::COMMAND | WorkRow::MONITOR) {
+            vec!["No output available".to_owned()]
+        } else {
+            Vec::new()
+        }
+    } else {
+        let from = printed.len().saturating_sub(DETAIL_LINES);
+        let shown = printed.len().saturating_sub(from);
+        let mut lines: Vec<String> = printed.iter().skip(from).map(|l| (*l).to_owned()).collect();
+        lines.push(if shown < printed.len() {
+            format!("Showing {shown} of {} lines", printed.len())
+        } else {
+            format!("Showing {shown} {}", if shown == 1 { "line" } else { "lines" })
+        });
+        lines
+    };
+    (title.to_owned(), facts, output)
+}
+
+/// A row's details under it.
+fn row_detail(row: &WorkRow, now: i64, theme: &Theme) -> AnyElement {
+    let (title, facts, output) = detail_lines(row, now);
+    let last = output.len().saturating_sub(1);
+    div()
+        .id(SharedString::from(format!("background-row-detail-{}", row.id)))
+        .role(gpui::Role::Group)
+        .aria_label(SharedString::from(title.clone()))
+        .ml(px(ROW_PAD_X + GLYPH_SLOT + 8.0))
+        .mr(px(ROW_PAD_X))
+        .mb(px(4.0))
+        .flex()
+        .flex_col()
+        .gap(px(2.0))
+        .text_size(px(SUB_SIZE))
+        .text_color(theme.text_muted)
+        .child(div().font_weight(gpui::FontWeight::MEDIUM).text_color(theme.text).child(SharedString::from(title)))
+        .children(facts.into_iter().map(|fact| div().min_w_0().truncate().child(SharedString::from(fact))))
+        .when(!output.is_empty(), |el| {
+            el.child(
+                div()
+                    .mt(px(2.0))
+                    .px(px(6.0))
+                    .py(px(4.0))
+                    .rounded(px(5.0))
+                    .bg(theme.element_hover)
+                    .flex()
+                    .flex_col()
+                    .font_family(theme.font_mono.clone())
+                    .children(output.into_iter().enumerate().map(|(ix, text)| {
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .when(ix == last, |el| el.text_color(theme.text_faint))
+                            .child(SharedString::from(text))
+                    })),
+            )
+        })
+        .into_any_element()
+}
+
+/// A section's heading over its rows: "Shells (2)".
+fn tray_section(name: &str, count: usize, theme: &Theme) -> AnyElement {
+    let words = SharedString::from(format!("{name} ({count})"));
+    div()
+        .id(SharedString::from(format!("background-tray-section-{name}")))
+        .role(gpui::Role::Heading)
+        .aria_label(words.clone())
+        .h(px(20.0))
+        .px(px(ROW_PAD_X))
+        .flex()
+        .items_end()
+        .text_size(px(SUB_SIZE))
+        .text_color(theme.text_faint)
+        .child(words)
+        .into_any_element()
 }
 
 /// A 6 px state dot; `pulse`: it breathes, for work that will wake the agent.
@@ -865,6 +1070,46 @@ mod tests {
         assert_eq!(live.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["chat:c", "task:a"]);
         assert_eq!(ended.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["task:b"]);
         assert_eq!(header_words(&tray), "1 needs you · 1 command");
+    }
+
+    /// Live rows of more than one kind sit under their kinds' sections, each kind's rows
+    /// together in the order the kinds first come; one kind has no heading.
+    #[test]
+    fn live_rows_sit_under_their_kinds_sections() {
+        let tray = WorkTray {
+            main: MainRow::default(),
+            rows: vec![
+                row("task:a", WorkRow::COMMAND, true),
+                row("chat:b", WorkRow::SUBAGENT, true),
+                row("task:c", WorkRow::COMMAND, true),
+            ],
+            counts: WorkCounts::default(),
+            summary: String::new(),
+            can_stop_all: true,
+        };
+        let (live, _) = split_rows(&tray);
+        assert_eq!(live.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["task:a", "task:c", "chat:b"]);
+        assert_eq!(sections(&live), [("Shells", 2), ("Agents", 1)]);
+        assert!(sections(&live[..2]).is_empty(), "one kind needs no heading");
+    }
+
+    /// A row's details say what it is, how it stands, what it runs and its last ten lines,
+    /// with how many show; a command that printed nothing says so.
+    #[test]
+    fn a_rows_details_read_as_the_tuis() {
+        let mut shell = row("task:a", WorkRow::COMMAND, false);
+        shell.title = "cargo test".into();
+        shell.state_words = "failed".into();
+        shell.outcome = Some("exit code 101".into());
+        shell.duration_ms = Some(83_000);
+        shell.output = Some((1..=12).map(|n| format!("line {n}")).collect::<Vec<_>>().join("\n"));
+        let (title, facts, output) = detail_lines(&shell, 0);
+        assert_eq!(title, "Shell details");
+        assert_eq!(facts, ["Status: failed · exit code 101", "Ran for 1m 23s", "Command: cargo test"]);
+        assert_eq!(output.first().map(String::as_str), Some("line 3"));
+        assert_eq!(output.last().map(String::as_str), Some("Showing 10 of 12 lines"));
+        shell.output = None;
+        assert_eq!(detail_lines(&shell, 0).2, ["No output available"]);
     }
 
     /// A live row ticks from when it began; an ended one says how long it ran, with its figures.

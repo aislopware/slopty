@@ -16,7 +16,7 @@ use slopty_view_doc::work::{duration_words, tokens_short};
 use crate::theme::Theme;
 
 /// The live line's words at `now`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ActivityWords {
     /// What the agent does, or the retry's line.
     pub lead: String,
@@ -26,6 +26,8 @@ pub struct ActivityWords {
     pub figures: Vec<String>,
     /// Under it: "Next: {task}", or the retry's hint.
     pub below: Option<String>,
+    /// How far the reply's silence has reddened the line, 0 to 1 (the TUI's stall tint).
+    pub stall: f32,
 }
 
 /// The words of `line` at `now`; `word` is what the transcript would say (the call under way or
@@ -38,6 +40,7 @@ pub fn activity_words(line: &ActivityLine, word: &str, elapsed_secs: i64, now: i
             retrying: true,
             figures: Vec::new(),
             below: retry.hint.clone().map(|hint| format!("If it persists, check {hint}.")),
+            stall: 0.0,
         };
     }
     let lead = line.phrase.clone().filter(|p| !p.trim().is_empty()).unwrap_or_else(|| word.to_owned());
@@ -59,12 +62,16 @@ pub fn activity_words(line: &ActivityLine, word: &str, elapsed_secs: i64, now: i
     } else if let Some(ms) = line.thought_ms {
         figures.push(format!("thought for {}", duration_words(ms.max(1_000))));
     }
-    ActivityWords {
-        lead,
-        retrying: false,
-        figures,
-        below: line.next.clone().filter(|n| !n.trim().is_empty()).map(|next| format!("Next: {next}")),
-    }
+    // slopty: a reply silent past the TUI's patience says the API has not answered.
+    let quiet = line.quiet_since.and_then(|since| u64::try_from(now.saturating_sub(since)).ok());
+    let below = match quiet {
+        Some(quiet) if quiet >= ActivityLine::NO_ANSWER_MS => Some(format!(
+            "Waiting for API response · {} without a word · check your network",
+            duration_words(quiet)
+        )),
+        _ => line.next.clone().filter(|n| !n.trim().is_empty()).map(|next| format!("Next: {next}")),
+    };
+    ActivityWords { lead, retrying: false, figures, below, stall: line.stall(now) }
 }
 
 /// The transcript's working line for chat `chat_id` drawn from its dock, or `None` while the
@@ -116,7 +123,14 @@ pub fn working_line(
                         div()
                             .min_w_0()
                             .text_size(crate::typography::ui_rems(12.0))
-                            .text_color(if words.retrying { theme.warning } else { theme.text_muted })
+                            // slopty: a silent reply reddens the words, as the TUI's spinner.
+                            .text_color(if words.retrying {
+                                theme.warning
+                            } else if words.stall > 0.0 {
+                                crate::theme::mix(theme.text_muted, theme.danger, words.stall)
+                            } else {
+                                theme.text_muted
+                            })
                             .child(crate::roll_text::roll_text(
                                 format!("working-word-{view}-{turn}"),
                                 SharedString::from(lead),
@@ -175,6 +189,24 @@ mod tests {
         let words = activity_words(&quiet, "Cogitating", 7, 0);
         assert_eq!(words.lead, "Cogitating");
         assert_eq!(words.figures, ["7s", "thought for 4s"]);
+    }
+
+    /// A reply silent past 10 s reddens the line, fully at 20 s; past 30 s it says the API
+    /// has not answered. A turn with no reply under way never does.
+    #[test]
+    fn a_silent_reply_reddens_then_says_so() {
+        let line = ActivityLine { quiet_since: Some(0), ..ActivityLine::default() };
+        assert!(activity_words(&line, "x", 0, 9_000).stall.abs() < f32::EPSILON);
+        let half = activity_words(&line, "x", 0, 15_000).stall;
+        assert!((half - 0.5).abs() < 0.01, "{half}");
+        let words = activity_words(&line, "x", 0, 31_000);
+        assert!((words.stall - 1.0).abs() < f32::EPSILON);
+        assert_eq!(
+            words.below.as_deref(),
+            Some("Waiting for API response · 31s without a word · check your network")
+        );
+        let tool_runs = ActivityLine::default();
+        assert!(activity_words(&tool_runs, "x", 0, 99_000).stall.abs() < f32::EPSILON);
     }
 
     /// A retry takes the line over and counts down to its next attempt.

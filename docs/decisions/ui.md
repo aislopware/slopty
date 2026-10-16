@@ -12744,3 +12744,48 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `view_model::work::tests`; `slopty-shell` `composer::dock_tests::{an_allow_takes_words_beside_it,
     an_option_shows_its_preview_beside_it}`,
     `composer::request_card::tests::allow_with_words_stands_where_the_agent_takes_them`.
+- ✅ **The rest of the TUI's words, second round (2026-10-16).** The catalog's last missing and
+  partial rows are shown, the TUI's way or better (`docs/decisions/agents.md` has the doors):
+  - **The group line.** A group of calls says what it did as the TUI's does. It gives how long
+    the model thought ("Thought for 12s", from the item before the thought to it), an edit's
+    line totals ("edited 2 files +12 -3"), and directories listed apart from commands. It also
+    says what commands landed: "committed 1a2b3c4", "pushed to main", "rebased onto main",
+    "created PR #12".
+  - **Chips.** A path reads relative to the chat's folder, else `~/…`, its middle cut keeping
+    the file's name. A command's standard error shows under its output in the danger colour,
+    without Claude Code's own notes. One-line JSON output is pretty-printed, and an address on
+    its own line opens with a click. A lone `sed -i` substitution reads as "Update(file)".
+    Agents started together sit under one row ("Running 3 Explore agents…", "3 agents
+    finished"). Only the last task list shows, as the TUI draws no row per change. A message the
+    agent sends the person (its brief tools) is plain text.
+  - **The working line** reddens as a reply goes quiet (from 10 s, full at 20 s) and at 30 s says
+    "Waiting for API response · 31s without a word · check your network".
+  - **Request cards.** A Claude Code plan shown whole offers "Edit plan…": the plan goes into the
+    composer, and sending approves it as edited. An agent's questions offer "Chat about this"
+    beside their answers. A question whose options have previews takes notes ("Notes: Add notes
+    on this design…"). A form's address is shown whole under its host. One that would not open
+    as shown, or is too long for a browser, is not opened with a click and says why in the
+    TUI's words.
+  - **Background tray.** Live rows of more than one kind sit under sections ("Shells (2)",
+    "Agents (1)"). Each row opens its details under it with its chevron or →: what it is
+    ("Shell details", "MCP task"), its status and outcome, how long it ran, what it runs, and
+    its last ten lines ("Showing 10 of 240 lines", "No output available").
+  - **Errors.** The agent's own headline leads when its first line is one (a start it refused,
+    a full context, a spend or credit limit, an organization's sign-in policy, a cloud
+    provider's credentials), with the machine after it.
+  - **The model card** says what fast mode costs under its switch, in the TUI's words.
+  - Tests: `slopty-ui` `view_model::folds::tests::agents_started_together_read_under_one_row`,
+    `view_model::facts::tests::{a_command_says_what_it_landed,
+    paths_errors_and_seds_read_as_the_tuis}`,
+    `view_model::tests::{a_plan_is_edited_and_questions_are_talked_over,
+    an_agents_headline_leads_its_error, a_thought_says_how_long_it_took,
+    notes_go_beside_the_answers}`; `slopty-shell` `background_tray::tests::{live_rows_sit_under_their_kinds_sections,
+    a_rows_details_read_as_the_tuis}`, `composer::activity::tests::a_silent_reply_reddens_then_says_so`,
+    `transcript::tests::reasoning_joins_the_tool_group_accordion` and its summary tests.
+- ✅ **A card's option keys wait while the person types (2026-10-16).** A bare digit picks a
+  card's option only while the composer is empty, so a request that arrived while the person
+  was typing could take a digit meant for the message. That one-page approval was then answered
+  for them. Now a digit or Enter on a card waits 1.5 s after the person's last keystroke and
+  1.5 s after the card appears, as t3code's `composerTypingGuard` does. A held key goes on to
+  the composer as typed text, and a click is never held.
+  - Tests: `slopty-shell` `composer::tests::a_key_typed_as_a_request_lands_answers_nothing`.

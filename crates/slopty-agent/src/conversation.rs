@@ -61,6 +61,7 @@ use crate::transcript::Tail;
 
 pub mod media;
 pub mod output;
+mod said;
 mod session;
 mod vocabulary;
 pub use session::{Located, Transcripts, subagents_dir};
@@ -450,10 +451,42 @@ impl Conversation {
         if let Some(t) = self.threads.get_mut(ctx.thread) {
             t.request = None;
         }
+        let Some(content) = record.get("message").and_then(|m| m.get("content")) else { return };
+        // A stop hook's feedback wakes the model as a message of Claude Code's own: the TUI
+        // says it as the hook's row, not the person's.
+        if let Some(feedback) =
+            content_text(content).trim_start().strip_prefix("Stop hook feedback")
+        {
+            let said = feedback.trim_start_matches(':').trim();
+            let text = if said.is_empty() {
+                "Stop hook feedback".to_owned()
+            } else {
+                format!("Stop hook feedback\n{said}")
+            };
+            let note = Note {
+                kind: NoteKind::Hook,
+                text: Clipped::head(&text, OUTPUT, None),
+                retry: None,
+                stop: None,
+            };
+            self.add(ctx, ctx.uuid.to_owned(), Body::Note(note), batch);
+            return;
+        }
         if bool_at(record, "isMeta") {
             return;
         }
-        let Some(content) = record.get("message").and_then(|m| m.get("content")) else { return };
+        // A prompt a plugin queued says whose it is, above it.
+        if let Some(origin) = record.get("origin").filter(|o| str_at(o, "kind") == Some("plugin"))
+            && let Some(name) = str_at(origin, "name").or_else(|| str_at(origin, "plugin"))
+        {
+            let note = Note {
+                kind: NoteKind::Quiet,
+                text: Clipped::head(&format!("Prompt from the {name} plugin"), OUTPUT, None),
+                retry: None,
+                stop: None,
+            };
+            self.add(ctx, format!("{}:origin", ctx.uuid), Body::Note(note), batch);
+        }
         if bool_at(record, "isCompactSummary") {
             let text = content_text(content);
             self.summary(ctx, &text, batch);
@@ -513,18 +546,52 @@ impl Conversation {
                     images: Vec::new(),
                     command: Some("!".to_owned()),
                 })
-            } else if let Some(output) =
-                ["local-command-stdout", "local-command-stderr", "bash-stdout", "bash-stderr"]
-                    .iter()
-                    .find_map(|name| tag(text, name))
+            } else if ["local-command-stdout", "local-command-stderr", "bash-stdout", "bash-stderr"]
+                .iter()
+                .any(|name| tag(text, name).is_some())
             {
-                let output = strip_ansi(output.trim());
-                if output.is_empty() {
-                    continue;
+                // What it printed, then its errors apart, as the TUI draws them in red.
+                let printed = |names: [&str; 2]| {
+                    let said = names.iter().find_map(|name| tag(text, name)).unwrap_or_default();
+                    strip_ansi(said.trim())
+                };
+                let id =
+                    if index == 0 { ctx.uuid.to_owned() } else { format!("{}:{index}", ctx.uuid) };
+                for (kind, said, at) in [
+                    (
+                        NoteKind::Command,
+                        printed(["local-command-stdout", "bash-stdout"]),
+                        id.clone(),
+                    ),
+                    (
+                        NoteKind::CommandError,
+                        printed(["local-command-stderr", "bash-stderr"]),
+                        format!("{id}:stderr"),
+                    ),
+                ] {
+                    if said.is_empty() {
+                        continue;
+                    }
+                    let note = Note {
+                        kind,
+                        text: Clipped::head(&said, OUTPUT, Some(reference())),
+                        retry: None,
+                        stop: None,
+                    };
+                    self.add(ctx, at, Body::Note(note), batch);
                 }
+                continue;
+            } else if let Some(update) = mcp_update(text) {
                 Body::Note(Note {
-                    kind: NoteKind::Command,
-                    text: Clipped::head(&output, OUTPUT, Some(reference())),
+                    kind: NoteKind::Quiet,
+                    text: Clipped::head(&update, OUTPUT, Some(reference())),
+                    retry: None,
+                    stop: None,
+                })
+            } else if let Some(message) = peer_message(text) {
+                Body::Note(Note {
+                    kind: NoteKind::Quiet,
+                    text: Clipped::head(&message, PROSE, Some(reference())),
                     retry: None,
                     stop: None,
                 })
@@ -690,16 +757,37 @@ impl Conversation {
                     }
                     Some("thinking") => {
                         let text = str_at(block, "thinking").unwrap_or_default();
+                        // Thinking its signature marks as narration is said to the person, and
+                        // the TUI draws it as the answer's own words.
+                        let said = Clipped::head(text, PROSE, Some(reference()));
+                        let body = if said::narration(str_at(block, "signature")) {
+                            Body::Text(said)
+                        } else {
+                            Body::Thinking(said)
+                        };
                         if !text.trim().is_empty() {
-                            self.add(
-                                ctx,
-                                id(),
-                                Body::Thinking(Clipped::head(text, PROSE, Some(reference()))),
-                                batch,
-                            );
+                            self.add(ctx, id(), body, batch);
                         }
                     }
                     Some("tool_use" | "server_tool_use") => self.call(ctx, block, batch),
+                    // A server tool's result rides the answer itself (the advisor's, a web
+                    // search's): it settles its call as a person's tool result would.
+                    Some(kind) if kind.ends_with("_tool_result") => {
+                        let content = block.get("content").cloned().unwrap_or(Value::Null);
+                        let failed = content
+                            .get("type")
+                            .and_then(Value::as_str)
+                            .is_some_and(|t| t.ends_with("_error"));
+                        let text = str_at(&content, "text").unwrap_or_default();
+                        let settled = serde_json::json!({
+                            "type": "tool_result",
+                            "tool_use_id": block.get("tool_use_id"),
+                            "content": text,
+                            "is_error": failed,
+                        });
+                        let structured = content.is_object().then_some(&content);
+                        self.result(ctx, &settled, structured, batch);
+                    }
                     _ => {}
                 },
             }
@@ -840,7 +928,8 @@ impl Conversation {
         let input = block.get("input").unwrap_or(&empty);
         let detail = detail(name, input, Some((id, ctx.uuid)));
         self.calls.insert(id.to_owned(), ctx.thread.clone());
-        let call = ToolCall { name: name.to_owned(), detail, result: None };
+        let title = said::header(name, input);
+        let call = ToolCall { name: name.to_owned(), detail, result: None, title };
         self.add(ctx, id.to_owned(), Body::Tool(Box::new(call)), batch);
         for waiting in self.pending.remove(id).unwrap_or_default() {
             match waiting {
@@ -886,20 +975,32 @@ impl Conversation {
         };
         let structured = result.filter(|r| r.is_object());
         let images = media::in_result(ctx.uuid, id, block, structured);
+        let input = said_input(&call.detail);
+        let said = said::said(
+            &call.name,
+            said::Outcome {
+                input: input.as_ref(),
+                // A list result (`ListMcpResourcesTool`'s) is the result whole.
+                result: result.filter(|r| r.is_object() || r.is_array()),
+                text: &text,
+                status,
+                at_ms: ctx.at_ms.as_millis(),
+            },
+        );
         let shown =
             apply_result(&mut call.detail, status, &text, structured, (ctx.thread, ctx.uuid), id);
-        let text = (!shown || status != ResultStatus::Ok).then(|| {
-            Clipped::head(
-                text.trim(),
-                OUTPUT,
-                Some(TextRef {
-                    record: ctx.uuid.to_owned(),
-                    part: Part::Result { tool_use_id: id.to_owned() },
-                }),
-            )
+        let full = Some(TextRef {
+            record: ctx.uuid.to_owned(),
+            part: Part::Result { tool_use_id: id.to_owned() },
         });
+        // A list the TUI draws under the call stands for the text the model read.
+        let text = match said.body {
+            Some(body) => Some(Clipped::head(body.trim(), OUTPUT, full)),
+            None => (!shown || status != ResultStatus::Ok)
+                .then(|| Clipped::head(text.trim(), OUTPUT, full)),
+        };
         let text = text.filter(|t| !t.text.is_empty() || images.is_empty());
-        call.result = Some(ToolResult { status, text, at_ms: ctx.at_ms, images });
+        call.result = Some(ToolResult { status, text, at_ms: ctx.at_ms, images, said: said.line });
         let changed_tasks = task_change(&call.detail, call.result.as_ref());
         let background = matches!(&call.detail, ToolDetail::Bash(b) if b.output_file.is_some());
         let entry = entry.clone();
@@ -1194,7 +1295,8 @@ fn detail(name: &str, input: &Value, at: Option<(&str, &str)>) -> ToolDetail {
             files: None,
             truncated: false,
         }),
-        "Bash" => ToolDetail::Bash(BashDetail {
+        // PowerShell is a shell of its own: its result has Bash's fields.
+        "Bash" | "PowerShell" => ToolDetail::Bash(BashDetail {
             command: Clipped::head(
                 str_at(input, "command").unwrap_or_default(),
                 OUTPUT,
@@ -1227,6 +1329,7 @@ fn detail(name: &str, input: &Value, at: Option<(&str, &str)>) -> ToolDetail {
             agent_id: None,
             agent_type: text("subagent_type"),
             description: text("description"),
+            name: text("name"),
             prompt: Clipped::head(
                 str_at(input, "prompt").unwrap_or_default(),
                 PROSE,
@@ -1328,6 +1431,27 @@ fn question(q: &Value) -> Question {
             })
             .unwrap_or_default(),
         multi_select: bool_at(q, "multiSelect"),
+    }
+}
+
+/// The input [`said::said`] reads of a call, where the call keeps it: an untyped tool's JSON, a
+/// question's questions, a plan's text.
+fn said_input(detail: &ToolDetail) -> Option<Value> {
+    match detail {
+        ToolDetail::Other { input } => serde_json::from_str(&input.text).ok(),
+        ToolDetail::Question(question) => Some(serde_json::json!({
+            "questions": question
+                .questions
+                .iter()
+                .map(|q| serde_json::json!({
+                    "question": q.text,
+                    "options": q.options.iter().map(|o| serde_json::json!({ "label": o.label }))
+                        .collect::<Vec<_>>(),
+                }))
+                .collect::<Vec<_>>(),
+        })),
+        ToolDetail::Plan { plan } => Some(serde_json::json!({ "plan": plan.text })),
+        _ => None,
     }
 }
 
@@ -1451,6 +1575,11 @@ fn apply_result(
             let Some(r) = result else { return false };
             agent.agent_id = string_at(r, "agentId").or_else(|| agent.agent_id.take());
             agent.agent_type = string_at(r, "agentType").or_else(|| agent.agent_type.take());
+            // A teammate is named by its name, as the TUI's `@name` row does.
+            if str_at(r, "status") == Some("teammate_spawned") {
+                let name = string_at(r, "name").or_else(|| agent.name.clone());
+                agent.agent_type = name.map(|n| format!("@{}", n.trim_start_matches('@')));
+            }
             agent.tokens = u64_at(r, "totalTokens");
             agent.tool_uses = u64_at(r, "totalToolUseCount");
             agent.duration_ms = u64_at(r, "totalDurationMs");
@@ -1844,6 +1973,64 @@ fn is_prompt(record: &Value) -> bool {
             && !text.starts_with('<')
             && !text.starts_with("[Request interrupted by user")
     })
+}
+
+/// An MCP server's word that a resource or a polled tool changed, as the TUI's row says it:
+/// "↻ docs: guide.md · re-indexed". A `file://` resource is named by its file, any other cut to
+/// 40 characters.
+fn mcp_update(text: &str) -> Option<String> {
+    let attr = |head: &str, name: &str| -> Option<String> {
+        let at = head.find(&format!("{name}=\""))?;
+        let rest = head.get(at.saturating_add(name.len()).saturating_add(2)..)?;
+        Some(rest.get(..rest.find('"')?)?.to_owned())
+    };
+    let mut rows = Vec::new();
+    let mut rest = text;
+    while let Some(start) = ["<mcp-resource-update", "<mcp-polling-update"]
+        .iter()
+        .filter_map(|open| rest.find(open))
+        .min()
+    {
+        let from = rest.get(start..)?;
+        let head = from.get(..from.find('>')?)?;
+        let server = attr(head, "server").unwrap_or_default();
+        let target = attr(head, "uri").or_else(|| attr(head, "tool")).unwrap_or_default();
+        let target = match target.strip_prefix("file://") {
+            Some(path) => path.rsplit('/').find(|p| !p.is_empty()).unwrap_or(path).to_owned(),
+            None if target.chars().count() > 40 => {
+                let mut cut: String = target.chars().take(39).collect();
+                cut.push('…');
+                cut
+            }
+            None => target,
+        };
+        let closes = from.find("</mcp-").unwrap_or(from.len());
+        let body = from.get(..closes).unwrap_or(from);
+        let reason = tag(body, "reason").map(str::trim).filter(|r| !r.is_empty());
+        rows.push(match reason {
+            Some(reason) => format!("↻ {server}: {target} · {reason}"),
+            None => format!("↻ {server}: {target}"),
+        });
+        rest = from.get(closes.max(1)..).unwrap_or_default();
+    }
+    (!rows.is_empty()).then(|| rows.join("\n"))
+}
+
+/// A message another Claude Code session sent this one (`<cross-session-message from="…">`):
+/// who sent it, then what it said.
+fn peer_message(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    let open = trimmed.strip_prefix("<cross-session-message")?;
+    let head = open.get(..open.find('>')?)?;
+    let attr = |name: &str| -> Option<&str> {
+        let at = head.find(&format!("{name}=\""))?;
+        let rest = head.get(at.saturating_add(name.len()).saturating_add(2)..)?;
+        rest.get(..rest.find('"')?)
+    };
+    let from = attr("from-name").or_else(|| attr("from")).unwrap_or("another session");
+    let after = open.get(head.len().saturating_add(1)..).unwrap_or_default();
+    let body = after.split_once("</cross-session-message>").map_or(after, |(body, _)| body).trim();
+    Some(format!("Message from another session · {from}\n{body}").trim_end().to_owned())
 }
 
 /// The text between `<name>` and `</name>`.

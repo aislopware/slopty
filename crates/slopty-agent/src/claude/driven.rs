@@ -288,6 +288,9 @@ pub struct Driven {
     goal_clearing: bool,
     /// Fast mode as Claude Code last said it stands, and whether the person turned it on.
     fast: (Option<String>, bool),
+    /// A turn of this process has ended: the next one reads its context from the prompt cache,
+    /// unless the cache expired while it waited.
+    turned: bool,
 }
 
 impl Driven {
@@ -373,6 +376,7 @@ impl Driven {
             said_once: (HashSet::new(), false),
             goal_clearing: false,
             fast: (None, false),
+            turned: false,
         }
     }
 
@@ -676,6 +680,9 @@ impl Driven {
         if super::history::clear_mode(choice).is_some() {
             return asked.tool == "ExitPlanMode";
         }
+        if choice == super::history::CLARIFY {
+            return asked.tool == "AskUserQuestion";
+        }
         let verdict = super::history::verdict(choice, None);
         match verdict {
             Some(Verdict::Answer { .. }) => asked.tool == "AskUserQuestion",
@@ -705,8 +712,30 @@ impl Driven {
         if super::history::clear_mode(choice).is_some() {
             return Some(self.plan_cleared(ask, &asked, choice, by, now));
         }
-        let verdict = super::history::verdict(choice, message)?;
-        let decision = crate::permission::decision(&verdict, &asked.input, &asked.suggestions);
+        let verdict = if choice == super::history::CLARIFY {
+            Verdict::Deny { message: clarify(&asked.input), interrupt: false }
+        } else {
+            super::history::verdict(choice, message)?
+        };
+        let words = matches!(verdict, Verdict::Allow | Verdict::AllowAlways)
+            .then(|| message.map(str::trim).filter(|m| !m.is_empty()).map(str::to_owned))
+            .flatten();
+        // A plan approved with words is approved as the person edited it, as the TUI's Ctrl+G
+        // does: the plan goes back in the call's input, and Claude Code saves it to the plan
+        // file and echoes it to the model.
+        let edited = (asked.tool == "ExitPlanMode").then(|| words.clone()).flatten();
+        let mut input = asked.input.clone();
+        if let (Some(plan), Some(fields)) = (&edited, input.as_object_mut()) {
+            fields.insert("plan".to_owned(), Value::String(plan.clone()));
+        }
+        let mut decision = crate::permission::decision(&verdict, &input, &asked.suggestions);
+        // Answers to the agent's questions carry what the TUI's dialog adds to them: the preview
+        // of each option picked, and the person's notes on it (the words beside the answers).
+        if let (Verdict::Answer { answers }, crate::permission::Decision::Allow { updated_input }) =
+            (&verdict, &mut decision)
+        {
+            annotate(updated_input, answers, message);
+        }
         let response = crate::permission::result(&decision);
         let line = json!({
             "type": "control_response",
@@ -715,9 +744,7 @@ impl Driven {
         self.writes.push(line.to_string());
         // "Yes, and tell Claude what to do next": the call goes ahead, and the person's words
         // go into the turn, which Claude Code takes at its next step.
-        let next = matches!(verdict, Verdict::Allow | Verdict::AllowAlways)
-            .then(|| message.map(str::trim).filter(|m| !m.is_empty()).map(str::to_owned))
-            .flatten();
+        let next = words.filter(|_| edited.is_none());
         let settled = Settled::Answered { verdict, by };
         let mut outs =
             self.history.permission(&PermissionEvent::Settled { ask: number, outcome: settled });
@@ -988,6 +1015,7 @@ impl Driven {
         outs.extend(self.fast_said(said, now));
         if let Some(agents) = said.get("agents").and_then(Value::as_array) {
             outs.extend(self.agents_listed(agents));
+            outs.extend(self.agents_too_long(agents, now));
         }
         // What only a question answers: its rules, its servers' apps, the surfaces its mods
         // draw, and whether ultracode applies.
@@ -1054,6 +1082,7 @@ impl Driven {
                 u32::try_from(used.saturating_mul(100).checked_div(of)?.min(100)).ok()
             });
         let needs_presence = bool_at(&request, "requires_user_interaction");
+        let disk = on_disk(&tool, &input, &self.history.meta().cwd);
         let prompt = PermissionPrompt {
             needs_presence,
             reason: asked_by(asks::reason(&request, &tool, meters.mode.as_deref()), &request),
@@ -1062,8 +1091,12 @@ impl Driven {
             detail: conv::proposed(&tool, &input),
             tool: tool.clone(),
             // A request whose "always allow" Claude Code holds back offers none, and so does one
-            // only the person at the card answers: no rule answers it again without them.
-            suggestions: if bool_at(&request, "suppress_always_allow_rule") || needs_presence {
+            // only the person at the card answers, or an overwrite they cannot review: no rule
+            // answers it again without them.
+            suggestions: if bool_at(&request, "suppress_always_allow_rule")
+                || needs_presence
+                || disk.as_ref().is_some_and(|d| d.one_time)
+            {
                 Vec::new()
             } else {
                 crate::permission::suggestions(&suggestions)
@@ -1071,6 +1104,8 @@ impl Driven {
             mode: meters.mode.clone(),
             asked_ms: now,
             exists: written_exists(&tool, &input),
+            on_disk: disk.map(|d| d.words),
+            default_to_no: bool_at(&request, "default_to_no"),
             context_used,
             before_plan: self.before_plan(),
             input: input.clone(),
@@ -1129,6 +1164,7 @@ impl Driven {
         match str_at(message, "subtype").unwrap_or_default() {
             "init" => {
                 let mut outs = self.servers_seen(message, now);
+                outs.extend(self.init_problems(message, now));
                 if let Some(model) = str_at(message, "model").map(str::to_owned) {
                     outs.extend(self.meters(|m| {
                         m.model = Some(super::model_label(&model));
@@ -1502,9 +1538,26 @@ impl Driven {
         outs.extend(self.history.stopping(None));
         outs.extend(self.history.compacting(false));
         let failed = bool_at(message, "is_error");
+        let errors = || {
+            let said: Vec<&str> = message
+                .get("errors")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect();
+            said.join("\n")
+        };
         let interrupted = str_at(message, "subtype") == Some("error_during_execution")
             || str_at(message, "terminal_reason").is_some_and(|r| r.starts_with("aborted"));
-        let end = if interrupted {
+        let end = if let Some(reason) = str_at(message, "startup_failure_reason") {
+            // Claude Code would not start: why, in words, before what it printed.
+            let words = format!("{STARTUP_REFUSED}: {}", startup_refused(reason));
+            End::Failed(Some(format!("{words}\n{}", errors()).trim_end().to_owned()))
+        } else if str_at(message, "terminal_reason") == Some("prompt_too_long") {
+            let said = str_at(message, "result").map_or_else(errors, str::to_owned);
+            End::Failed(Some(format!("{CONTEXT_FULL}\n{said}").trim_end().to_owned()))
+        } else if interrupted {
             End::Interrupted
         } else if failed {
             End::Failed(str_at(message, "result").map(str::to_owned).filter(|r| !r.is_empty()))
@@ -1515,6 +1568,14 @@ impl Driven {
             outs.extend(self.history.ended(&end, now));
         }
         outs.extend(self.fast_said(message, now));
+        // A hook held a call back: the turn stops at it until the person goes on.
+        if let Some(deferred) = message.get("deferred_tool_use").filter(|d| d.is_object()) {
+            let tool = str_at(deferred, "name").unwrap_or("a tool call");
+            let words =
+                format!("A hook deferred {tool} · the turn stopped here; send a message to go on");
+            outs.extend(self.history.notice(Notice::HOOK, &words, now));
+        }
+        outs.extend(self.cache_expired(message, now));
         if let Some(model_usage) = message.get("modelUsage").and_then(Value::as_object) {
             let window = model_usage.values().filter_map(|u| u64_at(u, "contextWindow")).max();
             if window.is_some() {
@@ -1744,6 +1805,77 @@ fn asked_by(reason: Option<String>, request: &Value) -> Option<String> {
     }
 }
 
+/// Context below which a cache that expired costs too little to say so, as the TUI's hint.
+const UNCACHED_SAY_FROM: u64 = 50_000;
+
+impl Driven {
+    /// A turn after the first that read none of its context from the prompt cache and wrote
+    /// much of it again: the cache expired while the conversation waited. The TUI warns of it
+    /// before the next message ("~120k uncached · /clear to start fresh"); here it is said once
+    /// it is known, from the turn's usage.
+    fn cache_expired(&mut self, result: &Value, now: WallMs) -> Vec<Out> {
+        let had_turn = std::mem::replace(&mut self.turned, true);
+        let Some(usage) = result.get("usage") else { return Vec::new() };
+        let read = u64_at(usage, "cache_read_input_tokens").unwrap_or(0);
+        let written = u64_at(usage, "cache_creation_input_tokens").unwrap_or(0);
+        if !had_turn || read > 0 || written < UNCACHED_SAY_FROM {
+            return Vec::new();
+        }
+        let words = format!(
+            "The prompt cache expired while the chat waited: ~{}k tokens went uncached · \
+             /clear starts fresh",
+            written / 1_000
+        );
+        self.passing("uncached", &words, now)
+    }
+}
+
+/// How a turn's failure begins when Claude Code would not start, before its reason in words.
+pub const STARTUP_REFUSED: &str = "Claude Code refused to start";
+
+/// How a turn's failure begins when the conversation no longer fits the model's context, as the
+/// TUI says it.
+pub const CONTEXT_FULL: &str =
+    "Context limit reached · compact or clear the conversation to continue";
+
+/// Why Claude Code would not start (`result.startup_failure_reason`), in words: what to fix
+/// rather than to try again.
+fn startup_refused(reason: &str) -> String {
+    match reason {
+        "org_pin_api_key_conflict" => {
+            "the organization's settings require its own sign-in, and an API key is set instead"
+        }
+        "provider_not_allowed" => "the managed settings do not allow this API provider",
+        "org_verify_failed" => "the sign-in's organization could not be verified",
+        "org_pin_mismatch" => "the sign-in belongs to an organization the settings do not allow",
+        "managed_settings_invalid" => {
+            "the managed settings could not be read, or they leave no model to use"
+        }
+        "remote_settings_required_unavailable" => {
+            "the settings the organization requires could not be loaded"
+        }
+        "gateway_signin_required" => "the gateway ended this sign-in",
+        "gateway_access_denied" => "the gateway refused this account",
+        "proxy_invalid" => "a proxy setting is not a complete URL",
+        "temp_dir_unusable" => "the temporary folder is unsafe or could not be made",
+        "cwd_unavailable" => "the folder was deleted, moved or cannot be read",
+        "shell_tool_missing" => "there is no shell tool: Git Bash and PowerShell are missing",
+        "session_held_by_background" => "the conversation runs as a background session",
+        "worktree_resume_refused" => "the session's worktree failed its safety checks",
+        "worktree_unverified" => {
+            "the session's worktree could not be verified now; trying again may work"
+        }
+        "cli_version_too_old" => "this Claude Code is older than Anthropic allows; update it",
+        "bypass_root" => "bypass permissions was asked for while running as root",
+        "org_config_required_unavailable" => {
+            "the organization's policy could not be loaded; trying again may work"
+        }
+        "org_config_refused" => "Anthropic refused the organization's policy for this sign-in",
+        other => return other.replace('_', " "),
+    }
+    .to_owned()
+}
+
 /// Why a compaction failed, as the TUI says it: its two known causes in short words, anything
 /// else as Claude Code said it.
 fn compact_failed(error: &str) -> String {
@@ -1765,6 +1897,126 @@ fn written_exists(tool: &str, input: &Value) -> Option<bool> {
     }
     let path = str_at(input, "file_path").filter(|p| p.starts_with('/'))?;
     std::path::Path::new(path).try_exists().ok()
+}
+
+/// The `annotations` an answered `AskUserQuestion` input carries, as the TUI's dialog writes
+/// them: by each question's text, the markdown preview of the option picked and the person's
+/// notes (`notes`: a JSON object of notes by question text).
+fn annotate(input: &mut Value, answers: &[conv::Answer], notes: Option<&str>) {
+    let notes: serde_json::Map<String, Value> = notes
+        .and_then(|n| serde_json::from_str::<Value>(n).ok())
+        .and_then(|n| n.as_object().cloned())
+        .unwrap_or_default();
+    let mut annotations = serde_json::Map::new();
+    let questions = input.get("questions").and_then(Value::as_array).cloned().unwrap_or_default();
+    for question in &questions {
+        let Some(text) = str_at(question, "question") else { continue };
+        let picked = answers.iter().find(|a| a.question == text).map(|a| a.answer.as_str());
+        let preview = question
+            .get("options")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .find(|option| picked.is_some() && str_at(option, "label") == picked)
+            .and_then(|option| str_at(option, "preview"))
+            .filter(|p| !p.trim().is_empty());
+        let note = notes.get(text).and_then(Value::as_str).map(str::trim).filter(|n| !n.is_empty());
+        let mut said = serde_json::Map::new();
+        if let Some(preview) = preview {
+            said.insert("preview".to_owned(), Value::String(preview.to_owned()));
+        }
+        if let Some(note) = note {
+            said.insert("notes".to_owned(), Value::String(note.to_owned()));
+        }
+        if !said.is_empty() {
+            annotations.insert(text.to_owned(), Value::Object(said));
+        }
+    }
+    if !annotations.is_empty()
+        && let Some(fields) = input.as_object_mut()
+    {
+        fields.insert("annotations".to_owned(), Value::Object(annotations));
+    }
+}
+
+/// What "Chat about this" tells the model, in the TUI's words: the person wants to talk the
+/// questions over first, and which they were.
+fn clarify(input: &Value) -> String {
+    let asked: Vec<String> = input
+        .get("questions")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|q| str_at(q, "question"))
+        .map(|q| format!("- \"{q}\"\n  (No answer provided)"))
+        .collect();
+    format!(
+        "The user wants to clarify these questions.\n    This means they may have additional \
+         information, context or questions for you.\n    Take their response into account and \
+         then reformulate the questions if appropriate.\n    Start by asking them what they \
+         would like to clarify.\n    Questions asked:\n{}",
+        asked.join("\n")
+    )
+}
+
+/// The most of an existing file the TUI reads to preview an overwrite (its `CQe`, 256 KiB).
+const PREVIEW_BYTES: u64 = 262_144;
+
+/// What the worker saw on disk where a call would write, in the TUI's words.
+struct OnDisk {
+    words: String,
+    /// The overwrite cannot be reviewed, so approval is one-time only.
+    one_time: bool,
+}
+
+/// What is worth saying about where `tool` would write: a symlink whose target leaves `cwd`
+/// (any writing tool), an existing file too large to preview, or one whose contents cannot be
+/// shown in full (a `Write` over it), as the TUI's permission card says.
+fn on_disk(tool: &str, input: &Value, cwd: &str) -> Option<OnDisk> {
+    let key = match tool {
+        "Write" | "Edit" | "MultiEdit" => "file_path",
+        "NotebookEdit" => "notebook_path",
+        _ => return None,
+    };
+    let path = std::path::Path::new(str_at(input, key).filter(|p| p.starts_with('/'))?);
+    let mut said = Vec::new();
+    let mut one_time = false;
+    if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
+        && let Ok(target) = std::fs::canonicalize(path)
+    {
+        let inside = std::fs::canonicalize(cwd).is_ok_and(|root| target.starts_with(root));
+        let target = target.display();
+        said.push(if inside {
+            format!("Symlink target: {target}")
+        } else {
+            format!("This will modify {target} (outside working directory) via a symlink")
+        });
+    }
+    if tool == "Write"
+        && let Ok(meta) = std::fs::metadata(path)
+        && meta.is_file()
+    {
+        let shown = path.display();
+        if meta.len() > PREVIEW_BYTES {
+            said.push(format!(
+                "Existing file is too large to preview — approving will overwrite {shown}."
+            ));
+        } else if std::fs::read(path).is_ok_and(|bytes| !showable(&bytes)) {
+            one_time = true;
+            said.push(format!(
+                "Current contents of {shown} cannot be shown in full — the overwrite cannot be \
+                 reviewed, so approval is one-time only (deny unless expected)."
+            ));
+        }
+    }
+    (!said.is_empty()).then(|| OnDisk { words: said.join("\n"), one_time })
+}
+
+/// Whether `bytes` read as text a card can show whole: UTF-8 without control characters
+/// besides line breaks and tabs.
+fn showable(bytes: &[u8]) -> bool {
+    std::str::from_utf8(bytes)
+        .is_ok_and(|text| !text.chars().any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t')))
 }
 
 /// A share (`0.0..=1.0`) in basis points.

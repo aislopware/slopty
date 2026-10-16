@@ -365,6 +365,7 @@ fn picked(id: &str, label: &str) -> slopty_view_proto::UserInputAnswer {
     slopty_view_proto::UserInputAnswer {
         question_id: id.to_owned(),
         labels: vec![label.to_owned()],
+        notes: None,
     }
 }
 
@@ -848,12 +849,8 @@ fn a_task_list_is_the_shells_checklist() {
     let mut state = fixtures::thread("tools");
     state.plan = None;
     let shown = todos(&transcript::entries(&state, &transcript::Look::new("w")));
-    assert_eq!(shown.len(), 5, "each task call");
-    assert_eq!(
-        shown.get(2),
-        Some(&vec![("Survey files".to_owned(), TodoStatus::InProgress)]),
-        "a change names the task it changes"
-    );
+    // The TUI draws no row per task call: the last is the list as it stands.
+    assert_eq!(shown.len(), 1, "the last task call");
     state.items.retain(|item| {
         !matches!(&item.body, ItemBody::Tool(call) if call.kind == slopty_proto::thread::kind::TASKS)
     });
@@ -1534,6 +1531,7 @@ fn an_allow_takes_words_and_options_carry_previews() {
     let with_words = slopty_view_proto::UserInputAnswer {
         question_id: questions[0].id.clone(),
         labels: vec!["Yes".to_owned(), "then commit".to_owned()],
+        notes: None,
     };
     assert_eq!(
         transcript::answer(&approval, &[with_words]),
@@ -1608,4 +1606,125 @@ fn a_signed_out_agent_says_so() {
     assert_eq!(detail.as_deref(), Some("Not logged in · Please run /login"));
     let (words, _) = transcript::error_words(Notice::API_ERROR, "Overloaded", None, None);
     assert_eq!(words, "The model's service returned an error. Try again.");
+}
+
+/// A Claude Code plan shown whole may be approved as the person edits it: its manual approval
+/// carries the edited plan as words. An agent's questions offer the choice beside them ("Chat
+/// about this"), which answers alone; a request that lists its deny first starts there.
+#[test]
+fn a_plan_is_edited_and_questions_are_talked_over() {
+    use slopty_proto::thread::detail::{Clipped, Question};
+    use slopty_proto::thread::{AgentId, Effect, Request};
+    let mut state = fixtures::thread("tools");
+    state.meta.agent = AgentId::named(AgentId::CLAUDE_CODE);
+    let mut plan = request(
+        Request::PLAN,
+        &[
+            ("always", "Yes, auto-accept edits", Effect::Allow),
+            ("allow", "Yes, manually approve edits", Effect::Allow),
+            ("deny", "No, keep planning", Effect::Deny),
+        ],
+    );
+    plan.text = Some(Clipped::whole("1. Read"));
+    let asked = asked_of(&mut state, plan.clone());
+    assert_eq!(asked.edit_from.as_deref(), Some("1. Read"));
+    assert_eq!(asked.allow_option, Some(1), "the manual approval");
+    let edited = slopty_view_proto::UserInputAnswer {
+        question_id: asked.id,
+        labels: vec!["Yes, manually approve edits".to_owned(), "1. Read\n2. Test".to_owned()],
+        notes: None,
+    };
+    assert_eq!(
+        transcript::answer(&plan, &[edited]),
+        Ok(("allow".to_owned(), Some("1. Read\n2. Test".to_owned())))
+    );
+
+    let mut questions = request(
+        Request::QUESTION,
+        &[("deny", "Deny", Effect::Deny), ("clarify", "Chat about this", Effect::Deny)],
+    );
+    questions.questions = vec![Question {
+        header: Some("DB".to_owned()),
+        text: "Which database?".to_owned(),
+        options: Vec::new(),
+        multi_select: false,
+    }];
+    let asked = asked_of(&mut state, questions.clone());
+    assert_eq!(asked.aside.as_deref(), Some("Chat about this"));
+    assert_eq!(
+        transcript::answer(&questions, &[picked("choice", "Chat about this")]),
+        Ok(("clarify".to_owned(), None))
+    );
+
+    let mut said_no = approval_of(&mut state, "ls");
+    said_no.options.rotate_right(1);
+    assert!(asked_of(&mut state, said_no).deny_first, "its deny listed first");
+}
+
+/// An error whose first line is the agent's own headline (a start it refused, a context that
+/// no longer fits, a spend limit) leads with it, its machine after it, the rest as detail.
+#[test]
+fn an_agents_headline_leads_its_error() {
+    let raw =
+        "Context limit reached · compact or clear the conversation to continue\nPrompt is too long";
+    let (words, detail) = transcript::error_words("turn", raw, Some("studio"), None);
+    assert_eq!(
+        words,
+        "Context limit reached · compact or clear the conversation to continue (on studio)"
+    );
+    assert_eq!(detail.as_deref(), Some(raw));
+}
+
+/// A thought says how long the model thought once something follows it: from the item before
+/// it in its turn to it.
+#[test]
+fn a_thought_says_how_long_it_took() {
+    use slopty_proto::thread::detail::Clipped;
+    use slopty_proto::thread::{Item, ItemBody, ItemId};
+    let mut state = fixtures::thread("tools");
+    let turn = state.turns.last().expect("a turn").id;
+    let first = state.items.iter().position(|i| i.turn == turn).expect("an item of the turn");
+    let before = state.items[first].at_ms.as_millis();
+    assert!(before > 0, "the fixture's times are known");
+    state.items.insert(
+        first + 1,
+        Item {
+            id: ItemId("thought-1".to_owned()),
+            turn,
+            at_ms: slopty_core::WallMs::from_millis(before + 12_000),
+            body: ItemBody::Reasoning(Clipped::whole("planning the change")),
+        },
+    );
+    let entries = transcript::entries(&state, &transcript::Look::new("w"));
+    let took = entries.iter().flat_map(|e| e.parts.iter()).find_map(|part| match part {
+        MessagePart::Reasoning { id, thought_ms, .. } if id == "thought-1" => Some(*thought_ms),
+        _ => None,
+    });
+    assert_eq!(took, Some(Some(12_000)));
+}
+
+/// The person's notes on a question go beside the answers, by the question's text.
+#[test]
+fn notes_go_beside_the_answers() {
+    use slopty_proto::thread::Request;
+    use slopty_proto::thread::detail::{Offered, Question};
+    let mut asked = request(Request::QUESTION, &[]);
+    asked.questions = vec![Question {
+        header: Some("Layout".to_owned()),
+        text: "Which layout?".to_owned(),
+        options: vec![Offered {
+            label: "Split".to_owned(),
+            description: None,
+            preview: Some("| a | b |".to_owned()),
+        }],
+        multi_select: false,
+    }];
+    let answer = slopty_view_proto::UserInputAnswer {
+        question_id: "0".to_owned(),
+        labels: vec!["Split".to_owned()],
+        notes: Some(" keep the gutter ".to_owned()),
+    };
+    let (choice, notes) = transcript::answer(&asked, &[answer]).expect("answered");
+    assert!(choice.contains("Split"), "{choice}");
+    assert_eq!(notes.as_deref(), Some(r#"{"Which layout?":"keep the gutter"}"#));
 }
