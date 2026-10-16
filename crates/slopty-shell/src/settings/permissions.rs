@@ -384,17 +384,19 @@ impl PermissionsPage {
                     )
                     .when(!rules.scopes.is_empty(), |el| el.child(scope))
                     .child(
-                        widgets::action_button(theme, widgets::ActionTone::Filled)
-                            .id("permission-add-rule")
-                            .role(gpui::Role::Button)
-                            .aria_label("Add rule")
-                            .tab_index(0)
-                            .when(rules.scopes.is_empty(), |el| {
-                                el.opacity(crate::theme::DISABLED_OPACITY).cursor_default()
-                            })
-                            .focus_visible(|s| s.border_2().border_color(theme.accent))
-                            .on_click(cx.listener(|this, _, _, cx| this.add_rule(cx)))
-                            .child("Add"),
+                        widgets::action_button_when(
+                            theme,
+                            widgets::ActionTone::Filled,
+                            !rules.scopes.is_empty(),
+                        )
+                        .id("permission-add-rule")
+                        .role(gpui::Role::Button)
+                        .aria_label("Add rule")
+                        .aria_disabled(rules.scopes.is_empty())
+                        .tab_index(0)
+                        .focus_visible(|s| s.border_2().border_color(theme.accent))
+                        .on_click(cx.listener(|this, _, _, cx| this.add_rule(cx)))
+                        .child("Add"),
                     ),
             ),
         )

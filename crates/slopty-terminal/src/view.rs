@@ -101,6 +101,12 @@ mod actions {
             FindPrev,
             /// Close the search bar.
             CloseFind,
+            /// Find with case as typed, or smart case again.
+            ToggleMatchCase,
+            /// Find whole words only, or anywhere again.
+            ToggleWholeWord,
+            /// Find a regular expression, or the text again.
+            ToggleRegex,
             /// Scroll the previous prompt to the top of the viewport.
             PrevPrompt,
             /// Scroll the next prompt to the top of the viewport.
@@ -141,7 +147,8 @@ mod actions {
 pub use actions::{
     AttachBlock, AttachSelection, ClearScreen, CloseFind, Copy, CopyBlockOutput, CopyLastOutput,
     CopyMode, Find, FindNext, FindPrev, NextPrompt, Paste, PrevPrompt, RerunLast, ScrollPageDown,
-    ScrollPageUp, ScrollToBottom, ScrollToTop, SelectAll, SendEscape,
+    ScrollPageUp, ScrollToBottom, ScrollToTop, SelectAll, SendEscape, ToggleMatchCase, ToggleRegex,
+    ToggleWholeWord,
 };
 
 /// The key context of a terminal's grid, where its commands bind.
@@ -195,6 +202,10 @@ pub fn commands() -> Vec<KeyCommand> {
         c("find_next", FindNext, &["cmd-g"], GRID),
         c("find_previous", FindPrev, &["cmd-shift-g"], GRID),
         c("close_find", CloseFind, &["escape"], &[Some(SEARCH_CTX)]),
+        // VS Code's find toggles.
+        c("toggle_match_case", ToggleMatchCase, &["alt-cmd-c"], &[Some(SEARCH_CTX)]),
+        c("toggle_whole_word", ToggleWholeWord, &["alt-cmd-w"], &[Some(SEARCH_CTX)]),
+        c("toggle_regex", ToggleRegex, &["alt-cmd-r"], &[Some(SEARCH_CTX)]),
         c("previous_prompt", PrevPrompt, &["cmd-up"], GRID),
         c("next_prompt", NextPrompt, &["cmd-down"], GRID),
         // ghostty's scroll keys; the ⌘ pair is what Terminal.app taught the Mac.
@@ -1170,7 +1181,8 @@ impl TerminalView {
                 .child(slopty_shell::frost::frosted(
                     popover::CARD_RADIUS,
                     slopty_shell::frost::MENU_BLUR,
-                    card,
+                    // It arrives as the shell's dialogs do; the link chip fades in as a tooltip.
+                    slopty_shell::motion::dialog_in("paste-confirm-in", card),
                 ))
                 .into_any_element(),
         )
@@ -1778,26 +1790,12 @@ impl TerminalView {
         popover::menu_at("block-menu", menu.at, panel.into_any_element(), closing)
     }
 
-    /// The keys bound to `action` in the grid, as a Mac menu writes them ("⌘C"): what the
-    /// menu shows beside its row, so a rebinding in the settings file shows there too.
+    /// The keys bound to `action` in the grid, as the shell writes every key ("⌘C",
+    /// `slopty_shell::keys`): what the menu shows beside its row, so a rebinding in the settings
+    /// file shows there too.
     fn shortcut(&self, action: &dyn gpui::Action, window: &Window) -> Option<String> {
         let binding = window.highest_precedence_binding_for_action_in(action, &self.focus)?;
-        let mut out = String::new();
-        for (n, stroke) in binding.keystrokes().iter().enumerate() {
-            if n > 0 {
-                out.push(' ');
-            }
-            let held = stroke.modifiers();
-            for (on, glyph) in
-                [(held.control, '⌃'), (held.alt, '⌥'), (held.shift, '⇧'), (held.platform, '⌘')]
-            {
-                if on {
-                    out.push(glyph);
-                }
-            }
-            out.push_str(&key_glyph(stroke.key()));
-        }
-        Some(out)
+        Some(slopty_shell::keys::binding_text(&binding).to_string())
     }
 
     /// ⌘⇧C: the last command's output (shell integration marks it) to the clipboard.
@@ -3803,10 +3801,11 @@ impl EntityInputHandler for TerminalView {
 }
 
 impl TerminalView {
-    /// The find bar over the top-right corner of the grid: the shell's floating card, frosted,
-    /// holding its search field (the Files search's), the toggles as chips, the tally and the
-    /// steps and close as a surface toolbar's icon buttons.
+    /// The find bar over the top-right corner of the grid: the shell's find card
+    /// (`popover::find_card`, the transcript's and the diff's), its search row holding the field,
+    /// the toggles as chips, the tally and the steps; each control names its key.
     fn render_search(search: &Search, cx: &Context<Self>) -> gpui::AnyElement {
+        use slopty_shell::settings::widgets::{ActionHint as _, Keys};
         let tally = if search.query.needle().is_empty() {
             Tally::Quiet
         } else if let Some(why) = &search.invalid {
@@ -3821,71 +3820,80 @@ impl TerminalView {
         let theme = chrome::theme(cx).for_popup();
         let words = tally.words();
         let bad = matches!(tally, Tally::Bad(_));
+        let found = matches!(tally, Tally::Found { total, .. } if total > 0);
         let value = match &tally {
             Tally::Bad(why) => SharedString::from(why.clone()),
             _ => SharedString::from(words.clone()),
         };
-        let toggle = |name: &str, face: &'static str, label: &'static str, on: bool, which| {
+        let focus = search.input.focus_handle(cx);
+        let keys = |action: Box<dyn gpui::Action>| Keys::ActionIn(action, focus.clone());
+        let toggle = |name: &str,
+                      face: &'static str,
+                      label: &'static str,
+                      on: bool,
+                      which,
+                      action: Box<dyn gpui::Action>| {
             let id = SharedString::from(format!("terminal-find-{name}"));
             let selector = id.to_string();
             chrome::chip(gpui::ElementId::Name(id), on, &theme)
                 .debug_selector(move || selector)
-                .aria_label(label)
                 .aria_toggled(if on { gpui::Toggled::True } else { gpui::Toggled::False })
                 .w(px(chrome::CONTROL_SIZE))
                 .justify_center()
                 .text_size(px(11.5))
-                .tooltip(slopty_shell::settings::widgets::text_tooltip(label))
+                .action_hint(label, keys(action), cx)
                 .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
                 .on_click(cx.listener(move |this, _ev, _window, cx| this.toggle_search(which, cx)))
                 .child(face)
         };
-        let step = |name: &str, icon: &'static str, label: &'static str, by: i64| {
-            chrome::icon_button(format!("terminal-find-{name}"), icon, label, &theme)
+        // With nothing to go to, the steps dim and keep their names.
+        let step = |name: &str, icon: &'static str, label: &'static str, by: i64, action| {
+            let selector = format!("terminal-find-{name}");
+            popover::find_step(SharedString::from(selector.clone()), icon, found, &theme)
+                .debug_selector(move || selector)
+                .action_hint(label, keys(action), cx)
                 .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
-                .on_click(cx.listener(move |this, _ev, _window, cx| this.step_match(by, cx)))
+                .when(found, |el| {
+                    el.on_click(cx.listener(move |this, _ev, _window, cx| this.step_match(by, cx)))
+                })
         };
-        let focus = search.input.focus_handle(cx);
-        let field = chrome::field()
+        let field_focus = focus.clone();
+        let field = div()
             .id("terminal-find-field")
             .debug_selector(|| "terminal-find-field".to_owned())
+            .flex_1()
+            .min_w_0()
+            .h(px(chrome::CONTROL_SIZE))
+            .flex()
+            .items_center()
             .overflow_hidden()
             .cursor_text()
-            // A press on the field's padding puts the caret in it too.
+            // A press beside the text puts the caret in it too.
             .on_mouse_down(MouseButton::Left, move |_ev, window, cx| {
-                window.focus(&focus, cx);
+                window.focus(&field_focus, cx);
                 cx.stop_propagation();
             })
-            .child(
-                icons::icon(icons::MAGNIFER)
-                    .size(px(chrome::ICON_SIZE))
-                    .flex_none()
-                    .text_color(theme.text_muted),
-            )
             .child(div().flex_1().min_w_0().child(search.input.clone()));
-        let count = div()
-            .id("terminal-find-count")
+        let count = popover::find_tally(&theme, words)
             .debug_selector(|| "terminal-find-count".to_owned())
-            .flex_none()
-            .px(px(4.0))
-            .font_features(slopty_kit::kit::tabular_figures())
-            .text_size(px(11.5))
-            .text_color(if bad { theme.danger } else { theme.text_muted })
-            .role(gpui::Role::Label)
+            .when(bad, |el| el.text_color(theme.danger))
             .aria_label("Matches")
-            .aria_value(value)
-            .child(SharedString::from(words));
-        let card = popover::popover_card(&theme)
+            .aria_value(value);
+        let close = popover::find_step("terminal-find-close", icons::CLOSE, true, &theme)
+            .debug_selector(|| "terminal-find-close".to_owned())
+            .action_hint("Close find", keys(Box::new(CloseFind)), cx)
+            .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
+            .on_click(cx.listener(|this, _ev, window, cx| {
+                this.close_find(&CloseFind, window, cx);
+            }));
+        let card = popover::find_card(&theme)
             .id("terminal-find")
             .debug_selector(|| "terminal-find".to_owned())
             .role(gpui::Role::Search)
             .aria_label("Find")
+            // The toggles trail the field, so the terminal's card is a little wider.
             .w(px(find::WIDTH))
             .max_w_full()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(chrome::CONTROL_GAP))
             .font_family(theme.font_sans.clone())
             // Over what it finds in: the pointer there is the bar's, not the text's.
             .occlude()
@@ -3897,6 +3905,7 @@ impl TerminalView {
                 find::MATCH_CASE,
                 search.query.is_on(Toggle::MatchCase),
                 Toggle::MatchCase,
+                Box::new(ToggleMatchCase),
             ))
             .child(toggle(
                 "word",
@@ -3904,6 +3913,7 @@ impl TerminalView {
                 find::WHOLE_WORD,
                 search.query.is_on(Toggle::WholeWord),
                 Toggle::WholeWord,
+                Box::new(ToggleWholeWord),
             ))
             .child(toggle(
                 "regex",
@@ -3911,22 +3921,12 @@ impl TerminalView {
                 find::REGEX,
                 search.query.is_on(Toggle::Regex),
                 Toggle::Regex,
+                Box::new(ToggleRegex),
             ))
             .child(count)
-            .child(step("previous", icons::ALT_ARROW_UP, "Previous match", -1))
-            .child(step("next", icons::ALT_ARROW_DOWN, "Next match", 1))
-            .child(
-                chrome::icon_button("terminal-find-close", icons::CLOSE, "Close find", &theme)
-                    .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
-                    .on_click(cx.listener(|this, _ev, window, cx| {
-                        this.close_find(&CloseFind, window, cx);
-                    })),
-            );
-        let card = slopty_shell::frost::frosted(
-            popover::CARD_RADIUS,
-            slopty_shell::frost::MENU_BLUR,
-            card,
-        );
+            .child(step("previous", icons::ALT_ARROW_UP, "Previous match", -1, Box::new(FindPrev)))
+            .child(step("next", icons::ALT_ARROW_DOWN, "Next match", 1, Box::new(FindNext)))
+            .child(close);
         div()
             .key_context(SEARCH_CTX)
             .absolute()
@@ -3936,13 +3936,22 @@ impl TerminalView {
             .when(cfg!(target_os = "ios"), |el| el.left(px(FLOAT_INSET)))
             .when(!cfg!(target_os = "ios"), |el| el.right(px(FLOAT_INSET)))
             .on_action(cx.listener(Self::close_find))
+            .on_action(cx.listener(|this, _: &ToggleMatchCase, _, cx| {
+                this.toggle_search(Toggle::MatchCase, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleWholeWord, _, cx| {
+                this.toggle_search(Toggle::WholeWord, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleRegex, _, cx| {
+                this.toggle_search(Toggle::Regex, cx);
+            }))
             // ⇧↩ steps back, as ↩ steps on: the field is one line, so its newline is the
             // previous match, taken before the field would put it in.
             .capture_action(cx.listener(|this, _: &slopty_shell::composer::Newline, _, cx| {
                 cx.stop_propagation();
                 this.step_match(-1, cx);
             }))
-            .child(card)
+            .child(popover::find_card_in("terminal-find-in", card))
             .into_any_element()
     }
 }
@@ -4374,27 +4383,6 @@ pub(super) fn selection_context(text: &str, block: Option<&CommandBlock>) -> Str
     let longest = text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
     let fence = "`".repeat(longest.max(2).saturating_add(1));
     format!("{from}\n{fence}\n{text}\n{fence}\n")
-}
-
-/// A key as a Mac menu shows it: a letter in capitals, an arrow or a return as its glyph.
-fn key_glyph(key: &str) -> String {
-    match key {
-        "enter" => "↩".to_owned(),
-        "escape" => "⎋".to_owned(),
-        "up" => "↑".to_owned(),
-        "down" => "↓".to_owned(),
-        "left" => "←".to_owned(),
-        "right" => "→".to_owned(),
-        "backspace" => "⌫".to_owned(),
-        "delete" => "⌦".to_owned(),
-        "tab" => "⇥".to_owned(),
-        "space" => "Space".to_owned(),
-        "home" => "↖".to_owned(),
-        "end" => "↘".to_owned(),
-        "pageup" => "⇞".to_owned(),
-        "pagedown" => "⇟".to_owned(),
-        other => other.to_uppercase(),
-    }
 }
 
 impl BlockMenuItem {

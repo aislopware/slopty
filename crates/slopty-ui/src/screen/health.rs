@@ -108,6 +108,16 @@ impl Health {
             Self::FramesLate => "Frames late",
         }
     }
+
+    /// What is wrong, as the mark's tooltip says it.
+    #[must_use]
+    pub const fn sentence(self) -> &'static str {
+        match self {
+            Self::Stalled => "No new frames are arriving",
+            Self::LowBandwidth => "The worker lowered the quality to fit the link",
+            Self::FramesLate => "Frames are reaching the display late",
+        }
+    }
 }
 
 /// What the health mark reads: the stream's counters, sampled once a second.

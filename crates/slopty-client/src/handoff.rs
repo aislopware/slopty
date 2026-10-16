@@ -13,6 +13,11 @@
 //! worker's may be minutes off. A waiting edit is remembered until the person is done with it
 //! ([`Handoffs::edited`]) or the worker withdraws it; an edit asked again after a reconnect is
 //! recognised by its number and only answered.
+//!
+//! An agent's ask of the window ([`HandoffEvent::Ui`]) is the UI's to do: [`Todo::Ui`] hands it
+//! over, and the UI sends [`answer`] once it is done, or [`refusal`] when it has no window. One
+//! that waited here longer than [`LATE_AFTER`] is refused, so the worker asks another window
+//! rather than two doing it.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -20,7 +25,7 @@ use std::time::Duration;
 use slopty_proto::ClientMsg;
 use slopty_proto::handoff::{
     EditFile, EditOutcome, HandoffCaps, HandoffEvent, HandoffId, HandoffReply, OfferReason,
-    OpenUrl, page,
+    OpenUrl, UiAsk, UiDone, UiFailure, page,
 };
 
 /// A page that waited longer than this between the link reading it and the UI acting on it is
@@ -85,6 +90,21 @@ pub enum Todo {
         /// The handoff.
         id: HandoffId,
     },
+    /// Do an agent's ask in the window, then send [`answer`] with what it did; a client with no
+    /// window sends [`refusal`] instead.
+    Ui(UiAsk),
+}
+
+/// What tells the worker how agent's ask `id` went: done, with the window after it, or why not.
+#[must_use]
+pub fn answer(id: HandoffId, outcome: Result<UiDone, UiFailure>) -> ClientMsg {
+    reply(HandoffReply::Ui { id, outcome: Box::new(outcome) })
+}
+
+/// What tells the worker this client does not take handoff `id`: it asks another.
+#[must_use]
+pub const fn refusal(id: HandoffId) -> ClientMsg {
+    reply(HandoffReply::Refused { id })
 }
 
 /// This client's handoffs from one worker: the edits a program waits on.
@@ -138,6 +158,15 @@ impl Handoffs {
                 self.waiting.remove(&id);
                 Todo::Withdraw { id }
             }
+            HandoffEvent::Ui(ask) if waited > LATE_AFTER => {
+                tracing::debug!(
+                    id = ask.id,
+                    ?waited,
+                    "an agent's ask came late; another window takes it"
+                );
+                Todo::Refuse { reply: refusal(ask.id) }
+            }
+            HandoffEvent::Ui(ask) => Todo::Ui(ask),
         }
     }
 
@@ -259,6 +288,26 @@ mod tests {
         let ahead = asked_at(2, "https://github.com/", None, now.saturating_add(hour));
         let held_up = h.heard(ahead, true, LATE_AFTER + Duration::from_millis(1));
         assert_eq!(offered(&held_up).map(|o| o.2), Some(OfferReason::Late), "a fast clock");
+    }
+
+    /// An agent's ask goes to the UI to do and answer; one that waited here too long is refused,
+    /// so the worker asks another window rather than two doing it.
+    #[test]
+    fn an_agents_ask_is_the_uis_unless_it_came_late() {
+        use slopty_proto::handoff::{UiAct, UiError};
+        let mut h = Handoffs::default();
+        let ask = UiAsk { id: 3, session: None, act: UiAct::State };
+        assert_eq!(h.heard(HandoffEvent::Ui(ask.clone()), false, NOW), Todo::Ui(ask.clone()));
+        let late = LATE_AFTER + Duration::from_millis(1);
+        assert_eq!(
+            h.heard(HandoffEvent::Ui(ask), false, late),
+            Todo::Refuse { reply: ClientMsg::Handoff(HandoffReply::Refused { id: 3 }) }
+        );
+        let failed = Err(UiFailure::new(UiError::Busy, "typing"));
+        assert_eq!(
+            answer(3, failed.clone()),
+            ClientMsg::Handoff(HandoffReply::Ui { id: 3, outcome: Box::new(failed) })
+        );
     }
 
     fn edit(id: HandoffId, wait: bool) -> EditFile {

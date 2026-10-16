@@ -96,7 +96,9 @@ pub fn icon_button(
             crate::theme::ink(0.05),
         ))
         .on_hover(crate::motion::hover_listener(id))
-        .focus_visible(|style| style.border_2().border_color(theme.accent))
+        // slopty: pressed reads a step darker; the ring is the shell's one (M8, M22).
+        .active(|style| style.bg(crate::theme::ink(0.09)))
+        .map(|el| focus_ring(el, theme))
         .map(keep_keyboard)
         .tooltip(crate::settings::widgets::text_tooltip(label))
         .child(crate::icons::icon(icon).size(px(ICON_SIZE)).text_color(theme.text_muted))
@@ -138,6 +140,11 @@ pub fn button(
         .flex_none()
         .whitespace_nowrap()
         .focus_visible(|style| style.border_2().border_color(theme.accent))
+        // slopty: pressed reads a step deeper (M22).
+        .map(|el| match tone {
+            Tone::Ghost => el.active(|style| style.bg(crate::theme::ink(0.09))),
+            Tone::Primary | Tone::Danger => el.active(|style| style.opacity(0.85)),
+        })
         .map(keep_keyboard)
 }
 
@@ -323,14 +330,16 @@ pub fn tooltip_card_keyed(
     keys: Option<SharedString>,
     theme: &Theme,
 ) -> crate::frost::Frosted {
+    let text: SharedString = text.into();
     tooltip_frame(
         theme,
+        (text.clone(), keys.clone()),
         div()
             .flex()
             .flex_row()
             .items_baseline()
             .gap(px(TOOLTIP_KEY_GAP))
-            .child(div().min_w_0().child(text.into()))
+            .child(div().min_w_0().child(text))
             .children(keys.map(|keys| tooltip_keys(theme, keys))),
     )
 }
@@ -341,9 +350,18 @@ pub const TOOLTIP_KEY_GAP: f32 = 8.0;
 pub const TOOLTIP_RADIUS: f32 = 6.0;
 
 /// The chip every tooltip is: frosted, hairline, the muted interface voice at the font-size
-/// setting, entering with [`crate::motion::fade_quick`] (none under reduced motion).
-pub fn tooltip_frame(theme: &Theme, content: impl IntoElement) -> crate::frost::Frosted {
+/// setting, entering with [`crate::motion::fade_quick`] (none under reduced motion). It is one
+/// `Tooltip` node for assistive tech, `spoken` as its label and value (the words, then the key).
+pub fn tooltip_frame(
+    theme: &Theme,
+    spoken: (SharedString, Option<SharedString>),
+    content: impl IntoElement,
+) -> crate::frost::Frosted {
+    let (label, value) = spoken;
     let card = div()
+        .id("tooltip")
+        .role(gpui::Role::Tooltip)
+        .aria_label(label)
         .max_w(px(320.0))
         .px(px(9.0))
         .py(px(6.0))
@@ -353,6 +371,7 @@ pub fn tooltip_frame(theme: &Theme, content: impl IntoElement) -> crate::frost::
         .bg(crate::popover::surface_bg(theme))
         .text_size(crate::typography::ui_rems(11.0))
         .text_color(theme.text_muted)
+        .when_some(value, |card, value| card.aria_value(value))
         .child(content);
     crate::frost::frosted(
         TOOLTIP_RADIUS,

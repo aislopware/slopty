@@ -29,8 +29,17 @@ pub use view::{
     ClearScreen, ClipHook, ClipPaste, CloseFind, Copy, CopyBlockOutput, CopyLastOutput, CopyMode,
     Find, FindNext, FindPrev, GridFrame, Guesses, KeyCommand, LinkArrival, NextPrompt, Paste,
     PlacedImage, PrevPrompt, RerunLast, SEARCH_CTX, ScrollPageDown, ScrollPageUp, ScrollToBottom,
-    ScrollToTop, SelectAll, Selection, SendEscape, TerminalView, TerminalViewEvent, bindings,
-    commands, escape,
+    ScrollToTop, SelectAll, Selection, SendEscape, TerminalView, TerminalViewEvent,
+    ToggleMatchCase, ToggleRegex, ToggleWholeWord, bindings, commands, escape,
 };
 #[cfg(target_os = "macos")]
 pub use view::{DropHook, DropNews, SinkDropped};
+
+#[cfg(test)]
+mod tests {
+    /// The shell falls back to the face the kit bundles and registers, by the same name.
+    #[test]
+    fn the_shell_falls_back_to_the_bundled_symbol_face() {
+        assert_eq!(slopty_shell::typography::SYMBOLS_FAMILY, slopty_kit::fonts::SYMBOLS_FAMILY);
+    }
+}

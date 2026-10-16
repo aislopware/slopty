@@ -12920,7 +12920,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   after its label (`settings::widgets::Standing`, `standing_note`, `SelectOption::standing`).
   Triggers show the concrete value and stay quiet at the default. A settings row offers
   "Reset" only when its value differs from the default (`reset_action`, Zed's rule), and a page's
-  "Restore defaults" is dimmed when nothing differs.
+  "Restore defaults" is dimmed when nothing differs. "Reset" lays out as tall as its words and
+  reaches 4 px past them, so a row keeps its height whether it shows; a disabled settings button
+  (`action_button_when`) is dimmed with no hover lift and says so (`aria_disabled`).
   The composer's pickers mark the catalog's first model "Default", the checkout picker's Local,
   and the mode menu's recommended mode. The effort slider marks the default step with a tick
   under it, its readout saying "Default" there. Claude Code's `default` model alias is not
@@ -12929,8 +12931,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   closes its tab, else the side pane closes the surface in front, else the window closes, through
   the unsaved-file gate. ⇧⌘W closes the window. The File and Window menus list Close Tab, and
   the tab menus list "Reopen closed tab ⇧⌘T". The terminal panel's tabs get the same right-click
-  menu as the side pane's (close this, others, left, right; `TabCloseAction`). Tests:
-  `slopty-shell` `app_menus::tests`.
+  menu as the side pane's (close this, others, left, right; `TabCloseAction`). ⌘; starts a side
+  chat of the open chat, Claude desktop's key (`shell::NewSideChat`), and the Chats header's "+"
+  names it. Tests: `slopty-shell` `app_menus::tests`, `keys::tests`.
 - ✅ **The chat holds still across Stop and a turn's end (2026-10-17).** Stop, a turn's end, an
   offline notice or a queue line never move what the person reads. The composer's notices
   (offline, a limit, a queued message, "Stopped") live in the shell's reserved status strip
@@ -13028,3 +13031,35 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `files::sections::tests::a_relative_time_reads_in_full_on_hover`,
   `files::editor_adapter::tests::the_editor_selects_in_the_themes_selection_colour`,
   `settings::devices::tests::copying_an_id_marks_it_copied_for_the_span`.
+- ✅ **The conversation keeps its controls, its words and its place (2026-10-17).** The view
+  model escapes every word a card shows (a rule, a dialog's payload, a URL, a reason, an
+  option's preview, a proposed diff, who sent a child's question), so the shell draws plain
+  strings and its second sanitiser is gone; a URL holding hidden characters does not open. The
+  footer drops its background count (the Background tray says it), shows "History n/total"
+  while the person walks their sent prompts, and hints "Queue a message for after this turn"
+  while a turn runs. The mode menu and the goal card take the shared menu's keys (arrows, Home
+  and End, a letter, Enter on release, Escape back to the field). The request card's links and
+  buttons, its scope chips, the question strip, the error card's buttons and a code block's
+  actions are tab stops with the shell's focus ring; an error card offers Copy error. A
+  question set can be skipped, which declines it plainly; a form can't. A draft holding images
+  or files keeps them on this client (its words go to the chat's machine as before), and a draft
+  that could not be kept says so once. A page card and the page pane wait with the shared
+  loading line and, failed, say "Couldn't show the page" with Try again, which reloads it; the
+  card's actions are the shared icon button, its quiet ones fading in on hover. A chip naming a
+  chat opens that chat, its tooltip naming it as it is called now ("Chat no longer available"
+  once gone). While a long turn scrolls, its prompt holds at the top as a one-line card that
+  opens to five lines on hover or focus and goes back to the prompt on click or Enter; it paints
+  above the top fade and gives way to the next prompt and to find's card. A visual's buttons,
+  tabs, toggles, links and clickable stacks are tab stops, and its sliders move by arrow, page
+  and Home/End keys. A message's copy and Rewind… stay tab stops while the strip is hidden,
+  each shown while it has the keyboard. Tests: `slopty-ui`
+  `view_model::tests::a_cards_every_shown_word_comes_escaped`; `slopty-shell`
+  `composer::dock_tests::the_mode_menu_walks_by_keys`,
+  `composer::kept_attachments::tests::a_draft_comes_back_as_kept`,
+  `composer::attachment_chip_tests::a_drafts_attachments_are_kept_for_the_next_composer`,
+  `composer::history::tests::a_draft_that_could_not_be_kept_says_so_once`,
+  `page::card_tests::a_failed_page_offers_try_again`,
+  `transcript::tests::sent_chat_chips_open_their_chat`,
+  `transcript::sticky::tests::a_long_turns_prompt_holds_at_the_top`,
+  `transcript::surface_tests::a_messages_copy_is_a_tab_stop`,
+  `visuals::tests::a_visuals_tabs_answer_the_keyboard`.

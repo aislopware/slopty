@@ -4,16 +4,16 @@
 //! the line that announces them ([`ClipAsk`]).
 //!
 //! Two kinds of process speak it to `slopty-worker`: the `slopty` CLI (status, doctor, the
-//! screen bench, and the `open`, `edit` and clipboard shims a session's programs find) and the
-//! app, which reads the doctor for "Use this Mac as a worker". Unlike the rest of this crate it
-//! is JSON, not postcard: the shims are small and the enums are tagged by field.
+//! screen bench, `slopty ui`, and the `open`, `edit` and clipboard shims a session's programs
+//! find) and the app, which reads the doctor for "Use this Mac as a worker". Unlike the rest of
+//! this crate it is JSON, not postcard: the shims are small and the enums are tagged by field.
 
 use std::net::IpAddr;
 
 use serde::{Deserialize, Serialize};
 use slopty_core::{SessionId, WorkerId};
 
-use crate::handoff::{EditOutcome, OfferReason};
+use crate::handoff::{EditOutcome, OfferReason, UiAct, UiDone, UiFailure};
 use crate::screen::CaptureTarget;
 use crate::server::WorkerCaps;
 use crate::tailnet::BackendState;
@@ -70,6 +70,18 @@ pub enum CtlRequest {
     /// and `wl-paste` a Linux session finds first on its `PATH`. Raw bytes travel after the
     /// request line ([`ClipAsk::Write`]) or after the reply line ([`CtlReply::ClipData`]).
     Clip(ClipAsk),
+    /// An agent drives the person's window (`slopty ui`): the client in front of its session
+    /// that has a window does it. Answered with [`CtlReply::UiDone`] or [`CtlReply::UiFailed`].
+    Ui(UiCall),
+}
+
+/// An agent's ask of the person's window ([`CtlRequest::Ui`]).
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct UiCall {
+    /// The session the agent runs in (`SLOPTY_SESSION`), when it runs in one.
+    pub session: Option<SessionId>,
+    /// What to do.
+    pub act: UiAct,
 }
 
 /// Which of the worker's clipboards a [`CtlRequest::Clip`] means.
@@ -361,6 +373,10 @@ pub enum CtlReply {
         /// Why.
         message: String,
     },
+    /// What a [`CtlRequest::Ui`] did, and the window after it.
+    UiDone(Box<UiDone>),
+    /// Why a [`CtlRequest::Ui`] did nothing.
+    UiFailed(UiFailure),
 }
 
 /// One screen stream as the control socket lists it.
@@ -569,6 +585,29 @@ impl Quantiles {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `slopty ui`'s ask and both answers read back from their JSON lines.
+    #[test]
+    fn an_agents_ask_of_the_window_crosses_the_socket() {
+        use crate::handoff::{UiError, UiTarget};
+        let ask = CtlRequest::Ui(UiCall {
+            session: None,
+            act: UiAct::Split(Some(UiTarget::Page { url: "https://example.com/".to_owned() })),
+        });
+        let line = serde_json::to_string(&ask).unwrap();
+        assert!(line.starts_with(r#"{"cmd":"ui""#), "{line}");
+        assert_eq!(serde_json::from_str::<CtlRequest>(&line).unwrap(), ask);
+        for reply in [
+            CtlReply::UiDone(Box::new(UiDone {
+                did: Some("showed the sidebar".to_owned()),
+                ..UiDone::default()
+            })),
+            CtlReply::UiFailed(UiFailure::new(UiError::NoWindow, "no Slopty window")),
+        ] {
+            let line = serde_json::to_string(&reply).unwrap();
+            assert_eq!(serde_json::from_str::<CtlReply>(&line).unwrap(), reply, "{line}");
+        }
+    }
 
     #[test]
     fn quantiles_read_any_order() {

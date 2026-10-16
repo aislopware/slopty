@@ -123,6 +123,18 @@ pub const fn ui_rems(pixels_at_default: f32) -> Rems {
     rems(pixels_at_default / 16.0)
 }
 
+/// slopty: the faces text falls back to before the platform's own cascade: the bundled symbol
+/// face (`slopty_kit::fonts::SYMBOLS_FAMILY`, registered at launch), so a prompt's powerline,
+/// devicon and box-drawing glyphs draw wherever the shell sets text, not as empty boxes. It
+/// holds only those code points, so it never takes a letter from the text's own face.
+pub fn symbol_fallbacks() -> gpui::FontFallbacks {
+    gpui::FontFallbacks::from_fonts(vec![SYMBOLS_FAMILY.to_owned()])
+}
+
+/// The bundled symbol face's family (`slopty_kit::fonts::SYMBOLS_FAMILY`; the shell does not
+/// depend on the kit).
+pub const SYMBOLS_FAMILY: &str = "Symbols Nerd Font Mono";
+
 // slopty: figures that tick or line up (a timer, a count, a percentage) keep one width.
 /// Tabular figures (OpenType `tnum`): a number that changes or sits over another does not shift.
 pub fn tabular() -> gpui::FontFeatures {

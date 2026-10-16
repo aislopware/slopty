@@ -353,5 +353,201 @@ expression: tools
       "type": "object"
     },
     "name": "show_page"
+  },
+  {
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {},
+      "type": "object"
+    },
+    "name": "ui_state"
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`ui_terminal`.",
+      "properties": {
+        "command": {
+          "description": "A command line to type once its shell is up.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "folder": {
+          "description": "The folder it starts in, relative to your working folder; your working folder when\nomitted.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "region": {
+          "description": "`terminal` (the drawer, the default) or `pane` (the side pane).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "title": "TerminalArgs",
+      "type": "object"
+    },
+    "name": "ui_terminal"
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`ui_open`, and what `ui_split` shows first.",
+      "properties": {
+        "diff": {
+          "default": false,
+          "description": "The chat's uncommitted changes.",
+          "type": "boolean"
+        },
+        "file": {
+          "description": "A file on this machine, relative to your working folder; `path:line` names a line.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "line": {
+          "description": "The line of `file` to start at, from 1.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "url": {
+          "description": "A web page's `http` or `https` address.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "title": "OpenArgs",
+      "type": "object"
+    },
+    "name": "ui_open"
+  },
+  {
+    "input_schema": {
+      "$defs": {
+        "ChangeArg": {
+          "description": "What becomes of a region.",
+          "oneOf": [
+            {
+              "const": "show",
+              "description": "On screen.",
+              "type": "string"
+            },
+            {
+              "const": "hide",
+              "description": "Off screen.",
+              "type": "string"
+            },
+            {
+              "const": "toggle",
+              "description": "The other of the two.",
+              "type": "string"
+            },
+            {
+              "const": "expand",
+              "description": "As large as it goes: the side pane over the chat.",
+              "type": "string"
+            },
+            {
+              "const": "collapse",
+              "description": "Back to its share: the side pane beside the chat.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`ui_region`.",
+      "properties": {
+        "change": {
+          "$ref": "#/$defs/ChangeArg",
+          "description": "What becomes of it."
+        },
+        "region": {
+          "description": "`sidebar`, `pane`, `files` or `terminal`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "region",
+        "change"
+      ],
+      "title": "RegionArgs",
+      "type": "object"
+    },
+    "name": "ui_region"
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`ui_chat`.",
+      "properties": {
+        "chat": {
+          "description": "The chat's id, a prefix of it, or its title; your own when omitted.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "title": "ChatArgs",
+      "type": "object"
+    },
+    "name": "ui_chat"
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`ui_open`, and what `ui_split` shows first.",
+      "properties": {
+        "diff": {
+          "default": false,
+          "description": "The chat's uncommitted changes.",
+          "type": "boolean"
+        },
+        "file": {
+          "description": "A file on this machine, relative to your working folder; `path:line` names a line.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "line": {
+          "description": "The line of `file` to start at, from 1.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "url": {
+          "description": "A web page's `http` or `https` address.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "title": "OpenArgs",
+      "type": "object"
+    },
+    "name": "ui_split"
   }
 ]

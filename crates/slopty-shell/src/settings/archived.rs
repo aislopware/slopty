@@ -501,11 +501,11 @@ impl Render for ArchivedPage {
         let delete_all = (count > 0).then(|| {
             // slopty: quiet at rest; red is spent on the confirmation's own button, which is
             // where something may be lost.
-            widgets::action_button(&theme, widgets::ActionTone::Outlined)
+            widgets::action_button_when(&theme, widgets::ActionTone::Outlined, !deleting)
                 .id("archived-delete-all")
                 .flex_none()
                 .aria_label("Delete all archived chats")
-                .when(deleting, |el| el.opacity(crate::theme::DISABLED_OPACITY).cursor_default())
+                .aria_disabled(deleting)
                 .tab_index(0)
                 .role(gpui::Role::Button)
                 .focus_visible(|s| s.border_2().border_color(theme.accent))

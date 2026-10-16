@@ -3631,10 +3631,13 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     disclosure, shut at first; a sidebar organised by status has one History for every project
     (the filtered one's while filtered), above Archived, each row naming its project. Opened, it
     asks the project's machines (`slopty.PastSessions`, through `ThreadRequest::Sessions`) for
-    two things at once: Claude Code's own list of the sessions in the folder, newest first (the
-    TUI's and `claude -p`'s alike), and the person's prompts there, from Claude Code's prompt
-    history. The list decides which sessions and in what order; the prompts give each its title
-    (its first prompt) and last prompt. A session that is a chat here already is left out. It
+    Claude Code's own list of the sessions in the folder, newest first (the TUI's and
+    `claude -p`'s alike). The worker names each from the two ends of its transcript, 64 KiB of
+    head and 64 KiB of tail (`sessions::GLANCE_BYTES`), as Claude Code's own resume picker does:
+    its title (the one the person gave it, else Claude Code's own, else its summary, else its
+    first prompt), its last prompt and its branch (the `branch` fact). One ask then serves; the
+    second ask of the prompt history, which scanned Codex's and pi's records too for up to 3 s,
+    goes. A session that is a chat here already is left out. It
     pages by 20 behind "Show more", keeps its rows while it asks again, and says in a line of
     its own when it is reading, has nothing, or failed (the machine's words, with Try again).
     Each row's height is fixed by what it shows, so the group it closes is never clipped.
@@ -3644,21 +3647,99 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     lit. With no words it lists the project's sessions as History does, or the machine's last
     prompted.
   - **Opening.** A session the machine keeps a thread of opens that chat. Any other is a start
-    of Claude Code with `--resume <id>` in the folder it ran in, which reads the whole
-    conversation from its transcript before anything runs; the shell opens the chat once the
-    machine says it started, so it shows the conversation at once. A message there goes to the
-    same session, so the TUI and the GUI write one history. A refusal is said in the machine's
-    words, in the picker's row or a notice.
+    of Claude Code with `--resume <id>` in the folder it ran in: the worker reads the whole
+    conversation from its transcript and starts nothing, so opening a past session to read it
+    costs no process and touches no transcript. The thread rests as one whose Claude Code ended,
+    and its first message starts `claude -p --resume <id>` with that message. The shell opens the
+    chat once the machine says it started, so it shows the conversation at once. A message there
+    goes to the same session, so the TUI and the GUI write one history. A refusal is said in the
+    machine's words, in the picker's row or a notice.
   - **A session running elsewhere.** Claude Code records each live process in
     `~/.claude/sessions/<pid>.json` (pid, `sessionId`, `cwd`, `kind`). Its own resume refuses a
     session another live process holds ("this session is running in another terminal", offering
     a copy), since two writers interleave their records in one transcript and each goes on from
     its own copy of the conversation. Slopty does the same: such a session is marked "In a
     terminal" (or "Running") in History and the picker, opens read from its transcript with the
-    plain words that it runs in another terminal, and no message starts a second Claude Code on
-    it. The marking and the refusal are the worker's (`PAST_RUNNING`), from Claude Code's live
-    records, the worker's own children left out.
+    plain words "This session is running in another terminal on <machine>. Close it there to
+    continue here.", and every message is refused with them, so no second Claude Code starts on
+    it. A start with a first message is refused whole, and the person keeps their words. Once
+    the other ends (looked for every second) the thread says so, and the next message takes the
+    session up. The marking and the refusal are the worker's (`PAST_RUNNING`,
+    `thread::claude::held`), the listing and the search alike, from Claude Code's live records:
+    a record is believed while its pid lives and, when it says when its process started
+    (`procStart`, `ps -o lstart=` in UTC, as Claude Code checks it), that process started then,
+    so a pid used again holds nothing. The sessions this worker's own Claude Codes run are left
+    out. A session another Claude Code takes up while its thread here rests is caught at the
+    next message too: the message waits in the queue, and the thread says why.
   - Tests: e2e `app::past_sessions` (`a_tui_session_is_listed_opened_and_continued`,
     `history_says_why_it_has_nothing`, `a_session_running_elsewhere_is_shown_not_taken`);
-    `slopty-ui` `workspace::view_model::past::tests`; `slopty-shell`
-    `shell::past_sessions::tests`.
+    `slopty-worker` `claude::{a_resumed_session_starts_claude_code_with_its_first_message,
+    a_session_held_elsewhere_is_shown_and_not_taken}` and
+    `thread::claude::held::tests`; `slopty-agent` `claude::sessions::tests::{
+    a_listing_names_each_session_from_the_ends_of_its_transcript,
+    live_claude_codes_are_read_from_their_records}`; `slopty-ui`
+    `workspace::view_model::past::tests`; `slopty-shell` `shell::past_sessions::tests`.
+
+- ✅ **Nothing reads a terminal's title (2026-10-17).** `slopty_agent::title` read the spinner
+  Claude Code paints into a terminal's title (OSC 0/2) to tell a hand-run agent's turn from its
+  rest, for orchestration's `WaitUntil::AgentNeedsInput` on a terminal. That reads an agent's
+  screen, which Slopty never does (CLAUDE.md, "only through its published doors"), and every
+  agent orchestration waits on now speaks through a door: it starts agents as threads
+  (`start_thread`: Claude Code over stream-json, Codex over its app-server, pi over its RPC
+  mode, any ACP agent), `Verb::AgentStatus` reads the thread's row, and a wait for an agent to
+  need the person is `EventFilter::AgentNeedsInput` over those rows. A terminal's agent is the
+  person's: orchestration may not type into it (`may_type`), so a wait on its turns drove
+  nothing.
+  - Deleted: `slopty_agent::title`, the title in `Observation` and in the session's probe,
+    `AgentSource`, `AgentStatus::Working` (a terminal's agent is `Running` or not), the worker's
+    agent broadcast (`Daemon::heard`) and `orchestrate::AgentFeed`. The 750 ms poll stays for
+    the foreground process alone, which keeps the typing guard.
+  - `WaitUntil::AgentNeedsInput` on a terminal is refused as `Invalid`, its words naming
+    `start_thread` and `events --agent-input`, until the variant and the CLI's
+    `wait --agent-input` go from `slopty-proto` and `slopty-cli`.
+  - Tests: `slopty-worker` `orchestrate::{a_wait_on_a_terminals_agent_is_refused,
+    nothing_is_typed_into_a_terminal_an_agent_runs_in}`; `slopty-agent` `tests::{
+    a_hand_started_claude_is_known_by_its_process, a_second_claude_in_the_same_terminal_is_a_new_agent,
+    the_table_keeps_only_agents_and_lets_them_go_with_their_terminals}`.
+
+- ✅ **Agents drive the person's window through open verbs (2026-10-17).** An agent working in
+  Slopty could not touch the window it ran beside: open a terminal, show a file, fold the
+  sidebar. It now can, as `slopty ui …` for its shell and the `ui_*` tools of `slopty mcp`,
+  the same six verbs named as the shell's own commands are: `state`, `terminal [--folder]
+  [--command] [--pane]` (the tab's id and its session back, as Orca's `terminal create` answers),
+  `open <file[:line] | url>` and `diff`, `show | hide | toggle | expand | collapse <region>`,
+  `chat [id | prefix | title]` (resolved as zeron resolves a chat) and `split [target]`. Every
+  answer is JSON: `did`, `made`, `ran` and the `window` after it (its page, the chat on screen,
+  each region shown or expanded, its tabs with their ids, kinds, targets and terminals, and
+  whether the person is typing), or `{"error": {"code", "message"}}`, the code one of
+  `no_window`, `unknown`, `busy`, `elsewhere`, `failed`, and the message what to do instead.
+  - Route: the ask is a handoff, as `slopty browse` and `slopty edit` are. The CLI writes
+    `CtlRequest::Ui` to its machine's worker (`SLOPTY_WORKER_SOCKET`) with its session; the
+    worker hands `HandoffEvent::Ui` to the clients that took handoffs, in the handoffs' order
+    (the client in front of that session, then the last typist, then one on any of the worker's
+    tiles, then the most recently active), each given `UI_WAIT`; a client answers with
+    `HandoffReply::Ui`. So only a window following this worker's fleet, the person's own, is
+    reached; a terminal client (`slopty attach`) refuses, and the next is asked. With no client
+    connected, none with a window, or none answering, the agent hears `no_window` and why; an
+    ask that reached its window late (`LATE_AFTER`) is refused rather than done out of time.
+  - The person stays in charge. No verb takes the keyboard: the window puts it back where it
+    was. What would move the chat or the keyboard from a draft being typed (`chat`, expanding the
+    pane over the composer), go past Settings, or hide the region the keyboard is in is `busy`.
+    Paths are the agent's machine's, so a file, a folder or the diff opens only beside a chat of
+    that machine, else `elsewhere`; a loopback page is shown through the client's forward. Each
+    change shows a notice naming the agent's chat ("<title>: opened …"). A verb never answers
+    for the person and never reads or types a credential: a terminal's command that acts as
+    root, destroys or spans lines waits at the prompt (`ran: false`), as the run buttons do.
+  - Open names: regions are words (`sidebar`, `pane`, `files`, `terminal`, with their common
+    aliases), and an unknown one is answered with the list the window has, so a later region is
+    a new word, not a new type. Claude desktop scopes its `preview_*` tools to the session's own
+    pane and answers in plain text; t3code keys previews by thread; here the window is one, so
+    the verbs reach the whole window and answer in data an agent can act on.
+  - Tests: e2e `app::agent_ui` (`an_agents_tools_lay_out_the_window`,
+    `the_window_stays_the_persons_and_says_why_it_refuses`); `slopty-shell`
+    `shell::agent_ui::tests`; `slopty-ui` `workspace::handoffs::tests`; `slopty-client`
+    `handoff::tests::an_agents_ask_is_the_uis_unless_it_came_late`; `slopty-proto`
+    `handoff::tests::an_agents_ask_and_its_answer_cross_the_link` and
+    `ctl::tests::an_agents_ask_of_the_window_crosses_the_socket`; `slopty-tools` `ui::tests`
+    and `tools::tests::the_window_tools_reach_the_window_through_their_carrier`; `slopty-cli`
+    `ui::tests`.

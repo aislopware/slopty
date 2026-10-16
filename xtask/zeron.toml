@@ -168,6 +168,8 @@ paths = [
     # Its self-updater: Slopty updates through its own builds.
     "crates/update/",
     "crates/ui/src/app_update.rs",
+    # Agent CLI updates: an agent updates itself on its machine; Slopty installs and updates none.
+    "crates/ui/src/shell/harness_updates.rs",
     # Window captures sent to an agent.
     "crates/ui/src/appshots.rs",
     "crates/ui/src/appshots/",

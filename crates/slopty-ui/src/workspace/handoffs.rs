@@ -13,6 +13,12 @@
 //! A path ⌘-clicked in a shell opens where a transcript's file link opens: in the Files pane of
 //! the chat the shell was opened for ([`WorkspaceEvent::OpenFile`]), made absolute against the
 //! shell's directory.
+//!
+//! An agent's ask of the window (`slopty ui`) is read here into the shell's own words
+//! (`slopty_shell::shell::agent_ui`): who asks (its chat's title), its chat (the thread seated
+//! at its session, or the chat a shell was opened for), its machine, a file as a link on that
+//! machine, and a page on the worker's loopback at the port that forwards it here. The shell
+//! does it, and its answer goes back to the worker.
 
 use std::time::{Duration, Instant};
 
@@ -20,7 +26,11 @@ use gpui::Context;
 use slopty_client::WorkerKey;
 use slopty_client::handoff::{self, Todo};
 use slopty_core::SessionId;
-use slopty_proto::handoff::{HandoffEvent, OfferReason, Wary};
+use slopty_proto::handoff::{
+    HandoffEvent, OfferReason, UiAct, UiAsk, UiChange, UiChat, UiDone, UiError, UiFailure,
+    UiRegion, UiTab, UiTarget, UiWindow, Wary,
+};
+use slopty_shell::shell::agent_ui;
 
 use super::{WorkspaceEvent, WorkspaceView};
 
@@ -98,7 +108,138 @@ impl WorkspaceView {
                 w.send(reply);
             }
             Todo::Withdraw { id } => cx.emit(WorkspaceEvent::Withdrawn { worker: key, id }),
+            Todo::Ui(ask) => self.agent_ui(key, ask, cx),
         }
+    }
+
+    /// An agent on `key` asks something of the person's window: the shell does it, once the
+    /// update that heard it is over, and its answer goes back to the worker.
+    fn agent_ui(&mut self, key: WorkerKey, ask: UiAsk, cx: &mut Context<Self>) {
+        let UiAsk { id, session, act } = ask;
+        let answer = move |view: &mut Self, outcome: Result<UiDone, UiFailure>| {
+            if let Some(w) = view.workers.get_mut(&key) {
+                w.send(handoff::answer(id, outcome));
+            }
+        };
+        let act = match self.shell_act(key, act) {
+            Ok(act) => act,
+            Err(failure) => return answer(self, Err(failure)),
+        };
+        let seated = session.and_then(|session| self.seated(key, session, cx));
+        let who = seated
+            .as_ref()
+            .map(|(_, title)| title.clone())
+            .filter(|title| !title.is_empty())
+            .unwrap_or_else(|| format!("An agent on {}", self.asker(key, session)));
+        let chat = seated.map(|(chat, _)| chat);
+        let ask = agent_ui::Ask { act, chat, device: Some(key.to_string()), who };
+        let view = cx.entity().downgrade();
+        cx.defer(move |cx| {
+            let answered: agent_ui::Answered = Box::new(move |outcome, cx| {
+                let outcome = outcome.map(ui_done).map_err(ui_failure);
+                let _gone = view.update(cx, |view, _| answer(view, outcome));
+            });
+            agent_ui::act(ask, answered, cx);
+        });
+    }
+
+    /// The chat of the agent seated at `session` on `key` (a thread's seat, or the chat a
+    /// shell was opened for) and its title.
+    fn seated(
+        &self,
+        key: WorkerKey,
+        session: SessionId,
+        cx: &gpui::App,
+    ) -> Option<(String, String)> {
+        let seat = session.to_string();
+        let found = self.held_hub(key).and_then(|hub| {
+            let hub = hub.read(cx);
+            let rows = &hub.threads().rows().rows;
+            rows.values()
+                .find(|row| row.facts.get(slopty_proto::agent::SEAT_FACT) == Some(&seat))
+                .map(|row| (row.id, row.title.clone()))
+        });
+        if let Some((thread, title)) = found {
+            return Some((self.chat_id(thread), title));
+        }
+        let chat = self.chat_of(session)?;
+        let title = self.summary(session).map(|s| s.title.clone()).unwrap_or_default();
+        Some((chat, title))
+    }
+
+    /// `act` in the shell's words: a file as a link on `key`, a page as this machine reaches it.
+    fn shell_act(&self, key: WorkerKey, act: UiAct) -> Result<agent_ui::Act, UiFailure> {
+        Ok(match act {
+            UiAct::State => agent_ui::Act::State,
+            UiAct::Terminal { folder, command, region } => {
+                agent_ui::Act::Terminal { folder, command, region }
+            }
+            UiAct::Open(target) => agent_ui::Act::Open(self.shell_target(key, target)?),
+            UiAct::Region { region, change } => {
+                agent_ui::Act::Region { region, change: shell_change(change) }
+            }
+            UiAct::Chat { chat } => agent_ui::Act::Chat(chat),
+            UiAct::Split(target) => agent_ui::Act::Split(
+                target.map(|target| self.shell_target(key, target)).transpose()?,
+            ),
+        })
+    }
+
+    /// What the side pane shows for an agent on `key`: a file by its link, a web page only
+    /// as a browser reads its address, one on the worker's loopback at the port forwarding it
+    /// here.
+    fn shell_target(
+        &self,
+        key: WorkerKey,
+        target: UiTarget,
+    ) -> Result<agent_ui::Target, UiFailure> {
+        match target {
+            UiTarget::File { path, .. } if !path.starts_with('/') => {
+                Err(UiFailure::new(UiError::Unknown, format!("{path} is not an absolute path")))
+            }
+            UiTarget::File { path, line } => {
+                let at = line.map_or_else(String::new, |line| format!("#L{line}"));
+                Ok(agent_ui::Target::File(format!("file://{}{at}", escaped(&path))))
+            }
+            UiTarget::Diff => Ok(agent_ui::Target::Diff),
+            UiTarget::Page { url } => {
+                let Some(page) = slopty_proto::handoff::page(&url) else {
+                    let message = format!("{url} is not an http or https address with a host");
+                    return Err(UiFailure::new(UiError::Unknown, message));
+                };
+                match page.wary {
+                    Some(why @ (Wary::UserInfo | Wary::Idn)) => {
+                        let message = format!("{why}, so the window does not open it for an agent");
+                        Err(UiFailure::new(UiError::Failed, message))
+                    }
+                    Some(Wary::Loopback) if !self.is_here(key) => self
+                        .forwarded(key, &page.url)
+                        .map(agent_ui::Target::Page)
+                        .ok_or_else(|| {
+                            let port = on_loopback(&page.url)
+                                .map_or_else(String::new, |(port, _)| format!(" {port}"));
+                            let name =
+                                self.workers.get(&key).map(|w| w.name.clone()).unwrap_or_default();
+                            let message = format!(
+                                "the page is on {name}'s own loopback, and nothing forwards its \
+                                 port{port} here yet"
+                            );
+                            UiFailure::new(UiError::Elsewhere, message)
+                        }),
+                    _ => Ok(agent_ui::Target::Page(page.url)),
+                }
+            }
+        }
+    }
+
+    /// Whether worker `key` is this machine: this client reaches it on its loopback.
+    fn is_here(&self, key: WorkerKey) -> bool {
+        let Some(address) = self.workers.get(&key).and_then(|w| w.address.as_deref()) else {
+            return false;
+        };
+        let host = address.trim_start_matches('[').trim_end_matches(']');
+        host.eq_ignore_ascii_case("localhost")
+            || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
     }
 
     /// A shell's link to a page on its worker's loopback was followed: it opens at the port
@@ -187,6 +328,62 @@ impl WorkspaceView {
             .or_else(|| self.workers.get(&key).map(|w| w.name.clone()))
             .unwrap_or_default()
     }
+}
+
+const fn shell_change(change: UiChange) -> agent_ui::Change {
+    match change {
+        UiChange::Show => agent_ui::Change::Show,
+        UiChange::Hide => agent_ui::Change::Hide,
+        UiChange::Toggle => agent_ui::Change::Toggle,
+        UiChange::Expand => agent_ui::Change::Expand,
+        UiChange::Collapse => agent_ui::Change::Collapse,
+    }
+}
+
+/// What the shell did, as the agent hears it.
+fn ui_done(done: agent_ui::Done) -> UiDone {
+    let tab = |tab: agent_ui::Tab| UiTab {
+        id: tab.id,
+        kind: tab.kind,
+        title: tab.title,
+        region: tab.region,
+        selected: tab.selected,
+        terminal: tab.terminal,
+        target: tab.target,
+    };
+    let window = done.window;
+    UiDone {
+        did: done.did,
+        made: done.made.map(tab),
+        ran: done.ran,
+        window: UiWindow {
+            page: window.page,
+            chat: window.chat.map(|chat| UiChat {
+                id: chat.id,
+                title: chat.title,
+                machine: chat.machine,
+            }),
+            regions: window
+                .regions
+                .into_iter()
+                .map(|r| UiRegion { name: r.name, shown: r.shown, expanded: r.expanded })
+                .collect(),
+            tabs: window.tabs.into_iter().map(tab).collect(),
+            typing: window.typing,
+        },
+    }
+}
+
+/// Why the shell did nothing, as the agent hears it.
+fn ui_failure(failure: agent_ui::Failure) -> UiFailure {
+    let code = match failure.code {
+        agent_ui::Code::NoWindow => UiError::NoWindow,
+        agent_ui::Code::Unknown => UiError::Unknown,
+        agent_ui::Code::Busy => UiError::Busy,
+        agent_ui::Code::Elsewhere => UiError::Elsewhere,
+        agent_ui::Code::Failed => UiError::Failed,
+    };
+    UiFailure::new(code, failure.message)
 }
 
 /// `path` as the shell printed it, absolute: as it is, under the worker's home for `~/`, else
@@ -321,6 +518,71 @@ mod tests {
         assert_eq!(said.as_deref(), Some("Nothing forwards studio's port 3000 here yet"));
         workspace.update(cx, |v, cx| v.open_worker_page(session, "http://127.0.0.1:5173/b", cx));
         assert_eq!(cx.opened_url().as_deref(), Some("http://localhost:15173/b"));
+    }
+
+    /// An agent's ask reaches the shell and its answer the worker: with no shell window up, the
+    /// worker hears there is none.
+    #[gpui::test]
+    fn an_agents_ask_is_answered_to_its_worker(cx: &mut TestAppContext) {
+        use slopty_proto::handoff::{UiAct, UiAsk, UiError};
+        let workspace = cx.new(|_| WorkspaceView::new(Theme::default()));
+        let cx = cx.add_empty_window();
+        let session = SessionId::new();
+        workspace.update(cx, |v, cx| v.add_worker(KEY, "studio".to_owned(), cx));
+        let mut rx = link(&workspace, cx, mac(|_| {}), vec![shell(session)]);
+        while rx.try_recv().is_ok() {}
+        let ask = UiAsk { id: 5, session: Some(session), act: UiAct::State };
+        workspace.update(cx, |v, cx| {
+            v.handoff_event(KEY, HandoffEvent::Ui(ask), Instant::now(), cx);
+        });
+        cx.run_until_parked();
+        let sent: Vec<ClientMsg> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        let [ClientMsg::Handoff(HandoffReply::Ui { id: 5, outcome })] = sent.as_slice() else {
+            panic!("one answer: {sent:?}");
+        };
+        let failure = outcome.as_ref().as_ref().err().map(|failure| failure.code);
+        assert_eq!(failure, Some(UiError::NoWindow), "{outcome:?}");
+    }
+
+    /// An agent's file is a link on its own machine; a page is read as a browser reads it, one
+    /// on the worker's loopback at the port that forwards it here or refused while none does,
+    /// and one with a name before its host refused.
+    #[gpui::test]
+    fn an_agents_targets_are_read_for_the_shell(cx: &mut TestAppContext) {
+        use slopty_proto::handoff::{UiError, UiTarget};
+        use slopty_shell::shell::agent_ui::Target;
+        let workspace = cx.new(|_| WorkspaceView::new(Theme::default()));
+        let cx = cx.add_empty_window();
+        let session = SessionId::new();
+        workspace.update(cx, |v, cx| v.add_worker(KEY, "studio".to_owned(), cx));
+        let _rx = link(&workspace, cx, mac(|_| {}), vec![shell(session)]);
+        let forward = Forward {
+            port: Port { number: 5173, pid: 1, process: "vite".into(), session: Some(session) },
+            local: Some(15173),
+        };
+        workspace.update(cx, |v, cx| v.ports_changed(session, vec![forward], cx));
+        let read = |target| workspace.read_with(cx, |v, _| v.shell_target(KEY, target));
+        let page = |url: &str| UiTarget::Page { url: url.to_owned() };
+        let file = UiTarget::File { path: "/w/a b.rs".to_owned(), line: Some(3) };
+        assert_eq!(read(file), Ok(Target::File("file:///w/a%20b.rs#L3".to_owned())));
+        let relative = UiTarget::File { path: "src/a.rs".to_owned(), line: None };
+        assert_eq!(read(relative).map_err(|f| f.code), Err(UiError::Unknown));
+        assert_eq!(
+            read(page("http://localhost:5173/app?x=1")),
+            Ok(Target::Page("http://localhost:15173/app?x=1".to_owned())),
+            "at its forward"
+        );
+        assert_eq!(
+            read(page("http://127.0.0.1:3000/")).map_err(|f| f.code),
+            Err(UiError::Elsewhere)
+        );
+        assert_eq!(read(page("https://u@evil.test/")).map_err(|f| f.code), Err(UiError::Failed));
+        assert_eq!(read(page("mailto:a@b.test")).map_err(|f| f.code), Err(UiError::Unknown));
+        assert_eq!(
+            read(page("https://example.com")),
+            Ok(Target::Page("https://example.com/".into()))
+        );
+        assert_eq!(read(UiTarget::Diff), Ok(Target::Diff));
     }
 
     /// A path as a shell printed it is made absolute on its machine: as it is, under the home

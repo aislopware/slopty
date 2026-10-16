@@ -1428,7 +1428,12 @@ impl ScreenView {
         .aria_label(SharedString::new_static(health.word()))
         .px(px(6.0))
         .bg(slopty_shell::theme::wash(0.06))
-        .tooltip(slopty_shell::settings::widgets::text_tooltip("Stream stats"))
+        // What is wrong, then where the figures are.
+        .tooltip(slopty_shell::settings::widgets::detail_tooltip(
+            health.sentence(),
+            "Click for the stream's stats",
+            None,
+        ))
         .child(
             slopty_shell::icons::icon(slopty_shell::icons::DANGER_TRIANGLE)
                 .size(px(slopty_shell::live::chrome::ICON_SIZE))
@@ -3609,7 +3614,7 @@ impl ScreenView {
             } else {
                 slopty_shell::icons::ALT_ARROW_DOWN
             },
-            "Details",
+            if open { "Hide details" } else { "Show details" },
             &theme,
         )
         .aria_expanded(open)

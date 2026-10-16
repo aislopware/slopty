@@ -2055,24 +2055,7 @@ pub(super) struct SidebarViewMenu {
     focus: FocusHandle,
 }
 
-struct SidebarViewOptionsTooltip;
-
-impl Render for SidebarViewOptionsTooltip {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::of(cx);
-        div()
-            .px(px(8.0))
-            .py(px(6.0))
-            .rounded(px(6.0))
-            .border_1()
-            .border_color(theme.border_strong)
-            .bg(theme.surface_raised)
-            .shadow_md()
-            .text_size(crate::typography::ui_rems(11.0))
-            .text_color(theme.text)
-            .child("Sidebar view options")
-    }
-}
+// slopty: the view options' tooltip is the house chip (`ActionHint::hint`).
 
 #[derive(Clone, Copy)]
 enum SidebarViewRow {
@@ -2265,6 +2248,8 @@ pub(super) struct AddSpaceFlow {
     crumb_scroll: gpui::ScrollHandle,
     crumb_key: String,
     focus_pending: bool,
+    /// slopty: where the keyboard was before the picker took it, given back when it closes.
+    return_focus: Option<FocusHandle>,
     load_task: Option<Task<()>>,
     drives_task: Option<Task<()>>,
     submit_task: Option<Task<()>>,
@@ -2639,7 +2624,8 @@ pub(crate) fn status_dot_color(status: ChatIndicator, theme: &Theme) -> gpui::Hs
         // Non-done statuses sit well below full
         // strength: at full alpha the colored words shouted across the
         // whole sidebar (user request) — only Done keeps its pop.
-        ChatIndicator::Working => theme.busy.opacity(0.55),
+        // slopty: working is the muted ink, the accent only a result nobody has seen.
+        ChatIndicator::Working => theme.busy,
         // slopty: Claude desktop's vocabulary: amber is "needs you", blue a result nobody has
         // seen, red a failure; working keeps zeron's busy glyph.
         ChatIndicator::AwaitingInput => theme.warning.opacity(0.9),
@@ -3682,13 +3668,19 @@ impl Shell {
         // The highlight starts ON the current filter row.
         let current = self.space_filter_key(cx);
         let handle = search.read(cx).focus_handle(cx);
-        self.spaces_menu.open(SpacesMenu {
-            search,
-            active: 0,
-            focus: cx.focus_handle(),
-            list_scroll: gpui::ScrollHandle::new(),
-            _search_events: search_events,
-        });
+        // slopty: closed, it gives the keyboard back (`Popup::open_in`).
+        self.spaces_menu.open_in(
+            SpacesMenu {
+                search,
+                active: 0,
+                focus: cx.focus_handle(),
+                list_scroll: gpui::ScrollHandle::new(),
+                _search_events: search_events,
+            },
+            &handle,
+            window,
+            cx,
+        );
         // Fresh handle at the top — don't let the stale rail baseline read
         // the reopen as scrolling.
         self.spaces_menu_bar.clear_scroll_baseline();
@@ -3782,15 +3774,21 @@ impl Shell {
     fn open_sidebar_view_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_spaces_menu(cx);
         let focus = cx.focus_handle();
-        self.sidebar_view_menu.open(SidebarViewMenu {
-            submenu: None,
-            submenu_active: None,
-            submenu_bounds: None,
-            submenu_on_left: false,
-            hover_intent: popover::HoverIntent::default(),
-            active: None,
-            focus: focus.clone(),
-        });
+        // slopty: closed, it gives the keyboard back (`Popup::open_in`).
+        self.sidebar_view_menu.open_in(
+            SidebarViewMenu {
+                submenu: None,
+                submenu_active: None,
+                submenu_bounds: None,
+                submenu_on_left: false,
+                hover_intent: popover::HoverIntent::default(),
+                active: None,
+                focus: focus.clone(),
+            },
+            &focus,
+            window,
+            cx,
+        );
         window.focus(&focus, cx);
         cx.notify();
     }
@@ -4295,7 +4293,7 @@ impl Shell {
                             .size(px(14.0))
                             .text_color(theme.text_muted),
                     )
-                    .child("Create Section"),
+                    .child("New section"),
                 )
                 .into_any_element(),
         );
@@ -4432,7 +4430,7 @@ impl Shell {
                             icon(icons::WIFI_OFF)
                                 .size(px(12.0))
                                 .flex_none()
-                                .text_color(theme.warning.opacity(0.8)),
+                                .text_color(theme.text_muted), // slopty: offline is quiet
                         )
                     }),
             );
@@ -4472,7 +4470,6 @@ impl Shell {
         let view_trigger = div()
             .id("sidebar-view-options")
             .role(gpui::Role::Button)
-            .aria_label("Sidebar view options")
             .aria_expanded(view_open)
             .track_focus(&view_focus)
             .size(px(24.0))
@@ -4481,9 +4478,7 @@ impl Shell {
             .items_center()
             .justify_center()
             .rounded(px(6.0))
-            .border_1()
-            .border_color(theme.border.opacity(0.0))
-            .focus_visible(|el| el.border_color(theme.border_strong))
+            .map(|el| crate::surface_chrome::focus_ring(el, theme))
             .cursor_pointer()
             .text_color(theme.text_muted)
             .bg(if view_open {
@@ -4525,8 +4520,8 @@ impl Shell {
                     }
                 }
             }))
-            .tooltip(|_, cx| cx.new(|_| SidebarViewOptionsTooltip).into())
-            .tooltip_show_delay(std::time::Duration::from_millis(350))
+            // slopty: the house tooltip, out of the way while its menu is up.
+            .map(|el| if view_open { el.aria_label("Sidebar view options") } else { el.hint("Sidebar view options") })
             .child(
                 icon(icons::MORE_HORIZONTAL)
                     .size(px(16.0))
@@ -4685,7 +4680,7 @@ impl Shell {
                                     icon(icons::WIFI_OFF)
                                         .size(px(12.0))
                                         .flex_none()
-                                        .text_color(theme.warning.opacity(0.8)),
+                                        .text_color(theme.text_muted), // slopty: offline is quiet
                                 )
                             })
                             // No check glyph — the selected row's glass plate
@@ -5332,7 +5327,7 @@ impl Shell {
                 let jump_slot = visible_slots.get(&chat.id).copied();
                 let jump_label: Option<SharedString> = if jump_hints && let Some(slot) = jump_slot {
                     let combo = keymap.get(ShortcutId::JumpSession(slot));
-                    (slot < JUMP_SLOTS && !combo.is_empty()).then(|| badge_combo(combo).into())
+                    (slot < JUMP_SLOTS && !combo.is_empty()).then(|| crate::keys::combo_text(combo))
                 } else {
                     None
                 };
@@ -5373,7 +5368,7 @@ impl Shell {
                 let element = self.render_chat_row(
                     chat.id.clone(),
                     transcript::single_line(
-                        &chat.title.clone().unwrap_or_else(|| "New session".into()),
+                        &chat.title.clone().unwrap_or_else(|| "New chat".into()),
                     )
                     .into(),
                     time_ago,
@@ -5544,6 +5539,9 @@ impl Shell {
                 })
                 .flatten();
             let new_chat_button = group_space.map(|project| {
+                // slopty: ⌘N starts a chat in the project the sidebar is filtered to, so that
+                // project's "+" names the key.
+                let takes_new = self.settings.space_filter.as_deref() == Some(project.as_str());
                 div()
                     .id(SharedString::from(format!(
                         "sidebar-group-new-chat-{collapse_key}"
@@ -5564,9 +5562,21 @@ impl Shell {
                         cx.stop_propagation();
                         this.open_new_session(Some(project.clone()), cx);
                     }))
-                    .tooltip(crate::settings::widgets::text_tooltip_above(
-                        "New chat in project",
-                    ))
+                    .map(|el| {
+                        if takes_new {
+                            el.tooltip(crate::settings::widgets::action_tooltip(
+                                "New chat in project",
+                                Keys::Action(Box::new(NewSession)),
+                            ))
+                        } else {
+                            el.tooltip(crate::settings::widgets::text_tooltip(
+                                "New chat in project",
+                            ))
+                        }
+                    })
+                    // slopty: above, clear of the chats under the header.
+                    .tooltip_placement(gpui::TooltipPlacement::Above)
+                    .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
                     .child(
                         icon(icons::PLUS)
                             .size(px(14.0))
@@ -5814,7 +5824,7 @@ impl Shell {
                 let element = self.render_chat_row(
                     chat.id.clone(),
                     transcript::single_line(
-                        &chat.title.clone().unwrap_or_else(|| "New session".into()),
+                        &chat.title.clone().unwrap_or_else(|| "New chat".into()),
                     )
                     .into(),
                     format_time_ago(chat.last_message_at.unwrap_or(chat.created_at), now).into(),
@@ -5924,6 +5934,7 @@ impl Shell {
             crumb_scroll: gpui::ScrollHandle::new(),
             crumb_key: String::new(),
             focus_pending: true,
+            return_focus: None, // slopty
             load_task: None,
             drives_task: None,
             submit_task: None,
@@ -5937,7 +5948,12 @@ impl Shell {
     /// Close the new-project picker, releasing the host's home index.
     pub(super) fn close_add_space(&mut self, cx: &mut Context<Self>) {
         self.release_home_folder_search(cx);
-        self.add_space = None;
+        // slopty: the keyboard goes back where it was (`popover::return_focus`).
+        if let Some(flow) = self.add_space.take()
+            && let Some(before) = flow.return_focus
+        {
+            popover::give_focus_back(before, flow.search.focus_handle(cx));
+        }
         cx.notify();
     }
 
@@ -6927,7 +6943,11 @@ impl Shell {
         let theme = Theme::of(cx).for_popup();
         let flow = self.add_space.as_mut()?;
         if std::mem::take(&mut flow.focus_pending) {
-            window.focus(&flow.search.focus_handle(cx), cx);
+            let search = flow.search.focus_handle(cx);
+            if flow.return_focus.is_none() {
+                flow.return_focus = window.focused(cx).filter(|before| *before != search);
+            }
+            window.focus(&search, cx);
         }
         let step = flow.step;
         let search = flow.search.clone();
@@ -7004,17 +7024,15 @@ impl Shell {
                         row(ix)
                             .child(glyph_el(device_glyph(&device.platform)))
                             .child(label_el(name))
-                            .child(
-                                div()
-                                    .size(px(5.0))
-                                    .flex_none()
-                                    .rounded_full()
-                                    .bg(if online {
-                                        theme.success
-                                    } else {
-                                        theme.text_faint
-                                    }),
-                            )
+                            // slopty: online needs no mark; offline wears the muted Wi-Fi-off.
+                            .when(!online, |row| {
+                                row.child(
+                                    icon(icons::WIFI_OFF)
+                                        .size(px(11.0))
+                                        .flex_none()
+                                        .text_color(theme.text_muted),
+                                )
+                            })
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.add_space_pick_device(device.clone(), cx)
                             }))
@@ -7210,7 +7228,7 @@ impl Shell {
                     "No folders here",
                     format!(
                         "Add this folder with {}, or go back with ←.",
-                        crate::settings::badge_combo("mod-enter")
+                        crate::keys::combo_text("mod-enter")
                     ),
                 ),
                 ProjectStep::Folders if home_loading => (
@@ -7461,8 +7479,8 @@ impl Shell {
                     .rounded(px(6.0))
                     .cursor_pointer()
                     .role(gpui::Role::Button)
-                    .aria_label(back_label)
-                    .tooltip(crate::settings::widgets::text_tooltip(back_label))
+                    // slopty: ← goes back, as the legend says.
+                    .action_hint(back_label, Keys::Fixed("left"), cx)
                     .hover(|s| s.bg(theme.element_hover))
                     .on_click(cx.listener(|this, _, window, cx| {
                         if this.add_space.as_ref().map(|f| f.step) == Some(ProjectStep::Devices) {
@@ -7490,14 +7508,14 @@ impl Shell {
             let id = ShortcutId::NewProject;
             let combo = self.settings.keymap.get(id);
             let valid = Keystroke::parse(&platform_combo(combo)).is_ok();
-            crate::settings::badge_combo(if valid { combo } else { id.default_combo() })
+            crate::keys::combo_text(if valid { combo } else { id.default_combo() })
         };
         let can_add = !busy && listing.is_some();
         let footer = command_palette::palette_footer()
             .child(command_palette::command_key_hint(&theme, "↑ ↓", "Navigate"))
             .child(command_palette::command_key_hint(
                 &theme,
-                "↵",
+                "⏎",
                 if cloning {
                     "Clone" // slopty
                 } else if step == ProjectStep::Folders {
@@ -7537,7 +7555,7 @@ impl Shell {
                         .when(!can_add, |el| el.opacity(0.5))
                         .child(popover::kbd_hint(
                             &theme,
-                            &crate::settings::badge_combo("mod-enter"),
+                            &crate::keys::combo_text("mod-enter"),
                         ))
                         .child(
                             div()

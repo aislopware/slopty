@@ -2114,3 +2114,14 @@ more full-window layer.
   `gestures.rs`; the merge keeps upstream's new `Caught` state and our hook in place of
   `self.momentum.take()`, with the end event still marked `fast_momentum`. longbridge had
   nothing new (`eeccb27f`).
+- ✅ **gpui-fast `b6b8aefd` (2026-10-17): tooltips anchored and warmed up, `aria_disabled`.** Our
+  commits `9e1f84c` and `b6b8aef` on the fork's `main`, not an upstream sync. A hover tooltip
+  can sit centred below or above its element rather than at the pointer (`TooltipPlacement`,
+  per element or per window), kept 8 px inside the window; Slopty's main window sets `Below`,
+  and the archive pill and the project row's "+" ask for `Above`. After one tooltip shows, the next skips its delay for 400 ms
+  (`TOOLTIP_WARM_FOR`). `aria_disabled` sets accesskit's disabled flag. longbridge has none of
+  the three; the fork lists them under Features in `docs/upstream-candidates.md`. Tests:
+  gpui-fast `fast::tests::focus_tooltip::{an_anchored_hover_tooltip_sits_under_its_control,
+  an_anchored_tooltip_keeps_off_the_windows_edge, the_next_tooltip_shows_at_once_while_warm}`,
+  `fast::tests::a11y::a_disabled_control_says_so` (the fork's fast tests, clippy and
+  `script/check-upstream` pass).

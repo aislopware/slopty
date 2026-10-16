@@ -7,6 +7,12 @@
 //! that said they take handoffs ([`HandoffCaps`]), the one in front of the shell first, with a
 //! [`HandoffEvent`], and each answers with a [`HandoffReply`] (`docs/decisions/terminal.md`, "A
 //! shell's browser and editor are the client's").
+//!
+//! An agent drives the person's window the same way (`slopty ui`, the `ui_*` tools): the CLI
+//! asks with `ctl::CtlRequest::Ui`, the worker hands a [`HandoffEvent::Ui`] to the clients that
+//! take pages, the one in front of the agent first, and the first with a window answers with
+//! [`HandoffReply::Ui`] (`docs/decisions/agents.md`, "Agents drive the person's window through
+//! open verbs").
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -219,6 +225,206 @@ pub enum HandoffEvent {
         /// The edit's number.
         id: HandoffId,
     },
+    /// Do something in the person's window for an agent. Answered with [`HandoffReply::Ui`],
+    /// or [`HandoffReply::Refused`] by a client with no window.
+    Ui(UiAsk),
+}
+
+/// What an agent asks of the person's window, and who asks.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct UiAsk {
+    /// The handoff's number.
+    pub id: HandoffId,
+    /// The session the agent runs in (its seat, or a shell's), which names its chat; `None`
+    /// for a program outside any.
+    pub session: Option<SessionId>,
+    /// What to do.
+    pub act: UiAct,
+}
+
+/// What an agent asks of the person's window: the verbs of `slopty ui`.
+///
+/// What they name stays open: a region, a place or a chat is a word the window reads, and a
+/// word it does not know is answered with the ones it does ([`UiError::Unknown`]). Paths are
+/// absolute on the asking agent's machine.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UiAct {
+    /// Say what the window shows.
+    State,
+    /// Open a terminal tab for the chat on screen.
+    Terminal {
+        /// The folder it starts in; the chat's own when `None`.
+        folder: Option<String>,
+        /// A command line to run in it once its shell is up. One that acts as root or
+        /// destroys, or that spans lines, is left at the prompt for the person to read.
+        command: Option<String>,
+        /// The region it opens in: `terminal` (the drawer, the default) or `pane`.
+        region: Option<String>,
+    },
+    /// Show something in the side pane of the chat on screen.
+    Open(UiTarget),
+    /// Show, hide, expand or collapse one region of the window.
+    Region {
+        /// `sidebar`, `pane`, `files` or `terminal`, as [`UiWindow::regions`] names them.
+        region: String,
+        /// What becomes of it.
+        change: UiChange,
+    },
+    /// Put a chat on screen.
+    Chat {
+        /// Its id, a prefix of its id, or its title; the agent's own chat when `None`.
+        chat: Option<String>,
+    },
+    /// Lay the chat and the side pane side by side at even widths, showing `target` there
+    /// first when given.
+    Split(Option<UiTarget>),
+}
+
+/// What the side pane shows for an agent.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UiTarget {
+    /// A file, by its absolute path, at a line from 1 when given.
+    File {
+        /// The file.
+        path: String,
+        /// The line.
+        line: Option<u32>,
+    },
+    /// A web page ([`page`]).
+    Page {
+        /// Its address.
+        url: String,
+    },
+    /// The chat's uncommitted changes.
+    Diff,
+}
+
+/// What becomes of a region ([`UiAct::Region`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UiChange {
+    /// On screen.
+    Show,
+    /// Off screen.
+    Hide,
+    /// The other of the two.
+    Toggle,
+    /// As large as it goes: the side pane over the chat; any other region shown.
+    Expand,
+    /// Back to its share: the side pane beside the chat; any other region hidden.
+    Collapse,
+}
+
+/// What an agent's ask did, and the window after it.
+#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub struct UiDone {
+    /// What changed, in words, as the window marked it (`opened a terminal in ~/app`); `None`
+    /// when nothing changed.
+    pub did: Option<String>,
+    /// The tab it opened.
+    pub made: Option<UiTab>,
+    /// For a terminal opened with a command: whether it ran, or waits at the prompt for the
+    /// person to read and run.
+    pub ran: Option<bool>,
+    /// The window after it.
+    pub window: UiWindow,
+}
+
+/// What the person's window shows.
+#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub struct UiWindow {
+    /// The page on screen: `chat`, or `settings` with its section after a slash.
+    pub page: String,
+    /// The chat on screen; `None` on the new-chat page.
+    pub chat: Option<UiChat>,
+    /// Its regions and whether each shows.
+    pub regions: Vec<UiRegion>,
+    /// The tabs open for the chat on screen, in order, the side pane's then the terminal's.
+    pub tabs: Vec<UiTab>,
+    /// The person is typing a draft: what would move the keyboard or the chat away from it is
+    /// refused ([`UiError::Busy`]).
+    pub typing: bool,
+}
+
+/// A chat, as the window shows it.
+#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub struct UiChat {
+    /// Its id.
+    pub id: String,
+    /// Its title.
+    pub title: Option<String>,
+    /// The machine it runs on, by name.
+    pub machine: Option<String>,
+}
+
+/// One region of the window.
+#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub struct UiRegion {
+    /// Its name: `sidebar`, `pane`, `files`, `terminal`.
+    pub name: String,
+    /// It is on screen.
+    pub shown: bool,
+    /// It takes the room of the chat beside it (the side pane's full width).
+    pub expanded: bool,
+}
+
+/// One tab of the window.
+#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub struct UiTab {
+    /// The window's name for it, stable while it is open (`pane/file/3`, `terminal/2`).
+    pub id: String,
+    /// What it shows: `file`, `page`, `diff`, `terminal`, `chat`, `screen`…
+    pub kind: String,
+    /// Its title as its tab shows it.
+    pub title: String,
+    /// The region it is in.
+    pub region: String,
+    /// It is the one its region shows.
+    pub selected: bool,
+    /// A terminal's session id, once its shell is up.
+    pub terminal: Option<String>,
+    /// The file it shows, or the page's address.
+    pub target: Option<String>,
+}
+
+/// Why an agent's ask was not done.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct UiFailure {
+    /// What kind of failure.
+    pub code: UiError,
+    /// For the agent to read: what went wrong and what would do it.
+    pub message: String,
+}
+
+impl UiFailure {
+    /// A failure of `code`, said as `message`.
+    pub fn new(code: UiError, message: impl Into<String>) -> Self {
+        Self { code, message: message.into() }
+    }
+}
+
+impl std::fmt::Display for UiFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+/// What kind of failure an agent's ask met.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UiError {
+    /// No Slopty window is open on this machine set, or none answered.
+    NoWindow,
+    /// It names a region, chat, file or place the window does not know.
+    Unknown,
+    /// The person is typing, or in Settings: the window stays as they have it.
+    Busy,
+    /// The chat on screen is on another machine than the agent, or there is none.
+    Elsewhere,
+    /// The window tried and it did not work.
+    Failed,
 }
 
 /// A web page a program asked to open.
@@ -255,7 +461,7 @@ pub struct EditFile {
 }
 
 /// Client → worker.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum HandoffReply {
     /// The page is open, or the file shows in a tile.
     Taken {
@@ -284,6 +490,13 @@ pub enum HandoffReply {
         /// How it ended.
         outcome: EditOutcome,
     },
+    /// An agent's ask of the window was done, or why not.
+    Ui {
+        /// The handoff's number.
+        id: HandoffId,
+        /// What it did and the window after it, or why it did nothing.
+        outcome: Box<Result<UiDone, UiFailure>>,
+    },
 }
 
 impl HandoffReply {
@@ -294,7 +507,8 @@ impl HandoffReply {
             Self::Taken { id }
             | Self::Offered { id, .. }
             | Self::Refused { id }
-            | Self::Edited { id, .. } => *id,
+            | Self::Edited { id, .. }
+            | Self::Ui { id, .. } => *id,
         }
     }
 }
@@ -313,6 +527,56 @@ pub enum EditOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An agent's ask of the window and its answer cross the link whole, each verb and each
+    /// failure; the answer names the ask it answers.
+    #[test]
+    fn an_agents_ask_and_its_answer_cross_the_link() {
+        let file = UiTarget::File { path: "/w/app/src/main.rs".to_owned(), line: Some(12) };
+        let acts = [
+            UiAct::State,
+            UiAct::Terminal {
+                folder: Some("/w/app".to_owned()),
+                command: Some("cargo test".to_owned()),
+                region: None,
+            },
+            UiAct::Open(file.clone()),
+            UiAct::Open(UiTarget::Page { url: "https://example.com/".to_owned() }),
+            UiAct::Open(UiTarget::Diff),
+            UiAct::Region { region: "sidebar".to_owned(), change: UiChange::Expand },
+            UiAct::Chat { chat: Some("Tidy the greeting".to_owned()) },
+            UiAct::Split(Some(file)),
+            UiAct::Split(None),
+        ];
+        for act in acts {
+            let event = HandoffEvent::Ui(UiAsk { id: 7, session: None, act });
+            let bytes = crate::codec::encode_body(&event).unwrap();
+            assert_eq!(crate::codec::decode_body::<HandoffEvent>(&bytes).unwrap(), event);
+        }
+        let tab = UiTab {
+            id: "terminal/2".to_owned(),
+            kind: "terminal".to_owned(),
+            title: "zsh".to_owned(),
+            region: "terminal".to_owned(),
+            selected: true,
+            terminal: Some("0192".to_owned()),
+            target: None,
+        };
+        let window = UiWindow {
+            page: "chat".to_owned(),
+            chat: Some(UiChat { id: "c1".to_owned(), title: None, machine: Some("studio".into()) }),
+            regions: vec![UiRegion { name: "pane".to_owned(), shown: true, expanded: false }],
+            tabs: vec![tab.clone()],
+            typing: true,
+        };
+        let done = UiDone { did: Some("opened".into()), made: Some(tab), ran: Some(false), window };
+        for outcome in [Ok(done), Err(UiFailure::new(UiError::Busy, "the person is typing"))] {
+            let reply = HandoffReply::Ui { id: 9, outcome: Box::new(outcome) };
+            let bytes = crate::codec::encode_body(&reply).unwrap();
+            assert_eq!(crate::codec::decode_body::<HandoffReply>(&bytes).unwrap(), reply);
+            assert_eq!(reply.id(), 9);
+        }
+    }
 
     /// Web addresses with a host pass; every other scheme, a hostless address, and one carrying
     /// whitespace or a control character do not.

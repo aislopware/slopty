@@ -216,7 +216,7 @@ pub(super) fn chat_card(state: &AppState, chat_id: &str, now: DateTime<Utc>) -> 
     });
     let subagents = state.running_subagents_for(chat_id, now);
     Some(ChatCard {
-        title: crate::transcript::single_line(chat.title.as_deref().unwrap_or("New session")).into(),
+        title: crate::transcript::single_line(chat.title.as_deref().unwrap_or("New chat")).into(),
         place: place.map(SharedString::from),
         online: state.device_online(&chat.device_id, now),
         folder: folder.map(SharedString::from),
@@ -233,12 +233,28 @@ pub(super) fn chat_card(state: &AppState, chat_id: &str, now: DateTime<Utc>) -> 
     })
 }
 
+/// slopty: when `at` was, in the person's time: "14:05" today, "Oct 16, 14:05" before, the year
+/// too past this one.
+pub(crate) fn absolute_time(at: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    let (at, now) = (at.with_timezone(&Local), now.with_timezone(&Local));
+    let format = if at.date_naive() == now.date_naive() {
+        "%H:%M"
+    } else if chrono::Datelike::year(&at) == chrono::Datelike::year(&now) {
+        "%b %-d, %H:%M"
+    } else {
+        "%b %-d %Y, %H:%M"
+    };
+    at.format(format).to_string()
+}
+
 /// How long a chat has stood as it is, for its hover card.
 fn status_words(chat: &Chat, status: ChatIndicator, session: Option<&Session>, now: DateTime<Utc>) -> Option<String> {
     let session = live(session, now);
     let since = session.and_then(|s| s.status_since.or(s.started_at));
     let ago = |at: DateTime<Utc>| format_time_ago(at, now);
     let last = chat.last_message_at.unwrap_or(chat.created_at);
+    // slopty: a relative time also says when, which "2d ago" alone never does.
+    let when = |words: String| format!("{words} \u{b7} {}", absolute_time(last, now));
     Some(match status {
         ChatIndicator::Working => match since.map(ago) {
             Some(age) if age != "now" => format!("Working for {age}"),
@@ -250,7 +266,9 @@ fn status_words(chat: &Chat, status: ChatIndicator, session: Option<&Session>, n
             }
             None => "Waiting on you".to_owned(),
         },
-        ChatIndicator::Errored => format!("Failed {} ago", ago(last)).replace("now ago", "just now"),
+        ChatIndicator::Errored => {
+            when(format!("Failed {} ago", ago(last)).replace("now ago", "just now"))
+        }
         ChatIndicator::Completed | ChatIndicator::Idle if waiting_on_itself(session, now) => {
             match since.map(ago) {
                 Some(age) if age != "now" => format!("Waiting on its own work for {age}"),
@@ -259,15 +277,15 @@ fn status_words(chat: &Chat, status: ChatIndicator, session: Option<&Session>, n
         }
         ChatIndicator::Completed => match ago(last).as_str() {
             "now" => "Done just now".to_owned(),
-            age => format!("Done {age} ago"),
+            age => when(format!("Done {age} ago")),
         },
         ChatIndicator::Idle => {
             let stopped = session.is_some_and(|s| s.status == SessionStatus::Stopped);
             match (stopped, ago(last).as_str()) {
                 (true, "now") => "Stopped just now".to_owned(),
-                (true, age) => format!("Stopped {age} ago"),
+                (true, age) => when(format!("Stopped {age} ago")),
                 (false, "now") => "Active just now".to_owned(),
-                (false, age) => format!("Last active {age} ago"),
+                (false, age) => when(format!("Last active {age} ago")),
             }
         }
     })
@@ -324,11 +342,10 @@ impl Render for ChatHoverCard {
         .join("\n");
         let mut lines: Vec<AnyElement> = Vec::new();
         if let Some(place) = card.place.clone() {
-            let dot = div()
-                .size(px(6.0))
-                .flex_none()
-                .rounded_full()
-                .bg(if card.online { theme.success } else { crate::theme::ink(0.24) });
+            // slopty: online needs no mark; offline wears the muted Wi-Fi-off.
+            let dot = (!card.online).then(|| {
+                icon(icons::WIFI_OFF).size(px(11.0)).flex_none().text_color(theme.text_muted)
+            });
             lines.push(
                 div()
                     .flex()
@@ -338,7 +355,7 @@ impl Render for ChatHoverCard {
                     .min_h(px(20.0))
                     .child(icon(icons::REMOTE_SERVER).size(px(13.0)).flex_none().text_color(theme.text_muted))
                     .child(div().flex_1().min_w_0().truncate().child(place))
-                    .child(dot)
+                    .children(dot)
                     .into_any_element(),
             );
         }
@@ -393,6 +410,19 @@ impl Render for ChatHoverCard {
 mod tests {
     use super::*;
     use chrono::TimeDelta;
+
+    /// A relative time also says when: the hour today, the date before, the year past this one.
+    #[test]
+    fn a_time_says_when() {
+        let now = Local::now();
+        let local = |at: chrono::DateTime<Local>| at.with_timezone(&Utc);
+        assert_eq!(absolute_time(local(now), local(now)), now.format("%H:%M").to_string());
+        let before = now - TimeDelta::days(400);
+        assert_eq!(
+            absolute_time(local(before), local(now)),
+            before.format("%b %-d %Y, %H:%M").to_string()
+        );
+    }
 
     fn session(chat: &str, status: SessionStatus, now: DateTime<Utc>) -> Session {
         Session {

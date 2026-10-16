@@ -13,7 +13,7 @@
 //! `shell::apply_keymap`, which clears every binding first), and
 //! [`app_menus`] builds the menu bar handed to `cx.set_menus` in `run_app`.
 
-use gpui::{App, KeyBinding, Menu, MenuItem, OsAction, SystemMenuType, Window, actions};
+use gpui::{Action, App, KeyBinding, Menu, MenuItem, OsAction, SystemMenuType, Window, actions};
 
 use crate::appearance::{self, AppearanceMode};
 use crate::composer;
@@ -31,6 +31,8 @@ actions!(
         Minimize,
         Zoom,
         CloseWindow,
+        // slopty: ⌘W closes the tab, ⇧⌘W the window (`docs/decisions/ui.md`, "⌘W closes the tab").
+        CloseTab,
         AppearanceSystem,
         AppearanceLight,
         AppearanceDark,
@@ -58,6 +60,7 @@ pub fn init(cx: &mut App) {
     cx.on_action(|_: &Minimize, cx| with_active_window(cx, |window| window.minimize_window()));
     cx.on_action(|_: &Zoom, cx| with_active_window(cx, |window| window.zoom_window()));
     cx.on_action(close_window);
+    cx.on_action(close_tab);
     // Appearance. Each verb persists and repaints every window; see
     // `appearance::set_mode`.
     cx.on_action(|_: &AppearanceSystem, cx| appearance::set_mode(AppearanceMode::System, cx));
@@ -103,10 +106,17 @@ pub(crate) fn quit_after_save(cx: &mut App) {
 }
 
 fn close_window(_: &CloseWindow, cx: &mut App) {
-    cx.defer(close_active_window);
+    cx.defer(|cx| close_active_window(false, cx));
 }
 
-fn close_active_window(cx: &mut App) {
+// slopty: a focused terminal closes its own tab before this runs (`terminal::panel`, the browser
+// its page); here ⌘W closes the side pane's tab, and the window only when no tab is open.
+fn close_tab(_: &CloseTab, cx: &mut App) {
+    cx.defer(|cx| close_active_window(true, cx));
+}
+
+/// Close the active window, or with `tab_first` the side pane's tab in front when it has one.
+fn close_active_window(tab_first: bool, cx: &mut App) {
     if let Some(window) = cx.active_window() {
         if let Some(window) = window.downcast::<shell::Shell>() {
             window
@@ -114,7 +124,7 @@ fn close_active_window(cx: &mut App) {
                     // ⌘W closes the right pane's active surface first (the tab
                     // the user just opened); an empty or closed pane falls
                     // through to the window close, unsaved-file gate and all.
-                    if shell.close_active_surface(window, cx) {
+                    if tab_first && shell.close_active_surface(window, cx) {
                         return;
                     }
                     if shell.prepare_window_close(cx) {
@@ -153,11 +163,108 @@ fn app_key_bindings(macos: bool) -> Vec<KeyBinding> {
             KeyBinding::new("cmd-h", Hide, None),
             KeyBinding::new("alt-cmd-h", HideOthers, None),
             KeyBinding::new("cmd-m", Minimize, None),
-            KeyBinding::new("cmd-w", CloseWindow, None),
+            KeyBinding::new("cmd-w", CloseTab, None),
+            KeyBinding::new("cmd-shift-w", CloseWindow, None),
         ]);
     }
     bindings
 }
+
+/// slopty: a window command the menu bar and the command palette both offer, named once in
+/// sentence case; the menu bar writes it in Title Case ([`title_case`], the macOS rule) and macOS
+/// writes its key beside it, the palette its key from the keymap.
+#[derive(Clone, Copy)]
+pub(crate) struct WindowCommand {
+    pub label: &'static str,
+    pub icon: &'static str,
+    pub action: fn() -> Box<dyn Action>,
+}
+
+impl PartialEq for WindowCommand {
+    fn eq(&self, other: &Self) -> bool {
+        self.label == other.label
+    }
+}
+
+impl std::fmt::Debug for WindowCommand {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label)
+    }
+}
+
+impl WindowCommand {
+    /// Its row in a menu-bar menu.
+    fn menu_item(&self) -> MenuItem {
+        MenuItem::Action {
+            name: title_case(self.label).into(),
+            action: (self.action)(),
+            os_action: None,
+            checked: false,
+            disabled: false,
+        }
+    }
+}
+
+macro_rules! command {
+    ($label:literal, $icon:expr, $action:expr) => {
+        WindowCommand { label: $label, icon: $icon, action: || Box::new($action) }
+    };
+}
+
+/// slopty: the File menu's tab commands.
+pub(crate) const TAB_COMMANDS: [WindowCommand; 2] = [
+    command!("New tab", crate::icons::PLUS, shell::NewRightTab),
+    command!("Reopen closed tab", crate::icons::WINDOW_RESTORE, shell::ReopenClosedTab),
+];
+
+/// slopty: the View menu's panes.
+pub(crate) const VIEW_COMMANDS: [WindowCommand; 6] = [
+    command!("Toggle sidebar", crate::icons::SPLIT_COLUMNS, shell::ToggleSidebar),
+    command!("Toggle side pane", crate::icons::SPLIT_COLUMNS, shell::ToggleChanges),
+    command!("Expand side pane", crate::icons::EXPAND_ARROWS, shell::ToggleExpandPane),
+    command!("Toggle files panel", crate::icons::FOLDER_TREE, shell::ToggleFiles),
+    command!("Toggle terminal", crate::icons::TERMINAL, crate::terminal::panel::ToggleTerminal),
+    command!("Chat details", crate::icons::INFO_CIRCLE, shell::ToggleSessionInfo),
+];
+
+/// slopty: the Go menu's moves.
+pub(crate) const GO_COMMANDS: [WindowCommand; 4] = [
+    command!("Back", crate::icons::ARROW_LEFT, shell::NavigateBack),
+    command!("Forward", crate::icons::ARROW_RIGHT, shell::NavigateForward),
+    command!("Next chat", crate::icons::ALT_ARROW_DOWN, shell::NextSession),
+    command!("Previous chat", crate::icons::ALT_ARROW_UP, shell::PrevSession),
+];
+
+/// slopty: every command the palette offers from the menu bar's table.
+pub(crate) fn window_commands() -> impl Iterator<Item = WindowCommand> {
+    TAB_COMMANDS.into_iter().chain(VIEW_COMMANDS).chain(GO_COMMANDS)
+}
+
+/// slopty: a sentence-case name in Title Case: each word capitalised but the short joining
+/// ones after the first.
+pub(crate) fn title_case(label: &str) -> String {
+    const MINOR: [&str; 9] = ["a", "an", "and", "in", "of", "on", "or", "the", "to"];
+    label
+        .split(' ')
+        .enumerate()
+        .map(|(ix, word)| {
+            if ix > 0 && MINOR.contains(&word) {
+                return word.to_owned();
+            }
+            let mut chars = word.chars();
+            chars
+                .next()
+                .map(|first| first.to_uppercase().chain(chars).collect())
+                .unwrap_or_default()
+        })
+        .collect::<Vec<String>>()
+        .join(" ")
+}
+
+/// The Go menu's rows for the sidebar's first nine chats (⌘1…⌘9).
+const JUMP_TITLES: [&str; crate::settings::JUMP_SLOTS] = [
+    "Chat 1", "Chat 2", "Chat 3", "Chat 4", "Chat 5", "Chat 6", "Chat 7", "Chat 8", "Chat 9",
+];
 
 /// The slopty menu bar. macOS renders this natively; mac-only entries are gated
 /// at runtime (`cfg!`) so the whole module compiles and tests on Linux.
@@ -171,7 +278,8 @@ pub fn app_menus() -> Vec<Menu> {
         MenuItem::action("About Slopty", About).disabled(!macos),
         // slopty: "Check for Updates…" is cut; Slopty updates through its own builds.
         MenuItem::separator(),
-        MenuItem::action("Settings", shell::OpenSettings),
+        // slopty: it opens a window of its own, so its name ends in "…" (the macOS rule).
+        MenuItem::action("Settings…", shell::OpenSettings),
         MenuItem::separator(),
     ];
     if macos {
@@ -186,8 +294,23 @@ pub fn app_menus() -> Vec<Menu> {
     }
     app_items.push(MenuItem::action("Quit Slopty", Quit));
 
+    // slopty: File, View and Go list the window's commands; macOS writes each one's key from the
+    // keymap beside it, so a rebind shows in the menu too.
     let mut menus = vec![
         Menu::new("Slopty").items(app_items),
+        Menu::new("File").items(
+            [
+                MenuItem::action("New Chat", shell::NewSession),
+                MenuItem::action("New Project…", shell::AddSpacePalette),
+            ]
+            .into_iter()
+            .chain(TAB_COMMANDS.iter().map(WindowCommand::menu_item))
+            .chain([
+                MenuItem::separator(),
+                MenuItem::action("Close Tab", CloseTab),
+                MenuItem::action("Save", shell::SaveFile),
+            ]),
+        ),
         // Standard clipboard verbs tied to the composer's existing actions via
         // their native selectors (`OsAction` → cut:/copy:/paste:/selectAll:),
         // so the OS Edit menu routes through the responder chain to the focused
@@ -206,19 +329,37 @@ pub fn app_menus() -> Vec<Menu> {
             MenuItem::os_action("Select All", composer::SelectAll, OsAction::SelectAll),
         ]),
     ];
-    // Appearance lives under View on every platform — it is the only View verb
-    // today, but "Appearance" as a top-level menu would read oddly next to Edit.
-    menus.push(Menu::new("View").items([
-        MenuItem::action("Appearance: System", AppearanceSystem),
-        MenuItem::action("Appearance: Light", AppearanceLight),
-        MenuItem::action("Appearance: Dark", AppearanceDark),
-    ]));
+    // Appearance lives under View on every platform, after the panes.
+    menus.push(Menu::new("View").items(VIEW_COMMANDS.iter().map(WindowCommand::menu_item).chain([
+        MenuItem::separator(),
+        MenuItem::action("Command Palette", shell::ToggleCommandPalette),
+        MenuItem::separator(),
+        MenuItem::submenu(Menu::new("Appearance").items([
+            MenuItem::action("System", AppearanceSystem),
+            MenuItem::action("Light", AppearanceLight),
+            MenuItem::action("Dark", AppearanceDark),
+        ])),
+    ])));
+    let [back, forward, next, previous] = GO_COMMANDS.map(|command| command.menu_item());
+    let mut go = vec![
+        back,
+        forward,
+        MenuItem::separator(),
+        next,
+        previous,
+        MenuItem::separator(),
+    ];
+    go.extend(JUMP_TITLES.iter().enumerate().map(|(slot, title)| {
+        MenuItem::action(*title, shell::JumpSession(slot))
+    }));
+    menus.push(Menu::new("Go").items(go));
     if macos {
         // Standard Window menu; macOS appends the open-window list itself.
         menus.push(Menu::new("Window").items([
             MenuItem::action("Minimize", Minimize),
             MenuItem::action("Zoom", Zoom),
             MenuItem::separator(),
+            MenuItem::action("Close Tab", CloseTab),
             MenuItem::action("Close Window", CloseWindow),
         ]));
     }
@@ -228,7 +369,7 @@ pub fn app_menus() -> Vec<Menu> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{Action as _, Keystroke};
+    use gpui::Keystroke;
 
     fn action_names(menu: &Menu) -> Vec<&'static str> {
         menu.items
@@ -258,7 +399,7 @@ mod tests {
             menus[0].items.iter().any(|item| matches!(
                 item,
                 MenuItem::Action { name, action, .. }
-                    if name.as_ref() == "Settings" && action.name() == shell::OpenSettings.name()
+                    if name.as_ref() == "Settings…" && action.name() == shell::OpenSettings.name()
             )),
             "the application menu should expose Settings"
         );
@@ -315,14 +456,43 @@ mod tests {
             .iter()
             .find(|m| m.name.as_ref() == "View")
             .expect("View menu present");
+        let appearance = view
+            .items
+            .iter()
+            .find_map(|item| match item {
+                MenuItem::Submenu(menu) if menu.name.as_ref() == "Appearance" => Some(menu),
+                _ => None,
+            })
+            .expect("Appearance under View");
         assert_eq!(
-            action_names(view),
+            action_names(appearance),
             vec![
                 AppearanceSystem.name(),
                 AppearanceLight.name(),
                 AppearanceDark.name()
             ]
         );
+    }
+
+    #[test]
+    fn the_menu_bar_names_the_palette_commands_in_title_case() {
+        assert_eq!(title_case("Reopen closed tab"), "Reopen Closed Tab");
+        assert_eq!(title_case("Next chat or side pane tab"), "Next Chat or Side Pane Tab");
+        let menus = app_menus();
+        let view = menus.iter().find(|m| m.name.as_ref() == "View").expect("View menu");
+        let names: Vec<&str> = view
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                MenuItem::Action { name, .. } => Some(name.as_ref()),
+                _ => None,
+            })
+            .collect();
+        for command in VIEW_COMMANDS {
+            assert!(names.contains(&title_case(command.label).as_str()), "{}", command.label);
+        }
+        let go = menus.iter().find(|m| m.name.as_ref() == "Go").expect("Go menu");
+        assert_eq!(action_names(go)[..2], [shell::NavigateBack.name(), shell::NavigateForward.name()]);
     }
 
     #[test]
@@ -348,7 +518,9 @@ mod tests {
             Some(combo("cmd-,"))
         );
         assert_eq!(find(&macos, Quit.name()), Some(combo("cmd-q")));
-        assert_eq!(find(&macos, CloseWindow.name()), Some(combo("cmd-w")));
+        // slopty: ⌘W closes the tab, ⇧⌘W the window.
+        assert_eq!(find(&macos, CloseTab.name()), Some(combo("cmd-w")));
+        assert_eq!(find(&macos, CloseWindow.name()), Some(combo("cmd-shift-w")));
         assert_eq!(find(&macos, Minimize.name()), Some(combo("cmd-m")));
 
         let other = app_key_bindings(false);

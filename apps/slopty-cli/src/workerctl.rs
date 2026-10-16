@@ -124,6 +124,9 @@ pub async fn run(cmd: WorkerCmd, server: Option<&str>, data_dir: &Path, json: bo
         reply @ (CtlReply::ClipTypes { .. } | CtlReply::ClipData { .. }) => {
             bail!("a clipboard answer nobody asked for: {reply:?}")
         }
+        reply @ (CtlReply::UiDone(_) | CtlReply::UiFailed(_)) => {
+            bail!("a window's answer nobody asked for: {reply:?}")
+        }
         CtlReply::Error { message } => bail!("{message}"),
     }
     Ok(())

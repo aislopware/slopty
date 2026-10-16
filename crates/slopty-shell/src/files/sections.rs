@@ -488,6 +488,8 @@ impl FilesSurface {
                     "files-sections-new-chat",
                     icons::PLUS,
                     "New side chat",
+                    // slopty: ⌘; starts one from anywhere in the chat.
+                    Some(Box::new(crate::shell::NewSideChat)),
                     theme,
                 )
                 .on_click(cx.listener(|_, _, _, cx| {
@@ -500,6 +502,7 @@ impl FilesSurface {
                     "files-sections-fork",
                     icons::FORK,
                     "Fork this chat",
+                    None,
                     theme,
                 )
                 .on_click(cx.listener(|_, _, _, cx| {
@@ -834,8 +837,10 @@ fn header_action(
     id: &'static str,
     icon_path: &'static str,
     label: &'static str,
+    action: Option<Box<dyn gpui::Action>>,
     theme: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
+    use crate::settings::widgets::{Keys, action_tooltip, text_tooltip};
     div()
         .id(id)
         .role(gpui::Role::Button)
@@ -849,7 +854,12 @@ fn header_action(
         .cursor_pointer()
         .hover(|s| s.bg(crate::theme::wash(0.09)))
         .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
-        .tooltip(crate::settings::widgets::text_tooltip(label))
+        .map(|el| match action {
+            Some(action) => el
+                .aria_keyshortcuts(crate::keys::aria_combo(crate::shell::NEW_SIDE_CHAT_KEY))
+                .tooltip(action_tooltip(label, Keys::Action(action))),
+            None => el.tooltip(text_tooltip(label)),
+        })
         .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
         // Icons take their color on the element itself, never inherited.
         .child(

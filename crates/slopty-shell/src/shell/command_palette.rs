@@ -318,7 +318,7 @@ impl Tab {
     fn label(self) -> &'static str {
         match self {
             Self::All => "All",
-            Self::Threads => "Threads",
+            Self::Threads => "Chats", // slopty
             Self::Commands => "Commands",
             Self::Files => "Files",
         }
@@ -358,12 +358,13 @@ impl Section {
         match self {
             Self::RecentFiles => "Recent Files",
             Self::QuickActions => "Quick Actions",
-            Self::RecentThreads => "Recent Threads",
-            Self::Threads => "Threads",
+            // slopty: one name for a conversation, "chat" (M17).
+            Self::RecentThreads => "Recent Chats",
+            Self::Threads => "Chats",
             Self::Commands => "Commands",
             Self::Files => "Files",
             Self::InFiles => "In Files",
-            Self::InThreads => "In Threads",
+            Self::InThreads => "In Chats",
         }
     }
 }
@@ -376,6 +377,9 @@ enum Command {
     Settings,
     Theme(AppearanceMode),
     ArchiveThread,
+    /// slopty: a command of the menu bar's table (`app_menus::window_commands`), dispatched as
+    /// its key would.
+    Window(crate::app_menus::WindowCommand),
 }
 
 impl Command {
@@ -384,11 +388,12 @@ impl Command {
             Self::NewChat => "New chat",
             Self::NewProject => "New project",
             Self::ResumeSession => super::past_sessions::RESUME, // slopty
-            Self::Settings => "Open settings",
+            Self::Settings => "Settings", // slopty: the name its menu and button use
             Self::Theme(AppearanceMode::System) => "Switch to system theme",
             Self::Theme(AppearanceMode::Light) => "Switch to light theme",
             Self::Theme(AppearanceMode::Dark) => "Switch to dark theme",
-            Self::ArchiveThread => "Archive thread",
+            Self::ArchiveThread => "Archive chat", // slopty
+            Self::Window(command) => command.label,
         }
     }
 
@@ -400,6 +405,7 @@ impl Command {
             Self::Settings => icons::SETTINGS,
             Self::Theme(mode) => mode.icon(),
             Self::ArchiveThread => icons::ARCHIVE_MINIMALISTIC,
+            Self::Window(command) => command.icon,
         }
     }
 }
@@ -485,8 +491,9 @@ fn matches_query(query: &str, text: &str) -> bool {
     query.split_whitespace().all(|word| text.contains(word))
 }
 
-/// `can_archive`: a focused, unarchived chat exists for Archive thread.
-fn commands_for(query: &str, is_dark: bool, can_archive: bool) -> Vec<Command> {
+/// `can_archive`: a focused, unarchived chat exists for Archive chat. slopty: `window` adds the
+/// menu bar's commands (the Commands tab, or any search).
+fn commands_for(query: &str, is_dark: bool, can_archive: bool, window: bool) -> Vec<Command> {
     [
         Command::NewChat,
         Command::NewProject,
@@ -500,6 +507,11 @@ fn commands_for(query: &str, is_dark: bool, can_archive: bool) -> Vec<Command> {
     ]
     .into_iter()
     .chain(can_archive.then_some(Command::ArchiveThread))
+    .chain(
+        crate::app_menus::window_commands()
+            .filter(|_| window)
+            .map(Command::Window),
+    )
     .filter(|command| matches_query(query, command.label()))
     .collect()
 }
@@ -802,9 +814,11 @@ impl Shell {
         let query = palette.search.read(cx).text().trim().to_lowercase();
         let can_archive = self.state.read(cx).archivable_selected_chat().is_some();
         let commands = |section| {
+            // slopty: the short list leads an empty All tab; Commands and a search hold them all.
+            let window = section == Section::Commands || !query.is_empty();
             PaletteSection::new(
                 section,
-                commands_for(&query, Theme::of(cx).appearance.is_dark(), can_archive)
+                commands_for(&query, Theme::of(cx).appearance.is_dark(), can_archive, window)
                     .into_iter()
                     .map(RowKind::Command),
             )
@@ -933,7 +947,7 @@ impl Shell {
                 let words = in_threads(THREADS_TAB_LIMIT, &titled(&threads));
                 vec![threads, words]
             }
-            (Tab::Commands, true) => vec![commands(Section::QuickActions)],
+            (Tab::Commands, true) => vec![commands(Section::Commands)], // slopty: all of them
             (Tab::Commands, false) => vec![commands(Section::Commands)],
             (Tab::Files, true) => vec![recent_files(FILES_TAB_LIMIT)],
             (Tab::Files, false) => vec![files(FILES_TAB_LIMIT), in_files(CONTENT_TAB_LIMIT)],
@@ -984,7 +998,7 @@ impl Shell {
                     })
                     .unwrap_or_default();
                 let fields = thread_search::ThreadFields {
-                    title: chat.title.as_deref().unwrap_or("New session"),
+                    title: chat.title.as_deref().unwrap_or("New chat"),
                     project: state
                         .space_for_chat(chat)
                         .map(|s| s.display_name())
@@ -1079,6 +1093,10 @@ impl Shell {
             RowKind::Command(Command::Settings) => self.open_last_settings(cx),
             RowKind::Command(Command::Theme(_)) => unreachable!(),
             RowKind::Command(Command::ArchiveThread) => self.archive_selected_chat(cx),
+            // slopty: after the palette closed, so the key's handler sees the window as it is.
+            RowKind::Command(Command::Window(command)) => {
+                window.dispatch_action((command.action)(), cx)
+            }
             RowKind::Chat(id) => self.open_chat(id, cx),
             RowKind::ChatWords(found) => self.open_chat(found.chat_id, cx), // slopty
             RowKind::File { path, is_dir } => {
@@ -1123,22 +1141,25 @@ impl Shell {
         self.add_file_surface_at(owner, path, location, window, cx);
     }
 
-    fn command_shortcut(&self, command: &Command) -> Option<String> {
+    fn command_shortcut(&self, command: &Command, cx: &App) -> Option<String> {
         let id = match command {
             Command::NewChat => ShortcutId::NewSession,
             Command::NewProject => ShortcutId::NewProject,
             Command::ResumeSession => ShortcutId::ResumeSession, // slopty
-            Command::Settings => return Some(crate::settings::badge_combo("mod-,")),
+            Command::Settings => return Some(crate::keys::combo_text("mod-,").to_string()),
             Command::ArchiveThread => ShortcutId::ArchiveSession,
             Command::Theme(_) => return None,
+            // slopty: the key the keymap holds for it now.
+            Command::Window(command) => {
+                return crate::keys::for_action_anywhere((command.action)().as_ref(), cx)
+                    .map(|keys| keys.to_string());
+            }
         };
         let combo = self.settings.keymap.get(id);
         let valid = Keystroke::parse(&platform_combo(combo)).is_ok();
-        Some(crate::settings::badge_combo(if valid {
-            combo
-        } else {
-            id.default_combo()
-        }))
+        Some(
+            crate::keys::combo_text(if valid { combo } else { id.default_combo() }).to_string(),
+        )
     }
 
     fn render_palette_row(
@@ -1153,7 +1174,7 @@ impl Shell {
         Some(match &row.kind {
             RowKind::Command(command) => {
                 let label = command.label();
-                let shortcut = self.command_shortcut(command);
+                let shortcut = self.command_shortcut(command, cx);
                 let target = row.clone();
                 popover::menu_row(theme, active, format!("command-action-{ix}"))
                     .id(("command-action", ix))
@@ -1281,7 +1302,7 @@ impl Shell {
                 let state = self.state.read(cx);
                 let chat = state.chats.iter().find(|chat| chat.id == found.chat_id)?;
                 let title: SharedString =
-                    transcript::single_line(chat.title.as_deref().unwrap_or("New session")).into();
+                    transcript::single_line(chat.title.as_deref().unwrap_or("New chat")).into();
                 let harness = chat.config.as_ref().map(|config| config.harness);
                 let who = if found.agent { "Agent:" } else { "You:" };
                 let target = row.clone();
@@ -1350,7 +1371,7 @@ impl Shell {
                     .flatten();
                 self.render_chat_row(
                     id.clone(),
-                    transcript::single_line(chat.title.as_deref().unwrap_or("New session")).into(),
+                    transcript::single_line(chat.title.as_deref().unwrap_or("New chat")).into(),
                     format_time_ago(chat.last_message_at.unwrap_or(chat.created_at), Utc::now())
                         .into(),
                     folder.into(),
@@ -1463,7 +1484,7 @@ impl Shell {
             .border_b_1()
             .border_color(crate::theme::hairline(0.06))
             .children(Tab::ALL.into_iter().map(|tab| {
-                let combo = crate::settings::badge_combo(&format!("mod-{}", tab.index() + 1));
+                let combo = crate::keys::combo_text(&format!("mod-{}", tab.index() + 1));
                 // The app's tab chip (right-pane surfaces, PR board), not a
                 // menu row: its height, type and washes.
                 crate::surface_chrome::tab(("command-tab", tab.index()), tab == current_tab, &theme)
@@ -1529,14 +1550,14 @@ impl Shell {
             .child(palette_header(
                 &theme,
                 search.into_any_element(),
-                popover::kbd_hint(&theme, &crate::settings::badge_combo("mod-k")),
+                popover::kbd_hint(&theme, &crate::keys::combo_text("mod-k")),
             ))
             .child(tabs)
             .child(body)
             .child(
                 palette_footer()
                     .child(command_key_hint(&theme, "↑ ↓", "Navigate"))
-                    .child(command_key_hint(&theme, "↵", "Open"))
+                    .child(command_key_hint(&theme, "⏎", "Open"))
                     .child(command_key_hint(&theme, "Esc", "Close")),
             );
         Some(palette_overlay(viewport, card))
@@ -1720,7 +1741,7 @@ pub(super) fn command_key_hint(theme: &Theme, keys: &str, label: &'static str) -
     };
     let cap = popover::key_cap(theme);
     let cap = match keys {
-        "↵" => cap.child(glyph(crate::icons::RETURN)),
+        "⏎" => cap.child(glyph(crate::icons::RETURN)),
         "←" => cap.child(glyph(crate::icons::ARROW_LEFT)),
         "↑ ↓" => cap
             .child(glyph(crate::icons::ARROW_UP))
@@ -2018,9 +2039,9 @@ mod tests {
 
     #[test]
     fn archive_is_offered_only_with_a_focused_chat() {
-        assert!(!commands_for("archive", true, false).contains(&Command::ArchiveThread));
+        assert!(!commands_for("archive", true, false, false).contains(&Command::ArchiveThread));
         assert_eq!(
-            commands_for("archive", true, true),
+            commands_for("archive", true, true, false),
             vec![Command::ArchiveThread]
         );
     }
@@ -3172,7 +3193,7 @@ mod tests {
     #[test]
     fn action_search_hides_empty_section_and_preserves_order() {
         assert_eq!(
-            commands_for("", true, false),
+            commands_for("", true, false, false),
             vec![
                 Command::NewChat,
                 Command::NewProject,
@@ -3182,36 +3203,49 @@ mod tests {
             ]
         );
         assert_eq!(
-            commands_for("new", true, false),
+            commands_for("new", true, false, false),
             vec![Command::NewChat, Command::NewProject]
         );
         assert_eq!(
-            commands_for("settings", true, false),
+            commands_for("settings", true, false, false),
             vec![Command::Settings]
         );
         assert_eq!(
-            commands_for("theme", true, false),
+            commands_for("theme", true, false, false),
             vec![Command::Theme(AppearanceMode::Light)]
         );
-        assert!(commands_for("deployment", true, false).is_empty());
+        assert!(commands_for("deployment", true, false, false).is_empty());
+    }
+
+    #[test]
+    fn the_palette_holds_the_menu_bars_commands() {
+        let labels = |query| {
+            commands_for(query, true, false, true)
+                .iter()
+                .map(Command::label)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(labels("side pane"), ["Toggle side pane", "Expand side pane"]);
+        assert_eq!(labels("reopen"), ["Reopen closed tab"]);
+        assert!(commands_for("side pane", true, false, false).is_empty());
     }
 
     #[test]
     fn theme_action_targets_the_opposite_resolved_appearance() {
         assert_eq!(
-            commands_for("theme", true, false),
+            commands_for("theme", true, false, false),
             vec![Command::Theme(AppearanceMode::Light)]
         );
         assert_eq!(
-            commands_for("theme", false, false),
+            commands_for("theme", false, false, false),
             vec![Command::Theme(AppearanceMode::Dark)]
         );
         assert_eq!(
-            commands_for("light", true, false),
+            commands_for("light", true, false, false),
             vec![Command::Theme(AppearanceMode::Light)]
         );
         assert_eq!(
-            commands_for("dark", false, false),
+            commands_for("dark", false, false, false),
             vec![Command::Theme(AppearanceMode::Dark)]
         );
     }

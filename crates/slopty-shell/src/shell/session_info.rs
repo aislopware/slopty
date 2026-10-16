@@ -32,6 +32,11 @@ pub(super) fn session_card_reserve(main: f32, transcript: f32) -> Option<f32> {
 
 /// A non-interactive card row: icon slot, label, optional trailing detail.
 fn info_row(theme: &Theme, glyph: AnyElement, label: SharedString) -> gpui::Div {
+    info_row_with(theme, glyph, div().flex_1().min_w_0().truncate().child(label))
+}
+
+/// slopty: [`info_row`] around a caller-drawn label (a branch cut in the middle).
+fn info_row_with(theme: &Theme, glyph: AnyElement, label: impl IntoElement) -> gpui::Div {
     div()
         .flex()
         .flex_row()
@@ -42,8 +47,11 @@ fn info_row(theme: &Theme, glyph: AnyElement, label: SharedString) -> gpui::Div 
         .text_size(crate::typography::ui_rems(13.0))
         .text_color(theme.text)
         .child(popover::picker_icon_slot(glyph))
-        .child(div().flex_1().min_w_0().truncate().child(label))
+        .child(label)
 }
+
+/// How much of a branch's end always shows.
+const BRANCH_TAIL: usize = 14;
 
 fn row_glyph(path: &'static str, theme: &Theme) -> AnyElement {
     icon(path)
@@ -187,17 +195,22 @@ impl Shell {
         };
 
         // ── Where it runs.
-        let device_row = info_row(
+        // slopty: a long machine name shows whole in its tooltip.
+        let device_row = info_row_with(
             &theme,
             row_glyph(if local { icons::LAPTOP } else { icons::MONITOR }, &theme),
-            device,
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .child(crate::settings::widgets::truncate_with_tip("session-info-device", device)),
         )
         .when(!online, |row| {
             row.child(
                 icon(icons::WIFI_OFF)
                     .size(px(12.0))
                     .flex_none()
-                    .text_color(theme.warning.opacity(0.8)),
+                    .text_color(theme.text_muted), // slopty: offline is quiet
             )
         });
         let project_row = match project {
@@ -212,10 +225,18 @@ impl Shell {
             None => info_row(&theme, row_glyph(icons::HOME, &theme), "No project".into())
                 .into_any_element(),
         };
+        // slopty: a long branch keeps its end, where branches differ; whole in its tooltip.
         let branch_row = branch.map(|branch| {
-            info_row(&theme, row_glyph(icons::GIT_BRANCH, &theme), branch.clone())
-                .id("session-info-branch")
-                .tooltip(crate::settings::widgets::text_tooltip(branch))
+            info_row_with(
+                &theme,
+                row_glyph(icons::GIT_BRANCH, &theme),
+                div().flex_1().min_w_0().flex().child(crate::settings::widgets::middle_truncate(
+                    "session-info-branch-name",
+                    branch,
+                    BRANCH_TAIL,
+                )),
+            )
+            .id("session-info-branch")
         });
 
         // ── This conversation.

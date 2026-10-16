@@ -52,7 +52,7 @@ use crate::settings::{
     self, CHAT_PANEL_MIN, ComposerSendBehavior, FILES_PANEL_MIN, JUMP_SLOTS, KeymapConfig,
     RIGHT_PANE_MIN, SIDEBAR_DEFAULT, SIDEBAR_MAX, SIDEBAR_MIN, SavePolicy, ShortcutId,
     SidebarOrganization, TERMINAL_DEFAULT_HEIGHT, TERMINAL_MAX_VH,
-    TERMINAL_MIN_HEIGHT, UiSettings, badge_combo, jump_hints_visible, modifier_send_hint_visible,
+    TERMINAL_MIN_HEIGHT, UiSettings, jump_hints_visible, modifier_send_hint_visible,
     platform_combo, sidebar_pin_profile_key,
 };
 use crate::state::{
@@ -60,6 +60,7 @@ use crate::state::{
     format_time_ago, // slopty: no accounts, sync or sign-in.
 };
 use crate::terminal::panel::{TerminalPanel, ToggleTerminal, clamp_terminal_height};
+use crate::settings::widgets::{ActionHint as _, Keys}; // slopty: tooltips with their key
 use crate::theme::Theme;
 use crate::transcript::{self, Transcript, TranscriptEvent};
 
@@ -96,11 +97,17 @@ mod mod_panes; // slopty: a mod's pane as a tab (S2)
 mod page_panes; // slopty: a page an agent showed, as a tab (M)
 mod compact; // slopty: the phone's anatomy
 mod chrome_keys; // slopty: find, history, tab and picker keys, and undoing an archive
+// slopty: the window's own commands, for the menu bar (`app_menus`).
+pub use chrome_keys::{
+    NavigateBack, NavigateForward, NewRightTab, OpenIn, ReopenClosedTab, ToggleExpandPane,
+    ToggleSessionInfo,
+};
 mod closed_tabs; // slopty: the right pane's closed tabs, opened again
 mod open_in; // slopty: a chat's folder in the person's editor
 mod subagent_drill; // slopty: a subagent drilled into from its card
 mod terminal_runs; // slopty: a transcript's Run in the chat's own shell terminal
 mod past_sessions; // slopty: Claude Code's past sessions: History, and Resume a session…
+pub mod agent_ui; // slopty: an agent drives this window (`slopty ui`)
 // slopty: voice removed.
 
 use spaces::{AddSpaceFlow, RenameSpaceDialog};
@@ -134,9 +141,13 @@ actions!(
         OpenSettings,
         NextSession,
         PrevSession,
-        ArchiveSession
+        ArchiveSession,
+        NewSideChat // slopty: ⌘; starts a side chat of the open chat (Claude desktop's key).
     ]
 );
+
+/// slopty: the fixed key for [`NewSideChat`], which the Chats header's "+" also names.
+pub const NEW_SIDE_CHAT_KEY: &str = "mod-;";
 
 /// Restore a default focus only after an in-flight handoff has had a frame to
 /// claim the window. A synchronous focus-lost fallback can otherwise steal
@@ -221,11 +232,24 @@ const CHAT_MENU_ROW_TAB: u8 = 5;
 const CHAT_MENU_ROW_OPEN_IN: u8 = 16; // slopty: past the tab rows
 
 #[derive(Clone, Copy)]
-enum TabCloseAction {
+pub(crate) enum TabCloseAction {
     This,
     Others,
     Left,
     Right,
+}
+
+impl TabCloseAction {
+    /// slopty: whether it closes the tab at `i` when asked from the tab at `index` (the side
+    /// pane's strip and the terminal's share it).
+    pub(crate) fn takes(self, i: usize, index: usize) -> bool {
+        match self {
+            Self::This => i == index,
+            Self::Others => i != index,
+            Self::Left => i < index,
+            Self::Right => i > index,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -503,8 +527,14 @@ pub fn apply_keymap(
             None,
         ),
     ]);
+    // slopty: ⌘; starts a side chat of the open chat, as Claude desktop's does.
+    cx.bind_keys([KeyBinding::new(&platform_combo(NEW_SIDE_CHAT_KEY), NewSideChat, None)]);
     crate::browser::bind_keys(cx, keymap);
+    // slopty: the files surface's and the diff's fixed keys, in their own contexts.
+    crate::files::bind_keys(cx);
+    crate::changes::bind_keys(cx);
     chrome_keys::bind_keys(cx, keymap); // slopty: find, history, tab, picker and undo keys
+    crate::terminal::panel::bind_keys(cx); // slopty: ⌘T in the terminal panel
     // ⌘1..⌘9 open the sidebar's first nine rows. A slot left unbound (an empty
     // combo in a hand-edited file) binds nothing rather than falling back —
     // the user cleared it on purpose.
@@ -1099,6 +1129,29 @@ pub(crate) fn sidebar_faded_label(
     fill: bool,
     label: impl IntoElement,
 ) -> impl IntoElement {
+    sidebar_faded_label_clear(id, fill, 0.0, label)
+}
+
+/// slopty: the window's cursor while a drag runs, wherever the pointer is (Zed's
+/// `pane_group.rs`): a resize that outruns its handle keeps its cursor.
+fn drag_cursor(style: gpui::CursorStyle) -> impl IntoElement {
+    gpui::canvas(|_, _, _| {}, move |_, _, window, _| window.set_window_cursor_style(style))
+        .absolute()
+        .size_0()
+}
+
+/// slopty: how far the hovered row's archive pill reaches into the label beside its corner:
+/// "Unarchive" (about 71 px with its glyph) past the corner's 4 px overhang, the narrowest
+/// resting corner ("3m", 12 px) and the line's 8 px gap.
+const ARCHIVE_PILL_CLEAR: f32 = 48.0;
+
+/// slopty: [`sidebar_faded_label`] keeping its last `clear` px empty, for a pill laid over it.
+pub(crate) fn sidebar_faded_label_clear(
+    id: SharedString,
+    fill: bool,
+    clear: f32,
+    label: impl IntoElement,
+) -> impl IntoElement {
     let overflow = gpui::ScrollHandle::new();
     crate::edge_fade::edge_faded(
         20.0,
@@ -1116,6 +1169,7 @@ pub(crate) fn sidebar_faded_label(
     )
     .fade_right(true)
     .fade_label_overflow(&overflow)
+    .clear_right(clear)
 }
 /// Square action beside the account trigger in the sidebar footer.
 const SIDEBAR_FOOTER_ACTION_SIZE: f32 = SIDEBAR_FOOTER_BUTTON_SIZE;
@@ -1342,27 +1396,7 @@ impl Render for SurfaceTabGhost {
     }
 }
 
-struct SurfaceTabTooltip {
-    text: SharedString,
-}
-
-impl Render for SurfaceTabTooltip {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::of(cx);
-        let card = div()
-            .max_w(px(380.0))
-            .px(px(9.0))
-            .py(px(6.0))
-            .rounded(px(6.0))
-            .border_1()
-            .border_color(theme.border)
-            .bg(crate::popover::surface_bg(theme))
-            .text_size(px(10.5))
-            .text_color(theme.text_muted)
-            .child(self.text.clone());
-        crate::frost::frosted(6.0, crate::frost::MENU_BLUR, card)
-    }
-}
+// slopty: a tab's tooltip is the house chip (`settings::widgets::text_tooltip`).
 /// Drag marker for the terminal-panel height handle.
 struct TerminalResize;
 
@@ -1373,6 +1407,15 @@ struct DragGhost;
 impl Render for DragGhost {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         Empty
+    }
+}
+
+/// slopty: a [`DragGhost`] that holds the closed hand for the whole drag of a chat row.
+struct GrabGhost;
+
+impl Render for GrabGhost {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        drag_cursor(gpui::CursorStyle::ClosedHand)
     }
 }
 
@@ -3860,15 +3903,7 @@ impl Shell {
         };
         tabs.into_iter()
             .enumerate()
-            .filter_map(|(i, tab)| {
-                let close = match action {
-                    TabCloseAction::This => i == index,
-                    TabCloseAction::Others => i != index,
-                    TabCloseAction::Left => i < index,
-                    TabCloseAction::Right => i > index,
-                };
-                close.then_some(tab)
-            })
+            .filter_map(|(i, tab)| action.takes(i, index).then_some(tab))
             .collect()
     }
 
@@ -5208,7 +5243,7 @@ impl Shell {
             return;
         }
         let input = cx.new(|cx| {
-            ComposerInput::new("Session title", cx)
+            ComposerInput::new("Chat title", cx)
                 .with_single_line()
                 .with_text_metrics(13.0, 17.0)
                 .with_accessibility_role(gpui::Role::TextInput)
@@ -6019,14 +6054,21 @@ impl Shell {
                         self.reduced_motion,
                     ),
                     false,
-                    16.0,
+                    14.0, // slopty: a 24 control holds a 14 glyph
                     theme.text_muted,
                 ),
-                ShortcutId::ToggleSidebar.label(),
                 &theme,
                 cx.listener(|this, _, _, cx| this.toggle_sidebar(cx)),
+            )
+            // slopty: what it does now, and its key.
+            .action_hint(
+                if self.settings.sidebar_collapsed { "Show sidebar" } else { "Hide sidebar" },
+                Keys::Action(Box::new(ToggleSidebar)),
+                cx,
             ))
-            .child(
+            .child({
+                let back = cx.listener(|this, _, _, cx| this.navigate_back(cx));
+                let forward = cx.listener(|this, _, _, cx| this.navigate_forward(cx));
                 div()
                     .ml(px(TITLEBAR_GROUP_GAP))
                     .flex()
@@ -6037,31 +6079,37 @@ impl Shell {
                         "nav-back",
                         icons::ARROW_LEFT,
                         "Back",
+                        Keys::Action(Box::new(chrome_keys::NavigateBack)),
                         can_back,
                         &theme,
-                        cx.listener(|this, _, _, cx| this.navigate_back(cx)),
+                        back,
+                        cx,
                     ))
                     .child(nav_history_button(
                         "nav-forward",
                         icons::ARROW_RIGHT,
                         "Forward",
+                        Keys::Action(Box::new(chrome_keys::NavigateForward)),
                         can_forward,
                         &theme,
-                        cx.listener(|this, _, _, cx| this.navigate_forward(cx)),
-                    )),
-            )
+                        forward,
+                        cx,
+                    ))
+            })
             .children(show_plus.then(|| {
                 div()
                     .flex_none()
                     .ml(px(TITLEBAR_GROUP_GAP))
                     .opacity(plus_alpha)
-                    .child(window_control_button(
-                        "titlebar-new-session",
-                        icons::PLUS,
-                        ShortcutId::NewSession.label(),
-                        &theme,
-                        cx.listener(|this, _, _, cx| this.open_new_session(None, cx)),
-                    ))
+                    .child(
+                        window_control_button(
+                            "titlebar-new-session",
+                            icons::PLUS,
+                            &theme,
+                            cx.listener(|this, _, _, cx| this.open_new_session(None, cx)),
+                        )
+                        .action_hint("New chat", Keys::Action(Box::new(NewSession)), cx),
+                    )
             }))
             .into_any_element()
     }
@@ -6832,10 +6880,11 @@ impl Shell {
                 state.send_undelivered(&id, now),
             )
         };
+        // slopty: a queued send is routine, so it is muted and wears the clock; amber is "needs you".
         let status_color = if undelivered {
             theme.danger
         } else if queued {
-            theme.warning
+            theme.text_muted
         } else {
             spaces::status_dot_color(status, theme)
         };
@@ -6940,6 +6989,38 @@ impl Shell {
                 .into_any_element()
         });
         let compact_jump_label = compact.then(|| jump_label.clone()).flatten();
+        // slopty: the archive pill lays over the corner's right end while the row is hovered, so
+        // the status or time under it keeps its width and the title never re-truncates (M12).
+        let show_pill = corner_hovered && !compact && jump_label.is_none();
+        let archive_pill = show_pill.then(|| {
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(4.0))
+                .h(px(18.0))
+                .px(px(4.0))
+                .rounded(px(5.0))
+                .bg(crate::theme::wash(0.10))
+                .hover(|s| s.bg(crate::theme::wash(0.18)))
+                .child(
+                    icon(if archived {
+                        icons::ARCHIVE_UP_MINIMALISTIC
+                    } else {
+                        icons::ARCHIVE_MINIMALISTIC
+                    })
+                    .size(px(11.0))
+                    .flex_none()
+                    .text_color(theme.text_muted),
+                )
+                .child(
+                    div()
+                        .whitespace_nowrap()
+                        .text_size(crate::typography::ui_rems(10.0))
+                        .text_color(theme.text_muted)
+                        .child(SharedString::from(if archived { "Unarchive" } else { "Archive" })),
+                )
+        });
         let corner_body: AnyElement = if let Some(label) = jump_label.filter(|_| !compact) {
             // The jump hint replaces the status/time corner while the modifier
             // is held, in the shared legend voice (the compact rows' plain
@@ -6952,47 +7033,6 @@ impl Shell {
                 .text_color(theme.text_muted.opacity(0.5))
                 .child(label)
                 .into_any_element()
-        } else if corner_hovered {
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(4.0))
-                .h(px(18.0))
-                .when(!compact, |el| {
-                    el.px(px(4.0))
-                        .mr(px(-4.0))
-                        .rounded(px(5.0))
-                        .bg(crate::theme::wash(0.10))
-                        .hover(|s| s.bg(crate::theme::wash(0.18)))
-                })
-                .child(
-                    icon(if archived {
-                        icons::ARCHIVE_UP_MINIMALISTIC
-                    } else {
-                        icons::ARCHIVE_MINIMALISTIC
-                    })
-                    .size(px(if compact {
-                        SIDEBAR_ACTIVE_HARNESS_ICON_SIZE
-                    } else {
-                        11.0
-                    }))
-                    .flex_none()
-                    .text_color(theme.text_muted),
-                )
-                .when(!compact, |el| {
-                    el.child(
-                        div()
-                            .text_size(crate::typography::ui_rems(10.0))
-                            .text_color(theme.text_muted)
-                            .child(SharedString::from(if archived {
-                                "Unarchive"
-                            } else {
-                                "Archive"
-                            })),
-                    )
-                })
-                .into_any_element()
         } else if compact {
             // slopty: compact rows draw their own trailing cluster, the machine's kind in it.
             div().into_any_element()
@@ -7002,8 +7042,8 @@ impl Shell {
                     // Glyph slot: Working wears the preset's animated pixel
                     // glyph beside its label, Done wears the check, and the
                     // remaining statuses use a compact dot.
-                    let glyph: AnyElement = if waiting_self {
-                        // slopty: at rest on its own work.
+                    let glyph: AnyElement = if waiting_self || queued {
+                        // slopty: at rest on its own work, or a send waiting its turn.
                         icon(icons::CLOCK_CIRCLE)
                             .size(px(11.0))
                             .flex_none()
@@ -7044,7 +7084,17 @@ impl Shell {
                                 .flex_row()
                                 .items_center()
                                 .gap(px(4.0))
-                                .child(glyph)
+                                // slopty: one 11-square slot for every status's glyph, so each
+                                // word starts at one x.
+                                .child(
+                                    div()
+                                        .size(px(11.0))
+                                        .flex_none()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .child(glyph),
+                                )
                                 .child(
                                     div()
                                         .text_size(crate::typography::ui_rems(10.0))
@@ -7074,27 +7124,25 @@ impl Shell {
         // One stable wrapper across both states (identity keeps the hover
         // from flickering as the content swaps); the swap is driven by the
         // ROW's hover (user request — corner-only felt undiscoverable), but
-        // archiving only clicks on the corner itself, so the row's own click
+        // archiving only clicks on the pill itself, so the row's own click
         // stays the selector.
         let corner: AnyElement = {
             let archive_id = id.clone();
+            let archive_selector = format!("{row_id}-archive");
             div()
                 .id(SharedString::from(format!("{row_id}-corner")))
                 .debug_selector({
                     let row_id = row_id.clone();
                     move || format!("{row_id}-corner")
                 })
-                .aria_label(if corner_hovered {
-                    if archived { "Unarchive" } else { "Archive" }
+                .aria_label(if compact {
+                    "Chat actions" // slopty: the machine's kind trails the row itself
                 } else {
-                    if compact {
-                        "Session actions" // slopty: the machine's kind trails the row itself
-                    } else {
-                        status_label.unwrap_or("Idle")
-                    }
+                    status_label.unwrap_or("Idle")
                 })
                 .when(compact, |el| el.w(px(18.0)).justify_center())
                 .flex_none()
+                .relative()
                 // Pin the corner to line 1's text height so the archive pill
                 // (taller, padded) overflows vertically instead of growing the
                 // row — the swap must not shift the card's content.
@@ -7106,22 +7154,33 @@ impl Shell {
                 .h(px(14.0))
                 .flex()
                 .items_center()
-                .when(!preview, |el| el.cursor_pointer())
-                .when(corner_hovered, |el| {
-                    el.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                // slopty: the resting corner holds its width under the pill.
+                .child(div().when(show_pill, |el| el.opacity(0.0)).child(corner_body))
+                .children(archive_pill.map(|pill| {
+                    div()
+                        .id(SharedString::from(archive_selector.clone()))
+                        .debug_selector(move || archive_selector.clone())
+                        .absolute()
+                        .top_0()
+                        .right(px(-4.0))
+                        .h(px(14.0))
+                        .flex()
+                        .items_center()
+                        .role(gpui::Role::Button)
+                        .aria_label(if archived { "Unarchive chat" } else { "Archive chat" })
+                        .cursor_pointer()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(cx.listener(move |this, _, _, cx| {
                             cx.stop_propagation();
                             this.chat_hover_resync = true;
                             this.set_chat_archived(archive_id.clone(), !archived, cx);
                         }))
                         // Above the pill: below it the chip would cover the next row.
-                        .tooltip(crate::settings::widgets::text_tooltip_above(if archived {
-                            "Unarchive session"
-                        } else {
-                            ShortcutId::ArchiveSession.label()
-                        }))
-                })
-                .child(corner_body)
+                        .tooltip(archive_tooltip(archived, selected))
+                        .tooltip_placement(gpui::TooltipPlacement::Above)
+                        .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
+                        .child(pill)
+                }))
                 .into_any_element()
         };
         let mut corner = Some(corner);
@@ -7246,7 +7305,7 @@ impl Shell {
                         shell.begin_sidebar_session_transfer(payload, point, window, cx);
                     });
                     cx.stop_propagation();
-                    cx.new(|_| DragGhost)
+                    cx.new(|_| GrabGhost)
                 })
             })
             // A row revealed for an inline rename reports where it painted,
@@ -7314,9 +7373,10 @@ impl Shell {
                         // slopty: the machine's kind leads the place line, and stays when a
                         // waiting reason takes the place's words.
                         .children(machine.clone().map(|mark| machine_mark(mark, subline)))
-                        .child(sidebar_faded_label(
+                        .child(sidebar_faded_label_clear(
                             format!("chat-device-{content_id}").into(),
                             true,
+                            if show_pill { ARCHIVE_PILL_CLEAR } else { 0.0 },
                             // slopty: a waiting row says why in place of where; the hover card
                             // keeps the place.
                             match reason.clone() {
@@ -7373,9 +7433,10 @@ impl Shell {
                             input,
                             theme,
                         ),
-                        None => sidebar_faded_label(
+                        None => sidebar_faded_label_clear(
                             format!("chat-title-{content_id}").into(),
                             true,
+                            if show_pill && !show_label { ARCHIVE_PILL_CLEAR } else { 0.0 },
                             div()
                                 .text_size(crate::typography::ui_rems(13.0))
                                 .line_height(px(17.0))
@@ -7387,7 +7448,7 @@ impl Shell {
                     })
                     // slopty: the machine's kind trails the title when no place line shows.
                     .when_some(machine.clone().filter(|_| !compact && !show_label), |el, mark| {
-                        el.child(machine_mark(mark, subline))
+                        el.child(div().when(show_pill, |el| el.opacity(0.0)).child(machine_mark(mark, subline)))
                     })
                     .when(!compact && !show_label, |el| {
                         el.child(
@@ -7463,7 +7524,7 @@ impl Shell {
                                 .aria_label(if show_archive {
                                     if archived { "Unarchive" } else { "Archive" }
                                 } else {
-                                    "Session time"
+                                    "Chat time"
                                 })
                                 .when(show_archive, |el| {
                                     el.cursor_pointer()
@@ -7479,13 +7540,11 @@ impl Shell {
                                                 cx,
                                             );
                                         }))
-                                        .tooltip(crate::settings::widgets::text_tooltip_above(
-                                            if archived {
-                                                "Unarchive session"
-                                            } else {
-                                                ShortcutId::ArchiveSession.label()
-                                            },
-                                        ))
+                                        .tooltip(archive_tooltip(archived, selected))
+                        .tooltip_placement(gpui::TooltipPlacement::Above)
+                                        .tooltip_show_delay(
+                                            crate::settings::widgets::TOOLTIP_DELAY,
+                                        )
                                 })
                                 .child(if show_archive {
                                     icon(if archived {
@@ -7698,8 +7757,9 @@ impl Shell {
         let chat_state = chat.map(|c| c.sync_state);
         let (label, glyph): (SharedString, AnyElement) = match conn.state {
             _ if chat_state == Some(slopty_view_proto::ChatSyncState::StorageError) => (
+                // slopty: work may be lost: the failure's red, not the waiting amber.
                 "Changes could not be saved".into(),
-                div().size(px(5.0)).rounded_full().bg(theme.warning).into_any_element(),
+                div().size(px(5.0)).rounded_full().bg(theme.danger).into_any_element(),
             ),
             S::Disabled => return None,
             S::Connected => {
@@ -7712,12 +7772,13 @@ impl Shell {
                     ).into_any_element(),
                 )
             }
+            // slopty: offline is no alarm while sends are saved: the muted Wi-Fi-off mark.
             S::Offline => (
                 "Offline — sends are saved".into(),
-                div()
-                    .size(px(5.0))
-                    .rounded_full()
-                    .bg(theme.warning)
+                icon(icons::WIFI_OFF)
+                    .size(px(11.0))
+                    .flex_none()
+                    .text_color(theme.text_muted)
                     .into_any_element(),
             ),
             S::Reconnecting => (
@@ -8016,12 +8077,20 @@ impl Shell {
                 )
                 .into_any_element()
         } else {
+            // slopty: the empty list names the key that fills it (M16).
+            let combo = self.settings.keymap.get(ShortcutId::NewSession);
             div()
                 .px(px(Theme::SPACE_SM))
                 .pb(px(Theme::SPACE_SM))
+                .flex()
+                .items_center()
+                .gap(px(6.0))
                 .text_size(crate::typography::ui_rems(12.0))
                 .text_color(theme.text_faint)
-                .child(SharedString::from("No sessions yet"))
+                .child(SharedString::from("No chats yet"))
+                .when(!combo.is_empty(), |el| {
+                    el.child(popover::kbd_hint(theme, &crate::keys::combo_text(combo)))
+                })
                 .into_any_element()
         };
 
@@ -8302,9 +8371,10 @@ impl Shell {
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(theme.bg)
                     .child(div().w_full().text_center().child(initial))
-                    // slopty: the server's link: green while it is up, muted while it is down.
+                    // slopty: the server's link: no mark while it is up (zeron draws none), a
+                    // muted one while it is down.
                     .relative()
-                    .children(online.map(|online| {
+                    .children(online.filter(|online| !online).map(|_| {
                         div()
                             .absolute()
                             .right(px(-2.0))
@@ -8313,7 +8383,7 @@ impl Shell {
                             .rounded_full()
                             .border_1()
                             .border_color(theme.bg)
-                            .bg(if online { theme.success } else { theme.text_muted })
+                            .bg(theme.text_muted)
                     })),
             )
             .child(sidebar_faded_label(
@@ -8353,12 +8423,8 @@ impl Shell {
         // Settings is a toggle: while its page is up the button keeps the
         // hover wash + full-strength glyph, and a click returns to chat.
         let settings_open = matches!(self.route, Route::Settings(_));
-        let settings_tooltip: SharedString = match (settings_open, cfg!(target_os = "macos")) {
-            (false, true) => "Settings · ⌘,".into(),
-            (false, false) => "Settings · Ctrl+,".into(),
-            (true, true) => "Close settings · ⌘,".into(),
-            (true, false) => "Close settings · Ctrl+,".into(),
-        };
+        // slopty: its key is the keymap's, as every tooltip's is.
+        let settings_label = if settings_open { "Close settings" } else { "Settings" };
         // slopty: voice removed.
         div()
             .w_full()
@@ -8379,19 +8445,11 @@ impl Shell {
                             .id("settings-trigger")
                             .debug_selector(|| "settings-trigger".into())
                             .role(gpui::Role::Button)
-                            .aria_label(if settings_open {
-                                "Close settings"
-                            } else {
-                                "Settings"
-                            })
+                            .action_hint(settings_label, Keys::Action(Box::new(OpenSettings)), cx)
                             .aria_toggled(if settings_open {
                                 gpui::Toggled::True
                             } else {
                                 gpui::Toggled::False
-                            })
-                            .tooltip(move |_, cx| {
-                                let text = settings_tooltip.clone();
-                                cx.new(|_| SurfaceTabTooltip { text }).into()
                             })
                             .tab_index(0)
                             .size(px(SIDEBAR_FOOTER_BUTTON_SIZE))
@@ -8411,7 +8469,7 @@ impl Shell {
                                 )
                             })
                             .on_hover(motion::hover_listener("settings-trigger"))
-                            .focus_visible(|s| s.border_2().border_color(theme.accent))
+                            .map(|el| crate::surface_chrome::focus_ring(el, &theme))
                             .on_click(cx.listener(|this, _, _, cx| this.toggle_settings(cx)))
                             .child(icon(icons::SETTINGS).size(px(15.0)).text_color(
                                 if settings_open {
@@ -8604,6 +8662,13 @@ impl Shell {
                     .iter()
                     .any(|chat| chat.id == chat_id && chat.parent_chat_id.is_some());
             let is_pinned = self.active_sidebar_pins(cx).contains(&chat_id);
+            // slopty: a row names its key where the key would do the same, on the open chat
+            // and the tab in front (M16).
+            let is_open = matches!(self.route, Route::Chat)
+                && self.state.read(cx).selected_chat.as_deref() == Some(chat_id.as_str());
+            let archive_keys = is_open
+                .then(|| crate::keys::for_action(&ArchiveSession, None, window, cx))
+                .flatten();
             let rename_id = chat_id.clone();
             let pin_id = chat_id.clone();
             let archive_id = chat_id.clone();
@@ -8662,7 +8727,8 @@ impl Shell {
                                     .size(px(16.0))
                                     .text_color(theme.text_muted),
                             )
-                            .child(SharedString::from("Archive"));
+                            .child(div().flex_1().child(SharedString::from("Archive")))
+                            .children(archive_keys.map(|keys| popover::kbd_hint(&theme, &keys)));
                     let copy = self.render_chat_copy_trigger(&chat_id, copy_open, &theme, cx);
                     // slopty: the chat's folder in the person's editor (`open_in`).
                     let open_in = (Self::offers_open_in()
@@ -8705,6 +8771,12 @@ impl Shell {
                 if !chat_id.is_empty() {
                     menu = menu.child(popover::menu_separator());
                 }
+                // slopty: ⌘W closes the tab in front, so only its own row says so.
+                let in_front = self.panel_key(cx) == key
+                    && self.closable_right_surface(cx) == Some(surface);
+                let close_keys = in_front
+                    .then(|| crate::keys::for_action(&crate::app_menus::CloseTab, None, window, cx))
+                    .flatten();
                 for (ix, (action, label)) in [
                     (TabCloseAction::This, "Close tab"),
                     (TabCloseAction::Others, "Close other tabs"),
@@ -8716,9 +8788,15 @@ impl Shell {
                 {
                     let enabled = !self.tabs_to_close(surface, action, cx).is_empty();
                     let key = key.clone();
+                    let hint = matches!(action, TabCloseAction::This)
+                        .then(|| close_keys.clone())
+                        .flatten();
                     let row = popover::menu_row(&theme, false, label)
                             .id(SharedString::from(label))
-                            .when(!enabled, |el| el.opacity(0.4).cursor_default())
+                            .role(gpui::Role::MenuItem)
+                            .when(!enabled, |el| {
+                                el.opacity(crate::theme::DISABLED_OPACITY).cursor_default()
+                            })
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 if !enabled {
                                     return;
@@ -8730,13 +8808,39 @@ impl Shell {
                                     }
                                 }
                             }))
-                            .child(label);
+                            .child(div().flex_1().child(label))
+                            .children(hint.map(|hint| popover::kbd_hint(&theme, &hint)));
                     menu = menu.child(self.chat_menu_hover_row(
                         CHAT_MENU_ROW_TAB + ix as u8,
                         row,
                         cx,
                     ));
                 }
+                // slopty: the tab closed last comes back here as from ⇧⌘T.
+                let reopen_label = "Reopen closed tab";
+                let can_reopen = self.closed_tabs.iter().any(|(pane, _)| *pane == key);
+                let reopen_keys =
+                    crate::keys::for_action(&chrome_keys::ReopenClosedTab, None, window, cx);
+                let row = popover::menu_row(&theme, false, reopen_label)
+                    .id(SharedString::from(reopen_label))
+                    .role(gpui::Role::MenuItem)
+                    .when(!can_reopen, |el| {
+                        el.opacity(crate::theme::DISABLED_OPACITY).cursor_default()
+                    })
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if !can_reopen {
+                            return;
+                        }
+                        this.close_chat_menu(cx);
+                        this.reopen_closed_tab(window, cx);
+                    }))
+                    .child(div().flex_1().child(reopen_label))
+                    .children(reopen_keys.map(|keys| popover::kbd_hint(&theme, &keys)));
+                menu = menu.child(popover::menu_separator()).child(self.chat_menu_hover_row(
+                    CHAT_MENU_ROW_TAB + 4,
+                    row,
+                    cx,
+                ));
             }
             let menu = menu.into_any_element();
             overlays.push(popover::menu_at(
@@ -8770,10 +8874,10 @@ impl Shell {
                     .iter()
                     .find(|c| c.id == chat_id)
                     .and_then(|c| c.title.clone())
-                    .unwrap_or_else(|| "New session".into()),
+                    .unwrap_or_else(|| "New chat".into()),
             );
             let card = popover::dialog_card(&theme)
-                .child(popover::dialog_title(&theme, "Delete session?"))
+                .child(popover::dialog_title(&theme, "Delete chat?"))
                 .child(div().mt(px(6.0)).child(popover::dialog_body(
                     &theme,
                     format!("\u{201C}{title}\u{201D} will be permanently deleted. This can\u{2019}t be undone."),
@@ -8852,6 +8956,10 @@ impl Shell {
             .flex_none()
             .occlude()
             .cursor_col_resize()
+            // slopty: the resize cursor holds for the whole drag, past the handle and the clamp.
+            .when(self.pane_resize_dragging == Some(kind), |el| {
+                el.child(drag_cursor(gpui::CursorStyle::ResizeColumn))
+            })
             .on_hover(motion::hover_listener(fade_key))
             // Codex-style seam feedback: the existing 1px panel border stays
             // visible at rest; hover adds a stronger center highlight that
@@ -9240,9 +9348,12 @@ impl Shell {
                                     + composer.read(cx).dock_clearance_correction();
                                 let changed = (measured.get() - next_height).abs() > 0.5
                                     || measured_has_composer.get() != contains_composer;
-                                measured.set(next_height);
-                                measured_has_composer.set(contains_composer);
+                                // slopty: the Cell moves only with the frame it asks for, so a
+                                // sub-pixel drift never leaves a retained frame reading a height
+                                // its rebuild did not.
                                 if changed {
+                                    measured.set(next_height);
+                                    measured_has_composer.set(contains_composer);
                                     window.request_animation_frame();
                                 }
                             },
@@ -9407,6 +9518,10 @@ impl Shell {
             .w_full()
             .flex_none()
             .cursor_row_resize()
+            // slopty: the resize cursor holds for the whole drag, past the handle and the clamp.
+            .when(self.pane_resize_dragging == Some(PaneResizeKind::Terminal), |el| {
+                el.child(drag_cursor(gpui::CursorStyle::ResizeRow))
+            })
             .on_hover(motion::hover_listener(handle_key))
             .child(
                 div()
@@ -9489,6 +9604,10 @@ impl Shell {
     fn render_status_strip(&mut self, composer_width: f32, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
         let now = Utc::now();
+        // slopty: the composer's notices (a road, a usage limit, a queued send on the new-chat
+        // canvas, a fresh "Stopped") draw in this reserved strip, so neither the composer nor
+        // the transcript moves when one comes or goes (`composer::status_line`).
+        let line = self.composer.update(cx, |composer, cx| composer.status_line(cx));
         let state = self.state.read(cx);
 
         // Keep notices aligned with the current composer width, including
@@ -9503,7 +9622,8 @@ impl Shell {
             .items_center()
             .gap(px(Theme::SPACE_SM))
             .px(px(Theme::SPACE_LG + 8.0))
-            .text_size(crate::typography::ui_rems(11.0));
+            .text_size(crate::typography::ui_rems(11.0))
+            .children(line);
 
         let Some(chat_id) = state.selected_chat.clone() else {
             return strip.into_any_element();
@@ -9957,14 +10077,10 @@ impl Shell {
                 }),
             )
             .aria_label(accessible_label)
+            // slopty: the house tooltip chip, at the house delay.
             .when_some(detail, |chip, detail| {
-                chip.tooltip(move |_, cx| {
-                    cx.new(|_| SurfaceTabTooltip {
-                        text: detail.clone(),
-                    })
-                    .into()
-                })
-                .tooltip_show_delay(Duration::from_millis(350))
+                chip.tooltip(crate::settings::widgets::text_tooltip(detail))
+                    .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
             })
             .on_click(cx.listener(move |this, _, window, cx| {
                 cx.stop_propagation();
@@ -10097,10 +10213,22 @@ impl Shell {
                     cx.notify();
                 }
             }))
-            .tooltip(crate::settings::widgets::text_tooltip("New tab"))
+            // slopty: named with its key, out of the way while its menu is up; Tab reaches it,
+            // and its glyph is a 24 control's 14.
+            .role(gpui::Role::Button)
+            .tab_index(0)
+            .map(|el| crate::surface_chrome::focus_ring(el, &theme))
+            .active(|style| style.bg(theme_pressed()))
+            .map(|el| {
+                if plus_open {
+                    el.aria_label("New tab")
+                } else {
+                    el.action_hint("New tab", Keys::Action(Box::new(chrome_keys::NewRightTab)), cx)
+                }
+            })
             .child(
                 icon(icons::PLUS)
-                    .size(px(13.0))
+                    .size(px(14.0))
                     .text_color(theme.text_muted),
             );
         if plus_open {
@@ -10391,17 +10519,36 @@ fn grid_backdrop(theme: &Theme) -> AnyElement {
         .into_any_element()
 }
 
+// slopty: a row's archive pill names ⇧⌘A only on the open chat's row, the one the key archives.
+/// The tooltip of a sidebar row's archive pill, above it (below, it would cover the next row).
+fn archive_tooltip(
+    archived: bool,
+    open: bool,
+) -> impl Fn(&mut Window, &mut App) -> gpui::AnyView + 'static {
+    use crate::settings::widgets::{action_tooltip, text_tooltip};
+    let tooltip: Box<dyn Fn(&mut Window, &mut App) -> gpui::AnyView> = match (archived, open) {
+        (true, _) => Box::new(text_tooltip("Unarchive chat")),
+        (false, true) => Box::new(action_tooltip(
+            ShortcutId::ArchiveSession.label(),
+            Keys::Action(Box::new(ArchiveSession)),
+        )),
+        (false, false) => Box::new(text_tooltip(ShortcutId::ArchiveSession.label())),
+    };
+    move |window, cx| tooltip(window, cx)
+}
+
 /// A size-6 icon button for the titlebar strip (slopty window-controls.tsx:
 /// `grid size-6 place-items-center rounded-md text-muted-foreground`).
+// slopty: the caller names it with `action_hint` (its tooltip, key and accessible name).
 fn window_control_button(
     id: &'static str,
     icon_path: &'static str,
-    label: &'static str,
     theme: &Theme,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
-) -> impl IntoElement {
-    let glyph = icon(icon_path).size(px(16.0)).text_color(theme.text_muted);
-    window_control_button_with(id, glyph, label, theme, on_click)
+) -> gpui::Stateful<gpui::Div> {
+    // slopty: a 24 control holds a 14 glyph (M48).
+    let glyph = icon(icon_path).size(px(14.0)).text_color(theme.text_muted);
+    window_control_button_with(id, glyph, theme, on_click)
 }
 
 /// [`window_control_button`] around a caller-drawn glyph (the morphing
@@ -10409,10 +10556,9 @@ fn window_control_button(
 fn window_control_button_with(
     id: &'static str,
     glyph: impl IntoElement,
-    label: &'static str,
     theme: &Theme,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
-) -> impl IntoElement {
+) -> gpui::Stateful<gpui::Div> {
     let fade_key = format!("window-control-{id}");
     div()
         .id(id)
@@ -10424,11 +10570,12 @@ fn window_control_button_with(
         .justify_center()
         .rounded(px(6.0))
         .cursor_pointer()
-        // slopty window-controls.tsx: `transition-colors` — the wash fades.
+        // slopty window-controls.tsx: `transition-colors` — the wash fades; the header
+        // buttons' wash, so the strip's controls agree (M24).
         .bg(motion::hover_blend(
             &fade_key,
-            theme.glass_hover().opacity(0.0),
-            theme.glass_hover(),
+            crate::theme::wash(0.0),
+            crate::theme::wash(0.11),
         ))
         .on_hover(motion::hover_listener(fade_key))
         // Buttons in/over a titlebar drag strip must be EXCLUDED from the
@@ -10450,10 +10597,17 @@ fn window_control_button_with(
             on_click(event, window, cx)
         })
         .child(glyph)
-        .tooltip(crate::settings::widgets::text_tooltip(label))
-        // slopty: named for VoiceOver (and the simulator's e2e taps).
+        // slopty: a button for VoiceOver (and the simulator's e2e taps), reached by Tab, pressed
+        // with a darker wash, its ring a hairline that never resizes it.
         .role(gpui::Role::Button)
-        .aria_label(label)
+        .tab_index(0)
+        .map(|el| crate::surface_chrome::focus_ring(el, theme))
+        .active(|style| style.bg(theme_pressed()))
+}
+
+// slopty: what a pressed chrome button shows under the pointer (Zed's `active_background`).
+fn theme_pressed() -> gpui::Hsla {
+    crate::theme::wash(0.16)
 }
 
 const WINDOWS_CAPTION_BUTTON_WIDTH: f32 = 36.0;
@@ -10565,16 +10719,24 @@ fn linux_caption_button(
 /// A titlebar history button (slopty window-controls.tsx): enabled it is a
 /// normal window-control button; disabled it dims to 35% opacity and ignores
 /// the pointer (`disabled:pointer-events-none disabled:opacity-35`).
+// slopty: named with its key, and disabled it keeps its name, dimmed.
 fn nav_history_button(
     id: &'static str,
     icon_path: &'static str,
     label: &'static str,
+    keys: crate::settings::widgets::Keys,
     enabled: bool,
     theme: &Theme,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+    cx: &App,
 ) -> AnyElement {
+    use crate::settings::widgets::ActionHint as _;
     if !enabled {
         return div()
+            .id(id)
+            .debug_selector(move || id.to_owned())
+            .role(gpui::Role::Button)
+            .action_hint(label, keys, cx)
             .size(px(24.0))
             .flex_none()
             .flex()
@@ -10586,24 +10748,26 @@ fn nav_history_button(
             .child(
                 icon(icon_path)
                     .size(px(16.0))
-                    .text_color(theme.text_muted.opacity(0.35)),
+                    .text_color(theme.text_muted.opacity(crate::theme::DISABLED_OPACITY)),
             )
             .into_any_element();
     }
-    window_control_button(id, icon_path, label, theme, on_click).into_any_element()
+    window_control_button(id, icon_path, theme, on_click)
+        .action_hint(label, keys, cx)
+        .into_any_element()
 }
 
 /// A size-7 icon button for the main-panel header (slopty __root.tsx:
 /// `grid size-7 place-items-center rounded-md text-muted-foreground`).
+// slopty: the caller names it with `action_hint` (its tooltip, key and accessible name).
 fn header_icon_button(
     id: &'static str,
     icon_path: &'static str,
-    label: &'static str,
     theme: &Theme,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
 ) -> gpui::Stateful<gpui::Div> {
     let glyph = icon(icon_path).size(px(16.0)).text_color(theme.text_muted);
-    header_icon_button_with(id, glyph, label, on_click)
+    header_icon_button_with(id, glyph, theme, on_click)
 }
 
 /// [`header_icon_button`] around a caller-drawn glyph (the morphing sidebar
@@ -10611,7 +10775,7 @@ fn header_icon_button(
 fn header_icon_button_with(
     id: &'static str,
     glyph: impl IntoElement,
-    label: &'static str,
+    theme: &Theme,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
 ) -> gpui::Stateful<gpui::Div> {
     let fade_key = format!("header-icon-{id}");
@@ -10641,12 +10805,18 @@ fn header_icon_button_with(
             cx.stop_propagation();
             on_click(event, window, cx)
         })
-        .tooltip(crate::settings::widgets::text_tooltip(label))
+        // slopty: a button reached by Tab, its ring a hairline that never resizes it, pressed
+        // with a darker wash.
+        .role(gpui::Role::Button)
+        .tab_index(0)
+        .map(|el| crate::surface_chrome::focus_ring(el, theme))
+        .active(|style| style.bg(theme_pressed()))
         .child(glyph)
 }
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        popover::return_focus(window, cx); // slopty: a closed menu gives the keyboard back
         // Every repaint (state frame, input, or the clock firing) reschedules
         // the next clock-driven one; the sidebar and transcript follow this
         // view's notifications.
@@ -10821,6 +10991,7 @@ impl Render for Shell {
             self.button_layout_sub =
                 Some(cx.observe_button_layout_changed(window, |_, _, cx| cx.notify()));
         }
+        agent_ui::serve(window, cx); // slopty: this window takes agents' asks (`agent_ui`)
 
         if self.activation_sub.is_none() {
             self.activation_sub = Some(cx.observe_window_activation(
@@ -10895,6 +11066,11 @@ impl Render for Shell {
             })
             .text_color(text)
             .font_family(font)
+            // slopty: every text under the window draws a prompt's symbols (`symbol_fallbacks`).
+            .map(|mut el| {
+                el.text_style().font_fallbacks = Some(crate::typography::symbol_fallbacks());
+                el
+            })
             .text_size(crate::typography::ui_rems(14.0))
             .on_drag_move::<SidebarSessionDrag>(cx.listener(Self::contain_pinned_session_drag))
             .on_drop::<SidebarSessionDrag>(cx.listener(|this, _, _, cx| {
@@ -10993,6 +11169,12 @@ impl Render for Shell {
             // Chat-scoped like the panel toggles: Settings has no current
             // session to archive. Quiet under an open popover, like the other
             // session-nav shortcuts.
+            // slopty: ⌘; starts a side chat of the open chat, as the Chats header's "+" does.
+            .on_action(cx.listener(|this, _: &NewSideChat, _, cx| {
+                if matches!(this.route, Route::Chat) && !this.overlay_owns_keyboard(cx) {
+                    this.create_child_chat(None, cx);
+                }
+            }))
             .on_action(cx.listener(|this, _: &ArchiveSession, _, cx| {
                 if matches!(this.route, Route::Chat) && !this.overlay_owns_keyboard(cx) {
                     this.archive_selected_chat(cx)

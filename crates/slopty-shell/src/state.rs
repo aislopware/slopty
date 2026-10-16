@@ -485,9 +485,6 @@ pub struct AppState {
     /// This engine's device id (best-effort `LocalDevice` probe; `None` until
     /// the engine serves it — views degrade gracefully).
     pub local_device_id: Option<String>,
-    /// Device-local agent CLI update lifecycle. Unlike `ListHarnesses`, this
-    /// standing stream may be backed by subprocess and network probes.
-    pub harness_updates: Vec<slopty_view_proto::HarnessUpdateStatus>,
     /// Data directory (`ui-settings.json`, `composer-defaults.json`); set at
     /// bootstrap so child views can persist small preference files.
     pub data_dir: Option<PathBuf>,
@@ -597,7 +594,6 @@ impl AppState {
             review_comments: HashMap::new(),
             review_comment_flushes: HashMap::new(),
             local_device_id: None,
-            harness_updates: Vec::new(),
             data_dir: None,
             clock: ClockTransitions::default(),
             engine: None,
@@ -1143,17 +1139,6 @@ impl AppState {
             .and_then(|d| sorted.iter().find(|s| s.device_id == d).copied())
             .or_else(|| sorted.first().copied())
             .map(|s| s.id.clone())
-    }
-
-    pub fn apply_harness_updates(
-        &mut self,
-        statuses: Vec<slopty_view_proto::HarnessUpdateStatus>,
-    ) -> bool {
-        if self.harness_updates == statuses {
-            return false;
-        }
-        self.harness_updates = statuses;
-        true
     }
 
     pub fn apply_auth(&mut self, auth: AuthState) -> bool {
@@ -2234,14 +2219,9 @@ impl AppState {
         // baseline instead of comparing the new runtime with the old one.
         self.connectivity_observed = false;
         let engine_info = handle.engine_info();
-        let supports_harness_updates =
-            engine_info.supports(slopty_view_proto::capabilities::HARNESS_UPDATES_V1);
         self.workspace_scope = Some(engine_info.workspace_scope);
         self.local_device_id = Some(engine_info.device_id.clone());
         self.link_roots_revision = self.link_roots_revision.wrapping_add(1);
-        if !supports_harness_updates {
-            self.harness_updates.clear();
-        }
         self.engine = Some(handle.clone());
         // slopty: a call that runs long says so in a toast, until it answers.
         let slow = handle.slow_calls.lock().ok().and_then(|mut slow| slow.take());
@@ -2307,14 +2287,6 @@ impl AppState {
             ),
             spawn_local_device_probe(cx, handle.clone()),
         ]);
-        if supports_harness_updates {
-            watch_tasks.push(spawn_watch(
-                cx,
-                handle.clone(),
-                methods::WATCH_HARNESS_UPDATES,
-                AppState::apply_harness_updates,
-            ));
-        }
         self.watch_tasks = watch_tasks;
         self.reconcile_change_request_watches(cx);
         // EngineInfo is part of the attachment boundary: views must know which
@@ -4484,8 +4456,8 @@ mod tests {
     }
 
     #[test]
-    fn identical_transfer_auth_and_harness_frames_report_no_change() {
-        use slopty_view_proto::{HarnessUpdatePhase, HarnessUpdateStatus, TransferProgress};
+    fn identical_transfer_and_auth_frames_report_no_change() {
+        use slopty_view_proto::TransferProgress;
         let mut state = AppState::new();
         assert!(!state.apply_transfers(vec![]));
         let progress = |done| TransferProgress {
@@ -4510,25 +4482,6 @@ mod tests {
         assert!(state.apply_auth(AuthState::NeedsOrganization { user: user.clone() }));
         assert!(!state.apply_auth(AuthState::NeedsOrganization { user }));
         assert!(!state.apply_auth_value(serde_json::json!({ "bogus": true })));
-
-        let status = |phase| HarnessUpdateStatus {
-            harness: HarnessId::CODEX,
-            installed_version: Some("1.0".into()),
-            latest_version: Some("2.0".into()),
-            channel: None,
-            source: Default::default(),
-            policy: Default::default(),
-            phase,
-            progress: None,
-            checked_at: None,
-            error: None,
-            can_apply: true,
-            manual_command: None,
-        };
-        assert!(!state.apply_harness_updates(vec![]));
-        assert!(state.apply_harness_updates(vec![status(HarnessUpdatePhase::Available)]));
-        assert!(!state.apply_harness_updates(vec![status(HarnessUpdatePhase::Available)]));
-        assert!(state.apply_harness_updates(vec![status(HarnessUpdatePhase::Current)]));
     }
 
     #[test]

@@ -270,6 +270,15 @@ impl Dispatch for Link {
     async fn send_waiting(&self, key: Option<IdempotencyKey>, verb: Verb) -> Outcome {
         retried(key, verb, (self.patience, true), |key, verb| self.request(key, verb)).await
     }
+
+    /// The person's window is reached through this machine's worker, not the server
+    /// (`slopty ui`).
+    async fn window(
+        &self,
+        act: slopty_proto::handoff::UiAct,
+    ) -> Result<slopty_proto::handoff::UiDone, slopty_proto::handoff::UiFailure> {
+        crate::ui::ask(&slopty_platform::dirs::data_dir(), act).await
+    }
 }
 
 /// `verb` sent by `attempt`, under `key` or a fresh key when it changes something, and sent

@@ -14,6 +14,12 @@
 //! back well within it and asked again under the same number). The program giving up (its
 //! end of the control socket closing) withdraws the edit from the tile.
 //!
+//! **An agent's ask of the window** ([`ui`], `slopty ui`) goes to the clients that take pages,
+//! in the same order, the one in front of the agent's session first: the first with a window
+//! does it and answers with what it did. One without a window refuses, and one that does not
+//! answer within [`UI_WAIT`] is withdrawn and passed over. With none connected, or none that
+//! has a window, the agent hears so at once.
+//!
 //! **Presence** ([`presence`]): each session's presence file follows whether any client is
 //! focused on it, written in order on a task of its own, off the connections' loops.
 
@@ -22,8 +28,11 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use slopty_core::{ClientId, SessionId, WallMs};
-use slopty_proto::ctl::{EditAsk, Handed, NoClient};
-use slopty_proto::handoff::{EditFile, HandoffEvent, HandoffId, HandoffReply, OpenUrl, Page};
+use slopty_proto::ctl::{EditAsk, Handed, NoClient, UiCall};
+use slopty_proto::handoff::{
+    EditFile, HandoffEvent, HandoffId, HandoffReply, OpenUrl, Page, UiAsk, UiDone, UiError,
+    UiFailure,
+};
 use slopty_worker::handoff::{Heard, Need, Nobody};
 use tokio::sync::mpsc;
 
@@ -36,6 +45,79 @@ pub const TAKE_WAIT: Duration = Duration::from_secs(3);
 /// How long a waiting edit outlives its client's connection: a relaunched app, or a phone back
 /// from the background, reconnects well within it.
 pub const LOST_AFTER: Duration = Duration::from_mins(5);
+
+/// How long one client has to do an agent's ask of its window: a terminal waits for its shell
+/// to come up before it answers with the shell's id, and for its command to be typed.
+pub const UI_WAIT: Duration = Duration::from_secs(20);
+
+/// Do an agent's ask in the window of the client in front of its session: what it did and the
+/// window after it, or why nothing was done.
+pub async fn ui(daemon: &Daemon, call: UiCall) -> Result<UiDone, UiFailure> {
+    let (id, candidates) = {
+        let mut handoffs = daemon.handoffs.lock();
+        (handoffs.next_id(), handoffs.candidates(call.session, Need::Open))
+    };
+    let candidates = candidates.map_err(|nobody| no_window(why_nobody(nobody)))?;
+    let UiCall { session, act } = call;
+    let ask = HandoffEvent::Ui(UiAsk { id, session, act });
+    let (waiter, mut heard) = mpsc::unbounded_channel();
+    let mut missed = Missed::default();
+    for client in candidates {
+        if !daemon.handoffs.lock().ask(client, id, ask.clone(), &waiter) {
+            continue;
+        }
+        match ui_answer(&mut heard, client).await {
+            Ok((by, outcome)) => {
+                finish(daemon, id, by);
+                return outcome;
+            }
+            Err(why) => missed.note(daemon, id, client, why),
+        }
+    }
+    daemon.handoffs.lock().finish(id, None);
+    Err(no_window(missed.why()))
+}
+
+/// The failure an agent hears when no client did its ask, for the reason given.
+fn no_window(why: NoClient) -> UiFailure {
+    let message = match why {
+        NoClient::NoneConnected => {
+            "no Slopty window is connected to this machine: the person's app is not running, \
+             or not linked to it"
+        }
+        NoClient::NoneCapable | NoClient::Refused => {
+            "no client connected to this machine has a window (only terminal clients are)"
+        }
+        NoClient::TimedOut => "the person's window did not answer in time",
+    };
+    UiFailure::new(UiError::NoWindow, message)
+}
+
+/// Wait up to [`UI_WAIT`] for `asked` to do an agent's ask: the client that answered and its
+/// outcome. An answer from any client asked for it counts, since that window did it; a refusal
+/// or a disconnect counts only from `asked`.
+async fn ui_answer(
+    heard: &mut mpsc::UnboundedReceiver<Heard>,
+    asked: ClientId,
+) -> Result<(ClientId, Result<UiDone, UiFailure>), No> {
+    let waited = tokio::time::timeout(UI_WAIT, async {
+        loop {
+            match heard.recv().await {
+                Some(Heard::Reply(by, HandoffReply::Ui { outcome, .. })) => {
+                    return Ok((by, *outcome));
+                }
+                Some(Heard::Reply(by, HandoffReply::Refused { .. })) if by == asked => {
+                    return Err(No::Refused);
+                }
+                Some(Heard::Gone(by)) if by == asked => return Err(No::Gone),
+                None => return Err(No::Gone),
+                Some(_) => {}
+            }
+        }
+    })
+    .await;
+    waited.unwrap_or(Err(No::TimedOut))
+}
 
 /// Open `page` for a program in `session` in the browser of the client in front of it, or
 /// offer it there ([`slopty_worker::handoff::Handoffs::open_as`]).
@@ -130,11 +212,13 @@ fn finish(daemon: &Daemon, id: HandoffId, taker: ClientId) -> String {
 }
 
 const fn nobody_for(nobody: Nobody) -> Handed {
-    Handed::Nobody {
-        why: match nobody {
-            Nobody::Connected => NoClient::NoneConnected,
-            Nobody::Capable => NoClient::NoneCapable,
-        },
+    Handed::Nobody { why: why_nobody(nobody) }
+}
+
+const fn why_nobody(nobody: Nobody) -> NoClient {
+    match nobody {
+        Nobody::Connected => NoClient::NoneConnected,
+        Nobody::Capable => NoClient::NoneCapable,
     }
 }
 

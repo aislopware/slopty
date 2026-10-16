@@ -232,12 +232,7 @@ impl FilesSurface {
         let key_of = |action: &dyn gpui::Action| {
             crate::keys::for_action(action, Some(&self.tree_focus), window, cx)
         };
-        let keys = [
-            None,
-            key_of(&super::CopyPath),
-            Some(crate::keys::combo_text("f2")),
-            key_of(&super::DeleteSelection),
-        ];
+        let keys = [None, key_of(&super::CopyPath), None, key_of(&super::DeleteSelection)];
         let delete_label = if count > 1 {
             format!("Delete {count} items…")
         } else {
@@ -289,7 +284,8 @@ impl FilesSurface {
                             }),
                     )
                     .child(div().flex_1().min_w_0().child(label))
-                    .children(keys[index].as_ref().map(|keys| popover::kbd_hint(&theme, keys))),
+                    .children(keys[index].as_ref().map(|keys| popover::kbd_hint(&theme, keys)))
+                    .when(index == 2, |row| popover::fixed_key(row, &theme, "f2")),
             );
         }
         Some(popover::menu_at(

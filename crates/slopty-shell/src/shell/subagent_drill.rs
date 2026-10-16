@@ -10,6 +10,7 @@
 use gpui::{AnyElement, Context, SharedString, div, prelude::*, px};
 
 use super::Shell;
+use crate::settings::widgets::{ActionHint as _, Keys};
 use crate::theme::Theme;
 
 /// The slim bar in place of the composer.
@@ -100,14 +101,18 @@ impl Shell {
                         div()
                             .id("subagent-breadcrumb-parent")
                             .role(gpui::Role::Link)
-                            .aria_label(SharedString::from(format!("Back to {}", drill.parent_title)))
+                            // slopty: one key per tooltip, the keymap's.
+                            .action_hint(
+                                SharedString::from(format!("Back to {}", drill.parent_title)),
+                                Keys::Action(Box::new(super::NavigateBack)),
+                                cx,
+                            )
                             .min_w_0()
                             .max_w(px(260.0))
                             .truncate()
                             .cursor_pointer()
                             .text_color(theme.text_muted)
                             .hover(|s| s.text_color(theme.text))
-                            .tooltip(crate::settings::widgets::text_tooltip("Back (⌘[ or Escape)"))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.open_chat(parent.clone(), cx);
                             }))

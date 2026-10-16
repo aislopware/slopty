@@ -103,8 +103,8 @@ fn enter_raw() -> Result<RawGuard> {
 }
 
 /// Do what a handoff asks of this terminal client: open a page with this machine's opener;
-/// refuse an edit, and a page to offer, since a raw terminal has nowhere to show a notice. The
-/// answer to send, if any.
+/// refuse an edit, a page to offer, and an agent's ask of the window, since a raw terminal has
+/// nowhere to show a notice and no window. The answer to send, if any.
 fn handoff(
     handoffs: &mut slopty_client::handoff::Handoffs,
     event: slopty_proto::handoff::HandoffEvent,
@@ -136,6 +136,7 @@ fn handoff(
         }
         Todo::Refuse { reply } => Some(reply),
         Todo::Offer { open, .. } => Some(ClientMsg::Handoff(HandoffReply::Refused { id: open.id })),
+        Todo::Ui(ask) => Some(slopty_client::handoff::refusal(ask.id)),
         Todo::Edit { .. } | Todo::Withdraw { .. } => None,
     }
 }

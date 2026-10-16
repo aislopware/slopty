@@ -79,6 +79,8 @@ pub struct Popup<T> {
     /// Whether the popup was still mounted when the current trigger press
     /// began — see [`Self::note_trigger_press`].
     pressed_while_open: bool,
+    // slopty: where the keyboard was before the menu took it, and the menu's own focus.
+    return_focus: Option<(gpui::FocusHandle, gpui::FocusHandle)>,
 }
 
 impl<T> Default for Popup<T> {
@@ -86,6 +88,7 @@ impl<T> Default for Popup<T> {
         Self {
             inner: None,
             pressed_while_open: false,
+            return_focus: None,
         }
     }
 }
@@ -93,6 +96,24 @@ impl<T> Default for Popup<T> {
 impl<T> Popup<T> {
     pub fn open(&mut self, value: T) {
         self.inner = Some((value, None));
+        self.return_focus = None; // slopty
+    }
+
+    /// slopty: [`Self::open`] for a menu that takes the keyboard into `menu_focus`: once it
+    /// closes, the keyboard goes back where it was ([`return_focus`]), unless the closing
+    /// press or the chosen row put it somewhere else.
+    pub fn open_in(
+        &mut self,
+        value: T,
+        menu_focus: &gpui::FocusHandle,
+        window: &gpui::Window,
+        cx: &gpui::App,
+    ) {
+        self.open(value);
+        self.return_focus = window
+            .focused(cx)
+            .filter(|before| before != menu_focus)
+            .map(|before| (before, menu_focus.clone()));
     }
 
     /// Open and interactive (not closing).
@@ -142,6 +163,10 @@ impl<T> Popup<T> {
         match &mut self.inner {
             Some((_, closing @ None)) => {
                 *closing = Some(std::time::Instant::now());
+                // slopty: the keyboard goes back on the window's next frame.
+                if let Some(focus) = self.return_focus.take() {
+                    RETURN_FOCUS.with_borrow_mut(|slot| *slot = Some(focus));
+                }
                 true
             }
             _ => false,
@@ -184,6 +209,31 @@ impl<T> Popup<T> {
         {
             self.inner = None;
         }
+    }
+}
+
+thread_local! {
+    /// slopty: the focus a closing [`Popup::open_in`] menu hands back, and the menu's own.
+    static RETURN_FOCUS: std::cell::RefCell<Option<(gpui::FocusHandle, gpui::FocusHandle)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// slopty: once `menu` closes, the keyboard goes back to `before` ([`return_focus`]): for a
+/// surface that takes the keyboard without a [`Popup`].
+pub fn give_focus_back(before: gpui::FocusHandle, menu: gpui::FocusHandle) {
+    RETURN_FOCUS.with_borrow_mut(|slot| *slot = Some((before, menu)));
+}
+
+/// slopty: give the keyboard back to where it was before a menu that just closed took it, when
+/// it is still on the menu or nowhere: what the window's root calls as it renders (M21).
+pub fn return_focus(window: &mut gpui::Window, cx: &mut gpui::App) {
+    let Some((before, menu)) = RETURN_FOCUS.with_borrow_mut(Option::take) else {
+        return;
+    };
+    match window.focused(cx) {
+        None => window.focus(&before, cx),
+        Some(now) if now == menu => window.focus(&before, cx),
+        Some(_) => {}
     }
 }
 
@@ -1147,6 +1197,18 @@ pub fn key_hint_pair(
 /// back to a mismatched face); the system font draws the platform's own.
 pub const KEY_GLYPH_FONT: &str = ".SystemUIFont";
 
+/// slopty: a menu row's fixed key, one its own handler takes rather than a binding to look up
+/// (F2 renames): the key at the row's end in [`kbd_hint`]'s voice, and the same key for
+/// assistive tech. A bound action's key is read from the keymap instead (`keys::for_action`).
+pub fn fixed_key(
+    row: gpui::Stateful<gpui::Div>,
+    theme: &Theme,
+    combo: &str,
+) -> gpui::Stateful<gpui::Div> {
+    row.aria_keyshortcuts(crate::keys::aria_combo(combo))
+        .child(kbd_hint(theme, &crate::keys::combo_text(combo)))
+}
+
 /// A shortcut legend (`⌘N`, `⇧⌘N`, `⌘1`): the sidebar's jump-hint voice
 /// everywhere — plain muted text at the row's subline size, no chip.
 pub fn kbd_hint(theme: &Theme, label: &str) -> gpui::Div {
@@ -1262,7 +1324,8 @@ pub fn find_step(
     }
     let step = crate::surface_chrome::focus_ring(step.tab_index(0), theme)
         .cursor_pointer()
-        .bg(motion::hover_blend(&fade, ink(0.0), ink(0.08)));
+        .bg(motion::hover_blend(&fade, ink(0.0), ink(0.08)))
+        .active(|style| style.bg(ink(0.12)));
     step.on_hover(motion::hover_listener(fade))
 }
 
@@ -2792,5 +2855,46 @@ mod find_card_tests {
             cx.notify();
         });
         assert_eq!(measure(cx), (FIND_CARD_WIDTH, SEARCH_ROW_HEIGHT, 24.0));
+    }
+}
+
+#[cfg(test)]
+mod return_focus_tests {
+    use gpui::{Context, Render, TestAppContext, Window};
+
+    use super::*;
+
+    struct Blank;
+
+    impl Render for Blank {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+        }
+    }
+
+    /// A menu that took the keyboard gives it back when it closes; a row that moved the
+    /// keyboard on keeps it where it went.
+    #[gpui::test]
+    fn a_closed_menu_gives_the_keyboard_back(cx: &mut TestAppContext) {
+        let (_view, cx) = cx.add_window_view(|_, _| Blank);
+        cx.update(|window, cx| {
+            let (before, menu, other) = (cx.focus_handle(), cx.focus_handle(), cx.focus_handle());
+            let mut popup = Popup::default();
+
+            window.focus(&before, cx);
+            popup.open_in((), &menu, window, cx);
+            window.focus(&menu, cx);
+            assert!(popup.begin_close());
+            return_focus(window, cx);
+            assert!(before.is_focused(window), "back where it was");
+
+            popup.finish_close();
+            popup.open_in((), &menu, window, cx);
+            window.focus(&menu, cx);
+            assert!(popup.begin_close());
+            window.focus(&other, cx);
+            return_focus(window, cx);
+            assert!(other.is_focused(window), "the row's own focus stays");
+        });
     }
 }

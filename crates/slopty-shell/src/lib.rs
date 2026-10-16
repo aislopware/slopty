@@ -310,8 +310,8 @@ pub fn open_chat(chat_id: String, cx: &mut App) {
     open_notification_target(chat_id, &state, cx);
 }
 
-/// A clicked banner: bring Slopty forward on its chat or settings destination,
-/// reopening the main window first if ⌘W closed it.
+/// A clicked banner: bring Slopty forward on its chat, reopening the main window first if ⌘W
+/// closed it. slopty: harness-update banners are gone, so every target is a chat.
 fn open_notification_target(target: String, state: &gpui::Entity<state::AppState>, cx: &mut App) {
     activate_main_window(cx);
     let shell = cx
@@ -322,17 +322,10 @@ fn open_notification_target(target: String, state: &gpui::Entity<state::AppState
         Some(shell) => {
             let _ = shell.update(cx, |shell, window, cx| {
                 window.activate_window();
-                if target == notify::AGENT_UPDATES_TARGET {
-                    shell.open_settings(shell::SettingsSection::Harnesses, cx);
-                } else {
-                    shell.open_chat(target, cx);
-                }
+                shell.open_chat(target, cx);
             });
         }
-        None if target != notify::AGENT_UPDATES_TARGET => {
-            state.update(cx, |state, cx| state.select_chat(Some(target), cx))
-        }
-        None => {}
+        None => state.update(cx, |state, cx| state.select_chat(Some(target), cx)),
     }
 }
 
@@ -467,6 +460,9 @@ fn open_main_window(
             },
             move |window, cx| {
                 window.set_rem_size(px(typography::font_size(cx).pixels()));
+                // slopty: a tooltip sits centred under the control it names, never under the
+                // pointer (`docs/decisions/ui.md`, "Tooltips name the action and its key").
+                window.set_tooltip_placement(gpui::TooltipPlacement::Below);
                 // React to the user flipping macOS between light and dark. Detached:
                 // the subscription lives as long as the window does, and the window
                 // owns nothing that would drop it early.

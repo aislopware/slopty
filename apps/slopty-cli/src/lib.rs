@@ -13,6 +13,7 @@
 //! * `slopty ssh` is `ssh` with a terminal the far side knows; a Slopty shell's `ssh` runs it.
 //! * `slopty browse` and `slopty edit` hand a shell's web pages and files to the client in front of
 //!   it; a Slopty session's `BROWSER`, `EDITOR` and `open` are this binary under other names.
+//! * `slopty ui` reads and drives the person's window for an agent in a shell ([`ui`]).
 //! * `slopty attach` is a real client over QUIC straight to a worker the server lists, or any
 //!   `host:port`: a raw-mode terminal that renders frames locally, without the GPUI apps.
 //!
@@ -33,6 +34,7 @@ mod mcp;
 mod probe;
 mod relay;
 mod service;
+mod ui;
 mod verbs;
 mod workerctl;
 
@@ -115,6 +117,12 @@ enum Cmd {
         /// `[+line] <file>`.
         #[arg(required = true, allow_hyphen_values = true)]
         args: Vec<std::ffi::OsString>,
+    },
+    /// Read and drive the person's Slopty window, for an agent in a shell (`slopty ui --help`).
+    #[command(long_about = ui::ABOUT, after_help = ui::AFTER)]
+    Ui {
+        #[command(subcommand)]
+        cmd: Option<ui::UiCmd>,
     },
     /// The app's `settings.toml`.
     Settings {
@@ -328,6 +336,7 @@ async fn run() -> Result<ExitCode> {
         }
         Cmd::Browse { targets } => return handoff::browse(&data_dir, &targets).await,
         Cmd::Edit { wait, args } => return handoff::edit(&data_dir, wait, args).await,
+        Cmd::Ui { cmd } => return ui::run(cmd, &data_dir).await,
         Cmd::Crashes { last, all_frames } => crashes(&data_dir, last, all_frames, cli.json),
         Cmd::Settings { cmd } => {
             let path = slopty_settings::path_in(&data_dir);

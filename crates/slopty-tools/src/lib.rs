@@ -11,6 +11,7 @@
 //! * [`tools`]: the MCP tools, their schemas, and a call run end to end.
 //! * [`mcp`]: those tools as an MCP server over any [`Dispatch`].
 //! * [`show`]: what an agent shows the person inline, a visual or a page, checked first.
+//! * [`ui`]: the person's Slopty window, read and driven by an agent.
 
 #![forbid(unsafe_code)]
 #![warn(unreachable_pub)]
@@ -25,8 +26,10 @@ pub mod ops;
 pub mod resolve;
 pub mod show;
 pub mod tools;
+pub mod ui;
 pub mod view;
 
+use slopty_proto::handoff::{UiAct, UiDone, UiError, UiFailure};
 use slopty_proto::orchestration::{ErrorCode, IdempotencyKey, Outcome, Verb};
 
 /// Where verbs go: something that answers each with its [`Outcome`], a failure included.
@@ -53,6 +56,16 @@ pub trait Dispatch: Send + Sync {
     ) -> impl Future<Output = Outcome> + Send {
         self.send(key, verb)
     }
+
+    /// Ask `act` of the person's window in front of the caller ([`ui`]): what it did, or why
+    /// not. Only a carrier on a worker's machine, where the caller's session is, reaches a
+    /// window; the server's own has none.
+    fn window(&self, act: UiAct) -> impl Future<Output = Result<UiDone, UiFailure>> + Send {
+        drop(act);
+        let message = "the person's window is reached from a worker's machine: `slopty mcp` or \
+                       `slopty ui` there, not the server's endpoint";
+        std::future::ready(Err(UiFailure::new(UiError::NoWindow, message)))
+    }
 }
 
 /// `D`, every verb sent as part of a change ([`Dispatch::send_waiting`]): what a tool that
@@ -67,6 +80,10 @@ impl<D: Dispatch> Dispatch for Waiting<'_, D> {
         verb: Verb,
     ) -> impl Future<Output = Outcome> + Send {
         self.0.send_waiting(key, verb)
+    }
+
+    fn window(&self, act: UiAct) -> impl Future<Output = Result<UiDone, UiFailure>> + Send {
+        self.0.window(act)
     }
 }
 

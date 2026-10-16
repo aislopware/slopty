@@ -11,6 +11,8 @@
 //!   ⌘⇧B is where an older map's sidebar key moves.)
 //! - ⌘Z undoes the archive just made, while its toast is up.
 //! - ⇧⌘O opens "Resume a session…", the picker of Claude Code's past sessions (`past_sessions`).
+//! - ⌥⌘O opens Open in under its button, ⇧⌘\\ expands the side pane over the chat, and ⌘I shows
+//!   or hides the chat's details card (each its titlebar button's key).
 //!
 //! A terminal keeps every key it takes for itself (its own find, and anything its program
 //! reads), and the browser keeps its own ⌘T, ⌘[ and ⌘]: those bind in their contexts, and this
@@ -38,7 +40,10 @@ actions!(
         OpenBranchPicker,
         NextEffort,
         UndoArchive,
-        ResumeSession
+        ResumeSession,
+        OpenIn,
+        ToggleExpandPane,
+        ToggleSessionInfo
     ]
 );
 
@@ -69,6 +74,9 @@ pub(super) fn bind_keys(cx: &mut App, keymap: &KeymapConfig) {
     fixed!("mod-]", NavigateForward);
     fixed!("mod-t", NewRightTab);
     fixed!("mod-z", UndoArchive);
+    fixed!("alt-mod-o", OpenIn);
+    fixed!("mod-shift-\\", ToggleExpandPane);
+    fixed!("mod-i", ToggleSessionInfo);
     // The diff's own find, where the Changes surface has the keyboard.
     bindings.push(KeyBinding::new(&platform_combo("mod-f"), FindInDiff, Some("Changes")));
     bindings.push(KeyBinding::new(&platform_combo("mod-g"), FindNextInDiff, Some("Changes")));
@@ -177,6 +185,26 @@ impl Shell {
         }))
         .on_action(cx.listener(|this, _: &ShowTurnDiff, window, cx| {
             this.show_turn_diff(window, cx);
+        }))
+        .on_action(cx.listener(|this, _: &OpenIn, window, cx| {
+            if in_own_keys(window) || this.overlay_owns_keyboard(cx) || !this.toggle_open_in(cx) {
+                cx.propagate();
+            }
+        }))
+        .on_action(cx.listener(|this, _: &ToggleExpandPane, window, cx| {
+            if in_own_keys(window) || !this.right_pane_shown(cx) {
+                cx.propagate();
+                return;
+            }
+            this.toggle_right_pane_expand(cx);
+        }))
+        .on_action(cx.listener(|this, _: &ToggleSessionInfo, window, cx| {
+            if in_own_keys(window) || !matches!(this.route, Route::Chat) || this.overlay_owns_keyboard(cx)
+            {
+                cx.propagate();
+                return;
+            }
+            this.toggle_session_info(cx);
         }))
     }
 

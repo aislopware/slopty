@@ -77,6 +77,11 @@ async fn handle(daemon: Daemon, stream: UnixStream) -> Result<()> {
         CtlRequest::Wake => CtlReply::Wake(daemon.wake.lock().awake()),
         // Bytes follow the line, on either side.
         CtlRequest::Clip(ask) => return crate::clip::answer(&daemon, ask, &mut rd, &mut wr).await,
+        // An agent's ask of the person's window (`handoff::ui`).
+        CtlRequest::Ui(call) => match crate::handoff::ui(&daemon, call).await {
+            Ok(done) => CtlReply::UiDone(Box::new(done)),
+            Err(failure) => CtlReply::UiFailed(failure),
+        },
     };
     let mut out = serde_json::to_vec(&reply)?;
     out.push(b'\n');

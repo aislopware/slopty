@@ -62,8 +62,6 @@ fn long_by_design(method: &str) -> bool {
             method,
             methods::CLONE_REPO
                 | methods::INSTALL_HARNESS
-                | methods::CHECK_HARNESS_UPDATES
-                | methods::APPLY_HARNESS_UPDATE
                 | methods::APPLY_UPDATE
                 | methods::FETCH_ALL
                 | methods::UPLOAD_CHUNK

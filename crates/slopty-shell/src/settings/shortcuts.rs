@@ -13,7 +13,7 @@ use crate::popover; // slopty: appshots removed.
 
 use crate::settings::widgets;
 use crate::settings::{
-    ComposerSendBehavior, KeymapConfig, ShortcutId, combo_from_keystroke, display_combo,
+    ComposerSendBehavior, KeymapConfig, ShortcutId, combo_from_keystroke,
 }; // slopty: the pull-request destination's row is gone
 use crate::state::AppState;
 use crate::theme::Theme;
@@ -332,7 +332,8 @@ fn binding_control(
     let chip_text: SharedString = if is_recording {
         "Press keys…".into()
     } else {
-        display_combo(&combo).into()
+        // slopty: the glyphs every other place writes a key in ("⇧⌘A").
+        crate::keys::combo_text(&combo)
     };
     div()
         .flex()
@@ -363,7 +364,7 @@ fn binding_control(
                 .aria_label(format!(
                     "Change {} shortcut: {}",
                     id.label(),
-                    display_combo(&combo)
+                    crate::keys::combo_text(&combo)
                 ))
                 .tab_index(0)
                 .min_w(px(96.0))
@@ -413,13 +414,13 @@ fn refusal(
 ) -> Option<SharedString> {
     // slopty: appshots removed.
     if send_combo_is_reserved(behavior, combo) {
-        return Some(format!("{} is reserved for the composer.", display_combo(combo)).into());
+        return Some(format!("{} is reserved for the composer.", crate::keys::combo_text(combo)).into());
     }
     conflict_owner(keymap, id, combo).map(|owner| {
         // slopty: dictation and appshots removed.
         format!(
             "{} is already assigned to {}.",
-            display_combo(combo),
+            crate::keys::combo_text(combo),
             owner.label()
         )
         .into()
@@ -433,12 +434,26 @@ pub fn conflict_owner(keymap: &KeymapConfig, id: ShortcutId, combo: &str) -> Opt
         .find(|&other| other != id && keymap.get(other) == combo) // slopty: appshots removed.
 }
 
+/// slopty: compact mode's default: off.
+const COMPACT_MODE_DEFAULT: bool = false;
+/// slopty: the compact model picker's default: on.
+const COMPACT_MODEL_PICKER_DEFAULT: bool = true;
+
+/// slopty: turn the compact model picker on or off, every window drawing it again.
+fn set_compact_model_picker(on: bool, cx: &mut gpui::App) {
+    crate::settings::update(crate::settings::SavePolicy::Debounced, cx, |settings| {
+        settings.compact_model_picker = on;
+    });
+    cx.refresh_windows();
+}
+
 pub fn send_combo_is_reserved(_behavior: ComposerSendBehavior, combo: &str) -> bool {
     combo == "mod-enter"
 }
 
-pub fn modifier_send_label(is_macos: bool) -> &'static str {
-    if is_macos { "⌘ Enter" } else { "Ctrl Enter" }
+// slopty: the keys as every other key in the app reads ("⌘⏎"; "Ctrl+Enter" off the Mac).
+pub fn modifier_send_label(is_macos: bool) -> String {
+    crate::keys::combo_text_on(is_macos, "mod-enter")
 }
 
 /// The page's sections, in display order. [`group`] is a total match, so every
@@ -453,7 +468,7 @@ const GROUP_ORDER: [&str; 7] = [ // slopty: dictation and appshots removed.
     "Panels",
     "Sessions",
     "Projects",
-    "Jump to session",
+    "Jump to chat",
 ];
 
 /// The section a shortcut's row renders under.
@@ -478,7 +493,7 @@ fn group(id: ShortcutId) -> &'static str {
         | ShortcutId::OpenBranchPicker // slopty: the composer's branch
         | ShortcutId::NextEffort // slopty: and its effort
         | ShortcutId::ResumeSession => "Sessions", // slopty: a past Claude Code session
-        ShortcutId::JumpSession(_) => "Jump to session",
+        ShortcutId::JumpSession(_) => "Jump to chat",
     }
 }
 
@@ -497,14 +512,17 @@ impl Render for ShortcutsPage {
         let escape_stops_active_agent = self.escape_stops_active_agent;
         let send_behavior = self.composer_send_behavior;
         let compact_mode = crate::settings::transcript_compact_mode(cx);
+        let compact_model_picker = crate::settings::compact_model_picker(cx);
+        // slopty: every choice these pages hold counts, each against its default.
         let customized = self.keymap != KeymapConfig::default()
             || escape_stops_active_agent
-            || send_behavior != ComposerSendBehavior::default();
-        let modifier_label = modifier_send_label(cfg!(target_os = "macos"));
-
+            || send_behavior != ComposerSendBehavior::default()
+            || compact_mode != COMPACT_MODE_DEFAULT
+            || compact_model_picker != COMPACT_MODEL_PICKER_DEFAULT;
+        let mac = cfg!(target_os = "macos");
         let send_behaviors = [
-            (ComposerSendBehavior::Enter, "Enter"),
-            (ComposerSendBehavior::ModEnter, modifier_label),
+            (ComposerSendBehavior::Enter, SharedString::from(crate::keys::combo_text_on(mac, "enter"))),
+            (ComposerSendBehavior::ModEnter, SharedString::from(modifier_send_label(mac))),
         ];
         let send_behavior_control = widgets::select(
             "composer-send-behavior",
@@ -513,9 +531,12 @@ impl Render for ShortcutsPage {
             |page: &mut Self| &mut page.send_select,
         )
         .options(
-            send_behaviors
-                .iter()
-                .map(|(_, label)| widgets::SelectOption::new(*label)),
+            send_behaviors.iter().map(|(behavior, label)| {
+                widgets::SelectOption::new(label.clone()).standing(
+                    (*behavior == ComposerSendBehavior::default())
+                        .then_some(widgets::Standing::Default),
+                )
+            }),
             send_behaviors
                 .iter()
                 .position(|(behavior, _)| *behavior == send_behavior)
@@ -525,6 +546,53 @@ impl Render for ShortcutsPage {
         .font_family(theme.font_mono.clone())
         .on_select(move |page, ix, _, cx| page.set_composer_send_behavior(send_behaviors[ix].0, cx))
         .render(&self.send_select, cx);
+        // slopty: "Reset" on a row whose choice is not its default (Zed's rule).
+        let send_reset = widgets::reset_action(
+            &theme,
+            "composer-send-behavior-reset",
+            "Send messages with",
+            send_behavior == ComposerSendBehavior::default(),
+        )
+        .map(|reset| {
+            reset.on_click(cx.listener(|this, _, _, cx| {
+                this.set_composer_send_behavior(ComposerSendBehavior::default(), cx);
+            }))
+        });
+        let compact_mode_reset = widgets::reset_action(
+            &theme,
+            "transcript-compact-mode-reset",
+            "Compact mode",
+            compact_mode == COMPACT_MODE_DEFAULT,
+        )
+        .map(|reset| {
+            reset.on_click(cx.listener(|_, _, _, cx| {
+                crate::settings::set_transcript_compact_mode(COMPACT_MODE_DEFAULT, cx);
+                cx.notify();
+            }))
+        });
+        let compact_model_picker_reset = widgets::reset_action(
+            &theme,
+            "compact-model-picker-reset",
+            "Compact model picker",
+            compact_model_picker == COMPACT_MODEL_PICKER_DEFAULT,
+        )
+        .map(|reset| {
+            reset.on_click(cx.listener(|_, _, _, cx| {
+                set_compact_model_picker(COMPACT_MODEL_PICKER_DEFAULT, cx);
+                cx.notify();
+            }))
+        });
+        let escape_reset = widgets::reset_action(
+            &theme,
+            "escape-stops-active-agent-reset",
+            "Stop agent with Escape",
+            !escape_stops_active_agent,
+        )
+        .map(|reset| {
+            reset.on_click(cx.listener(|this, _, _, cx| {
+                this.set_escape_stops_active_agent(false, cx);
+            }))
+        });
 
         let send_behavior_row = widgets::card_row(&theme, true)
             .child(
@@ -533,6 +601,7 @@ impl Render for ShortcutsPage {
                     .min_w(px(160.0))
                     .child(widgets::row_title(&theme, "Send messages with")),
             )
+            .children(send_reset)
             .child(send_behavior_control);
         let compact_mode_row = widgets::card_row(&theme, false)
             .child(
@@ -549,6 +618,7 @@ impl Render for ShortcutsPage {
                         ],
                     )),
             )
+            .children(compact_mode_reset)
             .child(
                 widgets::toggle_switch(&theme, compact_mode, "transcript-compact-mode")
                     .id("transcript-compact-mode-toggle")
@@ -567,7 +637,6 @@ impl Render for ShortcutsPage {
                         cx.notify();
                     })),
             );
-        let compact_model_picker = crate::settings::compact_model_picker(cx);
         let compact_model_picker_row = widgets::card_row(&theme, false)
             .child(
                 div()
@@ -583,6 +652,7 @@ impl Render for ShortcutsPage {
                         ],
                     )),
             )
+            .children(compact_model_picker_reset)
             .child(
                 widgets::toggle_switch(&theme, compact_model_picker, "compact-model-picker")
                     .id("compact-model-picker-toggle")
@@ -597,12 +667,7 @@ impl Render for ShortcutsPage {
                     .focus_visible(|s| s.border_2().border_color(theme.accent))
                     .cursor_pointer()
                     .on_click(cx.listener(move |_, _, _, cx| {
-                        crate::settings::update(
-                            crate::settings::SavePolicy::Debounced,
-                            cx,
-                            |settings| settings.compact_model_picker = !compact_model_picker,
-                        );
-                        cx.refresh_windows();
+                        set_compact_model_picker(!compact_model_picker, cx);
                         cx.notify();
                     })),
             );
@@ -621,6 +686,7 @@ impl Render for ShortcutsPage {
                         ],
                     )),
             )
+            .children(escape_reset)
             .child(
                 widgets::toggle_switch(
                     &theme,
@@ -749,36 +815,34 @@ impl Render for ShortcutsPage {
                                             ),
                                     )
                                     .child({
-                                        // `disabled:opacity-35` when nothing is
-                                        // customized or while recording.
-                                        let disabled = !customized || recording.is_some();
-                                        widgets::ghost_action(&theme)
-                                            .id("shortcuts-restore-defaults")
-                                            .flex_none()
-                                            .when(disabled, |el| el.opacity(0.35))
-                                            .when(!disabled, |el| {
-                                                el.on_click(
-                                                    cx.listener(|this, _, _, cx| {
-                                                        this.keymap = KeymapConfig::default();
-                                                        this.stop_recording();
-                                                        this.conflict_notice = None;
-                                                        this.commit(cx);
-                                                        this.set_escape_stops_active_agent(
-                                                            false, cx,
-                                                        );
-                                                        this.set_composer_send_behavior(
-                                                            ComposerSendBehavior::Enter,
-                                                            cx,
-                                                        );
-                                                    }),
-                                                )
-                                            })
-                                            .child(
-                                                crate::icons::icon(crate::icons::RESTART)
-                                                    .size(px(14.0))
-                                                    .text_color(theme.text_muted),
-                                            )
-                                            .child(SharedString::from("Restore defaults"))
+                                        // slopty: dimmed when nothing differs or while recording.
+                                        let enabled = customized && recording.is_none();
+                                        widgets::restore_defaults(
+                                            &theme,
+                                            "shortcuts-restore-defaults",
+                                            enabled,
+                                        )
+                                        .when(enabled, |el| {
+                                            el.on_click(cx.listener(|this, _, _, cx| {
+                                                this.keymap = KeymapConfig::default();
+                                                this.stop_recording();
+                                                this.conflict_notice = None;
+                                                this.commit(cx);
+                                                this.set_escape_stops_active_agent(false, cx);
+                                                this.set_composer_send_behavior(
+                                                    ComposerSendBehavior::default(),
+                                                    cx,
+                                                );
+                                                crate::settings::set_transcript_compact_mode(
+                                                    COMPACT_MODE_DEFAULT,
+                                                    cx,
+                                                );
+                                                set_compact_model_picker(
+                                                    COMPACT_MODEL_PICKER_DEFAULT,
+                                                    cx,
+                                                );
+                                            }))
+                                        })
                                     }),
                             )
                             .child(
@@ -906,7 +970,7 @@ mod tests {
                     page.conflict_notice
                         .as_deref()
                         .unwrap()
-                        .contains("New session")
+                        .contains("New chat")
                 );
                 assert_eq!(
                     page.keymap.random_wallpaper, // slopty: appshots removed.
@@ -1009,8 +1073,15 @@ mod tests {
 
     #[test]
     fn modifier_send_labels_are_platform_specific() {
-        assert_eq!(modifier_send_label(true), "⌘ Enter");
-        assert_eq!(modifier_send_label(false), "Ctrl Enter");
+        assert_eq!(modifier_send_label(true), "⌘⏎");
+        assert_eq!(modifier_send_label(false), "Ctrl+Enter");
+    }
+
+    #[test]
+    fn the_general_rows_reset_to_the_settings_defaults() {
+        let defaults = crate::settings::UiSettings::default();
+        assert_eq!(defaults.transcript_compact_mode, COMPACT_MODE_DEFAULT);
+        assert_eq!(defaults.compact_model_picker, COMPACT_MODEL_PICKER_DEFAULT);
     }
 
     #[test]

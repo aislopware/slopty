@@ -26,7 +26,10 @@ use slopty_view_rpc::methods;
 
 use crate::live::{self, TerminalLook};
 use crate::motion::{self, AnimationExt as _, TAB_SLIDE};
+use crate::popover;
+use crate::settings::widgets::{ActionHint as _, Keys};
 use crate::settings::{TERMINAL_MAX_VH, TERMINAL_MIN_HEIGHT};
+use crate::shell::TabCloseAction;
 use crate::state::{AppState, CANVAS_PANEL_PREFIX, EngineHandle};
 use crate::theme::Theme;
 
@@ -36,7 +39,11 @@ use super::view::terminal_panel_bg;
 pub const TAB_WIDTH: f32 = 118.0;
 pub const TAB_BAR_HEIGHT: f32 = 40.0;
 
-actions!(terminal, [ToggleTerminal]);
+// slopty: ⌘T opens a terminal tab where the panel has the keyboard (Terminal.app, Ghostty).
+actions!(terminal, [ToggleTerminal, NewTerminalTab]);
+
+/// slopty: the panel's key context, where its own tab keys bind.
+pub const KEY_CONTEXT: &str = "TerminalPanel";
 
 /// Bind the terminal keymap (global): Cmd+J on macOS, Ctrl+J elsewhere.
 pub fn init(cx: &mut App) {
@@ -46,6 +53,16 @@ pub fn init(cx: &mut App) {
         "ctrl-j"
     };
     cx.bind_keys([KeyBinding::new(toggle, ToggleTerminal, None)]);
+    bind_keys(cx);
+}
+
+/// slopty: the panel's own keys (⌘T, a new tab), bound again with each keymap.
+pub fn bind_keys(cx: &mut App) {
+    cx.bind_keys([KeyBinding::new(
+        &crate::settings::platform_combo("mod-t"),
+        NewTerminalTab,
+        Some(KEY_CONTEXT),
+    )]);
 }
 
 // ---------------------------------------------------------------------------
@@ -227,7 +244,17 @@ pub struct TerminalPanel {
     tab_seq: u64,
     drag: Option<DragState>,
     last_selected: Option<String>,
+    /// slopty: a tab's right-click menu.
+    tab_menu: popover::Popup<TabMenu>,
     _observe: Subscription,
+}
+
+/// slopty: a terminal tab's right-click menu: which tab, where.
+#[derive(Clone)]
+struct TabMenu {
+    chat: String,
+    key: u64,
+    position: gpui::Point<gpui::Pixels>,
 }
 
 impl TerminalPanel {
@@ -246,6 +273,7 @@ impl TerminalPanel {
             tab_seq: 0,
             drag: None,
             last_selected: None,
+            tab_menu: popover::Popup::default(),
             _observe: observe,
         }
     }
@@ -679,20 +707,54 @@ impl TerminalPanel {
         };
         tab.terminal_id = Some(id.clone());
         tab.target_device_id = target;
+        self.watch_view(chat, key, &id, cx);
+        self.refresh_view(chat, key, cx);
+        true
+    }
+
+    /// slopty: tab `key` hears the session `id`'s view say something new of itself (its title,
+    /// its end, its progress). `false` while the view is not there yet.
+    fn watch_view(&mut self, chat: &str, key: u64, id: &str, cx: &mut Context<Self>) -> bool {
         let panel = cx.weak_entity();
         let heard = chat.to_owned();
         let watch = live::watch(
-            &id,
+            id,
             Box::new(move |cx| {
                 let _ = panel.update(cx, |panel, cx| panel.refresh_view(&heard, key, cx));
             }),
             cx,
         );
+        let watching = watch.is_some();
         if let Some(tab) = self.tab_mut(chat, key) {
             tab._watch = watch;
         }
-        self.refresh_view(chat, key, cx);
-        true
+        watching
+    }
+
+    /// slopty: a session's view can arrive after its tab took the session (the worker opens it
+    /// on its own time): a tab not yet heard from starts hearing once its view is there, and reads
+    /// it once after the frame, or a progress report its program sent never reached the tab.
+    fn watch_arrived_views(&mut self, chat: &str, cx: &mut Context<Self>) {
+        let unheard: Vec<(u64, String)> = self
+            .chats
+            .get(chat)
+            .map(|tabs| {
+                tabs.tabs
+                    .iter()
+                    .filter(|tab| tab._watch.is_none())
+                    .filter_map(|tab| Some((tab.key, tab.terminal_id.clone()?)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for (key, id) in unheard {
+            if self.watch_view(chat, key, &id, cx) {
+                let chat = chat.to_owned();
+                cx.spawn(async move |panel, cx| {
+                    let _ = panel.update(cx, |panel, cx| panel.refresh_view(&chat, key, cx));
+                })
+                .detach();
+            }
+        }
     }
 
     /// slopty: read again what the tab's view says of itself.
@@ -713,6 +775,97 @@ impl TerminalPanel {
             }
             cx.notify();
         }
+    }
+
+    /// slopty: ⌘W in the panel closes its tab in front; the panel inside the side pane leaves
+    /// ⌘W to the pane, whose tab it is.
+    fn close_active_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.embedded {
+            return false;
+        }
+        let chat = self.selected_chat(cx);
+        let Some(key) = self.active_tab(cx).map(|tab| tab.key) else { return false };
+        self.close_tab(&chat, key, window, cx);
+        true
+    }
+
+    /// slopty: the tabs `action` closes, from tab `key` of chat `chat`, in the strip's order.
+    fn tabs_to_close(&self, chat: &str, key: u64, action: TabCloseAction) -> Vec<u64> {
+        let Some(tabs) = self.chats.get(chat) else { return Vec::new() };
+        let Some(index) = tabs.tabs.iter().position(|tab| tab.key == key) else {
+            return Vec::new();
+        };
+        tabs.tabs
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| action.takes(*i, index))
+            .map(|(_, tab)| tab.key)
+            .collect()
+    }
+
+    fn close_tab_menu(&mut self, cx: &mut Context<Self>) {
+        if self.tab_menu.begin_close() {
+            popover::reap_popup(cx, |panel: &mut Self| &mut panel.tab_menu);
+        }
+        cx.notify();
+    }
+
+    /// slopty: a tab's right-click menu, as the side pane's tabs have: close it, the others,
+    /// those to its left or right. Each row says its key when it has one.
+    fn render_tab_menu(&mut self, window: &Window, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let TabMenu { chat, key, position } = self.tab_menu.get().cloned()?;
+        let closing = self.tab_menu.closing_since();
+        let theme = Theme::of(cx).for_popup();
+        let close_keys = crate::keys::for_action(
+            &crate::app_menus::CloseTab,
+            Some(&self.focus_handle),
+            window,
+            cx,
+        );
+        let mut list = div().flex().flex_col().gap(px(popover::MENU_GAP));
+        for (action, label) in [
+            (TabCloseAction::This, "Close tab"),
+            (TabCloseAction::Others, "Close other tabs"),
+            (TabCloseAction::Left, "Close tabs to the left"),
+            (TabCloseAction::Right, "Close tabs to the right"),
+        ] {
+            let closes = self.tabs_to_close(&chat, key, action);
+            let enabled = !closes.is_empty();
+            let chat = chat.clone();
+            // ⌘W closes the tab in front, so only its own row says so.
+            let active = self.active_tab(cx).is_some_and(|tab| tab.key == key);
+            let hint = (matches!(action, TabCloseAction::This) && active)
+                .then(|| close_keys.clone())
+                .flatten();
+            list = list.child(
+                popover::menu_row(&theme, false, format!("terminal-tab-menu-{label}"))
+                    .id(SharedString::from(format!("terminal-tab-menu-{label}")))
+                    .role(gpui::Role::MenuItem)
+                    .aria_label(label)
+                    .when(!enabled, |el| {
+                        el.opacity(crate::theme::DISABLED_OPACITY).cursor_default()
+                    })
+                    .when(enabled, |el| {
+                        el.on_click(cx.listener(move |this, _, window, cx| {
+                            this.close_tab_menu(cx);
+                            for key in &closes {
+                                this.close_tab(&chat, *key, window, cx);
+                            }
+                        }))
+                    })
+                    .child(div().flex_1().child(label))
+                    .children(hint.map(|hint| popover::kbd_hint(&theme, &hint))),
+            );
+        }
+        let card = popover::popover_card(&theme)
+            .id("terminal-tab-menu")
+            .role(gpui::Role::Menu)
+            .aria_label("Terminal tab")
+            .w(px(216.0))
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_tab_menu(cx)))
+            .child(list)
+            .into_any_element();
+        Some(popover::menu_at("terminal-tab-menu", position, card, closing))
     }
 
     fn select_tab(&mut self, chat: &str, ix: usize, cx: &mut Context<Self>) {
@@ -881,29 +1034,54 @@ impl TerminalPanel {
                                 0.6,
                             )
                         };
+                        // slopty: the side pane's tab close: 18 square, r 6, its wash faded,
+                        // shown on the tab in front and on any tab under the pointer; the one in
+                        // front names ⌘W.
+                        let group: SharedString = format!("terminal-tab-group-{key}").into();
+                        let close_fade = format!("terminal-tab-close-{key}");
                         let close_btn = div()
                             .id(("terminal-tab-close", key))
-                            .size(px(20.0))
+                            .size(px(18.0))
                             .flex_none()
                             .flex()
                             .items_center()
                             .justify_center()
                             .rounded(px(6.0))
-                            .when(!selected, |el| el.invisible())
+                            .role(gpui::Role::Button)
+                            .when(!selected, |el| {
+                                el.opacity(0.0).group_hover(group.clone(), |s| s.opacity(1.0))
+                            })
                             .cursor_pointer()
-                            .hover(|s| s.bg(crate::theme::ink(0.09)))
+                            .bg(motion::hover_blend(
+                                &close_fade,
+                                crate::theme::wash(0.0),
+                                crate::theme::wash(0.11),
+                            ))
+                            .on_hover(motion::hover_listener(close_fade))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 cx.stop_propagation();
                                 this.close_tab(&chat_close2, key, window, cx);
                             }))
-                            .tooltip(crate::settings::widgets::text_tooltip("Close terminal"))
+                            .map(|el| {
+                                if selected {
+                                    el.action_hint(
+                                        "Close terminal",
+                                        Keys::Action(Box::new(crate::app_menus::CloseTab)),
+                                        cx,
+                                    )
+                                } else {
+                                    el.hint("Close terminal")
+                                }
+                            })
                             .child(
                                 crate::icons::icon(crate::icons::CLOSE)
                                     .size(px(12.0))
                                     .text_color(theme.text_muted.opacity(0.8)),
                             );
+                        let chat_menu = chat_owned.clone();
                         let tab_el = div()
                             .id(("terminal-tab", key))
+                            .group(group)
                             .w(px(TAB_WIDTH))
                             .h(px(28.0))
                             .flex_none()
@@ -935,6 +1113,19 @@ impl TerminalPanel {
                                     this.close_tab(&chat_close, key, window, cx);
                                 }),
                             )
+                            // slopty: right-click offers what the side pane's tabs offer.
+                            .on_mouse_down(
+                                MouseButton::Right,
+                                cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                                    cx.stop_propagation();
+                                    this.tab_menu.open(TabMenu {
+                                        chat: chat_menu.clone(),
+                                        key,
+                                        position: event.position,
+                                    });
+                                    cx.notify();
+                                }),
+                            )
                             .on_drag(
                                 TabDragPayload {
                                     chat: chat_drag,
@@ -960,7 +1151,11 @@ impl TerminalPanel {
                                 cx.entity_id(),
                                 cx,
                             ))
-                            .child(div().flex_1().min_w_0().truncate().child(title))
+                            // slopty: a cut title shows whole in a tooltip.
+                            .child(crate::settings::widgets::truncate_with_tip(
+                                format!("terminal-tab-title-{key}"),
+                                title,
+                            ))
                             .child(close_btn);
 
                         // Sliding transform while a sibling is dragged over: animate
@@ -990,64 +1185,56 @@ impl TerminalPanel {
                         }
                     }),
             )
+            // slopty: the strip's controls are the side pane's: 24 square, r 6, a faded wash, a 14
+            // glyph, reached by Tab, named with their keys.
             .child(
-                div()
-                    .id("terminal-new-tab")
-                    .size(px(28.0))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(8.0))
-                    .cursor_pointer()
-                    // slopty terminal-panel.tsx icon buttons: `transition-colors`.
-                    .bg(motion::hover_blend(
-                        "term-new-tab",
-                        gpui::transparent_black(),
-                        crate::theme::ink(0.05),
-                    ))
-                    .on_hover(motion::hover_listener("term-new-tab"))
+                strip_button("terminal-new-tab", crate::icons::PLUS, &theme)
                     .on_click(cx.listener(|this, _, _, cx| {
                         let chat = this.selected_chat(cx);
                         this.open_tab(chat, cx);
                         this.request_focus(cx);
                     }))
-                    .tooltip(crate::settings::widgets::text_tooltip("New terminal"))
-                    .child(
-                        crate::icons::icon(crate::icons::PLUS)
-                            .size(px(16.0))
-                            .text_color(theme.text_muted.opacity(0.6)),
+                    .action_hint(
+                        "New terminal",
+                        Keys::ActionIn(Box::new(NewTerminalTab), self.focus_handle.clone()),
+                        cx,
                     ),
             )
             // Collapse chevron pinned right (slopty "Hide terminal" ⌘J).
             .child(div().flex_1())
             .child(
-                div()
-                    .id("terminal-collapse")
-                    .size(px(28.0))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(8.0))
-                    .cursor_pointer()
-                    .bg(motion::hover_blend(
-                        "term-collapse",
-                        gpui::transparent_black(),
-                        crate::theme::ink(0.05),
-                    ))
-                    .on_hover(motion::hover_listener("term-collapse"))
+                strip_button("terminal-collapse", crate::icons::ALT_ARROW_DOWN, &theme)
                     .on_click(|_, window, cx| {
                         window.dispatch_action(Box::new(ToggleTerminal), cx);
                     })
-                    .tooltip(crate::settings::widgets::text_tooltip("Hide terminal"))
-                    .child(
-                        crate::icons::icon(crate::icons::ALT_ARROW_DOWN)
-                            .size(px(13.0))
-                            .text_color(theme.text_muted.opacity(0.55)),
-                    ),
+                    .action_hint("Hide terminal", Keys::Action(Box::new(ToggleTerminal)), cx),
             )
     }
+}
+
+/// slopty: a control in the tab strip, as the side pane's strip draws one.
+fn strip_button(id: &'static str, glyph: &'static str, theme: &Theme) -> gpui::Stateful<gpui::Div> {
+    let fade = format!("{id}-fade");
+    let button = div()
+        .id(id)
+        .size(px(24.0))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(6.0))
+        .cursor_pointer()
+        .role(gpui::Role::Button)
+        .tab_index(0)
+        .bg(motion::hover_blend(&fade, crate::theme::wash(0.0), crate::theme::wash(0.11)))
+        .on_hover(motion::hover_listener(fade))
+        .active(|style| style.bg(crate::theme::wash(0.16)))
+        .child(
+            crate::icons::icon(glyph)
+                .size(px(14.0))
+                .text_color(theme.text_muted),
+        );
+    crate::surface_chrome::focus_ring(button, theme)
 }
 
 /// slopty: a tab's leading glyph. While its program reports progress (`OSC 9;4`) the slot holds
@@ -1126,6 +1313,7 @@ impl Render for TerminalPanel {
         let corner_br = self.window_corner_br;
         let corner = px(crate::shell::LINUX_WINDOW_CORNER_RADIUS);
         let chat = self.selected_chat(cx);
+        self.watch_arrived_views(&chat, cx);
         // slopty: the body is Slopty's view of the active tab's session.
         let (id, failure) = self
             .active_tab(cx)
@@ -1167,10 +1355,28 @@ impl Render for TerminalPanel {
                 live::chrome::loading(caption, &theme, cx.entity_id(), cx).into_any_element()
             }
         };
+        let tab_menu = self.render_tab_menu(window, cx);
         div()
             .size_full()
             .flex()
             .flex_col()
+            // slopty: ⌘T and ⌘W act on the panel's tabs while it has the keyboard.
+            .key_context(KEY_CONTEXT)
+            .on_action(cx.listener(|this, _: &NewTerminalTab, _, cx| {
+                if this.embedded {
+                    cx.propagate();
+                    return;
+                }
+                let chat = this.selected_chat(cx);
+                this.open_tab(chat, cx);
+                this.request_focus(cx);
+            }))
+            .on_action(cx.listener(|this, _: &crate::app_menus::CloseTab, window, cx| {
+                if !this.close_active_tab(window, cx) {
+                    cx.propagate();
+                }
+            }))
+            .children(tab_menu)
             // Terminal chrome is fixed Geist; TerminalElement measures and
             // paints its viewport independently with the technical mono role.
             .font_family(theme.font_sans_fixed.clone())

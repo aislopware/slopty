@@ -77,7 +77,7 @@ impl Need {
 }
 
 /// What an ask in flight hears, and from which client.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Heard {
     /// A client asked answered.
     Reply(ClientId, HandoffReply),
@@ -702,7 +702,7 @@ mod tests {
         assert!(h.editing("/r/.git/COMMIT_EDITMSG"), "its saves go in place");
         assert!(!h.editing("/r/other"));
         let done = HandoffReply::Edited { id, outcome: EditOutcome::Done };
-        h.replied(a, done);
+        h.replied(a, done.clone());
         assert_eq!(heard.try_recv().ok(), Some(Heard::Reply(a, done)));
         h.finish(id, Some(a));
         assert!(!h.editing("/r/.git/COMMIT_EDITMSG"));

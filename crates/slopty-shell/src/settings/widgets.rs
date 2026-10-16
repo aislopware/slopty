@@ -1514,6 +1514,21 @@ pub enum ActionTone {
 }
 
 pub fn action_button(theme: &Theme, tone: ActionTone) -> gpui::Div {
+    action_button_when(theme, tone, true)
+}
+
+/// slopty: [`action_button`] that may be disabled: dimmed to [`crate::theme::DISABLED_OPACITY`],
+/// with the default cursor and no hover lift, since a second `.hover` would replace the tone's
+/// rather than remove it. The caller says so to assistive tech (`aria_disabled`) and skips the
+/// click.
+pub fn action_button_when(theme: &Theme, tone: ActionTone, enabled: bool) -> gpui::Div {
+    fn lift(
+        button: gpui::Div,
+        enabled: bool,
+        hover: impl FnOnce(gpui::StyleRefinement) -> gpui::StyleRefinement,
+    ) -> gpui::Div {
+        if enabled { button.hover(hover) } else { button }
+    }
     let button = div()
         .flex()
         .flex_row()
@@ -1524,34 +1539,54 @@ pub fn action_button(theme: &Theme, tone: ActionTone) -> gpui::Div {
         .px(px(10.0))
         .py(px(5.0))
         .text_size(crate::typography::ui_rems(12.5))
-        .cursor_pointer();
+        .map(|button| {
+            if enabled {
+                button.cursor_pointer()
+            } else {
+                button.opacity(crate::theme::DISABLED_OPACITY).cursor_default()
+            }
+        });
     match tone {
-        ActionTone::Quiet => button
-            .text_color(theme.text_muted)
-            .hover(|s| s.bg(theme.glass_hover()).text_color(theme.text)),
-        ActionTone::Outlined => button
-            .bg(theme.input_glass_bg())
-            .border_1()
-            .border_color(theme.border)
-            .text_color(theme.text)
-            .hover(|s| s.bg(theme.glass_hover()).border_color(theme.border_strong)),
+        ActionTone::Quiet => {
+            let (wash, text) = (theme.glass_hover(), theme.text);
+            lift(button.text_color(theme.text_muted), enabled, move |s| {
+                s.bg(wash).text_color(text)
+            })
+        }
+        ActionTone::Outlined => {
+            let (wash, edge) = (theme.glass_hover(), theme.border_strong);
+            lift(
+                button
+                    .bg(theme.input_glass_bg())
+                    .border_1()
+                    .border_color(theme.border)
+                    .text_color(theme.text),
+                enabled,
+                move |s| s.bg(wash).border_color(edge),
+            )
+        }
         ActionTone::Filled => {
             let lifted = select_fill(theme, true);
-            button
-                .bg(select_fill(theme, false))
-                .text_color(theme.text)
-                .hover(move |s| s.bg(lifted))
+            lift(
+                button.bg(select_fill(theme, false)).text_color(theme.text),
+                enabled,
+                move |s| s.bg(lifted),
+            )
         }
-        ActionTone::Solid => button
-            .bg(theme.solid)
-            .font_weight(gpui::FontWeight::MEDIUM)
-            .text_color(theme.on_solid)
-            .hover(|s| s.opacity(0.9)),
+        ActionTone::Solid => lift(
+            button
+                .bg(theme.solid)
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(theme.on_solid),
+            enabled,
+            |s| s.opacity(0.9),
+        ),
         // The dialogs' destructive fill (`popover::btn_danger`).
-        ActionTone::Danger => button
-            .bg(theme.danger_strong)
-            .text_color(gpui::white())
-            .hover(|s| s.opacity(0.9)),
+        ActionTone::Danger => lift(
+            button.bg(theme.danger_strong).text_color(gpui::white()),
+            enabled,
+            |s| s.opacity(0.9),
+        ),
     }
 }
 
@@ -1678,20 +1713,14 @@ impl RenderOnce for SettingsScroll {
 /// actions), in the same frosted chip as the rest of the app's tooltips.
 pub struct TextTooltip {
     text: SharedString,
-    above: bool,
     // slopty: the action's key, resolved when the tooltip opened, and a second line.
     keys: Option<SharedString>,
     detail: Option<SharedString>,
 }
 
-/// How far a [`text_tooltip_above`] chip sits over the pointer; clears a
-/// small control the pointer is anywhere inside.
-const TOOLTIP_ABOVE_GAP: f32 = 20.0;
-
-// slopty: gpui hangs a tooltip at the pointer + 1 px, so the arrow covers its first glyphs; the
-// chip sits clear of the cursor until gpui-fast anchors it to its trigger (Zed's `pl_2 pt_2p5`).
-const TOOLTIP_CURSOR_CLEAR_X: f32 = 8.0;
-const TOOLTIP_CURSOR_CLEAR_Y: f32 = 10.0;
+// slopty: the window anchors every tooltip under the control it names (`lib.rs`,
+// `set_tooltip_placement`), so the chip is drawn as it is; a control with content below it
+// sets `tooltip_placement(Above)` itself.
 
 impl Render for TextTooltip {
     fn render(
@@ -1701,26 +1730,10 @@ impl Render for TextTooltip {
     ) -> impl IntoElement {
         // slopty: the card is `live::chrome::tooltip_card`, which Slopty's own views draw too.
         let theme = Theme::of(cx);
-        let card = match self.detail.clone() {
+        match self.detail.clone() {
             Some(detail) => tooltip_card_detail(self.text.clone(), detail, self.keys.clone(), theme),
             None => crate::live::chrome::tooltip_card_keyed(self.text.clone(), self.keys.clone(), theme),
-        };
-        if !self.above {
-            return div()
-                .pl(px(TOOLTIP_CURSOR_CLEAR_X))
-                .pt(px(TOOLTIP_CURSOR_CLEAR_Y))
-                .child(card)
-                .into_any_element();
         }
-        // gpui hangs a tooltip below-right of the pointer. A zero-height box
-        // with end-aligned content makes the chip overflow upward instead.
-        div()
-            .h(px(0.0))
-            .flex()
-            .flex_col()
-            .justify_end()
-            .child(div().relative().bottom(px(TOOLTIP_ABOVE_GAP)).child(card))
-            .into_any_element()
     }
 }
 
@@ -1732,24 +1745,6 @@ pub fn text_tooltip(
     move |_, cx| {
         cx.new(|_| TextTooltip {
             text: text.clone(),
-            above: false,
-            keys: None,
-            detail: None,
-        })
-        .into()
-    }
-}
-
-/// Like [`text_tooltip`], shown above the pointer instead of below it, for
-/// controls with content underneath that the chip would otherwise cover.
-pub fn text_tooltip_above(
-    text: impl Into<SharedString>,
-) -> impl Fn(&mut gpui::Window, &mut gpui::App) -> gpui::AnyView + 'static {
-    let text: SharedString = text.into();
-    move |_, cx| {
-        cx.new(|_| TextTooltip {
-            text: text.clone(),
-            above: true,
             keys: None,
             detail: None,
         })
@@ -1813,15 +1808,7 @@ pub fn action_tooltip(
     label: impl Into<SharedString>,
     keys: Keys,
 ) -> impl Fn(&mut gpui::Window, &mut gpui::App) -> gpui::AnyView + 'static {
-    keyed_tooltip(label.into(), None, keys, false)
-}
-
-/// [`action_tooltip`] above the pointer (as [`text_tooltip_above`]).
-pub fn action_tooltip_above(
-    label: impl Into<SharedString>,
-    keys: Keys,
-) -> impl Fn(&mut gpui::Window, &mut gpui::App) -> gpui::AnyView + 'static {
-    keyed_tooltip(label.into(), None, keys, true)
+    keyed_tooltip(label.into(), None, keys)
 }
 
 /// A two-line tooltip: the title (and its key) over a quieter detail line.
@@ -1837,7 +1824,6 @@ pub fn detail_tooltip(
         let (title, detail) = (title.clone(), detail.clone());
         cx.new(|_| TextTooltip {
             text: title,
-            above: false,
             keys,
             detail: Some(detail),
         })
@@ -1849,14 +1835,12 @@ fn keyed_tooltip(
     label: SharedString,
     detail: Option<SharedString>,
     keys: Keys,
-    above: bool,
 ) -> impl Fn(&mut gpui::Window, &mut gpui::App) -> gpui::AnyView + 'static {
     move |window, cx| {
         let keys = keys.text(window, cx);
         let (text, detail) = (label.clone(), detail.clone());
         cx.new(|_| TextTooltip {
             text,
-            above,
             keys,
             detail,
         })
@@ -1873,8 +1857,10 @@ pub fn tooltip_card_detail(
     keys: Option<SharedString>,
     theme: &Theme,
 ) -> crate::frost::Frosted {
+    let title: SharedString = title.into();
     crate::live::chrome::tooltip_frame(
         theme,
+        (title.clone(), keys.clone()),
         div()
             .flex()
             .flex_col()
@@ -1885,7 +1871,7 @@ pub fn tooltip_card_detail(
                     .flex_row()
                     .items_baseline()
                     .gap(px(crate::live::chrome::TOOLTIP_KEY_GAP))
-                    .child(div().min_w_0().child(title.into()))
+                    .child(div().min_w_0().child(title))
                     .children(keys.map(|keys| crate::live::chrome::tooltip_keys(theme, keys))),
             )
             .child(
@@ -1978,7 +1964,9 @@ impl SelectOption {
 }
 
 /// "Reset" on a settings row whose value differs from its default; nothing at the default, so the
-/// absence of "Reset" is the mark (Zed's rule). The caller adds the click.
+/// absence of "Reset" is the mark (Zed's rule). The caller adds the click. It lays out as tall as
+/// its words and reaches 4 px above and below them, so the row keeps its height however compact
+/// it is, whether "Reset" shows or not, and the target stays 24 px.
 pub fn reset_action(
     theme: &Theme,
     id: impl Into<SharedString>,
@@ -1998,7 +1986,9 @@ pub fn reset_action(
             .role(gpui::Role::Button)
             .aria_label(format!("Reset {label} to default"))
             .flex_none()
-            .min_h(px(24.0))
+            .min_h(px(16.0))
+            .py(px(4.0))
+            .my(px(-4.0))
             .px(px(4.0))
             .rounded(px(4.0))
             .flex()
@@ -2089,11 +2079,7 @@ impl Render for OverflowTooltip {
         let Some(text) = self.text.clone() else {
             return div().into_any_element();
         };
-        div()
-            .pl(px(TOOLTIP_CURSOR_CLEAR_X))
-            .pt(px(TOOLTIP_CURSOR_CLEAR_Y))
-            .child(crate::live::chrome::tooltip_card(text, Theme::of(cx)))
-            .into_any_element()
+        crate::live::chrome::tooltip_card(text, Theme::of(cx)).into_any_element()
     }
 }
 

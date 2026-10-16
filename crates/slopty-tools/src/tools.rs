@@ -24,7 +24,7 @@ use slopty_proto::orchestration::{ErrorCode, IdempotencyKey, Outcome, ThreadView
 use crate::ops::{self, AgentWanted};
 use crate::resolve::Resolver;
 use crate::show::{self, ShowPageArgs, ShowVisualArgs};
-use crate::{Dispatch, ToolError, view};
+use crate::{Dispatch, ToolError, ui, view};
 
 /// What the model reads before any tool description.
 pub const INSTRUCTIONS: &str = "\
@@ -36,7 +36,10 @@ rest, agent_stop ends one with the agents under it, and agents lists every agent
 parent. branch_bring copies a branch from a clone on one machine to a clone on another. \
 Requests an agent asks are the person's to answer. show_visual shows the person a native \
 visual (a chart, table, dashboard, diagram, simulation or 3D view) inline, and show_page a web \
-page, each above your reply. Everything else is the `slopty` command: `slopty --help` lists it.";
+page, each above your reply. ui_state reads the person's Slopty window (its regions, tabs and \
+the chat on screen); ui_terminal, ui_open, ui_region, ui_chat and ui_split change it, never \
+taking the keyboard from the person. Everything else is the `slopty` command: `slopty --help` \
+lists it.";
 
 /// How often a long wait with a progress sink reports that it is still waiting.
 pub const PROGRESS_EVERY: Duration = Duration::from_secs(10);
@@ -273,6 +276,12 @@ pub fn list() -> Vec<Tool> {
         ),
         tool::<ShowVisualArgs>("show_visual", show::SHOW_VISUAL_DESCRIPTION, Kind::Read),
         tool::<ShowPageArgs>("show_page", show::SHOW_PAGE_DESCRIPTION, Kind::Read),
+        bare("ui_state", ui::STATE_DESCRIPTION, Kind::Read),
+        tool::<ui::TerminalArgs>("ui_terminal", ui::TERMINAL_DESCRIPTION, Kind::Write),
+        tool::<ui::OpenArgs>("ui_open", ui::OPEN_DESCRIPTION, Kind::Write),
+        tool::<ui::RegionArgs>("ui_region", ui::REGION_DESCRIPTION, Kind::Write),
+        tool::<ui::ChatArgs>("ui_chat", ui::CHAT_DESCRIPTION, Kind::Write),
+        tool::<ui::OpenArgs>("ui_split", ui::SPLIT_DESCRIPTION, Kind::Write),
     ]
 }
 
@@ -298,6 +307,19 @@ pub async fn call<D: Dispatch>(
     let Some(tool) = get(name) else {
         return Err(ErrorData::invalid_params(format!("no tool is called {name}"), None));
     };
+    // The window's answer is its own JSON, a failure's with its code.
+    if ui::NAMES.contains(&name) {
+        let text = |value: Value| vec![ContentBlock::text(value.to_string())];
+        let ran = match here() {
+            Ok(cwd) => ui::call(dispatch, name, arguments, &cwd).await,
+            Err(e) => Err(e),
+        };
+        return Ok(match ran {
+            Ok(Ok(done)) => CallToolResult::success(text(done)),
+            Ok(Err(failure)) => CallToolResult::error(text(failure)),
+            Err(e) => CallToolResult::error(vec![ContentBlock::text(e.to_string())]),
+        });
+    }
     // A change waits out a server it cannot reach, its lookups too; a read answers at once.
     let changes = tool.annotations.as_ref().and_then(|a| a.read_only_hint) == Some(false);
     let ran = if changes {
@@ -452,6 +474,8 @@ mod tests {
     struct Fake {
         verbs: Mutex<Vec<Verb>>,
         keys: Mutex<Vec<Option<IdempotencyKey>>>,
+        /// What the person's window was asked.
+        windows: Mutex<Vec<slopty_proto::handoff::UiAct>>,
     }
 
     impl Fake {
@@ -480,6 +504,19 @@ mod tests {
     }
 
     impl Dispatch for Fake {
+        fn window(
+            &self,
+            act: slopty_proto::handoff::UiAct,
+        ) -> impl Future<
+            Output = Result<slopty_proto::handoff::UiDone, slopty_proto::handoff::UiFailure>,
+        > + Send {
+            self.windows.lock().push(act);
+            std::future::ready(Ok(slopty_proto::handoff::UiDone {
+                did: Some("showed the sidebar".to_owned()),
+                ..slopty_proto::handoff::UiDone::default()
+            }))
+        }
+
         async fn send(&self, key: Option<IdempotencyKey>, verb: Verb) -> Outcome {
             self.verbs.lock().push(verb.clone());
             self.keys.lock().push(key);
@@ -561,8 +598,8 @@ mod tests {
         (result.is_error == Some(true), text)
     }
 
-    /// The tools are the eight primitives and the two that show the person something, and
-    /// nothing else: the rest is the `slopty` command.
+    /// The tools are the eight primitives, the two that show the person something and the six
+    /// that read and drive their window, and nothing else: the rest is the `slopty` command.
     #[test]
     fn every_tool_has_a_schema_a_description_and_a_hint() {
         let tools = list();
@@ -580,6 +617,12 @@ mod tests {
                 "branch_bring",
                 "show_visual",
                 "show_page",
+                "ui_state",
+                "ui_terminal",
+                "ui_open",
+                "ui_region",
+                "ui_chat",
+                "ui_split",
             ]
         );
         for t in &tools {
@@ -592,6 +635,43 @@ mod tests {
         for name in names {
             assert!(INSTRUCTIONS.contains(name), "the instructions name {name}");
         }
+    }
+
+    /// The window's tools reach the person's window through the carrier, each answer the
+    /// window's own JSON; a carrier with no window, as the server's endpoint, says so by its
+    /// code, and arguments that name nothing are the model's to fix before anything is asked.
+    #[tokio::test]
+    async fn the_window_tools_reach_the_window_through_their_carrier() {
+        use slopty_proto::handoff::{UiAct, UiChange};
+        struct Server;
+        impl Dispatch for Server {
+            fn send(
+                &self,
+                _key: Option<IdempotencyKey>,
+                _verb: Verb,
+            ) -> impl Future<Output = Outcome> + Send {
+                std::future::ready(Outcome::Done)
+            }
+        }
+
+        let fake = Fake::default();
+        let shown = json!({ "region": "sidebar", "change": "show" });
+        let (failed, text) = call_json(&fake, "ui_region", shown).await;
+        assert!(!failed, "{text}");
+        let answer: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(answer["did"], "showed the sidebar");
+        let asked = UiAct::Region { region: "sidebar".to_owned(), change: UiChange::Show };
+        assert_eq!(fake.windows.lock().as_slice(), [asked]);
+        let (failed, text) = call_json(&fake, "ui_open", json!({})).await;
+        let answer: Value = serde_json::from_str(&text).unwrap();
+        assert!(failed && answer["error"]["code"] == "unknown", "{text}");
+        assert_eq!(fake.windows.lock().len(), 1, "nothing asked of the window");
+
+        let result = call(&Server, "ui_state", Map::new(), None).await.unwrap();
+        let text = result.content[0].as_text().unwrap().text.clone();
+        let answer: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(result.is_error, Some(true));
+        assert_eq!(answer["error"]["code"], "no_window", "{text}");
     }
 
     /// What a model is handed is a golden: each tool's name and argument schema. A changed

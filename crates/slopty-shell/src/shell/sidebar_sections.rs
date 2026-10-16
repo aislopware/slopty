@@ -296,7 +296,8 @@ impl Shell {
                         cx.notify();
                     }),
                 )
-                .tooltip(crate::settings::widgets::text_tooltip("Section options"))
+                .role(gpui::Role::Button)
+                .hint("Section options")
                 .child(
                     icon(icons::MORE_HORIZONTAL)
                         .size(px(14.0))

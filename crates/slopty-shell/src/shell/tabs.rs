@@ -397,7 +397,7 @@ impl Shell {
             match state.selected_chat_row() {
                 Some(chat) => (
                     SharedString::from(transcript::single_line(
-                        &chat.title.clone().unwrap_or_else(|| "New session".into()),
+                        &chat.title.clone().unwrap_or_else(|| "New chat".into()),
                     )),
                     chat.config.as_ref().map(|c| c.harness),
                     false,
@@ -443,9 +443,9 @@ impl Shell {
                     widths.surface_reveal >= RIGHT_PANE_HEADER_CONTROLS_MIN_WIDTH;
                 // slopty: the expand button's name, said and shown.
                 let expand_label = if self.right_pane_expanded {
-                    "Collapse panel"
+                    "Restore side pane"
                 } else {
-                    "Expand panel"
+                    "Expand side pane"
                 };
                 // The toggle is the fixed right-edge anchor, like the left
                 // sidebar control. Only the tabs + expand section reveals to
@@ -489,15 +489,20 @@ impl Shell {
                                             header_icon_button(
                                                 "expand-changes",
                                                 right_pane_expand_icon(self.right_pane_expanded),
-                                                expand_label,
                                                 &theme,
                                                 cx.listener(|this, _, _, cx| {
                                                     this.toggle_right_pane_expand(cx)
                                                 }),
                                             )
-                                            // slopty: named for a screen reader.
-                                            .role(gpui::Role::Button)
-                                            .aria_label(expand_label),
+                                            // slopty: named, with its key, for the eye and a
+                                            // screen reader.
+                                            .action_hint(
+                                                expand_label,
+                                                Keys::Action(Box::new(
+                                                    chrome_keys::ToggleExpandPane,
+                                                )),
+                                                cx,
+                                            ),
                                         )
                                 }),
                         ),
@@ -534,14 +539,12 @@ impl Shell {
                                 header_icon_button(
                                     "toggle-files-panel",
                                     icons::FOLDER_TREE,
-                                    files_panel_label,
                                     &theme,
                                     cx.listener(|this, _, window, cx| {
                                         this.toggle_files_panel(window, cx)
                                     }),
                                 )
-                                .role(gpui::Role::Button)
-                                .aria_label(files_panel_label)
+                                .action_hint(files_panel_label, Keys::Action(Box::new(ToggleFiles)), cx)
                                 // slopty: no running-subagents mark; a subagent lives in its
                                 // parent's chat, not in this panel.
                                 .when(self.files_panel_open(cx) && fit.files, |button| {
@@ -561,8 +564,18 @@ impl Shell {
                                     16.0,
                                     theme.text_muted,
                                 ),
-                                ShortcutId::ToggleChanges.label(),
+                                &theme,
                                 cx.listener(|this, _, _, cx| this.toggle_right_pane(cx)),
+                            )
+                            // slopty: what it does now, and its key.
+                            .action_hint(
+                                if self.right_pane_open(cx) && fit.right {
+                                    "Hide side pane"
+                                } else {
+                                    "Show side pane"
+                                },
+                                Keys::Action(Box::new(ToggleChanges)),
+                                cx,
                             )),
                     )
                     .into_any_element(),
@@ -582,11 +595,10 @@ impl Shell {
             header_icon_button_with(
                 "toggle-session-info",
                 icons::corner_card_glyph(16.0, theme.text_muted),
-                label,
+                &theme,
                 cx.listener(|this, _, _, cx| this.toggle_session_info(cx)),
             )
-            .role(gpui::Role::Button)
-            .aria_label(label)
+            .action_hint(label, Keys::Action(Box::new(chrome_keys::ToggleSessionInfo)), cx)
             .flex_none()
             .on_mouse_down(
                 MouseButton::Left,
@@ -614,21 +626,24 @@ impl Shell {
                         .flex_row()
                         .items_center()
                         .gap(px(6.0))
+                        // slopty: the agent's mark rests in the muted ink; its brand hue would
+                        // wear a constant state loud (Claude desktop keeps clay for working).
                         .when_some(
                             harness.map(crate::pickers::harness_brand_icon),
-                            |el, (path, tint)| {
+                            |el, (path, _tint)| {
                                 el.child(
                                     icon(path)
                                         .size(px(14.0))
                                         .flex_none()
-                                        .text_color(tint.unwrap_or(theme.text_muted)),
+                                        .text_color(theme.text_muted),
                                 )
                             },
                         )
+                        // slopty: a cut title shows whole in a tooltip.
                         .child(
                             div()
                                 .min_w_0()
-                                .truncate()
+                                .flex()
                                 .text_size(crate::typography::ui_rems(12.0))
                                 .font_weight(gpui::FontWeight::MEDIUM)
                                 .text_color(if on_canvas {
@@ -636,7 +651,10 @@ impl Shell {
                                 } else {
                                     theme.text.opacity(0.85)
                                 })
-                                .child(title),
+                                .child(crate::settings::widgets::truncate_with_tip(
+                                    "chat-titlebar-title",
+                                    title,
+                                )),
                         ),
                 )
             })

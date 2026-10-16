@@ -1007,16 +1007,18 @@ pub const JUMP_SLOTS: usize = 9;
 const JUMP_DEFAULTS: [&str; JUMP_SLOTS] = [
     "mod-1", "mod-2", "mod-3", "mod-4", "mod-5", "mod-6", "mod-7", "mod-8", "mod-9",
 ];
+// slopty: one noun for a conversation everywhere: chat (`.research/micro-details-2026-10-16.md`
+// §1.4).
 const JUMP_LABELS: [&str; JUMP_SLOTS] = [
-    "Jump to session 1",
-    "Jump to session 2",
-    "Jump to session 3",
-    "Jump to session 4",
-    "Jump to session 5",
-    "Jump to session 6",
-    "Jump to session 7",
-    "Jump to session 8",
-    "Jump to session 9",
+    "Jump to chat 1",
+    "Jump to chat 2",
+    "Jump to chat 3",
+    "Jump to chat 4",
+    "Jump to chat 5",
+    "Jump to chat 6",
+    "Jump to chat 7",
+    "Jump to chat 8",
+    "Jump to chat 9",
 ];
 
 /// The rebindable app shortcuts. `JumpSession(slot)` is zero-based; a slot at
@@ -1085,17 +1087,18 @@ impl ShortcutId {
             ShortcutId::RandomWallpaper => "Random wallpaper",
             // slopty: appshots removed.
             ShortcutId::SaveFile => "Save file",
-            ShortcutId::BrowserReload => "Reload browser page",
-            ShortcutId::ToggleSidebar => "Toggle left sidebar",
-            ShortcutId::ToggleChanges => "Toggle right sidebar",
+            // slopty: each name is the one its button, menu and palette row use.
+            ShortcutId::BrowserReload => "Reload page",
+            ShortcutId::ToggleSidebar => "Toggle sidebar",
+            ShortcutId::ToggleChanges => "Toggle side pane",
             ShortcutId::ToggleFiles => "Toggle files panel",
             ShortcutId::ToggleTerminal => "Toggle terminal",
-            ShortcutId::NewSession => "New session",
+            ShortcutId::NewSession => "New chat",
             ShortcutId::NewProject => "New project",
             ShortcutId::OpenModelPicker => "Open model picker",
-            ShortcutId::NextSession => "Next session or right pane tab",
-            ShortcutId::PrevSession => "Previous session or right pane tab",
-            ShortcutId::ArchiveSession => "Archive session",
+            ShortcutId::NextSession => "Next chat or side pane tab",
+            ShortcutId::PrevSession => "Previous chat or side pane tab",
+            ShortcutId::ArchiveSession => "Archive chat",
             ShortcutId::ReopenClosedTab => "Reopen closed tab", // slopty
             ShortcutId::OpenBranchPicker => "Open branch picker", // slopty
             ShortcutId::NextEffort => "Next effort level", // slopty
@@ -1491,35 +1494,11 @@ pub fn display_combo_on(mac: bool, combo: &str) -> String {
         .join("+")
 }
 
-/// Compact combo for badge surfaces (the sidebar jump hints): macOS spells
-/// the modifiers as their key glyphs in canonical ⌃⌥⇧⌘ order and drops the
-/// separators ("⌘1", "⇧⌘A") — the form the model picker's ⌘N chips already
-/// use — while other platforms keep the textual [`display_combo`] ("Ctrl+1").
+// slopty: a stored combo reads as `keys::combo_text` writes it, everywhere; this name stays only
+// for the past-sessions picker until it calls that itself.
+/// A stored combo as Slopty writes a key ([`crate::keys::combo_text`]).
 pub fn badge_combo(combo: &str) -> String {
-    badge_combo_on(cfg!(target_os = "macos"), combo)
-}
-
-/// [`badge_combo`] for an explicit platform (see [`combo_from_keystroke_on`]).
-pub fn badge_combo_on(mac: bool, combo: &str) -> String {
-    if !mac {
-        return display_combo_on(false, combo);
-    }
-    let mut parts: Vec<&str> = combo.split('-').collect();
-    let key = parts.pop().unwrap_or("");
-    let mut out = String::new();
-    for glyph in ["ctrl", "alt", "shift", "mod"]
-        .iter()
-        .zip(['⌃', '⌥', '⇧', '⌘'])
-        .filter_map(|(name, glyph)| parts.contains(name).then_some(glyph))
-    {
-        out.push(glyph);
-    }
-    let mut chars = key.chars();
-    if let Some(first) = chars.next() {
-        out.extend(first.to_uppercase());
-        out.push_str(chars.as_str());
-    }
-    out
+    crate::keys::combo_text(combo).to_string()
 }
 
 impl UiSettings {
@@ -3618,20 +3597,6 @@ mod tests {
         assert!(!modifier_send_hint_visible(false, false, false));
         assert!(!modifier_send_hint_visible(true, true, false));
         assert!(!modifier_send_hint_visible(true, false, true));
-    }
-
-    #[test]
-    fn badge_combos_use_mac_glyphs_and_linux_text() {
-        // macOS: glyphs in canonical ⌃⌥⇧⌘ order, no separators — the model
-        // picker's ⌘N chip form.
-        assert_eq!(badge_combo_on(true, "mod-2"), "⌘2");
-        assert_eq!(badge_combo_on(true, "mod-shift-a"), "⇧⌘A");
-        assert_eq!(badge_combo_on(true, "mod-alt-3"), "⌥⌘3");
-        // A literal ctrl segment (macOS recorder spelling) is ⌃.
-        assert_eq!(badge_combo_on(true, "ctrl-tab"), "⌃Tab");
-        // Elsewhere the textual form stands.
-        assert_eq!(badge_combo_on(false, "mod-2"), "Ctrl+2");
-        assert_eq!(badge_combo_on(false, "mod-shift-a"), "Ctrl+Shift+A");
     }
 
     #[test]

@@ -5,15 +5,48 @@
 //! here are offered, Finder for a folder on this Mac. Every open goes through [`launch`], which an
 //! end-to-end run points at a file (`SLOPTY_E2E_OPEN_LOG`) so nothing is launched.
 
+use std::cell::Cell;
+
 use gpui::{
-    AnyElement, App, Context, IntoElement, ParentElement, Pixels, Point, SharedString, Styled,
-    div, prelude::*, px,
+    AnyElement, App, Bounds, Context, IntoElement, ParentElement, Pixels, Point, SharedString,
+    Styled, div, prelude::*, px,
 };
 
 use super::Shell;
 use crate::icons::{self, icon};
 use crate::popover;
+use crate::settings::widgets::{ActionHint as _, Keys};
 use crate::theme::Theme;
+
+thread_local! {
+    /// Where the titlebar's Open in button was last drawn: the menu hangs under it, whether a
+    /// click or ⌥⌘O asked for it.
+    static BUTTON: Cell<Option<Bounds<Pixels>>> = const { Cell::new(None) };
+}
+
+/// Under the button, its menu's top-left: below it by the menus' gap, its left edge aligned.
+fn under_button() -> Option<Point<Pixels>> {
+    BUTTON.with(Cell::get).map(|bounds| gpui::point(bounds.left(), bounds.bottom() + px(4.0)))
+}
+
+/// Whether `host` names this machine: a worker reached over loopback runs here, where Finder and
+/// the editors open its folders without SSH.
+fn on_this_machine(host: &str) -> bool {
+    let host = host.rsplit_once('@').map_or(host, |(_, host)| host);
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    host.eq_ignore_ascii_case("localhost")
+        || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
+}
+
+/// `path` with a leading `~` spelled out as `home`, as `open -a` takes it (no shell expands it).
+fn expand_home(path: &str, home: Option<&str>) -> String {
+    match (path.strip_prefix('~'), home) {
+        (Some(rest), Some(home)) if rest.is_empty() || rest.starts_with('/') => {
+            format!("{}{rest}", home.trim_end_matches('/'))
+        }
+        _ => path.to_owned(),
+    }
+}
 
 /// Where the person's own editors and Finder are: what [`launch`] opens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,20 +170,28 @@ impl Shell {
     }
 
     /// The folder chat `chat_id` works in, and the address of its machine when that is not this
-    /// Mac.
+    /// Mac. slopty: where it works, else the folder its agent's session runs in, else its
+    /// project's; a worker reached over loopback is this Mac, and a folder here is whole (`~`
+    /// spelled out), as `open -a` needs it.
     fn chat_folder(&self, chat_id: &str, cx: &App) -> Option<(String, Option<String>)> {
         let state = self.state.read(cx);
         let chat = state.chats.iter().find(|chat| chat.id == chat_id)?;
-        let path = chat
-            .cwd
-            .clone()
-            .filter(|cwd| !cwd.is_empty())
+        let path = [chat.cwd.as_ref(), chat.harness_session_cwd.as_ref()]
+            .into_iter()
+            .flatten()
+            .find(|cwd| !cwd.is_empty())
+            .cloned()
             .or_else(|| state.space_for_chat(chat).map(|space| space.path.clone()))?;
         let host = state
             .devices
             .iter()
             .find(|device| device.id == chat.device_id)
-            .and_then(|device| device.ssh_host.clone());
+            .and_then(|device| device.ssh_host.clone())
+            .filter(|host| !host.is_empty() && !on_this_machine(host));
+        let path = match host {
+            Some(_) => path,
+            None => expand_home(&path, std::env::var("HOME").ok().as_deref()),
+        };
         Some((path, host))
     }
 
@@ -176,6 +217,22 @@ impl Shell {
         cx.notify();
     }
 
+    /// ⌥⌘O: the selected chat's Open in menu under its button, or shut when it is up. Whether
+    /// there was a chat to do it for.
+    pub(super) fn toggle_open_in(&mut self, cx: &mut Context<Self>) -> bool {
+        if !Self::offers_open_in() {
+            return false;
+        }
+        if self.open_in.get().is_some() {
+            self.close_open_in(cx);
+            return true;
+        }
+        let Some(chat_id) = self.state.read(cx).selected_chat.clone() else { return false };
+        let Some(at) = under_button() else { return false };
+        self.open_open_in(chat_id, at, cx);
+        true
+    }
+
     fn close_open_in(&mut self, cx: &mut Context<Self>) {
         if self.open_in.begin_close() {
             popover::reap_popup(cx, |shell: &mut Self| &mut shell.open_in);
@@ -193,6 +250,9 @@ impl Shell {
         if choices.is_empty() {
             list = list.child(
                 div()
+                    .id("open-in-none")
+                    .role(gpui::Role::Label)
+                    .aria_label("No editor here can open it")
                     .px(px(8.0))
                     .py(px(6.0))
                     .text_size(crate::typography::ui_rems(13.0))
@@ -218,7 +278,11 @@ impl Shell {
                     .child(SharedString::from(editor.app())),
             );
         }
+        // slopty: the menu is a node of its own, its rows its items.
         let card = popover::popover_card(&theme)
+            .id("open-in-card")
+            .role(gpui::Role::Menu)
+            .aria_label("Open in")
             .w(px(216.0))
             .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_open_in(cx)))
             .child(list)
@@ -234,29 +298,40 @@ impl Shell {
         let chat_id = self.state.read(cx).selected_chat.clone()?;
         let theme = Theme::of(cx).clone();
         let open = self.open_in.get().is_some();
+        let button = super::header_icon_button(
+            "open-in",
+            icons::FILE_CODE,
+            &theme,
+            cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
+                if this.open_in.take_press_was_open() {
+                    this.close_open_in(cx);
+                    return;
+                }
+                // slopty: under the button, whether pressed or clicked, never at the pointer.
+                let at = under_button().unwrap_or_else(|| event.position());
+                this.open_open_in(chat_id.clone(), at, cx);
+            }),
+        )
+        .role(gpui::Role::Button);
+        // slopty: its tooltip names the key, and goes while the menu is up rather than cover it.
+        let button = if open {
+            button.aria_label("Open in…")
+        } else {
+            button.action_hint("Open in…", Keys::Action(Box::new(super::chrome_keys::OpenIn)), cx)
+        };
         Some(
-            super::header_icon_button(
-                "open-in",
-                icons::FILE_CODE,
-                "Open in…",
-                &theme,
-                cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
-                    if this.open_in.take_press_was_open() {
-                        this.close_open_in(cx);
-                        return;
-                    }
-                    let at = event.position() + gpui::point(px(-8.0), px(14.0));
-                    this.open_open_in(chat_id.clone(), at, cx);
-                }),
-            )
-            .role(gpui::Role::Button)
-            .aria_label("Open in…")
+            div()
+                .flex_none()
+                .on_children_prepainted(|bounds, _, _| {
+                    BUTTON.with(|button| button.set(bounds.first().copied()));
+                })
+                .child(button
             .flex_none()
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(|this, _, _, _| this.open_in.note_trigger_press()),
             )
-            .when(open, |button| button.bg(crate::theme::wash(0.09)))
+            .when(open, |button| button.bg(crate::theme::wash(0.09))))
             .into_any_element(),
         )
     }
@@ -304,6 +379,20 @@ mod tests {
         );
         assert_eq!(open(Editor::Finder, path, host), None, "Finder sees only this Mac");
         assert_eq!(open(Editor::VsCode, "~/code", host), None, "a remote path must be whole");
+    }
+
+    /// A worker reached over loopback is this Mac: its folders open here, `~` spelled out.
+    #[test]
+    fn a_loopback_worker_is_this_mac() {
+        assert!(on_this_machine("127.0.0.1"));
+        assert!(on_this_machine("me@localhost"));
+        assert!(on_this_machine("[::1]"));
+        assert!(!on_this_machine("studio.tail1234.ts.net"));
+        assert!(!on_this_machine("100.64.0.9"));
+        assert_eq!(expand_home("~/code/x", Some("/Users/me/")), "/Users/me/code/x");
+        assert_eq!(expand_home("~", Some("/Users/me")), "/Users/me");
+        assert_eq!(expand_home("~other/x", Some("/Users/me")), "~other/x");
+        assert_eq!(expand_home("/srv/x", Some("/Users/me")), "/srv/x");
     }
 
     #[test]

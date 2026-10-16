@@ -280,7 +280,7 @@ fn fallback(wait: bool, args: &[OsString], why: &str) -> Result<ExitCode> {
 
 /// One line out, one line back, on the control socket. The sending half stays open until the
 /// reply is in: the worker reads its closing as the edit given up.
-async fn exchange(socket: &Path, request: &CtlRequest) -> Result<CtlReply> {
+pub async fn exchange(socket: &Path, request: &CtlRequest) -> Result<CtlReply> {
     use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
     let stream = tokio::net::UnixStream::connect(socket).await?;
     let (rd, mut wr) = stream.into_split();
@@ -297,7 +297,7 @@ async fn exchange(socket: &Path, request: &CtlRequest) -> Result<CtlReply> {
 }
 
 /// The session named by `SLOPTY_SESSION`; `None` outside one.
-fn session() -> Result<Option<slopty_core::SessionId>> {
+pub fn session() -> Result<Option<slopty_core::SessionId>> {
     let Some(session) = std::env::var_os(slopty_proto::ctl::SESSION_ENV) else {
         return Ok(None);
     };

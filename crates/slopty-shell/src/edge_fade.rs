@@ -96,6 +96,7 @@ pub fn edge_faded(band: f32, top: bool, bottom: bool, child: impl IntoElement) -
         scroll_x: None,
         smooth_overflow_x: false,
         grow_x: false,
+        clear_right: 0.0, // slopty
         child: child.into_any_element(),
     }
 }
@@ -115,6 +116,7 @@ pub struct EdgeFaded {
     scroll_x: Option<ScrollHandle>,
     smooth_overflow_x: bool,
     grow_x: bool,
+    clear_right: f32, // slopty: see `clear_right`
     child: AnyElement,
 }
 
@@ -203,6 +205,14 @@ impl EdgeFaded {
 
     pub fn outset_bottom(mut self, px: f32) -> Self {
         self.outset_bottom = px;
+        self
+    }
+
+    /// slopty: keep the last `px` of the child clear, fading out over [`CLEAR_BAND`] before it,
+    /// so something laid over the right end (a row's hover pill) reads alone without the child
+    /// re-laying out under it.
+    pub fn clear_right(mut self, px: f32) -> Self {
+        self.clear_right = px.max(0.0);
         self
     }
 }
@@ -300,6 +310,8 @@ impl EdgeFaded {
         let (mut left, mut right) = (self.left, self.right);
         let mut outset_right = 0.0;
         let (mut band_left, mut band_right) = (None, None);
+        // slopty: a cleared end fades whether or not the label overflows; it applies after the
+        // overflow fade below, which it replaces.
         if let Some(scroll) = &self.scroll_x
             && self.grow_x
         {
@@ -321,9 +333,13 @@ impl EdgeFaded {
                 right &= scrolled < max_scroll - 1.0;
             }
         }
+        if self.clear_right > 0.0 {
+            (right, outset_right, band_right) = (true, 0.0, Some(px(CLEAR_BAND)));
+        }
         let fade = (top || bottom || left || right).then(|| {
             let mut bounds = bounds;
             bounds.size.width += px(outset_right);
+            bounds.size.width = (bounds.size.width - px(self.clear_right)).max(px(0.0)); // slopty
             let inset = px(self.inset_top).min(bounds.size.height);
             bounds.origin.y += inset;
             bounds.size.height -= inset;
@@ -351,6 +367,9 @@ impl EdgeFaded {
         Some(fade)
     }
 }
+
+/// slopty: the ramp before a [`EdgeFaded::clear_right`] end.
+pub const CLEAR_BAND: f32 = 16.0;
 
 fn label_fade_outset(overflow: f32, band: f32) -> f32 {
     let band = band.max(1.0);

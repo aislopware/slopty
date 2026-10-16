@@ -549,9 +549,6 @@ impl AppearancePage {
                                 )
                                 .map(|reset| {
                                     reset
-                                        .min_h(px(16.0))
-                                        .py(px(4.0))
-                                        .my(px(-4.0))
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.pending_width = None;
                                             crate::settings::set_transcript_width(

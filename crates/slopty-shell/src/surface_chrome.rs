@@ -80,7 +80,8 @@ pub(crate) fn tab_frame(
         } else {
             theme.text_muted
         })
-        .focus_visible(|style| style.border_2().border_color(theme.accent))
+        // slopty: a ring that never widens the chip (`focus_ring`).
+        .map(|el| focus_ring(el, theme))
         .when(selected, |el| el.bg(crate::theme::wash(0.10)))
 }
 
@@ -89,9 +90,12 @@ pub(crate) fn tab(
     selected: bool,
     theme: &Theme,
 ) -> gpui::Stateful<Div> {
-    tab_frame(id, selected, theme).when(!selected, |el| {
-        el.hover(|style| style.bg(crate::theme::wash(0.06)))
-    })
+    tab_frame(id, selected, theme)
+        .when(!selected, |el| {
+            el.hover(|style| style.bg(crate::theme::wash(0.06)))
+        })
+        // slopty: pressed reads a step deeper (M22).
+        .active(|style| style.bg(crate::theme::wash(0.14)))
 }
 
 /// Fixed pane tab width. Drag reordering (drop-index quantisation and slide
@@ -137,13 +141,15 @@ pub(crate) fn tab_chip(
     } = chip;
     let group: gpui::SharedString = format!("{id}-{ix}").into();
     let selector = group.clone();
+    let close_fade = format!("{close_id}-{ix}-fade");
     tab((id, ix), active, theme)
         .debug_selector(move || selector.to_string())
         .group(group.clone())
         .h(px(TAB_CHIP_HEIGHT))
         .w(px(TAB_CHIP_WIDTH))
         .flex_none()
-        .px(px(4.0))
+        // slopty: 4 from the edge, the focus ring's hairline included.
+        .px(px(4.0 - 1.0))
         .rounded(px(CONTROL_RADIUS))
         .flex()
         .flex_row()
@@ -186,12 +192,27 @@ pub(crate) fn tab_chip(
                 .debug_selector(move || format!("{close_id}-{ix}"))
                 .flex_none()
                 .size(px(18.0))
-                .rounded(px(4.0))
+                // slopty: r 6 and a faded wash, as the strip's other controls; the tab in front
+                // names ⌘W, which closes it.
+                .rounded(px(CONTROL_RADIUS))
                 .relative()
                 .role(gpui::Role::Button)
                 .aria_label("Close tab")
-                .tooltip(crate::settings::widgets::text_tooltip("Close tab"))
-                .hover(|s| s.bg(crate::theme::wash(0.12)))
+                .tooltip(if active {
+                    Box::new(crate::settings::widgets::action_tooltip(
+                        "Close tab",
+                        crate::settings::widgets::Keys::Action(Box::new(crate::app_menus::CloseTab)),
+                    )) as Box<dyn Fn(&mut gpui::Window, &mut gpui::App) -> gpui::AnyView>
+                } else {
+                    Box::new(crate::settings::widgets::text_tooltip("Close tab"))
+                })
+                .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
+                .bg(crate::motion::hover_blend(
+                    &close_fade,
+                    crate::theme::wash(0.0),
+                    crate::theme::wash(0.11),
+                ))
+                .on_hover(crate::motion::hover_listener(close_fade))
                 // The tab owns a drag payload. Claim the close press before
                 // it reaches that parent or GPUI starts a tab drag instead of
                 // delivering the close click.
