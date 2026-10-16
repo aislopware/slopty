@@ -548,7 +548,7 @@ type Curtain =
 #[cfg(target_os = "macos")]
 const PANICKED: i32 = 101;
 
-/// The exit code of a worker that found another holding its data directory ([`Held`]):
+/// The exit code of a worker that found another holding its data directory (`Held`):
 /// `EX_TEMPFAIL`, as the service manager that started it may try again once the other is gone.
 pub const HELD_ELSEWHERE: u8 = 75;
 

@@ -4880,6 +4880,18 @@ mod tests {
             assert!(after <= 2, "{what}: one burst, {after} more words");
             took
         }
+
+        /// Like [`Self::timed`] for a change made of many writes spread over as long as the disk
+        /// takes (a git directory deleted and made again): its first word must come within half
+        /// a second, and the words of its writes are let through however many there are.
+        async fn said(&mut self, what: &str, change: impl FnOnce()) {
+            let at = std::time::Instant::now();
+            change();
+            let heard = self.next(Duration::from_millis(500)).await;
+            assert!(heard.is_some(), "{what}: no word within half a second");
+            println!("MEASURE e2e {what} → RepoMoved at the client: {:?}", at.elapsed());
+            let _burst = self.until_quiet(slopty_worker::repowatch::HOLD.saturating_mul(3)).await;
+        }
     }
 
     /// A repository whose status and diffs a client shows is followed by the worker, which says
@@ -4965,7 +4977,7 @@ mod tests {
 
         // The git directory replaced: said at once, and the new one followed.
         words
-            .timed("the git directory replaced", || {
+            .said("the git directory replaced", || {
                 std::fs::remove_dir_all(repo.join(".git")).unwrap();
                 git(&repo, &["init", "-q", "-b", "main"]);
             })
