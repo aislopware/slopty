@@ -61,11 +61,13 @@ use crate::queue::Queue;
 
 mod asks;
 mod doors;
+mod ending;
 mod model;
 mod work;
 
 pub use asks::DIALOG_KINDS;
 pub use doors::{Ran, SURFACE_CLIENT};
+pub use ending::{ENDED, Ending, Kind as EndKind, ending};
 pub use model::THINKING_FACT;
 use model::{mode_words, switched_to};
 pub use work::{PROGRESS_EVERY, TAIL_EVERY};
@@ -1764,7 +1766,8 @@ impl Driven {
     /// Claude Code is gone, at `now`, for the reason in `why` when it failed: what it asked is
     /// no longer asked, its calls are cancelled, the turn under way ends stopped or failed, and
     /// what was on its way may not have reached it. The thread goes on by its next message,
-    /// which starts Claude Code again on the session.
+    /// which starts Claude Code again on the session. `why` is said as an [`ENDED`] notice, in
+    /// its own words ([`ending()`] words an end Claude Code chose).
     pub fn exited(&mut self, why: Option<&str>, now: WallMs) -> Vec<Out> {
         let mut outs = Vec::new();
         let numbers: Vec<u64> = self.asks.keys().copied().collect();
@@ -1778,7 +1781,7 @@ impl Driven {
         }
         outs.extend(self.shown());
         if let Some(why) = why {
-            outs.extend(self.history.notice(Notice::INFO, why, now));
+            outs.extend(self.history.notice(ENDED, why, now));
         }
         if self.running {
             // A stop asked for and not acknowledged ends the process: the turn ended stopped.

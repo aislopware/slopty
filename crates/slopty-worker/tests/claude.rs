@@ -5,12 +5,13 @@
 //! says; what it was started with and every line it heard is its record.
 //!
 //! One test per behaviour of the drive: a message delivered and a permission answered by its id,
-//! a stop not acknowledged in time escalated, a crash mid-turn, a message never acknowledged
-//! held as unknown, a torn line passed over, a permission outstanding across the adapter's
-//! restart (ptyd keeps Claude Code), the usage limit's hold, a thread taken up again by its next
-//! message, the lease stamped while the process lives and not after, a managed launcher's
-//! arguments handed on, a request tried again kept to one row, and a turn Claude Code really
-//! took played through the drive, its subagent and its permissions with it.
+//! a stop not acknowledged in time escalated, a crash mid-turn, an end by a signal said by its
+//! kind, a message never acknowledged held as unknown, a torn line passed over, a permission
+//! outstanding across the adapter's restart (ptyd keeps Claude Code), the usage limit's hold, a
+//! thread taken up again by its next message, the lease stamped while the process lives and not
+//! after, a managed launcher's arguments handed on, a request tried again kept to one row, and a
+//! turn Claude Code really took played through the drive, its subagent and its permissions with
+//! it.
 
 #[cfg(test)]
 mod claude {
@@ -270,9 +271,14 @@ mod claude {
 
     /// The stand-in's process, by the pid it recorded, ended at once.
     fn kill(record: &Value) {
+        signal(record, "-KILL");
+    }
+
+    /// The stand-in's process, by the pid it recorded, sent `signal` (`-TERM`).
+    fn signal(record: &Value, signal: &str) {
         let pid = record["pid"].as_u64().expect("a pid").to_string();
-        let killed = std::process::Command::new("kill").args(["-9", &pid]).status().unwrap();
-        assert!(killed.success(), "kill {pid}");
+        let sent = std::process::Command::new("kill").args([signal, &pid]).status().unwrap();
+        assert!(sent.success(), "kill {signal} {pid}");
     }
 
     /// A thread's Claude Code runs as the desktop app runs it, named by the start's id; the
@@ -504,6 +510,41 @@ mod claude {
             panic!("{:?}", state.turns)
         };
         assert!(error.contains("crashed mid-turn"), "{error}");
+    }
+
+    /// Claude Code ended mid-turn by a signal from outside says what kind of end it was, in
+    /// plain words with the one thing to do, as a failure of its own kind
+    /// ([`ENDED`](slopty_agent::claude::driven::ENDED)) and as the turn's error, not a bare
+    /// "Claude Code ended". (A crash's signal is told the same way, by
+    /// `ending::tests::each_kind_of_end_is_told_apart`; none is raised here, so the machine
+    /// files no crash report.)
+    #[tokio::test]
+    async fn an_end_by_a_signal_says_what_kind_it_was() {
+        for (sent, said) in [("-KILL", "killed (SIGKILL)"), ("-TERM", "outside Slopty (SIGTERM)")] {
+            let rig = Rig::new(&[]).await;
+            let (claude, _served) = rig.serve();
+            let thread = rig.started(&claude, "slow 300").await;
+            let active =
+                |s: &ThreadState| s.turns.last().is_some_and(|t| t.state == TurnState::Active);
+            rig.until(thread, "the turn", active).await;
+            signal(&rig.record(), sent);
+            let state = rig.until(thread, "the end", exited).await;
+            let Some(TurnState::Failed { error, .. }) = state.turns.last().map(|t| t.state.clone())
+            else {
+                panic!("{sent}: {:?}", state.turns)
+            };
+            assert!(error.contains(said), "{sent}: {error}");
+            assert!(error.ends_with("Send a message to start it again."), "{sent}: {error}");
+            let notice = state.items.iter().find_map(|i| match &i.body {
+                slopty_proto::thread::ItemBody::Notice(n)
+                    if n.kind == slopty_agent::claude::driven::ENDED =>
+                {
+                    Some(n.text.text.clone())
+                }
+                _ => None,
+            });
+            assert_eq!(notice.as_deref(), Some(error.as_str()), "{sent}: said once, as the error");
+        }
     }
 
     /// A message Claude Code never acknowledges is on its way until Claude Code ends; then it

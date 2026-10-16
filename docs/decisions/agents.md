@@ -3754,3 +3754,33 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   the question and its answer (`slopty-agent`'s driven Claude, lane W), then the composer's
   `/btw` routing to it with its answer shown in a dismissible card above the composer, the
   newest twenty exchanges kept as Claude Code keeps them.
+
+- ✅ **A Claude Code that ends unasked says what kind of end it was (2026-10-17).** From
+  `.research/claude-desktop-2026-10-16.md` §d.7 and §d.13 (D7). A Claude Code that failed used to
+  leave "Claude Code ended: <its last line of standard error>", a bare line in the chat's own
+  words, and a turn failed under the generic "The turn failed". The worker now says what kind of
+  end it was, in plain words with the one thing to do next (`slopty_agent::claude::driven::ending`),
+  from its exit status as ptyd reports it (a signal negated; `128 + n` from a shell counts as
+  signal n) and the last 4 KiB of its standard error:
+  - **Out of memory**, from its own words anywhere in that tail ("JavaScript heap out of
+    memory", `ENOMEM`), ahead of the signal, since an abort for memory ends on `SIGABRT`: close
+    what else runs there, then send a message.
+  - **Killed** (`SIGKILL`, often the system short of memory) or **stopped from outside Slopty**
+    (`SIGTERM`, `SIGINT`, `SIGHUP`, `SIGQUIT`), and **crashed** on any other signal, named
+    (`SIGSEGV`): send a message to start it again.
+  - From its last five lines only, so a warning it recovered from is not the cause: **too
+    old** (a flag it does not know: update it there), **not signed in** (sign it in there;
+    Slopty never signs in for the person), **its service out of reach** (`ECONNREFUSED`,
+    `getaddrinfo`: check that machine's network).
+  - Else **ended with code N**, with its last line.
+  - The words go as a notice of kind `ended`, open as every kind is, which the view model draws
+    as the failure it is, red, in these words; the failed turn's error is the same words, so the
+    chat says it once, with Try again. A Claude Code the worker itself ended, for reading
+    nothing it was sent, says so with the same next step. Claude desktop keeps about 110
+    categories, most of them its own process's (bun, a binary of the wrong architecture); these
+    are the ones a person can act on.
+  - Tests: `slopty-agent` `claude::driven::ending::tests::{each_kind_of_end_is_told_apart,
+    an_old_warning_is_not_the_cause, a_signal_is_named_and_a_code_is_not_one}`,
+    `claude::driven::tests::a_claude_code_gone_mid_turn_cuts_its_turn`; `slopty-worker`
+    `claude::an_end_by_a_signal_says_what_kind_it_was` (the stand-in killed and terminated
+    mid-turn through ptyd), `claude::a_crash_mid_turn_fails_the_turn_with_why`.

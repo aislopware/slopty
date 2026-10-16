@@ -667,6 +667,9 @@ async fn sweep_once(threads: &Threads) {
                         "a landed worktree swept"
                     );
                 }
+                for (_tree, _commits, words) in &swept.unpushed {
+                    tracing::info!("a landed worktree kept: {words}");
+                }
             }
             Err(e) => tracing::debug!(clone = %clone.display(), "no sweep: {e}"),
         }

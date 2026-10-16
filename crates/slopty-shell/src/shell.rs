@@ -1760,6 +1760,9 @@ pub struct Shell {
     /// expanded list ("Show more" reveals another page).
     pub(super) archived_open: bool,
     pub(super) archived_shown: usize,
+    // slopty: rows at rest each sidebar group shows before "Show more", by its collapse key
+    // (`sidebar_status::page_at_rest`); a group not named shows the first page.
+    pub(super) sidebar_group_shown: std::collections::HashMap<String, usize>,
     /// Ephemeral collapsed project/device sections, keyed by organization + id.
     pub(super) sidebar_collapsed_groups: std::collections::HashSet<String>,
     /// In-flight disclosure tweens, shared by device groups, Pinned and Archived.
@@ -2265,6 +2268,7 @@ impl Shell {
             archived_open: true,
             pinned_open: true,
             archived_shown: 0,
+            sidebar_group_shown: std::collections::HashMap::new(), // slopty
             sidebar_collapsed_groups: std::collections::HashSet::new(),
             sidebar_reveal_motions: std::collections::HashSet::new(),
             sidebar_disclosure_motion: std::collections::HashMap::new(),
@@ -7026,6 +7030,10 @@ impl Shell {
             // is held, in the shared legend voice (the compact rows' plain
             // muted text, `popover::kbd_hint`).
             div()
+                .debug_selector({
+                    let id = format!("jump-hint-{id}"); // slopty: for the tests
+                    move || id
+                })
                 .flex_none()
                 .whitespace_nowrap()
                 .font_family(crate::popover::KEY_GLYPH_FONT)

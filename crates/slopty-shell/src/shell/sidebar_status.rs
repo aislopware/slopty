@@ -10,6 +10,9 @@
 //! - **Unread weight.** A finished result nobody has seen sets its title in the heavier weight.
 //! - **The hover card.** Hovering a row shows where it runs (project @ machine, folder, branch),
 //!   which agent and model, how long it has stood as it is, and its running subagents.
+//! - **Show more.** A group shows its first [`REST_FIRST`] rows at rest, then "Show N more",
+//!   which adds [`REST_PAGE`] at a time, as desktop's groups and the Archived shelf do. A row that
+//!   needs the person or is at work always shows, and so does the open chat.
 
 use chrono::{DateTime, Local, Utc};
 use gpui::{AnyElement, AnyView, App, Context, IntoElement, Render, SharedString, Window, div, prelude::*, px};
@@ -74,6 +77,102 @@ impl StatusGroup {
             Self::Working => "Working",
             Self::Done => "Done",
         }
+    }
+}
+
+/// Whether a row with display status `status` and session `session` is at rest (Done): the rows
+/// a group pages behind "Show more".
+pub(super) fn at_rest(status: ChatIndicator, session: Option<&Session>, now: DateTime<Utc>) -> bool {
+    StatusGroup::of(status, session, now) == StatusGroup::Done
+}
+
+/// Rows at rest a sidebar group shows before "Show more", as the Archived shelf's first page.
+pub(super) const REST_FIRST: usize = 10;
+
+/// Rows at rest each "Show more" adds, as the Archived shelf's page.
+pub(super) const REST_PAGE: usize = 25;
+
+/// Keep of a group's `rows`, in order, those it draws while it shows `shown` rows at rest
+/// (`at_rest`): every row not at rest, the one `kept` (the open chat), and the first `shown` at
+/// rest. How many wait behind "Show more".
+pub(super) fn page_at_rest<T>(
+    rows: &mut Vec<T>,
+    shown: usize,
+    at_rest: impl Fn(&T) -> bool,
+    kept: impl Fn(&T) -> bool,
+) -> usize {
+    let before = rows.len();
+    let mut seen = 0_usize;
+    rows.retain(|row| {
+        if !at_rest(row) || kept(row) {
+            return true;
+        }
+        seen = seen.saturating_add(1);
+        seen <= shown
+    });
+    before.saturating_sub(rows.len())
+}
+
+/// The "Show N more" line under a sidebar group whose `hidden` rows wait, `height` tall, drawn as
+/// the Archived shelf draws its own.
+pub(super) fn show_more_row(
+    id: SharedString,
+    hidden: usize,
+    height: f32,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
+    let id_text = id.to_string();
+    let words = SharedString::from(format!("Show {} more", hidden.min(REST_PAGE)));
+    div()
+        .id(id)
+        .debug_selector(move || id_text)
+        .h(px(height))
+        .flex_none()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(10.0))
+        .px(px(Theme::SPACE_SM))
+        .rounded(px(6.0))
+        .text_size(crate::typography::ui_rems(13.0))
+        .text_color(theme.text_muted.opacity(0.55))
+        .cursor_pointer()
+        .role(gpui::Role::Button)
+        .aria_label(words.clone())
+        .hover(|s| s.bg(theme.glass_hover()).text_color(theme.text))
+        .child(icon(icons::PLUS).size(px(14.0)).flex_none())
+        .child(words)
+}
+
+impl super::Shell {
+    /// The "Show more" line under the sidebar group of `collapse_key`, when `hidden` rows wait:
+    /// its key, its height with the list's gap above it, and the line, which shows another page.
+    pub(super) fn render_group_more(
+        &self,
+        collapse_key: &str,
+        hidden: usize,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<(String, f32, AnyElement)> {
+        if hidden == 0 {
+            return None;
+        }
+        // As the Archived shelf's: a compact row's height, else 36.
+        let height = if self.settings.sidebar_compact {
+            super::sidebar_row_height(true, true, false, false)
+        } else {
+            36.0
+        };
+        let key = collapse_key.to_owned();
+        let id = SharedString::from(format!("sidebar-group-more-{collapse_key}"));
+        let element = show_more_row(id, hidden, height, theme)
+            .on_click(cx.listener(move |this, _, _, cx| {
+                let shown = this.sidebar_group_shown.get(&key).copied().unwrap_or(REST_FIRST);
+                this.sidebar_group_shown.insert(key.clone(), shown.saturating_add(REST_PAGE));
+                cx.notify();
+            }))
+            .into_any_element();
+        Some((format!("more:{collapse_key}"), height + super::SIDEBAR_LIST_GAP, element))
     }
 }
 
@@ -705,6 +804,128 @@ mod tests {
         assert_eq!(super::super::spaces::device_glyph("linux"), crate::icons::REMOTE_SERVER);
         assert_eq!(super::super::spaces::device_glyph("macos"), crate::icons::LAPTOP);
         assert_eq!(super::super::spaces::device_glyph("ios"), crate::icons::SMARTPHONE);
+    }
+
+    /// A group shows its first rows at rest and keeps the rest behind "Show more"; a row that
+    /// needs the person or works, and the open chat, always show.
+    #[test]
+    fn a_group_pages_its_rows_at_rest() {
+        // (id, at rest): every seventh needs the person; the last is the open chat.
+        let mut rows: Vec<(usize, bool)> = (0..30).map(|id| (id, id % 7 != 0)).collect();
+        let hidden = page_at_rest(&mut rows, REST_FIRST, |row| row.1, |row| row.0 == 29);
+        assert_eq!(hidden, 14, "25 at rest: ten shown, the open chat, fourteen behind");
+        assert_eq!(rows.iter().filter(|row| !row.1).count(), 5, "every row not at rest shows");
+        assert!(rows.iter().any(|row| row.0 == 29), "the open chat shows");
+        let mut few: Vec<(usize, bool)> = (0..REST_FIRST).map(|id| (id, true)).collect();
+        assert_eq!(page_at_rest(&mut few, REST_FIRST, |row| row.1, |_| false), 0, "nothing to page");
+    }
+
+    /// A shell window, its sidebar by status and `compact` or not, with `count` chats at rest,
+    /// newest first: c00, c01…
+    fn shell_with_chats(
+        cx: &mut gpui::TestAppContext,
+        count: usize,
+        compact: bool,
+    ) -> (gpui::Entity<super::super::Shell>, &mut gpui::VisualTestContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            crate::composer::init(cx, crate::settings::ComposerSendBehavior::default());
+            super::super::apply_keymap(
+                cx,
+                &crate::settings::KeymapConfig::default(),
+                crate::settings::ComposerSendBehavior::default(),
+            );
+        });
+        let path = dir.path().to_path_buf();
+        let (shell, cx) = cx.add_window_view(move |_, cx| {
+            let state = cx.new(|_| AppState::new());
+            let mut shell = super::super::Shell::new(
+                state,
+                crate::state::EngineBootConfig {
+                    data_dir: path.clone(),
+                    default_harness: slopty_view_proto::HarnessId::MOCK,
+                },
+                cx,
+            );
+            shell.reduced_motion = true;
+            shell.settings.sidebar_organization = crate::settings::SidebarOrganization::ByStatus;
+            shell.settings.sidebar_compact = compact;
+            let now = Utc::now();
+            let chats = (0..count).map(|n| chat(&format!("c{n:02}"), i64::try_from(n).unwrap(), now, false));
+            shell.state.update(cx, |state, _| {
+                state.connection = slopty_view_proto::view::ConnectionStatus::Ready;
+                state.workspace_scope = Some(slopty_view_proto::WorkspaceScope::Local);
+                state.local_device_id = Some("local".into());
+                state.chats = chats.collect();
+            });
+            shell
+        });
+        std::mem::forget(dir);
+        (shell, cx)
+    }
+
+    fn shown(cx: &mut gpui::VisualTestContext, id: &str) -> bool {
+        let selector: &'static str = Box::leak(format!("chat-{id}").into_boxed_str());
+        cx.debug_bounds(selector).is_some()
+    }
+
+    /// Done shows its first ten rows, then "Show 4 more"; pressed, it shows them all and no keys
+    /// skip a row it does not draw. The open chat shows wherever it falls.
+    #[gpui::test]
+    fn a_long_group_shows_more_on_request(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) = shell_with_chats(cx, 14, true);
+        redraw(cx);
+        const MORE: &str = "sidebar-group-more-status:status:done";
+        assert!(shown(cx, "c09") && !shown(cx, "c10"), "the first page");
+        assert!(cx.debug_bounds(MORE).is_some(), "Show more under the first page");
+        let order = shell.update(cx, |shell, cx| shell.sidebar_visible_order(cx));
+        assert_eq!(order.len(), REST_FIRST, "keys reach only the rows drawn: {order:?}");
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| state.selected_chat = Some("c12".into()));
+        });
+        redraw(cx);
+        assert!(shown(cx, "c12") && !shown(cx, "c11"), "the open chat shows");
+
+        let more = cx.debug_bounds(MORE).expect("Show more").center();
+        cx.simulate_click(more, gpui::Modifiers::default());
+        redraw(cx);
+        assert!((10..14).all(|n| shown(cx, &format!("c{n:02}"))), "every row now");
+        assert!(cx.debug_bounds(MORE).is_none(), "nothing left behind it");
+        let order = shell.update(cx, |shell, cx| shell.sidebar_visible_order(cx));
+        assert_eq!(order.len(), 14, "{order:?}");
+    }
+
+    /// Holding the jump keys' modifier numbers the first rows with their keys; let go, the
+    /// numbers go; the key opens its row.
+    #[gpui::test]
+    fn holding_the_modifier_numbers_the_rows(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) = shell_with_chats(cx, 3, false);
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        redraw(cx);
+        assert!(cx.update(|window, _| window.is_window_active()), "the window is the active one");
+        assert!(cx.debug_bounds("jump-hint-c00").is_none(), "no numbers before the key is held");
+        let held = if cfg!(target_os = "macos") {
+            gpui::Modifiers { platform: true, ..gpui::Modifiers::default() }
+        } else {
+            gpui::Modifiers { control: true, ..gpui::Modifiers::default() }
+        };
+        cx.simulate_modifiers_change(held);
+        assert!(shell.read_with(cx, |shell, _| shell.jump_hints), "the held key is heard");
+        redraw(cx);
+        for id in ["jump-hint-c00", "jump-hint-c01", "jump-hint-c02"] {
+            assert!(cx.debug_bounds(id).is_some(), "{id} while held");
+        }
+        cx.simulate_modifiers_change(gpui::Modifiers::default());
+        redraw(cx);
+        assert!(cx.debug_bounds("jump-hint-c00").is_none(), "gone once let go");
+        cx.simulate_keystrokes(&crate::settings::platform_combo("mod-2"));
+        let open = shell.read_with(cx, |shell, cx| shell.state.read(cx).selected_chat.clone());
+        assert_eq!(open.as_deref(), Some("c01"), "the second row's key opens it");
     }
 
     #[test]

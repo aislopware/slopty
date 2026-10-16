@@ -4827,6 +4827,19 @@ impl Shell {
                     groups.push((key, vec![chat]));
                 }
             }
+            // slopty: the rows past a group's "Show more" are not drawn, so no key reaches them.
+            let selected = state.selected_chat.as_deref();
+            for (key, rows) in &mut groups {
+                super::sidebar_status::page_at_rest(
+                    rows,
+                    self.sidebar_group_page(key),
+                    |chat| {
+                        let status = statuses.get(&chat.id).copied().unwrap_or(ChatIndicator::Idle);
+                        super::sidebar_status::at_rest(status, state.session_for(&chat.id), now)
+                    },
+                    |chat| selected == Some(chat.id.as_str()),
+                );
+            }
             groups
                 .into_iter()
                 .flat_map(|(_, rows)| rows)
@@ -4862,6 +4875,12 @@ impl Shell {
                 )
             }
         }
+    }
+
+    // slopty: the rows at rest group `group` shows before "Show more" (`sidebar_status`).
+    fn sidebar_group_page(&self, group: &str) -> usize {
+        let key = self.sidebar_group_collapse_key(group);
+        self.sidebar_group_shown.get(&key).copied().unwrap_or(super::sidebar_status::REST_FIRST)
     }
 
     /// A device/project group's key in `sidebar_collapsed_groups`.
@@ -4925,6 +4944,10 @@ impl Shell {
                 let collapse_key = self.sidebar_group_collapse_key(&group);
                 if self.sidebar_collapsed_groups.remove(&collapse_key) {
                     self.queue_sidebar_reveal(&format!("group:{collapse_key}"));
+                }
+                // slopty: a row past its group's "Show more" shows the whole group.
+                if !self.sidebar_visible_order(cx).contains(&chat.id) {
+                    self.sidebar_group_shown.insert(collapse_key, usize::MAX);
                 }
             }
         } else if let Some(index) = archived {
@@ -5142,6 +5165,25 @@ impl Shell {
                 existing.push(row);
             } else {
                 regular_groups.push((row.group.clone(), vec![row]));
+            }
+        }
+        // slopty: each group shows its first rows at rest, then "Show more" (`sidebar_status`).
+        let mut group_hidden = std::collections::HashMap::new();
+        {
+            let state = self.state.read(cx);
+            let selected = state.selected_chat.as_deref();
+            for (group, rows) in &mut regular_groups {
+                let Some((key, _)) = group else { continue };
+                let hidden = super::sidebar_status::page_at_rest(
+                    rows,
+                    self.sidebar_group_page(key),
+                    |row| {
+                        let session = state.session_for(&row.chat.id);
+                        super::sidebar_status::at_rest(row.status, session, now)
+                    },
+                    |row| selected == Some(row.chat.id.as_str()),
+                );
+                group_hidden.insert(key.clone(), hidden);
             }
         }
         // Sections keep their placed order, as Pinned does, not activity order.
@@ -5488,6 +5530,9 @@ impl Shell {
             let motion_key = format!("group:{collapse_key}");
             let collapsed = self.sidebar_collapsed_groups.contains(&collapse_key);
             let row_count = rendered_rows.len();
+            // slopty: the rows at rest past its page wait behind "Show more".
+            let hidden = group_hidden.get(&key).copied().unwrap_or(0);
+            rendered_rows.extend(self.render_group_more(&collapse_key, hidden, theme, cx));
             // slopty: the project's past Claude Code sessions close its group (`past_sessions`).
             rendered_rows.extend(project_group.then(|| self.project_history(&key, theme, cx)).flatten());
             let extra_gap = self.sidebar_transfer_extra_gap(&drag_group);
@@ -5589,7 +5634,7 @@ impl Shell {
                     theme,
                     group_icon,
                     visible_label,
-                    collapsed.then_some(row_count),
+                    collapsed.then_some(row_count + hidden), // slopty: with those behind Show more
                     new_chat_button,
                     chevron,
                 )
@@ -5597,6 +5642,7 @@ impl Shell {
                 .id(SharedString::from(format!("sidebar-group-{collapse_key}")))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     let was_open = !this.sidebar_collapsed_groups.contains(&toggle_key);
+                    this.sidebar_group_shown.remove(&toggle_key); // slopty: its first page again
                     this.begin_sidebar_disclosure_motion(
                         &toggle_motion_key,
                         if was_open { body_height } else { 0.0 },

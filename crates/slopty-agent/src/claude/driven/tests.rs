@@ -471,6 +471,9 @@ fn a_claude_code_gone_mid_turn_cuts_its_turn() {
     );
     assert!(matches!(thread.pending.as_slice(), [p] if p.is_unknown()), "{:?}", thread.pending);
     assert_eq!(thread.status.liveness, Liveness::Exited { resumable: true });
+    // Said as an end of its own kind, which the chat draws as a failure.
+    let said = notices(thread);
+    assert!(said.iter().any(|(kind, text)| kind == ENDED && text.contains("boom")), "{said:?}");
 }
 
 /// A line that is no JSON says nothing, and what comes after it is heard.

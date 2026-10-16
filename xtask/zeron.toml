@@ -191,8 +191,11 @@ paths = [
     "crates/ui/src/pull_request_interactions.rs",
     "crates/ui/src/shell/chat_pull_requests.rs",
     "crates/ui/src/shell/pull_request_pane.rs",
-    # The right pane's subagent list: subagents are rows under their agent in the sidebar.
+    # The right pane's subagent list: a subagent is a card in its parent's chat.
     "crates/ui/src/files/subagents.rs",
+    # Thread naming by an engine title run, which spends the person's plan: an agent names its
+    # own threads, and the person's rename is kept.
+    "crates/ui/src/settings/thread_naming.rs",
     # Per-device worktree locations: the engine side is not taken.
     "crates/ui/src/settings/worktrees.rs",
     # Agent accounts and their usage: Slopty never touches a credential.

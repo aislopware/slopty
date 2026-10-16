@@ -408,3 +408,21 @@ tools and its own judgement. Slopty adds reach and hearing, not a workflow.
     the app.
   - Tests: `repo::worktrees::tests::{a_sweep_takes_landed_clean_worktrees_and_keeps_the_rest,
     a_worktree_in_use_or_not_committed_is_kept}` (`slopty-worker`).
+- ✅ **A worktree with commits not pushed is kept** (2026-10-17, D12 of
+  `.research/claude-desktop-2026-10-16.md`, whose branch removal keeps commits that exist nowhere
+  else). Freeing or sweeping a worktree checked only for files not committed, so a worktree whose
+  commits sat on a detached `HEAD`, or had landed only in the clone's own `main` before it was
+  pushed, could go with work saved nowhere but this machine.
+  - **The check.** A commit of the worktree's `HEAD` is not pushed when no remote branch holds
+    it (`git rev-list HEAD --not --remotes`) and `origin`'s default branch has no commit of the
+    same patch (`git cherry`), so work rebased or cherry-picked there counts as pushed. A pull
+    request its forge says merged at its tip is pushed. A clone with no remote has nowhere to
+    push: there a commit counts when no branch holds it.
+  - **Kept and said.** `remove`, `free` (`GitOp::RemoveWorktree`, orchestration's verbs) and
+    the daily sweep keep such a worktree whole, and say "Kept: N commits not pushed in <tree>
+    (<the newest few, short hash and subject>)", as they say uncommitted files. Nothing is
+    deleted, and the worktree goes once its commits are pushed. A run the person discards
+    (`discard`) keeps its commits on its branch, as before.
+  - Tests: `repo::worktrees::tests::a_worktree_with_commits_not_pushed_is_kept`
+    (`slopty-worker`): a branch not pushed, a detached `HEAD`'s commit, and work landed only in
+    the clone's `main`, each kept, then gone once pushed.

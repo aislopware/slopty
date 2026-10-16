@@ -4,8 +4,9 @@
 //! `.claude/worktrees/`. Claude Code makes its own; for any other agent the worker makes it as
 //! the thread starts ([`make`]), the way Claude Code would, but never moving a branch that is
 //! there already. Freeing one ([`remove`]) loses nothing that is not saved elsewhere: a worktree
-//! with anything not committed, or with a terminal still working in it, is kept and said, and
-//! its branch goes only when every commit on it landed.
+//! with anything not committed, a commit on no remote branch, or a terminal still working in it
+//! is kept and said ("Kept: 2 commits not pushed"), and its branch goes only when every commit
+//! on it landed.
 //!
 //! A new worktree starts current: from its base branch as `origin` has it, fetched for a moment
 //! first, unless the clone holds commits `origin` lacks (`base_of`). The files the clone's
@@ -35,6 +36,8 @@ pub enum Failed {
     Busy(String),
     /// Something in it is not committed: what git lists, a few lines of it.
     Uncommitted(String),
+    /// Commits on it are saved nowhere else (`unpushed`): how many, a few of them.
+    Unpushed(String),
     /// Anything else, in words.
     Other(String),
     /// The worktree was made, but the repository's setup in it failed.
@@ -46,9 +49,11 @@ pub enum Failed {
 impl std::fmt::Display for Failed {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NotOne(why) | Self::Busy(why) | Self::Uncommitted(why) | Self::Other(why) => {
-                f.write_str(why)
-            }
+            Self::NotOne(why)
+            | Self::Busy(why)
+            | Self::Uncommitted(why)
+            | Self::Unpushed(why)
+            | Self::Other(why) => f.write_str(why),
             Self::Setup(failed) | Self::Archive(failed) => {
                 let what = if matches!(self, Self::Setup(_)) { "setup" } else { "archive script" };
                 write!(f, "the {what} from {} ", failed.setup.from)?;
@@ -605,21 +610,34 @@ async fn ahead_of(git: &Path, clone: &Path, tree: &Path, landed: &[String]) -> u
 /// Remove the worktree at `worktree` from its clone.
 ///
 /// It may be any linked worktree of the clone, an agent's or one made by hand, with no terminal
-/// whose directory is in it (`cwds`, every live terminal's) and nothing uncommitted in it:
-/// `git worktree remove` without `--force`, so git refuses what this missed. The branch it had
-/// checked out goes too when every commit on it is in one of `landed` (commits or branches of
-/// the clone; those that name nothing here are passed over) by patch, as `git cherry` reads
-/// it, so work rebased onto the target counts as landed.
+/// whose directory is in it (`cwds`, every live terminal's), nothing uncommitted in it and no
+/// commit saved nowhere else (`unpushed`): `git worktree remove` without `--force`, so git
+/// refuses what this missed. The branch it had checked out goes too when every commit on it is
+/// in one of `landed` (commits or branches of the clone; those that name nothing here are
+/// passed over) by patch, as `git cherry` reads it, so work rebased onto the target counts as
+/// landed.
 ///
 /// # Errors
 /// [`Failed::NotOne`] for a path that is no such worktree, [`Failed::Busy`] while a terminal
-/// works in it, [`Failed::Uncommitted`] for anything not committed, and [`Failed::Other`] for
-/// a git that failed.
+/// works in it, [`Failed::Uncommitted`] for anything not committed, [`Failed::Unpushed`] for a
+/// commit not pushed, and [`Failed::Other`] for a git that failed.
 pub async fn remove(
     git: &Path,
     worktree: &Path,
     landed: &[String],
     cwds: &[PathBuf],
+) -> Result<Removed, Failed> {
+    remove_unless_unsaved(git, worktree, landed, cwds, false).await
+}
+
+/// [`remove`], with the check for commits not pushed passed over when its forge says they are
+/// (`pushed`: its pull request merged at its tip).
+async fn remove_unless_unsaved(
+    git: &Path,
+    worktree: &Path,
+    landed: &[String],
+    cwds: &[PathBuf],
+    pushed: bool,
 ) -> Result<Removed, Failed> {
     let (tree, clone, branch) = {
         let worktree = worktree.to_path_buf();
@@ -638,7 +656,55 @@ pub async fn remove(
     if !status.trim().is_empty() {
         return Err(Failed::Uncommitted(kept_words(&tree, &status)));
     }
+    if !pushed {
+        let commits = unpushed(git, &tree).await?;
+        if !commits.is_empty() {
+            return Err(Failed::Unpushed(unpushed_words(git, &tree, &commits).await));
+        }
+    }
     take_out(git, (&tree, &clone, branch), landed, false).await
+}
+
+/// The commits of worktree `tree`'s `HEAD` that are saved nowhere else, newest first: on no
+/// remote branch, and not landed in `origin`'s default branch by patch (`git cherry`, so work
+/// rebased or squashed in by the same patch counts as pushed). A clone with no remote has
+/// nowhere to push: there a commit counts when no branch holds it, as a detached `HEAD`'s.
+async fn unpushed(git: &Path, tree: &Path) -> Result<Vec<String>, Failed> {
+    let remotes = bundle::run(git, tree, &["remote"]).await?;
+    let pushable = !remotes.trim().is_empty();
+    let elsewhere = if pushable { "--remotes" } else { "--branches" };
+    let listed = bundle::run(git, tree, &["rev-list", "HEAD", "--not", elsewhere]).await?;
+    let mut commits: Vec<String> =
+        listed.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_owned).collect();
+    if pushable && !commits.is_empty() {
+        let spec = format!("{DEFAULT_BRANCH}^{{commit}}");
+        let resolve = ["rev-parse", "--verify", "--quiet", "--end-of-options", &spec];
+        if let Ok(base) = bundle::run(git, tree, &resolve).await
+            && let Ok(cherry) = bundle::run(git, tree, &["cherry", base.trim(), "HEAD"]).await
+        {
+            let landed: std::collections::HashSet<&str> =
+                cherry.lines().filter_map(|line| line.strip_prefix("- ")).map(str::trim).collect();
+            commits.retain(|commit| !landed.contains(commit.as_str()));
+        }
+    }
+    Ok(commits)
+}
+
+/// What is said of worktree `tree` kept for `commits` not pushed (`unpushed`): how many, then
+/// the newest few by their subjects.
+async fn unpushed_words(git: &Path, tree: &Path, commits: &[String]) -> String {
+    let count = commits.len();
+    let noun = if count == 1 { "commit" } else { "commits" };
+    let mut args = vec!["show", "-s", "--format=%h %s", "--end-of-options"];
+    args.extend(commits.iter().take(SAID_LINES).map(String::as_str));
+    let shown = bundle::run(git, tree, &args).await.unwrap_or_default();
+    let lines: Vec<&str> = shown.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let tree = tree.display();
+    if lines.is_empty() {
+        format!("Kept: {count} {noun} not pushed in {tree}")
+    } else {
+        format!("Kept: {count} {noun} not pushed in {tree} ({})", lines.join("; "))
+    }
 }
 
 /// What is said of worktree `tree` kept for what `git status --porcelain` lists in it (`status`),
@@ -753,13 +819,19 @@ pub async fn free(
             .map_err(|e| Failed::Other(e.to_string()))??
     };
     let mut landed = vec![DEFAULT_BRANCH.to_owned(), "HEAD".to_owned()];
-    if let Some(branch) = branch.filter(|_| programs.has_forge())
-        && !landed_in(git, &clone, &branch, &landed).await
-        && merged_at_tip(git, programs, &tree).await
-    {
-        landed.push(branch);
-    }
-    remove(git, &tree, &landed, terminals).await
+    // A pull request merged at its tip is pushed: its forge holds it.
+    let merged = match branch.filter(|_| programs.has_forge()) {
+        Some(branch)
+            if !landed_in(git, &clone, &branch, &landed).await
+                && merged_at_tip(git, programs, &tree).await =>
+        {
+            Some(branch)
+        }
+        _ => None,
+    };
+    let pushed = merged.is_some();
+    landed.extend(merged);
+    remove_unless_unsaved(git, &tree, &landed, terminals, pushed).await
 }
 
 /// What a sweep of a clone's agent worktrees did ([`sweep`]).
@@ -770,6 +842,9 @@ pub struct Swept {
     /// The ones whose work landed but that hold something not committed, each with how many
     /// files git lists as changed there: kept, nothing of them lost.
     pub kept: Vec<(PathBuf, u32)>,
+    /// The ones whose work landed but that hold commits not pushed (`unpushed`), each with
+    /// how many and what is said of it: kept, nothing of them lost.
+    pub unpushed: Vec<(PathBuf, u32, String)>,
 }
 
 /// Take away the worktrees agents left under `clone`'s `.claude/worktrees/` whose work has
@@ -778,9 +853,10 @@ pub struct Swept {
 /// Each one clean, with no folder of `keep` in it (a thread the worker holds, a live terminal),
 /// and every commit on it in `origin`'s default branch or the branch the clone has checked out,
 /// by patch, or its pull request merged at its tip as the forge's command line says. One that holds
-/// anything not committed is kept and counted. A worktree with work not landed, one made by hand or
-/// by another tool elsewhere, and the clone itself are never touched. A worktree that cannot go
-/// (its archive script failed, git refused) is left as it is, for the next sweep.
+/// anything not committed, or a commit saved nowhere else (`unpushed`: landed only in the
+/// clone's own branch, not pushed), is kept and counted. A worktree with work not landed, one
+/// made by hand or by another tool elsewhere, and the clone itself are never touched. A worktree
+/// that cannot go (its archive script failed, git refused) is left as it is, for the next sweep.
 ///
 /// # Errors
 /// [`Failed::NotOne`] for a `clone` in no repository, [`Failed::Other`] for a git that cannot
@@ -815,11 +891,13 @@ pub async fn sweep(
             continue;
         };
         let mut gone = landed.to_vec();
-        let merged = ahead_of(git, &clone, &tree, &landed).await == 0
-            || (branch.is_some()
-                && programs.has_forge()
-                && merged_at_tip(git, programs, &tree).await);
-        if !merged {
+        let by_patch = ahead_of(git, &clone, &tree, &landed).await == 0;
+        // A pull request merged at its tip is pushed: its forge holds it.
+        let by_forge = !by_patch
+            && branch.is_some()
+            && programs.has_forge()
+            && merged_at_tip(git, programs, &tree).await;
+        if !by_patch && !by_forge {
             continue;
         }
         if !status.trim().is_empty() {
@@ -827,6 +905,15 @@ pub async fn sweep(
             tracing::info!(tree = %tree.display(), changed, "a landed worktree kept: uncommitted");
             swept.kept.push((tree, changed));
             continue;
+        }
+        if !by_forge {
+            let Ok(commits) = unpushed(git, &tree).await else { continue };
+            if !commits.is_empty() {
+                let count = u32::try_from(commits.len()).unwrap_or(u32::MAX);
+                let words = unpushed_words(git, &tree, &commits).await;
+                swept.unpushed.push((tree, count, words));
+                continue;
+            }
         }
         if let Some(branch) = &branch
             && !landed_in(git, &clone, branch, &landed).await
@@ -1309,6 +1396,67 @@ mod tests {
         let gone = remove(git, &elsewhere, &landed, &[]).await.expect("removed");
         assert!(gone.branch_removed, "{gone:?}");
         assert!(!elsewhere.exists());
+    }
+
+    /// A worktree holding a commit on no remote branch is kept and said, whether it is removed
+    /// or swept, and nothing of it is lost: a branch not pushed, a detached `HEAD`'s commit, and
+    /// work landed only in the clone's own `main`. Pushed, each goes.
+    #[tokio::test]
+    async fn a_worktree_with_commits_not_pushed_is_kept() {
+        let Some(git) = crate::changes::git() else { return };
+        let tmp = tempfile::tempdir().expect("temp");
+        let (origin, clone) = (tmp.path().join("origin.git"), tmp.path().join("clone"));
+        std::fs::create_dir_all(&clone).expect("mkdir");
+        git_in(tmp.path(), &["init", "-q", "--bare", "-b", "main", &origin.to_string_lossy()]);
+        git_in(&clone, &["init", "-q", "-b", "main"]);
+        git_in(&clone, &["commit", "-q", "--allow-empty", "-m", "c0"]);
+        git_in(&clone, &["remote", "add", "origin", &origin.to_string_lossy()]);
+        git_in(&clone, &["push", "-q", "origin", "main"]);
+        git_in(&clone, &["remote", "set-head", "origin", "main"]);
+        let landed = [DEFAULT_BRANCH.to_owned(), "HEAD".to_owned()];
+
+        let (ahead, ahead_branch) = agent_tree(&clone, "ahead");
+        git_in(&ahead, &["commit", "-q", "--allow-empty", "-m", "second step"]);
+        let kept = remove(git, &ahead, &landed, &[]).await;
+        assert!(
+            matches!(&kept, Err(Failed::Unpushed(why))
+                if why.starts_with("Kept: 2 commits not pushed in ")
+                    && why.contains("second step") && why.contains("ahead")),
+            "{kept:?}"
+        );
+        assert!(ahead.exists(), "nothing of it is lost");
+        git_in(&clone, &["push", "-q", "origin", &ahead_branch]);
+        let gone = remove(git, &ahead, &landed, &[]).await.expect("pushed, it goes");
+        assert!(!gone.branch_removed, "not landed: its branch stays");
+        assert!(!ahead.exists());
+
+        let detached = tmp.path().join("detached");
+        let detached_text = detached.to_string_lossy().into_owned();
+        git_in(&clone, &["worktree", "add", "-q", "--detach", &detached_text, "main"]);
+        git_in(&detached, &["commit", "-q", "--allow-empty", "-m", "on no branch"]);
+        let kept = remove(git, &detached, &landed, &[]).await;
+        assert!(
+            matches!(&kept, Err(Failed::Unpushed(why)) if why.starts_with("Kept: 1 commit not pushed")),
+            "{kept:?}"
+        );
+        assert!(detached.exists());
+
+        // Landed in the clone's own `main` by patch, which is not pushed yet.
+        let (local, local_branch) = agent_tree(&clone, "local");
+        git_in(&clone, &["cherry-pick", &local_branch]);
+        let programs = crate::repo::commit::Programs::default();
+        let swept = sweep(git, &programs, &clone, &[]).await.expect("swept");
+        let real = |p: &Path| std::fs::canonicalize(p).expect("there");
+        let [(tree, 1, why)] = swept.unpushed.as_slice() else { panic!("{swept:?}") };
+        assert_eq!(tree, &real(&local));
+        assert!(why.starts_with("Kept: 1 commit not pushed in "), "{why}");
+        assert!(swept.removed.is_empty() && local.exists(), "{swept:?}");
+        git_in(&clone, &["push", "-q", "origin", "main"]);
+        let swept = sweep(git, &programs, &clone, &[]).await.expect("swept");
+        assert!(swept.unpushed.is_empty(), "{swept:?}");
+        let [(gone, removed)] = swept.removed.as_slice() else { panic!("{swept:?}") };
+        assert_eq!(gone.file_name(), local.file_name());
+        assert!(removed.branch_removed && !local.exists(), "pushed, it went whole");
     }
 
     /// A sweep takes the agents' worktrees whose work landed and that are clean, their branches

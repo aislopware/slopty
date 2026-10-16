@@ -39,7 +39,8 @@ const STDERR_TAIL: u64 = 4096;
 const STDIN_MAX: usize = 64 << 20;
 
 /// Why a Claude Code that stopped reading was ended.
-const STOPPED_READING: &str = "Claude Code stopped reading what it was sent and was ended";
+const STOPPED_READING: &str = "Claude Code stopped reading what it was sent, so Slopty ended it. \
+                               Send a message to start it again.";
 
 /// How long a worker that goes gives the writer to hand Claude Code the lines it has, so the
 /// next worker does not find one cut short.
@@ -304,10 +305,10 @@ impl Task {
             };
             status = tokio::time::timeout(REAPED, reaped).await.ok();
         }
-        let failed = status.flatten().is_some_and(|s| s != 0);
+        let status = status.flatten();
         let why = match self.ended_for {
             Some(why) => Some(why.to_owned()),
-            None if failed => Some(self.why().await),
+            None if status.is_some_and(|s| s != 0) => Some(self.why(status).await),
             None => None,
         };
         // ptyd forgets the session, and the thread its custody.
@@ -322,14 +323,13 @@ impl Task {
         let _gone = ended.send((self.thread, left));
     }
 
-    /// Why Claude Code failed: the last line of its standard error, else its code.
-    async fn why(&self) -> String {
+    /// Why Claude Code, which exited with `status`, failed: what kind of end it was, from that
+    /// and the end of its standard error, in plain words with the one thing to do
+    /// ([`slopty_agent::claude::driven::ending()`]).
+    async fn why(&self, status: Option<i32>) -> String {
         let path = self.stderr.clone();
         let tail = tokio::task::spawn_blocking(move || tail_of(&path)).await.ok().flatten();
-        tail.map_or_else(
-            || "Claude Code ended".to_owned(),
-            |line| format!("Claude Code ended: {line}"),
-        )
+        slopty_agent::claude::driven::ending(status, tail.as_deref().unwrap_or_default()).words
     }
 
     /// Put `outs` into the host; the status line runs again a moment after anything changed.
@@ -507,7 +507,7 @@ impl Task {
     }
 }
 
-/// The last line of the file at `path` that says anything, from its last [`STDERR_TAIL`] bytes.
+/// The end of the file at `path`: its last [`STDERR_TAIL`] bytes.
 fn tail_of(path: &std::path::Path) -> Option<String> {
     use std::io::{Read as _, Seek as _};
     let mut file = std::fs::File::open(path).ok()?;
@@ -515,8 +515,7 @@ fn tail_of(path: &std::path::Path) -> Option<String> {
     file.seek(std::io::SeekFrom::Start(len.saturating_sub(STDERR_TAIL))).ok()?;
     let mut bytes = Vec::new();
     file.take(STDERR_TAIL).read_to_end(&mut bytes).ok()?;
-    let text = String::from_utf8_lossy(&bytes);
-    text.lines().rev().map(str::trim).find(|l| !l.is_empty()).map(str::to_owned)
+    Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 /// The codec of thread `state` read again from its session's `records`, Claude Code still at

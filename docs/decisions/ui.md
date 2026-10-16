@@ -12805,6 +12805,21 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `shell::sidebar_status::tests::every_row_says_which_machine_it_runs_on`,
     `shell::spaces` drag and order tests,
     `shell::chat_rename_tests::rename_opens_collapsed_sessions_groups_and_the_sidebar`.
+  - **Show more** (2026-10-17, C2c of `.research/claude-desktop-2026-10-16.md` §c.2). A group
+    shows its first ten rows at rest (Done), then "Show N more", which adds 25 at a time, as
+    desktop's groups and the Archived shelf do: Done by status, and the done chats of each
+    project by project, grow without end. A row that needs the person or is at work always
+    shows, and so does the open chat. A collapsed group's count includes the rows behind it;
+    closing and opening a group goes back to its first page; renaming a row behind it opens
+    the whole group. The jump keys and session cycling count only the rows drawn, so a row's
+    number is always its key. Tests: `shell::sidebar_status::tests::{a_group_pages_its_rows_at_rest,
+    a_long_group_shows_more_on_request}`.
+  - **⌘-held numbers** (C2b, zeron's own, kept). Holding the jump keys' modifier (⌘ on a Mac)
+    swaps the first nine rows' corners for their keys (`keys::combo_text` of the keymap's
+    `JumpSession` binding); letting go, deactivating the window or opening an overlay that owns
+    the keyboard takes them away, and the key opens its row. Settings › Shortcuts names them
+    "Jump to chat 1…9". Tests: `shell::sidebar_status::tests::holding_the_modifier_numbers_the_rows`,
+    `settings::tests::jump_hints_need_an_exact_modifier_match`.
 - ✅ **The symbol face is registered at startup; Plex and Lilex are gone (2026-10-16).** This
   supersedes "Fonts are bundled, never system-resolved" for the faces it names. The shell
   bundles and registers zeron's Geist and Geist Mono. `slopty-kit` keeps one face beside them,

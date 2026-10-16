@@ -872,7 +872,7 @@ fn worktree_failed(failed: &crate::repo::worktrees::Failed) -> Failure {
     use crate::repo::worktrees::Failed;
     let code = match failed {
         Failed::NotOne(_) => ErrorCode::Invalid,
-        Failed::Busy(_) | Failed::Uncommitted(_) => ErrorCode::Conflict,
+        Failed::Busy(_) | Failed::Uncommitted(_) | Failed::Unpushed(_) => ErrorCode::Conflict,
         Failed::Other(_) => ErrorCode::Failed,
         // The board and the orchestrator read why: the script's last lines go with it.
         Failed::Setup(setup) | Failed::Archive(setup) => {
