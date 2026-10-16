@@ -36,21 +36,21 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use slopty_agent::status::{AgentEvent, AgentStatus, SessionAgent};
+use slopty_agent::status::{AgentStatus, SessionAgent};
 use slopty_core::{ClientId, SessionId, WorkerId};
 use slopty_engine::ghostty::Position;
 use slopty_proto::WorkerMsg;
 use slopty_proto::folder::{FsOutcome, FsRefusal};
 use slopty_proto::orchestration::{
     BUNDLES, BranchBundle, Command, DirEntry, ErrorCode, FileStat, IdempotencyKey, Input, Line,
-    Outcome, Screen, Size, TermAgent, TermRef, ThreadOf, Verb, WaitUntil,
+    Outcome, Screen, Size, TermAgent, TermRef, ThreadOf, Verb,
 };
 use slopty_proto::screen::ScreenEvent;
 use slopty_proto::terminal::{CloseReason, OpenSession, SessionSummary, TermRequest, TermSize};
 use slopty_proto::thread::wire::{self, Intent, ThreadRow};
 use slopty_proto::thread::{Delivery, IntentId, ThreadId, ThreadState};
 use tokio::sync::broadcast;
-pub use wait::{AgentFeed, wait_for};
+pub use wait::wait_for;
 
 use crate::session::{Read, SessionHandle, Text};
 use crate::{ItemStore, Worker, WorkerError, listing};
@@ -252,8 +252,6 @@ struct Inner {
     worker: Worker,
     items: ItemStore,
     events: broadcast::Sender<WorkerMsg>,
-    /// What the daemon's poll of its terminals reports, as the daemon's agent table took it.
-    heard: broadcast::Sender<AgentEvent>,
     once: idempotency::Ledger,
     /// Terminals orchestration started as an agent's: an agent's before it is first seen, and
     /// after it ends.
@@ -288,15 +286,14 @@ impl std::fmt::Debug for Orchestrator {
 }
 
 impl Orchestrator {
-    /// An orchestrator for worker `id`, acting on its sessions, agent table, item registry,
-    /// client broadcast and agent reports; the clones the server asks for share `cloner` with
-    /// the person's own.
+    /// An orchestrator for worker `id`, acting on its sessions, agent table, item registry and
+    /// client broadcast; the clones the server asks for share `cloner` with the person's own.
     #[must_use]
     pub fn new(
         id: WorkerId,
         worker: Worker,
         items: ItemStore,
-        (events, heard): (broadcast::Sender<WorkerMsg>, broadcast::Sender<AgentEvent>),
+        events: broadcast::Sender<WorkerMsg>,
         cloner: crate::repo::cloning::Cloner,
     ) -> Self {
         let inner = Inner {
@@ -304,7 +301,6 @@ impl Orchestrator {
             worker,
             items,
             events,
-            heard,
             once: idempotency::Ledger::default(),
             agent_terms: parking_lot::Mutex::default(),
             choosing: tokio::sync::Mutex::default(),
@@ -502,12 +498,8 @@ impl Orchestrator {
             }
             Verb::WaitFor { term, until, timeout_ms } => {
                 let handle = self.session(term)?;
-                let feed = matches!(until, WaitUntil::AgentNeedsInput).then(|| AgentFeed {
-                    heard: inner.heard.subscribe(),
-                    agents: inner.worker.shared_agents(),
-                });
                 let timeout = Duration::from_millis(u64::from(timeout_ms));
-                Ok(Outcome::Waited(wait_for(&handle, &until, timeout, feed).await?))
+                Ok(Outcome::Waited(wait_for(&handle, &until, timeout).await?))
             }
             Verb::AgentStatus { term } => {
                 self.session(term)?;

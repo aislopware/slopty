@@ -1,31 +1,26 @@
 //! The coding agents a person runs in Slopty's terminals, as the worker sees them from outside.
 //!
 //! A terminal's agent is the person's own: Slopty drives the agents it starts through their own
-//! doors (`slopty_worker::thread`), and of one typed into a terminal it knows only what the
-//! terminal shows anyone:
+//! doors (`slopty_worker::thread`), and of one typed into a terminal it knows only that it is
+//! there. `slopty_worker` reads the foreground process of each session's tty; when
+//! `slopty_agent::detect` says it is a coding agent, the session has an agent, and when it goes
+//! the agent goes with it. Nothing of the terminal's screen is read.
 //!
-//! 1. **Foreground process.** `slopty_worker` reads the foreground process of each session's tty;
-//!    when `slopty_agent::detect` says it is a coding agent, the session gets an agent at
-//!    `AgentStatus::Idle`, and when it goes the agent goes with it.
-//! 2. **Title.** The spinning circle Claude Code paints into the terminal title separates a running
-//!    turn from an idle prompt (`slopty_agent::title`).
-//!
-//! What it sees serves orchestration alone (`Verb::AgentStatus`, `WaitUntil::AgentNeedsInput`).
+//! What it sees keeps orchestration from typing into the terminal (`orchestrate::may_type`).
 //! The sleep policy counts the threads Slopty drives, as their host holds them
-//! (`crate::threads::awake`), never a terminal's title.
+//! (`crate::threads::awake`).
 
 use std::path::PathBuf;
 use std::time::Duration;
 
 use slopty_agent::Observation;
 use slopty_agent::detect::Program;
-use slopty_agent::status::AgentEvent;
 use slopty_core::SessionId;
 use slopty_worker::session::Probe;
 
 use crate::Daemon;
 
-/// How often every session's foreground process and title are read.
+/// How often every session's foreground process is read.
 const TICK: Duration = Duration::from_millis(750);
 
 /// Watch every session for an agent, until the daemon stops.
@@ -41,38 +36,20 @@ pub async fn watch(daemon: Daemon) -> ! {
         for session in unlooked {
             let _sent = daemon.presence.send((session, false));
         }
-        {
-            let mut agents = daemon.agents.lock();
-            let mut events = Vec::new();
-            for (session, probe) in live {
-                events.extend(agents.observe(session, &observation(probe)));
+        let mut agents = daemon.agents.lock();
+        for (session, probe) in live {
+            if let Some(event) = agents.observe(session, &observation(probe)) {
+                tracing::debug!(session = %event.session, status = ?event.status, "agent");
             }
-            events.extend(agents.retain(&ids));
-            broadcast(&daemon, &agents, events);
-            drop(agents);
         }
-    }
-}
-
-/// Send what the poll found, dropping anything already overtaken.
-fn broadcast(daemon: &Daemon, agents: &slopty_agent::AgentTable, events: Vec<AgentEvent>) {
-    for event in events {
-        if !agents.is_current(&event) {
-            continue;
-        }
-        tracing::debug!(
-            session = %event.session,
-            status = ?event.status,
-            source = ?event.source,
-            "agent"
-        );
-        let _sent = daemon.heard.send(event);
+        let _gone = agents.retain(&ids);
+        drop(agents);
     }
 }
 
 /// What a probe saw, taken apart rather than copied.
 fn observation(probe: Probe) -> Observation {
-    let Probe { foreground, title, cwd } = probe;
+    let Probe { foreground, cwd } = probe;
     let (program, fg_cwd, pid, started) = match foreground {
         Some(fg) => {
             (Some(Program { name: fg.name, argv: fg.argv }), fg.cwd, Some(fg.pid), fg.started)
@@ -81,7 +58,6 @@ fn observation(probe: Probe) -> Observation {
     };
     Observation {
         program,
-        title,
         // The agent's own working directory is the truth; OSC 7 from the shell that launched
         // it is the fallback when the process table would not say.
         cwd: fg_cwd.or_else(|| cwd.map(PathBuf::from)),

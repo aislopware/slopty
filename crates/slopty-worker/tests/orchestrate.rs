@@ -6,7 +6,7 @@
 mod orchestrate {
     use std::time::Duration;
 
-    use slopty_agent::status::{AgentEvent, AgentSource, AgentStatus, SessionAgent};
+    use slopty_agent::status::{AgentStatus, SessionAgent};
     use slopty_core::{SessionId, WallMs};
     use slopty_proto::input::CellMetrics;
     use slopty_proto::orchestration::{Command, ErrorCode, Input, Screen, WaitUntil, Waited};
@@ -14,31 +14,12 @@ mod orchestrate {
     use slopty_pty::shell_integration::{self, ShellIntegration};
     use slopty_pty::{Pty, SpawnSpec};
     use slopty_worker::orchestrate::{
-        AgentFeed, Agents, list_commands, may_type, read_output, read_screen, send_input, wait_for,
+        Agents, list_commands, may_type, read_output, read_screen, send_input, wait_for,
     };
     use slopty_worker::session::{self, SessionHandle, SessionStart};
-    use tokio::sync::{broadcast, mpsc};
+    use tokio::sync::mpsc;
 
     const WAIT: Duration = Duration::from_secs(20);
-
-    /// An agent table that holds one status for every session.
-    #[derive(Default)]
-    struct Table(parking_lot::Mutex<Option<AgentStatus>>);
-
-    impl Table {
-        fn with(status: AgentStatus) -> std::sync::Arc<Self> {
-            std::sync::Arc::new(Self(parking_lot::Mutex::new(Some(status))))
-        }
-    }
-
-    impl Agents for Table {
-        fn status(&self, _session: SessionId) -> Option<SessionAgent> {
-            let status = (*self.0.lock())?;
-            Some(SessionAgent { status, source: AgentSource::Title, since_ms: WallMs::ZERO })
-        }
-
-        fn forget(&self, _session: SessionId) {}
-    }
 
     /// An agent table that says what the test set of every session: its agent, and whether an
     /// agent ended there.
@@ -58,7 +39,7 @@ mod orchestrate {
     impl Agents for Said {
         fn status(&self, _session: SessionId) -> Option<SessionAgent> {
             let status = self.0.lock().0?;
-            Some(SessionAgent { status, source: AgentSource::Title, since_ms: WallMs::ZERO })
+            Some(SessionAgent { status, since_ms: WallMs::ZERO })
         }
 
         fn forget(&self, _session: SessionId) {}
@@ -66,10 +47,6 @@ mod orchestrate {
         fn ended(&self, _session: SessionId) -> bool {
             self.0.lock().1
         }
-    }
-
-    fn agent_event(session: SessionId, status: AgentStatus) -> AgentEvent {
-        AgentEvent { session, status, source: AgentSource::Title, since_ms: WallMs::ZERO }
     }
 
     struct Shell {
@@ -184,10 +161,10 @@ mod orchestrate {
     async fn typed_text_is_waited_for_read_back_and_listed_as_a_command() {
         let sh = shell().await;
         let h = &sh.handle;
-        let done = wait_for(h, &WaitUntil::CommandDone, WAIT, None);
+        let done = wait_for(h, &WaitUntil::CommandDone, WAIT);
         let typed = async {
             send_input(h, &text("echo hi\n")).await.unwrap();
-            wait_for(h, &WaitUntil::Output("^hi$".to_owned()), WAIT, None).await.unwrap()
+            wait_for(h, &WaitUntil::Output("^hi$".to_owned()), WAIT).await.unwrap()
         };
         let (done, seen) = tokio::join!(done, typed);
         assert_eq!(done.unwrap(), Waited::Met { line: None });
@@ -229,7 +206,7 @@ mod orchestrate {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         let started = std::time::Instant::now();
-        let done = wait_for(h, &WaitUntil::CommandDone, WAIT, None);
+        let done = wait_for(h, &WaitUntil::CommandDone, WAIT);
         let interrupt =
             async { send_input(h, &Input::Keys(vec!["ctrl+c".to_owned()])).await.unwrap() };
         let (done, ()) = tokio::join!(done, interrupt);
@@ -249,14 +226,14 @@ mod orchestrate {
             .unwrap_err();
         assert_eq!(err.code, ErrorCode::Invalid);
         assert!(err.message.contains("[mods+]key"), "{err:?}");
-        let quiet = wait_for(h, &WaitUntil::Quiet { ms: 300 }, WAIT, None).await.unwrap();
+        let quiet = wait_for(h, &WaitUntil::Quiet { ms: 300 }, WAIT).await.unwrap();
         assert_eq!(quiet, Waited::Met { line: None });
         assert_eq!(
             last_row(&read_screen(h).await.unwrap()),
             "$",
             "the valid x was not sent either"
         );
-        let bad = wait_for(h, &WaitUntil::Output("(".to_owned()), WAIT, None).await.unwrap_err();
+        let bad = wait_for(h, &WaitUntil::Output("(".to_owned()), WAIT).await.unwrap_err();
         assert_eq!(bad.code, ErrorCode::Invalid);
     }
 
@@ -268,20 +245,19 @@ mod orchestrate {
         let h = &sh.handle;
         send_input(h, &text("echo one; echo two\n")).await.unwrap();
         until_commands(h, |c| c.iter().any(|c| c.exit.is_some())).await;
-        let done = wait_for(h, &WaitUntil::CommandDone, WAIT, None).await.unwrap();
+        let done = wait_for(h, &WaitUntil::CommandDone, WAIT).await.unwrap();
         assert_eq!(done, Waited::Met { line: None }, "it ended before the wait began");
         let short = Duration::from_millis(200);
-        let again = wait_for(h, &WaitUntil::CommandDone, short, None).await.unwrap();
+        let again = wait_for(h, &WaitUntil::CommandDone, short).await.unwrap();
         assert_eq!(again, Waited::TimedOut, "that command was reported already");
         let one = WaitUntil::Output("^one$".to_owned());
-        let Waited::Met { line: Some(first) } = wait_for(h, &one, WAIT, None).await.unwrap() else {
+        let Waited::Met { line: Some(first) } = wait_for(h, &one, WAIT).await.unwrap() else {
             panic!("the finished command's output is found");
         };
         assert_eq!(first.text, "one");
-        assert_eq!(wait_for(h, &one, short, None).await.unwrap(), Waited::TimedOut, "consumed");
+        assert_eq!(wait_for(h, &one, short).await.unwrap(), Waited::TimedOut, "consumed");
         let two = WaitUntil::Output("^two$".to_owned());
-        let Waited::Met { line: Some(second) } = wait_for(h, &two, WAIT, None).await.unwrap()
-        else {
+        let Waited::Met { line: Some(second) } = wait_for(h, &two, WAIT).await.unwrap() else {
             panic!("the line after the match is still unread");
         };
         assert_eq!(second.index, first.index.saturating_add(1));
@@ -293,62 +269,25 @@ mod orchestrate {
         let h = &sh.handle;
         let short = Duration::from_millis(200);
         let never = WaitUntil::Output("never printed".to_owned());
-        assert_eq!(wait_for(h, &never, short, None).await.unwrap(), Waited::TimedOut);
-        let exit = wait_for(h, &WaitUntil::Exit, WAIT, None);
+        assert_eq!(wait_for(h, &never, short).await.unwrap(), Waited::TimedOut);
+        let exit = wait_for(h, &WaitUntil::Exit, WAIT);
         let bye = async { send_input(h, &text("exit\n")).await.unwrap() };
         let (exit, ()) = tokio::join!(exit, bye);
         assert_eq!(exit.unwrap(), Waited::Met { line: None });
         let _status = sh.child.wait().await.unwrap();
         let never = WaitUntil::Output("never printed".to_owned());
-        let after = wait_for(h, &never, WAIT, None).await.unwrap();
+        let after = wait_for(h, &never, WAIT).await.unwrap();
         assert_eq!(after, Waited::Closed, "an exited program writes nothing more");
     }
 
+    /// A wait for a terminal's agent to come to rest is refused, saying how to wait on an
+    /// agent: the worker knows only that one runs there.
     #[tokio::test]
-    async fn an_agent_coming_to_rest_ends_the_wait() {
+    async fn a_wait_on_a_terminals_agent_is_refused() {
         let sh = shell().await;
-        let h = &sh.handle;
-        let (events, rx) = broadcast::channel(8);
-        let feed = AgentFeed { heard: rx, agents: Table::with(AgentStatus::Working) };
-        let waiting = wait_for(h, &WaitUntil::AgentNeedsInput, WAIT, Some(feed));
-        let event = agent_event;
-        let report = async {
-            let other = SessionId::new();
-            events.send(event(other, AgentStatus::Idle)).unwrap();
-            events.send(event(h.id(), AgentStatus::Working)).unwrap();
-            events.send(event(h.id(), AgentStatus::Idle)).unwrap();
-        };
-        let (waited, ()) = tokio::join!(waiting, report);
-        assert_eq!(waited.unwrap(), Waited::Met { line: None });
-    }
-
-    /// A wait that falls behind the daemon's events may have missed the very report it waits
-    /// for; it reads the status the missed reports left in the table.
-    #[tokio::test]
-    async fn a_wait_that_fell_behind_the_events_reads_the_status_they_left() {
-        let sh = shell().await;
-        let h = &sh.handle;
-        let (events, rx) = broadcast::channel(2);
-        let table = Table::with(AgentStatus::Working);
-        let feed = AgentFeed { heard: rx, agents: std::sync::Arc::<Table>::clone(&table) };
-        // The agent finished its turn; the report is pushed out by other sessions' reports
-        // before the wait reads any.
-        *table.0.lock() = Some(AgentStatus::Idle);
-        events.send(agent_event(h.id(), AgentStatus::Idle)).unwrap();
-        for _ in 0..3 {
-            events.send(agent_event(SessionId::new(), AgentStatus::Working)).unwrap();
-        }
-        let waited = wait_for(h, &WaitUntil::AgentNeedsInput, Duration::from_secs(2), Some(feed));
-        assert_eq!(waited.await.unwrap(), Waited::Met { line: None });
-
-        let (events, rx) = broadcast::channel(2);
-        let feed = AgentFeed { heard: rx, agents: Table::with(AgentStatus::Working) };
-        for _ in 0..3 {
-            events.send(agent_event(SessionId::new(), AgentStatus::Idle)).unwrap();
-        }
-        let still =
-            wait_for(h, &WaitUntil::AgentNeedsInput, Duration::from_millis(300), Some(feed));
-        assert_eq!(still.await.unwrap(), Waited::TimedOut, "still working: the wait goes on");
+        let refused = wait_for(&sh.handle, &WaitUntil::AgentNeedsInput, WAIT).await.unwrap_err();
+        assert_eq!(refused.code, ErrorCode::Invalid);
+        assert!(refused.message.contains("start_thread"), "{refused:?}");
     }
 
     #[tokio::test]
@@ -465,12 +404,10 @@ mod orchestrate {
         let code = |expects_agent| may_type(h, &said, expects_agent).err().map(|f| f.code);
         assert_eq!(code(false), None, "no agent, no guard");
         assert_eq!(code(true), Some(ErrorCode::Forbidden), "started as one, not seen yet");
-        for status in [AgentStatus::Idle, AgentStatus::Working] {
-            said.agent(status);
-            let refused = may_type(h, &said, false).expect_err("an agent runs");
-            assert_eq!(refused.code, ErrorCode::Forbidden, "{status:?}");
-            assert!(refused.message.contains("start_thread"), "{refused:?}");
-        }
+        said.agent(AgentStatus::Running);
+        let refused = may_type(h, &said, false).expect_err("an agent runs");
+        assert_eq!(refused.code, ErrorCode::Forbidden);
+        assert!(refused.message.contains("start_thread"), "{refused:?}");
         said.agent(AgentStatus::None);
         assert_eq!(code(false), None, "the table says none runs");
         said.end();

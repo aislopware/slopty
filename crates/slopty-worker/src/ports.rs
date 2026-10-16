@@ -23,7 +23,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
-use imp::{children, cpu, name, tcp_listeners};
+use imp::{children, name, tcp_listeners};
 use slopty_core::SessionId;
 use slopty_proto::orchestration::Port;
 
@@ -146,16 +146,6 @@ pub fn listening(roots: &[(SessionId, u32)]) -> Vec<Port> {
     }
     out.sort_by_key(|p| (p.number, p.pid));
     out
-}
-
-/// The processor time `root`'s live descendants have used, summed, in the kernel's own units.
-///
-/// The units are Mach ticks on macOS, clock ticks on Linux. It says whether a background command
-/// still works: it moves while any of them computes, and when one starts or ends. `root` itself
-/// (an agent's own process, which keeps a timer going) is left out.
-#[must_use]
-pub fn descendants_cpu(root: u32) -> u64 {
-    tree(root).into_iter().skip(1).map(cpu).fold(0, u64::wrapping_add)
 }
 
 /// The live direct children of `pid`: a managed launcher's Claude Code is its child
@@ -304,24 +294,6 @@ mod imp {
         Some(u16::from_be(lport)).filter(|&p| p != 0)
     }
 
-    /// The user and system time `pid` has used, in Mach ticks; 0 when it is gone.
-    pub(super) fn cpu(pid: u32) -> u64 {
-        let Ok(pid) = libc::c_int::try_from(pid) else { return 0 };
-        let mut info = std::mem::MaybeUninit::<libc::proc_taskinfo>::zeroed();
-        let Ok(bytes) = libc::c_int::try_from(size_of::<libc::proc_taskinfo>()) else { return 0 };
-        // SAFETY: the buffer is one `proc_taskinfo`, `bytes` long, which is what `proc_pidinfo`
-        // (libproc.h) writes for `PROC_PIDTASKINFO`; it returns the bytes it wrote.
-        let wrote = unsafe {
-            libc::proc_pidinfo(pid, libc::PROC_PIDTASKINFO, 0, info.as_mut_ptr().cast(), bytes)
-        };
-        if wrote != bytes {
-            return 0;
-        }
-        // SAFETY: zeroed is a valid `proc_taskinfo` (plain integers), and the call wrote it all.
-        let info = unsafe { info.assume_init() };
-        info.pti_total_user.wrapping_add(info.pti_total_system)
-    }
-
     /// The command name of `pid`, empty when it is gone.
     pub(super) fn name(pid: u32) -> String {
         let Ok(pid) = libc::c_int::try_from(pid) else { return String::new() };
@@ -393,14 +365,6 @@ mod imp {
         ports
     }
 
-    /// The user and system time `pid` has used, in clock ticks; 0 when it is gone.
-    pub(super) fn cpu(pid: u32) -> u64 {
-        std::fs::read_to_string(format!("/proc/{pid}/stat"))
-            .ok()
-            .and_then(|stat| procfs::cpu(&stat))
-            .unwrap_or(0)
-    }
-
     /// The command name of `pid`, empty when it is gone.
     pub(super) fn name(pid: u32) -> String {
         std::fs::read_to_string(format!("/proc/{pid}/comm"))
@@ -420,16 +384,6 @@ mod procfs {
     pub(super) fn parent(stat: &str) -> Option<u32> {
         let after = stat.get(stat.rfind(')')?.checked_add(1)?..)?;
         after.split_whitespace().nth(1)?.parse().ok()
-    }
-
-    /// `utime` plus `stime` in a `/proc/<pid>/stat` line: the 12th and 13th fields after the
-    /// parenthesised name.
-    pub(super) fn cpu(stat: &str) -> Option<u64> {
-        let after = stat.get(stat.rfind(')')?.checked_add(1)?..)?;
-        let mut fields = after.split_whitespace().skip(11);
-        let user: u64 = fields.next()?.parse().ok()?;
-        let system: u64 = fields.next()?.parse().ok()?;
-        Some(user.wrapping_add(system))
     }
 
     /// The inode a descriptor's link names when it is a socket (`socket:[12345]`).
@@ -472,8 +426,6 @@ mod procfs {
             assert_eq!(parent("4242 (tmux: (srv) x) S 17 4242 4242 0 -1"), Some(17));
             assert_eq!(socket_inode("socket:[41231]"), Some(41231));
             assert_eq!(socket_inode("/dev/pts/3"), None);
-            let stat = "4242 (cargo (build)) R 17 4242 4242 0 -1 4194304 100 0 0 0 250 31 0 0 20";
-            assert_eq!(cpu(stat), Some(281), "utime 250 + stime 31");
         }
     }
 }
@@ -598,40 +550,6 @@ mod tests {
         let ports = tcp_listeners(std::process::id());
         assert!(ports.contains(&addr.port()));
         assert!(!ports.contains(&local), "the client end is established, not listening");
-    }
-
-    /// A descendant that computes moves the sum; one that sleeps does not; the root's own
-    /// time is not in it. Each is waited for against a deadline, since a loaded machine can
-    /// take a while to start either child.
-    #[tokio::test]
-    async fn a_busy_descendant_moves_the_processor_time_and_a_sleeping_one_does_not() {
-        use std::time::{Duration, Instant};
-        let me = std::process::id();
-        let deadline = Instant::now() + Duration::from_secs(20);
-        let mut sleeper = std::process::Command::new("/bin/sleep").arg("30").spawn().unwrap();
-        // Once started, the sleeper's time stops moving: two reads apart agree.
-        let mut before = descendants_cpu(me);
-        loop {
-            tokio::time::sleep(Duration::from_millis(300)).await;
-            let now = descendants_cpu(me);
-            if now == before {
-                break;
-            }
-            assert!(Instant::now() < deadline, "a sleeping child kept using time: {now}");
-            before = now;
-        }
-        let mut busy = std::process::Command::new("/usr/bin/yes")
-            .stdout(std::process::Stdio::null())
-            .spawn()
-            .unwrap();
-        while descendants_cpu(me) <= before {
-            assert!(Instant::now() < deadline, "a busy child never moved it from {before}");
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        for child in [&mut sleeper, &mut busy] {
-            child.kill().unwrap();
-            child.wait().unwrap();
-        }
     }
 
     #[test]

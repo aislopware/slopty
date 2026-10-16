@@ -52,6 +52,7 @@ mod golden_machine {
                             label: "Opus".to_owned(),
                             options: Vec::new(),
                         }],
+                        model: Some("opus".to_owned()),
                         modes: vec![Mode {
                             id: "plan".to_owned(),
                             label: "Plan".to_owned(),

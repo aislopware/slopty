@@ -2264,6 +2264,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     the agent's own records say. No golden moves.
   - Tests: `claude_start::a_resume_of_a_session_a_claude_elsewhere_holds_is_refused`,
     `workspace::agent_start::tests::a_session_a_live_agent_holds_is_marked_running`.
+  - *Since* (2026-10-17): the roster and the refusal went with the TUI drive; the driven
+    adapter keeps one writer again (`agents.md`, "Past Claude Code sessions are seen and
+    continued in the GUI", a session running elsewhere).
 
 - ✅ **An approval names its call, and a plan may be approved with edits accepted** (2026-10-11,
   readiness 10-11 ranks 1 and 3, the agent's half).
@@ -2404,8 +2407,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     arrive the same way (`an_agent_starts_a_child_waits_reads_it_and_hears_it_as_messages`,
     `slopty-cli`).
   - **A terminal's own agent.** A `claude` the person runs in a terminal is known only by its
-    foreground process and the title it paints, working or at rest (`slopty_agent::AgentTable`),
-    for orchestration's waits and the sleep policy. Nothing is typed into it: orchestration's
+    foreground process (`slopty_agent::AgentTable`); its title is not read (2026-10-17,
+    `agents.md`, "Nothing reads a terminal's title"), and the sleep policy counts only the
+    threads Slopty drives. Nothing is typed into it: orchestration's
     input into a terminal an agent runs in is refused as `Forbidden`
     (`nothing_is_typed_into_a_terminal_an_agent_runs_in`). The deliveries ptyd typed whole for
     the composer (`PtydRequest::Deliver`), the draft guard, and the error codes only the typing

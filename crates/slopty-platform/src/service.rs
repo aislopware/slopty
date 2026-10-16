@@ -57,6 +57,11 @@ pub struct Service {
     /// dies (`KillMode=process`), as ptyd's sessions must, and a ptyd that starts again takes
     /// them back from the worker that holds their masters.
     pub leaves_children: bool,
+    /// A clean exit (status 0) ends it for good: the manager starts it again only after a
+    /// failure or a crash (systemd `Restart=on-failure`, launchd `KeepAlive` with
+    /// `SuccessfulExit = false`), as the worker that finds another holding its data directory
+    /// ends. Else it is started again however it ended.
+    pub clean_exit_ends: bool,
 }
 
 impl Service {
@@ -66,8 +71,8 @@ impl Service {
         format!("{}.service", self.name)
     }
 
-    /// The systemd user unit: restarted a second after it dies, started with the user's
-    /// session (`default.target`).
+    /// The systemd user unit: restarted a second after it dies ([`Self::clean_exit_ends`]),
+    /// started with the user's session (`default.target`).
     #[must_use]
     pub fn systemd_unit(&self) -> String {
         let mut unit = format!("[Unit]\nDescription={}\n", self.description.replace('\n', " "));
@@ -87,7 +92,9 @@ impl Service {
         if self.leaves_children {
             unit.push_str("KillMode=process\n");
         }
-        unit.push_str("Restart=always\nRestartSec=1\n\n[Install]\nWantedBy=default.target\n");
+        let restart = if self.clean_exit_ends { "on-failure" } else { "always" };
+        let _infallible = writeln!(unit, "Restart={restart}");
+        unit.push_str("RestartSec=1\n\n[Install]\nWantedBy=default.target\n");
         unit
     }
 }
@@ -372,7 +379,8 @@ impl Session {
         }
     }
 
-    /// `service` as a `LaunchAgent`: restarted when it dies and at login, its output in
+    /// `service` as a `LaunchAgent`: restarted when it dies ([`Service::clean_exit_ends`]) and at
+    /// login, its output in
     /// `~/Library/Logs/Slopty/<program>.log`. `gui` puts it in the login session
     /// (`LimitLoadToSessionType Aqua`), where `slopty-worker` reaches ScreenCaptureKit and the
     /// window server.
@@ -393,7 +401,14 @@ impl Session {
         }
         d.insert("EnvironmentVariables".into(), Value::Dictionary(vars));
         d.insert("RunAtLoad".into(), Value::Boolean(true));
-        d.insert("KeepAlive".into(), Value::Boolean(true));
+        let keep_alive = if service.clean_exit_ends {
+            let mut when = Dictionary::new();
+            when.insert("SuccessfulExit".into(), Value::Boolean(false));
+            Value::Dictionary(when)
+        } else {
+            Value::Boolean(true)
+        };
+        d.insert("KeepAlive".into(), keep_alive);
         d.insert("ThrottleInterval".into(), Value::Integer(2.into()));
         d.insert("ProcessType".into(), Value::String("Interactive".into()));
         d.insert("WorkingDirectory".into(), Value::String(path(&self.home)));
@@ -721,6 +736,7 @@ fn service(
         env: vars,
         after: Vec::new(),
         leaves_children: false,
+        clean_exit_ends: false,
     }
 }
 
@@ -748,6 +764,8 @@ pub fn worker_services(opts: &WorkerOpts, bin_dir: &Path, data_dir: &Path) -> Ve
     ptyd.leaves_children = true;
     let mut worker = service(WORKER, bin_dir, worker_args, &opts.log, data_dir, sockets());
     worker.after.push(PTYD.program.to_owned());
+    // A worker that finds another holding its data directory ends cleanly, and stays ended.
+    worker.clean_exit_ends = true;
     vec![(PTYD, ptyd), (WORKER, worker)]
 }
 
@@ -1411,6 +1429,7 @@ mod tests {
             env: vec![("SLOPTY_DATA_DIR".into(), "/home/me/a b/%h $x".into())],
             after: vec!["slopty-ptyd".into()],
             leaves_children: false,
+            clean_exit_ends: false,
         };
         assert_eq!(service.unit_name(), "slopty-worker.service", "the unit's file name");
         assert_eq!(
@@ -1431,6 +1450,20 @@ mod tests {
              WantedBy=default.target\n",
             "the unit, quoted as systemd reads it"
         );
+        let ends = Service { clean_exit_ends: true, ..service };
+        assert!(
+            ends.systemd_unit().contains("\nRestart=on-failure\nRestartSec=1\n"),
+            "a clean exit ends it: {}",
+            ends.systemd_unit()
+        );
+        let workers = worker_services(
+            &WorkerOpts::default(),
+            Path::new("/opt/slopty/bin"),
+            Path::new("/data/slopty"),
+        );
+        let units: Vec<String> = workers.iter().map(|(_job, s)| s.systemd_unit()).collect();
+        assert!(units[0].contains("\nRestart=always\n"), "ptyd always: {}", units[0]);
+        assert!(units[1].contains("\nRestart=on-failure\n"), "the worker: {}", units[1]);
     }
 
     /// A stand-in for `launchctl` and `systemctl`: it records each command line and succeeds,
@@ -1871,7 +1904,12 @@ mod tests {
         let env = worker["EnvironmentVariables"].as_dictionary().unwrap();
         assert_eq!(env["SLOPTY_WORKER_SOCKET"].as_string(), Some("/data/slopty/run/worker.sock"));
         assert_eq!(env["SLOPTY_DATA_DIR"].as_string(), Some("/data/slopty"), "its data");
-        assert_eq!(worker["KeepAlive"].as_boolean(), Some(true), "kept alive");
+        let keep_alive = worker["KeepAlive"].as_dictionary().expect("kept alive, on terms");
+        assert_eq!(
+            keep_alive["SuccessfulExit"].as_boolean(),
+            Some(false),
+            "started again after any exit but a clean one"
+        );
         assert_eq!(worker["ProcessType"].as_string(), Some("Interactive"), "out of App Nap");
         assert_eq!(worker["LimitLoadToSessionType"].as_string(), Some("Aqua"), "GUI session");
         assert_eq!(

@@ -467,14 +467,14 @@ mod actor {
         .await;
 
         // The probe names the shell waiting on `read` (macOS's `/bin/sh` is a bash), with
-        // no title or cwd announced.
+        // no cwd announced.
         let probe = session.probe().await.unwrap();
         assert_eq!(
             probe.foreground.as_ref().and_then(|f| f.argv.first()).map(String::as_str),
             Some("/bin/sh"),
             "{probe:?}"
         );
-        assert_eq!((probe.title, probe.cwd), (None, None));
+        assert_eq!(probe.cwd, None);
 
         // Focus reaches the engine (nothing is encoded while the program has not asked).
         session.request(b, TermRequest::Focus { focused: true }).unwrap();

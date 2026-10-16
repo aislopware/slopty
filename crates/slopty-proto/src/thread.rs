@@ -451,6 +451,10 @@ pub struct Effort {
 pub struct Offers {
     /// The models it can start on ([`wire::Start::model`]).
     pub models: Vec<Model>,
+    /// The model a start that asks for none runs on, by its id in [`Self::models`], where the
+    /// agent says: the one a model picker marks as recommended (Claude Code's `default`, the
+    /// model its account is given unless one is chosen).
+    pub model: Option<String>,
     /// The modes it can start in ([`wire::Start::mode`]).
     pub modes: Vec<Mode>,
     /// The mode a start that asks for none begins in, by its id in [`Self::modes`], where the

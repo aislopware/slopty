@@ -135,6 +135,7 @@ mod claude {
                 ptyd: self.socket.clone(),
                 path: Some(self.programs.clone().into_os_string()),
                 home: self.home.clone(),
+                machine: "rig".to_owned(),
             };
             (claude, claude::spawn(self.host.clone(), place, asks))
         }
@@ -640,6 +641,130 @@ mod claude {
         assert_eq!(state.turns.len(), 2, "the first turn read again, the second after it");
     }
 
+    /// Claude Code's own record of session `id` run in the rig's folder, as its TUI writes it:
+    /// one prompt and its answer.
+    fn seed(rig: &Rig, id: &str, prompt: &str, answer: &str) {
+        let path = slopty_agent::claude::sessions::transcript(&rig.home, &rig.work, id);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let cwd = rig.work.to_string_lossy();
+        let common = |uuid: &str, parent: Value| {
+            serde_json::json!({
+                "uuid": uuid, "parentUuid": parent, "sessionId": id, "cwd": cwd,
+                "timestamp": "2026-10-15T10:00:00.000Z", "isSidechain": false,
+                "userType": "external", "entrypoint": "cli", "version": "2.1.301",
+                "gitBranch": "main",
+            })
+        };
+        let mut user = common("u0", Value::Null);
+        user["type"] = "user".into();
+        user["message"] = serde_json::json!({ "role": "user", "content": prompt });
+        let mut said = common("a0", "u0".into());
+        said["type"] = "assistant".into();
+        said["requestId"] = "req_0".into();
+        said["message"] = serde_json::json!({
+            "id": "msg_0", "type": "message", "role": "assistant", "model": "claude-opus-5-5",
+            "content": [{ "type": "text", "text": answer }], "stop_reason": "end_turn",
+            "stop_sequence": null, "usage": { "input_tokens": 12, "output_tokens": 9 },
+        });
+        std::fs::write(&path, format!("{user}\n{said}\n")).unwrap();
+    }
+
+    /// A start that takes session `id` up again (`--resume <id>`), with `prompt` first.
+    fn resume(rig: &Rig, id: &str, prompt: Option<&str>) -> Box<Start> {
+        let mut start = rig.start("");
+        start.prompt = prompt.map(str::to_owned);
+        start.args = vec!["--resume".to_owned(), id.to_owned()];
+        start
+    }
+
+    /// Whether the stand-in was started with `--resume id`.
+    fn resumed_on(record: &Value, id: &str) -> bool {
+        let argv: Vec<&str> =
+            record["argv"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+        argv.windows(2).any(|w| w == ["--resume", id])
+    }
+
+    /// A session the TUI left, taken up with no first message, is read from its transcript and
+    /// rests with nothing started: Claude Code starts on the session with the first message.
+    #[tokio::test]
+    async fn a_resumed_session_starts_claude_code_with_its_first_message() {
+        let rig = Rig::new(&[]).await;
+        let (claude, _served) = rig.serve();
+        let id = "5a1c9a52-3b7e-4c1d-9a0e-2f5b8c7d1e40";
+        seed(&rig, id, "Explain the parser", "The parser reads tokens one by one.");
+        let outcome = claude.start(IntentId::new(), resume(&rig, id, None)).await;
+        let thread = slopty_agent::claude::thread_of(id);
+        assert_eq!(outcome, Outcome::Started { thread });
+        let state = rig
+            .until(thread, "read from its transcript", |s| s.turns.len() == 1 && exited(s))
+            .await;
+        assert!(notices(&state).is_empty(), "nothing to say: {:?}", notices(&state));
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(rig.record(), Value::Null, "nothing started before the first message");
+
+        rig.send(&claude, thread, "Keep going.");
+        let state = rig.until(thread, "the turn", turn_ended(2, TurnState::Complete)).await;
+        assert_eq!(state.status.liveness, Liveness::Live);
+        let record = rig.record();
+        assert!(resumed_on(&record, id), "on the same session: {:#}", record["argv"]);
+        assert_eq!(heard(&record, "user").len(), 1, "the first message, once");
+    }
+
+    /// A session a live Claude Code in a terminal holds (its `~/.claude/sessions/<pid>.json`) is
+    /// not taken: a start with a first message is refused in plain words and makes nothing; one
+    /// without opens it read from its transcript, saying where it runs, starts nothing and
+    /// refuses a message with the same words. Once that Claude Code ends the thread says so,
+    /// and the next message takes the session up.
+    #[tokio::test]
+    async fn a_session_held_elsewhere_is_shown_and_not_taken() {
+        let rig = Rig::new(&[]).await;
+        let (claude, _served) = rig.serve();
+        let id = "9d2e7a10-5c4b-4e8f-a1b2-c3d4e5f60718";
+        seed(&rig, id, "Profile the startup path", "Startup loads fonts.");
+        let mut terminal = std::process::Command::new("/bin/sleep").arg("60").spawn().unwrap();
+        let live = slopty_agent::claude::sessions::config_dir(&rig.home)
+            .join(slopty_agent::claude::sessions::LIVE_DIR);
+        std::fs::create_dir_all(&live).unwrap();
+        let record = serde_json::json!({
+            "pid": terminal.id(), "sessionId": id, "cwd": rig.work, "kind": "interactive",
+        });
+        std::fs::write(live.join(format!("{}.json", terminal.id())), record.to_string()).unwrap();
+        let words =
+            "This session is running in another terminal on rig. Close it there to continue here.";
+        let thread = slopty_agent::claude::thread_of(id);
+
+        let outcome = claude.start(IntentId::new(), resume(&rig, id, Some("Carry on."))).await;
+        assert_eq!(outcome, Outcome::Refused { reason: words.to_owned() });
+        assert!(rig.host.state(thread).is_none(), "nothing made");
+
+        let outcome = claude.start(IntentId::new(), resume(&rig, id, None)).await;
+        assert_eq!(outcome, Outcome::Started { thread });
+        let state = rig
+            .until(thread, "why it is not taken", |s| {
+                s.turns.len() == 1 && exited(s) && notices(s).iter().any(|n| n == words)
+            })
+            .await;
+        assert_eq!(state.turns.len(), 1, "its conversation, read");
+        let send = Intent::Send {
+            text: "Carry on.".to_owned(),
+            delivery: Delivery::Steer,
+            attachments: vec![],
+        };
+        assert_eq!(rig.intent(&claude, thread, &send), Outcome::Refused { reason: words.into() });
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(rig.record(), Value::Null, "no second Claude Code on the session");
+
+        terminal.kill().unwrap();
+        terminal.wait().unwrap();
+        rig.until(thread, "let go", |s| {
+            notices(s).iter().any(|n| n.starts_with("The other Claude Code on this session ended"))
+        })
+        .await;
+        rig.send(&claude, thread, "Carry on.");
+        rig.until(thread, "the turn", turn_ended(2, TurnState::Complete)).await;
+        assert!(resumed_on(&rig.record(), id), "taken up: {:#}", rig.record()["argv"]);
+    }
+
     /// A thread whose transcript cannot be read is kept as it was, not read again from nothing:
     /// its turns stay, the message that would take it up waits in its queue, and it says why.
     #[tokio::test]
@@ -1126,6 +1251,35 @@ mod claude {
         );
         let kept = std::fs::read_to_string(&transcript).unwrap();
         assert!(kept.contains("write a.txt one") && !kept.contains("write a.txt two"), "{kept}");
+    }
+
+    /// A rewind of the whole conversation branches before the first turn: the client names it
+    /// as the turn before the first message's, and the new thread shares nothing, a session of
+    /// its own in the folder, not one resumed.
+    #[tokio::test]
+    async fn a_fork_before_the_first_turn_shares_nothing() {
+        let rig = Rig::new(&[]).await;
+        let (claude, _served) = rig.serve();
+        let thread = rig.started(&claude, "Say hello.").await;
+        let state = rig.until(thread, "the first turn", turn_ended(1, TurnState::Complete)).await;
+        let before = slopty_proto::thread::TurnId(state.turns[0].id.0.saturating_sub(1));
+        let forked = claude.fork(thread, IntentId::new(), Some(before)).await;
+        let Outcome::Started { thread: fork } = forked else { panic!("{forked:?}") };
+        let fork_state = rig.host.state(fork).unwrap().0;
+        assert!(fork_state.turns.is_empty(), "{:?}", fork_state.turns);
+        assert_eq!(
+            fork_state.meta.forked_from.as_ref().map(|f| (f.thread, f.turn)),
+            Some((thread, Some(slopty_proto::thread::TurnId::BEFORE)))
+        );
+        let native = fork_state.meta.native.clone();
+        let record = rig
+            .record_once("the fork's Claude Code", |r| {
+                r["argv"].as_array().is_some_and(|a| a.iter().any(|w| w == native.as_str()))
+            })
+            .await;
+        let argv: Vec<&str> =
+            record["argv"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
+        assert!(!argv.contains(&"--resume") && !argv.contains(&"--fork-session"), "{argv:?}");
     }
 
     /// The person's status line command runs on the thread as Claude Code's TUI runs it, its

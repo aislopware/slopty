@@ -327,12 +327,6 @@ impl Worker {
         &*self.inner.agents
     }
 
-    /// The daemon's agent table, to keep.
-    #[must_use]
-    pub fn shared_agents(&self) -> Arc<dyn Agents> {
-        Arc::clone(&self.inner.agents)
-    }
-
     /// Record a child exit reported by ptyd, and tell the session's viewers.
     pub fn on_exit(&self, id: SessionId, exit: Exit) {
         if let Some(e) = self.inner.sessions.lock().get_mut(&id) {

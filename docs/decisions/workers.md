@@ -1594,12 +1594,11 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     Claude desktop gives a turn without progress the same hour.
   - **Paused turns keep their ceiling.** A `Waiting` thread holds for `PAUSED_CEILING` = 2 hours
     from the pause (`Status::since_ms`), whatever its commands do. The descendant-CPU sign was
-    never fed once the title path went quiet, so it goes; `ports::descendants_cpu` is left with
-    no caller outside its test.
-  - **The title stays, for orchestration only.** `AgentTable` still reads a hand-run agent's
-    title, because `Verb::AgentStatus` and `WaitUntil::AgentNeedsInput` read it. Deleting it
-    and its 750 ms poll needs those verbs ruled on first: they read a terminal's screen state to
-    tell a model when a TUI agent is idle.
+    never fed once the title path went quiet, so it goes, and `ports::descendants_cpu` with it
+    (2026-10-17).
+  - **The title goes too** (2026-10-17, `docs/decisions/agents.md`, "Nothing reads a
+    terminal's title"). The 750 ms poll stays for the foreground process alone, which keeps
+    orchestration from typing into a terminal an agent runs in.
   - Tests: `wake::tests::{a_thread_at_work_is_sampled_and_its_progress_moves_with_what_it_says,
     the_cap_lets_a_silent_thread_go, a_paused_turn_counts_up_to_the_ceiling}`; `slopty-workerd`
     `threads::{a_driven_turn_keeps_the_machine_awake_with_nobody_linked,
@@ -1611,17 +1610,26 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   the curtain's marker, the Caps Lock and the input source before its bind failed, and exited 1
   like any failure.
   - The worker takes an exclusive `flock` on the data directory itself (`File::try_lock`)
-    before it reads or writes anything there. A second one ends at once with `75`
-    (`HELD_ELSEWHERE`, `EX_TEMPFAIL`): no control socket, no marker, no port, and on a Mac it
-    does not lock the screen as a failed worker does. launchd's `KeepAlive` starts it again
-    after its 2 s throttle, and it takes the directory once the other is gone.
+    before it reads or writes anything there. A second one ends at once, cleanly (exit 0): no
+    control socket, no marker, no port, and on a Mac it does not lock the screen as a failed
+    worker does.
+  - *Ended for good* (2026-10-17, lane W). It first exited `75` (`EX_TEMPFAIL`), and launchd's
+    `KeepAlive` started it again every 2 s, each start finding the directory held again. The
+    service managers now start the worker again after any exit but a clean one: systemd
+    `Restart=on-failure`, launchd `KeepAlive { SuccessfulExit = false }`. launchd tells exit
+    codes apart no finer than zero or not, so a systemd-only `RestartPreventExitStatus=75`
+    could not be matched on a Mac; the one rule both managers keep is "a clean exit ends it".
+    A held worker exits 0; a restart at a client's word (`Verb::RestartWorker`) exits `75`
+    (`START_AGAIN`), and a closed endpoint is a failure. A stop by a signal stays clean.
   - The directory, not a file in it: the kernel lets go of the lock however the process ends,
     `kill -9` included, and the purge's list of worker paths (`WORKER_STATE`) gains nothing.
     The directory's own lock is the worker's; another daemon sharing the directory takes a
     file of its own.
-  - Test: `slopty-workerd` `lock::a_second_worker_on_the_same_data_dir_ends_with_its_own_code`
-    (the second exits 75 without opening its socket, the first still answers, and a third
-    takes the directory after the first is killed outright).
+  - Tests: `slopty-workerd` `lock::a_second_worker_on_the_same_data_dir_ends_for_good` (the
+    second exits 0 without opening its socket, the first still answers, and a third takes the
+    directory after the first is killed outright); `slopty-platform`
+    `service::tests::{a_service_is_written_as_a_systemd_user_unit,
+    the_worker_plist_runs_slopty_worker_with_its_flags}` (the units' restart rule).
 
 - ✅ **The worker waits on ptyd for 10 s at most** (2026-10-16, goal re-audit finding 9, the
   ptyd side). `PtydClient` had no timeout. A ptyd stopped or wedged held the request, and with

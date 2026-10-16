@@ -106,13 +106,18 @@ pub fn seen(host: &Host) -> BTreeMap<AgentId, Offers> {
     seen
 }
 
-/// `seed` with each list `seen` has in place of its own. The mode a start begins in stays the
-/// seed's: a thread that ran says which mode it was in, not which a new one starts in.
+/// `seed` with each list `seen` has in place of its own.
+///
+/// The mode a start begins in stays the seed's: a thread that ran says which mode it was in, not
+/// which a new one starts in. So does the default model, while the models offered still name it.
 #[must_use]
 pub fn merged(seed: Offers, seen: Option<&Offers>) -> Offers {
     let Some(seen) = seen else { return seed };
+    let models = pick(seed.models, &seen.models);
+    let model = seed.model.filter(|id| models.iter().any(|m| m.id == *id));
     Offers {
-        models: pick(seed.models, &seen.models),
+        models,
+        model,
         modes: pick(seed.modes, &seen.modes),
         mode: seed.mode,
         efforts: pick(seed.efforts, &seen.efforts),
@@ -199,6 +204,12 @@ mod tests {
         assert_eq!((offered.modes.clone(), offered.commands), (seed(&code).modes, vec![review]));
         assert!(offered.modes.iter().any(|m| m.id == "plan"), "{:?}", offered.modes);
         assert_eq!(offered.efforts, seed(&code).efforts);
+        assert_eq!(seed(&code).model.as_deref(), Some("default"), "Claude Code's own default");
+        assert_eq!(offered.model, None, "the models its thread heard do not name it");
+        let named = Model { id: "default".into(), label: "Default".into(), options: Vec::new() };
+        let heard = Offers { models: vec![named], ..Offers::default() };
+        let offered = merged(seed(&code), Some(&heard));
+        assert_eq!(offered.model.as_deref(), Some("default"), "named, it is marked");
 
         let pi = AgentId::named(AgentId::PI);
         assert_eq!(merged(seed(&pi), seen.get(&pi)), Offers::default());

@@ -37,9 +37,9 @@ pub fn startable_effort(effort: &str) -> bool {
 
 /// What a new Claude Code thread can be started with before any ran here.
 ///
-/// The models `/model` takes by alias ([`crate::claude::history::MODELS`]), the modes a start may
-/// ask for ([`startable_mode`]) and the levels `--effort` takes. Its commands come from a thread
-/// that ran.
+/// The models `/model` takes by alias ([`crate::claude::history::MODELS`]), its own default
+/// among them ([`DEFAULT_MODEL`]), the modes a start may ask for ([`startable_mode`]) and the
+/// levels `--effort` takes. Its commands come from a thread that ran.
 #[must_use]
 pub fn offers() -> Offers {
     let mode = |id: &str| {
@@ -67,6 +67,7 @@ pub fn offers() -> Offers {
                 options: Vec::new(),
             })
             .collect(),
+        model: Some(DEFAULT_MODEL.to_owned()),
         modes: PERMISSION_MODES.iter().filter(|m| startable_mode(m)).map(|m| mode(m)).collect(),
         // The machine's settings say it ([`starting_mode`]).
         mode: None,
@@ -81,6 +82,10 @@ pub fn offers() -> Offers {
         commands: Vec::new(),
     }
 }
+
+/// Claude Code's name for the model it runs on unless one is chosen: the one its account is
+/// given, which `/model` lists first as recommended.
+pub const DEFAULT_MODEL: &str = "default";
 
 /// The built-in mode a session starts in when nothing chooses one: Claude Code 2.1.283 on, in
 /// a terminal (code.claude.com/docs/en/permission-modes, "Which mode a session starts in").

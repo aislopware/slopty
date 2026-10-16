@@ -218,8 +218,6 @@ pub struct Snapshot {
 pub struct Probe {
     /// The foreground process of the session's tty.
     pub foreground: Option<slopty_pty::process::Foreground>,
-    /// Title from OSC 0/2, if any.
-    pub title: Option<String>,
     /// Cwd from OSC 7, if any.
     pub cwd: Option<String>,
 }
@@ -2246,11 +2244,7 @@ impl Actor {
                 let foreground = (!self.pty_closed)
                     .then(|| slopty_pty::process::foreground(self.master.as_fd()))
                     .flatten();
-                let _ignored = reply.send(Probe {
-                    foreground,
-                    title: self.title.clone(),
-                    cwd: self.cwd.clone(),
-                });
+                let _ignored = reply.send(Probe { foreground, cwd: self.cwd.clone() });
             }
             Cmd::Exited { exit } => {
                 self.exited = Some(exit);

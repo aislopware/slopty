@@ -23,6 +23,11 @@
 //!   and the person's status line command runs as the TUI runs it.
 //! - **A fork at a turn** keeps the conversation through that turn: Claude Code resumes the session
 //!   at that turn's last record into a new one (`--resume-session-at`).
+//! - **Taken up from Claude Code's sessions** (`--resume <id>`): the thread is read from the
+//!   session's transcript, and Claude Code starts with the first message, none before. A session
+//!   another live Claude Code on the machine holds ([`held`]) is shown and not taken: nothing
+//!   starts on it and no message goes to it until the other ends, as Claude Code's own resume
+//!   refuses it.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -51,6 +56,7 @@ use crate::facts::Installed;
 
 pub mod custody;
 mod driven;
+pub mod held;
 pub mod settings;
 
 /// Where a thread's task says its Claude Code has gone, or the worker has, with the asks it did
@@ -194,15 +200,20 @@ enum ThreadAsk {
 /// may be busy starting another thread (finding the install takes up to seconds), and a stop
 /// must not wait behind it.
 #[derive(Clone, Debug)]
-pub struct Claude(mpsc::UnboundedSender<Ask>, Running);
+pub struct Claude(mpsc::UnboundedSender<Ask>, Running, HeldBy);
 
 /// Where a [`Claude`]'s asks wait for [`spawn`], and where its own go back in.
 #[derive(Debug)]
-pub struct Asks(mpsc::UnboundedReceiver<Ask>, mpsc::UnboundedSender<Ask>, Running);
+pub struct Asks(mpsc::UnboundedReceiver<Ask>, mpsc::UnboundedSender<Ask>, Running, HeldBy);
 
 /// The task of each thread's Claude Code while it runs, the session's one writer: shared by the
 /// served loop, which starts and ends them, and the handles, which stop them at once.
 type Running = Arc<parking_lot::Mutex<HashMap<ThreadId, mpsc::UnboundedSender<ThreadAsk>>>>;
+
+/// The threads whose session another live Claude Code on the machine holds ([`held`]), with
+/// the words a message to one is refused with: shared by the served loop, which finds them and
+/// lets them go when the other ends, and the handles, which refuse at once.
+type HeldBy = Arc<parking_lot::Mutex<HashMap<ThreadId, String>>>;
 
 /// Where the driven Claude Codes run and keep what they keep.
 #[derive(Clone, Debug)]
@@ -215,6 +226,8 @@ pub struct Place {
     pub path: Option<OsString>,
     /// The home Claude Code keeps its sessions under (`~/.claude`).
     pub home: PathBuf,
+    /// The machine's name, as a thread whose session another Claude Code holds says it.
+    pub machine: String,
 }
 
 impl Claude {
@@ -222,8 +235,8 @@ impl Claude {
     #[must_use]
     pub fn channel() -> (Self, Asks) {
         let (tx, rx) = mpsc::unbounded_channel();
-        let running = Running::default();
-        (Self(tx.clone(), Arc::clone(&running)), Asks(rx, tx, running))
+        let (running, held) = (Running::default(), HeldBy::default());
+        (Self(tx.clone(), Arc::clone(&running), Arc::clone(&held)), Asks(rx, tx, running, held))
     }
 
     /// `ask` straight to `thread`'s running task, past the served loop; `ask` back when no task
@@ -501,6 +514,10 @@ impl Claude {
         if !live && !held && !takes_up {
             return refused("Claude Code is not running");
         }
+        // Another Claude Code holds the session: nothing goes to it until that one ends.
+        if takes_up && let Some(words) = self.2.lock().get(&thread) {
+            return refused(words);
+        }
         let asked = if matches!(
             asked,
             ThreadAsk::Interrupt | ThreadAsk::StopTask { .. } | ThreadAsk::Close
@@ -530,12 +547,16 @@ pub fn is_claude(state: &ThreadState) -> bool {
 ///
 /// First every thread an earlier worker left with Claude Code in ptyd's custody is taken up
 /// again; one whose Claude Code ptyd no longer holds is left exited and resumable.
-pub fn spawn(host: Host, place: Place, Asks(mut asks, again, running): Asks) -> JoinHandle<()> {
+pub fn spawn(
+    host: Host,
+    place: Place,
+    Asks(mut asks, again, running, held): Asks,
+) -> JoinHandle<()> {
     tokio::spawn(async move {
         let (ended_tx, mut ended) = mpsc::unbounded_channel();
         let custody = Custody::new(place.ptyd.clone());
         let mut served =
-            Served { host, custody, place, launcher: None, running, ended: ended_tx, again };
+            Served { host, custody, place, launcher: None, running, held, ended: ended_tx, again };
         served.take_up().await;
         loop {
             tokio::select! {
@@ -586,6 +607,8 @@ struct Served {
     launcher: Option<Installed>,
     /// The task of each thread's Claude Code while it runs: the session's one writer.
     running: Running,
+    /// The threads whose session another Claude Code holds.
+    held: HeldBy,
     /// Told by a task when its Claude Code has gone.
     ended: Ended,
     /// Where what the served threads do on their own comes back in (a `!` command that ended).
@@ -716,9 +739,23 @@ impl Served {
             })
             .into_iter()
             .collect();
+        // A session another Claude Code holds is not taken up: with a first message the start
+        // is refused, and the person keeps their words; without, it opens to be read.
+        let holder = match &resumed {
+            Some(native) if !self.running.lock().contains_key(&agent::thread_of(native)) => {
+                self.holder(native).await
+            }
+            _ => None,
+        };
+        if let Some(holder) = holder.as_ref().filter(|_| !first.is_empty()) {
+            return self.host.record_start(id, refused(&holder.words(&self.place.machine)));
+        }
         if let Some(native) = &resumed {
             let thread = agent::thread_of(native);
             if self.host.state(thread).is_some_and(|(s, _)| is_claude(&s)) {
+                if let Some(holder) = holder {
+                    self.hold(thread, holder);
+                }
                 self.route(thread, first).await;
                 return self.host.record_start(id, Outcome::Started { thread });
             }
@@ -756,12 +793,21 @@ impl Served {
             // says why it starts empty.
             let Some((state, _)) = self.host.state(thread) else { return outcome };
             let read = self.records(&state.meta).await;
-            let (driven, outs) = read_again(&state, read.as_deref().unwrap_or_default(), false);
+            let (mut driven, outs) = read_again(&state, read.as_deref().unwrap_or_default(), false);
             take(&self.host, outs);
             if let Err(why) = read {
                 say(&self.host, thread, "unread", &format!("{UNREAD}: {why}"));
             }
-            self.run(thread, driven, session, first).await;
+            if first.is_empty() {
+                // Nothing to say yet: Claude Code starts with the first message. Until then the
+                // thread rests as one whose Claude Code ended, and goes on by a message.
+                take(&self.host, driven.exited(None, WallMs::now()));
+                if let Some(holder) = holder {
+                    self.hold(thread, holder);
+                }
+            } else {
+                self.run(thread, driven, session, first).await;
+            }
         } else {
             self.run(thread, driven, session, first).await;
         }
@@ -771,6 +817,10 @@ impl Served {
     /// Branch a new thread off `from`'s session for intent `id`, once: Claude Code, run for the
     /// new thread on a session of the intent's id, resumes `from`'s into it (`--fork-session`),
     /// all of it, or through turn `after` (`--resume-session-at` that turn's last record).
+    ///
+    /// `after` names the last turn at or before it: a client names "the turn before" a message by
+    /// its number less one. Before the first turn ([`TurnId::BEFORE`], a rewind of the whole
+    /// conversation) nothing is shared, and the new thread is a session of its own in the folder.
     async fn fork(&mut self, from: ThreadId, id: IntentId, after: Option<TurnId>) -> Outcome {
         if let Some(outcome) = self.host.started(id) {
             return outcome;
@@ -779,8 +829,13 @@ impl Served {
             return self.host.record_start(id, refused("There is no such Claude Code thread here"));
         };
         let last = state.last_turn().map(|t| t.id);
+        let after = after.map(|after| {
+            let turns = state.turns.iter().map(|t| t.id);
+            turns.filter(|id| *id <= after && *id != TurnId::BEFORE).max().unwrap_or(TurnId::BEFORE)
+        });
+        let fresh = after == Some(TurnId::BEFORE);
         // A turn before the last: the record the next turn's prompt follows is that turn's last.
-        let at = match after.filter(|after| Some(*after) != last) {
+        let at = match after.filter(|after| Some(*after) != last && !fresh) {
             Some(after) => {
                 let records = match self.records(&state.meta).await {
                     Ok(records) => records,
@@ -799,7 +854,7 @@ impl Served {
         let native = id.to_string();
         let mut begun = None;
         let outcome = self.host.start(id, || {
-            let turn = if at.is_some() { after } else { last };
+            let turn = if at.is_some() || fresh { after } else { last };
             // Claude Code writes the conversation with its first message: before it there is none.
             if turn.is_none() {
                 return Err("There is nothing to fork yet".to_owned());
@@ -817,7 +872,11 @@ impl Served {
         };
         let thread = *thread;
         take(&self.host, outs);
-        let session = Session::Fork { from: state.meta.native.clone(), id: native, at };
+        let session = if fresh {
+            Session::New(native)
+        } else {
+            Session::Fork { from: state.meta.native.clone(), id: native, at }
+        };
         self.run(thread, driven, session, Vec::new()).await;
         outcome
     }
@@ -900,6 +959,18 @@ impl Served {
         if sends.is_empty() || state.meta.origin == ThreadMeta::SUBAGENT {
             return;
         }
+        // Another Claude Code took the session up since: the messages wait in the queue.
+        if let Some(holder) = self.holder(&state.meta.native).await {
+            let mut queue = slopty_agent::queue::Queue::of(&state.pending);
+            for send in sends {
+                if let ThreadAsk::Send { text, attachments, intent, .. } = send {
+                    let _shown = queue.hold(intent, &text, attachments, (), false);
+                }
+            }
+            self.host.apply(thread, vec![queue.shown()]);
+            self.hold(thread, holder);
+            return;
+        }
         // Read again from the transcript, the thread goes on in a Claude Code of its own.
         let Some((state, _)) = self.host.state(thread) else { return };
         let records = match self.records(&state.meta).await {
@@ -921,6 +992,37 @@ impl Served {
         let (driven, outs) = read_again(&state, &records, false);
         take(&self.host, outs);
         self.run(thread, driven, Session::Resume(state.meta.native.clone()), sends).await;
+    }
+
+    /// The live Claude Code elsewhere on the machine that holds session `native`, if one does.
+    async fn holder(&self, native: &str) -> Option<held::Holder> {
+        let (home, native) = (self.place.home.clone(), native.to_owned());
+        tokio::task::spawn_blocking(move || held::holder(&home, &native)).await.ok().flatten()
+    }
+
+    /// `thread`'s session is held by `holder`: the thread says so, refuses every message, and
+    /// is let go, saying so, once the other ends.
+    fn hold(&self, thread: ThreadId, holder: held::Holder) {
+        let words = holder.words(&self.place.machine);
+        if self.held.lock().insert(thread, words.clone()).is_some() {
+            return;
+        }
+        tracing::info!(%thread, pid = holder.pid, "its session is held by another Claude Code");
+        say(&self.host, thread, "held", &words);
+        let (host, held) = (self.host.clone(), Arc::clone(&self.held));
+        drop(tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(HELD_CHECK).await;
+                let looked = holder.clone();
+                if tokio::task::spawn_blocking(move || looked.lives()).await.unwrap_or(false) {
+                    continue;
+                }
+                held.lock().remove(&thread);
+                tracing::info!(%thread, "the other Claude Code let its session go");
+                say(&host, thread, "freed", FREED);
+                return;
+            }
+        }));
     }
 
     /// Run Claude Code for `thread` on `session`, with the thread's own flags, and serve it
@@ -1208,6 +1310,12 @@ fn lost(host: &Host, thread: ThreadId) {
         (actions, ())
     });
 }
+
+/// How often a held session's other Claude Code is looked for.
+const HELD_CHECK: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// What a thread says once the other Claude Code that held its session ended.
+const FREED: &str = "The other Claude Code on this session ended. A message here continues it.";
 
 /// What a thread says when its transcript cannot be read.
 const UNREAD: &str = "Its transcript could not be read, so the thread was kept as it was";

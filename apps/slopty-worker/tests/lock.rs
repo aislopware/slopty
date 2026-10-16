@@ -1,6 +1,7 @@
 //! One worker per data directory: a second worker started on the directory a first one serves
-//! from ends at once with its own exit code, before it touches anything there, and the first
-//! goes on serving. The lock goes with the process that held it, however it ended.
+//! from ends at once, cleanly so its service manager leaves it ended, before it touches anything
+//! there, and the first goes on serving. The lock goes with the process that held it, however it
+//! ended.
 
 #[cfg(test)]
 mod lock {
@@ -10,9 +11,6 @@ mod lock {
 
     use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
     use tokio::process::{Child, Command};
-
-    /// The exit code of a worker whose data directory another holds (`HELD_ELSEWHERE`).
-    const HELD_ELSEWHERE: i32 = 75;
 
     /// Slack for a loaded machine: each step is a process starting, not a wait.
     const STEP: Duration = Duration::from_secs(30);
@@ -109,11 +107,12 @@ mod lock {
             )
     }
 
-    /// A second worker on the directory the first serves from exits with its own code within a
-    /// moment, having opened no control socket of its own, and the first still answers. Once the
-    /// first is killed outright (no chance to let anything go), a third takes the directory.
+    /// A second worker on the directory the first serves from ends cleanly within a moment, so
+    /// no service manager starts it again, having opened no control socket of its own, and the
+    /// first still answers. Once the first is killed outright (no chance to let anything go), a
+    /// third takes the directory.
     #[tokio::test]
-    async fn a_second_worker_on_the_same_data_dir_ends_with_its_own_code() {
+    async fn a_second_worker_on_the_same_data_dir_ends_for_good() {
         let dir = tempfile::tempdir().unwrap();
         let dir = std::fs::canonicalize(dir.path()).unwrap();
         let mut children = Children(vec![ptyd(&dir).await]);
@@ -127,7 +126,7 @@ mod lock {
         let status = tokio::time::timeout(STEP, second.wait()).await.expect("it ends").unwrap();
         let took = began.elapsed();
         println!("the second worker ended in {took:?}");
-        assert_eq!(status.code(), Some(HELD_ELSEWHERE), "{status}");
+        assert_eq!(status.code(), Some(0), "ended for good: {status}");
         assert!(!dir.join("second.sock").exists(), "it opened nothing");
         assert!(answers(&dir.join("first.sock")).await, "the first still serves");
 

@@ -5,7 +5,7 @@
 //! agent over ACP. They are served to clients: the table on the control stream, a stream per
 //! followed thread, and intents answered once each.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,8 +15,8 @@ use slopty_core::{ClientId, SessionId};
 use slopty_net::{Connection, WorkerMsg};
 use slopty_proto::orchestration::ErrorCode;
 use slopty_proto::thread::wire::{
-    Expanded, Intent, IntentDone, Outcome, PastSessions, ReviewScope, Setup, Start, TableFrame,
-    ThreadFrame, ThreadRequest, ThreadRow,
+    Expanded, Intent, IntentDone, Outcome, PAST_RUNNING, PastSessions, ReviewScope, Setup, Start,
+    TableFrame, ThreadFrame, ThreadRequest, ThreadRow,
 };
 use slopty_proto::thread::{
     AgentId, Answerer, Cap, ContentRef, Cursor, Delivery, Drive, IntentId, Liveness, Phase,
@@ -137,6 +137,7 @@ pub fn start(daemon: &Daemon, asks: Adapters) {
         ptyd: asks.ptyd,
         path: None,
         home: slopty_platform::dirs::home(),
+        machine: daemon.name.clone(),
     };
     drop(claude::spawn(threads.host.clone(), place, asks.claude));
     if let Some(home) = codex::codex_home() {
@@ -736,8 +737,9 @@ fn answerer(client: ClientId) -> Answerer {
 
 /// The past sessions [`ThreadRequest::Sessions`] asks for, at most `limit`: agent `agent`'s in
 /// folder `cwd` as the agent lists them, with no `query`; else those the person's past prompts
-/// find ([`History`]). Each is named by the thread held of it here, if one is; why there are
-/// none, when they could not be had.
+/// find ([`History`]). Each is named by the thread held of it here, if one is, and a Claude
+/// Code session another live Claude Code on the machine holds says how that one runs
+/// ([`PAST_RUNNING`]); why there are none, when they could not be had.
 async fn sessions(
     threads: &Threads,
     agent: Option<AgentId>,
@@ -769,7 +771,13 @@ async fn sessions(
         }
     };
     let mut sessions = sessions;
+    let held = held_elsewhere(threads, &sessions).await;
     for past in &mut sessions {
+        if past.agent.is(AgentId::CLAUDE_CODE)
+            && let Some(holder) = held.get(&past.native)
+        {
+            past.facts.insert(PAST_RUNNING.to_owned(), holder.kind.clone());
+        }
         if let Some((thread, title)) = threads.host.session(&past.agent, &past.native) {
             past.thread = Some(thread);
             if !title.trim().is_empty() && (past.title.is_none() || !past.prompts.is_empty()) {
@@ -778,6 +786,29 @@ async fn sessions(
         }
     }
     PastSessions { agent, cwd, query, sessions, absent, cut }
+}
+
+/// The Claude Code sessions among `sessions` that a live Claude Code on the machine holds, by
+/// id: not the worker's own, which run the threads this worker keeps.
+async fn held_elsewhere(
+    threads: &Threads,
+    sessions: &[slopty_proto::thread::wire::PastSession],
+) -> HashMap<String, claude::held::Holder> {
+    if !sessions.iter().any(|past| past.agent.is(AgentId::CLAUDE_CODE)) {
+        return HashMap::new();
+    }
+    let ours: HashSet<String> = threads
+        .host
+        .visit(|state| {
+            (claude::is_claude(state) && state.status.liveness == Liveness::Live)
+                .then(|| state.meta.native.clone())
+        })
+        .into_iter()
+        .collect();
+    let home = slopty_platform::dirs::home();
+    tokio::task::spawn_blocking(move || claude::held::holders(&home, &ours))
+        .await
+        .unwrap_or_default()
 }
 
 /// Agent `agent`'s past sessions in folder `cwd`, at most `limit`, the last first, as the agent

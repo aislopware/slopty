@@ -155,9 +155,6 @@ pub(crate) struct Daemon {
     /// Each link as its client says hello, with the name it says: an older link of the same
     /// client and name lets go of the input it holds down ([`conn`]).
     pub hellos: broadcast::Sender<(ClientId, String, slopty_worker::clip::Link)>,
-    /// What [`agents::watch`] reports, once [`Self::agents`] took it: the daemon's own, for
-    /// orchestration's waits. Clients and the server read an agent from its thread's row.
-    pub heard: broadcast::Sender<slopty_agent::status::AgentEvent>,
     /// The item registry.
     pub items: ItemStore,
     /// The coding agents people run by hand in terminals, as [`agents::watch`] sees them.
@@ -358,7 +355,7 @@ fn join_server(
         daemon.id,
         daemon.worker.clone(),
         daemon.items.clone(),
-        (daemon.events.clone(), daemon.heard.clone()),
+        daemon.events.clone(),
         daemon.cloner.clone(),
     );
     if let Some(threads) = &daemon.threads {
@@ -548,9 +545,27 @@ type Curtain =
 #[cfg(target_os = "macos")]
 const PANICKED: i32 = 101;
 
-/// The exit code of a worker that found another holding its data directory (`Held`):
-/// `EX_TEMPFAIL`, as the service manager that started it may try again once the other is gone.
-pub const HELD_ELSEWHERE: u8 = 75;
+/// The exit code of a worker that ends to be started again, at a client's word
+/// (`Daemon::restart`): `EX_TEMPFAIL`.
+///
+/// The service managers start the worker again after any exit but a clean one
+/// (`Restart=on-failure`, `KeepAlive { SuccessfulExit = false }`, `slopty_platform::service`),
+/// since launchd tells exit codes apart no finer than that. A clean exit is one with nothing to do:
+/// a signal stopped it, or another worker holds its data directory (`Held`), which a restart
+/// every second would only find held again.
+const START_AGAIN: u8 = 75;
+
+/// The worker ends to be started again ([`START_AGAIN`]).
+#[derive(Debug)]
+struct StartAgain;
+
+impl std::fmt::Display for StartAgain {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ended at a client's word, to be started again")
+    }
+}
+
+impl std::error::Error for StartAgain {}
 
 /// Another worker holds the data directory: this one ends before it does anything there.
 #[derive(Debug)]
@@ -747,10 +762,12 @@ pub fn main() -> Result<std::process::ExitCode> {
         .context("start the runtime")?;
     match serve(runtime) {
         Ok(()) => Ok(std::process::ExitCode::SUCCESS),
+        // Nothing to do here: ended for good, not started again.
         Err(e) if e.is::<Held>() => {
             tracing::warn!("{e}");
-            Ok(std::process::ExitCode::from(HELD_ELSEWHERE))
+            Ok(std::process::ExitCode::SUCCESS)
         }
+        Err(e) if e.is::<StartAgain>() => Ok(std::process::ExitCode::from(START_AGAIN)),
         Err(e) => Err(e),
     }
 }
@@ -780,11 +797,13 @@ fn serve(runtime: tokio::runtime::Runtime) -> Result<()> {
             }));
             let code = match ended {
                 Ok(Ok(())) => 0,
-                // It did nothing, and holds nothing to lock the Mac for.
+                // It did nothing, and holds nothing to lock the Mac for: ended for good.
                 Ok(Err(e)) if e.is::<Held>() => {
                     tracing::warn!("{e}");
-                    i32::from(HELD_ELSEWHERE)
+                    0
                 }
+                // The Mac was locked on the way out, as a stop locks it.
+                Ok(Err(e)) if e.is::<StartAgain>() => i32::from(START_AGAIN),
                 Ok(Err(e)) => {
                     tracing::error!(error = ?e, "worker stopped");
                     lock_now(exit_lock.as_ref());
@@ -932,7 +951,6 @@ async fn run(
         name: paths::worker_name(),
         events,
         hellos: broadcast::Sender::new(EVENT_BUFFER),
-        heard: broadcast::Sender::new(EVENT_BUFFER),
         items,
         agents,
         clip: Arc::new(slopty_worker::clip::Clipboard::new(
@@ -995,10 +1013,7 @@ async fn run(
                 tracing::info!(%session, status = ?exit.status, "child exited");
                 daemon.worker.on_exit(session, exit);
                 // Whatever agent ran there has ended, killed or not: its thread hears it now.
-                let ended = daemon.agents.lock().exited(session);
-                if let Some(event) = ended {
-                    let _sent = daemon.heard.send(event);
-                }
+                let _ended = daemon.agents.lock().exited(session);
                 if let Some(summary) = daemon.worker.summary(session).await {
                     let _sent =
                         daemon.events.send(slopty_proto::WorkerMsg::SessionChanged(summary));
@@ -1072,7 +1087,9 @@ async fn run(
     let ended = loop {
         tokio::select! {
             client = daemon.listener.accept() => {
-                let Some(client) = client else { break Ok(()) };
+                let Some(client) = client else {
+                    break Err(anyhow::anyhow!("the worker's endpoint closed"));
+                };
                 tokio::spawn(conn::serve(daemon.clone(), client));
             }
             _signal = tokio::signal::ctrl_c() => {
@@ -1085,7 +1102,7 @@ async fn run(
             }
             () = restarted(daemon.restart.as_deref()) => {
                 tracing::info!("restarting at a client's word: shutting down to be started again");
-                break Ok(());
+                break Err(StartAgain.into());
             }
         }
     };

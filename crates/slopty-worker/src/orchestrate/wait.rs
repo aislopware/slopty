@@ -14,39 +14,26 @@
 //!   `CommandDone` consumes the command it reports, so the next waits for a later one.
 //! - `Exit` holds once the program is gone (its exit reported, its PTY closed, or the session
 //!   closed).
-//! - `AgentNeedsInput` holds at the next report of the terminal's agent at rest at its prompt, as
-//!   its title says. An agent already idle when the call starts counts only once it reports again:
-//!   its idle status is the one from before. A wait that fell behind the broadcast reads the status
-//!   the reports it missed left in the table, and holds if that one is at rest.
+//! - `AgentNeedsInput` is refused: an agent in a terminal is the person's, and the worker reads
+//!   nothing of its screen, so nothing tells its turns. An agent Slopty drives is a thread, whose
+//!   coming to rest orchestration hears from its row (`EventFilter::AgentNeedsInput`).
 //!
 //! Every condition but `Exit` ends as [`Waited::Closed`] when the program exits first.
 
-use std::sync::Arc;
 use std::time::Duration;
 
-use slopty_agent::status::{AgentEvent, AgentStatus};
 use slopty_engine::ghostty::Position;
 use slopty_proto::orchestration::{ErrorCode, Line, WaitUntil, Waited};
-use tokio::sync::{broadcast, watch};
+use tokio::sync::watch;
 use tokio::time::Instant;
 
-use super::{Agents, Failure};
+use super::Failure;
 use crate::session::{Activity, Read, SessionHandle, Text};
 
-/// The agent side of a wait: the reports after the call started, and the table they come from.
-pub struct AgentFeed {
-    /// The daemon's agent reports, subscribed when the call started.
-    pub heard: broadcast::Receiver<AgentEvent>,
-    /// The daemon's agent table: the status when the call starts, and again whenever the
-    /// broadcast lagged past events the wait may have needed.
-    pub agents: Arc<dyn Agents>,
-}
-
-impl std::fmt::Debug for AgentFeed {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AgentFeed").field("heard", &self.heard).finish_non_exhaustive()
-    }
-}
+/// Why a wait for a terminal's agent to come to rest is refused (see the module).
+const NO_AGENT_WAIT: &str = "the worker cannot tell when an agent in a terminal comes to rest: \
+    it knows only that one runs there; drive the agent as a thread (start_thread) and wait on \
+    its events (events --agent-input)";
 
 /// What woke a waiter.
 enum Wake {
@@ -68,14 +55,12 @@ async fn changed(activity: &mut watch::Receiver<Activity>, deadline: Instant) ->
 ///
 /// # Errors
 ///
-/// [`ErrorCode::Invalid`] for a pattern that does not compile or an agent wait without an
-/// [`AgentFeed`]; [`ErrorCode::UnknownTerminal`] when the session is gone before the wait
-/// starts.
+/// [`ErrorCode::Invalid`] for a pattern that does not compile, and for an agent wait (see the
+/// module); [`ErrorCode::UnknownTerminal`] when the session is gone before the wait starts.
 pub async fn wait_for(
     handle: &SessionHandle,
     until: &WaitUntil,
     timeout: Duration,
-    agent: Option<AgentFeed>,
 ) -> Result<Waited, Failure> {
     let now = Instant::now();
     let deadline = now.checked_add(timeout).unwrap_or(now);
@@ -114,12 +99,7 @@ pub async fn wait_for(
                 Wake::Gone => return Ok(Waited::Met { line: None }),
             }
         },
-        WaitUntil::AgentNeedsInput => {
-            let feed = agent.ok_or_else(|| {
-                Failure::new(ErrorCode::Invalid, "no agent status is tracked for this session")
-            })?;
-            agent_input(handle, feed, &mut activity, deadline).await
-        }
+        WaitUntil::AgentNeedsInput => Err(Failure::new(ErrorCode::Invalid, NO_AGENT_WAIT)),
     }
 }
 
@@ -208,48 +188,6 @@ async fn output(
             Wake::Changed => {}
             Wake::TimedOut => return Ok(Waited::TimedOut),
             Wake::Gone => return Ok(Waited::Closed),
-        }
-    }
-}
-
-/// At rest at its prompt: its title says no turn runs.
-const fn needs_input(status: AgentStatus) -> bool {
-    matches!(status, AgentStatus::Idle)
-}
-
-async fn agent_input(
-    handle: &SessionHandle,
-    mut feed: AgentFeed,
-    activity: &mut watch::Receiver<Activity>,
-    deadline: Instant,
-) -> Result<Waited, Failure> {
-    let session = handle.id();
-    let status = |agents: &dyn Agents| agents.status(session).map(|a| a.status);
-    loop {
-        tokio::select! {
-            ev = feed.heard.recv() => match ev {
-                Ok(ev) if ev.session == session && needs_input(ev.status) => {
-                    return Ok(Waited::Met { line: None });
-                }
-                Ok(_) => {}
-                // The report the wait is for may be among the ones missed: the table has
-                // the status they left behind.
-                Err(broadcast::error::RecvError::Lagged(_)) => {
-                    if status(&*feed.agents).is_some_and(needs_input) {
-                        return Ok(Waited::Met { line: None });
-                    }
-                }
-                Err(broadcast::error::RecvError::Closed) => return Ok(Waited::Closed),
-            },
-            wake = changed(activity, deadline) => match wake {
-                Wake::Changed => {
-                    if activity.borrow().exited {
-                        return Ok(Waited::Closed);
-                    }
-                }
-                Wake::TimedOut => return Ok(Waited::TimedOut),
-                Wake::Gone => return Ok(Waited::Closed),
-            },
         }
     }
 }
