@@ -1915,6 +1915,7 @@ struct InputLayoutKey {
     syntax: crate::theme::SyntaxPalette,
     marked_range: Option<Range<usize>>,
     placeholder: SharedString,
+    hint: Option<SharedString>,
     mentions_enabled: bool,
     active_line: Option<Range<usize>>,
 }
@@ -1946,6 +1947,9 @@ pub struct ComposerInput {
     edit_revision: u64,
     pub(crate) read_only: bool,
     placeholder: SharedString,
+    /// What the agent guesses comes next, shown faint in place of the placeholder while the draft
+    /// is empty; it takes no room of its own, so it comes and goes without moving anything.
+    hint: Option<SharedString>,
     selected_range: Range<usize>,
     selection_reversed: bool,
     caret_affinity: CaretAffinity,
@@ -2071,6 +2075,7 @@ impl ComposerInput {
             edit_revision: 0,
             read_only: false,
             placeholder: placeholder.into(),
+            hint: None,
             selected_range: 0..0,
             selection_reversed: false,
             caret_affinity: CaretAffinity::Downstream,
@@ -2533,6 +2538,23 @@ impl ComposerInput {
     ) {
         self.placeholder = placeholder.into();
         cx.notify();
+    }
+
+    /// Show `hint` faint in the empty draft instead of the placeholder; `None` brings it back.
+    pub fn set_hint(&mut self, hint: Option<SharedString>, cx: &mut Context<Self>) {
+        if self.hint != hint {
+            self.hint = hint;
+            cx.notify();
+        }
+    }
+
+    pub fn hint(&self) -> Option<&SharedString> {
+        self.hint.as_ref()
+    }
+
+    /// What the empty draft shows: the agent's guess, else the placeholder.
+    fn shown_placeholder(&self) -> SharedString {
+        self.hint.clone().unwrap_or_else(|| self.placeholder.clone())
     }
 
     pub fn set_text(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
@@ -3960,6 +3982,7 @@ impl ComposerInput {
             syntax: theme.syntax.clone(),
             marked_range: self.marked_range.clone(),
             placeholder: self.placeholder.clone(),
+            hint: self.hint.clone(),
             mentions_enabled: self.mentions_enabled,
             active_line: self.mentions_enabled.then(|| self.editing_source_range()),
         };
@@ -3980,7 +4003,7 @@ impl ComposerInput {
         // frame (or longer when no subsequent layout is requested).
         self.refresh_projection();
         let (display, is_placeholder) = if self.content.is_empty() {
-            (self.placeholder.clone(), true)
+            (self.shown_placeholder(), true)
         } else {
             (SharedString::from(self.projection.display.clone()), false)
         };
@@ -5007,7 +5030,7 @@ impl Render for ComposerInput {
             .id(("composer-input", cx.entity_id()))
             .role(self.accessibility_role)
             .aria_label(self.placeholder.clone())
-            .aria_placeholder(self.placeholder.clone())
+            .aria_placeholder(self.shown_placeholder())
             .key_context(self.key_context)
             .track_focus(&self.focus_handle)
             .cursor(CursorStyle::IBeam)
@@ -10167,6 +10190,12 @@ impl Render for Composer {
             );
         // slopty: the dock's quiet lines (what the agent waits on, its notes, a `!` command, the
         // prompt suggestion), a folded question's strip, and the bands its mods draw.
+        // The agent's guess shows faint in the empty draft, so it takes no room above it.
+        let hint = self.suggestion(cx).map(|s| {
+            let flat = s.split_whitespace().collect::<Vec<_>>().join(" ");
+            SharedString::from(format!("{flat}  ⇥ Tab"))
+        });
+        self.input.update(cx, |input, cx| input.set_hint(hint, cx));
         let dock_lines = self.render_dock_lines(&theme, cx);
         let folded = self.render_folded_question(&theme, cx);
         let bands = self.render_mod_bands(&theme, window, cx);

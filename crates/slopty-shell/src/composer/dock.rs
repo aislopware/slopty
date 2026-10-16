@@ -63,8 +63,6 @@ pub(crate) struct DockFeed {
     /// The `!` command under way, or just done.
     pub shell: Option<ShellRun>,
     shell_task: Option<Task<()>>,
-    /// The suggestion the person set aside (Escape), so it does not come back.
-    pub dismissed_suggestion: Option<String>,
 }
 
 impl DockFeed {
@@ -378,13 +376,10 @@ impl Composer {
         let dock = self.dock.dock_of(chat)?;
         let suggestion = dock.suggestion.clone().filter(|s| !s.trim().is_empty())?;
         let idle = dock.activity.is_none() && !self.run_live(cx);
-        (idle
-            && self.input.read(cx).is_empty()
-            && self.dock.dismissed_suggestion.as_deref() != Some(suggestion.as_str()))
-        .then_some(suggestion)
+        (idle && self.input.read(cx).is_empty()).then_some(suggestion)
     }
 
-    /// Take the suggestion into the draft (Tab, or a click); whether there was one.
+    /// Take the suggestion into the draft (Tab); whether there was one.
     pub(super) fn take_suggestion(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(suggestion) = self.suggestion(cx) else { return false };
         self.input.update(cx, |input, cx| input.set_text(suggestion, cx));
@@ -395,7 +390,8 @@ impl Composer {
     }
 
     /// The quiet lines above the tray stack: what the agent waits on once its turn ended, its
-    /// passing notes, a `!` command under way, and the prompt suggestion.
+    /// passing notes and a `!` command under way. The prompt suggestion is not one of them: it
+    /// shows faint in the empty draft.
     pub(super) fn render_dock_lines(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mut lines = Vec::new();
         let Some(chat) = self.state.read(cx).selected_chat.clone() else { return lines };
@@ -442,10 +438,27 @@ impl Composer {
         if let Some(run) = self.dock.shell.clone().filter(|run| run.chat == chat) {
             lines.push(self.render_shell_run(&run, theme, cx));
         }
-        if let Some(suggestion) = self.suggestion(cx) {
-            lines.push(self.render_suggestion(suggestion, theme, cx));
+        if lines.is_empty() {
+            return lines;
         }
-        lines
+        // The transcript scrolls under these lines, so they sit on the composer's own material,
+        // one card as the trays above them are, and stay legible over whatever passes beneath.
+        vec![
+            div()
+                .id("dock-lines")
+                .mx(px(8.0))
+                .px(px(4.0))
+                .py(px(4.0))
+                .flex()
+                .flex_col()
+                .gap(px(4.0))
+                .rounded(px(Theme::CONTROL_RADIUS))
+                .border_1()
+                .border_color(theme.composer_surface_border())
+                .bg(theme.composer_surface_bg())
+                .children(lines)
+                .into_any_element(),
+        ]
     }
 
     /// A `!` command's live chip: what runs and for how long, then where its output went.
@@ -495,69 +508,6 @@ impl Composer {
                     .child(SharedString::from(format!("! {}", run.command))),
             )
             .child(div().min_w_0().truncate().text_color(color).child(SharedString::from(words)))
-            .into_any_element()
-    }
-
-    /// The prompt suggestion: a quiet chip over the composer; Tab or a click takes it, ✕ sets it
-    /// aside.
-    fn render_suggestion(&self, suggestion: String, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let key: SharedString = format!("dock-suggestion-{}", cx.entity_id()).into();
-        let dismiss = suggestion.clone();
-        div()
-            .mx(px(4.0))
-            .flex()
-            .items_center()
-            .gap(px(4.0))
-            .child(
-                div()
-                    .id("dock-suggestion")
-                    .role(Role::Button)
-                    .aria_label(SharedString::from(format!("Suggested: {suggestion}")))
-                    .aria_description("Tab takes it into the message")
-                    .min_w_0()
-                    .h(px(24.0))
-                    .px(px(8.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .rounded(px(Theme::CONTROL_RADIUS))
-                    .border_1()
-                    .border_color(crate::theme::hairline(0.07))
-                    .bg(motion::hover_blend(&key, crate::theme::ink(0.03), crate::theme::ink(0.06)))
-                    .on_hover(motion::hover_listener(key.clone()))
-                    .cursor_pointer()
-                    .text_size(px(12.0))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.take_suggestion(cx);
-                    }))
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .text_color(theme.text_muted)
-                            .child(SharedString::from(suggestion)),
-                    )
-                    .child(crate::popover::kbd_hint(theme, "Tab")),
-            )
-            .child(
-                div()
-                    .id("dock-suggestion-dismiss")
-                    .role(Role::Button)
-                    .aria_label("Dismiss suggestion")
-                    .flex_none()
-                    .size(px(20.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(5.0))
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme.element_hover))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.dock.dismissed_suggestion = Some(dismiss.clone());
-                        cx.notify();
-                    }))
-                    .child(crate::icons::icon(crate::icons::CLOSE).size(px(10.0)).text_color(theme.text_faint)),
-            )
             .into_any_element()
     }
 }

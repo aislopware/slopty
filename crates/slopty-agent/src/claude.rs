@@ -43,8 +43,10 @@ pub const RESUME_AT_FLAG: &str = "--resume-session-at";
 /// A run that prints, reading and writing stream-json, asking about tool calls over the same
 /// stream, echoing the messages it takes, and streaming what the model writes as it writes it;
 /// with everything its TUI sees besides: what its subagents write, its hooks as they run, and
-/// the prompt it suggests next.
-pub const DRIVEN: [&str; 12] = [
+/// the prompt it suggests next. Bypassing permissions is allowed as a mode the person may pick,
+/// never turned on by it: without the allowance Claude Code refuses a switch to
+/// `bypassPermissions` mid-session. The desktop app launches its runs with it too.
+pub const DRIVEN: [&str; 13] = [
     "-p",
     "--output-format",
     "stream-json",
@@ -57,6 +59,7 @@ pub const DRIVEN: [&str; 12] = [
     "--forward-subagent-text",
     "--include-hook-events",
     "--prompt-suggestions",
+    "--allow-dangerously-skip-permissions",
 ];
 
 /// What Claude Code runs with besides the person's own environment, as the desktop app runs it.
@@ -189,7 +192,12 @@ mod tests {
         assert!(run.contains(&"--permission-prompt-tool=stdio".to_owned()));
         assert!(run.windows(2).any(|w| w == ["--session-id", "s1"]));
         assert!(run.ends_with(&["--model=opus".to_owned(), "--permission-mode=plan".to_owned()]));
-        for flag in ["--forward-subagent-text", "--include-hook-events", "--prompt-suggestions"] {
+        for flag in [
+            "--forward-subagent-text",
+            "--include-hook-events",
+            "--prompt-suggestions",
+            "--allow-dangerously-skip-permissions",
+        ] {
             assert!(run.contains(&flag.to_owned()), "{flag}");
         }
         let fork = args(&Session::Fork { from: "a".to_owned(), id: "b".to_owned(), at: None }, &[]);

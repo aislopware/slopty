@@ -479,6 +479,16 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
     result
 }
 
+/// How long a folder listing may take before the client is told why it waits; a listing of a
+/// home or a repository takes milliseconds, so only a read the OS holds runs past it.
+const LIST_WITHIN: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// What a listing past [`LIST_WITHIN`] says: macOS asks before a program reads a guarded folder
+/// (Desktop, Documents, Downloads, iCloud Drive, a removable or network volume), on the screen of
+/// the machine the worker runs on.
+const ASKING: &str = "macOS is asking on this machine whether Slopty may read this folder: \
+                      answer there, or allow Slopty in System Settings → Privacy & Security";
+
 /// Where the clipboard sends this client a fetch its promises need: the control stream, in
 /// order and waiting for room ([`in_order`]) off the thread AppKit chose to answer a promise on.
 fn clip_sink(posted: mpsc::UnboundedSender<WorkerMsg>) -> slopty_worker::clip::Sink {
@@ -1131,12 +1141,15 @@ impl Peer<'_> {
                 let (client, out) = (self.client, self.out.clone());
                 self.tasks.spawn(async move {
                     let dir = std::path::PathBuf::from(&path);
-                    let listing =
-                        tokio::task::spawn_blocking(move || slopty_worker::listing::folder(&dir))
-                            .await
-                            .unwrap_or_else(|_| Listing::Missing {
-                                error: "list failed".to_owned(),
-                            });
+                    let read =
+                        tokio::task::spawn_blocking(move || slopty_worker::listing::folder(&dir));
+                    // A read macOS holds for the person's say at this machine waits on nobody
+                    // the client can see: answer why in time, and let the read end on its own.
+                    let listing = match tokio::time::timeout(LIST_WITHIN, read).await {
+                        Ok(Ok(listing)) => listing,
+                        Ok(Err(_)) => Listing::Missing { error: "list failed".to_owned() },
+                        Err(_) => Listing::Missing { error: ASKING.to_owned() },
+                    };
                     tracing::debug!(%client, %path, "list folder");
                     let _sent = out.send(WorkerMsg::Folder { path, listing }).await;
                 });

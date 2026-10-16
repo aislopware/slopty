@@ -429,16 +429,21 @@ fn at_offers_the_sessions_agents(cx: &mut TestAppContext) {
     assert_eq!(text.trim_end(), "@agent-reviewer");
 }
 
-/// The agent's suggestion shows on an empty draft and Tab takes it; with no turn idle it hides.
+/// The agent's suggestion shows faint in the empty draft, taking no room above it, and Tab takes
+/// it; taken, it goes.
 #[gpui::test]
 fn tab_takes_the_suggestion(cx: &mut TestAppContext) {
     let dock = ChatDock { suggestion: Some("Run the tests".into()), can: can(), ..ChatDock::default() };
     let (composer, _, cx) = open(cx, dock, None);
+    draw(cx);
+    let hint = composer.read_with(cx, |composer, cx| composer.input.read(cx).hint().cloned());
+    assert_eq!(hint.as_deref(), Some("Run the tests  ⇥ Tab"));
     let nodes = draw(cx);
-    assert!(find(&nodes, Role::Button, "Suggested: Run the tests").is_some());
+    assert!(find(&nodes, Role::Status, "Run the tests").is_none(), "no line of its own over the draft");
     assert!(composer.update(cx, |composer, cx| composer.take_suggestion(cx)));
-    let nodes = draw(cx);
-    assert!(find(&nodes, Role::Button, "Suggested: Run the tests").is_none(), "taken, it goes");
+    draw(cx);
+    let hint = composer.read_with(cx, |composer, cx| composer.input.read(cx).hint().cloned());
+    assert_eq!(hint, None, "taken, it goes");
     let text = composer.read_with(cx, |composer, cx| composer.input.read(cx).text().to_owned());
     assert_eq!(text, "Run the tests");
     assert!(!composer.update(cx, |composer, cx| composer.take_suggestion(cx)), "nothing to take now");

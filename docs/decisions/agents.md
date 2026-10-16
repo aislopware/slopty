@@ -3560,3 +3560,16 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `workspace::view_model::work::tests::no_rule_allows_what_needs_the_person_at_the_card`,
     `view_model::tests::a_request_needing_the_person_reaches_its_card_as_one`; `slopty-shell`
     `composer::dock_tests::a_card_says_it_needs_the_person_at_it`.
+
+- ✅ **A listing never waits on a macOS prompt; bypass is a mode the person may pick (2026-10-16,
+  night).** Opening a machine's home in New project hung for 30 s and then said "the machine did
+  not answer": counting the items of Desktop, Documents, Downloads and Music made macOS ask on
+  the worker's screen (tccd logged four `AUTHREQ_PROMPTING` for `dev.aislopware.slopty.worker`),
+  and the read waited for an answer nobody was there to give. A listing now looks inside no
+  folder macOS guards (those four, Movies and Pictures, iCloud Drive and the other File Provider
+  drives, other apps' containers, mounted volumes): they are listed without a count or a
+  repository mark, and only opening one reads it. A listing past 5 s answers why it waits, on
+  that machine, instead of the client's generic timeout. Separately, Claude Code refused a switch
+  to bypass permissions mid-session ("not launched with --dangerously-skip-permissions"): every
+  driven run now starts with `--allow-dangerously-skip-permissions`, which only allows the mode,
+  as the desktop app's runs do; the person still picks it.

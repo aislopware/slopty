@@ -29,7 +29,7 @@ use crate::tools::repo_root;
 const SESSION: &str = "11111111-2222-4333-8444-555555555555";
 
 /// The flags the worker runs Claude Code with (`slopty_agent::claude::DRIVEN`).
-const DRIVEN: [&str; 12] = [
+const DRIVEN: [&str; 13] = [
     "-p",
     "--output-format",
     "stream-json",
@@ -42,6 +42,7 @@ const DRIVEN: [&str; 12] = [
     "--forward-subagent-text",
     "--include-hook-events",
     "--prompt-suggestions",
+    "--allow-dangerously-skip-permissions",
 ];
 
 /// The variables the worker gives it besides its own (`slopty_agent::claude::ENV`).

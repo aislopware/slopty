@@ -112,11 +112,13 @@ fn folder_entry(dir: &Path, name: &OsStr) -> Option<FolderEntry> {
     let target = if link { std::fs::metadata(&at).ok() } else { None };
     let meta = target.as_ref().unwrap_or(&own);
     let kind = if link && target.is_none() { FileKind::Symlink } else { kind(meta.file_type()) };
-    let items = (kind == FileKind::Dir)
+    // Only a folder read without asking is looked into: its count and repository mark.
+    let open = kind == FileKind::Dir && !asks_before_reading(&at);
+    let items = open
         .then(|| std::fs::read_dir(&at).ok())
         .flatten()
         .map(|entries| u32::try_from(entries.count()).unwrap_or(u32::MAX));
-    let repo = kind == FileKind::Dir && std::fs::symlink_metadata(at.join(".git")).is_ok();
+    let repo = open && std::fs::symlink_metadata(at.join(".git")).is_ok();
     let name = name.to_string_lossy().into_owned();
     Some(FolderEntry {
         repo,
@@ -128,6 +130,36 @@ fn folder_entry(dir: &Path, name: &OsStr) -> Option<FolderEntry> {
         link,
         items,
     })
+}
+
+/// Whether reading inside `at` may make macOS ask the person for access first: the folders
+/// Files and Folders guards (Desktop, Documents, Downloads, the media folders), iCloud Drive and
+/// the other File Provider drives, other apps' data, and removable or network volumes. Such a
+/// read waits until someone answers the prompt at that machine, which may be nobody, so a
+/// listing never looks inside one on its own; opening the folder reads it.
+#[cfg(target_os = "macos")]
+fn asks_before_reading(at: &Path) -> bool {
+    /// Home's folders that ask; only the folder itself, since what it holds is read once it is.
+    const OWN: [&str; 6] = ["Desktop", "Documents", "Downloads", "Movies", "Music", "Pictures"];
+    /// `~/Library`'s folders that ask, for themselves and all they hold.
+    const LIBRARY: [&str; 4] =
+        ["Mobile Documents", "CloudStorage", "Containers", "Group Containers"];
+    let home = slopty_platform::dirs::home();
+    let Ok(rest) = at.strip_prefix(&home) else {
+        return at.parent() == Some(Path::new("/Volumes"));
+    };
+    let mut parts = rest.iter().map(|part| part.to_str().unwrap_or_default());
+    match (parts.next(), parts.next()) {
+        (Some(own), None) => OWN.contains(&own),
+        (Some("Library"), Some(below)) => LIBRARY.contains(&below),
+        _ => false,
+    }
+}
+
+/// Elsewhere nothing asks before a read.
+#[cfg(not(target_os = "macos"))]
+const fn asks_before_reading(_at: &Path) -> bool {
+    false
 }
 
 /// The Finder's hidden flag (`chflags hidden`), which `~/Library` carries.
@@ -164,6 +196,28 @@ pub(crate) fn modified_ms(meta: &std::fs::Metadata) -> slopty_core::WallMs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A listing of the home stays out of the folders macOS guards, iCloud's and other apps'
+    /// data and mounted volumes, so it never waits on a prompt at the worker's screen; the
+    /// person's own folders, and what a guarded folder holds once opened, are looked into.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_listing_never_looks_where_macos_would_ask() {
+        let home = slopty_platform::dirs::home();
+        for asks in ["Desktop", "Documents", "Downloads", "Music", "Pictures", "Movies"] {
+            assert!(asks_before_reading(&home.join(asks)), "{asks}");
+        }
+        for asks in
+            ["Library/Mobile Documents", "Library/CloudStorage/Dropbox", "Library/Containers/x"]
+        {
+            assert!(asks_before_reading(&home.join(asks)), "{asks}");
+        }
+        assert!(asks_before_reading(Path::new("/Volumes/USB")));
+        for free in ["Projects", "Library", "Library/Caches", "Desktop/notes", ".config"] {
+            assert!(!asks_before_reading(&home.join(free)), "{free}");
+        }
+        assert!(!asks_before_reading(Path::new("/tmp")));
+    }
 
     fn listed(listing: Listing) -> (String, Vec<FolderEntry>, u32) {
         match listing {
