@@ -24,6 +24,8 @@ pub const CONTROL_RADIUS: f32 = crate::surface_chrome::CONTROL_RADIUS;
 pub const ICON_SIZE: f32 = crate::surface_chrome::ICON_SIZE;
 /// The room between a toolbar's controls.
 pub const CONTROL_GAP: f32 = crate::surface_chrome::CONTROL_GAP;
+/// The shell's keyboard focus ring (a hairline that takes the accent), for Slopty's own controls.
+pub use crate::surface_chrome::focus_ring;
 
 thread_local! {
     /// The shell's default theme, for a view drawn where no shell runs (a crate's own tests).
@@ -311,18 +313,64 @@ pub fn floating_pill(
 /// A [`crate::settings::widgets::TextTooltip`]'s frosted card, for what Slopty's own views show
 /// where a hint shows (a terminal link's target under ⌘).
 pub fn tooltip_card(text: impl Into<SharedString>, theme: &Theme) -> crate::frost::Frosted {
+    tooltip_card_keyed(text, None, theme)
+}
+
+/// [`tooltip_card`] naming an action and, after it, its key ("Show files panel  ⌘E"): the key
+/// in the menus' and palette's voice, one step under the label.
+pub fn tooltip_card_keyed(
+    text: impl Into<SharedString>,
+    keys: Option<SharedString>,
+    theme: &Theme,
+) -> crate::frost::Frosted {
+    tooltip_frame(
+        theme,
+        div()
+            .flex()
+            .flex_row()
+            .items_baseline()
+            .gap(px(TOOLTIP_KEY_GAP))
+            .child(div().min_w_0().child(text.into()))
+            .children(keys.map(|keys| tooltip_keys(theme, keys))),
+    )
+}
+
+/// Between a tooltip's words and its key (Claude desktop's `gap-2`).
+pub const TOOLTIP_KEY_GAP: f32 = 8.0;
+/// The tooltip's corners, which its frost masks to.
+pub const TOOLTIP_RADIUS: f32 = 6.0;
+
+/// The chip every tooltip is: frosted, hairline, the muted interface voice at the font-size
+/// setting, entering with [`crate::motion::fade_quick`] (none under reduced motion).
+pub fn tooltip_frame(theme: &Theme, content: impl IntoElement) -> crate::frost::Frosted {
     let card = div()
         .max_w(px(320.0))
         .px(px(9.0))
         .py(px(6.0))
-        .rounded(px(6.0))
+        .rounded(px(TOOLTIP_RADIUS))
         .border_1()
         .border_color(theme.border)
         .bg(crate::popover::surface_bg(theme))
-        .text_size(px(11.0))
+        .text_size(crate::typography::ui_rems(11.0))
         .text_color(theme.text_muted)
-        .child(text.into());
-    crate::frost::frosted(6.0, crate::frost::MENU_BLUR, card)
+        .child(content);
+    crate::frost::frosted(
+        TOOLTIP_RADIUS,
+        crate::frost::MENU_BLUR,
+        crate::motion::fade_quick("tooltip-in", card),
+    )
+}
+
+/// A tooltip's key, as [`crate::popover::kbd_hint`] sets one (the system face, so ⇧ ⌥ ⏎ draw),
+/// in `text_faint`: the chip is already muted and small.
+pub fn tooltip_keys(theme: &Theme, keys: SharedString) -> Div {
+    div()
+        .flex_none()
+        .whitespace_nowrap()
+        .font_family(crate::popover::KEY_GLYPH_FONT)
+        .text_size(crate::typography::ui_rems(11.0))
+        .text_color(theme.text_faint)
+        .child(keys)
 }
 
 // slopty: a float's controls are touch targets on an iPad: none under 24 pt either way.

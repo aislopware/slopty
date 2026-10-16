@@ -46,6 +46,16 @@ pub(crate) fn toolbar(theme: &Theme) -> Div {
         })
 }
 
+// slopty: one keyboard ring for every control: a transparent hairline at rest that takes the
+// accent when focused from the keyboard, so focus never changes a control's size.
+/// Gives `el` the shell's focus ring. The control also needs a `tab_index` to take focus.
+pub fn focus_ring<E: InteractiveElement + Styled>(el: E, theme: &Theme) -> E {
+    let accent = theme.accent;
+    el.border_1()
+        .border_color(gpui::transparent_black())
+        .focus_visible(move |style| style.border_color(accent))
+}
+
 /// Neutral navigation chip shared by the right-panel strip and PR navigation.
 pub(crate) fn tab_frame(
     id: impl Into<gpui::ElementId>,

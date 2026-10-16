@@ -1196,6 +1196,90 @@ pub fn search_row(theme: &Theme) -> gpui::Div {
         )
 }
 
+// slopty: one find bar for the transcript, the diff and the terminal: the search row's anatomy
+// on a frosted card, entering as a menu does (`.research/micro-details-2026-10-16.md` M19).
+
+/// A find card's width.
+pub const FIND_CARD_WIDTH: f32 = 340.0;
+
+/// The find card: the search row (magnifier, then the caller's field, tally and steps) on a
+/// card [`FIND_CARD_WIDTH`] wide. Mount it with [`find_card_in`].
+pub fn find_card(theme: &Theme) -> Div {
+    popover_card_flush(theme)
+        .w(px(FIND_CARD_WIDTH))
+        .h(px(SEARCH_ROW_HEIGHT))
+        .px(px(10.0))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.0))
+        .child(
+            crate::icons::icon(crate::icons::MAGNIFER)
+                .size(px(14.0))
+                .flex_none()
+                .text_color(theme.text_muted),
+        )
+}
+
+/// A [`find_card`] frosted at the card's radius and entering with [`motion::menu_in`].
+pub fn find_card_in(key: impl Into<ElementId>, card: impl IntoElement + Styled + 'static) -> crate::frost::Frosted {
+    crate::frost::frosted(
+        CARD_RADIUS,
+        crate::frost::MENU_BLUR,
+        motion::menu_in(key, card),
+    )
+}
+
+/// A find card's step or close button: 24 square, a 14 glyph, a faded hover. A step with no
+/// match to go to dims to [`crate::theme::DISABLED_OPACITY`] and takes no pointer; name it with
+/// [`crate::settings::widgets::ActionHint::action_hint`].
+pub fn find_step(
+    id: impl Into<ElementId>,
+    icon: &'static str,
+    enabled: bool,
+    theme: &Theme,
+) -> Stateful<Div> {
+    let id: ElementId = id.into();
+    let fade: SharedString = format!("find-step-{id}").into();
+    let step = div()
+        .id(id)
+        .role(gpui::Role::Button)
+        .flex_none()
+        .size(px(24.0))
+        .rounded(px(6.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            crate::icons::icon(icon)
+                .size(px(14.0))
+                .text_color(theme.text_muted),
+        );
+    if !enabled {
+        return step
+            .opacity(crate::theme::DISABLED_OPACITY)
+            .cursor_default();
+    }
+    let step = crate::surface_chrome::focus_ring(step.tab_index(0), theme)
+        .cursor_pointer()
+        .bg(motion::hover_blend(&fade, ink(0.0), ink(0.08)));
+    step.on_hover(motion::hover_listener(fade))
+}
+
+/// A find card's "3 of 12": quiet, in figures that hold their width as they count.
+pub fn find_tally(theme: &Theme, tally: impl Into<SharedString>) -> Stateful<Div> {
+    let tally: SharedString = tally.into();
+    div()
+        .id("find-tally")
+        .role(gpui::Role::Status)
+        .aria_label(tally.clone())
+        .flex_none()
+        .font_features(crate::typography::tabular())
+        .text_size(crate::typography::ui_rems(12.0))
+        .text_color(theme.text_faint)
+        .child(tally)
+}
+
 /// A searchable picker's row height, matching the model picker's rows.
 pub const PICKER_ROW_HEIGHT: f32 = 32.0;
 
@@ -2659,5 +2743,54 @@ mod adaptive_menu_tests {
             }
         );
         assert_eq!(menu_geometry(900.0, 920.0, 1000.0).height, 640.0);
+    }
+}
+
+// slopty: the find card holds its size, and a focus ring never widens a control.
+#[cfg(test)]
+mod find_card_tests {
+    use gpui::{Context, Render, TestAppContext, Window};
+
+    use super::*;
+
+    struct Find {
+        matches: bool,
+    }
+
+    impl Render for Find {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let theme = Theme::of(cx).clone();
+            div().size(px(600.0)).child(
+                find_card(&theme)
+                    .debug_selector(|| "find-card".into())
+                    .child(div().flex_1().min_w_0().child("query"))
+                    .child(find_tally(&theme, "3 of 12"))
+                    .child(
+                        find_step("find-next", crate::icons::ALT_ARROW_DOWN, self.matches, &theme)
+                            .debug_selector(|| "find-next".into()),
+                    ),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn the_find_card_and_its_steps_hold_their_size(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::default()));
+        let (view, cx) = cx.add_window_view(|_, _| Find { matches: true });
+        let measure = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear(cx);
+            });
+            let card = cx.debug_bounds("find-card").expect("card drawn");
+            let step = cx.debug_bounds("find-next").expect("step drawn");
+            (f32::from(card.size.width), f32::from(card.size.height), f32::from(step.size.width))
+        };
+        assert_eq!(measure(cx), (FIND_CARD_WIDTH, SEARCH_ROW_HEIGHT, 24.0));
+        view.update(cx, |find, cx| {
+            find.matches = false;
+            cx.notify();
+        });
+        assert_eq!(measure(cx), (FIND_CARD_WIDTH, SEARCH_ROW_HEIGHT, 24.0));
     }
 }

@@ -1700,6 +1700,10 @@ pub fn neutral(lightness: f32) -> Hsla {
     hsla(0.0, 0.0, v, 1.0)
 }
 
+// slopty: one dimming for every control that cannot act now (the menus' and search steps' 0.38).
+/// How far a disabled control fades, everywhere; pair it with `cursor_default`.
+pub const DISABLED_OPACITY: f32 = 0.38;
+
 /// Translucent **fill** ink for interactive states and chip plates: soft-white on
 /// dark, soft-black on light at [`INK_FILL_SCALE`] of the alpha.
 ///

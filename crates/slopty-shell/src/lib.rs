@@ -40,6 +40,7 @@ mod glass;
 mod haptics;
 // slopty: no History surface (ruled out).
 pub mod icons;
+pub mod keys; // slopty: how a key reads in tooltips, menus, the palette and the a11y tree
 pub(crate) mod image_media;
 pub(crate) mod image_viewer;
 pub mod links;

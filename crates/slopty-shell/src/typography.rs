@@ -123,6 +123,12 @@ pub const fn ui_rems(pixels_at_default: f32) -> Rems {
     rems(pixels_at_default / 16.0)
 }
 
+// slopty: figures that tick or line up (a timer, a count, a percentage) keep one width.
+/// Tabular figures (OpenType `tnum`): a number that changes or sits over another does not shift.
+pub fn tabular() -> gpui::FontFeatures {
+    gpui::FontFeatures(std::sync::Arc::new(vec![("tnum".to_owned(), 1)]))
+}
+
 pub const CODE_FONT_SIZE_DEFAULT: f32 = 12.5;
 pub const TERMINAL_FONT_SIZE_DEFAULT: f32 = 13.0;
 pub const FONT_SIZE_MIN: f32 = 8.0;
@@ -700,6 +706,11 @@ pub fn set_font_size(size: UiFontSize, window: &mut Window, cx: &mut App) -> boo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tabular_figures_turn_on_tnum() {
+        assert_eq!(tabular().tag_value_list(), &[("tnum".to_owned(), 1)]);
+    }
 
     #[test]
     fn wire_values_round_trip_and_unknown_falls_back() {

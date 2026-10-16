@@ -12,8 +12,9 @@
 //! and background pause keep them still.
 
 use gpui::{
-    AnyElement, App, AppContext, Context, Entity, EntityId, IntoElement, ParentElement,
-    PathBuilder, Render, RenderOnce, SharedString, Styled, Window, canvas, div, point, px,
+    AnyElement, App, AppContext, Context, Entity, EntityId, InteractiveElement as _, IntoElement,
+    ParentElement, PathBuilder, Render, RenderOnce, SharedString, StatefulInteractiveElement as _,
+    Styled, Window, canvas, div, point, px,
 };
 
 use crate::motion::{self, GRADIENT_SPIN, PULSE_STAGGER, SPLASH_OUT, SLOPTY_PULSE};
@@ -492,6 +493,73 @@ const _: () = {
     assert!(GRADIENT_SPIN.duration_ms == 750);
 };
 
+// slopty: one loading voice for every surface (`.research/micro-details-2026-10-16.md` M30).
+
+/// How long a load runs before it says so: a fast one never flashes "Loading…".
+pub const PENDING_GRACE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// "Loading file…" and its like: the mono spinner and muted words, shown only once the load has
+/// run [`PENDING_GRACE`]. `key` names the load, so a new one waits its own grace.
+pub fn pending(key: impl Into<SharedString>, text: impl Into<SharedString>) -> Pending {
+    Pending {
+        key: key.into(),
+        text: text.into(),
+    }
+}
+
+#[derive(IntoElement)]
+pub struct Pending {
+    key: SharedString,
+    text: SharedString,
+}
+
+/// Whether a load's grace has passed: a mark its timer sets, never the clock read while drawing.
+struct PendingGrace {
+    over: bool,
+}
+
+impl RenderOnce for Pending {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let grace = window.use_keyed_state(
+            gpui::ElementId::Name(format!("pending-{}", self.key).into()),
+            cx,
+            |_, cx: &mut Context<PendingGrace>| {
+                cx.spawn(async move |grace, cx| {
+                    cx.background_executor().timer(PENDING_GRACE).await;
+                    let _ = grace.update(cx, |grace, cx| {
+                        grace.over = true;
+                        cx.notify();
+                    });
+                })
+                .detach();
+                PendingGrace { over: false }
+            },
+        );
+        let row = div()
+            .id(gpui::ElementId::Name(format!("pending-row-{}", self.key).into()))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.0))
+            .min_h(px(20.0));
+        if !grace.read(cx).over {
+            return row;
+        }
+        let theme = Theme::of(cx).clone();
+        let view = window.current_view();
+        row.role(gpui::Role::Status)
+            .aria_label(self.text.clone())
+            .child(mini_mono_spinner(self.key.clone(), 2.0, theme.text_muted, view, cx))
+            .child(
+                div()
+                    .debug_selector(|| "pending-words".into())
+                    .text_size(crate::typography::ui_rems(13.0))
+                    .text_color(theme.text_muted)
+                    .child(self.text),
+            )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -513,5 +581,31 @@ mod tests {
                 "cell ({x},{y}) stagger {s}"
             );
         }
+    }
+
+    struct Loading;
+
+    impl Render for Loading {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().w(px(200.0)).child(pending("file", "Loading file…"))
+        }
+    }
+
+    #[gpui::test]
+    fn a_load_says_so_only_after_its_grace(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::default()));
+        let (_view, cx) = cx.add_window_view(|_, _| Loading);
+        let draw = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear(cx);
+            });
+        };
+        draw(cx);
+        assert!(cx.debug_bounds("pending-words").is_none(), "a fast load never flashes");
+        cx.executor().advance_clock(PENDING_GRACE);
+        cx.run_until_parked();
+        draw(cx);
+        assert!(cx.debug_bounds("pending-words").is_some());
     }
 }

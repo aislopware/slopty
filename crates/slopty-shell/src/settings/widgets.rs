@@ -617,21 +617,7 @@ pub fn badge(theme: &Theme, label: impl Into<SharedString>) -> gpui::Div {
         .child(label.into())
 }
 
-/// Emerald status pill (the Accounts "Active" badge:
-/// `bg-emerald-400/[0.12] text-emerald-300/90`).
-pub fn badge_active(theme: &Theme, label: impl Into<SharedString>) -> gpui::Div {
-    let emerald = theme.success;
-    let emerald_text = theme.success_muted; // emerald-300
-    div()
-        .flex_none()
-        .px(px(8.0))
-        .py(px(2.0))
-        .rounded_full()
-        .bg(emerald.opacity(0.12))
-        .text_size(crate::typography::ui_rems(10.5))
-        .text_color(emerald_text.opacity(0.9))
-        .child(label.into())
-}
+// slopty: no green "Active" pill; nothing routine wears a status hue.
 
 pub const SWITCH_WIDTH: f32 = 44.8;
 const SWITCH_HEIGHT: f32 = 28.8;
@@ -1693,11 +1679,19 @@ impl RenderOnce for SettingsScroll {
 pub struct TextTooltip {
     text: SharedString,
     above: bool,
+    // slopty: the action's key, resolved when the tooltip opened, and a second line.
+    keys: Option<SharedString>,
+    detail: Option<SharedString>,
 }
 
 /// How far a [`text_tooltip_above`] chip sits over the pointer; clears a
 /// small control the pointer is anywhere inside.
 const TOOLTIP_ABOVE_GAP: f32 = 20.0;
+
+// slopty: gpui hangs a tooltip at the pointer + 1 px, so the arrow covers its first glyphs; the
+// chip sits clear of the cursor until gpui-fast anchors it to its trigger (Zed's `pl_2 pt_2p5`).
+const TOOLTIP_CURSOR_CLEAR_X: f32 = 8.0;
+const TOOLTIP_CURSOR_CLEAR_Y: f32 = 10.0;
 
 impl Render for TextTooltip {
     fn render(
@@ -1706,9 +1700,17 @@ impl Render for TextTooltip {
         cx: &mut gpui::Context<Self>,
     ) -> impl IntoElement {
         // slopty: the card is `live::chrome::tooltip_card`, which Slopty's own views draw too.
-        let card = crate::live::chrome::tooltip_card(self.text.clone(), Theme::of(cx));
+        let theme = Theme::of(cx);
+        let card = match self.detail.clone() {
+            Some(detail) => tooltip_card_detail(self.text.clone(), detail, self.keys.clone(), theme),
+            None => crate::live::chrome::tooltip_card_keyed(self.text.clone(), self.keys.clone(), theme),
+        };
         if !self.above {
-            return card.into_any_element();
+            return div()
+                .pl(px(TOOLTIP_CURSOR_CLEAR_X))
+                .pt(px(TOOLTIP_CURSOR_CLEAR_Y))
+                .child(card)
+                .into_any_element();
         }
         // gpui hangs a tooltip below-right of the pointer. A zero-height box
         // with end-aligned content makes the chip overflow upward instead.
@@ -1731,6 +1733,8 @@ pub fn text_tooltip(
         cx.new(|_| TextTooltip {
             text: text.clone(),
             above: false,
+            keys: None,
+            detail: None,
         })
         .into()
     }
@@ -1746,7 +1750,473 @@ pub fn text_tooltip_above(
         cx.new(|_| TextTooltip {
             text: text.clone(),
             above: true,
+            keys: None,
+            detail: None,
         })
         .into()
+    }
+}
+
+// slopty: tooltips name the action and its key (`docs/decisions/ui.md`, "Tooltips name the
+// action and its key"). The key is looked up each time the tooltip opens, so a rebind shows at
+// once and an unbound action shows its words alone.
+
+/// How long the pointer rests on a control before its tooltip shows: one value for every hint
+/// the shell draws (Claude desktop 300 ms, macOS about 400).
+pub const TOOLTIP_DELAY: std::time::Duration = std::time::Duration::from_millis(350);
+
+/// Where a tooltip's key comes from.
+pub enum Keys {
+    /// Whatever `action` is bound to when the tooltip opens; nothing when unbound.
+    Action(Box<dyn gpui::Action>),
+    /// The same, resolved in `focus`'s key context (the composer's Submit, the browser's Reload).
+    ActionIn(Box<dyn gpui::Action>, gpui::FocusHandle),
+    /// A key a raw handler takes ("shift-tab", "escape"): only where that handler exists.
+    Fixed(&'static str),
+}
+
+impl Clone for Keys {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Action(action) => Self::Action(action.boxed_clone()),
+            Self::ActionIn(action, focus) => Self::ActionIn(action.boxed_clone(), focus.clone()),
+            Self::Fixed(combo) => Self::Fixed(combo),
+        }
+    }
+}
+
+impl Keys {
+    /// The key as the tooltip shows it now, or `None` when nothing binds the action.
+    pub fn text(&self, window: &gpui::Window, cx: &gpui::App) -> Option<SharedString> {
+        match self {
+            Self::Action(action) => crate::keys::for_action(action.as_ref(), None, window, cx),
+            Self::ActionIn(action, focus) => {
+                crate::keys::for_action(action.as_ref(), Some(focus), window, cx)
+            }
+            Self::Fixed(combo) => Some(crate::keys::combo_text(combo)),
+        }
+    }
+
+    /// The same key in `aria-keyshortcuts` spelling, from the keymap alone (no `Window`).
+    pub fn aria(&self, cx: &gpui::App) -> Option<SharedString> {
+        match self {
+            Self::Action(action) | Self::ActionIn(action, _) => {
+                crate::keys::aria_for_action(action.as_ref(), cx)
+            }
+            Self::Fixed(combo) => Some(crate::keys::aria_combo(combo)),
+        }
+    }
+}
+
+/// A tooltip naming an action and, when it has one, its key.
+pub fn action_tooltip(
+    label: impl Into<SharedString>,
+    keys: Keys,
+) -> impl Fn(&mut gpui::Window, &mut gpui::App) -> gpui::AnyView + 'static {
+    keyed_tooltip(label.into(), None, keys, false)
+}
+
+/// [`action_tooltip`] above the pointer (as [`text_tooltip_above`]).
+pub fn action_tooltip_above(
+    label: impl Into<SharedString>,
+    keys: Keys,
+) -> impl Fn(&mut gpui::Window, &mut gpui::App) -> gpui::AnyView + 'static {
+    keyed_tooltip(label.into(), None, keys, true)
+}
+
+/// A two-line tooltip: the title (and its key) over a quieter detail line.
+pub fn detail_tooltip(
+    title: impl Into<SharedString>,
+    detail: impl Into<SharedString>,
+    keys: Option<Keys>,
+) -> impl Fn(&mut gpui::Window, &mut gpui::App) -> gpui::AnyView + 'static {
+    let title: SharedString = title.into();
+    let detail: SharedString = detail.into();
+    move |window, cx| {
+        let keys = keys.as_ref().and_then(|keys| keys.text(window, cx));
+        let (title, detail) = (title.clone(), detail.clone());
+        cx.new(|_| TextTooltip {
+            text: title,
+            above: false,
+            keys,
+            detail: Some(detail),
+        })
+        .into()
+    }
+}
+
+fn keyed_tooltip(
+    label: SharedString,
+    detail: Option<SharedString>,
+    keys: Keys,
+    above: bool,
+) -> impl Fn(&mut gpui::Window, &mut gpui::App) -> gpui::AnyView + 'static {
+    move |window, cx| {
+        let keys = keys.text(window, cx);
+        let (text, detail) = (label.clone(), detail.clone());
+        cx.new(|_| TextTooltip {
+            text,
+            above,
+            keys,
+            detail,
+        })
+        .into()
+    }
+}
+
+/// The two-line tooltip chip ([`detail_tooltip`]; a project's icon, a pull request): the title
+/// row as [`crate::live::chrome::tooltip_card_keyed`] draws it, the detail under it a step
+/// quieter.
+pub fn tooltip_card_detail(
+    title: impl Into<SharedString>,
+    detail: impl Into<SharedString>,
+    keys: Option<SharedString>,
+    theme: &Theme,
+) -> crate::frost::Frosted {
+    crate::live::chrome::tooltip_frame(
+        theme,
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(3.0))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_baseline()
+                    .gap(px(crate::live::chrome::TOOLTIP_KEY_GAP))
+                    .child(div().min_w_0().child(title.into()))
+                    .children(keys.map(|keys| crate::live::chrome::tooltip_keys(theme, keys))),
+            )
+            .child(
+                div()
+                    .text_size(crate::typography::ui_rems(10.5))
+                    .text_color(theme.text_faint)
+                    .child(detail.into()),
+            ),
+    )
+}
+
+/// Names a control for the pointer and for assistive tech from one place: its tooltip (label
+/// and key, after [`TOOLTIP_DELAY`]), its `aria-label` and its `aria-keyshortcuts`.
+pub trait ActionHint: StatefulInteractiveElement + Sized {
+    fn action_hint(self, label: impl Into<SharedString>, keys: Keys, cx: &gpui::App) -> Self {
+        let label: SharedString = label.into();
+        let aria = keys.aria(cx);
+        let mut el = self
+            .aria_label(label.clone())
+            .tooltip(action_tooltip(label, keys))
+            .tooltip_show_delay(TOOLTIP_DELAY);
+        if let Some(aria) = aria {
+            el = el.aria_keyshortcuts(aria);
+        }
+        el
+    }
+
+    /// [`Self::action_hint`] for a control no key reaches: its tooltip and `aria-label`.
+    fn hint(self, label: impl Into<SharedString>) -> Self {
+        let label: SharedString = label.into();
+        self.aria_label(label.clone())
+            .tooltip(text_tooltip(label))
+            .tooltip_show_delay(TOOLTIP_DELAY)
+    }
+}
+
+impl<E: StatefulInteractiveElement + Sized> ActionHint for E {}
+
+// slopty: every choice marks its default and the one Slopty recommends, in plain words after the
+// option (`docs/decisions/ui.md`, "Every choice marks its default and the recommended one").
+
+/// What an option is to the person: the default, the one Slopty recommends, or both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Standing {
+    Default,
+    Recommended,
+    DefaultRecommended,
+}
+
+impl Standing {
+    /// The standing of an option that is (or is not) the default and recommended; `None` for
+    /// neither.
+    pub fn of(is_default: bool, is_recommended: bool) -> Option<Self> {
+        match (is_default, is_recommended) {
+            (true, true) => Some(Self::DefaultRecommended),
+            (true, false) => Some(Self::Default),
+            (false, true) => Some(Self::Recommended),
+            (false, false) => None,
+        }
+    }
+
+    pub fn words(self) -> &'static str {
+        match self {
+            Self::Default => "Default",
+            Self::Recommended => "Recommended",
+            Self::DefaultRecommended => "Default · Recommended",
+        }
+    }
+}
+
+/// The quiet note after an option's label, in the key hints' voice.
+pub fn standing_note(theme: &Theme, standing: Standing) -> gpui::Div {
+    div()
+        .flex_none()
+        .ml(px(6.0))
+        .whitespace_nowrap()
+        .text_size(crate::typography::ui_rems(11.0))
+        .text_color(theme.text_faint)
+        .child(SharedString::from(standing.words()))
+}
+
+impl SelectOption {
+    /// Marks the option as the default and/or recommended one (its row's note).
+    pub fn standing(self, standing: Option<Standing>) -> Self {
+        match standing {
+            Some(standing) => self.detail(standing.words()),
+            None => self,
+        }
+    }
+}
+
+/// "Reset" on a settings row whose value differs from its default; nothing at the default, so the
+/// absence of "Reset" is the mark (Zed's rule). The caller adds the click.
+pub fn reset_action(
+    theme: &Theme,
+    id: impl Into<SharedString>,
+    label: &str,
+    is_default: bool,
+) -> Option<gpui::Stateful<gpui::Div>> {
+    if is_default {
+        return None;
+    }
+    let id: SharedString = id.into();
+    let selector = id.clone();
+    let hover = theme.text;
+    Some(crate::surface_chrome::focus_ring(
+        div()
+            .id(gpui::ElementId::Name(id))
+            .debug_selector(move || selector.to_string())
+            .role(gpui::Role::Button)
+            .aria_label(format!("Reset {label} to default"))
+            .flex_none()
+            .min_h(px(24.0))
+            .px(px(4.0))
+            .rounded(px(4.0))
+            .flex()
+            .items_center()
+            .tab_index(0)
+            .text_size(crate::typography::ui_rems(11.0))
+            .text_color(theme.text_muted)
+            .cursor_pointer()
+            .hover(move |s| s.text_color(hover))
+            .child(SharedString::from("Reset")),
+        theme,
+    ))
+}
+
+/// A page's "Restore defaults", dimmed and inert while nothing differs from its default. The
+/// caller adds the click when `any_changed`.
+pub fn restore_defaults(theme: &Theme, id: &str, any_changed: bool) -> gpui::Stateful<gpui::Div> {
+    let selector: SharedString = id.to_owned().into();
+    ghost_action(theme)
+        .id(gpui::ElementId::Name(selector.clone()))
+        .debug_selector(move || selector.to_string())
+        .role(gpui::Role::Button)
+        .aria_label("Restore defaults")
+        .flex_none()
+        .when(any_changed, |el| el.tab_index(0))
+        .when(!any_changed, |el| {
+            el.opacity(crate::theme::DISABLED_OPACITY).cursor_default()
+        })
+        .child(
+            crate::icons::icon(crate::icons::RESTART)
+                .size(px(14.0))
+                .text_color(theme.text_muted),
+        )
+        .child(SharedString::from("Restore defaults"))
+}
+
+// slopty: truncated text always has a way out: the whole of it in a tooltip, only when cut.
+
+/// A one-line label that fades its tail when the room runs out (the sidebar's fade) and, only
+/// then, shows the whole text in a tooltip.
+pub fn truncate_with_tip(
+    id: impl Into<SharedString>,
+    text: impl Into<SharedString>,
+) -> impl IntoElement {
+    let id: SharedString = id.into();
+    let text: SharedString = text.into();
+    let overflow = ScrollHandle::new();
+    let probe = overflow.clone();
+    let tip = text.clone();
+    let selector = id.clone();
+    crate::edge_fade::edge_faded(
+        20.0,
+        false,
+        false,
+        div()
+            .id(gpui::ElementId::Name(id))
+            .debug_selector(move || selector.to_string())
+            .flex_1()
+            .min_w_0()
+            .overflow_hidden()
+            .track_scroll(&overflow)
+            .flex()
+            .tooltip(move |window, cx| overflow_tooltip(&probe, tip.clone(), window, cx))
+            .tooltip_show_delay(TOOLTIP_DELAY)
+            .child(div().flex_none().whitespace_nowrap().child(text)),
+    )
+    .fade_right(true)
+    .fade_label_overflow(&overflow)
+}
+
+/// The whole text of a cut label, or an empty view when it fits (gpui asks for a view either way).
+fn overflow_tooltip(
+    overflow: &ScrollHandle,
+    text: SharedString,
+    _window: &mut gpui::Window,
+    cx: &mut gpui::App,
+) -> gpui::AnyView {
+    let cut = overflow.max_offset().x > px(0.5);
+    cx.new(|_| OverflowTooltip { text: cut.then_some(text) }).into()
+}
+
+struct OverflowTooltip {
+    text: Option<SharedString>,
+}
+
+impl Render for OverflowTooltip {
+    fn render(&mut self, _: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        let Some(text) = self.text.clone() else {
+            return div().into_any_element();
+        };
+        div()
+            .pl(px(TOOLTIP_CURSOR_CLEAR_X))
+            .pt(px(TOOLTIP_CURSOR_CLEAR_Y))
+            .child(crate::live::chrome::tooltip_card(text, Theme::of(cx)))
+            .into_any_element()
+    }
+}
+
+/// Where a middle-cut value splits: everything before its last `tail` characters, and those
+/// (t3code's `MiddleTruncate`). A value no longer than `tail` is all tail.
+pub fn split_tail(value: &str, tail: usize) -> (&str, &str) {
+    let chars = value.chars().count();
+    if chars <= tail {
+        return ("", value);
+    }
+    let at = value
+        .char_indices()
+        .nth(chars - tail)
+        .map_or(value.len(), |(ix, _)| ix);
+    value.split_at(at)
+}
+
+/// A path or branch cut in the middle: its head ends in "…" when the room runs out, its last
+/// `tail` characters always show, and the whole value is in the tooltip when cut.
+pub fn middle_truncate(
+    id: impl Into<SharedString>,
+    value: impl Into<SharedString>,
+    tail: usize,
+) -> impl IntoElement {
+    let id: SharedString = id.into();
+    let value: SharedString = value.into();
+    let (head, end) = split_tail(&value, tail);
+    let (head, end) = (SharedString::from(head.to_owned()), SharedString::from(end.to_owned()));
+    let overflow = ScrollHandle::new();
+    let probe = overflow.clone();
+    let tip = value.clone();
+    let selector = id.clone();
+    div()
+        .id(gpui::ElementId::Name(id))
+        .debug_selector(move || selector.to_string())
+        .aria_label(value.clone())
+        .min_w_0()
+        .flex()
+        .flex_row()
+        .whitespace_nowrap()
+        .tooltip(move |window, cx| overflow_tooltip(&probe, tip.clone(), window, cx))
+        .tooltip_show_delay(TOOLTIP_DELAY)
+        .child(
+            // The head ends in "…" when cut; an unseen copy at its full width is what tells the
+            // tooltip it was.
+            div()
+                .id("head")
+                .relative()
+                .min_w_0()
+                .flex_shrink(1.0)
+                .overflow_hidden()
+                .track_scroll(&overflow)
+                .child(div().truncate().child(head.clone()))
+                .child(div().absolute().top_0().left_0().invisible().flex_none().child(head)),
+        )
+        .child(div().flex_none().child(end))
+}
+
+#[cfg(test)]
+mod hint_tests {
+    use super::*;
+
+    #[test]
+    fn standing_reads_in_plain_words() {
+        assert_eq!(Standing::of(false, false), None);
+        assert_eq!(Standing::of(true, false).map(Standing::words), Some("Default"));
+        assert_eq!(Standing::of(false, true).map(Standing::words), Some("Recommended"));
+        assert_eq!(
+            Standing::of(true, true).map(Standing::words),
+            Some("Default · Recommended")
+        );
+    }
+
+    #[test]
+    fn a_middle_cut_keeps_the_tail_whole() {
+        assert_eq!(split_tail("~/code/slopty/crates", 6), ("~/code/slopty/", "crates"));
+        assert_eq!(split_tail("main", 6), ("", "main"));
+        assert_eq!(split_tail("añb→ç", 2), ("añb", "→ç"));
+    }
+
+    #[test]
+    fn a_row_at_its_default_offers_no_reset() {
+        let theme = Theme::default();
+        assert!(reset_action(&theme, "width-reset", "Conversation width", true).is_none());
+        assert!(reset_action(&theme, "width-reset", "Conversation width", false).is_some());
+    }
+
+    gpui::actions!(hint_test, [Probe]);
+
+    struct Hinted;
+
+    impl Render for Hinted {
+        fn render(&mut self, _: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+            div().size(px(200.0)).child(
+                div()
+                    .id("hinted")
+                    .size(px(24.0))
+                    .debug_selector(|| "hinted".into())
+                    .role(gpui::Role::Button)
+                    .action_hint("Show files panel", Keys::Action(Box::new(Probe)), cx),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn the_hint_names_its_key_and_follows_a_rebind(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(Theme::default());
+            cx.bind_keys([gpui::KeyBinding::new("cmd-e", Probe, None)]);
+        });
+        let (_view, cx) = cx.add_window_view(|_, _| Hinted);
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear(cx);
+            let keys = Keys::Action(Box::new(Probe));
+            assert_eq!(keys.text(window, cx), Some(crate::keys::combo_text("cmd-e")));
+            assert_eq!(keys.aria(cx).as_deref(), Some("Meta+E"));
+            cx.clear_key_bindings();
+            cx.bind_keys([gpui::KeyBinding::new("cmd-shift-e", Probe, None)]);
+            assert_eq!(keys.text(window, cx), Some(crate::keys::combo_text("cmd-shift-e")));
+            cx.clear_key_bindings();
+            assert_eq!(keys.text(window, cx), None);
+            assert_eq!(Keys::Fixed("shift-tab").text(window, cx), Some(crate::keys::combo_text("shift-tab")));
+        });
     }
 }

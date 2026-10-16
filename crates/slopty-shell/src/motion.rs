@@ -1981,6 +1981,10 @@ mod tests {
 #[path = "motion/windows_pulse.rs"]
 mod windows_pulse;
 
+// slopty: the copy span and the growing section every surface shares.
+mod reveal;
+pub use reveal::{COPIED_FOR, RevealHeight, copied, copy_feedback, copy_icon, reveal_height};
+
 /// A bounded activation sheen for Fast service tier; GPUI handles reduced motion.
 pub fn fast_tier(
     id: impl Into<ElementId>,
