@@ -2096,3 +2096,21 @@ more full-window layer.
     flag), so no golden or tree test moves.
   - The old head `914ea1ab` stays fetchable on the fork's `keep/914ea1ab` for checks of commits
     that still pin it.
+- ✅ **gpui-kit `153d64d0` (2026-10-16, evening): upstream to `8a83be7e`, 4 commits.** Taken by
+  `cargo xtask upstream sync --only gpui-kit` with no conflict; the fork's checks pass on a
+  runner and `workspace-hack` is unchanged.
+  - #3526: a scrollbar leaves presses and hover over an element drawn above it to that element,
+    so a popover or menu over a scrolled list (settings, the terminal's views) takes its own
+    clicks.
+  - #3527: dragging a text area's scrollbar reaches the end of its content.
+  - #3536: text styles that differ only in shared heading callbacks compare equal, so markdown
+    headings stop counting as changed on each render.
+  - #3523: `TableState::select_on_modifier_click`; Slopty draws no gpui-kit table, so it reaches
+    only the lock.
+- ✅ **gpui-fast `c35b0689` (2026-10-16, evening): zed `d678e7de` imported.** One tracked
+  change: zed #64239, a touch that catches a fling picks its own axis from its first movement
+  instead of the fling's, so a finger that stops a sideways fling and moves up scrolls up (the
+  iPhone and iPad transcript and lists). It met our `fast::fling::catch` hook in
+  `gestures.rs`; the merge keeps upstream's new `Caught` state and our hook in place of
+  `self.momentum.take()`, with the end event still marked `fast_momentum`. longbridge had
+  nothing new (`eeccb27f`).
