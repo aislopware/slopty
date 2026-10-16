@@ -394,7 +394,7 @@ impl BrowserSurface {
             };
             self.page.loading = result.is_ok();
             if let Err(error) = result {
-                self.page.error = Some(format!("Could not open this page: {error}"));
+                self.page.error = Some(error.to_string());
             }
             window.focus(&self.focus, cx);
         }

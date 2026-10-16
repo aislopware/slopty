@@ -25,12 +25,12 @@ fn choose(
     String,
 > {
     let entries = std::fs::read_dir(folder).map_err(|_| {
-        "Unable to read the wallpaper folder. Choose an accessible folder in Appearance."
+        "Couldn't read the wallpaper folder. Choose one Slopty can open in Appearance."
             .to_string()
     })?;
     let mut candidates = Vec::new();
     for entry in entries {
-        let entry = entry.map_err(|_| "Unable to read the wallpaper folder.".to_string())?;
+        let entry = entry.map_err(|_| "Couldn't read the wallpaper folder.".to_string())?;
         let path = entry.path();
         let supported = path
             .extension()

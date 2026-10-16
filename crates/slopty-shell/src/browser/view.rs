@@ -1,5 +1,6 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
 use super::{BrowserEvent, BrowserSurface};
+use crate::settings::widgets::ActionHint as _;
 use crate::{icons, surface_chrome, theme::Theme};
 use gpui::{
     AnyElement, Context, Focusable, IntoElement, KeyDownEvent, MouseButton, Render, Window, div,
@@ -11,13 +12,22 @@ fn button(
     label: &'static str,
     glyph: &'static str,
     enabled: bool,
+    action: Option<Box<dyn gpui::Action>>,
+    focus: &gpui::FocusHandle,
     theme: &Theme,
-    _cx: &mut Context<BrowserSurface>,
+    cx: &mut Context<BrowserSurface>,
 ) -> gpui::Stateful<gpui::Div> {
     // Match Files/History chrome, including focus-preserving mouse-down and
     // tooltips. Disabled controls have neither a pointer cursor nor a handler.
-    crate::files::toolbar_button(id, label)
-        .when(!enabled, |el| el.cursor_default().opacity(0.35))
+    // slopty: the tooltip names the key the browser binds (⌘[ ⌘] ⇧⌘R), resolved in its context.
+    match action {
+        Some(action) => crate::files::toolbar_button_keyed(id, label, action, focus.clone(), cx),
+        None => crate::files::toolbar_button(id, label),
+    }
+        .when(!enabled, |el| {
+            el.cursor_default()
+                .opacity(crate::theme::DISABLED_OPACITY)
+        })
         .child(
             icons::icon(glyph)
                 .size(px(surface_chrome::ICON_SIZE))
@@ -223,7 +233,9 @@ impl BrowserSurface {
                                         this.navigate(&url, window, cx)
                                     }))
                             })
-                            .when(!available, |el| el.opacity(0.4))
+                            .when(!available, |el| {
+                                el.opacity(crate::theme::DISABLED_OPACITY).cursor_default()
+                            })
                             .child("Open"),
                     ),
             );
@@ -292,7 +304,7 @@ impl BrowserSurface {
         #[cfg(not(target_os = "linux"))]
         let starting = false;
         let title = if has_error {
-            "Couldn’t load this page"
+            "Couldn't load this page"
         } else if starting {
             "Starting browser…"
         } else if external && self.page.url.is_some() {
@@ -368,7 +380,7 @@ impl BrowserSurface {
                             .cursor_pointer()
                             .role(gpui::Role::Button)
                             .aria_label(if has_error {
-                                "Retry page"
+                                "Try again"
                             } else {
                                 "Enter an address"
                             })
@@ -552,6 +564,8 @@ impl Render for BrowserSurface {
             "Back",
             icons::ARROW_LEFT,
             self.page.can_back,
+            Some(Box::new(super::Back)),
+            &self.focus,
             &theme,
             cx,
         )
@@ -563,6 +577,8 @@ impl Render for BrowserSurface {
             "Forward",
             icons::ARROW_RIGHT,
             self.page.can_forward,
+            Some(Box::new(super::Forward)),
+            &self.focus,
             &theme,
             cx,
         )
@@ -574,6 +590,8 @@ impl Render for BrowserSurface {
             "Reload page",
             icons::REFRESH,
             has_page,
+            Some(Box::new(super::Reload)),
+            &self.focus,
             &theme,
             cx,
         )
@@ -611,26 +629,40 @@ impl Render for BrowserSurface {
                     .child(self.address.clone()),
             )
             .when(focused || self.address_edited, |el| {
+                // slopty: an 18 px mark in a 24 px target (M25); its tooltip names ⏎, which the
+                // address field takes.
                 el.child(
                     div()
                         .id("browser-go")
-                        .size(px(18.0))
+                        .size(px(24.0))
+                        .m(px(-3.0))
                         .flex_none()
-                        .rounded(px(4.0))
                         .flex()
                         .items_center()
                         .justify_center()
                         .cursor_pointer()
                         .role(gpui::Role::Button)
-                        .aria_label("Go to address")
-                        .hover(|s| s.bg(crate::theme::wash(0.10)))
+                        .group("browser-go")
                         .on_mouse_down(MouseButton::Left, |_, w, _| w.prevent_default())
                         .on_click(cx.listener(|this, _, w, cx| this.submit(w, cx)))
-                        .tooltip(crate::settings::widgets::text_tooltip("Go to address"))
+                        .action_hint(
+                            "Go to address",
+                            crate::settings::widgets::Keys::Fixed("enter"),
+                            cx,
+                        )
                         .child(
-                            icons::icon(icons::RETURN)
-                                .size(px(12.0))
-                                .text_color(theme.text_muted),
+                            div()
+                                .size(px(18.0))
+                                .rounded(px(4.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .group_hover("browser-go", |s| s.bg(crate::theme::wash(0.10)))
+                                .child(
+                                    icons::icon(icons::RETURN)
+                                        .size(px(12.0))
+                                        .text_color(theme.text_muted),
+                                ),
                         ),
                 )
             });
@@ -639,6 +671,8 @@ impl Render for BrowserSurface {
             "Open in default browser",
             icons::ARROW_UP_RIGHT,
             has_page,
+            None,
+            &self.focus,
             &theme,
             cx,
         )

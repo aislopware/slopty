@@ -32,10 +32,9 @@ impl FilesSurface {
                                 .update(cx, |surface, cx| match frame {
                                     Ok(frame) => surface.apply_workspace_changes(frame, cx),
                                     Err(error) => {
-                                        surface.watch_error = Some(
-                                            format!("File updates could not be decoded: {error}")
-                                                .into(),
-                                        );
+                                        tracing::warn!(%error, "workspace file update undecodable");
+                                        surface.watch_error =
+                                            Some("Couldn't read a file update; refresh to catch up".into());
                                         cx.notify();
                                     }
                                 })
@@ -47,7 +46,7 @@ impl FilesSurface {
                         if this
                             .update(cx, |surface, cx| {
                                 surface.watch_error =
-                                    Some("File updates interrupted — retrying".into());
+                                    Some("File updates paused; reconnecting…".into());
                                 cx.notify();
                             })
                             .is_err()

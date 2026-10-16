@@ -346,7 +346,7 @@ fn the_server_s_row_updates_a_server_on_another_build(cx: &mut TestAppContext) {
     );
     let said = toast(cx).unwrap_or_default();
     assert!(
-        said.starts_with("The server on hub runs this build, and Slopty could not connect"),
+        said.starts_with("The server on hub runs this build, and Slopty couldn't connect"),
         "{said}"
     );
     assert_eq!(status(cx).as_deref(), Some(crate::server::OTHER_BUILD), "back to what it is");
@@ -593,11 +593,11 @@ fn a_removal_takes_the_worker_off_then_the_server_forgets_it(cx: &mut TestAppCon
 
     ws.update(cx, |ws, cx| ws.remove_worker(other, cx));
     cx.run_until_parked();
-    deployer.removed(cx, Err(failure("Could not reach other")));
+    deployer.removed(cx, Err(failure("Couldn't reach other")));
     turn(cx);
     assert!(verbs.try_next().is_none(), "a failed removal forgets nothing");
     let said = notice(cx).unwrap_or_default();
-    assert!(said.starts_with("Could not remove other: Could not reach other"), "{said}");
+    assert!(said.starts_with("Couldn't remove other: Couldn't reach other"), "{said}");
 }
 
 /// A machine on a newer build is never updated from here, by its row or by "Update all": this

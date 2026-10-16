@@ -7,8 +7,8 @@ use std::{
 };
 
 use gpui::{
-    AnyElement, App, Context, Entity, Focusable as _, HighlightStyle, ListAlignment, ListOffset,
-    ListSizingBehavior, ListState, Render, ScrollHandle, SharedString, Subscription, Window, div,
+    AnyElement, App, Context, Entity, FocusHandle, Focusable as _, HighlightStyle, ListAlignment, ListOffset,
+    ListSizingBehavior, ListState, ScrollHandle, SharedString, Subscription, Window, div,
     font, list, point, prelude::*, px,
 };
 use gpui_base::input::{RopeExt as _, TextDecoration, TextDecorationCollection};
@@ -21,7 +21,7 @@ use super::{
     FileColumn, FilesCloseDisposition, FilesEvent, FilesSurface,
     client::{FilesRequestContext, WorkspaceFilesClient},
     document::{DocumentKey, DocumentPhase, FileDocument},
-    toolbar, toolbar_button,
+    toolbar, toolbar_button, toolbar_button_keyed,
 };
 use crate::{
     comments::{self, ReviewComment},
@@ -495,29 +495,6 @@ fn path_is_same_or_descendant(path: &str, ancestor: &str) -> bool {
     path == ancestor || path.starts_with(&format!("{ancestor}/"))
 }
 
-pub(super) struct FileEditorTooltip {
-    pub(super) text: SharedString,
-}
-
-impl Render for FileEditorTooltip {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::of(cx);
-        let card = div()
-            .max_w(px(360.0))
-            .px(px(9.0))
-            .py(px(6.0))
-            .rounded(px(6.0))
-            .border_1()
-            .border_color(theme.border)
-            .bg(crate::popover::surface_bg(theme))
-            .font_family(theme.font_sans.clone())
-            .text_size(px(10.5))
-            .text_color(theme.text_muted)
-            .child(self.text.clone());
-        crate::frost::frosted(6.0, crate::frost::MENU_BLUR, card)
-    }
-}
-
 impl FilesSurface {
     #[cfg(test)]
     pub(crate) fn test_images_visible(&self) -> bool {
@@ -749,7 +726,54 @@ impl FilesSurface {
         true
     }
 
-    fn toggle_word_wrap(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    /// ⇧⌘V and the header's eye: the Markdown preview or its source.
+    pub(super) fn toggle_markdown_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = self.preview.active.clone() else {
+            return;
+        };
+        if !super::markdown_preview::is_markdown(&path) {
+            return;
+        }
+        if let Some(document) = self.preview.documents.get_mut(&path) {
+            document.show_markdown = !document.show_markdown;
+            if !document.show_markdown {
+                if let Some(view) = &document.markdown {
+                    view.update(cx, |view, cx| view.suspend(cx));
+                }
+            }
+        }
+        if self
+            .preview
+            .documents
+            .get(&path)
+            .is_some_and(|d| !d.show_markdown)
+        {
+            self.focus_editor(window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Where the header's keys resolve: whatever holds focus in the open document (its image,
+    /// its Markdown preview or its editor), else the tree.
+    pub(super) fn keys_focus(&self, cx: &gpui::App) -> FocusHandle {
+        let document = self
+            .preview
+            .active
+            .as_ref()
+            .and_then(|path| self.preview.documents.get(path));
+        if let Some(view) = document.and_then(|d| d.image.clone()) {
+            return view.read(cx).focus.clone();
+        }
+        if let Some(view) = document.filter(|d| d.show_markdown).and_then(|d| d.markdown.clone()) {
+            return view.read(cx).focus.clone();
+        }
+        if let Some(editor) = document.and_then(|d| d.editor.clone()) {
+            return editor.focus_handle(cx);
+        }
+        self.tree_focus.clone()
+    }
+
+    pub(super) fn toggle_word_wrap(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let word_wrap = !self.preview.word_wrap;
         cx.emit(FilesEvent::WordWrapChanged(word_wrap));
     }
@@ -2415,13 +2439,9 @@ impl FilesSurface {
             );
         }
         crumbs = crumbs
-            .tooltip(move |_, cx| {
-                cx.new(|_| FileEditorTooltip {
-                    text: tooltip_path.clone(),
-                })
-                .into()
-            })
-            .tooltip_show_delay(Duration::from_millis(350));
+            .tooltip(crate::settings::widgets::text_tooltip(tooltip_path))
+            .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY);
+        let keys_focus = self.keys_focus(cx);
         toolbar(theme)
             .pr(px(crate::surface_chrome::CONTROL_GAP))
             .child(
@@ -2435,36 +2455,20 @@ impl FilesSurface {
             .child(crumbs)
             .when(markdown, |element| {
                 element.child(
-                    toolbar_button(
+                    toolbar_button_keyed(
                         "files-toggle-markdown",
                         if showing_markdown {
                             "Show Markdown code"
                         } else {
                             "Preview Markdown"
                         },
+                        Box::new(super::ToggleMarkdownPreview),
+                        keys_focus.clone(),
+                        cx,
                     )
                     .when(showing_markdown, |el| el.bg(crate::theme::wash(0.1)))
                     .on_click(cx.listener(|this, _, window, cx| {
-                        let Some(path) = this.preview.active.clone() else {
-                            return;
-                        };
-                        if let Some(document) = this.preview.documents.get_mut(&path) {
-                            document.show_markdown = !document.show_markdown;
-                            if !document.show_markdown {
-                                if let Some(view) = &document.markdown {
-                                    view.update(cx, |view, cx| view.suspend(cx));
-                                }
-                            }
-                        }
-                        if this
-                            .preview
-                            .documents
-                            .get(&path)
-                            .is_some_and(|d| !d.show_markdown)
-                        {
-                            this.focus_editor(window, cx);
-                        }
-                        cx.notify();
+                        this.toggle_markdown_preview(window, cx);
                     }))
                     .child(
                         icon(if showing_markdown {
@@ -2503,15 +2507,20 @@ impl FilesSurface {
                                     cx.listener(|this, _, _, cx| this.save_active_document(cx)),
                                 )
                         })
+                        // slopty: the retry names its key (⌘S); the reason is the detail line.
                         .when_some(detail, |element, detail| {
-                            element
-                                .tooltip(move |_, cx| {
-                                    cx.new(|_| FileEditorTooltip {
-                                        text: detail.clone(),
-                                    })
-                                    .into()
-                                })
-                                .tooltip_show_delay(Duration::from_millis(350))
+                            if retry {
+                                element.tooltip(crate::settings::widgets::detail_tooltip(
+                                    "Try again",
+                                    detail,
+                                    Some(crate::settings::widgets::Keys::Action(Box::new(
+                                        crate::shell::SaveFile,
+                                    ))),
+                                ))
+                            } else {
+                                element.tooltip(crate::settings::widgets::text_tooltip(detail))
+                            }
+                            .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
                         })
                         .child(label),
                 )
@@ -2539,13 +2548,16 @@ impl FilesSurface {
                 )
             })
             .child(
-                toolbar_button(
+                toolbar_button_keyed(
                     "files-toggle-word-wrap",
                     if self.preview.word_wrap() {
-                        "Disable word wrap"
+                        "Turn off word wrap"
                     } else {
-                        "Enable word wrap"
+                        "Turn on word wrap"
                     },
+                    Box::new(super::ToggleWordWrap),
+                    keys_focus,
+                    cx,
                 )
                 .when(self.preview.word_wrap(), |element| {
                     element.bg(crate::theme::wash(0.1))
@@ -2756,11 +2768,33 @@ impl FilesSurface {
         let Some(document) = self.preview.documents.get(path) else {
             return gpui::Empty.into_any_element();
         };
+        // slopty: one loading voice that never flashes, and a failed read that says what failed
+        // and offers the way on (M30, M31).
         if matches!(document.phase, DocumentPhase::Loading) {
-            return centered_state("Loading file…", theme.text_faint);
+            return div()
+                .flex_1()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(crate::loaders::pending(
+                    SharedString::from(format!("file-{path}")),
+                    "Loading file…",
+                ))
+                .into_any_element();
         }
         if let DocumentPhase::Error(error) = &document.phase {
-            return centered_state(error.clone(), theme.danger_muted);
+            let retry_path = path.to_string();
+            return super::failure_state(
+                "files-preview-error",
+                "Couldn't open this file",
+                error.clone(),
+                theme,
+                cx.listener(move |this, _, _, cx| {
+                    this.read_file(retry_path.clone(), cx);
+                    cx.notify();
+                }),
+                cx,
+            );
         }
         if let Some(editor) = editor {
             editor.update(cx, |state, _| {
@@ -2841,20 +2875,10 @@ impl FilesSurface {
                 element.child(outside_read_only_row(theme))
             })
             .when(truncated, |element| {
-                element.child(
-                    div()
-                        .h(px(28.0))
-                        .flex_none()
-                        .px(px(10.0))
-                        .border_b_1()
-                        .border_color(theme.border)
-                        .bg(theme.warning.opacity(0.045))
-                        .flex()
-                        .items_center()
-                        .text_size(px(10.0))
-                        .text_color(theme.warning_muted)
-                        .child("Large file preview is truncated and read-only."),
-                )
+                element.child(info_row(
+                    theme,
+                    "Large file: the preview shows its start, read-only",
+                ))
             })
             .child(code_scroll)
             .into_any_element()
@@ -3031,7 +3055,11 @@ impl FilesSurface {
                                 "file-comment-remove-{}",
                                 comment.id
                             )))
-                            .size(px(16.0))
+                            // slopty: a 24 px target around the 16 px mark (M25).
+                            .size(px(24.0))
+                            .m(px(-4.0))
+                            .role(gpui::Role::Button)
+                            .aria_label("Remove comment")
                             .flex_none()
                             .flex()
                             .items_center()
@@ -3044,6 +3072,7 @@ impl FilesSurface {
                                 this.remove_editor_comment(&id, cx)
                             }))
                             .tooltip(crate::settings::widgets::text_tooltip("Remove comment"))
+                            .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
                             .child(
                                 icon(icons::CLOSE_CIRCLE)
                                     .size(px(12.0))
@@ -3344,20 +3373,34 @@ fn centered_state(message: impl Into<SharedString>, color: gpui::Hsla) -> AnyEle
 /// The read-only line an outside file shows above its content — text or
 /// rendered Markdown — matching the truncated-preview row's shape.
 fn outside_read_only_row(theme: &Theme) -> AnyElement {
+    info_row(
+        theme,
+        read_only_message(Some(WorkspaceReadOnlyReason::OutsideWorkspace)),
+    )
+}
+
+// slopty: information over a file is quiet: the info glyph in `text_muted` on a faint ink, never
+// amber, which stays for the prompts that ask for a decision (M34).
+pub(super) fn info_row(theme: &Theme, text: impl Into<SharedString>) -> AnyElement {
     div()
         .h(px(28.0))
         .flex_none()
         .px(px(10.0))
+        .gap(px(6.0))
         .border_b_1()
         .border_color(theme.border)
-        .bg(crate::theme::wash(0.03))
+        .bg(crate::theme::ink(0.03))
         .flex()
         .items_center()
-        .text_size(px(10.0))
+        .text_size(crate::typography::ui_rems(11.0))
         .text_color(theme.text_muted)
-        .child(read_only_message(Some(
-            WorkspaceReadOnlyReason::OutsideWorkspace,
-        )))
+        .child(
+            icon(icons::INFO_CIRCLE)
+                .size(px(12.0))
+                .flex_none()
+                .text_color(theme.text_muted),
+        )
+        .child(div().min_w_0().truncate().child(text.into()))
         .into_any_element()
 }
 

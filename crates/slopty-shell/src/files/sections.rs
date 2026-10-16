@@ -127,6 +127,37 @@ pub(super) struct ExplorerSections {
     /// A section opened to reveal a renamed row: its motion starts on the
     /// render that knows the body height.
     reveal: Option<Section>,
+    // slopty: rows' "3m" moves on with the clock, not only with the state (M39).
+    clock: MinuteClock,
+}
+
+/// The next minute's redraw, armed while rows show a relative time.
+#[derive(Default)]
+struct MinuteClock(Option<gpui::Task<()>>);
+
+impl std::fmt::Debug for MinuteClock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("MinuteClock").field(&self.0.is_some()).finish()
+    }
+}
+
+/// When a relative time was, in full, for its tooltip: "Oct 16, 14:05", with the year when it is
+/// not this one.
+pub(crate) fn absolute_time(then: DateTime<Utc>) -> String {
+    absolute_time_in(then, &chrono::Local, Utc::now())
+}
+
+fn absolute_time_in<Tz: chrono::TimeZone>(then: DateTime<Utc>, zone: &Tz, now: DateTime<Utc>) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    use chrono::Datelike as _;
+    let local = then.with_timezone(zone);
+    if local.year() == now.with_timezone(zone).year() {
+        local.format("%b %-d, %H:%M").to_string()
+    } else {
+        local.format("%b %-d %Y, %H:%M").to_string()
+    }
 }
 
 impl Default for ExplorerSections {
@@ -142,6 +173,7 @@ impl Default for ExplorerSections {
             fingerprint: 0,
             chat_rename: None,
             reveal: None,
+            clock: MinuteClock::default(),
         }
     }
 }
@@ -355,6 +387,29 @@ impl FilesSurface {
         self.sections.scroll(Section::Chats).scroll_to_item(index);
     }
 
+    /// While rows show a relative time, look again at the next minute: a row's "3m" becomes "4m"
+    /// with no state change to prompt it.
+    fn arm_sections_clock(&mut self, rows: usize, now: DateTime<Utc>, cx: &mut Context<Self>) {
+        if rows == 0 || self.sections.clock.0.is_some() {
+            return;
+        }
+        let next_minute = (now.timestamp().div_euclid(60) + 1) * 60;
+        let delay = DateTime::from_timestamp(next_minute, 0)
+            .and_then(|at| (at - now).to_std().ok())
+            .unwrap_or(std::time::Duration::from_secs(60));
+        self.sections.clock.0 = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            this.update(cx, |files, cx| {
+                files.sections.clock.0 = None;
+                files.refresh_sections(cx);
+                let now = Utc::now();
+                let rows = child_chat_rows(files.state.read(cx), &files.chat_id, now).len();
+                files.arm_sections_clock(rows, now, cx);
+            })
+            .ok();
+        }));
+    }
+
     /// Re-render only when the footer's contents changed.
     pub(super) fn refresh_sections(&mut self, cx: &mut Context<Self>) {
         let fingerprint = fingerprint(self.state.read(cx), &self.chat_id, Utc::now());
@@ -369,6 +424,7 @@ impl FilesSurface {
         // slopty: Chats alone; subagents list under their agent in the sidebar.
         let chats = child_chat_rows(self.state.read(cx), &self.chat_id, now);
         self.sections.fingerprint = fingerprint(self.state.read(cx), &self.chat_id, now);
+        self.arm_sections_clock(chats.len(), now, cx);
         let wanted = content_height(
             Section::Chats,
             chats.len(),
@@ -754,7 +810,12 @@ impl FilesSurface {
                             theme,
                         )
                     }))
-                    .child(time_ago_label(row.time_ago.clone(), theme)),
+                    .child(time_ago_label(
+                        format!("files-chat-time-{}", row.chat_id),
+                        row.time_ago.clone(),
+                        row.activity,
+                        theme,
+                    )),
             );
         }
         if rows.len() > shown {
@@ -789,6 +850,7 @@ fn header_action(
         .hover(|s| s.bg(crate::theme::wash(0.09)))
         .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
         .tooltip(crate::settings::widgets::text_tooltip(label))
+        .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
         // Icons take their color on the element itself, never inherited.
         .child(
             icon(icon_path)
@@ -923,12 +985,22 @@ fn compact_row(id: String, theme: &Theme) -> gpui::Stateful<gpui::Div> {
         .hover(|s| s.bg(theme.glass_hover()).text_color(theme.text))
 }
 
-/// The compact row's trailing time, 11px in the faded subline color.
-fn time_ago_label(text: SharedString, theme: &Theme) -> gpui::Div {
+/// The compact row's trailing time, 11px in the faded subline color, in figures that hold their
+/// width; the full date and time on hover.
+fn time_ago_label(
+    id: String,
+    text: SharedString,
+    at: DateTime<Utc>,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
     div()
+        .id(SharedString::from(id))
         .flex_none()
+        .font_features(crate::typography::tabular())
         .text_size(crate::typography::ui_rems(11.0))
         .text_color(theme.text_muted.opacity(0.5))
+        .tooltip(crate::settings::widgets::text_tooltip(absolute_time(at)))
+        .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
         .child(text)
 }
 
@@ -985,6 +1057,17 @@ fn status_glyph(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_relative_time_reads_in_full_on_hover() {
+        let at = |text: &str| DateTime::parse_from_rfc3339(text).unwrap().with_timezone(&Utc);
+        let now = at("2026-10-17T09:00:00Z");
+        assert_eq!(absolute_time_in(at("2026-10-16T14:05:00Z"), &Utc, now), "Oct 16, 14:05");
+        assert_eq!(
+            absolute_time_in(at("2025-03-02T07:30:00Z"), &Utc, now),
+            "Mar 2 2025, 07:30"
+        );
+    }
 
     fn chat(id: &str, parent: Option<&str>, minutes_ago: i64) -> Chat {
         serde_json::from_value(serde_json::json!({

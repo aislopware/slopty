@@ -63,7 +63,7 @@ pub fn with_clipboard_shared(
         Loaded { error: None, settings, .. } if settings.clipboard.shared_with(&id) == share => {
             Ok(out)
         }
-        _ => Err(format!("could not set the clipboard for worker {id} in settings.toml")),
+        _ => Err(format!("couldn't set the clipboard for worker {id} in settings.toml")),
     }
 }
 

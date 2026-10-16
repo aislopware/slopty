@@ -663,7 +663,7 @@ impl Workspace {
             Err(failure) => {
                 let failure = in_a_toast(failure);
                 let hint = failure.hint.as_ref().map(|h| format!(" {h}")).unwrap_or_default();
-                let said = format!("Could not update {host}: {}.{hint}", failure.title);
+                let said = format!("Couldn't update {host}: {}.{hint}", failure.title);
                 run.progress.failed(failure);
                 Self::show_failure(said, cx);
             }
@@ -780,9 +780,7 @@ impl Workspace {
                 }
             }
             let failure = Failure::new(
-                format!(
-                    "The server on {label} runs this build, and Slopty could not connect to it"
-                ),
+                format!("The server on {label} runs this build, and Slopty couldn't connect to it"),
                 Some(format!("Check that UDP {} reaches it from this Mac.", address.port())),
                 vec![why],
             );
@@ -800,7 +798,7 @@ impl Workspace {
         } else if let Err(e) = self.save_server(Some(&address)) {
             link.close();
             let failure = Failure::new(
-                "The server runs, and Slopty could not save it".to_owned(),
+                "The server runs, and Slopty couldn't save it".to_owned(),
                 None,
                 vec![e],
             );
@@ -959,10 +957,7 @@ impl Workspace {
                 self.publish_device_actions(cx);
                 let failure = in_a_toast(failure);
                 let hint = failure.hint.map(|h| format!(" {h}")).unwrap_or_default();
-                Self::show_failure(
-                    format!("Could not remove {name}: {}.{hint}", failure.title),
-                    cx,
-                );
+                Self::show_failure(format!("Couldn't remove {name}: {}.{hint}", failure.title), cx);
             }
             Ok(removed) => {
                 tracing::info!(%worker, paths = removed.paths.len(), "worker removed there");
@@ -1225,7 +1220,7 @@ mod mac {
                 key.trust().await.map_err(|e| {
                     tracing::warn!(host = %key.target, error = %e, "trust its host key");
                     Failure::new(
-                        format!("Could not trust {}'s key", key.target),
+                        format!("Couldn't trust {}'s key", key.target),
                         None,
                         vec![e.to_string()],
                     )
@@ -1293,7 +1288,7 @@ mod mac {
     fn here() -> Result<PathBuf, Failure> {
         slopty_platform::service::sibling_dir().map_err(|e| {
             Failure::new(
-                "Could not find slopty-worker inside Slopty".to_owned(),
+                "Couldn't find slopty-worker inside Slopty".to_owned(),
                 None,
                 vec![e.to_string()],
             )

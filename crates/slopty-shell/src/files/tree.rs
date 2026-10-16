@@ -203,6 +203,19 @@ impl FilesSurface {
             .flex()
             .flex_col()
             .track_focus(&self.tree_focus)
+            // slopty: the tree's own keys (⌥⌘C copy path, ⌘⌫ delete), shown in its menu.
+            .key_context(super::TREE_KEY_CONTEXT)
+            .on_action(cx.listener(|this, _: &super::CopyPath, window, cx| {
+                if this.tree_rename.is_none() {
+                    this.copy_tree_paths(window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &super::DeleteSelection, window, cx| {
+                if this.tree_rename.is_none() {
+                    let paths = this.tree_action_paths();
+                    this.begin_tree_delete(paths, window, cx);
+                }
+            }))
             .on_hover(cx.listener(Self::on_tree_hovered))
             .on_mouse_down(
                 MouseButton::Left,
@@ -428,13 +441,20 @@ impl FilesSurface {
                     }))
                     .into_any_element()
             }
-            VisibleRowKind::Loading { .. } => status_row(
-                index,
-                padding + TREE_INDENT,
-                "Loading…",
-                theme.text_faint,
-                &theme,
-            ),
+            // slopty: a folder that opens fast never flashes "Loading…" (M30).
+            VisibleRowKind::Loading { directory } => div()
+                .id(("files-tree-loading", index))
+                .h(px(TREE_ROW_HEIGHT))
+                .w_full()
+                .flex_none()
+                .pl(px(padding + TREE_INDENT))
+                .flex()
+                .items_center()
+                .child(crate::loaders::pending(
+                    gpui::SharedString::from(format!("tree-{directory}")),
+                    "Loading…",
+                ))
+                .into_any_element(),
             VisibleRowKind::Empty { .. } => status_row(
                 index,
                 padding + TREE_INDENT,
@@ -464,13 +484,22 @@ impl FilesSurface {
                         });
                     this.load_directory(directory.clone(), cursor, cx);
                 }))
+                .role(gpui::Role::Button)
+                .aria_label(format!("Couldn't open this folder: {message}. Try again"))
                 .child(
                     div()
                         .min_w_0()
                         .truncate()
                         .text_size(px(10.5))
                         .text_color(theme.danger.opacity(0.82))
-                        .child(format!("{message} — Retry")),
+                        .child(format!("Couldn't open · {message}")),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_size(px(10.5))
+                        .text_color(theme.text_muted)
+                        .child("Try again"),
                 )
                 .into_any_element(),
             VisibleRowKind::LoadMore { directory, cursor } => div()

@@ -53,6 +53,7 @@ use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::markdown::render;
 use crate::motion::{self, AnimationExt as _, CHEVRON, COLLAPSE};
 use crate::popover::{self, Popup};
+use crate::settings::widgets::ActionHint as _;
 use crate::state::{AppState, EngineHandle};
 use crate::theme::Theme;
 use slopty_syntax::LanguageId as Lang;
@@ -67,8 +68,18 @@ use review::scoped_params;
 // keys, and on `ShowTurnDiff` reveals a diff tab, which takes the turn [`show_turn`] asked for.
 gpui::actions!(
     changes,
-    [FindInDiff, FindNextInDiff, FindPreviousInDiff, ShowTurnDiff]
+    [FindInDiff, FindNextInDiff, FindPreviousInDiff, ShowTurnDiff, ToggleDiffTree]
 );
+
+// slopty: ⇧⌘Y shows or hides the changed files' tree (Claude desktop's `toggleDiffFileList`).
+/// Binds the pane's own keys that the shell's keymap does not.
+pub(crate) fn bind_keys(cx: &mut App) {
+    cx.bind_keys([gpui::KeyBinding::new(
+        &crate::settings::platform_combo("mod-shift-y"),
+        ToggleDiffTree,
+        Some("Changes"),
+    )]);
+}
 
 // slopty: the turn a transcript asked to see the diff of, until a diff tab takes it.
 #[derive(Default)]
@@ -1760,6 +1771,10 @@ pub struct Changes {
     /// The keyboard goes back to the pane on the next frame (the find was put away).
     refocus: bool,
     tree_scroll: gpui::ScrollHandle,
+    // slopty: the turn list's scroll, and the one rail the review aids share: on the turn menu
+    // while it is open, else on the tree (M26).
+    turn_list_scroll: gpui::ScrollHandle,
+    aid_rail: popover::MenuScrollbarState,
     /// The file last picked in the tree.
     tree_selected: Option<usize>,
     _requested: Subscription,
@@ -1778,25 +1793,6 @@ pub enum ChangesEvent {
 }
 
 impl gpui::EventEmitter<ChangesEvent> for Changes {}
-
-struct DiffHeaderTooltip(&'static str);
-
-impl Render for DiffHeaderTooltip {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::of(cx);
-        div()
-            .px(px(8.0))
-            .py(px(6.0))
-            .rounded(px(6.0))
-            .border_1()
-            .border_color(theme.border_strong)
-            .bg(theme.surface_raised)
-            .shadow_md()
-            .text_size(px(11.0))
-            .text_color(theme.text)
-            .child(self.0)
-    }
-}
 
 impl Changes {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
@@ -1854,6 +1850,8 @@ impl Changes {
             focus: cx.focus_handle(),
             refocus: false,
             tree_scroll: gpui::ScrollHandle::new(),
+            turn_list_scroll: gpui::ScrollHandle::new(),
+            aid_rail: popover::MenuScrollbarState::default(),
             tree_selected: None,
             _requested: requested,
             _observe: observe,
@@ -3645,8 +3643,7 @@ impl Changes {
                         cx.stop_propagation();
                         cx.emit(ChangesEvent::OpenFile(path.clone()));
                     }))
-                    .tooltip(|_, cx| cx.new(|_| DiffHeaderTooltip("Open in file browser")).into())
-                    .tooltip_show_delay(Duration::from_millis(350))
+                    .hint("Open in file browser")
                     .child(
                         crate::icons::icon(crate::icons::DOCUMENT)
                             .size(px(crate::surface_chrome::ICON_SIZE))
@@ -3722,23 +3719,23 @@ impl Changes {
         label: &'static str,
         theme: &Theme,
     ) -> gpui::Stateful<gpui::Div> {
-        Self::header_toggle(id, icon_path, label, false, theme)
+        Self::header_toggle(id, icon_path, label, false, theme).hint(label)
     }
 
     /// [`Self::header_button`] with a latched look: an `active` toggle holds
     /// the hover wash and the full text tone, so the pane says which layout
-    /// it is in without a label.
+    /// it is in without a label. The caller names it
+    /// ([`crate::settings::widgets::ActionHint`]): its words, and its key when it has one.
     fn header_toggle(
         id: &'static str,
         icon_path: &'static str,
-        label: &'static str,
+        _label: &'static str,
         active: bool,
         theme: &Theme,
     ) -> gpui::Stateful<gpui::Div> {
         div()
             .id(id)
             .role(gpui::Role::Button) // slopty: read aloud and found by name.
-            .aria_label(label)
             .size(px(crate::surface_chrome::CONTROL_SIZE))
             .flex_none()
             .flex()
@@ -3764,8 +3761,6 @@ impl Changes {
             .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
                 window.prevent_default()
             })
-            .tooltip(move |_, cx| cx.new(|_| DiffHeaderTooltip(label)).into())
-            .tooltip_show_delay(Duration::from_millis(350))
             .child(
                 crate::icons::icon(icon_path)
                     .size(px(crate::surface_chrome::ICON_SIZE))
@@ -3787,6 +3782,7 @@ impl Changes {
             self.mode.is_split(),
             theme,
         )
+        .hint("Split view")
         .on_click(cx.listener(|this, _, _, cx| {
             cx.stop_propagation();
             this.toggle_mode(cx);
@@ -3802,6 +3798,7 @@ impl Changes {
             self.wrap_lines,
             theme,
         )
+        .hint("Wrap long lines")
         .on_click(cx.listener(|this, _, _, cx| {
             cx.stop_propagation();
             this.toggle_wrap(cx);
@@ -4201,16 +4198,27 @@ impl Changes {
                         .child(SharedString::from(format!("−{}", parsed.deletions))),
                 )
                 .child(div().flex_1())
+                // slopty: a partial diff is information, not a warning (M34).
                 .when(parsed.truncated, |el| {
                     el.child(
                         div()
+                            .id("changes-partial")
                             .flex_none()
+                            .flex()
+                            .items_center()
+                            .gap(px(4.0))
                             .text_size(px(10.0))
                             .px(px(6.0))
                             .py(px(2.0))
                             .rounded(px(4.0))
-                            .bg(theme.warning.opacity(0.08))
-                            .text_color(theme.warning.opacity(0.75))
+                            .bg(crate::theme::ink(0.03))
+                            .text_color(theme.text_muted)
+                            .hint("Too large to show whole: the diff shows its start")
+                            .child(
+                                crate::icons::icon(crate::icons::INFO_CIRCLE)
+                                    .size(px(11.0))
+                                    .text_color(theme.text_muted),
+                            )
                             .child(SharedString::from("Partial snapshot")),
                     )
                 })
@@ -4884,7 +4892,7 @@ impl Render for Changes {
             .map(|message| {
                 if message.contains("no turn recorded") {
                     (
-                        SharedString::from("No turn recorded yet — send a message first"),
+                        SharedString::from("No turns yet: send a message first"),
                         false,
                     )
                 } else if message.contains("unknown method") {
@@ -4899,7 +4907,22 @@ impl Render for Changes {
                 }
             });
 
-        let content: AnyElement = if let Some((message, warn)) = scoped_notice {
+        // slopty: a failed read names what failed and offers the way on (M31).
+        let content: AnyElement = if let Some((message, true)) = scoped_notice.clone() {
+            crate::files::failure_state(
+                "changes-scoped-error",
+                "Couldn't load this diff",
+                message,
+                &theme,
+                cx.listener(|this, _, _, cx| {
+                    this.scoped_for = None;
+                    this.scoped_error = None;
+                    this.sync(cx);
+                    cx.notify();
+                }),
+                cx,
+            )
+        } else if let Some((message, _)) = scoped_notice {
             div()
                 .flex_1()
                 .flex()
@@ -4907,11 +4930,7 @@ impl Render for Changes {
                 .justify_center()
                 .px(px(Theme::SPACE_LG))
                 .text_size(px(12.0))
-                .text_color(if warn {
-                    theme.warning.opacity(0.85)
-                } else {
-                    theme.text_faint
-                })
+                .text_color(theme.text_faint)
                 .child(message)
                 .into_any_element()
         } else {
@@ -5025,6 +5044,7 @@ impl Render for Changes {
             .on_action(cx.listener(|this, _: &FindInDiff, window, cx| this.open_find(window, cx)))
             .on_action(cx.listener(|this, _: &FindNextInDiff, _, cx| this.step_find(1, cx)))
             .on_action(cx.listener(|this, _: &FindPreviousInDiff, _, cx| this.step_find(-1, cx)))
+            .on_action(cx.listener(|this, _: &ToggleDiffTree, _, cx| this.toggle_tree(cx)))
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(|this, _, window, cx| {
@@ -5092,6 +5112,31 @@ mod tests {
             .unwrap();
         let saved = crate::settings::UiSettings::load(dir.path());
         assert!(saved.diff_ignore_whitespace && saved.diff_show_tree, "and the next launch");
+    }
+
+    // slopty: ⇧⌘Y shows and hides the changed files' tree from the pane.
+    #[gpui::test]
+    fn the_tree_key_toggles_the_changed_files(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            bind_keys(cx);
+        });
+        let state = cx.new(|_| AppState::new());
+        let (changes, cx) = cx.add_window_view(move |_, cx| Changes::new(state, cx));
+        changes.update_in(cx, |changes, window, cx| window.focus(&changes.focus, cx));
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            let focus = changes.read(cx).focus.clone();
+            assert_eq!(
+                crate::keys::for_action(&ToggleDiffTree, Some(&focus), window, cx),
+                Some(crate::keys::combo_text("mod-shift-y"))
+            );
+        });
+        cx.simulate_keystrokes(&crate::settings::platform_combo("mod-shift-y"));
+        changes.read_with(cx, |changes, _| assert!(changes.show_tree));
     }
 
     #[gpui::test]

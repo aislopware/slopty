@@ -34,6 +34,7 @@ pub mod preview;
 mod rename;
 pub mod search;
 mod sections;
+pub(crate) use sections::absolute_time;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod tree;
@@ -65,7 +66,57 @@ pub(super) fn path_is_outside(path: &str) -> bool {
     path.starts_with('/')
 }
 
+// slopty: the files surface's own keys, bound in its key context: Finder's ⇧⌘. for hidden files,
+// VS Code's ⇧⌘V (Markdown preview) and ⌥Z (word wrap), and in the tree Zed's ⌘⌫ (delete, with its
+// confirm) and ⌥⌘C (copy path). Raw F2 (rename) and fn-⌫ (delete) stay.
+gpui::actions!(
+    files,
+    [ToggleHiddenFiles, ToggleMarkdownPreview, ToggleWordWrap, CopyPath, DeleteSelection]
+);
+
+/// The key context of every files surface, and of its tree.
+pub(crate) const KEY_CONTEXT: &str = "Files";
+pub(crate) const TREE_KEY_CONTEXT: &str = "FileTree";
+
+/// Binds the files surface's keys. Their tooltips and menu rows read them back from the keymap.
+pub(crate) fn bind_keys(cx: &mut gpui::App) {
+    use crate::settings::platform_combo;
+    cx.bind_keys([
+        gpui::KeyBinding::new(&platform_combo("mod-shift-."), ToggleHiddenFiles, Some(KEY_CONTEXT)),
+        gpui::KeyBinding::new(
+            &platform_combo("mod-shift-v"),
+            ToggleMarkdownPreview,
+            Some(KEY_CONTEXT),
+        ),
+        gpui::KeyBinding::new("alt-z", ToggleWordWrap, Some(KEY_CONTEXT)),
+        gpui::KeyBinding::new(&platform_combo("alt-mod-c"), CopyPath, Some(TREE_KEY_CONTEXT)),
+        gpui::KeyBinding::new(
+            &platform_combo("mod-backspace"),
+            DeleteSelection,
+            Some(TREE_KEY_CONTEXT),
+        ),
+    ]);
+}
+
+/// A header button whose tooltip names it and, when bound, the key `action` fires on in this
+/// surface (`focus`).
+pub(super) fn toolbar_button_keyed(
+    id: &'static str,
+    label: &'static str,
+    action: Box<dyn gpui::Action>,
+    focus: FocusHandle,
+    cx: &gpui::App,
+) -> gpui::Stateful<gpui::Div> {
+    use crate::settings::widgets::{ActionHint as _, Keys};
+    toolbar_button_frame(id).action_hint(label, Keys::ActionIn(action, focus), cx)
+}
+
 pub(super) fn toolbar_button(id: &'static str, label: &'static str) -> gpui::Stateful<gpui::Div> {
+    use crate::settings::widgets::ActionHint as _;
+    toolbar_button_frame(id).hint(label)
+}
+
+fn toolbar_button_frame(id: &'static str) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
         .size(px(TOOLBAR_BUTTON_SIZE))
@@ -76,17 +127,112 @@ pub(super) fn toolbar_button(id: &'static str, label: &'static str) -> gpui::Sta
         .justify_center()
         .cursor_pointer()
         .role(gpui::Role::Button)
-        .aria_label(label)
         .occlude()
         .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
             window.prevent_default()
         })
         .hover(|style| style.bg(crate::theme::wash(0.14)))
-        .tooltip(move |_, cx| {
-            cx.new(|_| preview::FileEditorTooltip { text: label.into() })
-                .into()
-        })
-        .tooltip_show_delay(Duration::from_millis(350))
+}
+
+// slopty: a failure says what failed in the person's words, then the way on: "Try again" and the
+// raw reason behind "Copy error" (M31).
+/// A centred failure: its title, the reason in quieter words, "Try again" and "Copy error".
+pub(crate) fn failure_state(
+    id: &'static str,
+    title: &'static str,
+    detail: SharedString,
+    theme: &crate::theme::Theme,
+    on_retry: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+    cx: &gpui::App,
+) -> gpui::AnyElement {
+    let copy_key: SharedString = format!("{id}-copy").into();
+    let copied = crate::motion::copied(&copy_key, cx);
+    let copy_glyph = crate::motion::copy_icon(&copy_key, cx);
+    let copied_detail = detail.clone();
+    div()
+        .id(id)
+        .debug_selector(move || id.to_owned())
+        .role(gpui::Role::Alert)
+        .flex_1()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap(px(6.0))
+        .px(px(28.0))
+        .child(
+            div()
+                .text_center()
+                .text_size(crate::typography::ui_rems(13.0))
+                .text_color(theme.text)
+                .child(title),
+        )
+        .child(
+            div()
+                .max_w(px(420.0))
+                .text_center()
+                .line_clamp(3)
+                .text_size(crate::typography::ui_rems(12.0))
+                .text_color(theme.text_muted)
+                .child(detail),
+        )
+        .child(
+            div()
+                .mt(px(6.0))
+                .flex()
+                .flex_row()
+                .gap(px(6.0))
+                .child(
+                    state_button(SharedString::from(format!("{id}-retry")), "Try again", theme)
+                        .on_click(on_retry),
+                )
+                .child({
+                    use crate::settings::widgets::ActionHint as _;
+                    let key = copy_key.clone();
+                    state_button(SharedString::from(format!("{id}-copy")), "Copy error", theme)
+                        .hint(if copied { "Copied" } else { "Copy the error" })
+                        .on_click(move |_, _, cx| {
+                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                copied_detail.to_string(),
+                            ));
+                            crate::motion::copy_feedback(key.clone(), cx);
+                        })
+                        .child(
+                            crate::icons::icon(copy_glyph)
+                                .size(px(12.0))
+                                .flex_none()
+                                .text_color(if copied { theme.text } else { theme.text_muted }),
+                        )
+                }),
+        )
+        .into_any_element()
+}
+
+/// A bordered text button on a files state ("Try again").
+pub(super) fn state_button(
+    id: SharedString,
+    label: &'static str,
+    theme: &crate::theme::Theme,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .role(gpui::Role::Button)
+        .aria_label(label)
+        .h(px(28.0))
+        .px(px(12.0))
+        .gap(px(6.0))
+        .rounded(px(7.0))
+        .border_1()
+        .border_color(theme.border)
+        .bg(crate::theme::wash(0.04))
+        .hover(|style| style.bg(crate::theme::wash(0.09)))
+        .cursor_pointer()
+        .flex()
+        .flex_row()
+        .items_center()
+        .text_size(crate::typography::ui_rems(11.5))
+        .text_color(theme.text)
+        .child(label)
 }
 
 /// A workspace-relative file or directory dragged out of a Files surface.
@@ -384,6 +530,14 @@ impl Render for FilesSurface {
             )))
             .role(gpui::Role::Group)
             .aria_label("Workspace files")
+            .key_context(KEY_CONTEXT)
+            .on_action(cx.listener(|this, _: &ToggleHiddenFiles, _, cx| this.toggle_ignored(cx)))
+            .on_action(cx.listener(|this, _: &ToggleMarkdownPreview, window, cx| {
+                this.toggle_markdown_preview(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleWordWrap, window, cx| {
+                this.toggle_word_wrap(window, cx);
+            }))
             .size_full()
             .relative()
             .flex()
@@ -398,7 +552,7 @@ impl Render for FilesSurface {
             )
             .children(sections)
             .children(editor_context_menu)
-            .children(self.render_tree_context_menu(&theme, cx))
+            .children(self.render_tree_context_menu(&theme, window, cx))
             .children(self.render_tree_delete(&theme, window, cx))
     }
 }
@@ -448,21 +602,7 @@ impl FilesSurface {
                         .child(error),
                 )
                 .child(
-                    div()
-                        .id("files-retry-root")
-                        .h(px(28.0))
-                        .px(px(12.0))
-                        .rounded(px(7.0))
-                        .border_1()
-                        .border_color(theme.border)
-                        .bg(crate::theme::wash(0.04))
-                        .hover(|style| style.bg(crate::theme::wash(0.09)))
-                        .cursor_pointer()
-                        .flex()
-                        .items_center()
-                        .text_size(px(11.5))
-                        .text_color(theme.text)
-                        .child("Retry")
+                    state_button("files-retry-root".into(), "Try again", theme)
                         .on_click(cx.listener(|this, _, _, cx| this.retry_root(cx))),
                 )
                 .into_any_element()
@@ -517,18 +657,20 @@ impl FilesSurface {
                         .h(px(27.0))
                         .flex_none()
                         .px(px(10.0))
+                        // slopty: a paused feed is information, not a warning (M34).
                         .border_b_1()
-                        .border_color(theme.warning.opacity(0.22))
-                        .bg(theme.warning.opacity(0.045))
+                        .border_color(theme.border)
+                        .bg(crate::theme::ink(0.03))
                         .flex()
                         .items_center()
                         .gap(px(6.0))
                         .text_size(px(10.0))
-                        .text_color(theme.warning_muted)
+                        .text_color(theme.text_muted)
                         .child(
                             crate::icons::icon(crate::icons::REFRESH)
                                 .size(px(10.5))
-                                .flex_none(),
+                                .flex_none()
+                                .text_color(theme.text_muted),
                         )
                         .child(div().min_w_0().flex_1().truncate().child(error))
                         .child(
@@ -793,7 +935,7 @@ impl FilesSurface {
     ) -> gpui::AnyElement {
         crate::popover::menu_row(theme, false, id)
             .id(id)
-            .when(!enabled, |row| row.opacity(0.38).cursor_default())
+            .when(!enabled, |row| row.opacity(crate::theme::DISABLED_OPACITY).cursor_default())
             .when(enabled, |row| {
                 row.on_click(cx.listener(move |this, _, window, cx| {
                     this.dispatch_editor_context_action(editor.clone(), action, window, cx)
@@ -1309,13 +1451,16 @@ impl FilesSurface {
                     ),
             )
             .child(
-                toolbar_button(
+                toolbar_button_keyed(
                     "files-toggle-ignored",
                     if include_ignored {
-                        "Hide hidden and ignored files"
+                        "Hide hidden files"
                     } else {
-                        "Show all files (even hidden)"
+                        "Show hidden files"
                     },
+                    Box::new(ToggleHiddenFiles),
+                    self.tree_focus.clone(),
+                    cx,
                 )
                 .debug_selector(|| "files-toggle-ignored".into())
                 .when(include_ignored, |element| {
@@ -1405,6 +1550,32 @@ mod explorer_tests {
         cx.update(|window, cx| {
             assert!(files.read(cx).tree_focus.is_focused(window));
         });
+    }
+
+    // slopty: Finder's ⇧⌘. shows hidden files, and the eye's tooltip names it.
+    #[gpui::test]
+    fn the_hidden_files_key_toggles_and_its_button_names_it(cx: &mut TestAppContext) {
+        use crate::settings::platform_combo;
+        let (files, cx) = super::test_support::setup(cx);
+        cx.update(|_, cx| bind_keys(cx));
+        let shown = Rc::new(RefCell::new(None));
+        let emitted = shown.clone();
+        let _events = cx.update(|_, cx| {
+            cx.subscribe(&files, move |_, event, _| {
+                if let FilesEvent::ShowAllFilesChanged(value) = event {
+                    *emitted.borrow_mut() = Some(*value);
+                }
+            })
+        });
+        files.update_in(cx, |files, window, cx| files.tree_focus.focus(window, cx));
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            let focus = files.read(cx).tree_focus.clone();
+            let keys = crate::settings::widgets::Keys::ActionIn(Box::new(ToggleHiddenFiles), focus);
+            assert_eq!(keys.text(window, cx), Some(crate::keys::combo_text("mod-shift-.")));
+        });
+        cx.simulate_keystrokes(&platform_combo("mod-shift-."));
+        assert_eq!(*shown.borrow(), Some(true));
     }
 
     #[gpui::test]

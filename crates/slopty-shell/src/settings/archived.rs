@@ -75,7 +75,7 @@ impl ArchivedPage {
             this.update(cx, |page, cx| {
                 page.busy = None;
                 if let Err(err) = result {
-                    page.error = Some(format!("Unarchive failed: {err}").into());
+                    page.error = Some(format!("Couldn't unarchive this chat: {err}").into());
                 }
                 cx.notify();
             })
@@ -260,17 +260,14 @@ impl Render for ArchivedPage {
                 let title: SharedString = chat
                     .title
                     .clone()
-                    .unwrap_or_else(|| "Untitled session".into())
+                    .unwrap_or_else(|| "Untitled chat".into())
                     .into();
                 // Unknown device → no fragment at all (slopty renders the
                 // device span only when the name resolves).
                 let device: Option<SharedString> =
                     device_names.get(&chat.device_id).cloned().map(Into::into);
-                let time_ago: SharedString = crate::state::format_time_ago(
-                    chat.last_message_at.unwrap_or(chat.created_at),
-                    now,
-                )
-                .into();
+                let at = chat.last_message_at.unwrap_or(chat.created_at);
+                let time_ago: SharedString = crate::state::format_time_ago(at, now).into();
                 let location: Option<SharedString> =
                     crate::state::chat_location(&chat).map(Into::into);
                 let is_busy = busy.as_deref() == Some(chat.id.as_str());
@@ -324,11 +321,18 @@ impl Render for ArchivedPage {
                                             .text_color(theme.text)
                                             .child(title),
                                     )
+                                    // slopty: tabular figures, and the full date on hover (M39).
                                     .child(
                                         div()
+                                            .id(("archived-time", ix))
                                             .flex_none()
+                                            .font_features(crate::typography::tabular())
                                             .text_size(crate::typography::ui_rems(11.0))
                                             .text_color(theme.text_muted)
+                                            .tooltip(widgets::text_tooltip(
+                                                crate::files::absolute_time(at),
+                                            ))
+                                            .tooltip_show_delay(widgets::TOOLTIP_DELAY)
                                             .child(time_ago),
                                     ),
                             )
@@ -373,8 +377,9 @@ impl Render for ArchivedPage {
                             .border_color(theme.border)
                             .text_size(crate::typography::ui_rems(12.0))
                             .text_color(theme.text_muted)
-                            .opacity(0.8)
-                            .when(is_busy, |el| el.opacity(0.4))
+                            .when(is_busy, |el| {
+                                el.opacity(crate::theme::DISABLED_OPACITY).cursor_default()
+                            })
                             .cursor_pointer()
                             .hover(|s| s.bg(theme.surface_raised).text_color(theme.text))
                             .tab_index(0)
@@ -399,6 +404,7 @@ impl Render for ArchivedPage {
             })
             .collect();
 
+        let archive_key = crate::keys::for_action(&crate::shell::ArchiveSession, None, window, cx);
         let body: AnyElement = if items.is_empty() {
             // Centered empty state (slopty settings.archived.tsx).
             div()
@@ -419,16 +425,19 @@ impl Render for ArchivedPage {
                     div()
                         .mt(px(12.0))
                         .text_size(crate::typography::ui_rems(14.0))
-                        .child(SharedString::from("Nothing archived")),
+                        .child(SharedString::from("No archived chats")),
                 )
                 .child(
                     div()
                         .mt(px(4.0))
                         .text_size(crate::typography::ui_rems(12.0))
                         .text_color(theme.text_muted)
-                        .child(SharedString::from(
-                            "Right-click a session in the sidebar to archive it.",
-                        )),
+                        .child(SharedString::from(match archive_key {
+                            Some(key) => format!(
+                                "Archive a chat from its menu in the sidebar, or with {key}."
+                            ),
+                            None => "Archive a chat from its menu in the sidebar.".to_owned(),
+                        })),
                 )
                 .into_any_element()
         } else {
@@ -451,9 +460,11 @@ impl Render for ArchivedPage {
                     widgets::ghost_action(&theme)
                         .id("archived-previous")
                         .role(gpui::Role::Button)
-                        .aria_label("Previous archived sessions")
+                        .aria_label("Previous archived chats")
                         .tab_index(0)
-                        .opacity(if page > 0 { 1.0 } else { 0.4 })
+                        .when(page == 0, |el| {
+                            el.opacity(crate::theme::DISABLED_OPACITY).cursor_default()
+                        })
                         .focus_visible(|s| s.border_2().border_color(theme.accent))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.page = this.page.saturating_sub(1);
@@ -472,12 +483,10 @@ impl Render for ArchivedPage {
                     widgets::ghost_action(&theme)
                         .id("archived-next")
                         .role(gpui::Role::Button)
-                        .aria_label("Next archived sessions")
+                        .aria_label("Next archived chats")
                         .tab_index(0)
-                        .opacity(if (page + 1) * ARCHIVE_PAGE_SIZE < count {
-                            1.0
-                        } else {
-                            0.4
+                        .when((page + 1) * ARCHIVE_PAGE_SIZE >= count, |el| {
+                            el.opacity(crate::theme::DISABLED_OPACITY).cursor_default()
                         })
                         .focus_visible(|s| s.border_2().border_color(theme.accent))
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -490,10 +499,13 @@ impl Render for ArchivedPage {
         });
         let deleting = self.delete_all_task.is_some();
         let delete_all = (count > 0).then(|| {
-            widgets::action_button(&theme, widgets::ActionTone::Danger)
+            // slopty: quiet at rest; red is spent on the confirmation's own button, which is
+            // where something may be lost.
+            widgets::action_button(&theme, widgets::ActionTone::Outlined)
                 .id("archived-delete-all")
                 .flex_none()
-                .when(deleting, |el| el.opacity(0.5).cursor_default())
+                .aria_label("Delete all archived chats")
+                .when(deleting, |el| el.opacity(crate::theme::DISABLED_OPACITY).cursor_default())
                 .tab_index(0)
                 .role(gpui::Role::Button)
                 .focus_visible(|s| s.border_2().border_color(theme.accent))
@@ -501,7 +513,7 @@ impl Render for ArchivedPage {
                 .child(
                     crate::icons::icon(crate::icons::TRASH_BIN_MINIMALISTIC)
                         .size(px(16.0))
-                        .text_color(gpui::white()),
+                        .text_color(theme.text_muted),
                 )
                 .child(SharedString::from(if deleting {
                     "Deleting…"

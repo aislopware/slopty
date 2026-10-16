@@ -115,6 +115,8 @@ pub struct ScreenSurface {
     /// The picker's keyboard row, in the order shown.
     active: Option<usize>,
     scroll: ScrollHandle,
+    // slopty: the list's floating rail, as every scrolling list has (M26).
+    rail: popover::MenuScrollbarState,
     _search_events: Subscription,
     _watch: Option<Subscription>,
     _task: Option<Task<()>>,
@@ -185,6 +187,7 @@ impl ScreenSurface {
             query: String::new(),
             active: None,
             scroll: ScrollHandle::new(),
+            rail: popover::MenuScrollbarState::default(),
             _search_events: events,
             _watch: None,
             _task: None,
@@ -376,7 +379,7 @@ impl ScreenSurface {
 
     /// The machine's desktops and windows as zeron's picker: the search, then "Displays" and
     /// "Windows" (each app's together, its name trailing), the keyboard's row washed.
-    fn choices(&self, choices: &[Choice], theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn choices(&mut self, choices: &[Choice], theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let theme = theme.for_popup();
         let (displays, windows) = visible(choices, &self.query);
         let shown = displays.len() + windows.len();
@@ -384,6 +387,11 @@ impl ScreenSurface {
             .id("screen-choices-list")
             .track_scroll(&self.scroll)
             .overflow_y_scroll()
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                if this.rail.set_list_hovered(*hovered) {
+                    cx.notify();
+                }
+            }))
             .max_h(px(LIST_MAX_HEIGHT))
             .flex()
             .flex_col()
@@ -407,11 +415,11 @@ impl ScreenSurface {
                     .py(px(6.0))
                     .text_size(crate::typography::ui_rems(13.0))
                     .text_color(theme.text_muted)
-                    .child("No windows match"),
+                    .child("No matching windows"),
             );
         }
         let refresh =
-            super::chrome::icon_button("screen-refresh", icons::REFRESH, "Refresh", &theme)
+            super::chrome::icon_button("screen-refresh", icons::REFRESH, "Refresh windows", &theme)
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.list(cx);
                     cx.notify();
@@ -428,7 +436,12 @@ impl ScreenSurface {
             .flex()
             .flex_col()
             .child(search_row)
-            .child(popover::faded_menu_list(&self.scroll, list));
+            .child(
+                div()
+                    .relative()
+                    .child(popover::faded_menu_list(&self.scroll, list))
+                    .children(popover::rail(self, "screen-choices-rail", &theme, cx)),
+            );
         div()
             .size_full()
             .flex()
@@ -489,6 +502,16 @@ impl ScreenSurface {
             .size_full()
             .child(super::chrome::loading(caption, theme, view, cx))
             .into_any_element()
+    }
+}
+
+impl popover::ScrollRailHost for ScreenSurface {
+    fn rail_bar(&mut self) -> &mut popover::MenuScrollbarState {
+        &mut self.rail
+    }
+
+    fn rail_scroll(&self) -> Option<ScrollHandle> {
+        matches!(self.stage, Stage::Choices(_)).then(|| self.scroll.clone())
     }
 }
 

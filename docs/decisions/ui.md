@@ -13022,7 +13022,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   and archived chats' relative times move on each minute in tabular figures, with the date and
   time on hover. The file editor selects in the theme's selection colour. A mark under 24 px
   (a comment's ×, the browser's Go) gets a 24 px target around it, and a copied device ID keeps
-  its words and size. Tests: `slopty-shell`
+  its words and size. Archived sessions' Delete all is outlined, not red: the red is its
+  confirmation's, where the chats are lost. A permission rule whose own reading is only the rule
+  again says it once. Tests: `slopty-shell`
   `files::sections::tests::a_relative_time_reads_in_full_on_hover`,
   `files::editor_adapter::tests::the_editor_selects_in_the_themes_selection_colour`,
   `settings::devices::tests::copying_an_id_marks_it_copied_for_the_span`.

@@ -24,7 +24,7 @@ use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::icons;
 use crate::motion::ReduceMotion;
 use crate::popover::{self, Popup};
-use crate::settings::widgets;
+use crate::settings::widgets::{self, ActionHint as _};
 use crate::theme::{Appearance, Theme};
 use crate::theme_library;
 use crate::typography::{self, FontAvailability, UiFontFamily, UiFontSize};
@@ -209,6 +209,26 @@ impl FontKind {
         };
     }
 
+    // slopty: what each slot starts at, so its picker marks the default (M10).
+    fn default_family(self) -> UiFontFamily {
+        match self {
+            Self::Ui => UiFontFamily::Geist,
+            Self::Terminal | Self::Code => UiFontFamily::GeistMono,
+        }
+    }
+
+    /// The default size's place on this kind's ladder.
+    fn default_size_ix(self) -> usize {
+        match self {
+            Self::Ui => UiFontSize::ALL
+                .iter()
+                .position(|size| *size == UiFontSize::default())
+                .unwrap_or_default(),
+            Self::Terminal => nearest_mono_ix(typography::TERMINAL_FONT_SIZE_DEFAULT),
+            Self::Code => nearest_mono_ix(typography::CODE_FONT_SIZE_DEFAULT),
+        }
+    }
+
     fn pixel_size(self, cx: &gpui::App) -> f32 {
         match self {
             Self::Ui => typography::font_size(cx).pixels(),
@@ -383,6 +403,9 @@ impl AppearancePage {
             .unwrap_or_else(|| crate::settings::transcript_width(cx));
         let fraction =
             (width - TRANSCRIPT_WIDTH_MIN) / (TRANSCRIPT_WIDTH_MAX - TRANSCRIPT_WIDTH_MIN);
+        let default_fraction = (TRANSCRIPT_WIDTH_DEFAULT - TRANSCRIPT_WIDTH_MIN)
+            / (TRANSCRIPT_WIDTH_MAX - TRANSCRIPT_WIDTH_MIN);
+        let at_default = (width - TRANSCRIPT_WIDTH_DEFAULT).abs() < 0.5;
         let bounds = self.width_bounds.clone();
         let show_details = self.width_hovered
             || self.width_pressed
@@ -447,6 +470,18 @@ impl AppearancePage {
                             .rounded_full()
                             .bg(theme.accent),
                     )
+                    // slopty: a tick under the track at the default width (M10).
+                    .child(
+                        div()
+                            .absolute()
+                            .left(gpui::relative(default_fraction))
+                            .ml(px(-1.0))
+                            .top(px(8.0))
+                            .w(px(2.0))
+                            .h(px(4.0))
+                            .rounded(px(1.0))
+                            .bg(theme.text_faint),
+                    )
                     .child(
                         div()
                             .absolute()
@@ -491,29 +526,41 @@ impl AppearancePage {
                     .flex()
                     .flex_col()
                     .gap(px(4.0))
+                    // slopty: "Reset" shows whenever the width is not the default, and only then
+                    // (M10); the figure shows while the slider is in use.
                     .child(
                         div()
-                            .when(!show_details, |el| el.invisible())
                             .flex()
                             .justify_between()
                             .text_size(typography::ui_rems(12.0))
                             .line_height(px(16.0))
-                            .child(format!("{width:.0} px"))
                             .child(
                                 div()
-                                    .id("reset-transcript-width")
-                                    .cursor_pointer()
-                                    .text_color(theme.text_muted)
-                                    .hover(|style| style.text_color(theme.text))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.pending_width = None;
-                                        crate::settings::set_transcript_width(
-                                            TRANSCRIPT_WIDTH_DEFAULT,
-                                            cx,
-                                        );
-                                        cx.notify();
-                                    }))
-                                    .child("Reset"),
+                                    .when(!show_details, |el| el.invisible())
+                                    .font_features(typography::tabular())
+                                    .child(format!("{width:.0} px")),
+                            )
+                            .children(
+                                widgets::reset_action(
+                                    theme,
+                                    "reset-transcript-width",
+                                    "Conversation width",
+                                    at_default,
+                                )
+                                .map(|reset| {
+                                    reset
+                                        .min_h(px(16.0))
+                                        .py(px(4.0))
+                                        .my(px(-4.0))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.pending_width = None;
+                                            crate::settings::set_transcript_width(
+                                                TRANSCRIPT_WIDTH_DEFAULT,
+                                                cx,
+                                            );
+                                            cx.notify();
+                                        }))
+                                }),
                             ),
                     )
                     .child(slider)
@@ -1237,6 +1284,32 @@ impl AppearancePage {
         cx.notify();
     }
 
+    // slopty: a row whose value is not its default offers "Reset", and only then (M10).
+    fn reset_row(
+        &self,
+        id: impl Into<SharedString>,
+        label: &str,
+        is_default: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+        reset: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+    ) -> Option<gpui::Stateful<gpui::Div>> {
+        widgets::reset_action(theme, id, label, is_default).map(|button| {
+            button.on_click(cx.listener(move |this, _, window, cx| {
+                reset(this, window, cx);
+                cx.notify();
+            }))
+        })
+    }
+
+    /// Back to `kind`'s default family and size.
+    fn reset_font(&mut self, kind: FontKind, window: &mut Window, cx: &mut Context<Self>) {
+        kind.apply_family(kind.default_family(), cx);
+        let effective = kind.effective(cx);
+        self.set_selected_font(kind, effective);
+        self.commit_size(kind, kind.default_size_ix(), window, cx);
+    }
+
     fn on_scroll_hovered(&mut self, hovered: &bool, _: &mut Window, cx: &mut Context<Self>) {
         if self.scroll.set_list_hovered(*hovered) {
             cx.notify();
@@ -1379,6 +1452,16 @@ fn bar(fraction: f32, tone: Hsla) -> gpui::Div {
         .bg(tone)
 }
 
+/// A swatch's name in its tooltip and to assistive tech; the default says so.
+fn accent_name(accent: AccentSelection) -> String {
+    match accent {
+        AccentSelection::ThemeDefault => {
+            format!("Theme default · {}", widgets::Standing::Default.words())
+        }
+        AccentSelection::Preset(preset) => preset.label().into(),
+    }
+}
+
 fn accent_helper(accent: AccentSelection) -> String {
     match accent {
         AccentSelection::ThemeDefault => "Theme default".into(),
@@ -1402,6 +1485,13 @@ fn reduce_motion_helper(preference: ReduceMotion, system: bool) -> &'static str 
         (ReduceMotion::System, false) => "Following the system, which currently allows motion.",
         (ReduceMotion::On, _) => "Animations skip straight to their final state.",
         (ReduceMotion::Off, _) => "Animations play even if the system asks for less motion.",
+    }
+}
+
+fn treatment_word(treatment: SurfaceTreatment) -> &'static str {
+    match treatment {
+        SurfaceTreatment::Frosted => "Frosted",
+        SurfaceTreatment::Opaque => "Opaque",
     }
 }
 
@@ -1829,6 +1919,7 @@ impl AppearancePage {
             .enumerate()
             .map(|(ix, family)| {
                 let available = kind.is_available_for(availability, &family);
+                let is_default = family == kind.default_family();
                 let active = family == effective;
                 let focused = family == selected;
                 let label = SharedString::from(family.label().to_owned());
@@ -1848,8 +1939,12 @@ impl AppearancePage {
                             this.commit_font(kind, cx);
                         }))
                     })
-                    .when(!available, |row| row.opacity(0.45))
+                    .when(!available, |row| row.opacity(crate::theme::DISABLED_OPACITY))
                     .child(div().flex_1().min_w_0().truncate().child(label))
+                    .children(
+                        is_default
+                            .then(|| widgets::standing_note(theme, widgets::Standing::Default)),
+                    )
                     .into_any_element()
             })
             .collect();
@@ -1970,7 +2065,11 @@ impl AppearancePage {
         .options(
             kind.size_labels()
                 .into_iter()
-                .map(widgets::SelectOption::new),
+                .enumerate()
+                .map(move |(ix, label)| {
+                    widgets::SelectOption::new(label)
+                        .standing(widgets::Standing::of(ix == kind.default_size_ix(), false))
+                }),
             kind.size_ix(cx),
         )
         .width(128.0)
@@ -2000,11 +2099,15 @@ impl AppearancePage {
             .iter()
             .position(|(id, _)| *id == selected_id)
             .unwrap_or_default();
+        let default_id = ThemeSelection::default()
+            .variant_id(model_appearance(appearance_kind))
+            .to_owned();
         let options = variants.iter().map(|(id, name)| {
             let sample =
                 Theme::for_selection(appearance_kind, id, AccentSelection::ThemeDefault, surface);
             widgets::SelectOption::new(name.clone())
                 .leading(move || palette_preview(&sample).into_any_element())
+                .standing(widgets::Standing::of(*id == default_id, false))
         });
         let ids: Vec<String> = variants.iter().map(|(id, _)| id.clone()).collect();
         let (slug, label, heading) = if appearance_kind.is_light() {
@@ -2383,7 +2486,7 @@ impl AppearancePage {
                         .text_size(crate::typography::ui_rems(11.0))
                         .text_color(theme.warning)
                         .child(SharedString::from(format!(
-                            "{} could not be compiled · {}",
+                            "Couldn't compile {} · {}",
                             failure.name, failure.message
                         ))),
                 );
@@ -2516,7 +2619,7 @@ impl AppearancePage {
                 .flex()
                 .items_center()
                 .when(compilation.is_some() && !ready, |button| {
-                    button.opacity(0.45)
+                    button.opacity(crate::theme::DISABLED_OPACITY).cursor_default()
                 })
                 .when(compilation.is_none() || ready, |button| {
                     button
@@ -2955,7 +3058,9 @@ impl AppearancePage {
                     .py(px(0.0))
                     .flex()
                     .items_center()
-                    .when(!ready, |button| button.opacity(0.45))
+                    .when(!ready, |button| {
+                        button.opacity(crate::theme::DISABLED_OPACITY).cursor_default()
+                    })
                     .when(ready, |button| {
                         button
                             .tab_index(0)
@@ -3410,9 +3515,21 @@ impl Render for AppearancePage {
                     selection_t,
                     preview(mode, &current_themes, current_accent, current_surface),
                 )
+                // slopty: the default card says so, on a line every card keeps (M10).
+                .child(
+                    div()
+                        .h(px(14.0))
+                        .flex()
+                        .justify_center()
+                        .children((mode == AppearanceMode::default()).then(|| {
+                            widgets::standing_note(&theme, widgets::Standing::Default).ml_0()
+                        })),
+                )
                 .id(SharedString::from(format!("appearance-{}", mode.label())))
                 .tab_index(0)
                 .role(gpui::Role::Button)
+                .aria_label(mode.label())
+                .aria_selected(selected)
                 .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
                 .on_click(cx.listener(move |_, _, _, cx| {
                     appearance::set_mode(mode, cx);
@@ -3432,6 +3549,17 @@ impl Render for AppearancePage {
                 "Dark theme"
             };
             let selector = self.render_theme_selector(appearance_kind, &current_themes, &theme, cx);
+            let default_id = ThemeSelection::default()
+                .variant_id(model_appearance(appearance_kind))
+                .to_owned();
+            let reset = self.reset_row(
+                format!("{}-theme-reset", if appearance_kind.is_light() { "light" } else { "dark" }),
+                label,
+                current_themes.variant_id(model_appearance(appearance_kind)) == default_id,
+                &theme,
+                cx,
+                move |_, _, cx| appearance::set_theme(appearance_kind, default_id.clone(), cx),
+            );
             theme_rows.push(
                 widgets::card_row(&theme, index == 0)
                     .child(
@@ -3440,6 +3568,7 @@ impl Render for AppearancePage {
                             .min_w(px(160.0))
                             .child(widgets::row_title(&theme, label)),
                     )
+                    .children(reset)
                     .child(selector)
                     .into_any_element(),
             );
@@ -3452,6 +3581,7 @@ impl Render for AppearancePage {
             .map(|selection| {
                 let selected = selection == current_accent;
                 accent_swatch(&theme, selection, selected)
+                    .hint(accent_name(selection))
                     .tab_index(0)
                     .role(gpui::Role::Button)
                     .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
@@ -3466,9 +3596,25 @@ impl Render for AppearancePage {
                 &mut page.surface_select
             })
             .options(
-                SurfacePreference::ALL
-                    .into_iter()
-                    .map(|surface| widgets::SelectOption::new(surface_label(surface))),
+                SurfacePreference::ALL.into_iter().map(|surface| {
+                    let option = widgets::SelectOption::new(surface_label(surface));
+                    // slopty: the default names what it resolves to ("Default · Frosted").
+                    if surface == SurfacePreference::default() {
+                        option.detail(format!(
+                            "{} · {}",
+                            widgets::Standing::Default.words(),
+                            treatment_word(
+                                ThemeRegistry::active()
+                                    .variant(theme.variant_id.as_ref())
+                                    .map_or(theme.surface_treatment, |variant| {
+                                        variant.recommended_surface_treatment
+                                    })
+                            )
+                        ))
+                    } else {
+                        option
+                    }
+                }),
                 SurfacePreference::ALL
                     .into_iter()
                     .position(|surface| surface == current_surface)
@@ -3499,6 +3645,14 @@ impl Render for AppearancePage {
                             ],
                         )),
                 )
+                .children(self.reset_row(
+                    "accent-reset",
+                    "Accent color",
+                    current_accent == AccentSelection::ThemeDefault,
+                    &theme,
+                    cx,
+                    |_, _, cx| appearance::set_accent(AccentSelection::ThemeDefault, cx),
+                ))
                 .child(
                     div()
                         .max_w_full()
@@ -3518,6 +3672,20 @@ impl Render for AppearancePage {
                     .child(widgets::meta_line(&theme, vec![div()
                         .child("Use wallpaper colors for accents, highlights, and subtle surface tints.")
                         .into_any_element()])))
+                .children(
+                    widgets::reset_action(
+                        &theme,
+                        "wallpaper-theme-colors-reset",
+                        "Match wallpaper colors",
+                        !match_wallpaper,
+                    )
+                    .map(|reset| {
+                        reset.on_click(cx.listener(|_, _, _, cx| {
+                            crate::settings::wallpaper_colors::set_enabled(false, cx);
+                            cx.notify();
+                        }))
+                    }),
+                )
                 .child(widgets::toggle_switch(&theme, match_wallpaper, "wallpaper-theme-colors")
                     .id("wallpaper-theme-colors-toggle")
                     .tab_index(0)
@@ -3553,6 +3721,14 @@ impl Render for AppearancePage {
                             ],
                         )),
                 )
+                .children(self.reset_row(
+                    "appearance-surface-reset",
+                    "Glass",
+                    current_surface == SurfacePreference::default(),
+                    &theme,
+                    cx,
+                    |_, _, cx| appearance::set_surface(SurfacePreference::default(), cx),
+                ))
                 .child(surface_control)
                 .into_any_element(),
         );
@@ -3591,7 +3767,10 @@ impl Render for AppearancePage {
                     .child("Choose a replacement or remove it.")
                     .into_any_element(),
             ],
-            None => vec![div().child("No image selected").into_any_element()],
+            None => vec![
+                div().child("No image selected").into_any_element(),
+                div().child(widgets::Standing::Default.words()).into_any_element(),
+            ],
         };
         settings_rows.push(
             widgets::card_row(&theme, false)
@@ -3689,7 +3868,7 @@ impl Render for AppearancePage {
             .as_ref()
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| "Choose a folder of wallpaper images.".into());
-        let shortcut = crate::settings::display_combo(&wallpaper_settings.keymap.random_wallpaper);
+        let shortcut = crate::keys::combo_text(&wallpaper_settings.keymap.random_wallpaper);
         settings_rows.push(
             widgets::card_row(&theme, false)
                 .child(
@@ -3744,9 +3923,12 @@ impl Render for AppearancePage {
                 |page: &mut Self| &mut page.background_effect_select,
             )
             .options(
-                NewThreadBackgroundEffect::ALL
-                    .into_iter()
-                    .map(|effect| widgets::SelectOption::new(effect.label())),
+                NewThreadBackgroundEffect::ALL.into_iter().map(|effect| {
+                    widgets::SelectOption::new(effect.label()).standing(widgets::Standing::of(
+                        effect == NewThreadBackgroundEffect::default(),
+                        false,
+                    ))
+                }),
                 NewThreadBackgroundEffect::ALL
                     .into_iter()
                     .position(|effect| effect == current_background_effect)
@@ -3777,6 +3959,19 @@ impl Render for AppearancePage {
                                 ],
                             )),
                     )
+                    .children(self.reset_row(
+                        "new-thread-background-effect-reset",
+                        "Background effect",
+                        current_background_effect == NewThreadBackgroundEffect::default(),
+                        &theme,
+                        cx,
+                        |_, _, cx| {
+                            crate::settings::set_new_thread_background_effect(
+                                NewThreadBackgroundEffect::default(),
+                                cx,
+                            )
+                        },
+                    ))
                     .child(effect_control)
                     .into_any_element(),
             );
@@ -3789,9 +3984,10 @@ impl Render for AppearancePage {
             |page: &mut Self| &mut page.reduce_motion_select,
         )
         .options(
-            ReduceMotion::ALL
-                .into_iter()
-                .map(|preference| widgets::SelectOption::new(preference.label())),
+            ReduceMotion::ALL.into_iter().map(|preference| {
+                widgets::SelectOption::new(preference.label())
+                    .standing(widgets::Standing::of(preference == ReduceMotion::default(), false))
+            }),
             ReduceMotion::ALL
                 .into_iter()
                 .position(|preference| preference == current_reduce_motion)
@@ -3823,6 +4019,14 @@ impl Render for AppearancePage {
                             ],
                         )),
                 )
+                .children(self.reset_row(
+                    "reduce-motion-reset",
+                    "Reduce motion",
+                    current_reduce_motion == ReduceMotion::default(),
+                    &theme,
+                    cx,
+                    |_, _, cx| crate::motion::set_preference(ReduceMotion::default(), cx),
+                ))
                 .child(reduce_motion_control)
                 .into_any_element(),
             widgets::card_row(&theme, false)
@@ -3841,6 +4045,20 @@ impl Render for AppearancePage {
                                     .into_any_element(),
                             ],
                         )),
+                )
+                .children(
+                    widgets::reset_action(
+                        &theme,
+                        "pause-animations-in-background-reset",
+                        "Pause animations in background",
+                        !pause_in_background,
+                    )
+                    .map(|reset| {
+                        reset.on_click(cx.listener(|_, _, _, cx| {
+                            crate::motion::set_pause_in_background(false, cx);
+                            cx.notify();
+                        }))
+                    }),
                 )
                 .child(
                     widgets::toggle_switch(
@@ -3915,6 +4133,16 @@ impl Render for AppearancePage {
         .into_iter()
         .enumerate()
         {
+            let font_default =
+                kind.requested(cx) == kind.default_family() && kind.size_ix(cx) == kind.default_size_ix();
+            let reset = self.reset_row(
+                format!("{}-font-reset", kind.slug()),
+                kind.label(),
+                font_default,
+                &theme,
+                cx,
+                move |page, window, cx| page.reset_font(kind, window, cx),
+            );
             font_rows = font_rows.child(
                 widgets::card_row(&theme, ix == 0)
                     .justify_between()
@@ -3937,6 +4165,7 @@ impl Render for AppearancePage {
                             .flex_wrap()
                             .items_center()
                             .gap(px(8.0))
+                            .children(reset)
                             .child(picker)
                             .child(size_control),
                     ),
@@ -4070,6 +4299,24 @@ impl Render for AppearancePage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // slopty: each font slot's picker marks Geist or Geist Mono and its ladder the default size.
+    #[test]
+    fn each_font_slot_knows_its_default() {
+        assert_eq!(FontKind::Ui.default_family(), UiFontFamily::Geist);
+        assert_eq!(FontKind::Code.default_family(), UiFontFamily::GeistMono);
+        assert_eq!(FontKind::Terminal.default_family(), UiFontFamily::GeistMono);
+        assert_eq!(UiFontSize::ALL[FontKind::Ui.default_size_ix()], UiFontSize::default());
+        assert_eq!(
+            MONO_FONT_SIZES[FontKind::Code.default_size_ix()],
+            typography::CODE_FONT_SIZE_DEFAULT
+        );
+        assert_eq!(
+            MONO_FONT_SIZES[FontKind::Terminal.default_size_ix()],
+            typography::TERMINAL_FONT_SIZE_DEFAULT
+        );
+        assert_eq!(accent_name(AccentSelection::ThemeDefault), "Theme default · Default");
+    }
 
     fn background_settings() -> crate::settings::UiSettings {
         crate::settings::UiSettings {

@@ -22,6 +22,23 @@ impl HarnessesPage {
         cx.notify();
     }
 
+    // slopty: back to the agent's default ($ for skills, kept out of /) (M10).
+    fn reset_completion(&mut self, harness: HarnessId, dollar: bool, cx: &mut Context<Self>) {
+        let default = settings::SkillCompletionSettings::for_harness(harness);
+        settings::update(settings::SavePolicy::Immediate, cx, |settings| {
+            let mut preferences = settings.skill_completion(harness);
+            if dollar {
+                preferences.dollar = default.dollar;
+            } else {
+                preferences.separate_from_slash = default.separate_from_slash;
+            }
+            settings
+                .skill_completion_by_harness
+                .insert(harness, preferences);
+        });
+        cx.notify();
+    }
+
     pub(super) fn render_completion_for(
         &self,
         harness: HarnessId,
@@ -30,23 +47,38 @@ impl HarnessesPage {
     ) -> AnyElement {
         let current = settings::current(cx);
         let preferences = current.skill_completion(harness);
+        let defaults = settings::SkillCompletionSettings::for_harness(harness);
         let rows = [
             (
                 true,
                 "Use $ for skills",
                 "Type $ in the composer to pick a skill.",
                 preferences.dollar,
+                defaults.dollar,
             ),
             (
                 false,
                 "Separate / commands",
                 "Keep skills out of the / menu.",
                 preferences.separate_from_slash,
+                defaults.separate_from_slash,
             ),
         ]
         .into_iter()
         .enumerate()
-        .map(|(ix, (dollar, label, description, enabled))| {
+        .map(|(ix, (dollar, label, description, enabled, default))| {
+            let reset = widgets::reset_action(
+                theme,
+                format!("completion-reset-{harness:?}-{dollar}"),
+                label,
+                enabled == default,
+            )
+            .map(|reset| {
+                reset.on_click(cx.listener(move |page, _, _, cx| {
+                    cx.stop_propagation();
+                    page.reset_completion(harness, dollar, cx);
+                }))
+            });
             div()
                 .id(format!("completion-{harness:?}-{dollar}"))
                 .min_h(px(52.0))
@@ -87,6 +119,7 @@ impl HarnessesPage {
                             vec![div().child(description).into_any_element()],
                         )),
                 )
+                .children(reset)
                 .child(widgets::toggle_switch(
                     theme,
                     enabled,

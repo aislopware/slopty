@@ -555,7 +555,7 @@ impl FilesSurface {
             let label = if self.search_state.loading {
                 "Searching…"
             } else {
-                "No files found."
+                "No matching files"
             };
             return centered_search_message(label.into(), theme.text_faint);
         }

@@ -501,7 +501,7 @@ fn row(
         })
         .when(marked, |el| el.aria_active_descendant())
         // A row that cannot run now: zeron's disabled menu row.
-        .when(disabled, |el| el.opacity(0.38).cursor_default())
+        .when(disabled, |el| el.opacity(crate::theme::DISABLED_OPACITY).cursor_default())
         .on_mouse_move(move |_ev, _window, cx| {
             if !disabled && hover_cursor.read(cx).at != Some(n) {
                 hover_cursor.update(cx, |c, cx| {

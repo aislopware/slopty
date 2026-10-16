@@ -127,7 +127,8 @@ pub(crate) fn editor_style(theme: &Theme) -> InputEditorStyle {
         muted_foreground: theme.text_faint,
         background: gpui::transparent_black(),
         border: theme.border,
-        selection: theme.accent.opacity(0.22),
+        // slopty: one selection colour for every text surface (M40).
+        selection: theme.selection,
         caret: theme.caret,
         highlight_styles: Arc::new(SloptyHighlightStyleResolver {
             palette: theme.syntax.clone(),
@@ -274,6 +275,13 @@ mod tests {
 
     fn highlighted(source: &str, spans: Vec<HighlightSpan>) -> HighlightedDocument {
         HighlightedDocument::from_absolute_spans(LanguageId::Rust, source, spans).unwrap()
+    }
+
+    #[test]
+    fn the_editor_selects_in_the_themes_selection_colour() {
+        for theme in [Theme::dark(), Theme::light()] {
+            assert_eq!(editor_style(&theme).selection, theme.selection);
+        }
     }
 
     #[test]

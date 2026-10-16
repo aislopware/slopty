@@ -4,18 +4,18 @@
 //! The Changes pane's turn picker, find bar, whitespace toggle and file tree.
 
 use std::ops::Range;
-use std::time::Duration;
 
 use gpui::{AnyElement, App, Context, Focusable as _, Hsla, SharedString, Window, div, prelude::*, px};
 
 use super::review::{self, DiffMatch};
 use super::{
-    Changes, DiffFind, DiffHeaderTooltip, DiffRow, DiffScope, RequestedTurn,
-    add_color, body_rows, del_color,
+    Changes, DiffFind, DiffRow, DiffScope, FindInDiff, FindNextInDiff, FindPreviousInDiff,
+    RequestedTurn, ToggleDiffTree, add_color, body_rows, del_color,
 };
 use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::motion;
 use crate::popover;
+use crate::settings::widgets::{ActionHint as _, Keys};
 use crate::theme::Theme;
 
 /// The changed files' column beside the diff.
@@ -378,13 +378,25 @@ impl Changes {
             .child(popover::menu_heading(theme, "Turns"))
             .child(
                 div()
-                    .id("changes-turn-list")
-                    .max_h(px(280.0))
-                    .overflow_y_scroll()
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.0))
-                    .children(rows),
+                    .relative()
+                    .child(popover::faded_menu_list(
+                        &self.turn_list_scroll,
+                        div()
+                            .id("changes-turn-list")
+                            .max_h(px(280.0))
+                            .overflow_y_scroll()
+                            .track_scroll(&self.turn_list_scroll)
+                            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                                if this.aid_rail.set_list_hovered(*hovered) {
+                                    cx.notify();
+                                }
+                            }))
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.0))
+                            .children(rows),
+                    ))
+                    .children(popover::rail(self, "changes-turn-rail", theme, cx)),
             )
             .into_any_element()
     }
@@ -397,6 +409,11 @@ impl Changes {
             "Find in diff",
             self.find.is_some(),
             theme,
+        )
+        .action_hint(
+            "Find in diff",
+            Keys::ActionIn(Box::new(FindInDiff), self.focus.clone()),
+            cx,
         )
         .on_click(cx.listener(|this, _, window, cx| {
             cx.stop_propagation();
@@ -413,6 +430,11 @@ impl Changes {
             "File tree",
             self.show_tree,
             theme,
+        )
+        .action_hint(
+            if self.show_tree { "Hide file tree" } else { "Show file tree" },
+            Keys::ActionIn(Box::new(ToggleDiffTree), self.focus.clone()),
+            cx,
         )
         .on_click(cx.listener(|this, _, _, cx| {
             cx.stop_propagation();
@@ -440,25 +462,16 @@ impl Changes {
         let query = find.input.read(cx).text().to_owned();
         let tally = review::tally(&query, self.found_active, self.found.len());
         let popup = theme.for_popup();
-        let card = popover::popover_card(&popup)
+        let any = !self.found.is_empty();
+        // slopty: the shared find card: the search row's anatomy, frosted, entering as a menu
+        // does, its steps naming their keys and dimming with no match to go to (M19).
+        let card = popover::find_card(&popup)
             .id("changes-find-card")
             .role(gpui::Role::Search)
             .aria_label("Find in diff")
             .track_focus(&find.focus)
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| this.find_key(event, cx)))
             .occlude()
-            .w(px(320.0))
-            .px(px(8.0))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(6.0))
-            .child(
-                crate::icons::icon(crate::icons::MAGNIFER)
-                    .size(px(14.0))
-                    .flex_none()
-                    .text_color(popup.text_muted),
-            )
             .child(
                 div()
                     .flex_1()
@@ -466,47 +479,56 @@ impl Changes {
                     .text_size(crate::typography::ui_rems(13.0))
                     .child(find.input.clone()),
             )
+            .child(popover::find_tally(&popup, tally))
             .child(
-                div()
-                    .id("changes-find-tally")
-                    .role(gpui::Role::Status)
-                    .aria_label(SharedString::from(tally.clone()))
-                    .flex_none()
-                    .font_family(popup.font_mono.clone())
-                    .text_size(px(11.5))
-                    .text_color(popup.text_faint)
-                    .child(SharedString::from(tally)),
+                popover::find_step("changes-find-previous", crate::icons::ALT_ARROW_UP, any, &popup)
+                    .action_hint(
+                        "Previous match",
+                        Keys::ActionIn(Box::new(FindPreviousInDiff), find.focus.clone()),
+                        cx,
+                    )
+                    .when(any, |step| {
+                        step.on_click(cx.listener(|this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.step_find(-1, cx);
+                        }))
+                    }),
             )
-            .child(find_button("changes-find-previous", crate::icons::ALT_ARROW_UP, "Previous match", &popup).on_click(
-                cx.listener(|this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.step_find(-1, cx);
-                }),
-            ))
-            .child(find_button("changes-find-next", crate::icons::ALT_ARROW_DOWN, "Next match", &popup).on_click(
-                cx.listener(|this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.step_find(1, cx);
-                }),
-            ))
-            .child(find_button("changes-find-close", crate::icons::CLOSE, "Close find", &popup).on_click(
-                cx.listener(|this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.close_find(cx);
-                }),
-            ));
+            .child(
+                popover::find_step("changes-find-next", crate::icons::ALT_ARROW_DOWN, any, &popup)
+                    .action_hint(
+                        "Next match",
+                        Keys::ActionIn(Box::new(FindNextInDiff), find.focus.clone()),
+                        cx,
+                    )
+                    .when(any, |step| {
+                        step.on_click(cx.listener(|this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.step_find(1, cx);
+                        }))
+                    }),
+            )
+            .child(
+                popover::find_step("changes-find-close", crate::icons::CLOSE, true, &popup)
+                    .action_hint("Close find", Keys::Fixed("escape"), cx)
+                    .on_mouse_down(gpui::MouseButton::Left, |_, window, _| window.prevent_default())
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.close_find(cx);
+                    })),
+            );
         Some(
             div()
                 .absolute()
                 .top(px(8.0))
                 .right(px(12.0))
-                .child(card)
+                .child(popover::find_card_in("changes-find-card-in", card))
                 .into_any_element(),
         )
     }
 
     /// The changed files as a tree beside the diff; a click brings a file's header to the top.
-    pub(super) fn render_tree(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(super) fn render_tree(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.show_tree {
             return None;
         }
@@ -515,18 +537,24 @@ impl Changes {
         let paths: Vec<&str> = files.iter().map(|file| file.path.as_str()).collect();
         let rows = review::diff_tree(&paths);
         let selected = self.tree_selected;
-        Some(
-            div()
+        // The turn menu holds the rail while it is open.
+        let rail = if self.turn_menu.get().is_none() {
+            popover::rail(self, "changes-tree-rail", theme, cx)
+        } else {
+            None
+        };
+        let list = div()
                 .id("changes-tree")
                 .role(gpui::Role::Tree)
                 .aria_label("Changed files")
-                .w(px(TREE_WIDTH))
-                .flex_none()
-                .h_full()
+                .size_full()
                 .overflow_y_scroll()
                 .track_scroll(&self.tree_scroll)
-                .border_r_1()
-                .border_color(crate::theme::hairline(0.06))
+                .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                    if this.aid_rail.set_list_hovered(*hovered) {
+                        cx.notify();
+                    }
+                }))
                 .py(px(4.0))
                 .children(rows.into_iter().map(|row| {
                     let key = SharedString::from(format!("changes-tree-row:{}", row.path));
@@ -597,9 +625,35 @@ impl Changes {
                                 .child(SharedString::from(row.name)),
                         )
                         .children(counts)
-                }))
+                }));
+        Some(
+            div()
+                .relative()
+                .w(px(TREE_WIDTH))
+                .flex_none()
+                .h_full()
+                .border_r_1()
+                .border_color(crate::theme::hairline(0.06))
+                .child(popover::faded_menu_list(&self.tree_scroll, list))
+                .children(rail)
                 .into_any_element(),
         )
+    }
+}
+
+impl popover::ScrollRailHost for Changes {
+    fn rail_bar(&mut self) -> &mut popover::MenuScrollbarState {
+        &mut self.aid_rail
+    }
+
+    fn rail_scroll(&self) -> Option<gpui::ScrollHandle> {
+        if self.turn_menu.get().is_some() {
+            Some(self.turn_list_scroll.clone())
+        } else if self.show_tree {
+            Some(self.tree_scroll.clone())
+        } else {
+            None
+        }
     }
 }
 
@@ -614,7 +668,6 @@ fn glyph_toggle(
     div()
         .id(id)
         .role(gpui::Role::Button)
-        .aria_label(label)
         .size(px(crate::surface_chrome::CONTROL_SIZE))
         .flex_none()
         .flex()
@@ -632,8 +685,7 @@ fn glyph_toggle(
         })
         .occlude()
         .on_mouse_down(gpui::MouseButton::Left, |_, window, _| window.prevent_default())
-        .tooltip(move |_, cx| cx.new(|_| DiffHeaderTooltip(label)).into())
-        .tooltip_show_delay(Duration::from_millis(350))
+        .hint(label)
         .child(
             div()
                 .text_size(px(13.0))
@@ -641,32 +693,6 @@ fn glyph_toggle(
                 .text_color(if active { theme.text } else { theme.text_muted.opacity(0.7) })
                 .child(glyph),
         )
-}
-
-/// One of the find card's small square buttons: an icon, its label read aloud and shown.
-fn find_button(
-    id: &'static str,
-    icon: &'static str,
-    label: &'static str,
-    theme: &Theme,
-) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(id)
-        .role(gpui::Role::Button)
-        .aria_label(label)
-        .size(px(22.0))
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(6.0))
-        .cursor_pointer()
-        .bg(motion::hover_blend(id, crate::theme::ink(0.0), crate::theme::ink(0.06)))
-        .on_hover(motion::hover_listener(id))
-        .on_mouse_down(gpui::MouseButton::Left, |_, window, _| window.prevent_default())
-        .tooltip(move |_, cx| cx.new(|_| DiffHeaderTooltip(label)).into())
-        .tooltip_show_delay(Duration::from_millis(350))
-        .child(crate::icons::icon(icon).size(px(13.0)).text_color(theme.text_muted))
 }
 
 /// A time of day, as the turn list shows when a message was sent; none for an unknown time.

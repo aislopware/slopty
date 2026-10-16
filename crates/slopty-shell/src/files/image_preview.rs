@@ -85,7 +85,7 @@ impl ImagePreview {
     pub fn deleted(&mut self, cx: &mut Context<Self>) {
         self.suspend(cx);
         self.suspended = false;
-        self.error = Some("This image was removed from the workspace.".into());
+        self.error = Some("Removed from the workspace".into());
     }
 
     pub fn reload(&mut self, cx: &mut Context<Self>) {
@@ -158,7 +158,7 @@ impl ImagePreview {
         self.task = None;
         match result.and_then(|media| {
             if media.bytes > MAX_MEDIA_BYTES {
-                Err("Image exceeds preview memory limit".into())
+                Err("Too large to preview".into())
             } else {
                 Ok(media)
             }
@@ -210,18 +210,20 @@ impl Render for ImagePreview {
                 window,
                 cx,
             ));
-        } else {
+        } else if let Some(error) = self.error.clone() {
             root = root.child(
                 div()
                     .px(px(16.0))
                     .text_size(px(12.0))
                     .text_color(theme.text_muted)
-                    .child(
-                        self.error
-                            .clone()
-                            .unwrap_or_else(|| "Loading image…".into()),
-                    ),
+                    .child(format!("Couldn't show this image · {error}")),
             );
+        } else {
+            // slopty: a fast image never flashes "Loading image…" (M30).
+            root = root.child(crate::loaders::pending(
+                gpui::SharedString::from(format!("image-{}", self.generation)),
+                "Loading image…",
+            ));
         }
         let entity = cx.weak_entity();
         root.child(
@@ -329,13 +331,13 @@ mod tests {
             let mut oversized = media();
             oversized.bytes = MAX_MEDIA_BYTES + 1;
             view.complete(view.generation, Ok(oversized), cx);
-            assert!(view.error.as_ref().unwrap().contains("memory limit"));
+            assert!(view.error.as_ref().unwrap().contains("Too large"));
             assert!(view.source.is_none());
             view.reload(cx);
             view.deleted(cx);
             view.activate(cx);
             assert!(view.task.is_none());
-            assert!(view.error.as_ref().unwrap().contains("removed"));
+            assert!(view.error.as_ref().unwrap().contains("Removed"));
         });
         let weak = view.update(cx, |view, cx| {
             view.reload(cx);

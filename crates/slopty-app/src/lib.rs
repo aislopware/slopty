@@ -262,7 +262,7 @@ impl Workspace {
                 // Once the press that asked has been dispatched: the shell opens it in the window.
                 cx.defer(move |cx| {
                     if !slopty_shell::live::open_file(&chat, &target, cx) {
-                        slopty_shell::toast::error(cx, "The file could not be opened");
+                        slopty_shell::toast::error(cx, "Couldn't open the file");
                     }
                 });
             }
@@ -489,7 +489,10 @@ impl Workspace {
     fn apply_loaded(&mut self, loaded: Loaded, cx: &mut Context<Self>) {
         if let Some(error) = &loaded.error {
             tracing::error!(%error, "settings ignored");
-            Self::show_failure(format!("Settings: {error}"), cx);
+            Self::show_failure(
+                format!("Couldn't read settings.toml, so nothing changed: {error}"),
+                cx,
+            );
             self.rebuild_theme(cx);
             return;
         }
@@ -660,7 +663,7 @@ impl Workspace {
         let name = self.directory.get(id).map_or_else(|| id.to_string(), |w| w.name.clone());
         let Some(caller) = self.server_caller() else {
             Self::show_failure(
-                format!("Could not forget {name}: the server does not answer yet"),
+                format!("Couldn't forget {name}: the server does not answer yet"),
                 cx,
             );
             return;
@@ -675,7 +678,7 @@ impl Workspace {
             let Ok(outcome) = rx.await else { return };
             let _gone = this.update(cx, |_, cx| match outcome {
                 slopty_proto::orchestration::Outcome::Error { message, .. } => {
-                    Self::show_failure(format!("Could not forget {name}: {message}"), cx);
+                    Self::show_failure(format!("Couldn't forget {name}: {message}"), cx);
                 }
                 _forgotten => slopty_shell::toast::success(cx, forgot(&name)),
             });
@@ -1045,7 +1048,10 @@ impl Workspace {
             .and_then(|text| settings::save(&self.settings_path, &text, &mut self.settings_seen));
         match kept {
             Ok(loaded) => self.settings = loaded.settings,
-            Err(e) => Self::show_failure(format!("Settings: {e}"), cx),
+            Err(e) => Self::show_failure(
+                format!("Couldn't save clipboard sharing to settings.toml: {e}"),
+                cx,
+            ),
         }
     }
 

@@ -11,7 +11,6 @@ use gpui::{
     AnyElement, ClipboardItem, Context, Entity, SharedString, Subscription, Task, Window, div,
     prelude::*, px,
 };
-use std::time::Duration;
 
 use slopty_view_proto::WorkspaceScope;
 
@@ -71,15 +70,17 @@ pub struct DevicesPage {
     add_wanted: Option<Choice>,
     /// The server address a link named, for the dialog's field when it opens.
     add_server: Option<String>,
-    /// Device id whose id-chip shows "Copied" right now.
-    copied: Option<String>,
     error: Option<SharedString>,
-    copy_task: Option<Task<()>>,
     // slopty: the action call under way.
     action_task: Option<Task<()>>,
     // slopty: the server's code is up ("Connect a phone").
     inviting: bool,
     _observe: Subscription,
+}
+
+/// The copy span's key for one device's ID.
+fn copied_key(device_id: &str) -> String {
+    format!("device-id-{device_id}")
 }
 
 impl DevicesPage {
@@ -91,9 +92,7 @@ impl DevicesPage {
             add: None,
             add_wanted: None,
             add_server: None,
-            copied: None,
             error: None,
-            copy_task: None,
             action_task: None,
             inviting: false,
             _observe: observe,
@@ -160,19 +159,11 @@ impl DevicesPage {
         true
     }
 
+    // slopty: a copy keeps the button's size and words: its glyph turns to a check and its
+    // tooltip says "Copied" for the shared span (M5).
     fn copy_id(&mut self, device_id: String, cx: &mut Context<Self>) {
         cx.write_to_clipboard(ClipboardItem::new_string(device_id.clone()));
-        self.copied = Some(device_id);
-        self.copy_task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(Duration::from_millis(1500))
-                .await;
-            this.update(cx, |page, cx| {
-                page.copied = None;
-                cx.notify();
-            })
-            .ok();
-        }));
+        crate::motion::copy_feedback(copied_key(&device_id), cx);
         cx.notify();
     }
 
@@ -264,7 +255,6 @@ impl Render for DevicesPage {
             let state = self.state.read(cx);
             (state.devices.clone(), state.local_device_id.clone())
         };
-        let copied = self.copied.clone();
         if let Some(choice) = self.add_wanted {
             self.show_add_device(choice, window, cx);
         }
@@ -308,7 +298,7 @@ impl Render for DevicesPage {
                                 .focus_visible(|s| s.border_2().border_color(theme.accent))
                                 .on_click(cx.listener(move |_, _, _, cx| {
                                     cx.write_to_clipboard(ClipboardItem::new_string(link.clone()));
-                                    crate::toast::info(cx, "Link copied");
+                                    crate::toast::success(cx, "Link copied");
                                 }))
                         }))
                         // slopty: a dialog commits with the solid button, as Add device does.
@@ -336,7 +326,7 @@ impl Render for DevicesPage {
         let device_row = |ix: usize, device: slopty_view_proto::Device, first: bool| {
             let online = device_online(device.last_seen_at, now);
             let is_local = local_id.as_deref() == Some(device.id.as_str());
-            let id_copied = copied.as_deref() == Some(device.id.as_str());
+            let id_copied = crate::motion::copied(&copied_key(&device.id), cx);
             let copy_id = device.id.clone();
             // slopty: a machine whose worker has not said what it runs shows no platform.
             let mut meta: Vec<AnyElement> = (!device.platform.is_empty())
@@ -360,7 +350,6 @@ impl Render for DevicesPage {
             if !is_local {
                 meta.push(if online {
                     div()
-                        .text_color(theme.success_muted)
                         .child(SharedString::from("Online"))
                         .into_any_element()
                 } else {
@@ -403,14 +392,24 @@ impl Render for DevicesPage {
                         .gap(px(4.0))
                         .children(actions)
                         .child(
-                            widgets::text_action(
-                                &theme,
-                                widgets::ActionTone::Quiet,
-                                if id_copied { "Copied" } else { "Copy ID" },
-                            )
+                            widgets::action_button(&theme, widgets::ActionTone::Quiet)
+                                .gap(px(4.0))
+                                .child(
+                                    crate::icons::icon(if id_copied {
+                                        crate::icons::CHECK
+                                    } else {
+                                        crate::icons::COPY
+                                    })
+                                    .size(px(12.0))
+                                    .flex_none()
+                                    .text_color(if id_copied { theme.text } else { theme.text_muted }),
+                                )
+                                .child(SharedString::from("Copy ID"))
                             .id(("device-id", ix))
                             .tab_index(0)
                             .role(gpui::Role::Button)
+                            .tooltip(widgets::text_tooltip(if id_copied { "Copied" } else { "Copy this device's ID" }))
+                            .tooltip_show_delay(widgets::TOOLTIP_DELAY)
                             .aria_label(format!("Copy device ID {}", device.id))
                             .focus_visible(|s| s.border_2().border_color(theme.accent))
                             .on_click(cx.listener(
@@ -473,7 +472,6 @@ impl Render for DevicesPage {
                     server.name.clone(),
                     if server.online {
                         div()
-                            .text_color(theme.success_muted)
                             .child(SharedString::from("Online"))
                             .into_any_element()
                     } else {
@@ -591,6 +589,21 @@ impl Render for DevicesPage {
 mod tests {
     use super::*;
     use chrono::TimeDelta;
+
+    // slopty: Copy ID keeps its words; its glyph shows the check for the shared span (M5).
+    #[gpui::test]
+    fn copying_an_id_marks_it_copied_for_the_span(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+        cx.update(|cx| cx.set_global(crate::theme::Theme::default()));
+        let state = cx.new(|_| AppState::new());
+        let page = cx.new(|cx| DevicesPage::new(state, cx));
+        page.update(cx, |page, cx| page.copy_id("studio".into(), cx));
+        assert_eq!(cx.read_from_clipboard().and_then(|item| item.text()).as_deref(), Some("studio"));
+        assert!(cx.update(|cx| crate::motion::copied(&copied_key("studio"), cx)));
+        cx.executor().advance_clock(crate::motion::COPIED_FOR);
+        cx.run_until_parked();
+        assert!(!cx.update(|cx| crate::motion::copied(&copied_key("studio"), cx)));
+    }
 
     #[test]
     fn presence_window() {

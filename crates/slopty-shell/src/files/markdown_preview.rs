@@ -1136,8 +1136,8 @@ impl MarkdownPreview {
                             Some(Err(error)) => div()
                                 .p(px(12.0))
                                 .text_size(px(12.0))
-                                .text_color(theme.warning_muted)
-                                .child(error.clone())
+                                .text_color(theme.text_muted)
+                                .child(format!("Couldn't draw this diagram · {error}"))
                                 .into_any_element(),
                             None => div()
                                 .p(px(12.0))
@@ -1384,21 +1384,19 @@ impl Render for MarkdownPreview {
                 }
             }))
             .child(render::selection_surface_reset(self.scope.clone()))
+            // slopty: one loading voice; the truncation is information, not a warning (M30, M34).
             .when(self.loading, |el| {
                 el.child(
                     div()
                         .px(px(24.0))
-                        .text_color(theme.text_muted)
-                        .child("Loading preview…"),
+                        .child(crate::loaders::pending("markdown-preview", "Loading preview…")),
                 )
             })
             .when(self.truncated, |el| {
-                el.child(
-                    div()
-                        .px(px(24.0))
-                        .text_color(theme.warning_muted)
-                        .child("Large file preview is truncated and read-only."),
-                )
+                el.child(super::preview::info_row(
+                    &theme,
+                    "Large file: the preview shows its start, read-only",
+                ))
             })
             .child(
                 list(self.list.clone(), cx.processor(Self::render_row))

@@ -289,7 +289,7 @@ impl Workspace {
                 ),
                 Err(why) => {
                     let failure = AddFailure {
-                        title: format!("Slopty could not connect to {typed}"),
+                        title: format!("Slopty couldn't connect to {typed}"),
                         lines: vec![why],
                         ..AddFailure::default()
                     };
@@ -472,7 +472,7 @@ async fn serve_run(
                     }
                 }
                 Failure::new(
-                    format!("The server runs on {}, and Slopty could not connect to it", to.host),
+                    format!("The server runs on {}, and Slopty couldn't connect to it", to.host),
                     Some(format!("Check that UDP {SERVER_PORT} reaches it from this Mac.")),
                     vec![why],
                 )
@@ -678,7 +678,7 @@ async fn fix(
         Some(this_mac::Fix::AllowNotes) => flow.notes = Some(host.ask_notes().await),
         Some(this_mac::Fix::OpenAtLogin) => match host.open_at_login().await {
             Ok(now) => flow.login = Some(now),
-            Err(why) => send(frames, stopped(format!("Slopty could not open at login: {why}"))),
+            Err(why) => send(frames, stopped(format!("Slopty couldn't open at login: {why}"))),
         },
         Some(this_mac::Fix::MoveToApplications) => {
             flow.worker = this_mac::Worker::Installing;
@@ -693,7 +693,7 @@ async fn fix(
                     return Then::Over;
                 }
                 Err(why) => {
-                    flow.worker = this_mac::Worker::Failed(format!("Could not move Slopty: {why}"));
+                    flow.worker = this_mac::Worker::Failed(format!("Couldn't move Slopty: {why}"));
                 }
             }
         }
@@ -773,7 +773,10 @@ async fn this_mac_run(
                 let followed = this.update(cx, |ws, cx| {
                     if ws.server_address() != Some(&server) {
                         if let Err(e) = ws.save_server(Some(&server)) {
-                            Workspace::show_failure(format!("Settings: {e}"), cx);
+                            Workspace::show_failure(
+                                format!("Couldn't save the server to settings.toml: {e}"),
+                                cx,
+                            );
                         }
                         ws.set_server(Some(server), None, cx);
                     }

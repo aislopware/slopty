@@ -46,12 +46,18 @@ mod completion;
 const DETAILS_INSET: f32 = 4.0 + 36.0 + 12.0;
 
 // slopty: how freely agents act (`[agents] autonomy`): the value, its label, and the note under
-// the row title for the chosen one.
+// the row title for the chosen one. The names are the composer's mode menu's, Claude Code's own
+// (`slopty_agent::claude::offers`), so one choice reads alike in both places.
 const AUTONOMY: [(&str, &str, &str); 3] = [
-    ("auto", "Auto", "Each agent's own judgement decides what needs you."),
-    ("full", "Full", "Agents never stop to ask permission."),
-    ("ask", "Ask", "Agents ask before what their harness guards."),
+    ("auto", "Auto", "Asks only about what looks risky."),
+    ("full", "Bypass permissions", "Asks nothing: agents act without stopping."),
+    ("ask", "Manual", "Asks before edits, commands and the network."),
 ];
+
+/// Where `auto` sits in [`AUTONOMY`]: the default, and the one Slopty recommends.
+const AUTONOMY_DEFAULT: usize = 0;
+/// Where `full` sits: the one that asks nothing, so its note is a warning.
+const AUTONOMY_FULL: usize = 1;
 
 fn offers_install(harness: HarnessId, installed: bool, can_install: bool) -> bool {
     harness != HarnessId::MOCK && !installed && can_install
@@ -264,15 +270,27 @@ impl HarnessesPage {
 
     // slopty: the Autonomy section under the agents.
     fn render_autonomy(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let selected = self.autonomy.unwrap_or(0);
+        let selected = self.autonomy.unwrap_or(AUTONOMY_DEFAULT);
         let select = widgets::select(
             "agents-autonomy",
             "Autonomy",
             theme,
             |page: &mut Self| &mut page.autonomy_select,
         )
+        // slopty: Auto is marked the default and the recommended one; Bypass permissions says
+        // what it costs (M10).
         .options(
-            AUTONOMY.iter().map(|(_, label, _)| widgets::SelectOption::new(*label)),
+            AUTONOMY.iter().enumerate().map(|(ix, (_, label, _))| {
+                let option = widgets::SelectOption::new(*label);
+                if ix == AUTONOMY_FULL {
+                    option.detail("Asks nothing")
+                } else {
+                    option.standing(widgets::Standing::of(
+                        ix == AUTONOMY_DEFAULT,
+                        ix == AUTONOMY_DEFAULT,
+                    ))
+                }
+            }),
             selected,
         )
         .width(136.0)
@@ -283,6 +301,20 @@ impl HarnessesPage {
         })
         .render(&self.autonomy_select, cx);
         let note = AUTONOMY.get(selected).map_or("", |(.., note)| *note);
+        let note_color = if selected == AUTONOMY_FULL { theme.warning } else { theme.text_muted };
+        let reset = widgets::reset_action(
+            theme,
+            "agents-autonomy-reset",
+            "How freely agents act",
+            selected == AUTONOMY_DEFAULT,
+        )
+        .map(|reset| {
+            reset.on_click(cx.listener(|page, _, _, cx| {
+                if let Some(engine) = page.state.read(cx).engine().cloned() {
+                    page.load_autonomy(engine, Some(AUTONOMY_DEFAULT), cx);
+                }
+            }))
+        });
         widgets::section(
             theme,
             "Autonomy",
@@ -295,9 +327,10 @@ impl HarnessesPage {
                             .child(widgets::row_title(theme, "How freely agents act"))
                             .child(widgets::meta_line(
                                 theme,
-                                vec![div().child(note).into_any_element()],
+                                vec![div().text_color(note_color).child(note).into_any_element()],
                             )),
                     )
+                    .children(reset)
                     .child(select),
             ),
         )
@@ -406,7 +439,7 @@ impl HarnessesPage {
                     Ok(id) => page.show_install(harness, id, cx),
                     Err(error) => {
                         page.installing = None;
-                        page.error = Some(format!("Installation failed — {error}"));
+                        page.error = Some(format!("Couldn't install the agent: {error}"));
                     }
                 }
                 cx.notify();
@@ -724,7 +757,22 @@ impl HarnessesPage {
                 // user doesn't want must not be stuck on because it isn't
                 // installed); turning ON still does.
                 let interactive = !last_enabled && (enabled || installed);
-                let (icon_path, tint) = crate::pickers::harness_brand_icon(harness);
+                let (icon_path, _) = crate::pickers::harness_brand_icon(harness);
+                // slopty: an agent on or off against its default (installed and not the mock)
+                // offers "Reset" (M10).
+                let default_on = installed && harness != HarnessId::MOCK;
+                let reset = widgets::reset_action(
+                    &theme,
+                    format!("harness-reset-{harness:?}"),
+                    &descriptor.name,
+                    enabled == default_on || last_enabled,
+                )
+                .map(|reset| {
+                        reset.on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.toggle(harness, default_on, cx);
+                        }))
+                    });
 
                 let mut meta: Vec<gpui::AnyElement> = Vec::new();
                 // Installing REPLACES the not-installed hint in place, so the
@@ -785,8 +833,8 @@ impl HarnessesPage {
                             .into_any_element(),
                     );
                 }
-                // widgets::row_tile with the brand tint honored (the Claude
-                // mark keeps its orange, like the picker rail).
+                // slopty: the brand mark rests in `text_muted`: clay is for an agent at work, not a
+                // constant state (M15).
                 let tile = div()
                     .flex_none()
                     .size(px(36.0))
@@ -798,7 +846,7 @@ impl HarnessesPage {
                     .child(
                         crate::icons::icon(icon_path)
                             .size(px(16.0))
-                            .text_color(tint.unwrap_or(theme.text_muted)),
+                            .text_color(theme.text_muted),
                     );
                 let expanded = enabled && self.expanded_harness == Some(harness);
                 let header = widgets::card_row(&theme, ix == 0)
@@ -916,6 +964,7 @@ impl HarnessesPage {
                                 }),
                             ),
                     )
+                    .children(reset)
                     .child(
                         widgets::toggle_switch(
                             &theme,
@@ -923,7 +972,9 @@ impl HarnessesPage {
                             format!("harness-switch-{harness:?}"),
                         )
                         .id(("harness-toggle", ix))
-                        .when(!interactive && !enabled, |el| el.opacity(0.55))
+                        .when(!interactive && !enabled, |el| {
+                            el.opacity(crate::theme::DISABLED_OPACITY)
+                        })
                         .when(interactive, |el| {
                             el.cursor_pointer()
                                 .tab_index(0)
@@ -1017,7 +1068,7 @@ impl Render for HarnessesPage {
                                 page.load(cx);
                                 cx.notify();
                             }))
-                            .child(SharedString::from("Retry")),
+                            .child(SharedString::from("Try again")),
                     )
                     .into_any_element()
             }
@@ -1078,6 +1129,22 @@ impl Render for HarnessesPage {
 
 #[cfg(test)]
 mod tests {
+    // slopty: the autonomy choices read as the composer's mode menu reads them; Auto is the
+    // default and the recommended one, and the one that asks nothing says so (M10).
+    #[test]
+    fn autonomy_names_its_default_and_what_full_costs() {
+        use super::{AUTONOMY, AUTONOMY_DEFAULT, AUTONOMY_FULL};
+        assert_eq!(AUTONOMY[AUTONOMY_DEFAULT].0, "auto");
+        assert_eq!(AUTONOMY[AUTONOMY_DEFAULT].1, "Auto");
+        assert_eq!(AUTONOMY[AUTONOMY_FULL].0, "full");
+        assert_eq!(AUTONOMY[AUTONOMY_FULL].1, "Bypass permissions");
+        assert!(AUTONOMY[AUTONOMY_FULL].2.starts_with("Asks nothing"));
+        assert_eq!(
+            crate::settings::widgets::Standing::of(true, true).map(|s| s.words()),
+            Some("Default · Recommended")
+        );
+    }
+
     #[gpui::test]
     fn expanded_agent_preferences_render_inside_the_agent_row(cx: &mut gpui::TestAppContext) {
         use gpui::AppContext;
@@ -1271,7 +1338,7 @@ mod install_tests {
                     crate::toast::shown(cx).into_iter().map(|(_, text)| text.to_string()).last()
                 });
                 let said = said.unwrap_or_default();
-                assert!(said.contains("Installation failed") && said.contains("out of reach"), "{said}");
+                assert!(said.contains("Couldn't install") && said.contains("out of reach"), "{said}");
                 assert!(page.install_run.is_none());
             });
 

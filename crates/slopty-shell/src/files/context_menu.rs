@@ -177,15 +177,7 @@ impl FilesSurface {
                     });
                 }
             }
-            1 => {
-                let text = paths
-                    .iter()
-                    .map(|path| absolute_workspace_path(&origin.context.cwd, path))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                cx.write_to_clipboard(ClipboardItem::new_string(text));
-                self.tree_focus.focus(window, cx);
-            }
+            1 => self.copy_full_paths(&paths, &origin.context.cwd, window, cx),
             // slopty: no index: a rename with no path does nothing.
             2 => {
                 if let Some(path) = paths.first() {
@@ -197,21 +189,62 @@ impl FilesSurface {
         }
     }
 
+    /// ⌥⌘C in the tree: the selection's full paths, as the menu's "Copy full path" copies them.
+    pub(super) fn copy_tree_paths(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let paths = self.tree_action_paths();
+        let Some(origin) = self.interaction_origin(cx) else {
+            return;
+        };
+        if paths.is_empty() || paths.iter().any(|path| self.tree.node(path).is_none()) {
+            return;
+        }
+        self.copy_full_paths(&paths, &origin.context.cwd, window, cx);
+    }
+
+    // slopty: a copy says it happened: the menu closes, so a toast confirms (M5).
+    fn copy_full_paths(
+        &mut self,
+        paths: &[String],
+        root: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let text = paths
+            .iter()
+            .map(|path| absolute_workspace_path(root, path))
+            .collect::<Vec<_>>()
+            .join("\n");
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        crate::toast::success(cx, copied_paths_message(paths.len()));
+        self.tree_focus.focus(window, cx);
+    }
+
     pub(super) fn render_tree_context_menu(
         &self,
         theme: &Theme,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
         let menu = self.tree_context_menu.get()?;
         let theme = theme.for_popup();
         let count = menu.paths.len();
+        // slopty: each row names its key, read from the keymap in the tree's context (M16, M41).
+        let key_of = |action: &dyn gpui::Action| {
+            crate::keys::for_action(action, Some(&self.tree_focus), window, cx)
+        };
+        let keys = [
+            None,
+            key_of(&super::CopyPath),
+            Some(crate::keys::combo_text("f2")),
+            key_of(&super::DeleteSelection),
+        ];
         let delete_label = if count > 1 {
             format!("Delete {count} items…")
         } else {
             "Delete…".into()
         };
         let mut card = popover::popover_card(&theme)
-            .w(px(190.0))
+            .w(px(220.0))
             .flex()
             .flex_col()
             .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_tree_context_menu(cx)))
@@ -219,7 +252,7 @@ impl FilesSurface {
         for (index, (label, icon_path)) in [
             ("Add to chat".to_string(), icons::CHAT_ROUND_LINE),
             (
-                if count > 1 { "Copy paths" } else { "Copy path" }.to_string(),
+                if count > 1 { "Copy full paths" } else { "Copy full path" }.to_string(),
                 icons::COPY,
             ),
             ("Rename…".to_string(), icons::PEN),
@@ -238,20 +271,9 @@ impl FilesSurface {
                     .role(gpui::Role::MenuItem)
                     .aria_label(label.clone())
                     .when(index == 3, |row| row.text_color(theme.danger))
-                    .when(index == 1, |row| {
-                        row.tooltip(move |_, cx| {
-                            cx.new(|_| preview::FileEditorTooltip {
-                                text: if count > 1 {
-                                    "Copy full paths, one per line"
-                                } else {
-                                    "Copy full path"
-                                }
-                                .into(),
-                            })
-                            .into()
-                        })
+                    .when(!enabled, |el| {
+                        el.opacity(crate::theme::DISABLED_OPACITY).cursor_default()
                     })
-                    .when(!enabled, |el| el.opacity(0.38).cursor_default())
                     .when(enabled, |el| {
                         el.on_click(cx.listener(move |this, _, window, cx| {
                             this.dispatch_tree_menu(index, window, cx)
@@ -266,7 +288,8 @@ impl FilesSurface {
                                 theme.text_muted
                             }),
                     )
-                    .child(label),
+                    .child(div().flex_1().min_w_0().child(label))
+                    .children(keys[index].as_ref().map(|keys| popover::kbd_hint(&theme, keys))),
             );
         }
         Some(popover::menu_at(
@@ -275,6 +298,15 @@ impl FilesSurface {
             card.into_any_element(),
             self.tree_context_menu.closing_since(),
         ))
+    }
+}
+
+/// What the toast says after a copy of `count` full paths.
+fn copied_paths_message(count: usize) -> String {
+    if count == 1 {
+        "Copied full path".into()
+    } else {
+        format!("Copied {count} full paths")
     }
 }
 
@@ -381,6 +413,57 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event, FilesEvent::OpenFile(_)))
         );
+    }
+
+    // slopty: the tree's Mac keys (⌥⌘C, ⌘⌫) act, the menu names them, and a copy says so.
+    #[gpui::test]
+    fn the_trees_keys_copy_and_delete_and_its_menu_names_them(cx: &mut TestAppContext) {
+        use crate::settings::platform_combo;
+        let (files, cx) = super::super::test_support::setup(cx);
+        cx.update(|_, cx| super::super::bind_keys(cx));
+        files.update_in(cx, |files, window, cx| {
+            files.tree.select("a.txt");
+            files.tree_focus.focus(window, cx);
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.simulate_keystrokes(&platform_combo("alt-mod-c"));
+        assert_eq!(
+            cx.update(|_, cx| cx.read_from_clipboard()).and_then(|item| item.text()).as_deref(),
+            Some("/workspace/a.txt")
+        );
+        assert!(
+            cx.update(|_, cx| crate::toast::messages(cx))
+                .iter()
+                .any(|message| message.as_ref() == "Copied full path")
+        );
+        files.update_in(cx, |files, window, cx| {
+            files.open_tree_context_menu("a.txt".into(), gpui::point(px(50.), px(50.)), window, cx);
+        });
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            let focus = files.read(cx).tree_focus.clone();
+            assert_eq!(
+                crate::keys::for_action(&super::super::CopyPath, Some(&focus), window, cx),
+                Some(crate::keys::combo_text("alt-mod-c"))
+            );
+            assert_eq!(
+                crate::keys::for_action(&super::super::DeleteSelection, Some(&focus), window, cx),
+                Some(crate::keys::combo_text("mod-backspace"))
+            );
+        });
+        files.update_in(cx, |files, _, cx| files.close_tree_context_menu(cx));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.simulate_keystrokes(&platform_combo("mod-backspace"));
+        files.read_with(cx, |files, _| {
+            assert_eq!(files.tree_delete.as_ref().map(|d| d.paths.clone()), Some(vec!["a.txt".to_owned()]));
+        });
+    }
+
+    #[test]
+    fn a_copy_of_paths_says_how_many() {
+        assert_eq!(copied_paths_message(1), "Copied full path");
+        assert_eq!(copied_paths_message(3), "Copied 3 full paths");
     }
 
     #[gpui::test]

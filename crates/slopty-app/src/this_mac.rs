@@ -930,7 +930,7 @@ mod mac {
         let session = Session::native();
         service::install_server(&session, None, "info", source, data)
             .await
-            .map_err(|e| format!("Could not start the server: {e}"))?;
+            .map_err(|e| format!("Couldn't start the server: {e}"))?;
         let started = std::time::Instant::now();
         loop {
             match net::link_server(address).await {
@@ -1361,7 +1361,7 @@ mod tests {
         assert_eq!(checklist_of(Worker::Up(unset), "")[1].mark, Missing, "registered nowhere");
 
         let failed = Flow {
-            server: Server::Failed("Could not start the server".to_owned()),
+            server: Server::Failed("Couldn't start the server".to_owned()),
             ..Flow::looking(1)
         };
         let lines = checklist(&failed, "", "/Users/me/Library/Logs/Slopty/slopty-server.log");

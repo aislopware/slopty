@@ -80,7 +80,7 @@ impl Skipped {
     pub fn words(&self) -> Option<String> {
         let last = self.last.as_deref()?;
         let what = if self.count == 1 { "1 update".to_owned() } else { format!("{} updates", self.count) };
-        Some(format!("{what} of the rules could not be read and are not shown: {last}"))
+        Some(format!("Couldn't read {what} of the rules, so they are not shown: {last}"))
     }
 }
 
@@ -277,14 +277,18 @@ impl PermissionsPage {
         let busy = self.busy.as_deref() == Some(row.rule.as_str());
         let scope = self.rules.as_ref().map(|rules| scope_of(rules, &row.source)).unwrap_or_default();
         let (behavior, rule) = (row.behavior.clone(), row.rule.clone());
+        // slopty: the subtitle says where the rule comes from, never the rule again in other
+        // words; the agent's own reading of it is the title's tooltip (lane E's refusal), and a
+        // reading that is only the rule again is said nowhere.
+        let description = row.description.clone().filter(|d| !d.trim().is_empty() && d.trim() != row.rule.trim());
         let mut meta = vec![SharedString::from(row.source_label.clone())];
-        if let Some(description) = row.description.clone().filter(|d| !d.trim().is_empty()) {
-            meta.push(description.into());
-        }
         if !row.in_effect {
             meta.push("Overridden".into());
         }
-        let words = format!("{}: {}", row.rule, meta.join(", "));
+        let words = match &description {
+            Some(description) => format!("{}: {}, {description}", row.rule, meta.join(", ")),
+            None => format!("{}: {}", row.rule, meta.join(", ")),
+        };
         widgets::card_row(theme, ix == 0)
             .id(SharedString::from(format!("permission-rule-{}-{ix}", row.behavior)))
             .role(gpui::Role::ListItem)
@@ -297,7 +301,17 @@ impl PermissionsPage {
                     .flex()
                     .flex_col()
                     .gap(px(2.0))
-                    .child(widgets::row_title(theme, row.rule.clone()).font_family(theme.font_mono.clone()))
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("permission-rule-title-{}-{ix}", row.behavior)))
+                            .min_w_0()
+                            .when_some(description, |title, description| {
+                                title
+                                    .tooltip(widgets::text_tooltip(description))
+                                    .tooltip_show_delay(widgets::TOOLTIP_DELAY)
+                            })
+                            .child(widgets::row_title(theme, row.rule.clone()).font_family(theme.font_mono.clone())),
+                    )
                     .child(
                         div()
                             .text_size(crate::typography::ui_rems(12.0))
@@ -312,7 +326,7 @@ impl PermissionsPage {
                         .role(gpui::Role::Button)
                         .aria_label(SharedString::from(format!("Remove {}", row.rule)))
                         .tab_index(0)
-                        .when(busy, |el| el.opacity(0.4))
+                        .when(busy, |el| el.opacity(crate::theme::DISABLED_OPACITY).cursor_default())
                         .focus_visible(|s| s.border_2().border_color(theme.accent))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.change(false, behavior.clone(), rule.clone(), scope.clone(), cx);
@@ -375,7 +389,9 @@ impl PermissionsPage {
                             .role(gpui::Role::Button)
                             .aria_label("Add rule")
                             .tab_index(0)
-                            .when(rules.scopes.is_empty(), |el| el.opacity(0.4))
+                            .when(rules.scopes.is_empty(), |el| {
+                                el.opacity(crate::theme::DISABLED_OPACITY).cursor_default()
+                            })
                             .focus_visible(|s| s.border_2().border_color(theme.accent))
                             .on_click(cx.listener(|this, _, _, cx| this.add_rule(cx)))
                             .child("Add"),
@@ -436,7 +452,7 @@ impl Render for PermissionsPage {
             },
             Some(rules) if !rules.known => body.push(empty(
                 &theme,
-                "No rules said yet",
+                "No rules yet",
                 "The agent says its rules once a session runs in this folder.",
             )),
             Some(rules) => {
@@ -658,7 +674,7 @@ mod tests {
             assert_eq!(page.unreachable, None, "reading again");
             assert_eq!(page.skipped.count, 1);
             let said = page.skipped.words().unwrap_or_default();
-            assert!(said.starts_with("1 update of the rules could not be read"), "{said}");
+            assert!(said.starts_with("Couldn't read 1 update of the rules"), "{said}");
         });
     }
 

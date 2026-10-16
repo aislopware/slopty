@@ -62,6 +62,24 @@ impl FilesSettingsPage {
         cx.notify();
     }
 
+    // slopty: a row whose value is not its default offers "Reset", and only then (M10).
+    fn reset(
+        &self,
+        id: &'static str,
+        label: &str,
+        is_default: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+        reset: impl Fn(&mut Self, &mut Context<Self>) + 'static,
+    ) -> Option<gpui::Stateful<gpui::Div>> {
+        widgets::reset_action(theme, id, label, is_default).map(|button| {
+            button.on_click(cx.listener(move |this, _, _, cx| {
+                reset(this, cx);
+                cx.notify();
+            }))
+        })
+    }
+
     fn on_scroll_hovered(&mut self, hovered: &bool, _: &mut Window, cx: &mut Context<Self>) {
         if self.scroll.set_list_hovered(*hovered) {
             cx.notify();
@@ -99,6 +117,10 @@ impl Render for FilesSettingsPage {
                 } else {
                     format!("{delay} ms")
                 })
+                .standing(widgets::Standing::of(
+                    delay == crate::settings::FILES_AUTOSAVE_DELAY_DEFAULT_MS,
+                    false,
+                ))
             }),
             DELAY_OPTIONS
                 .iter()
@@ -124,6 +146,10 @@ impl Render for FilesSettingsPage {
                             .flex_col()
                             .child(widgets::row_title(&theme, "Autosave")),
                     )
+                    .children(self.reset("files-autosave-reset", "Autosave", !autosave_enabled, &theme, cx, |this, cx| {
+                        this.autosave_enabled = false;
+                        cx.emit(FilesSettingsEvent::AutosaveChanged(false));
+                    }))
                     .child(
                         widgets::toggle_switch(&theme, autosave_enabled, "files-autosave")
                             .id("files-autosave-toggle")
@@ -155,6 +181,18 @@ impl Render for FilesSettingsPage {
                                 .flex_col()
                                 .child(widgets::row_title(&theme, "Autosave delay")),
                         )
+                        .children(self.reset(
+                            "files-autosave-delay-reset",
+                            "Autosave delay",
+                            selected == crate::settings::FILES_AUTOSAVE_DELAY_DEFAULT_MS,
+                            &theme,
+                            cx,
+                            |this, cx| {
+                                let delay = crate::settings::FILES_AUTOSAVE_DELAY_DEFAULT_MS;
+                                this.autosave_delay_ms = delay;
+                                cx.emit(FilesSettingsEvent::AutosaveDelayChanged(delay));
+                            },
+                        ))
                         .child(delay_control),
                 )
             })
@@ -168,6 +206,10 @@ impl Render for FilesSettingsPage {
                             .flex_col()
                             .child(widgets::row_title(&theme, "Word wrap")),
                     )
+                    .children(self.reset("files-word-wrap-reset", "Word wrap", !word_wrap, &theme, cx, |this, cx| {
+                        this.word_wrap = false;
+                        cx.emit(FilesSettingsEvent::WordWrapChanged(false));
+                    }))
                     .child(
                         widgets::toggle_switch(&theme, word_wrap, "files-word-wrap")
                             .id("files-word-wrap-toggle")
@@ -196,15 +238,23 @@ impl Render for FilesSettingsPage {
                             .min_w(px(160.0))
                             .flex()
                             .flex_col()
-                            .child(widgets::row_title(&theme, "Show hidden and ignored files")),
+                            .child(widgets::row_title(&theme, "Show hidden files"))
+                            .child(widgets::meta_line(
+                                &theme,
+                                vec![div().child("Dotfiles and what git ignores").into_any_element()],
+                            )),
                     )
+                    .children(self.reset("files-show-all-reset", "Show hidden files", !show_all_files, &theme, cx, |this, cx| {
+                        this.show_all_files = false;
+                        cx.emit(FilesSettingsEvent::ShowAllFilesChanged(false));
+                    }))
                     .child(
                         widgets::toggle_switch(&theme, show_all_files, "files-show-all")
                             .id("files-show-all-toggle")
                             .cursor_pointer()
                             .tab_index(0)
                             .role(gpui::Role::Switch)
-                            .aria_label("Show hidden and ignored files")
+                            .aria_label("Show hidden files")
                             .aria_toggled(if show_all_files {
                                 gpui::Toggled::True
                             } else {
@@ -246,5 +296,43 @@ impl Render for FilesSettingsPage {
                 .fade_overflow_y(&self.scroll.scroll),
             )
             .children(scrollbar)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::TestAppContext;
+
+    use super::*;
+
+    // slopty: a row offers "Reset" only while its value is not the default, and Reset puts the
+    // default back (M10).
+    #[gpui::test]
+    fn a_row_offers_reset_only_off_its_default(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::default()));
+        let (page, cx) = cx.add_window_view(|_, cx| {
+            FilesSettingsPage::new(true, crate::settings::FILES_AUTOSAVE_DELAY_DEFAULT_MS, true, false, cx)
+        });
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen = events.clone();
+        let _events =
+            cx.update(|_, cx| cx.subscribe(&page, move |_, event, _| seen.borrow_mut().push(*event)));
+        let draw = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear(cx);
+            });
+        };
+        draw(cx);
+        assert!(cx.debug_bounds("files-autosave-reset").is_some(), "autosave is on, off by default");
+        assert!(cx.debug_bounds("files-word-wrap-reset").is_some(), "wrap is on, off by default");
+        assert!(cx.debug_bounds("files-autosave-delay-reset").is_none(), "the delay is the default");
+        assert!(cx.debug_bounds("files-show-all-reset").is_none(), "hidden files are off");
+        let reset = cx.debug_bounds("files-word-wrap-reset").unwrap().center();
+        cx.simulate_click(reset, gpui::Modifiers::default());
+        draw(cx);
+        assert!(cx.debug_bounds("files-word-wrap-reset").is_none());
+        page.read_with(cx, |page, _| assert!(!page.word_wrap));
+        assert_eq!(*events.borrow(), [FilesSettingsEvent::WordWrapChanged(false)]);
     }
 }

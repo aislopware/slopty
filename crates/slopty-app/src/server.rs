@@ -646,10 +646,7 @@ impl Workspace {
         let Some(caller) =
             self.server.as_ref().and_then(|s| s.task.as_ref()).map(ServerTask::caller)
         else {
-            Self::show_failure(
-                format!("Could not wake {name}: the server does not answer yet"),
-                cx,
-            );
+            Self::show_failure(format!("Couldn't wake {name}: the server does not answer yet"), cx);
             return;
         };
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -700,10 +697,10 @@ fn wake_notice(name: &str, outcome: Outcome) -> Result<String, String> {
         Outcome::WakeSent { by, .. } => {
             Ok(format!("{by} sent {name} a wake; it shows online once it is up"))
         }
-        Outcome::Error { message, .. } => Err(format!("Could not wake {name}: {message}")),
+        Outcome::Error { message, .. } => Err(format!("Couldn't wake {name}: {message}")),
         other => {
             tracing::warn!(?other, "a wake answered with something else");
-            Err(format!("Could not wake {name}: the server answered something else"))
+            Err(format!("Couldn't wake {name}: the server answered something else"))
         }
     }
 }
@@ -848,7 +845,7 @@ mod tests {
         let shown = cx.update(|_, cx| slopty_shell::toast::shown(cx));
         let (kind, words) = shown.last().expect("a toast");
         assert_eq!(*kind, slopty_shell::toast::ToastKind::Error, "{words}");
-        assert!(words.starts_with("Could not wake"), "{words}");
+        assert!(words.starts_with("Couldn't wake"), "{words}");
     }
 
     /// The server's Copy grant puts the grant on the clipboard, as the policy file takes it, and
@@ -919,7 +916,7 @@ mod tests {
         };
         assert_eq!(
             wake_notice("studio", refused),
-            Err("Could not wake studio: the link to the server has stopped".to_owned())
+            Err("Couldn't wake studio: the link to the server has stopped".to_owned())
         );
     }
 }

@@ -554,7 +554,7 @@ impl AddDeviceDialog {
                         this.press_found(server, at.clone(), window, cx);
                     }));
             } else {
-                row = row.cursor_default().opacity(0.6);
+                row = row.cursor_default().opacity(crate::theme::DISABLED_OPACITY);
             }
             list = list.child(row);
         }
@@ -567,9 +567,10 @@ impl AddDeviceDialog {
         let mut list = div().mt(px(16.0)).flex().flex_col().gap(px(2.0));
         for (ix, step) in progress.steps.iter().enumerate() {
             let mark = match step.mark {
+                // slopty: a done step is routine: a quiet check, never green (M14).
                 Mark::Done => crate::icons::icon(crate::icons::CHECK)
                     .size(px(14.0))
-                    .text_color(theme.success_muted)
+                    .text_color(theme.text_muted)
                     .into_any_element(),
                 Mark::Failed => crate::icons::icon(crate::icons::CLOSE)
                     .size(px(14.0))
@@ -815,7 +816,7 @@ impl Render for AddDeviceDialog {
                     div().flex_none().mt(px(2.0)).child(
                         crate::icons::icon(crate::icons::CHECK)
                             .size(px(14.0))
-                            .text_color(theme.success_muted),
+                            .text_color(theme.text_muted),
                     ),
                 )
                 .child(div().min_w_0().child(added))
