@@ -84,7 +84,7 @@ fn can() -> DockCan {
 }
 
 fn modes(id: &str) -> ModeChip {
-    let choice = |id: &str, label: &str| ModeChoice { id: id.into(), label: label.into(), description: None };
+    let choice = |id: &str, label: &str| ModeChoice { id: id.into(), label: label.into(), description: None, recommended: false };
     ModeChip {
         id: id.into(),
         label: if id == "plan" { "Plan".into() } else { "Default".into() },

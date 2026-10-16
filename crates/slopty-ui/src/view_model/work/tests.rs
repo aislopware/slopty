@@ -175,6 +175,23 @@ fn the_mode_chip_is_loud_for_bypass() {
     assert!(dock(&state, &counts, 0).can.set_mode);
 }
 
+/// Auto, the recommended default, is quiet on the chip, and its menu row says it is recommended.
+#[test]
+fn the_recommended_auto_mode_is_quiet() {
+    let mut state = thread_with(&[Cap::SET_MODE]);
+    state.meta.modes = ["auto", "acceptEdits", "plan"]
+        .iter()
+        .map(|id| Mode { id: (*id).to_owned(), label: super::humane(id), description: None })
+        .collect();
+    state.meters = Meters { mode: Some("auto".to_owned()), ..Meters::default() };
+    let counts = tray(&state, &[], &chat_of).counts;
+    let chip = dock(&state, &counts, 0).mode.expect("a chip");
+    assert_eq!((chip.words.as_str(), chip.tone.as_str()), ("", ModeChip::QUIET));
+    let recommended: Vec<&str> =
+        chip.choices.iter().filter(|c| c.recommended).map(|c| c.id.as_str()).collect();
+    assert_eq!(recommended, ["auto"]);
+}
+
 /// The context card warns as the TUI does: before it compacts on its own, or when it is nearly
 /// full with nothing to compact it; the last turn's tokens ride along.
 #[test]

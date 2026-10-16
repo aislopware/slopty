@@ -288,8 +288,8 @@ pub struct ModeChip {
     /// What the chip says ("Accept edits on"); empty for the agent's default mode, whose chip
     /// says nothing.
     pub words: String,
-    /// How loud it is: [`ModeChip::DANGER`] (nothing is asked), [`ModeChip::WARNING`] (a judge
-    /// decides), [`ModeChip::PLAN`], [`ModeChip::ACCEPT`], [`ModeChip::QUIET`].
+    /// How loud it is: [`ModeChip::DANGER`] (nothing is asked), [`ModeChip::PLAN`],
+    /// [`ModeChip::ACCEPT`], [`ModeChip::QUIET`].
     pub tone: String,
     /// The modes it can be switched to, in the agent's order: what ⇧Tab cycles through.
     pub choices: Vec<ModeChoice>,
@@ -302,10 +302,9 @@ impl ModeChip {
     pub const DANGER: &'static str = "danger";
     /// It plans and does not act.
     pub const PLAN: &'static str = "plan";
-    /// The agent's default: the chip says nothing.
+    /// The recommended default (auto) or plain asking (manual): the chip says the mode's name
+    /// quietly.
     pub const QUIET: &'static str = "quiet";
-    /// The agent's own judge of risk decides (auto mode).
-    pub const WARNING: &'static str = "warning";
 }
 
 /// A mode the chip can switch to.
@@ -319,6 +318,9 @@ pub struct ModeChoice {
     /// What it does, when the agent says.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// The agent's own default, the mode it recommends: its menu row says so.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub recommended: bool,
 }
 
 /// The context window: how full it is, by category when the agent counted them.

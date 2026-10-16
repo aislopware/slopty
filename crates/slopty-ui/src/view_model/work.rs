@@ -390,15 +390,17 @@ fn mode_chip(state: &ThreadState) -> Option<ModeChip> {
             id: mode.id.clone(),
             label: mode.label.clone(),
             description: mode.description.clone(),
+            recommended: mode.id == RECOMMENDED_MODE,
         })
         .collect();
     let label = choices
         .iter()
         .find(|mode| mode.id == id)
         .map_or_else(|| humane(&id), |mode| mode.label.clone());
+    // The recommended default says its name quietly; only a mode the person chose that asks less,
+    // or plans, stands out.
     let tone = match id.as_str() {
         "bypassPermissions" | "dontAsk" => ModeChip::DANGER,
-        "auto" => ModeChip::WARNING,
         "plan" => ModeChip::PLAN,
         "acceptEdits" => ModeChip::ACCEPT,
         _ => ModeChip::QUIET,
@@ -406,6 +408,11 @@ fn mode_chip(state: &ThreadState) -> Option<ModeChip> {
     let words = if tone == ModeChip::QUIET { String::new() } else { format!("{label} on") };
     Some(ModeChip { id, label, words, tone: tone.to_owned(), choices })
 }
+
+/// The mode Claude Code starts in when nothing chooses another, and the one it recommends: auto,
+/// where a judge asks only about what looks risky
+/// (`slopty_agent::claude::offers`, its built-in mode).
+const RECOMMENDED_MODE: &str = "auto";
 
 /// An agent's camel-cased name for people: `acceptEdits` → "Accept edits".
 fn humane(id: &str) -> String {

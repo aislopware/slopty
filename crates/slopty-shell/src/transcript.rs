@@ -3578,6 +3578,9 @@ pub struct Transcript {
     /// transcript's bottom (measured last frame): the last row pads past it
     /// so pinned content rests above the glass chrome it scrolls under.
     bottom_clearance: f32,
+    /// slopty: the list's viewport as this frame began. A page row reads it while the list lays
+    /// out, when asking the list itself would borrow it twice.
+    page_viewport: gpui::Bounds<Pixels>,
     /// Hovered rail tick (grows + shows the preview card).
     rail_hover: Option<usize>,
     /// `(row id, entry id)` under the pointer — reveals the entry's timestamp
@@ -3922,6 +3925,7 @@ impl Transcript {
             selection_scroll_task: None,
             rail_enabled,
             bottom_clearance: 0.0,
+            page_viewport: gpui::Bounds::default(),
             rail_hover: None,
             hovered_entry: None,
             copied_code: None,
@@ -10346,6 +10350,8 @@ fn entry_fingerprint(entry: &SessionMessageEntry, pending: bool) -> u64 {
 
 impl Render for Transcript {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // slopty: before the list lays out, where reading it borrows nothing.
+        self.page_viewport = self.list.viewport_bounds();
         // slopty: a subagent's card sizes its child by the window, and drills in on a phone's.
         self.subagents.window = window.viewport_size();
         self.watch_rewind(cx);

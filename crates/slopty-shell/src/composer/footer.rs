@@ -323,7 +323,8 @@ impl Composer {
             .into_any_element()
     }
 
-    /// The permission mode: its words, amber when nothing is asked; a click opens its choices.
+    /// The permission mode: its words, quiet for the recommended default, amber when nothing is
+    /// asked; a click opens its choices.
     fn mode_segment(&self, chip: &ModeChip, can_switch: bool, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let pending = self
             .footer
@@ -336,7 +337,6 @@ impl Composer {
         };
         let (color, wash) = match chip.tone.as_str() {
             ModeChip::DANGER => (theme.warning, Some(theme.warning.opacity(0.12))),
-            ModeChip::WARNING => (theme.warning, None),
             ModeChip::PLAN => (theme.accent, None),
             ModeChip::ACCEPT => (theme.text_muted, None),
             _ => (theme.text_faint, None),
@@ -408,7 +408,22 @@ impl Composer {
                             .min_w_0()
                             .flex()
                             .flex_col()
-                            .child(SharedString::from(choice.label.clone()))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.0))
+                                    .child(SharedString::from(choice.label.clone()))
+                                    // slopty: the agent's own default, which it recommends.
+                                    .when(choice.recommended, |el| {
+                                        el.child(
+                                            div()
+                                                .text_size(px(11.0))
+                                                .text_color(popup.text_faint)
+                                                .child("Default · Recommended"),
+                                        )
+                                    }),
+                            )
                             .when_some(choice.description.clone(), |el, description| {
                                 el.child(
                                     div()
@@ -510,7 +525,7 @@ mod tests {
             tone: ModeChip::QUIET.into(),
             choices: ["default", "acceptEdits", "plan", "bypassPermissions"]
                 .iter()
-                .map(|id| ModeChoice { id: (*id).into(), label: (*id).into(), description: None })
+                .map(|id| ModeChoice { id: (*id).into(), label: (*id).into(), description: None, recommended: false })
                 .collect(),
         }
     }
