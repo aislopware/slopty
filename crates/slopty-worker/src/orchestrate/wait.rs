@@ -14,9 +14,10 @@
 //!   `CommandDone` consumes the command it reports, so the next waits for a later one.
 //! - `Exit` holds once the program is gone (its exit reported, its PTY closed, or the session
 //!   closed).
-//! - `AgentNeedsInput` is refused: an agent in a terminal is the person's, and the worker reads
-//!   nothing of its screen, so nothing tells its turns. An agent Slopty drives is a thread, whose
-//!   coming to rest orchestration hears from its row (`EventFilter::AgentNeedsInput`).
+//!
+//! No condition waits on an agent in a terminal: that agent is the person's, and the worker reads
+//! nothing of its screen. An agent Slopty drives is a thread, whose coming to rest orchestration
+//! hears from its row (`EventFilter::AgentNeedsInput`).
 //!
 //! Every condition but `Exit` ends as [`Waited::Closed`] when the program exits first.
 
@@ -29,11 +30,6 @@ use tokio::time::Instant;
 
 use super::Failure;
 use crate::session::{Activity, Read, SessionHandle, Text};
-
-/// Why a wait for a terminal's agent to come to rest is refused (see the module).
-const NO_AGENT_WAIT: &str = "the worker cannot tell when an agent in a terminal comes to rest: \
-    it knows only that one runs there; drive the agent as a thread (start_thread) and wait on \
-    its events (events --agent-input)";
 
 /// What woke a waiter.
 enum Wake {
@@ -55,8 +51,8 @@ async fn changed(activity: &mut watch::Receiver<Activity>, deadline: Instant) ->
 ///
 /// # Errors
 ///
-/// [`ErrorCode::Invalid`] for a pattern that does not compile, and for an agent wait (see the
-/// module); [`ErrorCode::UnknownTerminal`] when the session is gone before the wait starts.
+/// [`ErrorCode::Invalid`] for a pattern that does not compile;
+/// [`ErrorCode::UnknownTerminal`] when the session is gone before the wait starts.
 pub async fn wait_for(
     handle: &SessionHandle,
     until: &WaitUntil,
@@ -99,7 +95,6 @@ pub async fn wait_for(
                 Wake::Gone => return Ok(Waited::Met { line: None }),
             }
         },
-        WaitUntil::AgentNeedsInput => Err(Failure::new(ErrorCode::Invalid, NO_AGENT_WAIT)),
     }
 }
 

@@ -280,16 +280,6 @@ mod orchestrate {
         assert_eq!(after, Waited::Closed, "an exited program writes nothing more");
     }
 
-    /// A wait for a terminal's agent to come to rest is refused, saying how to wait on an
-    /// agent: the worker knows only that one runs there.
-    #[tokio::test]
-    async fn a_wait_on_a_terminals_agent_is_refused() {
-        let sh = shell().await;
-        let refused = wait_for(&sh.handle, &WaitUntil::AgentNeedsInput, WAIT).await.unwrap_err();
-        assert_eq!(refused.code, ErrorCode::Invalid);
-        assert!(refused.message.contains("start_thread"), "{refused:?}");
-    }
-
     #[tokio::test]
     async fn a_listener_in_the_session_is_found_with_its_port() {
         let sh = shell().await;

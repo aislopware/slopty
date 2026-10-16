@@ -505,21 +505,17 @@ pub struct UntilArgs {
     /// The terminal's program exits.
     #[arg(long)]
     exit: bool,
-    /// The agent in the terminal needs a human or goes idle.
-    #[arg(long)]
-    agent_input: bool,
 }
 
 impl UntilArgs {
     fn until(self) -> Result<WaitUntil> {
-        let Self { output, quiet, command_done, exit, agent_input } = self;
-        match (output, quiet, command_done, exit, agent_input) {
-            (Some(pattern), None, false, false, false) => Ok(WaitUntil::Output(pattern)),
-            (None, Some(ms), false, false, false) => Ok(WaitUntil::Quiet { ms }),
-            (None, None, true, false, false) => Ok(WaitUntil::CommandDone),
-            (None, None, false, true, false) => Ok(WaitUntil::Exit),
-            (None, None, false, false, true) => Ok(WaitUntil::AgentNeedsInput),
-            _ => bail!("give one of --output, --quiet, --command-done, --exit, --agent-input"),
+        let Self { output, quiet, command_done, exit } = self;
+        match (output, quiet, command_done, exit) {
+            (Some(pattern), None, false, false) => Ok(WaitUntil::Output(pattern)),
+            (None, Some(ms), false, false) => Ok(WaitUntil::Quiet { ms }),
+            (None, None, true, false) => Ok(WaitUntil::CommandDone),
+            (None, None, false, true) => Ok(WaitUntil::Exit),
+            _ => bail!("give one of --output, --quiet, --command-done, --exit"),
         }
     }
 }
@@ -1064,7 +1060,7 @@ mod tests {
         );
         assert_eq!(until(&["wait", "t", "--command-done"]).0, WaitUntil::CommandDone);
         assert_eq!(until(&["wait", "t", "--exit"]).0, WaitUntil::Exit);
-        assert_eq!(until(&["wait", "t", "--agent-input"]).0, WaitUntil::AgentNeedsInput);
+        parse(&["wait", "t", "--agent-input"]).unwrap_err();
         parse(&["wait", "t"]).unwrap_err();
         parse(&["wait", "t", "--exit", "--command-done"]).unwrap_err();
     }

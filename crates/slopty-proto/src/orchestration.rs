@@ -187,7 +187,7 @@ impl TermAgent {
         }
     }
 
-    /// Whether it waits on the person or rests: what [`WaitUntil::AgentNeedsInput`] waits for.
+    /// Whether it waits on the person or rests: what [`EventFilter::AgentNeedsInput`] keeps.
     #[must_use]
     pub const fn needs_input(&self) -> bool {
         matches!(self.rung, Rung::NeedsYou)
@@ -246,8 +246,6 @@ pub enum WaitUntil {
     CommandDone,
     /// The session's program exits.
     Exit,
-    /// The agent in the session comes to rest at its prompt.
-    AgentNeedsInput,
 }
 
 /// A request to the server.
@@ -740,8 +738,7 @@ pub enum EventFilter {
     /// Every event.
     #[default]
     All,
-    /// An agent's move to a state that needs a human or is idle, as
-    /// [`WaitUntil::AgentNeedsInput`] reads it, on any worker.
+    /// A driven agent's move to a state that needs a human or is idle, on any worker.
     AgentNeedsInput,
 }
 

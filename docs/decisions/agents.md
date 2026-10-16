@@ -3694,11 +3694,9 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `AgentSource`, `AgentStatus::Working` (a terminal's agent is `Running` or not), the worker's
     agent broadcast (`Daemon::heard`) and `orchestrate::AgentFeed`. The 750 ms poll stays for
     the foreground process alone, which keeps the typing guard.
-  - `WaitUntil::AgentNeedsInput` on a terminal is refused as `Invalid`, its words naming
-    `start_thread` and `events --agent-input`, until the variant and the CLI's
-    `wait --agent-input` go from `slopty-proto` and `slopty-cli`.
-  - Tests: `slopty-worker` `orchestrate::{a_wait_on_a_terminals_agent_is_refused,
-    nothing_is_typed_into_a_terminal_an_agent_runs_in}`; `slopty-agent` `tests::{
+  - `WaitUntil::AgentNeedsInput` and the CLI's `wait --agent-input` are gone (2026-10-17): a
+    driven agent's coming to rest is `events --agent-input`.
+  - Tests: `slopty-worker` `orchestrate::nothing_is_typed_into_a_terminal_an_agent_runs_in`; `slopty-agent` `tests::{
     a_hand_started_claude_is_known_by_its_process, a_second_claude_in_the_same_terminal_is_a_new_agent,
     the_table_keeps_only_agents_and_lets_them_go_with_their_terminals}`.
 

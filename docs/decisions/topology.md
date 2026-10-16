@@ -263,9 +263,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `CommandDone` is met by the first command whose `133;D` came at or after the mark, and it
     consumes that command. A command that ended before its wait arrived therefore still counts,
     and the same line or command never ends two waits. `Quiet` restarts on any output. `Exit`
-    holds once the program is gone. `AgentNeedsInput` holds at once for an agent blocked on a
-    human, and otherwise at its next report of blocked, idle or done. An agent already idle
-    when the wait starts has usually just been typed to, so its idle status is stale. Every
+    holds once the program is gone. No condition waits on an agent in a terminal (agents.md,
+    "Nothing reads a terminal's title"); a driven agent's rest is an event. Every
     wait sleeps on the session's activity channel and the agent events, never on a timer that
     asks again.
   - **Read views.** Each view is a message to the session's thread, answered from
