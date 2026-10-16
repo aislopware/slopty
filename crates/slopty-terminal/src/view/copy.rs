@@ -164,14 +164,14 @@ impl TerminalView {
     }
 
     /// The foot of the grid in copy mode: it says so, and "Done" leaves it, as Esc does.
-    pub(super) fn render_copy_mode(&self, cx: &Context<Self>) -> Option<gpui::Div> {
+    pub(super) fn render_copy_mode(&self, cx: &Context<Self>) -> gpui::AnyElement {
         let pill = FootPill {
             id: "copy-mode",
-            icon: slopty_kit::icons::Symbol::CharacterCursorIbeam,
+            icon: slopty_shell::icons::KEYBOARD,
             words: SharedString::new_static(COPY_MODE),
             act: COPY_MODE_DONE,
         };
-        self.render_foot_pill(pill, cx, |this, _window, cx| this.leave_copy_mode(cx))
+        self.render_foot_pill(&pill, cx, |this, _window, cx| this.leave_copy_mode(cx))
     }
 }
 
@@ -213,7 +213,7 @@ mod tests {
     ) -> (Entity<TerminalView>, mpsc::Receiver<ClientMsg>, &mut VisualTestContext) {
         let (tx, rx) = mpsc::channel(4096);
         cx.update(|cx| {
-            gpui_kit::init(cx);
+            cx.set_global(slopty_shell::theme::Theme::default());
             cx.bind_keys(super::super::key_bindings());
         });
         let (view, cx) = cx.add_window_view(|window, cx| {

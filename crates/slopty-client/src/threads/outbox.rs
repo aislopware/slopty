@@ -51,9 +51,7 @@ impl Sent {
                         .iter()
                         .any(|i| matches!(&i.body, ItemBody::User(m) if m.intent == Some(self.id)))
             }
-            Intent::Answer { ask, .. } | Intent::Release { ask } => {
-                self.failed() || !request_open(state, ask)
-            }
+            Intent::Answer { ask, .. } => self.failed() || !request_open(state, ask),
             Intent::Interrupt => {
                 self.outcome.is_some()
                     && state.last_turn().is_none_or(|t| !matches!(t.state, TurnState::Active))
@@ -86,7 +84,9 @@ impl Sent {
             | Intent::Seen { .. }
             | Intent::Draft { .. }
             | Intent::Name { .. }
-            | Intent::Said { .. } => self.outcome.is_some(),
+            | Intent::Said { .. }
+            | Intent::End
+            | Intent::SetOption { .. } => self.outcome.is_some(),
         }
     }
 
@@ -95,7 +95,7 @@ impl Sent {
     fn shown_in_row(&self, row: Option<&ThreadRow>) -> bool {
         match &self.intent {
             Intent::Send { .. } if self.failed() => false,
-            Intent::Answer { ask, .. } | Intent::Release { ask } => {
+            Intent::Answer { ask, .. } => {
                 self.failed() || row.is_none_or(|row| !row.requests.iter().any(|r| r.id == *ask))
             }
             _ => true,

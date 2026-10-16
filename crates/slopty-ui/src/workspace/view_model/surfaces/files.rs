@@ -5,16 +5,23 @@
 //! ([`WorkspaceView::surface_place`]); an absolute path reads a file outside it, which is never
 //! written. A file's version is its size and modification time, which is what the worker's save
 //! checks a conflict by.
+//!
+//! The tree's watch asks nothing: the worker follows the folders the shell listed and those of
+//! the documents it read, and lists one again unasked when its entries change or one of its
+//! files is written ([`WorkspaceView::folder_moved`]). The git status's watch asks for the
+//! status again only when the worker says the repository moved.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::hash::{DefaultHasher, Hash as _, Hasher as _};
+use std::rc::Rc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use futures::StreamExt as _;
+use futures::FutureExt as _;
 use gpui::{Context, Task};
 use slopty_client::WorkerKey;
 use slopty_core::WallMs;
+use slopty_proto::ClientMsg;
 use slopty_proto::file::{FileRead, WriteResult};
 use slopty_proto::folder::{FsOp, FsOutcome, FsRefusal, Listing};
 use slopty_proto::git::{GitDone, GitOp, GitOutcome};
@@ -35,15 +42,12 @@ use slopty_view_proto::{
 };
 use slopty_view_rpc::{RpcError, RpcReply};
 
-use super::{absolute, ask, join, value, within};
+use super::{absolute, ask, join, value, watched, within};
 use crate::view_model::rows;
 use crate::workspace::WorkspaceView;
 
-/// How often a watched tree's listed folders are looked at again.
-const RELIST: Duration = Duration::from_secs(2);
-
-/// How often a watched repository's status is asked again.
-const RESTATUS: Duration = Duration::from_secs(3);
+/// The documents read last whose folders the worker follows, so a write to one reaches it.
+const FOLLOWED_DOCUMENTS: usize = 16;
 
 /// The most matches a search returns when the shell names no limit.
 const MATCHES: usize = 200;
@@ -64,6 +68,44 @@ pub(super) struct Kept {
     listed: HashMap<(WorkerKey, String), BTreeMap<String, Vec<Seen>>>,
     /// Pictures being read in chunks, by worker and absolute path.
     images: VecDeque<((WorkerKey, String), Picture)>,
+    /// The tree watches open, by worker and workspace.
+    trees: HashMap<(WorkerKey, String), Vec<Tree>>,
+    /// The documents read last, oldest first.
+    documents: VecDeque<Document>,
+    /// The folders each worker was last told to follow.
+    folders_sent: HashMap<WorkerKey, Vec<String>>,
+}
+
+/// A tree watch: where its frames go, and the last frame's number.
+struct Tree {
+    id: u64,
+    tx: futures::channel::mpsc::UnboundedSender<serde_json::Value>,
+    sequence: u64,
+}
+
+impl Tree {
+    /// Send `changes`, or ask the shell to read everything again; `false` once it is gone.
+    fn send(&mut self, changes: Vec<WorkspaceFileChange>, resync_required: bool) -> bool {
+        self.sequence = self.sequence.saturating_add(1);
+        let frame = WorkspaceFileChanges { sequence: self.sequence, resync_required, changes };
+        serde_json::to_value(&frame).is_ok_and(|frame| self.tx.unbounded_send(frame).is_ok())
+    }
+}
+
+/// A document the shell read: where it is, and its size and time as read.
+#[derive(Clone, PartialEq, Eq)]
+struct Document {
+    key: WorkerKey,
+    root: String,
+    path: String,
+    stamp: Option<(u64, u64)>,
+}
+
+impl Document {
+    /// Its folder, as the worker names it.
+    fn folder(&self) -> String {
+        join(&self.root, self.path.rsplit_once('/').map_or("", |(dir, _)| dir))
+    }
 }
 
 /// An entry of a listed folder, as it was.
@@ -102,6 +144,16 @@ fn time(at: WallMs) -> Option<chrono::DateTime<chrono::Utc>> {
 /// The checkout id of the workspace at `root` on `key`.
 fn checkout_id(key: WorkerKey, root: &str) -> String {
     format!("{key}:{root}")
+}
+
+/// The folder `path` names as the workspace at `root` names it: `""` for the root itself, none
+/// when it is outside.
+fn inside<'a>(root: &str, path: &'a str) -> Option<&'a str> {
+    if path == root {
+        return Some("");
+    }
+    let rest = path.strip_prefix(root.trim_end_matches('/'))?.strip_prefix('/')?;
+    Some(rest.trim_matches('/'))
 }
 
 /// `rel`'s last part.
@@ -330,7 +382,10 @@ impl WorkspaceView {
                 let at = dir.clone();
                 this.update(cx, |view, _| {
                     let files = &mut view.view_model.surfaces.files;
-                    files.listed.entry(workspace).or_default().insert(at, kept);
+                    let new = files.listed.entry(workspace).or_default().insert(at, kept).is_none();
+                    if new {
+                        view.send_folders(key);
+                    }
                 })
                 .map_err(super::gone)?;
                 let shown = u32::try_from(listed.len()).unwrap_or(u32::MAX);
@@ -470,8 +525,17 @@ impl WorkspaceView {
         let path = join(&root, &request.path);
         let rx = self.surface_read(key, path);
         let checkout = checkout_id(key, &root);
-        cx.spawn(async move |_, cx| {
+        cx.spawn(async move |this, cx| {
             let read = within(cx, rx).await?;
+            let stamp = match &read {
+                FileRead::Text { size, modified_ms, .. } => Some((*size, modified_ms.as_millis())),
+                FileRead::Media { bytes, modified_ms, .. } => {
+                    Some((bytes.len() as u64, modified_ms.as_millis()))
+                }
+                _ => None,
+            };
+            let document = Document { key, root: root.clone(), path: request.path.clone(), stamp };
+            this.update(cx, |view, _| view.read_document(document)).map_err(super::gone)?;
             let mut text = WorkspaceFileText {
                 checkout_id: checkout,
                 path: request.path,
@@ -733,10 +797,10 @@ impl WorkspaceView {
         })
     }
 
-    /// `WatchWorkspaceFiles`: the workspace's changes, as its listed folders show them, looked
-    /// at again every [`RELIST`] while the watch is open.
+    /// `WatchWorkspaceFiles`: the workspace's changes, as its listed folders and its documents'
+    /// folders show them when the worker lists one again on its own ([`Self::folder_moved`]).
     pub(super) fn watch_files(
-        &self,
+        &mut self,
         params: &serde_json::Value,
         cx: &Context<Self>,
     ) -> Task<Result<RpcReply, RpcError>> {
@@ -747,63 +811,141 @@ impl WorkspaceView {
         if let Err(error) = request::<WatchWorkspaceFilesRequest>(params.clone()) {
             return fail(error);
         }
-        let (tx, rx) = futures::channel::mpsc::unbounded::<serde_json::Value>();
-        let workspace = (key, root.clone());
+        let (tx, reply, gone) = watched();
+        let id = self.view_model.surfaces.next_watch();
+        let workspace = (key, root);
+        let trees = self.view_model.surfaces.files.trees.entry(workspace.clone()).or_default();
+        trees.push(Tree { id, tx, sequence: 0 });
+        self.send_folders(key);
         cx.spawn(async move |this, cx| {
-            let mut sequence = 0_u64;
-            while !tx.is_closed() {
-                cx.background_executor().timer(RELIST).await;
-                let Ok(dirs) = this.update(cx, |view, _| {
-                    let listed = view.view_model.surfaces.files.listed.get(&workspace);
-                    listed.map(|dirs| dirs.keys().cloned().collect::<Vec<_>>()).unwrap_or_default()
-                }) else {
-                    return;
-                };
-                let mut found = Vec::new();
-                for dir in dirs {
-                    let path = join(&root, &dir);
-                    let listing = match ask(&this, cx, |v| v.surface_list(key, path)).await {
-                        Ok(listing) => listing,
-                        Err(RpcError::Closed) => return,
-                        Err(_) => continue,
-                    };
-                    let now = match listing {
-                        Listing::Listed { entries, .. } => Some(seen(&entries)),
-                        Listing::NotFolder | Listing::Missing { .. } => None,
-                    };
-                    let Ok(was) = this.update(cx, |view, _| {
-                        let listed = view.view_model.surfaces.files.listed.entry(workspace.clone());
-                        let dirs = listed.or_default();
-                        match &now {
-                            Some(now) => dirs.insert(dir.clone(), now.clone()),
-                            None => dirs.remove(&dir),
-                        }
-                    }) else {
-                        return;
-                    };
-                    if let (Some(was), Some(now)) = (was, now) {
-                        found.extend(changes(&dir, &was, &now));
+            let _gone = gone.await;
+            let _closing = this.update(cx, |view, _| {
+                let files = &mut view.view_model.surfaces.files;
+                if let Some(trees) = files.trees.get_mut(&workspace) {
+                    trees.retain(|tree| tree.id != id);
+                    if trees.is_empty() {
+                        files.trees.remove(&workspace);
                     }
                 }
-                if found.is_empty() {
-                    continue;
-                }
-                sequence = sequence.saturating_add(1);
-                let frame =
-                    WorkspaceFileChanges { sequence, resync_required: false, changes: found };
-                let Ok(frame) = serde_json::to_value(&frame) else { return };
-                if tx.unbounded_send(frame).is_err() {
-                    return;
-                }
-            }
+                view.send_folders(workspace.0);
+            });
         })
         .detach();
-        Task::ready(Ok(RpcReply::Stream(rx.boxed())))
+        Task::ready(Ok(reply))
     }
 
-    /// `WatchWorkspaceGitStatus`: the workspace's repository status, sent when it changes.
+    /// The shell read `document`: its folder is followed while it is among the last read.
+    fn read_document(&mut self, document: Document) {
+        let key = document.key;
+        let documents = &mut self.view_model.surfaces.files.documents;
+        documents.retain(|d| (d.key, &d.root, &d.path) != (key, &document.root, &document.path));
+        if documents.len() >= FOLLOWED_DOCUMENTS {
+            documents.pop_front();
+        }
+        documents.push_back(document);
+        self.send_folders(key);
+    }
+
+    /// Tell `key` the folders the tree watches follow there, when that moved: each listed
+    /// folder of a workspace with a watch open, and the folders of its documents read last.
+    pub(super) fn send_folders(&mut self, key: WorkerKey) {
+        let files = &self.view_model.surfaces.files;
+        let watched = |root: &String| {
+            files.trees.get(&(key, root.clone())).is_some_and(|trees| !trees.is_empty())
+        };
+        let mut paths = BTreeSet::new();
+        for ((k, root), dirs) in &files.listed {
+            if *k == key && watched(root) {
+                paths.extend(dirs.keys().map(|dir| join(root, dir)));
+            }
+        }
+        for document in files.documents.iter().filter(|d| d.key == key && watched(&d.root)) {
+            paths.insert(document.folder());
+        }
+        let paths: Vec<String> = paths.into_iter().collect();
+        // A link told nothing yet follows nothing.
+        if files.folders_sent.get(&key).map_or(paths.is_empty(), |sent| *sent == paths) {
+            return;
+        }
+        if self.surface_send(key, ClientMsg::WatchFolders { paths: paths.clone() }) {
+            self.view_model.surfaces.files.folders_sent.insert(key, paths);
+        }
+    }
+
+    /// The worker listed the folder `path` again on its own, since something in it changed:
+    /// what changed goes to the tree watches of each workspace that listed it, and a document
+    /// read from it, in a folder the workspace did not list, is said to be modified or gone.
+    pub(super) fn folder_moved(&mut self, key: WorkerKey, path: &str, listing: &Listing) {
+        let now = match listing {
+            Listing::Listed { entries, .. } => Some(entries.as_slice()),
+            Listing::NotFolder | Listing::Missing { .. } => None,
+        };
+        let files = &mut self.view_model.surfaces.files;
+        let mut found: Vec<((WorkerKey, String), Vec<WorkspaceFileChange>)> = Vec::new();
+        let mut unlisted = false;
+        for ((k, root), dirs) in &mut files.listed {
+            let Some(dir) = inside(root, path).filter(|_| *k == key) else { continue };
+            if !dirs.contains_key(dir) {
+                continue;
+            }
+            let dir = dir.to_owned();
+            let Some(entries) = now else {
+                unlisted = true;
+                dirs.remove(&dir);
+                continue;
+            };
+            if let Some(was) = dirs.insert(dir.clone(), seen(entries)) {
+                found.push(((key, root.clone()), changes(&dir, &was, &seen(entries))));
+            }
+        }
+        for document in files.documents.iter_mut().filter(|d| d.key == key) {
+            let dir = document.path.rsplit_once('/').map_or("", |(dir, _)| dir);
+            let listed = files.listed.get(&(key, document.root.clone()));
+            if document.folder() != path || listed.is_some_and(|dirs| dirs.contains_key(dir)) {
+                continue;
+            }
+            let name = base_name(&document.path);
+            let entry = now.and_then(|entries| entries.iter().find(|e| e.name == name));
+            let stamp = entry.map(|e| (e.size, e.modified_ms.as_millis()));
+            let kind = match (entry, stamp == document.stamp) {
+                (None, _) => WorkspaceFileChangeKind::Removed,
+                (Some(_), false) => WorkspaceFileChangeKind::Modified,
+                (Some(_), true) => continue,
+            };
+            document.stamp = stamp;
+            let change = WorkspaceFileChange {
+                operation_id: None,
+                kind,
+                path: document.path.clone(),
+                old_path: None,
+            };
+            found.push(((key, document.root.clone()), vec![change]));
+        }
+        for (workspace, changes) in found.into_iter().filter(|(_, c)| !c.is_empty()) {
+            if let Some(trees) = files.trees.get_mut(&workspace) {
+                trees.retain_mut(|tree| tree.send(changes.clone(), false));
+            }
+        }
+        if unlisted {
+            self.send_folders(key);
+        }
+    }
+
+    /// The link to `key` came back: the folders go to the new link, and each tree watch there
+    /// has the shell read its folders and documents again, for what the old one missed.
+    pub(super) fn trees_relinked(&mut self, key: WorkerKey) {
+        let files = &mut self.view_model.surfaces.files;
+        files.folders_sent.remove(&key);
+        for ((..), trees) in files.trees.iter_mut().filter(|((k, _), _)| *k == key) {
+            trees.retain_mut(|tree| tree.send(Vec::new(), true));
+        }
+        self.send_folders(key);
+    }
+
+    /// `WatchWorkspaceGitStatus`: the workspace's repository status, sent when it changes, asked
+    /// again only when the worker says the repository moved or the link came back.
     pub(super) fn watch_git_status(
-        &self,
+        &mut self,
         params: &serde_json::Value,
         cx: &Context<Self>,
     ) -> Task<Result<RpcReply, RpcError>> {
@@ -811,31 +953,50 @@ impl WorkspaceView {
             Ok(place) => place,
             Err(error) => return fail(error),
         };
-        let (tx, rx) = futures::channel::mpsc::unbounded::<serde_json::Value>();
+        let (tx, reply, mut gone) = watched();
+        let id = self.view_model.surfaces.next_watch();
+        let bell = Rc::new(tokio::sync::Notify::new());
+        self.follow_repos(id, &bell, &[(key, root.clone())]);
         cx.spawn(async move |this, cx| {
             let mut last: Option<Option<String>> = None;
-            while !tx.is_closed() {
+            loop {
                 let repo = root.clone();
-                let status = match ask(&this, cx, |v| v.surface_git(key, repo, GitOp::Status)).await
-                {
-                    Ok(outcome) => git_status(key, &root, outcome),
-                    Err(RpcError::Closed) => return,
-                    Err(_) => None,
+                // The shell letting the watch go ends it at once, an answer still out or not.
+                let mut asked = std::pin::pin!(
+                    ask(&this, cx, |v| v.surface_git(key, repo, GitOp::Status)).fuse()
+                );
+                let answer = futures::select_biased! {
+                    _ = gone => break,
+                    answer = asked => answer,
                 };
-                let revision = status.as_ref().map(|status| status.revision.clone());
-                if last.as_ref() != Some(&revision) {
-                    last = Some(revision);
+                let status = match answer {
+                    Ok(outcome) => Some(git_status(key, &root, outcome)),
+                    Err(RpcError::Closed) => return,
+                    // Unanswered, the link down: what the shell shows stands until it is back.
+                    Err(error) if super::is_unanswered(&error) => None,
+                    Err(_) => Some(None),
+                };
+                let revision = |status: &CheckoutGitStatus| status.revision.clone();
+                if let Some(status) = status
+                    && last.as_ref() != Some(&status.as_ref().map(revision))
+                {
+                    last = Some(status.as_ref().map(revision));
                     let frame = WorkspaceGitStatusFrame { status };
-                    let Ok(frame) = serde_json::to_value(&frame) else { return };
-                    if tx.unbounded_send(frame).is_err() {
-                        return;
+                    let sent =
+                        serde_json::to_value(&frame).is_ok_and(|f| tx.unbounded_send(f).is_ok());
+                    if !sent {
+                        break;
                     }
                 }
-                cx.background_executor().timer(RESTATUS).await;
+                futures::select_biased! {
+                    _ = gone => break,
+                    () = bell.notified().fuse() => {}
+                }
             }
+            let _closing = this.update(cx, |view, _| view.unfollow_repos(id));
         })
         .detach();
-        Task::ready(Ok(RpcReply::Stream(rx.boxed())))
+        Task::ready(Ok(reply))
     }
 }
 

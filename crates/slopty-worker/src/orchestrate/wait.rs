@@ -14,11 +14,10 @@
 //!   `CommandDone` consumes the command it reports, so the next waits for a later one.
 //! - `Exit` holds once the program is gone (its exit reported, its PTY closed, or the session
 //!   closed).
-//! - `AgentNeedsInput` holds at once when the agent is blocked on a human, else at the next report
-//!   of it blocked, idle at its prompt or done with its turn. An agent already idle when the call
-//!   starts counts only once it reports again: the caller has usually just typed to it, and its
-//!   idle status is the one from before. A wait that fell behind the broadcast reads the status the
-//!   reports it missed left in the table, and holds if that one needs input.
+//! - `AgentNeedsInput` holds at the next report of the terminal's agent at rest at its prompt, as
+//!   its title says. An agent already idle when the call starts counts only once it reports again:
+//!   its idle status is the one from before. A wait that fell behind the broadcast reads the status
+//!   the reports it missed left in the table, and holds if that one is at rest.
 //!
 //! Every condition but `Exit` ends as [`Waited::Closed`] when the program exits first.
 
@@ -213,15 +212,9 @@ async fn output(
     }
 }
 
-/// Blocked on a human, idle at its prompt, or done with its turn, finished or failed.
-const fn needs_input(status: &AgentStatus) -> bool {
-    matches!(
-        status,
-        AgentStatus::Blocked(_)
-            | AgentStatus::Idle
-            | AgentStatus::Done
-            | AgentStatus::Failed { .. }
-    )
+/// At rest at its prompt: its title says no turn runs.
+const fn needs_input(status: AgentStatus) -> bool {
+    matches!(status, AgentStatus::Idle)
 }
 
 async fn agent_input(
@@ -232,20 +225,17 @@ async fn agent_input(
 ) -> Result<Waited, Failure> {
     let session = handle.id();
     let status = |agents: &dyn Agents| agents.status(session).map(|a| a.status);
-    if matches!(status(&*feed.agents), Some(AgentStatus::Blocked(_))) {
-        return Ok(Waited::Met { line: None });
-    }
     loop {
         tokio::select! {
             ev = feed.heard.recv() => match ev {
-                Ok(ev) if ev.session == session && needs_input(&ev.status) => {
+                Ok(ev) if ev.session == session && needs_input(ev.status) => {
                     return Ok(Waited::Met { line: None });
                 }
                 Ok(_) => {}
                 // The report the wait is for may be among the ones missed: the table has
                 // the status they left behind.
                 Err(broadcast::error::RecvError::Lagged(_)) => {
-                    if status(&*feed.agents).is_some_and(|s| needs_input(&s)) {
+                    if status(&*feed.agents).is_some_and(needs_input) {
                         return Ok(Waited::Met { line: None });
                     }
                 }

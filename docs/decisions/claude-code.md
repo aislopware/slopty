@@ -914,6 +914,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   tracker `a_report_from_any_program_drives_the_pill`, CLI
   `a_report_is_a_hook_payload_the_tracker_reads`.
 
+- ❌ **Deleted 2026-10-16: the TUI-only ruling below.** Claude Code is driven ("Claude Code is driven,
+  and its observed lane is gone", at the end): the ruling is kept as the record.
 - ✅ **The agent is used through its TUI; Slopty only reads its status** (2026-09-15, protocol
   48). Claude Code has no public API and its stream-json shape, slash commands, transcript
   records and prompt menus move between releases; a GUI of Slopty's own over it was a second
@@ -1196,6 +1198,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     finds nothing, a killed relay withdraws, the last follower leaving hands it back to the
     TUI, and with nobody following the relay is let go at once).
 
+- ❌ **Deleted 2026-10-16: the mod below.** Claude Code is driven ("Claude Code is driven,
+  and its observed lane is gone", at the end): the ruling is kept as the record.
 - ✅ **Slopty's Claude Code mod is the live channel, behind a strict version gate; the mod is
   TypeScript** (2026-09-27, phase 1c of "Claude Code gets a conversation face", verified against
   the official Claude Code 2.1.283; measured in `.research/claude-gui-study-2026-09-27.md`,
@@ -1222,8 +1226,14 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     - The mod's first event is a `hello` naming its protocol (`MOD_PROTOCOL`) and Claude Code's
       version. Nothing else is heard until a hello passes `slopty_agent::live::gate`: this
       protocol, and a version in `MOD_CLAUDE_VERSIONS`, which holds exactly the versions
-      recorded (today `["2.1.296"]`, recorded 2026-10-10 with the mod unchanged; 2.1.295, 2.1.291,
-      2.1.290, 2.1.289 and 2.1.286 before it).
+      recorded (today `["2.1.301"]`, recorded 2026-10-16; 2.1.296, 2.1.295, 2.1.291, 2.1.290,
+      2.1.289 and 2.1.286 before it).
+    - From 2.1.299 a subagent's turn fires `turn.start` and `turn.complete` of its own, under a
+      turn id of its own. The mod passes `agentId` on both edges, and the worker's live board
+      ends only the blocks of the thread whose turn ended (`live::Board::apply`), so the
+      session's own turns are the edges without it. 2.1.301's transcript also gains request
+      records (`api-request`, `api-request-blob`, `api-request-shape`, `atis-latch`), which
+      carry no conversation and are skipped.
     - From 2.1.295 a session with no settings starts in auto mode, and the request carries
       `system` entries after the turn. The recorder runs `--permission-mode default`, since
       auto mode's classifier would ask the canned API and be refused, and its canned API reads
@@ -1688,6 +1698,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   what runs in the session, or once its tile or worker is gone. Test:
   `a_face_stays_through_a_dropped_link_with_its_draft`.
 
+- ❌ **Deleted 2026-10-16: the resume typed after a reboot below.** Claude Code is driven ("Claude Code is driven,
+  and its observed lane is gone", at the end): the ruling is kept as the record.
 - ✅ **An agent comes back after a reboot** (2026-09-29). Session restore brought every lost
   shell back but never what it ran, so a Claude Code conversation came back as a bare prompt.
   A conversation the person left running is now resumed with `claude --resume <id>` (Claude
@@ -1872,6 +1884,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     - Golden: `worker_agent_waiting`.
     - `slopty-tools` reports the state as "paused".
 
+- ❌ **Deleted 2026-10-16: the status line's worktree below.** Claude Code is driven ("Claude
+  Code is driven, and its observed lane is gone"); an agent's branch is its thread's `branch`
+  fact.
 - ✅ **The pull request and worktree a status line names reach every client** (2026-09-30;
   wire change). Claude Code gives its status line command `pr: {number, url, review_state?,
   kind?}` (`review_state` is `approved`, `pending`, `changes_requested` or `draft`; `kind` is
@@ -1920,6 +1935,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     prints the variable, and the file follows a real client's focus, disconnect and
     reconnect, then goes when the worker is sent SIGTERM.
 
+- ❌ **Deleted 2026-10-16: the registry's agents put back below.** Claude Code is driven ("Claude Code is driven,
+  and its observed lane is gone", at the end): the ruling is kept as the record.
 - ✅ **After a worker restart, Claude Code's own registry puts the agents back** (2026-09-30;
   read from the registry since 2026-10-05). A restarted worker finds its agents again by
   process, but it loses what only hooks had said: a permission prompt, a question, the
@@ -1998,6 +2015,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `always_allow_says_a_mode_in_words`, `a_question_asked_in_the_terminal_is_shown_on_the_thread`
     and `a_hooks_folder_outranks_the_terminals_from_the_first_hook`.
 
+- ❌ **Deleted 2026-10-16: the wired `claude` in a shell below.** Claude Code is driven ("Claude Code is driven,
+  and its observed lane is gone", at the end): the ruling is kept as the record.
 - ✅ **A `claude` typed in a Slopty shell is wired as one Slopty starts** (2026-10-03, readiness
   audit A7). An agent opened with ⌘⇧T or the palette got the relay's hooks, Slopty's tools and
   a pinned conversation (`Worker::as_agent`), but one typed in a shell got only the mod: its
@@ -2360,3 +2379,37 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     visible command the build renders in its TUI, or has only there. A bare-only one must take
     arguments. The table must be the pinned mod version's. A snapshot of the TUI-rendered
     commands makes a bump that adds one, or turns one into plain text, show in review.
+
+- ✅ **Claude Code is driven, and its observed lane is gone** (2026-10-16; the drive itself is
+  `agents.md`, "Each agent's drive" and "Why Claude is driven"). The worker runs the person's
+  own `claude` as Claude's desktop app runs it, `claude -p` over stream-json with the control
+  protocol, in ptyd's custody, and nothing else of Claude Code's: its hooks and the relay
+  (`slopty hook`, its status line and the reports it handed over), Slopty's mod and its
+  socket, the transcript follower and the newest-file guess, the five-second dialog
+  inference, the composer that typed into the TUI, the registry reads, and the `claude`
+  wrapper the shell integration put in front of a typed `claude` are deleted. A `claude` the
+  person types in a terminal is that terminal's program and nothing more.
+  - **After a reboot.** A Claude Code in a shell is no longer typed back with `--resume` when
+    ptyd comes back: Slopty no longer reads terminals for agents. A driven thread survives a
+    worker restart in ptyd's keeping; when ptyd itself is gone (a reboot), the thread is
+    exited and resumable, its cut turn marked, and its next message starts Claude Code again
+    with `--resume`.
+  - **A managed `claude`.** A managed launcher found as the person's `claude` (such as
+    `~/.local/bin/claude`) takes the drive's arguments and hands them to the client it starts;
+    `a_managed_launcher_hands_the_arguments_on` (`crates/slopty-worker/tests/claude.rs`) proves
+    it against the stand-in launcher.
+  - **Reports** from the server reach a seated agent as a message of their own through the
+    drive (`reports_reach_a_seated_agent_as_a_message_of_their_own`, `slopty-workerd`), not
+    through a hook. An agent's words to another (`agent_tell`) and a child's coming to rest
+    arrive the same way (`an_agent_starts_a_child_waits_reads_it_and_hears_it_as_messages`,
+    `slopty-cli`).
+  - **A terminal's own agent.** A `claude` the person runs in a terminal is known only by its
+    foreground process and the title it paints, working or at rest (`slopty_agent::AgentTable`),
+    for orchestration's waits and the sleep policy. Nothing is typed into it: orchestration's
+    input into a terminal an agent runs in is refused as `Forbidden`
+    (`nothing_is_typed_into_a_terminal_an_agent_runs_in`). The deliveries ptyd typed whole for
+    the composer (`PtydRequest::Deliver`), the draft guard, and the error codes only the typing
+    guard used (`AwaitsPerson`, `AgentNotReady`, `AgentExited`) are deleted with it.
+  - **Wire.** `WorkerMsg::AgentBranch` and `AgentReport::Branch` (the worktree a status line
+    named) and `FromServer::Pushes` (the word by which a worker held a prompt for a pocketed
+    phone) are deleted; an agent's branch is its thread's `branch` fact.

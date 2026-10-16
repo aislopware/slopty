@@ -108,6 +108,7 @@ fn a_held_drop_rings_and_ends_with_the_workers_word(cx: &mut TestAppContext) {
     view.update(cx, |v, cx| v.drag_hold(p, cx));
     cx.run_until_parked();
     let ring = cx.debug_bounds("screen-drop-ring").expect("the ring while promises are written");
+    assert_eq!(ring.size, size(px(24.0), px(24.0)), "the shell's spinner in its disc");
     assert!((ring.center().x - p.x).abs() < px(1.0) && (ring.center().y - p.y).abs() < px(1.0));
     drop(drags(&mut rx));
     let promised = vec![Promised { item: 0, file: None }];
@@ -208,7 +209,8 @@ fn leaving_the_tile_during_a_worker_drag_hands_it_over(cx: &mut TestAppContext) 
     };
 
     let drag = begin(cx);
-    assert!(cx.debug_bounds("screen-drag-out-items").is_some(), "drawn at the pointer");
+    let ghost = cx.debug_bounds("screen-drag-out-items").expect("drawn at the pointer");
+    assert_eq!(ghost.size.height, px(24.0), "the shell's drag ghost");
     let _sent = std::iter::from_fn(|| rx.try_recv().ok()).count();
     cx.simulate_mouse_move(point(px(600.0), px(150.0)), held, none);
     cx.simulate_mouse_move(point(px(650.0), px(150.0)), held, none);

@@ -1,7 +1,7 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
 //! Chat chips: a reference to another Slopty chat, dropped into a composer
 //! from the sidebar. The draft and the transcript keep the private link; the
-//! agent receives a plain description it can act on with Slopty's `read_chat`
+//! agent receives a plain description it can act on with Slopty's `agent_read`
 //! tool, which accepts the chat's id.
 use std::ops::Range;
 
@@ -101,7 +101,8 @@ pub fn chat_mention_prompt(text: &str) -> String {
     for link in chat_mention_links(text) {
         out.push_str(&text[at..link.range.start]);
         out.push_str(&format!(
-            "the Slopty chat \"{}\" (chat id {}; read it with the Slopty read_chat tool)",
+            "the Slopty chat \"{}\" (chat id {}; read it with the Slopty agent_read tool, \
+             `agent` set to that id)",
             link.title, link.chat_id
         ));
         at = link.range.end;
@@ -127,7 +128,7 @@ mod tests {
         assert_eq!(
             chat_mention_prompt(&text),
             "Compare the Slopty chat \"Brief Hello Interaction\" (chat id 0fd51606-ab; \
-             read it with the Slopty read_chat tool) with this one"
+             read it with the Slopty agent_read tool, `agent` set to that id) with this one"
         );
         // Markup in a title stays text.
         let marked = chat_mention_link("a1", "[x](y) `z`").unwrap();

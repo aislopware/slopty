@@ -12,9 +12,10 @@ workspace = true
 
 [dependencies]
 gpui.workspace = true
-gpui-kit.workspace = true
 # A picture the program draws (kitty graphics, iTerm2, sixel) handed to GPUI as a frame (`view`).
 image.workspace = true
+# A find's pattern, written for the worker to compile (`view::find`).
+regex.workspace = true
 rustc-hash.workspace = true
 # A client view of the term stream: the session's state, its pacing, the clipboard it pastes
 # from and the files dropped on it.
@@ -26,6 +27,9 @@ slopty-kit.workspace = true
 slopty-platform.workspace = true
 slopty-predict.workspace = true
 slopty-proto.workspace = true
+# The shell's own parts the view's floats are drawn with: its cards, menus, pills, buttons, rail,
+# icons and tooltips (`docs/decisions/ui.md`, "Slopty's own views draw with the shell's helpers").
+slopty-shell.workspace = true
 slopty-theme.workspace = true
 tokio.workspace = true
 tracing.workspace = true

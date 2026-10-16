@@ -1,4 +1,4 @@
-// Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
+// Derived from zeron (MIT, github.com/zeronsh/zeron @ 3b2f780), see THIRD_PARTY_NOTICES.md
 //! Message parts: the event fold, the render-only privacy policy, and continuation splitting.
 //!
 //! Ports of `packages/control/src/parts.ts` (fold) and
@@ -135,6 +135,7 @@ pub enum MessagePart {
         name: String,
         mime_type: String,
     },
+    // slopty: no agent visuals.
     /// Model thinking. Carries its body in a dedicated doc field (`reasoning`,
     /// never `text`) so pre-reasoning desktop builds — whose unknown-kind
     /// fallback renders `text` as prose — degrade to an invisible empty text
@@ -204,6 +205,21 @@ pub enum MessagePart {
     Error {
         id: String,
         message: String,
+        // slopty: one error grammar: the copy in `message`, what the agent said kept apart, and
+        // whether the turn can be tried again.
+        /// What the agent or its machine said, word for word, behind the copy.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+        /// The failed turn can be tried again (`RetryTurn`).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        retry: bool,
+    },
+    // slopty: a quiet one-line divider of Slopty's: a compaction, a subagent's news.
+    /// A one-line divider between turns that no one wrote: "Compacted · 143k tokens →
+    /// summary", "ui-lane came to rest".
+    Marker {
+        id: String,
+        text: String,
     },
     /// The seam in a forked chat's transcript: everything above was copied
     /// from `source_chat_id` when the fork was cut, everything below is this
@@ -226,10 +242,12 @@ impl MessagePart {
         match self {
             MessagePart::Text { id, .. }
             | MessagePart::Image { id, .. }
+            // slopty: no agent visuals.
             | MessagePart::Reasoning { id, .. }
             | MessagePart::Tool { id, .. }
             | MessagePart::Input { id, .. }
             | MessagePart::Error { id, .. }
+            | MessagePart::Marker { id, .. } // slopty: dividers.
             | MessagePart::Fork { id, .. } => id,
         }
     }
@@ -262,7 +280,11 @@ impl MessagePart {
                 name,
                 mime_type,
             } => id.len() + path.len() + name.len() + mime_type.len(),
-            MessagePart::Error { message, .. } => message.len(),
+            // slopty: no agent visuals.
+            MessagePart::Error {
+                message, detail, ..
+            } => message.len() + detail.as_ref().map_or(0, String::len), // slopty: its detail.
+            MessagePart::Marker { text, .. } => text.len(), // slopty: dividers.
             MessagePart::Fork {
                 source_chat_id,
                 source_title,
@@ -319,6 +341,7 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                 out.push(image);
             }
         }
+        // slopty: no agent visuals.
         AgentEvent::ReasoningDelta { text } => {
             // Empty deltas are liveness heartbeats (redacted thinking) — the
             // engine drops them before the fold, but stay tolerant here too.
@@ -429,6 +452,8 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
             out.push(MessagePart::Error {
                 id,
                 message: message.clone(),
+                detail: None, // slopty: one error grammar.
+                retry: false,
             });
         }
         AgentEvent::Done { error, .. } => {
@@ -437,6 +462,8 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                 out.push(MessagePart::Error {
                     id,
                     message: message.clone(),
+                    detail: None, // slopty: one error grammar.
+                    retry: false,
                 });
             }
         }

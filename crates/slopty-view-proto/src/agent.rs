@@ -1,4 +1,4 @@
-// Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
+// Derived from zeron (MIT, github.com/zeronsh/zeron @ 3b2f780), see THIRD_PARTY_NOTICES.md
 //! Agent-side wire types: harness identity, run requests, streaming events, tool calls.
 
 use serde::{Deserialize, Serialize};
@@ -481,6 +481,8 @@ pub const SUBAGENT_INPUT_KEEP: [&str; 5] = [
     "subagent_type",
 ];
 
+// slopty: no agent visuals.
+
 /// Where one checklist item stands. Claude's TodoWrite, OpenCode and ACP plans
 /// distinguish the item being worked on from those still waiting; Codex and
 /// Cursor only report done / not done.
@@ -579,7 +581,7 @@ pub struct ToolDiff {
     pub new_text: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)] // slopty: Default.
 #[serde(rename_all = "camelCase")]
 pub struct UserInputQuestion {
     pub id: String,
@@ -596,6 +598,23 @@ pub struct UserInputQuestion {
     /// It takes one of its options, on a click, and no words of one's own.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub choices_only: bool,
+    // slopty: an approval that is long, unknown or destructive is never shown as allowable at
+    // a key's press (Claude desktop's rules).
+    /// Focus starts on the deny ([`Self::deny_option`]), not the first option.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub deny_first: bool,
+    /// No key answers it: only a click on an option does.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub click_only: bool,
+    /// The allow stays disabled until the whole of `question` has been scrolled through.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub read_gate: bool,
+    /// Which of `options` turns the call down once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deny_option: Option<usize>,
+    /// The change an edit's approval would make.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposed: Option<ToolDiff>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -641,6 +660,7 @@ pub enum AgentEvent {
         name: String,
         mime_type: String,
     },
+    // slopty: no agent visuals.
     ReasoningDelta {
         text: String,
     },

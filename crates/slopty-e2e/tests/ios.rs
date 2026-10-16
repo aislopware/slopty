@@ -22,48 +22,12 @@ mod tests {
         Simulator { udid, bundle_id }
     }
 
-    /// A made-up Claude Code session of `turns` turns, each the person's prompt and a long
-    /// answer, as its transcript keeps them: long enough that the first prompt is far above
-    /// the tail on a phone.
-    fn long_session(turns: usize) -> String {
-        use serde_json::json;
-        let mut out = String::new();
-        let mut parent: Option<String> = None;
-        let mut n = 0_u64;
-        let mut push = |mut record: serde_json::Value| {
-            n = n.saturating_add(1);
-            let uuid = format!("00000000-0000-4000-9000-{n:012}");
-            record["uuid"] = json!(uuid);
-            record["parentUuid"] = parent.clone().map_or(serde_json::Value::Null, |p| json!(p));
-            record["timestamp"] = json!(format!("2026-10-05T09:{:02}:{:02}.000Z", n / 60, n % 60));
-            record["sessionId"] = json!("s1");
-            record["isSidechain"] = json!(false);
-            out.push_str(&record.to_string());
-            out.push('\n');
-            parent = Some(uuid);
-        };
-        for turn in 0..turns {
-            push(json!({ "type": "user", "message": { "role": "user",
-                "content": format!("Step {turn}: tighten the parser's error path") } }));
-            let answer = (0..6)
-                .map(|p| {
-                    format!("Paragraph {p} of turn {turn}: the span is kept and the cursor reset.")
-                })
-                .collect::<Vec<_>>()
-                .join("\n\n");
-            push(json!({ "type": "assistant", "message": {
-                "id": format!("msg_{turn}"), "role": "assistant", "model": "claude-opus-5-5",
-                "content": [{ "type": "text", "text": answer }], "stop_reason": "end_turn",
-                "usage": { "input_tokens": 12, "output_tokens": 420 } } }));
-        }
-        out
-    }
-
     /// A note's "Deny" pressed while the app is not running: the system launches it in the
     /// background and hands it the press before any window, so the press is answered with no
-    /// window, through a link of its own to the server its settings name. The held relay gets
-    /// its answer and the thread's request is gone. Pressed again on the prompt now gone, the
-    /// press says so in a note in place of the one pressed.
+    /// window, through a link of its own to the server its settings name. The thread's request
+    /// (a Claude Code thread, the stand-in, asking to run a command) is answered and gone.
+    /// Pressed again on the prompt now gone, the press says so in a note in place of the one
+    /// pressed.
     ///
     /// simctl delivers pushes but cannot press a note's button, so the press is handed in at
     /// launch through the e2e build's seam ([`slopty_e2e::LAUNCH_TAP_ENV`]), along the path the
@@ -74,41 +38,21 @@ mod tests {
         use serde_json::json;
         use slopty_e2e::harness::slopty_json;
 
-        let mut stack = Stack::launch_on_simulator("e2e-ios-cold", simulator()).await.unwrap();
-        let dump = stack
-            .driver
-            .wait_for("the first shell with a prompt", STEP, |d| {
-                d.status == "connected"
-                    && d.terminals.iter().any(|t| t.rows.iter().any(|r| !r.is_empty()))
-            })
-            .await
-            .unwrap();
-        let session = dump.terminals[0].session.clone();
+        let mut stack =
+            Stack::launch_on_simulator_with_claude("e2e-ios-cold", simulator()).await.unwrap();
         // Notes allowed with no prompt, so the press's own note can be shown.
         stack.driver.push_register(&[0; 32]).await.unwrap();
 
-        let transcript = stack.path("projects").join("s1.jsonl");
-        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
-        std::fs::write(&transcript, long_session(1)).unwrap();
-        let transcript = transcript.to_string_lossy().into_owned();
-        let start = json!({
-            "hook_event_name": "SessionStart", "source": "startup", "session_id": "s1",
-            "transcript_path": transcript, "cwd": stack.path("home"),
-        });
-        let started = stack.relay_hook(&session, &[], &start).unwrap().wait().await.unwrap();
-        assert!(started.success(), "the relay ran");
-        let ask = json!({
-            "hook_event_name": "PermissionRequest", "session_id": "s1",
-            "transcript_path": transcript, "cwd": stack.path("home"),
-            "tool_name": "Bash", "tool_input": { "command": "rm -rf build" },
-        });
-        let mut held = stack.relay_hook(&session, &[], &ask).unwrap();
-
-        let term = format!("e2e-ios-cold/{session}");
         let cli = stack.path("cli");
         let address = stack.server.address().to_owned();
+        let folder = stack.path("repo");
+        std::fs::create_dir_all(&folder).unwrap();
+        let folder = folder.to_string_lossy().into_owned();
+        let start = ["agent", "start", "e2e-ios-cold", "--folder", &folder, "bash", "rm -rf build"];
+        let started = slopty_json(&address, &cli, &start, b"").await.unwrap();
+        let agent = started["agent"].as_str().expect("an agent started").to_owned();
         let read_thread = async || {
-            let args = ["agent", "read", "--term", term.as_str()];
+            let args = ["agent", "read", "--thread", agent.as_str(), "--activity"];
             slopty_json(&address, &cli, &args, b"").await.unwrap()
         };
         let mut read = read_thread().await;
@@ -119,31 +63,28 @@ mod tests {
             read = read_thread().await;
         }
         let ask = read["requests"][0]["ask"].as_str().unwrap().to_owned();
-        let held_on: slopty_core::WorkerId = read["worker"].as_str().unwrap().parse().unwrap();
+        let thread = read["thread"].as_str().unwrap_or(&agent).to_owned();
         // Spelled as `slopty_platform::notify::info` keys a note, which builds on Apple only.
         let pressed = json!({
             "id": "e2e-cold",
             "action": "deny",
-            "info": {
-                "worker": held_on.as_uuid().as_u128().to_string(),
-                "session": session,
-                "ask": ask,
-            },
+            "info": { "thread": thread, "ask": ask },
         })
         .to_string();
 
         // Killed, then launched by the press.
         let launched = std::time::Instant::now();
         stack.relaunch_on_simulator(&[(slopty_e2e::LAUNCH_TAP_ENV, &pressed)]).await.unwrap();
-        let status = tokio::time::timeout(STEP, held.wait()).await;
-        let status = status.expect("the held relay got its answer").unwrap();
+        let mut read = read_thread().await;
+        while read["requests"].as_array().is_none_or(|r| !r.is_empty()) {
+            assert!(launched.elapsed() < STEP, "the request still waits: {read}");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            read = read_thread().await;
+        }
         println!(
-            "MEASURE ios-cold: a Deny pressed on a killed app reached the held relay within {:.0} ms",
+            "MEASURE ios-cold: a Deny pressed on a killed app answered the thread within {:.0} ms",
             launched.elapsed().as_secs_f64() * 1e3
         );
-        assert!(status.success(), "the relay ends well on an answer: {status}");
-        let read = read_thread().await;
-        assert_eq!(read["requests"].as_array().map(Vec::len), Some(0), "{read}");
 
         // The same press on the prompt now gone: said in a note in its place.
         stack.relaunch_on_simulator(&[(slopty_e2e::LAUNCH_TAP_ENV, &pressed)]).await.unwrap();

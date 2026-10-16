@@ -343,7 +343,7 @@ fn open(path: &Path, extra: OFlags) -> io::Result<OwnedFd> {
 }
 
 /// Whether the volume can miss another machine's writes (`MNT_LOCAL` from sys/mount.h).
-fn remote(fs: &rustix::fs::StatFs) -> bool {
+pub(super) fn remote(fs: &rustix::fs::StatFs) -> bool {
     let local = fs.f_flags & libc::MNT_LOCAL.cast_unsigned() != 0;
     let kind: String = fs
         .f_fstypename

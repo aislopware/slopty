@@ -41,15 +41,13 @@ pub fn notice_body(notice: &Notice) -> String {
 
 /// The identifier of a note about `notice`.
 ///
-/// It is its terminal's session (a thread's tile, or a program's own terminal), else its
-/// thread's. The app's note about the same moment has the same one, so either replaces the
-/// other.
+/// It is its thread's, or a program's own terminal's session. The app's note about the same
+/// moment has the same one, so either replaces the other.
 #[must_use]
 pub fn note_id(notice: &Notice) -> String {
-    match (&notice.about, notice.tile) {
-        (Subject::Thread(_), Some(tile)) => tile.session.to_string(),
-        (Subject::Thread(at), None) => format!("{}-{}", info::THREAD, at.thread),
-        (Subject::Terminal(term), _) => term.session.to_string(),
+    match &notice.about {
+        Subject::Thread(at) => format!("{}-{}", info::THREAD, at.thread),
+        Subject::Terminal(term) => term.session.to_string(),
     }
 }
 
@@ -67,21 +65,16 @@ pub fn note_id(notice: &Notice) -> String {
 pub fn note_of(body: &PushBody) -> Note {
     let notice = &body.notice;
     let mut keys = BTreeMap::new();
-    let worker = match (&notice.about, notice.tile) {
-        (Subject::Thread(at), _) => Some(at.worker),
-        (Subject::Terminal(term), _) => Some(term.worker),
+    let worker = match &notice.about {
+        Subject::Thread(at) => at.worker,
+        Subject::Terminal(term) => term.worker,
     };
-    if let Some(worker) = worker {
-        keys.insert(info::WORKER.to_owned(), worker.as_uuid().as_u128().to_string());
-    }
-    match (&notice.about, notice.tile) {
-        (_, Some(tile)) => {
-            keys.insert(info::SESSION.to_owned(), tile.session.to_string());
-        }
-        (Subject::Thread(at), None) => {
+    keys.insert(info::WORKER.to_owned(), worker.as_uuid().as_u128().to_string());
+    match &notice.about {
+        Subject::Thread(at) => {
             keys.insert(info::THREAD.to_owned(), at.thread.to_string());
         }
-        (Subject::Terminal(term), None) => {
+        Subject::Terminal(term) => {
             keys.insert(info::SESSION.to_owned(), term.session.to_string());
         }
     }
@@ -409,11 +402,10 @@ mod tests {
 
     use super::*;
 
-    fn notice(kind: NoticeKind, about: Subject, tile: Option<TermRef>) -> Notice {
+    fn notice(kind: NoticeKind, about: Subject) -> Notice {
         Notice {
             kind,
             about,
-            tile,
             title: "Rank the fleet".to_owned(),
             text: "Run cargo test?".to_owned(),
             worked_ms: None,
@@ -421,9 +413,8 @@ mod tests {
         }
     }
 
-    /// A thread at a terminal is that terminal's note, with its worker and session for the
-    /// tap, urgent and with the buttons when it asks a yes or no; one with no terminal is its
-    /// thread's.
+    /// A thread's note is its thread's, with its worker and thread for the tap, urgent and with
+    /// the buttons when it asks a yes or no.
     #[test]
     fn a_pushed_note_carries_what_a_tap_routes_by() {
         let (worker, session, thread) = (WorkerId::new(), SessionId::new(), ThreadId::new());
@@ -431,13 +422,13 @@ mod tests {
         let tile = TermRef { worker, session };
         let ask = AskId("toolu_01".to_owned());
         let body = PushBody {
-            notice: notice(NoticeKind::NeedsYou, at, Some(tile)),
+            notice: notice(NoticeKind::NeedsYou, at),
             ask: Some(ask),
             picks: Vec::new(),
             quiet: false,
         };
         let note = note_of(&body);
-        assert_eq!(note.id, session.to_string());
+        assert_eq!(note.id, format!("thread-{thread}"));
         assert_eq!(
             (note.title.as_str(), note.body.as_str()),
             ("Rank the fleet", "Run cargo test?")
@@ -450,7 +441,7 @@ mod tests {
             note.info,
             keys(&[
                 (info::WORKER, worker_key.clone()),
-                (info::SESSION, session.to_string()),
+                (info::THREAD, thread.to_string()),
                 (info::ASK, "toolu_01".to_owned()),
             ])
         );
@@ -461,7 +452,7 @@ mod tests {
         assert!(moved.silent, "a quiet push only moves its buttons");
         assert_eq!(moved.category, Some(super::super::REPLYING), "the yes or no went: a reply");
 
-        let mut done = notice(NoticeKind::Finished, at, None);
+        let mut done = notice(NoticeKind::Finished, at);
         done.via = Some(Via { thread: ThreadId::new(), title: "Explore".to_owned() });
         done.title = " ".to_owned();
         let note = note_of(&PushBody { notice: done, ask: None, picks: Vec::new(), quiet: false });
@@ -477,7 +468,7 @@ mod tests {
         assert_eq!((note.category, note.urgent), (Some(super::super::REPLYING), false));
 
         // A program's own wait leads to its terminal, under the id the app's own note has.
-        let program = notice(NoticeKind::NeedsYou, Subject::Terminal(tile), None);
+        let program = notice(NoticeKind::NeedsYou, Subject::Terminal(tile));
         let note =
             note_of(&PushBody { notice: program, ask: None, picks: Vec::new(), quiet: false });
         assert_eq!(note.id, session.to_string());
@@ -504,7 +495,7 @@ mod tests {
         let labels = |l: &[&str]| l.iter().map(|l| (*l).to_owned()).collect::<Vec<String>>();
         let picks = labels(&["Split", "Unified"]);
         let body = PushBody {
-            notice: notice(NoticeKind::NeedsYou, at, None),
+            notice: notice(NoticeKind::NeedsYou, at),
             ask: Some(AskId("toolu_02".to_owned())),
             picks: picks.clone(),
             quiet: false,
@@ -542,10 +533,9 @@ mod tests {
     fn a_push_opens_to_its_note_on_its_phone_only() {
         let key = DeviceKey::generate().unwrap();
         let token = "0f".repeat(32);
-        let (worker, session) = (WorkerId::new(), SessionId::new());
-        let at = Subject::Thread(ThreadAt { worker, thread: ThreadId::new() });
+        let at = Subject::Thread(ThreadAt { worker: WorkerId::new(), thread: ThreadId::new() });
         let body = PushBody {
-            notice: notice(NoticeKind::NeedsYou, at, Some(TermRef { worker, session })),
+            notice: notice(NoticeKind::NeedsYou, at),
             ask: None,
             picks: Vec::new(),
             quiet: false,

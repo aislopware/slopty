@@ -16,12 +16,11 @@
 use std::rc::Rc;
 
 use gpui::{
-    Context, InteractiveElement as _, IntoElement as _, ParentElement as _,
-    StatefulInteractiveElement as _, Styled as _, anchored, deferred, div, point, px,
+    Context, InteractiveElement as _, IntoElement as _, ParentElement as _, SharedString,
+    StatefulInteractiveElement as _, Styled as _, div, px,
 };
-use slopty_kit::colors::hsla;
-use slopty_kit::kit::menu::Mark;
-use slopty_kit::kit::{self, Menu, MenuItem, MenuPanel};
+use slopty_shell::live::chrome;
+use slopty_shell::live::menu::{Mark, Menu, MenuItem, MenuPanel};
 
 use super::{ScreenView, ScreenViewEvent};
 
@@ -51,11 +50,19 @@ pub const TYPE_CLIPBOARD: &str = "Type the clipboard";
 /// The group the view's root names, so the button shows while the pointer is over the picture.
 pub(super) const GROUP: &str = "screen-view";
 
+/// How far the controls' pill sits in from the body's top and right edges.
+pub(super) const EDGE: f32 = 8.0;
+
+/// The floating pill's height (the shell's jump pill).
+pub(super) const PILL: f32 = 30.0;
+
+/// The room between the pill and what hangs under it: zeron's menu gap.
+const GAP: f32 = 6.0;
+
 /// How far below the body's top edge what hangs under the controls' pill starts: the menu, and
 /// the stats, which would cover the button if they shared its corner.
-pub(super) fn under_controls(theme: &slopty_theme::Theme) -> f32 {
-    let pill = theme.spacing.xs.mul_add(2.0, kit::icon_button_side(theme));
-    theme.spacing.sm + pill + theme.spacing.xs
+pub(super) const fn under_controls() -> f32 {
+    EDGE + PILL + GAP
 }
 
 /// What only the workspace can do for a view: it says which it offers, and how each stands.
@@ -176,60 +183,79 @@ impl ScreenView {
     }
 
     /// The button in the picture's top right corner, the stream's health mark beside it while
-    /// it is unwell, and the menu while it is open.
+    /// it is unwell, and the menu while it is open: the shell's floating pill holding its
+    /// control, the menu the shell's own, hung under the pill's corner.
     pub(super) fn controls(&self, cx: &Context<Self>) -> gpui::AnyElement {
-        let theme = &self.theme;
+        let theme = chrome::theme(cx).clone();
         let view = cx.entity();
-        let health = Self::health_mark(&view, self.header(), theme, 1.0);
+        let health = Self::health_mark(&view, self.header(), &theme);
         // Over a pointer the button waits for the pointer, unless the stream is unwell or the
         // menu is open; a finger has no hover, so on touch it stays.
         let always = self.touch || self.controls_open || health.is_some();
-        let button = kit::icon_button(
-            theme,
+        let stream = self.stream.0;
+        let button = chrome::icon_button(
             "screen-controls",
-            slopty_kit::icons::Symbol::Ellipsis,
+            slopty_shell::icons::MORE_HORIZONTAL,
             CONTROLS,
+            &theme.for_popup(),
         )
-        .debug_selector(|| "screen-controls".to_owned())
+        .aria_expanded(self.controls_open)
         .on_click(cx.listener(|this, _ev, window, cx| {
             // A press that found the menu open closed it on its way down (outside the menu):
             // its click leaves it closed rather than opening it again.
             let open = !this.controls_open && !std::mem::take(&mut this.controls_pressed_open);
             this.set_controls_open(open, window, cx);
         }));
-        let pill = kit::elevate(kit::pill_frame(theme), theme)
-            .id("screen-controls-pill")
+        let row = div()
             .flex()
             .items_center()
-            .gap(px(theme.spacing.xs))
-            .p(px(theme.spacing.xs))
-            .text_color(hsla(theme.surfaces.text_secondary))
-            // Before the menu's press outside closes it: the pill paints first, so its capture
-            // runs first.
-            .capture_any_mouse_down(cx.listener(|this, _ev, _window, _cx| {
-                this.controls_pressed_open = this.controls_open;
-            }))
-            // A press on the pill is the pill's: it never reaches the picture under it.
-            .on_mouse_down(gpui::MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
-            .on_mouse_down(gpui::MouseButton::Right, |_ev, _w, cx| cx.stop_propagation())
+            .gap(px(chrome::CONTROL_GAP))
+            // The pill's ends hug the control: a round 30 round the 24 square.
+            .mx(px(-10.0))
             .children(health)
-            .child(button);
+            .child(button)
+            .into_any_element();
+        let pressed = cx.listener(|this, _ev: &gpui::MouseDownEvent, _window, _cx| {
+            this.controls_pressed_open = this.controls_open;
+        });
+        let pill = slopty_shell::live::floating_pill(
+            SharedString::from(format!("screen-controls-pill-{stream}")),
+            None,
+            &theme,
+            move |_| (None, row),
+            move |pill| {
+                pill.debug_selector(|| "screen-controls-pill".to_owned())
+                    // Before the menu's press outside closes it: the pill paints first, so its
+                    // capture runs first.
+                    .capture_any_mouse_down(pressed)
+                    // A press on the pill is the pill's: it never reaches the picture under it.
+                    .on_mouse_down(gpui::MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
+                    .on_mouse_down(gpui::MouseButton::Right, |_ev, _w, cx| cx.stop_propagation())
+            },
+        );
+        let pill = div().child(pill);
         let pill =
             if always { pill } else { pill.opacity(0.0).group_hover(GROUP, |el| el.opacity(1.0)) };
         div()
             .absolute()
-            .top(px(theme.spacing.sm))
-            .right(px(theme.spacing.sm))
+            .top(px(EDGE))
+            .right(px(EDGE))
             .child(pill)
             .children(self.controls_open.then(|| self.controls_menu(cx)))
             .into_any_element()
     }
 
-    /// The open menu, hung under the button's corner and kept inside the window.
+    /// The open menu, hung under the pill's corner and kept inside the window.
     fn controls_menu(&self, cx: &Context<Self>) -> gpui::AnyElement {
         let this = cx.entity().downgrade();
         let mut menu = Menu::new();
+        let mut asked = false;
         for (row, label, mark) in self.control_rows() {
+            // What the workspace does for the view stands apart from the view's own rows.
+            if matches!(row, Row::Ask(_)) && !asked {
+                asked = true;
+                menu.separator();
+            }
             let this = this.clone();
             let key = label.to_lowercase().replace(' ', "-");
             menu.push(
@@ -240,25 +266,16 @@ impl ScreenView {
             );
         }
         let close = this;
-        let panel = MenuPanel::new("screen-controls-menu", CONTROLS, Rc::new(menu), &self.theme, {
+        let panel = MenuPanel::new("screen-controls-menu", CONTROLS, Rc::new(menu), {
             move |window, cx| {
                 let _gone = close.update(cx, |v, cx| v.set_controls_open(false, window, cx));
             }
         });
-        let margin = self.theme.spacing.sm;
-        let corner = point(
-            self.bounds.origin.x + self.bounds.size.width - px(margin),
-            self.bounds.origin.y + px(under_controls(&self.theme)),
-        );
-        deferred(
-            anchored()
-                .anchor(gpui::Anchor::TopRight)
-                .position(corner)
-                .snap_to_window_with_margin(px(margin))
-                .child(panel),
+        slopty_shell::popover::anchored_menu_below_end(
+            SharedString::from(format!("screen-controls-menu-{}", self.stream.0)),
+            panel.into_any_element(),
+            None,
         )
-        .with_priority(slopty_kit::layer::Layer::Submenu.priority())
-        .into_any_element()
     }
 
     /// Whether the controls' menu is open.

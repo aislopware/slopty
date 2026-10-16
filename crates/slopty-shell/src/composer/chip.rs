@@ -33,6 +33,11 @@ pub enum ChipKind {
     Directory,
     /// Another chat, dropped from the sidebar.
     Chat,
+    // slopty: words quoted from an answer, and a terminal's block or selection.
+    /// Words quoted from the transcript; the agent receives them as a `>` quote.
+    Quote,
+    /// A terminal's block or selection; the agent receives it fenced.
+    Context,
 }
 
 /// What a chip's icon is painted from: a monochrome glyph tinted like the
@@ -174,6 +179,8 @@ pub(crate) fn chip_icon(
         ChipKind::Skill => ChipIcon::Glyph(crate::icons::MAGIC_STICK_3),
         ChipKind::Command => ChipIcon::Glyph(crate::icons::COMMAND),
         ChipKind::Chat => ChipIcon::Glyph(crate::icons::CHAT_ROUND_LINE),
+        ChipKind::Quote => ChipIcon::Glyph(crate::icons::DOCUMENT), // slopty: quotes.
+        ChipKind::Context => ChipIcon::Glyph(crate::icons::TERMINAL), // slopty: terminal context.
         ChipKind::File => ChipIcon::FileTheme(asset_path(FileIconIdentity::file(path), appearance)),
         ChipKind::Directory => ChipIcon::FileTheme(asset_path(
             FileIconIdentity::directory(path.trim_end_matches('/'), false),
@@ -295,4 +302,225 @@ pub(crate) fn chip_text(
         .child(underlay)
         .child(styled)
         .into_any_element()
+}
+
+// slopty: the quote and terminal-context chips. The draft holds each as a link whose
+// destination carries the words, percent-encoded; the send turns it into what the agent reads
+// (a `>` quote, a fenced block), so every agent takes it as plain Markdown.
+
+/// The scheme of a quote chip's link.
+pub(crate) const QUOTE_SCHEME: &str = "slopty-quote:";
+/// The scheme of a terminal-context chip's link.
+pub(crate) const CONTEXT_SCHEME: &str = "slopty-context:";
+
+/// The longest label a quote chip shows, in characters.
+const QUOTE_LABEL_CHARS: usize = 36;
+
+fn encode_component(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for byte in text.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            out.push(byte as char);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
+
+fn decode_component(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        match bytes[at] {
+            b'%' => {
+                let hex = text.get(at + 1..at + 3)?;
+                out.push(u8::from_str_radix(hex, 16).ok()?);
+                at += 3;
+            }
+            byte if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') => {
+                out.push(byte);
+                at += 1;
+            }
+            _ => return None,
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+fn escape_label(label: &str) -> String {
+    label
+        .replace('\\', "\\\\")
+        .replace('[', "\\[")
+        .replace(']', "\\]")
+        .replace('`', "\\`")
+}
+
+/// What a quote chip reads: its first words on one line, in quotation marks.
+pub(crate) fn quote_label(text: &str) -> String {
+    let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut label = line.clone();
+    if line.chars().count() > QUOTE_LABEL_CHARS {
+        // The ellipsis is one of the label's characters.
+        let cut: String = line.chars().take(QUOTE_LABEL_CHARS - 1).collect();
+        label = cut.trim_end().to_owned() + "…";
+    }
+    format!("“{label}”")
+}
+
+/// A quote chip's link for `text`, or `None` for words that are only space.
+pub(crate) fn quote_link(text: &str) -> Option<String> {
+    let text = text.trim();
+    (!text.is_empty()).then(|| {
+        format!("[{}]({QUOTE_SCHEME}{})", escape_label(&quote_label(text)), encode_component(text))
+    })
+}
+
+/// A terminal-context chip's link: `fenced` is the block the terminal hands over (fenced and
+/// named after its command), the chip "Terminal · 24 lines".
+pub(crate) fn context_link(fenced: &str) -> Option<String> {
+    let fenced = fenced.trim_end_matches('\n');
+    let body = fenced_body(fenced)?;
+    let lines = body.lines().count().max(1);
+    let label = format!("Terminal · {lines} line{}", if lines == 1 { "" } else { "s" });
+    Some(format!("[{}]({CONTEXT_SCHEME}{})", escape_label(&label), encode_component(fenced)))
+}
+
+/// The inside of a fenced block that is the whole of `text`.
+fn fenced_body(text: &str) -> Option<&str> {
+    let text = text.trim();
+    let fence_len = text.bytes().take_while(|b| *b == b'`').count();
+    if fence_len < 3 {
+        return None;
+    }
+    let fence = &text[..fence_len];
+    let (_, rest) = text.split_once('\n')?;
+    let body = rest.strip_suffix(fence)?;
+    Some(body.strip_suffix('\n').unwrap_or(body))
+}
+
+/// One quote or terminal-context chip in a draft.
+pub(crate) struct ContextChipLink {
+    pub(crate) range: Range<usize>,
+    pub(crate) kind: ChipKind,
+    pub(crate) label: String,
+    pub(crate) text: String,
+}
+
+/// The quote and terminal-context chips in `raw`, in order: only canonical links, never
+/// escaped text or code examples.
+pub(crate) fn context_chip_links(raw: &str) -> Vec<ContextChipLink> {
+    if !raw.contains(QUOTE_SCHEME) && !raw.contains(CONTEXT_SCHEME) {
+        return Vec::new();
+    }
+    let mut links = Vec::new();
+    let mut open: Option<(Range<usize>, ChipKind, String)> = None;
+    let mut label = String::new();
+    for (event, range) in pulldown_cmark::Parser::new(raw).into_offset_iter() {
+        match event {
+            pulldown_cmark::Event::Start(pulldown_cmark::Tag::Link { dest_url, .. }) => {
+                let (kind, encoded) = if let Some(rest) = dest_url.strip_prefix(QUOTE_SCHEME) {
+                    (ChipKind::Quote, rest)
+                } else if let Some(rest) = dest_url.strip_prefix(CONTEXT_SCHEME) {
+                    (ChipKind::Context, rest)
+                } else {
+                    continue;
+                };
+                if let Some(text) = decode_component(encoded) {
+                    open = Some((range, kind, text));
+                    label.clear();
+                }
+            }
+            pulldown_cmark::Event::Text(text) if open.is_some() => label.push_str(&text),
+            pulldown_cmark::Event::End(pulldown_cmark::TagEnd::Link) => {
+                if let Some((range, kind, text)) = open.take() {
+                    links.push(ContextChipLink { range, kind, label: label.clone(), text });
+                }
+            }
+            _ => {}
+        }
+    }
+    links
+}
+
+/// `raw` as the agent receives it: each quote chip a `>` quote on lines of its own, each
+/// terminal-context chip its fenced block.
+pub(crate) fn expand_context_chips(raw: &str) -> String {
+    let links = context_chip_links(raw);
+    if links.is_empty() {
+        return raw.to_owned();
+    }
+    let mut out = String::with_capacity(raw.len());
+    let mut at = 0;
+    for link in links {
+        let before = &raw[at..link.range.start];
+        out.push_str(before);
+        let block = match link.kind {
+            ChipKind::Quote => link
+                .text
+                .lines()
+                .map(|line| if line.is_empty() { ">".to_owned() } else { format!("> {line}") })
+                .collect::<Vec<_>>()
+                .join("\n"),
+            _ => link.text.clone(),
+        };
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(&block);
+        out.push('\n');
+        // A blank line ends the quote or block before the person's own words, which would
+        // otherwise run on into the quote.
+        let rest = &raw[link.range.end..];
+        let words = rest.trim_start_matches([' ', '\n']);
+        if !words.is_empty() {
+            out.push('\n');
+        }
+        at = raw.len() - words.len();
+    }
+    out.push_str(&raw[at..]);
+    out
+}
+
+#[cfg(test)]
+mod context_chip_tests {
+    use super::*;
+
+    #[test]
+    fn a_quote_reaches_the_agent_as_a_quote() {
+        let link = quote_link("The cache is\nstale [here]").unwrap();
+        assert!(link.starts_with("[“The cache is stale \\[here\\]”](slopty-quote:"), "{link}");
+        let draft = format!("{link} why?");
+        let links = context_chip_links(&draft);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].kind, ChipKind::Quote);
+        assert_eq!(links[0].text, "The cache is\nstale [here]");
+        assert_eq!(expand_context_chips(&draft), "> The cache is\n> stale [here]\n\nwhy?");
+        assert_eq!(quote_link("  \n "), None);
+    }
+
+    #[test]
+    fn a_terminal_block_reaches_the_agent_fenced() {
+        let fenced = "```sh\n$ make\nerror: no rule\n```\n";
+        let link = context_link(fenced).unwrap();
+        assert!(link.starts_with("[Terminal · 2 lines](slopty-context:"), "{link}");
+        let draft = format!("Why does this fail?\n{link}\n");
+        assert_eq!(
+            expand_context_chips(&draft),
+            "Why does this fail?\n```sh\n$ make\nerror: no rule\n```\n"
+        );
+        assert!(context_link("plain words").is_none());
+    }
+
+    #[test]
+    fn a_long_quote_label_is_cut_and_literal_links_stay() {
+        let label = quote_label(&"word ".repeat(20));
+        assert!(label.chars().count() <= 2 + QUOTE_LABEL_CHARS, "{label}");
+        assert!(label.ends_with("…”") && !label.contains(" …"), "{label}");
+        assert_eq!(quote_label("  short   words "), "“short words”");
+        let literal = "`[x](slopty-quote:abc)`";
+        assert!(context_chip_links(literal).is_empty());
+        assert_eq!(expand_context_chips(literal), literal);
+    }
 }

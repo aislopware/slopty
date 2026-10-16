@@ -1,10 +1,10 @@
 //! The slash commands an agent takes, for the conversation face's composer menu.
 //!
 //! Two sources:
-//! - **Claude Code's own list**, every command the person can run now, built-in, plugin, the
-//!   person's and the project's, and MCP prompts alike, in the typeahead's order. The mod sends it
-//!   (`$.command.list()`, [`crate::live::Catalog`]) where it is heard. It is the menu there:
-//!   nothing is compiled in, so a new Claude Code's commands come with it.
+//! - **Claude Code's own list**, every command and skill the person can run now, built-in, plugin,
+//!   the person's and the project's, and MCP prompts alike, as `initialize` answers it
+//!   ([`Listed`]). It is the menu: nothing is compiled in, so a new Claude Code's commands come
+//!   with it.
 //! - **Custom commands**, read from where Claude Code loads them ([`custom`]): the person's
 //!   `~/.claude/commands` and `~/.claude/skills`, the project's `.claude/commands` and
 //!   `.claude/skills` in the agent's directory and each one above it short of the home directory,
@@ -16,16 +16,16 @@
 //! directory's), unless it says `user-invocable: false`. A plugin's are named
 //! `<plugin>:<name>`. The first of a name wins, in the order project, personal, plugin, so the
 //! menu lists each name once. They give Claude Code's list their argument hints and where each
-//! comes from, which it does not say, and stand alone where the mod is not heard ([`listed`]).
+//! comes from, which it does not say, and stand alone until it lists its own ([`listed`]).
 
 use std::collections::HashSet;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::conversation::{CommandSource, SlashCommand};
-use crate::live::CommandInfo;
 
 /// Most bytes of a command or skill file read for its front matter and first line.
 const HEAD_BYTES: u64 = 8 * 1024;
@@ -39,60 +39,29 @@ const MAX_DEPTH: usize = 4;
 /// Longest description kept, in characters.
 const DESCRIPTION_CHARS: usize = 160;
 
-/// Claude Code's own commands that open a dialog in its terminal whatever follows them.
+/// One command or skill as Claude Code lists it (`initialize`'s `commands`).
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct Listed {
+    /// What the person runs it by, without the slash.
+    pub name: String,
+    /// The typeahead's line for it.
+    #[serde(default)]
+    pub description: String,
+    /// What it takes, in a few words.
+    #[serde(default, rename = "argumentHint")]
+    pub argument_hint: String,
+    /// Whether it is Claude Code's own.
+    #[serde(default)]
+    pub builtin: bool,
+}
+
+/// The menu of slash commands, each name once.
 ///
-/// Each is a name or an alias. Sent from a thread's composer, the dialog shows only in the TUI,
-/// so the client shows the TUI. Claude Code's command list does not say which do; its build does,
-/// and `cargo xtask fixtures claude-commands` records it (`tests/fixtures/claude/commands.json`):
-/// each renders in the TUI, or exists only there (`rewind`).
-pub const DIALOGS: &[&str] = &[
-    "bashes",
-    "context",
-    "help",
-    "hooks",
-    "ide",
-    "install-github-app",
-    "login",
-    "logout",
-    "memory",
-    "permissions",
-    "plugin",
-    "plugins",
-    "privacy-settings",
-    "rewind",
-    "status",
-    "tasks",
-    "terminal-setup",
-    "theme",
-    "upgrade",
-    "usage",
-];
-
-/// Its commands that open a dialog only when run bare: given arguments they act at once
-/// (`/model sonnet`, `/config theme=dark`, `/mcp reconnect github`).
-pub const BARE_DIALOGS: &[&str] =
-    &["add-dir", "config", "export", "mcp", "model", "resume", "settings"];
-
-/// Whether Claude Code's built-in command `name` can open a dialog in its terminal.
+/// It is Claude Code's own list (`agent`) once it gave one, each command with the argument hint
+/// it gives (else its file's on disk) and the source its file on disk gives (`custom`); else the
+/// custom commands alone.
 #[must_use]
-pub fn may_open_dialog(name: &str) -> bool {
-    DIALOGS.contains(&name) || BARE_DIALOGS.contains(&name)
-}
-
-/// Whether Claude Code shows `draft`, sent, as a dialog in its terminal: `/permissions`, a bare
-/// `/model`.
-#[must_use]
-pub fn opens_dialog(draft: &str) -> bool {
-    let Some(command) = draft.trim().strip_prefix('/') else { return false };
-    let (name, args) = command.split_once(char::is_whitespace).unwrap_or((command, ""));
-    DIALOGS.contains(&name) || (BARE_DIALOGS.contains(&name) && args.trim().is_empty())
-}
-
-/// The menu: Claude Code's own list (`agent`) where the mod sent one, each command with the
-/// argument hint and the source its file on disk gives (`custom`); else the custom commands
-/// alone. Each name once.
-#[must_use]
-pub fn listed(agent: Option<&[CommandInfo]>, custom: &[SlashCommand]) -> Vec<SlashCommand> {
+pub fn listed(agent: Option<&[Listed]>, custom: &[SlashCommand]) -> Vec<SlashCommand> {
     let mut seen = HashSet::new();
     let Some(agent) = agent.filter(|a| !a.is_empty()) else {
         return custom.iter().filter(|c| seen.insert(c.name.clone())).cloned().collect();
@@ -102,27 +71,22 @@ pub fn listed(agent: Option<&[CommandInfo]>, custom: &[SlashCommand]) -> Vec<Sla
         .filter(|c| seen.insert(c.name.clone()))
         .map(|c| {
             let own = custom.iter().find(|o| o.name == c.name);
+            let hint = Some(c.argument_hint.trim()).filter(|h| !h.is_empty()).map(str::to_owned);
             SlashCommand {
                 name: c.name.clone(),
                 description: cut(c.description.trim()),
-                argument_hint: own.and_then(|o| o.argument_hint.clone()),
-                source: own.map_or_else(|| source_of(&c.source), |o| o.source),
+                argument_hint: hint.or_else(|| own.and_then(|o| o.argument_hint.clone())),
+                source: own.map_or_else(|| source_of(c.builtin), |o| o.source),
                 skill: own.is_some_and(|o| o.skill),
             }
         })
         .collect()
 }
 
-/// Where Claude Code says a command comes from, as the menu ranks it. Its `user` is the
-/// person's or the project's file, which a file found on disk tells apart; one not found is
-/// taken as the person's. An MCP server's prompt ranks as a plugin's: both are added to
-/// Claude Code rather than written by the person.
-fn source_of(said: &str) -> CommandSource {
-    match said {
-        "builtin" => CommandSource::BuiltIn,
-        "user" => CommandSource::Personal,
-        _ => CommandSource::Plugin,
-    }
+/// Where a command comes from when no file on disk says: Claude Code's own, else added to it
+/// (a plugin's, an MCP server's prompt).
+const fn source_of(builtin: bool) -> CommandSource {
+    if builtin { CommandSource::BuiltIn } else { CommandSource::Plugin }
 }
 
 /// The custom commands and skills Claude Code would load for an agent in `cwd`, in the order
@@ -337,52 +301,6 @@ mod tests {
 
     use super::*;
 
-    /// Every command said to open a dialog is one the pinned Claude Code build renders in its
-    /// TUI, or has only there, and is not hidden; one that opens a dialog only bare takes
-    /// arguments. The commands the TUI renders are pinned too, so a Claude Code bump that adds
-    /// one or turns one into plain text shows in review.
-    #[test]
-    fn the_dialog_commands_are_the_build_s_own() {
-        let path =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/claude/commands.json");
-        let doc: Value =
-            serde_json::from_str(&fs::read_to_string(path).expect("read")).expect("json");
-        let claude = doc["claude"].as_str().expect("a version");
-        assert!(
-            crate::claude_mod::MOD_CLAUDE_VERSIONS.contains(&claude),
-            "commands.json is {claude}'s: record it again with `cargo xtask fixtures claude-commands`"
-        );
-        let commands = doc["commands"].as_array().expect("commands");
-        let find = |name: &str| {
-            commands.iter().find(|c| {
-                c["name"] == name
-                    || c["aliases"].as_array().is_some_and(|a| a.iter().any(|a| a == name))
-            })
-        };
-        for name in DIALOGS.iter().chain(BARE_DIALOGS) {
-            let command = find(name).unwrap_or_else(|| panic!("{name} is no command of {claude}"));
-            let shown = command["jsx"] == true || command["tui_only"] == true;
-            assert!(shown && command["hidden"] == false, "{name}: {command}");
-        }
-        for name in BARE_DIALOGS {
-            assert!(
-                find(name).is_some_and(|c| c["argument_hint"].is_string()),
-                "{name} takes none"
-            );
-        }
-        let rendered: Vec<&str> = commands
-            .iter()
-            .filter(|c| c["hidden"] == false && (c["jsx"] == true || c["tui_only"] == true))
-            .filter_map(|c| c["name"].as_str())
-            .collect();
-        insta::assert_snapshot!("claude_tui_commands", rendered.join("\n"));
-        assert!(
-            opens_dialog("/permissions") && opens_dialog(" /model ") && opens_dialog("/settings")
-        );
-        assert!(!opens_dialog("/model sonnet") && !opens_dialog("/config theme=dark"));
-        assert!(!opens_dialog("/doctor") && !opens_dialog("/agents") && !opens_dialog("model"));
-    }
-
     fn write(path: &Path, text: &str) {
         fs::create_dir_all(path.parent().expect("a parent")).expect("dirs");
         fs::write(path, text).expect("write");
@@ -460,16 +378,17 @@ mod tests {
         assert_eq!(said("model"), None, "nothing of Claude Code's own is compiled in");
     }
 
-    /// Where the mod sent Claude Code's list, it is the menu, in its order: a command with a
-    /// file on disk takes the file's argument hint and source, the rest are ranked by what
-    /// Claude Code says of them, and a long description is cut. With an empty list the
+    /// Once Claude Code gave its list, it is the menu, in its order: a command with a file on
+    /// disk takes the file's argument hint and source, the rest are Claude Code's own or added
+    /// to it, and a long description is cut. With an empty list the
     /// custom commands stand alone.
     #[test]
     fn claude_codes_own_list_is_the_menu_with_the_disks_hints() {
-        let info = |name: &str, description: &str, source: &str| CommandInfo {
+        let info = |name: &str, description: &str, builtin: bool| Listed {
             name: name.to_owned(),
             description: description.to_owned(),
-            source: source.to_owned(),
+            argument_hint: String::new(),
+            builtin,
         };
         let own = vec![SlashCommand {
             name: "review".to_owned(),
@@ -480,11 +399,11 @@ mod tests {
         }];
         let long = "x".repeat(400);
         let agent = [
-            info("model", "Set the AI model", "builtin"),
-            info("review", "Review the diff", "user"),
-            info("deploy", &long, "user"),
-            info("github:pr", "Open a PR", "mcp"),
-            info("model", "again", "builtin"),
+            info("model", "Set the AI model", true),
+            info("review", "Review the diff", false),
+            info("deploy", &long, false),
+            info("github:pr", "Open a PR", false),
+            info("model", "again", true),
         ];
         let listed = listed(Some(&agent), &own);
         let names: Vec<&str> = listed.iter().map(|c| c.name.as_str()).collect();
@@ -495,7 +414,7 @@ mod tests {
             (CommandSource::Project, Some("[focus]"))
         );
         assert_eq!(listed[0].source, CommandSource::BuiltIn);
-        assert_eq!(listed[2].source, CommandSource::Personal);
+        assert_eq!(listed[2].source, CommandSource::Plugin);
         assert_eq!(listed[2].description.chars().count(), DESCRIPTION_CHARS);
         assert_eq!(listed[3].source, CommandSource::Plugin);
         assert_eq!(super::listed(Some(&[]), &own), own, "an empty list is no list");

@@ -16,15 +16,13 @@
 
 use std::sync::Arc;
 
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     Context, InteractiveElement as _, IntoElement, MouseButton, MouseMoveEvent, ParentElement as _,
-    Pixels, Point, Styled as _, div, px,
+    Pixels, Point, SharedString, Styled as _, div, px,
 };
 use slopty_client::dnd::out::{Outgoing, Shared};
 use slopty_client::dnd::{Hover, Outcome, Phase, Read};
-use slopty_kit::colors::hsla;
-use slopty_kit::icons::{Status, Symbol, icon, status_icon};
-use slopty_kit::kit;
 use slopty_proto::drag::{DragEvent, DragId, DragInput, DragItem, DragOp, DragOps, Promised};
 use slopty_proto::screen::ScreenInput;
 
@@ -48,8 +46,11 @@ pub(super) struct Taking {
     handed: bool,
 }
 
-/// The most item icons drawn at the pointer; past them a count says how many more.
-const ICONS: usize = 3;
+/// How far past the pointer a drag's ghost sits.
+const GHOST_OFFSET: f32 = 12.0;
+
+/// The side of a drop's landing disc.
+const RING: f32 = 24.0;
 
 impl ScreenView {
     /// A drag carrying `read` entered the tile at `position` (window points), its source
@@ -207,52 +208,53 @@ impl ScreenView {
     }
 
     /// The items of a drag out of the worker's app, drawn just past the pointer at `at` (from
-    /// the body's top left) while it is on the tile: a file, a folder or data each, a few at
-    /// most, and how many more.
+    /// the body's top left) while it is on the tile: the shell's drag ghost (its files' drag
+    /// chip), with the first item's icon and name, and how many more.
     pub(super) fn taking_icons(
         &self,
         (x, y): (Pixels, Pixels),
+        cx: &Context<Self>,
     ) -> Option<impl IntoElement + use<>> {
         let taking = self.taking.as_ref().filter(|t| !t.handed)?;
-        let theme = &self.theme;
-        let side = theme.density.hit;
-        let gap = theme.spacing.inset();
-        let ink = hsla(theme.surfaces.text_muted);
-        let shown = taking.items.iter().take(ICONS).map(|item| {
-            let name = match &item.file {
-                Some(file) if file.folder => Symbol::Folder,
-                Some(_) | None => Symbol::Doc,
-            };
-            kit::elevate(div(), theme)
-                .size(px(side))
-                .rounded(px(theme.radii.sm))
+        let theme = slopty_shell::live::chrome::theme(cx);
+        let first = taking.items.first();
+        let file = first.and_then(|item| item.file.as_ref());
+        let name = file.map_or_else(
+            || first.and_then(|item| item.promised.clone()).unwrap_or_else(|| "Item".to_owned()),
+            |file| file.name.clone(),
+        );
+        let identity = if file.is_some_and(|file| file.folder) {
+            slopty_shell::file_icons::FileIconIdentity::directory(&name, false)
+        } else {
+            slopty_shell::file_icons::FileIconIdentity::file(&name)
+        };
+        let glyph = slopty_shell::file_icons::icon(identity, theme.appearance).size(px(14.0));
+        let more = taking.items.len().saturating_sub(1);
+        let ghost =
+            div()
+                .absolute()
+                .left(x + px(GHOST_OFFSET))
+                .top(y + px(GHOST_OFFSET))
+                .debug_selector(|| "screen-drag-out-items".to_owned())
+                .h(px(24.0))
+                .max_w(px(220.0))
+                .px(px(8.0))
                 .flex()
                 .items_center()
-                .justify_center()
-                .child(icon(theme, name, ink))
-        });
-        let more = taking.items.len().saturating_sub(ICONS);
-        let count = (more > 0).then(|| {
-            kit::elevate(div(), theme)
-                .h(px(side))
-                .px(px(gap))
-                .rounded(px(theme.radii.sm))
-                .flex()
-                .items_center()
-                .text_size(px(theme.typography.small()))
-                .text_color(ink)
-                .child(format!("+{more}"))
-        });
-        let icons = div()
-            .absolute()
-            .left(x + px(gap))
-            .top(y + px(gap))
-            .flex()
-            .gap(px(gap / 2.0))
-            .debug_selector(|| "screen-drag-out-items".to_owned())
-            .children(shown)
-            .children(count);
-        Some(icons)
+                .gap(px(5.0))
+                .rounded(px(6.0))
+                .bg(theme.surface_raised)
+                .border_1()
+                .border_color(theme.border_strong)
+                .text_size(px(11.5))
+                .text_color(theme.text)
+                .opacity(0.85)
+                .child(glyph)
+                .child(div().min_w_0().truncate().child(SharedString::from(name)))
+                .children((more > 0).then(|| {
+                    div().flex_none().text_color(theme.text_muted).child(format!("+{more}"))
+                }));
+        Some(ghost)
     }
 
     /// Whether a drop is being landed: its ring shows, and the worker holds its button down
@@ -267,24 +269,37 @@ impl ScreenView {
         self.drop.map(|d| d.hover.drag())
     }
 
-    /// The ring at a drop's point while the worker lands it.
-    pub(super) fn drop_ring(&self) -> Option<impl IntoElement + use<>> {
+    /// The ring at a drop's point while the worker lands it: the shell's small spinner in a
+    /// frosted disc.
+    pub(super) fn drop_ring(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
         let at = self.drop?.ring?;
-        let theme = &self.theme;
-        let side = theme.density.hit;
-        let icon = theme.icon();
-        let ring = kit::elevate(div(), theme)
-            .absolute()
-            .left(at.x - px(side / 2.0))
-            .top(at.y - px(side / 2.0))
-            .size(px(side))
+        let theme = slopty_shell::live::chrome::theme(cx).for_popup();
+        let view = cx.entity_id();
+        let spinner = slopty_shell::loaders::mini_mono_spinner(
+            "screen-drop",
+            2.0,
+            theme.text_muted,
+            view,
+            cx,
+        );
+        let disc = div()
+            .size(px(RING))
             .rounded_full()
+            .border_1()
+            .border_color(theme.border)
+            .bg(slopty_shell::popover::surface_bg(&theme))
+            .when(!theme.is_frost(), gpui::Styled::shadow_md)
             .flex()
             .items_center()
             .justify_center()
+            .child(spinner);
+        let ring = div()
+            .absolute()
+            .left(at.x - px(RING / 2.0))
+            .top(at.y - px(RING / 2.0))
+            .size(px(RING))
             .debug_selector(|| "screen-drop-ring".to_owned())
-            // Busy is muted: colour is kept for what needs the person.
-            .child(status_icon(theme, Status::Working, px(icon), hsla(theme.surfaces.text_muted)));
+            .child(slopty_shell::frost::frosted(RING / 2.0, slopty_shell::frost::MENU_BLUR, disc));
         Some(ring)
     }
 }

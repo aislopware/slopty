@@ -8,10 +8,10 @@
 mod acp;
 mod bench;
 mod bundle;
+mod canned;
 mod check;
 mod ci_profile;
 mod claude;
-mod claude_mod;
 mod codex;
 mod deep;
 mod dist;

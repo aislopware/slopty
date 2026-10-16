@@ -17,7 +17,8 @@ slopty-view-proto = { path = "../slopty-view-proto" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-# slopty: chrono served only the cut document layer.
+# slopty: chrono served only the cut document layer; a limit's reset time takes it again.
+chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
 similar = "2"
 

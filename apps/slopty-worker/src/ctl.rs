@@ -1,17 +1,9 @@
 //! Local control socket: newline-delimited JSON, one request per connection.
 
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::Duration;
+use std::path::Path;
 
 use anyhow::{Context as _, Result};
-use slopty_agent::Hook;
-use slopty_core::SessionId;
-use slopty_proto::WorkerMsg;
-use slopty_proto::ctl::{
-    CtlReply, CtlRequest, Health, InboxAt, PasteboardAccess, PermissionAnswer, ReportsAsk,
-    Tailscale,
-};
+use slopty_proto::ctl::{CtlReply, CtlRequest, Health, PasteboardAccess, Tailscale};
 use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
@@ -67,25 +59,6 @@ async fn handle(daemon: Daemon, stream: UnixStream) -> Result<()> {
         CtlRequest::Screens => {
             let (live, closed) = daemon.screens.summaries();
             CtlReply::Screens { live, closed }
-        }
-        CtlRequest::Hook { session, payload } => match heard(&daemon, session, &payload).await {
-            Ok((_hook, changed)) => CtlReply::Ok { changed },
-            Err(message) => CtlReply::Error { message },
-        },
-        // Taken in like any hook, then held. The relay keeps its end open while it waits; its
-        // closing withdraws the question.
-        CtlRequest::Permission(ask) => match heard(&daemon, ask.session, &ask.payload).await {
-            Ok((hook, _changed)) => {
-                let wait = Duration::from_millis(ask.wait_ms);
-                let decision =
-                    crate::threads::hold::ask(&daemon, ask.session, &hook, wait, closed(rd));
-                CtlReply::Permission(PermissionAnswer { decision: decision.await })
-            }
-            Err(message) => CtlReply::Error { message },
-        },
-        CtlRequest::Reports(ask) => reports(&daemon, ask).await,
-        CtlRequest::ReportsHanded { session, token, batch } => {
-            handed(&daemon, session, &token, batch).await
         }
         CtlRequest::Open { session, url } => match slopty_proto::handoff::page(&url) {
             Some(page) => CtlReply::Handoff(crate::handoff::open(&daemon, session, page).await),
@@ -166,123 +139,6 @@ async fn doctor(daemon: &Daemon) -> Health {
         turns: daemon.threads.as_ref().map_or(0, crate::threads::Threads::driven_turns),
         uptime_secs: daemon.started_at.elapsed().as_secs(),
     }
-}
-
-/// Why a program is not taken as speaking from `session`: its token is not the one this
-/// worker made for it.
-fn unvouched(daemon: &Daemon, session: SessionId, token: &str) -> Option<CtlReply> {
-    (!daemon.session_key.vouches(session, token)).then(|| CtlReply::Error {
-        message: format!("not {session}'s own token ({})", slopty_proto::ctl::SESSION_TOKEN_ENV),
-    })
-}
-
-/// `slopty hook reports` asks for the batch kept for its session: the one it names by the
-/// token this worker made for it. Its inbox is noted, and the reply says what to print; the
-/// batch stays kept until [`handed`].
-async fn reports(daemon: &Daemon, ask: ReportsAsk) -> CtlReply {
-    use slopty_agent::reports;
-    let ReportsAsk { session, token, payload, inbox } = ask;
-    if let Some(refused) = unvouched(daemon, session, &token) {
-        return refused;
-    }
-    let hook = match Hook::parse(&payload) {
-        Ok(hook) => hook,
-        Err(e) => return CtlReply::Error { message: format!("bad hook payload: {e}") },
-    };
-    let (deliveries, inboxes, turn) =
-        (daemon.deliveries.clone(), daemon.inboxes.clone(), Arc::clone(&daemon.reports_turn));
-    let handed = tokio::task::spawn_blocking(move || {
-        if let Some(InboxAt { socket, token }) = inbox {
-            let inbox = reports::Inbox { socket: PathBuf::from(socket), token };
-            if let Err(e) = reports::keep_inbox(&inboxes, session, &inbox) {
-                tracing::warn!(%session, error = %e, "the agent's inbox not noted");
-            }
-        }
-        let held = hook.stop_hook_active == Some(true);
-        let transcript = hook.transcript_path.as_deref().map(Path::new);
-        let turn_now = reports::Turn { prompt: hook.prompt.as_deref(), transcript, held };
-        let _turn = turn.lock();
-        reports::hand_over(&deliveries, session, hook.event, turn_now)
-    })
-    .await;
-    match handed {
-        Ok(handed) => CtlReply::Reports {
-            batch: handed.as_ref().map(|h| h.batch),
-            print: handed.and_then(|h| h.print).map(|print| print.to_string()),
-        },
-        Err(e) => CtlReply::Error { message: format!("reports not read: {e}") },
-    }
-}
-
-/// `slopty hook reports` printed `batch` for its session: it is dropped, and the server hears
-/// it was handed over.
-async fn handed(daemon: &Daemon, session: SessionId, token: &str, batch: u64) -> CtlReply {
-    if let Some(refused) = unvouched(daemon, session, token) {
-        return refused;
-    }
-    let (deliveries, turn) = (daemon.deliveries.clone(), Arc::clone(&daemon.reports_turn));
-    let dropped = tokio::task::spawn_blocking(move || {
-        let _turn = turn.lock();
-        slopty_agent::reports::handed(&deliveries, session, batch)
-    })
-    .await
-    .map_err(std::io::Error::other)
-    .flatten();
-    match dropped {
-        Ok(was_kept) => {
-            if was_kept {
-                let report = slopty_proto::server::AgentReport::Delivered { session, batch };
-                let _sent = daemon.reports.send(report);
-            }
-            CtlReply::Ok { changed: was_kept }
-        }
-        Err(e) => CtlReply::Error { message: format!("reports not dropped: {e}") },
-    }
-}
-
-/// A hook fired in `session`: the followers hear of it and the agent table takes it in. The
-/// hook as read, and whether the agent's status changed; or why it was not taken.
-async fn heard(daemon: &Daemon, session: SessionId, payload: &str) -> Result<(Hook, bool), String> {
-    let hook = Hook::parse(payload).map_err(|e| format!("bad hook payload: {e}"))?;
-    // A hook may come before the open that started its agent returns.
-    if daemon.worker.get_opened(session).await.is_err() {
-        return Err("no such session".to_owned());
-    }
-    tracing::debug!(%session, event = ?hook.event, "hook");
-    daemon.follows.lock().board.heard(session, &hook);
-    let (mut event, branch) = {
-        let mut agents = daemon.agents.lock();
-        let event = agents.apply(session, &hook);
-        (event, agents.branch(session, &hook))
-    };
-    if let Some(branch) = branch {
-        let _sent = daemon.events.send(WorkerMsg::AgentBranch(branch));
-    }
-    // A question or an elicitation the notification did not spell out (a `Stop` always carries
-    // its last message): the transcript tail has the line. Read off the runtime's blocking
-    // pool; the table lock is not held meanwhile.
-    if let Some(ev) = &mut event
-        && slopty_agent::wants_transcript(ev)
-        && let Some(path) = hook.transcript_path.clone()
-    {
-        let line = tokio::task::spawn_blocking(move || {
-            slopty_agent::transcript::last_assistant_line(Path::new(&path))
-        })
-        .await
-        .ok()
-        .flatten();
-        if let Some(line) = line
-            && daemon.agents.lock().set_detail(session, &line)
-        {
-            ev.detail = Some(slopty_agent::truncate(&line));
-        }
-    }
-    let changed = event.is_some();
-    if let Some(event) = event {
-        tracing::debug!(%session, status = ?event.status, detail = ?event.detail, "agent");
-        let _sent = daemon.heard.send(event);
-    }
-    Ok((hook, changed))
 }
 
 #[cfg(test)]

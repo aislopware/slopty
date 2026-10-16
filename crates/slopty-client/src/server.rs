@@ -314,7 +314,11 @@ async fn run(
             let due = carried.iter().filter_map(|c| c.until).min();
             tokio::select! {
                 () = &mut wait => break,
-                () = up.resume.notified() => break,
+                () = up.resume.notified() => {
+                    // A resume may have brought the path back: the schedule starts again.
+                    redial.reset();
+                    break;
+                }
                 () = tokio::time::sleep_until(due.unwrap_or_else(tokio::time::Instant::now)),
                     if due.is_some() => give_up(&mut carried),
                 Some(call) = up.calls.recv() => call.answer(unreachable(&why)),

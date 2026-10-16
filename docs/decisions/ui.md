@@ -7616,56 +7616,6 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   the 17 pt rows by weight, not by size. Tests: `a_phone_bar_is_a_navigation_bar`,
   `a_phone_drawer_names_the_workspace`. Golden: `thread-phone`; the iOS phone goldens are
   retaken on the simulator.
-- ✅ **State is a glyph; colour is a hue per state and an identity per machine** (2026-10-06,
-  `.research/status-color-2026-10-06.md`, checkpoint 1 of its build order; amends "Colour goes
-  to what needs the person" and "The chrome's icons are SF Symbols", and overrules the earlier
-  studies where its §8 says so). The person found the status marks plain and asked for colour
-  with elegance. Every reference (Linear, the Codex app, T3 Code, Warp, Raycast) gives a state
-  one glyph in one hue and keeps the words beside it neutral; none draws a state as a dot.
-  - **One family of circles.** Needs you is `exclamationmark.circle.fill` in `warn_fill`,
-    failed `xmark.circle.fill` in `error_fill`, a finish not yet seen
-    `checkmark.circle.fill` in `success_fill` (it fades in over `Pace::Settle`, at once under
-    Reduce Motion), working the stepped spokes in `working_fill` (a braille cell since
-    2026-10-06, "The working mark is a braille cell"). Waiting is a dashed ring
-    and idle, where a mark is needed, an empty ring, both muted. Away keeps `wifi.slash`.
-    Rows still show nothing at rest.
-  - **The rings are ours** (`icons::Ring`: `Empty`, `Dashed`, `Pie(share)`). SF's
-    `circle.dashed` drew gaps under a device pixel at 1x and read as a plain circle. The
-    painter puts the outer edge on the device grid and strokes a whole number of device
-    pixels, one at 1x. A dashed ring's six gaps are two pixels or more there.
-  - **The board speaks the same family** (`icons::Phase`, named so because the project model
-    already has a `Stage`). Up next is the empty ring, verifying a pie of its share (half
-    while unknown) in `working_fill`, ready to merge `checkmark.circle` in `success_fill`,
-    merged the filled check in `merged_fill`, violet as GitHub's merged is. A lane head leads
-    with its lane's glyph at the small size. A card follows its agent once one is on it.
-  - **Two hues and an identity set join the theme.** `working`/`working_fill` (OKLCH hue 250)
-    and `merged`/`merged_fill` (300), each a text step and a fill step, plus `identity`, eight
-    hues for a machine's or a project's own glyph (identity colour itself is the next
-    checkpoint). Every fill sits at one lightness per mode: 0.72 in dark, 0.58 to 0.64 in
-    light. Amber keeps its own (OKLCH yellow at 0.6 is olive), and so does red, since at the
-    others' higher lightness red turns pink and it stays where the colour-blind pairs pinned
-    it. The identity set leaves out red, amber, green, blue and violet. Each of its hues
-    stands 20 degrees or more from every status hue, so the spec's purple moved to a magenta
-    at 325 (it sat 10 from merged) and indigo to 272.
-  - **A glyph carries the hue; words stay neutral.** `Status::ink` is the fill step and
-    `Status::word` a neutral tone, failure alone keeping `error`. Inside a thread's stream the
-    spinner stays muted (`Status::quiet_ink`). The bell's count, when only reviews are unread,
-    is the green fill, not the accent.
-  - **Dots are gone.** The navigator's unseen dot, the rollups', the stream health's, the
-    unreachable server's and the lane heads' are glyphs now. A file's unsaved dot is the word
-    "Edited" after its name (a label in `text_muted`, as macOS's "— Edited"), and a
-    miniature's state says "Edited" too.
-  - Tests: theme `status_fills_share_one_lightness`, `identity_keeps_clear_of_the_states`,
-    `a_status_fill_reads_as_a_mark`, `vision::working_merged_and_done_marks_stay_apart`;
-    icons `each_status_has_its_own_mark`,
-    `a_status_wears_its_fill_and_its_word_stays_neutral`,
-    `ring::tests::a_ring_is_one_device_pixel_at_1x`, `a_dashed_ring_shows_its_gaps_at_1x`,
-    `the_pie_fills_its_share_clockwise_from_twelve`; the kit lints
-    `a_state_is_a_glyph_not_a_dot` (a filled, childless `rounded_full` box anywhere in the
-    chrome, the two switch knobs and the brand mark's dots ruled out of it) and
-    `a_status_glyph_wears_its_fill` (no status glyph handed a text tone);
-    `workspace::tests::bodies::edited_follows_the_title`,
-    `frame::an_unseen_check_marks_a_finished_tile_until_it_is_looked_at`.
 - ✅ **Light and dark only; the Increase Contrast variant is deleted** (2026-10-06, ruled with the
   status-colour pass). Supersedes "Increase Contrast derives its own chrome" and the Increase
   Contrast clauses of every entry above that carries one: the focused tile's line, the
@@ -11069,41 +11019,6 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `chrome::a_sash_drag_is_no_news_for_the_chrome`,
     `desktop::a_touch_device_opens_a_desktop_at_its_own_size_and_keeps_the_pick`.
 
-- ✅ **The chrome's icons are Octicons at 14** (2026-10-12, `.research/design-polish-2026-10-12.md`
-  §3, batch 2; supersedes "The chrome's icons are IBM Carbon's at 16", the files' Material
-  shapes, and the leads' `text_secondary` of "An icon takes its words' size, weight and
-  tier"). The person found the renders not right yet; the study measured Carbon at 16 as a
-  1.06 px line beside IBM Plex's 1.29 px stem, carrying about a third of its words' tone.
-  - **GitHub Octicons (MIT, 19.40.0), its 16-grid art drawn at 14 in the 16 slot**
-    (`Typography::glyph`): a 1.31 px line, the words' stem; a 12.9 px figure with a point of
-    air, as Zed sets its icons. Chevrons and a tab's close are the 12-grid art at 12
-    (`Symbol::small_art`). Octicons is the vocabulary of what Slopty works on: branch, commit,
-    pull request open, draft and closed (each its own glyph now), merge, diff, repo. The
-    laptop is our own on Octicons' grid; Octicons has none. Carbon's files went.
-  - **A file wears its kind, not its language**: code, Markdown, a picture or sound, an
-    archive, a binary, else the plain document (`file_types::glyph`). Material's 59 logos and
-    the SVG renderer path that masked them went; `Mark::File` went with them. A file's tab
-    wore no glyph, as Zed's tabs do (superseded: every tab leads with its kind, "Balance,
-    after the person's five spots"); on a Mac the shown one's glyph is its proxy, which drags
-    the file out as a document window's title icon does.
-  - **Ink**: leads wear `icon_muted` at rest and `icon` when chosen, a state its own fill. The
-    dark `icon_muted` rose from Zed's #7E879A to #9AA2B1, so a glyph carries at least 0.70 of
-    its words' tone mass on both planes in both appearances (0.81 dark, 0.82 light).
-  - **Identity colour is the row bar alone**: a project's or a machine's colour runs down its
-    navigator head's leading edge, 2 pt, over a light tint of the row in the same colour
-    (`alpha::IDENTITY`, Delta's colour-coded rows), and its glyph wears `icon_muted`: one
-    carrier per row, where there were up to three.
-  - **Decorative glyphs went**: the settings section list is words alone, a compaction note
-    has no scissors, an ended agent wears `stop`.
-  - Tests: `slopty-kit` `icons::tests::a_glyph_weighs_like_its_words` (the median line through
-    the paint path's own sizing at 1x, 1.15–1.50 px), `icons::tests::a_glyph_is_crisp_at_one_x`
-    (Σα²/Σα ≥ 0.72 over every glyph, none under 0.55), `a_glyph_is_fourteen_in_a_slot_of_sixteen`,
-    `glyphs::tests::every_glyph_reads`, `file_types::tests::a_file_leads_with_its_kinds_glyph`;
-    `slopty-theme` `icon_muted_carries_three_quarters_of_its_words`; `slopty-ui`
-    `lints::a_lead_wears_icon_muted_or_its_state` (replaces `a_lead_is_never_muted_at_rest`),
-    `lints::identity_colour_is_the_row_bar` (replaces `identity_colour_stays_on_its_glyph`),
-    `workspace::tests::bodies::a_files_tab_wears_no_glyph_but_its_proxy`.
-
 - ✅ **A goal starts only where its machine says it can** (2026-10-12,
   `.research/readiness-a-2026-10-12.md` finding 1, the GUI half; the server's `Verb::GoalCheck`
   is lane W's). The walk found the sheet offering the home, starting an orchestrator there, and
@@ -11930,6 +11845,15 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   per-device worktree settings are in `xtask/zeron.toml`'s `[skip]`: a pull request opens in
   the web browser, and the worktree locations are the engine's, which is not taken. Their
   traces in the shell are cut and marked `// slopty:`.
+- ✅ **zeron adopted to `3b2f780` (2026-10-16).** Taken: the sidebar's Archived toggle in its
+  View menu (#901; revealing an archived chat turns the shelf back on) and Settings → Archived's
+  Delete all, one `deleteChat` per archived chat behind a confirmation (#861), which the view
+  model already answers. The Cmd+K Recent Files fix (#890), OpenCode's question forms (#833)
+  and Cursor's model defaults (#920) are in zeron's engine and drivers, which are not taken.
+  Agent visuals (#900) are in `[skip]`: an agent's `show_visual` Luau script runs in zeron's
+  own sandbox (mlua) and wgpu renderer, sent through its engine's MCP server and a
+  `PublishVisual` upload, none of which Slopty has; the shell, protocol and document hunks are
+  cut and marked `// slopty:`.
 - ✅ **Every call the shell makes has an answer from Slopty (2026-10-14).** Tried across two
   Macs, the copied shell asked 35 calls nothing on Slopty's side answered, so New project, the
   model picker and more said "unknown method". The view model now answers each one from what
@@ -12271,3 +12195,153 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   (`Verb::Settings { of: None }`), which takes its file up again; with no server linked the page
   says so. Tests: `slopty-ui`
   `workspace::view_model::surfaces::settings::tests::autonomy_is_set_on_the_server`.
+- ✅ **The window's own keys, a closed tab back, undo an archive, slow calls, Open in
+  (2026-10-16).** ⌘F finds in the chat's thread, or in the diff where the Changes surface has the
+  keyboard; ⌘G and ⌘⇧G step. The shell binds the keys and hands them to the transcript's and the
+  diff's own find by action name, so a terminal keeps its own ⌘F. ⌘[ and ⌘] walk the history,
+  ⌘T opens the right pane's new tab menu, ⌘⇧T opens again the tab closed last in the pane shown
+  (the window keeps twenty, as the pane's tabs are kept across launches; a terminal is not kept,
+  since closing it ends its shell). The branch picker is ⌥⌘B: ⌘⇧G is Find previous and ⌘⇧B is
+  where an older map's sidebar key moves;
+  ⌘⇧E steps the model's effort. An archive offers Undo in its toast and on ⌘Z while the toast is
+  up. A call the person waits on past ten seconds says so in one toast, "Waiting on studio · List
+  folders", gone when it answers; the watch wraps the engine's service, so every view's calls
+  pass it, and calls long by design (watches, clones, installs, updates, uploads, adding a
+  device) never raise it. Open in hands a chat's folder to the editors installed on this Mac: by
+  `open -a` here, by the editor's SSH link at `Device::ssh_host` on another machine (VS Code and
+  Cursor's `vscode-remote/ssh-remote+`, Zed's `zed://ssh/`), Finder only for this Mac; every open
+  goes through one seam an e2e run points at a file. Tests: `slopty-shell`
+  `shell::navigation_tests::{a_closed_tab_comes_back_with_its_key, new_tab_and_history_keys,
+  an_archive_is_undone_from_its_toast_or_cmd_z}`, `state::slow_calls::tests`,
+  `shell::open_in::tests`; e2e `app::interface::{a_closed_tab_comes_back_with_cmd_shift_t,
+  open_in_hands_the_folder_to_an_editor}`.
+- ✅ **The sidebar says where each agent stands, after Claude desktop's Code sidebar
+  (2026-10-16).** Values and behaviour only (`.research/claude-desktop-2026-10-16.md` items 3,
+  14, 15). A row that waits says why, from what its agent holds open: "Waiting for your answer",
+  "Plan ready for review", "Needs your approval · run cargo test", or "Waiting · 4m" for an agent
+  at rest on its own work (a calm clock glyph, not a live state), "Compacting its context" while
+  it summarises. The reason takes the location line where there is one, else a line of its own
+  under the title, so compact rows that wait grow by one line while they wait. A finished result
+  nobody has seen sets its title in the heavier weight. The dots speak desktop's vocabulary:
+  amber needs you, blue a result nobody has seen, red failed; working keeps zeron's busy glyph.
+  "By status" joins Organize: Needs you, Working, Done, and inside a group rows keep the order
+  their sessions started in, so a row moves only when its agent's phase changes, never on a
+  republish or a new message (people said desktop's rows "move around on their own"). Resting on
+  a row shows its card: project @ machine with the machine's dot, its folder (the middle given up
+  first), branch, agent · model · effort, how long it has stood as it is, and running subagents.
+  A chat with no project names its machine as "@ studio". Every repeating status animation keys
+  its phase off one clock for the process, so every running glyph in every row and window moves
+  in unison. Dark sets text at the weight the design names: macOS font smoothing dilates a glyph
+  by its colour's luminance, so light text on dark painted about a weight heavier than the same
+  text in light; under a dark theme the window draws antialiased, never dilated (gpui-fast's
+  `TextSmoothing::Antialiased`, the web's `-webkit-font-smoothing: antialiased`), where desktop
+  lightens its variable weights (Geist ships here as static faces, so no 460 exists to pick).
+  Tests: `slopty-shell` `shell::sidebar_status::tests`, `motion::tests::
+  status_animations_mounted_apart_move_in_unison`, `theme::tests::dark_text_is_set_at_its_own_weight`;
+  e2e `app::interface::a_rows_hover_card_names_where_it_runs`.
+- ✅ **The shell's frame, settings and toasts in zeron's anatomy (2026-10-16).** From
+  `.research/unstyled-audit-2026-10-16.md` F1 and H. The sidebar's server pill opens a menu with
+  the link as its heading and rows for Devices, Connect a phone (while the server shows its code)
+  and Change server. The right pane's "+" offers Remote window as its empty picker does, and a
+  window's tab wears the window glyph. On a phone the chat and the new-session page wear a
+  navigation bar (a back chevron to Sessions under the session's title over "project @ machine",
+  or "New session" and a close) in place of the desktop's sidebar and history cluster; the
+  sidebar foot is gone, Settings being a tab; a session row pins on a leading swipe, archives (or
+  brings back) on a trailing one, and opens its menu on a long press; the capsule and the selected
+  tab sit on glass, the capsule's status glyph before its words. Add device's failure is
+  zeron's error strip, its tailnet rows and choices are whole-row picker rows, its run's share
+  rides the running step as the upload arc, its fields wear the shell's editor style, and "Set up
+  the server there instead" is a quiet action. Devices: every machine row has a tile by
+  platform so the blocks share one text edge, the invite's Done is the solid commit, Remove now
+  is the destructive fill. Providers set an install command in the code face, not in backticks.
+  Toasts: an action is sonner's small one (24 tall, 12 px), so a toast with Stop keeps its
+  height; a transfer moves in place with its progress ring and words; an error clamps at four
+  lines (whole while the stack is hovered) and copies its words; wake and update failures are
+  error toasts, an update done a success. A browser tab shows its page's own icon, read inside
+  the page by the web view and posted as a small PNG (no HTTP client of the shell's own); any
+  other page message is dropped. Tests: `slopty-shell` `toast::tests`, `settings::add_device::tests`,
+  `settings::devices::tests`, `browser::favicon_tests`, `shell::compact::tests`,
+  `shell::sidebar_status::tests::the_server_menu_has_rows`; e2e `app::devices`,
+  `app::interface::{the_server_menu_offers_devices_and_a_server_change, a_pages_icon_shows_on_its_tab}`,
+  `ios::compact`.
+- ✅ **No Claude Code TUI beside its chat (2026-10-16).** The person dropped switching between
+  an agent's TUI and its chat: Claude Code is driven over stream-json only, so a chat's agent has
+  no TUI to show. The header's "Claude Code's TUI beside the chat" toggle, the shell's per-chat
+  agent-TUI tab and the kept tab's `agent` flag are deleted; a subagent still shares its agent's
+  panes.
+- ✅ **The palette finds threads by their words; New project clones (2026-10-16).** From
+  `.research/zeron-gaps-2026-10-16.md` I1 and I2. Two characters and a 200 ms pause into the
+  palette's Threads or All tab ask `SearchChats`. Its matches come after the title matches,
+  under "In Threads", one row per chat with "Agent:" or "You:" and the words. A chat that
+  already matched by title is not listed again, and an answer to an older query is dropped. New
+  project's Folders step ends in "Clone repository…", which turns its field into an address
+  field. The field takes a URL (https, http, ssh, git) or `user@host:path`, never a path on the
+  machine, since the worker clones only from a remote that becomes the clone's origin. `CloneRepo`
+  `{url, parentPath}` clones into the open folder and adds the project itself, and the window
+  lands in it; a spinner notice stays up while it runs, and a failure says why in an error notice.
+- ✅ **A transcript's Run, the mode chip, plan meters and kept review aids (2026-10-16).**
+  - **Run.** On the person's click, a code line's Run types the line into the chat's own shell
+    terminal: a bottom-drawer tab the shell opens for runs, never one that runs an agent or a
+    project action. A plain one-line command runs at once. Some lines are typed but left at the
+    prompt for the person to read and run with Enter: several lines, or a command that acts as
+    root or destroys, anywhere in a pipeline (`sudo`, `rm`, `dd`, `mkfs`, `kill`, `chmod`, `mv`, a
+    forced push, `reset --hard`, `clean`, a write to a device). The app reaches the terminal
+    through `live::serve_runs`, which calls `TerminalView::run_text` or `type_text`.
+  - **Mode chip.** The agent's modes (Claude Code's permission modes, an ACP agent's session
+    modes, offered as the model option `mode`) sit in a chip left of the model chip, as in Claude
+    desktop's composer row. The chip opens the model menu at its Mode choices.
+  - **Plan meters.** The Agents page draws zeron's usage meters under each agent with the plan
+    windows its threads last published. The `ListHarnesses` row's `usage` carries them; the
+    newest reading across machines wins, and an agent that said none has no meters.
+  - **Kept review aids.** The diff's whitespace filter and file tree are settings
+    (`diffIgnoreWhitespace`, `diffShowTree`), kept across launches.
+- ✅ **Slopty's own views draw with the shell's helpers (2026-10-16).** From
+  `.research/unstyled-audit-2026-10-16.md` A to E and F2 and `.research/zeron-gaps-2026-10-16.md`
+  G1 to G4. Everything Slopty draws in and around a terminal and a remote screen (buttons,
+  menus, pills, the find bar, the rail, notices, the picker) is zeron's helpers, through
+  `slopty_shell::live`: `chrome` (the toolbar's icon button, the dialog buttons, a chip, a
+  field, the 30 pt floating pill, the frosted tooltip card, loading and empty states) and
+  `menu` (a menu on `popover_card` with zeron's menu rows, its keys as `kbd_hint`, Finder's
+  keyboard model). Icons are the shell's Solar set and progress the shell's loaders. The kit's
+  imitations are deleted: `kit::sync`, the kit's menu, find bar and progress, `layer.rs`, the
+  Octicons, the status glyphs and rings, `chrome_text`, `file_types` and `highlight`; gpui-kit
+  leaves the kit, the terminal and the screen viewer. The kit keeps what is no view's: tabular
+  figures, the one duration and size format, the motion gate, the sparkline, `Status` and the
+  accessibility tree tests read. A float the pointer presses leaves the keyboard where it was,
+  as a Mac's buttons do, and Tab still reaches it; a menu that is closing never takes the
+  keyboard back. The menu bar's Copy, Paste and Select All reach a focused terminal. A
+  program's progress (`OSC 9;4`) rides its terminal tab as the shell's upload arc, a spinner
+  while only busy, red when failed and muted when paused, read as "Progress" with its share. A
+  program that ended leaves "[process exited N]" under its last line; a worker out of reach
+  says so at the foot with the shell's spinner. In the find field ↩ goes to the next hit and
+  ⇧↩ to the one before. A terminal tab is a plain shell: the agent's own terminal tab is gone.
+  The grid is zeron's plain one: no hairline between blocks, no failed block's bar or wash, no
+  sticky header, no facts under the pointer and no "took" captions; the selection, the cursor
+  and the search hits are the shell's translucent washes. A prompt still steps back, and the
+  right click's menu and ⌘↑/⌘↓ still know the blocks. This deletes "The chrome's icons are
+  Octicons at 14" and "State is a glyph; colour is a hue per state and an identity per
+  machine" (the hues the latter added, `working_fill`, `merged_fill` and the identity set, stay
+  in the theme), and supersedes in `docs/decisions/terminal.md` "A block scrolled past its
+  prompt keeps its command in a sticky header", "A failed block wears a bar and a wash, and
+  says how it ended under the pointer", "A block's head is a surface, and its rule is that
+  surface's top edge", "No band under a block's prompt; a hairline parts the blocks", the
+  edge-to-edge half of "A prompt steps back so its command reads first, and a block spans its
+  tile" and the covered pill (`set_covered`) of "A view scrolled up holds still, and a pill
+  counts the lines below". Tests: `slopty-shell` `live::menu::tests`;
+  `slopty-terminal` `view::tests::{a_right_click_off_a_block_offers_the_terminals_own_items,
+  the_edit_menu_selects_copies_and_pastes_in_the_grid, shift_return_in_the_find_field_steps_back,
+  out_of_reach_takes_the_place_of_the_lines_below, an_ended_program_leaves_its_trailer,
+  the_rail_shows_on_a_scroll_and_drags_the_viewport,
+  a_paste_the_worker_holds_back_waits_for_a_confirmation}`; `slopty-ui`
+  `screen::tests::{the_corner_button_opens_the_stream_s_controls,
+  the_health_mark_is_a_chip_in_the_controls_pill}`; `slopty-app`
+  `interface::tests::a_terminal_names_what_a_drop_does`; e2e
+  `app::surfaces_live::the_terminal_s_floats_wear_the_shell`.
+- ✅ **A remote picture is letterboxed on the pane (2026-10-16).** A remote window or display
+  whose aspect differs from its pane is letterboxed on the pane's own ground (the shell theme's
+  `bg`), in the light appearance as in the dark, as zeron frames media (the browser view, the
+  image viewer's plate). The near-black stage Slopty used before was a dark band in a light
+  pane, a seam no other surface had. The picture's own edge already reads as a screen's, so it
+  needs no stage of its own. Before the first frame the body is that same ground, so nothing
+  changes colour when the picture arrives. Tests: `slopty-ui`
+  `screen::tests::a_letterbox_is_the_pane_in_both_appearances`.

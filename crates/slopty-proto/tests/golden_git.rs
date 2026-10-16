@@ -302,8 +302,14 @@ mod golden_git {
         use slopty_proto::thread::{Patch, TreeRef};
 
         let ask = |request, op| ClientMsg::Git { request, repo: "~/src/demo".to_owned(), op };
-        snap("client_git_changes_head", &ask(9, GitOp::Changes { against: Against::Head }));
-        snap("client_git_changes_base", &ask(10, GitOp::Changes { against: Against::Base }));
+        snap(
+            "client_git_changes_head",
+            &ask(9, GitOp::Changes { against: Against::Head, ignore_whitespace: false }),
+        );
+        snap(
+            "client_git_changes_base",
+            &ask(10, GitOp::Changes { against: Against::Base, ignore_whitespace: true }),
+        );
         let file = FileDiff {
             path: "src/lib.rs".to_owned(),
             from: Some("1f2e3d4c".to_owned()),
@@ -391,6 +397,16 @@ mod golden_git {
         snap("worker_repo_clone_failed", &done(CloneOutcome::Failed { said }));
     }
 
+    /// The repositories whose status and diffs a client shows, followed by the worker, and its
+    /// word that one moved.
+    #[test]
+    fn watch_repos() {
+        let watch =
+            ClientMsg::WatchRepos { paths: vec!["/w/slopty".to_owned(), "~/notes".to_owned()] };
+        snap("client_watch_repos", &watch);
+        snap("worker_repo_moved", &WorkerMsg::RepoMoved { repo: "/w/slopty".to_owned() });
+    }
+
     /// A repository's run scripts asked of a worker, and the scripts ready to open.
     #[test]
     fn run_scripts() {
@@ -423,7 +439,7 @@ mod golden_git {
         use slopty_proto::thread::detail::Hunk;
 
         let (from, to) = (Some("1a2b3c4d".to_owned()), Some("5a6b7c8d".to_owned()));
-        let op = GitOp::FileDiff { from: from.clone(), to: to.clone() };
+        let op = GitOp::FileDiff { from: from.clone(), to: to.clone(), ignore_whitespace: false };
         let ask = ClientMsg::Git { request: 15, repo: "~/src/demo".to_owned(), op };
         snap("client_git_file_diff", &ask);
         let patch = Patch {

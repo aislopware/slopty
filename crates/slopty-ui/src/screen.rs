@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 use core_video::pixel_buffer::CVPixelBuffer;
 use gpui::composition::{NativeHost, NativeHostOptions};
 use gpui::{
-    Animation, AnimationExt as _, App, Autocapitalize, Bounds, ContentMask, Context, CursorImage,
+    AnimationExt as _, App, Autocapitalize, Bounds, ContentMask, Context, CursorImage,
     CursorImageId, CursorStyle, DevicePixels, ElementInputHandler, EntityInputHandler,
     EventEmitter, FocusHandle, Focusable, Global, InteractiveElement as _, IntoElement, Keystroke,
     LongPressEvent, Modifiers, MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent,
@@ -44,8 +44,7 @@ use gpui::{
 use slopty_client::pacing::{PacingStats, PaintRate, Spread};
 use slopty_client::{CursorState, ScreenHandle, ScreenStats};
 use slopty_core::StreamId;
-use slopty_kit::colors::hsla;
-use slopty_kit::{keys, kit};
+use slopty_kit::keys;
 use slopty_proto::ClientMsg;
 use slopty_proto::drag::DragInput;
 use slopty_proto::input::{KeyAction, KeyCode, Mods, MouseButton as ProtoButton};
@@ -1406,47 +1405,39 @@ impl ScreenView {
         }
     }
 
-    /// The header's health mark for `view`, whose header shows `header`: a dot and one word,
-    /// only while something is wrong. A click opens the stats overlay.
+    /// The health mark for `view`, whose header shows `header`, beside the controls in their
+    /// pill: a surface chip with a warning glyph and one word, only while something is wrong. A
+    /// click opens the stats overlay.
     #[must_use]
     pub fn health_mark(
         view: &gpui::Entity<Self>,
         header: StreamHeader,
-        theme: &Theme,
-        k: f32,
+        theme: &slopty_shell::theme::Theme,
     ) -> Option<gpui::AnyElement> {
         let health = header.health?;
-        let s = theme.surfaces;
-        // Degraded is grey and a hollow triangle, since it asks nothing of the person; stalled
-        // is the filled one in red. Amber means "needs you" alone.
-        let (glyph, ink) = if health == Health::Stalled {
-            (slopty_kit::icons::Symbol::ExclamationmarkTriangleFill, s.error_fill)
-        } else {
-            (slopty_kit::icons::Symbol::ExclamationmarkTriangle, s.text_secondary)
-        };
+        let theme = theme.for_popup();
+        // Degraded asks nothing of the person: the warning's amber; stalled is the danger's red.
+        let ink = if health == Health::Stalled { theme.danger } else { theme.warning };
         let view = view.clone();
-        let mark = div()
-            .id(SharedString::from(format!("health-{}", header.stream)))
-            .debug_selector(|| "stream-health".to_owned())
-            .role(gpui::accesskit::Role::Button)
-            .aria_label(SharedString::new_static(health.word()))
-            .flex_none()
-            .flex()
-            .items_center()
-            .gap(px(theme.spacing.xs * k))
-            .px(px(theme.spacing.xs * k))
-            .rounded(px(theme.radii.sm * k))
-            .cursor_pointer()
-            .hover(move |el| el.bg(hsla(s.hover)))
-            .text_size(px(theme.typography.small() * k))
-            .text_color(hsla(s.text_secondary))
-            .child(slopty_kit::icons::icon(theme, glyph, hsla(ink)).size(px(theme.icon() * k)))
-            .child(health.word());
-        Some(
-            slopty_kit::a11y::tab_stop(mark, s.focus)
-                .on_click(move |_ev, _w, cx| view.update(cx, |v, cx| v.set_hud(true, cx)))
-                .into_any_element(),
+        let mark = slopty_shell::live::chrome::chip(
+            SharedString::from(format!("health-{}", header.stream)),
+            false,
+            &theme,
         )
+        .debug_selector(|| "stream-health".to_owned())
+        .aria_label(SharedString::new_static(health.word()))
+        .px(px(6.0))
+        .bg(slopty_shell::theme::wash(0.06))
+        .tooltip(slopty_shell::settings::widgets::text_tooltip("Stream stats"))
+        .child(
+            slopty_shell::icons::icon(slopty_shell::icons::DANGER_TRIANGLE)
+                .size(px(slopty_shell::live::chrome::ICON_SIZE))
+                .flex_none()
+                .text_color(ink),
+        )
+        .child(health.word())
+        .on_click(move |_ev, _w, cx| view.update(cx, |v, cx| v.set_hud(true, cx)));
+        Some(mark.into_any_element())
     }
 
     /// Whether the stats overlay is showing.
@@ -1873,44 +1864,46 @@ impl ScreenView {
         if !self.paste_held() {
             return None;
         }
-        let theme = &self.theme;
-        let s = &theme.surfaces;
-        let stop = kit::eased(
-            div()
-                .id("screen-paste-cancel")
-                .debug_selector(|| "screen-paste-cancel".to_owned())
-                .role(gpui::accesskit::Role::Button)
-                .aria_label(CANCEL_PASTE)
-                .px(px(theme.spacing.xs))
-                .rounded(px(theme.radii.xs))
-                .cursor_pointer()
-                .text_color(hsla(s.text_secondary)),
+        let theme = slopty_shell::live::chrome::theme(cx).clone();
+        let stop = pill_button(
+            "screen-paste-cancel",
+            "Cancel",
+            slopty_shell::live::chrome::Tone::Ghost,
+            &theme.for_popup(),
         )
-        .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
-        .child("Cancel")
+        .aria_label(CANCEL_PASTE)
         .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
         .on_click(cx.listener(|_this, _ev, _w, cx| {
             cx.stop_propagation();
             cx.emit(ScreenViewEvent::CancelPaste);
         }));
-        // A pill over a picture floats, as the zoom's readout does.
-        let pill = kit::elevate(kit::pill_frame(theme), theme)
-            .id("screen-paste-held")
-            .debug_selector(|| "screen-paste-held".to_owned())
-            .role(gpui::accesskit::Role::Status)
-            .aria_label(PASTE_HELD)
-            .flex()
-            .items_center()
-            .gap(px(theme.spacing.sm))
-            .text_color(hsla(s.text_secondary))
-            .font_family(theme.typography.ui_family.clone())
-            .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
-            .child(PASTE_HELD)
-            .child(stop);
+        // A pill over a picture floats, as the shell's jump pill does over a transcript.
+        let pill = slopty_shell::live::floating_pill(
+            SharedString::from(format!("screen-paste-held-{}", self.stream.0)),
+            None,
+            &theme,
+            move |popup| {
+                let words = div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .mr(px(-10.0))
+                    .child(slopty_shell::live::chrome::pill_words(PASTE_HELD, popup))
+                    .child(stop)
+                    .into_any_element();
+                (None, words)
+            },
+            |pill| {
+                pill.debug_selector(|| "screen-paste-held".to_owned())
+                    .role(gpui::accesskit::Role::Status)
+                    .aria_label(PASTE_HELD)
+                    .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
+            },
+        );
         Some(
             div()
                 .absolute()
-                .bottom(px(theme.spacing.sm))
+                .bottom(px(12.0))
                 .left_0()
                 .right_0()
                 .flex()
@@ -2052,12 +2045,12 @@ impl ScreenView {
     }
 
     /// Put the zoom readout up, and take it down after [`READOUT_HOLD`]: fading over
-    /// [`kit::FADE`], or at once under Reduce Motion.
+    /// the shell's quick fade, or at once under Reduce Motion.
     fn show_readout(&mut self, cx: &Context<Self>) {
         self.readout = Some(Readout::Shown);
         self.readout_gen = self.readout_gen.wrapping_add(1);
         let generation = self.readout_gen;
-        let fade = kit::motion(cx);
+        let fade = !cx.reduce_motion();
         self.readout_timer = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(READOUT_HOLD).await;
             if fade {
@@ -2065,7 +2058,7 @@ impl ScreenView {
                     v.readout = Some(Readout::Fading(generation));
                     cx.notify();
                 });
-                cx.background_executor().timer(kit::FADE).await;
+                cx.background_executor().timer(slopty_shell::motion::FADE_QUICK.total()).await;
             }
             let _gone = this.update(cx, |v, cx| {
                 v.readout = None;
@@ -2860,8 +2853,9 @@ impl ScreenView {
                 )
             }
         };
-        let fill = hsla(self.theme.surfaces.text);
-        let outline = hsla(self.theme.surfaces.ground);
+        // The system's own arrow: black inside a white rim, whatever the appearance.
+        let fill = gpui::black();
+        let outline = gpui::white();
         Some(
             div()
                 .absolute()
@@ -3327,49 +3321,58 @@ impl Render for ScreenView {
             }
             (None, _) if waited => {
                 let text = waiting_text(self.source);
+                let theme = slopty_shell::live::chrome::theme(cx).clone();
+                let view = cx.entity_id();
                 div()
                     // A status, not a picture: it is the only thing a screen reader can be told
                     // while the surface is empty, and it changes when the worker reports the
-                    // source.
+                    // source. Zeron's loading anatomy, as the shell's own "Connecting…" before it,
+                    // so the place keeps its size and tone from one to the other.
                     .id("screen-waiting")
                     .role(gpui::accesskit::Role::Status)
                     .aria_label(text)
                     .size_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_size(px(self.theme.typography.small()))
-                    .text_color(hsla(self.theme.surfaces.text_muted))
-                    .font_family(self.theme.typography.ui_family.clone())
-                    .child(text)
+                    .child(slopty_shell::live::chrome::loading(text, &theme, view, cx))
                     .into_any_element()
             }
             _ => div().size_full().into_any_element(),
         };
         let readout = self.readout.zip(self.readout()).map(|(state, text)| {
-            let theme = &self.theme;
-            // A pill over a picture floats: over a remote desktop's own white or black a
-            // veil of the chrome's grey could vanish, and the lifted surface cannot.
-            let pill = kit::tabular(kit::elevate(kit::pill_frame(theme), theme))
-                .id("zoom-readout")
-                .role(gpui::accesskit::Role::Status)
-                .aria_label(SharedString::from(text.clone()))
-                .text_color(hsla(theme.surfaces.text_secondary))
-                .font_family(theme.typography.ui_family.clone())
-                .child(text);
+            let theme = slopty_shell::live::chrome::theme(cx).clone();
+            let label = SharedString::from(text.clone());
+            // A pill over a picture floats: over a remote desktop's own white or black a veil
+            // of the chrome's grey could vanish, and the frosted pill cannot.
+            let pill = slopty_shell::live::floating_pill(
+                SharedString::from(format!("zoom-readout-pill-{}", self.stream.0)),
+                None,
+                &theme,
+                move |popup| {
+                    let words = slopty_shell::live::chrome::pill_words(text, popup)
+                        .font_features(tabular_figures());
+                    (None, words.into_any_element())
+                },
+                move |pill| {
+                    pill.debug_selector(|| "zoom-readout".to_owned())
+                        .role(gpui::accesskit::Role::Status)
+                        .aria_label(label)
+                },
+            );
+            let pill = div().child(pill);
             let pill = match state {
-                Readout::Shown => pill.into_any_element(),
+                Readout::Shown => {
+                    slopty_shell::motion::fade_quick("zoom-readout", pill).into_any_element()
+                }
                 Readout::Fading(generation) => pill
                     .with_animation(
                         ("zoom-readout-fade", generation),
-                        Animation::new(kit::FADE).with_easing(kit::ease_out()),
+                        slopty_shell::motion::FADE_QUICK.animation(),
                         |el, t| el.opacity(1.0 - t),
                     )
                     .into_any_element(),
             };
             div()
                 .absolute()
-                .top(px(theme.spacing.xs))
+                .top(px(controls::EDGE))
                 .left_0()
                 .right_0()
                 .flex()
@@ -3396,13 +3399,9 @@ impl Render for ScreenView {
             .group(controls::GROUP)
             .size_full()
             .overflow_hidden()
-            // A picture sits on the stage, dark in both appearances as media is, so its edge
-            // reads as a screen's; until there is one, the body is the page its words are on.
-            .bg(hsla(if self.shape.is_some() {
-                self.theme.surfaces.stage
-            } else {
-                self.theme.content()
-            }))
+            // The picture sits on the pane's own ground in both appearances, as zeron frames
+            // media (`docs/decisions/ui.md`, "A remote picture is letterboxed on the pane").
+            .bg(slopty_shell::live::chrome::theme(cx).bg)
             .cursor(styled)
             .on_key_down(cx.listener(Self::key_down))
             .on_key_up(cx.listener(Self::key_up))
@@ -3433,10 +3432,13 @@ impl Render for ScreenView {
             .child(record_bounds)
             // The system's drag is the pointer while one is over the tile.
             .children(self.cursor_overlay(drawn.filter(|_| self.drop.is_none())))
-            .children(self.drop_ring())
+            .children(self.drop_ring(cx))
             .children(self.paste_line(cx))
             .children(
-                self.taking_icons(self.frame_to_body(self.zoom.to_frame(self.pointer_spot(now).0))),
+                self.taking_icons(
+                    self.frame_to_body(self.zoom.to_frame(self.pointer_spot(now).0)),
+                    cx,
+                ),
             )
             .children(console)
             .children(readout)
@@ -3461,33 +3463,38 @@ impl ScreenView {
         if title.is_empty() {
             return None;
         }
-        let theme = &self.theme;
         if self.unlocking {
-            return Some(self.unlock_line());
+            return Some(self.unlock_line(cx));
         }
-        let icon = match self.source {
-            SourceState::Away => slopty_kit::icons::Symbol::Display,
-            _ => slopty_kit::icons::Symbol::Lock,
+        let theme = slopty_shell::live::chrome::theme(cx).for_popup();
+        let mark = match self.source {
+            SourceState::Away => slopty_shell::icons::MONITOR,
+            _ => slopty_shell::icons::LOCK,
         };
         let unlock = (self.source == SourceState::Locked).then(|| {
-            kit::button(theme, "screen-unlock-here", UNLOCK_HERE, kit::ButtonKind::Secondary)
-                .debug_selector(|| "screen-unlock-here".to_owned())
-                .mt(px(theme.spacing.md))
-                .on_click(cx.listener(|this, _ev, window, cx| this.unlock_here(window, cx)))
+            slopty_shell::live::chrome::button(
+                "screen-unlock-here",
+                UNLOCK_HERE,
+                slopty_shell::live::chrome::Tone::Primary,
+                &theme,
+            )
+            .on_click(cx.listener(|this, _ev, window, cx| this.unlock_here(window, cx)))
         });
-        let card = kit::elevate(div(), theme)
-            .rounded(px(theme.radii.lg))
-            .py(px(theme.spacing.lg))
-            .max_w(px(kit::Overlay::List.bounds().0 / 2.0))
+        // zeron's dialog: its card, title and body, the one action at its foot.
+        let card = slopty_shell::popover::dialog_card(&theme)
+            .max_w_full()
+            .gap(px(8.0))
+            .cursor(CursorStyle::Arrow)
             .child(
-                kit::notice(
-                    theme,
-                    kit::notice_mark(theme, icon),
-                    title,
-                    Some(SharedString::new_static(detail)),
-                )
-                .children(unlock),
-            );
+                slopty_shell::icons::icon(mark)
+                    .size(px(20.0))
+                    .flex_none()
+                    .text_color(theme.text_muted),
+            )
+            .child(slopty_shell::popover::dialog_title(&theme, title).mt(px(4.0)))
+            .child(slopty_shell::popover::dialog_body(&theme, detail))
+            .children(unlock.map(|button| div().mt(px(12.0)).flex().justify_end().child(button)));
+        let card = slopty_shell::frost::frosted(16.0, slopty_shell::frost::MENU_BLUR, card);
         Some(
             div()
                 .id("screen-console")
@@ -3499,9 +3506,12 @@ impl ScreenView {
                 .flex()
                 .items_center()
                 .justify_center()
-                .p(px(theme.spacing.md))
-                .bg(kit::scrim(theme))
-                .child(card)
+                .p(px(16.0))
+                .bg(slopty_shell::theme::scrim(0.35))
+                .child(slopty_shell::motion::dialog_in(
+                    SharedString::from(format!("screen-console-{}", self.stream.0)),
+                    div().child(card),
+                ))
                 .into_any_element(),
         )
     }
@@ -3519,27 +3529,28 @@ impl ScreenView {
 
     /// The slim line over a locked Mac's picture once "Unlock here" is pressed: what to type,
     /// on a lifted pill at the top, the rest of the body the stream's.
-    fn unlock_line(&self) -> gpui::AnyElement {
-        let theme = &self.theme;
-        let pill = kit::elevate(kit::pill_frame(theme), theme)
-            .child(
-                slopty_kit::icons::icon(
-                    theme,
-                    slopty_kit::icons::Symbol::Lock,
-                    hsla(theme.surfaces.text_muted),
+    fn unlock_line(&self, cx: &Context<Self>) -> gpui::AnyElement {
+        let theme = slopty_shell::live::chrome::theme(cx).clone();
+        let pill = slopty_shell::live::floating_pill(
+            SharedString::from(format!("screen-unlocking-{}", self.stream.0)),
+            None,
+            &theme,
+            |popup| {
+                (
+                    Some(slopty_shell::live::chrome::pill_glyph(slopty_shell::icons::LOCK, popup)),
+                    slopty_shell::live::chrome::pill_words(TYPE_THE_PASSWORD, popup)
+                        .into_any_element(),
                 )
-                .size(px(theme.icon())),
-            )
-            .text_color(hsla(theme.surfaces.text_secondary))
-            .font_family(theme.typography.ui_family.clone())
-            .child(TYPE_THE_PASSWORD);
+            },
+            |pill| pill,
+        );
         div()
             .id("screen-unlocking")
             .debug_selector(|| "screen-unlocking".to_owned())
             .role(gpui::accesskit::Role::Status)
             .aria_label(TYPE_THE_PASSWORD)
             .absolute()
-            .top(px(theme.spacing.xs))
+            .top(px(controls::EDGE))
             .left_0()
             .right_0()
             .flex()
@@ -3553,16 +3564,16 @@ impl ScreenView {
     /// lines in the mono face. It floats: over a remote desktop's own white or black a veil of
     /// the chrome's grey could vanish, and the lifted surface cannot. A press on it stays here.
     fn hud_panel(&self, summary: &[Figure], text: &str, cx: &Context<Self>) -> gpui::AnyElement {
-        let theme = &self.theme;
-        let s = theme.surfaces;
+        let theme = slopty_shell::live::chrome::theme(cx).for_popup();
         let separator = " \u{b7} ";
         let mut line = String::new();
         let mut runs = Vec::new();
-        let font = gpui::font(theme.typography.ui_family.clone());
+        let font =
+            gpui::Font { features: tabular_figures(), ..gpui::font(theme.font_sans.clone()) };
         let run = |len: usize, tone| gpui::TextRun {
             len,
             font: font.clone(),
-            color: hsla(tone),
+            color: tone,
             background_color: None,
             underline: None,
             strikethrough: None,
@@ -3570,13 +3581,13 @@ impl ScreenView {
         for (ix, figure) in summary.iter().enumerate() {
             if ix > 0 {
                 line.push_str(separator);
-                runs.push(run(separator.len(), s.text_muted));
+                runs.push(run(separator.len(), theme.text_faint));
             }
             line.push_str(&figure.text);
-            runs.push(run(figure.text.len(), if figure.warn { s.warn } else { s.text_secondary }));
+            runs.push(run(figure.text.len(), if figure.warn { theme.warning } else { theme.text }));
         }
         let plain = if line.is_empty() {
-            div().text_color(hsla(s.text_muted)).child("\u{2026}").into_any_element()
+            div().text_color(theme.text_muted).child("\u{2026}").into_any_element()
         } else {
             let line = SharedString::from(line);
             // The figures are said as they are drawn, so a screen reader hears them and a
@@ -3591,57 +3602,61 @@ impl ScreenView {
                 .into_any_element()
         };
         let open = self.hud_details;
-        let details = kit::icon_button(
-            theme,
+        let details = slopty_shell::live::chrome::icon_button(
             "stream-stats-details",
             if open {
-                slopty_kit::icons::Symbol::ChevronUp
+                slopty_shell::icons::ALT_ARROW_UP
             } else {
-                slopty_kit::icons::Symbol::ChevronDown
+                slopty_shell::icons::ALT_ARROW_DOWN
             },
             "Details",
+            &theme,
         )
         .aria_expanded(open)
         .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
         .on_click(cx.listener(|this, _ev, _w, cx| this.toggle_hud_details(cx)));
-        let trends = open.then(|| self.hud_trends()).flatten();
+        let trends = open.then(|| self.hud_trends(&theme)).flatten();
         let lines = open.then(|| {
+            // The engineering lines in the mono face, as the shell's key hints set theirs.
             div()
                 .debug_selector(|| "stream-stats-details-lines".to_owned())
-                .pt(px(theme.spacing.xs))
-                .border_t(kit::HAIR)
-                .border_color(hsla(s.stroke))
-                .font_family(theme.typography.mono_families.first().cloned().unwrap_or_default())
-                .text_size(px(theme.typography.caption()))
-                .text_color(hsla(s.text_muted))
+                .mx(px(-slopty_shell::popover::CARD_INSET))
+                .px(px(8.0))
+                .pt(px(6.0))
+                .border_t_1()
+                .border_color(slopty_shell::theme::hairline(0.07))
+                .font_family(theme.font_mono.clone())
+                .text_size(slopty_shell::typography::ui_rems(11.0))
+                .text_color(theme.text_muted)
                 .whitespace_nowrap()
                 .child(SharedString::from(text.to_owned()))
         });
-        let panel = kit::tabular(kit::elevate(div(), theme))
+        let panel = slopty_shell::popover::popover_card(&theme)
             .id("stream-stats")
             .debug_selector(|| "stream-stats".to_owned())
             .role(gpui::accesskit::Role::Status)
             .aria_label("Stream stats")
             .flex()
             .flex_col()
-            .gap(px(theme.spacing.xs))
-            .p(px(theme.spacing.sm))
-            .rounded(px(theme.radii.lg))
+            .gap(px(6.0))
             .cursor(CursorStyle::Arrow)
-            .font_family(theme.typography.ui_family.clone())
-            .text_size(px(theme.typography.small()))
+            .font_family(theme.font_sans.clone())
+            .font_features(tabular_figures())
             .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
             .on_mouse_down(MouseButton::Right, |_ev, _w, cx| cx.stop_propagation())
-            .child(
-                div().flex().items_center().gap(px(theme.spacing.sm)).child(plain).child(details),
-            )
+            .child(div().flex().items_center().gap(px(8.0)).pl(px(8.0)).child(plain).child(details))
             .children(trends)
             .children(lines);
+        let panel = slopty_shell::frost::frosted(
+            slopty_shell::popover::CARD_RADIUS,
+            slopty_shell::frost::MENU_BLUR,
+            panel,
+        );
         // Under the controls' pill, which shares the corner.
         div()
             .absolute()
-            .top(px(controls::under_controls(theme)))
-            .right(px(theme.spacing.sm))
+            .top(px(controls::under_controls()))
+            .right(px(controls::EDGE))
             .child(panel)
             .into_any_element()
     }
@@ -3654,10 +3669,8 @@ const TREND_WIDTH: f32 = 96.0;
 impl ScreenView {
     /// Behind "Details", over the engineering lines: the last half minute of the frame's age,
     /// the jitter and the round trip, each a sparkline with its latest figure.
-    fn hud_trends(&self) -> Option<gpui::AnyElement> {
+    fn hud_trends(&self, theme: &slopty_shell::theme::Theme) -> Option<gpui::AnyElement> {
         let history = &self.hud.as_ref()?.history;
-        let theme = &self.theme;
-        let s = theme.surfaces;
         let trend = |id: &'static str, name: &'static str, values: &VecDeque<f32>| {
             let latest = values.back().copied().filter(|v| v.is_finite());
             let figure = latest.map_or_else(|| "\u{2013}".to_owned(), |v| format!("{v:.0} ms"));
@@ -3665,43 +3678,61 @@ impl ScreenView {
             div()
                 .flex()
                 .flex_col()
-                .gap(px(theme.spacing.xxs))
+                .gap(px(2.0))
                 .child(
                     div()
                         .flex()
                         .justify_between()
-                        .gap(px(theme.spacing.sm))
-                        .text_size(px(theme.typography.caption()))
-                        .child(div().text_color(hsla(s.text_muted)).child(name))
-                        .child(
-                            kit::tabular(div())
-                                .text_color(hsla(s.text_secondary))
-                                .child(SharedString::from(figure)),
-                        ),
+                        .gap(px(8.0))
+                        .text_size(slopty_shell::typography::ui_rems(11.0))
+                        .child(div().text_color(theme.text_muted).child(name))
+                        .child(div().text_color(theme.text).child(SharedString::from(figure))),
                 )
                 .child(
-                    kit::Spark::new(
+                    slopty_kit::kit::Spark::new(
                         id,
                         values.iter().copied().collect(),
                         history.pushed,
                         HUD_HISTORY,
                         label,
                     )
-                    .tone(hsla(s.accent))
-                    .size(px(TREND_WIDTH), px(theme.spacing.lg)),
+                    .tone(theme.text_muted)
+                    .size(px(TREND_WIDTH), px(16.0)),
                 )
         };
         Some(
             div()
                 .debug_selector(|| "stream-stats-trends".to_owned())
                 .flex()
-                .gap(px(theme.spacing.md))
+                .gap(px(12.0))
+                .px(px(8.0))
                 .child(trend("stream-trend-age", "Frame age", &history.age))
                 .child(trend("stream-trend-jitter", "Jitter", &history.jitter))
                 .child(trend("stream-trend-rtt", "Round trip", &history.rtt))
                 .into_any_element(),
         )
     }
+}
+
+/// Figures of one width (OpenType `tnum`), so a readout that changes does not shift.
+fn tabular_figures() -> gpui::FontFeatures {
+    gpui::FontFeatures(Arc::new(vec![("tnum".to_owned(), 1)]))
+}
+
+/// A button inside a floating pill: the shell's dialog button, 24 tall and as round as the
+/// pill round it.
+fn pill_button(
+    id: &'static str,
+    label: &str,
+    tone: slopty_shell::live::chrome::Tone,
+    popup: &slopty_shell::theme::Theme,
+) -> gpui::Stateful<gpui::Div> {
+    slopty_shell::live::chrome::button(id, label, tone, popup)
+        .h(px(24.0))
+        .py_0()
+        .flex()
+        .items_center()
+        .rounded_full()
 }
 
 /// The system pointer over the picture. Before the first frame there is nothing to point at
@@ -4512,6 +4543,7 @@ mod tests {
         assert!(std::iter::from_fn(|| rx.try_recv().ok()).next().is_none(), "all of it waits");
         let line = cx.debug_bounds("screen-paste-held").expect("the line says what waits");
         assert!(line.size.width > px(0.0));
+        assert!(line.size.height >= px(30.0), "the shell's floating pill: {line:?}");
         let stop = cx.debug_bounds("screen-paste-cancel").expect("with its stop");
         cx.simulate_click(stop.center(), Modifiers::default());
         cx.run_until_parked();
@@ -4614,6 +4646,8 @@ mod tests {
         cx.run_until_parked();
         let over = cx.debug_bounds("screen-console").expect("the notice is up");
         assert_eq!(over.size, size(px(400.0), px(300.0)), "over the whole body");
+        let unlock = cx.debug_bounds("screen-unlock-here").expect("its one action");
+        assert!(unlock.size.height >= px(26.0), "a dialog's button: {unlock:?}");
         assert!(statuses(cx).contains(&"The Mac is locked".to_owned()), "{:?}", statuses(cx));
         assert!(!view.read_with(cx, |v, _| v.handle.source_live()), "no refreshes asked");
         view.update(cx, |v, cx| v.set_source_state(SourceState::Away, cx));
@@ -5737,7 +5771,7 @@ mod tests {
         cx.executor().advance_clock(READOUT_HOLD.saturating_sub(QUALITY_COOLDOWN));
         cx.run_until_parked();
         assert!(matches!(state(cx), Some(Readout::Fading(_))), "{:?}", state(cx));
-        cx.executor().advance_clock(kit::FADE);
+        cx.executor().advance_clock(slopty_shell::motion::FADE_QUICK.total());
         cx.run_until_parked();
         assert_eq!(state(cx), None);
 
@@ -6062,11 +6096,11 @@ mod tests {
         Bounds { origin: point(px(x), px(y)), size: size(px(w), px(h)) }
     }
 
-    /// A picture of another aspect than its body letterboxes on the stage, the same near-black
-    /// in the light appearance as in the dark; before its first picture the body is the page
-    /// its words are on.
+    /// A picture of another aspect than its body letterboxes on the pane's own ground, in the
+    /// light appearance as in the dark, as zeron frames media; before its first picture the body
+    /// is that same ground.
     #[gpui::test]
-    fn a_letterbox_is_the_stage_in_both_appearances(cx: &mut gpui::TestAppContext) {
+    fn a_letterbox_is_the_pane_in_both_appearances(cx: &mut gpui::TestAppContext) {
         let (view, _rx, cx) = windowed(cx);
         let body = |cx: &mut gpui::VisualTestContext| {
             let (scale, quads) =
@@ -6078,16 +6112,15 @@ mod tests {
                 .filter_map(|q| q.background.as_solid())
                 .collect::<Vec<_>>()
         };
-        for variant in [slopty_theme::Variant::Dark, slopty_theme::Variant::Light] {
-            let theme = Theme::new(variant);
-            view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
+        for shell in [slopty_shell::theme::Theme::dark(), slopty_shell::theme::Theme::light()] {
+            let ground = shell.bg;
+            cx.update(|_window, cx| cx.set_global(shell));
+            view.update(cx, |_, cx| cx.notify());
             cx.run_until_parked();
-            if variant == slopty_theme::Variant::Dark {
-                assert_eq!(body(cx), [hsla(theme.content())], "no picture yet: the page");
-                view.update(cx, |v, cx| v.show_picture(picture(800, 400), cx));
-                cx.run_until_parked();
-            }
-            assert_eq!(body(cx), [hsla(slopty_theme::STAGE)], "{variant:?}: the stage");
+            assert_eq!(body(cx), [ground], "no picture yet: the pane");
+            view.update(cx, |v, cx| v.show_picture(picture(800, 400), cx));
+            cx.run_until_parked();
+            assert_eq!(body(cx), [ground], "the letterbox is the pane");
         }
     }
 
@@ -6657,7 +6690,11 @@ mod tests {
                 .any(|r| matches!(r, ScreenRequest::Input { .. } | ScreenRequest::Focus(_))),
             "{watched:?}"
         );
-        assert!(cx.debug_bounds("screen-driver").is_some(), "the pill says who drives");
+        let pill = cx.debug_bounds("screen-driver").expect("the pill says who drives");
+        let button = cx.debug_bounds("screen-driver-act").expect("the pill's button");
+        assert_eq!(pill.size.height, px(controls::PILL), "the shell's floating pill");
+        assert!(pill.size.height >= button.size.height, "the button inside it whole: {button:?}");
+        assert!(pill.top() <= button.top() && pill.bottom() >= button.bottom(), "not cut");
 
         let act = cx.debug_bounds("screen-driver-act").expect("the pill's button").center();
         cx.simulate_click(act, Modifiers::default());
@@ -6744,6 +6781,10 @@ mod tests {
             "screen-controls-menu-type-the-clipboard",
         ];
         assert!(cx.debug_bounds("screen-controls-menu").is_none(), "closed at first");
+        let pill = cx.debug_bounds("screen-controls-pill").expect("the pill");
+        assert_eq!(pill.size.height, px(controls::PILL), "the shell's floating pill");
+        let button = cx.debug_bounds("screen-controls").expect("the button");
+        assert_eq!(button.size.height, px(24.0), "a surface toolbar's control");
         click(cx, "screen-controls");
         assert!(view.read_with(cx, |v, _| v.controls_open()));
         assert!(cx.debug_bounds("screen-controls-menu-stream-stats").is_some(), "always there");
@@ -6787,5 +6828,26 @@ mod tests {
         assert!(!button.intersects(&stats), "the stats hang under the button: {stats:?}");
         click(cx, "screen-controls");
         assert!(view.read_with(cx, |v, _| v.controls_open()), "still within reach");
+    }
+
+    /// An unwell stream's mark sits in the controls' pill as a surface chip: 24 tall, its word
+    /// beside the warning glyph, and a click on it brings up the stats.
+    #[gpui::test]
+    fn the_health_mark_is_a_chip_in_the_controls_pill(cx: &mut gpui::TestAppContext) {
+        let (view, _rx, cx) = windowed(cx);
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("stream-health").is_none(), "silent while all is well");
+        view.update(cx, |v, cx| {
+            v.health = Some(Health::Stalled);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let mark = cx.debug_bounds("stream-health").expect("the mark");
+        let pill = cx.debug_bounds("screen-controls-pill").expect("shown while unwell");
+        assert_eq!(mark.size.height, px(24.0), "a surface chip");
+        assert!(pill.top() <= mark.top() && pill.bottom() >= mark.bottom(), "inside the pill");
+        cx.simulate_click(mark.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |v, _| v.hud()), "the stats came up");
     }
 }

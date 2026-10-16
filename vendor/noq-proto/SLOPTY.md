@@ -251,6 +251,14 @@ Commits 2, 3 and 13 share `VideoSim` in the `bbr3` tests: a screen encoder's fra
 bottleneck, paced by noq's token bucket. `video_through_one_bottleneck` (ignored) prints what
 BBR3 does with that traffic (docs/MEASUREMENTS.md, "noq's BBR3 against the draft").
 
+Upstream `main` was read through `1fe2a342` (2026-10-15, still no release past 1.3.0). Patches 21
+and 22 are its two fixes that change what a Slopty link does. The rest is not taken: #838 moves
+imports to `core` and `alloc` (no behaviour, and it touches 54 files under the patches), #740 adds
+sent-packet counts nothing here reads, #827 fixes qlog output, which Slopty does not build, and
+#797 and #798 change tests only. `noq` #824 wakes `wait_idle` and `wait_all_draining` when the
+endpoint driver is dropped; the server's only `wait_idle`, at shutdown, runs with the driver alive
+and under a one-second timeout, so it arrives with the next published `noq`.
+
 `noq-proto` and `noq-udp` (`vendor/noq-udp/SLOPTY.md`) are patched (`[patch.crates-io]` in
 the workspace `Cargo.toml`); `noq` comes from crates.io. The files are the crate as published (its normalised
 `Cargo.toml`, `src`, `benches`, licences) plus the patches. To move to a newer noq: take the

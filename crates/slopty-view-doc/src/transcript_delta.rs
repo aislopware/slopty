@@ -29,6 +29,14 @@ pub struct TranscriptUpdate {
     /// encoding. Omitted on ordinary live updates and by older engines.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replay_baseline: Option<TranscriptBaseline>,
+    // slopty: the plan's rate windows ride the transcript beside the context, as the agent's
+    // meters say them.
+    /// The plan's rate windows, most used first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub limits: Vec<slopty_view_proto::AgentUsageWindow>,
+    /// When the usage limit holding the agent lifts, while one does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit_resets_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Compact presentation watermark: stable part ids and text byte lengths.

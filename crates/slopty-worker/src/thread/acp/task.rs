@@ -151,6 +151,8 @@ impl Task {
         let Process { mut child, stdout, stderr } = agent;
         let mut lines = BufReader::new(stdout).split(b'\n');
         let mut worker_gone = false;
+        // Alive while the agent runs: stamped until its output ends or it is ended.
+        let lease = self.host.lease(self.thread);
         while self.lost.is_none() {
             tokio::select! {
                 line = lines.next_segment() => match line {
@@ -169,6 +171,7 @@ impl Task {
                 }
             }
         }
+        lease.stop();
         // Closing stdin asks the agent to end; one that does not in time is killed.
         drop(self.stdin.take());
         let status = if let Ok(status) = tokio::time::timeout(SHUTDOWN, child.wait()).await {

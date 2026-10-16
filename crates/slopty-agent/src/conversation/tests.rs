@@ -257,8 +257,8 @@ fn a_long_diff_keeps_its_counts() {
     assert_eq!((patch.added, patch.removed), (1000, 1));
     assert_eq!(patch.hunks.len(), 1, "the second hunk is past the cap");
     assert_eq!(patch.clipped_lines, 601);
-    let (thread, at) =
-        crate::observed::text_ref(patch.full.as_ref().expect("ref")).expect("the decoder's own");
+    let (thread, at) = crate::claude::history::text_ref(patch.full.as_ref().expect("ref"))
+        .expect("the decoder's own");
     assert_eq!(thread, MAIN, "the whole diff names the thread it is in");
     let whole = full_text(&jsonl, &at).expect("patch");
     assert!(whole.starts_with("@@ -1,1 +1,1000 @@\n+added 0\n"));

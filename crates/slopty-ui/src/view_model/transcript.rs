@@ -4,13 +4,19 @@
 //! A text the worker cut reads whole once its whole has come ([`Look::whole`]), and says how much
 //! is still to come until then. A picture goes by a path of its own ([`image_path`]), which the
 //! interface reads back through the thread's link to it.
+//!
+//! Beside the turns go a few entries no one wrote: a plan's own card (`plan-card:<ask>`, its text
+//! the part `plan:<ask>`), a divider for a compaction or a subagent's news
+//! ([`MessagePart::Marker`]), the seam of a forked chat ([`MessagePart::Fork`]), and the words one
+//! agent told another, as from that agent. A failure reads in one grammar: what happened and the
+//! one thing to do, the agent's own words kept behind it ([`error_words`]).
 
 use std::collections::HashMap;
 
 use slopty_proto::thread::detail::{Clipped, Patch};
 use slopty_proto::thread::{
-    ContentRef, Image, IntentId, ItemBody, Notice, Request, ThreadId, ThreadState, ToolCall,
-    ToolDetail, ToolState, Turn, TurnId, TurnState, kind,
+    Compaction, ContentRef, Image, IntentId, ItemBody, Notice, Request, ThreadId, ThreadState,
+    ToolCall, ToolDetail, ToolState, Turn, TurnId, TurnState, kind,
 };
 use slopty_view_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry, ToolDiffStat};
 use slopty_view_proto::{UserInputAnswer, UserInputQuestion};
@@ -20,11 +26,16 @@ use slopty_view_proto::{UserInputAnswer, UserInputQuestion};
 /// itself sent.
 pub struct Look<'a> {
     device: &'a str,
+    host: Option<&'a str>,
     child_running: Box<dyn Fn(ThreadId) -> Option<bool> + 'a>,
     named: ByIntent<'a>,
     said: ByIntent<'a>,
     whole: Whole<'a>,
+    source: Source<'a>,
 }
+
+/// A thread's chat id and title, for the seam of a chat forked off it.
+type Source<'a> = Box<dyn Fn(ThreadId) -> Option<(String, String)> + 'a>;
 
 /// Words the workspace keeps by the intent that sent them.
 type ByIntent<'a> = Box<dyn Fn(IntentId) -> Option<String> + 'a>;
@@ -44,11 +55,27 @@ impl<'a> Look<'a> {
     pub fn new(device: &'a str) -> Self {
         Self {
             device,
+            host: None,
             child_running: Box::new(|_| None),
             named: Box::new(|_| None),
             said: Box::new(|_| None),
             whole: Box::new(|_| None),
+            source: Box::new(|_| None),
         }
+    }
+
+    /// The name of the machine the thread runs on, which a failure there names.
+    #[must_use]
+    pub const fn host(mut self, name: &'a str) -> Self {
+        self.host = Some(name);
+        self
+    }
+
+    /// The chat id and title of a thread, which a chat forked off it names at its seam.
+    #[must_use]
+    pub fn source(mut self, source: impl Fn(ThreadId) -> Option<(String, String)> + 'a) -> Self {
+        self.source = Box::new(source);
+        self
     }
 
     /// Whether a subagent's thread still runs, for its spawn chip, wherever it runs.
@@ -150,16 +177,38 @@ fn with_images(text: String, thread: ThreadId, item: &str, images: &[Image]) -> 
     format!("{body}\n\n{IMAGES_TRAILER}\n{}", paths.join("\n"))
 }
 
+/// The entries being made: each with the turn it answers, and the answer being gathered.
+struct Made {
+    out: Vec<SessionMessageEntry>,
+    /// The turn each entry of `out` answers, for an answer's own.
+    turns: Vec<Option<TurnId>>,
+    /// The answer being gathered: its turn, and its entry.
+    answer: Option<(TurnId, SessionMessageEntry)>,
+}
+
+impl Made {
+    /// The answer being gathered goes in.
+    fn flush(&mut self) {
+        if let Some((turn, entry)) = self.answer.take() {
+            self.out.push(entry);
+            self.turns.push(Some(turn));
+        }
+    }
+
+    /// An entry of no turn's answer goes in, after the answer being gathered.
+    fn own(&mut self, entry: SessionMessageEntry) {
+        self.flush();
+        self.out.push(entry);
+        self.turns.push(None);
+    }
+}
+
 /// `state`'s transcript, as `look` reads it.
 #[must_use]
 pub fn entries(state: &ThreadState, look: &Look<'_>) -> Vec<SessionMessageEntry> {
     let device = look.device;
     let thread = state.meta.id;
-    let mut out: Vec<SessionMessageEntry> = Vec::new();
-    // The turn each entry of `out` answers, for an answer's own.
-    let mut turns: Vec<Option<TurnId>> = Vec::new();
-    // The answer being gathered: its turn, and its entry.
-    let mut answer: Option<(TurnId, SessionMessageEntry)> = None;
+    let mut made = Made { out: Vec::new(), turns: Vec::new(), answer: None };
     let last_tasks = state
         .items
         .iter()
@@ -167,98 +216,339 @@ pub fn entries(state: &ThreadState, look: &Look<'_>) -> Vec<SessionMessageEntry>
     // A task's text by its id, as a task call before named it: a change to a task names it by id
     // alone.
     let mut named: Named<'_> = HashMap::new();
+    // The plans to approve, by the call that asked: each gets its card after that call.
+    let plans: Vec<&Request> = state
+        .requests
+        .iter()
+        .filter(|request| request.kind == Request::PLAN && plan_text(request).is_some())
+        .collect();
+    let seam = seam(state);
     for (ix, item) in state.items.iter().enumerate() {
         let id = item.id.0.clone();
         let at = at(item.at_ms);
-        if let ItemBody::User(message) = &item.body {
-            // The id the shell gave the message, where it sent it, so its echo gives way.
-            let shown = message.intent.and_then(&look.named).unwrap_or_else(|| id.clone());
-            // The person's own words where the shell sent them, its chips and pictures as the
-            // shell holds them; else what the agent was given, and its pictures.
-            let text = message.intent.and_then(&look.said).unwrap_or_else(|| {
-                with_images(look.words(&message.text), thread, &id, &message.images)
-            });
-            if let Some((turn, entry)) = answer.take() {
-                out.push(entry);
-                turns.push(Some(turn));
+        match &item.body {
+            ItemBody::User(message) => {
+                // The id the shell gave the message, where it sent it, so its echo gives way.
+                let shown = message.intent.and_then(&look.named).unwrap_or_else(|| id.clone());
+                // The person's own words where the shell sent them, its chips and pictures as
+                // the shell holds them; else what the agent was given, and its pictures.
+                let text = message.intent.and_then(&look.said).unwrap_or_else(|| {
+                    with_images(look.words(&message.text), thread, &id, &message.images)
+                });
+                let parts = vec![MessagePart::Text { id: format!("{shown}:text"), text }];
+                made.own(own_entry(shown, MessageRole::User, parts, at, device));
             }
-            out.push(SessionMessageEntry {
-                parts: vec![MessagePart::Text { id: format!("{shown}:text"), text }],
-                id: shown,
-                role: MessageRole::User,
-                created_at: at,
-                device_id: device.to_owned(),
-                status: None,
-                continuation_of: None,
-                duration_ms: None,
-            });
-            turns.push(None);
-            continue;
-        }
-        let mut parts = Vec::new();
-        if let ItemBody::Tool(call) = &item.body {
-            if let Some(ToolDetail::Tasks { steps, .. }) = &call.detail {
-                for step in steps.iter().filter(|step| !step.text.is_empty()) {
-                    if let Some(task) = &step.id {
-                        named.insert(task, &step.text);
+            // What Slopty handed the agent from the person and other agents: an agent's words
+            // as from it, a child's news as a quiet line.
+            ItemBody::Notice(notice) if notice.kind == Notice::REPORT => {
+                for entry in report(&id, &look.words(&notice.text), at, device) {
+                    made.own(entry);
+                }
+            }
+            ItemBody::Compaction(compaction) => {
+                let marker = MessagePart::Marker { id: id.clone(), text: compacted(compaction) };
+                made.own(own_entry(id.clone(), MessageRole::System, vec![marker], at, device));
+            }
+            body => {
+                let mut parts = Vec::new();
+                if let ItemBody::Tool(call) = body {
+                    if let Some(ToolDetail::Tasks { steps, .. }) = &call.detail {
+                        for step in steps.iter().filter(|step| !step.text.is_empty()) {
+                            if let Some(task) = &step.id {
+                                named.insert(task, &step.text);
+                            }
+                        }
+                    }
+                    // The last task list is the thread's own as it stands, whole.
+                    let plan = (Some(ix) == last_tasks).then_some(state.plan.as_ref()).flatten();
+                    parts.push(tool(thread, id.clone(), call, plan, &named, &look.child_running));
+                    parts.extend(call.images.iter().enumerate().map(|(n, image)| {
+                        MessagePart::Image {
+                            id: format!("{id}:image:{n}"),
+                            path: image_path(thread, &id, n, image),
+                            name: format!("Image {}", n.saturating_add(1)),
+                            mime_type: image.media_type.clone(),
+                        }
+                    }));
+                } else if let Some(part) = part(&id, body, look) {
+                    parts.push(part);
+                }
+                for part in parts {
+                    match &mut made.answer {
+                        Some((turn, entry)) if *turn == item.turn => entry.parts.push(part),
+                        _ => {
+                            made.flush();
+                            let turn = state.turns.iter().find(|t| t.id == item.turn);
+                            made.answer = Some((item.turn, assistant(&id, at, device, turn, part)));
+                        }
                     }
                 }
             }
-            // The last task list is the thread's own as it stands, whole.
-            let plan = (Some(ix) == last_tasks).then_some(state.plan.as_ref()).flatten();
-            parts.push(tool(thread, id.clone(), call, plan, &named, &look.child_running));
-            parts.extend(call.images.iter().enumerate().map(|(n, image)| MessagePart::Image {
-                id: format!("{id}:image:{n}"),
-                path: image_path(thread, &id, n, image),
-                name: format!("Image {}", n.saturating_add(1)),
-                mime_type: image.media_type.clone(),
-            }));
-        } else if let Some(part) = part(&id, &item.body, look) {
-            parts.push(part);
         }
-        for part in parts {
-            match &mut answer {
-                Some((turn, entry)) if *turn == item.turn => entry.parts.push(part),
-                _ => {
-                    if let Some((turn, entry)) = answer.take() {
-                        out.push(entry);
-                        turns.push(Some(turn));
-                    }
-                    let turn = state.turns.iter().find(|t| t.id == item.turn);
-                    answer = Some((item.turn, assistant(&id, at, device, turn, part)));
-                }
-            }
+        for request in plans.iter().filter(|request| request.item.as_ref() == Some(&item.id)) {
+            made.own(plan_card(request, look, at, device));
+        }
+        if seam == Some(ix)
+            && let Some(entry) = fork_seam(state, look, at, device)
+        {
+            made.own(entry);
         }
     }
-    if let Some((turn, entry)) = answer {
-        out.push(entry);
-        turns.push(Some(turn));
+    made.flush();
+    // A plan asked of no call shown here has its card at the end.
+    for request in &plans {
+        let shown = request
+            .item
+            .as_ref()
+            .is_some_and(|item| state.items.iter().any(|shown| shown.id == *item));
+        if !shown {
+            made.own(plan_card(request, look, at(request.opened_ms), device));
+        }
     }
-    failures(state, &turns, &mut out);
+    let Made { mut out, turns, .. } = made;
+    failures(state, look, &turns, &mut out);
     plan_part(state, last_tasks.is_some(), device, &mut out);
     out
 }
 
+/// An entry no turn's answer holds: the person's message, a divider, a card.
+fn own_entry(
+    id: String,
+    role: MessageRole,
+    parts: Vec<MessagePart>,
+    at: i64,
+    device: &str,
+) -> SessionMessageEntry {
+    SessionMessageEntry {
+        id,
+        role,
+        parts,
+        created_at: at,
+        device_id: device.to_owned(),
+        status: None,
+        continuation_of: None,
+        duration_ms: None,
+    }
+}
+
+/// A compaction as its divider says it: how many tokens became the summary, when the agent said.
+fn compacted(compaction: &Compaction) -> String {
+    match compaction.before_tokens {
+        Some(tokens) => format!("Compacted · {} tokens → summary", tokens_short(tokens)),
+        None => "Compacted · context → summary".to_owned(),
+    }
+}
+
+/// A count of tokens as a person reads it: `950`, `14k`, `1.2M`.
+fn tokens_short(tokens: u64) -> String {
+    if tokens >= 1_000_000 {
+        let tenths = tokens.saturating_add(50_000) / 100_000;
+        let (whole, part) = (tenths / 10, tenths % 10);
+        if part == 0 { format!("{whole}M") } else { format!("{whole}.{part}M") }
+    } else if tokens >= 1_000 {
+        format!("{}k", tokens.saturating_add(500) / 1_000)
+    } else {
+        tokens.to_string()
+    }
+}
+
+/// The text of a plan to approve: its markdown, which its card shows whole.
+fn plan_text(request: &Request) -> Option<&str> {
+    request.text.as_ref().map(|text| text.text.as_str()).filter(|text| !text.trim().is_empty())
+}
+
+/// A plan's own card: an entry `plan-card:<ask>` whose one part, `plan:<ask>`, is the plan's
+/// markdown. The question panel then asks only for its choices.
+fn plan_card(request: &Request, look: &Look<'_>, at: i64, device: &str) -> SessionMessageEntry {
+    let text = request.text.as_ref().map(|text| look.words(text)).unwrap_or_default();
+    let ask = &request.id.0;
+    let part = MessagePart::Text { id: format!("plan:{ask}"), text };
+    let mut entry =
+        own_entry(format!("plan-card:{ask}"), MessageRole::Assistant, vec![part], at, device);
+    entry.status = Some(MessageStatus::Complete);
+    entry
+}
+
+/// The index of the last item a forked chat copied from its source, after which its seam goes:
+/// the last of the turns it shares, where its fork says which; else the last made before the
+/// fork itself began.
+fn seam(state: &ThreadState) -> Option<usize> {
+    let fork = state.meta.forked_from?;
+    match fork.turn {
+        Some(shared) => state.items.iter().rposition(|item| item.turn <= shared),
+        None => state
+            .items
+            .iter()
+            .rposition(|item| !item.at_ms.is_zero() && item.at_ms < state.meta.created_ms),
+    }
+}
+
+/// The seam of a chat forked off another: "Forked from `<title>`", between what it copied and its
+/// own.
+fn fork_seam(
+    state: &ThreadState,
+    look: &Look<'_>,
+    at: i64,
+    device: &str,
+) -> Option<SessionMessageEntry> {
+    let fork = state.meta.forked_from?;
+    let (source_chat_id, source_title) =
+        (look.source)(fork.thread).unwrap_or_else(|| (fork.thread.to_string(), String::new()));
+    let id = format!("fork:{}", state.meta.id);
+    let part = MessagePart::Fork { id: id.clone(), source_chat_id, source_title };
+    Some(own_entry(id, MessageRole::System, vec![part], at, device))
+}
+
+/// How a report's block names an agent's words: `Agent <name> (<thread>) says (an agent, not the
+/// person):`, as `slopty-server`'s deliveries frame them.
+const AGENT_SAYS: &str = " says (an agent, not the person):";
+
+/// What Slopty handed an agent with a turn (its `<slopty-reports>` frame), as the person reads
+/// it: each agent's words as a message from that agent (the shell names it in bold), the
+/// person's own as theirs, and what came of other agents' work as one quiet line each. A report
+/// whose frame does not read stays as the agent got it.
+fn report(item: &str, text: &str, at: i64, device: &str) -> Vec<SessionMessageEntry> {
+    let mut blocks: Vec<(String, Vec<&str>)> = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("<slopty-reports") || trimmed == "</slopty-reports>" {
+            continue;
+        }
+        if let Some(body) = line.strip_prefix("  ")
+            && let Some((_, lines)) = blocks.last_mut()
+        {
+            lines.push(body);
+            continue;
+        }
+        if trimmed.is_empty() || (trimmed.starts_with('(') && trimmed.ends_with("are read)")) {
+            continue;
+        }
+        blocks.push((trimmed.to_owned(), Vec::new()));
+    }
+    if blocks.is_empty() {
+        let part = MessagePart::Text { id: format!("{item}:report"), text: text.to_owned() };
+        return vec![own_entry(
+            format!("{item}:report"),
+            MessageRole::User,
+            vec![part],
+            at,
+            device,
+        )];
+    }
+    let mut out = Vec::new();
+    for (n, (head, lines)) in blocks.into_iter().enumerate() {
+        let id = format!("{item}:report:{n}");
+        let body = lines.join("\n");
+        let entry = if head == "The person says:" {
+            let part = MessagePart::Text { id: format!("{id}:text"), text: body };
+            own_entry(id, MessageRole::User, vec![part], at, device)
+        } else if let Some(who) =
+            head.strip_prefix("Agent ").and_then(|rest| rest.strip_suffix(AGENT_SAYS))
+        {
+            let (name, thread) = match who.rsplit_once(" (") {
+                Some((name, thread)) => (name, thread.trim_end_matches(')')),
+                None => (who, who),
+            };
+            // zeron's attribution header, which its transcript shows as "Message from <name>".
+            let text = format!(
+                "[Message from Slopty chat {name} ({thread}). Reply to it with the Slopty \
+                 `send_message` tool, chat {thread}.]\n\n{body}"
+            );
+            let part = MessagePart::Text { id: format!("{id}:text"), text };
+            own_entry(id, MessageRole::User, vec![part], at, device)
+        } else {
+            let said = std::iter::once(head.as_str()).chain(lines).collect::<Vec<_>>().join(" ");
+            let marker =
+                MessagePart::Marker { id: id.clone(), text: super::text::line(&said, 200) };
+            own_entry(id, MessageRole::System, vec![marker], at, device)
+        };
+        out.push(entry);
+    }
+    out
+}
+
 /// Each failed turn's error, at the end of its last answer, unless a notice there already says
-/// it.
-fn failures(state: &ThreadState, turns: &[Option<TurnId>], out: &mut [SessionMessageEntry]) {
+/// it; the last turn's, when it failed, offers to try it again.
+fn failures(
+    state: &ThreadState,
+    look: &Look<'_>,
+    turns: &[Option<TurnId>],
+    out: &mut [SessionMessageEntry],
+) {
+    let last_turn = state.turns.last().map(|turn| turn.id);
     for turn in &state.turns {
         let TurnState::Failed { error, .. } = &turn.state else { continue };
         let Some(last) = turns.iter().rposition(|t| *t == Some(turn.id)) else { continue };
-        let said = turns
-            .iter()
-            .zip(out.iter())
-            .filter(|(t, _)| **t == Some(turn.id))
-            .flat_map(|(_, entry)| &entry.parts)
-            .any(|part| matches!(part, MessagePart::Error { message, .. } if message.trim() == error.trim()));
+        let retry = Some(turn.id) == last_turn;
+        let says = |part: &MessagePart| match part {
+            MessagePart::Error { message, detail, .. } => {
+                detail.as_deref().unwrap_or(message).trim() == error.trim()
+                    || message.trim() == error.trim()
+            }
+            _ => false,
+        };
+        let mut said = false;
+        for (_, entry) in turns.iter().zip(out.iter_mut()).filter(|(t, _)| **t == Some(turn.id)) {
+            if let Some(MessagePart::Error { retry: again, .. }) =
+                entry.parts.iter_mut().rev().find(|part| says(part))
+            {
+                *again = retry;
+                said = true;
+            }
+        }
         if said {
             continue;
         }
         if let Some(entry) = out.get_mut(last) {
             let id = format!("{}:error", entry.id);
-            entry.parts.push(MessagePart::Error { id, message: error.clone() });
+            let (message, detail) = error_words(TURN_FAILED, error, look.host, None);
+            entry.parts.push(MessagePart::Error { id, message, detail, retry });
         }
     }
+}
+
+/// The kind [`error_words`] gives a failed turn with no notice of its own.
+const TURN_FAILED: &str = "turn-failed";
+
+/// A failure of kind `kind` (a [`Notice`]'s, or `turn-failed`) in one grammar.
+///
+/// What happened, on which machine where one is named (`host`), then the one thing to do; and
+/// the agent's own words (`raw`) kept behind it. A kind it does not know reads as the agent
+/// said it.
+#[must_use]
+pub fn error_words(
+    kind: &str,
+    raw: &str,
+    host: Option<&str>,
+    retrying: Option<&slopty_proto::thread::Retry>,
+) -> (String, Option<String>) {
+    let on = host.map(|host| format!(" on {host}")).unwrap_or_default();
+    let words = match kind {
+        Notice::API_ERROR => match retrying {
+            Some(retry) => {
+                let of = retry.max.map(|max| format!(" of {max}")).unwrap_or_default();
+                format!(
+                    "The model's service returned an error{on}. Trying again (attempt {}{of})…",
+                    retry.attempt
+                )
+            }
+            None => format!("The model's service returned an error{on}. Try again."),
+        },
+        Notice::LIMIT => {
+            "The plan's usage limit was reached. Send a message to try again once it resets."
+                .to_owned()
+        }
+        Notice::DECLINED => {
+            "The agent's own safety check turned this step down. Say what you meant more \
+             plainly, then send it again."
+                .to_owned()
+        }
+        Notice::HOOK => format!("A hook stopped this step{on}. Fix the hook, then try again."),
+        TURN_FAILED => format!("The turn failed{on}. Try again."),
+        _ => return (raw.to_owned(), None),
+    };
+    let raw = raw.trim();
+    (words, (!raw.is_empty()).then(|| raw.to_owned()))
 }
 
 /// The agent's task list where no call of its wrote it (Codex's plan, an ACP agent's): a list
@@ -347,8 +637,12 @@ pub fn settle(entries: &mut [SessionMessageEntry], live: bool) {
 /// entry of their own after the person's message. A request is asked where the person looks,
 /// whatever it is: an approval, a question, a plan, Claude Code's own dialog at start.
 pub fn asks(state: &ThreadState, device: &str, entries: &mut Vec<SessionMessageEntry>) {
-    let parts: Vec<MessagePart> =
-        state.requests.iter().filter(|request| request.is_open()).map(input).collect();
+    let parts: Vec<MessagePart> = state
+        .requests
+        .iter()
+        .filter(|request| request.is_open())
+        .map(|request| input(request, state))
+        .collect();
     let Some(first) = state.requests.iter().find(|request| request.is_open()) else { return };
     let at = at(first.opened_ms);
     if let Some(entry) = tail(entries, &format!("ask:{}", first.id.0), at, device) {
@@ -359,7 +653,8 @@ pub fn asks(state: &ThreadState, device: &str, entries: &mut Vec<SessionMessageE
 /// `why` an intent was turned down, said at the end of the transcript.
 pub fn refused(why: &str, at: i64, device: &str, entries: &mut Vec<SessionMessageEntry>) {
     let id = format!("refused:{at}");
-    let part = MessagePart::Error { id: id.clone(), message: why.to_owned() };
+    let part =
+        MessagePart::Error { id: id.clone(), message: why.to_owned(), detail: None, retry: false };
     if let Some(entry) = tail(entries, &id, at, device) {
         entry.parts.push(part);
     }
@@ -413,24 +708,186 @@ fn choice_label(choice: &slopty_proto::thread::Choice) -> String {
     }
 }
 
-/// An open request as the shell's input part.
+/// The most characters an approval's payload has and is still allowed at a key: past it, or
+/// past [`KEY_LINES`], the deny is where focus starts (Claude desktop's rule).
+const KEY_CHARS: usize = 600;
+
+/// The most lines an approval's payload has and is still allowed at a key.
+const KEY_LINES: usize = 6;
+
+/// How an approval may be answered at a key ([`UserInputQuestion::deny_first`],
+/// [`UserInputQuestion::click_only`], [`UserInputQuestion::read_gate`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Gate {
+    deny_first: bool,
+    click_only: bool,
+    long: bool,
+}
+
+/// The commands that only read, which a key may allow when nothing else rides with them.
+const READ_ONLY_COMMANDS: [&str; 14] = [
+    "ls", "cat", "head", "tail", "pwd", "echo", "wc", "which", "file", "stat", "tree", "rg",
+    "grep", "du",
+];
+
+/// The git commands that only read.
+const READ_ONLY_GIT: [&str; 5] = ["status", "diff", "log", "show", "blame"];
+
+/// What in a command can destroy work or reach past it: deleting, forcing, rewriting history,
+/// raising privileges, wiping disks.
+const DESTRUCTIVE: [&str; 22] = [
+    "rm -rf",
+    "rm -fr",
+    "rm -r ",
+    "rm -f ",
+    "--force",
+    "push -f",
+    "reset --hard",
+    "clean -f",
+    "branch -d",
+    "checkout -- ",
+    "restore ",
+    "mkfs",
+    "dd if=",
+    "> /dev/",
+    "chmod -r",
+    "chown -r",
+    "sudo ",
+    "drop table",
+    "drop database",
+    "truncate ",
+    "kill -9",
+    ":(){",
+];
+
+/// The command an exec call runs.
+const fn command(call: &ToolCall) -> Option<&str> {
+    match &call.detail {
+        Some(ToolDetail::Exec(exec)) => Some(exec.command.text.as_str()),
+        _ => None,
+    }
+}
+
+/// Whether `command` reads and nothing more: one read-only program, nothing chained, piped or
+/// redirected.
+fn reads_only(command: &str) -> bool {
+    if command.contains([';', '|', '&', '>', '<', '`', '$', '\n']) {
+        return false;
+    }
+    let mut words = command.split_whitespace();
+    match words.next() {
+        Some("git") => words.next().is_some_and(|sub| READ_ONLY_GIT.contains(&sub)),
+        Some(program) => READ_ONLY_COMMANDS.contains(&program),
+        None => false,
+    }
+}
+
+/// Whether `command` can destroy work or reach past it ([`DESTRUCTIVE`]).
+fn destructive(command: &str) -> bool {
+    let command = format!("{} ", command.to_lowercase());
+    DESTRUCTIVE.iter().any(|mark| command.contains(mark))
+}
+
+/// How an approval of `call` (when its call is known), in a thread whose mode is `mode`, may be
+/// answered: a long, unknown or destructive one starts on its deny; nothing but a known read
+/// is allowed at a key, and nothing at all in plan mode; a long one is read through before it
+/// can be allowed. Any other request is answered as it asks.
+fn gate(request: &Request, call: Option<&ToolCall>, mode: Option<&str>) -> Gate {
+    if !matches!(request.kind.as_str(), Request::APPROVAL | Request::RETRY) {
+        return Gate::default();
+    }
+    let payload = call
+        .and_then(command)
+        .map(str::to_owned)
+        .or_else(|| request.text.as_ref().map(|text| text.text.clone()))
+        .unwrap_or_else(|| request.title.clone());
+    let long = payload.chars().count() > KEY_CHARS || payload.lines().count() > KEY_LINES;
+    let unknown = call.is_none_or(|call| call.detail.is_none());
+    let risky = call.and_then(command).is_some_and(destructive);
+    let safe = call.is_some_and(|call| match &call.detail {
+        Some(ToolDetail::Read(_) | ToolDetail::Search(_) | ToolDetail::WebSearch(_)) => true,
+        Some(ToolDetail::Exec(exec)) => reads_only(exec.command.text.trim()),
+        _ => false,
+    });
+    let planning = mode.is_some_and(|mode| mode.eq_ignore_ascii_case("plan"));
+    let deny_first = long || unknown || risky;
+    Gate { deny_first, click_only: deny_first || !safe || planning, long }
+}
+
+/// The change an approval of `call` would make, for its card: an edit's or a write's diff.
+fn proposed(request: &Request, call: Option<&ToolCall>) -> Option<slopty_view_proto::ToolDiff> {
+    let call = call?;
+    if !matches!(request.kind.as_str(), Request::APPROVAL | Request::RETRY) {
+        return None;
+    }
+    tool_diff(call, None).or_else(|| {
+        let patch = request.proposed.as_ref()?;
+        let path = match &call.detail {
+            Some(ToolDetail::Edit(edit)) => edit.path.clone(),
+            Some(ToolDetail::Write(write)) => write.path.clone(),
+            _ => return None,
+        };
+        let lines = patch_lines(patch);
+        let side = |keep: char| -> String {
+            lines
+                .iter()
+                .filter_map(|line| {
+                    let mut chars = line.chars();
+                    let mark = chars.next()?;
+                    (mark == ' ' || mark == keep).then(|| format!("{}\n", chars.as_str()))
+                })
+                .collect()
+        };
+        let old_text = side('-');
+        Some(slopty_view_proto::ToolDiff {
+            path,
+            old_text: (!old_text.is_empty()).then_some(old_text),
+            new_text: side('+'),
+        })
+    })
+}
+
+/// An open request of `state`'s as the shell's input part.
 ///
 /// A request that offers choices and asks no questions (an approval, a plan, Claude Code's trust
 /// dialog) takes one of them on a click, headed by its own title; one that offers none takes
-/// words; an agent's questions keep their own headers and the words one may add.
-fn input(request: &Request) -> MessagePart {
+/// words; an agent's questions keep their own headers and the words one may add. A plan whose
+/// text its card shows asks only "Plan ready" and its choices. An approval says how it may be
+/// answered at a key ([`gate`]) and the change it would make, and every word it shows has what
+/// would hide or reorder text shown as its code ([`super::text::escaped`]).
+fn input(request: &Request, state: &ThreadState) -> MessagePart {
+    use super::text::escaped;
+    let call = request.item.as_ref().and_then(|item| {
+        state.items.iter().find(|shown| shown.id == *item).and_then(|shown| match &shown.body {
+            ItemBody::Tool(call) => Some(&**call),
+            _ => None,
+        })
+    });
     let questions = if request.questions.is_empty() && !request.options.is_empty() {
         let title = request.title.trim();
         let text = request.text.as_ref().map(|text| text.text.trim()).unwrap_or_default();
+        let carded = request.kind == Request::PLAN && plan_text(request).is_some();
+        let (header, question) = if carded {
+            ("Plan ready".to_owned(), String::new())
+        } else {
+            (if title.is_empty() { header(request) } else { title.to_owned() }, text.to_owned())
+        };
+        let gate = gate(request, call, state.meters.mode.as_deref());
         vec![UserInputQuestion {
             id: CHOICE.to_owned(),
-            header: if title.is_empty() { header(request) } else { title.to_owned() },
-            question: text.to_owned(),
-            options: request.options.iter().map(choice_label).collect(),
+            header: escaped(&header),
+            question: escaped(&question),
+            options: request.options.iter().map(|c| escaped(&choice_label(c))).collect(),
             multi_select: false,
             prefill: None,
             multiline: false,
             choices_only: true,
+            deny_first: gate.deny_first,
+            click_only: gate.click_only,
+            read_gate: gate.long,
+            deny_option: slopty_proto::thread::plain_deny(&request.options)
+                .and_then(|deny| request.options.iter().position(|c| c.id == deny.id)),
+            proposed: proposed(request, call),
         }]
     } else if request.questions.is_empty() {
         let mut question = request.title.clone();
@@ -440,12 +897,9 @@ fn input(request: &Request) -> MessagePart {
         vec![UserInputQuestion {
             id: CHOICE.to_owned(),
             header: header(request),
-            question,
-            options: Vec::new(),
-            multi_select: false,
-            prefill: None,
+            question: escaped(&question),
             multiline: true,
-            choices_only: false,
+            ..UserInputQuestion::default()
         }]
     } else {
         request
@@ -454,13 +908,11 @@ fn input(request: &Request) -> MessagePart {
             .enumerate()
             .map(|(ix, question)| UserInputQuestion {
                 id: ix.to_string(),
-                header: question.header.clone().unwrap_or_else(|| header(request)),
-                question: question.text.clone(),
-                options: question.options.iter().map(|o| o.label.clone()).collect(),
+                header: escaped(&question.header.clone().unwrap_or_else(|| header(request))),
+                question: escaped(&question.text),
+                options: question.options.iter().map(|o| escaped(&o.label)).collect(),
                 multi_select: question.multi_select,
-                prefill: None,
-                multiline: false,
-                choices_only: false,
+                ..UserInputQuestion::default()
             })
             .collect()
     };
@@ -491,6 +943,17 @@ pub fn answer(
             .enumerate()
             .filter_map(|(ix, question)| {
                 let labels = &answers.iter().find(|a| a.question_id == ix.to_string())?.labels;
+                // A label shown with its hidden characters as codes goes back as the agent's.
+                let labels: Vec<&str> = labels
+                    .iter()
+                    .map(|label| {
+                        question
+                            .options
+                            .iter()
+                            .find(|o| super::text::escaped(&o.label) == *label)
+                            .map_or(label.as_str(), |o| o.label.as_str())
+                    })
+                    .collect();
                 Some(Answer { question: question.text.clone(), answer: labels.join(Answer::JOIN) })
             })
             .collect();
@@ -506,7 +969,9 @@ pub fn answer(
         .map(|label| label.trim().to_owned())
         .filter(|label| !label.is_empty())
         .ok_or_else(|| "Pick an answer".to_owned())?;
-    if let Some(choice) = request.options.iter().find(|c| choice_label(c) == picked) {
+    if let Some(choice) =
+        request.options.iter().find(|c| super::text::escaped(&choice_label(c)) == picked)
+    {
         return Ok((choice.id.clone(), None));
     }
     if request.options.is_empty() {
@@ -555,6 +1020,7 @@ fn part(id: &str, body: &ItemBody, look: &Look<'_>) -> Option<MessagePart> {
         ItemBody::Text(text) => MessagePart::Text { id, text: look.words(text) },
         ItemBody::Reasoning(text) => MessagePart::Reasoning { id, text: look.words(text) },
         ItemBody::Notice(notice) => return notice_part(id, notice, look),
+        // The person's messages, calls and compactions are entries or parts of their own.
         ItemBody::Tool(_)
         | ItemBody::User(_)
         | ItemBody::Compaction(_)
@@ -563,14 +1029,18 @@ fn part(id: &str, body: &ItemBody, look: &Look<'_>) -> Option<MessagePart> {
     })
 }
 
-/// A notice as the shell draws it: a failure in red, what a command printed or the agent said
-/// as words, and nothing for a stop, which the answer already says it was.
+/// A notice as the shell draws it: a failure in red, in one grammar ([`error_words`]), what a
+/// command printed or the agent said as words, and nothing for a stop, which the answer already
+/// says it was.
 fn notice_part(id: String, notice: &Notice, look: &Look<'_>) -> Option<MessagePart> {
     let text = look.words(&notice.text);
     match notice.kind.as_str() {
         Notice::INTERRUPTED => None,
         Notice::INFO | Notice::COMMAND | Notice::REWOUND => Some(MessagePart::Text { id, text }),
-        _ => Some(MessagePart::Error { id, message: text }),
+        kind => {
+            let (message, detail) = error_words(kind, &text, look.host, notice.retry.as_ref());
+            Some(MessagePart::Error { id, message, detail, retry: false })
+        }
     }
 }
 

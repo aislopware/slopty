@@ -1,13 +1,12 @@
 //! A terminal-only Linux worker, reached from this Mac the way the app reaches any worker: the
 //! client core's link over QUIC, a `TermState` fed its frames, typing through the terminal's
-//! input requests. The worker, its ptyd and the `slopty` relay are the Linux builds, running in
-//! a Debian container on Docker Desktop as an account of their own.
+//! input requests. The worker and its ptyd are the Linux builds, running in a Debian container on
+//! Docker Desktop as an account of their own.
 //!
 //! Live (`#[ignore]`), run by `cargo xtask linux e2e`, which builds the Linux
 //! binaries, starts the container and says where it is (`SLOPTY_LINUX_WORKER`, the address
-//! published on this Mac's loopback; `SLOPTY_LINUX_CONTAINER`; `SLOPTY_LINUX_USER`;
-//! `SLOPTY_LINUX_BIN_DIR`, where the binaries are inside it). Nothing is typed into a shell the
-//! test did not open, and the agent status comes from a hook played through `slopty hook`.
+//! published on this Mac's loopback; `SLOPTY_LINUX_CONTAINER`; `SLOPTY_LINUX_USER`). Nothing is
+//! typed into a shell the test did not open.
 //! Files the worker is to notice change through `docker exec` as its account, so inotify hears
 //! another process write them, as it would an editor.
 
@@ -29,8 +28,6 @@ mod tests {
     use slopty_proto::search::{SearchEvent, SearchQuery, SearchRequest};
     use slopty_proto::server::Os;
     use slopty_proto::terminal::{OpenSession, TermEvent, TermRequest, TermSize};
-    use slopty_proto::thread::wire::{TableFrame, ThreadRequest};
-    use slopty_proto::thread::{AgentId, Phase};
     use slopty_proto::transfer::{
         ClipEntry, ClipFormat, ClipMsg, ClipType, Dest, Offer, Peer, Rep, XferMsg,
     };
@@ -52,7 +49,6 @@ mod tests {
         addr: SocketAddr,
         container: String,
         user: String,
-        bin_dir: String,
     }
 
     fn linux() -> Linux {
@@ -61,7 +57,6 @@ mod tests {
             addr: var("SLOPTY_LINUX_WORKER").parse().expect("SLOPTY_LINUX_WORKER is ip:port"),
             container: var("SLOPTY_LINUX_CONTAINER"),
             user: var("SLOPTY_LINUX_USER"),
-            bin_dir: var("SLOPTY_LINUX_BIN_DIR"),
         }
     }
 
@@ -440,7 +435,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     #[ignore = "live: cargo xtask linux e2e"]
-    async fn a_linux_worker_runs_a_shell_serves_files_and_reports_an_agent() {
+    async fn a_linux_worker_runs_a_shell_and_serves_files() {
         let linux = linux();
         let size = TermSize { cols: 80, rows: 24, ..TermSize::default() };
         let (mut shell, ack) = Client::open(&linux, &[], size).await.unwrap();
@@ -524,38 +519,6 @@ mod tests {
         assert!(text.starts_with("[Trash Info]"), "{text}");
         assert!(text.contains(&format!("\nPath={home}/e2e/note.txt\n")), "{text}");
         assert!(text.contains("\nDeletionDate="), "{text}");
-
-        // 4. An agent's status: a hook played through the Linux `slopty hook` inside the container,
-        //    finding the worker by the platform's socket rule, reaches this client in its thread's
-        //    row.
-        let table = ClientMsg::Thread(ThreadRequest::Table { have: None });
-        shell.link.send(table).await.unwrap();
-        let session = shell.session.to_string();
-        let relay = format!("{}/slopty", linux.bin_dir);
-        let mut hook = exec(&linux, &[("SLOPTY_SESSION", &session)], &[&relay, "hook"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .spawn()
-            .unwrap();
-        let payload = r#"{"hook_event_name":"UserPromptSubmit","session_id":"linux-e2e","prompt":"tidy the linux box"}"#;
-        let mut stdin = hook.stdin.take().unwrap();
-        stdin.write_all(payload.as_bytes()).await.unwrap();
-        drop(stdin);
-        let status = tokio::time::timeout(STEP, hook.wait()).await.unwrap().unwrap();
-        assert!(status.success(), "slopty hook: {status}");
-        let id = shell.session;
-        let agent = shell
-            .until_control("the agent's status", |msg| match msg {
-                WorkerMsg::Threads(
-                    TableFrame::Snapshot { rows, .. } | TableFrame::Delta { rows, .. },
-                ) => rows
-                    .into_iter()
-                    .find(|r| r.terminal == Some(id) && r.status.phase == Phase::Working),
-                _other => None,
-            })
-            .await
-            .unwrap();
-        assert_eq!(agent.agent, AgentId::named(AgentId::CLAUDE_CODE), "{agent:?}");
 
         shell.close().await;
     }

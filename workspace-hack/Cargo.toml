@@ -22,8 +22,6 @@ doctest = false
 aho-corasick = { version = "1" }
 anstyle = { version = "1" }
 arrayvec = { version = "0.7", default-features = false, features = ["std"] }
-bit-set = { version = "0.8" }
-bit-vec = { version = "0.8" }
 bitflags = { version = "2", default-features = false, features = ["serde", "std"] }
 bstr = { version = "1" }
 bytemuck = { version = "1", default-features = false, features = ["aarch64_simd", "extern_crate_alloc", "wasm_simd"] }
@@ -45,7 +43,7 @@ futures-core = { version = "0.3" }
 futures-io = { version = "0.3" }
 futures-sink = { version = "0.3" }
 futures-util = { version = "0.3", default-features = false, features = ["async-await-macro", "channel", "io", "sink"] }
-getrandom-9fbad63c4bcf4a8f = { package = "getrandom", version = "0.4", default-features = false, features = ["std", "sys_rng"] }
+getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 gpui = { git = "https://github.com/aislopware/gpui-fast.git", features = ["profiler", "test-support"] }
 gpui_platform = { git = "https://github.com/aislopware/gpui-fast.git", features = ["font-kit", "test-support"] }
 http_client = { git = "https://github.com/aislopware/gpui-fast.git", default-features = false, features = ["test-support"] }
@@ -152,7 +150,6 @@ errno = { version = "0.3" }
 event-listener = { version = "5" }
 foldhash = { version = "0.2" }
 futures-lite = { version = "2" }
-getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
 gpui_apple = { git = "https://github.com/aislopware/gpui-fast.git", features = ["font-kit", "runtime_shaders", "test-support"] }
 gpui_macos = { git = "https://github.com/aislopware/gpui-fast.git", default-features = false, features = ["font-kit", "runtime_shaders", "test-support"] }
 gpui_platform = { git = "https://github.com/aislopware/gpui-fast.git", default-features = false, features = ["runtime_shaders", "wayland", "x11"] }
@@ -171,6 +168,7 @@ objc2-core-text = { version = "0.3", default-features = false, features = ["CTFo
 objc2-core-video = { version = "0.3", default-features = false, features = ["CVBase", "CVBuffer", "CVHostTime", "CVImageBuffer", "CVMetalTexture", "CVMetalTextureCache", "CVPixelBuffer", "CVPixelBufferIOSurface", "CVPixelBufferPool", "CVReturn", "objc2", "objc2-core-graphics", "objc2-metal", "std"] }
 objc2-file-provider = { version = "0.3", default-features = false, features = ["Extension", "NSFileProviderDomain", "NSFileProviderEnumerating", "NSFileProviderError", "NSFileProviderItem", "NSFileProviderModifyItemOptions", "NSFileProviderReplicatedExtension", "NSFileProviderRequest", "block2", "objc2-uniform-type-identifiers", "std"] }
 objc2-foundation = { version = "0.3" }
+objc2-quartz-core = { version = "0.3", default-features = false, features = ["CADisplayLink", "CALayer", "CAMediaTiming", "CAMediaTimingFunction", "CAMetalLayer", "CAOpenGLLayer", "CATransaction", "std"] }
 objc2-security = { version = "0.3", default-features = false, features = ["CSCommon", "SecBase", "SecCode", "SecItem", "SecTrust", "objc2", "std"] }
 objc2-uniform-type-identifiers = { version = "0.3", default-features = false, features = ["UTCoreTypes", "UTType", "std"] }
 objc2-user-notifications = { version = "0.3", default-features = false, features = ["UNNotification", "UNNotificationAction", "UNNotificationCategory", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationSettings", "UNNotificationSound", "UNNotificationTrigger", "UNUserNotificationCenter", "block2", "std"] }
@@ -187,7 +185,7 @@ bitflags = { version = "2", default-features = false, features = ["serde", "std"
 block2 = { version = "0.6" }
 errno = { version = "0.3" }
 foldhash = { version = "0.2" }
-getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
+getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 libc = { version = "0.2" }
 objc2 = { version = "0.6", features = ["disable-encoding-assertions", "exception"] }
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["CFArray", "CFAttributedString", "CFBase", "CFByteOrder", "CFCGTypes", "CFCalendar", "CFCharacterSet", "CFData", "CFDate", "CFDictionary", "CFError", "CFFileSecurity", "CFLocale", "CFMachPort", "CFMessagePort", "CFNotificationCenter", "CFNumber", "CFPlugInCOM", "CFRunLoop", "CFSet", "CFStream", "CFString", "CFTimeZone", "CFURL", "CFUUID", "objc2", "std"] }
@@ -203,7 +201,6 @@ dispatch2 = { version = "0.3" }
 errno = { version = "0.3" }
 event-listener = { version = "5" }
 futures-lite = { version = "2" }
-getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
 gpui_apple = { git = "https://github.com/aislopware/gpui-fast.git", features = ["runtime_shaders", "test-support"] }
 gpui_ios = { git = "https://github.com/aislopware/gpui-fast.git", features = ["runtime_shaders", "test-support"] }
 libc = { version = "0.2" }
@@ -225,7 +222,7 @@ uuid = { version = "1", default-features = false, features = ["v5"] }
 [target.aarch64-apple-ios.build-dependencies]
 bitflags = { version = "2", default-features = false, features = ["serde", "std"] }
 errno = { version = "0.3" }
-getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
+getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 libc = { version = "0.2" }
 rust-embed-impl = { version = "8", default-features = false, features = ["debug-embed", "include-exclude", "interpolate-folder-path"] }
 rustix = { version = "1", features = ["event", "net", "pipe", "process", "pty", "stdio", "system", "termios", "time"] }
@@ -237,7 +234,6 @@ dispatch2 = { version = "0.3" }
 errno = { version = "0.3" }
 event-listener = { version = "5" }
 futures-lite = { version = "2" }
-getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
 gpui_apple = { git = "https://github.com/aislopware/gpui-fast.git", features = ["runtime_shaders", "test-support"] }
 gpui_ios = { git = "https://github.com/aislopware/gpui-fast.git", features = ["runtime_shaders", "test-support"] }
 libc = { version = "0.2" }
@@ -259,7 +255,7 @@ uuid = { version = "1", default-features = false, features = ["v5"] }
 [target.aarch64-apple-ios-sim.build-dependencies]
 bitflags = { version = "2", default-features = false, features = ["serde", "std"] }
 errno = { version = "0.3" }
-getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
+getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 libc = { version = "0.2" }
 rust-embed-impl = { version = "8", default-features = false, features = ["debug-embed", "include-exclude", "interpolate-folder-path"] }
 rustix = { version = "1", features = ["event", "net", "pipe", "process", "pty", "stdio", "system", "termios", "time"] }

@@ -63,7 +63,7 @@ env:
   # rust-analyzer, rust-src, the iOS and musl standard libraries; 1.9 GB on a runner). Each job
   # installs what it uses (`dtolnay/rust-toolchain`), and `gate::tests` holds the version to
   # the file's.
-  RUSTUP_TOOLCHAIN: 1.99.0
+  RUSTUP_TOOLCHAIN: 1.99.1
 
 jobs:
   # The checks of the crates named, in two jobs side by side (`xtask check --part`): the lints on
@@ -93,7 +93,7 @@ jobs:
       # Host clippy and rustdoc for the Mac; with --full, both iOS triples and Linux.
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.99.0
+          toolchain: 1.99.1
           components: rustfmt, clippy
           targets: >-
             aarch64-apple-darwin, aarch64-apple-ios, aarch64-apple-ios-sim,
@@ -220,7 +220,7 @@ jobs:
           actions-cache: ${{ startsWith(inputs.test_runner, 'macos') && 'true' || 'false' }}
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.99.0
+          toolchain: 1.99.1
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: gate
@@ -339,7 +339,7 @@ jobs:
           actions-cache: ${{ startsWith(inputs.runner, 'macos') && 'true' || 'false' }}
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.99.0
+          toolchain: 1.99.1
           components: rustfmt, clippy
           targets: >-
             aarch64-apple-darwin, aarch64-apple-ios, aarch64-apple-ios-sim,

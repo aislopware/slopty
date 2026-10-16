@@ -29,6 +29,14 @@ const CONTENT_INDEX_RETRY: Duration = Duration::from_millis(500);
 const CONTENT_INDEX_RETRY_MAX: Duration = Duration::from_secs(2);
 const FILE_INDEX_RETRY: Duration = Duration::from_millis(500);
 const RESULTS_FADE_BAND: f32 = 18.0;
+// slopty: what the chats said is searched once typing pauses on two characters or more
+// (`SearchChats`), below the title matches.
+/// Shorter queries match nearly every chat's words; they are not sent.
+const MIN_CHAT_WORDS_CHARS: usize = 2;
+/// The pause in typing before the chats' words are searched.
+const CHAT_WORDS_DEBOUNCE: Duration = Duration::from_millis(200);
+/// How many matches one search asks for.
+const CHAT_WORDS_LIMIT: usize = 50;
 
 pub(super) struct CommandPalette {
     search: Entity<ComposerInput>,
@@ -52,7 +60,116 @@ pub(super) struct CommandPalette {
     files_ready: Option<WorkspaceTarget>,
     /// Content matches in the focused chat's workspace.
     content: WorkspaceQuery<Vec<WorkspaceContentMatch>>,
+    // slopty: what the chats said that matches the query.
+    chat_words: ChatWordsQuery,
     _search_events: Subscription,
+}
+
+// slopty: one place a chat's words matched (`SearchChats`): the chat, who said it, a line around
+// the match and the match's byte range in that line.
+/// A chat whose words match the query.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ChatWordsMatch {
+    chat_id: String,
+    /// The agent said it; else the person did.
+    agent: bool,
+    /// The words around the match, on one line.
+    excerpt: String,
+    /// The match's byte range in `excerpt`; empty when the answer's range did not fit it.
+    range: std::ops::Range<usize>,
+}
+
+impl ChatWordsMatch {
+    /// One answer's entry, or `None` when it names no chat. A range that is not on the
+    /// excerpt's character boundaries is dropped, not the match.
+    fn parse(value: &serde_json::Value) -> Option<Self> {
+        let chat_id = value.get("chatId")?.as_str().filter(|id| !id.is_empty())?.to_owned();
+        let agent = value.get("role").and_then(serde_json::Value::as_str) != Some("user");
+        // One line: line breaks and tabs become spaces, each one byte for one, so the range
+        // still lands.
+        let excerpt: String = value
+            .get("excerpt")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .chars()
+            .map(|c| if matches!(c, '\n' | '\r' | '\t') { ' ' } else { c })
+            .collect();
+        let offset = |key: &str| {
+            value.get(key).and_then(serde_json::Value::as_u64).and_then(|v| usize::try_from(v).ok())
+        };
+        let range = match (offset("matchStart"), offset("matchEnd")) {
+            (Some(start), Some(end))
+                if start < end
+                    && end <= excerpt.len()
+                    && excerpt.is_char_boundary(start)
+                    && excerpt.is_char_boundary(end) =>
+            {
+                start..end
+            }
+            _ => 0..0,
+        };
+        Some(Self { chat_id, agent, excerpt, range })
+    }
+
+    /// An answer's matches, first per chat, in the answer's order; anything else answers none.
+    fn parse_all(answer: &serde_json::Value) -> Vec<Self> {
+        let list = answer.as_array().or_else(|| answer.get("matches").and_then(|m| m.as_array()));
+        let mut seen = std::collections::HashSet::new();
+        list.into_iter()
+            .flatten()
+            .filter_map(Self::parse)
+            .filter(|found| seen.insert(found.chat_id.clone()))
+            .collect()
+    }
+}
+
+// slopty: the chats' words search's request state: an answer to an older query is dropped, and
+// a failure (an older view model, a server that does not search) shows no matches.
+#[derive(Default)]
+struct ChatWordsQuery {
+    /// Bumped per request; an answer to an older one is dropped.
+    generation: u64,
+    loading: bool,
+    results: Vec<ChatWordsMatch>,
+    task: Option<Task<()>>,
+}
+
+impl ChatWordsQuery {
+    /// Forget the results, cancelling any request in flight.
+    fn clear(&mut self) {
+        self.generation += 1;
+        self.loading = false;
+        self.results.clear();
+        self.task = None;
+    }
+
+    /// Start a request; the returned generation identifies its answer. Rows from the last
+    /// answer stay up meanwhile.
+    fn begin(&mut self) -> u64 {
+        self.generation += 1;
+        self.loading = true;
+        self.generation
+    }
+
+    /// Settle request `generation` with its answer; `false` when a newer one superseded it.
+    fn finish(
+        &mut self,
+        generation: u64,
+        answer: Result<serde_json::Value, slopty_view_rpc::RpcError>,
+    ) -> bool {
+        if self.generation != generation {
+            return false;
+        }
+        self.loading = false;
+        self.results = match answer {
+            Ok(answer) => ChatWordsMatch::parse_all(&answer),
+            Err(error) => {
+                tracing::debug!(%error, "palette chat words search failed");
+                Vec::new()
+            }
+        };
+        true
+    }
 }
 
 /// An asynchronous workspace section's request state. Rows from the last
@@ -232,6 +349,8 @@ enum Section {
     Commands,
     Files,
     InFiles,
+    // slopty: chats whose words match, below the title matches.
+    InThreads,
 }
 
 impl Section {
@@ -244,6 +363,7 @@ impl Section {
             Self::Commands => "Commands",
             Self::Files => "Files",
             Self::InFiles => "In Files",
+            Self::InThreads => "In Threads",
         }
     }
 }
@@ -292,6 +412,9 @@ enum RowKind {
     },
     /// A line of a file in the focused chat's workspace.
     Content(WorkspaceContentMatch),
+    // slopty: a chat by what was said in it.
+    /// A chat whose words matched.
+    ChatWords(ChatWordsMatch),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -317,6 +440,7 @@ impl PaletteRow {
             RowKind::Content(found) => {
                 format!("content:{}:{}:{}", found.path, found.line, found.column)
             }
+            RowKind::ChatWords(found) => format!("words:{}", found.chat_id),
         };
         RowKey(self.section, id)
     }
@@ -464,6 +588,7 @@ impl Shell {
                     palette.scroll.set_offset(gpui::point(px(0.0), px(0.0)));
                 }
                 this.search_palette_workspace(cx);
+                this.search_palette_chat_words(cx); // slopty
                 cx.notify();
             }
         });
@@ -481,6 +606,7 @@ impl Shell {
             files: WorkspaceQuery::default(),
             files_ready: None,
             content: WorkspaceQuery::default(),
+            chat_words: ChatWordsQuery::default(), // slopty
             _search_events: events,
         });
         // Load the default Files list (recently changed files) right away.
@@ -634,6 +760,36 @@ impl Shell {
         }));
     }
 
+    // slopty: what the chats said, searched once typing pauses (`SearchChats`); a query too
+    // short to send clears the matches.
+    /// Look the query up in every chat's words.
+    fn search_palette_chat_words(&mut self, cx: &mut Context<Self>) {
+        let engine = self.state.read(cx).engine().cloned();
+        let Some(palette) = self.command_palette.as_mut() else {
+            return;
+        };
+        let query = palette.search.read(cx).text().trim().to_owned();
+        let Some(engine) = engine.filter(|_| query.chars().count() >= MIN_CHAT_WORDS_CHARS) else {
+            palette.chat_words.clear();
+            return;
+        };
+        let generation = palette.chat_words.begin();
+        let params = serde_json::json!({ "query": query, "limit": CHAT_WORDS_LIMIT });
+        palette.chat_words.task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(CHAT_WORDS_DEBOUNCE).await;
+            let answer = engine.client().call(methods::SEARCH_CHATS, params).await;
+            this.update(cx, |shell, cx| {
+                let Some(palette) = shell.command_palette.as_mut() else {
+                    return;
+                };
+                if palette.chat_words.finish(generation, answer) {
+                    cx.notify();
+                }
+            })
+            .ok();
+        }));
+    }
+
     /// The open palette's sections for its tab and query.
     fn palette_sections(&self, cx: &App) -> Vec<PaletteSection> {
         let Some(palette) = &self.command_palette else {
@@ -714,20 +870,65 @@ impl Shell {
             )
             .with_status(palette.content.status())
         };
+        // slopty: chats by their words, each chat once, none a title match already lists.
+        let in_threads = |limit, titled: &[String]| {
+            let state = self.state.read(cx);
+            PaletteSection::new(
+                Section::InThreads,
+                palette
+                    .chat_words
+                    .results
+                    .iter()
+                    .filter(|found| !titled.contains(&found.chat_id))
+                    .filter(|found| {
+                        state
+                            .chats
+                            .iter()
+                            .any(|chat| chat.id == found.chat_id && chat.is_top_level())
+                    })
+                    .take(limit)
+                    .cloned()
+                    .map(RowKind::ChatWords),
+            )
+            .with_status(
+                (palette.chat_words.loading && palette.chat_words.results.is_empty())
+                    .then(|| "Searching…".into()),
+            )
+        };
+        let titled = |section: &PaletteSection| -> Vec<String> {
+            section
+                .rows
+                .iter()
+                .filter_map(|row| match &row.kind {
+                    RowKind::Chat(id) => Some(id.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
         let sections = match (palette.tab, query.is_empty()) {
             (Tab::All, true) => vec![
                 recent_files(ALL_TAB_LIMIT),
                 commands(Section::QuickActions),
                 recent_threads(ALL_TAB_LIMIT),
             ],
-            (Tab::All, false) => vec![
-                threads(ALL_TAB_LIMIT),
-                commands(Section::Commands),
-                files(ALL_TAB_LIMIT),
-                in_files(ALL_TAB_LIMIT),
-            ],
+            (Tab::All, false) => {
+                let threads = threads(ALL_TAB_LIMIT);
+                let words = in_threads(ALL_TAB_LIMIT, &titled(&threads));
+                vec![
+                    threads,
+                    words, // slopty
+                    commands(Section::Commands),
+                    files(ALL_TAB_LIMIT),
+                    in_files(ALL_TAB_LIMIT),
+                ]
+            }
             (Tab::Threads, true) => vec![recent_threads(THREADS_TAB_LIMIT)],
-            (Tab::Threads, false) => vec![threads(THREADS_TAB_LIMIT)],
+            (Tab::Threads, false) => {
+                let threads = threads(THREADS_TAB_LIMIT);
+                // slopty: then the chats whose words match.
+                let words = in_threads(THREADS_TAB_LIMIT, &titled(&threads));
+                vec![threads, words]
+            }
             (Tab::Commands, true) => vec![commands(Section::QuickActions)],
             (Tab::Commands, false) => vec![commands(Section::Commands)],
             (Tab::Files, true) => vec![recent_files(FILES_TAB_LIMIT)],
@@ -874,6 +1075,7 @@ impl Shell {
             RowKind::Command(Command::Theme(_)) => unreachable!(),
             RowKind::Command(Command::ArchiveThread) => self.archive_selected_chat(cx),
             RowKind::Chat(id) => self.open_chat(id, cx),
+            RowKind::ChatWords(found) => self.open_chat(found.chat_id, cx), // slopty
             RowKind::File { path, is_dir } => {
                 self.open_palette_path(path, is_dir, None, window, cx)
             }
@@ -1064,6 +1266,47 @@ impl Shell {
                                 ranges,
                                 theme,
                             )),
+                    )
+                    .into_any_element()
+            }
+            // slopty: the chat's title, and under it who said the words and the words, the
+            // match in `text` over the faint line.
+            RowKind::ChatWords(found) => {
+                let state = self.state.read(cx);
+                let chat = state.chats.iter().find(|chat| chat.id == found.chat_id)?;
+                let title: SharedString =
+                    transcript::single_line(chat.title.as_deref().unwrap_or("New session")).into();
+                let harness = chat.config.as_ref().map(|config| config.harness);
+                let who = if found.agent { "Agent:" } else { "You:" };
+                let target = row.clone();
+                let glyph = match harness.map(crate::pickers::harness_brand_icon) {
+                    Some((path, tint)) => icon(path).text_color(tint.unwrap_or(theme.text_muted)),
+                    None => icon(icons::CHAT_ROUND_LINE).text_color(theme.text_muted),
+                };
+                popover::menu_row(theme, active, format!("command-words-{ix}"))
+                    .id(("command-words", ix))
+                    .rounded(px(popover::PALETTE_ITEM_RADIUS))
+                    .role(gpui::Role::Button)
+                    .aria_label(SharedString::from(format!("{title}, {who} {}", found.excerpt)))
+                    .min_h(px(44.0))
+                    .py(px(5.0))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.activate_palette_row(target.clone(), window, cx)
+                    }))
+                    .child(glyph.size(px(16.0)).flex_none())
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.0))
+                            .child(div().truncate().child(popover::search_highlight(
+                                title,
+                                Some(query),
+                                theme,
+                            )))
+                            .child(chat_words_line(who, found, theme)),
                     )
                     .into_any_element()
             }
@@ -1292,6 +1535,34 @@ impl Shell {
             );
         Some(palette_overlay(viewport, card))
     }
+}
+
+// slopty: a chat words match's second line: who said it, then the words in `text_faint` with
+// the match in `text`, one line, cut at the row's end.
+/// "Agent: …the words…", the match lit.
+fn chat_words_line(who: &'static str, found: &ChatWordsMatch, theme: &Theme) -> gpui::Div {
+    let lead = who.len() + 1;
+    let line: SharedString = format!("{who} {}", found.excerpt).into();
+    let mut highlights = vec![(
+        0..who.len(),
+        gpui::HighlightStyle { color: Some(theme.text_muted), ..Default::default() },
+    )];
+    if !found.range.is_empty() {
+        highlights.push((
+            found.range.start + lead..found.range.end + lead,
+            gpui::HighlightStyle {
+                color: Some(theme.text),
+                font_weight: Some(gpui::FontWeight::MEDIUM),
+                ..Default::default()
+            },
+        ));
+    }
+    div()
+        .min_w_0()
+        .truncate()
+        .text_size(crate::typography::ui_rems(12.0))
+        .text_color(theme.text_faint)
+        .child(gpui::StyledText::new(line).with_highlights(highlights))
 }
 
 /// A section's title, in the sidebar's secondary text style, with its
@@ -1769,9 +2040,20 @@ mod tests {
         /// Every request sent so far for `method`; other methods are
         /// answered with an empty object (or a ready search index).
         fn take(&mut self, method: &str, cx: &mut TestAppContext) -> Vec<serde_json::Value> {
+            self.take_after(method, CONTENT_DEBOUNCE, cx)
+        }
+
+        // slopty: what was asked once the clock moved `step` per round; zero asks what was
+        // sent without letting any pause end.
+        fn take_after(
+            &mut self,
+            method: &str,
+            step: Duration,
+            cx: &mut TestAppContext,
+        ) -> Vec<serde_json::Value> {
             let mut found = Vec::new();
             loop {
-                cx.executor().advance_clock(CONTENT_DEBOUNCE);
+                cx.executor().advance_clock(step);
                 cx.run_until_parked();
                 let Ok(request) = self.requests.try_recv() else {
                     return found;
@@ -1929,12 +2211,151 @@ mod tests {
                     engine.reply(&request, serde_json::json!({ "state": warm }))
                 }
                 methods::SEARCH_WORKSPACE_FILES => engine.reply(&request, serde_json::json!([])),
+                // slopty: the chats' words search is not the workspace's.
+                methods::SEARCH_CHATS => {
+                    engine.reply(&request, serde_json::json!([]));
+                    continue;
+                }
                 _ => engine.reply(&request, content_answer(Vec::new(), false)),
             }
             if method != methods::SEARCH_WORKSPACE_CONTENT {
                 methods_seen.push(method);
             }
         }
+    }
+
+    // slopty: the chats' words: a match each, after the pause, from the answer's shape.
+    fn words(chat: &str, role: &str, excerpt: &str, start: usize, end: usize) -> serde_json::Value {
+        serde_json::json!({
+            "chatId": chat, "role": role, "excerpt": excerpt,
+            "matchStart": start, "matchEnd": end,
+        })
+    }
+
+    /// The `SearchChats` requests sent once typing paused.
+    fn chat_word_requests(engine: &mut FakeEngine, cx: &mut TestAppContext) -> Vec<serde_json::Value> {
+        cx.executor().advance_clock(CHAT_WORDS_DEBOUNCE);
+        engine.take(methods::SEARCH_CHATS, cx)
+    }
+
+    #[test]
+    fn a_chat_words_answer_is_read_defensively() {
+        let found = ChatWordsMatch::parse_all(&serde_json::json!([
+            words("a", "agent", "both tests\npass now", 11, 15),
+            words("a", "user", "a second match of a", 0, 1),
+            words("b", "user", "naïve pass", 3, 5),
+            { "role": "agent", "excerpt": "no chat" },
+            words("c", "agent", "short", 2, 99),
+        ]));
+        assert_eq!(found.len(), 3, "one per chat, none without a chat: {found:?}");
+        assert!(found[0].agent);
+        assert_eq!(found[0].excerpt, "both tests pass now", "one line");
+        assert_eq!(&found[0].excerpt[found[0].range.clone()], "pass");
+        assert!(!found[1].agent);
+        assert!(found[1].range.is_empty(), "inside a character: no highlight, still a match");
+        assert!(found[2].range.is_empty(), "past the excerpt");
+        let wrapped =
+            ChatWordsMatch::parse_all(&serde_json::json!({ "matches": [words("d", "agent", "x", 0, 1)] }));
+        assert_eq!(wrapped.len(), 1);
+        assert!(ChatWordsMatch::parse_all(&serde_json::json!({})).is_empty());
+    }
+
+    // slopty: chats whose words match come after the title matches, a title match never twice,
+    // and only once typing paused on two characters.
+    #[gpui::test]
+    fn chat_words_follow_title_matches_after_the_pause(cx: &mut TestAppContext) {
+        let (window, _dir, mut engine) = engine_palette(cx, false);
+        window
+            .update(cx, |shell, _, cx| {
+                shell.state.update(cx, |state, _| {
+                    state.apply_chats(vec![
+                        titled("deploy-thread", "Deploy the docs", false, 1),
+                        titled("quiet", "Fix the composer", false, 2),
+                        chat("side", Some("quiet"), false, 3),
+                    ]);
+                });
+                shell.select_palette_tab(Tab::Threads, cx);
+            })
+            .unwrap();
+        type_query(window, "d", cx);
+        assert!(chat_word_requests(&mut engine, cx).is_empty(), "one character is not sent");
+        type_query(window, "deploy", cx);
+        cx.executor().advance_clock(CHAT_WORDS_DEBOUNCE - Duration::from_millis(1));
+        assert!(
+            engine.take_after(methods::SEARCH_CHATS, Duration::ZERO, cx).is_empty(),
+            "waits for the pause"
+        );
+        let asked = chat_word_requests(&mut engine, cx);
+        assert_eq!(asked.len(), 1);
+        assert_eq!(asked[0]["params"]["query"], "deploy");
+        assert_eq!(asked[0]["params"]["limit"], CHAT_WORDS_LIMIT);
+        let searching = palette_section(window, Section::InThreads, cx).expect("searching");
+        assert_eq!(searching.status.as_deref(), Some("Searching…"));
+        engine.reply(
+            &asked[0],
+            serde_json::json!([
+                words("deploy-thread", "agent", "deploy it", 0, 6),
+                words("quiet", "agent", "then deploy to staging", 5, 11),
+                words("side", "agent", "deploy the side", 0, 6),
+                words("gone", "user", "deploy", 0, 6),
+            ]),
+        );
+        cx.run_until_parked();
+        let shown = window.read_with(cx, |shell, cx| sections(shell, cx)).unwrap();
+        assert_eq!(shown.len(), 2);
+        assert_eq!(shown[0], (Section::Threads, vec![RowKind::Chat("deploy-thread".into())]));
+        assert_eq!(shown[1].0, Section::InThreads);
+        let ids: Vec<_> = shown[1]
+            .1
+            .iter()
+            .map(|kind| match kind {
+                RowKind::ChatWords(found) => found.chat_id.clone(),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(ids, ["quiet"], "no title match twice, no side chat, no chat unknown here");
+        // The keyboard reaches the words row after the title row.
+        window
+            .update(cx, |shell, _, cx| {
+                shell.move_palette_selection(true, cx);
+                let sections = shell.palette_sections(cx);
+                let rows = flat_rows(&sections);
+                let at = shell.command_palette.as_ref().unwrap().active_position(&rows);
+                assert!(matches!(&rows[at].kind, RowKind::ChatWords(found) if found.chat_id == "quiet"));
+            })
+            .unwrap();
+        // Cleared below two characters.
+        type_query(window, "q", cx);
+        assert!(palette_section(window, Section::InThreads, cx).is_none());
+    }
+
+    // slopty: an answer to an older query is dropped; a failed search shows no words.
+    #[gpui::test]
+    fn stale_or_failed_chat_word_answers_show_nothing(cx: &mut TestAppContext) {
+        let (window, _dir, mut engine) = engine_palette(cx, false);
+        window
+            .update(cx, |shell, _, cx| {
+                shell.state.update(cx, |state, _| {
+                    state.apply_chats(vec![titled("quiet", "Fix the composer", false, 2)]);
+                });
+                shell.select_palette_tab(Tab::Threads, cx);
+            })
+            .unwrap();
+        type_query(window, "old", cx);
+        let old = chat_word_requests(&mut engine, cx);
+        type_query(window, "new words", cx);
+        let new = chat_word_requests(&mut engine, cx);
+        assert_eq!((old.len(), new.len()), (1, 1));
+        engine.reply(&old[0], serde_json::json!([words("quiet", "agent", "old", 0, 3)]));
+        cx.run_until_parked();
+        let section = palette_section(window, Section::InThreads, cx);
+        assert!(
+            section.as_ref().is_none_or(|section| section.rows.is_empty()),
+            "an older query's answer is dropped: {section:?}"
+        );
+        engine.fail(&new[0], &format!("unknown method: {}", methods::SEARCH_CHATS));
+        cx.run_until_parked();
+        assert!(palette_section(window, Section::InThreads, cx).is_none(), "nothing to show");
     }
 
     #[gpui::test]

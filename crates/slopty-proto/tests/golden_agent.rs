@@ -1,6 +1,6 @@
 //! Golden byte snapshots of the agent messages: the primitives one agent drives another with,
 //! what the server asks of a worker to start one or carry a branch, a thread read and answered,
-//! the news a worker hands an agent through its hooks, and what a worker reports of itself and
+//! the news a worker hands an agent as a message, and what a worker reports of itself and
 //! its agents. A changed snapshot is a wire change: accept it deliberately (`cargo insta
 //! review`).
 
@@ -9,7 +9,7 @@ mod golden_agent {
     use std::collections::BTreeMap;
 
     use slopty_core::{SessionId, WallMs, WorkerId};
-    use slopty_proto::agent::{AgentBranch, AgentEntry, AgentStart, PARENT_FACT, Worktree};
+    use slopty_proto::agent::{AgentEntry, AgentStart, PARENT_FACT, Worktree};
     use slopty_proto::codec;
     use slopty_proto::folder::FsOp;
     use slopty_proto::orchestration::{BranchBundle, Outcome, TermRef, ThreadOf, Verb};
@@ -131,6 +131,7 @@ mod golden_agent {
             effort: None,
             attachments: Vec::new(),
             args: Vec::new(),
+            options: BTreeMap::new(),
             worktree: Some(NewWorktree {
                 name: "store".to_owned(),
                 base: None,
@@ -186,7 +187,6 @@ mod golden_agent {
             of: ThreadOf::On { worker: term().worker, thread: thread(0x7e7e) },
             view: ThreadView::Activity,
             after: Some(TurnId(4)),
-            hold: true,
         };
         snap("read_thread_on", &request(found));
         let read = ThreadRead {
@@ -358,23 +358,10 @@ mod golden_agent {
     }
 
     /// What a worker tells the server of its agents beyond their status, and the news the
-    /// server hands an agent through its hooks.
+    /// server hands an agent as a message.
     #[test]
     fn agent_reports() {
         let session = term().session;
-        snap(
-            "report_branch",
-            &ToServer::Report(AgentReport::Branch(AgentBranch {
-                session,
-                worktree: Some(Worktree {
-                    name: "rows".to_owned(),
-                    path: "/w/.claude/worktrees/rows".to_owned(),
-                    branch: Some("worktree-rows".to_owned()),
-                    original_cwd: "/w".to_owned(),
-                    original_branch: Some("main".to_owned()),
-                }),
-            })),
-        );
         snap("report_delivered", &ToServer::Report(AgentReport::Delivered { session, batch: 7 }));
         snap(
             "deliver",

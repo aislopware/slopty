@@ -60,6 +60,8 @@ pub struct ThreadState {
     /// The person's own words for the messages given the agent in its words, by the intent
     /// that sent each ([`Action::Said`]): shown in their place.
     pub said: BTreeMap<IntentId, String>,
+    /// When the worker last heard its agent alive during a turn ([`Action::Lease`]).
+    pub lease_ms: Option<WallMs>,
 }
 
 impl ThreadState {
@@ -85,6 +87,7 @@ impl ThreadState {
             draft: None,
             named: String::new(),
             said: BTreeMap::new(),
+            lease_ms: None,
         }
     }
 
@@ -165,6 +168,9 @@ impl ThreadState {
             }
             Action::Said { message, words } => {
                 self.said.insert(*message, words.clone());
+            }
+            Action::Lease(at) => {
+                self.lease_ms = Some(self.lease_ms.map_or(*at, |had| had.max(*at)));
             }
         }
     }
@@ -285,7 +291,6 @@ impl ThreadState {
             last_line: self.last_line(),
             doing: self.doing(),
             changed,
-            terminal: self.meta.terminal,
             cwd: Some(self.meta.cwd.clone()).filter(|cwd| !cwd.is_empty()),
             repo: None,
             repo_id: None,
@@ -304,6 +309,7 @@ impl ThreadState {
                 .map(|turn| turn.started_ms),
             seen: self.seen,
             draft: self.draft.clone(),
+            lease_ms: self.lease_ms,
             created_ms: self.meta.created_ms,
             updated_ms,
         }

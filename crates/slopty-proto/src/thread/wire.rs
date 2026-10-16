@@ -14,7 +14,7 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-use slopty_core::{SessionId, WallMs};
+use slopty_core::WallMs;
 
 use super::{
     Action, AgentId, AskId, Cap, Changed, Choice, ContentRef, Cursor, Delivery, Drive, IntentId,
@@ -131,6 +131,10 @@ pub struct Start {
     pub attachments: Vec<String>,
     /// More arguments for the agent, checked by its adapter.
     pub args: Vec<String>,
+    /// The model's options it starts with, by option id to choice id
+    /// ([`Model::options`](super::Model::options)); the agent's own defaults for those left out.
+    #[serde(default)]
+    pub options: BTreeMap<String, String>,
     /// A git worktree of its own to work in: the worker makes it from the clone `cwd` is in
     /// (`.claude/worktrees/<name>` on branch `worktree-<name>`), or reopens it when it is
     /// there, and the agent starts in it where `cwd` stands in the clone. A start whose `cwd`
@@ -252,11 +256,6 @@ pub enum Intent {
         /// Words to go with it, where the agent takes them.
         message: Option<String>,
     },
-    /// Give a request back to the agent's own prompt.
-    Release {
-        /// The request.
-        ask: AskId,
-    },
     /// Switch the model, by the agent's own id.
     SetModel {
         /// The model.
@@ -343,6 +342,20 @@ pub enum Intent {
         /// The words as the person wrote them.
         words: String,
     },
+    /// End the agent's process, and with it every piece of background work it runs, keeping
+    /// its conversation to take up again ([`Cap::END`]): the stop for work a turn left running
+    /// (a subagent, a background command) and the last word on an agent that does not stop.
+    /// The thread is left exited and resumable, with a notice of how it ended.
+    End,
+    /// Choose one of the options the thread's model offers
+    /// ([`Model::options`](super::Model::options)), by their ids: Claude Code's fast mode
+    /// through its own command, Codex's service tier on its next turn ([`Cap::SET_OPTION`]).
+    SetOption {
+        /// The option ([`OptionOffer::id`](super::OptionOffer::id)).
+        option: String,
+        /// The choice ([`OptionChoice::id`](super::OptionChoice::id)).
+        choice: String,
+    },
 }
 
 /// A file's change as a review showed it, or some of its hunks.
@@ -389,7 +402,9 @@ impl Intent {
             | Self::Promote { .. }
             | Self::Move { .. } => Cap::QUEUE,
             Self::Interrupt => Cap::INTERRUPT,
-            Self::Answer { .. } | Self::Release { .. } => Cap::APPROVALS,
+            Self::End => Cap::END,
+            Self::SetOption { .. } => Cap::SET_OPTION,
+            Self::Answer { .. } => Cap::APPROVALS,
             Self::SetModel { .. } => Cap::SET_MODEL,
             Self::SetMode { .. } => Cap::SET_MODE,
             Self::SetEffort { .. } => Cap::SET_EFFORT,
@@ -725,8 +740,6 @@ pub struct ThreadRow {
     pub doing: Option<String>,
     /// Lines added and removed over the turns the worker holds.
     pub changed: Changed,
-    /// The terminal its TUI runs in.
-    pub terminal: Option<SessionId>,
     /// The directory it works in, as its agent said.
     pub cwd: Option<String>,
     /// The root of the repository that directory is in, once the worker has looked.
@@ -758,6 +771,10 @@ pub struct ThreadRow {
     /// What the person was writing to it and has not sent, as a device last kept it
     /// ([`Intent::Draft`]); empty words once cleared; none before any was kept.
     pub draft: Option<Draft>,
+    /// When the worker last heard its agent alive during a turn, by the worker's clock
+    /// ([`super::Action::Lease`]): a client shows a turn as running only while this is fresh,
+    /// and none before any turn was leased.
+    pub lease_ms: Option<WallMs>,
     /// When it began ([`ThreadMeta::created_ms`](super::ThreadMeta::created_ms)).
     pub created_ms: WallMs,
     /// When it last changed.

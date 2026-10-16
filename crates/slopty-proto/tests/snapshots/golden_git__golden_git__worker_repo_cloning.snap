@@ -2,5 +2,5 @@
 source: crates/slopty-proto/tests/golden_git.rs
 expression: hex(&bytes)
 ---
-16 00 00 00 1d 0d 11 52 65 63 65 69 76 69 6e 67
+16 00 00 00 1c 0d 11 52 65 63 65 69 76 69 6e 67
 20 6f 62 6a 65 63 74 73 01 2d

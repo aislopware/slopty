@@ -12,7 +12,6 @@ use std::ffi::CStr;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use slopty_agent::managed::ManagedSettings;
 use slopty_proto::screen::{DisplayInfo, VideoCodec};
 use slopty_proto::server::{Fact, Facts, Form, InstalledAgent, Os, WorkerCaps};
 use slopty_proto::thread::{AgentId, Offers};
@@ -61,24 +60,13 @@ const ADAPTED: [(&str, &str); 3] =
 ///
 /// Claude Code, Codex and pi, then each agent reached over ACP whose program is here, the
 /// person's own (`own_acp`, from `[worker.acp]`) among the known ones. What a client offers to
-/// start on this machine is exactly this, with no server needed. Claude Code's entry says
-/// whether the managed settings in `managed` ([`ManagedSettings::files`]) keep Slopty's hooks
-/// off.
+/// start on this machine is exactly this, with no server needed.
 pub async fn installed_agents(
     dirs: &[PathBuf],
     own_acp: &BTreeMap<String, Vec<String>>,
-    managed: &[PathBuf],
 ) -> Vec<InstalledAgent> {
     let (agents, acp) = crate::facts::agents(dirs, own_acp).await;
-    let mut installed = agents_in(&agents, &acp);
-    let files = managed.to_vec();
-    let hooks_off =
-        tokio::task::spawn_blocking(move || !ManagedSettings::from_files(&files).runs_own_hooks());
-    let hooks_off = hooks_off.await.unwrap_or(false);
-    for agent in &mut installed {
-        agent.managed_hooks_off = hooks_off && agent.agent == AgentId::named(AgentId::CLAUDE_CODE);
-    }
-    installed
+    agents_in(&agents, &acp)
 }
 
 /// How long the directories agents are found in stay quiet before they are looked in again:
@@ -89,13 +77,11 @@ pub const INSTALL_SETTLE: Duration = Duration::from_secs(1);
 ///
 /// They are looked for again whenever an entry in one of the directories is added, removed or
 /// renamed (an agent installed, upgraded or removed), once the directories have been quiet for
-/// [`INSTALL_SETTLE`], whenever the person's own ACP agents (`own_acp`) change, and whenever a
-/// managed settings file in `managed` changes, comes or goes. It ends once `installed` has no
-/// receiver left.
+/// [`INSTALL_SETTLE`], and whenever the person's own ACP agents (`own_acp`) change. It ends once
+/// `installed` has no receiver left.
 pub async fn follow_agents(
     dirs: Vec<PathBuf>,
     mut own_acp: watch::Receiver<BTreeMap<String, Vec<String>>>,
-    managed: Vec<PathBuf>,
     installed: watch::Sender<Vec<InstalledAgent>>,
 ) {
     let named = |paths: &[PathBuf]| -> Vec<String> {
@@ -103,24 +89,19 @@ pub async fn follow_agents(
     };
     // Held for as long as it follows: each follower ends with its list's sender.
     let (_lists, mut lists) = watch::channel(named(&dirs));
-    let (_files, mut files) = watch::channel(named(&managed));
     // A follower takes a list as it changes, so the first one is marked.
     lists.mark_changed();
-    files.mark_changed();
     let mut moved = crate::fswatch::follow_folders(lists, crate::fswatch::Limits::default());
-    let mut settings = crate::fswatch::follow(files, crate::fswatch::Limits::default());
-    // Looked in only once both followers watch their lists: a follower takes a path as it is
-    // when it takes the list, so an install before that is no event, and only a look after it
-    // is sure to see it.
-    for mut taken in [moved.status(), settings.status()] {
-        if taken.wait_for(|status| status.lists > 0).await.is_err() {
-            return;
-        }
+    // Looked in only once the follower watches its list: it takes a path as it is when it
+    // takes the list, so an install before that is no event, and only a look after it is sure
+    // to see it.
+    if moved.status().wait_for(|status| status.lists > 0).await.is_err() {
+        return;
     }
     let mut own = own_acp.borrow_and_update().clone();
     let mut acp_followed = true;
     loop {
-        let now = installed_agents(&dirs, &own, &managed).await;
+        let now = installed_agents(&dirs, &own).await;
         installed.send_if_modified(|was| {
             let differs = *was != now;
             *was = now;
@@ -143,7 +124,6 @@ pub async fn follow_agents(
                     }
                 }
             }
-            seen = settings.next() => if seen.is_none() { return },
             () = installed.closed() => return,
         }
     }
@@ -163,13 +143,12 @@ pub fn agents_in(agents: &Facts, acp: &Facts) -> Vec<InstalledAgent> {
         let version = text(agents.get(*program)?);
         let agent = AgentId::named(name);
         let offers = crate::thread::offers::seed(&agent);
-        Some(InstalledAgent { offers, agent, version, managed_hooks_off: false })
+        Some(InstalledAgent { offers, agent, version })
     });
     let reached = acp.iter().map(|(name, fact)| InstalledAgent {
         agent: AgentId::acp(name),
         version: text(fact),
         offers: Offers::default(),
-        managed_hooks_off: false,
     });
     adapted.chain(reached).collect()
 }
@@ -509,8 +488,7 @@ mod tests {
         let bin = dir.path().canonicalize().expect("path");
         let (_own, own_acp) = watch::channel(BTreeMap::new());
         let (installed, mut agents) = watch::channel(Vec::new());
-        let following =
-            tokio::spawn(follow_agents(vec![bin.clone()], own_acp, Vec::new(), installed));
+        let following = tokio::spawn(follow_agents(vec![bin.clone()], own_acp, installed));
         let codex = |agents: &[InstalledAgent]| {
             agents
                 .iter()
@@ -533,50 +511,6 @@ mod tests {
         until(&mut agents, Some("0.162.0")).await;
         std::fs::remove_file(&program).expect("remove");
         until(&mut agents, None).await;
-        following.abort();
-    }
-
-    /// Claude Code's entry says when the managed settings keep Slopty's hooks off, and says so
-    /// again as the settings change while the worker runs; no other agent's ever does.
-    #[tokio::test]
-    async fn managed_settings_that_keep_the_hooks_off_are_said_as_they_change() {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        let dir = tempfile::tempdir().expect("dir");
-        let root = dir.path().canonicalize().expect("path");
-        let bin = root.join("bin");
-        std::fs::create_dir_all(&bin).expect("bin");
-        for (program, says) in [("claude", "2.1.295 (Claude Code)"), ("codex", "codex-cli 0.162.0")]
-        {
-            let path = bin.join(program);
-            std::fs::write(&path, format!("#!/bin/sh\necho '{says}'\n")).expect("write");
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("mode");
-        }
-        let file = root.join("managed-settings.json");
-        let (_own, own_acp) = watch::channel(BTreeMap::new());
-        let (installed, mut agents) = watch::channel(Vec::new());
-        let managed = vec![file.clone(), root.join("absent.json")];
-        let following = tokio::spawn(follow_agents(vec![bin], own_acp, managed, installed));
-        let off = |agents: &[InstalledAgent]| {
-            let flag = |name| agents.iter().find(|a| a.agent == AgentId::named(name));
-            flag(AgentId::CLAUDE_CODE).zip(flag(AgentId::CODEX)).map(|(claude, codex)| {
-                assert!(!codex.managed_hooks_off, "only Claude Code's");
-                claude.managed_hooks_off
-            })
-        };
-        let until = async |agents: &mut watch::Receiver<Vec<InstalledAgent>>, want: bool| {
-            let waited = tokio::time::timeout(Duration::from_secs(30), async {
-                while off(&agents.borrow_and_update()) != Some(want) {
-                    agents.changed().await.expect("following");
-                }
-            });
-            waited.await.expect("came to what was awaited");
-        };
-        until(&mut agents, false).await;
-        std::fs::write(&file, r#"{"allowManagedHooksOnly": true}"#).expect("write");
-        until(&mut agents, true).await;
-        std::fs::write(&file, r#"{"disableSideloadFlags": true}"#).expect("write");
-        until(&mut agents, false).await;
         following.abort();
     }
 

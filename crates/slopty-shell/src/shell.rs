@@ -1,4 +1,4 @@
-// Derived from zeron (MIT, github.com/zeronsh/zeron @ 75b7260), see THIRD_PARTY_NOTICES.md
+// Derived from zeron (MIT, github.com/zeronsh/zeron @ 3b2f780), see THIRD_PARTY_NOTICES.md
 //! The app shell (slopty `__root.tsx`): sidebar column + main panel + optional
 //! right "Changes" pane, plus the boot splash and the connection gate.
 //!
@@ -86,6 +86,7 @@ mod side_chats;
 mod sidebar_pins;
 mod sidebar_sections;
 mod sidebar_subagents; // slopty: an agent's subagents under its sidebar row
+mod sidebar_status; // slopty: status groups, reasons and the hover card
 mod search_warm;
 pub(crate) mod spaces;
 mod thread_search;
@@ -94,6 +95,10 @@ mod tabs;
 mod live_surfaces; // slopty: remote window and desktop surfaces
 mod kept_tabs; // slopty: the pane's tabs kept across launches
 mod compact; // slopty: the phone's anatomy
+mod chrome_keys; // slopty: find, history, tab and picker keys, and undoing an archive
+mod closed_tabs; // slopty: the right pane's closed tabs, opened again
+mod open_in; // slopty: a chat's folder in the person's editor
+mod terminal_runs; // slopty: a transcript's Run in the chat's own shell terminal
 // slopty: voice removed.
 
 use spaces::{AddSpaceFlow, RenameSpaceDialog};
@@ -211,6 +216,7 @@ const CHAT_MENU_ROW_ARCHIVE: u8 = 2;
 const CHAT_MENU_ROW_COPY: u8 = 3;
 const CHAT_MENU_ROW_DELETE: u8 = 4;
 const CHAT_MENU_ROW_TAB: u8 = 5;
+const CHAT_MENU_ROW_OPEN_IN: u8 = 16; // slopty: past the tab rows
 
 #[derive(Clone, Copy)]
 enum TabCloseAction {
@@ -496,6 +502,7 @@ pub fn apply_keymap(
         ),
     ]);
     crate::browser::bind_keys(cx, keymap);
+    chrome_keys::bind_keys(cx, keymap); // slopty: find, history, tab, picker and undo keys
     // ⌘1..⌘9 open the sidebar's first nine rows. A slot left unbound (an empty
     // combo in a hand-edited file) binds nothing rather than falling back —
     // the user cleared it on purpose.
@@ -709,6 +716,15 @@ pub enum RightSurface {
     Subagent(u64),
     SideChat(u64),
     Screen(u64), // slopty: a remote window or desktop (`live_surfaces`)
+}
+
+// slopty: what a remote window tab's chip wears: the window glyph for a window (its choice's id
+// is `window:<n>`), the monitor for a desktop or before anything is chosen.
+fn screen_chip_glyph(chosen: Option<&str>) -> &'static str {
+    match chosen {
+        Some(id) if id.starts_with("window:") => icons::WINDOW_RESTORE,
+        _ => icons::MONITOR,
+    }
 }
 
 fn push_unique_right_surface(tabs: &mut Vec<RightSurface>, surface: RightSurface) -> bool {
@@ -1038,6 +1054,12 @@ fn sidebar_row_height(compact: bool, show_label: bool, branch: bool, pr: bool) -
     } else {
         chat_row_height(branch, pr) - if show_label { 0.0 } else { 16.0 }
     }
+}
+
+// slopty: a waiting row's reason takes a line of its own where no location line carries it
+// (compact rows, rows with Location off): 14 tall, 2 apart.
+fn sidebar_reason_height(compact: bool, show_label: bool, reason: bool) -> f32 {
+    if reason && (compact || !show_label) { 16.0 } else { 0.0 }
 }
 
 /// Flex gap between sidebar list items.
@@ -1723,13 +1745,19 @@ pub struct Shell {
     /// entity from the bottom drawer's (own PTYs, own grid geometry; one
     /// panel can only size one visible grid at a time).
     right_terminal: Option<Entity<TerminalPanel>>,
-    /// slopty: per chat, the right-pane terminal tab that shows its agent's own TUI.
-    agent_tui: std::collections::HashMap<String, u64>,
     /// slopty: the tabs each chat's pane had when the app last ran, until it is shown again
     /// (`kept_tabs`).
     unrestored_tabs: std::collections::BTreeMap<String, crate::settings::SavedTabs>,
     /// The surface-tab strip's `+` menu (Browser / Terminal / Diffs / History rows).
     right_plus: popover::Popup<()>,
+    // slopty: the right pane's closed tabs, newest last, each with its pane (`closed_tabs`).
+    closed_tabs: Vec<(String, crate::settings::SavedSurface)>,
+    // slopty: the chat archived last and its Undo toast (`chrome_keys`).
+    last_archive: Option<(String, u64)>,
+    /// slopty: the terminal tab each chat's transcript runs its lines in.
+    run_tabs: std::collections::HashMap<String, u64>,
+    // slopty: the Open in menu (`open_in`).
+    open_in: popover::Popup<open_in::OpenInMenu>,
     /// Host-owned project Actions cached per (device, space).
     project_actions: crate::project_actions::ProjectActionsController,
     /// Diff surfaces by id — each tab its own [`Changes`] viewer with its own
@@ -2210,9 +2238,12 @@ impl Shell {
             jump_hints: false,
             terminal: None,
             right_terminal: None,
-            agent_tui: std::collections::HashMap::new(),
             unrestored_tabs: settings.session_tabs.clone(),
             right_plus: popover::Popup::default(),
+            closed_tabs: Vec::new(),       // slopty
+            last_archive: None,            // slopty
+            run_tabs: std::collections::HashMap::new(), // slopty
+            open_in: popover::Popup::default(), // slopty
             project_actions: crate::project_actions::ProjectActionsController::default(),
             diffs: std::collections::HashMap::new(),
             files: std::collections::HashMap::new(),
@@ -2832,49 +2863,6 @@ impl Shell {
     /// Open and on screen: the window fit is not hiding it.
     fn right_pane_shown(&self, cx: &App) -> bool {
         self.right_pane_open(cx) && self.horizontal_fit().right
-    }
-
-    /// slopty: the right-pane tab of the current chat that shows its agent's own TUI, when it
-    /// is open there and in front.
-    pub(crate) fn agent_tui_shown(&self, cx: &App) -> Option<u64> {
-        let key = self.panel_key(cx);
-        let tab = *self.agent_tui.get(&key)?;
-        let surface = RightSurface::Terminal(tab);
-        let listed = self.right_tabs.get(&key).is_some_and(|tabs| tabs.contains(&surface));
-        (listed && self.right_pane_open(cx) && self.resolved_right_active(cx) == surface)
-            .then_some(tab)
-    }
-
-    /// slopty: the current chat's agent's own TUI (Claude Code's, on the session the chat
-    /// shows) beside the chat, in the right pane, so the person works in either at once; put
-    /// away when it is in front there (its tab closes, the agent goes on).
-    pub(crate) fn toggle_agent_tui(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(tab) = self.agent_tui_shown(cx) {
-            self.close_right_surface(RightSurface::Terminal(tab), window, cx);
-            return;
-        }
-        let key = self.panel_key(cx);
-        let kept = self.agent_tui.get(&key).copied().filter(|tab| {
-            let surface = RightSurface::Terminal(*tab);
-            self.right_tabs.get(&key).is_some_and(|tabs| tabs.contains(&surface))
-        });
-        let tab = match kept {
-            Some(tab) => tab,
-            None => {
-                let panel = self.right_terminal_panel(cx);
-                let opened = panel.update(cx, |panel, cx| {
-                    panel.set_open(true, cx);
-                    panel.open_agent_tab_for_selected(cx)
-                });
-                let Some(tab) = opened else { return };
-                self.right_tabs.entry(key.clone()).or_default().push(RightSurface::Terminal(tab));
-                self.agent_tui.insert(key, tab);
-                tab
-            }
-        };
-        self.set_surfaces_open(true, cx);
-        self.set_right_active(RightSurface::Terminal(tab), cx);
-        cx.notify();
     }
 
     /// The current chat's terminal flag (per-session, in-memory).
@@ -4057,6 +4045,8 @@ impl Shell {
                         replay_baseline: Some(slopty_view_doc::TranscriptBaseline::capture(&entries)),
                         frame: slopty_view_doc::TranscriptFrame::Reset { reset: entries },
                         context_usage: None,
+                        limits: Vec::new(), // slopty: new field.
+                        limit_resets_at: None, // slopty: new field.
                     };
                     let prepared = crate::transcript::TranscriptPreparation::default()
                         .prepare(&update)
@@ -4138,6 +4128,7 @@ impl Shell {
             }
             return;
         }
+        self.remember_closed_tab(&key, surface, cx); // slopty: ⌘⇧T opens it again
         if let Some(tabs) = self.right_tabs.get_mut(&key) {
             tabs.retain(|s| *s != surface);
         }
@@ -4323,6 +4314,7 @@ impl Shell {
         panel_key: &str,
         cx: &mut Context<Self>,
     ) {
+        self.remember_closed_tab(panel_key, surface, cx); // slopty: ⌘⇧T opens it again
         if let Some(tabs) = self.right_tabs.get_mut(panel_key) {
             tabs.retain(|candidate| *candidate != surface);
         }
@@ -5050,6 +5042,10 @@ impl Shell {
                 .appearance_page
                 .as_ref()
                 .is_some_and(|page| page.update(cx, |page, cx| page.dismiss_on_escape(cx))),
+            SettingsSection::Archived => self
+                .archived_page
+                .as_ref()
+                .is_some_and(|page| page.update(cx, |page, cx| page.dismiss_on_escape(cx))),
             _ => false,
         }
     }
@@ -5744,6 +5740,10 @@ impl Shell {
             serde_json::json!({ "op": "setChatArchived", "chatId": chat_id, "archived": archived }),
             cx,
         );
+        // slopty: an archive can be undone from its toast, or with ⌘Z while it is up.
+        if archived {
+            self.offer_undo_archive(chat_id, cx);
+        }
         cx.notify();
     }
 
@@ -7014,6 +7014,33 @@ impl Shell {
         let shows_metadata = branch.is_some() || change_request.is_some();
         let queued = queued && !undelivered;
         let working = status == slopty_view_proto::ChatIndicator::Working && !queued && !undelivered;
+        // slopty: why it stands as it does (`sidebar_status`): what a waiting agent waits on,
+        // an agent waiting on its own work, a finished result nobody has seen.
+        let (reason, waiting_self) = {
+            let now = Utc::now();
+            let state = self.state.read(cx);
+            let session = state.session_for(&id);
+            let settled = !queued && !undelivered && !archived && search_query.is_none();
+            (
+                settled
+                    .then(|| sidebar_status::reason(status, session, now))
+                    .flatten()
+                    .map(SharedString::from),
+                settled
+                    && matches!(
+                        status,
+                        slopty_view_proto::ChatIndicator::Idle
+                            | slopty_view_proto::ChatIndicator::Completed
+                    )
+                    && sidebar_status::waiting_on_itself(session, now),
+            )
+        };
+        let unread = sidebar_status::unread(status) && !archived && !queued && !undelivered;
+        let status_label = if waiting_self && status_label.is_none() {
+            Some("Waiting")
+        } else {
+            status_label
+        };
         // Subagents running under this chat show as a "● N" pill beside the
         // row's own activity indicator, never in place of it: the pill takes
         // the time stamp's spot (compact) or leads the status (regular), and
@@ -7042,6 +7069,12 @@ impl Shell {
                 icon(icons::CHECK)
                     .size(px(11.0))
                     .text_color(status_color)
+                    .into_any_element()
+            } else if waiting_self {
+                // slopty: at rest on its own work: a calm clock, not a live state.
+                icon(icons::CLOCK_CIRCLE)
+                    .size(px(11.0))
+                    .text_color(theme.text_muted)
                     .into_any_element()
             } else {
                 div()
@@ -7134,7 +7167,14 @@ impl Shell {
                     // Glyph slot: Working wears the preset's animated pixel
                     // glyph beside its label, Done wears the check, and the
                     // remaining statuses use a compact dot.
-                    let glyph: AnyElement = if status == slopty_view_proto::ChatIndicator::Completed {
+                    let glyph: AnyElement = if waiting_self {
+                        // slopty: at rest on its own work.
+                        icon(icons::CLOCK_CIRCLE)
+                            .size(px(11.0))
+                            .flex_none()
+                            .text_color(theme.text_muted)
+                            .into_any_element()
+                    } else if status == slopty_view_proto::ChatIndicator::Completed {
                         icon(icons::CHECK)
                             .size(px(11.0))
                             .flex_none()
@@ -7174,7 +7214,11 @@ impl Shell {
                                     div()
                                         .text_size(crate::typography::ui_rems(10.0))
                                         .font_weight(gpui::FontWeight::MEDIUM)
-                                        .text_color(status_color)
+                                        .text_color(if waiting_self {
+                                            theme.text_muted
+                                        } else {
+                                            status_color
+                                        })
                                         .child(SharedString::from(label)),
                                 ),
                         )
@@ -7259,6 +7303,8 @@ impl Shell {
         };
         let select_id = id.clone();
         let menu_id = id.clone();
+        let card_id = id.clone(); // slopty: its hover card
+        let row_label = title.clone(); // slopty: the row as a screen reader names it
         let search_query_none = search_query.is_none();
         let rename_input = (search_query_none && !preview)
             .then(|| self.rename_input_for(&id, ChatRenameSurface::Sidebar))
@@ -7276,7 +7322,8 @@ impl Shell {
         // below its near-opaque selected fill, and blending toward it visibly
         // dimmed the active row under the pointer (user report).
         let hover_bg = if selected { selected_wash } else { hover };
-        let rest_text = if selected || search_query.is_some() {
+        // slopty: an unread result reads at full strength, as a selected row does.
+        let rest_text = if selected || search_query.is_some() || unread {
             text
         } else if archived {
             text.opacity(0.55)
@@ -7295,7 +7342,7 @@ impl Shell {
                 show_label,
                 branch.is_some(),
                 change_request.is_some(),
-            )))
+            ) + sidebar_reason_height(compact, show_label, reason.is_some())))
             .flex()
             .flex_col()
             .gap(px(2.0))
@@ -7332,6 +7379,13 @@ impl Shell {
                     })
                 })
                 .cursor_pointer()
+                // slopty: where it runs, which agent, and how long it has stood as it is; the
+                // row is a button named by its title.
+                .when(search_query_none, |el| {
+                    el.tooltip(sidebar_status::hover_card(self.state.clone(), card_id.clone()))
+                        .role(gpui::Role::Button)
+                        .aria_label(row_label.clone())
+                })
                 .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
                     // The palette's copy of the row only opens; the sidebar's
                     // double-click edits the title in place.
@@ -7429,11 +7483,20 @@ impl Shell {
                         .child(sidebar_faded_label(
                             format!("chat-device-{content_id}").into(),
                             true,
-                            div()
-                                .text_size(crate::typography::ui_rems(11.0))
-                                .line_height(px(14.0))
-                                .text_color(subline)
-                                .child(popover::search_highlight(space_name, search_query, theme)),
+                            // slopty: a waiting row says why in place of where; the hover card
+                            // keeps the place.
+                            match reason.clone() {
+                                Some(reason) => div()
+                                    .text_size(crate::typography::ui_rems(11.0))
+                                    .line_height(px(14.0))
+                                    .text_color(theme.text_muted)
+                                    .child(reason),
+                                None => div()
+                                    .text_size(crate::typography::ui_rems(11.0))
+                                    .line_height(px(14.0))
+                                    .text_color(subline)
+                                    .child(popover::search_highlight(space_name, search_query, theme)),
+                            },
                         ))
                         .child(div().text_color(subline).children(corner.take())),
                 )
@@ -7482,6 +7545,8 @@ impl Shell {
                             div()
                                 .text_size(crate::typography::ui_rems(13.0))
                                 .line_height(px(17.0))
+                                // slopty: the heavier weight marks a result nobody has seen.
+                                .when(unread, |el| el.font_weight(gpui::FontWeight::SEMIBOLD))
                                 .child(popover::search_highlight(title, search_query, theme)),
                         )
                         .into_any_element(),
@@ -7614,6 +7679,29 @@ impl Shell {
                         )
                     }),
             )
+            // slopty: the reason line, where no location line carries it: under the title,
+            // past the status glyph.
+            .when_some(reason.filter(|_| compact || !show_label), |row, reason| {
+                row.child(
+                    div()
+                        .id(SharedString::from(format!("{row_id}-reason")))
+                        .debug_selector({
+                            let id = id.clone();
+                            move || format!("chat-reason-{id}")
+                        })
+                        .w_full()
+                        .pl(px(if compact { 17.0 } else { 0.0 }))
+                        .child(sidebar_faded_label(
+                            format!("chat-reason-label-{content_id}").into(),
+                            true,
+                            div()
+                                .text_size(crate::typography::ui_rems(11.0))
+                                .line_height(px(14.0))
+                                .text_color(theme.text_muted)
+                                .child(reason),
+                        )),
+                )
+            })
             // Line 3 is structural, not reserved whitespace: compact states
             // omit it completely when both Branch and Pull request are hidden.
             .when(!compact && shows_metadata, |row| {
@@ -8227,14 +8315,17 @@ impl Shell {
                 el.child(pill)
             })
             // slopty: no self-updater and no Star on GitHub banner.
-            .child(
-                div()
-                    .p(px(Theme::SPACE_SM))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .child(self.render_sidebar_footer_row(theme, cx)),
-            )
+            // slopty: a phone has no sidebar foot: Settings is a tab, the server its page's.
+            .when(!self.compact(), |el| {
+                el.child(
+                    div()
+                        .p(px(Theme::SPACE_SM))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .child(self.render_sidebar_footer_row(theme, cx)),
+                )
+            })
             .into_any_element()
     }
 
@@ -8271,6 +8362,62 @@ impl Shell {
             sidebar_server_identity(state.connectivity.server.as_ref()) // slopty: the server, not an account.
         };
         self.render_user_menu(user_line, menu_identity, online, theme, cx)
+    }
+
+    // slopty: the server menu's rows: Devices, Connect a phone (while the server offers its
+    // code), and Change server (Add device on "A server").
+    fn server_menu_rows(&self, theme: &Theme, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let invite = self
+            .state
+            .read(cx)
+            .connectivity
+            .server
+            .as_ref()
+            .is_some_and(|server| server.invite.is_some());
+        let row = |id: &'static str, glyph: &'static str, label: &'static str| {
+            popover::menu_row(theme, false, format!("user-menu-{id}"))
+                .id(id)
+                .debug_selector(move || id.into())
+                .role(gpui::Role::MenuItem)
+                .aria_label(label)
+                .child(icon(glyph).size(px(14.0)).flex_none().text_color(theme.text_muted))
+                .child(div().flex_1().min_w_0().truncate().child(label))
+        };
+        let mut rows = vec![
+            row("user-menu-devices", icons::LAPTOP, "Devices")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.close_user_menu(cx);
+                    this.open_settings(SettingsSection::Devices, cx);
+                }))
+                .into_any_element(),
+        ];
+        if invite {
+            rows.push(
+                row("user-menu-connect-phone", icons::SMARTPHONE, "Connect a phone")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.close_user_menu(cx);
+                        this.open_connect_phone(cx);
+                    }))
+                    .into_any_element(),
+            );
+        }
+        rows.push(
+            row("user-menu-change-server", icons::REMOTE_SERVER, "Change server")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.close_user_menu(cx);
+                    this.open_add_device_on(crate::settings::add_device::Choice::Server, cx);
+                }))
+                .into_any_element(),
+        );
+        rows
+    }
+
+    // slopty: the server menu's "Connect a phone": Settings → Devices with the server's code up.
+    fn open_connect_phone(&mut self, cx: &mut Context<Self>) {
+        self.open_settings(SettingsSection::Devices, cx);
+        let state = self.state.clone();
+        let page = self.devices_page.get_or_insert_with(|| cx.new(|cx| DevicesPage::new(state, cx)));
+        page.update(cx, |page, cx| page.open_invite(cx));
     }
 
     fn render_user_menu(
@@ -8397,16 +8544,10 @@ impl Shell {
                 .flex()
                 .flex_col()
                 .gap(px(2.0))
-                .child(
-                    div()
-                        .px(px(8.0))
-                        .pt(px(6.0))
-                        .pb(px(4.0))
-                        .text_size(crate::typography::ui_rems(11.0))
-                        .text_color(theme.text_muted)
-                        .truncate()
-                        .child(menu_identity),
-                )
+                // slopty: the server's link as the heading, then what the person does about
+                // servers and machines (zeron's account rows' anatomy).
+                .child(popover::menu_heading(theme, &menu_identity))
+                .children(self.server_menu_rows(theme, cx))
                 // slopty: no accounts, sync or sign-in.
                 // slopty: no self-updater.
                 .into_any_element();
@@ -8736,9 +8877,24 @@ impl Shell {
                             )
                             .child(SharedString::from("Archive"));
                     let copy = self.render_chat_copy_trigger(&chat_id, copy_open, &theme, cx);
+                    // slopty: the chat's folder in the person's editor (`open_in`).
+                    let open_in = (Self::offers_open_in()
+                        && !self.open_in_choices(&chat_id, cx).is_empty())
+                    .then(|| {
+                        let open_id = chat_id.clone();
+                        let row = popover::menu_row(&theme, false, format!("chat-menu-open-in-{chat_id}"))
+                            .id("chat-menu-open-in")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.open_open_in(open_id.clone(), position, cx)
+                            }))
+                            .child(icon(icons::FILE_CODE).size(px(16.0)).text_color(theme.text_muted))
+                            .child(SharedString::from("Open in\u{2026}"));
+                        self.chat_menu_hover_row(CHAT_MENU_ROW_OPEN_IN, row, cx)
+                    });
                     menu.child(self.chat_menu_hover_row(CHAT_MENU_ROW_PIN, pin, cx))
                         .child(self.chat_menu_hover_row(CHAT_MENU_ROW_ARCHIVE, archive, cx))
                         .child(self.chat_menu_hover_row(CHAT_MENU_ROW_COPY, copy, cx))
+                        .children(open_in)
                 };
                 let delete = popover::menu_row(&theme, false, format!("chat-menu-delete-{chat_id}"))
                     .id("chat-menu-delete")
@@ -8803,6 +8959,7 @@ impl Shell {
                 chat_menu_closing,
             ));
         }
+        overlays.extend(self.render_open_in_menu(cx)); // slopty: `open_in`
 
         overlays.extend(self.render_space_overlays(viewport, window, cx));
         overlays.extend(self.render_section_overlays(viewport, window, cx));
@@ -9414,67 +9571,28 @@ impl Shell {
         transcript: Entity<Transcript>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let theme = Theme::of(cx).for_popup();
-        let glass = theme.is_frost();
-        let base = if glass {
-            popover::surface_bg(&theme)
-        } else {
-            motion::hover_blend(hover_key, theme.surface_raised, theme.surface_raised_hover)
+        // slopty: the anatomy is [`crate::live::chrome::floating_pill`], which Slopty's own views
+        // float too.
+        let theme = Theme::of(cx);
+        let content = |theme: &Theme| {
+            let glyph = div()
+                .text_size(crate::typography::ui_rems(13.0))
+                .text_color(theme.text_muted)
+                .child(SharedString::from("↓"))
+                .into_any_element();
+            let words = div()
+                .text_size(crate::typography::ui_rems(13.0))
+                .text_color(theme.text)
+                .child(SharedString::from("Scroll to bottom"))
+                .into_any_element();
+            (Some(glyph), words)
         };
-        let wash = if glass {
-            motion::hover_blend(hover_key, gpui::transparent_black(), theme.glass_hover())
-        } else {
-            gpui::transparent_black()
-        };
-        let pill = div()
-            .id(anim_key)
-            .h(px(30.0))
-            .rounded_full()
-            .border_1()
-            .border_color(theme.border)
-            .when(!glass, |el| el.shadow_md())
-            .cursor_pointer()
-            .bg(base)
-            .on_hover(motion::hover_listener(hover_key))
-            .on_click(cx.listener(move |_, _, _, cx| {
+        let hover = Some(hover_key.into());
+        crate::live::chrome::floating_pill(anim_key, hover, theme, content, |pill| {
+            pill.cursor_pointer().on_click(cx.listener(move |_, _, _, cx| {
                 transcript.update(cx, |transcript, cx| transcript.jump_to_bottom(cx));
             }))
-            .child(
-                // The hover wash rides an inner full-height layer so it
-                // composites over the tint (a div has one bg).
-                div()
-                    .h_full()
-                    .rounded_full()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .pl(px(11.0))
-                    .pr(px(13.0))
-                    .bg(wash)
-                    .child(
-                        div()
-                            .text_size(crate::typography::ui_rems(13.0))
-                            .text_color(theme.text_muted)
-                            .child(SharedString::from("↓")),
-                    )
-                    .child(
-                        div()
-                            .text_size(crate::typography::ui_rems(13.0))
-                            .text_color(theme.text)
-                            .child(SharedString::from("Scroll to bottom")),
-                    ),
-            );
-        // Frost OUTSIDE the entry animation (the composer pill's exact
-        // composition): one scene layer — blur, then the pill's quads, then
-        // glyphs — so the pill always composes over the transcript content
-        // scrolling under it, and never loses its washes to the kind-sorted
-        // draw order (frost.rs module docs).
-        crate::frost::frosted(
-            15.0,
-            crate::frost::MENU_BLUR,
-            motion::dialog_in(anim_key, pill),
-        )
-        .into_any_element()
+        })
     }
 
     /// Terminal panel dock at the main-column bottom: a 5px height-drag handle
@@ -10031,7 +10149,11 @@ impl Shell {
                 RightSurface::Subagent(_) => icons::BOT,
                 RightSurface::Terminal(_) => icons::TERMINAL,
                 RightSurface::Browser(_) => icons::GLOBE,
-                RightSurface::Screen(_) => icons::MONITOR, // slopty:
+                // slopty: a window's chip wears the window glyph its picker row wore; a desktop,
+                // or nothing chosen yet, the monitor.
+                RightSurface::Screen(id) => screen_chip_glyph(
+                    self.screen_surface_chosen(id, cx).map(|(id, _)| id).as_deref(),
+                ),
                 RightSurface::Picker => icons::PLUS,
             };
             // Working chats and subagents swap their harness icon for the
@@ -10082,7 +10204,14 @@ impl Shell {
                 )
                 .into_any_element()
             } else if let Some(favicon) = browser_favicon {
-                gpui::img(favicon).size(px(12.0)).into_any_element()
+                // slopty: named, so a screen reader (and the e2e) tells the page's own icon
+                // from the default globe.
+                div()
+                    .id(SharedString::from(format!("right-tab-favicon-{ix}")))
+                    .role(gpui::Role::Image)
+                    .aria_label("Page icon")
+                    .child(gpui::img(favicon).size(px(12.0)))
+                    .into_any_element()
             } else if matches!(surface, RightSurface::File(_)) {
                 crate::file_icons::icon(
                     crate::file_icons::FileIconIdentity::file(file_identity_path.as_ref()),
@@ -10313,6 +10442,25 @@ impl Shell {
                                         .text_color(theme.text_muted),
                                 )
                                 .child(SharedString::from("Terminal")),
+                        )
+                        // slopty: a remote window or desktop of the chat's machine, as the empty
+                        // pane's picker offers it.
+                        .child(
+                            popover::menu_row(&theme, false, "right-plus-screen")
+                                .id("right-plus-screen-row")
+                                .debug_selector(|| "right-plus-screen-row".into())
+                                .role(gpui::Role::MenuItem)
+                                .aria_label("Remote window")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.add_screen_surface(cx);
+                                    this.close_right_plus(cx);
+                                }))
+                                .child(
+                                    icon(icons::MONITOR)
+                                        .size(px(13.0))
+                                        .text_color(theme.text_muted),
+                                )
+                                .child(SharedString::from("Remote window")),
                         )
                         .when(self.space_git_detected(cx), |menu| {
                             menu.child(
@@ -11177,6 +11325,7 @@ impl Render for Shell {
                     this.open_add_space(cx);
                 }
             }));
+        let root = self.chrome_actions(root, cx); // slopty: `chrome_keys`
 
         // slopty: no accounts, sync or sign-in.
         let root = match &gate {
@@ -11418,6 +11567,7 @@ impl Render for Shell {
                     Empty.into_any_element()
                 };
                 let title_bar = self.render_title_bar(cx);
+                let compact_nav = self.render_compact_nav_bar(cx); // slopty: the phone's
                 // Sidebar tone: a slightly lighter column behind the sidebar.
                 // Its width rides the same tween as the sidebar, so the tone
                 // melts away with the collapse instead of vanishing in a frame.
@@ -11460,18 +11610,31 @@ impl Render for Shell {
                                     .child(right_seam),
                             ),
                     )
-                    .child(
-                        div()
+                    // slopty: a phone's navigation bar stands in for the titlebar, its title
+                    // and its sidebar and history cluster.
+                    .when(compact_nav.is_none(), |el| {
+                        el.child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .right_0()
+                                // slopty: voice removed.
+                                .child(title_bar),
+                        )
+                    })
+                    // slopty: voice removed.
+                    .child(match compact_nav {
+                        Some(bar) => div()
                             .absolute()
                             .top_0()
                             .left_0()
                             .right_0()
-                            // slopty: voice removed.
-                            .child(title_bar),
-                    )
-                    // slopty: voice removed.
-                    .child(self.render_titlebar_cluster(cx))
-                    .children(self.render_sidebar_options_titlebar(cx))
+                            .child(bar)
+                            .into_any_element(),
+                        None => self.render_titlebar_cluster(cx),
+                    })
+                    .children(self.render_sidebar_options_titlebar(cx).filter(|_| !self.compact()))
                     .children(overlays);
                 root.child(sidebar_tone)
                     // slopty: clear of a phone's or tablet's edges.
@@ -11581,6 +11744,7 @@ mod tests {
             parent_chat_id: None,
             subagent: false, // slopty: subagents
             in_parent: false,
+            draft: None, // slopty: new field.
         }
     }
 
@@ -11889,6 +12053,8 @@ mod tests {
             started_at: Some(updated_at),
             updated_at,
             running_subagents: 0,
+            status_since: None, // slopty: new field.
+            waiting_on: None, // slopty: new field.
         }
     }
 
@@ -12193,6 +12359,14 @@ mod tests {
     }
 
     // slopty: no accounts, sync or sign-in.
+
+    // slopty: a remote window's chip matches its picker row's glyph.
+    #[test]
+    fn a_remote_window_chip_wears_its_kind() {
+        assert_eq!(screen_chip_glyph(Some("window:42")), icons::WINDOW_RESTORE);
+        assert_eq!(screen_chip_glyph(Some("display:1")), icons::MONITOR);
+        assert_eq!(screen_chip_glyph(None), icons::MONITOR, "nothing chosen yet");
+    }
 
     #[test]
     fn titlebar_cluster_matches_slopty_window_controls() {
@@ -13503,6 +13677,7 @@ mod exit_regressions {
                         space_id: Some("other".into()),
                         last_seen_at: None,
                         room_gen: None,
+                        draft: None, // slopty: new field.
                     }]);
                     state.select_space(Some("mine".into()), cx);
                 });

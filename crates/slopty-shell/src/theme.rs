@@ -1526,6 +1526,7 @@ impl Theme {
             .with_code_font_size(crate::typography::code_font_size(cx))
             .with_terminal_font_size(crate::typography::terminal_font_size(cx));
         sync_gpui_base_scrollbar(&next, cx);
+        cx.set_text_smoothing(text_smoothing_for(next.appearance)); // slopty: dark weights
         cx.set_global(next);
         // An accent-only swap leaves CURRENT_APPEARANCE unchanged, but cached
         // resolved colors still need to be discarded for the next frame.
@@ -1601,6 +1602,7 @@ impl Theme {
         });
         set_current_appearance(appearance);
         sync_gpui_base_scrollbar(&next, cx);
+        cx.set_text_smoothing(text_smoothing_for(next.appearance)); // slopty: dark weights
         cx.set_global(next);
         if changed || force_generation {
             bump_style_generation();
@@ -1625,6 +1627,20 @@ impl Theme {
     /// State wash at `alpha` — see [`wash`].
     pub fn wash(&self, alpha: f32) -> Hsla {
         wash_for(self.appearance, alpha)
+    }
+}
+
+// slopty: weight compensation in dark, as Claude desktop lightens its weights there. On macOS,
+// font smoothing dilates a glyph by its colour's luminance, so light text on a dark plane paints
+// about a weight heavier than the same text dark on light. Dark sets every glyph at the weight
+// the design names (antialiased, never dilated, the web's `-webkit-font-smoothing:
+// antialiased`); light keeps the platform's smoothing, which barely dilates dark text.
+/// How text is smoothed under `appearance`.
+pub(crate) fn text_smoothing_for(appearance: Appearance) -> gpui::TextSmoothing {
+    if appearance.is_dark() {
+        gpui::TextSmoothing::Antialiased
+    } else {
+        gpui::TextSmoothing::Native
     }
 }
 
@@ -2035,6 +2051,22 @@ mod tests {
         // oklch(0.145 0 0) is Tailwind neutral-950, slopty's app background.
         let rgb = srgb_u8(oklch_to_srgb(0.145, 0.0, 0.0));
         assert_eq!(rgb, [10, 10, 10]);
+    }
+
+    // slopty: dark sets text at its own weight; light keeps the platform's smoothing, and an
+    // appearance switch carries the policy with it.
+    #[gpui::test]
+    fn dark_text_is_set_at_its_own_weight(cx: &mut gpui::TestAppContext) {
+        assert_eq!(text_smoothing_for(Appearance::Dark), gpui::TextSmoothing::Antialiased);
+        assert_eq!(text_smoothing_for(Appearance::Light), gpui::TextSmoothing::Native);
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            crate::settings::init(Default::default(), tempfile::tempdir().unwrap().path(), cx);
+            Theme::install(Appearance::Dark, cx);
+            assert_eq!(cx.text_smoothing(), gpui::TextSmoothing::Antialiased);
+            Theme::install(Appearance::Light, cx);
+            assert_eq!(cx.text_smoothing(), gpui::TextSmoothing::Native);
+        });
     }
 
     #[test]

@@ -408,6 +408,8 @@ impl Composer {
                 .id("todo-panel-toggle")
                 .role(gpui::Role::Button)
                 .aria_label(label)
+                // slopty: how far the list has come, "2/5", as the header shows it.
+                .aria_value(SharedString::from(format!("{}/{}", summary.done, summary.total)))
                 .flex_1()
                 .min_w_0()
                 .h(px(HEADER_HEIGHT))

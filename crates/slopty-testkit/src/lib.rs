@@ -1,6 +1,8 @@
 //! What the tests measure with, in one place: never a dependency of a shipped binary.
 //!
 //! - [`bins`]: the daemons and doubles a test spawns, from the test's own build.
+//! - [`claude_stream`]: the stand-in `claude` driven over stream-json, as the driven adapter runs
+//!   Claude Code.
 //! - [`env`](mod@env): the clean environment each of them starts from, never the person's.
 //! - [`group`]: a test's daemons in a process group of their own, ended whole and waited for, so
 //!   nothing a test started outlives it.
@@ -16,10 +18,11 @@
 //!   lane.
 //! - [`relay`]: a link a test can cut and restore, between a daemon and the server it dials, as a
 //!   network loss is met: packets stop, and both ends keep running.
+//! - [`replay`]: a recorded Claude Code turn, made the stand-in `claude`'s own (`STUB_REPLAY`).
 //!
 //! And four doubles, binaries, so tests start agents without spending anyone's plan:
-//! `slopty-stub-claude`, a stand-in for `claude` that speaks the hook protocol, calls Slopty's
-//! tools through the `slopty mcp` it is handed, and records what it was given;
+//! `slopty-stub-claude`, a stand-in for `claude` driven over stream-json ([`claude_stream`]),
+//! which calls Slopty's tools through the `slopty mcp` it is handed and records what it was given;
 //! `slopty-stub-managed-claude`, a stand-in for a managed launcher in `claude`'s place, which
 //! answers `--managed-help` and runs the stand-in `claude` as its child, as such a launcher does;
 //! `slopty-stub-pi`, a stand-in for `pi --mode rpc` that replays a recording of pi's RPC mode
@@ -35,10 +38,12 @@
 pub mod alloc;
 pub mod bench;
 pub mod bins;
+pub mod claude_stream;
 pub mod env;
 pub mod group;
 pub mod live;
 pub mod process;
 pub mod relay;
+pub mod replay;
 pub mod soc;
 pub mod stats;

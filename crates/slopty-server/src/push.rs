@@ -83,10 +83,6 @@ pub struct Outgoing {
 
 /// What a push does on the phone.
 #[derive(Clone, PartialEq, Eq, Debug)]
-#[expect(
-    clippy::large_enum_variant,
-    reason = "one per note a phone is pushed, a few a minute at most; a box would cost more"
-)]
 pub enum Sending {
     /// Show the note this body makes, sealed to the phone.
     Note(PushBody),
@@ -531,7 +527,6 @@ mod tests {
         let notice = Notice {
             kind: NoticeKind::NeedsYou,
             about: Subject::Thread(ThreadAt { worker, thread: ThreadId::new() }),
-            tile: None,
             title: "\u{1f600}".repeat(500),
             text: asked,
             worked_ms: None,
@@ -557,8 +552,7 @@ mod tests {
     /// collapse id.
     #[test]
     fn a_long_notice_still_fits_apns() {
-        use slopty_core::{SessionId, WorkerId};
-        use slopty_proto::orchestration::TermRef;
+        use slopty_core::WorkerId;
         use slopty_proto::thread::ThreadId;
         use slopty_proto::thread::attention::{Notice, ThreadAt, Via};
 
@@ -566,7 +560,6 @@ mod tests {
         let notice = Notice {
             kind: NoticeKind::Finished,
             about: Subject::Thread(ThreadAt { worker, thread: ThreadId::new() }),
-            tile: Some(TermRef { worker, session: SessionId::new() }),
             title: "\u{1f600}".repeat(500),
             text: "\u{1f600}".repeat(5_000),
             worked_ms: Some(90_000),
@@ -623,8 +616,7 @@ mod tests {
     /// it, it would show what was answered.
     #[tokio::test(start_paused = true)]
     async fn a_note_older_than_its_take_back_is_not_sent_again() {
-        use slopty_core::{SessionId, WorkerId};
-        use slopty_proto::orchestration::TermRef;
+        use slopty_core::WorkerId;
         use slopty_proto::thread::ThreadId;
         use slopty_proto::thread::attention::{Notice, ThreadAt};
 
@@ -633,7 +625,6 @@ mod tests {
         let notice = Notice {
             kind: NoticeKind::NeedsYou,
             about,
-            tile: Some(TermRef { worker, session: SessionId::new() }),
             title: "Allow?".to_owned(),
             text: "Bash".to_owned(),
             worked_ms: None,

@@ -6,7 +6,7 @@
 mod orchestrate {
     use std::time::Duration;
 
-    use slopty_agent::status::{AgentEvent, AgentSource, AgentStatus, BlockReason, SessionAgent};
+    use slopty_agent::status::{AgentEvent, AgentSource, AgentStatus, SessionAgent};
     use slopty_core::{SessionId, WallMs};
     use slopty_proto::input::CellMetrics;
     use slopty_proto::orchestration::{Command, ErrorCode, Input, Screen, WaitUntil, Waited};
@@ -14,8 +14,7 @@ mod orchestrate {
     use slopty_pty::shell_integration::{self, ShellIntegration};
     use slopty_pty::{Pty, SpawnSpec};
     use slopty_worker::orchestrate::{
-        AgentFeed, Agents, list_commands, may_deliver, may_type, read_output, read_screen,
-        send_input, wait_for,
+        AgentFeed, Agents, list_commands, may_type, read_output, read_screen, send_input, wait_for,
     };
     use slopty_worker::session::{self, SessionHandle, SessionStart};
     use tokio::sync::{broadcast, mpsc};
@@ -34,26 +33,21 @@ mod orchestrate {
 
     impl Agents for Table {
         fn status(&self, _session: SessionId) -> Option<SessionAgent> {
-            let status = self.0.lock().clone()?;
-            Some(SessionAgent {
-                status,
-                source: AgentSource::Hook,
-                since_ms: WallMs::ZERO,
-                mode: None,
-            })
+            let status = (*self.0.lock())?;
+            Some(SessionAgent { status, source: AgentSource::Title, since_ms: WallMs::ZERO })
         }
 
         fn forget(&self, _session: SessionId) {}
     }
 
-    /// An agent table that says what the test set of every session: its agent and where its
-    /// status came from, and whether an agent ended there.
+    /// An agent table that says what the test set of every session: its agent, and whether an
+    /// agent ended there.
     #[derive(Default)]
-    struct Said(parking_lot::Mutex<(Option<(AgentStatus, AgentSource)>, bool)>);
+    struct Said(parking_lot::Mutex<(Option<AgentStatus>, bool)>);
 
     impl Said {
-        fn agent(&self, status: AgentStatus, source: AgentSource) {
-            *self.0.lock() = (Some((status, source)), false);
+        fn agent(&self, status: AgentStatus) {
+            *self.0.lock() = (Some(status), false);
         }
 
         fn end(&self) {
@@ -63,8 +57,8 @@ mod orchestrate {
 
     impl Agents for Said {
         fn status(&self, _session: SessionId) -> Option<SessionAgent> {
-            let (status, source) = self.0.lock().0.clone()?;
-            Some(SessionAgent { status, source, since_ms: WallMs::ZERO, mode: None })
+            let status = self.0.lock().0?;
+            Some(SessionAgent { status, source: AgentSource::Title, since_ms: WallMs::ZERO })
         }
 
         fn forget(&self, _session: SessionId) {}
@@ -74,37 +68,8 @@ mod orchestrate {
         }
     }
 
-    /// An agent at its prompt by its hooks' word, whose last turn the person stopped or not.
-    struct Stopped(parking_lot::Mutex<bool>);
-
-    impl Agents for Stopped {
-        fn status(&self, _session: SessionId) -> Option<SessionAgent> {
-            Some(SessionAgent {
-                status: AgentStatus::Blocked(BlockReason::IdlePrompt),
-                source: AgentSource::Hook,
-                since_ms: WallMs::ZERO,
-                mode: None,
-            })
-        }
-
-        fn forget(&self, _session: SessionId) {}
-
-        fn interrupted(&self, _session: SessionId) -> bool {
-            *self.0.lock()
-        }
-    }
-
     fn agent_event(session: SessionId, status: AgentStatus) -> AgentEvent {
-        AgentEvent {
-            session,
-            status,
-            agent_session: None,
-            detail: None,
-            attention: true,
-            source: AgentSource::Hook,
-            since_ms: WallMs::ZERO,
-            mode: None,
-        }
+        AgentEvent { session, status, source: AgentSource::Title, since_ms: WallMs::ZERO }
     }
 
     struct Shell {
@@ -340,7 +305,7 @@ mod orchestrate {
     }
 
     #[tokio::test]
-    async fn an_agent_blocked_on_a_human_ends_the_wait() {
+    async fn an_agent_coming_to_rest_ends_the_wait() {
         let sh = shell().await;
         let h = &sh.handle;
         let (events, rx) = broadcast::channel(8);
@@ -351,17 +316,10 @@ mod orchestrate {
             let other = SessionId::new();
             events.send(event(other, AgentStatus::Idle)).unwrap();
             events.send(event(h.id(), AgentStatus::Working)).unwrap();
-            let why = BlockReason::Permission { tool: "Bash".to_owned() };
-            events.send(event(h.id(), AgentStatus::Blocked(why))).unwrap();
+            events.send(event(h.id(), AgentStatus::Idle)).unwrap();
         };
         let (waited, ()) = tokio::join!(waiting, report);
         assert_eq!(waited.unwrap(), Waited::Met { line: None });
-
-        let (_events, rx) = broadcast::channel::<AgentEvent>(8);
-        let blocked = AgentStatus::Blocked(BlockReason::Question);
-        let feed = AgentFeed { heard: rx, agents: Table::with(blocked) };
-        let at_once = wait_for(h, &WaitUntil::AgentNeedsInput, WAIT, Some(feed)).await;
-        assert_eq!(at_once.unwrap(), Waited::Met { line: None }, "already blocked");
     }
 
     /// A wait that falls behind the daemon's events may have missed the very report it waits
@@ -496,68 +454,28 @@ mod orchestrate {
         });
     }
 
-    /// A terminal with an agent takes input only while the agent can: not before its hooks
-    /// speak, not while it asks a person, not while a person has a line typed and unsent, not
-    /// once it ended. A terminal with none takes anything.
+    /// Nothing is typed into a terminal a coding agent runs in, nor one orchestration started
+    /// an agent in before the poll sees it; once the agent ended, the terminal is a shell again
+    /// and takes input, and one with no agent takes anything.
     #[tokio::test]
-    async fn nothing_is_typed_into_an_agent_that_cannot_take_it() {
-        use slopty_core::ClientId;
-        use slopty_proto::terminal::TermRequest;
-
+    async fn nothing_is_typed_into_a_terminal_an_agent_runs_in() {
         let sh = shell().await;
         let h = &sh.handle;
         let said = Said::default();
-        let refused = |expects_agent| may_type(h, &said, expects_agent).err();
-        let code = |expects_agent| refused(expects_agent).map(|f| f.code);
+        let code = |expects_agent| may_type(h, &said, expects_agent).err().map(|f| f.code);
         assert_eq!(code(false), None, "no agent, no guard");
-        assert_eq!(code(true), Some(ErrorCode::AgentNotReady), "started as one, not seen yet");
-        for source in [AgentSource::Process, AgentSource::Title, AgentSource::Transcript] {
-            said.agent(AgentStatus::Idle, source);
-            assert_eq!(code(false), Some(ErrorCode::AgentNotReady), "{source:?}: no hook yet");
+        assert_eq!(code(true), Some(ErrorCode::Forbidden), "started as one, not seen yet");
+        for status in [AgentStatus::Idle, AgentStatus::Working] {
+            said.agent(status);
+            let refused = may_type(h, &said, false).expect_err("an agent runs");
+            assert_eq!(refused.code, ErrorCode::Forbidden, "{status:?}");
+            assert!(refused.message.contains("start_thread"), "{refused:?}");
         }
-        said.agent(AgentStatus::Idle, AgentSource::Hook);
-        assert_eq!(code(true), None);
-        said.agent(
-            AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".into() }),
-            AgentSource::Hook,
-        );
-        let blocked = refused(false).expect("blocked on a permission");
-        assert_eq!(blocked.code, ErrorCode::AwaitsPerson);
-        assert!(blocked.message.contains("the person's to answer"), "{blocked:?}");
-        said.agent(AgentStatus::Blocked(BlockReason::Question), AgentSource::Hook);
-        assert_eq!(code(false), Some(ErrorCode::AwaitsPerson));
-        said.agent(AgentStatus::Blocked(BlockReason::IdlePrompt), AgentSource::Hook);
-        assert_eq!(code(false), None, "idle at its prompt is not waiting on anyone");
-        said.agent(AgentStatus::Working, AgentSource::Hook);
-        assert_eq!(code(false), None);
-
-        let person = ClientId::new();
-        h.request(person, TermRequest::Raw(b"# half a line".to_vec())).unwrap();
-        let typing = refused(false).expect("a person's draft");
-        assert_eq!(typing.code, ErrorCode::AwaitsPerson);
-        assert!(typing.message.contains("typing"), "{typing:?}");
-        send_input(h, &text("# orchestration's own line\n")).await.unwrap();
-        assert!(h.draft_pending(), "orchestration's Enter does not send the person's line");
-        let enter = slopty_worker::orchestrate::keys::parse("enter", 1).unwrap();
-        h.request(person, TermRequest::Key(enter)).unwrap();
-        assert_eq!(code(false), None, "sent");
-
+        said.agent(AgentStatus::None);
+        assert_eq!(code(false), None, "the table says none runs");
         said.end();
-        assert_eq!(code(false), Some(ErrorCode::AgentExited), "its shell would read it");
-    }
-
-    /// What is kept for an agent the person stopped waits for their next prompt: its idle
-    /// prompt a minute later takes typing as before, but no post wakes it, until it is prompted
-    /// again.
-    #[tokio::test]
-    async fn the_person_s_stop_holds_what_is_kept_for_the_agent() {
-        let sh = shell().await;
-        let stopped = Stopped(parking_lot::Mutex::new(true));
-        assert_eq!(may_type(&sh.handle, &stopped, true).err(), None, "the person may type");
-        let held = may_deliver(&sh.handle, &stopped).expect_err("held");
-        assert_eq!(held.code, ErrorCode::AwaitsPerson);
-        assert!(held.message.contains("the person stopped this agent"), "{held:?}");
-        *stopped.0.lock() = false;
-        assert_eq!(may_deliver(&sh.handle, &stopped).err(), None, "prompted again");
+        assert_eq!(code(false), None, "ended: its shell takes input");
+        assert_eq!(code(true), None, "started as one, and ended");
+        send_input(h, &text("# a line for the shell\n")).await.unwrap();
     }
 }

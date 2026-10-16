@@ -94,15 +94,19 @@ impl WorkspaceView {
         let startable = key.map(|key| self.startable_on(key)).unwrap_or_default();
         let off = self.view_model.surfaces.agents_off.set(&agents_off_path());
         let core = AGENTS.iter().map(|(harness, name, agent)| {
-            (*harness, (*name).to_owned(), startable.iter().any(|id| id.is(agent)))
+            let installed = startable.iter().any(|id| id.is(agent));
+            (*harness, (*name).to_owned(), installed, (*agent).to_owned())
         });
         let acp = startable.iter().filter_map(|id| {
             let name = id.acp_name()?;
-            Some((HarnessId::named(name), name.to_owned(), true))
+            Some((HarnessId::named(name), name.to_owned(), true, id.0.clone()))
         });
+        let now = slopty_core::WallMs::now();
         core.chain(acp)
-            .map(|(harness, name, installed)| {
+            .map(|(harness, name, installed, agent)| {
                 let on = !off.contains(harness.as_str());
+                // slopty: the plan windows its threads last published, the newest reading.
+                let usage = self.faces.threads.usage_of(&agent, now);
                 serde_json::json!({
                     "id": harness,
                     "name": name,
@@ -112,6 +116,7 @@ impl WorkspaceView {
                     "installed": installed,
                     "canInstall": false,
                     "enabled": installed && on,
+                    "usage": usage,
                 })
             })
             .collect()

@@ -15,17 +15,13 @@
 //! ([`idempotency`]). A start under an id the caller chose is done once per id: asked again,
 //! it answers the terminal that id already names.
 //!
-//! Nothing is typed into an agent's terminal while the agent cannot take it ([`may_type`]):
-//! while it waits on a person, while a person has a line typed and unsent, before its first
-//! hook, or after it ended. An agent's first prompt waits for its hooks to say it is at its
-//! prompt, and is never typed blind.
+//! Nothing is typed into a terminal a coding agent runs in ([`may_type`]): an agent is driven
+//! through its own door, as a thread, never by keys (`docs/decisions/agents.md`).
 //!
 //! Any agent's thread is read and its requests answered through the daemon's [`ThreadReads`]
-//! ([`thread_read`]), a Claude Code TUI's held prompts followed through its [`Conversations`]
-//! ([`conversation`]); a still picture from ScreenCaptureKit ([`still`]); a
-//! file too large for one reply goes up in parts ([`upload`]).
+//! ([`thread_read`]); a still picture from ScreenCaptureKit ([`still`]); a file too large for
+//! one reply goes up in parts ([`upload`]).
 
-pub mod conversation;
 pub mod idempotency;
 pub mod keys;
 pub mod still;
@@ -40,8 +36,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-pub use conversation::{Conversations, Sources};
-use slopty_agent::status::{AgentEvent, AgentSource, AgentStatus, BlockReason, SessionAgent};
+use slopty_agent::status::{AgentEvent, AgentStatus, SessionAgent};
 use slopty_core::{ClientId, SessionId, WorkerId};
 use slopty_engine::ghostty::Position;
 use slopty_proto::WorkerMsg;
@@ -54,8 +49,6 @@ use slopty_proto::screen::ScreenEvent;
 use slopty_proto::terminal::{CloseReason, OpenSession, SessionSummary, TermRequest, TermSize};
 use slopty_proto::thread::wire::{self, Intent, ThreadRow};
 use slopty_proto::thread::{Delivery, IntentId, ThreadId, ThreadState};
-/// One part of a delivery ptyd types ([`Deliver`]).
-pub use slopty_pty::protocol::Part;
 use tokio::sync::broadcast;
 pub use wait::{AgentFeed, wait_for};
 
@@ -98,14 +91,6 @@ pub const MAX_DIR_ENTRIES: u32 = 10_000;
 const MIN_SIZE: Size = Size { cols: 10, rows: 2 };
 const MAX_SIZE: Size = Size { cols: 1000, rows: 500 };
 
-/// Between typed or pasted words and the Enter that submits them. Ink-based TUIs (Claude
-/// Code) read a paste and an Enter that arrive in one read as one paste, and the Enter is
-/// swallowed.
-///
-/// ptyd keeps the pause, not this worker: the words and their Enter are one delivery
-/// ([`deliver_entry`]), so a worker that goes in between loses neither.
-pub const SUBMIT_PAUSE: Duration = Duration::from_millis(200);
-
 /// How long after answering [`Verb::RestartWorker`] the daemon exits: time for the answer to
 /// leave on the server's link, which goes with the process.
 const RESTART_AFTER: Duration = Duration::from_millis(500);
@@ -126,11 +111,6 @@ pub trait Agents: Send + Sync {
     /// The agent that ran in `session` has ended and none has started there since. A table
     /// that keeps no such history says no.
     fn ended(&self, _session: SessionId) -> bool {
-        false
-    }
-    /// The person stopped the last turn of the agent in `session` (Esc) and has not prompted
-    /// it since. A table that keeps no such word says no.
-    fn interrupted(&self, _session: SessionId) -> bool {
         false
     }
 }
@@ -179,13 +159,11 @@ pub trait ThreadReads: Send + Sync {
     /// `thread` as it stands; `None` for one this worker does not hold.
     fn state(&self, thread: ThreadId) -> Option<ThreadState>;
 
-    /// Do `intent` on `thread` once under `id`, as a client's would be done, by orchestration:
-    /// a prompt held in a terminal is answered as [`crate::conversation::ORCHESTRATION`].
+    /// Do `intent` on `thread` once under `id`, as a client's would be done, by orchestration.
     fn intent(&self, thread: ThreadId, id: IntentId, intent: Intent) -> wire::Outcome;
 
-    /// The row of the thread whose agent runs in terminal `session`, hanging from no other:
-    /// the latest to change, when several did.
-    fn at_terminal(&self, session: SessionId) -> Option<ThreadRow>;
+    /// The row of the thread seated at terminal `session`, if one is.
+    fn seated_at(&self, session: SessionId) -> Option<ThreadRow>;
 }
 
 /// A boxed future a [`SeatedThreads`] answers with.
@@ -274,9 +252,8 @@ struct Inner {
     worker: Worker,
     items: ItemStore,
     events: broadcast::Sender<WorkerMsg>,
-    /// What the agents' hooks and the daemon's poll report, as the daemon's agent table took it.
+    /// What the daemon's poll of its terminals reports, as the daemon's agent table took it.
     heard: broadcast::Sender<AgentEvent>,
-    conversations: Arc<dyn Conversations>,
     once: idempotency::Ledger,
     /// Terminals orchestration started as an agent's: an agent's before it is first seen, and
     /// after it ends.
@@ -312,15 +289,15 @@ impl std::fmt::Debug for Orchestrator {
 
 impl Orchestrator {
     /// An orchestrator for worker `id`, acting on its sessions, agent table, item registry,
-    /// client broadcast, agent reports and followed conversations; the clones the server asks
-    /// for share `cloner` with the person's own.
+    /// client broadcast and agent reports; the clones the server asks for share `cloner` with
+    /// the person's own.
     #[must_use]
     pub fn new(
         id: WorkerId,
         worker: Worker,
         items: ItemStore,
         (events, heard): (broadcast::Sender<WorkerMsg>, broadcast::Sender<AgentEvent>),
-        (conversations, cloner): (Arc<dyn Conversations>, crate::repo::cloning::Cloner),
+        cloner: crate::repo::cloning::Cloner,
     ) -> Self {
         let inner = Inner {
             id,
@@ -328,7 +305,6 @@ impl Orchestrator {
             items,
             events,
             heard,
-            conversations,
             once: idempotency::Ledger::default(),
             agent_terms: parking_lot::Mutex::default(),
             choosing: tokio::sync::Mutex::default(),
@@ -499,9 +475,8 @@ impl Orchestrator {
                     attach: false,
                 };
                 let handle = self.open_as(session, &req, ORCHESTRATOR).await?;
-                // A command that runs Claude Code is guarded as an agent from the
-                // start: until its first hook a dialog of its own may be up, and typing would
-                // answer it.
+                // A command that runs Claude Code is guarded as an agent's from the start,
+                // before the poll first sees it.
                 if slopty_agent::detect::is_claude("", &req.command) {
                     inner.agent_terms.lock().insert(handle.id());
                 }
@@ -536,8 +511,7 @@ impl Orchestrator {
             }
             Verb::AgentStatus { term } => {
                 self.session(term)?;
-                let row =
-                    inner.thread_reads.get().and_then(|reads| reads.at_terminal(term.session));
+                let row = inner.thread_reads.get().and_then(|reads| reads.seated_at(term.session));
                 Ok(Outcome::Agent(row.as_ref().map(|r| Box::new(TermAgent::of(r)))))
             }
             Verb::Close { term } => {
@@ -623,13 +597,9 @@ impl Orchestrator {
                     Err(e) => Err(Failure::new(ErrorCode::Failed, e.to_string())),
                 }
             }
-            Verb::ReadThread { of, view, after, hold } => {
+            Verb::ReadThread { of, view, after } => {
                 let (thread, reads) = self.thread_of(&of)?;
                 let state = reads.state(thread).ok_or_else(|| no_thread(thread))?;
-                // Only Claude Code's prompts wait in its terminal unless someone follows it.
-                if hold && let Some(session) = state.meta.terminal {
-                    inner.conversations.follow(session);
-                }
                 let read = thread_read::read(&state, inner.id, view, after);
                 Ok(Outcome::Thread(Box::new(read)))
             }
@@ -765,7 +735,6 @@ impl Orchestrator {
         inner.worker.close(session).await?;
         inner.agent_terms.lock().remove(&session);
         inner.worker.agents().forget(session);
-        inner.conversations.forget(session);
         let reason = CloseReason::Requested;
         let _sent = inner.events.send(WorkerMsg::SessionClosed { session, reason });
         for delta in inner.items.remove_session(session, ORCHESTRATOR) {
@@ -966,18 +935,11 @@ pub async fn resize(handle: &SessionHandle, size: TermSize) -> Result<(), Failur
 /// Whether orchestration may type into the terminal `handle` reaches now, read at the moment
 /// of the write.
 ///
-/// A terminal with an agent in it (the table holds one, or orchestration started it as an
-/// agent's: `expects_agent`) takes input only while the agent can:
-///
-/// - not while it waits on a person: a permission, a question, an elicitation
-///   ([`ErrorCode::AwaitsPerson`]; the person answers, never an agent);
-/// - not while a person has typed into it and not sent it ([`SessionHandle::draft_pending`];
-///   [`ErrorCode::AwaitsPerson`]), which would be merged into their line;
-/// - not before a hook of its session has spoken ([`ErrorCode::AgentNotReady`]): until then a
-///   dialog of its own may be up, and typing would answer it;
-/// - not once it has ended ([`ErrorCode::AgentExited`]): the shell below it would run the text.
-///
-/// A terminal with no agent takes anything.
+/// Not while a coding agent runs there (the table holds one, or orchestration started the
+/// terminal as an agent's, `expects_agent`, and it has not ended): Slopty drives an agent
+/// through its own door, as a thread, never by typing into its screen, and an agent the person
+/// runs by hand is theirs ([`ErrorCode::Forbidden`]). Once the agent ended, its terminal is a
+/// shell again and takes input.
 ///
 /// # Errors
 ///
@@ -988,152 +950,16 @@ pub fn may_type(
     expects_agent: bool,
 ) -> Result<(), Failure> {
     let session = handle.id();
-    let agent = agents.status(session).filter(|a| a.status != AgentStatus::None);
-    let ended = agents.ended(session);
-    if agent.is_none() && !expects_agent && !ended {
-        return Ok(());
-    }
-    // A program that exited may leave its last status behind: nothing reads the input now.
-    let exited = handle.activity().borrow().exited;
-    let Some(agent) = agent.filter(|_| !exited) else {
-        if exited || ended {
-            return Err(Failure::new(
-                ErrorCode::AgentExited,
-                "the agent in this terminal has exited, so its shell would get the input; \
-                 start the agent again or close the terminal",
-            ));
-        }
-        return Err(not_ready());
-    };
-    if let AgentStatus::Blocked(why) = &agent.status {
-        let what = match why {
-            BlockReason::Permission { .. } => Some("a permission prompt"),
-            BlockReason::Question => Some("a question"),
-            BlockReason::Elicitation => Some("an MCP server's question"),
-            BlockReason::IdlePrompt => None,
-        };
-        if let Some(what) = what {
-            return Err(Failure::new(
-                ErrorCode::AwaitsPerson,
-                format!(
-                    "the agent waits on {what}, which is the person's to answer; wait for them"
-                ),
-            ));
-        }
-    }
-    if agent.source != AgentSource::Hook {
-        return Err(not_ready());
-    }
-    if handle.draft_pending() {
+    let runs = agents.status(session).is_some_and(|a| a.status != AgentStatus::None);
+    let ended = agents.ended(session) || handle.activity().borrow().exited;
+    if (runs || expects_agent) && !ended {
         return Err(Failure::new(
-            ErrorCode::AwaitsPerson,
-            "a person is typing into this agent's prompt; wait until they send it",
+            ErrorCode::Forbidden,
+            "a coding agent runs in this terminal: Slopty never types into an agent, it drives \
+             one as a thread (start_thread); this one is the person's",
         ));
     }
     Ok(())
-}
-
-fn not_ready() -> Failure {
-    Failure::new(
-        ErrorCode::AgentNotReady,
-        "the agent has not reported through its hooks yet, so a dialog of its own may be up; \
-         wait for it (wait_for agent_needs_input) and try again",
-    )
-}
-
-/// Whether what is kept for the agent in `handle`'s terminal may be posted to wake it now.
-///
-/// What is kept is reports, and the person's or the orchestrator's words through the server. It
-/// may go as [`may_type`] says, and not while the person's own stop of its last turn stands. A
-/// post starts a turn in an idle agent, so one the person just stopped would be started again
-/// in nobody's name; what is kept waits for its next hook, which is the person's next prompt,
-/// and rides with their turn.
-///
-/// # Errors
-///
-/// [`may_type`]'s refusals, and [`ErrorCode::AwaitsPerson`] after the person's stop.
-pub fn may_deliver(handle: &SessionHandle, agents: &dyn Agents) -> Result<(), Failure> {
-    may_type(handle, agents, true)?;
-    if agents.interrupted(handle.id()) {
-        return Err(Failure::new(
-            ErrorCode::AwaitsPerson,
-            "the person stopped this agent; what is kept for it goes with their next prompt",
-        ));
-    }
-    Ok(())
-}
-
-/// What hands ptyd the parts of an entry to type whole ([`Worker::deliver`]).
-pub trait Deliver: Send + Sync {
-    /// Have ptyd type `parts` into `session` as delivery `delivery`, and return once it took
-    /// them.
-    fn deliver_parts(
-        &self,
-        session: SessionId,
-        delivery: u64,
-        parts: Vec<Part>,
-    ) -> BoxFuture<'_, Result<(), WorkerError>>;
-}
-
-impl Deliver for Worker {
-    fn deliver_parts(
-        &self,
-        session: SessionId,
-        delivery: u64,
-        parts: Vec<Part>,
-    ) -> BoxFuture<'_, Result<(), WorkerError>> {
-        Box::pin(Self::deliver(self, session, delivery, parts))
-    }
-}
-
-/// Type `words` and an Enter [`SUBMIT_PAUSE`] after them into `handle`'s session, as one
-/// delivery named `delivery` that ptyd types whole.
-///
-/// Once ptyd has it, it is typed whatever becomes of this worker, a worker sending it again
-/// under the same name has it typed no second time, and every input to the session waits
-/// until it is typed, so nothing lands between the words and their Enter. `guard` is asked right
-/// before, after the session's mark is set where the cursor stands (as [`write_input`] sets it).
-///
-/// This is the one way the worker types something and submits it: a spawned agent's brief, a
-/// thread's message, a command.
-///
-/// # Errors
-///
-/// What `guard` refuses, with nothing typed; the session gone; the link to ptyd failing, with
-/// nothing typed.
-pub async fn deliver_entry(
-    handle: &SessionHandle,
-    deliver: &dyn Deliver,
-    delivery: u64,
-    words: crate::Words,
-    guard: impl Fn() -> Result<(), Failure>,
-) -> Result<(), Failure> {
-    let enter = keys::parse("enter", 0).map_err(|why| Failure::new(ErrorCode::Invalid, why))?;
-    guard()?;
-    if handle.mark().is_none() {
-        handle.mark_if_unset(position(handle).await?);
-    }
-    guard()?;
-    let entry = handle.entry(words, enter).await?;
-    let pause = u32::try_from(SUBMIT_PAUSE.as_millis()).unwrap_or(u32::MAX);
-    let parts =
-        vec![Part { after_ms: 0, bytes: entry.words }, Part { after_ms: pause, bytes: entry.key }];
-    match deliver.deliver_parts(handle.id(), delivery, parts).await {
-        Ok(()) => {
-            handle.entered(Some(SUBMIT_PAUSE));
-            Ok(())
-        }
-        Err(e) => {
-            handle.entered(None);
-            Err(e.into())
-        }
-    }
-}
-
-/// A name for a delivery no other of its session's has had, before or after a restart: the
-/// random half of a fresh time-ordered id.
-pub(crate) fn delivery_name() -> u64 {
-    SessionId::new().as_uuid().as_u64_pair().1
 }
 
 /// Type into a session the way a client's input path does.

@@ -3,8 +3,9 @@
 //! unlock or the path monitor hands it. Nothing sleeps and no network changes.
 //!
 //! Timed from the event to the first live row: the worker's shell drawn again from a link that
-//! came up after the cut. Before resumes were heard, only the dead link's silence said it was
-//! dead (three seconds to say so, five to give it up); `docs/MEASUREMENTS.md` has both.
+//! came up after the cut. Without a resume, only the dead link's silence says it is dead: no
+//! pong for 4 s shows it silent and 6 s relinks it (`slopty_net::liveness`);
+//! `docs/MEASUREMENTS.md` has both.
 
 use std::time::{Duration, Instant};
 
@@ -16,7 +17,7 @@ const STEP: Duration = Duration::from_secs(20);
 const QUICK: Duration = Duration::from_millis(5);
 /// Deaths timed with a resume after each.
 const RESUMED: usize = 20;
-/// Deaths timed with nothing said: each takes the silence's five seconds.
+/// Deaths timed with nothing said: each takes the silence's six seconds.
 const SILENT: usize = 5;
 
 fn links(d: &Dump) -> u64 {

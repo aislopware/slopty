@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use slopty_core::WallMs;
 use slopty_proto::thread::wire::ThreadRow;
 use slopty_proto::thread::{Phase, ThreadId, ThreadMeta};
-use slopty_view_proto::{Chat, Session, SessionStatus, Space};
+use slopty_view_proto::{Chat, Session, SessionStatus, SessionWait, Space};
 
 /// A wall time as the shell's.
 #[must_use]
@@ -69,7 +69,8 @@ fn plain(path: &str, home: Option<&str>) -> String {
 /// - the deepest added folder it works in, or whose repository it is, by either path;
 /// - else, in one of Slopty's worktrees of a clone, the clone's own folder;
 /// - else its repository's root, else where it works;
-/// - and none for a chat at home, which has no project.
+/// - and none for a chat at home or in a scratch folder of its own
+///   ([`slopty_view_proto::projectless`]), which has no project.
 #[must_use]
 pub fn place(
     cwd: Option<&str>,
@@ -97,6 +98,10 @@ pub fn place(
         .max_by_key(|&(depth, _)| depth);
     if let Some((_, path)) = deepest {
         return Some(path.trim_end_matches('/').to_owned());
+    }
+    let scratch = plain(slopty_view_proto::projectless::SCRATCH_ROOT, home);
+    if under(&cwd, &scratch) {
+        return None;
     }
     let folder = repo.unwrap_or(cwd);
     if let Some((clone, _)) = folder.split_once(WORKTREES) {
@@ -163,6 +168,8 @@ pub fn chat(row: &ThreadRow, device: &str) -> Chat {
         parent_chat_id: parent(row).map(|thread| thread.to_string()),
         subagent: subagent(row),
         in_parent: row.parent.is_some(),
+        // What the person last kept writing to it, on any device.
+        draft: row.draft.as_ref().map(|draft| draft.text.clone()).filter(|text| !text.is_empty()),
     }
 }
 
@@ -195,16 +202,96 @@ pub fn pull(
     })
 }
 
-/// A thread's live status as a session, as of `now`, with the subagents of it that run.
+/// A plan's rate window as the usage ring names it: Claude Code's five-hour window is the
+/// session's, its seven-day ones the week's (the model it is for after), as zeron names them.
+fn window_label(name: &str) -> String {
+    let name = name.trim();
+    let (base, rest) = if let Some(rest) = name.strip_prefix("five-hour") {
+        ("Session", rest)
+    } else if let Some(rest) = name.strip_prefix("seven-day") {
+        ("Week", rest)
+    } else if let Some(rest) = name.strip_prefix("month") {
+        ("Month", rest)
+    } else {
+        let mut chars = name.chars();
+        let first = chars.next().map(|c| c.to_uppercase().collect::<String>()).unwrap_or_default();
+        return format!("{first}{}", chars.as_str()).replace(['-', '_'], " ");
+    };
+    let rest = rest.trim_start_matches(['-', '_', ' ']);
+    if rest.is_empty() {
+        return base.to_owned();
+    }
+    let mut chars = rest.chars();
+    let first = chars.next().map(|c| c.to_uppercase().collect::<String>()).unwrap_or_default();
+    format!("{base} · {first}{}", chars.as_str())
+}
+
+/// A plan's rate windows as the shell's usage ring takes them, the most used first.
 #[must_use]
-pub fn session(row: &ThreadRow, device: &str, running: u32, now: DateTime<Utc>) -> Session {
-    // An agent waiting on its own background work or a wakeup is at its prompt: the person may
-    // write to it, and there is no turn for a stop to end. It works again when one wakes it.
+pub fn limits(limits: &[slopty_proto::thread::Limit]) -> Vec<slopty_view_proto::AgentUsageWindow> {
+    let mut windows: Vec<_> = limits
+        .iter()
+        .map(|limit| slopty_view_proto::AgentUsageWindow {
+            label: window_label(&limit.name),
+            used_fraction: f32::from(u16::try_from(limit.used_bp.min(10_000)).unwrap_or(10_000))
+                / 10_000.0,
+            resets_at: limit.resets_ms.map(time),
+        })
+        .collect();
+    windows.sort_by(|a, b| b.used_fraction.total_cmp(&a.used_fraction));
+    windows
+}
+
+/// The longest a session's reason line is, in characters as seen.
+const SUMMARY_MAX: usize = 60;
+
+/// What a thread's row says it waits on, as the sidebar's reason line names it: an approval, a
+/// question, a plan, its context being compacted, or the row's own open kind.
+#[must_use]
+pub fn waiting_on(row: &ThreadRow) -> Option<SessionWait> {
+    use slopty_proto::thread::Wait;
+    let wait = row.status.wait.as_ref()?;
+    let kind = match wait.kind.as_str() {
+        "permission" => SessionWait::APPROVAL,
+        "question" => SessionWait::QUESTION,
+        "plan" => SessionWait::PLAN,
+        Wait::COMPACTING => SessionWait::COMPACTING,
+        other => other,
+    };
+    let summary = super::text::line(&wait.text, SUMMARY_MAX);
+    Some(SessionWait { kind: kind.to_owned(), summary: (!summary.is_empty()).then_some(summary) })
+}
+
+/// A thread's live status as a session, with the subagents of it that run.
+///
+/// A turn under way stands as of `leased`: when this client, by its own clock, last heard the
+/// row's lease ([`ThreadRow::lease_ms`]) move, the worker's word that its agent lives. So the
+/// shell lets one whose agent went silent go stale, and a worker whose clock is off by any
+/// amount moves nothing. A row with no lease stands as of `heard`, when this client last heard
+/// its worker.
+#[must_use]
+pub fn session(
+    row: &ThreadRow,
+    device: &str,
+    running: u32,
+    heard: DateTime<Utc>,
+    leased: Option<DateTime<Utc>>,
+) -> Session {
     let status = match row.status.phase {
         Phase::Working => SessionStatus::Working,
         Phase::NeedsYou => SessionStatus::AwaitingInput,
         Phase::Failed => SessionStatus::Errored,
-        Phase::Waiting | Phase::Idle | Phase::Done | Phase::Stopped => SessionStatus::Idle,
+        // At its prompt, waiting on its own background work or a wakeup: the person may write
+        // to it, and there is no turn for a stop to end.
+        Phase::Waiting => SessionStatus::Waiting,
+        Phase::Done => SessionStatus::Done,
+        Phase::Stopped => SessionStatus::Stopped,
+        Phase::Idle => SessionStatus::Idle,
+    };
+    let live = matches!(status, SessionStatus::Working | SessionStatus::AwaitingInput);
+    let updated_at = match leased {
+        Some(leased) if live => leased,
+        _ => heard,
     };
     Session {
         last_completed_turn: row
@@ -217,8 +304,10 @@ pub fn session(row: &ThreadRow, device: &str, running: u32, now: DateTime<Utc>) 
         // A turn's time runs from when it began, through its approvals and waits.
         started_at: (status == SessionStatus::Working)
             .then(|| time(row.began_ms.unwrap_or(row.status.since_ms))),
-        updated_at: now,
+        updated_at,
         running_subagents: running,
+        status_since: (!row.status.since_ms.is_zero()).then(|| time(row.status.since_ms)),
+        waiting_on: waiting_on(row),
     }
 }
 

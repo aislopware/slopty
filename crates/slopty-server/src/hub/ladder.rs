@@ -94,9 +94,6 @@ struct Phones {
     out: Option<mpsc::Sender<Outgoing>>,
     /// Where the phones go to be kept ([`crate::store::PushStore`]).
     kept: Option<watch::Sender<PushKept>>,
-    /// [`Self::answerable`], as every worker's link sends it: a word each link takes the
-    /// latest of, so none is dropped behind a full queue.
-    said: watch::Sender<bool>,
     /// The notes each phone shows that a take-back is to take down ([`Shown`]).
     shown: Shown,
     /// What each phone is owed a take-back of, decided and not yet taken by the push queue.
@@ -222,11 +219,6 @@ struct Pushing<'a> {
 }
 
 impl Phones {
-    /// Whether a pocketed phone can answer a yes or no: pushing is set up and a phone is known.
-    fn answerable(&self) -> bool {
-        self.out.is_some() && !self.devices.is_empty()
-    }
-
     /// Hand the phones, and what they show and are owed, to the keeper when that moved.
     fn keep(&self) {
         if let Some(kept) = &self.kept {
@@ -628,21 +620,21 @@ impl Board {
         self.tables.iter().find_map(|(worker, table)| {
             table
                 .values()
-                .any(|r| seat_fact(r) == Some(session))
+                .any(|r| seat_of(r) == Some(session))
                 .then_some(TermRef { worker: *worker, session })
         })
     }
 
-    /// Every thread with no terminal of its own whose agent runs, by its seat: it counts as a
-    /// live terminal does. One asleep does not, since its agent ended.
+    /// Every seated thread whose agent runs, by its seat: it counts as a live terminal does. One
+    /// asleep does not, since its agent ended.
     pub(super) fn live_seats(&self) -> Vec<TermRef> {
         self.tables
             .iter()
             .flat_map(|(worker, table)| {
                 table
                     .values()
-                    .filter(|r| r.terminal.is_none() && there(r))
-                    .filter_map(|r| Some(TermRef { worker: *worker, session: seat_fact(r)? }))
+                    .filter(|r| there(r))
+                    .filter_map(|r| Some(TermRef { worker: *worker, session: seat_of(r)? }))
             })
             .collect()
     }
@@ -654,7 +646,7 @@ impl Board {
     }
 
     /// Each thread on `worker` hanging from no other whose rung, phase or ask moved since last
-    /// asked, with the terminal its TUI runs in: what [`Happening::Rung`] tells. One gone from
+    /// asked, with the terminal it is seated at: what [`Happening::Rung`] tells. One gone from
     /// the table is forgotten.
     ///
     /// [`Happening::Rung`]: slopty_proto::orchestration::Happening::Rung
@@ -672,7 +664,7 @@ impl Board {
             });
             if moved {
                 self.rungs_said.insert((worker, row.id), now.clone());
-                moves.push((row.terminal, now));
+                moves.push((seat_of(row), now));
             }
         }
         moves
@@ -913,7 +905,7 @@ impl Hub {
             let how = Pushing { ask: ask.as_ref(), turn, ..Pushing::default() };
             if !first {
                 tell_pushing(board, &notice, how);
-            } else if route(&board.seats, &notice).away {
+            } else if route(board, &notice).away {
                 board.phones.send(&board.seats, &notice, Pushing { new_only: true, ..how });
             }
         }
@@ -921,26 +913,14 @@ impl Hub {
     }
 }
 
-/// Tell every worker linked whether a pocketed phone can answer, once that moved: while one
-/// can, a worker holds for it any prompt nobody follows ([`FromServer::Pushes`]). Tell each
-/// client that said it is a phone whether the server can push to it, once that moved
+/// Tell each client that said it is a phone whether the server can push to it, once that moved
 /// ([`FromServer::Pushable`]).
 fn say_pushes(state: &State) {
     let phones = &state.board.phones;
-    let now = phones.answerable();
-    phones.said.send_if_modified(|said| std::mem::replace(said, now) != now);
     for seat in state.board.seats.values() {
         let Some(client) = seat.client else { continue };
         let now = Some(phones.out.is_some() && phones.devices.contains_key(&client));
         seat.pushable.send_if_modified(|was| std::mem::replace(was, now) != now);
-    }
-}
-
-impl Board {
-    /// Whether a pocketed phone can answer, as it moves: each worker's link sends its latest
-    /// ([`FromServer::Pushes`]), once after the welcome when one can, then on every change.
-    pub(super) fn pushes(&self) -> watch::Receiver<bool> {
-        self.phones.said.subscribe()
     }
 }
 
@@ -985,13 +965,12 @@ pub(super) fn program_moved(
     let notice = Notice {
         kind: NoticeKind::NeedsYou,
         about: Subject::Terminal(term),
-        tile: Some(term),
         title: title.to_owned(),
         text: text.to_owned(),
         worked_ms: None,
         via: None,
     };
-    if route(&board.seats, &notice).away {
+    if route(board, &notice).away {
         board.phones.send(&board.seats, &notice, Pushing::default());
     }
 }
@@ -1021,7 +1000,7 @@ pub(super) struct Ask {
 /// phones when it finds the person at none of them, as `how` says: with the request its
 /// note's buttons answer, or a finished turn's note to take back once the turn is seen.
 fn tell_pushing(board: &mut Board, notice: &Notice, how: Pushing<'_>) {
-    let reach = route(&board.seats, notice);
+    let reach = route(board, notice);
     let mut unheard = Vec::new();
     for link in &reach.links {
         let Some(seat) = board.seats.get(link) else { continue };
@@ -1043,14 +1022,8 @@ struct Root<'a> {
     row: &'a ThreadRow,
 }
 
-/// Where `row`'s thread sits: the seat it was started at ([`SEAT_FACT`]), which stays its seat
-/// while the person's TUI joins it in a terminal of its own; else the terminal its TUI runs in.
+/// Where `row`'s thread sits: the seat it was started at, as its row's [`SEAT_FACT`] says.
 pub(super) fn seat_of(row: &ThreadRow) -> Option<SessionId> {
-    seat_fact(row).or(row.terminal)
-}
-
-/// The seat a thread was started at, as its row's [`SEAT_FACT`] says.
-fn seat_fact(row: &ThreadRow) -> Option<SessionId> {
     row.facts.get(SEAT_FACT)?.parse().ok()
 }
 
@@ -1127,8 +1100,7 @@ fn roots(tables: &HashMap<WorkerId, BTreeMap<ThreadId, ThreadRow>>) -> Vec<Root<
                 let row = table.get(&root)?;
                 let (rung, from) = source(row, &family);
                 let at = ThreadAt { worker: *worker, thread: root };
-                let ranked =
-                    Ranked { at, rung, since_ms: from.status.since_ms, terminal: row.terminal };
+                let ranked = Ranked { at, rung, since_ms: from.status.since_ms };
                 Some(Root { ranked, row })
             })
         })
@@ -1154,7 +1126,7 @@ fn ladder(tables: &HashMap<WorkerId, BTreeMap<ThreadId, ThreadRow>>) -> Ladder {
         let ranked = &root.ranked;
         fleet.add(ranked);
         workers.entry(ranked.at.worker).or_default().add(ranked);
-        if let Some(session) = root.row.terminal {
+        if let Some(session) = seat_of(root.row) {
             tiles.entry((ranked.at.worker, session)).or_default().add(ranked);
         }
         if let Some(folder) = root.row.repo.as_ref().or(root.row.cwd.as_ref()) {
@@ -1290,7 +1262,6 @@ fn notice_of(
     let notice = Notice {
         kind,
         about: Subject::Thread(at),
-        tile: row.terminal.map(|session| TermRef { worker: at.worker, session }),
         title: row.title.clone(),
         text: text(kind, from),
         worked_ms,
@@ -1334,7 +1305,7 @@ fn left(board: &mut Board) {
         let Some((notice, ask)) = notice_of(board, at, (NoticeKind::NeedsYou, None)) else {
             continue;
         };
-        if route(&board.seats, &notice).away {
+        if route(board, &notice).away {
             let how = Pushing { ask: ask.as_ref(), new_only: true, ..Pushing::default() };
             board.phones.send(&board.seats, &notice, how);
         }
@@ -1368,9 +1339,19 @@ struct Reach {
     away: bool,
 }
 
-/// Where `notice` goes among `seats`.
-fn route(seats: &BTreeMap<u64, Sitting>, notice: &Notice) -> Reach {
-    let tile = notice.tile;
+/// Where `notice` goes among the board's seats: nowhere while what it is about is on a screen,
+/// a terminal or the seat its thread was started at.
+fn route(board: &Board, notice: &Notice) -> Reach {
+    let seats = &board.seats;
+    let tile = match notice.about {
+        Subject::Terminal(term) => Some(term),
+        Subject::Thread(at) => board
+            .tables
+            .get(&at.worker)
+            .and_then(|t| t.get(&at.thread))
+            .and_then(seat_of)
+            .map(|session| TermRef { worker: at.worker, session }),
+    };
     let at = |seat: Option<Seat>| {
         seats
             .iter()

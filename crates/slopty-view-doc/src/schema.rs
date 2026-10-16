@@ -1,4 +1,4 @@
-// Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
+// Derived from zeron (MIT, github.com/zeronsh/zeron @ 3b2f780), see THIRD_PARTY_NOTICES.md
 //! Session doc schema over `loro` — Rust port of `packages/session-doc/src/schema.ts`.
 //!
 //! Container layout (MUST stay shape-compatible with the TS edge/tail materializer):
@@ -143,6 +143,7 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             mime_type: Some(mime_type.clone()),
             ..Default::default()
         },
+        // slopty: no agent visuals.
         MessagePart::Text { id, text } => DocPartJson {
             id: id.clone(),
             kind: "text".into(),
@@ -206,10 +207,18 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             resolved: Some(*resolved),
             ..Default::default()
         },
-        MessagePart::Error { id, message } => DocPartJson {
+        // slopty: an error's detail and retry are the live view's, not the doc's.
+        MessagePart::Error { id, message, .. } => DocPartJson {
             id: id.clone(),
             kind: "error".into(),
             message: Some(message.clone()),
+            ..Default::default()
+        },
+        // slopty: dividers.
+        MessagePart::Marker { id, text } => DocPartJson {
+            id: id.clone(),
+            kind: "marker".into(),
+            text: Some(text.clone()),
             ..Default::default()
         },
         MessagePart::Fork {
@@ -230,6 +239,7 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
 fn from_doc_part(p: DocPartJson) -> MessagePart {
     match p.kind.as_str() {
         "image" => image_part(p.id, p.path, p.name, p.mime_type),
+        // slopty: no agent visuals.
         "tool" => match p.call.and_then(|c| serde_json::from_value(c).ok()) {
             Some(call) => MessagePart::Tool {
                 id: p.id,
@@ -268,6 +278,13 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
         "error" => MessagePart::Error {
             id: p.id,
             message: p.message.unwrap_or_default(),
+            detail: None, // slopty: one error grammar.
+            retry: false,
+        },
+        // slopty: dividers.
+        "marker" => MessagePart::Marker {
+            id: p.id,
+            text: p.text.unwrap_or_default(),
         },
         "reasoning" => MessagePart::Reasoning {
             id: p.id,
@@ -310,6 +327,8 @@ fn image_part(
         _ => MessagePart::Error {
             id,
             message: "Generated image unavailable".into(),
+            detail: None, // slopty: one error grammar.
+            retry: false,
         },
     }
 }
@@ -481,6 +500,8 @@ fn salvage_part(part: &serde_json::Value, entry_id: &str, ix: usize) -> Option<M
         return Some(MessagePart::Error {
             id,
             message: message.to_owned(),
+            detail: None, // slopty: one error grammar.
+            retry: false,
         });
     }
     None

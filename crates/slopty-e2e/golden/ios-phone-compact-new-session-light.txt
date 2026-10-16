@@ -1,4 +1,4 @@
 Window (focused)
-Button │ Server: e2e-server, Connected
-Button │ Settings
-Button │ Toggle left sidebar
+Group │ Navigation
+Heading │ New session
+Button │ Close

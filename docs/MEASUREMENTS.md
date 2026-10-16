@@ -18,6 +18,11 @@ side.
 - `shell_round_trip_over_iroh`, `screen_stream_over_iroh` and `screen_start_up_over_iroh` in
   `apps/slopty-worker/tests/e2e.rs` are now `shell_round_trip_over_quic`,
   `screen_stream_over_quic` and `screen_start_up_over_quic`.
+- The terminal view's measurement tests (`dense_screen_cost`, `image_texture_cost`,
+  `terminal_frames_cost`, `lines_below_cost`) live in `slopty-terminal` now: run them with
+  `-p slopty-terminal` where an entry says `-p slopty-ui`. `failed_blocks_cost` is gone with the
+  blocks' heads, rules, washes and hovered facts it timed (2026-10-16, `docs/decisions/ui.md`,
+  "Slopty's own views draw with the shell's helpers"); the entries that ran it stay as history.
 
 ## 2026-09-04 — control-stream round trip, loopback: iroh `fast-apple-datapath` costs 50 ms
 
@@ -4325,7 +4330,8 @@ still while scrolled up) and drawn. Five runs, p50 / p95 / p99 / max in µs:
 cargo test -p slopty-ui --release --lib lines_below_cost -- --ignored --nocapture
 ```
 
-The pill costs 15 µs at p50 and 15–25 µs at p95: a few boxes, an icon from the atlas and two
+(Superseded 2026-10-16, "the lines-below pill as zeron's floating pill": the hidden arm went with
+`set_covered`, and the test lives in `slopty-terminal`.) The pill costs 15 µs at p50 and 15–25 µs at p95: a few boxes, an icon from the atlas and two
 labels. That is 0.2 % of a 120 Hz frame, and a frame with the pill up costs what a frame
 following the output costs. The count is `view_offset`, one read. Holding the view still is
 two reads of the state and no rows, and a scrolled frame with the pill hidden is the cheapest
@@ -4993,37 +4999,6 @@ so every prompt's frame waited about 21 µs for it. The actor now only notes tha
 due and resolves it after the read's frame has gone out. The prompt's frame waits for none of
 the 40 µs, and the viewers hear a `Cwd` event only when the directory, the repository or the
 branch has changed, where before they heard one at every prompt.
-
-## 2026-09-26 — failed blocks in the paint
-
-A frame of the terminal view with command blocks on screen: `terminal::view::tests::failed_blocks_cost`
-(headless GPUI, release, mac-studio) draws a 100 × 40 screen of ten four-row blocks, every
-other one failed, and times a notify and the draw it brings, 2 000 frames with the pointer off
-the window and 2 000 with it over a failed block's output, in alternating blocks of 200 after a
-warm-up round. "Before" is the index as it stood (the red separator, no hover); "after" adds the
-error bar and wash on the failed blocks' rows and the hovered block's facts. Both binaries were
-built from one scratch export, with only this change's files differing, and run four times
-each, alternating, while other sessions built on the machine. Headless GPUI shapes with a no-op
-text system, so the numbers are the element's and the layout's own work, not CoreText's.
-
-| build | pointer away, p50 | pointer over a failed block, p50 |
-| --- | --- | --- |
-| before (four runs) | 135.7–136.3 µs | 135.8–136.5 µs |
-| after (four runs) | 136.2–137.3 µs | 151.1–152.1 µs |
-
-The bars and washes cost about 1 µs a frame: `TermState::failed_runs` reads the marks of the
-rows once, with two indexed prompt lookups, and each failed block adds two quads. The facts a
-hovered block shows cost about 15 µs a frame, and only while the pointer rests on a block: the
-status, the duration and the "…" button are GPUI elements laid out over the grid. The p95 and
-p99 moved with the load on the machine, not with the build (before: 142–509 µs p95; after:
-144–521 µs).
-
-```sh
-# the measurement test; prints one MEASURE line
-cargo test -p slopty-ui --release --lib failed_blocks_cost -- --ignored --nocapture
-```
-
-Logs: `target/logs/terminal-agent-measure-interleaved.log`.
 
 ## 2026-09-26 — what the navigator adds to a frame
 
@@ -16874,4 +16849,171 @@ target directory.
 ```sh
 # in the lane's tree, which `cargo xtask remote` keeps (target/local/<lane>/tree)
 CARGO_TARGET_DIR=../clean cargo build --timings -p slopty-shell --target aarch64-apple-darwin
+```
+
+## 2026-10-16 — Watches wait on the worker's events
+
+The view model polled a status every 3 s, a working tree's diff every 2 s and each listed
+folder every 2 s. Now the worker follows the repositories on screen (`slopty_worker::repowatch`:
+one `FSEvents` stream a repository on macOS) and says `RepoMoved` once a burst; the view model
+asks git only then (`docs/decisions/workspace.md`, "The status, the diffs and the tree wait on
+the worker's events"). Setup: mac-studio, debug build, other lanes building at once (load
+15 to 34). The e2e numbers run the real worker daemon and a client link on loopback, so each
+is change → `RepoMoved` at the client, including the git command's own run time.
+
+| change | `repowatch` follower | e2e, at the client |
+| --- | --- | --- |
+| a new file in a folder nobody listed | 45 ms | p50 45 ms of 10, 36 to 46 ms |
+| an agent's edit in place | 45 ms | 43 ms |
+| `git add` in a terminal | 57 ms | 57 ms |
+| `git commit` in a terminal | 54 ms | 56 ms |
+| a branch switched | 45 ms | 43 ms |
+| the git directory replaced (`rm -rf .git && git init`) | 54 ms | 99 ms |
+| a commit in the new git directory (`git add` of the tree first) | 54 ms | 300 ms |
+| the repository deleted | 47 ms | 93 ms |
+| a write in a repository made again in its place | 46 ms | 141 ms |
+| a write after the link dropped and came back | | 44 ms |
+| an edit, the repository past its watches (looked at every 3 s) | 2.4 s | |
+
+- **Every change is said in about 45 ms**: `FSEvents`' 10 ms latency and its 11 ms delivery,
+  then the 30 ms the burst must stay quiet (`QUIET`). The rows past 90 ms time a git command or
+  a deletion that runs longer itself.
+- **A burst is one word.** 1 000 files written in 98 ms (119 ms in the e2e) were one report,
+  the first 141 ms after the burst began; 1 000 writes to one tracked file in 7 ms were one.
+- **Idle is silent.** No word in 2 s idle after start-up, after each change's burst, or from a
+  build's ignored `target/`, an ignored log or a git object; and a status asked because of a
+  word never brings another (the worker's `git status` takes no optional locks).
+- **No slow safety refresh was kept**: nothing here showed a change the events missed.
+
+```sh
+# in the lane's tree (target/local/<lane>/tree), the test binaries the check built
+target/debug/deps/repowatch-<hash> --test-threads 1 --nocapture | grep MEASURE
+SLOPTY_BINS_FRESH=1 target/debug/deps/e2e-<hash> \
+  tests::a_watched_repository_says_when_it_moves_and_nothing_while_idle --exact --nocapture
+# or: cargo nextest run -p slopty-worker --test repowatch --no-capture
+```
+
+## 2026-10-16 — the engine on ghostty `f7b096bd` (upstream `b3dc3d79`)
+
+Mac Studio M1 Max, `cargo nextest run --release -p slopty-engine --run-ignored only -E
+'test(/_cost$/)'` (what `cargo xtask bench` runs), retired instructions per operation, once on
+`vendor/ghostty` at `e6198455` and once at `f7b096bd`, the same target dir, other lanes building
+throughout. The move brings upstream's OSC 8 in VT output (#14711) merged with the fork's own,
+paste protection that counts a carriage return, and a scrollback use-after-free fix. Rows that
+moved by 1 % or more; the other 33 series (frames, scroll, fetch, search past 1 000 lines, OSC
+writes, Unicode, PNG) moved by less.
+
+| series | before | after |
+| --- | --- | --- |
+| `engine.checkpoint_cost.format` | 51 699 684 | 50 201 332 (−2.9 %) |
+| `engine.checkpoint_cut_cost.format_whole` | 1 317 701 730 | 1 276 517 286 (−3.1 %) |
+| `engine.checkpoint_cut_cost.format_cut_to_fit` | 1 830 093 392 | 1 771 671 141 (−3.2 %) |
+| `engine.checkpoint_cut_cost.format_cut_again` | 523 322 602 | 507 067 169 (−3.1 %) |
+| `engine.memory_cost.plain.format_resident` | 42 943 622 | 41 250 962 (−3.9 %) |
+| `engine.memory_cost.plain.format_compressed` | 46 583 168 | 44 763 504 (−3.9 %) |
+| `engine.memory_cost.shell.format_resident` | 90 687 588 | 92 946 044 (+2.5 %) |
+| `engine.memory_cost.shell.format_compressed` | 115 454 105 | 116 762 918 (+1.1 %) |
+| `engine.search_cost.1000_lines.plain` | 3 906 268 | 4 019 439 (+2.9 %) |
+| `engine.search_cost.1000_lines.regex` | 3 121 399 | 3 171 472 (+1.6 %) |
+| `engine.encode_cost.echo` | 4 168 | 4 258 (+2.2 %) |
+
+- The VT formatter is 3–4 % cheaper on plain output: a page without links now skips reading
+  each cell's hyperlink (upstream's half of the merged formatter). The shell history, which is
+  styled, formats 1–2.5 % dearer; this run did not profile where.
+- The 1 000-line search and the echo's encode moved by 90 to 110 000 instructions; the same
+  searches at 10 000 and 50 000 lines moved by 0.1 % or less, so the small case's change was not
+  looked into further.
+
+```sh
+# a tree with vendor/ghostty at each commit (GHOSTTY_SOURCE_DIR), one target dir
+SLOPTY_BENCH_OUT=target/lanes/bench-after.jsonl cargo nextest run --release -p slopty-engine \
+  -p workspace-hack --run-ignored only -E 'test(/_cost$/)' --no-capture
+```
+
+## 2026-10-16 — a stalled control stream, found by its pings (macos-26 runner, e2e app build)
+
+A worker's control streams stalled while its connection, keep-alives and datagrams went on (the
+worker's e2e seam, `SLOPTY_E2E_STALL_CONTROL`), three times in a row against the real app and
+server (`link_with_datagrams_but_a_stalled_stream`, `docs/decisions/transport.md`, "A link is
+alive while its control stream answers"). Before this change nothing found such a link: its
+datagrams kept the app's count moving and QUIC's idle timeout never fired. Times from the stall,
+then from its lift.
+
+| what | stall 1 | stall 2 | stall 3 | bound |
+| --- | --- | --- | --- | --- |
+| the app shows the worker silent | 3 852 ms | 3 053 ms | 4 037 ms | 4 s after the last pong |
+| the app relinks it | 5 882 ms | 5 405 ms | 5 869 ms | 6 s after the last pong |
+| the server lists it unreachable (first stall) | 6 010 ms | | | 6 s after its last ping, and a look |
+| connected again on a new link after the lift | 89 ms | 103 ms | 95 ms | 2 s |
+
+- **Detection sits inside the six seconds the design sets.** The stall falls somewhere between
+  two pings, so the silence is counted from the pong before it: 4 to 6 s.
+- **A dead link found by its silence alone now takes p50 6 658 ms, p95 6 963 ms** (5 deaths,
+  `a_resume_brings_a_dead_link_back_at_once`, same run), against 6.6 s on 2026-09-30 with the
+  datagram count: the stream's six seconds replace the count's five, plus the redial. A resume's
+  probe still brings it back in p50 361 ms, p95 387 ms (20 deaths).
+
+```sh
+cargo xtask remote --e2e app --place runner \
+  -E 'test(link_with_datagrams_but_a_stalled_stream) | test(a_resume_brings_a_dead_link_back_at_once)'
+```
+
+## 2026-10-16 — the terminal on the shell, what it costs the build
+
+The terminal and the screen viewer now take `slopty-shell` for zeron's helpers, and leave
+gpui-kit (`docs/decisions/ui.md`, "Slopty's own views draw with the shell's helpers"). mac-studio,
+`cargo check -p slopty-terminal` (the dev profile) in the lane's directory, one target dir for
+both sides with every dependency outside the workspace already built. "Before" is `HEAD`
+`4f0fc7b7`; "after" is the same commit with this change's crates. Each round cleans every
+workspace crate under the terminal (`cargo clean -p` for each, both sides' sets) and checks one
+side, alternating, while other sessions built (load average 6 to 8).
+
+| side | crates rebuilt | round 1 | round 2 | round 3 | median |
+| --- | --- | --- | --- | --- | --- |
+| before (17 workspace crates, gpui-kit) | 28 | 54.0 s | 20.6 s | 47.8 s | 47.8 s |
+| after (26 workspace crates, no gpui-kit) | 35 | 46.3 s | 28.9 s | 36.1 s | 36.1 s |
+
+- **No cost to see from scratch.** The shell brings nine workspace crates into the terminal's
+  graph (the shell, its theme, Markdown, syntax, the veil, the three view crates and
+  `gpui_tokio`), and the terminal and the kit drop gpui-kit. The spread between rounds (20 to
+  54 s on one side) is the machine's load, wider than any difference between the sides. The
+  counts include units that flip between the two sides' feature sets (gpui's platform crates),
+  which each round rebuilds too.
+- **An edit to the shell now rechecks the terminal**: 3.9 s for the shell and the terminal,
+  where before the terminal did not depend on the shell at all. The terminal sits after the
+  shell on the critical path of any build that has both, which the app always did.
+
+```sh
+# in two exports of the tree, before/ and after/, one target dir T
+# each round: `cargo clean -p <crate> --target-dir "$T"` for every workspace crate that
+# `cargo tree -p slopty-terminal` lists on either side, then, in one side's export:
+cargo check -p slopty-terminal --target-dir "$T"
+```
+
+## 2026-10-16 — the lines-below pill as zeron's floating pill
+
+The pill at a scrolled terminal's foot is zeron's floating pill now (30 pt, its border, shadow
+and entry), and the arm with the pill hidden is gone with `set_covered`, which nothing calls.
+mac-studio, release, headless GPUI, the 2026-09-25 setup otherwise: one 100 × 40 terminal at
+1000 × 900 pt flooding one line a frame, following the output and scrolled up 20 lines with the
+pill shown, in alternating blocks of 50 frames, ten rounds (500 frames each). Five runs, load
+average 6 to 7, p50 / p95 / p99 / max in µs:
+
+| run | following | scrolled, pill shown |
+| --- | --- | --- |
+| 1 | 41.8 / 58.3 / 126.6 / 221.3 | 30.7 / 35.0 / 37.7 / 73.8 |
+| 2 | 43.2 / 57.8 / 184.5 / 208.9 | 30.8 / 36.8 / 70.2 / 168.7 |
+| 3 | 40.8 / 46.6 / 95.9 / 187.8 | 29.7 / 32.0 / 35.7 / 46.4 |
+| 4 | 41.5 / 54.3 / 139.2 / 213.5 | 30.0 / 34.5 / 38.4 / 93.7 |
+| 5 | 40.9 / 51.8 / 114.0 / 208.4 | 29.8 / 33.3 / 43.9 / 131.6 |
+
+A frame scrolled up with the pill shown costs about 30 µs at p50, a quarter less than one
+following the output: held still, it draws no new row, and the pill's border, shadow and words
+cost less than that row. Both arms cost a quarter or less of 2026-09-25's, which ran on a tree
+three weeks older. Without a hidden arm the pill's own cost is not measured apart from its
+frame's; the whole scrolled frame, pill included, stays under the frame that follows the
+output.
+
+```
+cargo test -p slopty-terminal --release --lib lines_below_cost -- --ignored --nocapture
 ```

@@ -137,38 +137,6 @@ if status is-interactive; and test -n "$TERMINFO"; and test file = (type -t sudo
     end
 end
 
-# `claude` starts the user's own Claude Code wired as an agent Slopty starts: its hooks reach
-# the worker (status, permission prompts), it has Slopty's tools when the worker has a server,
-# and it loads Slopty's mod. `slopty hook wire` says how, as NUL-ended words: the variables to
-# set, an empty word, then the arguments, the user's own among them. Without that answer (an
-# older CLI, an error) the call goes through as typed. A `claude` of the user's own (a
-# function, an alias, an autoloaded file) is left alone, and SLOPTY_NO_CLAUDE_MOD=1 passes
-# every call through untouched.
-if status is-interactive; and set -q SLOPTY_CLI; and test -x "$SLOPTY_CLI"; and not functions -q claude
-    function claude --wraps claude -d "claude, wired to Slopty"
-        if test -n "$SLOPTY_NO_CLAUDE_MOD"; and test "$SLOPTY_NO_CLAUDE_MOD" != 0
-            command claude $argv
-            return
-        end
-        set -l words ($SLOPTY_CLI hook wire -- $argv 2>/dev/null | string split0)
-        set -l split (contains -i -- "" $words)
-        if test -z "$split"
-            command claude $argv
-            return
-        end
-        set -l vars $words[1..$split]
-        set -e vars[-1]
-        set -e words[1..$split]
-        # `env` sets them for this one run in every fish 3: a `set -lx` would end with the loop
-        # that made it, and `set -f` needs fish 3.4. It hands over to claude as typing it does.
-        if set -q vars[1]
-            command env $vars claude $words
-        else
-            command claude $words
-        end
-    end
-end
-
 # `codex` runs without what names this terminal (SLOPTY_SESSION and its token). Codex's app-server daemon, which the first `codex` starts, keeps its starter's
 # environment for every thread's commands, so a daemon started here would have every Codex
 # thread, whoever started it, speak as this terminal. A `codex` of the user's own (a

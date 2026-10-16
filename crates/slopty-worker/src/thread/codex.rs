@@ -57,16 +57,10 @@
 //! withdrawn, its turn under way stopped, exited and resumable. So does each thread an earlier
 //! worker left at work when no Codex answers as this one starts; one that answers has them read
 //! again instead. A thread left exited still takes a message, which takes it up again.
-//! A request with nothing to answer in the GUI (a secret, a permissions grant, a page to open) is
-//! handed to Codex's own TUI ([`Codex::release`]): `codex resume <thread>` in one of the worker's
-//! terminals, in the thread's folder, which joins the running daemon as one more client. The
-//! thread names that terminal while it runs, so a client shows it. With no daemon running it is
-//! refused: only a start brings the daemon up.
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::{SinkExt as _, StreamExt as _};
@@ -77,7 +71,7 @@ use slopty_agent::codex::protocol::{self as p, Method, RequestId, ServerNotifica
 use slopty_agent::codex::rpc::{self, Incoming};
 use slopty_agent::codex::shared::{Send, Setting, Settings, Shared};
 use slopty_agent::queue::Queue;
-use slopty_core::{SessionId, WallMs};
+use slopty_core::WallMs;
 use slopty_proto::thread::wire::{Outcome, PastSession, Start};
 use slopty_proto::thread::{
     Action, AgentId, Answerer, AskId, Delivery, Drive, Fork, IntentId, ItemBody, Link, Pending,
@@ -90,7 +84,6 @@ use tokio::time::Instant;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message;
 
-use super::terminals::Terminals;
 use super::{Host, Seated};
 
 /// Why a message to a Codex thread did not go: the person's Codex holds no such thread.
@@ -167,9 +160,6 @@ pub fn codex_home() -> Option<PathBuf> {
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")))
 }
 
-/// Why a request is not handed to Codex's own TUI while no daemon runs.
-pub const NO_TUI: &str = "Codex isn't running on this machine, so its own terminal can't join";
-
 /// What a client asks of a Codex thread.
 #[derive(Debug)]
 enum Ask {
@@ -216,11 +206,6 @@ enum Ask {
         seated: Option<Box<Seated>>,
         reply: oneshot::Sender<Outcome>,
     },
-    Release {
-        thread: ThreadId,
-        id: IntentId,
-        reply: oneshot::Sender<Outcome>,
-    },
     Fork {
         thread: ThreadId,
         id: IntentId,
@@ -255,13 +240,6 @@ enum Ask {
         thread: ThreadId,
         setting: Setting,
     },
-    /// A Codex TUI the worker did not open runs on the thread in terminal `session`, or ran
-    /// there and is gone.
-    Runs {
-        thread: ThreadId,
-        session: SessionId,
-        running: bool,
-    },
 }
 
 impl Ask {
@@ -275,46 +253,28 @@ impl Ask {
             | Self::Promote { thread, .. }
             | Self::Move { thread, .. }
             | Self::Interrupt { thread }
-            | Self::Release { thread, .. }
             | Self::Fork { thread, .. }
             | Self::Review { thread, .. }
             | Self::Set { thread, .. }
             | Self::Wake { thread } => Some(*thread),
-            // A thread let go is not taken up again to be closed, nor to be told where its TUI
-            // runs: it is named as it is followed again.
-            Self::Start { .. } | Self::Sessions { .. } | Self::Close { .. } | Self::Runs { .. } => {
-                None
-            }
+            // A thread let go is not taken up again to be closed.
+            Self::Start { .. } | Self::Sessions { .. } | Self::Close { .. } => None,
         }
     }
 }
 
-/// How the person's own `codex` is launched for a start or a request: the `PATH` it is looked
-/// for on alone, when given, and the worker's terminals its TUI opens in, when there are any.
-#[derive(Clone)]
+/// How the person's own `codex` is launched to bring its daemon up: the `PATH` it is looked
+/// for on alone, when given.
+#[derive(Clone, Debug)]
 pub struct Launch {
-    terminals: Option<Arc<dyn Terminals>>,
     path: Option<OsString>,
-}
-
-impl std::fmt::Debug for Launch {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Launch").field("path", &self.path).finish_non_exhaustive()
-    }
 }
 
 impl Launch {
     /// `codex` found on `path` alone when it is given, else as the person's terminal finds it.
     #[must_use]
     pub const fn new(path: Option<OsString>) -> Self {
-        Self { terminals: None, path }
-    }
-
-    /// Codex's TUI opened in `terminals`.
-    #[must_use]
-    pub fn with_terminals(mut self, terminals: Arc<dyn Terminals>) -> Self {
-        self.terminals = Some(terminals);
-        self
+        Self { path }
     }
 
     /// Bring the person's daemon up with Codex's own `codex app-server daemon start`: the
@@ -346,27 +306,10 @@ impl Launch {
             Daemon::Failed { message } => Err(daemon_failed(&message)),
         }
     }
-
-    /// Open the person's own `codex resume <native>` in `cwd`: its terminal, or why not.
-    async fn open(&self, native: &str, cwd: String) -> Result<SessionId, String> {
-        let terminals =
-            self.terminals.as_ref().ok_or_else(|| "there are no terminals here".to_owned())?;
-        let codex = crate::facts::installed("codex", self.path.clone())
-            .await
-            .ok_or_else(|| NO_CODEX.to_owned())?;
-        let program = codex.program.to_string_lossy().into_owned();
-        let command = slopty_agent::codex::shared::tui(program, native);
-        let env = vec![("PATH".to_owned(), codex.path.to_string_lossy().into_owned())];
-        terminals.open(command, cwd, env).await
-    }
 }
 
-/// What something launched of Codex's says back to the loop that launched it.
+/// What the daemon's start says back to the loop that launched it.
 enum Said {
-    /// Its TUI opened on `thread` for intent `id`, or why not.
-    Opened { thread: ThreadId, id: IntentId, opened: Result<SessionId, String> },
-    /// The TUI's program ended.
-    Closed { thread: ThreadId, session: SessionId },
     /// The daemon's start came to its socket, or to why not.
     Daemon(Result<PathBuf, String>),
 }
@@ -493,26 +436,6 @@ impl Codex {
     /// Someone follows `thread`: Codex takes it up again if the worker let it go.
     pub fn wake(&self, thread: ThreadId) {
         let _gone = self.0.send(Ask::Wake { thread });
-    }
-
-    /// Codex's TUI on thread `native`, one the person or an agent started rather than the
-    /// worker, runs in terminal `session` (`running`), or has gone from it: the thread names
-    /// that terminal while it runs, as it names one the worker opened. So a client shows it, a
-    /// request handed to the TUI goes to it, and the terminal's agent is held to what its
-    /// terminal allows by the thread's settings.
-    pub fn tui_runs(&self, native: &str, session: SessionId, running: bool) {
-        let thread = slopty_agent::codex::shared::thread_of(native);
-        let _gone = self.0.send(Ask::Runs { thread, session, running });
-    }
-
-    /// Hand `thread`'s requests to Codex's own TUI for intent `id`, once: done when it runs on
-    /// the thread in one of the worker's terminals, opened now unless it already was.
-    pub async fn release(&self, thread: ThreadId, id: IntentId) -> Outcome {
-        let (reply, outcome) = oneshot::channel();
-        if self.0.send(Ask::Release { thread, id, reply }).is_err() {
-            return refused("Codex threads are not served here".to_owned());
-        }
-        outcome.await.unwrap_or_else(|_| refused("the Codex threads stopped".to_owned()))
     }
 
     /// Start the thread of intent `id` as `start` says, once: its first turn is `start`'s
@@ -714,8 +637,8 @@ enum Bringing {
 /// Follow every thread of the daemon at `socket` into `host`, and act on the asks of its
 /// [`Codex`].
 ///
-/// A start while no daemon runs brings it up, and Codex's own TUI is opened on a thread,
-/// through `launch`, where it is given; without it a start then is refused.
+/// A start while no daemon runs brings it up through `launch`, where it is given; without it a
+/// start then is refused.
 pub fn spawn(
     host: Host,
     socket: PathBuf,
@@ -725,7 +648,7 @@ pub fn spawn(
     tokio::spawn(async move {
         let mut socket = socket;
         let (said, mut hear) = mpsc::unbounded_channel();
-        let mut open = Opened { launch, said, running: HashMap::new(), waiting: HashMap::new() };
+        let open = Opened { launch, said };
         // The starts waiting on the daemon's start.
         let mut held: Vec<Ask> = Vec::new();
         // The messages written while no daemon answers, waiting for one ([`HOLD_FOR`]).
@@ -742,7 +665,7 @@ pub fn spawn(
             match joined {
                 Ok(ws) => {
                     bringing = Bringing::Idle;
-                    let mut session = Session::new(host.clone(), ws, open, rest);
+                    let mut session = Session::new(host.clone(), ws, rest);
                     session.held = std::mem::take(&mut held);
                     expire(&host, &mut parked, Instant::now());
                     session.held.extend(std::mem::take(&mut parked).into_iter().map(|p| p.ask));
@@ -750,7 +673,6 @@ pub fn spawn(
                     session.exited();
                     let at = Instant::now();
                     parked.extend(session.abandon(WENT).into_iter().map(|ask| Parked { at, ask }));
-                    open = session.into_tuis();
                     match ended {
                         Ended::Asks => return,
                         Ended::Link(why) => {
@@ -766,9 +688,9 @@ pub fn spawn(
                 Err(why) => tracing::trace!(socket = %socket.display(), "no Codex: {why}"),
             }
             // What is asked while Codex is not there is not kept: its intent was answered. A
-            // start waits on the daemon's start, and a request handed to the TUI is refused. A
-            // message waits for Codex to come back, for a while ([`HOLD_FOR`]), and an answer
-            // goes nowhere, as its request ended with Codex.
+            // start waits on the daemon's start. A message waits for Codex to come back, for a
+            // while ([`HOLD_FOR`]), and an answer goes nowhere, as its request ended
+            // with Codex.
             loop {
                 tokio::select! {
                     () = tokio::time::sleep(RETRY) => {
@@ -801,22 +723,11 @@ pub fn spawn(
                                 let _gone = said.send(Said::Daemon(launch.daemon_start().await));
                             });
                         }
-                        Some(Ask::Release { thread, id, reply }) => {
-                            let _gone = reply.send(open.refuse(&host, thread, id, NO_TUI));
-                        }
                         Some(Ask::Fork { thread, id, reply, .. }) => {
                             let _gone = reply.send(once(&host, thread, id, refused(NOT_RUNNING.to_owned())));
                         }
                         Some(Ask::Sessions { reply, .. }) => {
                             let _gone = reply.send(Err(NOT_RUNNING.to_owned()));
-                        }
-                        // Named once Codex is followed again.
-                        Some(Ask::Runs { thread, session, running }) => {
-                            if running {
-                                open.running.insert(thread, session);
-                            } else if open.running.get(&thread) == Some(&session) {
-                                open.running.remove(&thread);
-                            }
                         }
                         Some(_) => {}
                         None => return,
@@ -837,21 +748,6 @@ pub fn spawn(
                             bringing = Bringing::Idle;
                             refuse_held(&host, &mut held, &why);
                         }
-                        Said::Closed { thread, session } => {
-                            if open.running.get(&thread) == Some(&session) {
-                                open.running.remove(&thread);
-                            }
-                        }
-                        // Opened as Codex went: the TUI runs all the same, and the thread names
-                        // it once Codex is followed again.
-                        Said::Opened { thread, id, opened: Ok(session) } => {
-                            open.running.insert(thread, session);
-                            let _done = open.settle(&host, thread, id, Outcome::Done);
-                        }
-                        Said::Opened { thread, id, opened: Err(why) } => {
-                            let reason = format!("Codex's own terminal didn't open: {why}");
-                            let _refused = open.refuse(&host, thread, id, &reason);
-                        }
                     },
                 }
             }
@@ -859,32 +755,10 @@ pub fn spawn(
     })
 }
 
-/// The TUIs opened on threads, and the opens under way.
+/// How Codex's daemon is brought up, and where its start is said.
 struct Opened {
     launch: Option<Launch>,
-    /// Where an open, a TUI's end or the daemon's start is said.
     said: mpsc::UnboundedSender<Said>,
-    /// The terminal Codex's TUI runs in on each thread.
-    running: HashMap<ThreadId, SessionId>,
-    /// Who waits on each open under way.
-    waiting: HashMap<IntentId, Vec<oneshot::Sender<Outcome>>>,
-}
-
-impl Opened {
-    /// Intent `id` for `thread` refused with `reason`, once; told to whoever waits on it.
-    fn refuse(&mut self, host: &Host, thread: ThreadId, id: IntentId, reason: &str) -> Outcome {
-        self.settle(host, thread, id, refused(reason.to_owned()))
-    }
-
-    /// Intent `id` for `thread` came to `outcome`, noted once and told to whoever waits on it;
-    /// the outcome it first had when it was noted before.
-    fn settle(&mut self, host: &Host, thread: ThreadId, id: IntentId, outcome: Outcome) -> Outcome {
-        let outcome = host.intent(thread, id, |_| (outcome.clone(), Vec::new())).unwrap_or(outcome);
-        for reply in self.waiting.remove(&id).unwrap_or_default() {
-            let _gone = reply.send(outcome.clone());
-        }
-        outcome
-    }
 }
 
 type Socket = WebSocketStream<UnixStream>;
@@ -984,14 +858,14 @@ struct Followed {
     shared: Shared,
     /// When Codex or a client last said anything of it.
     heard: Instant,
+    /// The thread stamped alive while this connection follows it.
+    lease: super::host::Lease,
 }
 
 /// One connection to the daemon.
 struct Session {
     host: Host,
     ws: Socket,
-    /// Codex's own TUIs on the threads.
-    tuis: Opened,
     next: i64,
     waiting: HashMap<i64, Waiting>,
     /// Followed threads, by Codex's id.
@@ -1046,11 +920,10 @@ fn tools(host: &Host, seated: &Seated) -> std::collections::BTreeMap<String, Val
 }
 
 impl Session {
-    fn new(host: Host, ws: Socket, tuis: Opened, rest: Duration) -> Self {
+    fn new(host: Host, ws: Socket, rest: Duration) -> Self {
         Self {
             host,
             ws,
-            tuis,
             next: 0,
             waiting: HashMap::new(),
             threads: HashMap::new(),
@@ -1133,11 +1006,6 @@ impl Session {
         messages
     }
 
-    /// What it held of Codex's TUIs, for the next connection.
-    fn into_tuis(self) -> Opened {
-        self.tuis
-    }
-
     async fn run(
         &mut self,
         asks: &mut mpsc::UnboundedReceiver<Ask>,
@@ -1176,10 +1044,8 @@ impl Session {
                     Some(ask) => self.ask(ask).await.err(),
                     None => return Ended::Asks,
                 },
-                Some(tui) = hear.recv() => {
-                    self.tui(tui);
-                    None
-                }
+                // A daemon's start that answers once the daemon was joined anyway is done with.
+                Some(Said::Daemon(_)) = hear.recv() => None,
             };
             if let Some(why) = ended {
                 return Ended::Link(why);
@@ -1191,6 +1057,9 @@ impl Session {
     /// it: Codex is not there to say more, so a turn under way is stopped and what it asked
     /// withdrawn ([`cut_short`]).
     fn exited(&self) {
+        for followed in self.threads.values() {
+            followed.lease.stop();
+        }
         let unloaded =
             self.unloaded.iter().map(|native| slopty_agent::codex::shared::thread_of(native));
         for thread in self.threads.values().map(|f| f.id).chain(unloaded) {
@@ -1221,9 +1090,7 @@ impl Session {
             .iter()
             .filter(|(_, f)| now.saturating_duration_since(f.heard) >= self.rest)
             .filter(|(_, f)| f.shared.rests())
-            .filter(|(_, f)| {
-                self.host.followers(f.id) == 0 && !self.tuis.running.contains_key(&f.id)
-            })
+            .filter(|(_, f)| self.host.followers(f.id) == 0)
             .map(|(native, _)| native.clone())
             .collect();
         for native in resting {
@@ -1279,13 +1146,10 @@ impl Session {
 
     /// `ask`, held for a thread Codex could not take up again, answered with `reason` where
     /// someone waits on it; what was answered already is only noted.
-    fn unanswered(&mut self, ask: Ask, reason: &str) {
+    fn unanswered(&self, ask: Ask, reason: &str) {
         match ask {
             Ask::Fork { thread, id, reply, .. } => {
                 let _gone = reply.send(once(&self.host, thread, id, refused(reason.to_owned())));
-            }
-            Ask::Release { thread, id, reply } => {
-                let _gone = reply.send(self.tuis.refuse(&self.host, thread, id, reason));
             }
             ask @ (Ask::Send { .. } | Ask::Edit { .. }) => {
                 message_not_sent(&self.host, ask, reason);
@@ -1705,6 +1569,7 @@ impl Session {
     /// way: the thread is taken up again for it at once.
     async fn unload(&mut self, native: String) -> Result<(), String> {
         let Some(mut followed) = self.threads.remove(&native) else { return Ok(()) };
+        followed.lease.stop();
         cut_short(&self.host, followed.id);
         let queued = followed.shared.queue().take_all();
         if queued.is_empty() {
@@ -1907,8 +1772,7 @@ impl Session {
         if under_way {
             self.partial.insert(thread.id.clone());
         }
-        let terminal = self.tuis.running.get(&slopty_agent::codex::shared::thread_of(&thread.id));
-        let (shared, actions) = Shared::new(thread, terminal.copied());
+        let (shared, actions) = Shared::new(thread);
         let id = shared.meta().id;
         let begun = if self.host.holds(id) {
             self.host.reset(id, ThreadState::new(shared.meta().clone())).map(|_| ())
@@ -1924,7 +1788,9 @@ impl Session {
         self.unloaded.remove(&thread.id);
         self.adopt(id, &actions);
         self.host.apply(id, actions);
-        self.threads.insert(thread.id.clone(), Followed { id, shared, heard: Instant::now() });
+        let lease = self.host.lease(id);
+        let followed = Followed { id, shared, heard: Instant::now(), lease };
+        self.threads.insert(thread.id.clone(), followed);
         let mut late = Vec::new();
         if let Some(followed) = self.threads.get_mut(&thread.id) {
             if let Some(limits) = &self.limits {
@@ -2113,15 +1979,6 @@ impl Session {
         }
         match ask {
             Ask::Wake { .. } => Ok(()),
-            Ask::Runs { thread, session, running: true } => {
-                self.tuis.running.insert(thread, session);
-                self.name_terminal(thread, Some(session));
-                Ok(())
-            }
-            Ask::Runs { thread, session, running: false } => {
-                self.tui(Said::Closed { thread, session });
-                Ok(())
-            }
             Ask::Close { thread, done } => {
                 let result = self.close(thread).await;
                 let _gone = done.send(());
@@ -2301,10 +2158,6 @@ impl Session {
                     }
                 }
             }
-            Ask::Release { thread, id, reply } => {
-                self.release(thread, id, reply);
-                Ok(())
-            }
             Ask::Interrupt { thread } => {
                 let Some((params, held)) = self.followed(thread).and_then(|f| f.shared.stop())
                 else {
@@ -2330,79 +2183,6 @@ impl Session {
                     }
                 }
             }
-        }
-    }
-
-    /// Hand `thread`'s requests to Codex's own TUI for intent `id`: done at once when it runs
-    /// there already, else once it is opened, off this connection's loop.
-    fn release(&mut self, thread: ThreadId, id: IntentId, reply: oneshot::Sender<Outcome>) {
-        if let Some(first) = self.host.outcome(thread, id) {
-            let _gone = reply.send(first);
-            return;
-        }
-        if let Some(waiting) = self.tuis.waiting.get_mut(&id) {
-            waiting.push(reply);
-            return;
-        }
-        self.tuis.waiting.insert(id, vec![reply]);
-        if self.tuis.running.contains_key(&thread) {
-            self.tuis.settle(&self.host, thread, id, Outcome::Done);
-            return;
-        }
-        let (Some(launch), Some(followed)) = (self.tuis.launch.clone(), self.followed(thread))
-        else {
-            let reason = "Codex's own terminal can't be opened here for this thread";
-            self.tuis.refuse(&self.host, thread, id, reason);
-            return;
-        };
-        let (native, cwd) =
-            (followed.shared.meta().native.clone(), followed.shared.meta().cwd.clone());
-        let said = self.tuis.said.clone();
-        tokio::spawn(async move {
-            let opened = launch.open(&native, cwd).await;
-            if let (Ok(session), Some(terminals)) = (&opened, &launch.terminals) {
-                let (session, ended, said) = (*session, terminals.exited(*session), said.clone());
-                tokio::spawn(async move {
-                    ended.await;
-                    let _gone = said.send(Said::Closed { thread, session });
-                });
-            }
-            let _gone = said.send(Said::Opened { thread, id, opened });
-        });
-    }
-
-    /// What a TUI opened on a thread says. A daemon's start that answers once the daemon was
-    /// joined anyway is done with.
-    fn tui(&mut self, said: Said) {
-        let (thread, terminal) = match said {
-            Said::Daemon(_) => return,
-            Said::Opened { thread, id, opened: Ok(session) } => {
-                tracing::info!(%thread, %session, "Codex's own terminal opened");
-                self.tuis.running.insert(thread, session);
-                self.tuis.settle(&self.host, thread, id, Outcome::Done);
-                (thread, Some(session))
-            }
-            Said::Opened { thread, id, opened: Err(why) } => {
-                let reason = format!("Codex's own terminal didn't open: {why}");
-                self.tuis.refuse(&self.host, thread, id, &reason);
-                return;
-            }
-            Said::Closed { thread, session } => {
-                if self.tuis.running.get(&thread) != Some(&session) {
-                    return;
-                }
-                self.tuis.running.remove(&thread);
-                (thread, None)
-            }
-        };
-        self.name_terminal(thread, terminal);
-    }
-
-    /// `thread`, when followed, names `terminal` as the one its TUI runs in, or none.
-    fn name_terminal(&mut self, thread: ThreadId, terminal: Option<SessionId>) {
-        let named = self.followed(thread).map(|f| f.shared.set_terminal(terminal));
-        if let Some(actions) = named.filter(|a| !a.is_empty()) {
-            self.host.apply(thread, actions);
         }
     }
 

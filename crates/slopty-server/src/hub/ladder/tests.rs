@@ -1,7 +1,5 @@
 //! The ladder as the hub ranks it from the rows workers publish, and where its notices go.
 
-use std::collections::BTreeMap;
-
 use slopty_core::SessionId;
 use slopty_proto::server::ToServer;
 use slopty_proto::thread::attention::Counts;
@@ -14,7 +12,9 @@ use slopty_proto::thread::{
 use super::super::tests::{registration, summary};
 use super::*;
 
-pub(in crate::hub) fn row(phase: Phase, since: u64, terminal: Option<SessionId>) -> ThreadRow {
+/// A thread's row, seated at `seat` when one is given.
+pub(in crate::hub) fn row(phase: Phase, since: u64, seat: Option<SessionId>) -> ThreadRow {
+    let facts = seat.map(|s| (SEAT_FACT.to_owned(), s.to_string())).into_iter().collect();
     ThreadRow {
         id: ThreadId::new(),
         agent: AgentId::named(AgentId::CLAUDE_CODE),
@@ -30,11 +30,10 @@ pub(in crate::hub) fn row(phase: Phase, since: u64, terminal: Option<SessionId>)
         last_line: Some("Done.".to_owned()),
         doing: None,
         changed: Changed::default(),
-        terminal,
         parent: None,
-        drive: Drive::named(Drive::OBSERVED),
+        drive: Drive::named(Drive::DRIVEN),
         caps: Vec::new(),
-        facts: BTreeMap::new(),
+        facts,
         to_review: false,
         pull: None,
         meters: Meters::default(),
@@ -47,6 +46,7 @@ pub(in crate::hub) fn row(phase: Phase, since: u64, terminal: Option<SessionId>)
         cwd: None,
         repo: None,
         repo_id: None,
+        lease_ms: None,
     }
 }
 
@@ -235,7 +235,7 @@ async fn notices_go_where_the_person_is_and_a_subagent_speaks_through_its_parent
     let notice = &heard[0];
     let parent_at = Subject::Thread(ThreadAt { worker, thread: parent.id });
     assert_eq!((notice.kind, &notice.about), (NoticeKind::NeedsYou, &parent_at));
-    assert_eq!((notice.tile, notice.text.as_str()), (Some(tile), "Run cargo test?"));
+    assert_eq!(notice.text, "Run cargo test?");
     let via = notice.via.as_ref().map(|v| v.thread);
     assert_eq!(via, Some(child.id), "it says which subagent asks");
     assert!(phone.notices().is_empty(), "no push to the phone while at the desk");
@@ -394,50 +394,6 @@ impl crate::push::Pusher for Answering {
         self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Box::pin(std::future::ready(self.0.clone()))
     }
-}
-
-/// The workers hear whether a pocketed phone can answer a yes or no: once pushing is set up and
-/// a phone is known, and again only when that moves. A worker that registers while one can
-/// hears so at once; one that registers while none can hears nothing.
-#[tokio::test]
-async fn the_workers_hear_whether_a_pocketed_phone_can_answer() {
-    use slopty_proto::push::PushDevice;
-
-    let hub = Hub::new("server".to_owned(), Vec::new());
-    let (tx, _first_rx) = mpsc::channel(8);
-    let first = hub
-        .register(registration(WorkerId::new(), Vec::new()), [100, 64, 0, 7].into(), tx)
-        .unwrap();
-    let mut first = first.pushes();
-    // What a link has yet to send of the word: its latest, once it moved.
-    let told = |rx: &mut watch::Receiver<bool>| {
-        rx.has_changed().unwrap_or(false).then(|| *rx.borrow_and_update())
-    };
-    assert_eq!(told(&mut first), None, "nothing can be pushed yet");
-    let (client, phone) = (ClientId::new(), Client::sit(&hub, "phone"));
-    let device = PushDevice {
-        token: "0f".repeat(32),
-        key: [7; 32],
-        sandbox: true,
-        topic: "dev.aislopware.slopty".to_owned(),
-        quiet_ms: 60_000,
-    };
-    hub.push_device(phone.seated.link(), client, Some(device.clone()));
-    assert_eq!(told(&mut first), None, "a phone, but pushing is off");
-    let (out, _pushed) = mpsc::channel(8);
-    hub.push_to(Some(out));
-    assert_eq!(told(&mut first), Some(true), "set up, with a phone");
-    hub.push_device(phone.seated.link(), client, Some(device.clone()));
-    assert_eq!(told(&mut first), None, "said once");
-
-    let (tx, _second_rx) = mpsc::channel(8);
-    let second = hub
-        .register(registration(WorkerId::new(), Vec::new()), [100, 64, 0, 8].into(), tx)
-        .unwrap();
-    let mut second = second.pushes();
-    assert!(*second.borrow_and_update(), "at once");
-    hub.forget_device(client, &device.token);
-    assert_eq!((told(&mut first), told(&mut second)), (Some(false), Some(false)), "no phone now");
 }
 
 /// A phone hears whether the server can push to it: nothing before it says it is a phone, no

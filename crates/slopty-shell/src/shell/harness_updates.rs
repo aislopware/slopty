@@ -91,7 +91,8 @@ fn visible_rows(
         .collect()
 }
 
-fn agent_name(harness: HarnessId) -> &'static str {
+// slopty: the sidebar's hover card names the agent too.
+pub(super) fn agent_name(harness: HarnessId) -> &'static str {
     match harness {
         HarnessId::CLAUDE_CODE => "Claude Code",
         HarnessId::CODEX => "Codex",

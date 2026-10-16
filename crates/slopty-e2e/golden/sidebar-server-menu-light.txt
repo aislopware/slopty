@@ -1,0 +1,8 @@
+Window
+Button │ Server: e2e-server, Connected (focused)
+Button │ Settings
+Button │ Toggle left sidebar
+Button │ Sidebar view options
+MenuItem │ Devices
+MenuItem │ Connect a phone
+MenuItem │ Change server

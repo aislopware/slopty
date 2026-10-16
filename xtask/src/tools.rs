@@ -42,7 +42,7 @@ pub const SERVER_CRATES: [&str; 8] = [
 
 /// The crates that build for Linux and must go on doing so: [`SERVER_CRATES`], the worker with
 /// every crate under it, and the CLI with the client core, for `slopty worker install` and
-/// `slopty hook` on a Linux worker (`docs/decisions/platform.md`, "Linux seams").
+/// Slopty's tools (`slopty mcp`) on a Linux worker (`docs/decisions/platform.md`, "Linux seams").
 pub const LINUX_CRATES: [&str; 29] = [
     "slopty-core",
     "slopty-crash",

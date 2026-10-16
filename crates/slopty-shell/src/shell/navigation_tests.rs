@@ -33,6 +33,8 @@ impl Render for NavigationHost {
                 .on_action(cx.listener(|shell, _: &PrevSession, window, cx| {
                     shell.cycle_navigation(false, window, cx);
                 }))
+                // slopty: the window's own keys (`chrome_keys`).
+                .map(|el| shell.chrome_actions(el, cx))
                 .child(div().h(px(40.)).child(shell.render_right_tab_strip(cx)))
                 .child(
                     div()
@@ -526,3 +528,104 @@ fn ctrl_c_in_a_terminal_is_not_taken_by_a_transcript_selection(cx: &mut TestAppC
 }
 
 // slopty: no pull-request pages.
+// slopty: ⌘⇧T opens the tab closed last again, in front, with the pane open.
+#[gpui::test]
+fn a_closed_tab_comes_back_with_its_key(cx: &mut TestAppContext) {
+    let (shell, cx) = setup(cx);
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.add_diff_surface(window, cx);
+            shell.close_right_surface(RightSurface::Diff(1), window, cx);
+            assert!(!shell.right_tabs[&shell.panel_key(cx)].contains(&RightSurface::Diff(1)));
+            // A closed terminal's shell is gone with it: nothing to reopen.
+            shell.remember_closed_tab("parent", RightSurface::Terminal(9), cx);
+            assert_eq!(shell.closed_tabs.len(), 1);
+        })
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    cx.simulate_keystrokes(&platform_combo(ShortcutId::ReopenClosedTab.default_combo()));
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    cx.update(|_, cx| {
+        let shell = shell.read(cx);
+        let key = shell.panel_key(cx);
+        assert!(shell.right_tabs[&key].contains(&RightSurface::Diff(2)), "the diff is back");
+        assert_eq!(shell.resolved_right_active(cx), RightSurface::Diff(2), "in front");
+        assert!(shell.right_pane_open(cx));
+        assert!(shell.closed_tabs.is_empty());
+    });
+    // Nothing more closed here: the key does nothing.
+    cx.simulate_keystrokes(&platform_combo(ShortcutId::ReopenClosedTab.default_combo()));
+    cx.update(|_, cx| {
+        let shell = shell.read(cx);
+        assert_eq!(shell.right_tabs[&shell.panel_key(cx)].len(), 3);
+    });
+}
+
+// slopty: ⌘T opens the right pane's new tab menu; ⌘[ and ⌘] walk the history.
+#[gpui::test]
+fn new_tab_and_history_keys(cx: &mut TestAppContext) {
+    let (shell, cx) = setup(cx);
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| window.focus(&shell.composer.focus_handle(cx), cx))
+    });
+    cx.simulate_keystrokes(&platform_combo("mod-t"));
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    shell.read_with(cx, |shell, cx| {
+        assert!(shell.right_pane_open(cx));
+        assert!(shell.right_plus.get().is_some(), "the new tab menu is open");
+    });
+    shell.update(cx, |shell, cx| shell.close_right_plus(cx));
+    for chat in ["parent", "other"] {
+        shell.update(cx, |shell, cx| shell.open_chat(chat.into(), cx));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+    }
+    cx.simulate_keystrokes(&platform_combo("mod-["));
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    shell.read_with(cx, |shell, cx| {
+        assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("parent"), "back");
+    });
+    cx.simulate_keystrokes(&platform_combo("mod-]"));
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    shell.read_with(cx, |shell, cx| {
+        assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("other"), "forward");
+    });
+}
+
+// slopty: an archive offers Undo; ⌘Z takes it while its toast is up, and only once.
+#[gpui::test]
+fn an_archive_is_undone_from_its_toast_or_cmd_z(cx: &mut TestAppContext) {
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let _guard = runtime.enter();
+    let (out, mut requests) = tokio::sync::mpsc::channel(16);
+    let (_replies, inbound) = tokio::sync::mpsc::channel::<String>(16);
+    let engine = crate::state::EngineHandle::from_test_client(slopty_view_rpc::RpcClient::new(
+        out, inbound,
+    ));
+    let (shell, cx) = setup(cx);
+    cx.update(|window, cx| {
+        window.activate_window();
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| state.set_test_engine(engine));
+            shell.set_chat_archived("parent".into(), true, cx);
+        })
+    });
+    cx.run_until_parked();
+    cx.update(|_, cx| {
+        assert_eq!(crate::toast::messages(cx), ["Archived \u{201c}parent\u{201d}"]);
+    });
+    cx.simulate_keystrokes(&platform_combo("mod-z"));
+    cx.run_until_parked();
+    let sent: Vec<serde_json::Value> = std::iter::from_fn(|| requests.try_recv().ok())
+        .map(|raw| serde_json::from_str(&raw).unwrap())
+        .collect();
+    let archived: Vec<bool> =
+        sent.iter().filter_map(|request| request["params"]["archived"].as_bool()).collect();
+    assert_eq!(archived, [true, false], "archived, then brought back");
+    cx.update(|_, cx| assert!(crate::toast::messages(cx).is_empty(), "the toast went"));
+    shell.read_with(cx, |shell, _| assert!(shell.last_archive.is_none()));
+    // Nothing left to undo: ⌘Z goes on to whatever else takes it.
+    cx.simulate_keystrokes(&platform_combo("mod-z"));
+    cx.run_until_parked();
+    assert!(requests.try_recv().is_err());
+}

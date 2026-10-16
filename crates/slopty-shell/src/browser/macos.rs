@@ -2,6 +2,7 @@
 //! AppKit boundary for the browser. Wry owns the native child and its UI
 //! delegate; our navigation delegate supplies browser policy and state. All
 //! callbacks enqueue events, never re-enter GPUI. No page-to-engine IPC.
+// slopty: one page-to-shell message only, the page's own favicon (`FAVICON_SCRIPT`).
 use super::model::{PageState, Presentation, allowed_navigation};
 use gpui::{App, Window}; // slopty: no `Bounds`/`Pixels`; gpui-fast places the page
 use objc2::rc::Retained;
@@ -222,7 +223,9 @@ pub(super) enum NativeEvent {
     Finished,
     NewTab(String),
     Key(gpui::Keystroke),
-    Favicon { page: String, url: String },
+    // slopty: the icon itself, read inside the page as a PNG `data:` URL (no HTTP client of
+    // the shell's own), for the page at `page`.
+    Favicon { page: String, data: String },
 }
 
 struct ObserverState {
@@ -349,6 +352,8 @@ impl NativePage {
     ) -> Result<Self, String> {
         let mtm = MainThreadMarker::new().ok_or("Browser must be created on the main thread")?;
         let new_tab = tx.clone();
+        // slopty: the page's favicon, posted by `FAVICON_SCRIPT`; anything else is dropped.
+        let favicon = tx.clone();
         let web = wry::WebViewBuilder::new()
             .with_webview_configuration(data.configuration(mtm))
             .with_visible(false)
@@ -360,6 +365,11 @@ impl NativePage {
                 wry::NewWindowResponse::Deny
             })
             .with_download_started_handler(|_, _| false)
+            .with_ipc_handler(move |request| {
+                if let Some((page, data)) = super::favicon_message(request.body()) {
+                    let _ = favicon.try_send(NativeEvent::Favicon { page, data });
+                }
+            })
             .build_as_child(window)
             .map_err(|e| e.to_string())?;
         let view = Retained::into_super(web.webview());
@@ -523,32 +533,67 @@ impl NativePage {
             }
         }
     }
-    pub fn discover_favicon(&self, page: String) {
+    // slopty: the page reads its own icon in its own session and cookies, draws it to a
+    // 64 px canvas and posts it as a PNG `data:` URL (zeron fetched the link with reqwest).
+    pub fn discover_favicon(&self) {
         let host = self.0.borrow();
-        let tx = host.tx.clone();
         // Our navigation delegate owns readiness, so Wry's private pending-
         // script queue is intentionally bypassed. This runs only after finish.
-        let completion = block2::RcBlock::new(move |value: *mut AnyObject, error: *mut NSError| {
-            if !error.is_null() {
-                return;
-            }
-            if let Some(url) =
-                unsafe { value.as_ref() }.and_then(|value| value.downcast_ref::<NSString>())
-            {
-                let _ = tx.try_send(NativeEvent::Favicon {
-                    page: page.clone(),
-                    url: url.to_string(),
-                });
-            }
-        });
         unsafe {
             host.view.evaluateJavaScript_completionHandler(
-                &NSString::from_str("(() => { const link = document.querySelector('link[rel~=icon]'); return link ? link.href : new URL('/favicon.ico', location.href).href; })()"),
-                Some(&completion),
+                &NSString::from_str(FAVICON_SCRIPT),
+                None,
             );
         }
     }
 }
+
+// slopty: finds the icon link (else `/favicon.ico`), fetches it as the page would, decodes it
+// in WebKit (ICO and SVG included), and posts it once; then again whenever the page changes its
+// icon link. Failures (no icon, CORS, CSP) post nothing and the tab keeps the globe.
+const FAVICON_SCRIPT: &str = r#"(() => {
+  const ipc = window.ipc;
+  if (!ipc) return;
+  const send = async () => {
+    const page = location.href;
+    const link = document.querySelector('link[rel~="icon" i]');
+    const href = link && link.href ? link.href : new URL('/favicon.ico', location.href).href;
+    try {
+      const response = await fetch(href, { credentials: 'include' });
+      if (!response.ok) return;
+      const blob = await response.blob();
+      if (blob.size === 0 || blob.size > 1048576) return;
+      const url = URL.createObjectURL(blob);
+      try {
+        const image = new Image();
+        image.src = url;
+        await image.decode();
+        const side = 64;
+        const w = image.naturalWidth || side, h = image.naturalHeight || side;
+        const scale = Math.min(side / w, side / h);
+        const canvas = document.createElement('canvas');
+        canvas.width = side;
+        canvas.height = side;
+        canvas.getContext('2d').drawImage(
+          image, (side - w * scale) / 2, (side - h * scale) / 2, w * scale, h * scale);
+        ipc.postMessage(JSON.stringify({ sloptyFavicon: page, data: canvas.toDataURL('image/png') }));
+      } finally {
+        URL.revokeObjectURL(url);
+      }
+    } catch (_) {}
+  };
+  send();
+  if (window.__sloptyFaviconWatch || !document.head) return;
+  let timer = 0;
+  const watch = new MutationObserver((records) => {
+    const icon = (node) => node.nodeName === 'LINK' && /(^|\s)icon(\s|$)/i.test(node.rel || '');
+    if (!records.some((r) => icon(r.target) || [...r.addedNodes].some(icon))) return;
+    clearTimeout(timer);
+    timer = setTimeout(send, 250);
+  });
+  watch.observe(document.head, { childList: true, subtree: true, attributes: true, attributeFilter: ['href', 'rel'] });
+  Object.defineProperty(window, '__sloptyFaviconWatch', { value: watch });
+})();"#;
 
 fn has_focus(view: &NSView) -> bool {
     view.window()

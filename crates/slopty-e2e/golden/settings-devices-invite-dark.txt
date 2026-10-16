@@ -1,0 +1,20 @@
+Window
+Button │ Back
+TabList │ Settings sections
+Tab │ General
+Tab │ Appearance
+Tab │ Notifications
+Tab │ Shortcuts
+Tab │ Providers
+Tab │ Devices
+Tab │ Files
+Tab │ Archived sessions
+Button │ Server: e2e-server, Connected
+Button │ Close settings
+Button │ Connect a phone or iPad (focused)
+Button │ Change server
+Button │ Show in Finder e2e-invite
+Button │ Copy device ID bc12344ba6976680a329238068e2abab
+Button │ Add device
+Button │ Copy link
+Button │ Done

@@ -238,7 +238,7 @@ impl CannedApi {
 fn serve(stream: TcpStream, mut log: std::fs::File, work: &Path) -> Result<()> {
     let mut writer = stream.try_clone()?;
     let mut reader = BufReader::new(stream);
-    while let Some((line, body)) = crate::claude_mod::request(&mut reader)? {
+    while let Some((line, body)) = crate::canned::request(&mut reader)? {
         let body: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
         writeln!(log, "{}", json!({ "line": line, "body": body }))?;
         let (status, kind, payload) = if line.starts_with("POST") && line.contains("/responses") {

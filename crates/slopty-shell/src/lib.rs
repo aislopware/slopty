@@ -1,4 +1,4 @@
-// Derived from zeron (MIT, github.com/zeronsh/zeron @ 75b7260), see THIRD_PARTY_NOTICES.md
+// Derived from zeron (MIT, github.com/zeronsh/zeron @ 3b2f780), see THIRD_PARTY_NOTICES.md
 //! slopty-shell — the gpui viewport. Shell, sidebar, conversation, composer, terminal,
 //! diff pane.
 //!
@@ -13,8 +13,8 @@
 //! - [`shell`] — sidebar + main panel + right-pane scaffold + gate;
 //! - [`loaders`] — slopty pulse loader, gradient spinner, boot splash.
 
-// slopty: voice, dictation, the orb, appshots, the updater, sign-in, sync, agent accounts and
-// the pull-request pages are not taken (docs/decisions/ui.md).
+// slopty: voice, dictation, the orb, appshots, the updater, sign-in, sync, agent accounts,
+// the pull-request pages and agent visuals are not taken (docs/decisions/ui.md).
 mod account_usage;
 pub mod app_menus;
 pub mod appearance;
@@ -494,6 +494,13 @@ fn open_main_window(
                     .ok()
                     .and_then(Result::ok)
                     .unwrap_or(false)
+                });
+                // slopty: a transcript's Run types its line into the chat's shell terminal.
+                let runner = shell.downgrade();
+                transcript::serve_terminal_runs(cx, move |chat, line, window, cx| {
+                    runner
+                        .update(cx, |shell, cx| shell.run_in_terminal(chat, line, window, cx))
+                        .unwrap_or(false)
                 });
                 let weak_shell = shell.downgrade();
                 window.on_window_should_close(cx, move |window, cx| {

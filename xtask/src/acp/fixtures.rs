@@ -35,7 +35,7 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, bail, ensure};
 use serde_json::{Value, json};
 
-use crate::claude_mod::{Block, request, sse};
+use crate::canned::{Block, request, sse};
 use crate::scrub::{Scrub, host};
 use crate::tools::repo_root;
 

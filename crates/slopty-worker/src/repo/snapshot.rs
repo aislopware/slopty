@@ -400,6 +400,22 @@ impl Repo {
     /// sides are read in one `git cat-file --batch` for the whole review, and only a text side
     /// small enough to cut is held whole: a picture or a larger file says its size instead.
     pub async fn changes(&self, from: &TreeRef, to: &TreeRef) -> Result<Vec<FileDiff>, Failed> {
+        self.changes_with(from, to, false).await
+    }
+
+    /// [`Repo::changes`], whitespace not counting when `ignore_whitespace`, as `git diff -w`
+    /// reads it: a line that differs only in spaces is no change, and a file whose content
+    /// changed only so is left out (one added, removed, renamed or given a new mode stays).
+    ///
+    /// # Errors
+    ///
+    /// When git fails.
+    pub async fn changes_with(
+        &self,
+        from: &TreeRef,
+        to: &TreeRef,
+        ignore_whitespace: bool,
+    ) -> Result<Vec<FileDiff>, Failed> {
         let raw = self.run(&["diff-tree", "-r", "-z", "-M", &from.0, &to.0], None, None).await?;
         let entries = parse_raw(&raw);
         let ids: Vec<&str> = entries
@@ -417,11 +433,23 @@ impl Repo {
             let bytes = old.size.max(new.size);
             let (kind, patch) = match (old.text(), new.text()) {
                 _ if is_picture(&entry.path) => (FileKind::Image { bytes }, empty_patch()),
-                (Some(old), Some(new)) => (FileKind::Text, diff(&lossy(old), &lossy(new))),
+                (Some(old), Some(new)) => {
+                    (FileKind::Text, diff_with(&lossy(old), &lossy(new), ignore_whitespace))
+                }
                 _ if old.binary || new.binary => (FileKind::Binary, empty_patch()),
                 _ => (FileKind::TooLarge { bytes }, empty_patch()),
             };
             let modes = entry.modes.filter(|m| m.from != 0 && m.to != 0 && m.from != m.to);
+            let only_spaces = ignore_whitespace
+                && kind == FileKind::Text
+                && patch.hunks.is_empty()
+                && entry.from.is_some()
+                && entry.to.is_some()
+                && entry.old_path.is_none()
+                && modes.is_none();
+            if only_spaces {
+                continue;
+            }
             files.push(FileDiff {
                 path: entry.path,
                 old_path: entry.old_path,
@@ -484,13 +512,18 @@ impl Repo {
 
     /// One file's hunks whole, from blob `from` to blob `to` (none for a side the file lacks),
     /// and whether a side is not text: binary, or past [`TEXT_BYTES`], which has no hunks.
-    async fn patch(&self, from: Option<&str>, to: Option<&str>) -> Result<(bool, Patch), Failed> {
+    async fn patch(
+        &self,
+        from: Option<&str>,
+        to: Option<&str>,
+        ignore_whitespace: bool,
+    ) -> Result<(bool, Patch), Failed> {
         let old = self.blob(from).await?;
         let new = self.blob(to).await?;
         if !is_text(&old) || !is_text(&new) {
             return Ok((true, empty_patch()));
         }
-        Ok((false, diff(&lossy(&old), &lossy(&new))))
+        Ok((false, diff_with(&lossy(&old), &lossy(&new), ignore_whitespace)))
     }
 
     /// The bytes of the blob a review named on one side of a file ([`FileDiff::from`],
@@ -802,17 +835,21 @@ pub const NO_FORK: &str = "The two branches share no history";
 ///
 /// When git fails, or no scratch index can be made.
 pub async fn working_tree(git: &Path, root: &Path, against: Against) -> Result<Review, Failed> {
-    let scratch = tempfile::tempdir().map_err(|e| Failed(format!("a scratch index: {e}")))?;
-    let index = scratch.path().join("index");
-    let repo = Repo { git: git.to_owned(), root: root.to_owned(), index: index.clone() };
-    let own = ["rev-parse", "--path-format=absolute", "--git-path", "index"];
-    let own = PathBuf::from(repo.line(&own, None).await?);
-    // No index yet (nothing ever added): the scratch one starts from `HEAD` instead.
-    if tokio::fs::copy(&own, &index).await.is_err() {
-        let _partial = tokio::fs::remove_file(&index).await;
-    } else {
-        same_age(&own, &index).await?;
-    }
+    working_tree_with(git, root, against, false).await
+}
+
+/// [`working_tree`], whitespace not counting when `ignore_whitespace` ([`Repo::changes_with`]).
+///
+/// # Errors
+///
+/// When git fails, or no scratch index can be made.
+pub async fn working_tree_with(
+    git: &Path,
+    root: &Path,
+    against: Against,
+    ignore_whitespace: bool,
+) -> Result<Review, Failed> {
+    let (repo, _scratch) = scratch_repo(git, root).await?;
     let scope = ReviewScope::WorkingTree(against.clone());
     let Some(from) = repo.against(&against).await? else {
         return Ok(Review {
@@ -824,8 +861,60 @@ pub async fn working_tree(git: &Path, root: &Path, against: Against) -> Result<R
         });
     };
     let to = repo.take().await?;
-    let files = repo.changes(&from, &to).await?;
+    let files = repo.changes_with(&from, &to, ignore_whitespace).await?;
     Ok(Review { scope, from: Some(from), to: Some(to), files, absent: None })
+}
+
+/// What one turn changed in the repository at `root` ([`ReviewScope::Turn`]).
+///
+/// From `before`, the tree the worker took when it began, to `after`, the one it took when it
+/// ended, or to the working tree now while it runs; whitespace not counting when
+/// `ignore_whitespace`.
+///
+/// # Errors
+///
+/// When git fails, or no scratch index can be made.
+pub async fn turn(
+    git: &Path,
+    root: &Path,
+    (turn, before, after): (TurnId, TreeRef, Option<TreeRef>),
+    ignore_whitespace: bool,
+) -> Result<Review, Failed> {
+    let (repo, _scratch) = scratch_repo(git, root).await?;
+    tree_id(&before)?;
+    let to = match after {
+        Some(after) => {
+            tree_id(&after)?;
+            after
+        }
+        None => repo.take().await?,
+    };
+    let files = repo.changes_with(&before, &to, ignore_whitespace).await?;
+    let scope = ReviewScope::Turn(turn);
+    Ok(Review { scope, from: Some(before), to: Some(to), files, absent: None })
+}
+
+/// A tree a client named, refused unless it is an object id.
+fn tree_id(tree: &TreeRef) -> Result<(), Failed> {
+    object_id(&tree.0)
+}
+
+/// The repository at `root` written through a scratch copy of the person's index, so a tree of
+/// the working tree hashes only what changed since git last looked, and their index, `HEAD` and
+/// refs are never touched; the scratch directory, which goes when dropped.
+async fn scratch_repo(git: &Path, root: &Path) -> Result<(Repo, tempfile::TempDir), Failed> {
+    let scratch = tempfile::tempdir().map_err(|e| Failed(format!("a scratch index: {e}")))?;
+    let index = scratch.path().join("index");
+    let repo = Repo { git: git.to_owned(), root: root.to_owned(), index: index.clone() };
+    let own = ["rev-parse", "--path-format=absolute", "--git-path", "index"];
+    let own = PathBuf::from(repo.line(&own, None).await?);
+    // No index yet (nothing ever added): the scratch one starts from `HEAD` instead.
+    if tokio::fs::copy(&own, &index).await.is_err() {
+        let _partial = tokio::fs::remove_file(&index).await;
+    } else {
+        same_age(&own, &index).await?;
+    }
+    Ok((repo, scratch))
 }
 
 /// What the commits of `head` brought since it left `base`, as committed, in the repository at
@@ -873,15 +962,15 @@ pub async fn range(git: &Path, root: &Path, base: &str, head: &str) -> Result<Re
 pub async fn file_diff(
     git: &Path,
     root: &Path,
-    from: Option<&str>,
-    to: Option<&str>,
+    (from, to): (Option<&str>, Option<&str>),
+    ignore_whitespace: bool,
 ) -> Result<Patch, Failed> {
     for id in from.iter().chain(to.iter()) {
         object_id(id)?;
     }
     // Blobs are read from the object store alone: no index is ever named.
     let repo = Repo { git: git.to_owned(), root: root.to_owned(), index: PathBuf::new() };
-    repo.patch(from, to).await.map(|(_binary, patch)| patch)
+    repo.patch(from, to, ignore_whitespace).await.map(|(_binary, patch)| patch)
 }
 
 /// The bytes of blob `id` in the repository at `root`, a review's picture side
@@ -1067,9 +1156,14 @@ fn lines(text: &str) -> Vec<&str> {
 }
 
 /// The hunks from `old` to `new`, as a review shows them and a pick names them.
-fn groups(old: &[&str], new: &[&str]) -> Vec<Vec<DiffOp>> {
+fn groups<T: std::hash::Hash + Eq + Ord>(old: &[T], new: &[T]) -> Vec<Vec<DiffOp>> {
     let ops = similar::capture_diff_slices(Algorithm::Myers, old, new);
     similar::group_diff_ops(ops, CONTEXT)
+}
+
+/// `line` with no whitespace in it, as `git diff -w` compares lines.
+fn spaceless(line: &str) -> String {
+    line.chars().filter(|c| !c.is_whitespace()).collect()
 }
 
 /// What a group of ops covers on each side.
@@ -1082,9 +1176,23 @@ fn span(group: &[DiffOp]) -> (Range<usize>, Range<usize>) {
 /// The diff from `old` to `new`.
 #[must_use]
 pub fn diff(old: &str, new: &str) -> Patch {
+    diff_with(old, new, false)
+}
+
+/// The diff from `old` to `new`, whitespace not counting when `ignore_whitespace` (`git diff
+/// -w`): lines are matched with their spaces taken out, and a line kept shows as the new side
+/// has it.
+#[must_use]
+pub fn diff_with(old: &str, new: &str, ignore_whitespace: bool) -> Patch {
     let (old_lines, new_lines) = (lines(old), lines(new));
+    let grouped = if ignore_whitespace {
+        let key = |lines: &[&str]| lines.iter().map(|l| spaceless(l)).collect::<Vec<_>>();
+        groups(&key(&old_lines), &key(&new_lines))
+    } else {
+        groups(&old_lines, &new_lines)
+    };
     let mut patch = empty_patch();
-    for group in groups(&old_lines, &new_lines) {
+    for group in grouped {
         let (old_span, new_span) = span(&group);
         let mut text = Vec::new();
         for op in &group {
@@ -1092,7 +1200,7 @@ pub fn diff(old: &str, new: &str) -> Patch {
             let line = |mark: char, l: &str| format!("{mark}{}", l.strip_suffix('\n').unwrap_or(l));
             match tag {
                 DiffTag::Equal => {
-                    let same = old_lines.get(old_range).unwrap_or_default();
+                    let same = new_lines.get(new_range).unwrap_or_default();
                     text.extend(same.iter().map(|l| line(' ', l)));
                 }
                 DiffTag::Delete | DiffTag::Insert | DiffTag::Replace => {

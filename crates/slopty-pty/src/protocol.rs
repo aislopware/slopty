@@ -145,6 +145,9 @@ pub enum PtydRequest {
         started_ms: WallMs,
         /// The terminfo name the child was given as `TERM`.
         term: String,
+        /// The session is a piped one ([`Self::SpawnPiped`]): the descriptor is its socket,
+        /// not a PTY master.
+        piped: bool,
     },
     /// Become the build at `program`, keeping every session: ptyd runs it in place, so its pid,
     /// its children and their masters stay, and hands it every session's state
@@ -159,31 +162,21 @@ pub enum PtydRequest {
         /// The new build's `slopty-ptyd`.
         program: PathBuf,
     },
-    /// Type `parts` into the session's program, in order, each after its pause, behind any
-    /// delivery still typing: input the worker hands over whole, such as a pasted prompt and
-    /// the Enter that submits it, so a worker that goes in between loses none of it, and a
-    /// handover to a new build carries what is left of it ([`Heir::typing`]). `delivery` names
-    /// it: one this ptyd took for the session already is not typed again, so a worker that
-    /// cannot tell whether its delivery went sends it again. Answered `Ok` once taken (or
-    /// taken before), before anything is typed.
-    Deliver {
-        /// The session it is about.
+    /// Spawn on a pipe rather than a PTY ([`crate::pty::spawn_piped`]): one end of a Unix
+    /// stream socket pair is the child's standard input and output, and ptyd keeps the other as
+    /// the session's master, read into the ring while no worker holds it, handed over by
+    /// `Attach`, kept across a handover, as a PTY's. A program driven over its standard streams
+    /// so outlives the worker driving it. `spec.size` is ignored and a `Resize` does nothing;
+    /// `Close` sends `SIGTERM` to the child's process group, `SIGKILL` if it still runs 5 s
+    /// later. Answer: `Spawned` or `Error`.
+    SpawnPiped {
+        /// Chosen by the worker.
         id: SessionId,
-        /// The delivery's name, chosen by the worker.
-        delivery: u64,
-        /// What is typed.
-        parts: Vec<Part>,
+        /// What to run.
+        spec: SpawnSpec,
+        /// Where its standard error goes, appended to (made `0600`); `/dev/null` when `None`.
+        stderr: Option<PathBuf>,
     },
-}
-
-/// One part of a [`PtydRequest::Deliver`].
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct Part {
-    /// How long after the part before it (or the delivery's arrival) it is typed.
-    pub after_ms: u32,
-    /// The bytes, as the program's terminal encodes them.
-    #[serde(with = "byte_string")]
-    pub bytes: Vec<u8>,
 }
 
 /// The flag a ptyd running a new build in place ([`PtydRequest::Succeed`]) runs it with,
@@ -253,7 +246,7 @@ pub struct Heir {
     pub master: i32,
     /// Its child.
     pub pid: u32,
-    /// Slave device path.
+    /// Slave device path; empty for a piped session.
     pub tty: PathBuf,
     /// When the child was spawned.
     pub started_ms: WallMs,
@@ -279,12 +272,8 @@ pub struct Heir {
     /// An adopted child's start as the kernel recorded it when it was adopted
     /// ([`crate::process::start_mark`]): it is that child only while its pid carries this mark.
     pub orphan_mark: Option<u64>,
-    /// The deliveries taken for it ([`PtydRequest::Deliver`]), the newest last: the new build
-    /// takes none of them again.
-    pub delivered: Vec<u64>,
-    /// What those deliveries still have to type, in order, the first part from where it was
-    /// left: the new build types it.
-    pub typing: Vec<Part>,
+    /// A piped session ([`PtydRequest::SpawnPiped`]): `master` is its socket, `tty` empty.
+    pub piped: bool,
 }
 
 /// ptyd → the worker.
@@ -381,7 +370,7 @@ pub struct SessionInfo {
     pub id: SessionId,
     /// Child pid.
     pub pid: u32,
-    /// Slave device path.
+    /// Slave device path; empty for a piped session.
     pub tty: PathBuf,
     /// Size of record.
     pub size: TermSize,
@@ -393,9 +382,10 @@ pub struct SessionInfo {
     pub backlog: usize,
     /// Checkpoint bytes held.
     pub checkpoint: usize,
-    /// The deliveries ([`PtydRequest::Deliver`]) this ptyd took for it, the newest last: a
-    /// worker that started again learns from them whether the one it owes went.
-    pub delivered: Vec<u64>,
+    /// A piped session ([`PtydRequest::SpawnPiped`]), no terminal: `tty` is empty. A worker's
+    /// terminals leave it alone; whoever spawned it attaches it.
+    #[serde(default)]
+    pub piped: bool,
 }
 
 /// [`PtydRequest::Output`] as its codec frame, ready for [`crate::PtydClient::output`].

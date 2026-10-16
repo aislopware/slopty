@@ -13,7 +13,7 @@
 //! goes to from that and each client's [`Seat`].
 
 use serde::{Deserialize, Serialize};
-use slopty_core::{SessionId, WallMs, WorkerId};
+use slopty_core::{WallMs, WorkerId};
 
 use super::wire::{PullStands, ThreadRow};
 use super::{Phase, ThreadId};
@@ -169,8 +169,6 @@ pub struct Ranked {
     pub rung: Rung,
     /// Since when it stands there, by its worker's clock: the longest waiting goes first.
     pub since_ms: WallMs,
-    /// The terminal its TUI runs in, when it has one: whose agent already speaks for it.
-    pub terminal: Option<SessionId>,
 }
 
 /// Where a group of threads stands: a tile's, a worker's, a tree's, a space's, the fleet's.
@@ -349,8 +347,6 @@ pub struct Notice {
     pub kind: NoticeKind,
     /// What it is about.
     pub about: Subject,
-    /// The terminal to open for it: the thread's.
-    pub tile: Option<TermRef>,
     /// The thread's title.
     pub title: String,
     /// What it wants or said, in a line.

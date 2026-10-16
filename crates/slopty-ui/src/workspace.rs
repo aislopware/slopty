@@ -162,7 +162,7 @@ pub enum WorkerStatus {
     Connecting,
     /// Link up.
     Connected,
-    /// Link up but nothing heard for this many seconds (keep-alives come every second).
+    /// Link up but no pong for this many seconds (pings go every 2 s, `slopty_net::liveness`).
     Silent(u64),
     /// Link up, but the device was away or the path moved under it: a probe is out, and the
     /// tiles are set back until it answers.
@@ -264,6 +264,9 @@ struct Worker {
     /// Its home directory as its hello said, so a path under it reads `~/…`; `None` until a
     /// link has said, or when the daemon has none.
     home: Option<String>,
+    /// Where this client reaches it (its tailnet name or address, no port), as the app dials
+    /// it; `None` until the app says.
+    address: Option<String>,
     /// Where its `settings.toml` is, as its hello said; `None` until a link has said, or when
     /// the daemon has none.
     settings: Option<String>,
@@ -323,6 +326,7 @@ impl Worker {
             rtt: None,
             relay: RelayWatch::default(),
             home: None,
+            address: None,
             settings: None,
             caps: None,
             behind: None,
@@ -604,14 +608,6 @@ impl WorkspaceView {
     #[must_use]
     pub fn screen(&self, item: ItemId) -> Option<&Entity<ScreenView>> {
         self.screens.get(&item)
-    }
-
-    /// The agent at work in `session` as its thread's row says, in the status vocabulary and
-    /// in one short line; `None` with no agent there.
-    #[must_use]
-    pub fn agent(&self, session: SessionId) -> Option<(slopty_kit::icons::Status, String)> {
-        let agent = self.agent_state(session)?;
-        Some((agents::agent_mark_of(agent), agents::agent_status_text(agent)))
     }
 
     /// This client's id on `worker`'s wire, while linked.

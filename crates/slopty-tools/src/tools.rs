@@ -637,7 +637,6 @@ mod tests {
             of: ThreadOf::Thread(child()),
             view: ThreadView::Activity,
             after: Some(TurnId(4)),
-            hold: false,
         };
         assert_eq!(fake.last(), Some(asked));
         let (failed, text) = call_json(&fake, "agent_read", json!({ "agent": "t1" })).await;

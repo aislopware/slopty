@@ -6,13 +6,11 @@
 //! [`REMOVED_KEPT`] removals; a cursor older than the oldest of them gets every row too.
 //!
 //! A row says which repository its thread works in, as a shell's summary does, so a client
-//! groups an agent with no terminal (a Codex, pi or ACP thread, or one with no tile on that
-//! client) with the other clones of its project (`Places`).
+//! groups an agent's thread with the other clones of its project (`Places`).
 
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 
-use slopty_core::SessionId;
 use slopty_proto::terminal::RepoId;
 use slopty_proto::thread::wire::{TableFrame, ThreadRow};
 use slopty_proto::thread::{Cursor, ThreadId};
@@ -76,17 +74,6 @@ impl Table {
             changed: watch::Sender::new(cursor),
             places: Places::default(),
         }
-    }
-
-    /// The row of the thread whose agent runs in terminal `session`, hanging from no other:
-    /// the latest to change, when several did.
-    #[must_use]
-    pub fn at_terminal(&self, session: SessionId) -> Option<&ThreadRow> {
-        self.rows
-            .values()
-            .map(|(row, _)| row)
-            .filter(|row| row.parent.is_none() && row.terminal == Some(session))
-            .max_by_key(|row| (row.updated_ms, row.id))
     }
 
     /// Thread `id`'s row.
@@ -199,7 +186,6 @@ mod tests {
             native: "s".to_owned(),
             cwd: String::new(),
             title: "t".to_owned(),
-            terminal: None,
             parent: None,
             origin: ThreadMeta::PERSON.to_owned(),
             forked_from: None,

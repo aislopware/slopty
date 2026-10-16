@@ -4,7 +4,6 @@
 //! worker registered with the server, and drives them through the `slopty` CLI the way an agent
 //! does, cycle after cycle for `--seconds`:
 //! - open a quiet bash, flood it (`seq 1 20000`) and wait for the end of the output;
-//! - play a hook through `slopty hook report` (working, then idle), as a wrapped agent would;
 //! - read the terminal's output as a second reader;
 //! - close it.
 //!
@@ -21,8 +20,7 @@
 //! - a daemon's peak footprint passes its [`PEAK_MIB`] budget;
 //! - a daemon holds more descriptors or threads after the load has settled than before it;
 //! - `leaks <pid>` finds a leak in a daemon at the end (exit 1; `man leaks`);
-//! - a hook report fails, or a CLI call cannot reach the server (it is sent again once, so the load
-//!   goes on).
+//! - a CLI call cannot reach the server (it is sent again once, so the load goes on).
 //!
 //! Beside the terminals, `--stream-lanes` lanes (one by default) stream the worker's drawn screen
 //! (`SLOPTY_SYNTHETIC_SCREEN`: one display and two windows, drawn and encoded by VideoToolbox as
@@ -520,10 +518,8 @@ fn wait_child(child: &mut Child, bound: Duration) -> Result<std::process::ExitSt
     status.context("reaped")
 }
 
-/// Open a quiet bash, flood it, play a hook to it, read it back and close it. A hook the relay
-/// failed to deliver goes into `missed` and the cycle goes on: it is a finding, and the load is
-/// still worth watching.
-fn cycle(stack: &Stack, n: u32, missed: &mut Vec<String>) -> Result<()> {
+/// Open a quiet bash, flood it, read it back and close it.
+fn cycle(stack: &Stack, n: u32) -> Result<()> {
     let cwd = stack.root.to_string_lossy().into_owned();
     let name = format!("soak-{n}");
     let opened = stack.slopty(&[
@@ -546,14 +542,6 @@ fn cycle(stack: &Stack, n: u32, missed: &mut Vec<String>) -> Result<()> {
     let typed = format!("seq 1 {FLOOD_LINES}; echo {done}\n");
     stack.slopty(&["send", &term, "--text", &typed])?;
     stack.slopty(&["wait", &term, "--output", &format!("^{done}$"), "--timeout", "30000"])?;
-    let session = term.rsplit('/').next().context("a term is worker/session")?;
-    let socket = stack.root.join("worker.sock").to_string_lossy().into_owned();
-    let env = [("SLOPTY_SESSION", session), ("SLOPTY_WORKER_SOCKET", socket.as_str())];
-    for status in ["working", "idle"] {
-        if let Err(e) = stack.call(&["hook", "report", status, "soak"], &env) {
-            missed.push(format!("{e:#}"));
-        }
-    }
     stack.slopty(&["output", &term, "--max", "200"])?;
     stack.slopty(&["close", &term])?;
     Ok(())
@@ -912,7 +900,6 @@ fn settle(
 fn fill(
     stack: &Stack,
     samples: &mut Vec<Sample>,
-    missed: &mut Vec<String>,
     started: Instant,
     interval: Duration,
     last: u32,
@@ -922,19 +909,17 @@ fn fill(
     std::thread::scope(|scope| {
         let lanes: Vec<_> = std::iter::repeat_with(|| {
             scope.spawn(|| {
-                let mut lost = Vec::new();
-                let ran = loop {
+                loop {
                     let n = next.fetch_add(1, Ordering::Relaxed);
                     if n >= end {
                         break Ok(());
                     }
-                    if let Err(e) = cycle(stack, n, &mut lost) {
+                    if let Err(e) = cycle(stack, n) {
                         // The other lanes stop at their next cycle.
                         next.store(end, Ordering::Relaxed);
                         break Err(e);
                     }
-                };
-                (ran, lost)
+                }
             })
         })
         .take(FILL_LANES)
@@ -944,10 +929,7 @@ fn fill(
             std::thread::sleep(interval);
         }
         for lane in lanes {
-            let (ran, lost) =
-                lane.join().map_err(|_panic| anyhow::anyhow!("a fill lane panicked"))?;
-            missed.extend(lost);
-            ran?;
+            lane.join().map_err(|_panic| anyhow::anyhow!("a fill lane panicked"))??;
         }
         Ok(end.saturating_sub(1))
     })
@@ -1032,7 +1014,6 @@ fn soak(stack: &Stack, opts: &SoakOpts, out: &Path) -> Result<Value> {
     let started = Instant::now();
     let interval = Duration::from_secs(opts.interval.max(1));
     let mut samples = Vec::new();
-    let mut missed = Vec::new();
     let mut n = 0_u32;
     let lanes = opts.stream_lanes;
     let mut streams = Vec::new();
@@ -1040,7 +1021,7 @@ fn soak(stack: &Stack, opts: &SoakOpts, out: &Path) -> Result<Value> {
     println!("▶ warm up: two cycles and a stream of each target, then {SETTLE:?} alone");
     for _ in 0..2 {
         n = n.wrapping_add(1);
-        cycle(stack, n, &mut missed)?;
+        cycle(stack, n)?;
     }
     for _ in &targets {
         streams.push(stream(stack, &targets));
@@ -1056,7 +1037,7 @@ fn soak(stack: &Stack, opts: &SoakOpts, out: &Path) -> Result<Value> {
     let mut aborted: Option<String> = None;
     let fill_started = Instant::now();
     match with_streams(stack, &targets, lanes, &mut streams, || {
-        fill(stack, &mut samples, &mut missed, started, interval, n)
+        fill(stack, &mut samples, started, interval, n)
     }) {
         Ok(last) => n = last,
         Err(e) => aborted = Some(format!("the fill stopped: {e:#}")),
@@ -1079,7 +1060,7 @@ fn soak(stack: &Stack, opts: &SoakOpts, out: &Path) -> Result<Value> {
         while aborted.is_none() && Instant::now() < deadline {
             n = n.wrapping_add(1);
             let began = Instant::now();
-            cycle(stack, n, &mut missed)?;
+            cycle(stack, n)?;
             cycles.push(began.elapsed());
             if Instant::now() >= next {
                 samples.extend(sample(stack, started, "load"));
@@ -1099,13 +1080,6 @@ fn soak(stack: &Stack, opts: &SoakOpts, out: &Path) -> Result<Value> {
 
     let mut failures = Vec::new();
     failures.extend(aborted);
-    if let Some(first) = missed.first() {
-        failures.push(format!(
-            "{} of {} hook reports failed; the first: {first}",
-            missed.len(),
-            u64::from(n).saturating_mul(2)
-        ));
-    }
     let unreached = stack.unreached.load(Ordering::Relaxed);
     if let Some(first) = stack.first_unreached.get() {
         failures.push(format!(

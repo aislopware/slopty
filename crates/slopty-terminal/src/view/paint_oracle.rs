@@ -369,7 +369,10 @@ type Step = Box<dyn Fn(&mut TerminalView, &mut Window, &mut gpui::Context<Termin
 /// those moved.
 fn run(seed: u64, steps: usize, text: Arc<dyn PlatformTextSystem>) -> (u64, u64) {
     let mut cx = TestAppContext::build_with_text_system(TestDispatcher::new(seed), None, text);
-    cx.update(gpui_kit::init);
+    cx.update(|cx| cx.set_global(slopty_shell::theme::Theme::default()));
+    // The floats' entries (a pill's rise) run on the wall clock, so two windows drawn a moment
+    // apart would differ mid-motion; still, every animation is drawn at its end.
+    cx.update(|cx| cx.set_reduce_motion(true));
     let mut sides = sides(&mut cx);
     let mut rng = Rng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
     let (mut seq, mut first) = (0_u64, 0_u64);
@@ -527,7 +530,7 @@ fn next_step(rng: &mut Rng, seq: &mut u64, first: &mut u64, cursor: &mut Cursor)
                         view.find(&Find, window, cx);
                     }
                     if let Some(search) = &mut view.search {
-                        search.query.needle = "x".to_owned();
+                        search.query = search.query.with_needle("x");
                         search.asked = "x".to_owned();
                     }
                     let total = u32::try_from(lines.len()).unwrap_or(0);

@@ -78,50 +78,6 @@ pub fn is_claude(name: &str, argv: &[String]) -> bool {
     false
 }
 
-/// The arguments Claude Code itself was given, out of a command line [`is_claude`] accepts.
-///
-/// They are what follows `claude`, or the script a runtime runs. Empty when they cannot be
-/// told apart from the rest, as inside a shell's `-c` command.
-#[must_use]
-pub fn agent_args(argv: &[String]) -> &[String] {
-    let Some((argv0, rest)) = argv.split_first() else { return &[] };
-    let program = base(argv0);
-    if program == "claude" {
-        return rest;
-    }
-    if !RUNTIMES.contains(&program) {
-        return &[];
-    }
-    let shell = SHELLS.contains(&program);
-    let mut words = rest.iter();
-    while let Some(arg) = words.next() {
-        if let Some(flags) = arg.strip_prefix('-') {
-            if shell && flags.contains('c') {
-                return &[];
-            }
-            continue;
-        }
-        return if is_claude_script(arg) { words.as_slice() } else { &[] };
-    }
-    &[]
-}
-
-/// The command a shell runs, when `argv` is a shell handed one (`sh -c '<command>'`).
-#[must_use]
-pub fn shell_command(argv: &[String]) -> Option<&str> {
-    let (argv0, rest) = argv.split_first()?;
-    if !SHELLS.contains(&base(argv0)) {
-        return None;
-    }
-    let mut words = rest.iter();
-    while let Some(flags) = words.next()?.strip_prefix('-') {
-        if flags.contains('c') {
-            return words.next().map(String::as_str);
-        }
-    }
-    None
-}
-
 /// Whether the command a shell was handed (`sh -c '<command>'`) starts the agent.
 fn is_claude_command(command: &str) -> bool {
     shell_agent_args(command).is_some()
@@ -135,8 +91,7 @@ fn is_claude_command(command: &str) -> bool {
 ///
 /// Expansions (`$VAR`, `$(…)`, globs) are not performed, so a flag spelled through one is not
 /// seen: this reads what a person or an agent wrote, not what a shell would compute.
-#[must_use]
-pub fn shell_agent_args(command: &str) -> Option<Vec<String>> {
+fn shell_agent_args(command: &str) -> Option<Vec<String>> {
     let words = shell_split(command);
     words.split(|w| matches!(w, Word::Operator)).find_map(|simple| {
         let mut plain = simple.iter().map(|w| match w {
@@ -146,19 +101,6 @@ pub fn shell_agent_args(command: &str) -> Option<Vec<String>> {
         let program = plain.find(|w| !is_assignment(w) && !PREFIXES.contains(w))?;
         (base(program) == "claude").then(|| plain.map(str::to_owned).collect())
     })
-}
-
-/// The words of `line` when it is one simple command, split and unquoted as a shell does;
-/// none when it chains or pipes several.
-#[must_use]
-pub fn simple_command(line: &str) -> Option<Vec<String>> {
-    shell_split(line)
-        .into_iter()
-        .map(|word| match word {
-            Word::Plain(text) => Some(text),
-            Word::Operator => None,
-        })
-        .collect()
 }
 
 /// Words that run the command after them: `exec claude`, `env FOO=1 claude`.
@@ -305,22 +247,6 @@ mod tests {
         assert!(is_claude("node", &argv(&["node", "--enable-source-maps", "/usr/bin/claude"])));
     }
 
-    /// The agent's own arguments follow `claude` or the script a runtime runs; inside a
-    /// shell's `-c` command they are not told apart.
-    #[test]
-    fn the_agents_own_arguments_follow_its_program_or_script() {
-        let words = |line: &str| argv(&line.split(' ').collect::<Vec<_>>());
-        assert_eq!(agent_args(&words("/opt/bin/claude --model x")), words("--model x"));
-        let cli = "/n/@anthropic-ai/claude-code/cli.js";
-        assert_eq!(agent_args(&words(&format!("node --x {cli} -c"))), words("-c"));
-        assert_eq!(
-            agent_args(&words("/bin/sh /Users/x/bin/claude --effort high")),
-            words("--effort high")
-        );
-        assert_eq!(agent_args(&words("/bin/zsh -lic claude")), Vec::<String>::new());
-        assert_eq!(agent_args(&words("node server.js --model x")), Vec::<String>::new());
-    }
-
     /// A shell's command starts the agent when `claude` is the program of any of its simple
     /// commands, after assignments or `exec`; quoting is undone as the shell undoes it.
     #[test]
@@ -339,9 +265,6 @@ mod tests {
         assert_eq!(args("'claude'"), owned(&[]), "a quoted program is still the program");
         assert!(is_claude("bash", &argv(&["/bin/sh", "-c", "cd x && claude"])));
         assert!(!is_claude("bash", &argv(&["/bin/sh", "-c", "cd x && echo claude"])));
-        assert_eq!(shell_command(&argv(&["/bin/zsh", "-lic", "claude"])), Some("claude"));
-        assert_eq!(shell_command(&argv(&["claude", "-c", "x"])), None, "not a shell");
-        assert_eq!(shell_command(&argv(&["-zsh"])), None);
     }
 
     #[test]

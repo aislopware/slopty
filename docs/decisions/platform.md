@@ -1208,8 +1208,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - `Stack::relaunch_on_simulator(env)` ends the app as the system ends a suspended one and
     launches it again on the same data with the press.
   - Test: `a_killed_app_answers_a_note_s_deny_with_no_window` (`tests/ios.rs`, live by
-    `cargo xtask e2e ios`). A held Bash prompt is denied by a cold launch, the relay ends
-    well and the thread's request is gone; the same press again shows "That prompt is no
+    `cargo xtask e2e ios`). A Claude Code thread's Bash prompt (the stand-in's) is denied by
+    a cold launch and the thread's request is gone; the same press again shows "That prompt is no
     longer waiting" in the pressed note's place. It prints a `MEASURE ios-cold` line.
 
 - ✅ **A Mac the person left counts as left at once** (2026-10-12, readiness 10-12 rank 1,

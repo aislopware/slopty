@@ -1,6 +1,5 @@
 //! One PTY-backed child, its output ring and the last worker's checkpoint.
 
-use std::collections::VecDeque;
 use std::os::fd::{AsRawFd as _, BorrowedFd, OwnedFd};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -10,7 +9,7 @@ use parking_lot::Mutex;
 use rustix::process::{Pid, Signal};
 use slopty_core::{SessionId, WallMs};
 use slopty_proto::terminal::TermSize;
-use slopty_pty::protocol::{Exit, Heir, Part, SessionInfo};
+use slopty_pty::protocol::{Exit, Heir, SessionInfo};
 use slopty_pty::shell_integration::ShellIntegration;
 use slopty_pty::{Pty, PtyMaster, Ring, SpawnSpec};
 use tokio::sync::{broadcast, watch};
@@ -56,6 +55,9 @@ pub struct Session {
     /// Such a child's start as the kernel recorded it when this ptyd took it
     /// ([`slopty_pty::process::start_mark`]): its pid is that child's only while it carries it.
     mark: Option<u64>,
+    /// The child runs on a socket pair, not a PTY (`PtydRequest::SpawnPiped`): `master` is its
+    /// socket, there is no tty, and it is ended by `SIGTERM` rather than a hangup.
+    piped: bool,
 }
 
 /// How long a session a worker held when the ptyd before this build handed it over is kept out
@@ -88,6 +90,7 @@ struct Start {
     exited: Option<Exit>,
     orphan: bool,
     mark: Option<u64>,
+    piped: bool,
 }
 
 /// What a session's reader is to do with the master.
@@ -116,19 +119,10 @@ struct State {
     checkpoint: Vec<u8>,
     /// Connection id holding the master, if any.
     attached_by: Option<u64>,
-    /// The deliveries taken ([`Session::deliver`]), the newest last, at most
-    /// [`DELIVERIES_KEPT`].
-    delivered: Vec<u64>,
-    /// What the deliveries taken still have to type, in order: a part leaves only once it is
-    /// all written, so a handover finds here exactly what is left.
-    typing: VecDeque<Part>,
-    /// A task types [`Self::typing`] now.
-    typer: bool,
 }
 
-/// How many deliveries a session remembers taking: a worker sends one again only right after
-/// it restarted, so a few cover every one it could.
-const DELIVERIES_KEPT: usize = 32;
+/// How long a closed piped session's child has after its `SIGTERM` before it is killed.
+const PIPED_GRACE: Duration = Duration::from_secs(5);
 
 /// What a worker taking the master is handed besides it.
 #[derive(Debug)]
@@ -180,14 +174,45 @@ impl Session {
                 ring: Ring::new(backlog_bytes),
                 checkpoint: Vec::new(),
                 attached_by: None,
-                delivered: Vec::new(),
-                typing: VecDeque::new(),
-                typer: false,
             },
             reader: Reader::Drain,
             exited: None,
             orphan: false,
             mark: None,
+            piped: false,
+        })?;
+        session.watch(Watch::Child(child), events);
+        Ok(session)
+    }
+
+    /// Spawn on a socket pair rather than a PTY (`PtydRequest::SpawnPiped`), its standard error
+    /// into `stderr`; start the reader and the exit waiter.
+    pub fn spawn_piped(
+        id: SessionId,
+        spec: &SpawnSpec,
+        stderr: Option<&std::path::Path>,
+        backlog_bytes: usize,
+        events: broadcast::Sender<Broadcast>,
+    ) -> Result<Arc<Self>, slopty_pty::PtyError> {
+        let slopty_pty::pty::Piped { io, child } = slopty_pty::pty::spawn_piped(spec, stderr)?;
+        let session = Self::start(Start {
+            id,
+            pid: child.id().unwrap_or(0),
+            started_ms: WallMs::now(),
+            term: String::new(),
+            tty: PathBuf::new(),
+            master: io,
+            state: State {
+                size: TermSize::default(),
+                ring: Ring::new(backlog_bytes),
+                checkpoint: Vec::new(),
+                attached_by: None,
+            },
+            reader: Reader::Drain,
+            exited: None,
+            orphan: false,
+            mark: None,
+            piped: true,
         })?;
         session.watch(Watch::Child(child), events);
         Ok(session)
@@ -204,27 +229,26 @@ impl Session {
         conn: u64,
         events: broadcast::Sender<Broadcast>,
     ) -> Result<Arc<Self>, slopty_pty::PtyError> {
-        let slopty_pty::Adoptee { pid, size, started_ms, term } = child;
+        let slopty_pty::Adoptee { pid, size, started_ms, term, piped } = child;
+        let tty = if piped { PathBuf::new() } else { slopty_pty::pty::slave_of(&master)? };
         let session = Self::start(Start {
             id,
             pid,
             started_ms,
             term,
-            tty: slopty_pty::pty::slave_of(&master)?,
+            tty,
             master,
             state: State {
                 size,
                 ring: Ring::new(backlog_bytes),
                 checkpoint: Vec::new(),
                 attached_by: Some(conn),
-                delivered: Vec::new(),
-                typing: VecDeque::new(),
-                typer: false,
             },
             reader: Reader::Pause,
             exited: None,
             orphan: true,
             mark: mark_of(pid),
+            piped,
         })?;
         session.watch(Watch::Orphan, events);
         Ok(session)
@@ -253,8 +277,7 @@ impl Session {
             attached,
             orphan,
             orphan_mark,
-            delivered,
-            typing,
+            piped,
             // Taken already: it is `master`.
             ..
         } = heir;
@@ -282,22 +305,18 @@ impl Session {
                 ring: Ring::holding(backlog_bytes, &backlog, dropped),
                 checkpoint,
                 attached_by: None,
-                delivered,
-                typing: typing.into(),
-                typer: false,
             },
             reader: if attached { Reader::Pause } else { Reader::Drain },
             exited,
             orphan: orphan || watched,
             mark,
+            piped,
         })?;
         match child {
             Some(child) => session.watch(Watch::Child(child), events),
             None if watched => session.watch(Watch::Orphan, events),
             None => {}
         }
-        // What the build before was typing goes on, from the part it had not finished.
-        session.type_owed();
         if attached {
             let kept = Arc::clone(&session);
             tokio::spawn(async move {
@@ -310,8 +329,20 @@ impl Session {
     }
 
     fn start(start: Start) -> Result<Arc<Self>, slopty_pty::PtyError> {
-        let Start { id, pid, started_ms, term, tty, master, state, reader, exited, orphan, mark } =
-            start;
+        let Start {
+            id,
+            pid,
+            started_ms,
+            term,
+            tty,
+            master,
+            state,
+            reader,
+            exited,
+            orphan,
+            mark,
+            piped,
+        } = start;
         let master = Arc::new(PtyMaster::new(master)?);
         let (reader, _) = watch::channel(reader);
         let (parked, _) = watch::channel(false);
@@ -328,6 +359,7 @@ impl Session {
             parked,
             orphan,
             mark,
+            piped,
         });
         let reading = Arc::clone(&session);
         tokio::spawn(async move { reading.read_loop().await });
@@ -472,112 +504,6 @@ impl Session {
         }
     }
 
-    /// Type `parts` into the program in order, each after its pause, behind whatever earlier
-    /// deliveries still type, unless delivery `delivery` was taken already
-    /// (`PtydRequest::Deliver`): `false` then. They are typed on a task of their own, so they
-    /// finish whatever becomes of the worker that sent them, and what is left of them goes to
-    /// the next build with the session ([`Self::heir`]).
-    pub fn deliver(self: &Arc<Self>, delivery: u64, parts: Vec<Part>) -> bool {
-        {
-            let mut state = self.state.lock();
-            if state.delivered.contains(&delivery) {
-                tracing::info!(session = %self.id, delivery, "delivery taken already");
-                return false;
-            }
-            if state.delivered.len() >= DELIVERIES_KEPT {
-                state.delivered.remove(0);
-            }
-            state.delivered.push(delivery);
-            tracing::info!(session = %self.id, delivery, parts = parts.len(), "delivery taken");
-            state.typing.extend(parts);
-        }
-        self.type_owed();
-        true
-    }
-
-    /// Start typing what the deliveries owe, unless a task does already.
-    fn type_owed(self: &Arc<Self>) {
-        {
-            let mut state = self.state.lock();
-            if state.typer || state.typing.is_empty() {
-                return;
-            }
-            state.typer = true;
-        }
-        tokio::spawn(Arc::clone(self).typer());
-    }
-
-    /// Type [`State::typing`] until it is empty. Each part's pause is waited out, then its
-    /// bytes are written under the lock as far as the tty takes them, and the part leaves the
-    /// queue only once it is all written: a handover, which records the queue on this one
-    /// thread between two polls, finds every byte either typed or still queued.
-    async fn typer(self: Arc<Self>) {
-        loop {
-            let front = self.state.lock().typing.front().map(|part| part.after_ms);
-            let Some(pause) = front else {
-                self.typed_out();
-                return;
-            };
-            tokio::time::sleep(Duration::from_millis(u64::from(pause))).await;
-            loop {
-                match self.type_front() {
-                    Typed::Whole => break,
-                    Typed::Part => {
-                        if let Err(e) = self.master.writable().await {
-                            tracing::warn!(session = %self.id, error = %e, "delivery not typed");
-                            self.state.lock().typing.clear();
-                            self.typed_out();
-                            return;
-                        }
-                    }
-                    Typed::Nothing => {
-                        self.typed_out();
-                        return;
-                    }
-                }
-            }
-        }
-    }
-
-    /// Write the front part as far as the tty takes it, under the lock: [`Typed::Whole`] once it
-    /// is all written and gone from the queue. A write that fails drops the queue.
-    fn type_front(&self) -> Typed {
-        let mut state = self.state.lock();
-        let Some(part) = state.typing.front_mut() else {
-            return Typed::Nothing;
-        };
-        // Waited out: a handover from here on does not wait for it again.
-        part.after_ms = 0;
-        match self.master.try_write(&part.bytes) {
-            Ok(n) if n >= part.bytes.len() => {
-                state.typing.pop_front();
-                tracing::debug!(session = %self.id, bytes = n, "delivery part typed");
-                Typed::Whole
-            }
-            Ok(n) => {
-                part.bytes.drain(..n);
-                Typed::Part
-            }
-            Err(e) => {
-                tracing::warn!(session = %self.id, error = %e, "delivery not typed");
-                state.typing.clear();
-                Typed::Nothing
-            }
-        }
-    }
-
-    /// The typer stops, unless a part came in since it looked: then it goes on.
-    fn typed_out(self: &Arc<Self>) {
-        let more = {
-            let mut state = self.state.lock();
-            state.typer = false;
-            !state.typing.is_empty()
-        };
-        if more {
-            self.type_owed();
-        }
-    }
-
     /// Replace the checkpoint with one from connection `conn`, if it holds the master; the
     /// ring's bytes are inside it now, so they go.
     pub fn set_checkpoint(&self, conn: u64, checkpoint: Vec<u8>) {
@@ -623,20 +549,34 @@ impl Session {
     }
 
     /// The session is closed: the reader drops what the child still writes from now on,
-    /// whoever holds the master ([`Reader::Discard`]), and the child is hung up, then killed if
-    /// it has not exited within `grace`. Once the child is reaped nothing holds the session, so
-    /// its master, ring and checkpoint go.
+    /// whoever holds the master ([`Reader::Discard`]), and the child is hung up
+    /// ([`Self::hang_up`]), then killed if it has not exited within `grace` ([`PIPED_GRACE`]
+    /// for a piped one). Once the child is reaped nothing holds the session, so its master,
+    /// ring and checkpoint go.
     pub fn close(self: Arc<Self>, grace: Duration) {
         self.reader.send_replace(Reader::Discard);
         if self.exited.borrow().is_some() {
             return;
         }
-        let _hup = self.signal(Signal::HUP);
+        let grace = if self.piped { PIPED_GRACE } else { grace };
+        let _hup = self.hang_up();
         tokio::spawn(async move {
             if !self.exits_within(grace).await {
                 let _kill = self.signal(Signal::KILL);
             }
         });
+    }
+
+    /// Tell the child's process group to end: a hangup on a terminal, `SIGTERM` on a pipe,
+    /// which has no terminal to hang up.
+    pub fn hang_up(&self) -> Result<(), std::io::Error> {
+        self.signal(if self.piped { Signal::TERM } else { Signal::HUP })
+    }
+
+    /// A piped session (`PtydRequest::SpawnPiped`): no tty to size.
+    #[must_use]
+    pub const fn piped(&self) -> bool {
+        self.piped
     }
 
     /// The master fd.
@@ -665,8 +605,7 @@ impl Session {
             attached: state.attached_by.is_some(),
             orphan: self.orphan,
             orphan_mark: self.mark.filter(|_| self.orphan),
-            delivered: state.delivered.clone(),
-            typing: state.typing.iter().cloned().collect(),
+            piped: self.piped,
         }
     }
 
@@ -683,7 +622,7 @@ impl Session {
             exited: *self.exited.borrow(),
             backlog: state.ring.len(),
             checkpoint: state.checkpoint.len(),
-            delivered: state.delivered.clone(),
+            piped: self.piped,
         }
     }
 
@@ -717,14 +656,4 @@ fn exit_of(status: std::process::ExitStatus) -> Exit {
 /// Process `pid`'s start mark ([`slopty_pty::process::start_mark`]).
 fn mark_of(pid: u32) -> Option<u64> {
     i32::try_from(pid).ok().and_then(slopty_pty::process::start_mark)
-}
-
-/// How far [`Session::type_front`] got with the front part.
-enum Typed {
-    /// All of it went, and it left the queue.
-    Whole,
-    /// Some of it is still to go once the tty takes input.
-    Part,
-    /// The queue is empty, or a write failed and it was dropped.
-    Nothing,
 }

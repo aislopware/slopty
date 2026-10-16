@@ -4,11 +4,7 @@
 //! Every request an agent waits on shows in its worker's thread table, which this client keeps
 //! for every worker it links to; the worker holds a yes or no that nobody follows for the
 //! clients that keep the table, for a bounded time. An answer goes through the worker's thread
-//! hub as the thread's own tray sends it (`Intent::Answer`), once. Where the person has the
-//! agent's terminal in front of them (the focused tile while the app is frontmost, showing the
-//! TUI rather than the thread) the request goes back to the TUI at once (`Intent::Release`):
-//! the agent's own dialog shows where they look, and nothing waits on a button they will not
-//! press.
+//! hub as the thread's own tray sends it (`Intent::Answer`), once.
 //!
 //! A note's button can come before the request it answers is here: the app was launched by
 //! the tap, or its link to the worker is new and the worker's table has not come yet. The
@@ -21,9 +17,6 @@
 //! or out of time. One turned down, or never acknowledged within [`HOLD_VERDICT`], says
 //! [`ANSWER_NOT_SENT`], apart from a request that no longer waits, and may be answered again.
 //! Through the server, a lost link is tried again within the same time.
-//!
-//! The handing back follows the workspace's changes, never a frame: it sends messages, which
-//! nothing drawing does.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -32,7 +25,7 @@ use gpui::Context;
 use slopty_client::WorkerKey;
 use slopty_core::ClientId;
 use slopty_platform::notify::Pressed;
-use slopty_proto::orchestration::{ErrorCode, Outcome, TermRef, ThreadOf, ThreadView, Verb};
+use slopty_proto::orchestration::{ErrorCode, Outcome, ThreadOf, ThreadView, Verb};
 use slopty_proto::thread::attention::Rung;
 use slopty_proto::thread::wire::{Intent, RequestCard};
 use slopty_proto::thread::{AskId, Delivery, IntentId, ThreadId};
@@ -185,12 +178,13 @@ impl WorkspaceView {
         text: String,
         cx: &mut Context<Self>,
     ) {
-        let thread = match route.about {
-            About::Session(session) => self.session_thread(session),
-            About::Thread(thread) => Some(thread),
+        let About::Thread(thread) = route.about else {
+            Self::unanswered(route, REPLY_NOT_SENT, cx);
+            self.settle_taps(cx);
+            return;
         };
         let linked = self.workers.get(&route.worker).is_some_and(|w| w.link.is_some());
-        if let Some(thread) = thread.filter(|_| linked) {
+        if linked {
             tracing::info!(%thread, "a note's reply sent");
             let hub = self.thread_hub(route.worker, cx);
             // Sent now, as the thread's own composer sends (`ThreadMeta::delivery_now`).
@@ -205,12 +199,8 @@ impl WorkspaceView {
             self.settle_taps(cx);
             return;
         }
-        let of = match (thread, route.about) {
-            (Some(thread), _) | (None, About::Thread(thread)) => Some(ThreadOf::Thread(thread)),
-            (None, About::Session(session)) => super::keys::worker_id(route.worker)
-                .map(|worker| ThreadOf::Term(TermRef { worker, session })),
-        };
-        let (Some(caller), Some(of)) = (self.server.clone(), of) else {
+        let of = ThreadOf::Thread(thread);
+        let Some(caller) = self.server.clone() else {
             Self::unanswered(route, REPLY_NOT_SENT, cx);
             self.settle_taps(cx);
             return;
@@ -240,9 +230,8 @@ impl WorkspaceView {
         let now = cx.background_executor().now();
         let mut due: Option<Duration> = None;
         for tap in std::mem::take(&mut self.approvals.tapped) {
-            // A terminal's note answers the request of the thread its agent runs.
             let thread = match tap.route.about {
-                About::Session(session) => self.session_thread(session),
+                About::Session(_) => None,
                 About::Thread(thread) => Some(thread),
             };
             if let Some(thread) = thread
@@ -255,7 +244,7 @@ impl WorkspaceView {
             }
             // Its worker not linked here yet, while the server's ladder has its thread waiting
             // on the person: answered through the server, which holds a pushed phone's yes or no.
-            if let Some(thread) = self.on_servers_ladder(&tap.route, thread) {
+            if let Some(thread) = thread.filter(|t| self.on_servers_ladder(&tap.route, *t)) {
                 self.answer_through_server(tap, thread, cx);
                 continue;
             }
@@ -335,25 +324,18 @@ impl WorkspaceView {
         }
     }
 
-    /// The thread of `route`'s note, when its worker is not linked here and the server's ladder
-    /// has it waiting on the person, and a server is there to answer it through: `thread` when
-    /// the note named it, else the one the ladder seats in its terminal.
-    fn on_servers_ladder(&self, route: &Route, thread: Option<ThreadId>) -> Option<ThreadId> {
-        self.server.as_ref()?;
-        if self.workers.get(&route.worker).is_some_and(|w| w.link.is_some()) {
-            return None;
+    /// Whether `thread`, of `route`'s note, is to be answered through the server: its worker is
+    /// not linked here, the server's ladder has it waiting on the person, and a server is there
+    /// to answer it through.
+    fn on_servers_ladder(&self, route: &Route, thread: ThreadId) -> bool {
+        if self.server.is_none()
+            || self.workers.get(&route.worker).is_some_and(|w| w.link.is_some())
+        {
+            return false;
         }
-        self.thread_stands()
-            .find(|(id, stand)| {
-                let ours = match route.about {
-                    About::Thread(of) => of == *id,
-                    About::Session(session) => {
-                        thread == Some(*id) || stand.terminal == Some(session)
-                    }
-                };
-                ours && stand.worker == route.worker && stand.rung == Rung::NeedsYou
-            })
-            .map(|(id, _)| id)
+        self.thread_stands().any(|(id, stand)| {
+            id == thread && stand.worker == route.worker && stand.rung == Rung::NeedsYou
+        })
     }
 
     /// Answer `tap` on `thread` through the server: read the thread's open requests there for
@@ -385,7 +367,6 @@ impl WorkspaceView {
                 of: ThreadOf::Thread(thread),
                 view: ThreadView::Messages,
                 after: None,
-                hold: false,
             };
             let why = match call(read).await {
                 Outcome::Thread(read) => {

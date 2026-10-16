@@ -15,9 +15,8 @@ use gpui::{
     App, Context, InteractiveElement as _, IntoElement as _, ParentElement as _, SharedString,
     StatefulInteractiveElement as _, Styled as _, div, px,
 };
-use slopty_kit::colors::hsla;
-use slopty_kit::kit;
 use slopty_proto::thread::AgentId;
+use slopty_shell::live::chrome::{self, Tone};
 
 use super::ScreenView;
 
@@ -89,19 +88,18 @@ impl ScreenView {
     }
 
     /// At the foot of the picture, while an agent drives it: who drives, and the way to take or
-    /// give back control. It floats over the picture, lifted, as the zoom's readout does.
+    /// give back control, on the shell's floating pill. Taking control is the surface's one
+    /// action, so it is the solid button; handing back is the quiet one.
     pub(super) fn driver_pill(&self, cx: &Context<Self>) -> Option<gpui::AnyElement> {
         let driver = self.driver.as_ref()?;
-        let theme = &self.theme;
-        let s = theme.surfaces;
-        let (words, button) = if self.control {
-            (IN_CONTROL.to_owned(), HAND_BACK)
+        let theme = chrome::theme(cx).clone();
+        let (words, button, tone) = if self.control {
+            (IN_CONTROL.to_owned(), HAND_BACK, Tone::Ghost)
         } else {
-            (format!("{} is driving", driver.name), TAKE_CONTROL)
+            (format!("{} is driving", driver.name), TAKE_CONTROL, Tone::Primary)
         };
         let control = self.control;
-        let act = kit::button(theme, "screen-driver-act", button, kit::ButtonKind::Secondary)
-            .debug_selector(|| "screen-driver-act".to_owned())
+        let act = super::pill_button("screen-driver-act", button, tone, &theme.for_popup())
             .on_click(cx.listener(move |this, _ev, _w, cx| {
                 if control {
                     this.hand_back(cx);
@@ -109,30 +107,37 @@ impl ScreenView {
                     this.take_control(cx);
                 }
             }));
-        let pill = kit::elevate(kit::pill_frame(theme), theme)
-            .id("screen-driver")
-            .debug_selector(|| "screen-driver".to_owned())
-            .flex()
-            .items_center()
-            .gap(px(theme.spacing.sm))
-            .pl(px(theme.spacing.md))
-            .font_family(theme.typography.ui_family.clone())
-            .text_size(px(theme.typography.small()))
-            .text_color(hsla(s.text_secondary))
-            // A press on the pill is the pill's: it never reaches the picture under it.
-            .on_mouse_down(gpui::MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
-            .child(
-                div()
-                    .id("screen-driver-words")
-                    .role(Role::Status)
-                    .aria_label(SharedString::from(words.clone()))
-                    .child(SharedString::from(words)),
-            )
-            .child(act);
+        let pill = slopty_shell::live::floating_pill(
+            SharedString::from(format!("screen-driver-{}", self.stream.0)),
+            None,
+            &theme,
+            move |popup| {
+                let row = div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.0))
+                    // The button sits in the pill's end, as round as it.
+                    .mr(px(-10.0))
+                    .child(
+                        chrome::pill_words(SharedString::from(words.clone()), popup)
+                            .id("screen-driver-words")
+                            .role(Role::Status)
+                            .aria_label(SharedString::from(words)),
+                    )
+                    .child(act)
+                    .into_any_element();
+                (None, row)
+            },
+            |pill| {
+                pill.debug_selector(|| "screen-driver".to_owned())
+                    // A press on the pill is the pill's: it never reaches the picture under it.
+                    .on_mouse_down(gpui::MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
+            },
+        );
         Some(
             div()
                 .absolute()
-                .bottom(px(theme.spacing.md))
+                .bottom(px(12.0))
                 .left_0()
                 .right_0()
                 .flex()

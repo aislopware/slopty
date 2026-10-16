@@ -7,7 +7,8 @@
 //! [`repo`] answers which repository a session's working directory is in, which only the
 //! machine the shell runs on can know; [`file::read`] reads a file for a file tile,
 //! [`listing::folder`] a directory for a folder tile, [`fsop::apply`] makes, moves or trashes an
-//! entry for one, and [`search`] searches the files under a directory for text.
+//! entry for one, and [`search`] searches the files under a directory for text;
+//! [`repowatch`] says when a repository a client shows the status or diffs of changed.
 //! [`orchestrate::Orchestrator`] answers the verbs the server forwards (open, type, read, wait,
 //! files, [`ports`]); [`caps`] says what this worker can do, and [`facts`] what it is and has
 //! for a project's placement.
@@ -16,7 +17,6 @@ pub mod caps;
 pub mod changes;
 pub mod clip;
 pub mod compress;
-pub mod conversation;
 pub mod facts;
 pub mod file;
 pub mod find;
@@ -33,6 +33,7 @@ pub mod orchestrate;
 pub mod platform;
 pub mod ports;
 pub mod repo;
+pub mod repowatch;
 pub mod restore;
 pub mod screen;
 pub mod search;
@@ -45,9 +46,7 @@ pub mod xfer;
 pub use items::ItemStore;
 pub use manager::Worker;
 pub use screen::{DatagramSink, ScreenError, ScreenStream};
-pub use session::{
-    ClientSink, DragData, DragFetch, DragStream, Entry, SessionHandle, Taken, Words,
-};
+pub use session::{ClientSink, DragData, DragFetch, DragStream, SessionHandle, Taken};
 
 /// Worker errors.
 #[derive(Debug, thiserror::Error)]

@@ -808,7 +808,7 @@ impl Workspace {
         } else {
             self.set_server(Some(address), Some(link), cx);
         }
-        Self::show_notice(format!("Updated {name}"), cx);
+        slopty_shell::toast::success(cx, format!("Updated {name}"));
         self.server_update_ended(cx);
         cx.notify();
     }
@@ -838,7 +838,7 @@ impl Workspace {
         // "Update all" stops here: workers brought to a build their server does not run would
         // lose it.
         let held = std::mem::take(&mut self.workers_after_server);
-        Self::show_notice(update_failed_words(&said, held), cx);
+        Self::show_failure(update_failed_words(&said, held), cx);
     }
 }
 

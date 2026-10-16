@@ -4,7 +4,7 @@
 //! LANs, or the `[network] allow` ranges in `settings.toml`), and bridges control and session
 //! streams to [`slopty_worker::Worker`]. PTY masters live in `slopty-ptyd`, so this process can
 //! restart without killing shells. A local control socket lets `slopty` (the CLI) inspect state
-//! and relay agent hooks.
+//! and act on its behalf.
 
 #![forbid(unsafe_code)]
 
@@ -15,11 +15,11 @@ mod ctl;
 mod dnd;
 mod files;
 mod handoff;
-mod modsock;
 mod paths;
 mod ports;
 mod screens;
 mod server;
+mod stall;
 mod tailnet;
 mod threads;
 mod tunnel;
@@ -155,14 +155,12 @@ pub(crate) struct Daemon {
     /// Each link as its client says hello, with the name it says: an older link of the same
     /// client and name lets go of the input it holds down ([`conn`]).
     pub hellos: broadcast::Sender<(ClientId, String, slopty_worker::clip::Link)>,
-    /// What the agents' hooks and [`agents::watch`] report, once [`Self::agents`] took it: the
-    /// daemon's own, which feeds the observed threads and orchestration's waits. Clients and
-    /// the server read an agent from its thread's row instead.
+    /// What [`agents::watch`] reports, once [`Self::agents`] took it: the daemon's own, for
+    /// orchestration's waits. Clients and the server read an agent from its thread's row.
     pub heard: broadcast::Sender<slopty_agent::status::AgentEvent>,
     /// The item registry.
     pub items: ItemStore,
-    /// Coding agents observed in sessions: fed by `slopty hook` over the control socket, and
-    /// by [`agents::watch`] for the sessions no hook speaks for.
+    /// The coding agents people run by hand in terminals, as [`agents::watch`] sees them.
     pub agents: Arc<parking_lot::Mutex<AgentTable>>,
     /// Clipboard sync over the worker's pasteboard.
     pub clip: Arc<slopty_worker::clip::Clipboard<Board>>,
@@ -195,12 +193,6 @@ pub(crate) struct Daemon {
     pub home: String,
     /// Its `settings.toml`, which a client opens to edit this machine's settings.
     pub settings: String,
-    /// Who follows which session's thread, the permission prompts held for them, and what the
-    /// hooks said of each session.
-    pub follows: Arc<parking_lot::Mutex<threads::hold::Follows>>,
-    /// Slopty's Claude Code mod as written under the data dir, and the socket it posts to;
-    /// `None` when it could not be written, and agents run without it.
-    pub claude_mod: Option<slopty_agent::claude_mod::Installed>,
     /// The displays made for clients, on the main thread; `None` where none can be made, and
     /// every `OpenDisplay` then streams a physical display.
     pub displays: Displays,
@@ -216,18 +208,6 @@ pub(crate) struct Daemon {
     /// Where a session's presence file is made (`true`) or removed, in order
     /// ([`handoff::presence`]).
     pub presence: tokio::sync::mpsc::UnboundedSender<(SessionId, bool)>,
-    /// What the hooks said of an agent that the server takes and no client needs: a batch
-    /// of news handed over ([`ctl`]), for the server link.
-    pub reports: broadcast::Sender<slopty_proto::server::AgentReport>,
-    /// Where the reports the server sends an agent wait for its hooks to hand them over
-    /// ([`slopty_agent::reports`]), beside the control socket.
-    pub deliveries: PathBuf,
-    /// Where each agent's inbox is noted, which takes its reports at once
-    /// ([`slopty_agent::reports::Inbox`]).
-    pub inboxes: PathBuf,
-    /// Held across each change to a session's kept batch: keeping one, handing it over, and
-    /// dropping it once handed, so a batch kept meanwhile is never dropped in its place.
-    pub reports_turn: Arc<parking_lot::Mutex<()>>,
     /// The key every session's token is made under, kept in the data directory: the token
     /// proves which session a program speaks from, to this daemon and to the server.
     pub session_key: slopty_agent::vouch::SessionKey,
@@ -274,12 +254,6 @@ impl Daemon {
         if watched {
             let _sent = self.presence.send((session, false));
         }
-        let released = {
-            let mut follows = self.follows.lock();
-            follows.board.forget(session);
-            follows.holds.forget(session)
-        };
-        threads::hold::release(self, released);
         let _sent = self.events.send(slopty_proto::WorkerMsg::SessionClosed { session, reason });
         for delta in self.items.remove_session(session, by) {
             let _sent = self.events.send(slopty_proto::WorkerMsg::Items(delta));
@@ -385,12 +359,11 @@ fn join_server(
         daemon.worker.clone(),
         daemon.items.clone(),
         (daemon.events.clone(), daemon.heard.clone()),
-        (Arc::new(threads::hold::Orchestrated(daemon.clone())), daemon.cloner.clone()),
+        daemon.cloner.clone(),
     );
     if let Some(threads) = &daemon.threads {
         orchestrator.set_seated_threads(Arc::new(threads.clone()));
-        orchestrator
-            .set_thread_reads(Arc::new(threads::Reads::new(threads.clone(), daemon.clone())));
+        orchestrator.set_thread_reads(Arc::new(threads::Reads::new(threads.clone())));
     }
     let settings = slopty_settings::path_in(data_dir);
     orchestrator.set_settings_file(settings.clone());
@@ -408,21 +381,17 @@ fn join_server(
 }
 
 /// What the sessions started from now on find in their environment: this daemon's control
-/// socket, where the `slopty hook` relay inside them reaches it; the server it registers with,
-/// so `slopty mcp` and the CLI in any of them, an agent's tools included, reach the fleet with
-/// no flag; and the Claude Code mod's, so a `claude` typed in one finds it.
+/// socket, where Slopty's CLI inside them reaches it; and the server it registers with, so
+/// `slopty mcp` and the CLI in any of them, an agent's tools included, reach the fleet with no
+/// flag.
 fn session_env(
     ctl_path: &std::path::Path,
     server: Option<&slopty_net::HostAddr>,
-    claude_mod: Option<&slopty_agent::claude_mod::Installed>,
 ) -> Vec<(String, String)> {
     let mut env =
         vec![("SLOPTY_WORKER_SOCKET".to_owned(), ctl_path.to_string_lossy().into_owned())];
     if let Some(addr) = server {
         env.push((slopty_proto::ctl::SERVER_ENV.to_owned(), addr.to_string()));
-    }
-    if let Some(installed) = claude_mod {
-        env.extend(installed.session_env());
     }
     env
 }
@@ -509,7 +478,7 @@ async fn follow_settings(
         }
         if reregister {
             drop(joined.take());
-            let env = session_env(&ctl_path, server.as_ref(), daemon.claude_mod.as_ref());
+            let env = session_env(&ctl_path, server.as_ref());
             daemon.worker.set_session_env(env);
             if let Some(addr) = server {
                 tracing::info!(server = %addr, "[network] server changed: registering");
@@ -548,12 +517,10 @@ fn watch_caps(
     tokio::spawn(async move {
         let dirs = slopty_worker::facts::agent_dirs().await;
         let own = own_acp.borrow_and_update().clone();
-        let managed =
-            slopty_agent::managed::ManagedSettings::files(&slopty_platform::dirs::home()).to_vec();
-        let found = slopty_worker::caps::installed_agents(&dirs, &own, &managed).await;
+        let found = slopty_worker::caps::installed_agents(&dirs, &own).await;
         let (installed, agents) = tokio::sync::watch::channel(found);
         tokio::spawn(slopty_worker::caps::watch(caps, load, agents, host));
-        slopty_worker::caps::follow_agents(dirs, own_acp, managed, installed).await;
+        slopty_worker::caps::follow_agents(dirs, own_acp, installed).await;
     });
     tokio::spawn(async move {
         while changed.changed().await.is_ok() {
@@ -886,36 +853,17 @@ async fn run(
     if let Some(displays) = &displays {
         hold_displays(displays, &ctl_path, &data_dir);
     }
-    let mod_path = modsock::beside(&ctl_path);
-    let claude_mod = match slopty_agent::claude_mod::install(&data_dir) {
-        Ok(dir) => Some(slopty_agent::claude_mod::Installed { dir, socket: mod_path.clone() }),
-        Err(e) => {
-            tracing::warn!(error = %e, "the Claude Code mod could not be written; agents run without it");
-            None
-        }
-    };
     let presence_dir = data_dir.join("presence");
     let (presence, presence_changes) = tokio::sync::mpsc::unbounded_channel();
-    let (reports, _none) = broadcast::channel(EVENT_BUFFER);
-    // The server sends again what it sent and was not handed over.
-    let deliveries = slopty_agent::reports::dir(&ctl_path);
-    let inboxes = slopty_agent::reports::inboxes(&ctl_path);
-    if let Err(e) = slopty_agent::reports::clear(&deliveries) {
-        tracing::warn!(error = %e, "reports of an earlier run left in place");
-    }
     let session_key = slopty_agent::vouch::SessionKey::load_or_make(&data_dir)
         .with_context(|| format!("the session key in {}", data_dir.display()))?;
     worker.set_session_key(session_key);
     let transfers = Arc::new(slopty_worker::xfer::Transfers::new(
         args.drop_dir.clone().unwrap_or_else(slopty_worker::xfer::Transfers::default_drop_root),
     ));
-    let (threads, observing) = threads::open(
-        &data_dir.join("threads"),
-        &data_dir.join("snapshots"),
-        worker.clone(),
-        Arc::clone(&agents),
-    )
-    .unzip();
+    let (threads, adapters) =
+        threads::open(&data_dir.join("threads"), &data_dir.join("snapshots"), worker.clone())
+            .unzip();
     watch_caps(caps_tx, load_tx, events.clone(), acp, threads.as_ref().map(|t| t.host().clone()));
     let daemon = Daemon {
         worker,
@@ -944,14 +892,8 @@ async fn run(
         load,
         home: slopty_platform::dirs::home().to_str().map(str::to_owned).unwrap_or_default(),
         settings: slopty_settings::path_in(&data_dir).to_string_lossy().into_owned(),
-        follows: Arc::default(),
         handoffs: Arc::default(),
         presence,
-        reports,
-        claude_mod,
-        deliveries,
-        inboxes,
-        reports_turn: Arc::default(),
         session_key,
         server_link: Arc::new(tokio::sync::watch::Sender::new(None)),
         cloner: slopty_worker::repo::cloning::Cloner::default(),
@@ -973,10 +915,10 @@ async fn run(
     daemon.worker.share_clipboard(&for_sessions);
     tokio::spawn(clip::watch(daemon.clone()));
     tokio::spawn(ports::watch(daemon.clone(), port_hints));
-    // Agents the hooks never report: the foreground process, the title, the transcript.
+    // Agents people run by hand in terminals: the foreground process and the title.
     tokio::spawn(agents::watch(daemon.clone()));
-    if let Some(asks) = observing {
-        threads::start(&daemon, asks);
+    if let Some(adapters) = adapters {
+        threads::start(&daemon, adapters);
     }
 
     // A terminal whose program exits stays, its last screen and its status kept, until a client
@@ -1028,20 +970,10 @@ async fn run(
     });
 
     let server = server_address(args.server.as_deref(), &data_dir);
-    if daemon.claude_mod.is_some() {
-        match modsock::bind(&mod_path).await {
-            Ok(listener) => {
-                tokio::spawn(modsock::serve(daemon.clone(), listener));
-            }
-            Err(e) => tracing::error!(error = %e, "mod socket"),
-        }
-    }
-    let env = session_env(&ctl_path, server.as_ref(), daemon.claude_mod.as_ref());
+    let env = session_env(&ctl_path, server.as_ref());
     daemon.worker.set_session_env(env);
     daemon.worker.set_presence_dir(presence_dir.clone());
     tokio::spawn(handoff::presence(presence_dir.clone(), presence_changes));
-    // The control socket first: an agent resumed below says it started through its hooks at
-    // once, and a hook that finds no socket is lost, so the agent was never heard to start.
     let ctl_listener = ctl::bind(&ctl_path).await.context("control socket")?;
     tokio::spawn(ctl::serve(daemon.clone(), ctl_listener));
     // Sessions whose shells were lost to a reboot or to ptyd ending come back under their old

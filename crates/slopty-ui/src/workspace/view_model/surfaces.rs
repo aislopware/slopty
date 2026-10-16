@@ -11,11 +11,19 @@
 //! reply comes back through [`WorkspaceView::surface_heard`]. A git op, a change to the files and
 //! a search carry a number of the surfaces' own; a read, a listing and a find are told apart by
 //! their path, and the workspace's own tiles hear them too.
+//!
+//! A watch asks nothing while nothing changes. The worker follows what the watches show on the
+//! file system's events: the folders of a tree and of the documents read
+//! (`ClientMsg::WatchFolders`, answered by a `WorkerMsg::Folder` unasked) and the repositories of
+//! a status or a diff (`ClientMsg::WatchRepos`, answered by `WorkerMsg::RepoMoved`), each set
+//! whole and sent again when it changes or the link comes back
+//! ([`WorkspaceView::surfaces_relinked`]), when what the link missed is asked again once.
 
 mod actions;
 mod adding;
 mod catalog;
 mod changes;
+mod clone;
 mod composer;
 mod devices;
 
@@ -29,7 +37,10 @@ mod projects;
 mod settings;
 mod sidebar;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::pin::Pin;
+use std::rc::Rc;
+use std::task::Poll;
 use std::time::Duration;
 
 use futures::FutureExt as _;
@@ -41,7 +52,7 @@ use slopty_proto::git::{GitOp, GitOutcome};
 use slopty_proto::search::{SearchEvent, SearchQuery, SearchRequest};
 use slopty_proto::{ClientMsg, RequestId, WorkerMsg};
 use slopty_view_rpc::{RpcError, RpcReply, methods};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Notify, mpsc, oneshot};
 
 use super::param;
 use crate::workspace::WorkspaceView;
@@ -104,6 +115,15 @@ pub(super) struct Surfaces {
     read_back: composer::ReadBack,
     /// The sidebar's pins and sections.
     sidebar: sidebar::Sidebar,
+    /// The last number given a watch.
+    last_watch: u64,
+    /// The repositories the status and diff watches follow, by worker and folder as named,
+    /// with each waiting watch's number and bell.
+    repos: BTreeMap<(WorkerKey, String), Vec<Bell>>,
+    /// The folders whose repositories each worker was last told to follow.
+    repos_sent: HashMap<WorkerKey, Vec<String>>,
+    /// The clones on their way ([`clone`]).
+    clones: clone::Clones,
 }
 
 impl std::fmt::Debug for Surfaces {
@@ -124,6 +144,63 @@ impl Surfaces {
             if self.last < FIRST_REQUEST { FIRST_REQUEST } else { self.last.wrapping_add(1) };
         self.last
     }
+
+    /// A fresh number for a watch.
+    const fn next_watch(&mut self) -> u64 {
+        self.last_watch = self.last_watch.wrapping_add(1);
+        self.last_watch
+    }
+
+    /// The link to `key` dropped and came back: what was asked on the old one is answered
+    /// never, so its askers hear so now, not after [`ANSWER_WITHIN`].
+    fn forget_asked(&mut self, key: WorkerKey) {
+        self.git.retain(|(k, _), _| *k != key);
+        self.fs.retain(|(k, _), _| *k != key);
+        self.searches.retain(|(k, _), _| *k != key);
+        self.reads.retain(|(k, _), _| *k != key);
+        self.writes.retain(|(k, _), _| *k != key);
+        self.listings.retain(|(k, _), _| *k != key);
+        self.finds.retain(|(k, ..), _| *k != key);
+        self.folder_finds.retain(|(k, _), _| *k != key);
+        self.clones.forget(key);
+    }
+}
+
+/// A watch waiting on a repository: its number, and the bell rung when the repository moved.
+type Bell = (u64, Rc<Notify>);
+
+/// A watch's stream to the shell, which says when the shell lets it go: its other end, from
+/// [`watched`], then resolves.
+struct Watched<S> {
+    inner: S,
+    _gone: futures::channel::oneshot::Sender<()>,
+}
+
+impl<S: futures::Stream + Unpin> futures::Stream for Watched<S> {
+    type Item = S::Item;
+
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
+        Pin::new(&mut self.inner).poll_next(cx)
+    }
+}
+
+/// A watch's channel to the shell: where its frames go, the reply that carries them, and what
+/// resolves once the shell lets the stream go.
+///
+/// The last is fused on its own: a bare `oneshot::Receiver` says it is terminated as soon as
+/// its sender is dropped, so a `select!` would skip it and never hear the shell let go.
+fn watched() -> (
+    futures::channel::mpsc::UnboundedSender<serde_json::Value>,
+    RpcReply,
+    futures::future::Fuse<futures::channel::oneshot::Receiver<()>>,
+) {
+    let (tx, rx) = futures::channel::mpsc::unbounded::<serde_json::Value>();
+    let (gone_tx, gone) = futures::channel::oneshot::channel();
+    let stream = Watched { inner: rx, _gone: gone_tx };
+    (tx, RpcReply::Stream(Box::pin(stream)), gone.fuse())
 }
 
 /// A call's answer as a value.
@@ -131,9 +208,17 @@ fn value<T: serde::Serialize>(answer: &T) -> Result<RpcReply, RpcError> {
     RpcReply::value(answer)
 }
 
+/// What a call says when its worker went quiet or away before it answered.
+const UNANSWERED: &str = "the machine did not answer";
+
 /// The worker went quiet or away before it answered.
 fn unanswered() -> RpcError {
-    RpcError::Failed("the machine did not answer".to_owned())
+    RpcError::Failed(UNANSWERED.to_owned())
+}
+
+/// Whether `error` is the worker not answering, which says nothing of what it would have.
+fn is_unanswered(error: &RpcError) -> bool {
+    matches!(error, RpcError::Failed(said) if said == UNANSWERED)
 }
 
 /// Wait for a worker's answer on `rx`, at most [`ANSWER_WITHIN`].
@@ -211,6 +296,7 @@ impl WorkspaceView {
             methods::ANSWER_ADD_DEVICE => Task::ready(self.answer_add_device(&params)),
             methods::LOOK_ON_TAILNET => self.look_on_tailnet(cx),
             methods::DEVICE_ACTION => Task::ready(self.device_action(&params, cx)),
+            methods::CLONE_REPO => self.clone_repo(&params, cx),
             _ => return None,
         };
         Some(answer)
@@ -219,6 +305,9 @@ impl WorkspaceView {
     /// A worker's message, heard before the workspace's own handling: an answer to a surface's
     /// request is taken. Whether it was the surfaces' alone, so nothing else is to hear it.
     pub fn surface_heard(&mut self, key: WorkerKey, msg: &WorkerMsg) -> bool {
+        if self.clone_heard(key, msg) {
+            return true;
+        }
         let surfaces = &mut self.view_model.surfaces;
         match msg {
             WorkerMsg::GitDone { request, outcome } => {
@@ -255,10 +344,20 @@ impl WorkspaceView {
                 false
             }
             WorkerMsg::Folder { path, listing } => {
-                for tx in surfaces.listings.remove(&(key, path.clone())).unwrap_or_default() {
+                let asked = surfaces.listings.remove(&(key, path.clone())).unwrap_or_default();
+                if asked.is_empty() {
+                    self.folder_moved(key, path, listing);
+                }
+                for tx in asked {
                     let _gone = tx.send(listing.clone());
                 }
                 false
+            }
+            WorkerMsg::RepoMoved { repo } => {
+                for (_, bell) in surfaces.repos.get(&(key, repo.clone())).into_iter().flatten() {
+                    bell.notify_one();
+                }
+                true
             }
             WorkerMsg::FoundFolders { query, home, folders, indexing } => {
                 for tx in surfaces.folder_finds.remove(&(key, query.clone())).unwrap_or_default() {
@@ -280,6 +379,75 @@ impl WorkspaceView {
     /// Send `msg` to `key`; whether it went.
     fn surface_send(&self, key: WorkerKey, msg: ClientMsg) -> bool {
         self.workers.get(&key).is_some_and(|worker| worker.send(msg))
+    }
+
+    /// Have `bell` rung when any of `repos` moves, in place of what the watch `id` followed.
+    fn follow_repos(&mut self, id: u64, bell: &Rc<Notify>, repos: &[(WorkerKey, String)]) {
+        let mut keys = self.unfollow_repos_of(id);
+        for (key, repo) in repos {
+            let watches = self.view_model.surfaces.repos.entry((*key, repo.clone())).or_default();
+            watches.push((id, Rc::clone(bell)));
+            keys.push(*key);
+        }
+        keys.sort_unstable();
+        keys.dedup();
+        for key in keys {
+            self.send_repos(key);
+        }
+    }
+
+    /// The watch `id` follows no repository any more.
+    fn unfollow_repos(&mut self, id: u64) {
+        for key in self.unfollow_repos_of(id) {
+            self.send_repos(key);
+        }
+    }
+
+    /// Take the watch `id` off every repository; the workers whose repositories it followed.
+    fn unfollow_repos_of(&mut self, id: u64) -> Vec<WorkerKey> {
+        let mut keys = Vec::new();
+        self.view_model.surfaces.repos.retain(|(key, _), watches| {
+            let before = watches.len();
+            watches.retain(|(watch, _)| *watch != id);
+            if watches.len() != before {
+                keys.push(*key);
+            }
+            !watches.is_empty()
+        });
+        keys
+    }
+
+    /// Tell `key` the folders whose repositories the watches follow there, when that moved.
+    fn send_repos(&mut self, key: WorkerKey) {
+        let surfaces = &self.view_model.surfaces;
+        let paths: Vec<String> = surfaces
+            .repos
+            .keys()
+            .filter(|(k, _)| *k == key)
+            .map(|(_, repo)| repo.clone())
+            .collect();
+        // A link told nothing yet follows nothing.
+        if surfaces.repos_sent.get(&key).map_or(paths.is_empty(), |sent| *sent == paths) {
+            return;
+        }
+        if self.surface_send(key, ClientMsg::WatchRepos { paths: paths.clone() }) {
+            self.view_model.surfaces.repos_sent.insert(key, paths);
+        }
+    }
+
+    /// The link to `key` came up again: the watches' sets go to the new link, and each watch
+    /// looks once at what the old one may have missed.
+    pub(in crate::workspace) fn surfaces_relinked(&mut self, key: WorkerKey) {
+        let surfaces = &mut self.view_model.surfaces;
+        surfaces.forget_asked(key);
+        surfaces.repos_sent.remove(&key);
+        for ((..), watches) in surfaces.repos.iter().filter(|((k, _), _)| *k == key) {
+            for (_, bell) in watches {
+                bell.notify_one();
+            }
+        }
+        self.send_repos(key);
+        self.trees_relinked(key);
     }
 
     /// Ask `op` of the repository holding `repo` on `key`.

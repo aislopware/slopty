@@ -57,6 +57,32 @@ use crate::state::{AppState, EngineHandle};
 use crate::theme::Theme;
 use slopty_syntax::LanguageId as Lang;
 
+// slopty: find in the diff, the whitespace filter, the changed files' tree and any turn's diff.
+mod aids;
+mod review;
+pub use review::{DiffMatch, TreeRow, TurnChoice, diff_tree, find_matches, turn_choices};
+use review::scoped_params;
+
+// slopty: the diff's find, and a transcript's "Open diff" landing on a turn. The shell binds the
+// keys, and on `ShowTurnDiff` reveals a diff tab, which takes the turn [`show_turn`] asked for.
+gpui::actions!(
+    changes,
+    [FindInDiff, FindNextInDiff, FindPreviousInDiff, ShowTurnDiff]
+);
+
+// slopty: the turn a transcript asked to see the diff of, until a diff tab takes it.
+#[derive(Default)]
+struct RequestedTurn(Option<String>);
+
+impl gpui::Global for RequestedTurn {}
+
+/// Open the diff at the turn of entry `turn` (the person's message that began it, or any entry of
+/// its answer): a diff tab takes it, and the shell is asked to show one ([`ShowTurnDiff`]).
+pub(crate) fn show_turn(turn: &str, window: &mut Window, cx: &mut App) {
+    cx.set_global(RequestedTurn(Some(turn.to_owned())));
+    window.dispatch_action(Box::new(ShowTurnDiff), cx);
+}
+
 // ---------------------------------------------------------------------------
 // Layout numbers (analytic — they drive the fold tween)
 // ---------------------------------------------------------------------------
@@ -875,6 +901,9 @@ pub enum DiffScope {
     Branch,
     /// Changes since the current chat's last turn started.
     LatestTurn,
+    // slopty: any turn's, picked beside the scope menu (the turn is the pane's `turn`).
+    /// The changes one earlier turn made.
+    Turn,
     // slopty: no History surface (ruled out)
 }
 
@@ -888,6 +917,7 @@ impl DiffScope {
             Self::WorkingTree => "Working tree",
             Self::Branch => "Branch changes",
             Self::LatestTurn => "Latest turn",
+            Self::Turn => "Turn", // slopty: any turn's.
         }
     }
 
@@ -896,7 +926,7 @@ impl DiffScope {
         match self {
             Self::WorkingTree => "workingTree",
             Self::Branch => "branch",
-            Self::LatestTurn => "turn",
+            Self::LatestTurn | Self::Turn => "turn", // slopty: any turn's.
         }
     }
 }
@@ -911,6 +941,7 @@ pub fn scope_label(scope: DiffScope, count: usize, base: Option<&str>) -> String
             None => format!("{count} Changed {files}"),
         },
         DiffScope::LatestTurn => format!("{count} Changed {files} this turn"),
+        DiffScope::Turn => format!("{count} Changed {files} in this turn"), // slopty: any turn's.
     }
 }
 
@@ -944,6 +975,7 @@ pub fn clean_message(scope: DiffScope, base: Option<&str>) -> String {
             None => "No branch changes".to_string(),
         },
         DiffScope::LatestTurn => "No changes this turn".to_string(),
+        DiffScope::Turn => "No changes in this turn".to_string(), // slopty: any turn's.
     }
 }
 
@@ -1615,6 +1647,14 @@ struct CommentDraft {
     _events: Subscription,
 }
 
+// slopty: the find bar over the diff: its field, and the card holding the keyboard while the
+// field has it (↑↓ and ⏎ bubble to it).
+struct DiffFind {
+    input: Entity<ComposerInput>,
+    focus: FocusHandle,
+    _events: Subscription,
+}
+
 /// The Changes pane entity. Lazy: no RPC until [`Changes::ensure_watch`] runs
 /// (the shell calls it when the pane first opens).
 pub struct Changes {
@@ -1669,6 +1709,25 @@ pub struct Changes {
     draft: Option<CommentDraft>,
     hover: Option<HoverRow>,
     comment_key: u64,
+    // slopty: any turn's diff, find in the diff, whitespace and the changed files' tree.
+    /// The turn [`DiffScope::Turn`] shows, by the id of the person's message that began it.
+    turn: Option<String>,
+    turn_menu: Popup<()>,
+    ignore_whitespace: bool,
+    show_tree: bool,
+    find: Option<DiffFind>,
+    found: Vec<DiffMatch>,
+    found_active: Option<usize>,
+    /// The parse key and query `found` was made for.
+    found_for: Option<(String, String)>,
+    /// The pane's own key context (`Changes`), where the find's actions land.
+    focus: FocusHandle,
+    /// The keyboard goes back to the pane on the next frame (the find was put away).
+    refocus: bool,
+    tree_scroll: gpui::ScrollHandle,
+    /// The file last picked in the tree.
+    tree_selected: Option<usize>,
+    _requested: Subscription,
     // slopty: no History surface (ruled out)
     _observe: Subscription,
 }
@@ -1709,7 +1768,11 @@ impl Changes {
         let observe = cx.observe(&state, |this: &mut Self, _, cx| this.sync(cx));
         let settings = crate::settings::current(cx);
         let mode = DiffMode::from_split(settings.diff_split);
-        Self {
+        // slopty: a turn a transcript asks for while the tab is up, and the review aids' last
+        // choices.
+        let requested =
+            cx.observe_global::<RequestedTurn>(|this: &mut Self, cx| this.take_requested_turn(cx));
+        let mut this = Self {
             state,
             mode,
             wrap_lines: settings.diff_wrap,
@@ -1744,8 +1807,24 @@ impl Changes {
             draft: None,
             hover: None,
             comment_key: 0,
+            turn: None,
+            turn_menu: Popup::default(),
+            // slopty: the review aids as the person last chose them, kept across launches.
+            ignore_whitespace: settings.diff_ignore_whitespace,
+            show_tree: settings.diff_show_tree,
+            find: None,
+            found: Vec::new(),
+            found_active: None,
+            found_for: None,
+            focus: cx.focus_handle(),
+            refocus: false,
+            tree_scroll: gpui::ScrollHandle::new(),
+            tree_selected: None,
+            _requested: requested,
             _observe: observe,
-        }
+        };
+        this.take_requested_turn(cx); // slopty: a tab opened for a turn starts on it.
+        this
     }
 
     // slopty: no History surface (ruled out)
@@ -1873,7 +1952,7 @@ impl Changes {
     fn active_diff(&self, cx: &App) -> Option<CheckoutDiff> {
         match self.scope {
             DiffScope::WorkingTree => self.resolved(cx),
-            DiffScope::Branch | DiffScope::LatestTurn => self.scoped.clone(), // slopty: no History surface (ruled out)
+            DiffScope::Branch | DiffScope::LatestTurn | DiffScope::Turn => self.scoped.clone(), // slopty: no History surface (ruled out)
         }
     }
 
@@ -1886,15 +1965,17 @@ impl Changes {
             DiffScope::WorkingTree => "wt".to_string(),
             DiffScope::Branch => format!("br:{}", self.base_ref.as_deref().unwrap_or("")),
             DiffScope::LatestTurn => "turn".to_string(),
+            DiffScope::Turn => format!("turn:{}", self.turn.as_deref().unwrap_or("")), // slopty: any turn's.
         }
     }
 
     fn parse_key(&self, diff: &CheckoutDiff) -> String {
         format!(
-            "{}:{}:{}",
+            "{}:{}:{}{}",
             diff.checkout_id,
             diff.checksum,
-            self.scope_key()
+            self.scope_key(),
+            if self.ignore_whitespace { ":w" } else { "" } // slopty: whitespace ignored.
         )
     }
 
@@ -1990,13 +2071,18 @@ impl Changes {
             _ => None,
         };
         let target = self.desired_target(cx);
+        // slopty: the picked turn, and whether whitespace counts.
+        let turn = (self.scope == DiffScope::Turn).then(|| self.turn.clone()).flatten();
+        let ignore_whitespace = self.ignore_whitespace;
         let context = format!(
-            "{}|{}|{}|{}|{}",
+            "{}|{}|{}|{}|{}|{}|{}",
             target.as_deref().unwrap_or("local"),
             chat_id,
             cwd,
             self.scope.mode(),
-            base.as_deref().unwrap_or("") // slopty: no commit scope
+            base.as_deref().unwrap_or(""), // slopty: no commit scope
+            turn.as_deref().unwrap_or(""),
+            ignore_whitespace
         );
         let watch_sum = self.resolved(cx).map(|d| d.checksum).unwrap_or_default();
         let key = format!("{context}|{watch_sum}");
@@ -2026,6 +2112,8 @@ impl Changes {
             if let Some(base) = base {
                 params.insert("baseRef".into(), serde_json::Value::String(base));
             }
+            // slopty: which turn, and whitespace ignored (`git diff -w`).
+            scoped_params(&mut params, turn, ignore_whitespace);
             if let Some(target) = target {
                 params.insert("targetDeviceId".into(), serde_json::Value::String(target));
             }
@@ -2126,11 +2214,28 @@ impl Changes {
         let additions = diff.additions;
         let deletions = diff.deletions;
         let file_count = diff.files.len();
+        let ignore_whitespace = self.ignore_whitespace; // slopty: whitespace ignored.
         self.parse_task = Some(cx.spawn(async move |this, cx| {
             let files = cx
                 .background_executor()
-                .spawn(async move { parse_patch(&patch) })
+                .spawn(async move {
+                    let mut files = parse_patch(&patch);
+                    if ignore_whitespace {
+                        review::ignore_whitespace(&mut files);
+                    }
+                    files
+                })
                 .await;
+            // slopty: what is left once whitespace is ignored is counted again.
+            let (additions, deletions, file_count) = if ignore_whitespace {
+                (
+                    files.iter().map(|f| f.additions).sum(),
+                    files.iter().map(|f| f.deletions).sum(),
+                    files.len(),
+                )
+            } else {
+                (additions, deletions, file_count)
+            };
             this.update(cx, |changes, cx| {
                 // Late results for a superseded diff are re-checked by key.
                 let current = changes.active_diff(cx).map(|d| changes.parse_key(&d));
@@ -2175,6 +2280,7 @@ impl Changes {
                     horizontal,
                     files: Arc::new(files),
                 });
+                changes.refresh_find(cx); // slopty: the find follows the content.
                 cx.notify();
             })
             .ok();
@@ -2770,6 +2876,15 @@ impl Changes {
     /// Handle Escape before focused descendants such as a terminal receive it.
     /// A popup in its exit animation remains a blocker until it unmounts.
     pub(crate) fn handle_escape(&mut self, cx: &mut Context<Self>) -> bool {
+        // slopty: the turn menu and the find bar close on Escape too.
+        if self.turn_menu.is_open() {
+            self.close_turn_menu(cx);
+            return true;
+        }
+        if self.find.is_some() {
+            self.close_find(cx);
+            return true;
+        }
         if self.ref_menu.is_open() {
             self.close_ref_menu(cx);
             return true;
@@ -2778,7 +2893,9 @@ impl Changes {
             self.close_scope_menu(cx);
             return true;
         }
-        self.scope_menu.get().is_some() || self.ref_menu.get().is_some()
+        self.scope_menu.get().is_some()
+            || self.ref_menu.get().is_some()
+            || self.turn_menu.get().is_some() // slopty: the turn menu.
     }
 
     fn open_ref_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -3058,6 +3175,7 @@ impl Changes {
                 line,
                 flat: _,
             } => {
+                let line_ix = line; // slopty: the find marks lines by index.
                 let Some(file_diff) = files.get(file as usize) else {
                     return gpui::Empty.into_any_element();
                 };
@@ -3073,6 +3191,7 @@ impl Changes {
                     .map(|highlights| highlights.spans(line))
                     .unwrap_or(&[]);
                 let gutter_px = gutter_width(file_diff);
+                let marks = self.find_marks(file, hunk, line_ix, &theme); // slopty: find.
                 let row = diff_line_row(
                     line,
                     spans,
@@ -3080,6 +3199,7 @@ impl Changes {
                     gutter_px,
                     code_width,
                     Some(code_scroll.slot("unified")),
+                    &marks,
                 );
                 let Some((side, line_no)) = line_anchor(line) else {
                     return row;
@@ -3125,6 +3245,13 @@ impl Changes {
                 // Same slot on both sides = a context row: one line, drawn in
                 // both columns.
                 let mirrored = left.is_some() && left == right;
+                // slopty: the find's marks on each column's line.
+                let left_marks = left
+                    .map(|slot| self.find_marks(file, hunk, slot, &theme))
+                    .unwrap_or_default();
+                let right_marks = right
+                    .map(|slot| self.find_marks(file, hunk, slot, &theme))
+                    .unwrap_or_default();
                 let left = left.and_then(|slot| lines.get(slot as usize));
                 let right = right.and_then(|slot| lines.get(slot as usize));
                 // `\ No newline at end of file` is not code on one side — it
@@ -3153,6 +3280,9 @@ impl Changes {
                         let runs = shared_runs
                             .clone()
                             .unwrap_or_else(|| line_runs(line, highlight.as_deref(), &theme));
+                        // slopty: the find's marks.
+                        let runs =
+                            review::mark_runs(runs, if old { &left_marks } else { &right_marks });
                         let number = if old { line.old_no } else { line.new_no };
                         split_line_cell(
                             line,
@@ -3531,6 +3661,8 @@ impl Changes {
     ) -> gpui::Stateful<gpui::Div> {
         div()
             .id(id)
+            .role(gpui::Role::Button) // slopty: read aloud and found by name.
+            .aria_label(label)
             .size(px(crate::surface_chrome::CONTROL_SIZE))
             .flex_none()
             .flex()
@@ -3682,6 +3814,7 @@ impl Changes {
                 .flex()
                 .items_center()
                 .gap(px(crate::surface_chrome::CONTROL_GAP))
+                .children(self.render_aid_controls(&theme, cx)) // slopty: find, tree, whitespace.
                 .child(self.split_toggle(&theme, cx))
                 .child(self.wrap_toggle(&theme, cx))
                 .child(
@@ -3707,6 +3840,7 @@ impl Changes {
             .gap(px(crate::surface_chrome::CONTROL_GAP))
             .child(trigger)
             .children(self.render_ref_selector(&theme, cx))
+            .children(self.render_turn_selector(&theme, cx)) // slopty: any turn's diff.
             .child(div().flex_1()) // slopty: no History surface (ruled out)
             .child(trailing)
             .into_any_element()
@@ -4118,6 +4252,7 @@ fn diff_line_row(
     gutter_px: f32,
     code_width: DiffCodeWidth,
     scroll: Option<DiffCodeScroll>,
+    marks: &[(std::ops::Range<usize>, gpui::Hsla)], // slopty: the find's marks.
 ) -> AnyElement {
     if line.kind == LineKind::Meta {
         return meta_line_row(
@@ -4179,6 +4314,7 @@ fn diff_line_row(
         theme.text.opacity(0.92),
         theme,
     );
+    let runs = review::mark_runs(runs, marks); // slopty: the find's marks.
     let content_width = match code_width {
         DiffCodeWidth::Clipped => None,
         DiffCodeWidth::Scrollable(metrics) => Some(metrics.unified_content_width(gutter_px)),
@@ -4510,6 +4646,7 @@ pub(crate) fn render_file_body_with_syntax(
                 gutter_px,
                 DiffCodeWidth::Clipped,
                 None,
+                &[], // slopty: the find marks only the live rows.
             ));
         }
     }
@@ -4572,6 +4709,7 @@ fn render_file_body_upto(
                             scroll
                                 .as_ref()
                                 .map(|scroll| scroll.slot(format_args!("{hunk_ix}-{line_ix}"))),
+                            &[], // slopty: the find marks only the live rows.
                         ));
                         y += diff_line_height(theme);
                     }
@@ -4638,8 +4776,12 @@ fn render_file_body_upto(
 }
 
 impl Render for Changes {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // slopty: no History surface (ruled out)
+        // slopty: the find put away hands the keyboard back to the pane.
+        if std::mem::take(&mut self.refocus) {
+            window.focus(&self.focus, cx);
+        }
         let theme = Theme::of(cx).clone();
         let active = self.active_diff(cx);
         let scope = self.scope;
@@ -4729,8 +4871,25 @@ impl Render for Changes {
                     .child(SharedString::from(clean_message(scope, base.as_deref())))
                     .into_any_element(),
                 DiffPhase::List => {
-                    if self.parsed.is_some() {
+                    // slopty: a diff whose every change was whitespace, read with whitespace
+                    // ignored, says so.
+                    let only_space = self.ignore_whitespace
+                        && self.parsed.as_ref().is_some_and(|parsed| parsed.files.is_empty());
+                    if only_space {
+                        div()
+                            .flex_1()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_size(px(12.0))
+                            .text_color(theme.text_faint)
+                            .child(SharedString::from("Only whitespace changed"))
+                            .into_any_element()
+                    } else if self.parsed.is_some() {
                         let sticky_header = self.render_sticky_file_header(&theme, cx);
+                        // slopty: the changed files' tree beside the diff, and the find over it.
+                        let tree = self.render_tree(&theme, cx);
+                        let find = self.render_find(&theme, cx);
                         div()
                             .flex_1()
                             .min_h_0()
@@ -4739,16 +4898,28 @@ impl Render for Changes {
                             .children(self.render_header_strip(&theme))
                             .child(
                                 div()
-                                    .relative()
                                     .flex_1()
                                     .min_h_0()
-                                    .overflow_hidden()
+                                    .flex()
+                                    .flex_row()
+                                    .children(tree)
                                     .child(
-                                        list(self.list.clone(), cx.processor(Self::render_row))
-                                            .size_full()
-                                            .with_sizing_behavior(gpui::ListSizingBehavior::Auto),
-                                    )
-                                    .when_some(sticky_header, |el, header| el.child(header)),
+                                        div()
+                                            .relative()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .h_full()
+                                            .overflow_hidden()
+                                            .child(
+                                                list(self.list.clone(), cx.processor(Self::render_row))
+                                                    .size_full()
+                                                    .with_sizing_behavior(
+                                                        gpui::ListSizingBehavior::Auto,
+                                                    ),
+                                            )
+                                            .when_some(sticky_header, |el, header| el.child(header))
+                                            .children(find),
+                                    ),
                             )
                             .into_any_element()
                     } else {
@@ -4772,6 +4943,20 @@ impl Render for Changes {
         };
 
         div()
+            // slopty: the pane's key context, where the find's actions land.
+            .key_context("Changes")
+            .track_focus(&self.focus)
+            .on_action(cx.listener(|this, _: &FindInDiff, window, cx| this.open_find(window, cx)))
+            .on_action(cx.listener(|this, _: &FindNextInDiff, _, cx| this.step_find(1, cx)))
+            .on_action(cx.listener(|this, _: &FindPreviousInDiff, _, cx| this.step_find(-1, cx)))
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    if !this.focus.contains_focused(window, cx) {
+                        window.focus(&this.focus, cx);
+                    }
+                }),
+            )
             .size_full()
             .flex()
             .flex_col()
@@ -4800,6 +4985,38 @@ impl Render for Changes {
 mod tests {
     use super::*;
     use chrono::Utc;
+
+    // slopty: the review aids' choices outlive the tab and the launch.
+    #[gpui::test]
+    fn the_review_aids_keep_their_last_choice(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        });
+        let state = cx.new(|_| AppState::new());
+        let first = cx.add_window({
+            let state = state.clone();
+            move |_, cx| Changes::new(state, cx)
+        });
+        first
+            .update(cx, |changes, _, cx| {
+                assert!(!changes.ignore_whitespace && !changes.show_tree);
+                changes.toggle_ignore_whitespace(cx);
+                changes.toggle_tree(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let second = cx.add_window(move |_, cx| Changes::new(state, cx));
+        second
+            .update(cx, |changes, _, _| {
+                assert!(changes.ignore_whitespace && changes.show_tree, "a new tab takes them");
+            })
+            .unwrap();
+        let saved = crate::settings::UiSettings::load(dir.path());
+        assert!(saved.diff_ignore_whitespace && saved.diff_show_tree, "and the next launch");
+    }
 
     #[gpui::test]
     fn editing_staged_diff_comments_preserves_identity_and_cancellation(
@@ -5721,6 +5938,7 @@ rename to new_name.rs
             space_id: None,
             last_seen_at: None,
             room_gen: None,
+            draft: None, // slopty: new field.
         }
     }
 
@@ -5847,7 +6065,16 @@ rename to new_name.rs
         assert_eq!(DiffScope::WorkingTree.mode(), "workingTree");
         assert_eq!(DiffScope::Branch.mode(), "branch");
         assert_eq!(DiffScope::LatestTurn.mode(), "turn");
+        assert_eq!(DiffScope::Turn.mode(), "turn", "slopty: any turn's, named by `turn`");
         assert_eq!(DiffScope::default(), DiffScope::WorkingTree);
+    }
+
+    // slopty: an earlier turn reads as one.
+    #[test]
+    fn an_earlier_turn_has_its_own_words() {
+        assert_eq!(DiffScope::Turn.label(), "Turn");
+        assert_eq!(scope_label(DiffScope::Turn, 1, None), "1 Changed file in this turn");
+        assert_eq!(clean_message(DiffScope::Turn, None), "No changes in this turn");
     }
 
     #[test]

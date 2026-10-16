@@ -237,7 +237,7 @@ mod tests {
                 Incoming::Answer { outcome: Ok(result), .. } if result.get("thread").is_some() => {
                     let thread: p::Thread =
                         serde_json::from_value(result["thread"].clone()).unwrap();
-                    let (begun, actions) = Shared::new(&thread, None);
+                    let (begun, actions) = Shared::new(&thread);
                     state = Some(ThreadState::new(begun.meta().clone()));
                     shared = Some(begun);
                     actions
@@ -417,7 +417,7 @@ mod tests {
                 Incoming::Answer { outcome: Ok(result), .. } if result.get("thread").is_some() => {
                     let thread: p::Thread =
                         serde_json::from_value(result["thread"].clone()).unwrap();
-                    let (begun, actions) = Shared::new(&thread, None);
+                    let (begun, actions) = Shared::new(&thread);
                     state = Some(ThreadState::new(begun.meta().clone()));
                     shared = Some(begun);
                     actions
@@ -479,7 +479,7 @@ mod tests {
         let started = lines.iter().find(|l| l.msg["result"].get("thread").is_some()).unwrap();
         let thread: p::Thread =
             serde_json::from_value(started.msg["result"]["thread"].clone()).unwrap();
-        let (mut shared, _) = Shared::new(&thread, None);
+        let (mut shared, _) = Shared::new(&thread);
         let asked = lines
             .iter()
             .find(|l| l.msg.get("method").is_some_and(|m| m == "item/tool/requestUserInput"))
@@ -504,7 +504,7 @@ mod tests {
         let started = lines.iter().find(|l| l.msg["result"].get("thread").is_some()).unwrap();
         let thread: p::Thread =
             serde_json::from_value(started.msg["result"]["thread"].clone()).unwrap();
-        let (shared, actions) = Shared::new(&thread, None);
+        let (shared, actions) = Shared::new(&thread);
         let mut state = ThreadState::new(shared.meta().clone());
         for action in &actions {
             state.apply(action);
@@ -934,7 +934,7 @@ mod tests {
         let mut thread = started.msg["result"]["thread"].clone();
         thread["reasoningEffort"] = json!("high");
         let thread: p::Thread = serde_json::from_value(thread).unwrap();
-        let (mut shared, actions) = Shared::new(&thread, None);
+        let (mut shared, actions) = Shared::new(&thread);
         let mut state = ThreadState::new(shared.meta().clone());
         for action in &actions {
             state.apply(action);
@@ -991,7 +991,7 @@ mod tests {
         thread["reasoningEffort"] = json!("high");
         thread["model"] = json!("mock-model");
         let thread: p::Thread = serde_json::from_value(thread).unwrap();
-        let (mut shared, actions) = Shared::new(&thread, None);
+        let (mut shared, actions) = Shared::new(&thread);
         let mut state = ThreadState::new(shared.meta().clone());
         for action in actions.iter().chain(&shared.models(&catalog("mock-model"))) {
             state.apply(action);
@@ -1094,7 +1094,7 @@ mod tests {
         let mut thread = started.msg["result"]["thread"].clone();
         thread["forkedFromId"] = json!("019a-parent");
         let thread: p::Thread = serde_json::from_value(thread).unwrap();
-        let (forked, _) = Shared::new(&thread, None);
+        let (forked, _) = Shared::new(&thread);
         assert_eq!(
             forked.meta().forked_from,
             Some(Fork { thread: shared::thread_of("019a-parent"), turn: None })

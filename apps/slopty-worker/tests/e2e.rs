@@ -19,7 +19,6 @@ mod tests {
     use slopty_proto::items::{Item, ItemKind, ItemOp, ItemSync};
     use slopty_proto::screen::{CaptureTarget, Quality, ScreenEvent, ScreenRequest, SourceState};
     use slopty_proto::terminal::{OpenSession, TermEvent, TermRequest, TermSize};
-    use slopty_proto::thread::wire::{TableFrame, ThreadRequest, ThreadRow};
     use slopty_proto::transfer::{
         ClipEntry, ClipFormat, ClipMsg, ClipType, Offer, Peer, Purpose, Rep, TunnelHost,
         TunnelOpen, TunnelRefusal,
@@ -240,17 +239,6 @@ mod tests {
             Uni::Session { session, rx } => (session, rx),
             Uni::Bulk { header, .. } => panic!("a bulk stream, not a session: {header:?}"),
             Uni::Thread { .. } => panic!("a thread stream"),
-        }
-    }
-
-    /// The next thread stream the worker opens: its frames.
-    async fn thread_stream(
-        conn: &slopty_net::Connection,
-    ) -> FramedRecv<slopty_proto::thread::wire::ThreadFrame> {
-        match tokio::time::timeout(STEP, streams::accept_uni(conn)).await.unwrap().unwrap() {
-            Uni::Thread { rx, .. } => rx,
-            Uni::Session { session, .. } => panic!("a session stream, not a thread: {session}"),
-            Uni::Bulk { header, .. } => panic!("a bulk stream, not a thread: {header:?}"),
         }
     }
 
@@ -1271,148 +1259,6 @@ mod tests {
             "the program the lost shell ran is not started again"
         );
         worker.tx.send(&ClientMsg::Term { session, req: TermRequest::Close }).await.unwrap();
-    }
-
-    /// A Claude Code conversation running in a shell comes back resumed when ptyd ends: the
-    /// next worker types `claude --resume <id>` at the new shell's first prompt, with the model
-    /// it was started with and the permission mode its hooks last reported, in its directory.
-    /// Nothing else of its command line is kept. `claude` is the test's own script; the hook
-    /// goes to the worker's control socket as the relay would send it.
-    #[tokio::test]
-    async fn a_claude_code_conversation_comes_back_resumed() {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        use tokio::io::AsyncWriteExt as _;
-
-        // An argument may hold newlines (an appended prompt carries Slopty's pointer), so the
-        // stub ends each word with US and each run with RS.
-        const WORD: char = '\u{1f}';
-        const RUN: char = '\u{1e}';
-
-        let dir = tempfile::tempdir().unwrap();
-        let place = dir.path().join("project");
-        let bin = dir.path().join("bin");
-        std::fs::create_dir_all(&place).unwrap();
-        std::fs::create_dir_all(&bin).unwrap();
-        let ran = dir.path().join("claude-ran");
-        let claude = bin.join("claude");
-        std::fs::write(
-            &claude,
-            "#!/bin/sh\nprintf '%s\\037' \"$PWD\" \"$@\" >> \"$CLAUDE_RAN\"\nprintf '\\036' >> \"$CLAUDE_RAN\"\n\
-             echo fake-claude-up\nsleep 120\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let conversation = "4f1c7a52-9d0e-4b8a-a1a3-0c5f3e0b8d11";
-        let transcript = dir.path().join(format!("{conversation}.jsonl"));
-        std::fs::write(&transcript, b"{}\n").unwrap();
-
-        let (mut guard, addr) = daemons(dir.path()).await;
-        let (endpoint, mut worker) = dial(addr).await;
-        guard.1 = Some(endpoint);
-        let path = format!("{}:/usr/bin:/bin", bin.display());
-        let open = OpenSession {
-            size: TermSize { cols: 200, rows: 20, ..TermSize::default() },
-            cwd: Some(place.to_string_lossy().into_owned()),
-            command: vec!["/bin/bash".to_owned()],
-            env: vec![
-                ("PATH".to_owned(), path),
-                ("HOME".to_owned(), dir.path().to_string_lossy().into_owned()),
-                ("CLAUDE_RAN".to_owned(), ran.to_string_lossy().into_owned()),
-                ("BASH_SILENCE_DEPRECATION_WARNING".to_owned(), "1".to_owned()),
-            ],
-            title: None,
-            attach: true,
-        };
-        worker.tx.send(&ClientMsg::OpenSession { request: 1, spec: open }).await.unwrap();
-        let session = next_msg(&mut worker, |m| match m {
-            WorkerMsg::SessionOpened { summary, .. } => Some(summary.id),
-            _ => None,
-        })
-        .await;
-        let (_opened, mut events) = session_stream(&worker).await;
-        let started = "claude --model opus-x --append-system-prompt hush-hush 'fix it'\r";
-        worker
-            .tx
-            .send(&ClientMsg::Term { session, req: TermRequest::Raw(started.as_bytes().to_vec()) })
-            .await
-            .unwrap();
-        wait_for_text(&mut events, "fake-claude-up").await;
-
-        let hook = serde_json::json!({
-            "session_id": conversation,
-            "hook_event_name": "SessionStart",
-            "source": "startup",
-            "cwd": place,
-            "transcript_path": transcript,
-            "permission_mode": "plan",
-        });
-        let request = slopty_proto::ctl::CtlRequest::Hook { session, payload: hook.to_string() };
-        let mut ctl =
-            tokio::net::UnixStream::connect(dir.path().join("worker.sock")).await.unwrap();
-        let mut line = serde_json::to_vec(&request).unwrap();
-        line.push(b'\n');
-        ctl.write_all(&line).await.unwrap();
-        let mut reply = String::new();
-        BufReader::new(ctl).read_line(&mut reply).await.unwrap();
-        let reply: slopty_proto::ctl::CtlReply = serde_json::from_str(&reply).unwrap();
-        assert!(matches!(reply, slopty_proto::ctl::CtlReply::Ok { .. }), "{reply:?}");
-
-        // The agent tick puts the conversation and the flags of the process it sees into the
-        // session's recipe.
-        let recipe = dir.path().join("data").join("sessions").join(format!("{session}.json"));
-        tokio::time::timeout(Duration::from_secs(20), async {
-            while !std::fs::read_to_string(&recipe)
-                .is_ok_and(|r| r.contains(conversation) && r.contains("opus-x"))
-            {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        })
-        .await
-        .expect("the conversation is kept");
-        assert!(!std::fs::read_to_string(&recipe).unwrap().contains("hush-hush"));
-
-        end_both(&mut guard).await;
-        drop(events);
-        drop(worker);
-        let ptyd = spawn_ptyd(dir.path()).await;
-        let (next, _addr) = spawn_worker(dir.path()).await;
-        guard.0 = vec![ptyd, next];
-
-        let runs = tokio::time::timeout(STEP, async {
-            loop {
-                let text = std::fs::read_to_string(&ran).unwrap_or_default();
-                if text.matches(RUN).count() >= 2 {
-                    return text;
-                }
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        })
-        .await
-        .expect("the agent is resumed");
-        // The shell's `claude` adds Slopty's mod, the relay's settings and Slopty's tools; the
-        // rest is the resume.
-        let mut words = runs.split(RUN).nth(1).unwrap().split(WORD).filter(|w| !w.is_empty());
-        let mut resumed = Vec::new();
-        while let Some(word) = words.next() {
-            if word == "--settings" {
-                let _relay = words.next();
-            } else if !["--plugin-dir=", "--mcp-config=", "--append-system-prompt="]
-                .iter()
-                .any(|added| word.starts_with(added))
-            {
-                resumed.push(word);
-            }
-        }
-        let Some((cwd, args)) = resumed.split_first() else { panic!("no command in {runs:?}") };
-        assert_eq!(
-            std::path::Path::new(cwd).canonicalize().unwrap(),
-            place.canonicalize().unwrap()
-        );
-        assert_eq!(
-            args,
-            ["--resume", conversation, "--model", "opus-x", "--permission-mode", "plan"]
-        );
     }
 
     /// Streams the first display through the worker into the real client stack (`WorkerLink` +
@@ -3692,25 +3538,6 @@ mod tests {
         }
     }
 
-    /// The first control message `pick` takes within a step, skipping the others.
-    /// The row of the thread in terminal `session` that `pred` holds of, once the worker's
-    /// table, asked for now, has one.
-    async fn row_at(
-        worker: &mut WorkerConn,
-        session: SessionId,
-        pred: impl Fn(&ThreadRow) -> bool,
-    ) -> ThreadRow {
-        let table = ClientMsg::Thread(ThreadRequest::Table { have: None });
-        worker.tx.send(&table).await.unwrap();
-        next_msg(worker, |m| match m {
-            WorkerMsg::Threads(
-                TableFrame::Snapshot { rows, .. } | TableFrame::Delta { rows, .. },
-            ) => rows.into_iter().find(|r| r.terminal == Some(session) && pred(r)),
-            _ => None,
-        })
-        .await
-    }
-
     async fn next_msg<T>(
         worker: &mut WorkerConn,
         mut pick: impl FnMut(WorkerMsg) -> Option<T>,
@@ -4973,189 +4800,238 @@ mod tests {
         assert!(quiet.is_err(), "no listing once nothing is followed");
     }
 
-    /// One request on the worker's control socket, and its reply.
-    async fn ctl(
-        sock: &std::path::Path,
-        request: &slopty_proto::ctl::CtlRequest,
-    ) -> slopty_proto::ctl::CtlReply {
-        use tokio::io::AsyncWriteExt as _;
-        let mut stream = tokio::net::UnixStream::connect(sock).await.unwrap();
-        let mut line = serde_json::to_vec(request).unwrap();
-        line.push(b'\n');
-        stream.write_all(&line).await.unwrap();
-        let mut reply = String::new();
-        BufReader::new(stream).read_line(&mut reply).await.unwrap();
-        serde_json::from_str(reply.trim()).unwrap()
+    /// `git -C repo args…` as a person's terminal runs it, with no config of the machine's.
+    fn git(repo: &std::path::Path, args: &[&str]) {
+        let ran = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env("GIT_AUTHOR_NAME", "Person")
+            .env("GIT_AUTHOR_EMAIL", "person@example.com")
+            .env("GIT_COMMITTER_NAME", "Person")
+            .env("GIT_COMMITTER_EMAIL", "person@example.com")
+            .output()
+            .unwrap();
+        assert!(ran.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&ran.stderr));
     }
 
-    /// A managed launcher in `claude`'s place (the stand-in `slopty-stub-managed-claude`,
-    /// which runs the stand-in `claude` as its child, as such a launcher does). The worker asks
-    /// it nothing but `--managed-help` and takes its version from its newest client; a tile on
-    /// `claude` is wired through it, and a hook from the test is heard in it. A worker that
-    /// starts again under it finds the agent's status in Claude Code's registry, which names
-    /// the launcher's child, not the terminal's foreground process.
+    /// A repository at `repo` with one commit: a crate three folders deep.
+    fn repository(repo: &std::path::Path) {
+        std::fs::create_dir_all(repo.join("crates/deep/src")).unwrap();
+        std::fs::write(repo.join("crates/deep/src/lib.rs"), "pub fn one() {}\n").unwrap();
+        git(repo, &["init", "-q", "-b", "main"]);
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "-q", "-m", "first"]);
+    }
+
+    /// The `RepoMoved` words a client hears of one folder.
+    struct Words {
+        link: slopty_client::WorkerLink,
+        events: tokio::sync::mpsc::Receiver<LinkEvent>,
+        repo: String,
+    }
+
+    impl Words {
+        fn new(mut link: slopty_client::WorkerLink, repo: &std::path::Path) -> Self {
+            let events = link.events().unwrap();
+            Self { link, events, repo: repo.to_string_lossy().into_owned() }
+        }
+
+        /// Have the worker follow the folder's repository, or nothing.
+        async fn watch(&self, on: bool) {
+            let paths = if on { vec![self.repo.clone()] } else { Vec::new() };
+            self.link.send(ClientMsg::WatchRepos { paths }).await.unwrap();
+        }
+
+        /// How long the next word took, if it came `within`.
+        async fn next(&mut self, within: Duration) -> Option<Duration> {
+            let at = std::time::Instant::now();
+            let until = tokio::time::Instant::now().checked_add(within).unwrap();
+            loop {
+                let event = tokio::time::timeout_at(until, self.events.recv()).await.ok()??;
+                if matches!(&event, LinkEvent::Control(WorkerMsg::RepoMoved { repo }) if *repo == self.repo)
+                {
+                    return Some(at.elapsed());
+                }
+            }
+        }
+
+        /// The words heard until none came for `quiet`.
+        async fn until_quiet(&mut self, quiet: Duration) -> u32 {
+            let mut heard = 0_u32;
+            while self.next(quiet).await.is_some() {
+                heard = heard.saturating_add(1);
+            }
+            heard
+        }
+
+        /// The time from `change` to its word, which must come within half a second; the
+        /// words after it, of the same burst, are let through.
+        async fn timed(&mut self, what: &str, change: impl FnOnce()) -> Duration {
+            let at = std::time::Instant::now();
+            change();
+            let heard = self.next(Duration::from_millis(500)).await;
+            assert!(heard.is_some(), "{what}: no word within half a second");
+            let took = at.elapsed();
+            println!("MEASURE e2e {what} → RepoMoved at the client: {took:?}");
+            let after = self.until_quiet(slopty_worker::repowatch::HOLD.saturating_mul(3)).await;
+            assert!(after <= 2, "{what}: one burst, {after} more words");
+            took
+        }
+    }
+
+    /// A repository whose status and diffs a client shows is followed by the worker, which says
+    /// `RepoMoved` when something git reports on changed, so the client asks git only then:
+    /// a write in a folder no client listed, an agent's edit, a stage, a commit and a branch
+    /// switched in a terminal each reach the client within half a second, and an idle
+    /// repository sends nothing. How it fails: a thousand files written are a word or two, a
+    /// git directory replaced and a repository deleted are said and what is made in their place
+    /// is followed, and a link that dropped follows nothing until the next one names the
+    /// repository again. Prints change → word at the client on loopback (MEASUREMENTS.md,
+    /// "Watches wait on the worker's events").
     #[tokio::test]
-    async fn a_managed_claude_is_followed_through_its_launcher() {
-        use slopty_proto::ctl::{CtlReply, CtlRequest};
-        use slopty_proto::thread::{AgentId, Cap, Phase};
+    async fn a_watched_repository_says_when_it_moves_and_nothing_while_idle() {
+        use slopty_worker::repowatch::HOLD;
+        /// Only a guard against a watch that never comes up: fseventsd starts one stream at a
+        /// time for the whole system.
+        const UP: Duration = Duration::from_secs(90);
 
         let dir = tempfile::tempdir().unwrap();
-        let dir = std::fs::canonicalize(dir.path()).unwrap();
-        let home = home_of(&dir);
-        let programs = dir.join("programs");
-        std::fs::create_dir_all(&programs).unwrap();
-        std::os::unix::fs::symlink(bin("slopty-stub-managed-claude"), programs.join("claude"))
-            .unwrap();
-        let client = home.join(".local/share/claude-managed/artifacts/2.1.289/darwin-arm64");
-        std::fs::create_dir_all(&client).unwrap();
-        std::os::unix::fs::symlink(bin("slopty-stub-claude"), client.join("claude")).unwrap();
-        let log = dir.join("launcher.log");
-        let env = [
-            ("PATH", slopty_testkit::env::path_with(&programs)),
-            ("STUB_MANAGED_LOG", log.clone().into_os_string()),
-        ];
-        let ptyd = spawn_ptyd_with(&dir, &env).await;
-        let (first, addr) = spawn_worker_with(&dir, &env).await;
-        let mut guard = Guard(vec![ptyd, first], None);
-        let (endpoint, mut worker) = dial(addr).await;
+        let (mut guard, addr) = daemons(dir.path()).await;
+        let (endpoint, worker) = dial(addr).await;
         guard.1 = Some(endpoint);
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let repo = root.join("repo");
+        repository(&repo);
+        let mut words = Words::new(slopty_client::WorkerLink::start(worker), &repo);
+        words.watch(true).await;
+        words.next(UP).await.expect("the watch comes up and says so");
+        assert_eq!(words.until_quiet(Duration::from_secs(2)).await, 0, "idle: no word");
 
-        let claude_code = |agents: &[slopty_proto::server::InstalledAgent]| {
-            agents
-                .iter()
-                .find(|a| a.agent == AgentId::named(AgentId::CLAUDE_CODE))
-                .map(|a| a.version.clone())
-        };
-        let version = next_caps_version(&mut worker, &claude_code).await;
-        assert_eq!(version, "2.1.289", "its newest client's, read off the disk");
+        let mut took = Vec::new();
+        for n in 0..10 {
+            took.push(
+                words
+                    .timed("a new file in a folder nobody listed", || {
+                        let path = repo.join(format!("crates/deep/src/new{n}.rs"));
+                        std::fs::write(path, "pub fn two() {}\n").unwrap();
+                    })
+                    .await,
+            );
+        }
+        took.push(
+            words
+                .timed("an agent's edit in place", || {
+                    std::fs::write(repo.join("crates/deep/src/lib.rs"), "pub fn three() {}\n")
+                        .unwrap();
+                })
+                .await,
+        );
+        took.push(words.timed("git add in a terminal", || git(&repo, &["add", "-A"])).await);
+        took.push(
+            words
+                .timed("git commit in a terminal", || git(&repo, &["commit", "-q", "-m", "two"]))
+                .await,
+        );
+        took.push(
+            words
+                .timed("git switch in a terminal", || git(&repo, &["switch", "-q", "-c", "side"]))
+                .await,
+        );
+        took.sort_unstable();
+        let (median, most) = (took[took.len() / 2], took[took.len().saturating_sub(1)]);
+        println!(
+            "MEASURE e2e change → RepoMoved, {} changes: p50 {median:?}, max {most:?}",
+            took.len()
+        );
+        assert_eq!(words.until_quiet(Duration::from_secs(2)).await, 0, "idle again: no word");
 
-        let record = dir.join("record.json");
-        let open = OpenSession {
-            size: TermSize { cols: 120, rows: 30, ..TermSize::default() },
-            cwd: Some(dir.to_string_lossy().into_owned()),
-            command: vec!["claude".to_owned()],
-            env: vec![("STUB_RECORD".to_owned(), record.to_string_lossy().into_owned())],
-            title: None,
-            attach: false,
-        };
-        worker.tx.send(&ClientMsg::OpenSession { request: 1, spec: open }).await.unwrap();
-        let session = next_msg(&mut worker, |m| match m {
-            WorkerMsg::SessionOpened { summary, .. } => Some(summary.id),
-            _ => None,
-        })
-        .await;
-        let seen = until_json(&record).await;
-        let argv: Vec<&str> =
-            seen["argv"].as_array().unwrap().iter().filter_map(|a| a.as_str()).collect();
-        assert!(argv.contains(&"--settings"), "wired through the launcher: {argv:?}");
-        let launched = tokio::time::timeout(STEP, async {
-            loop {
-                let found = launcher_log(&log)
-                    .into_iter()
-                    .find_map(|line| Some((line["pid"].as_i64()?, line["client"].as_i64()?)));
-                if let Some(found) = found {
-                    return found;
-                }
-                tokio::time::sleep(Duration::from_millis(25)).await;
+        // A thousand files written at once, as a build or a checkout does: a word or two.
+        let at = std::time::Instant::now();
+        for n in 0..1_000 {
+            std::fs::write(repo.join(format!("crates/deep/src/many{n}.rs")), "//\n").unwrap();
+        }
+        let wrote = at.elapsed();
+        let first = words.next(wrote.saturating_add(Duration::from_millis(500))).await;
+        assert!(first.is_some(), "the burst is said");
+        let all = words.until_quiet(HOLD.saturating_mul(3)).await.saturating_add(1);
+        let most = u32::try_from(wrote.as_millis().checked_div(HOLD.as_millis()).unwrap())
+            .unwrap()
+            .saturating_add(2);
+        println!("MEASURE e2e 1000 files written in {wrote:?}: {all} RepoMoved");
+        assert!(all <= most, "{all} words for a burst of {wrote:?}");
+
+        // The git directory replaced: said at once, and the new one followed.
+        words
+            .timed("the git directory replaced", || {
+                std::fs::remove_dir_all(repo.join(".git")).unwrap();
+                git(&repo, &["init", "-q", "-b", "main"]);
+            })
+            .await;
+        // Its watch starts again behind fseventsd's other starts: a stage in the new git
+        // directory is said once it is up.
+        let at = std::time::Instant::now();
+        let mut n = 0_u32;
+        loop {
+            n = n.saturating_add(1);
+            std::fs::write(repo.join(format!("crates/deep/src/staged{n}.rs")), "//\n").unwrap();
+            git(&repo, &["add", "."]);
+            if words.next(Duration::from_millis(500)).await.is_some() {
+                break;
             }
-        })
-        .await
-        .expect("the launcher started its client");
-        let (_launcher, child) = launched;
+            assert!(at.elapsed() < UP, "the new git directory is never followed");
+        }
+        let _burst = words.until_quiet(HOLD.saturating_mul(3)).await;
+        words
+            .timed("a commit in the new git directory", || {
+                git(&repo, &["commit", "-q", "-m", "anew"]);
+            })
+            .await;
 
-        let sock = dir.join("worker.sock");
-        let conversation = "6d3f1c2a-8b7e-4f10-9c2d-5e4a3b2c1d0e";
-        let transcript = dir.join(format!("{conversation}.jsonl"));
-        std::fs::write(&transcript, b"").unwrap();
-        let start = serde_json::json!({
-            "hook_event_name": "SessionStart", "session_id": conversation, "source": "startup",
-            "transcript_path": transcript, "cwd": dir,
-        });
-        let hook = CtlRequest::Hook { session, payload: start.to_string() };
-        assert!(matches!(ctl(&sock, &hook).await, CtlReply::Ok { .. }));
-        // The hook gave the tile an agent's thread, one a hook speaks for.
-        let approvals = Cap::named(Cap::APPROVALS);
-        let heard = row_at(&mut worker, session, |r| r.caps.contains(&approvals)).await;
-        assert_eq!(heard.agent, AgentId::named(AgentId::CLAUDE_CODE));
+        // The repository deleted: said at once; one made in its place is said and followed.
+        words.timed("the repository deleted", || std::fs::remove_dir_all(&repo).unwrap()).await;
+        let made = root.join("made");
+        repository(&made);
+        std::fs::rename(&made, &repo).unwrap();
+        // The word is its watch's as it comes up.
+        words.next(UP).await.expect("the repository made in its place is said");
+        let _up = words.until_quiet(HOLD.saturating_mul(3)).await;
+        words
+            .timed("a write in the repository made again", || {
+                std::fs::write(repo.join("crates/deep/src/lib.rs"), "pub fn four() {}\n").unwrap();
+            })
+            .await;
 
-        // Claude Code's registry names the client, the launcher's child, as waiting on a
-        // permission prompt: what a restarted worker can only learn from it.
-        let sessions = home.join(".claude/sessions");
-        std::fs::create_dir_all(&sessions).unwrap();
-        let entry = serde_json::json!({
-            "pid": child, "sessionId": conversation, "cwd": dir, "kind": "interactive",
-            "status": "waiting", "waitingFor": "permission prompt", "version": "2.1.289",
-        });
-        std::fs::write(sessions.join(format!("{child}.json")), entry.to_string()).unwrap();
-        std::fs::write(sessions.join(format!("{child}.key")), "never read").unwrap();
+        // Let go: nothing more is said.
+        words.watch(false).await;
+        tokio::time::sleep(HOLD).await;
+        std::fs::write(repo.join("crates/deep/src/unwatched.rs"), "x").unwrap();
+        assert_eq!(words.until_quiet(HOLD.saturating_mul(3)).await, 0, "let go: no word");
 
-        let mut old = guard.0.pop().unwrap();
-        old.start_kill().unwrap();
-        old.wait().await.unwrap();
-        drop(worker);
-        let (next, addr) = spawn_worker_with(&dir, &env).await;
-        guard.0.push(next);
-        let (endpoint, mut worker) = dial(addr).await;
+        // The link drops: the worker forgets what it followed, and the next link names it again.
+        words.watch(true).await;
+        words.next(UP).await.expect("followed again");
+        let _up = words.until_quiet(HOLD.saturating_mul(3)).await;
+        drop(words);
+        let (endpoint, worker) = dial(addr).await;
         guard.1 = Some(endpoint);
-        // The restarted worker recovered the status the registry gives the child.
-        row_at(&mut worker, session, |r| {
-            r.status.phase == Phase::NeedsYou
-                && r.status.wait.as_ref().is_some_and(|w| w.kind == "permission")
-        })
-        .await;
-
-        for line in launcher_log(&log) {
-            let argv: Vec<&str> =
-                line["argv"].as_array().unwrap().iter().filter_map(|a| a.as_str()).collect();
-            let asked = argv == ["--managed-help"];
-            assert!(asked || !line["client"].is_null(), "only asked if it is a launcher: {line}");
-            assert!(!argv.contains(&"--version") && argv.first() != Some(&"agents"), "{line}");
-        }
-        let asked = launcher_log(&log)
-            .iter()
-            .filter(|l| l["argv"] == serde_json::json!(["--managed-help"]))
-            .count();
-        assert!((1..=2).contains(&asked), "once by each worker, at most: {asked}");
-    }
-
-    /// The version of Claude Code the worker's capabilities list, once they list it.
-    async fn next_caps_version(
-        worker: &mut WorkerConn,
-        claude_code: &impl Fn(&[slopty_proto::server::InstalledAgent]) -> Option<String>,
-    ) -> String {
-        if let Some(version) = claude_code(&worker.ack.caps.agents) {
-            return version;
-        }
-        next_msg(worker, |m| match m {
-            WorkerMsg::Caps(caps) => claude_code(&caps.agents),
-            _ => None,
-        })
-        .await
-    }
-
-    /// The JSON document at `path`, once it is there whole.
-    async fn until_json(path: &std::path::Path) -> serde_json::Value {
-        tokio::time::timeout(STEP, async {
-            loop {
-                if let Some(seen) =
-                    std::fs::read(path).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok())
-                {
-                    return seen;
-                }
-                tokio::time::sleep(Duration::from_millis(25)).await;
-            }
-        })
-        .await
-        .expect("the document is written")
-    }
-
-    /// Every run the stand-in launcher logged.
-    fn launcher_log(log: &std::path::Path) -> Vec<serde_json::Value> {
-        std::fs::read_to_string(log)
-            .unwrap_or_default()
-            .lines()
-            .filter_map(|line| serde_json::from_str(line).ok())
-            .collect()
+        let mut words = Words::new(slopty_client::WorkerLink::start(worker), &repo);
+        std::fs::write(repo.join("crates/deep/src/lib.rs"), "pub fn five() {}\n").unwrap();
+        assert_eq!(
+            words.until_quiet(HOLD.saturating_mul(3)).await,
+            0,
+            "a new link follows nothing yet"
+        );
+        words.watch(true).await;
+        words.next(UP).await.expect("the new link's watch comes up and says so");
+        let _up = words.until_quiet(HOLD.saturating_mul(3)).await;
+        words
+            .timed("a write after the link came back", || {
+                std::fs::write(repo.join("crates/deep/src/lib.rs"), "pub fn six() {}\n").unwrap();
+            })
+            .await;
     }
 
     /// The greeting names the daemon's home, which a client writes as `~`, and what the worker
@@ -5233,356 +5109,6 @@ mod tests {
             _ => None,
         })
         .await;
-    }
-
-    /// A hook in a shell gives its terminal an agent's thread, one a hook speaks for, at work
-    /// since the turn began.
-    #[tokio::test]
-    async fn a_hook_gives_a_shell_an_agents_thread() {
-        use slopty_proto::ctl::{CtlReply, CtlRequest};
-        use slopty_proto::thread::{AgentId, Cap, Phase};
-
-        let dir = tempfile::tempdir().unwrap();
-        let (_guard, mut worker) = connect(dir.path()).await;
-        let session = open_shell(&mut worker, dir.path()).await;
-        let sock = dir.path().join("worker.sock");
-        let payload = r#"{"hook_event_name":"UserPromptSubmit","prompt":"fix the build"}"#;
-        let hook = CtlRequest::Hook { session, payload: payload.to_owned() };
-        assert!(matches!(ctl(&sock, &hook).await, CtlReply::Ok { .. }));
-        let approvals = Cap::named(Cap::APPROVALS);
-        let row = row_at(&mut worker, session, |r| r.status.phase == Phase::Working).await;
-        assert_eq!(row.agent, AgentId::named(AgentId::CLAUDE_CODE));
-        assert!(row.caps.contains(&approvals), "a hook speaks for it: {:?}", row.caps);
-        assert!(!row.status.since_ms.is_zero(), "stamped when the turn began");
-        let close = ClientMsg::Term { session, req: TermRequest::Close };
-        worker.tx.send(&close).await.unwrap();
-    }
-
-    /// Erase the line [`exact_echoes`] left in a `cat` session (⌃U) and let its frames pass,
-    /// so the next run starts on an empty line.
-    async fn clear_line(
-        send: &tokio::sync::mpsc::Sender<ClientMsg>,
-        frames: &mut FramedRecv<TermEvent>,
-        session: SessionId,
-    ) {
-        let req = TermRequest::Raw(b"\x15".to_vec());
-        send.send(ClientMsg::Term { session, req }).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(30)).await;
-        while tokio::time::timeout(Duration::from_millis(30), frames.recv()).await.is_ok() {}
-    }
-
-    /// A measurement, not a check: what following a busy agent's thread costs a key's echo on
-    /// the same connection. Three arms alternate, 200 keys each into `/bin/cat`, five rounds:
-    /// nothing else going on; an agent's transcript growing by a 2 KB answer every 5 ms
-    /// (400 KB/s, with a hook every 50 ms) whose thread nobody follows; and the same, followed.
-    /// The last also reports how long an appended answer took to reach the follower.
-    #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "a measurement: cargo test -p slopty-workerd --release --test e2e \
-                echo_beside_a_followed_thread -- --ignored --nocapture"]
-    async fn echo_beside_a_followed_thread() {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, Ordering};
-
-        use slopty_proto::ctl::CtlRequest;
-        use slopty_proto::thread::wire::{ThreadFrame, ThreadRequest};
-        use slopty_proto::thread::{Action, ItemBody};
-
-        let dir = tempfile::tempdir().unwrap();
-        let (_guard, mut worker) = connect(dir.path()).await;
-        let agent = open_shell(&mut worker, dir.path()).await;
-        let (session, frames) = open_cat(&mut worker, true).await;
-        let mut frames = frames.unwrap();
-
-        let main = dir.path().join("projects").join("s1.jsonl");
-        std::fs::create_dir_all(main.parent().unwrap()).unwrap();
-        std::fs::write(&main, "").unwrap();
-        let sock = dir.path().join("worker.sock");
-        let start = serde_json::json!({
-            "hook_event_name": "SessionStart", "session_id": "s1",
-            "transcript_path": main, "cwd": dir.path(),
-        });
-        ctl(&sock, &CtlRequest::Hook { session: agent, payload: start.to_string() }).await;
-        let thread = slopty_agent::observed::thread_of("s1");
-
-        let WorkerConn { tx, rx, conn, .. } = worker;
-        let (send, mut outbox) = tokio::sync::mpsc::channel::<ClientMsg>(64);
-        let writer = tokio::spawn(async move {
-            let mut tx = tx;
-            while let Some(msg) = outbox.recv().await {
-                tx.send(&msg).await.unwrap();
-            }
-        });
-        let reader = tokio::spawn(async move {
-            let mut rx = rx;
-            while rx.recv().await.is_ok() {}
-        });
-
-        // The agent: answers appended to its transcript, each saying when it was written.
-        let base = std::time::Instant::now();
-        let busy = Arc::new(AtomicBool::new(false));
-        let generator = {
-            let (busy, main, sock) = (Arc::clone(&busy), main.clone(), sock.clone());
-            tokio::spawn(async move {
-                let mut file = std::fs::OpenOptions::new().append(true).open(&main).unwrap();
-                let filler = "lorem ipsum dolor sit amet ".repeat(75);
-                let mut n: u64 = 0;
-                let mut tick = tokio::time::interval(Duration::from_millis(5));
-                loop {
-                    tick.tick().await;
-                    if !busy.load(Ordering::Relaxed) {
-                        continue;
-                    }
-                    n = n.saturating_add(1);
-                    let us = base.elapsed().as_micros();
-                    let record = serde_json::json!({
-                        "type": "assistant", "uuid": format!("g{n}"),
-                        "parentUuid": (n > 1).then(|| format!("g{}", n.saturating_sub(1))),
-                        "timestamp": "2026-09-27T03:15:26.000Z",
-                        "message": { "role": "assistant",
-                            "content": [{ "type": "text", "text": format!("t={us} {filler}") }] },
-                    });
-                    std::io::Write::write_all(&mut file, format!("{record}\n").as_bytes()).unwrap();
-                    if n.is_multiple_of(10) {
-                        let hook = serde_json::json!({
-                            "hook_event_name": "PostToolUse", "session_id": "s1",
-                            "tool_name": "Bash", "tool_use_id": format!("t{n}"),
-                            "transcript_path": main,
-                        });
-                        let payload = hook.to_string();
-                        ctl(&sock, &CtlRequest::Hook { session: agent, payload }).await;
-                    }
-                }
-            })
-        };
-
-        let mut rows = Vec::new();
-        let mut lags: Vec<f64> = Vec::new();
-        for round in 1..=5 {
-            eprintln!("round {round}");
-            busy.store(false, Ordering::Relaxed);
-            let quiet = exact_echoes(&send, &mut frames, session, 200).await;
-            clear_line(&send, &mut frames, session).await;
-            busy.store(true, Ordering::Relaxed);
-            let unfollowed = exact_echoes(&send, &mut frames, session, 200).await;
-            clear_line(&send, &mut frames, session).await;
-
-            let follow = ThreadRequest::Follow { thread, have: None, turns: 1, max_latency_ms: 0 };
-            send.send(ClientMsg::Thread(follow)).await.unwrap();
-            let mut stream = thread_stream(&conn).await;
-            let follower = tokio::spawn(async move {
-                let mut lags = Vec::new();
-                let mut changes = 0_usize;
-                // An answer may come as it starts and again as it completes: timed once.
-                let mut timed = std::collections::HashSet::new();
-                // The snapshot is the backlog, not live.
-                while let Ok(frame) = stream.recv().await {
-                    let ThreadFrame::Actions { actions, .. } = frame else { continue };
-                    changes = changes.saturating_add(actions.len());
-                    for action in actions {
-                        let (Action::ItemStarted(item) | Action::ItemCompleted(item)) = action
-                        else {
-                            continue;
-                        };
-                        let ItemBody::Text(text) = item.body else { continue };
-                        let written = text.text.strip_prefix("t=").and_then(|t| {
-                            t.split_once(' ').and_then(|(us, _)| us.parse::<u128>().ok())
-                        });
-                        if let Some(us) = written.filter(|us| timed.insert(*us)) {
-                            let now = base.elapsed().as_micros();
-                            #[expect(clippy::cast_precision_loss, reason = "micros below 2^53")]
-                            lags.push(now.saturating_sub(us) as f64 / 1e3);
-                        }
-                    }
-                }
-                (lags, changes)
-            });
-            let followed = exact_echoes(&send, &mut frames, session, 200).await;
-            clear_line(&send, &mut frames, session).await;
-            send.send(ClientMsg::Thread(ThreadRequest::Unfollow { thread })).await.unwrap();
-            let (lag, changes) = tokio::time::timeout(STEP, follower).await.unwrap().unwrap();
-            eprintln!("round {round}: {changes} actions followed");
-            lags.extend(lag);
-            rows.push((round, quiet, unfollowed, followed));
-        }
-        busy.store(false, Ordering::Relaxed);
-        generator.abort();
-        let mut pooled = [Vec::new(), Vec::new(), Vec::new()];
-        for (_round, quiet, unfollowed, followed) in &rows {
-            for (all, samples) in pooled.iter_mut().zip([quiet, unfollowed, followed]) {
-                all.extend_from_slice(samples);
-            }
-        }
-        for (arm, samples) in ["quiet", "busy, not followed", "busy, followed"].iter().zip(pooled) {
-            let (p50, p99, max) = p50_p99_max(&samples);
-            let (_p50, p90, _max) = quantiles(&mut samples.clone());
-            eprintln!(
-                "all {arm:>19}: p50 {p50:.2} / p90 {p90:.2} / p99 {p99:.2} / max {max:.2} ms over {}",
-                samples.len()
-            );
-        }
-        for (round, quiet, unfollowed, followed) in rows {
-            for (arm, samples) in
-                [("quiet", quiet), ("busy, not followed", unfollowed), ("busy, followed", followed)]
-            {
-                let (p50, p99, max) = p50_p99_max(&samples);
-                let (_p50, p90, _max) = quantiles(&mut samples.clone());
-                eprintln!(
-                    "round {round} {arm:>19}: p50 {p50:.2} / p90 {p90:.2} / p99 {p99:.2} / \
-                     max {max:.2} ms"
-                );
-            }
-        }
-        let (l50, l99, lmax) = p50_p99_max(&lags);
-        let (_l50, l90, _lmax) = quantiles(&mut lags.clone());
-        eprintln!(
-            "append → follower over {} answers: p50 {l50:.1} / p90 {l90:.1} / p99 {l99:.1} / \
-             max {lmax:.1} ms",
-            lags.len()
-        );
-        writer.abort();
-        reader.abort();
-    }
-
-    /// A Claude Code record of an answer saying when it was written, `us` after the test began.
-    fn answer_record(n: u64, us: u128, text: &str) -> String {
-        let record = serde_json::json!({
-            "type": "assistant", "uuid": format!("g{n}"),
-            "parentUuid": (n > 1).then(|| format!("g{}", n.saturating_sub(1))),
-            "timestamp": "2026-09-27T03:15:26.000Z",
-            "message": { "role": "assistant",
-                "content": [{ "type": "text", "text": format!("t={us} {text}") }] },
-        });
-        format!("{record}\n")
-    }
-
-    /// A measurement, not a check: how long an answer appended to the transcript of a Claude
-    /// Code the mod does not reach takes to reach a follower, with no hook to say it was
-    /// written. 120 answers, 97 ms apart, so each lands at another moment of any timer the
-    /// worker reads on.
-    #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "a measurement: cargo test -p slopty-workerd --release --test e2e \
-                a_transcript_write_reaches_its_follower -- --ignored --nocapture"]
-    async fn a_transcript_write_reaches_its_follower() {
-        use slopty_proto::ctl::CtlRequest;
-        use slopty_proto::thread::wire::{ThreadFrame, ThreadRequest};
-        use slopty_proto::thread::{Action, ItemBody};
-
-        let dir = tempfile::tempdir().unwrap();
-        let (_guard, mut worker) = connect(dir.path()).await;
-        let agent = open_shell(&mut worker, dir.path()).await;
-        let main = dir.path().join("projects").join("s1.jsonl");
-        std::fs::create_dir_all(main.parent().unwrap()).unwrap();
-        std::fs::write(&main, "").unwrap();
-        let sock = dir.path().join("worker.sock");
-        let start = serde_json::json!({
-            "hook_event_name": "SessionStart", "session_id": "s1",
-            "transcript_path": main, "cwd": dir.path(),
-        });
-        ctl(&sock, &CtlRequest::Hook { session: agent, payload: start.to_string() }).await;
-        let thread = slopty_agent::observed::thread_of("s1");
-
-        let WorkerConn { mut tx, rx, conn, .. } = worker;
-        let reader = tokio::spawn(async move {
-            let mut rx = rx;
-            while rx.recv().await.is_ok() {}
-        });
-        let follow = ThreadRequest::Follow { thread, have: None, turns: 1, max_latency_ms: 0 };
-        tx.send(&ClientMsg::Thread(follow)).await.unwrap();
-        let mut stream = thread_stream(&conn).await;
-        let base = std::time::Instant::now();
-        let follower = tokio::spawn(async move {
-            let mut lags = Vec::new();
-            let mut timed = std::collections::HashSet::new();
-            while let Ok(frame) = stream.recv().await {
-                let ThreadFrame::Actions { actions, .. } = frame else { continue };
-                for action in actions {
-                    let (Action::ItemStarted(item) | Action::ItemCompleted(item)) = action else {
-                        continue;
-                    };
-                    let ItemBody::Text(text) = item.body else { continue };
-                    let written = text.text.strip_prefix("t=").and_then(|t| {
-                        t.split_once(' ').and_then(|(us, _)| us.parse::<u128>().ok())
-                    });
-                    if let Some(us) = written.filter(|us| timed.insert(*us)) {
-                        let now = base.elapsed().as_micros();
-                        #[expect(clippy::cast_precision_loss, reason = "micros below 2^53")]
-                        lags.push(now.saturating_sub(us) as f64 / 1e3);
-                    }
-                }
-            }
-            lags
-        });
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        let mut file = std::fs::OpenOptions::new().append(true).open(&main).unwrap();
-        for n in 1..=120_u64 {
-            let record = answer_record(n, base.elapsed().as_micros(), "an answer");
-            std::io::Write::write_all(&mut file, record.as_bytes()).unwrap();
-            tokio::time::sleep(Duration::from_millis(97)).await;
-        }
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        tx.send(&ClientMsg::Thread(ThreadRequest::Unfollow { thread })).await.unwrap();
-        let lags = tokio::time::timeout(STEP, follower).await.unwrap().unwrap();
-        let (p50, p99, max) = p50_p99_max(&lags);
-        let (_p50, p90, _max) = quantiles(&mut lags.clone());
-        eprintln!(
-            "write → follower, no hook, over {} answers: p50 {p50:.1} / p90 {p90:.1} / \
-             p99 {p99:.1} / max {max:.1} ms",
-            lags.len()
-        );
-        assert_eq!(lags.len(), 120, "every answer reached the follower");
-        reader.abort();
-    }
-
-    /// A measurement, not a check: what Claude Code sessions observed at rest cost the worker.
-    /// Its idle wakeups and cycles over ten seconds, first with no session, then with eight
-    /// shells each heard as a Claude Code with a transcript that does not change.
-    #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "a measurement: cargo test -p slopty-workerd --release --test e2e \
-                observed_sessions_at_rest -- --ignored --nocapture"]
-    async fn observed_sessions_at_rest() {
-        use slopty_proto::ctl::CtlRequest;
-
-        const SESSIONS: u64 = 8;
-        const OVER: Duration = Duration::from_secs(10);
-
-        let dir = tempfile::tempdir().unwrap();
-        let (guard, mut worker) = connect(dir.path()).await;
-        let pid = guard.0.get(1).and_then(Child::id).and_then(|p| i32::try_from(p).ok()).unwrap();
-        let rest = async |what: &str| {
-            tokio::time::sleep(Duration::from_secs(3)).await;
-            let before = slopty_testkit::process::usage(pid).unwrap();
-            tokio::time::sleep(OVER).await;
-            let after = slopty_testkit::process::usage(pid).unwrap();
-            let secs = OVER.as_secs_f64();
-            #[expect(clippy::cast_precision_loss, reason = "counts below 2^53")]
-            let (woke, cycles) = (
-                after.wakeups.saturating_sub(before.wakeups) as f64 / secs,
-                after.cycles.saturating_sub(before.cycles) as f64 / secs / 1e6,
-            );
-            eprintln!("worker at rest, {what}: {woke:.1} wakeups/s, {cycles:.2} M cycles/s");
-            (woke, cycles)
-        };
-        let (idle_woke, idle_cycles) = rest("no session").await;
-        let sock = dir.path().join("worker.sock");
-        std::fs::create_dir_all(dir.path().join("projects")).unwrap();
-        for n in 1..=SESSIONS {
-            let agent = open_shell(&mut worker, dir.path()).await;
-            let main = dir.path().join("projects").join(format!("s{n}.jsonl"));
-            std::fs::write(&main, answer_record(1, 0, "an answer")).unwrap();
-            let start = serde_json::json!({
-                "hook_event_name": "SessionStart", "session_id": format!("s{n}"),
-                "transcript_path": main, "cwd": dir.path(),
-            });
-            ctl(&sock, &CtlRequest::Hook { session: agent, payload: start.to_string() }).await;
-        }
-        let (woke, cycles) = rest(&format!("{SESSIONS} observed sessions")).await;
-        #[expect(clippy::cast_precision_loss, reason = "a handful")]
-        let each = SESSIONS as f64;
-        eprintln!(
-            "each observed session at rest: {:.2} wakeups/s, {:.3} M cycles/s",
-            (woke - idle_woke) / each,
-            (cycles - idle_cycles) / each
-        );
     }
 
     /// The next control message `pick` takes, within a step.

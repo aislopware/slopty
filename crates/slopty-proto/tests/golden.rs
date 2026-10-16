@@ -235,25 +235,6 @@ mod golden {
         insta::assert_snapshot!("worker_frame_copy", hex(&bytes));
     }
 
-    /// The worktree an agent's status line names.
-    #[test]
-    fn agent_branch() {
-        use slopty_proto::agent::{AgentBranch, Worktree};
-        snap(
-            "worker_agent_branch",
-            &WorkerMsg::AgentBranch(AgentBranch {
-                session: session(),
-                worktree: Some(Worktree {
-                    name: "fix-login".to_owned(),
-                    path: "/r/.claude/worktrees/fix-login".to_owned(),
-                    branch: Some("worktree-fix-login".to_owned()),
-                    original_cwd: "/r".to_owned(),
-                    original_branch: Some("main".to_owned()),
-                }),
-            }),
-        );
-    }
-
     /// A page and a file a program in a shell hands the client, and what the client answers.
     #[test]
     fn handoff() {
@@ -1776,6 +1757,8 @@ mod golden {
         };
         snap("server_session_changed", &ToServer::SessionChanged(summary));
         snap("server_worker_load", &FromServer::Load { worker, load: 0.75 });
+        snap("server_ping", &ToServer::Ping { sent_at: MonoTime::from_nanos(1_000_000) });
+        snap("server_pong", &FromServer::Pong { sent_at: MonoTime::from_nanos(1_000_000) });
     }
 
     /// `OSC 9;4` as the tile header and the Dock read it, and a session reopened after its
@@ -2254,9 +2237,8 @@ mod ctl {
     use serde::de::DeserializeOwned;
     use slopty_core::{DisplayId, SessionId, WallMs, WindowId, WorkerId};
     use slopty_proto::ctl::{
-        CtlReply, CtlRequest, Decision, Health, InboxAt, LinkState, LtrStats, PasteboardAccess,
-        PermissionAnswer, PermissionAsk, Quantiles, ReportsAsk, ScreenStats, ScreenSummary,
-        ServerHealth, Tailscale,
+        CtlReply, CtlRequest, Health, LinkState, LtrStats, PasteboardAccess, Quantiles,
+        ScreenStats, ScreenSummary, ServerHealth, Tailscale,
     };
     use slopty_proto::screen::{CaptureTarget, VideoCodec};
     use slopty_proto::server::{Os, WorkerCaps};
@@ -2274,22 +2256,6 @@ mod ctl {
         let line = serde_json::to_string(msg).expect("encodes");
         assert_eq!(serde_json::from_str::<T>(&line).ok().as_ref(), Some(msg), "{name} reads back");
         insta::assert_snapshot!(name, line);
-    }
-
-    /// `value` with every object's keys in order. Whether a `Value` keeps the order its keys were
-    /// written in is `serde_json`'s `preserve_order`, which a build gets or not from what else it
-    /// links (the workspace's tests do, `-p slopty-proto` alone does not): in key order, a line
-    /// reads the same either way.
-    fn sorted(value: serde_json::Value) -> serde_json::Value {
-        match value {
-            serde_json::Value::Object(map) => {
-                let mut entries: Vec<_> = map.into_iter().collect();
-                entries.sort_by(|(a, _), (b, _)| a.cmp(b));
-                entries.into_iter().map(|(key, value)| (key, sorted(value))).collect()
-            }
-            serde_json::Value::Array(items) => items.into_iter().map(sorted).collect(),
-            other => other,
-        }
     }
 
     fn health() -> Health {
@@ -2344,37 +2310,6 @@ mod ctl {
         snap("ctl_request_status", &CtlRequest::Status);
         snap("ctl_request_doctor", &CtlRequest::Doctor);
         snap("ctl_request_screens", &CtlRequest::Screens);
-        snap(
-            "ctl_request_hook",
-            &CtlRequest::Hook {
-                session: session(),
-                payload: r#"{"hook_event_name":"Stop"}"#.to_owned(),
-            },
-        );
-        snap(
-            "ctl_request_permission",
-            &CtlRequest::Permission(PermissionAsk {
-                session: session(),
-                payload: r#"{"hook_event_name":"PermissionRequest","tool_name":"Bash"}"#.to_owned(),
-                wait_ms: 595_000,
-            }),
-        );
-        snap(
-            "ctl_request_reports",
-            &CtlRequest::Reports(ReportsAsk {
-                session: session(),
-                token: "c0ffee".to_owned(),
-                payload: r#"{"hook_event_name":"UserPromptSubmit","prompt":"go on"}"#.to_owned(),
-                inbox: Some(InboxAt {
-                    socket: "/tmp/claude-501/inbox.sock".to_owned(),
-                    token: Some("t0ken".to_owned()),
-                }),
-            }),
-        );
-        snap(
-            "ctl_request_reports_handed",
-            &CtlRequest::ReportsHanded { session: session(), token: "c0ffee".to_owned(), batch: 7 },
-        );
     }
 
     #[test]
@@ -2486,41 +2421,6 @@ mod ctl {
         );
     }
 
-    /// Every decision a permission request can get.
-    #[test]
-    fn permissions() {
-        let reply = |decision| CtlReply::Permission(PermissionAnswer { decision });
-        snap("ctl_reply_permission_pass", &reply(Decision::Pass));
-        snap("ctl_reply_permission_allow", &reply(Decision::Allow { updated_input: None }));
-        snap(
-            "ctl_reply_permission_answer",
-            &reply(Decision::Allow {
-                updated_input: Some(sorted(serde_json::json!({
-                    "answers": { "Which layout?": "Split" },
-                    "questions": [{
-                        "header": "Layout", "multiSelect": false, "question": "Which layout?",
-                        "options": [{ "label": "Split" }, { "label": "Stacked" }]
-                    }]
-                }))),
-            }),
-        );
-        snap(
-            "ctl_reply_permission_always",
-            &reply(Decision::AllowAlways {
-                updated_input: None,
-                updated_permissions: vec![sorted(serde_json::json!({
-                    "behavior": "allow", "destination": "localSettings",
-                    "rules": [{ "ruleContent": "cargo test:*", "toolName": "Bash" }],
-                    "type": "addRules"
-                }))],
-            }),
-        );
-        snap(
-            "ctl_reply_permission_deny",
-            &reply(Decision::Deny { message: "Not now.".to_owned(), interrupt: true }),
-        );
-    }
-
     /// A program's page and file for the client, how each went, and what keeps the machine
     /// awake.
     #[test]
@@ -2572,16 +2472,6 @@ mod ctl {
     fn outcomes() {
         snap("ctl_reply_ok", &CtlReply::Ok { changed: true });
         snap("ctl_reply_error", &CtlReply::Error { message: "no such session".to_owned() });
-        snap(
-            "ctl_reply_reports",
-            &[
-                CtlReply::Reports {
-                    batch: Some(7),
-                    print: Some(r#"{"decision":"block","reason":"task 2: done"}"#.to_owned()),
-                },
-                CtlReply::Reports { batch: None, print: None },
-            ],
-        );
     }
 
     /// What the doctor says of a worker whose clipboard reads wait on the person, and of one

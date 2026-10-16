@@ -69,8 +69,9 @@ zed itself so it is never behind zed while longbridge lags.
   app turns retention off to confirm it, and a step in `workspace/tests/retained.rs` is how it
   stays fixed.
 - `cargo xtask fixtures claude [--only <name>]` records the conversation fixtures from a real
-  session (it uses the model and your login), and `cargo xtask fixtures claude-mod` records the
-  mod's against a canned local API with no account. Both run the official Claude Code build
+  session (it uses the model and your login), and `cargo xtask fixtures claude-stream` records
+  Claude Code driven as the worker drives it (`claude -p` over stream-json with the control
+  protocol) against a canned local API with no account. Both run the official Claude Code build
   that xtask fetches from npm into `target/claude/<version>/`, checked against the registry's
   sha512; `SLOPTY_CLAUDE` points at another binary of the same pinned version.
 - `cargo xtask codex schema [--check]` writes the Codex app-server types

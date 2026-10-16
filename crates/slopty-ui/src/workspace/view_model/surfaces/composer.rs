@@ -23,8 +23,8 @@ use slopty_proto::thread::wire::{Intent, ThreadRequest, ThreadRow};
 use slopty_proto::thread::{AgentId, Offers};
 use slopty_proto::transfer::Dest;
 use slopty_view_proto::{
-    ChatConfig, FileSearchMatch, HarnessId, Model, ReasoningLevel, RepoRef, SandboxLevel,
-    SlashCommand,
+    ChatConfig, FileSearchMatch, HarnessId, Model, ModelOption, ModelOptionChoice, ReasoningLevel,
+    RepoRef, SandboxLevel, SlashCommand, TransferProgress,
 };
 use slopty_view_rpc::{RpcError, RpcReply, methods};
 
@@ -46,14 +46,33 @@ const ATTACHMENT_MAX: usize = 64 << 20;
 /// How long a side chat may take to start: its agent branches the whole thread first.
 const ASIDE_WITHIN: Duration = Duration::from_secs(60);
 
-/// The files being attached, by the shell's upload id: their parts as they came, by number.
+/// The files being attached, by the shell's upload id: their parts as they came, by number; and
+/// those on their way to their machine, by transfer.
 #[derive(Debug, Default)]
-pub(super) struct Uploads(HashMap<String, Upload>);
+pub(super) struct Uploads(HashMap<String, Upload>, HashMap<XferId, Attaching>);
+
+/// A file on its way to its machine to go with a message.
+#[derive(Debug)]
+struct Attaching {
+    /// The shell's upload id.
+    upload: String,
+    /// Its name.
+    name: String,
+    /// Bytes the machine has, of `total`.
+    done: u64,
+    /// Bytes in it.
+    total: u64,
+}
 
 /// The model and effort the person picked for each chat, by its id, until its thread runs
 /// them or turns the switch down; a chat they never picked for shows what its thread runs.
+/// And the model's options each chat was last set to (its fast mode), which its thread's row
+/// does not say.
 #[derive(Debug, Default)]
-pub(super) struct Configs(HashMap<String, Picked>);
+pub(super) struct Configs(
+    HashMap<String, Picked>,
+    HashMap<String, serde_json::Map<String, serde_json::Value>>,
+);
 
 /// A chat's pick, and the switches it asked of the chat's thread.
 #[derive(Debug)]
@@ -121,7 +140,66 @@ fn fail(error: impl Into<String>) -> Task<Result<RpcReply, RpcError>> {
     Task::ready(Err(RpcError::Failed(error.into())))
 }
 
-/// An agent's offered models as the shell's, each with the efforts it offers.
+/// A model's options as the shell's picker offers them: Codex's service tiers, Claude Code's
+/// fast mode.
+pub(super) fn model_options(options: &[slopty_proto::thread::OptionOffer]) -> Vec<ModelOption> {
+    options
+        .iter()
+        .map(|option| ModelOption {
+            id: option.id.clone(),
+            label: option.label.clone(),
+            choices: option
+                .choices
+                .iter()
+                .map(|choice| ModelOptionChoice {
+                    id: choice.id.clone(),
+                    label: choice.label.clone(),
+                })
+                .collect(),
+            default_choice: option.default.clone(),
+        })
+        .collect()
+}
+
+/// The option the picker shows an agent's modes as (Claude Code's permission modes, an ACP
+/// agent's session modes): switched through the agent's own `SetMode`, started in by
+/// `Start::mode`, never sent as an option.
+pub(in crate::workspace) const MODE_OPTION: &str = "mode";
+
+/// An agent's `modes` as the picker's option, on `default` (the mode a start that asks for
+/// none begins in) where it is one of them, else the first; none where it offers no modes.
+fn mode_option(modes: &[slopty_proto::thread::Mode], default: Option<&str>) -> Option<ModelOption> {
+    let first = modes.first()?;
+    let default = default.filter(|id| modes.iter().any(|mode| mode.id == *id));
+    Some(ModelOption {
+        id: MODE_OPTION.to_owned(),
+        label: "Mode".to_owned(),
+        choices: modes
+            .iter()
+            .map(|mode| ModelOptionChoice { id: mode.id.clone(), label: mode.label.clone() })
+            .collect(),
+        default_choice: default.unwrap_or(&first.id).to_owned(),
+    })
+}
+
+/// The options the shell picked (`fastMode: "on"`, `fastMode: true`), as a start or a switch
+/// names them: option id to choice id.
+fn picked_options(picked: &serde_json::Map<String, serde_json::Value>) -> BTreeMap<String, String> {
+    picked
+        .iter()
+        .filter_map(|(option, choice)| {
+            let choice = match choice {
+                serde_json::Value::String(choice) => choice.clone(),
+                serde_json::Value::Bool(on) => if *on { "on" } else { "off" }.to_owned(),
+                serde_json::Value::Number(n) => n.to_string(),
+                _ => return None,
+            };
+            Some((option.clone(), choice))
+        })
+        .collect()
+}
+
+/// An agent's offered models as the shell's, each with the efforts and options it offers.
 fn models(offers: &Offers, harness: HarnessId) -> Vec<Model> {
     let efforts: Vec<ReasoningLevel> = offers
         .efforts
@@ -137,7 +215,7 @@ fn models(offers: &Offers, harness: HarnessId) -> Vec<Model> {
             label: model.label.clone(),
             description: None,
             reasoning_levels: efforts.clone(),
-            options: Vec::new(),
+            options: model_options(&model.options),
         })
         .collect()
 }
@@ -377,6 +455,13 @@ impl WorkspaceView {
             let row = listed.remove(at);
             listed.insert(0, row);
         }
+        // The agent's modes go with every model it runs.
+        if let Some(mode) = mode_option(&installed.offers.modes, installed.offers.mode.as_deref()) {
+            for model in &mut listed {
+                model.options.retain(|option| option.id != MODE_OPTION);
+                model.options.push(mode.clone());
+            }
+        }
         listed
     }
 
@@ -449,7 +534,8 @@ impl WorkspaceView {
     }
 
     /// What the thread `row` on `device` runs, as the shell's chat config: its agent, its model
-    /// by the id the picker lists it by, its effort.
+    /// by the id the picker lists it by, its effort, its mode, and the options it was last set
+    /// to here.
     fn thread_config(&self, device: &str, row: &ThreadRow) -> ChatConfig {
         let model = row.meters.model_id.as_deref().map(|id| {
             let listed = if row.agent.is(AgentId::CLAUDE_CODE) {
@@ -473,7 +559,14 @@ impl WorkspaceView {
                 .effort
                 .as_deref()
                 .and_then(|effort| serde_json::from_value(serde_json::json!(effort)).ok()),
-            model_options: serde_json::Map::new(),
+            model_options: {
+                let configs = &self.view_model.surfaces.configs.1;
+                let mut options = configs.get(&self.chat_id(row.id)).cloned().unwrap_or_default();
+                if let Some(mode) = row.meters.mode.clone().filter(|m| !m.trim().is_empty()) {
+                    options.insert(MODE_OPTION.to_owned(), serde_json::Value::String(mode));
+                }
+                options
+            },
             sandbox: SandboxLevel::WorkspaceWrite,
         }
     }
@@ -502,8 +595,10 @@ impl WorkspaceView {
 
     /// Drop each pick the chat's thread settled: one whose switch it turned down, so the chat
     /// shows what it runs again beside the refusal its transcript says, and one its meters say
-    /// it runs now, so what it runs from then on (a switch in its terminal) shows as it moves.
+    /// it runs now, so what it runs from then on (a switch the agent made itself) shows as it
+    /// moves.
     pub(in crate::workspace) fn settle_configs(&mut self, cx: &Context<Self>) {
+        let mut refused = Vec::new();
         let settled: Vec<String> = self
             .view_model
             .surfaces
@@ -516,6 +611,7 @@ impl WorkspaceView {
                         hub.read(cx).refusals(*thread).any(|refusal| asked.contains(&refusal.id))
                     })
                 {
+                    refused.push((*chat).clone());
                     return true;
                 }
                 let Some((key, thread)) = self.chat_thread(chat, cx) else { return false };
@@ -534,11 +630,44 @@ impl WorkspaceView {
         for chat in settled {
             self.view_model.surfaces.configs.0.remove(&chat);
         }
+        // An option the thread turned down is not what it runs.
+        for chat in refused {
+            self.view_model.surfaces.configs.1.remove(&chat);
+        }
     }
 
-    /// `setChatConfig`: the model and effort the person picked for a chat, kept for it and,
-    /// where it has a thread, switched there through its agent's own door (`SetModel`,
-    /// `SetEffort`) when they differ from what it runs. `None` for every other operation.
+    /// The options the shell picked, as a start names them ([`picked_options`]), its mode
+    /// apart ([`Self::start_mode`]).
+    pub(in crate::workspace) fn start_options(
+        picked: &serde_json::Map<String, serde_json::Value>,
+    ) -> BTreeMap<String, String> {
+        let mut options = picked_options(picked);
+        options.remove(MODE_OPTION);
+        options
+    }
+
+    /// The mode the shell picked for a start, by the agent's id for it.
+    pub(in crate::workspace) fn start_mode(
+        picked: &serde_json::Map<String, serde_json::Value>,
+    ) -> Option<String> {
+        picked_options(picked).remove(MODE_OPTION)
+    }
+
+    /// Keep the options picked for the chat `chat`, which its thread's row does not say.
+    pub(in crate::workspace) fn keep_options(
+        &mut self,
+        chat: &str,
+        options: &serde_json::Map<String, serde_json::Value>,
+    ) {
+        if !options.is_empty() {
+            self.view_model.surfaces.configs.1.insert(chat.to_owned(), options.clone());
+        }
+    }
+
+    /// `setChatConfig`: the model, effort, mode and options the person picked for a chat, kept
+    /// for it and, where it has a thread, switched there through its agent's own door
+    /// (`SetModel`, `SetEffort`, `SetMode`, `SetOption`) when they differ from what it runs.
+    /// `None` for every other operation.
     pub(in crate::workspace) fn config_mutate(
         &mut self,
         op: &str,
@@ -575,6 +704,17 @@ impl WorkspaceView {
             {
                 intents.push(Intent::SetEffort { effort });
             }
+            let had = shown.as_ref().map(|s| picked_options(&s.model_options)).unwrap_or_default();
+            for (option, choice) in picked_options(&config.model_options) {
+                if had.get(&option) == Some(&choice) {
+                    continue;
+                }
+                intents.push(if option == MODE_OPTION {
+                    Intent::SetMode { mode: choice }
+                } else {
+                    Intent::SetOption { option, choice }
+                });
+            }
             let ids = intents
                 .into_iter()
                 .map(|intent| hub.update(cx, |hub, cx| hub.intent(thread, intent, cx)))
@@ -583,6 +723,9 @@ impl WorkspaceView {
         } else {
             None
         };
+        if !config.model_options.is_empty() {
+            self.view_model.surfaces.configs.1.insert(chat.clone(), config.model_options.clone());
+        }
         self.view_model.surfaces.configs.0.insert(chat, Picked { config, asked });
         self.view_changed(cx);
         Some(Ok(serde_json::json!({})))
@@ -590,11 +733,12 @@ impl WorkspaceView {
 
     /// `RetryDelivery`: what this client asked of the chat's thread (or, for a chat not started
     /// yet, its start) and the worker has not answered, sent again under the same ids, so each is
-    /// still acted on once.
+    /// still acted on once; and the messages the thread holds as refused or not known to have
+    /// gone, sent again as new ones ([`Self::view_remint`]).
     fn retry_delivery(
         &mut self,
         params: &serde_json::Value,
-        cx: &Context<Self>,
+        cx: &mut Context<Self>,
     ) -> Result<RpcReply, RpcError> {
         let chat = param(params, "chatId").ok_or_else(|| RpcError::BadParams("chatId".into()))?;
         // A start turned down goes again, under a new id.
@@ -623,11 +767,61 @@ impl WorkspaceView {
                 ClientMsg::Thread(ThreadRequest::Intent { id, thread, intent })
             })
             .collect();
-        let retried = unanswered.len();
+        let mut retried = unanswered.len();
         for msg in unanswered {
             self.send(key, msg);
         }
+        retried = retried.saturating_add(self.view_remint(key, thread, cx));
         value(&serde_json::json!({ "retried": retried }))
+    }
+
+    /// Send again, each as a message of its own, what the thread holds as never to go by
+    /// itself: refused by its agent, or not known to have reached it
+    /// ([`slopty_proto::thread::Pending::is_unknown`]). Each goes under a new intent and keeps
+    /// the id the shell gave it, so the shell's own row of it is the one that goes; the held
+    /// one is withdrawn. How many went.
+    pub(in crate::workspace) fn view_remint(
+        &mut self,
+        key: WorkerKey,
+        thread: slopty_proto::thread::ThreadId,
+        cx: &mut Context<Self>,
+    ) -> usize {
+        let hub = self.thread_hub(key, cx);
+        let held: Vec<slopty_proto::thread::Pending> = hub
+            .read(cx)
+            .threads()
+            .mirror(thread)
+            .and_then(slopty_client::threads::Mirror::state)
+            .map(|state| {
+                state.pending.iter().filter(|p| p.is_unknown() || p.is_refused()).cloned().collect()
+            })
+            .unwrap_or_default();
+        for pending in &held {
+            let old = pending.intent;
+            let withdraw = Intent::Withdraw { pending: old };
+            let _withdrawn = hub.update(cx, |hub, cx| hub.intent(thread, withdraw, cx));
+            let send = Intent::Send {
+                text: pending.text.clone(),
+                delivery: pending.delivery,
+                attachments: pending.attachments.clone(),
+            };
+            let id = hub.update(cx, |hub, cx| hub.intent(thread, send, cx));
+            let bridge = &mut self.view_model;
+            if let Some(name) = bridge.named.remove(&old) {
+                bridge.named.insert(id, name);
+            } else {
+                bridge.named.insert(id, old.to_string());
+            }
+            if let Some(row) = bridge.queue_rows.remove(&old) {
+                bridge.queue_rows.insert(id, row);
+            }
+            if let Some(words) = bridge.said.get(&old).cloned() {
+                bridge.said.insert(id, words.clone());
+                let said = Intent::Said { message: id, words };
+                let _said = hub.update(cx, |hub, cx| hub.intent(thread, said, cx));
+            }
+        }
+        held.len()
     }
 
     /// `ReadAttachmentChunk`: the attached file `path` on its machine, from `offset`, in base64:
@@ -1053,12 +1247,18 @@ impl WorkspaceView {
         else {
             return fail("the machine is not connected");
         };
-        cx.background_spawn(async move {
+        // Its progress shows on the message's thumbnail, by the shell's upload id, as the
+        // machine says how much it has.
+        let xfer = XferId::new();
+        let total = u64::try_from(upload.size.div_ceil(4).saturating_mul(3)).unwrap_or(u64::MAX);
+        let attaching = Attaching { upload: id.to_owned(), name: name.clone(), done: 0, total };
+        self.view_model.surfaces.uploads.1.insert(xfer, attaching);
+        self.view_changed(cx);
+        let sending = cx.background_spawn(async move {
             let encoded: String = upload.parts.into_values().collect();
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(encoded)
                 .map_err(|e| RpcError::BadParams(format!("the file's parts do not read: {e}")))?;
-            let xfer = XferId::new();
             let folder = std::env::temp_dir().join(format!("slopty-attach-{xfer}"));
             let file = folder.join(&name);
             let written =
@@ -1075,7 +1275,85 @@ impl WorkspaceView {
                 .next()
                 .ok_or_else(|| RpcError::Failed("the machine kept nothing".to_owned()))?;
             value(&serde_json::json!({ "path": path }))
+        });
+        cx.spawn(async move |this, cx| {
+            let landed = sending.await;
+            let _gone = this.update(cx, |view, cx| {
+                view.view_model.surfaces.uploads.1.remove(&xfer);
+                view.view_changed(cx);
+            });
+            landed
         })
+    }
+
+    /// How far the attachment going as transfer `xfer` has come: `done` bytes are on its
+    /// machine. Whether it was one.
+    pub(in crate::workspace) fn attach_progress(
+        &mut self,
+        xfer: XferId,
+        done: u64,
+        cx: &Context<Self>,
+    ) -> bool {
+        let Some(attaching) = self.view_model.surfaces.uploads.1.get_mut(&xfer) else {
+            return false;
+        };
+        if attaching.done != done {
+            attaching.done = done.min(attaching.total);
+            self.view_changed(cx);
+        }
+        true
+    }
+
+    /// The files on their way to their machine to go with a message, for their thumbnails.
+    pub(in crate::workspace) fn attaching(&self) -> Vec<TransferProgress> {
+        let mut out: Vec<TransferProgress> = self
+            .view_model
+            .surfaces
+            .uploads
+            .1
+            .values()
+            .map(|a| TransferProgress {
+                upload_id: a.upload.clone(),
+                file_name: a.name.clone(),
+                done: a.done,
+                total: a.total,
+            })
+            .collect();
+        out.sort_by(|a, b| a.upload_id.cmp(&b.upload_id));
+        out
+    }
+
+    /// Make the scratch folder `cwd` (`~/.slopty/scratch/<name>`,
+    /// [`slopty_view_proto::projectless`]) on `key`, each folder down to it that is not there
+    /// yet; then `then`. A folder already there is as good as made; one that cannot be made
+    /// leaves the agent to say so as it starts there.
+    pub(in crate::workspace) fn make_scratch(
+        key: WorkerKey,
+        cwd: &str,
+        then: impl FnOnce(&mut Self, &mut Context<Self>) + 'static,
+        cx: &Context<Self>,
+    ) {
+        use slopty_proto::folder::{FsOp, FsOutcome, FsRefusal};
+        let mut steps = Vec::new();
+        let mut parent = "~".to_owned();
+        for name in cwd.trim_start_matches("~/").split('/').filter(|name| !name.is_empty()) {
+            steps.push(FsOp::MakeDir { parent: parent.clone(), name: name.to_owned() });
+            parent = format!("{parent}/{name}");
+        }
+        cx.spawn(async move |this, cx| {
+            for op in steps {
+                let Ok(rx) = this.update(cx, |view, _| view.surface_fs(key, op)) else { return };
+                match within(cx, rx).await {
+                    Ok(FsOutcome::Done { .. } | FsOutcome::Refused(FsRefusal::Clash { .. })) => {}
+                    outcome => {
+                        tracing::warn!(?outcome, "a scratch folder was not made");
+                        break;
+                    }
+                }
+            }
+            let _gone = this.update(cx, |view, cx| then(view, cx));
+        })
+        .detach();
     }
 }
 
@@ -1134,7 +1412,25 @@ mod tests {
     #[test]
     fn an_agents_models_carry_the_efforts_it_offers() {
         let offers = Offers {
-            models: vec![Offered { id: "opus".into(), label: "Opus".into() }],
+            models: vec![Offered {
+                id: "opus".into(),
+                label: "Opus".into(),
+                options: vec![slopty_proto::thread::OptionOffer {
+                    id: "serviceTier".into(),
+                    label: "Speed".into(),
+                    choices: vec![
+                        slopty_proto::thread::OptionChoice {
+                            id: "flex".into(),
+                            label: "Flex".into(),
+                        },
+                        slopty_proto::thread::OptionChoice {
+                            id: "fast".into(),
+                            label: "Fast".into(),
+                        },
+                    ],
+                    default: "flex".into(),
+                }],
+            }],
             efforts: vec![
                 Effort { id: "low".into(), label: "Low".into(), description: None },
                 Effort { id: "xhigh".into(), label: "X-High".into(), description: None },
@@ -1153,11 +1449,28 @@ mod tests {
         assert_eq!(shown.len(), 1);
         assert_eq!((shown[0].id.as_str(), shown[0].label.as_str()), ("opus", "Opus"));
         assert_eq!(shown[0].reasoning_levels, [ReasoningLevel::Low, ReasoningLevel::XHigh]);
+        let tier = &shown[0].options[0];
+        assert_eq!((tier.id.as_str(), tier.default_choice.as_str()), ("serviceTier", "flex"));
+        assert_eq!(
+            tier.choices.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+            ["flex", "fast"]
+        );
         let none = models(&Offers { efforts: Vec::new(), ..offers.clone() }, HarnessId::CODEX);
         assert_eq!(none[0].reasoning_levels, super::super::settings::efforts(HarnessId::CODEX));
         let said = commands(&offers);
         assert_eq!(said[0].name, "compact");
         assert_eq!(said[0].input_hint.as_deref(), Some("[focus]"));
+    }
+
+    /// A pick of an option goes as its agent names it: a switch's `on`, a tier's own id.
+    #[test]
+    fn a_picked_option_goes_by_its_choice() {
+        let picked = serde_json::json!({ "fastMode": true, "serviceTier": "fast", "odd": [1] });
+        let picked = picked.as_object().cloned().expect("a map");
+        let options = picked_options(&picked);
+        assert_eq!(options.get("fastMode").map(String::as_str), Some("on"));
+        assert_eq!(options.get("serviceTier").map(String::as_str), Some("fast"));
+        assert!(!options.contains_key("odd"), "what names no choice goes nowhere");
     }
 }
 
@@ -1208,5 +1521,169 @@ mod picks {
             v.settle_configs(cx);
             assert!(v.picked_config(&chat).is_none(), "run now: the thread's own shows");
         });
+    }
+
+    /// Fast mode picked for a running chat is asked of its thread through its agent's own
+    /// door, and shows as picked once the pick settles; a pick it already has asks nothing.
+    #[gpui::test]
+    fn a_fast_mode_pick_goes_to_the_thread(cx: &mut gpui::TestAppContext) {
+        use slopty_proto::ClientMsg;
+        use slopty_proto::thread::wire::{Intent, ThreadRequest};
+        let state = fixtures::thread("tools");
+        let chat = state.meta.id.to_string();
+        let workspace = cx.new(|_| WorkspaceView::new(slopty_theme::Theme::default()));
+        let cx = cx.add_empty_window();
+        workspace.update(cx, |v, cx| v.add_worker(KEY, "studio".to_owned(), cx));
+        let mut rx = link(&workspace, cx, mac(|_| {}), Vec::new());
+        let rows = vec![state.row(WallMs::ZERO)];
+        workspace.update(cx, |v, cx| {
+            v.threads_linked(KEY, cx);
+            v.thread_table(
+                KEY,
+                &TableFrame::Snapshot { cursor: Cursor { epoch: 1, seq: 1 }, rows },
+                cx,
+            );
+        });
+        let fast = serde_json::json!({ "fastMode": "on" }).as_object().cloned().expect("a map");
+        let params = serde_json::json!({
+            "chatId": chat,
+            "config": { "harness": "claude-code", "model": null, "reasoning": null,
+                        "modelOptions": fast, "sandbox": "workspace-write" },
+        });
+        let set = |cx: &mut gpui::VisualTestContext| {
+            workspace.update(cx, |v, cx| v.config_mutate("setChatConfig", &params, cx))
+        };
+        assert!(matches!(set(cx), Some(Ok(_))));
+        cx.run_until_parked();
+        let asked: Vec<Intent> = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|msg| match msg {
+                ClientMsg::Thread(ThreadRequest::Intent { intent, .. }) => Some(intent),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            asked,
+            [Intent::SetOption { option: "fastMode".to_owned(), choice: "on".to_owned() }]
+        );
+        let shown = workspace.update(cx, |v, cx| {
+            v.settle_configs(cx);
+            let row = state.row(WallMs::ZERO);
+            v.chat_config(&chat, &KEY.to_string(), &row).model_options
+        });
+        assert_eq!(shown, fast, "what it was set to shows");
+        assert!(matches!(set(cx), Some(Ok(_))));
+        cx.run_until_parked();
+        let again = std::iter::from_fn(|| rx.try_recv().ok())
+            .any(|msg| matches!(msg, ClientMsg::Thread(ThreadRequest::Intent { .. })));
+        assert!(!again, "set already: nothing asked");
+    }
+
+    /// The agent's modes are a picked option on every model it lists, on the mode a start
+    /// begins in; a mode picked for a running chat is switched through its agent's own
+    /// `SetMode`, a new chat starts in it, and the mode the thread runs shows as picked.
+    #[gpui::test]
+    fn an_agents_modes_are_picked_and_switched_by_its_own_door(cx: &mut gpui::TestAppContext) {
+        use slopty_proto::ClientMsg;
+        use slopty_proto::server::InstalledAgent;
+        use slopty_proto::thread::wire::{Intent, ThreadRequest};
+        use slopty_proto::thread::{AgentId, Mode, Offers};
+        let mode = |id: &str, label: &str| Mode {
+            id: id.to_owned(),
+            label: label.to_owned(),
+            description: None,
+        };
+        let offers = Offers {
+            modes: vec![mode("default", "Ask"), mode("acceptEdits", "Edit"), mode("plan", "Plan")],
+            mode: Some("acceptEdits".to_owned()),
+            ..Offers::default()
+        };
+        let claude = InstalledAgent {
+            agent: AgentId::named(AgentId::CLAUDE_CODE),
+            version: "2.1.296".to_owned(),
+            offers,
+        };
+        let mut state = fixtures::thread("tools");
+        state.meters.mode = Some("default".to_owned());
+        let chat = state.meta.id.to_string();
+        let workspace = cx.new(|_| WorkspaceView::new(slopty_theme::Theme::default()));
+        let cx = cx.add_empty_window();
+        workspace.update(cx, |v, cx| v.add_worker(KEY, "studio".to_owned(), cx));
+        let mut rx = link(&workspace, cx, mac(|caps| caps.agents.push(claude)), Vec::new());
+        let rows = vec![state.row(WallMs::ZERO)];
+        workspace.update(cx, |v, cx| {
+            v.threads_linked(KEY, cx);
+            let cursor = Cursor { epoch: 1, seq: 1 };
+            v.thread_table(KEY, &TableFrame::Snapshot { cursor, rows }, cx);
+        });
+        let listed = workspace.update(cx, |v, cx| {
+            let params =
+                serde_json::json!({ "harness": "claude-code", "targetDeviceId": KEY.to_string() });
+            v.listed_models(&params, cx)
+        });
+        assert!(!listed.is_empty(), "Claude's models");
+        for model in &listed {
+            let modes =
+                model.options.iter().find(|o| o.id == super::MODE_OPTION).expect("its modes");
+            let ids: Vec<&str> = modes.choices.iter().map(|c| c.id.as_str()).collect();
+            assert_eq!(ids, ["default", "acceptEdits", "plan"]);
+            assert_eq!(modes.default_choice, "acceptEdits", "where a start begins");
+        }
+        let shown = workspace.update(cx, |v, _| {
+            v.chat_config(&chat, &KEY.to_string(), &state.row(WallMs::ZERO)).model_options
+        });
+        assert_eq!(shown.get(super::MODE_OPTION), Some(&serde_json::json!("default")), "it runs");
+
+        let plan = serde_json::json!({ "mode": "plan" }).as_object().cloned().expect("a map");
+        let params = serde_json::json!({
+            "chatId": chat,
+            "config": { "harness": "claude-code", "model": null, "reasoning": null,
+                        "modelOptions": plan, "sandbox": "workspace-write" },
+        });
+        assert!(matches!(
+            workspace.update(cx, |v, cx| v.config_mutate("setChatConfig", &params, cx)),
+            Some(Ok(_))
+        ));
+        cx.run_until_parked();
+        let asked: Vec<Intent> = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|msg| match msg {
+                ClientMsg::Thread(ThreadRequest::Intent { intent, .. }) => Some(intent),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(asked, [Intent::SetMode { mode: "plan".to_owned() }], "never an option");
+        assert_eq!(WorkspaceView::start_mode(&plan).as_deref(), Some("plan"));
+        assert!(WorkspaceView::start_options(&plan).is_empty(), "a start's mode, not an option");
+    }
+
+    /// A file on its way to its machine is said by the shell's upload id as the machine takes
+    /// it, and leaves the list when it landed.
+    #[gpui::test]
+    fn a_files_progress_is_said_by_its_upload_id(cx: &mut gpui::TestAppContext) {
+        use slopty_core::XferId;
+        let workspace = cx.new(|_| WorkspaceView::new(slopty_theme::Theme::default()));
+        let cx = cx.add_empty_window();
+        let xfer = XferId::new();
+        let attaching = super::Attaching {
+            upload: "u-1".to_owned(),
+            name: "shot.png".to_owned(),
+            done: 0,
+            total: 4_000_000,
+        };
+        let said = workspace.update(cx, |v, cx| {
+            v.view_model.surfaces.uploads.1.insert(xfer, attaching);
+            assert!(v.attach_progress(xfer, 1_500_000, cx), "one of the attachments");
+            assert!(!v.attach_progress(XferId::new(), 1, cx), "a terminal's own upload");
+            v.attaching()
+        });
+        assert_eq!(said.len(), 1);
+        assert_eq!(
+            (said[0].upload_id.as_str(), said[0].done, said[0].total),
+            ("u-1", 1_500_000, 4_000_000)
+        );
+        let gone = workspace.update(cx, |v, _| {
+            v.view_model.surfaces.uploads.1.remove(&xfer);
+            v.attaching()
+        });
+        assert_eq!(gone, []);
     }
 }

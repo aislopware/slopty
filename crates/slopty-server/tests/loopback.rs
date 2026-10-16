@@ -85,6 +85,25 @@ mod tests {
         tokio::time::timeout(PATIENCE, connect(&endpoint, &addr, role)).await.unwrap()
     }
 
+    /// Hold a worker's link as a worker does: pinged every two seconds and every message read,
+    /// so the server keeps its lease however long the test runs (`slopty_net::liveness`).
+    fn keep_pinging(mut link: ServerLink) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let mut beat = tokio::time::interval(slopty_net::liveness::PING_EVERY);
+            loop {
+                tokio::select! {
+                    msg = link.rx.recv() => if msg.is_err() { return },
+                    _ = beat.tick() => {
+                        let ping = ToServer::Ping { sent_at: slopty_core::MonoTime::now() };
+                        if link.tx.send(&ping).await.is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
+        })
+    }
+
     /// The next message but the logged events, which the hub's own tests cover.
     async fn next(link: &mut ServerLink) -> FromServer {
         loop {
@@ -189,7 +208,7 @@ mod tests {
         assert!(matches!(outcome, Outcome::Error { code: ErrorCode::WorkerUnreachable, .. }));
 
         // It comes back under the same id.
-        let _back = dial(&server, worker_role(id)).await.unwrap();
+        let _back = keep_pinging(dial(&server, worker_role(id)).await.unwrap());
         let FromServer::Worker(info) = next(&mut client).await else { panic!("back online") };
         assert_eq!(info.liveness, Liveness::Online);
         server.shutdown().await;
@@ -250,6 +269,44 @@ mod tests {
         server.shutdown().await;
     }
 
+    /// A worker whose control stream stops carrying while its connection stays up (QUIC's
+    /// keep-alives still answered, as a stalled reader or writer leaves it) loses its lease once
+    /// six seconds pass without a word on the stream, and its pings keep a lease that holds.
+    #[tokio::test]
+    async fn a_worker_whose_stream_stalls_turns_unreachable_within_six_seconds() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = start(dir.path()).await;
+        let (pinging, stalled) = (WorkerId::new(), WorkerId::new());
+        let _kept = keep_pinging(dial(&server, worker_role(pinging)).await.unwrap());
+        let mut client = dial(&server, client_role()).await.unwrap();
+        let _directory = next(&mut client).await;
+        let _ladder = next(&mut client).await;
+        let _present = next(&mut client).await;
+        // Registered, welcomed, and then nothing on the stream: no ping, no read.
+        let _stalled = dial(&server, worker_role(stalled)).await.unwrap();
+        let started = std::time::Instant::now();
+        let FromServer::Worker(online) = next(&mut client).await else { panic!("online") };
+        assert_eq!((online.worker, online.liveness), (stalled, Liveness::Online));
+        let FromServer::Worker(info) = next(&mut client).await else { panic!("a change") };
+        let took = started.elapsed();
+        assert_eq!((info.worker, info.liveness), (stalled, Liveness::Unreachable), "{took:?}");
+        println!("MEASURE a stalled worker stream ends its lease after {took:?}");
+        let within = slopty_net::liveness::PONG_WITHIN;
+        assert!(took >= within.checked_sub(Duration::from_millis(500)).unwrap(), "{took:?}");
+        // The QUIC idle timeout would take as long; the connection still answers, so only the
+        // stream's silence ends it. The ceiling allows a loaded runner's late look.
+        assert!(took < within.checked_add(Duration::from_secs(3)).unwrap(), "{took:?}");
+        let list = ToServer::Request { id: 1, key: None, verb: Verb::ListWorkers };
+        client.tx.send(&list).await.unwrap();
+        let FromServer::Reply { outcome: Outcome::Workers(listed), .. } = next(&mut client).await
+        else {
+            panic!("list_workers")
+        };
+        let kept = listed.iter().find(|w| w.worker == pinging).unwrap();
+        assert_eq!(kept.liveness, Liveness::Online, "a worker that pings keeps its lease");
+        server.shutdown().await;
+    }
+
     /// A worker that moves under a link that holds (a laptop roaming to another network) keeps
     /// its lease, and is published at its new address within a couple of seconds: clients dial
     /// it there. Linux only, where `127.0.0.2` is loopback too.
@@ -263,7 +320,7 @@ mod tests {
         let endpoint = bind_client().unwrap();
         let through = HostAddr::from(relay.addr());
         let worker = connect(&endpoint, &through, worker_role(id));
-        let _worker = tokio::time::timeout(PATIENCE, worker).await.unwrap().unwrap();
+        let _worker = keep_pinging(tokio::time::timeout(PATIENCE, worker).await.unwrap().unwrap());
         let mut client = dial(&server, client_role()).await.unwrap();
         let FromServer::Directory(directory) = next(&mut client).await else { panic!("first") };
         assert_eq!(directory[0].address, "127.0.0.1:45999");

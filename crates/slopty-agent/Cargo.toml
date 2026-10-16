@@ -18,7 +18,7 @@ agent-client-protocol-schema = { workspace = true, features = [
     "unstable_end_turn_token_usage",
     "unstable_session_fork",
 ] }
-# The Claude mod's directory is named by its files' digest (`claude_mod`).
+# Content digests: the pi gate's directory, pictures, a vouch's key.
 blake3.workspace = true
 # The pictures in a transcript are base64; the worker sends their bytes.
 data-encoding.workspace = true

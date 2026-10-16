@@ -42,7 +42,6 @@ use parking_lot::Mutex;
 use slopty_agent::vouch::SessionKey;
 use slopty_core::{SessionId, WallMs, WorkerId};
 use slopty_proto::RequestId;
-use slopty_proto::agent::AgentBranch;
 use slopty_proto::lan::{LanPort, MacAddr};
 use slopty_proto::orchestration::{
     ErrorCode, EventFilter, Happening, HubEvent, IdempotencyKey, KEY_LIFETIME, Outcome, TermRef,
@@ -250,9 +249,6 @@ struct Entry {
     /// Which registration the entry reflects; a lease of another generation is stale.
     generation: u64,
     link: Option<Link>,
-    /// What each session's status line said of its worktree and pull request: the branch an
-    /// agent's entry names.
-    branches: HashMap<SessionId, AgentBranch>,
     /// What the worker reported it is and has.
     facts: Facts,
     /// Its facts were asked for on this registration: a worker gathers them only once asked
@@ -299,7 +295,6 @@ impl Hub {
                 sessions: Vec::new(),
                 generation: 0,
                 link: None,
-                branches: HashMap::new(),
                 facts: Facts::new(),
                 facts_asked: false,
                 session_key: None,
@@ -553,18 +548,15 @@ impl Hub {
             entry.link = link;
             entry.session_key = Some(key);
             entry.facts_asked = false;
-            entry.branches.retain(|session, _| !gone.contains(session));
             (reshaped, gone, opened)
         } else {
             let opened = sessions.clone();
-            let (branches, facts) = (HashMap::new(), Facts::new());
             let entry = Entry {
                 info: info.clone(),
                 sessions,
                 generation,
                 link,
-                branches,
-                facts,
+                facts: Facts::new(),
                 facts_asked: false,
                 session_key: Some(key),
             };
@@ -721,11 +713,9 @@ impl Hub {
                 }
                 opened
             }
-            // Only the person answers a permission, so only the person's read holds prompts.
-            Verb::ReadThread { of, view, after, .. } => match self.thread_on(of) {
+            Verb::ReadThread { of, view, after } => match self.thread_on(of) {
                 Ok(of) => {
-                    let hold = caller == Caller::Person;
-                    let read = self.forward(key, Verb::ReadThread { of, view, after, hold }).await;
+                    let read = self.forward(key, Verb::ReadThread { of, view, after }).await;
                     if let (Some(reader), ThreadOf::On { thread, .. }) = (from, of) {
                         self.inner.state.lock().deliveries.seen(reader, thread);
                     }
@@ -1078,9 +1068,6 @@ impl Hub {
     /// agent's next seat.
     fn session_closed(&self, state: &mut State, term: TermRef) {
         self.happen(Happening::SessionClosed { term });
-        if let Some(entry) = state.workers.get_mut(&term.worker) {
-            entry.branches.remove(&term.session);
-        }
         state.deliveries.closed(term);
         state.agents.closed(term.session);
     }
@@ -1190,13 +1177,6 @@ impl Lease {
         self.worker
     }
 
-    /// Whether a pocketed phone can answer, as it moves, for the worker's link to send
-    /// ([`FromServer::Pushes`]).
-    #[must_use]
-    pub fn pushes(&self) -> watch::Receiver<bool> {
-        self.hub.inner.state.lock().board.pushes()
-    }
-
     /// Publish the worker at `ip` from now on, on the port it listens on: its machine came to
     /// have an address other machines reach (Tailscale came up after it registered), or moved
     /// under its link (a laptop roaming to another network). Every client is told, and the
@@ -1296,13 +1276,6 @@ impl Lease {
             ToServer::Cloning { clone, phase, percent } => {
                 tracing::debug!(%worker, clone, phase, ?percent, "a clone moves");
             }
-            ToServer::Report(AgentReport::Branch(branch)) => {
-                if branch.worktree.is_none() {
-                    entry.branches.remove(&branch.session);
-                } else {
-                    entry.branches.insert(branch.session, branch);
-                }
-            }
             ToServer::Report(AgentReport::Delivered { session, batch }) => {
                 hub.delivered(&mut state, TermRef { worker, session }, batch);
             }
@@ -1313,6 +1286,9 @@ impl Lease {
                 }
                 hub.rows_moved(&mut state);
             }
+            // A ping proves the link's stream, which the link itself answers and times
+            // (`link::read_worker`); `last_seen_ms` above is all it changes here.
+            ToServer::Ping { .. } => {}
             ToServer::Hello { .. }
             | ToServer::Request { .. }
             | ToServer::Presence(_)
@@ -1717,7 +1693,6 @@ pub(crate) mod tests {
                 of: ThreadOf::On { worker, thread: ThreadId::new() },
                 view: ThreadView::Activity,
                 after: None,
-                hold: true,
             },
             Verb::AnswerRequest {
                 of: ThreadOf::On { worker, thread: ThreadId::new() },

@@ -16,7 +16,7 @@ use std::time::{Duration, Instant, SystemTime};
 use parking_lot::{Mutex, RwLock};
 
 use super::watch::Watch;
-use super::{narrows, rank, walk_matching, walker, worktree_of};
+use super::{narrows, rank, recent, walk_bounded, walk_matching, walker, worktree_of};
 
 /// Paths an index holds at most; a tree past it is indexed in part, as the walk found it.
 pub const MAX_PATHS: usize = 2_000_000;
@@ -350,6 +350,36 @@ impl Index {
                 ));
             }
         }
+    }
+
+    /// The files under `dir` (canonical, inside the worktree) changed lately, at most `limit`,
+    /// relative to `dir`: git's changes newest first, then the files of the folders whose
+    /// entries changed last (`find::recent`).
+    #[must_use]
+    pub fn recent(&self, dir: &Path, limit: usize) -> Vec<String> {
+        let tree = self.ready();
+        self.catch_up(tree);
+        let Ok(rel) = dir.strip_prefix(&self.shared.top) else { return Vec::new() };
+        let prefix = dir_key(rel);
+        let others = || {
+            let held = tree.read();
+            let dirs: Vec<(&str, SystemTime)> = held
+                .dirs
+                .iter()
+                .filter(|(dir, _)| dir.starts_with(&*prefix))
+                .filter_map(|(dir, time)| Some((dir.as_ref(), (*time)?)))
+                .collect();
+            let files = recent::of_newest_dirs(dirs, |dir| {
+                // The files directly in `dir`: no `/` in what follows it.
+                held.below(dir)
+                    .filter(|rest| !rest.contains('/'))
+                    .map(|f| format!("{dir}{f}"))
+                    .collect()
+            });
+            drop(held);
+            files
+        };
+        recent::recent(&self.shared.top, &prefix, others, limit)
     }
 
     /// The paths under `dir` (canonical, inside the worktree) that `query` matches, best
@@ -694,18 +724,27 @@ impl Indexes {
 
     /// The paths under `dir` that `query` matches, best first, at most `limit`, relative to
     /// `dir`: from its worktree's index, or a bounded walk outside one; with what the person
-    /// should know of the index, the first time there is something.
+    /// should know of the index, the first time there is something. An empty query answers the
+    /// files changed lately, git's changes first ([`Index::recent`]).
     #[must_use]
     pub fn matching(&self, dir: &Path, query: &str, limit: usize) -> Answer {
-        if query.trim().is_empty() || limit == 0 {
+        if limit == 0 {
             return Answer::default();
         }
         let Ok(dir) = std::fs::canonicalize(dir) else { return Answer::default() };
+        let recent = query.trim().is_empty();
         match worktree_of(&dir) {
             Some(top) => {
                 let index = self.index(&top);
-                let paths = index.matching(&dir, query, limit);
+                let paths = if recent {
+                    index.recent(&dir, limit)
+                } else {
+                    index.matching(&dir, query, limit)
+                };
                 Answer { paths, notice: index.take_notice() }
+            }
+            None if recent => {
+                Answer { paths: recent::walked(&dir, walk_bounded(&dir), limit), notice: None }
             }
             None => Answer { paths: walk_matching(&dir, query, limit), notice: None },
         }

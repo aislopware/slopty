@@ -2,9 +2,9 @@
 //! from T3 Code's model manifest (`assets/t3code-model-manifest.json`, MIT,
 //! `THIRD_PARTY_NOTICES.md`).
 //!
-//! The menu is Claude Code's, as Slopty's mod reads it from the running Claude Code (the
-//! `/config` menu's `model` row): the models this account and its managed settings allow,
-//! the same the terminal's `/model` offers, by alias (`default`, `sonnet`, `opus`). The
+//! The menu is Claude Code's, as its worker reads it from the installed Claude Code: the models
+//! this account and its managed settings allow, the same its own `/model` offers, by alias
+//! (`default`, `sonnet`, `opus`). The
 //! manifest names each model by its id, with its name, the aliases it answers to, whether it
 //! is current, the efforts it takes, and the oldest Claude Code that runs it; T3 Code keeps it
 //! up to date. Each alias of the menu is offered as the model it answers for, by id, so what a
@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::sync::LazyLock;
 
 use serde::Deserialize;
-use slopty_view_proto::{Model, ReasoningLevel};
+use slopty_view_proto::{Model, ModelOption, ModelOptionChoice, ReasoningLevel};
 
 /// The manifest's driver for Claude Code.
 const CLAUDE: &str = "claudeAgent";
@@ -49,8 +49,17 @@ struct Capabilities {
 struct Descriptor {
     id: String,
     #[serde(default)]
+    label: Option<String>,
+    /// `select` or `boolean`.
+    #[serde(default, rename = "type")]
+    kind: Option<String>,
+    #[serde(default)]
     options: Vec<Choice>,
 }
+
+/// The one option of a model's beside its effort that Claude Code takes from Slopty: its fast
+/// mode, which its own `/fast` toggles. Its context window is the model's `[1m]` row instead.
+const FAST_MODE: &str = "fastMode";
 
 #[derive(Debug, Deserialize)]
 struct Choice {
@@ -116,14 +125,31 @@ impl Entry {
             || self.aliases.iter().any(|a| a.eq_ignore_ascii_case(id))
     }
 
-    /// It as the picker's row: its name without "Claude", the efforts its profile takes.
+    /// It as the picker's row: its name without "Claude", the efforts its profile takes, and
+    /// its fast mode where it has one.
     fn row(&self, profiles: &HashMap<String, Profile>) -> Model {
-        let efforts = self
-            .profile
-            .as_ref()
-            .and_then(|profile| profiles.get(profile))
-            .into_iter()
-            .flat_map(|profile| &profile.capabilities.option_descriptors)
+        let descriptors = || {
+            self.profile
+                .as_ref()
+                .and_then(|profile| profiles.get(profile))
+                .into_iter()
+                .flat_map(|profile| &profile.capabilities.option_descriptors)
+        };
+        let options = descriptors()
+            .filter(|d| d.id == FAST_MODE && d.kind.as_deref() == Some("boolean"))
+            .map(|d| ModelOption {
+                id: d.id.clone(),
+                label: d.label.clone().unwrap_or_else(|| "Fast Mode".to_owned()),
+                choices: [("off", "Off"), ("on", "On")]
+                    .map(|(id, label)| ModelOptionChoice {
+                        id: id.to_owned(),
+                        label: label.to_owned(),
+                    })
+                    .into(),
+                default_choice: "off".to_owned(),
+            })
+            .collect();
+        let efforts = descriptors()
             .filter(|descriptor| descriptor.id == "effort")
             .flat_map(|descriptor| &descriptor.options)
             .filter_map(|choice| serde_json::from_value(serde_json::json!(choice.id)).ok())
@@ -133,7 +159,7 @@ impl Entry {
             label: self.name.strip_prefix("Claude ").unwrap_or(&self.name).to_owned(),
             description: None,
             reasoning_levels: efforts,
-            options: Vec::new(),
+            options,
         }
     }
 }
@@ -228,6 +254,20 @@ mod tests {
         );
         let fallback = claude_menu("2.1.296", &[], None);
         assert!(fallback.iter().any(|m| m.id == "claude-fable-5-1"), "no menu yet: the current");
+    }
+
+    /// A model whose profile takes fast mode offers it as the picker's on/off option; one that
+    /// does not offers none.
+    #[test]
+    fn a_model_that_takes_fast_mode_offers_it() {
+        let rows = claude_models("2.1.296", None);
+        let opus = rows.iter().find(|m| m.id == "claude-opus-5-5").expect("Opus 5.5");
+        let fast = opus.options.iter().find(|o| o.id == FAST_MODE).expect("its fast mode");
+        let choices: Vec<&str> = fast.choices.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(choices, ["off", "on"]);
+        assert_eq!(fast.default_choice, "off");
+        let haiku = rows.iter().find(|m| m.id == "claude-haiku-5-5").expect("Haiku 5.5");
+        assert!(haiku.options.is_empty(), "no fast mode");
     }
 
     #[test]

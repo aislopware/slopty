@@ -105,6 +105,9 @@ opt-level = 0
 [profile.dev.package.linktime-proc-macro]
 opt-level = 0
 
+[profile.dev.package.macro_rules_attribute-proc_macro]
+opt-level = 0
+
 [profile.dev.package.multiversion_no_op]
 opt-level = 0
 

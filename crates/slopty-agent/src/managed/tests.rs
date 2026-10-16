@@ -14,64 +14,20 @@ fn settings(doc: &Value) -> ManagedSettings {
 #[test]
 fn nothing_managed_forbids_nothing() {
     let none = ManagedSettings::default();
-    assert!(none.sideloads() && none.runs_own_hooks() && none.hears_mod());
+    assert!(none.sideloads());
     assert!(none.admits_mcp("slopty", &["/bin/slopty", "mcp"]));
 }
 
-/// Each key that touches Slopty reads as what it costs: sideloading off takes the plugin and
-/// the tools, hooks off or managed-only take the relay and the mod, plugin-only hooks take the
-/// relay, a blocked plugin network takes the mod.
+/// Sideloading off takes Slopty's tools, and so does confining MCP to plugins; confining
+/// another surface does not.
 #[test]
 fn each_key_reads_as_what_it_costs() {
     let sideload = settings(&json!({ "disableSideloadFlags": true }));
-    assert!(!sideload.sideloads() && !sideload.hears_mod());
-    assert!(!sideload.admits_mcp("slopty", &[]));
-    assert!(sideload.runs_own_hooks(), "--settings is no sideload flag");
-
-    for key in ["disableAllHooks", "allowManagedHooksOnly"] {
-        let off = settings(&json!({ key: true }));
-        assert!(!off.runs_own_hooks() && !off.hears_mod(), "{key}");
-        assert!(off.sideloads(), "{key}");
-    }
+    assert!(!sideload.sideloads() && !sideload.admits_mcp("slopty", &[]));
     let plugin_hooks = settings(&json!({ "strictPluginOnlyCustomization": ["hooks"] }));
-    assert!(!plugin_hooks.runs_own_hooks());
     assert!(plugin_hooks.admits_mcp("slopty", &[]), "only hooks are confined");
     let plugin_all = settings(&json!({ "strictPluginOnlyCustomization": true }));
-    assert!(!plugin_all.runs_own_hooks() && !plugin_all.admits_mcp("slopty", &[]));
-
-    let quiet = settings(&json!({ "env": { "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1" } }));
-    assert!(quiet.disables_nonessential_traffic && !quiet.hears_mod());
-    let empty = settings(&json!({ "env": { "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "" } }));
-    assert!(empty.hears_mod(), "set empty is unset");
-}
-
-/// Why the mod is left out, policy first: the nonessential-traffic switch blocks it whether
-/// the managed settings set it or the run's own environment does, except set empty, which
-/// Claude Code reads as unset.
-#[test]
-fn the_mod_is_off_for_its_first_reason() {
-    let none = ManagedSettings::default();
-    assert_eq!(none.mod_off(None), None);
-    assert_eq!(none.mod_off(Some("")), None, "set empty is unset");
-    assert_eq!(none.mod_off(Some("1")), Some(ModOff::QuietByEnvironment));
-    assert_eq!(none.mod_off(Some("true")), Some(ModOff::QuietByEnvironment));
-    let quiet = settings(&json!({ "env": { "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1" } }));
-    assert_eq!(quiet.mod_off(None), Some(ModOff::QuietByPolicy));
-    assert_eq!(quiet.mod_off(Some("1")), Some(ModOff::QuietByPolicy));
-    let cases = [
-        ("disableSideloadFlags", ModOff::SideloadingOff),
-        ("disableAllHooks", ModOff::HooksOff),
-        ("allowManagedHooksOnly", ModOff::ManagedHooksOnly),
-    ];
-    for (key, why) in cases {
-        let off = settings(
-            &json!({ key: true, "env": { "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1" } }),
-        );
-        assert_eq!(off.mod_off(Some("1")), Some(why), "{key}");
-        assert!(!off.hears_mod(), "{key}");
-    }
-    let said = ModOff::QuietByEnvironment.to_string();
-    assert!(said.contains("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"), "{said}");
+    assert!(!plugin_all.admits_mcp("slopty", &[]));
 }
 
 /// The MCP lists: a deny wins, an allow list admits only what it names, and the managed-only
@@ -107,14 +63,11 @@ fn the_reader_keeps_only_the_listed_keys() {
         "availableModels": ["opus", "sonnet"],
         "enforceAvailableModels": true,
         "permissions": { "defaultMode": "auto", "deny": ["Bash(rm:*)"] },
-        "disableAgentView": true,
     });
     let read = settings(&doc);
     let shown = format!("{read:?}");
     assert!(!shown.contains("secret") && !shown.contains("rm:"), "{shown}");
-    assert!(
-        read.disables_terminal_title && read.disable_agent_view && read.enforce_available_models
-    );
+    assert!(read.enforce_available_models);
     assert_eq!(
         read.available_models.as_deref(),
         Some(&["opus".to_owned(), "sonnet".to_owned()][..])
@@ -132,7 +85,7 @@ fn the_files_are_read_together() {
     let broken = dir.path().join("broken.json");
     std::fs::write(
         &system,
-        r#"{"disableAllHooks": false, "deniedMcpServers": [{"serverName": "a"}]}"#,
+        r#"{"disableSideloadFlags": false, "deniedMcpServers": [{"serverName": "a"}]}"#,
     )
     .unwrap();
     std::fs::write(
@@ -143,7 +96,7 @@ fn the_files_are_read_together() {
     std::fs::write(&broken, "{").unwrap();
     let missing = dir.path().join("missing.json");
     let read = ManagedSettings::from_files(&[system, remote, broken, missing]);
-    assert!(read.disable_sideload_flags && !read.disable_all_hooks);
+    assert!(read.disable_sideload_flags);
     assert_eq!(read.denied_mcp_servers.len(), 2);
 }
 

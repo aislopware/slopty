@@ -1,8 +1,9 @@
 //! The phone's anatomy on the simulator (`cargo xtask e2e ios --sim iphone|ipad`): a phone
 //! opens on its Sessions page (the large title, the session list, the "New session" capsule and
-//! the tab bar), "New session" takes the whole screen for the new chat, and the chat's sidebar
-//! button goes back. An iPad keeps the shell's columns, the sidebar beside the chat. Each state is
-//! a golden in light and in dark, `ios-<device>-compact-*`.
+//! the tab bar, with no sidebar foot), "New session" takes the whole screen for the new chat under
+//! a navigation bar (its title and a close button, none of the desktop's sidebar and history
+//! cluster), and its close goes back. An iPad keeps the shell's columns, the sidebar beside the
+//! chat. Each state is a golden in light and in dark, `ios-<device>-compact-*`.
 
 use std::path::Path;
 use std::time::Duration;
@@ -81,15 +82,26 @@ async fn a_phone_opens_on_its_sessions_and_a_chat_takes_the_screen() {
     for tab in ["Sessions", "Settings", "Search"] {
         assert!(dump.a11y_node("Tab", Some(tab)).is_some(), "{tab}: {:#?}", dump.a11y);
     }
+    // Settings is a tab, so the desktop's sidebar foot (the server pill, the gear) is gone.
+    assert!(dump.a11y_node("Button", Some("Settings")).is_none(), "{:#?}", dump.a11y);
     goldens(drv, &dir, device, "sessions").await;
 
-    // "New session" takes the screen for the new chat, its composer ready.
+    // "New session" takes the screen for the new chat, its composer ready, under the phone's
+    // navigation bar: its title and a close, none of the desktop's sidebar and history cluster.
     tap(drv, "Button", "New session").await;
-    drv.wait_for("the new chat", STEP, |d| !sessions_page(d)).await.unwrap();
+    let page = drv.wait_for("the new chat", STEP, |d| !sessions_page(d)).await.unwrap();
+    let bar = page.a11y_node("Group", Some("Navigation")).map(|n| n.bounds);
+    let [_, bar_top, _, bar_height] = bar.unwrap_or_else(|| panic!("{:#?}", page.a11y));
+    assert!(page.a11y_node("Heading", Some("New session")).is_some(), "{:#?}", page.a11y);
+    let close = page.a11y_node("Button", Some("Close")).map(|n| n.bounds).unwrap();
+    assert!(close[1] >= bar_top && close[1] + close[3] <= bar_top + bar_height + 0.5, "{close:?}");
+    for desktop in ["Toggle left sidebar", "Back", "Forward"] {
+        assert!(page.a11y_node("Button", Some(desktop)).is_none(), "{desktop}: {:#?}", page.a11y);
+    }
     goldens(drv, &dir, device, "new-session").await;
 
-    // The chat's sidebar button goes back to Sessions.
-    tap(drv, "Button", "Toggle left sidebar").await;
+    // Its close goes back to Sessions.
+    tap(drv, "Button", "Close").await;
     drv.wait_for("the Sessions page again", STEP, sessions_page).await.unwrap();
 
     // Settings from the tab bar, and back from its page to Sessions.

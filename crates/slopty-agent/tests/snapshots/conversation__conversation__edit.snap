@@ -1,13 +1,12 @@
 ---
 source: crates/slopty-agent/tests/conversation.rs
-assertion_line: 81
 expression: "decode(\"edit\").snapshot()"
 ---
 - id: Main
   origin: ~
   entries:
     - id: 00000000-0000-4000-8000-000000000003
-      at_ms: 1791610951108
+      at_ms: 1792130287142
       body:
         Prompt:
           text:
@@ -18,7 +17,7 @@ expression: "decode(\"edit\").snapshot()"
           images: []
           command: ~
     - id: toolu_01
-      at_ms: 1791610953548
+      at_ms: 1792130289071
       body:
         Tool:
           name: Read
@@ -33,10 +32,10 @@ expression: "decode(\"edit\").snapshot()"
           result:
             status: Ok
             text: ~
-            at_ms: 1791610953602
+            at_ms: 1792130289127
             images: []
     - id: toolu_02
-      at_ms: 1791610955417
+      at_ms: 1792130290343
       body:
         Tool:
           name: Edit
@@ -64,10 +63,10 @@ expression: "decode(\"edit\").snapshot()"
           result:
             status: Ok
             text: ~
-            at_ms: 1791610955481
+            at_ms: 1792130290375
             images: []
     - id: toolu_03
-      at_ms: 1791610957616
+      at_ms: 1792130291564
       body:
         Tool:
           name: Write
@@ -95,10 +94,10 @@ expression: "decode(\"edit\").snapshot()"
           result:
             status: Ok
             text: ~
-            at_ms: 1791610957666
+            at_ms: 1792130291592
             images: []
     - id: toolu_04
-      at_ms: 1791610958896
+      at_ms: 1792130293502
       body:
         Tool:
           name: Read
@@ -113,10 +112,10 @@ expression: "decode(\"edit\").snapshot()"
           result:
             status: Ok
             text: ~
-            at_ms: 1791610958920
+            at_ms: 1792130293528
             images: []
-    - id: "00000000-0000-4000-8000-000000000030:0"
-      at_ms: 1791610960932
+    - id: "00000000-0000-4000-8000-000000000035:0"
+      at_ms: 1792130294388
       body:
         Text:
           text: done
@@ -126,17 +125,17 @@ expression: "decode(\"edit\").snapshot()"
   tasks: []
   turns:
     - prompt: 00000000-0000-4000-8000-000000000003
-      started_ms: 1791610951108
-      ended_ms: 1791610960966
+      started_ms: 1792130287142
+      ended_ms: 1792130294411
       models:
         - claude-haiku-5-5
       requests: 5
       usage:
         input: 10
-        cache_read: 85484
-        cache_write: 8102
-        output: 547
-        thinking: 134
-      context_tokens: 19083
+        cache_read: 86060
+        cache_write: 8104
+        output: 549
+        thinking: 136
+      context_tokens: 19199
       mode: default
       stop: end_turn

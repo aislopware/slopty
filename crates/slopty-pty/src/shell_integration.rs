@@ -1056,61 +1056,6 @@ mod tests {
         assert_sudo_wrapped(&text, "fish");
     }
 
-    /// A `claude` typed in a Slopty shell runs with the variables and the arguments
-    /// `slopty hook wire` answers with, word for word (a space or an empty word kept); as typed
-    /// when the CLI gives no answer or the person opted out; and not over the user's own
-    /// `claude`.
-    #[tokio::test]
-    async fn a_typed_claude_runs_as_the_cli_wires_it() {
-        let tmp = tempfile::tempdir().unwrap();
-        let bin = tmp.path().join("bin");
-        fs::create_dir_all(&bin).unwrap();
-        let executable = |path: &Path, script: &str| {
-            fs::write(path, script).unwrap();
-            fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-        };
-        executable(
-            &bin.join("claude"),
-            "#!/bin/sh\nprintf 'got'; printf '[%s]' \"$@\"; printf 'hooks[%s]\\n' \"${CLAUDE_CODE_ENABLE_FUNCTION_HOOKS-}\"\n",
-        );
-        // The stand-in CLI: `hook wire --` and the words typed. It answers with a variable, the
-        // empty word and a flag in front of them, and with nothing to a call it refuses.
-        let cli = tmp.path().join("slopty");
-        executable(
-            &cli,
-            "#!/bin/sh\n[ \"$1 $2 $3\" = 'hook wire --' ] || exit 2\nshift 3\n\
-             for a in \"$@\"; do [ \"$a\" = --refused ] && exit 1; done\n\
-             printf 'CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1\\0\\0--wired\\0'\n\
-             for a in \"$@\"; do printf '%s\\0' \"$a\"; done\n",
-        );
-        let cli = cli.to_string_lossy().into_owned();
-        let path = format!("{}:/usr/bin:/bin", bin.display());
-        let env = [(CLI, cli.as_str()), ("PATH", path.as_str())];
-        let input =
-            "claude -p 'a b' ''\nclaude --refused x\nSLOPTY_NO_CLAUDE_MOD=1 claude y\nexit\n";
-        let mut shells: Vec<(&str, &str, &str)> =
-            vec![("/bin/zsh", ".zshrc", "alias claude='command claude --mine'\n")];
-        shells.extend(
-            bashes().into_iter().map(|b| (b, ".bashrc", "alias claude='command claude --mine'\n")),
-        );
-        let fish = fish();
-        shells.extend(
-            fish.map(|f| (f, ".config/fish/config.fish", "alias claude 'command claude --mine'\n")),
-        );
-        for (n, (shell, rc, alias)) in shells.into_iter().enumerate() {
-            let tag = format!("claude-{n}");
-            let interactive = || Shell { program: shell, args: &["-i"] };
-            let text = run_shell_with(&tag, interactive(), &[], &env, input).await;
-            assert!(text.contains("got[--wired][-p][a b][]hooks[1]"), "{shell}: {text:?}");
-            assert!(text.contains("got[--refused][x]hooks[]"), "{shell}, refused: {text:?}");
-            assert!(text.contains("got[y]hooks[]"), "{shell}, opted out: {text:?}");
-            let tag = format!("claude-own-{n}");
-            let own =
-                run_shell_with(&tag, interactive(), &[(rc, alias)], &env, "claude z\nexit\n").await;
-            assert!(own.contains("got[--mine][z]hooks[]"), "{shell}, the user's alias: {own:?}");
-        }
-    }
-
     /// A typed `codex` runs with nothing that names the terminal, its arguments as typed and the
     /// rest of the environment kept, in every shell, so a Codex daemon it starts has no
     /// terminal to lend its threads; the user's own `codex` is left alone.

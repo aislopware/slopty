@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use slopty_client::{WorkerKey, WorkerLink};
 use slopty_core::WorkerId;
+use slopty_net::liveness::{Beat, Pulse};
 use slopty_platform::resume::Resume;
 use slopty_ui::workspace::WorkerStatus;
 /// The workspace's key for a worker: its id's 128 bits.
@@ -15,8 +16,8 @@ pub struct WorkerSlot {
     /// Its identity (the directory's key).
     pub id: WorkerId,
     /// Wakes its connect loop out of a wait: it came back online, or the server went away and
-    /// its cached address is worth a try. While a link is up it wakes the link's [`Hearing`]
-    /// check instead, which gives up a silent link at once.
+    /// its cached address is worth a try. While a link is up it wakes the link's ping
+    /// supervisor instead, which pings at once and gives up a silent link.
     pub wake: std::sync::Arc<tokio::sync::Notify>,
     /// The workspace's key for it.
     pub key: WorkerKey,
@@ -121,90 +122,61 @@ pub fn adopt(
     Some(slot.key)
 }
 
-/// Nothing heard from a worker for this long shows as silent: three keep-alives missed.
-pub const SILENCE_WARN: Duration = slopty_net::endpoint::KEEP_ALIVE.saturating_mul(3);
-/// Nothing heard for this long and the link is given up, so the redial takes over instead of
-/// the transport's idle timeout: five keep-alives missed.
-pub const SILENCE_DROP: Duration = slopty_net::endpoint::KEEP_ALIVE.saturating_mul(5);
-/// How often a link's liveness and RTT are sampled: twice a keep-alive, so a bar is crossed
-/// within half a second of the silence reaching it.
-pub const HEARING_TICK: Duration = match slopty_net::endpoint::KEEP_ALIVE.checked_div(2) {
-    Some(half) => half,
-    None => Duration::ZERO,
-};
-
-/// Whether a worker is heard, from its link's count of received datagrams sampled over time.
+/// One worker link's supervisor (`slopty_net::liveness`).
 ///
-/// Keep-alives move the count every [`slopty_net::endpoint::KEEP_ALIVE`] on an idle link, so a
-/// count that stands still is the worker gone or the path cut, long before the transport's
-/// idle timeout says so.
+/// The link is alive while its control stream answers the pings it sends, whatever the
+/// datagrams beside it say. It pings the stream every two seconds, shows the link silent once
+/// one ping went unanswered, and relinks it once two did: six seconds after the last answer.
 #[derive(Clone, Copy, Debug)]
-pub struct Hearing {
-    count: u64,
-    at: Instant,
+pub struct Supervisor {
+    beat: Beat,
+    pongs: u64,
 }
 
-/// What a [`Hearing`] sample says.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Heard {
-    /// Something arrived within [`SILENCE_WARN`].
-    Live,
-    /// Nothing for this long, past [`SILENCE_WARN`].
-    Silent(Duration),
-    /// Nothing for this long, past [`SILENCE_DROP`]: give the link up.
-    Lost(Duration),
+/// What a [`Supervisor`]'s look says to do.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Look {
+    /// Ping the control stream now ([`slopty_client::WorkerLink::ping_stream`]).
+    pub ping_stream: bool,
+    /// And then this.
+    pub tick: Tick,
 }
 
-impl Hearing {
-    /// A link that came up at `now`.
-    #[must_use]
-    pub const fn new(now: Instant) -> Self {
-        Self { count: 0, at: now }
-    }
-
-    /// The link had received `count` datagrams at `now`.
-    pub fn sample(&mut self, count: u64, now: Instant) -> Heard {
-        if count != self.count {
-            self.count = count;
-            self.at = now;
-        }
-        let gap = now.saturating_duration_since(self.at);
-        if gap >= SILENCE_DROP {
-            Heard::Lost(gap)
-        } else if gap >= SILENCE_WARN {
-            Heard::Silent(gap)
-        } else {
-            Heard::Live
-        }
-    }
-}
-
-/// What a link's tick does with what it heard.
+/// What a link's look does with what it heard.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Tick {
     /// Show this.
     Show(WorkerStatus),
-    /// Ping the worker, since a restarted one answers with a reset that ends the link, and show
-    /// this.
+    /// Ping the connection too, since a restarted worker answers with a reset that ends the
+    /// link, and show this.
     Ping(WorkerStatus),
-    /// Give the link up. `at_once`: redial now rather than after the backoff.
-    GiveUp {
-        /// Redial now.
-        at_once: bool,
-    },
+    /// Give the link up and dial again at once, its views kept, set back, until the new link
+    /// lands ([`WorkerStatus::Relinking`]).
+    Relink,
 }
 
-impl Heard {
-    /// What the tick does. `woken`: the server says the worker is back online or moved, so a
-    /// link that is silent then is the dead one.
+impl Supervisor {
+    /// A link that came up at `now`, its control stream answered `pongs` times so far.
     #[must_use]
-    pub const fn tick(self, woken: bool) -> Tick {
-        match self {
-            Self::Live => Tick::Show(WorkerStatus::Connected),
-            Self::Silent(_) | Self::Lost(_) if woken => Tick::GiveUp { at_once: true },
-            Self::Silent(gap) => Tick::Ping(WorkerStatus::Silent(gap.as_secs())),
-            Self::Lost(_) => Tick::GiveUp { at_once: false },
+    pub const fn new(now: Instant, pongs: u64) -> Self {
+        Self { beat: Beat::new(now), pongs }
+    }
+
+    /// Look at the link at `now`, its stream answered `pongs` times so far. `woken`: the server
+    /// says the worker is back online or moved, so a link in doubt then is the dead one.
+    pub fn look(&mut self, pongs: u64, woken: bool, now: Instant) -> Look {
+        if pongs != self.pongs {
+            self.pongs = pongs;
+            self.beat.heard(now);
         }
+        let tick = match self.beat.pulse(now) {
+            Pulse::Live => Tick::Show(WorkerStatus::Connected),
+            Pulse::Silent(_) | Pulse::Dead(_) if woken => Tick::Relink,
+            Pulse::Silent(gap) => Tick::Ping(WorkerStatus::Silent(gap.as_secs())),
+            Pulse::Dead(_) => Tick::Relink,
+        };
+        let ping_stream = tick != Tick::Relink && self.beat.ping_due(now);
+        Look { ping_stream, tick }
     }
 }
 
@@ -261,52 +233,78 @@ mod tests {
         assert!(slots[0].link.is_some());
     }
 
+    /// Looked at every half second, a link whose stream answers each ping stays connected;
+    /// one whose stream stops answering (its datagrams may still flow) shows silent after one
+    /// missed ping and is relinked six seconds after its last answer.
     #[test]
-    fn the_silence_bars_are_three_and_five_keep_alives() {
-        assert_eq!(SILENCE_WARN, Duration::from_secs(3));
-        assert_eq!(SILENCE_DROP, Duration::from_secs(5));
-        assert_eq!(HEARING_TICK, Duration::from_millis(500));
+    fn a_link_lives_by_its_pongs_and_is_relinked_six_seconds_after_the_last() {
+        use slopty_net::liveness::{LOOK_EVERY, PING_EVERY, PONG_WITHIN, SILENT_AFTER};
+        let start = Instant::now();
+        let mut sup = Supervisor::new(start, 0);
+        let first = sup.look(0, false, start);
+        assert_eq!(first, Look { ping_stream: true, tick: Tick::Show(WorkerStatus::Connected) });
+        let (mut now, mut pongs, mut pings) = (start, 0, 1_u64);
+        for _ in 0..40 {
+            now += LOOK_EVERY;
+            // Every ping answered by the next look.
+            pongs = pings;
+            let look = sup.look(pongs, false, now);
+            assert_eq!(look.tick, Tick::Show(WorkerStatus::Connected));
+            pings += u64::from(look.ping_stream);
+        }
+        assert_eq!(pings, 11, "one ping every two seconds over twenty");
+        let stalled = now;
+        let mut silent = None;
+        let relinked = loop {
+            now += LOOK_EVERY;
+            let look = sup.look(pongs, false, now);
+            match look.tick {
+                Tick::Relink => break now.duration_since(stalled),
+                Tick::Ping(WorkerStatus::Silent(_)) => {
+                    silent.get_or_insert_with(|| now.duration_since(stalled));
+                }
+                Tick::Show(_) | Tick::Ping(_) => {}
+            }
+        };
+        // The stream stopped somewhere between two pings: counted from its last answer, it
+        // shows silent four seconds on and is relinked six seconds on.
+        let silent = silent.expect("silent before it is relinked");
+        assert!(
+            silent >= SILENT_AFTER.saturating_sub(PING_EVERY) && silent <= SILENT_AFTER,
+            "{silent:?}"
+        );
+        assert!(
+            relinked >= PONG_WITHIN.saturating_sub(PING_EVERY) && relinked <= PONG_WITHIN,
+            "{relinked:?}"
+        );
+        assert_eq!(relinked.saturating_sub(silent), PONG_WITHIN.saturating_sub(SILENT_AFTER));
     }
 
+    /// A link in doubt is relinked at once when the server says the worker is back or moved;
+    /// a live one stays.
     #[test]
-    fn a_link_is_heard_while_keep_alives_arrive_and_lost_five_seconds_after_they_stop() {
+    fn a_link_in_doubt_is_relinked_at_once_when_the_server_says_the_worker_is_back() {
         let start = Instant::now();
         let at = |ms: u64| start + Duration::from_millis(ms);
-        let mut hearing = Hearing::new(start);
-        // A keep-alive and its ACK a second apart, sampled every half second: always live.
-        for tick in 1..=20_u64 {
-            assert_eq!(hearing.sample(tick / 2, at(tick * 500)), Heard::Live, "tick {tick}");
+        let mut sup = Supervisor::new(start, 0);
+        assert_eq!(sup.look(0, true, at(500)).tick, Tick::Show(WorkerStatus::Connected));
+        for ms in [1_000, 1_500, 2_000, 2_500, 3_000, 3_500] {
+            let _looked = sup.look(0, false, at(ms));
         }
-        // The worker dies after the last count, heard at 10 s.
-        assert_eq!(hearing.sample(10, at(12_500)), Heard::Live);
-        assert_eq!(hearing.sample(10, at(13_000)), Heard::Silent(Duration::from_secs(3)));
-        assert_eq!(hearing.sample(10, at(14_500)), Heard::Silent(Duration::from_millis(4_500)));
-        assert_eq!(hearing.sample(10, at(15_000)), Heard::Lost(Duration::from_secs(5)));
-        // Anything at all that arrives makes it live again.
-        assert_eq!(hearing.sample(11, at(15_500)), Heard::Live);
+        assert_eq!(sup.look(0, false, at(4_000)).tick, Tick::Ping(WorkerStatus::Silent(4)));
+        assert_eq!(sup.look(0, true, at(4_500)).tick, Tick::Relink);
+        assert_eq!(sup.look(1, false, at(5_000)).tick, Tick::Show(WorkerStatus::Connected));
     }
 
+    /// An app that was away (the Mac asleep, the app suspended in the background on iOS) does
+    /// not relink a link for the time it was away: it pings at once and waits for the answer.
     #[test]
-    fn a_link_that_never_hears_anything_is_lost_from_when_it_came_up() {
+    fn an_app_back_from_away_pings_before_it_judges() {
         let start = Instant::now();
-        let mut hearing = Hearing::new(start);
-        assert_eq!(hearing.sample(0, start + SILENCE_WARN), Heard::Silent(SILENCE_WARN));
-        assert_eq!(hearing.sample(0, start + SILENCE_DROP), Heard::Lost(SILENCE_DROP));
-    }
-
-    #[test]
-    fn a_silent_link_pings_and_is_given_up_at_once_when_the_server_says_the_worker_is_back() {
-        let silent = Heard::Silent(Duration::from_millis(3_500));
-        assert_eq!(Heard::Live.tick(false), Tick::Show(WorkerStatus::Connected));
-        assert_eq!(
-            Heard::Live.tick(true),
-            Tick::Show(WorkerStatus::Connected),
-            "a live link stays"
-        );
-        assert_eq!(silent.tick(false), Tick::Ping(WorkerStatus::Silent(3)));
-        assert_eq!(silent.tick(true), Tick::GiveUp { at_once: true });
-        let lost = Heard::Lost(SILENCE_DROP);
-        assert_eq!(lost.tick(false), Tick::GiveUp { at_once: false });
-        assert_eq!(lost.tick(true), Tick::GiveUp { at_once: true });
+        let mut sup = Supervisor::new(start, 0);
+        let _looked = sup.look(0, false, start);
+        let back = start + Duration::from_secs(600);
+        let look = sup.look(0, false, back);
+        assert_eq!(look, Look { ping_stream: true, tick: Tick::Show(WorkerStatus::Connected) });
     }
 }

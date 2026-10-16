@@ -15,7 +15,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   through). Timings in MEASUREMENTS.md "gate wall time". Not done: a separate target dir per
   step to overlap cargo invocations (would double the disk and the cold builds).
 
-- ✅ Rust 1.99.0 pinned; edition 2024; resolver 3; `[workspace.lints]` with clippy
+- ✅ Rust 1.99.1 pinned; edition 2024; resolver 3; `[workspace.lints]` with clippy
   all/pedantic/nursery/cargo + curated restriction lints; `panic = "unwind"` everywhere
   (`panic = "abort"` turns any ObjC exception crossing objc2 into a process abort).
 
@@ -1647,6 +1647,13 @@ more full-window layer.
   Rejected: a `--target-dir` flag on every cargo call. It keeps the per-lane dirs, but on CI one
   dir per runner is all a lane needs, and `CARGO_TARGET_TMPDIR`, which cargo sets from the
   target dir for integration tests, would still split those keys.
+  - **Here too** (2026-10-16). The local check (`xtask local`) still set `CARGO_TARGET_DIR`
+    per lane, so with ten lanes checking at once the sccache server held 32 Rust hits in
+    12,772 compiles (0.25 %), and every new lane directory compiled the whole dependency graph
+    cold while the Mac's load sat at 15 on 10 cores. A lane now names its target dir in
+    `target/local/<lane>/.cargo/config.toml`, which cargo finds above the lane's tree, and no
+    `CARGO_*` variable differs between lanes. Measured on a two-dependency probe in two target
+    dirs: 0 of 9 units hit with the variable, 7 of 9 with the config file.
 
 - ✅ **Apple targets are linted on Linux** (2026-10-11, `.research/ci-speed-2026-10-11.md`
   item 1; supersedes round 3's "Do not move host clippy or rustdoc to Linux"). Host clippy, iOS
@@ -2025,3 +2032,53 @@ more full-window layer.
   thin LTO over 16 codegen units, for a bundle to try on real machines; shipping keeps `dist`.
   Each binary's `main` now reads `SLOPTY_COMMIT` and names it to proto
   (`slopty_proto::wire::set_commit`), so a new stamp compiles only the binaries.
+
+- ✅ **Upstream sync of 2026-10-16: gpui-fast `0aca5479`, gpui-kit `914ea1ab`, ghostty
+  `f7b096bd`.** longbridge's gpui-fast `eeccb27f` (#66–#68) and zed `28d0a354` are in the
+  gpui-fast fork; gpui-kit is rebased onto `1b6059c1` (17 upstream commits); ghostty upstream
+  `b3dc3d79` is merged; libghostty-rs is re-pinned to it (`54f2db63`).
+  - zed merged its own iOS backend (#63068, rewritten on typed objc2 with Rust-owned scene
+    delegates). The fork keeps its `gpui_ios`, grown from that PR's August draft over 31
+    commits: hardware keys, VoiceOver, edit menus, native composition, the pointer, pinch,
+    frame pacing, keyboard insets, `render_to_image` and the input the app's tests drive, none
+    of which zed's has. The import holds zed's copy, the allowlist exempts the directory, and
+    upstream's core API is taken as it is: `Window::insets` is zed's now, with the same
+    signature Slopty's compact shell calls. What zed's backend does better is ported into ours
+    as it shows up.
+  - zed took wgpu from a gfx-rs revision for a Vulkan surface-drop fix (#65649). Only the
+    Linux and Windows builds use it; the lock gains the wgpu 30 crates and one proc macro
+    (`macro_rules_attribute-proc_macro`, so `.cargo/ci-profile.toml` moves), and gpui-kit's
+    WASM example moves to wasm-bindgen 0.2.129, which that wgpu asks for.
+  - zed's focus map moved behind one lock (#65177, the stalls when a conversation restores);
+    the fork's focus queries read it so. Its new input-handler `focus_id` lets a frame replayed
+    from the last one redraw when the platform hands back another field's handler.
+  - gpui-kit: four conflicts. The input state keeps upstream's bounce (#3500) beside our
+    `ScrollRequest`; `ScrollBounce` keeps our momentum-phase rule for its child-owned mode and
+    upstream's shared engine for the wheel-owned default; the script deadline counts the
+    thread's CPU time and keeps upstream's slow-call warning; the select keeps upstream's
+    reconciliation (#3446), which notifies as ours did. Upstream's own fix for the shell
+    probes (a `refresh` before the draw) replaced ours in two tests. #3532 makes `gpui-shell`'s
+    default `webview` feature need `gpui-webview`, which is built on longbridge's window
+    composition the fork does its own way: the crate is a member again so the manifest
+    resolves, the shell's defaults leave it out, and the lint and the sync's clippy exclude it.
+  - Judged against Slopty: the editor and textareas now rubber-band on a trackpad at their
+    ends on macOS, like the transcript and sidebar already do (#3500); the caret is drawn crisp
+    at 1 px and no longer flashes off on a click (#3515); a plain wheel scrolls a horizontal
+    strip (#3518). Slopty uses no select, focus trap, webview, syntect or shell, so #3446,
+    #3443, #3499, #3512 and the shell changes reach only the lock.
+  - ghostty: upstream's OSC 8 in VT output (#14711) met the fork's own. Ours stays where it
+    does more (a blank before a cell closes an open link and style, protection and semantic
+    content); upstream's is taken for the rest: a page with no links never checks a cell's,
+    and the point map counts an opening OSC 8 without formatting it twice. The context-signal
+    OSC is upstream's hierarchical context now, and libghostty-rs renames it with it.
+    `zig build test-lib-vt`: 6936 passed, 54 skipped.
+  - gpui-fast's metal release test raced the GPU (a frame finished before the next was
+    encoded); it now encodes all three before committing any. The libghostty-rs pin had moved
+    without its regenerated bindings, so the binding named `HIERARCHICAL_CONTEXT` before its
+    bindings did; they are regenerated (`54f2db63`). The old gpui-kit head `bb14d3c4` stays
+    fetchable on the fork's `keep/bb14d3c4` for checks of commits that still pin it.
+  - The engine's formatter is 3–4 % cheaper on plain output and 1–2.5 % dearer on styled
+    shell history (docs/MEASUREMENTS.md, "the engine on ghostty `f7b096bd`").
+  - Checks: the fork's gpui and gpui_apple tests (928), clippy, the compat check and the iOS
+    simulator check; gpui-kit's workspace clippy, story, recipe and shell tests; libghostty-vt
+    built and tested on a runner against the merged ghostty.

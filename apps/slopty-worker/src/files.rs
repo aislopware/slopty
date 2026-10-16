@@ -2,8 +2,9 @@
 //! read, a quick-open walk, a folder op or a look at the watched files touches the disk, and
 //! none of it may hold up a terminal's echo on the same connection. A text or picture too big
 //! for the control stream goes on a bulk stream after its announcement
-//! (`slopty_worker::file::announce`). The watched files are followed on the kernel's events
-//! (`slopty_worker::fswatch`).
+//! (`slopty_worker::file::announce`). The watched files and folders are followed on the
+//! kernel's events (`slopty_worker::fswatch`), and the watched repositories on their trees'
+//! (`slopty_worker::repowatch`).
 
 use slopty_core::{ClientId, WallMs};
 use slopty_net::{Connection, NetError, WorkerMsg};
@@ -48,7 +49,7 @@ pub async fn send_file(
         FileRead::TooLarge { .. } => "too large",
         FileRead::Media { .. } => "media",
     };
-    tracing::info!(%client, %path, kind, "read file");
+    tracing::debug!(%client, %path, kind, "read file");
     let modified_ms = match &read {
         FileRead::Streamed { modified_ms, .. } => *modified_ms,
         _ => WallMs::ZERO,
@@ -187,9 +188,10 @@ pub async fn save_in_order(
                     GitOp::RemoveWorktree => Some(Holds::Under(slopty_worker::file::expand_home(
                         std::path::Path::new(&repo),
                     ))),
-                    GitOp::Status | GitOp::Changes { .. } | GitOp::Range { .. } => {
-                        Some(Holds::Nothing)
-                    }
+                    GitOp::Status
+                    | GitOp::Changes { .. }
+                    | GitOp::Turn { .. }
+                    | GitOp::Range { .. } => Some(Holds::Nothing),
                     _ => None,
                 };
                 let (finished, done_rx) = watch::channel(false);
@@ -293,6 +295,7 @@ pub async fn git_op(
         GitOp::PullStatus => "pull request status",
         GitOp::Merge { .. } => "merge",
         GitOp::Changes { .. } => "changes",
+        GitOp::Turn { .. } => "turn",
         GitOp::Range { .. } => "range",
         GitOp::RemoveWorktree => "remove worktree",
         GitOp::Branches => "branches",
@@ -305,6 +308,20 @@ pub async fn git_op(
         GitOp::MarkReady => "mark ready",
         GitOp::Switch { .. } => "switch",
     };
+    let reads = matches!(
+        op,
+        GitOp::Status
+            | GitOp::Changes { .. }
+            | GitOp::Turn { .. }
+            | GitOp::Range { .. }
+            | GitOp::FileDiff { .. }
+            | GitOp::Blob { .. }
+            | GitOp::Branches
+            | GitOp::Worktrees
+            | GitOp::PullStatus
+            | GitOp::PullComments { .. }
+            | GitOp::Scripts
+    );
     // An op that moves the pull request has its watch read it again once it is done.
     let moves_pull = matches!(
         op,
@@ -330,7 +347,13 @@ pub async fn git_op(
     if moves_pull && done {
         slopty_worker::thread::pulls::nudge(std::path::Path::new(&repo));
     }
-    tracing::info!(%client, request, %repo, op = what, done, "git op");
+    // A look, which a status or a diff on screen asks again at each change, is no event of the
+    // log's; a change the person made is.
+    if reads {
+        tracing::debug!(%client, request, %repo, op = what, done, "git op");
+    } else {
+        tracing::info!(%client, request, %repo, op = what, done, "git op");
+    }
     let _sent = out.send(WorkerMsg::GitDone { request, outcome }).await;
 }
 
@@ -346,23 +369,20 @@ pub async fn folder_page(
         tokio::task::spawn_blocking(move || slopty_worker::listing::folder_page(&dir, Some(&from)))
             .await
             .unwrap_or_else(|_| Listing::Missing { error: "list failed".to_owned() });
-    tracing::info!(%client, %path, after = %after.name, "folder page");
+    tracing::debug!(%client, %path, after = %after.name, "folder page");
     let _sent = out.send(WorkerMsg::FolderPage { path, after, listing }).await;
 }
 
-/// Answer a quick-open query under `root`.
+/// Answer a quick-open query under `root`; an empty one with the files changed lately, as the
+/// palette lists them before anything is typed.
 pub async fn find(out: mpsc::Sender<WorkerMsg>, root: String, query: String) {
-    let answer = if query.is_empty() {
-        slopty_worker::find::Answer::default()
-    } else {
-        let (dir, needle) = (root.clone(), query.clone());
-        tokio::task::spawn_blocking(move || {
-            let dir = slopty_worker::file::expand_home(std::path::Path::new(&dir));
-            slopty_worker::find::matching(&dir, &needle, FILES_LISTED)
-        })
-        .await
-        .unwrap_or_default()
-    };
+    let (dir, needle) = (root.clone(), query.clone());
+    let answer = tokio::task::spawn_blocking(move || {
+        let dir = slopty_worker::file::expand_home(std::path::Path::new(&dir));
+        slopty_worker::find::matching(&dir, &needle, FILES_LISTED)
+    })
+    .await
+    .unwrap_or_default();
     let slopty_worker::find::Answer { paths, notice } = answer;
     let _sent = out.send(WorkerMsg::FoundFiles { root, query, paths, notice }).await;
 }
@@ -420,6 +440,27 @@ pub async fn watch_folders(
                 .unwrap_or_else(|_| Listing::Missing { error: "list failed".to_owned() });
             tracing::debug!(%client, %path, "folder changed");
             if out.send(WorkerMsg::Folder { path, listing }).await.is_err() {
+                return;
+            }
+        }
+    }
+}
+
+/// Watch the repositories whose status and diffs a client shows: each list `lists` holds
+/// replaces the last, and a repository in which something git reports on changed is said as
+/// `WorkerMsg::RepoMoved` for each folder of the list it holds, once per burst of changes
+/// ([`slopty_worker::repowatch`]). Ends with the connection.
+pub async fn watch_repos(
+    client: ClientId,
+    out: mpsc::Sender<WorkerMsg>,
+    lists: watch::Receiver<Vec<String>>,
+) {
+    let span = tracing::debug_span!("watch repos", %client);
+    let mut moves = span.in_scope(|| slopty_worker::repowatch::follow(lists));
+    while let Some(repos) = moves.next().await {
+        for repo in repos {
+            tracing::debug!(%client, %repo, "repository moved");
+            if out.send(WorkerMsg::RepoMoved { repo }).await.is_err() {
                 return;
             }
         }

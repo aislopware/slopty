@@ -21,37 +21,81 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
        its daemon, pi's session file. The worker's thread log is a cache rebuilt from it, never
        a second history.
     2. One writer per session, enforced by the worker.
-    3. Slopty acts only through the agent's published doors: its protocol (Codex app-server,
-       pi RPC, Claude's stream-json control protocol when driven, ACP), its hooks, or
-       keystrokes into its TUI sent on the person's word behind the draft guard. It never reads
-       the screen to control an agent, never types menu digits or cycles mode keys, and never
-       answers for the person.
-    4. The TUI can always take a session over: live beside the face for Codex, and for a driven
-       agent by resuming the session the agent itself keeps. A TUI-born agent gets the whole GUI.
+    3. Slopty acts only through the agent's published doors: its protocol (Claude's stream-json
+       control protocol, Codex app-server, pi RPC, ACP). It never reads the screen to control
+       an agent, never types into an agent's terminal, and never answers for the person.
+    4. The TUI can always take a session over by resuming the session the agent itself keeps,
+       and a session the TUI began is taken up from its own record.
     5. Slopty launches the user's own unmodified binary, never offers a login and never reads a
        credential. API keys and third-party providers are first-class.
   - **Each agent's drive.** An adapter declares a drive and an open set of capabilities, and the
-    UI shows a control only where the capability is present.
-    - *Claude Code, observed by default.* Its TUI runs in the PTY, and the face reads hooks, the
-      transcript and the mod's live blocks. The worker owns the composer and the queue, and
-      types on the person's word. Approvals go through the blocking `PermissionRequest` hook.
-    - *Claude Code, driven, as an opt-in per profile* (`claude -p` stream-json with the control
-      protocol). Recommended for API keys and third-party providers.
-    - *Codex, shared.* Slopty is a second live client of the user's app-server daemon socket,
-      and `codex` in a PTY attaches to the same thread beside the face.
+    UI shows a control only where the capability is present. Every agent is driven: Slopty is
+    the session's one writer, and no agent's TUI runs in a PTY for Slopty to follow.
+    - *Claude Code, driven* (2026-10-16), as Claude's own desktop app drives it:
+      `claude -p --output-format stream-json --verbose --input-format stream-json
+      --permission-prompt-tool=stdio --replay-user-messages`, with `--session-id` for a new
+      thread and `--resume` to go on, and the environment the desktop app sets
+      (`CLAUDE_CODE_EAGER_FLUSH=1`, `MCP_CONNECTION_NONBLOCKING=true`,
+      `CLAUDE_CODE_ENABLE_ASK_USER_QUESTION_TOOL=true`) with `PATH` from the login shell. A
+      managed launcher in `claude`'s place gets the same arguments and hands them on. The codec
+      is `slopty_agent::claude::driven`, the IO `slopty_worker::thread::claude`:
+      - *delivery* is acknowledged by the message's own uuid coming back (the echo, or Claude
+        Code saying it queued or began it); one not acknowledged in 120 s goes again under the
+        same uuid, which Claude Code takes once, and after that, or when Claude Code ends first,
+        it is held as one that may not have reached it;
+      - *a stop* is the `interrupt` control request; one not acknowledged in 1.5 s ends the
+        process, the turn is cut, and the next message takes the session up again. A subagent
+        is stopped with `stop_task`;
+      - *approvals* are `can_use_tool` requests, answered by their own request id; an
+        `initialize` answer names those still open, so a worker that comes back asks them again
+        and prompts are never lost;
+      - *settings apply live*: `set_model`, `set_permission_mode`, effort and fast mode
+        (`Model::options`, `Start::options`, `Intent::SetOption`); slash commands and skills go
+        as user messages; `get_context_usage` reads the context;
+      - *waits*: compaction, the plan's usage limit (messages are held and go once it resets),
+        a stop under way (`stopping`, then `stopped`), and a turn that shows no progress for 16
+        minutes, which a machine waking from sleep does not trip;
+      - *one writer*: every ask of a thread goes through its one task, intents carry ids, and
+        the same `ThreadState` reducer holds the thread on the worker and every client. A
+        thread whose Claude Code ended is exited and resumable: its next message starts Claude
+        Code again with `--resume`, the thread read again from the transcript first.
+    - *Codex, shared.* Slopty is a live client of the user's app-server daemon socket; no
+      `codex` runs in a PTY for Slopty.
     - *pi, driven,* over `pi --mode rpc`, with Slopty's permission-gate extension, which fails
       closed, because pi has no permission system of its own.
     - *Any ACP agent, driven,* over its stdio with the protocol's own types (see "Any ACP agent
       is driven by one adapter" below).
-    - *Any other program:* status only, through `slopty hook report`.
-  - **Why Claude stays observed by default.** Driving gives a far richer face (token deltas,
-    mode and model in place, `rewind_files`, `stop_task`). But Zed reports that Agent SDK use
-    on subscription plans moved to a separate, limited credit pool, about 15–30× the cost for
-    heavy use. A driven `claude -p` session is very likely billed the same way. Anthropic's
-    legal page permits the unmodified binary with the user's own subscription, while its SDK
-    overview forbids third-party claude.ai login, and no page settles driven `-p` use. The
-    observed path is plainly allowed, already built and keeps the TUI live. Reopen this when
-    Anthropic settles the question.
+    - *A lease.* While an agent's process lives, the worker stamps its thread alive
+      (`Action::Lease`) at least every 15 s (every 10 s, `LEASE_EVERY`), for every drive alike,
+      and stops the moment the process is gone, before the end is told. A client shows a turn
+      as running only while the stamp is fresh.
+  - **Why Claude is driven.** Observing Claude Code (its TUI in a PTY, read through hooks, the
+    transcript and a mod's live blocks, typed into on the person's word) kept the terminal live
+    but left the face guessing: a newest-file guess for which transcript was the session, a
+    five-second inference of which dialog was up, keystrokes timed against a draft guard, and a
+    mod that a managed install could switch off. The person directs and reviews agents and
+    wants every surface exact. Driving gives the face what Claude Code itself knows, with ids
+    for every message and approval, and is how Anthropic's own desktop app runs it, so a driven
+    session is a supported use of the person's own binary. The observed lane, its hooks, its
+    mod and its keystroke paths were deleted with this ruling, not kept beside it.
+  - **Custody: a turn survives a worker restart.** Claude Code runs in ptyd's keeping as a piped
+    session (no terminal): ptyd holds its standard input and output, keeps what it writes while
+    no worker holds it, and hands the session back when a worker asks. A worker that goes, by a
+    crash, an update or a kill, leaves Claude Code running mid-turn; the next one takes the
+    session up (`claude-custody` names it on the thread), reads the thread again from the
+    transcript, then what Claude Code wrote meanwhile, and sends `initialize` again, whose
+    answer reopens any approval still waiting. A ptyd that itself handed over to a new build
+    keeps the session; one that started afresh is handed it back from the worker's copy. Only
+    when ptyd no longer holds the process is the thread left exited and resumable, the cut turn
+    marked. The proof is the e2e `a_turn_survives_the_worker_restarting_mid_turn`
+    (`apps/slopty-worker/tests/threads.rs`) and
+    `a_permission_outstanding_survives_the_adapter_going`
+    (`crates/slopty-worker/tests/claude.rs`).
+  - **The stand-in.** `slopty-stub-claude` speaks the same stream-json and control protocol
+    (`slopty_testkit::claude_stream`) and fails on cue: a crash mid-turn, no echo, a torn line,
+    no answer to `initialize`, an exit at start, a slow stop, a usage limit, a held subagent.
+    `crates/slopty-worker/tests/claude.rs` proves one behaviour per test against it and a real
+    ptyd; tests never start a signed-in Claude Code.
   - **Remote feels local.** Adapters, approval holds and turn snapshots live on the worker, so
     a dropped link pauses nothing. Each followed thread streams a snapshot, then actions
     numbered by epoch and sequence. A client resumes from where it left off with only the
@@ -195,6 +239,9 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     thread are kept in `threads/starts`. A check, its action and its record happen under one
     lock.
 
+- ❌ **Deleted 2026-10-16: the observed Claude Code ruling below.** Claude Code is driven
+  (see "Each agent's drive" and "Why Claude is driven" above): its hooks, its mod, its
+  transcript follower and its keystroke paths went with that ruling. Kept as the record.
 - ✅ **Claude Code observed is an adapter: a codec in `slopty-agent`, its IO on the worker**
   (2026-10-02, `crates/slopty-agent/src/observed.rs`, `crates/slopty-worker/src/thread/claude.rs`;
   tests in `observed/tests.rs` over the recorded fixtures, and `crates/slopty-worker/tests/claude_threads.rs`).
@@ -278,6 +325,9 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     own transcripts, on the blocking pool: a text cut at `EXPANDED_CHARS`, a picture's bytes,
     or `Gone`.
 
+- ❌ **Deleted 2026-10-16: the observed Claude Code ruling below.** Claude Code is driven
+  (see "Each agent's drive" and "Why Claude is driven" above): its hooks, its mod, its
+  transcript follower and its keystroke paths went with that ruling. Kept as the record.
 - ✅ **The worker types what is sent to an observed agent, under the draft guard**
   (2026-10-02, `crates/slopty-worker/src/thread/compose.rs`; tests in
   `crates/slopty-worker/tests/compose.rs` over a real terminal whose program records every
@@ -371,6 +421,9 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   terminal already, so it comes back held as typed and not sent, and is never typed again.
   The composer goes on with every thread's waiting messages when the daemon starts.
 
+- ❌ **Deleted 2026-10-16: the observed Claude Code ruling below.** Claude Code is driven
+  (see "Each agent's drive" and "Why Claude is driven" above): its hooks, its mod, its
+  transcript follower and its keystroke paths went with that ruling. Kept as the record.
 - ✅ **An observed thread is named by the session until its first prompt names it**
   (2026-10-02, `crates/slopty-agent/src/observed.rs`, `observed::Observed::title`). Claude
   Code paints the session's own name in the terminal title (`✳ Fix the flaky test`), so a
@@ -1920,6 +1973,9 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     (`slopty-worker/tests/threads.rs`); goldens `intent_aside`, `intent_discard`,
     `intent_keep_aside`.
 
+- ❌ **Deleted 2026-10-16: the observed Claude Code ruling below.** Claude Code is driven
+  (see "Each agent's drive" and "Why Claude is driven" above): its hooks, its mod, its
+  transcript follower and its keystroke paths went with that ruling. Kept as the record.
 - ✅ **Claude Code's prompts are held for thread follows, and the conversation stream is gone**
   (2026-10-04, item 7 of the readiness audit). Every agent reaches a client as a thread, so the
   old Claude Code follow stream had no reader left.
@@ -2059,6 +2115,9 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     (`slopty-worker/tests/agent_open.rs`); `a_typed_claude_is_wired_as_one_slopty_starts`
     (`slopty-cli/tests/claude_wire.rs`).
 
+- ❌ **Deleted 2026-10-16: the observed Claude Code ruling below.** Claude Code is driven
+  (see "Each agent's drive" and "Why Claude is driven" above): its hooks, its mod, its
+  transcript follower and its keystroke paths went with that ruling. Kept as the record.
 - ✅ **A live block waits for its prompt** (2026-10-04). The mod streams a block as the model
   writes it, often before the transcript has the prompt that started the turn: the hook and
   the mod run ahead of the file, read on a hook or every 250 ms. The observed adapter put such
@@ -2291,6 +2350,9 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `worker_git_branches` goldens, `git::tests::a_branches_read_changes_nothing_and_is_kept`
     and `workspace::tests::thread_start::the_place_chip_starts_a_worktree_from_a_branch_picked`.
 
+- ❌ **Deleted 2026-10-16: the observed Claude Code ruling below.** Claude Code is driven
+  (see "Each agent's drive" and "Why Claude is driven" above): its hooks, its mod, its
+  transcript follower and its keystroke paths went with that ruling. Kept as the record.
 - ✅ **A Claude Code start held at its own dialog keeps its message and says it asks in its
   terminal** (2026-10-09, `.research/readiness-2026-10-08.md` rank 1). Claude Code may open on
   a dialog of its own, such as the folder's trust or a project's `.mcp.json`, before it takes
@@ -2312,6 +2374,9 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   - Tests: `claude_start::a_start_held_at_its_own_dialog_says_so_once_its_hooks_are_silent`,
     `agent_tile::a_start_held_at_claude_codes_own_dialog_keeps_its_message_and_shows_the_terminal`.
 
+- ❌ **Deleted 2026-10-16: the observed Claude Code ruling below.** Claude Code is driven
+  (see "Each agent's drive" and "Why Claude is driven" above): its hooks, its mod, its
+  transcript follower and its keystroke paths went with that ruling. Kept as the record.
 - ✅ **A yes or no waits for a pocketed phone, which answers it through the server**
   (2026-10-09, `.research/readiness-2026-10-08.md` rank 3; wire change). A phone's link ends
   soon after it leaves the screen. Once it did, nobody was left to answer an approval, so the
@@ -2460,6 +2525,9 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   - Tests: `conversation::thread::tests::carry::branching_onto_another_machine_hands_the_workspace_a_start_there`;
     `workspace::tests::faces::a_thread_goes_on_on_another_machine_with_its_repository`.
 
+- ❌ **Deleted 2026-10-16: the observed Claude Code ruling below.** Claude Code is driven
+  (see "Each agent's drive" and "Why Claude is driven" above): its hooks, its mod, its
+  transcript follower and its keystroke paths went with that ruling. Kept as the record.
 - ✅ **Auto mode's declines are said, and the person may let the call be tried again**
   (readiness rank 3, 2026-10-09). Claude Code 2.1.295 starts a person's own `claude` in auto
   mode, where a classifier stands in for the person. When the classifier turns a call down,
@@ -2495,6 +2563,9 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     as Claude Code runs it, a follower answering), and
     `conversation::thread::tests::doors::auto_modes_decline_is_let_try_again_or_kept`.
 
+- ❌ **Deleted 2026-10-16: the observed Claude Code ruling below.** Claude Code is driven
+  (see "Each agent's drive" and "Why Claude is driven" above): its hooks, its mod, its
+  transcript follower and its keystroke paths went with that ruling. Kept as the record.
 - ✅ **A plan or a question waits for a pocketed phone too** (readiness rank 8, 2026-10-09).
   A yes or no nobody followed was already held for a phone the server pushes to, for as long
   as the relay waits, and its note's Allow answered it through the server. A plan to confirm
@@ -2567,6 +2638,9 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `golden__orchestration__server_request_spawn` (one byte fewer) and
     `golden_thread__frame_actions` (the two statuses that named them are gone).
 
+- ❌ **Deleted 2026-10-16: the observed Claude Code ruling below.** Claude Code is driven
+  (see "Each agent's drive" and "Why Claude is driven" above): its hooks, its mod, its
+  transcript follower and its keystroke paths went with that ruling. Kept as the record.
 - ✅ **The word that a pocketed phone can answer always reaches the workers** (2026-10-09).
   - **The bug.** While a phone can answer, a worker holds for it any prompt nobody follows
     (`FromServer::Pushes`). The server used to queue that word on each worker's link with
@@ -2596,6 +2670,9 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   before it. Test: `threads::tests::an_intent_s_answer_waits_for_room_in_a_full_queue`
   (`slopty-workerd`).
 
+- ❌ **Deleted 2026-10-16: the observed Claude Code ruling below.** Claude Code is driven
+  (see "Each agent's drive" and "Why Claude is driven" above): its hooks, its mod, its
+  transcript follower and its keystroke paths went with that ruling. Kept as the record.
 - ✅ **A plan or a question waits for the Mac's approvers** (2026-10-10, readiness 10-10 rank
   5). A question (`AskUserQuestion`) or a plan (`ExitPlanMode`) from an agent nobody followed
   went straight back to the TUI when no pocketed phone could answer, even with the Mac app
@@ -2618,6 +2695,9 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     approver) and `threads::hold::tests::a_followed_thread_keeps_its_prompt_past_the_approvers_hold`
     (slopty-workerd).
 
+- ❌ **Deleted 2026-10-16: the observed Claude Code ruling below.** Claude Code is driven
+  (see "Each agent's drive" and "Why Claude is driven" above): its hooks, its mod, its
+  transcript follower and its keystroke paths went with that ruling. Kept as the record.
 - ✅ **What an observer misses in a lag is read again** (2026-10-10, readiness 10-10 rank 23).
   The worker's Claude Code observer skipped a lag on the daemon's agent reports or its terminal
   events, expecting the next change to tell it again. A lag keeps the newest messages, but one
@@ -2633,6 +2713,9 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     lost behind 80 reports of other terminals is read from the table, and a close lost behind
     80 events takes its provisional thread.
 
+- ❌ **Deleted 2026-10-16: the observed Claude Code ruling below.** Claude Code is driven
+  (see "Each agent's drive" and "Why Claude is driven" above): its hooks, its mod, its
+  transcript follower and its keystroke paths went with that ruling. Kept as the record.
 - ✅ **Auto mode's declines are pinned by a real capture** (2026-10-10, readiness 10-10 rank 24).
   The decline path above was tested only on input written to look like the hooks reference.
   `cargo xtask fixtures claude` now records an `auto` scenario. The session runs in auto mode
@@ -2733,6 +2816,9 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
       up twice in all); `a_start_under_way_is_kept_until_its_outcome` (slopty-worker
       `tests/threads.rs`).
 
+- ❌ **Deleted 2026-10-16: the observed Claude Code ruling below.** Claude Code is driven
+  (see "Each agent's drive" and "Why Claude is driven" above): its hooks, its mod, its
+  transcript follower and its keystroke paths went with that ruling. Kept as the record.
 - ✅ **A start held at Claude Code's trust dialog is trusted on the person's press** (2026-10-10,
   readiness 10-10 rank 13, the worker's half). A start in a folder Claude Code had not trusted
   stopped at its trust dialog, and the thread asked the person to answer in the terminal. That
@@ -3004,6 +3090,9 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     mode in `a_start_pi_cannot_take_is_refused` (`slopty-worker/tests/pi.rs`); the pi task's
     mode in `any_agent_runs_a_task_as_a_thread` (`hub/thread_tests.rs`).
 
+- ❌ **Deleted 2026-10-16: the observed Claude Code ruling below.** Claude Code is driven
+  (see "Each agent's drive" and "Why Claude is driven" above): its hooks, its mod, its
+  transcript follower and its keystroke paths went with that ruling. Kept as the record.
 - ✅ **An observed Claude Code is read when its transcript is written** (2026-10-11,
   readiness-w 10-12 rank 2; `crates/slopty-worker/src/thread/claude.rs` and `claude/follow.rs`).
   - **The gap.** With no mod streaming and no hook for the write, an observed session read its
@@ -3071,6 +3160,9 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   - Tests: `a_start_names_its_parent_and_takes_the_person_s_autonomy` (`slopty-server`), the
     settings' `agents_autonomy`, and `apps/slopty-cli/tests/agents.rs` end to end.
 
+- ❌ **Deleted 2026-10-16: the observed Claude Code ruling below.** Claude Code is driven
+  (see "Each agent's drive" and "Why Claude is driven" above): its hooks, its mod, its
+  transcript follower and its keystroke paths went with that ruling. Kept as the record.
 - ✅ **An observed Claude Code is read from the conversation its registry names** (2026-10-14).
   A Claude Code no hook speaks for (one started by hand, one whose managed settings keep hooks
   off, one adopted after the worker restarted) was read from the newest `.jsonl` in its
@@ -3094,6 +3186,9 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   Code recorded the interruption, complete otherwise. Test: `slopty-agent`
   `conversation::tests::a_prompt_ends_the_turn_still_open_before_it`.
 
+- ❌ **Deleted 2026-10-16: the observed Claude Code ruling below.** Claude Code is driven
+  (see "Each agent's drive" and "Why Claude is driven" above): its hooks, its mod, its
+  transcript follower and its keystroke paths went with that ruling. Kept as the record.
 - ✅ **An observed Claude Code's threads follow its sessions, not the last word heard**
   (2026-10-15). A hook that moves a terminal to another session (`/clear`, `/resume`) names the
   new transcript before the status that says so reaches the observer, which read the new file
@@ -3135,6 +3230,9 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   `slopty-worker` `a_subagent_left_at_work_stops_once_a_later_claude_code_runs_its_session`,
   `slopty-ui` `a_subagent_stops_with_the_agent_it_ran_in`.
 
+- ❌ **Deleted 2026-10-16: the observed Claude Code ruling below.** Claude Code is driven
+  (see "Each agent's drive" and "Why Claude is driven" above): its hooks, its mod, its
+  transcript follower and its keystroke paths went with that ruling. Kept as the record.
 - ✅ **What the composer types is matched to the agent's copy, and nothing is typed twice**
   (2026-10-15). A stop is accepted while Claude Code runs a tool, not only while the model
   writes. The agent's copy of a typed message is found by more than exact words: the head of a
@@ -3193,6 +3291,9 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   `an_ended_session_does_not_hide_the_agent_at_its_terminal`; `slopty-proto`
   `a_thread_removed_and_made_again_stays_in_the_table`; the worker table's
   `a_thread_made_again_is_a_row_not_a_removal`.
+- ❌ **Deleted 2026-10-16: the observed Claude Code ruling below.** Claude Code is driven
+  (see "Each agent's drive" and "Why Claude is driven" above): its hooks, its mod, its
+  transcript follower and its keystroke paths went with that ruling. Kept as the record.
 - ✅ **A message caught being typed by a restart goes once (2026-10-15).** A restart holds a
   Claude Code message it caught being typed until the agent's transcript is read again
   (`schedule::CHECKING`, which the composer never types), knowing it as typed so the agent's

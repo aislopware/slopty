@@ -1,0 +1,649 @@
+//! Claude Code driven on the worker, end to end: the thread host, the adapter's IO, a real
+//! `slopty-ptyd` holding each Claude Code, and the stand-in `claude` (`slopty-stub-claude`,
+//! `slopty_testkit::claude_stream`) alone on the `PATH` the adapter is given. The stand-in speaks
+//! stream-json with Claude Code's control protocol and fails as a knob in ptyd's environment
+//! says; what it was started with and every line it heard is its record.
+//!
+//! One test per behaviour of the drive: a message delivered and a permission answered by its id,
+//! a stop not acknowledged in time escalated, a crash mid-turn, a message never acknowledged
+//! held as unknown, a torn line passed over, a permission outstanding across the adapter's
+//! restart (ptyd keeps Claude Code), the usage limit's hold, a thread taken up again by its next
+//! message, the lease stamped while the process lives and not after, a managed launcher's
+//! arguments handed on, a request tried again kept to one row, and a turn Claude Code really
+//! took played through the drive, its subagent and its permissions with it.
+
+#[cfg(test)]
+mod claude {
+    use std::path::{Path, PathBuf};
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    use serde_json::Value;
+    use slopty_core::{ClientId, WallMs};
+    use slopty_proto::thread::wire::{Intent, Outcome, Start};
+    use slopty_proto::thread::{
+        AgentId, Answerer, Delivery, IntentId, Liveness, ThreadId, ThreadState, TurnState, Wait,
+    };
+    use slopty_worker::thread::Host;
+    use slopty_worker::thread::claude::custody::Custody;
+    use slopty_worker::thread::claude::{self, Claude, Place};
+    use slopty_worker::thread::log::Limits;
+    use tokio::process::{Child, Command};
+
+    const WAIT: Duration = Duration::from_secs(30);
+
+    /// `name` from this build (`slopty_testkit::bins`), found from the profile directory: this
+    /// package has no binary of its own to name.
+    fn bin(name: &str) -> PathBuf {
+        let exe = std::env::current_exe().unwrap();
+        let target = Path::new(env!("CARGO_TARGET_TMPDIR")).parent().unwrap();
+        let profile = exe.ancestors().find(|dir| dir.parent() == Some(target)).unwrap();
+        slopty_testkit::bins::bin(&profile.join("slopty-worker-tests").to_string_lossy(), name)
+    }
+
+    /// A worker's threads and data, a project, ptyd with the stand-in's knobs in its
+    /// environment, and the stand-in as `claude` alone on a `PATH` of its own.
+    struct Rig {
+        _dir: tempfile::TempDir,
+        host: Host,
+        data: PathBuf,
+        work: PathBuf,
+        home: PathBuf,
+        programs: PathBuf,
+        record: PathBuf,
+        ptyd: Child,
+        socket: PathBuf,
+        me: ClientId,
+    }
+
+    impl Drop for Rig {
+        fn drop(&mut self) {
+            // ptyd leads a group of its own: ended whole, nothing it started outlives the test.
+            let ended = slopty_testkit::group::end(
+                std::slice::from_mut(&mut self.ptyd),
+                Child::id,
+                |child| child.try_wait().is_ok_and(|status| status.is_some()),
+            );
+            debug_assert!(ended, "ptyd's group outlived the test");
+        }
+    }
+
+    impl Rig {
+        /// A rig whose stand-in runs with `knobs` (`slopty_testkit::claude_stream`).
+        async fn new(knobs: &[(&str, &str)]) -> Self {
+            Self::with(knobs, |programs, _home| {
+                std::os::unix::fs::symlink(bin("slopty-stub-claude"), programs.join("claude"))
+                    .unwrap();
+            })
+            .await
+        }
+
+        /// A rig whose `claude` `install` puts in the programs directory, under the home.
+        async fn with(knobs: &[(&str, &str)], install: impl FnOnce(&Path, &Path)) -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().canonicalize().unwrap();
+            let (data, work, home, programs) =
+                (root.join("data"), root.join("work"), root.join("home"), root.join("bin"));
+            for made in [&data, &work, &home, &programs] {
+                std::fs::create_dir_all(made).unwrap();
+            }
+            install(&programs, &home);
+            let record = root.join("record.json");
+            let socket = root.join("ptyd.sock");
+            let mut command = Command::new(bin("slopty-ptyd"));
+            // A clean environment: nothing of the developer's reaches the Claude Code it runs.
+            slopty_testkit::env::scrub(command.as_std_mut(), &home);
+            let ptyd = command
+                .env("STUB_RECORD", &record)
+                .envs(knobs.iter().copied())
+                .arg("--socket")
+                .arg(&socket)
+                .stdout(Stdio::null())
+                .stderr(Stdio::inherit())
+                .process_group(0)
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap();
+            slopty_testkit::group::ward(ptyd.id());
+            tokio::time::timeout(WAIT, async {
+                while tokio::net::UnixStream::connect(&socket).await.is_err() {
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+            })
+            .await
+            .expect("ptyd listens");
+            let host = Host::open(&data.join("threads"), Limits::default()).unwrap();
+            Self {
+                _dir: dir,
+                host,
+                data,
+                work,
+                home,
+                programs,
+                record,
+                ptyd,
+                socket,
+                me: ClientId::new(),
+            }
+        }
+
+        /// The driven Claude Code threads served, as a worker serves them.
+        fn serve(&self) -> (Claude, tokio::task::JoinHandle<()>) {
+            let (claude, asks) = Claude::channel();
+            let place = Place {
+                data_dir: self.data.clone(),
+                ptyd: self.socket.clone(),
+                path: Some(self.programs.clone().into_os_string()),
+                home: self.home.clone(),
+            };
+            (claude, claude::spawn(self.host.clone(), place, asks))
+        }
+
+        fn start(&self, prompt: &str) -> Box<Start> {
+            Box::new(Start {
+                agent: AgentId::named(AgentId::CLAUDE_CODE),
+                cwd: self.work.to_string_lossy().into_owned(),
+                drive: None,
+                prompt: Some(prompt.to_owned()),
+                model: None,
+                mode: None,
+                effort: None,
+                attachments: Vec::new(),
+                args: Vec::new(),
+                options: std::collections::BTreeMap::new(),
+                worktree: None,
+            })
+        }
+
+        async fn started(&self, claude: &Claude, prompt: &str) -> ThreadId {
+            let outcome = claude.start(IntentId::new(), self.start(prompt)).await;
+            let Outcome::Started { thread } = outcome else { panic!("{outcome:?}") };
+            thread
+        }
+
+        fn by(&self) -> Answerer {
+            Answerer { client: Some(self.me), name: "Slopty".to_owned() }
+        }
+
+        /// Intent `intent` on `thread`, decided as the daemon decides it: once per id.
+        fn intent(&self, claude: &Claude, thread: ThreadId, intent: &Intent) -> Outcome {
+            let id = IntentId::new();
+            let decided = self.host.intent(thread, id, |state| {
+                if intent.needs().is_some_and(|needs| !state.meta.can(needs)) {
+                    return (intent.unsupported(), Vec::new());
+                }
+                (claude.decide(state, id, intent, self.by()), Vec::new())
+            });
+            decided.unwrap()
+        }
+
+        fn send(&self, claude: &Claude, thread: ThreadId, text: &str) {
+            let send = Intent::Send {
+                text: text.to_owned(),
+                delivery: Delivery::Steer,
+                attachments: vec![],
+            };
+            assert_eq!(self.intent(claude, thread, &send), Outcome::Done, "{text}");
+        }
+
+        fn answer(&self, claude: &Claude, thread: ThreadId, choice: &str) -> Outcome {
+            let (state, _) = self.host.state(thread).unwrap();
+            let ask = state.open_requests().next().expect("an open request").id.clone();
+            let answer = Intent::Answer { ask, choice: choice.to_owned(), message: None };
+            self.intent(claude, thread, &answer)
+        }
+
+        /// `thread` once `done` holds of it.
+        async fn until(
+            &self,
+            thread: ThreadId,
+            what: &str,
+            done: impl Fn(&ThreadState) -> bool,
+        ) -> ThreadState {
+            let mut feed = self.host.watch(thread).unwrap();
+            let waited = tokio::time::timeout(WAIT, async {
+                loop {
+                    let (state, _) = self.host.state(thread).unwrap();
+                    if done(&state) {
+                        return state;
+                    }
+                    // A stamp of time alone (a lease) changes nothing a test waits on, so the
+                    // feed is not the only wake.
+                    let _woke = tokio::time::timeout(Duration::from_millis(200), feed.recv()).await;
+                }
+            })
+            .await;
+            waited.unwrap_or_else(|_| panic!("{what}: {:#?}", self.host.state(thread)))
+        }
+
+        /// What the stand-in that ran last was started with and heard.
+        fn record(&self) -> Value {
+            std::fs::read(&self.record)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+                .unwrap_or(Value::Null)
+        }
+
+        /// The stand-in's record once `done` holds of it.
+        async fn record_once(&self, what: &str, done: impl Fn(&Value) -> bool) -> Value {
+            let waited = tokio::time::timeout(WAIT, async {
+                loop {
+                    let record = self.record();
+                    if done(&record) {
+                        return record;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await;
+            waited.unwrap_or_else(|_| panic!("{what}: {:#}", self.record()))
+        }
+    }
+
+    /// The control requests and user messages the stand-in heard, by their kind.
+    fn heard<'a>(record: &'a Value, kind: &str) -> Vec<&'a Value> {
+        record["received"]
+            .as_array()
+            .map(|lines| {
+                lines
+                    .iter()
+                    .filter(|l| l["type"] == kind || l["request"]["subtype"] == kind)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn turn_ended(n: usize, state: TurnState) -> impl Fn(&ThreadState) -> bool {
+        move |s: &ThreadState| {
+            s.turns.len() == n && s.turns.last().is_some_and(|t| t.state == state)
+        }
+    }
+
+    fn asking(s: &ThreadState) -> bool {
+        s.open_requests().count() == 1
+    }
+
+    fn exited(s: &ThreadState) -> bool {
+        matches!(s.status.liveness, Liveness::Exited { resumable: true })
+    }
+
+    /// The stand-in's process, by the pid it recorded, ended at once.
+    fn kill(record: &Value) {
+        let pid = record["pid"].as_u64().expect("a pid").to_string();
+        let killed = std::process::Command::new("kill").args(["-9", &pid]).status().unwrap();
+        assert!(killed.success(), "kill {pid}");
+    }
+
+    /// A thread's Claude Code runs as the desktop app runs it, named by the start's id; the
+    /// first message goes as a user message under the start's intent and is the person's once
+    /// Claude Code echoes it; a tool call is asked about by its request's id and the answer
+    /// goes back under that id, the call then run.
+    #[tokio::test]
+    async fn a_message_is_delivered_and_a_permission_answered_by_its_id() {
+        let rig = Rig::new(&[]).await;
+        let (claude, _served) = rig.serve();
+        let id = IntentId::new();
+        let outcome = claude.start(id, rig.start("bash touch made")).await;
+        let Outcome::Started { thread } = outcome else { panic!("{outcome:?}") };
+        assert_eq!(claude.start(id, rig.start("bash touch made")).await, outcome, "once");
+
+        let state = rig.until(thread, "the ask", asking).await;
+        assert_eq!(state.meta.native, id.to_string(), "named by the start");
+        let record = rig.record();
+        let argv: Vec<&str> =
+            record["argv"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
+        for flag in [
+            "-p",
+            "--verbose",
+            "--replay-user-messages",
+            "--permission-prompt-tool=stdio",
+            "--session-id",
+        ] {
+            assert!(argv.contains(&flag), "{flag} in {argv:?}");
+        }
+        assert_eq!(record["cwd"], rig.work.to_string_lossy().as_ref());
+        for (name, value) in slopty_agent::claude::ENV {
+            assert!(record["inherited"].get(name).is_some(), "{name}, as the desktop app sets it");
+            if name.starts_with("CLAUDE_") {
+                assert_eq!(record["env"][name], value, "{name}");
+            }
+        }
+        let sent = heard(&record, "user");
+        assert_eq!(sent.len(), 1, "sent once: {sent:#?}");
+        assert_eq!(sent[0]["uuid"], id.to_string(), "under the start's intent");
+        assert!(state.pending.is_empty(), "echoed, so delivered: {:?}", state.pending);
+
+        assert_eq!(rig.answer(&claude, thread, "allow"), Outcome::Done);
+        let state = rig.until(thread, "the turn", turn_ended(1, TurnState::Complete)).await;
+        assert!(state.open_requests().next().is_none());
+        let record = rig.record();
+        let answers = heard(&record, "control_response");
+        let asked = record["received"].as_array().unwrap().len();
+        assert_eq!(answers.len(), 1, "answered once, of {asked} lines");
+        assert_eq!(answers[0]["response"]["response"]["behavior"], "allow");
+    }
+
+    /// A stop Claude Code does not acknowledge within its time is escalated: the worker ends
+    /// the process, the turn is cut as interrupted, and the thread goes on by its next message.
+    #[tokio::test]
+    async fn a_stop_not_acknowledged_in_time_ends_the_process() {
+        let rig = Rig::new(&[("STUB_SLOW_INTERRUPT_MS", "20000")]).await;
+        let (claude, _served) = rig.serve();
+        let thread = rig.started(&claude, "slow 100").await;
+        rig.until(thread, "the turn under way", |s| {
+            s.turns.last().is_some_and(|t| t.state == TurnState::Active)
+        })
+        .await;
+        let asked = Instant::now();
+        assert_eq!(rig.intent(&claude, thread, &Intent::Interrupt), Outcome::Done);
+        let state = rig.until(thread, "the process ended", exited).await;
+        let took = asked.elapsed();
+        println!("a stop not acknowledged ended Claude Code after {took:?}");
+        assert!(
+            took >= slopty_agent::claude::driven::INTERRUPT_ACK,
+            "given its time first: {took:?}"
+        );
+        assert!(took < Duration::from_secs(10), "not left to finish: {took:?}");
+        assert_eq!(state.turns.last().map(|t| t.state.clone()), Some(TurnState::Interrupted));
+    }
+
+    /// Claude Code gone mid-turn fails the turn with why, from its standard error, and leaves
+    /// the thread exited and resumable.
+    #[tokio::test]
+    async fn a_crash_mid_turn_fails_the_turn_with_why() {
+        let rig = Rig::new(&[("STUB_CRASH_MID_TURN", "1")]).await;
+        let (claude, _served) = rig.serve();
+        let thread = rig.started(&claude, "Say hello.").await;
+        let state = rig.until(thread, "the crash", exited).await;
+        let Some(TurnState::Failed { error, .. }) = state.turns.last().map(|t| t.state.clone())
+        else {
+            panic!("{:?}", state.turns)
+        };
+        assert!(error.contains("crashed mid-turn"), "{error}");
+    }
+
+    /// A message Claude Code never acknowledges is on its way until Claude Code ends; then it
+    /// is held as one that may not have reached it, never shown as delivered.
+    #[tokio::test]
+    async fn a_message_never_acknowledged_is_held_as_unknown() {
+        let rig = Rig::new(&[("STUB_NO_ECHO", "1")]).await;
+        let (claude, _served) = rig.serve();
+        let thread = rig.started(&claude, "slow 100").await;
+        let state = rig.until(thread, "on its way", |s| !s.pending.is_empty()).await;
+        assert!(state.pending.iter().all(|p| !p.is_unknown()), "{:?}", state.pending);
+        rig.record_once("heard", |r| !heard(r, "user").is_empty()).await;
+        assert_eq!(rig.intent(&claude, thread, &Intent::End), Outcome::Done);
+        let state = rig.until(thread, "ended", exited).await;
+        let [held] = state.pending.as_slice() else { panic!("{:?}", state.pending) };
+        assert!(held.is_unknown(), "{held:?}");
+    }
+
+    /// A line that is no JSON, and one cut short, are passed over: the thread goes on.
+    #[tokio::test]
+    async fn a_torn_line_is_passed_over() {
+        let rig = Rig::new(&[("STUB_MALFORMED", "1")]).await;
+        let (claude, _served) = rig.serve();
+        let thread = rig.started(&claude, "Say hello.").await;
+        let state = rig.until(thread, "the turn", turn_ended(1, TurnState::Complete)).await;
+        assert_eq!(state.status.liveness, Liveness::Live);
+    }
+
+    /// A Claude Code that cannot start says why on the thread, which is left exited.
+    #[tokio::test]
+    async fn a_claude_code_that_cannot_start_says_why() {
+        let rig = Rig::new(&[("STUB_EXIT_ON_START", "2")]).await;
+        let (claude, _served) = rig.serve();
+        let thread = rig.started(&claude, "Say hello.").await;
+        let state = rig.until(thread, "ended", exited).await;
+        let said = state.items.iter().any(|i| {
+            matches!(&i.body, slopty_proto::thread::ItemBody::Notice(n)
+                if n.text.text.contains("this install is broken"))
+        });
+        assert!(said, "{:#?}", state.items);
+    }
+
+    /// The adapter goes while Claude Code asks a permission (the worker restarted): ptyd keeps
+    /// Claude Code running, the next adapter takes it up, asks it again what it waits on, and
+    /// the person's answer reaches the same process, which finishes the turn.
+    #[tokio::test]
+    async fn a_permission_outstanding_survives_the_adapter_going() {
+        let rig = Rig::new(&[]).await;
+        let (claude, served) = rig.serve();
+        let thread = rig.started(&claude, "bash touch made").await;
+        rig.until(thread, "the ask", asking).await;
+        let pid = rig.record()["pid"].clone();
+
+        served.abort();
+        drop(served.await);
+        drop(claude);
+        // Let go of by the adapter that went: ptyd holds it, attached to no one.
+        let custody = Custody::new(rig.socket.clone());
+        let free = tokio::time::timeout(WAIT, async {
+            loop {
+                let held = custody.sessions().await.unwrap();
+                if held.len() == 1 && !held[0].attached {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        });
+        free.await.expect("ptyd keeps Claude Code, let go");
+        drop(custody);
+
+        let (claude, _served) = rig.serve();
+        let record = rig.record_once("asked again", |r| heard(r, "initialize").len() == 2).await;
+        assert_eq!(record["pid"], pid, "the same Claude Code");
+        let state = rig.until(thread, "the ask again", asking).await;
+        assert_eq!(state.status.liveness, Liveness::Live);
+        assert_eq!(rig.answer(&claude, thread, "allow"), Outcome::Done);
+        let state = rig.until(thread, "the turn", turn_ended(1, TurnState::Complete)).await;
+        let record = rig.record();
+        assert_eq!(record["pid"], pid, "finished by the same Claude Code");
+        assert_eq!(heard(&record, "control_response").len(), 1, "answered once");
+        assert_eq!(state.turns.len(), 1, "one turn, read again whole");
+    }
+
+    /// The plan's usage limit holds what is sent until it resets, then it goes.
+    #[tokio::test]
+    async fn the_usage_limit_holds_messages_until_it_resets() {
+        let rig = Rig::new(&[("STUB_LIMIT_RESET_S", "2")]).await;
+        let (claude, _served) = rig.serve();
+        let thread = rig.started(&claude, "limit").await;
+        let limited =
+            |s: &ThreadState| s.status.wait.as_ref().is_some_and(|w| w.kind == Wait::LIMIT);
+        // The limit is said before the turn's result ends it.
+        let ended = |s: &ThreadState| {
+            limited(s) && s.turns.last().is_some_and(|t| t.state != TurnState::Active)
+        };
+        let state = rig.until(thread, "limited", ended).await;
+        let Some(TurnState::Failed { until_ms: Some(resets), .. }) =
+            state.turns.last().map(|t| t.state.clone())
+        else {
+            panic!("{:?}", state.turns)
+        };
+        rig.send(&claude, thread, "Say hi.");
+        let state = rig.until(thread, "held", |s| !s.pending.is_empty()).await;
+        assert!(limited(&state));
+        assert_eq!(heard(&rig.record(), "user").len(), 1, "held on the worker");
+        let state = rig.until(thread, "let go", turn_ended(2, TurnState::Complete)).await;
+        let now = WallMs::now();
+        assert!(now >= resets, "not before the reset: {now:?} < {resets:?}");
+        assert!(state.status.wait.is_none(), "{:?}", state.status.wait);
+        assert_eq!(heard(&rig.record(), "user").len(), 2);
+    }
+
+    /// A thread whose Claude Code ended goes on by its next message: Claude Code is started
+    /// again on the session (`--resume`), and the turn runs there.
+    #[tokio::test]
+    async fn an_ended_thread_goes_on_by_its_next_message() {
+        let rig = Rig::new(&[]).await;
+        let (claude, _served) = rig.serve();
+        let thread = rig.started(&claude, "Say hello.").await;
+        let state = rig.until(thread, "the first turn", turn_ended(1, TurnState::Complete)).await;
+        let native = state.meta.native.clone();
+        let first = rig.record()["pid"].clone();
+        assert_eq!(rig.intent(&claude, thread, &Intent::End), Outcome::Done);
+        rig.until(thread, "ended", exited).await;
+
+        rig.send(&claude, thread, "Say more.");
+        let state = rig.until(thread, "the second turn", turn_ended(2, TurnState::Complete)).await;
+        assert_eq!(state.status.liveness, Liveness::Live);
+        let record = rig.record();
+        assert_ne!(record["pid"], first, "started again");
+        let argv: Vec<&str> =
+            record["argv"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
+        let at = argv.iter().position(|a| *a == "--resume").expect("resumed");
+        assert_eq!(argv[at + 1], native);
+        assert_eq!(state.turns.len(), 2, "the first turn read again, the second after it");
+    }
+
+    /// A live thread is stamped alive within 15 s while its Claude Code runs, idle or not,
+    /// and never once the process is gone.
+    #[tokio::test]
+    async fn a_live_thread_is_leased_and_not_after_its_process_ends() {
+        let rig = Rig::new(&[]).await;
+        let (claude, _served) = rig.serve();
+        let thread = rig.started(&claude, "Say hello.").await;
+        let state = rig.until(thread, "the first turn", turn_ended(1, TurnState::Complete)).await;
+        let first = state.lease_ms.expect("stamped as it started");
+        let state = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let (state, _) = rig.host.state(thread).unwrap();
+                if state.lease_ms.is_some_and(|at| at > first) {
+                    return state;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("stamped again within 15 s while idle");
+        let again = state.lease_ms.unwrap();
+        println!("stamped {} ms apart", again.as_millis() - first.as_millis());
+
+        kill(&rig.record());
+        let state = rig.until(thread, "gone", exited).await;
+        let last = state.lease_ms;
+        tokio::time::sleep(slopty_worker::thread::host::LEASE_EVERY + Duration::from_secs(2)).await;
+        let (state, _) = rig.host.state(thread).unwrap();
+        assert_eq!(state.lease_ms, last, "no stamp after the process ended");
+        assert_ne!(state.status.liveness, Liveness::Live);
+    }
+
+    /// A managed launcher in `claude`'s place takes the drive's arguments and hands them on to
+    /// the client it starts, and the thread runs on that client.
+    #[tokio::test]
+    async fn a_managed_launcher_hands_the_arguments_on() {
+        let rig = Rig::with(&[], |programs, home| {
+            std::os::unix::fs::symlink(bin("slopty-stub-managed-claude"), programs.join("claude"))
+                .unwrap();
+            let client = home.join(".local/share/claude-managed/artifacts/2.1.301/stand-in");
+            std::fs::create_dir_all(&client).unwrap();
+            std::os::unix::fs::symlink(bin("slopty-stub-claude"), client.join("claude")).unwrap();
+        })
+        .await;
+        let (claude, _served) = rig.serve();
+        let thread = rig.started(&claude, "Say hello.").await;
+        let state = rig.until(thread, "the turn", turn_ended(1, TurnState::Complete)).await;
+        // The client's own record: started by the launcher, with what the drive gave it.
+        let record = rig.record();
+        assert!(
+            record["inherited"].get("SCC_MANAGED_ARTIFACT").is_some(),
+            "started by the launcher: {:#}",
+            record["inherited"]
+        );
+        let argv: Vec<&str> =
+            record["argv"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
+        for flag in ["-p", "--input-format", "stream-json", "--permission-prompt-tool=stdio"] {
+            assert!(argv.contains(&flag), "{flag} handed on: {argv:?}");
+        }
+        let at = argv.iter().position(|a| *a == "--session-id").expect("a session id");
+        assert_eq!(argv[at + 1], state.meta.native);
+    }
+
+    /// The tool calls a recorded transcript's main conversation makes.
+    fn recorded_calls(fixture: &str) -> usize {
+        let dir = slopty_testkit::replay::fixture(fixture);
+        let text = std::fs::read_to_string(dir.join("transcript.jsonl")).unwrap();
+        text.lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|record| record["type"] == "assistant")
+            .filter_map(|record| record["message"]["content"].as_array().cloned())
+            .flatten()
+            .filter(|part| part["type"] == "tool_use")
+            .count()
+    }
+
+    /// A turn Claude Code really took, played over the stream by the stand-in, comes through
+    /// the drive whole: every tool call of the recording is a call of the thread, its subagent a
+    /// thread of its own, and the turn ends complete.
+    #[tokio::test]
+    async fn a_recorded_turn_plays_through_the_drive_with_its_subagent() {
+        let rig = Rig::new(&[("STUB_REPLAY", "tools")]).await;
+        let (claude, _served) = rig.serve();
+        let thread = rig.started(&claude, "Survey the files").await;
+        let state = rig.until(thread, "the turn", turn_ended(1, TurnState::Complete)).await;
+        let calls = state
+            .items
+            .iter()
+            .filter(|item| matches!(item.body, slopty_proto::thread::ItemBody::Tool(_)))
+            .count();
+        assert_eq!(calls, recorded_calls("tools"), "{:#?}", state.items);
+        assert_eq!(rig.host.threads().len(), 2, "the thread and its subagent's");
+    }
+
+    /// Each permission a recorded turn asked for holds the played turn until it is answered,
+    /// one at a time, and the turn ends once the last is.
+    #[tokio::test]
+    async fn a_recorded_turn_waits_on_each_permission_it_asked() {
+        let rig = Rig::new(&[("STUB_REPLAY", "permission")]).await;
+        let (claude, _served) = rig.serve();
+        let thread = rig.started(&claude, "Touch three files").await;
+        let mut answered = Vec::new();
+        for n in 1..=3 {
+            let new = |s: &ThreadState| s.open_requests().any(|r| !answered.contains(&r.id));
+            rig.until(thread, &format!("ask {n}"), new).await;
+            let (state, _) = rig.host.state(thread).unwrap();
+            answered.extend(state.open_requests().map(|r| r.id.clone()));
+            assert_eq!(rig.answer(&claude, thread, "allow"), Outcome::Done, "ask {n}");
+        }
+        rig.until(thread, "the turn", turn_ended(1, TurnState::Complete)).await;
+        let answers = heard(&rig.record(), "control_response").len();
+        assert_eq!(answers, 3, "each answered once");
+    }
+
+    /// A request Claude Code tries again three times and then gets through is one row of the
+    /// thread: made at the first attempt, updated in place by the two after it, and gone once
+    /// the turn streams again.
+    #[tokio::test]
+    async fn a_request_tried_again_is_one_row_updated_then_gone() {
+        use slopty_proto::thread::{Action, ItemBody, Notice};
+        let rig = Rig::new(&[]).await;
+        let (claude, _served) = rig.serve();
+        let thread = rig.started(&claude, "retry 3").await;
+        let mut feed = rig.host.watch(thread).unwrap();
+        let state = rig.until(thread, "the turn", turn_ended(1, TurnState::Complete)).await;
+        let retrying = |body: &ItemBody| matches!(body, ItemBody::Notice(n) if n.kind == Notice::API_ERROR && n.retry.is_some());
+        let (mut made, mut updated, mut gone) = (Vec::new(), Vec::new(), Vec::new());
+        while let Ok(batch) = feed.try_recv() {
+            for action in &batch.actions {
+                match action {
+                    Action::ItemStarted(item) if retrying(&item.body) => made.push(item.id.clone()),
+                    Action::ItemUpdated(item) if retrying(&item.body) => {
+                        updated.push(item.id.clone());
+                    }
+                    Action::ItemRemoved { item } => gone.push(item.clone()),
+                    _ => {}
+                }
+            }
+        }
+        assert_eq!(made.len(), 1, "one row: {made:?}");
+        assert_eq!(updated, vec![made[0].clone(); 2], "updated in place");
+        assert_eq!(gone, made, "gone once it went through");
+        let left = state
+            .items
+            .iter()
+            .filter(|i| matches!(&i.body, ItemBody::Notice(n) if n.kind == Notice::API_ERROR))
+            .count();
+        assert_eq!(left, 0, "{:#?}", state.items);
+    }
+}

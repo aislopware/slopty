@@ -15,14 +15,11 @@ mod handoff {
     use slopty_core::{ClientId, SessionId};
     use slopty_net::client::{WorkerConn, bind_client, connect_addr};
     use slopty_net::{ClientMsg, WorkerMsg};
-    use slopty_proto::ctl::{Awake, CtlReply, CtlRequest};
     use slopty_proto::handoff::{EditOutcome, HandoffEvent, HandoffReply, OfferReason, Wary};
     use slopty_proto::handshake::Hello;
     use slopty_proto::terminal::{OpenSession, TermRequest, TermSize};
-    use slopty_proto::thread::wire::{TableFrame, ThreadRequest};
-    use slopty_proto::thread::{Phase, Wait};
     use slopty_worker::handoff::TYPED_RECENTLY;
-    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
+    use tokio::io::{AsyncBufReadExt as _, BufReader};
     use tokio::process::{Child, Command};
 
     const STEP: Duration = Duration::from_secs(20);
@@ -144,42 +141,6 @@ mod handoff {
                 std::os::unix::fs::symlink(bin("slopty"), &link).unwrap();
             }
             link
-        }
-
-        /// One request on the control socket, and its reply.
-        async fn ctl(&self, request: &CtlRequest) -> CtlReply {
-            let mut stream = tokio::net::UnixStream::connect(self.sock()).await.unwrap();
-            let mut line = serde_json::to_vec(request).unwrap();
-            line.push(b'\n');
-            stream.write_all(&line).await.unwrap();
-            let mut reply = String::new();
-            BufReader::new(stream).read_line(&mut reply).await.unwrap();
-            serde_json::from_str(reply.trim()).unwrap()
-        }
-
-        async fn awake(&self) -> Awake {
-            match self.ctl(&CtlRequest::Wake).await {
-                CtlReply::Wake(awake) => awake,
-                other => panic!("{other:?}"),
-            }
-        }
-
-        /// Wait until what keeps the machine awake satisfies `want`.
-        async fn awake_until(&self, want: impl Fn(&Awake) -> bool) -> Awake {
-            let deadline = tokio::time::Instant::now().checked_add(STEP).unwrap();
-            loop {
-                let awake = self.awake().await;
-                if want(&awake) {
-                    return awake;
-                }
-                assert!(tokio::time::Instant::now() < deadline, "still {awake:?}");
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        }
-
-        async fn hook(&self, session: SessionId, payload: &str) {
-            let hook = CtlRequest::Hook { session, payload: payload.to_owned() };
-            assert!(matches!(self.ctl(&hook).await, CtlReply::Ok { .. }));
         }
     }
 
@@ -643,144 +604,5 @@ mod handoff {
             assert!(tokio::time::Instant::now() < deadline, "presence files outlived the worker");
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-    }
-
-    /// With nobody connected, a working agent holds the machine awake and its stop lets it go;
-    /// a turn paused on background work keeps holding it.
-    #[tokio::test]
-    async fn a_working_agent_keeps_the_worker_awake_with_nobody_connected() {
-        let dir = tempfile::tempdir().unwrap();
-        let d = daemons(dir.path()).await;
-        let (endpoint, mut client) = d.client("app").await;
-        let shell = open(&mut client, &[], false).await;
-        close(&endpoint).await;
-        d.awake_until(|a| a.clients == 0 && !a.system).await;
-        assert!(!asserted(d.worker_pid()), "nothing held with nobody there");
-        d.hook(shell, r#"{"hook_event_name":"UserPromptSubmit","prompt":"build it"}"#).await;
-        let awake = d.awake_until(|a| a.agents == 1).await;
-        assert!(awake.system, "{awake:?}");
-        assert!(asserted(d.worker_pid()), "macOS holds the machine for the worker");
-        d.hook(
-            shell,
-            r#"{"hook_event_name":"Stop","background_tasks":[{"id":"b1","type":"shell","status":"running","description":"cargo build"}],"session_crons":[]}"#,
-        )
-        .await;
-        tokio::time::sleep(Duration::from_millis(1_600)).await;
-        assert_eq!(d.awake().await.agents, 1, "background work holds it too");
-        d.hook(shell, r#"{"hook_event_name":"Stop","background_tasks":[],"session_crons":[]}"#)
-            .await;
-        let awake = d.awake_until(|a| a.agents == 0).await;
-        assert!(!awake.system, "{awake:?}");
-        assert!(!asserted(d.worker_pid()), "and lets it go");
-    }
-
-    /// Whether macOS lists an idle-sleep assertion held by `pid` for Slopty (`pmset -g
-    /// assertions`, which reads the power manager's own table).
-    fn asserted(pid: u32) -> bool {
-        let out = std::process::Command::new("/usr/bin/pmset")
-            .args(["-g", "assertions"])
-            .output()
-            .unwrap();
-        let text = String::from_utf8_lossy(&out.stdout);
-        text.lines().any(|line| {
-            line.contains(&format!("pid {pid}("))
-                && line.contains("PreventUserIdleSystemSleep")
-                && line.contains("Slopty client or agent at work")
-        })
-    }
-
-    /// The recorded turn that ended with a background command out leaves the agent's thread
-    /// waiting on it, which asks nobody's attention; the recorded one that ended with nothing
-    /// out is done.
-    #[tokio::test]
-    async fn a_paused_turn_raises_no_done() {
-        let dir = tempfile::tempdir().unwrap();
-        let d = daemons(dir.path()).await;
-        let (_e, mut client) = d.client("app").await;
-        let shell = open(&mut client, &[], false).await;
-        let stops = recorded_stops();
-        let (paused, finished) = (
-            stops.iter().find(|s| s.contains("\"status\":\"running\"")).unwrap(),
-            stops.last().unwrap(),
-        );
-        let table = ClientMsg::Thread(ThreadRequest::Table { have: None });
-        client.tx.send(&table).await.unwrap();
-        d.hook(shell, r#"{"hook_event_name":"UserPromptSubmit","prompt":"go"}"#).await;
-        d.hook(shell, paused).await;
-        let at = |phase: Phase| {
-            move |m: WorkerMsg| {
-                let WorkerMsg::Threads(
-                    TableFrame::Snapshot { rows, .. } | TableFrame::Delta { rows, .. },
-                ) = m
-                else {
-                    return None;
-                };
-                rows.into_iter().find(|r| r.terminal == Some(shell) && r.status.phase == phase)
-            }
-        };
-        let waits = next_msg(&mut client, at(Phase::Waiting)).await;
-        let wait = waits.status.wait.expect("what it waits on");
-        assert_eq!(
-            (wait.kind.as_str(), wait.text.as_str()),
-            (Wait::TASK, "Sleep then print a marker")
-        );
-        d.hook(shell, finished).await;
-        next_msg(&mut client, at(Phase::Done)).await;
-    }
-
-    /// The `Stop` payloads of the recorded `background` scenario, in order.
-    fn recorded_stops() -> Vec<String> {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../crates/slopty-agent/tests/fixtures/conversation/background/hooks.jsonl");
-        std::fs::read_to_string(path)
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()["input"].clone())
-            .filter(|input| input["hook_event_name"] == "Stop")
-            .map(|input| input.to_string())
-            .collect()
-    }
-
-    /// The worktree an agent's status line names reaches every client, a later one in its
-    /// greeting.
-    #[tokio::test]
-    async fn a_status_lines_worktree_reaches_every_client() {
-        let dir = tempfile::tempdir().unwrap();
-        let d = daemons(dir.path()).await;
-        let (_e, mut client) = d.client("app").await;
-        let shell = open(&mut client, &[], false).await;
-        d.hook(shell, r#"{"hook_event_name":"SessionStart","session_id":"s1","source":"startup"}"#)
-            .await;
-        let status = serde_json::json!({
-            "session_id": "s1",
-            "worktree": { "name": "fix-build", "path": "/r/.claude/worktrees/fix-build", "original_cwd": "/r" },
-        });
-        let mut wrapper = scrubbed(d.link("slopty"), &d.dir)
-            .args(["hook", "statusline"])
-            .env("SLOPTY_WORKER_SOCKET", d.sock())
-            .env("SLOPTY_SESSION", shell.to_string())
-            .env("CLAUDE_CONFIG_DIR", d.dir.join("claude-config"))
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .spawn()
-            .unwrap();
-        let mut input = wrapper.stdin.take().unwrap();
-        input.write_all(status.to_string().as_bytes()).await.unwrap();
-        drop(input);
-        assert!(tokio::time::timeout(STEP, wrapper.wait()).await.unwrap().unwrap().success());
-        let branch = next_msg(&mut client, |m| match m {
-            WorkerMsg::AgentBranch(b) => Some(b),
-            _ => None,
-        })
-        .await;
-        assert_eq!(branch.session, shell);
-        assert_eq!(branch.worktree.map(|w| w.name).as_deref(), Some("fix-build"));
-        let (_e2, mut later) = d.client("later").await;
-        let greeted = next_msg(&mut later, |m| match m {
-            WorkerMsg::AgentBranch(b) => Some(b),
-            _ => None,
-        })
-        .await;
-        assert_eq!(greeted.worktree.map(|w| w.name).as_deref(), Some("fix-build"));
     }
 }

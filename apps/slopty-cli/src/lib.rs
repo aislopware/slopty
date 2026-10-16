@@ -10,7 +10,6 @@
 //! * `slopty wake <worker>` wakes a sleeping worker from its own LAN.
 //! * `slopty worker …` talks to the local `slopty-worker` over its control socket.
 //! * `slopty worker deploy <ssh target>` puts a worker on another machine over `ssh`.
-//! * `slopty hook` is the Claude Code hook relay, wired into each `claude` a Slopty session starts.
 //! * `slopty ssh` is `ssh` with a terminal the far side knows; a Slopty shell's `ssh` runs it.
 //! * `slopty browse` and `slopty edit` hand a shell's web pages and files to the client in front of
 //!   it; a Slopty session's `BROWSER`, `EDITOR` and `open` are this binary under other names.
@@ -29,13 +28,11 @@ mod client;
 mod clipboard;
 mod deploy;
 mod handoff;
-mod hook;
 mod link;
 mod mcp;
 mod probe;
 mod relay;
 mod service;
-mod statusline;
 mod verbs;
 mod workerctl;
 
@@ -118,11 +115,6 @@ enum Cmd {
         /// `[+line] <file>`.
         #[arg(required = true, allow_hyphen_values = true)]
         args: Vec<std::ffi::OsString>,
-    },
-    /// Claude Code hook relay: forwards the hook on stdin to the worker daemon (exits 0 always).
-    Hook {
-        #[command(subcommand)]
-        cmd: Option<hook::HookCmd>,
     },
     /// The app's `settings.toml`.
     Settings {
@@ -336,11 +328,6 @@ async fn run() -> Result<ExitCode> {
         }
         Cmd::Browse { targets } => return handoff::browse(&data_dir, &targets).await,
         Cmd::Edit { wait, args } => return handoff::edit(&data_dir, wait, args).await,
-        Cmd::Hook { cmd: None } => {
-            hook::relay(&data_dir).await;
-            Ok(())
-        }
-        Cmd::Hook { cmd: Some(cmd) } => hook::run(cmd, &data_dir).await,
         Cmd::Crashes { last, all_frames } => crashes(&data_dir, last, all_frames, cli.json),
         Cmd::Settings { cmd } => {
             let path = slopty_settings::path_in(&data_dir);
@@ -426,7 +413,7 @@ mod tests {
         for args in [
             &["slopty", "--data-dir", "/d", "worker", "status"][..],
             &["slopty", "worker", "uninstall", "--data-dir", "/d"],
-            &["slopty", "hook", "--data-dir", "/d"],
+            &["slopty", "worker", "doctor", "--data-dir", "/d"],
         ] {
             let cli = super::Cli::try_parse_from(args).unwrap();
             assert_eq!(cli.data_dir.as_deref(), Some(std::path::Path::new("/d")), "{args:?}");

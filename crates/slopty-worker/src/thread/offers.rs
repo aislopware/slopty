@@ -23,8 +23,8 @@ pub fn seed(agent: &AgentId) -> Offers {
     if agent.is(AgentId::CLAUDE_CODE) {
         let home = slopty_platform::dirs::home();
         Offers {
-            mode: Some(slopty_agent::resume::starting_mode(&home)),
-            ..slopty_agent::resume::offers()
+            mode: Some(slopty_agent::claude::offers::starting_mode(&home)),
+            ..slopty_agent::claude::offers::offers()
         }
     } else if agent.is(AgentId::CODEX) {
         slopty_agent::codex::shared::offers()
@@ -141,7 +141,6 @@ mod tests {
             native: format!("{agent}-{created}"),
             cwd: "/w".to_owned(),
             title: String::new(),
-            terminal: None,
             parent: None,
             origin: ThreadMeta::PERSON.to_owned(),
             forked_from: None,
@@ -149,7 +148,7 @@ mod tests {
             caps: Vec::new(),
             models: models
                 .iter()
-                .map(|m| Model { id: (*m).to_owned(), label: (*m).to_owned() })
+                .map(|m| Model { id: (*m).to_owned(), label: (*m).to_owned(), options: Vec::new() })
                 .collect(),
             modes: Vec::new(),
             efforts: efforts

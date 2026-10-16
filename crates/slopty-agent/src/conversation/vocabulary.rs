@@ -32,7 +32,7 @@
 //! observer makes each a request on the session's thread.
 
 use serde::{Deserialize, Serialize};
-use slopty_core::{ClientId, SessionId, WallMs};
+use slopty_core::WallMs;
 pub use slopty_proto::thread::detail::{EditDetail, Hunk, Patch, WriteDetail};
 
 /// A clipping limit: whichever of the two is reached first.
@@ -279,6 +279,8 @@ pub enum NoteKind {
     Info,
     /// A hook failed or stopped the turn (the text is what it said).
     Hook,
+    /// Slopty's reports handed to the agent (`<slopty-reports>`).
+    Report,
 }
 
 /// The API error that ended a turn, as Claude Code records it.
@@ -926,72 +928,28 @@ pub enum LiveKind {
     },
 }
 
-/// A permission prompt held on the worker, or its end, as the session's thread observer hears
-/// it; or a call auto mode turned down.
+/// A permission Claude Code asks for, or its end.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum PermissionEvent {
-    /// Claude Code asks, and the worker holds the question for whoever can answer it.
+    /// Claude Code asks.
     Asked(Box<PermissionPrompt>),
     /// The prompt is no longer waiting.
     Settled {
-        /// The session.
-        session: SessionId,
         /// [`PermissionPrompt::ask`].
         ask: u64,
         /// How it ended.
         outcome: Settled,
     },
-    /// Auto mode's classifier turned a call down (`PermissionDenied`). Told whether or not a
-    /// prompt to let it try again is held after it.
-    Declined(Box<Declined>),
 }
 
-impl PermissionEvent {
-    /// The session whose prompt this is.
-    #[must_use]
-    pub const fn session(&self) -> SessionId {
-        match self {
-            Self::Asked(prompt) => prompt.session,
-            Self::Settled { session, .. } => *session,
-            Self::Declined(declined) => declined.session,
-        }
-    }
-}
-
-/// A call Claude Code's auto mode turned down without asking anyone.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct Declined {
-    /// The terminal session the agent runs in.
-    pub session: SessionId,
-    /// The call's id (`tool_use_id`), which names its entry in the transcript.
-    pub call: Option<String>,
-    /// The tool's name as the model called it.
-    pub tool: String,
-    /// What the call would do, in a line (a command, a path).
-    pub line: Option<String>,
-    /// Why, as Claude Code said it: the rule that matched (`[Data Exfiltration]`), or that the
-    /// classifier reached no verdict.
-    pub reason: String,
-    /// Whether the person may let it try again: Claude Code ignores that for a decline with no
-    /// verdict.
-    pub retryable: bool,
-    /// When Claude Code said so, by the worker's clock.
-    pub at_ms: WallMs,
-}
-
-/// A permission Claude Code asks for before running a tool, held while a client follows the
-/// session's thread or, for a yes-or-no prompt, while one keeps the thread table.
+/// A permission Claude Code asks for before running a tool.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct PermissionPrompt {
-    /// The terminal session the agent runs in.
-    pub session: SessionId,
-    /// Names the prompt in answers, unique on the worker.
+    /// Names the prompt in answers, unique in its session.
     pub ask: u64,
     /// The tool's name as the model called it.
     pub tool: String,
-    /// The call it asks about (its `tool_use_id`), when the worker knows it: the
-    /// `PermissionRequest` hook names none, so it is the call whose `PreToolUse` came last with
-    /// the same tool and input.
+    /// The call it asks about (its `tool_use_id`).
     pub call: Option<String>,
     /// What the call would do, as a conversation entry shows a call (an edit's proposed change
     /// as a patch).
@@ -1002,11 +960,6 @@ pub struct PermissionPrompt {
     pub mode: Option<String>,
     /// When Claude Code asked, by the worker's clock.
     pub asked_ms: WallMs,
-    /// When the worker gives up holding it and the TUI's dialog shows instead, on that clock.
-    pub until_ms: WallMs,
-    /// For a call auto mode turned down (`PermissionDenied`), why: the prompt is then whether
-    /// the agent may try it again, and no dialog shows when nobody answers.
-    pub declined: Option<String>,
 }
 
 /// One permission update "allow always" applies.
@@ -1077,12 +1030,8 @@ pub enum Settled {
         /// The answer Claude Code was given.
         verdict: Verdict,
         /// Who gave it.
-        by: ClientId,
+        by: slopty_proto::thread::Answerer,
     },
-    /// Handed back undecided: the TUI shows its own dialog now. The last follower or approver
-    /// left, a client handed it to the TUI (`Intent::Release` on its request), or the worker
-    /// held it as long as it may.
-    Released,
     /// Claude Code stopped waiting (the turn was interrupted, the agent quit).
     Withdrawn,
 }

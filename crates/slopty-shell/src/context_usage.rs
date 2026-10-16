@@ -40,8 +40,12 @@ pub(crate) fn ring_chip(
     open: bool,
     theme: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
+    // slopty: each ring names itself to the accessibility tree ("Plan usage 64%").
+    let name = if id == "account-usage" { "Plan usage" } else { "Context" };
     div()
         .id(id)
+        .role(gpui::Role::Button)
+        .aria_label(SharedString::from(format!("{name} {label}")))
         .flex_none()
         .flex()
         .items_center()

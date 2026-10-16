@@ -1,14 +1,4 @@
-//! One markdown look for every surface that draws it with gpui-kit's `TextView`.
-//!
-//! A Markdown file's preview and a conversation read the same, because both take their sizes,
-//! colours and corners from the theme.
-
-use std::rc::Rc;
-
-use gpui::{App, Window};
-
-/// What a task row's box does with the row's index (the surface's owner has the text).
-pub type Toggle = Rc<dyn Fn(usize, &mut Window, &mut App)>;
+//! Markdown said as plain words, for chrome that draws one line of it.
 
 /// A line of Markdown said as plain words, for chrome that draws one line of text.
 ///

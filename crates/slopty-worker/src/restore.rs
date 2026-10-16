@@ -9,20 +9,8 @@
 //! screen and scrollback (`<id>.vt`, the VT bytes ptyd is handed). A worker that finds a recipe
 //! ptyd no longer holds reopens the session under the same id, so every workspace item keeps its
 //! tile: a new shell in the old directory, below the old screen and a divider. What the old shell
-//! was running is never started again, with one exception: a Claude Code conversation the person
-//! left running comes back with `claude --resume` (`docs/decisions/claude-code.md`, "An agent comes
-//! back after a reboot"). The daemon's agent tick tells the keeper which conversation each session
-//! holds ([`Keeper::agent`]); a tile opened on `claude` runs it again resumed, and a shell the
-//! person typed `claude` into gets the resuming line typed at its first prompt.
-//! A Codex or pi the person typed into a terminal comes back the same way, with its own
-//! resuming line (`codex resume <id>`, `pi --session <id>`) typed at the first prompt in its
-//! folder, once the daemon's agent tick has found the session it holds ([`Keeper::typed`],
-//! `slopty_agent::typed`).
-//! A conversation Claude Code still runs in the background (`claude --bg`, in its session
-//! registry) is opened with `claude attach <id>` instead: `--resume` refuses it while it runs.
-//! A Codex that was the terminal's own command comes back the same way, in a shell: on the
-//! person's daemon, as every Codex Slopty lets an agent open is, its thread is found as a typed
-//! one's is.
+//! was running is never started again: an agent the person ran in a terminal is theirs to take
+//! up, and the threads Slopty drives come back on their own (`docs/decisions/agents.md`).
 //!
 //! The checkpoints reach the keeper as ptyd gets them, and each session's is written off the
 //! session's thread, paced by its size (`pace`): a small screen is on disk within
@@ -35,8 +23,6 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use slopty_agent::resume::Resume;
-use slopty_agent::typed::Typed;
 use slopty_core::{SessionId, WallMs};
 use slopty_proto::terminal::{Restored, TermSize};
 use tokio::sync::{mpsc, oneshot};
@@ -87,23 +73,6 @@ pub struct Recipe {
     pub saved_ms: WallMs,
     /// It was itself reopened after a loss, and what it ran before that.
     pub restored: Option<Restored>,
-    /// The Claude Code conversation running in it, to resume.
-    pub agent: Option<Resume>,
-    /// The Codex or pi session running in it, typed there by the person, to take up again.
-    pub typed: Option<Typed>,
-}
-
-/// What an agent the worker resumes is given besides its own flags.
-#[derive(Clone, Debug, Default)]
-pub struct AgentLaunch {
-    /// The `slopty hook` relay, given again to an agent started with it on its `--settings`.
-    pub relay: Option<String>,
-    /// Slopty's Claude Code mod, loaded into an agent the worker starts itself. One typed at
-    /// a prompt gets it from the shell's `claude` function.
-    pub claude_mod: Option<slopty_agent::claude_mod::Installed>,
-    /// The conversations Claude Code runs in the background now ([`background`]): one of them is
-    /// opened with `claude attach`, since `claude --resume` refuses it while it runs.
-    pub background: Vec<String>,
 }
 
 /// How a lost session starts again ([`Recipe::reopen`]).
@@ -111,14 +80,9 @@ pub struct AgentLaunch {
 pub struct Reopen {
     /// What its PTY runs.
     pub command: Vec<String>,
-    /// Where: the agent's directory when one is resumed, else the shell's last. `None` when
-    /// that is gone, which leaves the shell at home.
+    /// Where: the shell's last directory. `None` when that is gone, which leaves the shell at
+    /// home.
     pub cwd: Option<PathBuf>,
-    /// The line that resumes the agent, to type at the new shell's first prompt, when the
-    /// agent ran in the shell rather than as the session's own command.
-    pub launch: Option<String>,
-    /// The conversation resumed.
-    pub agent: Option<Resume>,
     /// What its viewers are told.
     pub restored: Restored,
 }
@@ -135,124 +99,19 @@ impl Recipe {
             size,
             saved_ms: WallMs::ZERO,
             restored: None,
-            agent: None,
-            typed: None,
         }
     }
 
-    /// How session `id` starts again, given the system's shells and the home directory
-    /// Claude Code keeps its conversations under. Blocking: it looks at the directories and
-    /// the transcript.
-    ///
-    /// The shell comes back as [`Self::reopen_command`] says. A conversation kept with it is
-    /// resumed only while both its directory and its transcript are there; otherwise the
-    /// session is the shell alone, with one line in the log.
+    /// How a lost session starts again, given the system's shells: as
+    /// [`Self::reopen_command`] says, in the directory its shell was last in while that is there.
     #[must_use]
-    pub fn reopen(&self, id: SessionId, shells: &str, home: &Path, launch: &AgentLaunch) -> Reopen {
-        let shell = self.reopen_command(shells);
-        let agent = self.agent.as_ref().and_then(|agent| {
-            let Some(cwd) = existing_dir(&agent.cwd) else {
-                tracing::info!(session = %id, cwd = %agent.cwd, "agent not resumed: its directory is gone");
-                return None;
-            };
-            let transcript = agent.transcript(home);
-            if !transcript.is_file() {
-                tracing::info!(session = %id, transcript = %transcript.display(), "agent not resumed: its conversation is gone");
-                return None;
-            }
-            Some((agent, cwd))
-        });
-        let Some((agent, cwd)) = agent else {
-            let again = shell == self.command;
-            let typed = self.typed.as_ref().and_then(|typed| typed_again(id, typed));
-            let (cwd, launch) = match typed {
-                Some((cwd, line)) => (Some(cwd), Some(line)),
-                None => (self.cwd.as_deref().and_then(existing_dir), None),
-            };
-            return Reopen {
-                command: shell,
-                cwd,
-                launch,
-                agent: None,
-                restored: self.restored(again),
-            };
-        };
-        // What Slopty gave it is given again: the relay and its tools, with the line that says
-        // what they reach, or the pointer to the CLI, which a line typed at a prompt cannot
-        // carry when it spans lines.
-        let args = |in_shell: bool| {
-            let mut args = agent.args();
-            if agent.relay
-                && let Some(relay) = &launch.relay
-            {
-                args = slopty_agent::hooks::with_relay(args, relay, &cwd);
-            }
-            if agent.mcp
-                && let Some(relay) = &launch.relay
-            {
-                args = slopty_agent::hooks::with_mcp(args, relay);
-            }
-            if !in_shell && (agent.mcp || agent.relay) {
-                let line = if agent.mcp {
-                    slopty_agent::hooks::TOOLS_LINE
-                } else {
-                    slopty_agent::hooks::POINTER
-                };
-                args = slopty_agent::hooks::with_line(args, line);
-            }
-            if let Some(installed) = launch.claude_mod.as_ref().filter(|_mod| !in_shell) {
-                installed.args(args)
-            } else {
-                args
-            }
-        };
-        // Still running in the background: it is opened where it runs, with nothing given anew.
-        let attach = launch.background.contains(&agent.session);
-        let args = |in_shell: bool| {
-            if attach {
-                vec![slopty_agent::roster::ATTACH.to_owned(), agent.session.clone()]
-            } else {
-                args(in_shell)
-            }
-        };
-        let ran_it = self.command.first().filter(|program| {
-            slopty_agent::detect::is_claude(
-                program.rsplit('/').next().unwrap_or(program),
-                &self.command,
-            )
-        });
-        if let Some(program) = ran_it {
-            let program =
-                if program.rsplit('/').next() == Some("claude") { program } else { "claude" };
-            return Reopen {
-                command: std::iter::once(program.to_owned()).chain(args(false)).collect(),
-                cwd: Some(cwd),
-                launch: None,
-                agent: Some(agent.clone()),
-                restored: self.restored(true),
-            };
-        }
-        let words: Vec<String> = std::iter::once("claude".to_owned()).chain(args(true)).collect();
-        let again = shell == self.command;
-        // Quoting cannot keep a control character from the line editor: it would act on it as
-        // it is typed. A kept recipe is a file anybody with the account can write.
-        if !words.iter().all(|word| slopty_agent::resume::typeable(word)) {
-            tracing::warn!(session = %id, "agent not resumed: its line has a control character");
-            return Reopen {
-                cwd: self.cwd.as_deref().and_then(existing_dir),
-                launch: None,
-                agent: None,
-                restored: self.restored(again),
-                command: shell,
-            };
-        }
-        let words: Vec<String> = words.iter().map(|word| slopty_core::shell_quote(word)).collect();
+    pub fn reopen(&self, shells: &str) -> Reopen {
+        let command = self.reopen_command(shells);
+        let again = command == self.command;
         Reopen {
-            command: shell,
-            cwd: Some(cwd),
-            launch: Some(words.join(" ")),
-            agent: Some(agent.clone()),
+            cwd: self.cwd.as_deref().and_then(existing_dir),
             restored: self.restored(again),
+            command,
         }
     }
 
@@ -283,43 +142,6 @@ impl Recipe {
     }
 }
 
-/// The folder and the line that take `typed` up again in a new shell there: none when the
-/// folder is gone, or when a word of the line has a control character, which the line editor
-/// would act on as it is typed (a kept recipe is a file anybody with the account can write).
-fn typed_again(id: SessionId, typed: &Typed) -> Option<(PathBuf, String)> {
-    let Some(cwd) = existing_dir(&typed.cwd) else {
-        tracing::info!(session = %id, cwd = %typed.cwd, "agent not resumed: its directory is gone");
-        return None;
-    };
-    let words = typed.words();
-    if !words.iter().all(|word| slopty_agent::resume::typeable(word)) {
-        tracing::warn!(session = %id, "agent not resumed: its line has a control character");
-        return None;
-    }
-    let words: Vec<String> = words.iter().map(|word| slopty_core::shell_quote(word)).collect();
-    Some((cwd, words.join(" ")))
-}
-
-/// The conversations of `recipes` that Claude Code runs in the background now, as its session
-/// registry in `sessions` lists them ([`slopty_agent::roster::registered`]).
-///
-/// The registry is read only when a recipe holds a conversation; one that cannot be read is
-/// none.
-pub async fn background<'a>(
-    sessions: PathBuf,
-    recipes: impl IntoIterator<Item = &'a Recipe>,
-) -> Vec<String> {
-    if !recipes.into_iter().any(|recipe| recipe.agent.is_some()) {
-        return Vec::new();
-    }
-    tokio::task::spawn_blocking(move || {
-        let listed = slopty_agent::roster::registered(&sessions, crate::ports::alive);
-        slopty_agent::roster::background(&listed).map(str::to_owned).collect()
-    })
-    .await
-    .unwrap_or_default()
-}
-
 /// `dir` (a leading `~` being this worker's home) when it is a directory now.
 fn existing_dir(dir: &str) -> Option<PathBuf> {
     Some(crate::file::expand_home(Path::new(dir))).filter(|dir| dir.is_dir())
@@ -335,8 +157,6 @@ enum Job {
     // Boxed: a recipe is far larger than any other job.
     Opened(SessionId, Box<Recipe>),
     Checkpoint(SessionId, Vec<u8>, Place),
-    Agent(SessionId, Option<Resume>),
-    Typed(SessionId, Option<Typed>),
     Forget(SessionId),
     Flush(oneshot::Sender<()>),
 }
@@ -397,18 +217,6 @@ impl Keeper {
     /// Session `id`'s newest checkpoint, and where it stands.
     pub fn checkpoint(&self, id: SessionId, state: Vec<u8>, place: Place) {
         let _sent = self.jobs.send(Job::Checkpoint(id, state, place));
-    }
-
-    /// The Claude Code conversation session `id` holds now, or none: written at once when it
-    /// differs from the one kept.
-    pub fn agent(&self, id: SessionId, agent: Option<Resume>) {
-        let _sent = self.jobs.send(Job::Agent(id, agent));
-    }
-
-    /// The Codex or pi session, typed by the person, session `id` holds now, or none: written
-    /// at once when it differs from the one kept.
-    pub fn typed(&self, id: SessionId, typed: Option<Typed>) {
-        let _sent = self.jobs.send(Job::Typed(id, typed));
     }
 
     /// Session `id` was closed: nothing of it is kept.
@@ -499,24 +307,6 @@ async fn write_loop(
                 }
                 recipe.size = place.size;
                 waiting.insert(id, state);
-            }
-            Some(Job::Agent(id, agent)) => {
-                if let Some(recipe) = recipes.get_mut(&id)
-                    && recipe.agent != agent
-                {
-                    recipe.agent = agent;
-                    let recipe = recipe.clone();
-                    write_recipe(&dir, id, &recipe).await;
-                }
-            }
-            Some(Job::Typed(id, typed)) => {
-                if let Some(recipe) = recipes.get_mut(&id)
-                    && recipe.typed != typed
-                {
-                    recipe.typed = typed;
-                    let recipe = recipe.clone();
-                    write_recipe(&dir, id, &recipe).await;
-                }
             }
             Some(Job::Forget(id)) => {
                 recipes.remove(&id);
@@ -637,7 +427,7 @@ mod tests {
     const SHELLS: &str = "# List of acceptable shells\n/bin/bash\n/bin/sh\n/bin/zsh\n";
 
     fn reopen(recipe: &Recipe) -> Reopen {
-        recipe.reopen(SessionId::new(), SHELLS, Path::new("/nowhere"), &AgentLaunch::default())
+        recipe.reopen(SHELLS)
     }
 
     /// A tile opened on a shell gets that shell back; anything else, the login shell. The
@@ -654,236 +444,11 @@ mod tests {
         assert!(recipe(&["/opt/fish"]).reopen_command(SHELLS).is_empty(), "not listed");
 
         let first = reopen(&recipe(&["claude", "--continue"]));
-        assert!(first.command.is_empty() && first.launch.is_none(), "no conversation kept");
+        assert!(first.command.is_empty(), "no agent runs again");
         assert_eq!(first.restored.command, ["claude", "--continue"]);
         let reopened = Recipe { restored: Some(first.restored), ..recipe(&[]) };
         assert_eq!(reopen(&reopened).restored.command, ["claude", "--continue"], "kept");
         assert_eq!(reopen(&recipe(&["/bin/zsh"])).restored.command, Vec::<String>::new());
-    }
-
-    /// A conversation kept with the session comes back resumed in its own directory: typed at
-    /// the first prompt of a shell the person ran it in, or as the command of a tile opened on
-    /// it, which then has nothing left to offer. Its transcript or its directory gone, the
-    /// session is the shell alone.
-    #[test]
-    fn a_kept_conversation_comes_back_resumed() {
-        let home = tempfile::tempdir().unwrap();
-        let project = tempfile::tempdir().unwrap();
-        let transcript = home.path().join("abc.jsonl");
-        std::fs::write(&transcript, b"{}\n").unwrap();
-        let agent = Resume {
-            session: "abc".to_owned(),
-            cwd: project.path().to_string_lossy().into_owned(),
-            transcript: Some(transcript.to_string_lossy().into_owned()),
-            args: vec!["--model".to_owned(), "opus 5".to_owned()],
-            relay: false,
-            mcp: false,
-        };
-        let open = |command: &[&str]| Recipe {
-            agent: Some(agent.clone()),
-            cwd: Some("/".to_owned()),
-            ..recipe(command)
-        };
-        let at = |recipe: &Recipe| {
-            recipe.reopen(SessionId::new(), SHELLS, home.path(), &AgentLaunch::default())
-        };
-
-        let shell = at(&open(&["/bin/zsh"]));
-        assert_eq!(shell.command, ["/bin/zsh"]);
-        assert_eq!(shell.launch.as_deref(), Some("claude --resume abc --model 'opus 5'"));
-        assert_eq!(shell.cwd.as_deref(), Some(project.path()));
-        assert_eq!(shell.agent.as_ref(), Some(&agent));
-
-        let tile = at(&open(&["/opt/bin/claude", "--model", "opus 5", "hello"]));
-        assert_eq!(tile.command, ["/opt/bin/claude", "--resume", "abc", "--model", "opus 5"]);
-        assert!(tile.launch.is_none());
-        assert!(tile.restored.command.is_empty(), "the agent runs again");
-
-        std::fs::remove_file(&transcript).unwrap();
-        let gone = at(&open(&["/bin/zsh"]));
-        assert_eq!(
-            (gone.command.as_slice(), gone.launch, gone.agent),
-            (["/bin/zsh".to_owned()].as_slice(), None, None)
-        );
-        assert_eq!(gone.cwd.as_deref(), Some(Path::new("/")), "the shell's own directory");
-        std::fs::write(&transcript, b"{}\n").unwrap();
-        let moved = Recipe {
-            agent: Some(Resume { cwd: "/nowhere/at/all".to_owned(), ..agent.clone() }),
-            ..open(&["/bin/zsh"])
-        };
-        assert!(at(&moved).launch.is_none(), "its directory is gone");
-
-        // A kept recipe is a file: one whose flags hold a control character is never typed.
-        for word in ["x\ry", "\u{3}", "a\u{1b}[200~b"] {
-            let tampered = Recipe {
-                agent: Some(Resume {
-                    args: vec!["--name".to_owned(), word.to_owned()],
-                    ..agent.clone()
-                }),
-                ..open(&["/bin/zsh"])
-            };
-            let shell = at(&tampered);
-            assert_eq!(
-                (shell.command.as_slice(), shell.launch, shell.agent),
-                (["/bin/zsh".to_owned()].as_slice(), None, None),
-                "{word:?}"
-            );
-        }
-    }
-
-    /// A project's Codex that was its terminal's own command comes back as a typed one does: a
-    /// login shell in its folder with `codex resume <thread>` at the first prompt, and none of
-    /// its old flags. Without the thread found, it is the shell alone.
-    #[test]
-    fn a_codex_that_was_its_terminal_s_command_comes_back_on_its_thread() {
-        use slopty_agent::typed::Agent;
-
-        let project = tempfile::tempdir().unwrap();
-        let cwd = project.path().to_string_lossy().into_owned();
-        let id = "01a120d0-87f0-7cc3-b4dc-052b22902bc5";
-        let opened = Recipe {
-            env: vec![("LANG".to_owned(), "C".to_owned())],
-            cwd: Some(cwd.clone()),
-            ..recipe(&["codex", "-m", "gpt-5", "Fix the build."])
-        };
-        let found = Typed { agent: Agent::Codex, session: id.to_owned(), cwd };
-        let back = reopen(&Recipe { typed: Some(found), ..opened.clone() });
-        assert!(back.command.is_empty(), "the login shell, not Codex again: {:?}", back.command);
-        assert_eq!(back.cwd.as_deref(), Some(project.path()));
-        assert_eq!(back.launch.as_deref(), Some(format!("codex resume {id}").as_str()));
-        let bare = reopen(&opened);
-        assert_eq!((bare.command.len(), bare.launch), (0, None), "no thread found: the shell");
-    }
-
-    /// A conversation Claude Code still runs in the background is opened where it runs,
-    /// `claude attach <id>`, with nothing given anew: as a tile's command, or typed at the
-    /// first prompt of the shell it ran in. One no longer there is resumed as before.
-    #[test]
-    fn a_conversation_running_in_the_background_is_attached_not_resumed() {
-        let home = tempfile::tempdir().unwrap();
-        let project = tempfile::tempdir().unwrap();
-        let transcript = home.path().join("abc.jsonl");
-        std::fs::write(&transcript, b"{}\n").unwrap();
-        let agent = Resume {
-            session: "abc".to_owned(),
-            cwd: project.path().to_string_lossy().into_owned(),
-            transcript: Some(transcript.to_string_lossy().into_owned()),
-            args: vec!["--model".to_owned(), "opus".to_owned()],
-            relay: true,
-            mcp: false,
-        };
-        let open = |command: &[&str]| Recipe { agent: Some(agent.clone()), ..recipe(command) };
-        let launch = AgentLaunch {
-            relay: Some("/opt/slopty".to_owned()),
-            background: vec!["abc".to_owned()],
-            ..AgentLaunch::default()
-        };
-        let at = |recipe: &Recipe, launch: &AgentLaunch| {
-            recipe.reopen(SessionId::new(), SHELLS, home.path(), launch)
-        };
-        let tile = at(&open(&["/opt/bin/claude", "--bg"]), &launch);
-        assert_eq!(tile.command, ["/opt/bin/claude", "attach", "abc"]);
-        assert_eq!(tile.cwd.as_deref(), Some(project.path()));
-        let shell = at(&open(&["/bin/zsh"]), &launch);
-        assert_eq!(shell.launch.as_deref(), Some("claude attach abc"));
-        let ended = AgentLaunch { background: vec!["other".to_owned()], ..launch };
-        let resumed = at(&open(&["/bin/zsh"]), &ended);
-        assert!(resumed.launch.unwrap().contains("--resume abc"), "resumed as before");
-    }
-
-    /// A Codex or pi the person typed into a shell comes back in a new shell in its folder with
-    /// its own resuming line typed at the first prompt. One whose folder is gone, or whose
-    /// session has a control character in it, leaves the shell alone in its last folder.
-    #[test]
-    fn a_typed_codex_or_pi_comes_back_with_its_own_line() {
-        use slopty_agent::typed::Agent;
-
-        let project = tempfile::tempdir().unwrap();
-        let cwd = project.path().to_string_lossy().into_owned();
-        let kept = |agent, session: &str, cwd: &str| Recipe {
-            typed: Some(Typed { agent, session: session.to_owned(), cwd: cwd.to_owned() }),
-            cwd: Some("/".to_owned()),
-            ..recipe(&["/bin/zsh"])
-        };
-        let id = "01a120d0-87f0-7cc3-b4dc-052b22902bc5";
-        let codex = reopen(&kept(Agent::Codex, id, &cwd));
-        assert_eq!(codex.command, ["/bin/zsh"], "the shell it ran in");
-        assert_eq!(codex.cwd.as_deref(), Some(project.path()), "in the agent's folder");
-        assert_eq!(codex.launch.as_deref(), Some(format!("codex resume {id}").as_str()));
-        let pi = reopen(&kept(Agent::Pi, "s-1", &cwd));
-        assert_eq!(pi.launch.as_deref(), Some("pi --session s-1"));
-
-        let gone = reopen(&kept(Agent::Pi, "s-1", "/nowhere/at/all"));
-        assert_eq!((gone.launch, gone.cwd.as_deref()), (None, Some(Path::new("/"))));
-        let tampered = reopen(&kept(Agent::Codex, "x\u{3}y", &cwd));
-        assert_eq!(tampered.launch, None, "a control character is never typed");
-    }
-
-    /// Claude Code's registry is read for the conversations it runs in the background only when
-    /// a lost session held one; a session whose process ended, and a registry that is not
-    /// there, list none.
-    #[tokio::test]
-    async fn the_background_conversations_are_claude_codes_own_list() {
-        let dir = tempfile::tempdir().unwrap();
-        let live = std::process::id();
-        let gone = i32::MAX;
-        for (pid, kind, session) in
-            [(live.to_string(), "bg", "abc"), (gone.to_string(), "bg", "ended")]
-        {
-            let file = dir.path().join(format!("{pid}.json"));
-            std::fs::write(file, format!(r#"{{"sessionId":"{session}","kind":"{kind}"}}"#))
-                .unwrap();
-        }
-        let held = Recipe {
-            agent: Some(Resume {
-                session: "abc".to_owned(),
-                cwd: "/".to_owned(),
-                transcript: None,
-                args: Vec::new(),
-                relay: false,
-                mcp: false,
-            }),
-            ..recipe(&["/bin/zsh"])
-        };
-        let sessions = dir.path().to_path_buf();
-        let shells = background(sessions.clone(), [&recipe(&["/bin/zsh"])]).await;
-        assert_eq!(shells, Vec::<String>::new(), "not read for shells alone");
-        assert_eq!(background(sessions, [&held]).await, ["abc"], "the ended one is passed over");
-        let none = dir.path().join("none");
-        assert_eq!(background(none, [&held]).await, Vec::<String>::new());
-    }
-
-    /// An agent Slopty wired comes back wired as it was: its relay, its tools and the line that
-    /// says what they reach. A shell the person ran it in gets all but the line, which a prompt
-    /// cannot take.
-    #[test]
-    fn a_wired_agent_comes_back_with_its_tools() {
-        let home = tempfile::tempdir().unwrap();
-        let project = tempfile::tempdir().unwrap();
-        let transcript = home.path().join("abc.jsonl");
-        std::fs::write(&transcript, b"{}\n").unwrap();
-        let agent = Resume {
-            session: "abc".to_owned(),
-            cwd: project.path().to_string_lossy().into_owned(),
-            transcript: Some(transcript.to_string_lossy().into_owned()),
-            args: Vec::new(),
-            relay: true,
-            mcp: true,
-        };
-        let launch =
-            AgentLaunch { relay: Some("/opt/slopty".to_owned()), ..AgentLaunch::default() };
-        let recipe = |command: &[&str]| Recipe { agent: Some(agent.clone()), ..recipe(command) };
-        let tile = recipe(&["claude"]).reopen(SessionId::new(), SHELLS, home.path(), &launch);
-        let kept = slopty_agent::resume::invocation(&tile.command[1..]);
-        assert!(kept.relay && kept.mcp, "{:?}", tile.command);
-        let line = format!("--append-system-prompt={}", slopty_agent::hooks::TOOLS_LINE);
-        assert!(tile.command.contains(&line), "{:?}", tile.command);
-        assert!(tile.command.windows(2).any(|w| w == ["--resume", "abc"]), "{:?}", tile.command);
-
-        let shell = recipe(&["/bin/zsh"]).reopen(SessionId::new(), SHELLS, home.path(), &launch);
-        let line = shell.launch.expect("typed at its prompt");
-        assert!(line.contains("--mcp-config"), "{line}");
-        assert!(!line.contains("--append-system-prompt"), "{line}");
     }
 
     /// Recipes and screens round-trip through the directory; a checkpoint updates where the
@@ -927,39 +492,6 @@ mod tests {
             &std::fs::metadata(dir.path()).unwrap().permissions(),
         );
         assert_eq!(mode & 0o777, 0o700);
-    }
-
-    /// Each session keeps the conversation it was last told of, on disk at once, and loses it
-    /// when told there is none; a session the keeper does not hold is not written.
-    #[tokio::test]
-    async fn each_session_keeps_its_own_conversation() {
-        let dir = tempfile::tempdir().unwrap();
-        let (keeper, _found) = Keeper::open(dir.path()).unwrap();
-        let (a, b, stray) = (SessionId::new(), SessionId::new(), SessionId::new());
-        keeper.opened(a, recipe(&[]));
-        keeper.opened(b, recipe(&[]));
-        let conversation = |session: &str| Resume {
-            session: session.to_owned(),
-            cwd: "/w".to_owned(),
-            transcript: None,
-            args: Vec::new(),
-            relay: false,
-            mcp: false,
-        };
-        keeper.agent(a, Some(conversation("first")));
-        keeper.agent(b, Some(conversation("other")));
-        keeper.agent(a, Some(conversation("second")));
-        keeper.agent(stray, Some(conversation("stray")));
-        keeper.flush().await;
-        let (_again, found) = Keeper::open(dir.path()).unwrap();
-        assert_eq!(found[&a].agent.as_ref().map(|r| r.session.as_str()), Some("second"));
-        assert_eq!(found[&b].agent.as_ref().map(|r| r.session.as_str()), Some("other"));
-        assert!(!found.contains_key(&stray));
-        keeper.agent(b, None);
-        keeper.flush().await;
-        let (_again, found) = Keeper::open(dir.path()).unwrap();
-        assert!(found[&b].agent.is_none());
-        assert!(found[&a].agent.is_some());
     }
 
     /// A burst of checkpoints is one write now and one of the newest once the first one's pace

@@ -774,12 +774,6 @@ pub struct TerminalInfo {
     /// The line-numbering epoch of the latest frame (a reflow, reset or alt-screen switch
     /// starts a new one); `None` before the first frame.
     pub epoch: Option<u32>,
-    /// The coding agent's state as its thread's row says it, in the status vocabulary:
-    /// `idle`, `working`, `waiting`, `needs-you`, `done`, `failed`; `None` without an agent.
-    pub agent: Option<String>,
-    /// The agent's state in one short line, as the app says it ("Needs approval: $ ls", the
-    /// call it is on); `None` without an agent.
-    pub agent_detail: Option<String>,
     /// Keystroke → paint, for keys typed into this terminal.
     pub latency: LatencyInfo,
     /// What the terminal font said about itself, once the grid has been laid out.

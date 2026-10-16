@@ -1,4 +1,4 @@
-// Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
+// Derived from zeron (MIT, github.com/zeronsh/zeron @ 3b2f780), see THIRD_PARTY_NOTICES.md
 //! Spaces sidebar: the space-filter dropdown (searchable, with "All projects"),
 //! the filtered Sessions list, and the add-space palette (device
 //! tabs + filtered folder browser).
@@ -1279,6 +1279,34 @@ mod pinned_session_tests {
             assert_eq!(cx.debug_bounds("chat-time-archived").unwrap(), time);
         }
 
+        // Hiding Archived removes the whole shelf without changing its chats or disclosure state.
+        for visible in [false, true, false] {
+            shell.update(cx, |shell, cx| {
+                let open = shell.archived_open;
+                shell.activate_sidebar_view_row(SidebarViewRow::ShowArchived, cx);
+                assert_eq!(shell.settings.sidebar_show_archived, visible);
+                assert_eq!(shell.archived_open, open);
+                assert_eq!(shell.archived_sidebar_chats(cx).len(), 1);
+            });
+            cx.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear(cx);
+            });
+            assert_eq!(cx.debug_bounds("archived-toggle").is_some(), visible);
+            assert_eq!(cx.debug_bounds("chat-archived").is_some(), visible);
+        }
+
+        shell.update(cx, |shell, cx| {
+            assert!(shell.reveal_sidebar_chat("archived", cx));
+            assert!(shell.settings.sidebar_show_archived);
+        });
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear(cx);
+        });
+        assert!(cx.debug_bounds("archived-toggle").is_some());
+        assert!(cx.debug_bounds("chat-archived").is_some());
+
         // Sessions owns all unpinned rows, including their keyboard traversal.
         for open in [false, true] {
             let toggle = cx.debug_bounds("sessions-toggle").unwrap().center();
@@ -2033,6 +2061,8 @@ struct ActiveChatRow {
     branch: Option<String>,
     change_request: Option<slopty_view_proto::ChangeRequestSummary>,
     group: Option<(String, String)>,
+    // slopty: the row says why it waits (`sidebar_status::reason`), which may take a line.
+    reason: bool,
 }
 
 pub(super) fn compare_sidebar_chats(
@@ -2101,6 +2131,7 @@ impl Render for SidebarViewOptionsTooltip {
 #[derive(Clone, Copy)]
 enum SidebarViewRow {
     ByProject,
+    ByStatus, // slopty
     Compact,
     ShowProjectIcon,
     ShowProjectLabel,
@@ -2112,6 +2143,7 @@ enum SidebarViewRow {
     ShowPullRequest,
     ShowHarness,
     ShowProjectFilter,
+    ShowArchived,
 }
 
 impl SidebarViewRow {
@@ -2120,17 +2152,24 @@ impl SidebarViewRow {
     fn closes_submenu(self) -> bool {
         matches!(
             self,
-            Self::ByProject | Self::ByDevice | Self::InOneList | Self::LastUpdated | Self::Created
+            Self::ByProject
+                | Self::ByDevice
+                | Self::InOneList
+                | Self::ByStatus // slopty
+                | Self::LastUpdated
+                | Self::Created
         )
     }
 }
 
+// slopty: By status joins Organize.
 const SIDEBAR_VIEW_GROUPS: [(&str, std::ops::Range<usize>); 3] =
-    [("Organize", 0..3), ("Sort", 3..5), ("Show", 5..11)];
+    [("Organize", 0..4), ("Sort", 4..6), ("Show", 6..13)];
 
-const SIDEBAR_VIEW_ROWS: [SidebarViewRow; 11] = [
+const SIDEBAR_VIEW_ROWS: [SidebarViewRow; 13] = [
     SidebarViewRow::ByDevice,
     SidebarViewRow::ByProject,
+    SidebarViewRow::ByStatus,
     SidebarViewRow::InOneList,
     SidebarViewRow::LastUpdated,
     SidebarViewRow::Created,
@@ -2140,6 +2179,7 @@ const SIDEBAR_VIEW_ROWS: [SidebarViewRow; 11] = [
     SidebarViewRow::ShowProjectIcon,
     SidebarViewRow::ShowProjectLabel,
     SidebarViewRow::ShowProjectFilter,
+    SidebarViewRow::ShowArchived,
 ];
 
 // list items stay tightly related at 2px, while section boundaries use 12px
@@ -2320,6 +2360,8 @@ pub(super) struct AddSpaceFlow {
     /// Folders matching the query anywhere under the device's home (Home
     /// location only).
     home_search: HomeFolderSearch,
+    // slopty: the search field takes a repository's address, to clone into the open folder.
+    cloning: bool,
     _search_events: Subscription,
 }
 
@@ -2496,6 +2538,53 @@ fn add_space_target(
     }
 }
 
+// slopty: a clone may take a while: its notice stays up until the answer takes it down.
+/// How long the clone's notice may stay up, at most.
+const CLONE_NOTICE_LASTS: Duration = Duration::from_secs(20 * 60);
+
+// slopty: what passes for a repository's address in "Clone repository…": a URL git takes
+// (`https://`, `ssh://`, `git://`) or scp-like `user@host:path`, with no spaces. A path on the
+// machine is none: the worker clones only from a remote, which the clone keeps as its origin.
+/// Whether `url` reads as an address git can clone from.
+fn looks_like_repo_url(url: &str) -> bool {
+    let url = url.trim();
+    if url.is_empty() || url.chars().any(char::is_whitespace) {
+        return false;
+    }
+    let scheme = ["https://", "http://", "ssh://", "git://", "git+ssh://"]
+        .iter()
+        .any(|scheme| {
+            url.get(..scheme.len()).is_some_and(|head| head.eq_ignore_ascii_case(scheme))
+                && url.len() > scheme.len()
+        });
+    let scp = url.split_once(':').is_some_and(|(host, path)| {
+        host.contains('@') && !host.contains('/') && !path.is_empty()
+    });
+    (scheme || scp) && clone_repo_name(url).is_some()
+}
+
+/// The folder a clone of `url` is named: its last segment, without `.git`.
+fn clone_repo_name(url: &str) -> Option<String> {
+    let trimmed = url.trim().trim_end_matches('/');
+    let last = trimmed.rsplit(['/', ':']).next()?;
+    let name = last.strip_suffix(".git").unwrap_or(last);
+    (!name.is_empty() && name != "." && name != ".." && !name.contains('\\'))
+        .then(|| name.to_owned())
+}
+
+/// The project a clone became, as `CloneRepo` answers it: `{spaceId, deviceId, path}`; `None`
+/// for an answer that does not say.
+fn cloned_space(answer: &serde_json::Value) -> Option<(String, String, String)> {
+    let field = |name: &str| {
+        answer
+            .get(name)
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    };
+    Some((field("spaceId")?, field("deviceId")?, field("path")?))
+}
+
 /// The title over the picker's matches from under home, with the host's
 /// search status trailing.
 fn home_folders_header(theme: &Theme, status: Option<&'static str>) -> gpui::Div {
@@ -2639,14 +2728,11 @@ pub(crate) fn status_dot_color(status: ChatIndicator, theme: &Theme) -> gpui::Hs
         // strength: at full alpha the colored words shouted across the
         // whole sidebar (user request) — only Done keeps its pop.
         ChatIndicator::Working => theme.busy.opacity(0.55),
-        // Blue: "asking you a question" must read differently from "busy
-        // working" at a glance.
-        ChatIndicator::AwaitingInput => theme.accent.opacity(0.6),
+        // slopty: Claude desktop's vocabulary: amber is "needs you", blue a result nobody has
+        // seen, red a failure; working keeps zeron's busy glyph.
+        ChatIndicator::AwaitingInput => theme.warning.opacity(0.9),
         ChatIndicator::Errored => theme.danger.opacity(0.65),
-        // Green: finished-but-unseen reads as "ready for you".
-        ChatIndicator::Completed => {
-            theme.success.opacity(0.9) // emerald-400
-        }
+        ChatIndicator::Completed => theme.accent.opacity(0.9),
         ChatIndicator::Idle => crate::theme::ink(0.14),
     }
 }
@@ -3824,6 +3910,9 @@ impl Shell {
             SidebarViewRow::InOneList => {
                 self.settings.sidebar_organization = SidebarOrganization::InOneList
             }
+            SidebarViewRow::ByStatus => {
+                self.settings.sidebar_organization = SidebarOrganization::ByStatus
+            }
             SidebarViewRow::LastUpdated => self.settings.sidebar_sort = SidebarSort::LastUpdated,
             SidebarViewRow::Created => self.settings.sidebar_sort = SidebarSort::Created,
             SidebarViewRow::ShowBranch => {
@@ -3838,6 +3927,9 @@ impl Shell {
             }
             SidebarViewRow::ShowHarness => {
                 self.settings.sidebar_show_harness = !self.settings.sidebar_show_harness
+            }
+            SidebarViewRow::ShowArchived => {
+                self.settings.sidebar_show_archived = !self.settings.sidebar_show_archived
             }
             SidebarViewRow::ShowProjectFilter => {
                 self.settings.sidebar_show_project_filter =
@@ -4008,6 +4100,7 @@ impl Shell {
         let labels = [
             "By device",
             "By project",
+            "By status",
             "None",
             "Last updated",
             "Created",
@@ -4017,10 +4110,12 @@ impl Shell {
             "Project icon",
             "Location",
             "Project filter",
+            "Archived",
         ];
         let icons = [
             icons::LAPTOP,
             icons::FOLDER,
+            icons::CLOCK_CIRCLE,
             icons::LIST,
             icons::CLOCK_CIRCLE,
             icons::CALENDAR,
@@ -4031,10 +4126,12 @@ impl Shell {
             // Location names the host: the remote glyph sidebar rows wear.
             icons::REMOTE_SERVER,
             icons::FOLDER,
+            icons::ARCHIVE_MINIMALISTIC,
         ];
         let selected = [
             organization == SidebarOrganization::ByDevice,
             organization == SidebarOrganization::ByProject,
+            organization == SidebarOrganization::ByStatus,
             organization == SidebarOrganization::InOneList,
             sort == SidebarSort::LastUpdated,
             sort == SidebarSort::Created,
@@ -4044,10 +4141,11 @@ impl Shell {
             self.settings.sidebar_show_project_icon,
             self.settings.sidebar_show_project_label,
             self.settings.sidebar_show_project_filter,
+            self.settings.sidebar_show_archived,
         ];
         let values = [
-            labels[selected[..3].iter().position(|v| *v).unwrap_or(0)].to_string(),
-            labels[3 + selected[3..5].iter().position(|v| *v).unwrap_or(0)].to_string(),
+            labels[selected[..4].iter().position(|v| *v).unwrap_or(0)].to_string(),
+            labels[4 + selected[4..6].iter().position(|v| *v).unwrap_or(0)].to_string(),
         ];
         let mut groups: Vec<AnyElement> = Vec::new();
         for (group, (label, range)) in SIDEBAR_VIEW_GROUPS.iter().enumerate() {
@@ -4788,12 +4886,20 @@ impl Shell {
             .as_ref()
             .map_or(saved_pins.as_slice(), |ids| ids.as_slice());
         let state = self.state.read(cx);
-        let mut chats: Vec<slopty_view_proto::Chat> = state
-            .sidebar_chats(Utc::now(), filter.as_deref())
+        let now = Utc::now();
+        let mut rows: Vec<(ChatIndicator, slopty_view_proto::Chat)> = state
+            .sidebar_chats(now, filter.as_deref())
             .into_iter()
-            .map(|(_, chat)| chat.clone())
+            .map(|(status, chat)| (status, chat.clone()))
             .collect();
-        chats.sort_by(|left, right| compare_sidebar_chats(self.settings.sidebar_sort, left, right));
+        rows.sort_by(|left, right| compare_sidebar_chats(self.settings.sidebar_sort, &left.1, &right.1));
+        // slopty: by status, the order the rows draw in (`render_active_rows`).
+        if self.settings.sidebar_organization == SidebarOrganization::ByStatus {
+            super::sidebar_status::order_by_status(&mut rows, state, now);
+        }
+        let statuses: std::collections::HashMap<String, ChatIndicator> =
+            rows.iter().map(|(status, chat)| (chat.id.clone(), *status)).collect();
+        let chats: Vec<slopty_view_proto::Chat> = rows.into_iter().map(|(_, chat)| chat).collect();
         let (pinned_chats, chats): (Vec<_>, Vec<_>) = chats
             .into_iter()
             .partition(|chat| pinned_order.contains(&chat.id));
@@ -4823,10 +4929,17 @@ impl Shell {
             let mut groups: Vec<(Option<(String, String)>, Vec<slopty_view_proto::Chat>)> = Vec::new();
             for chat in chats {
                 let key = Some((
-                    if self.settings.sidebar_organization == SidebarOrganization::ByProject {
-                        sidebar_project_group(state, &chat).0
-                    } else {
-                        chat.device_id.clone()
+                    match self.settings.sidebar_organization {
+                        SidebarOrganization::ByProject => sidebar_project_group(state, &chat).0,
+                        // slopty: its status group, as drawn.
+                        SidebarOrganization::ByStatus => super::sidebar_status::StatusGroup::of(
+                            statuses.get(&chat.id).copied().unwrap_or(ChatIndicator::Idle),
+                            state.session_for(&chat.id),
+                            now,
+                        )
+                        .key()
+                        .to_owned(),
+                        _ => chat.device_id.clone(),
                     },
                     String::new(),
                 ));
@@ -4873,6 +4986,16 @@ impl Shell {
             SidebarOrganization::ByDevice => Some(chat.device_id.clone()),
             SidebarOrganization::ByProject => Some(sidebar_project_group(state, chat).0),
             SidebarOrganization::InOneList => None,
+            // slopty: its status group.
+            SidebarOrganization::ByStatus => {
+                let now = Utc::now();
+                let status = state.display_status_for(chat, now);
+                Some(
+                    super::sidebar_status::StatusGroup::of(status, state.session_for(&chat.id), now)
+                        .key()
+                        .to_owned(),
+                )
+            }
         }
     }
 
@@ -4882,6 +5005,7 @@ impl Shell {
             SidebarOrganization::ByDevice => "device",
             SidebarOrganization::ByProject => "project",
             SidebarOrganization::InOneList => "list",
+            SidebarOrganization::ByStatus => "status", // slopty
         };
         format!("{organization}:{group}")
     }
@@ -4944,6 +5068,10 @@ impl Shell {
                 self.queue_sidebar_reveal("sessions");
             }
         } else if let Some(index) = archived {
+            if !self.settings.sidebar_show_archived {
+                self.settings.sidebar_show_archived = true;
+                self.schedule_save(cx);
+            }
             if !self.archived_open {
                 self.archived_open = true;
                 self.archived_shown = ARCHIVED_INITIAL_ROWS;
@@ -5006,7 +5134,8 @@ impl Shell {
         let folder = match (project, state.device_name(&chat.device_id)) {
             (Some(project), Some(_)) => format!("{project} @ {device}"),
             (Some(project), None) => project,
-            (None, Some(_)) => device.clone(),
+            // slopty: a chat with no project names its machine as the rest do: "@ studio".
+            (None, Some(_)) => format!("@ {device}"),
             (None, None) => String::new(),
         };
         // The branch shows whenever the engine has stamped one —
@@ -5020,11 +5149,23 @@ impl Shell {
             .change_request_for_chat(&chat)
             .cloned()
             .filter(|_| self.settings.sidebar_show_pull_request);
+        let now = Utc::now();
+        let session = state.session_for(&chat.id);
         let group = match self.settings.sidebar_organization {
             SidebarOrganization::ByDevice => Some((chat.device_id.clone(), device)),
             SidebarOrganization::ByProject => Some(sidebar_project_group(state, &chat)),
             SidebarOrganization::InOneList => None,
+            // slopty: Needs you, Working, Done.
+            SidebarOrganization::ByStatus => {
+                let group = super::sidebar_status::StatusGroup::of(status, session, now);
+                Some((group.key().to_owned(), group.label().to_owned()))
+            }
         };
+        // slopty: as the row decides it (`Shell::render_chat_row`): a send held or failed says
+        // that instead.
+        let reason = !state.send_queued(&chat.id, now)
+            && !state.send_undelivered(&chat.id, now)
+            && super::sidebar_status::reason(status, session, now).is_some();
         ActiveChatRow {
             status,
             chat: chat.clone(),
@@ -5032,6 +5173,7 @@ impl Shell {
             branch,
             change_request,
             group,
+            reason,
         }
     }
 
@@ -5061,6 +5203,10 @@ impl Shell {
             chats.sort_by(|left, right| {
                 compare_sidebar_chats(self.settings.sidebar_sort, &left.1, &right.1)
             });
+            // slopty: by status, rows keep the order they started in, inside their group.
+            if self.settings.sidebar_organization == SidebarOrganization::ByStatus {
+                super::sidebar_status::order_by_status(&mut chats, state, now);
+            }
             chats
                 .into_iter()
                 .map(|(status, chat)| self.sidebar_chat_data(status, chat, state))
@@ -5097,6 +5243,10 @@ impl Shell {
                     self.settings.sidebar_show_project_label,
                     row.branch.is_some(),
                     row.change_request.is_some(),
+                ) + super::sidebar_reason_height(
+                    self.settings.sidebar_compact,
+                    self.settings.sidebar_show_project_label,
+                    row.reason,
                 ) + self.sidebar_subagents(&row.chat.id, now, cx).height() // slopty: in its slot
             })
             .collect();
@@ -5187,7 +5337,11 @@ impl Shell {
                     self.settings.sidebar_show_project_label,
                     rows[index].branch.is_some(),
                     rows[index].change_request.is_some(),
-                );
+                ) + super::sidebar_reason_height(
+                    self.settings.sidebar_compact,
+                    self.settings.sidebar_show_project_label,
+                    rows[index].reason,
+                ); // slopty: its reason line
                 // Move the vacant slot to the destination instead of keeping two
                 // holes. Sample layout and paint with the same reversible easing.
                 let collapse = !returning
@@ -5298,6 +5452,7 @@ impl Shell {
                     branch,
                     change_request,
                     group: _,
+                    reason,
                 } = row;
                 let time_ago: SharedString =
                     format_time_ago(chat.last_message_at.unwrap_or(chat.created_at), now).into();
@@ -5314,6 +5469,10 @@ impl Shell {
                     self.settings.sidebar_show_project_label,
                     branch.is_some(),
                     change_request.is_some(),
+                ) + super::sidebar_reason_height(
+                    self.settings.sidebar_compact,
+                    self.settings.sidebar_show_project_label,
+                    reason,
                 ) + subagents.height();
                 // Only rows a jump slot can reach wear a chip; row 10 onward
                 // keeps its time-ago.
@@ -5382,6 +5541,8 @@ impl Shell {
                 );
                 let element =
                     self.with_sidebar_subagents(element, &chat.id, &subagents, now, theme, cx); // slopty
+                // slopty: on a phone, swipe to pin or archive, press long for its menu.
+                let element = self.compact_session_row(element, &chat.id, false, cx);
                 // The source slot shrinks when its vacancy moves across sections.
                 // Its zero-height anchor still tracks the live activity position.
                 let element = if let Some(origin) = origin {
@@ -5791,6 +5952,9 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        if !self.settings.sidebar_show_archived {
+            return None;
+        }
         const INITIAL: usize = ARCHIVED_INITIAL_ROWS;
         const PAGE: usize = ARCHIVED_PAGE_ROWS;
         let now = Utc::now();
@@ -5850,6 +6014,7 @@ impl Shell {
             chevron,
         )
             .id("archived-toggle")
+            .debug_selector(|| "archived-toggle".into())
             .on_click(cx.listener(move |this, _, _, cx| {
                 let was_open = this.archived_open;
                 this.begin_sidebar_disclosure_motion(
@@ -5877,31 +6042,30 @@ impl Shell {
                     .sidebar_show_harness
                     .then(|| chat.config.as_ref().map(|c| c.harness))
                     .flatten();
-                list = list.child(
-                    self.render_chat_row(
-                        chat.id.clone(),
-                        transcript::single_line(
-                            &chat.title.clone().unwrap_or_else(|| "New session".into()),
-                        )
-                        .into(),
-                        format_time_ago(chat.last_message_at.unwrap_or(chat.created_at), now)
-                            .into(),
-                        row.folder.into(),
-                        row.branch.map(SharedString::from),
-                        row.change_request,
-                        harness,
-                        row.status,
-                        is_selected,
-                        true,
-                        false,
-                        None,
-                        None,
-                        self.settings.sidebar_show_project_icon,
-                        None,
-                        theme,
-                        cx,
-                    ),
+                let element = self.render_chat_row(
+                    chat.id.clone(),
+                    transcript::single_line(
+                        &chat.title.clone().unwrap_or_else(|| "New session".into()),
+                    )
+                    .into(),
+                    format_time_ago(chat.last_message_at.unwrap_or(chat.created_at), now).into(),
+                    row.folder.into(),
+                    row.branch.map(SharedString::from),
+                    row.change_request,
+                    harness,
+                    row.status,
+                    is_selected,
+                    true,
+                    false,
+                    None,
+                    None,
+                    self.settings.sidebar_show_project_icon,
+                    None,
+                    theme,
+                    cx,
                 );
+                // slopty: on a phone, swipe to pin or bring back, press long for its menu.
+                list = list.child(self.compact_session_row(element, &chat.id, true, cx));
             }
             let mut body = div().w_full().flex().flex_col().child(list);
             if has_more {
@@ -5995,6 +6159,7 @@ impl Shell {
             drives_task: None,
             submit_task: None,
             home_search: HomeFolderSearch::default(),
+            cloning: false, // slopty
             _search_events: search_events,
         });
         cx.notify();
@@ -6012,6 +6177,7 @@ impl Shell {
     fn add_space_in_home(&self) -> bool {
         self.add_space.as_ref().is_some_and(|flow| {
             flow.step == ProjectStep::Folders
+                && !flow.cloning // slopty: an address is no folder to look for
                 && flow
                     .location
                     .as_ref()
@@ -6364,6 +6530,11 @@ impl Shell {
             }
             ProjectStep::Folders => {}
         }
+        // slopty: the address is cloned; the row after the folders asks for one.
+        if self.add_space.as_ref().is_some_and(|flow| flow.cloning) {
+            self.add_space_clone(cx);
+            return;
+        }
         let rows = self.add_space_folder_rows(cx);
         let Some(flow) = self.add_space.as_ref() else {
             return;
@@ -6372,7 +6543,12 @@ impl Shell {
             let text = flow.search.read(cx).text().to_string();
             if let Some(target) = crate::pickers::typed_path_target(&text, flow.home.as_deref()) {
                 self.add_space_descend(target, false, cx);
+                return; // slopty: else the clone row, the only one
             }
+        }
+        if flow.active >= rows.len() {
+            // slopty: "Clone repository…".
+            self.add_space_begin_clone(cx);
             return;
         }
         let entry = match rows.get(flow.active) {
@@ -6407,7 +6583,8 @@ impl Shell {
         if self
             .add_space
             .as_ref()
-            .is_none_or(|f| f.step != ProjectStep::Folders)
+            // slopty: an address's slashes are its own.
+            .is_none_or(|f| f.step != ProjectStep::Folders || f.cloning)
         {
             return false;
         }
@@ -6668,8 +6845,155 @@ impl Shell {
         cx.notify();
     }
 
+    // slopty: "Clone repository…": the search field takes a repository's address, and the clone
+    // goes in the open folder on the picked machine (`CloneRepo`), then is added as a project.
+    /// Let the search field take an address; one already typed there stays.
+    fn add_space_begin_clone(&mut self, cx: &mut Context<Self>) {
+        let Some(flow) = self.add_space.as_mut() else {
+            return;
+        };
+        flow.cloning = true;
+        flow.active = 0;
+        flow.error = None;
+        flow.focus_pending = true;
+        flow.list_scroll.set_offset(gpui::Point::default());
+        let search = flow.search.clone();
+        let keep = looks_like_repo_url(search.read(cx).text().trim());
+        search.update(cx, |input, cx| {
+            input.set_placeholder("Repository address or path…", cx);
+            if !keep {
+                input.set_text("", cx);
+            }
+        });
+        // Not in Home any more: its search lets go.
+        self.search_home_folders(cx);
+        cx.notify();
+    }
+
+    /// Back from the address to the folders.
+    fn add_space_end_clone(&mut self, cx: &mut Context<Self>) {
+        let Some(flow) = self.add_space.as_mut() else {
+            return;
+        };
+        flow.cloning = false;
+        flow.active = 0;
+        flow.focus_pending = true;
+        let search = flow.search.clone();
+        search.update(cx, |input, cx| {
+            input.set_placeholder("Search folders…", cx);
+            input.set_text("", cx);
+        });
+        self.search_home_folders(cx);
+        cx.notify();
+    }
+
+    /// Where the typed address would be cloned: its name and the folder it makes.
+    fn add_space_clone_target(&self, cx: &App) -> Option<(String, String)> {
+        let flow = self.add_space.as_ref().filter(|flow| flow.cloning)?;
+        let url = flow.search.read(cx).text().trim().to_owned();
+        let name = clone_repo_name(&url).filter(|_| looks_like_repo_url(&url))?;
+        let into = crate::pickers::child_path(&flow.browser.ready()?.path, &name);
+        Some((name, into))
+    }
+
+    /// Clone the typed address into the open folder on the picked machine. The picker closes
+    /// at once; a notice says it is under way, and the clone becomes a project, or says why
+    /// not.
+    fn add_space_clone(&mut self, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let local = self.state.read(cx).local_device_id.clone();
+        let Some((name, into)) = self.add_space_clone_target(cx) else {
+            return;
+        };
+        let Some(flow) = self.add_space.as_ref() else {
+            return;
+        };
+        let Some(device) = flow.device.clone() else {
+            return;
+        };
+        let url = flow.search.read(cx).text().trim().to_owned();
+        let Some(parent) = flow.browser.ready().map(|folder| folder.path.clone()) else {
+            return;
+        };
+        let mut params = serde_json::Map::new();
+        params.insert("deviceId".into(), device.id.clone().into());
+        params.insert("url".into(), url.into());
+        params.insert("parentPath".into(), parent.into());
+        add_space_target(&mut params, Some(device.id.as_str()), local.as_deref());
+        self.close_add_space(cx);
+        let notice = crate::toast::working(
+            cx,
+            format!("Cloning {name} on {}", device.name),
+            CLONE_NOTICE_LASTS,
+        );
+        cx.spawn(async move |this, cx| {
+            let answer = engine
+                .client()
+                .call(methods::CLONE_REPO, serde_json::Value::Object(params))
+                .await;
+            this.update(cx, |shell, cx| {
+                if let Some(notice) = notice {
+                    crate::toast::withdraw(cx, notice);
+                }
+                match answer {
+                    Ok(answer) => {
+                        match cloned_space(&answer) {
+                            Some((space, device, path)) => {
+                                shell.adopt_cloned_space(space, device, path, cx);
+                            }
+                            None => crate::toast::error(
+                                cx,
+                                format!("Cloned {name} into {into}, but it is not a project"),
+                            ),
+                        }
+                    }
+                    Err(error) => {
+                        crate::toast::error(cx, format!("Could not clone {name}: {error}"));
+                    }
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Land in the project a clone became, which the clone already added: known at once,
+    /// before the list that brings it arrives.
+    fn adopt_cloned_space(
+        &mut self,
+        space_id: String,
+        device_id: String,
+        path: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.update(cx, |s, cx| {
+            if !s.spaces.iter().any(|existing| existing.id == space_id) {
+                s.spaces.push(Space {
+                    id: space_id.clone(),
+                    device_id,
+                    path,
+                    name: None,
+                    git_detected: true,
+                    git_checked_at: None,
+                    checkout_id: None,
+                    repository_id: None,
+                    created_at: Utc::now(),
+                });
+            }
+            cx.notify();
+        });
+        self.land_in_space(space_id, cx);
+    }
+
     /// Back traverses folders, then locations, then devices.
     fn add_space_go_up(&mut self, cx: &mut Context<Self>) {
+        // slopty: out of the address, back to the folder it would go in.
+        if self.add_space.as_ref().is_some_and(|flow| flow.cloning) {
+            self.add_space_end_clone(cx);
+            return;
+        }
         let Some(flow) = &self.add_space else {
             return;
         };
@@ -6735,7 +7059,9 @@ impl Shell {
                 let count = match self.add_space.as_ref().map(|f| f.step) {
                     Some(ProjectStep::Devices) => self.add_space_devices(cx).len(),
                     Some(ProjectStep::Locations) => self.add_space_locations(cx).len(),
-                    _ => self.add_space_folder_rows(cx).len(),
+                    // slopty: the clone row after the folders, or the one clone row.
+                    _ if self.add_space.as_ref().is_some_and(|f| f.cloning) => 1,
+                    _ => self.add_space_folder_rows(cx).len() + 1,
                 };
                 let delta = if key == popover::MenuKey::Up { -1 } else { 1 };
                 if let Some(flow) = self.add_space.as_mut() {
@@ -6754,6 +7080,10 @@ impl Shell {
             // subfolders; the usual target (a repo root full of subfolders)
             // is only ever "the folder you're standing in".
             popover::MenuKey::Enter => self.add_space_open_active(cx),
+            // slopty: while an address is typed, ⌘⏎ clones it as ⏎ does.
+            popover::MenuKey::ModEnter if self.add_space.as_ref().is_some_and(|f| f.cloning) => {
+                self.add_space_clone(cx)
+            }
             popover::MenuKey::ModEnter => self.submit_add_space(cx),
             popover::MenuKey::Backspace => {
                 let empty = self
@@ -6844,6 +7174,7 @@ impl Shell {
         let busy = flow.submit_busy;
         let active = flow.active;
         let loading = matches!(flow.browser, Loadable::Idle | Loadable::Loading);
+        let cloning = flow.cloning; // slopty
         let drives_loading = matches!(flow.drives, Loadable::Loading);
         let home_loading = flow.home_search.loading;
         let home_status = if flow.home_search.indexing {
@@ -6893,6 +7224,8 @@ impl Shell {
             ))
         };
         let mut rows: Vec<AnyElement> = Vec::new();
+        // slopty: the clone row after the folders, not one the empty state counts.
+        let mut clone_rows = 0;
         match step {
             ProjectStep::Devices => {
                 for (ix, device) in self.add_space_devices(cx).into_iter().enumerate() {
@@ -6935,6 +7268,55 @@ impl Shell {
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.add_space_goto_location(name.clone(), path.clone(), cx)
                             }))
+                            .into_any_element(),
+                    );
+                }
+            }
+            // slopty: an address typed to clone: the clone it makes, or what to type.
+            ProjectStep::Folders if cloning => {
+                clone_rows = 1;
+                if let Some((name, into)) = self.add_space_clone_target(cx) {
+                    let shown = home
+                        .as_deref()
+                        .and_then(|home| into.strip_prefix(home.trim_end_matches('/')))
+                        .filter(|rest| rest.starts_with('/'))
+                        .map_or_else(|| into.clone(), |rest| format!("~{rest}"));
+                    rows.push(
+                        row(0)
+                            .role(gpui::Role::Button)
+                            .aria_label(SharedString::from(format!("Clone {name}")))
+                            .child(glyph_el(icons::CLOUD))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(8.0))
+                                    .child(div().flex_none().child(format!("Clone {name}")))
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_color(theme.text_muted)
+                                            .child(format!("into {shown}")),
+                                    ),
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| this.add_space_clone(cx)))
+                            .into_any_element(),
+                    );
+                } else {
+                    rows.push(
+                        div()
+                            .px(px(8.0))
+                            .py(px(6.0))
+                            .text_size(crate::typography::ui_rems(12.0))
+                            .text_color(theme.text_muted)
+                            .child(if query.trim().is_empty() {
+                                "Paste the repository's address: https://… or git@host:owner/repo.git."
+                            } else {
+                                "Not an address git can clone from."
+                            })
                             .into_any_element(),
                     );
                 }
@@ -6982,6 +7364,24 @@ impl Shell {
                                 .into_any_element(),
                         );
                     }
+                    // slopty: a repository from elsewhere, cloned into this folder.
+                    let ix = rows.len();
+                    clone_rows = 1;
+                    rows.push(
+                        row(ix)
+                            .role(gpui::Role::Button)
+                            .aria_label("Clone repository…")
+                            .child(glyph_el(icons::CLOUD))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_color(theme.text_muted)
+                                    .child("Clone repository…"),
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| this.add_space_begin_clone(cx)))
+                            .into_any_element(),
+                    );
                 }
             }
         }
@@ -7028,7 +7428,10 @@ impl Shell {
                         })),
                 ),
             );
-        } else if count == 0 && !(step == ProjectStep::Locations && drives_loading) {
+        } else if count == clone_rows // slopty: the clone row is no folder
+            && !cloning
+            && !(step == ProjectStep::Locations && drives_loading)
+        {
             let (title, hint) = match step {
                 ProjectStep::Devices => ("No devices found", "Try another device name.".into()),
                 ProjectStep::Locations => {
@@ -7326,7 +7729,9 @@ impl Shell {
             .child(command_palette::command_key_hint(
                 &theme,
                 "↵",
-                if step == ProjectStep::Folders {
+                if cloning {
+                    "Clone" // slopty
+                } else if step == ProjectStep::Folders {
                     "Open"
                 } else {
                     "Select"
@@ -7336,7 +7741,7 @@ impl Shell {
                 el.child(command_palette::command_key_hint(&theme, "←", "Back"))
             })
             .child(command_palette::command_key_hint(&theme, "Esc", "Close"))
-            .when(step == ProjectStep::Folders, |el| {
+            .when(step == ProjectStep::Folders && !cloning, |el| {
                 el.child(div().flex_1()).child(
                     div()
                         .id("project-add")
@@ -7658,6 +8063,7 @@ mod tests {
             space_id: None,
             last_seen_at: None,
             room_gen: None,
+            draft: None, // slopty: new field.
         }
     }
 
@@ -8403,6 +8809,161 @@ mod home_folder_search_tests {
                 assert!(flow.browser_repo);
             })
             .unwrap();
+    }
+
+    // slopty: what passes for an address to clone, and the folder it makes.
+    #[test]
+    fn a_clone_address_is_a_url_scp_or_path_and_names_its_folder() {
+        for url in [
+            "https://github.com/zeronsh/zeron.git",
+            "https://github.com/zeronsh/zeron",
+            "HTTPS://example.com/a/b/",
+            "ssh://git@host:22/owner/repo.git",
+            "git@github.com:owner/repo.git",
+            "git://127.0.0.1:9418/origin.git",
+        ] {
+            assert!(looks_like_repo_url(url), "{url}");
+        }
+        for url in [
+            "",
+            "   ",
+            "repo",
+            "https://",
+            "github.com/owner/repo",
+            "/",
+            "~/",
+            "a b",
+            "C:/x",
+            "file:///srv/git/origin.git",
+            "/srv/git/origin.git",
+            "~/src/origin",
+        ] {
+            assert!(!looks_like_repo_url(url), "{url:?}");
+        }
+        assert_eq!(clone_repo_name("https://github.com/zeronsh/zeron.git").as_deref(), Some("zeron"));
+        assert_eq!(clone_repo_name("git@github.com:owner/repo.git").as_deref(), Some("repo"));
+        assert_eq!(clone_repo_name("https://example.com/a/b/").as_deref(), Some("b"));
+        assert_eq!(clone_repo_name("/srv/git/origin.git").as_deref(), Some("origin"));
+        assert_eq!(clone_repo_name("https://example.com/.git"), None);
+        let answer = serde_json::json!({ "spaceId": "s", "deviceId": "d", "path": "/home/me/zeron" });
+        assert_eq!(
+            cloned_space(&answer),
+            Some(("s".to_owned(), "d".to_owned(), "/home/me/zeron".to_owned()))
+        );
+        assert_eq!(cloned_space(&serde_json::json!({ "path": "/x" })), None);
+    }
+
+    /// Opens Home on `device`, its listing answered, then "Clone repository…" with `url` typed.
+    fn clone_typed(
+        cx: &mut TestAppContext,
+        device: &str,
+        url: &str,
+    ) -> (gpui::WindowHandle<Shell>, tempfile::TempDir, FakeEngine) {
+        let (window, dir, mut engine) = picker(cx, device);
+        go_home(window, cx);
+        engine.take(methods::SEARCH_HOME_FOLDERS, cx);
+        // The clone row follows the folders; ⏎ on it takes an address.
+        window
+            .update(cx, |shell, _, cx| {
+                let folders = shell.add_space_folder_rows(cx).len();
+                shell.add_space.as_mut().unwrap().active = folders;
+                shell.add_space_open_active(cx);
+                assert!(shell.add_space.as_ref().unwrap().cloning);
+            })
+            .unwrap();
+        type_query(window, url, cx);
+        engine.take(methods::SEARCH_HOME_FOLDERS, cx);
+        (window, dir, engine)
+    }
+
+    // slopty: a clone goes in the open folder on the picked machine, then is its project.
+    #[gpui::test]
+    fn a_clone_goes_in_the_open_folder_and_becomes_the_project(cx: &mut TestAppContext) {
+        let (window, _dir, mut engine) =
+            clone_typed(cx, "remote", "https://github.com/zeronsh/zeron.git");
+        // Typing an address neither descends at its slashes nor searches Home.
+        window
+            .read_with(cx, |shell, cx| {
+                let flow = shell.add_space.as_ref().unwrap();
+                assert_eq!(flow.browser.ready().unwrap().path, "/home/me");
+                assert_eq!(
+                    shell.add_space_clone_target(cx),
+                    Some(("zeron".to_owned(), "/home/me/zeron".to_owned()))
+                );
+            })
+            .unwrap();
+        window
+            .update(cx, |shell, _, cx| shell.add_space_open_active(cx))
+            .unwrap();
+        let asked = engine.take(methods::CLONE_REPO, cx);
+        assert_eq!(asked.len(), 1);
+        let params = &asked[0]["params"];
+        assert_eq!(params["url"], "https://github.com/zeronsh/zeron.git");
+        assert_eq!(params["parentPath"], "/home/me");
+        assert_eq!(params["deviceId"], "remote");
+        assert_eq!(params["targetDeviceId"], "remote");
+        window
+            .read_with(cx, |shell, cx| {
+                assert!(shell.add_space.is_none(), "the picker closes at once");
+                assert_eq!(crate::toast::messages(cx), ["Cloning zeron on remote"]);
+            })
+            .unwrap();
+        // The clone added the project itself: the window lands in it, adding nothing again.
+        engine.reply(
+            &asked[0],
+            serde_json::json!({ "spaceId": "cloned", "deviceId": "remote", "path": "/home/me/zeron" }),
+        );
+        assert!(engine.take(methods::MUTATE, cx).is_empty(), "no second project");
+        window
+            .read_with(cx, |shell, cx| {
+                let state = shell.state.read(cx);
+                let space = state.spaces.iter().find(|s| s.id == "cloned").unwrap();
+                assert_eq!((space.device_id.as_str(), space.path.as_str()), ("remote", "/home/me/zeron"));
+                assert_eq!(state.selected_space.as_deref(), Some("cloned"));
+                assert!(crate::toast::messages(cx).is_empty(), "the notice is taken down");
+            })
+            .unwrap();
+    }
+
+    // slopty: a clone that fails says why, and adds nothing.
+    #[gpui::test]
+    fn a_failed_clone_says_why_and_adds_nothing(cx: &mut TestAppContext) {
+        let (window, _dir, mut engine) = clone_typed(cx, "local", "git@example.com:srv/origin.git");
+        window
+            .update(cx, |shell, _, cx| shell.add_space_open_active(cx))
+            .unwrap();
+        let asked = engine.take(methods::CLONE_REPO, cx);
+        assert!(asked[0]["params"].get("targetDeviceId").is_none(), "this machine's own");
+        engine.fail(&asked[0], "fatal: repository not found");
+        cx.run_until_parked();
+        assert!(engine.take(methods::MUTATE, cx).is_empty());
+        window
+            .read_with(cx, |shell, cx| {
+                assert!(shell.state.read(cx).spaces.is_empty());
+                let said = crate::toast::messages(cx);
+                assert_eq!(said.len(), 1);
+                assert!(said[0].starts_with("Could not clone origin"), "{said:?}");
+            })
+            .unwrap();
+    }
+
+    // slopty: what is not an address clones nothing; ← goes back to the folders.
+    #[gpui::test]
+    fn a_non_address_clones_nothing_and_back_returns_to_the_folders(cx: &mut TestAppContext) {
+        let (window, _dir, mut engine) = clone_typed(cx, "local", "not a url");
+        window
+            .update(cx, |shell, _, cx| {
+                assert_eq!(shell.add_space_clone_target(cx), None);
+                shell.add_space_open_active(cx);
+                assert!(shell.add_space.is_some(), "still asking");
+                shell.add_space_go_up(cx);
+                let flow = shell.add_space.as_ref().unwrap();
+                assert!(!flow.cloning);
+                assert_eq!(flow.step, ProjectStep::Folders);
+                assert!(flow.search.read(cx).text().is_empty());
+            })
+            .unwrap();
+        assert!(engine.take(methods::CLONE_REPO, cx).is_empty());
     }
 
     #[gpui::test]

@@ -269,6 +269,28 @@ fn find_git(
         .find(|git| is_file(git))
 }
 
+/// The paths a `git status --porcelain=v2 -z` names, a rename's original left out.
+pub(crate) fn status_paths(said: &str) -> Vec<&str> {
+    let mut paths = Vec::new();
+    let mut records = said.split('\0');
+    while let Some(record) = records.next() {
+        let fields = match record.as_bytes().first() {
+            Some(b'1') => 9,
+            Some(b'2') => {
+                let _original = records.next();
+                10
+            }
+            Some(b'u') => 11,
+            Some(b'?' | b'!') => 2,
+            _ => continue,
+        };
+        if let Some(path) = record.splitn(fields, ' ').last() {
+            paths.push(path);
+        }
+    }
+    paths
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -406,5 +428,15 @@ mod tests {
             count(repo.to_path_buf()).await,
             Some(RepoChanges { files: 2, added: 2, removed: 1 })
         );
+    }
+
+    #[test]
+    fn a_status_names_its_paths() {
+        let said = "# branch.oid 0123\0# branch.head main\0\
+                    1 .M N... 100644 100644 100644 aaa bbb src/a file.rs\0\
+                    2 R. N... 100644 100644 100644 aaa bbb R100 new.rs\0old.rs\0\
+                    u UU N... 100644 100644 100644 100644 aaa bbb ccc both.rs\0\
+                    ? notes.txt\0";
+        assert_eq!(status_paths(said), ["src/a file.rs", "new.rs", "both.rs", "notes.txt"]);
     }
 }

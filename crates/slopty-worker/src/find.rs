@@ -13,6 +13,7 @@
 //! a `/` or a word inside one. Ties go to the shorter path.
 
 mod index;
+mod recent;
 mod watch;
 
 use std::cmp::Reverse;
@@ -33,7 +34,8 @@ const MAX_VISITED: usize = 20_000;
 /// The paths under `root` that `query` matches, best first, at most `limit`.
 ///
 /// Relative to `root`, a directory ending in `/`. Hidden entries and what the ignore files
-/// exclude are skipped, git repository or not. Nothing for an empty query.
+/// exclude are skipped, git repository or not. An empty query answers the files changed lately
+/// instead, git's changes first (`find::recent`).
 ///
 /// Answered from the worker's shared index of the worktree `root` is in ([`Indexes::shared`]),
 /// built on the first query, with what the person should know of it the first time there is
@@ -61,6 +63,14 @@ fn walker(root: &Path, depth: Option<usize>) -> ignore::WalkBuilder {
 /// The paths under `root` that `query` matches by a walk bounded in depth and entries: for a
 /// directory no worktree holds.
 fn walk_matching(root: &Path, query: &str, limit: usize) -> Vec<String> {
+    let found = walk_bounded(root);
+    let all: Vec<usize> = (0..found.len()).collect();
+    let best = rank(&found, 0, &all, query, limit).best;
+    best.into_iter().filter_map(|at| found.get(at).cloned()).collect()
+}
+
+/// The paths under `root` a bounded walk finds, relative to it, a directory ending in `/`.
+fn walk_bounded(root: &Path) -> Vec<String> {
     let mut found = Vec::new();
     let walk = walker(root, Some(MAX_DEPTH)).sort_by_file_name(Ord::cmp).build();
     for entry in walk.take(MAX_VISITED).flatten() {
@@ -74,9 +84,7 @@ fn walk_matching(root: &Path, query: &str, limit: usize) -> Vec<String> {
         }
         found.push(path);
     }
-    let all: Vec<usize> = (0..found.len()).collect();
-    let best = rank(&found, 0, &all, query, limit).best;
-    best.into_iter().filter_map(|at| found.get(at).cloned()).collect()
+    found
 }
 
 /// Candidates each thread scores at least: below twice this a query runs on the calling thread,

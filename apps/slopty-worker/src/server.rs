@@ -12,7 +12,6 @@
 //! link only carries: gathered on a task of their own, they go out after each registration and
 //! whenever they change.
 
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
@@ -20,6 +19,7 @@ use slopty_agent::status::SessionAgent;
 use slopty_core::SessionId;
 use slopty_crash::log::{Repeats, Tell};
 use slopty_net::framed::FramedSend;
+use slopty_net::liveness::{Beat, Pulse};
 use slopty_net::redial::Redial;
 use slopty_net::server::{DialError, ServerLink};
 use slopty_net::{HostAddr, NetError};
@@ -72,10 +72,6 @@ impl Agents for DaemonAgents {
     fn ended(&self, session: SessionId) -> bool {
         self.0.lock().ended(session)
     }
-
-    fn interrupted(&self, session: SessionId) -> bool {
-        self.0.lock().interrupted(session)
-    }
 }
 
 /// What a registration keeps sending as it changes.
@@ -101,8 +97,9 @@ pub async fn run(
     addr: HostAddr,
     watched: Watched,
 ) -> ! {
-    // A server gone for weeks is redialled every couple of seconds: its failure is logged when
-    // it starts or changes, then once an hour, not on every redial (`slopty_crash::log`).
+    // A server gone for weeks is redialled every couple of seconds for a minute, then every half
+    // minute or so: its failure is logged when it starts or changes, then once an hour, not on
+    // every redial (`slopty_crash::log`). A machine that wakes from sleep dials at once.
     let mut dialing = Dialing {
         redial: Redial::default(),
         repeats: Repeats::new(slopty_crash::log::STILL_EVERY),
@@ -110,8 +107,6 @@ pub async fn run(
     loop {
         let ended =
             session(&daemon, &orchestrator, &endpoint, &addr, watched.clone(), &mut dialing).await;
-        // No phone's answer comes through a server this worker is not linked to.
-        crate::threads::hold::pushed(&daemon, false);
         let redialling = |why: String| stands(&daemon, &addr, LinkState::Redialling { why });
         match ended {
             Ok(why) => {
@@ -155,7 +150,10 @@ pub async fn run(
                 redialling(why);
             }
         }
-        tokio::time::sleep(dialing.redial.next(std::time::Instant::now())).await;
+        if slopty_net::redial::wait(dialing.redial.next(std::time::Instant::now())).await {
+            tracing::info!(server = %addr, "woke from sleep; dialling the server now");
+            dialing.redial.reset();
+        }
     }
 }
 
@@ -220,7 +218,6 @@ async fn session(
     // Subscribed before the registration is taken: whatever happens after it is sent after it.
     let mut events = daemon.events.subscribe();
     let mut cloning = orchestrator.clone_progress();
-    let mut reports = daemon.reports.subscribe();
     let now = caps.borrow_and_update().clone();
     let registration = Registration {
         worker: daemon.id,
@@ -230,6 +227,8 @@ async fn session(
         sessions: daemon.worker.summaries().await,
         session_key: daemon.session_key.bytes(),
     };
+    // The self-test's stalled control streams hold a new link's too (`stall`).
+    crate::stall::hold().await;
     let link =
         match slopty_net::server::connect(endpoint, addr, Role::Worker(Box::new(registration)))
             .await
@@ -259,13 +258,6 @@ async fn session(
     if out.send(ToServer::Load(load)).await.is_err() {
         return Ok("the writer stopped");
     }
-    // Nor where each agent's work lands, which the status lines said before this link.
-    let standing = daemon.agents.lock().branches();
-    for report in standing.into_iter().map(AgentReport::Branch) {
-        if out.send(ToServer::Report(report)).await.is_err() {
-            return Ok("the writer stopped");
-        }
-    }
     // Nor what it is and has, once that is known.
     let known = facts.borrow_and_update().clone();
     if !known.is_empty() && out.send(ToServer::Facts(known)).await.is_err() {
@@ -276,9 +268,29 @@ async fn session(
     // Nor its threads: the whole table goes first on every registration.
     let mut threads = daemon.threads.as_ref().map(crate::threads::Publish::of);
     let mut requests = JoinSet::new();
+    // The control stream is the lease (`slopty_net::liveness`): pinged every 2 s, and given up
+    // 6 s after its last answer however alive the connection under it looks, so the server
+    // and this worker agree the lease ended and the redial finds a stream that carries.
+    let mut beat = Beat::new(std::time::Instant::now());
+    let mut look = tokio::time::interval(slopty_net::liveness::LOOK_EVERY);
+    look.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let why = loop {
         tokio::select! {
-            msg = rx.recv() => match msg {
+            _ = look.tick() => {
+                let now = std::time::Instant::now();
+                if let Pulse::Dead(gap) = beat.pulse(now) {
+                    tracing::warn!(server = %name, ?gap, "the server stopped answering on the control stream");
+                    break "the server stopped answering";
+                }
+                if beat.ping_due(now) {
+                    let ping = ToServer::Ping { sent_at: slopty_core::MonoTime::now() };
+                    // A full queue already waits on the server; its answer to the last ping
+                    // still counts.
+                    let _full = out.try_send(ping);
+                }
+            }
+            msg = async { crate::stall::hold().await; rx.recv().await } => match msg {
+                Ok(FromServer::Pong { .. }) => beat.heard(std::time::Instant::now()),
                 Ok(FromServer::Request { id, key, verb }) => {
                     let (orchestrator, out) = (orchestrator.clone(), out.clone());
                     requests.spawn(async move {
@@ -306,13 +318,8 @@ async fn session(
                         let _sent = out.send(ToServer::Reply { id, outcome }).await;
                     });
                 }
-                // A task's thread that runs in no terminal is sent the reports as a message.
-                Ok(FromServer::Deliver { session, batch, reports })
-                    if daemon
-                        .threads
-                        .as_ref()
-                        .is_some_and(|t| t.seated_without_terminal(session).is_some()) =>
-                {
+                // The thread seated there is sent the reports as a message.
+                Ok(FromServer::Deliver { session, batch, reports }) => {
                     let context = reports.text();
                     let sent = daemon.threads.as_ref().map(|t| t.deliver(session, batch, &context));
                     match sent {
@@ -329,40 +336,6 @@ async fn session(
                         other => tracing::warn!(%session, batch, ?other, "reports not sent"),
                     }
                 }
-                Ok(FromServer::Deliver { session, batch, reports }) => {
-                    let (dir, turn) =
-                        (daemon.deliveries.clone(), Arc::clone(&daemon.reports_turn));
-                    let kept = tokio::task::spawn_blocking(move || {
-                        let _turn = turn.lock();
-                        slopty_agent::reports::put(&dir, session, batch, &reports)
-                    });
-                    match kept.await {
-                        // Read already, every report of it: the server did not hear so, and
-                        // hears it now.
-                        Ok(Ok(false)) => {
-                            tracing::debug!(%session, batch, "reports read already");
-                            let report = AgentReport::Delivered { session, batch };
-                            if out.send(ToServer::Report(report)).await.is_err() {
-                                break "the writer stopped";
-                            }
-                        }
-                        Ok(Ok(true)) => match may_post(daemon, session) {
-                            Ok(()) => {
-                                tracing::debug!(%session, batch, "reports kept, and posted");
-                                let (deliveries, inboxes) =
-                                    (daemon.deliveries.clone(), daemon.inboxes.clone());
-                                tokio::spawn(hand_over(deliveries, inboxes, session));
-                            }
-                            Err(why) => {
-                                tracing::debug!(%session, batch, why, "reports kept for the hooks");
-                            }
-                        },
-                        Ok(Err(e)) => tracing::warn!(%session, error = %e, "reports not kept"),
-                        Err(e) => tracing::warn!(%session, error = %e, "reports not kept"),
-                    }
-                }
-                // A prompt nobody here can answer waits for a pocketed phone while one can.
-                Ok(FromServer::Pushes(pushed)) => crate::threads::hold::pushed(daemon, pushed),
                 Ok(other) => tracing::debug!(?other, "server message a worker does not take"),
                 Err(NetError::Closed) => break "the server closed the link",
                 Err(e) => return Err(e.into()),
@@ -371,18 +344,9 @@ async fn session(
                 let msg = match ev {
                     Ok(WorkerMsg::SessionChanged(summary)) => ToServer::SessionChanged(summary),
                     Ok(WorkerMsg::SessionClosed { session, reason }) => {
-                        let (inboxes, deliveries) =
-                            (daemon.inboxes.clone(), daemon.deliveries.clone());
-                        drop(tokio::task::spawn_blocking(move || {
-                            let forgot = slopty_agent::reports::forget_inbox(&inboxes, session);
-                            slopty_agent::reports::forget_handed(&deliveries, session).and(forgot)
-                        }));
                         ToServer::SessionClosed { session, reason }
                     }
                     Ok(WorkerMsg::Load(load)) => ToServer::Load(load),
-                    Ok(WorkerMsg::AgentBranch(branch)) => {
-                        ToServer::Report(AgentReport::Branch(branch))
-                    }
                     Ok(_) => continue,
                     // What was missed is in a fresh registration.
                     Err(broadcast::error::RecvError::Lagged(_)) => break "fell behind the daemon's events",
@@ -397,27 +361,6 @@ async fn session(
                     Ok((clone, p)) => ToServer::Cloning { clone, phase: p.phase, percent: p.percent },
                     // A step of progress missed is overtaken by the next.
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(broadcast::error::RecvError::Closed) => break "the daemon is stopping",
-                };
-                if out.send(msg).await.is_err() {
-                    break "the writer stopped";
-                }
-            }
-            report = reports.recv() => {
-                let msg = match report {
-                    Ok(report) => ToServer::Report(report),
-                    // What was dropped is the last batch each agent read: told again.
-                    Err(broadcast::error::RecvError::Lagged(missed)) => {
-                        tracing::warn!(missed, "agent reports dropped; the batches read told again");
-                        let mut sent = true;
-                        for report in read_last(daemon).await {
-                            sent &= out.send(ToServer::Report(report)).await.is_ok();
-                        }
-                        if !sent {
-                            break "the writer stopped";
-                        }
-                        continue;
-                    }
                     Err(broadcast::error::RecvError::Closed) => break "the daemon is stopping",
                 };
                 if out.send(msg).await.is_err() {
@@ -485,6 +428,7 @@ async fn next_frame(
 /// error in its place: nothing of it was written, and the caller hears why.
 async fn write(mut tx: FramedSend<ToServer>, mut rx: mpsc::Receiver<ToServer>) {
     while let Some(msg) = rx.recv().await {
+        crate::stall::hold().await;
         let sent = match tx.send(&msg).await {
             Err(NetError::Codec(CodecError::TooLarge { len, max })) => match msg {
                 ToServer::Reply { id, .. } => {
@@ -508,102 +452,6 @@ fn too_large(len: usize, max: usize) -> Outcome {
         code: ErrorCode::Failed,
         message: format!("the answer is {len} bytes, more than the {max} one message carries"),
     }
-}
-
-/// How long posting to an agent's inbox may take before it is given up; the batch waits for the
-/// hooks either way.
-const INBOX_PATIENCE: std::time::Duration = std::time::Duration::from_secs(2);
-
-/// Wake the agent in `session` with the batch kept for it, through its inbox when it noted one.
-/// The batch stays for its hooks, which acknowledge it: Claude Code may hold or drop what
-/// arrives on the inbox and says nothing back, so the post is noted with the mark its message
-/// carries, and the next hook hands the batch over itself unless the mark shows the agent read
-/// it ([`slopty_agent::reports::hand_over`]). An inbox whose socket is gone is forgotten.
-async fn hand_over(deliveries: PathBuf, inboxes: PathBuf, session: SessionId) {
-    use slopty_agent::reports;
-    let found = tokio::task::spawn_blocking({
-        let (deliveries, inboxes) = (deliveries.clone(), inboxes.clone());
-        move || -> std::io::Result<Option<(reports::Inbox, reports::Batch)>> {
-            let Some(inbox) = reports::inbox(&inboxes, session)? else { return Ok(None) };
-            Ok(reports::peek(&deliveries, session)?.map(|batch| (inbox, batch)))
-        }
-    })
-    .await;
-    let (inbox, batch) = match found {
-        Ok(Ok(Some(found))) => found,
-        Ok(Ok(None)) => return,
-        Ok(Err(e)) => return tracing::warn!(%session, error = %e, "reports not read"),
-        Err(e) => return tracing::warn!(%session, error = %e, "reports not read"),
-    };
-    let posted = reports::Posted::new(batch.number);
-    // Noted before the post: a hook the message sets off at once finds the note.
-    let noted = tokio::task::spawn_blocking({
-        let (deliveries, posted) = (deliveries.clone(), posted.clone());
-        move || reports::note_posted(&deliveries, session, &posted)
-    })
-    .await;
-    if let Ok(Err(e)) | Err(e) = noted.map_err(std::io::Error::other) {
-        return tracing::warn!(%session, error = %e, "post not noted, so not made");
-    }
-    let text = reports::message(&inbox, &batch.context, &posted.mark);
-    match tokio::time::timeout(INBOX_PATIENCE, post(&inbox.socket, text.as_bytes())).await {
-        Ok(Ok(())) => {
-            tracing::debug!(%session, batch = batch.number, "reports posted to the agent's inbox");
-        }
-        failed => {
-            let gone = matches!(&failed, Ok(Err(e)) if matches!(
-                e.kind(),
-                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
-            ));
-            tracing::debug!(%session, ?failed, gone, "reports wait for the agent's hooks");
-            if gone {
-                let forgot =
-                    tokio::task::spawn_blocking(move || reports::forget_inbox(&inboxes, session));
-                if let Ok(Err(e)) | Err(e) = forgot.await.map_err(std::io::Error::other) {
-                    tracing::warn!(%session, error = %e, "a gone inbox not forgotten");
-                }
-            }
-        }
-    }
-}
-
-/// The last batch each session's agent read, as word that it did.
-async fn read_last(daemon: &Daemon) -> Vec<AgentReport> {
-    let (dir, turn) = (daemon.deliveries.clone(), Arc::clone(&daemon.reports_turn));
-    let read = tokio::task::spawn_blocking(move || {
-        let _turn = turn.lock();
-        slopty_agent::reports::last_handed(&dir)
-    });
-    match read.await.map_err(std::io::Error::other).flatten() {
-        Ok(read) => read
-            .into_iter()
-            .map(|(session, batch)| AgentReport::Delivered { session, batch })
-            .collect(),
-        Err(e) => {
-            tracing::warn!(error = %e, "the batches read not listed");
-            Vec::new()
-        }
-    }
-}
-
-/// Whether reports kept for `session` may be posted to its agent's inbox now
-/// ([`slopty_worker::orchestrate::may_deliver`]): only when the agent could take typed input,
-/// and not while the person's stop of its last turn stands. Not while a prompt is the person's
-/// to answer or a draft of theirs is in its prompt, nor before its hooks say it is at its
-/// prompt or after it is gone. The batch then waits for the hook that follows once that
-/// clears: the person's prompt, the turn's end, the agent's start.
-fn may_post(daemon: &Daemon, session: SessionId) -> Result<(), String> {
-    let handle = daemon.worker.get(session).map_err(|e| e.to_string())?;
-    let agents = DaemonAgents(Arc::clone(&daemon.agents));
-    slopty_worker::orchestrate::may_deliver(&handle, &agents).map_err(|f| f.message)
-}
-
-/// Write `text` to the Unix socket at `socket` and close it.
-async fn post(socket: &Path, text: &[u8]) -> std::io::Result<()> {
-    use tokio::io::AsyncWriteExt as _;
-    let mut stream = tokio::net::UnixStream::connect(socket).await?;
-    stream.write_all(text).await?;
-    stream.shutdown().await
 }
 
 #[cfg(test)]

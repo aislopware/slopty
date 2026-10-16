@@ -23,7 +23,8 @@
 //! always does. A write inside one of its files moves no stamp of the folder's, but changes the
 //! size its listing shows: inotify's directory watch hears it, and on macOS an `FSEvents` stream
 //! over the followed folders does (`kqueue::Queue::follow_contents`), since a kqueue watch on a
-//! directory does not. Such a folder is reported after [`CONTENT_HOLD`], at that rate at most.
+//! directory does not. Such a folder is reported [`CONTENT_QUIET`] after the first such write,
+//! and then at most once each [`CONTENT_HOLD`].
 
 use std::collections::{BTreeSet, HashMap};
 use std::ffi::{OsStr, OsString};
@@ -61,10 +62,16 @@ pub const QUIET: Duration = Duration::from_millis(2);
 /// Also the shortest time between two reports of one file, and the longest a file just emptied
 /// waits for the writes that usually follow a truncate.
 pub const HOLD: Duration = Duration::from_millis(50);
-/// How long a folder whose entries only changed inside waits to be listed again.
+/// How long a folder whose entries only changed inside waits to be listed again, after the
+/// first such write since its last report.
 ///
-/// Also the shortest time between two such listings: sizes can lag this much, where a listing
-/// of 2 000 entries every [`HOLD`] while a log grows would be traffic for nothing.
+/// An agent's edit of an open file reaches its document this soon: the writes of one save are
+/// in one listing, and a file written in a stream is listed once its first burst is in.
+pub const CONTENT_QUIET: Duration = Duration::from_millis(100);
+/// The shortest time between two listings of a folder whose entries only changed inside.
+///
+/// Sizes can lag this much while a log grows, where a listing of 2 000 entries every [`HOLD`]
+/// would be traffic for nothing.
 pub const CONTENT_HOLD: Duration = Duration::from_millis(250);
 
 /// What one client's following may cost.
@@ -362,8 +369,9 @@ struct Touch {
     done: bool,
     /// A [`HOLD`] after its last report: a file that keeps changing is sent at that rate.
     not_before: Option<Instant>,
-    /// A followed folder whose entries only changed inside: it is due after [`CONTENT_HOLD`],
-    /// and reported though its own stamp did not move.
+    /// A followed folder whose entries only changed inside: it is due [`CONTENT_QUIET`] after
+    /// its first touch and [`CONTENT_HOLD`] after its last report, and reported though its own
+    /// stamp did not move.
     content: bool,
 }
 
@@ -371,7 +379,7 @@ impl Touch {
     fn due(self) -> Instant {
         if self.content {
             let paced = self.not_before.map(|at| later(at, CONTENT_HOLD.saturating_sub(HOLD)));
-            let due = later(self.first, CONTENT_HOLD);
+            let due = later(self.first, CONTENT_QUIET);
             return paced.map_or(due, |at| due.max(at));
         }
         let hold = later(self.first, HOLD);
@@ -839,6 +847,28 @@ fn anchor_dirs(path: &Path) -> Vec<(PathBuf, OsString)> {
     anchors
 }
 
+/// Whether the volume `path` is on can miss another machine's writes, so its events do not say
+/// all that changes there: a network or FUSE file system, or a VM's or container's host share.
+#[must_use]
+pub fn remote_volume(path: &Path) -> bool {
+    #[cfg(target_vendor = "apple")]
+    {
+        rustix::fs::statfs(path).is_ok_and(|fs| kqueue::remote(&fs))
+    }
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        rustix::fs::statfs(path)
+            .ok()
+            .and_then(|fs| u64::try_from(fs.f_type).ok())
+            .is_some_and(linux_remote)
+    }
+    #[cfg(not(any(target_vendor = "apple", target_os = "linux", target_os = "android")))]
+    {
+        let _any = path;
+        true
+    }
+}
+
 /// Raise this process's soft limit on open descriptors as far as it may go, and answer the
 /// limit it has now.
 ///
@@ -974,7 +1004,7 @@ mod tests {
         let soon_after_a_report = Touch { not_before: Some(later(t0, HOLD)), ..done };
         assert_eq!(soon_after_a_report.due(), later(t0, HOLD));
         let inside = Touch { content: true, ..quiet };
-        assert_eq!(inside.due(), later(t0, CONTENT_HOLD), "a size waits");
+        assert_eq!(inside.due(), later(t0, CONTENT_QUIET), "a size waits");
         let inside_again = Touch { not_before: Some(later(t0, HOLD * 2)), ..inside };
         assert_eq!(inside_again.due(), later(t0, HOLD + CONTENT_HOLD), "paced from the report");
     }

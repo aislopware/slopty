@@ -206,6 +206,8 @@ icon_assets![
     (STOP, "stop"),
     (CHECK, "check"),
     (COPY, "copy"),
+    // slopty: Solar Linear's lock, for a remote Mac that is locked and its password pill.
+    (LOCK, "lock-keyhole-minimalistic"),
     // Project Action icon family (Solar Linear-compatible strokes).
     (ACTION_PLAY, "action-play"),
     (ACTION_TEST, "action-test"),
@@ -373,6 +375,7 @@ mod tests {
             GIT_BRANCH,
             CLOSE_CIRCLE,
             FOLDER_TREE,
+            LOCK,
         ] {
             let bytes = Assets.load(path).unwrap().unwrap();
             let image = renderer.render_single_frame(&bytes, 1.0).unwrap();

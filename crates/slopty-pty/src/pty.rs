@@ -16,7 +16,7 @@ use tokio::io::unix::AsyncFd;
 
 use crate::PtyError;
 use crate::shell_integration::{self, ShellIntegration};
-use crate::spawn::{Child, Launch};
+use crate::spawn::{Child, Launch, Stdio};
 
 /// What to run on the PTY.
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
@@ -106,73 +106,164 @@ impl Pty {
         spec: &SpawnSpec,
         integration: Option<&ShellIntegration>,
     ) -> Result<Spawned, PtyError> {
-        let cwd = spec.cwd.clone().unwrap_or_else(home);
-        let (program, args, arg0) = resolve_command(&spec.command, &cwd);
-        let injection = integration.map(|si| si.apply(&program, &args, arg0.as_deref(), &spec.env));
-        let (args, arg0, extra_env) = match injection {
-            Some(inj) => (inj.args, inj.arg0, inj.env),
-            None => (args, arg0, Vec::new()),
-        };
-        // Decided once: `default_term` changes when the terminfo is installed, and the child's
-        // `TERM` and the name reported with it must be the same. The spec's own variables come
-        // last, so a `TERM` among them is the child's.
-        let term = spec
-            .env
-            .iter()
-            .rev()
-            .find(|(k, _)| k == "TERM")
-            .map_or_else(|| default_term().to_owned(), |(_, v)| v.clone());
-        if term.len() > MAX_TERM_BYTES {
-            return Err(PtyError::os(
-                "TERM",
-                io::Error::new(io::ErrorKind::InvalidInput, "longer than a terminfo name"),
-            ));
-        }
-        let mut env = Env::inherited();
-        env.set("TERM", &term);
-        env.set("COLORTERM", "truecolor");
-        env.set("TERM_PROGRAM", "slopty");
-        env.set("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
-        // `TERM` and the search path have to agree: when the database is ours, point the child
-        // at it; otherwise clear whatever we inherited and let ncurses use the usual places.
-        match crate::terminfo::child_database() {
-            Some(dir) => env.set("TERMINFO", dir),
-            None => env.remove("TERMINFO"),
-        }
-        forget_parent_agent(&mut env);
-        // Web pages and editors go to the client, unless the session's own variables say
-        // otherwise (they come after).
-        let handoff = integration.map(|si| {
-            let inherited = std::env::var("PATH").ok();
-            (si.handoff_env(&spec.env), si.handoff_path(&spec.env, inherited.as_deref()))
-        });
-        let (handoff_env, handoff_path) = handoff.unwrap_or_default();
-        // One of Slopty's own commands inherited from a daemon started inside a Slopty session
-        // is nobody's choice; a stale `VISUAL` would beat the user's `EDITOR`.
-        for name in ["BROWSER", "EDITOR", "VISUAL"] {
-            if env.get(name).is_some_and(shell_integration::is_handoff_command) {
-                env.remove(name);
-            }
-        }
-        for (k, v) in handoff_env.into_iter().chain(extra_env) {
-            env.set(k, v);
-        }
-        for (k, v) in &spec.env {
-            env.set(k, v);
-        }
-        if let Some(path) = handoff_path {
-            env.set("PATH", path);
-        }
-
-        let child = executable(&program, &cwd, env.0.get(OsStr::new("PATH")))
-            .and_then(|executable| {
-                let argv = std::iter::once(arg0.unwrap_or(program)).chain(args);
-                Launch::new(&executable, argv, env.0, &cwd)
-            })
-            .and_then(|launch| launch.spawn(self.slave()))
-            .map_err(|e| PtyError::os("spawn", e))?;
+        let (launch, term) = prepare(spec, integration, Terminal::Yes)?;
+        let child = launch.spawn(Stdio::Tty(self.slave())).map_err(|e| PtyError::os("spawn", e))?;
         Ok(Spawned { child, term })
     }
+}
+
+/// Whether a child gets a terminal: what [`prepare`] puts into its environment for one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Terminal {
+    /// A PTY: `TERM` and the rest of a terminal's variables.
+    Yes,
+    /// A pipe: none of them, inherited ones dropped.
+    No,
+}
+
+/// Everything the child of `spec` gets (its program, arguments, environment, directory),
+/// settled before [`crate::spawn`] forks so the child only makes system calls on it; and its
+/// `TERM`, empty without a terminal.
+fn prepare(
+    spec: &SpawnSpec,
+    integration: Option<&ShellIntegration>,
+    terminal: Terminal,
+) -> Result<(Launch, String), PtyError> {
+    let cwd = spec.cwd.clone().unwrap_or_else(home);
+    let (program, args, arg0) = resolve_command(&spec.command, &cwd);
+    let injection = integration.map(|si| si.apply(&program, &args, arg0.as_deref(), &spec.env));
+    let (args, arg0, extra_env) = match injection {
+        Some(inj) => (inj.args, inj.arg0, inj.env),
+        None => (args, arg0, Vec::new()),
+    };
+    let mut env = Env::inherited();
+    let term = match terminal {
+        Terminal::Yes => {
+            // Decided once: `default_term` changes when the terminfo is installed, and the
+            // child's `TERM` and the name reported with it must be the same. The spec's own
+            // variables come last, so a `TERM` among them is the child's.
+            let term = spec
+                .env
+                .iter()
+                .rev()
+                .find(|(k, _)| k == "TERM")
+                .map_or_else(|| default_term().to_owned(), |(_, v)| v.clone());
+            if term.len() > MAX_TERM_BYTES {
+                return Err(PtyError::os(
+                    "TERM",
+                    io::Error::new(io::ErrorKind::InvalidInput, "longer than a terminfo name"),
+                ));
+            }
+            env.set("TERM", &term);
+            env.set("COLORTERM", "truecolor");
+            env.set("TERM_PROGRAM", "slopty");
+            env.set("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
+            // `TERM` and the search path have to agree: when the database is ours, point the
+            // child at it; otherwise clear whatever we inherited and let ncurses use the usual
+            // places.
+            match crate::terminfo::child_database() {
+                Some(dir) => env.set("TERMINFO", dir),
+                None => env.remove("TERMINFO"),
+            }
+            term
+        }
+        Terminal::No => {
+            // No terminal, so nothing may say there is one: a program that sees `TERM` paints
+            // for it.
+            for name in TERMINAL_ENV {
+                env.remove(name);
+            }
+            String::new()
+        }
+    };
+    forget_parent_agent(&mut env);
+    // Web pages and editors go to the client, unless the session's own variables say
+    // otherwise (they come after).
+    let handoff = integration.map(|si| {
+        let inherited = std::env::var("PATH").ok();
+        (si.handoff_env(&spec.env), si.handoff_path(&spec.env, inherited.as_deref()))
+    });
+    let (handoff_env, handoff_path) = handoff.unwrap_or_default();
+    // One of Slopty's own commands inherited from a daemon started inside a Slopty session
+    // is nobody's choice; a stale `VISUAL` would beat the user's `EDITOR`.
+    for name in ["BROWSER", "EDITOR", "VISUAL"] {
+        if env.get(name).is_some_and(shell_integration::is_handoff_command) {
+            env.remove(name);
+        }
+    }
+    for (k, v) in handoff_env.into_iter().chain(extra_env) {
+        env.set(k, v);
+    }
+    for (k, v) in &spec.env {
+        env.set(k, v);
+    }
+    if let Some(path) = handoff_path {
+        env.set("PATH", path);
+    }
+    let launch = executable(&program, &cwd, env.0.get(OsStr::new("PATH")))
+        .and_then(|executable| {
+            let argv = std::iter::once(arg0.unwrap_or(program)).chain(args);
+            Launch::new(&executable, argv, env.0, &cwd)
+        })
+        .map_err(|e| PtyError::os("spawn", e))?;
+    Ok((launch, term))
+}
+
+/// What a terminal's child is told of it, none of which a piped child is given.
+const TERMINAL_ENV: [&str; 5] =
+    ["TERM", "COLORTERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "TERMINFO"];
+
+/// A child spawned on a pipe rather than a PTY ([`spawn_piped`]): its end of the pair is its
+/// standard input and output, `io` is the other.
+#[derive(Debug)]
+pub struct Piped {
+    /// This side of the socket pair: what the child writes reads here, and what is written
+    /// here is its standard input. Close-on-exec.
+    pub io: OwnedFd,
+    /// The child.
+    pub child: Child,
+}
+
+/// Spawn `spec` with no terminal, on one end of a Unix stream socket pair.
+///
+/// That end is its standard input and output, `stderr` (appended to, made `0600`) or
+/// `/dev/null` its standard error, and it runs in a session and process group of its own. A
+/// program driven over its standard streams (a `claude -p` speaking stream-json) runs so, and
+/// the other end goes wherever a PTY's master would: `spec.size` means nothing here, and the
+/// child gets none of a terminal's variables.
+///
+/// # Errors
+///
+/// When the pair, the error file or the spawn fails.
+pub fn spawn_piped(spec: &SpawnSpec, stderr: Option<&Path>) -> Result<Piped, PtyError> {
+    use rustix::net::{AddressFamily, SocketFlags, SocketType};
+    let (launch, _term) = prepare(spec, None, Terminal::No)?;
+    let (io, theirs) = rustix::net::socketpair(
+        AddressFamily::UNIX,
+        SocketType::STREAM,
+        SocketFlags::empty(),
+        None,
+    )
+    .map_err(|e| PtyError::os("socketpair", e))?;
+    // macOS has no `SOCK_CLOEXEC`: set at once, so as short a window as there can be.
+    for fd in [&io, &theirs] {
+        rustix::io::fcntl_setfd(fd, rustix::io::FdFlags::CLOEXEC)
+            .map_err(|e| PtyError::os("FD_CLOEXEC", e))?;
+    }
+    let err = match stderr {
+        Some(path) => rustix::fs::open(
+            path,
+            OFlags::WRONLY | OFlags::CREATE | OFlags::APPEND | OFlags::CLOEXEC,
+            Mode::RUSR | Mode::WUSR,
+        )
+        .map_err(|e| PtyError::os("open the error file", e))?,
+        None => rustix::fs::open(c"/dev/null", OFlags::WRONLY | OFlags::CLOEXEC, Mode::empty())
+            .map_err(|e| PtyError::os("open /dev/null", e))?,
+    };
+    let child = launch
+        .spawn(Stdio::Piped { io: theirs.as_fd(), err: err.as_fd() })
+        .map_err(|e| PtyError::os("spawn", e))?;
+    Ok(Piped { io, child })
 }
 
 /// XNU's `EREDRIVEOPEN`: an open of a cloning device such as `/dev/ptmx` that raced another
@@ -497,8 +588,9 @@ impl PtyMaster {
 fn read_fd(fd: &OwnedFd, buf: &mut [u8]) -> io::Result<usize> {
     match rustix::io::read(fd, buf) {
         Ok(n) => Ok(n),
-        // macOS reports the slave hangup as EIO on read; treat it as EOF.
-        Err(rustix::io::Errno::IO) => Ok(0),
+        // macOS reports the slave hangup as EIO on read; treat it as EOF. A piped child's end
+        // of its socket pair closed with input unread resets it: the same end.
+        Err(rustix::io::Errno::IO | rustix::io::Errno::CONNRESET) => Ok(0),
         Err(e) => Err(e.into()),
     }
 }
@@ -851,7 +943,7 @@ mod tests {
 
             let pty = Pty::open(size()).unwrap();
             let started = Instant::now();
-            let mut child = launch.spawn(pty.slave()).unwrap();
+            let mut child = launch.spawn(Stdio::Tty(pty.slave())).unwrap();
             fork_only.push(started.elapsed());
             child.wait().await.unwrap();
 

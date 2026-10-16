@@ -80,7 +80,9 @@ impl Element for Frosted {
         window: &mut Window,
         cx: &mut App,
     ) {
-        if Theme::of(cx).is_frost() {
+        // slopty: Slopty's own views frost their floats too, and are drawn where no shell has
+        // set a theme (their crates' tests): there, nothing is frosted.
+        if cx.try_global::<Theme>().is_some_and(Theme::is_frost) {
             window.paint_layer(bounds, |window| {
                 window.paint_backdrop_blur(
                     bounds,

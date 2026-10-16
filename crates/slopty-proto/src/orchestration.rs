@@ -24,7 +24,7 @@
 //!
 //! Agents start agents ([`Verb::AgentStart`]) on the machine they name, tell them things, wait
 //! for them and read them, at any depth: the server records who started whom, and a child coming
-//! to rest is news to its parent through the parent's hooks (`docs/decisions/projects.md`).
+//! to rest is news to its parent, as a message of its own (`docs/decisions/projects.md`).
 
 use std::time::Duration;
 
@@ -246,7 +246,7 @@ pub enum WaitUntil {
     CommandDone,
     /// The session's program exits.
     Exit,
-    /// The agent in the session reaches a state that needs a human or is idle.
+    /// The agent in the session comes to rest at its prompt.
     AgentNeedsInput,
 }
 
@@ -406,10 +406,6 @@ pub enum Verb {
         view: ThreadView,
         /// The last turn already read; from the first held when absent.
         after: Option<TurnId>,
-        /// Hold the agent's prompts that only its terminal shows for an answer here from then
-        /// on, as a person following the thread does. The server sets it, for the person alone:
-        /// an agent's read leaves every prompt where it is.
-        hold: bool,
     },
     /// Answer a thread's open request ([`ThreadRead::requests`]) as a client's would be: by
     /// one of the choices it offers. The person's alone; an agent is
@@ -590,8 +586,8 @@ pub enum Verb {
     /// tools, and records the caller's agent as its parent. Answered with
     /// [`Outcome::ThreadStarted`] once it runs.
     AgentStart(Box<crate::agent::AgentStart>),
-    /// Words for an agent, marked as the caller's: they reach it through its hooks (its inbox
-    /// wakes it when idle), never typed into its terminal. Answered with [`Outcome::Done`].
+    /// Words for an agent, marked as the caller's: they reach it as a message through its
+    /// thread, never typed into a terminal. Answered with [`Outcome::Done`].
     AgentTell {
         /// Which agent.
         agent: ThreadId,
@@ -811,7 +807,7 @@ pub enum Happening {
     Rung {
         /// Where.
         worker: WorkerId,
-        /// The terminal its TUI runs in, when one does.
+        /// The terminal it is seated at, when it is.
         terminal: Option<SessionId>,
         /// Where it stands now.
         agent: TermAgent,
@@ -953,16 +949,8 @@ pub enum ErrorCode {
     Unsupported,
     /// It would take what another holds: a branch moved on, a session another writes.
     Conflict,
-    /// Nothing may type into the agent now: it waits on a person (a permission, a question),
-    /// or a person has typed into its composer and not sent it. The message says which.
-    AwaitsPerson,
-    /// The agent has not said it is ready: no hook of its session has arrived yet, so a
-    /// dialog of its own (trusting a folder, an MCP server) may be up.
-    AgentNotReady,
-    /// The agent's program has ended; what is typed would reach the shell below it.
-    AgentExited,
-    /// The caller may not do this: an agent answering a permission, or changing what only the
-    /// person changes.
+    /// The caller may not do this: an agent answering a permission, changing what only the
+    /// person changes, or typing into a terminal a coding agent runs in.
     Forbidden,
     /// There is nothing new to carry: the branch has no commit beyond the one it would start
     /// after, so the other side has it from the same forge.

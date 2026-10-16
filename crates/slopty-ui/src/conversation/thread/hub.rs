@@ -564,7 +564,6 @@ pub fn refused_words(intent: &Intent, why: &str) -> String {
         Intent::Move { .. } => "Couldn't reorder the queue".to_owned(),
         Intent::Interrupt => "Couldn't stop".to_owned(),
         Intent::Answer { .. } => "The answer didn't go".to_owned(),
-        Intent::Release { .. } => "Couldn't hand the request back".to_owned(),
         Intent::SetModel { model } => format!("Couldn't switch to {model}"),
         Intent::SetMode { mode } => format!("Couldn't switch to {mode}"),
         Intent::Keep(pick) => format!("Couldn't keep {}", file_name(&pick.path)),
@@ -579,6 +578,8 @@ pub fn refused_words(intent: &Intent, why: &str) -> String {
         Intent::Draft { .. } => "Couldn't keep the draft".to_owned(),
         Intent::Name { .. } => "Couldn't rename the chat".to_owned(),
         Intent::Said { .. } => "Couldn't keep the message's own words".to_owned(),
+        Intent::End => "Couldn't end the agent".to_owned(),
+        Intent::SetOption { option, choice } => format!("Couldn't set {option} to {choice}"),
     };
     format!("{what}: {why}")
 }
@@ -608,10 +609,6 @@ fn write(cache: &Cache, batch: Writes) {
     }
 }
 
-/// What `claude` takes to go on with a session: `--resume <id>`
-/// (`slopty_agent::resume::RESUME_FLAG`, which the app does not link).
-const RESUME_FLAG: &str = "--resume";
-
 /// What a start of a Codex thread takes to take it up again: `resume <thread>`
 /// (`slopty_agent::codex::shared::RESUME`).
 const CODEX_RESUME: &str = "resume";
@@ -635,30 +632,25 @@ fn gone(state: &ThreadState) -> Option<Gone> {
     if !resumable {
         return Some(Gone::Over);
     }
-    let codex = meta.agent.is(AgentId::CODEX) && meta.drive.is(Drive::SHARED);
-    let claude = meta.agent.is(AgentId::CLAUDE_CODE) && meta.drive.is(Drive::OBSERVED);
-    if !codex && !claude {
+    // A shared Codex is taken up by a start of its own; every other agent's adapter takes
+    // its session up again with the next message.
+    if !(meta.agent.is(AgentId::CODEX) && meta.drive.is(Drive::SHARED)) {
         return Some(Gone::ByMessage);
     }
     if meta.native.trim().is_empty() {
         return Some(Gone::Over);
     }
-    let (model, args) = if codex {
-        (None, vec![CODEX_RESUME.to_owned(), meta.native.clone()])
-    } else {
-        let model = state.meters.model_id.clone().filter(|m| !m.trim().is_empty());
-        (model, vec![RESUME_FLAG.to_owned(), meta.native.clone()])
-    };
     Some(Gone::Resume(Box::new(Start {
         agent: meta.agent.clone(),
         cwd: meta.cwd.clone(),
         drive: Some(meta.drive.clone()),
         prompt: None,
-        model,
+        model: None,
         mode: None,
         effort: None,
         attachments: Vec::new(),
-        args,
+        args: vec![CODEX_RESUME.to_owned(), meta.native.clone()],
+        options: std::collections::BTreeMap::new(),
         worktree: None,
     })))
 }

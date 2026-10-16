@@ -5,9 +5,13 @@
 //! The shell keeps its own settings, typography, theme and window; the workspace hears the window
 //! come forward and go back, as it heard its own, and its views wear the shell's look ([`wear`]).
 
-use gpui::{AnyWindowHandle, App, Entity, Hsla};
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use gpui::{AnyWindowHandle, App, Entity, Hsla, SharedString, Subscription};
 use slopty_settings::{Loaded, Settings};
 use slopty_shell::live::{Chrome, Hosted, TerminalLook};
+use slopty_terminal::{TerminalView, TerminalViewEvent};
 use slopty_theme::{Rgb, Theme, Tint};
 use slopty_ui::view_model::live::{LiveLook, LiveView};
 use slopty_ui::workspace::WorkspaceView;
@@ -90,13 +94,57 @@ fn host_live_views(view: &Entity<WorkspaceView>, cx: &mut App) {
         cx,
         move |id, look, cx| {
             let look = live_look(look);
-            terminals.upgrade()?.update(cx, |v, cx| v.hosted_terminal(id, look, cx)).map(hosted)
+            let view = terminals.upgrade()?.update(cx, |v, cx| v.hosted_terminal(id, look, cx))?;
+            Some(hosted_terminal(view, cx))
         },
         move |id, cx| screens.upgrade()?.update(cx, |v, cx| v.hosted_screen(id, cx)).map(hosted),
-        move |id, changed, cx| {
-            watched.upgrade()?.update(cx, |v, cx| v.hosted_watch(id, changed, cx))
-        },
+        move |id, changed, cx| watch(&watched.upgrade()?, id, changed, cx),
     );
+    // A transcript's Run types its line into the chat's terminal: run, or left at the prompt.
+    let typed = view.downgrade();
+    slopty_shell::live::serve_runs(cx, move |id, line, enter, cx| {
+        let Some(view) = typed.upgrade() else { return false };
+        let look = live_look(&TerminalLook::of(cx));
+        let terminal = view
+            .update(cx, |v, cx| v.hosted_terminal(id, look, cx))
+            .and_then(|live| live.view.downcast::<TerminalView>().ok());
+        let Some(terminal) = terminal else { return false };
+        let line = line.to_owned();
+        terminal.update(cx, |terminal, cx| {
+            if enter {
+                terminal.run_text(line, cx);
+            } else {
+                terminal.type_text(line, cx);
+            }
+        });
+        true
+    });
+}
+
+/// Call `changed` when the view `id` says something new of itself: what the workspace hears (a
+/// title, an end), and a terminal's progress, which only its tab shows.
+fn watch(
+    view: &Entity<WorkspaceView>,
+    id: &str,
+    changed: Box<dyn FnMut(&mut App)>,
+    cx: &mut App,
+) -> Option<Subscription> {
+    let changed = Rc::new(RefCell::new(changed));
+    let told = Rc::clone(&changed);
+    let heard = view.update(cx, |v, cx| {
+        v.hosted_watch(id, Box::new(move |cx: &mut App| (told.borrow_mut())(cx)), cx)
+    })?;
+    let look = live_look(&TerminalLook::of(cx));
+    let terminal = view
+        .update(cx, |v, cx| v.hosted_terminal(id, look, cx))
+        .and_then(|live| live.view.downcast::<TerminalView>().ok());
+    let Some(terminal) = terminal else { return Some(heard) };
+    let progress = cx.subscribe(&terminal, move |_, event, cx| {
+        if matches!(event, TerminalViewEvent::Progress) {
+            (changed.borrow_mut())(cx);
+        }
+    });
+    Some(Subscription::join(heard, progress))
 }
 
 /// The shell's terminal frame, as the workspace takes it.
@@ -111,15 +159,26 @@ pub(crate) fn theme(settings: &Settings, cx: &App) -> Theme {
         return settings::theme_for(settings, false);
     };
     let mut theme = settings::theme_for(settings, chrome.dark);
-    wear(&mut theme, &chrome, &TerminalLook::of(cx));
+    let ui_size = slopty_shell::typography::font_size(cx).pixels() * CHROME_TEXT / DEFAULT_REM;
+    wear(&mut theme, &chrome, &TerminalLook::of(cx), ui_size);
     theme
 }
 
+/// The shell's chrome text, at its default size: zeron's 13 px rem.
+const CHROME_TEXT: f32 = 13.0;
+
+/// The rem the shell's sizes are given at: Settings → Appearance → font size's default.
+const DEFAULT_REM: f32 = 16.0;
+
 /// Dress `theme` in the shell's look, so nothing Slopty draws reads as a seam: the chrome's
-/// planes, lines, text and states from `chrome`, the grid's face, size and palette from `look`.
-/// A translucent colour of the shell's is laid over its panel where the theme keeps an opaque
-/// one, and stays a wash where the theme keeps a [`Tint`].
-fn wear(theme: &mut Theme, chrome: &Chrome, look: &TerminalLook) {
+/// planes, lines, text and states from `chrome`, its type at `ui_size` (Settings → Appearance →
+/// font size), the grid's face, size and palette from `look`. A translucent colour of the
+/// shell's is laid over its panel where the theme keeps an opaque one, and stays a wash where the
+/// theme keeps a [`Tint`]. Slopty's views draw their floats, buttons and icons with the shell's
+/// own helpers (`slopty_shell::live`), and their grid's selection, cursor and find hits from
+/// `look` itself, translucent; what is worn here is the rest, and the colours a program asks its
+/// terminal for.
+fn wear(theme: &mut Theme, chrome: &Chrome, look: &TerminalLook, ui_size: f32) {
     let on = |color: Hsla| opaque(color, chrome.panel);
     let s = &mut theme.surfaces;
     s.ground = on(chrome.panel);
@@ -153,8 +212,21 @@ fn wear(theme: &mut Theme, chrome: &Chrome, look: &TerminalLook) {
     s.warn = on(chrome.warning);
     s.error = on(chrome.danger);
     s.error_fill = on(chrome.danger_strong);
+    // The states' marks, grounds and edges, as the shell washes its own (no Zed blue left).
+    s.success_fill = s.success;
+    s.warn_fill = s.warn;
+    s.working_fill = s.working;
+    s.info_border = on(chrome.accent.opacity(STATE_EDGE));
+    s.success_background = tint(chrome.success.opacity(STATE_GROUND));
+    s.warning_background = tint(chrome.warning.opacity(STATE_GROUND));
+    s.error_background = tint(chrome.danger.opacity(STATE_GROUND));
+    s.error_border = on(chrome.danger.opacity(STATE_EDGE));
+    s.indent_guide = s.stroke;
+    s.line_number = s.text_muted;
+    s.line_number_active = s.text_secondary;
     let type_ = &mut theme.typography;
     type_.ui_family = chrome.sans.to_string();
+    type_.ui_size = ui_size;
     let family = look.family.to_string();
     type_.mono_families.retain(|f| *f != family);
     type_.mono_families.insert(0, family);
@@ -165,6 +237,8 @@ fn wear(theme: &mut Theme, chrome: &Chrome, look: &TerminalLook) {
     let palette = &mut theme.terminal;
     palette.bg = opaque(bg, bg);
     palette.fg = opaque(look.foreground, bg);
+    // What a program asks its terminal for (OSC 12, 17): the grid paints the translucent
+    // cursor and selection from `look` itself.
     palette.cursor = opaque(look.cursor, bg);
     palette.cursor_text = palette.bg;
     palette.selection = opaque(look.selection, bg);
@@ -172,6 +246,13 @@ fn wear(theme: &mut Theme, chrome: &Chrome, look: &TerminalLook) {
         *slot = opaque(color, bg);
     }
 }
+
+/// A state's quiet ground (a failure's, a warning's), as a share of its mark: the shell's error
+/// strip's `danger`·0.06 (`settings::widgets::error_strip`).
+const STATE_GROUND: f32 = 0.06;
+
+/// A state's edge, as a share of its mark: the error strip's `danger`·0.2 line.
+const STATE_EDGE: f32 = 0.2;
 
 /// `color` laid over `under`, opaque.
 fn opaque(color: Hsla, under: Hsla) -> Rgb {
@@ -193,9 +274,41 @@ fn byte(channel: f32) -> u8 {
     byte
 }
 
+/// A terminal of the workspace, as the shell places it: also the status its program ended with,
+/// how far the program says it has got, and what a drop of files on it does.
+fn hosted_terminal(view: LiveView, cx: &App) -> Hosted {
+    let terminal = view.view.clone().downcast::<TerminalView>().ok();
+    let mut hosted = hosted(view);
+    if let Some(terminal) = terminal {
+        let terminal = terminal.read(cx);
+        hosted.exit = terminal.exited().flatten();
+        hosted.progress = terminal.progress();
+        hosted.drop = Some(drop_words(terminal.takes_drops(), terminal.title()));
+    }
+    hosted
+}
+
+/// What a drop of files on a terminal does: its program takes them when it asks for drops,
+/// else their paths are typed.
+fn drop_words(takes: bool, title: Option<&str>) -> SharedString {
+    match title.map(str::trim).filter(|title| !title.is_empty()) {
+        Some(title) if takes => format!("Drop into {title}").into(),
+        _ if takes => "Drop into the program".into(),
+        _ => "Drop to paste paths".into(),
+    }
+}
+
 /// A workspace view, as the shell places it.
 fn hosted(view: LiveView) -> Hosted {
-    Hosted { view: view.view, focus: view.focus, title: view.title, ended: view.ended }
+    Hosted {
+        view: view.view,
+        focus: view.focus,
+        title: view.title,
+        ended: view.ended,
+        exit: None,
+        progress: None,
+        drop: None,
+    }
 }
 
 #[cfg(test)]
@@ -246,6 +359,9 @@ mod tests {
             foreground: rgb(0x00ee_eeee).into(),
             cursor: rgb(0x00ff_ffff).into(),
             selection: hsla(0.6, 0.8, 0.5, 0.3),
+            search_match: hsla(0.6, 0.8, 0.5, 0.15),
+            search_current: hsla(0.6, 0.8, 0.5, 0.3),
+            faint: hsla(0.0, 0.0, 0.5, 1.0),
             ansi: [rgb(0x00ff_0000).into(); 16],
             dark: true,
         }
@@ -260,7 +376,7 @@ mod tests {
         let mut settings = Settings::default();
         settings.terminal.copy_on_select = true;
         let mut theme = settings::theme_for(&settings, true);
-        wear(&mut theme, &chrome(), &terminal());
+        wear(&mut theme, &chrome(), &terminal(), 13.0);
         let s = &theme.surfaces;
         assert_eq!(s.ground, Rgb::hex(0x0006_0606));
         assert_eq!(theme.variant(), slopty_theme::Variant::Dark);
@@ -283,5 +399,20 @@ mod tests {
         assert_eq!(palette.selection, wash, "over the grid's own panel");
         assert_ne!(palette.selection, opaque(hsla(0.6, 0.8, 0.5, 1.0), rgb(0).into()));
         assert!(theme.behaviour.copy_on_select, "the file's behaviour stays");
+        assert!((theme.typography.ui_size - 13.0).abs() < f32::EPSILON, "the shell's type size");
+        // No Zed blue left: a state's ground, edge and fill are the shell's own marks.
+        assert_eq!(s.error_border, opaque(hsla(0.0, 0.8, 0.6, 0.2), rgb(0x0006_0606).into()));
+        assert_eq!(s.error_background.alpha, byte(0.06));
+        assert_eq!(s.success_fill, s.success);
+        assert_eq!(s.info_border, opaque(hsla(0.6, 0.8, 0.6, 0.2), rgb(0x0006_0606).into()));
+    }
+
+    /// What a drop on a terminal does reads as its view says: into the program asking for drops,
+    /// by its title when it has one, else the paths typed.
+    #[test]
+    fn a_terminal_names_what_a_drop_does() {
+        assert_eq!(drop_words(true, Some("yazi")).as_ref(), "Drop into yazi");
+        assert_eq!(drop_words(true, Some("  ")).as_ref(), "Drop into the program");
+        assert_eq!(drop_words(false, Some("zsh")).as_ref(), "Drop to paste paths");
     }
 }

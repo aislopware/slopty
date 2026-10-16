@@ -10,11 +10,15 @@
 //! The other way round, a path a person ⌘-clicks in a shell opens where a transcript's file link
 //! opens, in its chat's Files pane ([`open_file`]): the shell serves that once its window is up.
 
+pub mod chrome;
+pub mod menu;
 pub mod screen;
 
 use std::rc::Rc;
 
 use gpui::{AnyView, App, FocusHandle, Global, Hsla, SharedString, Subscription};
+
+pub use chrome::floating_pill;
 
 /// One of Slopty's views, as the shell places it.
 #[derive(Clone)]
@@ -27,6 +31,41 @@ pub struct Hosted {
     pub title: Option<SharedString>,
     /// Its program has ended.
     pub ended: bool,
+    /// The status it ended with, when its program said one.
+    pub exit: Option<i32>,
+    /// How far its program says it has got (a terminal's `OSC 9;4`), while it says.
+    pub progress: Option<Progress>,
+    /// What a drop of files on it does, in its words ("Drop to paste paths"); `None` when it
+    /// takes no files.
+    pub drop: Option<SharedString>,
+}
+
+/// How far a program says it has got: a terminal's `OSC 9;4` report, which its tab shows.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Progress {
+    /// This share of it, 0 to 1.
+    Share(f32),
+    /// Under way, how far unknown.
+    Busy,
+    /// Held, at this share when one is known.
+    Paused(Option<f32>),
+    /// Stopped by a failure, at this share when one is known.
+    Failed(Option<f32>),
+}
+
+impl Progress {
+    /// Its share as a whole percent, when it has one.
+    #[must_use]
+    pub fn percent(self) -> Option<u8> {
+        let share = match self {
+            Self::Share(share) => Some(share),
+            Self::Busy => None,
+            Self::Paused(share) | Self::Failed(share) => share,
+        }?;
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "0..=100")]
+        let percent = (share.clamp(0.0, 1.0) * 100.0).round() as u8;
+        Some(percent)
+    }
 }
 
 /// How the shell's theme asks a terminal to look: zeron's font, padding and palette.
@@ -46,8 +85,14 @@ pub struct TerminalLook {
     pub foreground: Hsla,
     /// The block cursor.
     pub cursor: Hsla,
-    /// The selection wash.
+    /// The selection wash, translucent over whatever the program painted.
     pub selection: Hsla,
+    /// A find's hit, a lighter selection.
+    pub search_match: Hsla,
+    /// The find's hit the person is on: the selection itself.
+    pub search_current: Hsla,
+    /// The quietest ink: the scrollbar's thumb, a dim trailer.
+    pub faint: Hsla,
     /// ANSI 0–15.
     pub ansi: [Hsla; 16],
     /// The dark appearance.
@@ -58,7 +103,12 @@ impl TerminalLook {
     /// The look the shell's theme gives a terminal.
     #[must_use]
     pub fn of(cx: &App) -> Self {
-        let theme = crate::theme::Theme::of(cx);
+        Self::from_theme(crate::theme::Theme::of(cx))
+    }
+
+    /// The look `theme` gives a terminal.
+    #[must_use]
+    pub fn from_theme(theme: &crate::theme::Theme) -> Self {
         Self {
             family: theme.font_terminal.clone(),
             font_size: theme.terminal_font_size,
@@ -69,6 +119,11 @@ impl TerminalLook {
             foreground: theme.terminal.foreground,
             cursor: theme.cursor,
             selection: theme.terminal.selection,
+            // In-surface hits are the selection's colour (zeron's find in a file), the hit the
+            // person is on whole and the rest at half.
+            search_match: theme.selection.opacity(theme.selection.a * 0.5),
+            search_current: theme.selection,
+            faint: theme.text_faint,
             ansi: theme.terminal.ansi,
             dark: theme.appearance.is_dark(),
         }
@@ -141,7 +196,8 @@ impl Chrome {
             surface: theme.surface,
             raised: theme.surface_raised,
             card: theme.surface_card,
-            overlay: theme.surface_overlay,
+            // slopty: what floats is the popover's plane, frosted where the theme frosts.
+            overlay: crate::popover::surface_bg(theme),
             input: theme.input_bg,
             hover: theme.element_hover,
             active: theme.element_active,
@@ -268,6 +324,27 @@ pub(crate) fn serve_files(cx: &mut App, open: impl Fn(&str, &str, &mut App) -> b
 pub fn open_file(chat: &str, target: &str, cx: &mut App) -> bool {
     let Some(Files(open)) = cx.try_global::<Files>().cloned() else { return false };
     open(chat, target, cx)
+}
+
+type RunLineFn = dyn Fn(&str, &str, bool, &mut App) -> bool;
+
+/// How the app types a line into one of its terminals.
+#[derive(Clone)]
+struct Runs(Rc<RunLineFn>);
+
+impl Global for Runs {}
+
+/// Serve [`run_line`] with `run`: the terminal's id, the line, and whether to press Enter after
+/// it; whether that terminal took it.
+pub fn serve_runs(cx: &mut App, run: impl Fn(&str, &str, bool, &mut App) -> bool + 'static) {
+    cx.set_global(Runs(Rc::new(run)));
+}
+
+/// Type `line` into terminal `id`, and run it when `enter`, else leave it at the prompt: whether
+/// the terminal took it.
+pub fn run_line(id: &str, line: &str, enter: bool, cx: &mut App) -> bool {
+    let Some(Runs(run)) = cx.try_global::<Runs>().cloned() else { return false };
+    run(id, line, enter, cx)
 }
 
 /// The shell's way into a chat's draft: Slopty's terminals hand it a block or a selection.

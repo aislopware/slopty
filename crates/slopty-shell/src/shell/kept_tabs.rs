@@ -1,6 +1,6 @@
 //! slopty: the right pane's surface tabs kept across launches. Each chat's pane comes back as it
-//! was when the app quit, its tabs in their order and the one in front: its terminals and its
-//! agent's TUI on the same sessions (they live on in their machine), its files, pages, diffs,
+//! was when the app quit, its tabs in their order and the one in front: its terminals on the
+//! same sessions (they live on in their machine), its files, pages, diffs,
 //! side chats and remote windows. A chat's tabs come back the first time it is shown, once the
 //! app is connected; a terminal that ended meanwhile does not.
 
@@ -29,12 +29,12 @@ impl Shell {
     }
 
     /// What opens `surface` of the pane `key` again; `None` for one that is not kept.
-    fn kept_surface(&self, key: &str, surface: RightSurface, cx: &App) -> Option<SavedSurface> {
+    pub(super) fn kept_surface(&self, key: &str, surface: RightSurface, cx: &App) -> Option<SavedSurface> {
         Some(match surface {
             RightSurface::Terminal(tab) => {
                 let panel = self.right_terminal.as_ref()?.read(cx);
                 let id = panel.terminal_id(key, tab)?.to_owned();
-                SavedSurface::Terminal { id, agent: self.agent_tui.get(key) == Some(&tab) }
+                SavedSurface::Terminal { id }
             }
             RightSurface::File(id) => {
                 let path = self.file_surface_paths.get(&id)?.clone();
@@ -131,7 +131,7 @@ impl Shell {
     }
 
     /// Open `surface` again in the pane `key`, the shown chat's: the tab it made.
-    fn restore_surface(
+    pub(super) fn restore_surface(
         &mut self,
         key: &str,
         surface: SavedSurface,
@@ -139,17 +139,14 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Option<RightSurface> {
         match surface {
-            SavedSurface::Terminal { id, agent } => {
+            SavedSurface::Terminal { id } => {
                 let panel = self.right_terminal_panel(cx);
                 let tab = panel.update(cx, |panel, cx| {
                     panel.set_open(true, cx);
-                    panel.reopen_tab_for_selected(id, agent, cx)
+                    panel.reopen_tab_for_selected(id, cx)
                 })?;
                 let surface = RightSurface::Terminal(tab);
                 self.right_tabs.entry(key.to_owned()).or_default().push(surface);
-                if agent {
-                    self.agent_tui.insert(key.to_owned(), tab);
-                }
                 Some(surface)
             }
             SavedSurface::File { chat, path } => {

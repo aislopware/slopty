@@ -81,16 +81,14 @@ Tests make no sound on this Mac: the drawn screen's worker sounds only under `SL
    listener found by `ports`, a close, and a shell that exits on its own. A killed worker must
    turn unreachable and come back online under the same id.
    `cargo xtask linux e2e` (serial) is a terminal-only Linux worker.
-   ptyd, the worker and the `slopty` relay are cross-built for `aarch64-unknown-linux-gnu`
+   ptyd, the worker and the `slopty` CLI are cross-built for `aarch64-unknown-linux-gnu`
    and run in a Debian container on Docker Desktop, as an account with bash for its shell,
    on the paths a Linux install takes. The worker's UDP port is published on this Mac's
    loopback, and its `[network] allow` admits the bridge gateway its packets come from. From
    this Mac, `tests/linux.rs` connects with the client core's link and a `TermState`. The
    greeting must say Linux, aarch64 and Debian, with no capture, input, encoder or display.
    The login shell from passwd must echo a typed command and run it. A folder made there must
-   list through `ListFolder`, and a file in it must read through `ReadFile`. A
-   `UserPromptSubmit` hook played through the Linux `slopty hook` inside the container must
-   reach the client as `Working`. It also times 300 keystrokes into `cat` to their echo and
+   list through `ListFolder`, and a file in it must read through `ReadFile`. It also times 300 keystrokes into `cat` to their echo and
    prints the percentiles. The container is capped at two CPUs and removed at the end.
 4. **Live desktop**, `cargo xtask e2e worker|screen|input|all`: real capture and real event
    posting, own data dir under `target/e2e/`. The assertions live inside those tests.
@@ -113,8 +111,15 @@ rest through the codec, which must send exactly what the agent was sent. The wor
 stand-ins in the agent's place: `slopty-stub-pi` and `slopty-stub-acp` replay such a recording
 (named in a config file beside the binary), match each message the worker sends to the next one
 recorded, and write down what they heard. A test then asserts both the thread the worker built
-and what the agent was sent. Claude Code is played through its hooks (`CtlRequest::Hook`,
-`slopty hook` as the test's own child) and `slopty-stub-claude`. A fixture no recording can reach,
+and what the agent was sent. Claude Code is played by `slopty-stub-claude`
+(`slopty_testkit::claude_stream`), which speaks stream-json with the control protocol as
+`claude -p` does, keeps its conversation where Claude Code keeps it, records every line it
+heard, and fails on cue (a crash mid-turn, no echo, a torn line, no answer to `initialize`, an
+exit at start, a slow stop, a usage limit). It also calls Slopty's tools through the
+`slopty mcp` it is handed, as a script names them per prompt (`STUB_TURNS`), and plays a recorded
+Claude Code turn of the conversation fixtures over the stream as its own (`STUB_REPLAY`,
+`slopty_testkit::replay`). `crates/slopty-worker/tests/claude.rs` proves the drive one behaviour
+per test against it and a real ptyd. A fixture no recording can reach,
 such as an agent asking to be signed in, is written to the schema by hand, and its test says so.
 
 ## Where the gate runs

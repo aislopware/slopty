@@ -84,12 +84,21 @@ mod tests {
 
     /// Answer every request the server forwards as done, until the link ends.
     async fn work(mut link: ServerLink) {
-        while let Ok(msg) = link.rx.recv().await {
-            if let FromServer::Request { id, .. } = msg {
-                let reply = ToServer::Reply { id, outcome: Outcome::Done };
-                if link.tx.send(&reply).await.is_err() {
-                    return;
-                }
+        // Pinged as a worker does, or the server ends the lease (`slopty_net::liveness`).
+        let mut beat = tokio::time::interval(slopty_net::liveness::PING_EVERY);
+        loop {
+            let reply = tokio::select! {
+                msg = link.rx.recv() => match msg {
+                    Ok(FromServer::Request { id, .. }) => {
+                        ToServer::Reply { id, outcome: Outcome::Done }
+                    }
+                    Ok(_other) => continue,
+                    Err(_ended) => return,
+                },
+                _ = beat.tick() => ToServer::Ping { sent_at: slopty_core::MonoTime::now() },
+            };
+            if link.tx.send(&reply).await.is_err() {
+                return;
             }
         }
     }

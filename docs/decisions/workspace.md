@@ -794,9 +794,12 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
     (`kqueue::Queue::follow_contents`, started again when the set changes). It rings the
     kqueue through an `EVFILT_USER` event, so the follower still waits on one descriptor. A
     write to a direct child counts, and so does an entry made in a subfolder, whose count
-    the listing shows. Such a folder is listed again after `CONTENT_HOLD` (250 ms) and at
-    that rate at most, though its own stamp did not move: a growing log is a listing four
-    times a second, not one every 50 ms. `FSEvents`' 11 ms does not matter at that pace.
+    the listing shows. Such a folder is listed again `CONTENT_QUIET` (100 ms) after the first
+    such write and then once each `CONTENT_HOLD` (250 ms) at most, though its own stamp did
+    not move: a growing log is a listing four times a second, not one every 50 ms. The first
+    such write waits 100 ms, not 250 ms, since the open documents' folders are now followed
+    this way (2026-10-16, "The status, the diffs and the tree wait on the worker's events"): an
+    agent's edit of an open file reaches its document 100 ms plus `FSEvents`' 11 ms after it.
   - **The tile keeps its place.** A new listing of the same directory keeps the selection on
     the same name, or on the same row when that entry went, and does not scroll
     (`FolderView::set_listing`).
@@ -2391,3 +2394,101 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
   worker) are what remain of `slopty_client::layout`. Tests: `slopty-proto`
   `items::tests::an_edit_changes_only_what_moves`, `slopty-client`
   `items::tests::snapshot_then_deltas_and_echoes`.
+
+- ✅ **The status, the diffs and the tree wait on the worker's events** (2026-10-16). The view
+  model polled: every open tree listed each folder it had shown again every 2 s, the git status
+  asked for a status every 3 s, and the diff watch diffed each followed chat's working tree
+  every 2 s, on every linked worker, whether anything had changed or not. The worker already
+  followed files and folders on the kernel's events (`WatchFiles`, `WatchFolders`), but nothing
+  in the view model sent those. Now nothing in these watches runs on a clock.
+  - **The tree.** The view model tells each worker the folders its open trees listed and the
+    folders of the last 16 documents read (`ClientMsg::WatchFolders`, the whole set when it
+    changes). The worker lists a folder again unasked when its entries or one of its files
+    change (`fswatch::follow_folders`), and the view model turns the new listing into the
+    tree's changes, or, for a document read from a folder the tree did not list, into its
+    "modified" or "removed".
+  - **A repository watch.** `ClientMsg::WatchRepos { paths }` names the folders whose status or
+    diffs are on screen, and the worker says `WorkerMsg::RepoMoved { repo }` once a burst when
+    something git reports on changed (`slopty_worker::repowatch`). The status and diff watches
+    ask git again only on that word. A word that comes while an answer is out asks once more
+    when it is in, however many came.
+  - **What counts.** In the working tree, any file made, written, removed, renamed or given a
+    new mode, however deep, unless git ignores it and does not track it (the folders'
+    `.gitignore`, `info/exclude` and the global excludes, read as git reads them, through the
+    `ignore` crate the worker already had). In the git directory, only what moves a status or a
+    diff against `HEAD`: `HEAD`, the index, `packed-refs`, the branches, a merge's or a pick's
+    head, `info/exclude` and a submodule's `HEAD` or index. Objects, logs, locks and the
+    worker's own thread snapshots (`refs/slopty`) do not, and the worker's own `git status`
+    runs with `GIT_OPTIONAL_LOCKS=0`, so the status a word asks for never writes the index and
+    never causes another word. A `target/` a build churns costs a match per event and no word.
+  - **One stream per repository on macOS, a watch per folder on Linux.** `FSEvents` covers a
+    tree however deep with one stream, which is what it is for. Its 11 ms delivery, which
+    ruled it out for a file tile, is well under the burst pacing here. inotify needs a watch on
+    each folder git does not ignore, added as folders are made, and on the folders of the git
+    directory that hold what moves a status.
+  - **Bursts.** A repository is reported once its events have been quiet for 30 ms (`QUIET`),
+    or after 200 ms of steady change (`HOLD`), and two words for one repository are at least
+    `HOLD` apart. A checkout or a build writing a thousand files is a word or two, so a status
+    is asked at most five times a second while a tree churns, and the view model folds those it
+    is still answering into one.
+  - **Failure.** A repository on a volume whose events can miss another machine's writes
+    (network, FUSE, a VM's share), one whose `FSEvents` stream is refused, and one past its
+    watches (`repowatch::Limits`, 65 536 folders, or the kernel's `max_user_watches`, which
+    then frees its watches for the file tiles) is looked at every 3 s instead (`POLL`): its
+    `git status` and the stamps of the files it names, said only when they moved, so even then
+    an idle repository costs the client nothing. Events the kernel dropped (`MustScanSubDirs`,
+    `IN_Q_OVERFLOW`) are a word, and inotify watches the folders again.
+  - **A repository moved, deleted or replaced.** A repository is its top and its git
+    directory by path and by inode, and by its watch seeing either go: Linux hands a freed
+    inode to the next folder made, so `rm -rf .git && git init` can make a git directory with
+    the old one's inode. One deleted, renamed or replaced (that, or a clone moved into its
+    place) is a word, then the worker finds the repository again from the folder named and
+    follows it afresh. A folder with no repository is watched for one
+    made there, and a `git init` in it is a word.
+  - **The link.** A connection's watches end with it. The view model sends the folder and
+    repository sets on every new link, has each status and diff watch ask once for what the old
+    link missed, and has each open tree read again (`resync_required`). An ask the old link
+    left unanswered fails at once rather than after its 30 s, and a watch whose worker did not
+    answer keeps what the shell shows instead of blanking it.
+  - **No slow safety refresh.** None was kept: nothing measured a change the events missed on
+    a local volume, and where events can miss one the repository is polled already. The diff
+    watch looks once a second at which chats the workspace follows, its own state, to diff a
+    chat's folder as soon as it is followed; that asks no worker anything.
+  - Numbers in MEASUREMENTS.md, 2026-10-16, "Watches wait on the worker's events". Tests:
+    worker `repowatch` unit tests (git's rules, what in the git directory counts, a status's
+    paths, the burst pacing) and `tests/repowatch.rs` on the real file system and a real git:
+    `a_repository_is_reported_on_each_change_git_sees_and_never_while_idle`,
+    `a_repository_made_in_a_folder_is_noticed`, `a_repository_left_out_of_the_list_is_let_go`,
+    `a_burst_of_a_thousand_writes_is_a_report_or_two`,
+    `a_repository_deleted_is_said_and_one_made_in_its_place_followed`,
+    `a_git_directory_replaced_is_followed_afresh`,
+    `past_its_watches_a_repository_is_looked_at_and_says_nothing_idle`; worker e2e
+    `a_watched_repository_says_when_it_moves_and_nothing_while_idle` (through the daemon and a
+    client link, the reconnect included); ui `surfaces::files::tests::watches`
+    (`a_status_watch_asks_only_when_the_repository_moved`,
+    `a_tree_watch_takes_the_workers_listings_and_asks_none`); proto golden `client_watch_repos`,
+    `worker_repo_moved`.
+
+- ✅ **Quick open offers the files changed lately before anything is typed** (2026-10-16). An
+  empty query asked the worker for nothing, so Recent Files never held the file an agent had
+  just made. Now `""` answers, under the folder asked: what `git status` says changed (modified,
+  added, renamed, unmerged, untracked; a deleted file left out), newest first, then the files
+  of the folders whose entries changed last, newest first, each once, files only, at most the
+  limit (`slopty_worker::find::recent`). git is asked each time the palette opens, so it is as
+  fresh as the disk with nothing kept. Tests: worker `find::recent` unit tests on a real
+  repository (`the_changed_files_come_first_then_the_newest`,
+  `outside_a_repository_the_newest_files_alone`, `the_newest_folders_give_their_files`); app
+  `interface::the_palette_lists_recent_files_at_once`.
+- ✅ **A turn's diff and whitespace that does not count, from the worker** (2026-10-16). The
+  Changes pane asks for one turn's changes (`"turn"`, the user entry that began it) and for a
+  diff with whitespace not counting (`"ignoreWhitespace"`, as `git diff -w`). The worker
+  already takes a turn's tree when it begins and ends (`Turn::before`, `Turn::after`, kept
+  under `refs/slopty`), so `GitOp::Turn` diffs those two trees, or the first and the working
+  tree now while the turn runs; no new snapshot is taken. A turn with no tree (a folder outside
+  git) asks the thread's own review, which says why. Whitespace is left out in the worker's own
+  diff: lines are matched on their text with every space taken out and the context reads as
+  the file is now, and a file changed only in its spaces leaves the review rather than show
+  as a change with nothing in it. `GitOp::Changes` and `GitOp::FileDiff` take the same `ignore_whitespace`, so a clipped
+  file fetched whole reads the same way. Tests: worker `tests/turn_diff.rs` on a real
+  repository (`a_turn_shows_what_changed_between_its_snapshots`,
+  `whitespace_counts_only_when_asked`).

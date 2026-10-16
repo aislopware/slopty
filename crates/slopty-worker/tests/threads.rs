@@ -27,11 +27,10 @@ mod threads {
             native: "s1".to_owned(),
             cwd: "/work".to_owned(),
             title: "Fix the build".to_owned(),
-            terminal: None,
             parent: None,
             origin: ThreadMeta::PERSON.to_owned(),
             forked_from: None,
-            drive: Drive::named(Drive::OBSERVED),
+            drive: Drive::named(Drive::DRIVEN),
             caps: vec![Cap::named(Cap::QUEUE)],
             models: Vec::new(),
             facts: BTreeMap::new(),
@@ -555,6 +554,15 @@ mod threads {
         })
     }
 
+    /// `action`, the person's item, marked as sent for `intent`.
+    fn sent_as(action: Action, intent: IntentId) -> Action {
+        let Action::ItemStarted(mut item) = action else { return action };
+        if let ItemBody::User(message) = &mut item.body {
+            message.intent = Some(intent);
+        }
+        Action::ItemStarted(item)
+    }
+
     fn intent_of(state: &ThreadState, id: &str) -> Option<IntentId> {
         state.items.iter().find(|i| i.id.0 == id).and_then(|i| match &i.body {
             ItemBody::User(message) => message.intent,
@@ -562,49 +570,10 @@ mod threads {
         })
     }
 
-    /// A message a restart caught being typed waits for its transcript's word: it goes on once
-    /// that was read with its agent back where it was typed, and waits for the person when its
-    /// agent came back elsewhere or not at all; the other messages are left as they were.
-    #[tokio::test]
-    async fn a_message_caught_being_typed_waits_for_its_transcripts_word() {
-        let dir = tempfile::tempdir().unwrap();
-        let host = open(dir.path());
-        let (first, second) = (slopty_core::SessionId::new(), slopty_core::SessionId::new());
-        let meta = ThreadMeta { terminal: Some(first), ..meta() };
-        let thread = meta.id;
-        host.create(meta).unwrap();
-        assert!(!host.moved(thread, first) && host.moved(thread, second));
-        let checking = PendingState::Held { reason: schedule::CHECKING.to_owned() };
-        let (caught, queued) = (IntentId::new(), IntentId::new());
-        let pending = |intent, state| Pending {
-            intent,
-            text: "later".to_owned(),
-            attachments: vec![],
-            delivery: Delivery::Queue,
-            state,
-        };
-        let set = |host: &Host| {
-            let list =
-                vec![pending(caught, checking.clone()), pending(queued, PendingState::Waiting)];
-            host.apply(thread, vec![Action::PendingSet(list)]);
-        };
-        let states = |host: &Host| -> Vec<PendingState> {
-            state(host, thread).0.pending.iter().map(|p| p.state.clone()).collect()
-        };
-        set(&host);
-        host.settle_checking(thread, true);
-        assert_eq!(states(&host), [PendingState::Waiting, PendingState::Waiting], "it goes on");
-        set(&host);
-        host.settle_checking(thread, false);
-        let cut = PendingState::Held { reason: schedule::CUT_OFF.to_owned() };
-        assert_eq!(states(&host), [cut, PendingState::Waiting], "the person's to send again");
-    }
-
     /// What the worker adds to a thread and its agent never tells (the intent a message came
     /// from, each turn's snapshots, what waits to be sent) outlives the thread being read again
     /// from the agent's session, after a worker restart too. A message that was being sent
-    /// waits to go again: its delivery is named for it, so ptyd types it only if it never took
-    /// it.
+    /// waits to go again: its adapter says once it went.
     #[tokio::test]
     async fn what_the_worker_owns_outlives_a_read_again() {
         let dir = tempfile::tempdir().unwrap();
@@ -613,7 +582,6 @@ mod threads {
         let thread = meta.id;
         host.create(meta.clone()).unwrap();
         let (sent, waiting, sending) = (IntentId::new(), IntentId::new(), IntentId::new());
-        host.typed(thread, sent, "hello there", "hello there");
         let tree = TreeRef("4b825dc6".to_owned());
         let pending = |intent, state| Pending {
             intent,
@@ -626,7 +594,7 @@ mod threads {
             thread,
             vec![
                 turn(1),
-                prompt("p1", 1, "  hello there\n"),
+                sent_as(prompt("p1", 1, "  hello there\n"), sent),
                 Action::Snapshot { turn: TurnId(1), edge: Edge::Before, tree: tree.clone() },
                 Action::PendingSet(vec![
                     pending(waiting, PendingState::Waiting),
@@ -790,71 +758,6 @@ mod threads {
         state.pending.iter().map(|p| (p.text.clone(), p.delivery, p.state.clone())).collect()
     }
 
-    /// A start's first message an earlier worker left on its way is never left "being sent"
-    /// for good: the next worker takes it off the list when the thread shows the agent took
-    /// it, and else holds it, saying it may have gone, so the person can withdraw it or send it
-    /// again. A message the composer was typing is left to go again on its own delivery.
-    #[test]
-    fn a_starts_first_message_cut_off_by_a_restart_is_settled() {
-        let dir = tempfile::tempdir().unwrap();
-        let host = open(dir.path());
-        let sending = |intent, text: &str| Pending {
-            intent,
-            text: text.to_owned(),
-            attachments: vec![],
-            delivery: Delivery::Queue,
-            state: PendingState::Sending,
-        };
-        let begin = |intent| {
-            let meta = meta();
-            let thread = meta.id;
-            host.create(meta).unwrap();
-            host.record_start(intent, Outcome::Started { thread });
-            host.first_message(thread, sending(intent, "hello"));
-            thread
-        };
-        let (took, lost, typing) = (IntentId::new(), IntentId::new(), IntentId::new());
-        let taken = begin(took);
-        let prompt = Item {
-            id: ItemId("p1".to_owned()),
-            turn: TurnId(1),
-            at_ms: WallMs::ZERO,
-            body: ItemBody::User(UserMessage {
-                text: Clipped::whole("hello"),
-                images: Vec::new(),
-                command: None,
-                intent: Some(took),
-            }),
-        };
-        host.apply(taken, vec![turn(1), Action::ItemStarted(prompt)]);
-        let left = begin(lost);
-        let both = vec![sending(lost, "hello"), sending(typing, "next")];
-        host.apply(left, vec![Action::PendingSet(both)]);
-        drop(host);
-
-        let host = open(dir.path());
-        assert_eq!(pending_of(&host, taken), [], "taken: gone from the list");
-        let cut = PendingState::Held { reason: schedule::CUT_OFF.to_owned() };
-        assert_eq!(
-            pending_of(&host, left),
-            [
-                ("hello".to_owned(), Delivery::Queue, cut),
-                ("next".to_owned(), Delivery::Queue, PendingState::Sending),
-            ],
-            "the first held; the composer's left to go again"
-        );
-        // The agent's transcript read again shows it, knowing nothing of the intent: it is
-        // the held one's, which leaves the list.
-        host.reset(left, ThreadState::new(state(&host, left).0.meta)).unwrap();
-        host.apply(left, vec![turn(1), self::prompt("p1", 1, "hello")]);
-        assert_eq!(intent_of(&state(&host, left).0, "p1"), Some(lost), "the item is the intent's");
-        assert_eq!(
-            pending_of(&host, left),
-            [("next".to_owned(), Delivery::Queue, PendingState::Waiting)],
-            "taken: gone from the list"
-        );
-    }
-
     /// A thread whose log no longer reads (an older build wrote it) goes with its directory, so
     /// it is not read and warned of at every start; what is not a thread's stays.
     #[test]
@@ -899,68 +802,6 @@ mod threads {
         host.reset(thread, ThreadState::new(unknown)).unwrap();
         let (again, _) = self::state(&host, thread);
         assert_eq!(again.meta.parent, Some(link), "read again from nothing");
-    }
-
-    /// The agent's copy of a message typed into its terminal is the message's where it is not
-    /// what was typed word for word: the head of a long one, which Claude Code keeps clipped; a
-    /// command, which it keeps as its name and arguments; and one sent with files, whose paths
-    /// were typed after the words, of which Claude Code kept a picture as a placeholder, or as a
-    /// picture apart. Another message's copy is not.
-    #[test]
-    fn a_typed_message_is_known_in_the_agents_copy() {
-        use slopty_proto::thread::ContentRef;
-        use slopty_proto::thread::detail::Clip;
-        let dir = tempfile::tempdir().unwrap();
-        let host = open(dir.path());
-        let meta = meta();
-        let thread = meta.id;
-        host.create(meta).unwrap();
-        let user = |id: &str, text: Clipped, command: Option<&str>| {
-            Action::ItemStarted(Item {
-                id: ItemId(id.to_owned()),
-                turn: TurnId(1),
-                at_ms: WallMs::ZERO,
-                body: ItemBody::User(UserMessage {
-                    text,
-                    images: vec![],
-                    command: command.map(str::to_owned),
-                    intent: None,
-                }),
-            })
-        };
-        let long = (0..2_000).fold(String::new(), |mut long, n| {
-            std::fmt::Write::write_fmt(&mut long, format_args!("line {n} of a long paste\n"))
-                .unwrap();
-            long
-        });
-        assert!(long.chars().count() > 32_000, "longer than an agent keeps");
-        let prose = Clip { lines: 400, chars: 32_000 };
-        let head = Clipped::head(&long, prose, Some(ContentRef("p1".to_owned())));
-        assert!(head.is_clipped());
-        let paths = ["/drop/a/shot.png", "/drop/b/notes.txt"];
-        let with_files = slopty_agent::attach::with_paths("Look at this", paths);
-        let (cut, command, picture, apart, other) =
-            (IntentId::new(), IntentId::new(), IntentId::new(), IntentId::new(), IntentId::new());
-        host.typed(thread, cut, &long, &long);
-        host.typed(thread, command, "/model opus", "/model opus");
-        host.typed(thread, picture, "Look at this", &with_files);
-        host.typed(thread, apart, "Look at this", &with_files);
-        host.typed(thread, other, "Something else", "Something else");
-        host.apply(
-            thread,
-            vec![
-                turn(1),
-                user("p1", head, None),
-                user("p2", Clipped::whole("opus"), Some("/model")),
-                user("p3", Clipped::whole("Look at this [Image #1] /drop/b/notes.txt"), None),
-                user("p4", Clipped::whole("Look at this"), None),
-                user("p5", Clipped::whole("Look at that"), None),
-            ],
-        );
-        let (state, _) = state(&host, thread);
-        let intents: Vec<Option<IntentId>> =
-            ["p1", "p2", "p3", "p4", "p5"].iter().map(|id| intent_of(&state, id)).collect();
-        assert_eq!(intents, [Some(cut), Some(command), Some(picture), Some(apart), None]);
     }
 
     /// A message the person schedules waits in the thread's pending list on the worker, once
@@ -1114,6 +955,7 @@ mod threads {
             effort: None,
             attachments: Vec::new(),
             args: Vec::new(),
+            options: BTreeMap::new(),
             worktree: Some(NewWorktree::named("fix")),
         };
         let (id, other) = (IntentId::new(), IntentId::new());

@@ -1,19 +1,15 @@
 //! The thread host on the daemon (`slopty_worker::thread`).
 //!
-//! Every Claude Code session the daemon sees is observed into the agent-neutral thread model,
-//! its permission prompts held for the thread's followers ([`hold`]), every Codex thread is
-//! followed, and a pi thread or the thread
-//! of any ACP agent is started and driven here. A Claude Code thread is started in one of the
-//! daemon's terminals and observed, and a Codex thread is started over the person's Codex daemon.
-//! They are served to clients: the table on the control stream, a stream per followed thread, and
-//! intents answered once each.
+//! Every agent's thread is driven here through the agent's own door: Claude Code as `claude -p`
+//! in ptyd's custody, Codex over the person's Codex daemon, pi over its RPC mode, any other
+//! agent over ACP. They are served to clients: the table on the control stream, a stream per
+//! followed thread, and intents answered once each.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use hold::Orchestrated;
 use slopty_agent::codex::shared::Setting;
 use slopty_core::{ClientId, SessionId};
 use slopty_net::{Connection, WorkerMsg};
@@ -23,166 +19,82 @@ use slopty_proto::thread::wire::{
     ThreadFrame, ThreadRequest, ThreadRow,
 };
 use slopty_proto::thread::{
-    Action, AgentId, Answerer, AskId, Cap, ContentRef, Cursor, Delivery, Drive, IntentId, Liveness,
-    Phase, ThreadId, ThreadState, TreeRef, TurnId,
+    AgentId, Answerer, Cap, ContentRef, Cursor, Delivery, Drive, IntentId, Liveness, Phase,
+    ThreadId, ThreadState, TreeRef, TurnId,
 };
-use slopty_worker::conversation::{ORCHESTRATION, Seen};
 use slopty_worker::manager::Worker;
-use slopty_worker::orchestrate::{self, Agents, Conversations as _, Failure};
+use slopty_worker::orchestrate::{self, Failure};
 use slopty_worker::repo::worktrees;
-use slopty_worker::session::SessionHandle;
 use slopty_worker::thread::acp::{self, Acp};
-use slopty_worker::thread::claude::{self, Driver, Sources};
+use slopty_worker::thread::claude::{self, Claude};
 use slopty_worker::thread::codex::{self, Codex};
-use slopty_worker::thread::compose::Terminals;
 use slopty_worker::thread::history::{self, History};
 use slopty_worker::thread::host::UnderWay;
 use slopty_worker::thread::pi::{self, Pi};
 use slopty_worker::thread::review::Snapshots;
 use slopty_worker::thread::screens::Screens;
-use slopty_worker::thread::terminals::{Pending, Terminals as AgentTerminalsTrait};
-use slopty_worker::thread::{Composer, Follower, Host, Seated, schedule};
+use slopty_worker::thread::{Follower, Host, Seated, schedule};
 use tokio::sync::{mpsc, watch};
 use tokio::task::{AbortHandle, JoinSet};
 
 use crate::Daemon;
 
-pub mod hold;
 mod starts;
 
-/// What an observed session needs of the daemon.
-struct Observed(Daemon);
-
-impl Sources for Observed {
-    fn sources(&self, session: SessionId) -> orchestrate::Sources {
-        Orchestrated(self.0.clone()).sources(session)
-    }
-
-    fn seen(&self, session: SessionId) -> watch::Receiver<Seen> {
-        self.0.follows.lock().board.watch(session)
-    }
-
-    fn standing(&self) -> Vec<slopty_agent::status::AgentEvent> {
-        self.0.agents.lock().snapshot()
-    }
-
-    fn open(&self, session: SessionId) -> bool {
-        self.0.worker.get(session).is_ok()
-    }
-
-    fn hooks_off(&self) -> bool {
-        self.0.caps.borrow().agents.iter().any(|agent| agent.managed_hooks_off)
-    }
-}
-
-/// The daemon's terminals and agents, as the composer types into them.
-struct Typing {
-    worker: Worker,
-    agents: crate::server::DaemonAgents,
-}
-
-impl Agents for Typing {
-    fn status(&self, session: SessionId) -> Option<slopty_agent::status::SessionAgent> {
-        self.agents.status(session)
-    }
-
-    fn forget(&self, session: SessionId) {
-        self.agents.forget(session);
-    }
-
-    fn ended(&self, session: SessionId) -> bool {
-        self.agents.ended(session)
-    }
-}
-
-impl Terminals for Typing {
-    fn terminal(&self, session: SessionId) -> Option<SessionHandle> {
-        self.worker.get(session).ok()
-    }
-}
-
-impl orchestrate::Deliver for Typing {
-    fn deliver_parts(
-        &self,
-        session: SessionId,
-        delivery: u64,
-        parts: Vec<orchestrate::Part>,
-    ) -> orchestrate::BoxFuture<'_, Result<(), slopty_worker::WorkerError>> {
-        Box::pin(self.worker.deliver(session, delivery, parts))
-    }
-}
-
-/// The daemon's threads and what serves them.
-///
-/// The adapter answers for them, the composer types what is sent to them, and their turns
-/// are snapshotted. Cheap to clone.
+/// The daemon's threads and what serves them: each agent's adapter, and the snapshots of their
+/// turns. Cheap to clone.
 #[derive(Clone, Debug)]
 pub struct Threads {
     host: Host,
-    claude: Driver,
-    claude_start: claude::start::Starter,
+    claude: Claude,
     codex: Codex,
     pi: Pi,
     acp: Acp,
-    composer: Composer,
     snapshots: Snapshots,
     history: History,
     worker: Worker,
     starts: starts::Starts,
 }
 
-/// Open the threads kept under `dir`, and what [`start`] needs to observe into them.
+/// Open the threads kept under `dir`, and what [`start`] serves them with.
 ///
-/// They are typed into through `worker`'s terminals as `agents` says of them, and their
-/// snapshots' indexes are kept under `snapshots`. A host that cannot open is warned of, and
-/// the daemon goes on without threads.
-pub fn open(
-    dir: &Path,
-    snapshots: &Path,
-    worker: Worker,
-    agents: Arc<parking_lot::Mutex<slopty_agent::AgentTable>>,
-) -> Option<(Threads, Observing)> {
+/// Their snapshots' indexes are kept under `snapshots`, and `worker`'s terminals are where a
+/// seat's variables come from. A host that cannot open is warned of, and the daemon goes on
+/// without threads.
+pub fn open(dir: &Path, snapshots: &Path, worker: Worker) -> Option<(Threads, Adapters)> {
     match Host::open(dir, slopty_worker::thread::log::Limits::default()) {
         Ok(host) => {
             let seats = worker.clone();
             host.set_seat_env(Arc::new(move |seat| seats.seat_env(seat)));
-            let (claude, asks) = Driver::channel();
-            let (claude_start, claude_start_asks) = claude::start::Starter::channel();
+            let (claude, claude_asks) = Claude::channel();
             let (codex, codex_asks) = Codex::channel();
             let (pi, pi_asks) = Pi::channel();
             let (acp, acp_asks) = Acp::channel();
-            let terminals = Arc::new(AgentTerminals(worker.clone()));
-            let typing =
-                Typing { worker: worker.clone(), agents: crate::server::DaemonAgents(agents) };
-            let composer = Composer::new(host.clone(), Arc::new(typing));
             let git = slopty_worker::changes::git().map(Path::to_path_buf);
             let snapshots = Snapshots::new(host.clone(), snapshots, git);
             // The threads live under the data directory, where pi's gate is written too.
             let data = dir.parent().unwrap_or(dir).to_path_buf();
             let history = History::new(history::Stores::here(), history::Limits::default());
-            let observing = Observing {
-                claude: asks,
-                claude_start: claude_start_asks,
+            let adapters = Adapters {
+                claude: claude_asks,
                 codex: codex_asks,
                 pi: pi_asks,
                 acp: acp_asks,
                 data,
-                terminals,
+                ptyd: worker.ptyd_socket().to_path_buf(),
             };
             let threads = Threads {
                 host,
                 claude,
-                claude_start,
                 codex,
                 pi,
                 acp,
-                composer,
                 snapshots,
                 history,
                 worker,
                 starts: starts::Starts::default(),
             };
-            Some((threads, observing))
+            Some((threads, adapters))
         }
         Err(e) => {
             tracing::warn!(dir = %dir.display(), "the thread host did not open: {e}");
@@ -191,134 +103,23 @@ pub fn open(
     }
 }
 
-/// The daemon's terminals, as an agent's own TUI runs in them: Claude Code started from a
-/// client, pi's TUI when a session is handed to it. Each is titled by its program until the
-/// program titles it.
-#[derive(Debug)]
-struct AgentTerminals(Worker);
-
-impl AgentTerminalsTrait for AgentTerminals {
-    fn open(
-        &self,
-        command: Vec<String>,
-        cwd: String,
-        env: Vec<(String, String)>,
-    ) -> Pending<'_, Result<SessionId, String>> {
-        Box::pin(async move {
-            let open = opening(command, cwd, env);
-            self.0.open(&open).await.map(|session| session.id()).map_err(|e| e.to_string())
-        })
-    }
-
-    fn open_at(
-        &self,
-        seat: SessionId,
-        command: Vec<String>,
-        cwd: String,
-        env: Vec<(String, String)>,
-    ) -> Pending<'_, Result<SessionId, String>> {
-        Box::pin(async move {
-            let open = opening(command, cwd, env);
-            self.0.open_as(seat, &open).await.map(|session| session.id()).map_err(|e| e.to_string())
-        })
-    }
-
-    fn exited(&self, session: SessionId) -> Pending<'static, ()> {
-        let handle = self.0.get(session).ok();
-        Box::pin(async move {
-            let Some(handle) = handle else { return };
-            let mut activity = handle.activity();
-            while !activity.borrow_and_update().exited {
-                if activity.changed().await.is_err() {
-                    return;
-                }
-            }
-        })
-    }
-
-    fn close(&self, session: SessionId) -> Pending<'_, ()> {
-        Box::pin(async move {
-            if let Err(e) = self.0.close(session).await {
-                tracing::debug!(%session, "an agent's terminal did not close: {e}");
-            }
-        })
-    }
-}
-
-/// The agents' terminals, each one opened told to every client as a client's own is: the
-/// thread names the terminal its agent runs in, and a client shows the agent there only once it
-/// knows that terminal is live.
-#[derive(Debug)]
-struct Announced {
-    terminals: Arc<AgentTerminals>,
-    daemon: Daemon,
-}
-
-impl Announced {
-    /// Tell every client of `session`, just opened.
-    async fn announce(&self, session: SessionId) {
-        if let Some(summary) = self.daemon.worker.summary(session).await {
-            let _sent = self.daemon.events.send(WorkerMsg::SessionChanged(summary));
-        }
-    }
-}
-
-impl AgentTerminalsTrait for Announced {
-    fn open(
-        &self,
-        command: Vec<String>,
-        cwd: String,
-        env: Vec<(String, String)>,
-    ) -> Pending<'_, Result<SessionId, String>> {
-        Box::pin(async move {
-            let session = self.terminals.open(command, cwd, env).await?;
-            self.announce(session).await;
-            Ok(session)
-        })
-    }
-
-    fn open_at(
-        &self,
-        seat: SessionId,
-        command: Vec<String>,
-        cwd: String,
-        env: Vec<(String, String)>,
-    ) -> Pending<'_, Result<SessionId, String>> {
-        Box::pin(async move {
-            let session = self.terminals.open_at(seat, command, cwd, env).await?;
-            self.announce(session).await;
-            Ok(session)
-        })
-    }
-
-    fn exited(&self, session: SessionId) -> Pending<'static, ()> {
-        self.terminals.exited(session)
-    }
-
-    fn close(&self, session: SessionId) -> Pending<'_, ()> {
-        self.terminals.close(session)
-    }
-}
-
 /// What the adapters take their asks from once they start.
 #[derive(Debug)]
-pub struct Observing {
+pub struct Adapters {
     claude: claude::Asks,
-    claude_start: claude::start::Asks,
     codex: codex::Asks,
     pi: pi::Asks,
     acp: acp::Asks,
     /// The daemon's data directory.
     data: PathBuf,
-    /// The terminals Claude Code and pi's TUI run in.
-    terminals: Arc<AgentTerminals>,
+    /// Where ptyd listens, which keeps each Claude Code.
+    ptyd: PathBuf,
 }
 
-/// Observe every Claude Code session and follow every Codex thread into the daemon's
-/// threads, start Claude Code threads in its terminals, serve the pi and ACP threads it starts,
-/// snapshot each turn, name the screens each agent drives, and watch each thread's pull
-/// request where gh or glab is installed.
-pub fn start(daemon: &Daemon, asks: Observing) {
+/// Serve the daemon's threads: drive Claude Code, pi and ACP agents, follow every Codex thread,
+/// snapshot each turn, name the screens each agent drives, and watch each thread's pull request
+/// where gh or glab is installed.
+pub fn start(daemon: &Daemon, asks: Adapters) {
     let Some(threads) = &daemon.threads else { return };
     drop(threads.snapshots.spawn());
     drop(Screens::new(threads.host.clone()).spawn());
@@ -329,22 +130,15 @@ pub fn start(daemon: &Daemon, asks: Observing) {
             drop(slopty_worker::thread::pulls::spawn(host, programs, snapshots));
         }
     }));
-    threads.composer.resume();
-    let sources: Arc<dyn Sources> = Arc::new(Observed(daemon.clone()));
-    let (events, heard) = (daemon.events.subscribe(), daemon.heard.subscribe());
-    drop(claude::spawn(threads.host.clone(), events, heard, sources, asks.claude));
-    let terminals: Arc<dyn AgentTerminalsTrait> =
-        Arc::new(Announced { terminals: asks.terminals, daemon: daemon.clone() });
-    drop(claude::start::spawn(
-        threads.host.clone(),
-        threads.claude.clone(),
-        Arc::clone(&terminals),
-        None,
-        slopty_agent::roster::sessions_dir(&slopty_platform::dirs::home()),
-        asks.claude_start,
-    ));
+    let place = claude::Place {
+        data_dir: asks.data.clone(),
+        ptyd: asks.ptyd,
+        path: None,
+        home: slopty_platform::dirs::home(),
+    };
+    drop(claude::spawn(threads.host.clone(), place, asks.claude));
     if let Some(home) = codex::codex_home() {
-        let launch = codex::Launch::new(None).with_terminals(Arc::clone(&terminals));
+        let launch = codex::Launch::new(None);
         drop(codex::spawn(threads.host.clone(), codex::socket_of(&home), Some(launch), asks.codex));
     }
     // The registry's agents and the person's own, `[worker.acp]`, read at each start.
@@ -355,11 +149,9 @@ pub fn start(daemon: &Daemon, asks: Observing) {
     drop(pi::spawn(threads.host.clone(), asks.data, None, asks.pi));
     drop(acp::spawn(threads.host.clone(), None, own, asks.acp));
     // A scheduled message goes as the person's own, the way a client's does.
-    let (sending, at) = (threads.clone(), daemon.clone());
-    let fire: schedule::Fire = Arc::new(move |thread, id, intent| {
-        let who = Who { daemon: &at, link: ORCHESTRATION, client: ClientId::nil() };
-        act_as(&who, &sending, thread, id, &intent)
-    });
+    let sending = threads.clone();
+    let fire: schedule::Fire =
+        Arc::new(move |thread, id, intent| act_as(ClientId::nil(), &sending, thread, id, &intent));
     drop(schedule::spawn(threads.host.clone(), fire));
     resume_starts(threads);
 }
@@ -420,8 +212,6 @@ pub struct Origin<'a> {
     pub conn: &'a Connection,
     /// Its control stream.
     pub out: &'a mpsc::Sender<WorkerMsg>,
-    /// The connection, as the held prompts tell clients apart.
-    pub link: slopty_worker::clip::Link,
     /// The client.
     pub client: ClientId,
     /// The connection's tasks, which end with it.
@@ -429,11 +219,6 @@ pub struct Origin<'a> {
 }
 
 impl Origin<'_> {
-    /// Who acts through this connection.
-    const fn who(&self) -> Who<'_> {
-        Who { daemon: self.daemon, link: self.link, client: self.client }
-    }
-
     /// Answer the client: at once while its control queue has room, else on a task of the
     /// connection's that waits for room ([`post_on`]).
     fn post(&mut self, msg: WorkerMsg) {
@@ -464,8 +249,8 @@ pub struct Following {
     /// The task keeping the client's table current, replaced by its next ask.
     table: Option<AbortHandle>,
     /// Each followed thread's task, which takes its requests here and ends when the sender
-    /// goes, and the terminal the thread's agent runs in.
-    threads: HashMap<ThreadId, (mpsc::UnboundedSender<Command>, Option<SessionId>)>,
+    /// goes.
+    threads: HashMap<ThreadId, mpsc::UnboundedSender<Command>>,
 }
 
 impl Drop for Following {
@@ -485,12 +270,6 @@ enum Command {
 }
 
 impl Following {
-    /// Whether a followed thread's agent runs in `session`: the prompts held there are held
-    /// for this connection while it is.
-    fn follows_session(&self, session: SessionId) -> bool {
-        self.threads.values().any(|(_, terminal)| *terminal == Some(session))
-    }
-
     /// Take `req` from the client on `at`.
     pub fn handle(&mut self, at: &mut Origin<'_>, req: ThreadRequest) {
         let Some(threads) = at.daemon.threads.clone() else {
@@ -516,8 +295,6 @@ impl Following {
                 if let Some(old) = self.table.take() {
                     old.abort();
                 }
-                // Every thread's requests show in the table, so its holder answers approvals.
-                at.daemon.follows.lock().holds.approve(at.link);
                 self.table = Some(at.tasks.spawn(table(threads.host, have, at.out.clone())));
             }
             ThreadRequest::Follow { thread, have, turns, max_latency_ms } => {
@@ -532,26 +309,16 @@ impl Following {
                 if codex::is_shared(&state) {
                     threads.codex.wake(thread);
                 }
-                let terminal = state.meta.terminal;
-                // Its prompts are held for this client while it follows, and shown on the thread.
-                if let Some(session) = terminal {
-                    at.daemon.follows.lock().holds.follow(session, at.link);
-                }
                 tracing::info!(client = %at.client, %thread, ?have, "follow thread");
                 let follower =
                     Follower::new(threads.host.clone(), thread, have, turns, max_latency_ms);
                 let (commands, taken) = mpsc::unbounded_channel();
                 at.tasks.spawn(stream(threads, at.conn.clone(), follower, taken));
-                self.threads.insert(thread, (commands, terminal));
+                self.threads.insert(thread, commands);
             }
             ThreadRequest::Unfollow { thread } => {
-                let Some((_task, terminal)) = self.threads.remove(&thread) else { return };
-                tracing::info!(client = %at.client, %thread, "unfollow thread");
-                if let Some(session) = terminal
-                    && !self.follows_session(session)
-                {
-                    let released = at.daemon.follows.lock().holds.unfollow(session, at.link);
-                    hold::release(at.daemon, released);
+                if self.threads.remove(&thread).is_some() {
+                    tracing::info!(client = %at.client, %thread, "unfollow thread");
                 }
             }
             ThreadRequest::Page { thread, before, turns } => {
@@ -580,24 +347,9 @@ impl Following {
             // An agent's own review names the change as commits first: on a task of its own.
             ThreadRequest::Intent { id, thread, intent: Intent::Review { from, to } } => {
                 tracing::info!(client = %at.client, %id, %thread, "review by the agent");
-                let (daemon, link, client, out) =
-                    (at.daemon.clone(), at.link, at.client, at.out.clone());
+                let (client, out) = (at.client, at.out.clone());
                 at.tasks.spawn(async move {
-                    let who = Who { daemon: &daemon, link, client };
-                    let outcome = review(&who, &threads, thread, id, &from, &to).await;
-                    let _gone = out.send(WorkerMsg::IntentDone(IntentDone { id, outcome })).await;
-                });
-            }
-            // Codex's own TUI is found and opened on the thread: on a task of its own.
-            ThreadRequest::Intent { id, thread, intent: Intent::Release { .. } }
-                if threads
-                    .host
-                    .state(thread)
-                    .is_some_and(|(state, _)| codex::is_shared(&state)) =>
-            {
-                let (codex, out) = (threads.codex, at.out.clone());
-                at.tasks.spawn(async move {
-                    let outcome = codex.release(thread, id).await;
+                    let outcome = review(client, &threads, thread, id, &from, &to).await;
                     let _gone = out.send(WorkerMsg::IntentDone(IntentDone { id, outcome })).await;
                 });
             }
@@ -679,7 +431,7 @@ impl Following {
 
     fn command(&self, at: &Origin<'_>, thread: ThreadId, command: Command) {
         match self.threads.get(&thread) {
-            Some((task, _)) => {
+            Some(task) => {
                 let _gone = task.send(command);
             }
             None => {
@@ -718,14 +470,13 @@ async fn run_start(
     threads.host.record_start(id, outcome)
 }
 
-/// Start a thread for intent `id` as `start` says, once, on its agent's adapter: pi and an
-/// ACP agent are looked for and run here, Claude Code opens in a terminal, Codex's daemon is
-/// asked.
+/// Start a thread for intent `id` as `start` says, once, on its agent's adapter: Claude Code,
+/// pi and an ACP agent are looked for and run here, Codex's daemon is asked.
 async fn begin(threads: &Threads, id: IntentId, start: Box<Start>) -> Outcome {
     if start.agent.is(AgentId::PI) {
         threads.pi.start(id, start).await
     } else if start.agent.is(AgentId::CLAUDE_CODE) {
-        threads.claude_start.start(id, *start).await
+        threads.claude.start(id, start).await
     } else if start.agent.is(AgentId::CODEX) {
         threads.codex.start(id, *start).await
     } else if slopty_agent::acp::name_of(&start.agent).is_some() {
@@ -755,7 +506,7 @@ async fn fork(threads: &Threads, thread: ThreadId, id: IntentId, after: Option<T
     } else if acp::is_acp(&state) {
         threads.acp.fork(thread, id, after).await
     } else if state.meta.agent.is(AgentId::CLAUDE_CODE) {
-        threads.claude_start.fork(thread, id, after).await
+        threads.claude.fork(thread, id, after).await
     } else {
         let reason = format!("{} threads are not forked here", state.meta.agent.0);
         threads.host.record_start(id, refused(reason))
@@ -817,7 +568,6 @@ async fn free_worktree(threads: &Threads, state: &ThreadState) {
         .await
         .into_iter()
         .filter(|s| matches!(s.state, slopty_proto::terminal::SessionState::Running))
-        .filter(|s| Some(s.id) != state.meta.terminal)
         .filter_map(|s| s.cwd)
         .map(|cwd| slopty_worker::file::expand_home(Path::new(&cwd)));
     let cwds: Vec<PathBuf> = others.into_iter().chain(terminals).collect();
@@ -842,9 +592,9 @@ const REVIEW_TITLE: &str = "The changes on show in Slopty's review";
 /// Ask `thread`'s agent for its own review of the change from `from` to `to`, for intent `id`,
 /// once: the change is kept as two commits ([`Snapshots::review_range`]), then Codex's reviewer
 /// takes the head commit, and Claude Code's `/code-review` the range, sent as the person's turn
-/// through its composer as any command of theirs is.
+/// as any command of theirs is.
 async fn review(
-    who: &Who<'_>,
+    client: ClientId,
     threads: &Threads,
     thread: ThreadId,
     id: IntentId,
@@ -874,9 +624,9 @@ async fn review(
         let outcome = threads.codex.review(thread, range.head, REVIEW_TITLE.to_owned()).await;
         return once(outcome);
     }
-    let text = format!("/{} {}", slopty_agent::observed::REVIEW_COMMAND, range.dots());
+    let text = format!("/{} {}", slopty_agent::claude::REVIEW_COMMAND, range.dots());
     let delivery = state.meta.delivery_after_turn();
-    act_as(who, threads, thread, id, &Intent::Send { text, delivery, attachments: Vec::new() })
+    act_as(client, threads, thread, id, &Intent::Send { text, delivery, attachments: Vec::new() })
 }
 
 /// Keep aside `thread` for intent `id`, once, as an ordinary thread of its own.
@@ -933,7 +683,6 @@ async fn sessions(
         }
     };
     let mut sessions = sessions;
-    mark_running(&mut sessions).await;
     for past in &mut sessions {
         if let Some((thread, title)) = threads.host.session(&past.agent, &past.native) {
             past.thread = Some(thread);
@@ -943,27 +692,6 @@ async fn sessions(
         }
     }
     PastSessions { agent, cwd, query, sessions, absent, cut }
-}
-
-/// Mark each Claude Code session a live Claude Code holds, as Claude Code's own registry of its
-/// live sessions says it now ([`slopty_proto::thread::wire::PAST_RUNNING`]): the person sees it
-/// runs before they pick it, and a pick of it is refused.
-async fn mark_running(sessions: &mut [slopty_proto::thread::wire::PastSession]) {
-    if !sessions.iter().any(|p| p.agent.is(AgentId::CLAUDE_CODE)) {
-        return;
-    }
-    let listed = tokio::task::spawn_blocking(|| {
-        let registry = slopty_agent::roster::sessions_dir(&slopty_platform::dirs::home());
-        slopty_agent::roster::registered(&registry, slopty_worker::ports::alive)
-    })
-    .await
-    .unwrap_or_default();
-    for past in sessions.iter_mut().filter(|p| p.agent.is(AgentId::CLAUDE_CODE)) {
-        if let Some(live) = slopty_agent::roster::holder(&listed, &past.native) {
-            let how = live.kind.clone().unwrap_or_else(|| "interactive".to_owned());
-            past.facts.insert(slopty_proto::thread::wire::PAST_RUNNING.to_owned(), how);
-        }
-    }
 }
 
 /// Agent `agent`'s past sessions in folder `cwd`, at most `limit`, the last first, as the agent
@@ -978,10 +706,12 @@ async fn listed(
     let listed = if agent.is(AgentId::CLAUDE_CODE) {
         let (home, dir) = (slopty_platform::dirs::home(), PathBuf::from(&cwd));
         let most = usize::try_from(limit).unwrap_or(usize::MAX);
-        tokio::task::spawn_blocking(move || slopty_agent::discover::sessions(&home, &dir, most))
-            .await
-            .map_err(|e| e.to_string())
-            .and_then(|listed| listed.map_err(|e| format!("Claude Code's sessions: {e}")))
+        tokio::task::spawn_blocking(move || {
+            slopty_agent::claude::sessions::sessions(&home, &dir, most)
+        })
+        .await
+        .map_err(|e| e.to_string())
+        .and_then(|listed| listed.map_err(|e| format!("Claude Code's sessions: {e}")))
     } else if agent.is(AgentId::CODEX) {
         threads.codex.sessions(cwd.clone(), limit).await
     } else if agent.is(AgentId::PI) {
@@ -1015,12 +745,12 @@ fn act(
     id: IntentId,
     intent: &Intent,
 ) -> Outcome {
-    act_as(&at.who(), threads, thread, id, intent)
+    act_as(at.client, threads, thread, id, intent)
 }
 
-/// [`act`], for `who`.
+/// [`act`], for `client`: the nil client for the worker's own and orchestration's.
 fn act_as(
-    who: &Who<'_>,
+    client: ClientId,
     threads: &Threads,
     thread: ThreadId,
     id: IntentId,
@@ -1030,33 +760,22 @@ fn act_as(
     if let Some(outcome) = schedule::act(&threads.host, thread, id, intent) {
         return outcome;
     }
-    let decided = threads.host.intent(thread, id, |state| decide(who, threads, state, id, intent));
+    let decided =
+        threads.host.intent(thread, id, |state| decide(client, threads, state, id, intent));
     decided.unwrap_or_else(|| refused("no such thread".to_owned()))
 }
 
-/// Who acts on a thread: a client's connection, or orchestration's verbs.
-struct Who<'a> {
-    /// The daemon.
-    daemon: &'a Daemon,
-    /// The link the held prompts know it by.
-    link: slopty_worker::clip::Link,
-    /// The client; the nil client for orchestration.
-    client: ClientId,
-}
-
 /// The daemon's threads as orchestration's verbs read and answer them
-/// ([`slopty_worker::orchestrate::ThreadReads`]): as [`ORCHESTRATION`], by the nil client,
-/// so a Claude Code prompt held for orchestration's read is answered here.
+/// ([`slopty_worker::orchestrate::ThreadReads`]), by the nil client.
 #[derive(Clone)]
 pub struct Reads {
     threads: Threads,
-    daemon: Daemon,
 }
 
 impl Reads {
-    /// `threads`, as `daemon`'s orchestration reaches them.
-    pub const fn new(threads: Threads, daemon: Daemon) -> Self {
-        Self { threads, daemon }
+    /// `threads`, as orchestration reaches them.
+    pub const fn new(threads: Threads) -> Self {
+        Self { threads }
     }
 }
 
@@ -1066,117 +785,41 @@ impl orchestrate::ThreadReads for Reads {
     }
 
     fn intent(&self, thread: ThreadId, id: IntentId, intent: Intent) -> Outcome {
-        let who = Who { daemon: &self.daemon, link: ORCHESTRATION, client: ClientId::nil() };
         tracing::info!(%thread, %id, "an intent from orchestration");
-        act_as(&who, &self.threads, thread, id, &intent)
+        act_as(ClientId::nil(), &self.threads, thread, id, &intent)
     }
 
-    fn at_terminal(&self, session: SessionId) -> Option<ThreadRow> {
-        self.threads.host.at_terminal(session)
+    fn seated_at(&self, session: SessionId) -> Option<ThreadRow> {
+        let thread = self.threads.host.seated_at(session)?;
+        let (state, _) = self.threads.host.state(thread)?;
+        Some(state.row(slopty_core::WallMs::now()))
     }
 }
 
-/// What comes of `intent` on `state`'s thread, done as it is decided.
+/// What comes of `intent` on `state`'s thread, from `client`, done as it is decided.
 fn decide(
-    who: &Who<'_>,
+    client: ClientId,
     threads: &Threads,
     state: &ThreadState,
     id: IntentId,
     intent: &Intent,
-) -> (Outcome, Vec<Action>) {
-    if beyond_caps(state, intent) {
+) -> (Outcome, Vec<slopty_proto::thread::Action>) {
+    if intent.needs().is_some_and(|needs| !state.meta.can(needs)) {
         return (intent.unsupported(), Vec::new());
     }
-    if let Some(trusting) = trust_pressed(threads, state, intent) {
-        return (trusting, Vec::new());
-    }
-    if codex::is_shared(state) {
-        return (shared(who, &threads.codex, state, id, intent), Vec::new());
-    }
-    if pi::is_pi(state) {
-        let by = answerer(who.client);
-        return (threads.pi.decide(state, id, intent, by), Vec::new());
-    }
-    if acp::is_acp(state) {
-        let by = answerer(who.client);
-        return (threads.acp.decide(state, id, intent, by), Vec::new());
-    }
-    let Some(session) = state.meta.terminal else {
-        let reason = "the thread's agent runs in no terminal here".to_owned();
-        return (refused(reason), Vec::new());
-    };
-    // An agent that exited left its terminal to whatever runs there now, maybe another session:
-    // nothing of this thread's goes into it. Its messages still waiting may be changed.
-    let waiting_only =
-        matches!(intent, Intent::Withdraw { .. } | Intent::Edit { .. } | Intent::Move { .. });
-    if matches!(state.status.liveness, Liveness::Exited { .. }) && !waiting_only {
-        return (refused("Claude Code no longer runs this session".to_owned()), Vec::new());
-    }
-    if let Some(decided) = threads.composer.decide(state, id, intent) {
-        return decided;
-    }
-    let outcome = match intent {
-        Intent::Answer { ask, choice, message } => {
-            let verdict = slopty_agent::observed::verdict(choice, message.as_deref());
-            match (held(ask), verdict) {
-                (None, _) => refused(format!("no request {}", ask.0)),
-                (_, None) => refused(format!("no choice {choice}")),
-                (Some(held), Some(verdict)) => {
-                    answered(hold::answer(who.daemon, who.link, who.client, session, held, verdict))
-                }
-            }
-        }
-        Intent::Release { ask } => match held(ask) {
-            Some(held) => {
-                answered(hold::hand_back(who.daemon, who.link, who.client, session, held))
-            }
-            // Asked in the agent's own terminal with nothing held here: it is there already.
-            None if asked_in_terminal(state, ask) => Outcome::Done,
-            None => refused(format!("no request {}", ask.0)),
-        },
-        _ => intent.unsupported(),
+    let by = answerer(client);
+    let outcome = if codex::is_shared(state) {
+        shared(client, &threads.codex, state, id, intent)
+    } else if claude::is_claude(state) {
+        threads.claude.decide(state, id, intent, by)
+    } else if pi::is_pi(state) {
+        threads.pi.decide(state, id, intent, by)
+    } else if acp::is_acp(state) {
+        threads.acp.decide(state, id, intent, by)
+    } else {
+        refused(format!("{} threads are not driven here", state.meta.agent.0))
     };
     (outcome, Vec::new())
-}
-
-/// Whether `intent` asks what `state`'s thread does not declare it can do. "Trust this folder"
-/// is never beyond it: Claude Code held at its trust dialog has spoken no hook yet, so its thread
-/// declares no approvals, and the trust it offers is the start's own, not an approval.
-fn beyond_caps(state: &ThreadState, intent: &Intent) -> bool {
-    !presses_trust(intent) && intent.needs().is_some_and(|needs| !state.meta.can(needs))
-}
-
-/// Whether `intent` is the press of "Trust this folder" on a start held at the trust dialog.
-fn presses_trust(intent: &Intent) -> bool {
-    matches!(intent, Intent::Answer { ask, choice, .. }
-        if ask.0 == slopty_agent::observed::UNHEARD_ASK
-            && choice == slopty_agent::observed::TRUST_CHOICE)
-}
-
-/// "Trust this folder" pressed on a Claude Code start held at a dialog of its own, where the
-/// request offers it: the folder is trusted and Claude Code opened again past the dialog, on
-/// the starts' own task ([`claude::start::Starter::trust`]). Taken at once; the request settles
-/// when the agent's hooks first speak. `None` for any other intent.
-fn trust_pressed(threads: &Threads, state: &ThreadState, intent: &Intent) -> Option<Outcome> {
-    let Intent::Answer { ask, choice, .. } = intent else { return None };
-    if !presses_trust(intent) {
-        return None;
-    }
-    let offered = state
-        .requests
-        .iter()
-        .any(|r| r.id == *ask && r.is_open() && r.options.iter().any(|o| o.id == *choice));
-    if !offered {
-        return Some(refused("This start offers no trust to give".to_owned()));
-    }
-    let (starts, thread) = (threads.claude_start.clone(), state.meta.id);
-    drop(tokio::spawn(async move {
-        let outcome = starts.trust(thread).await;
-        if !matches!(outcome, Outcome::Done) {
-            tracing::warn!(%thread, ?outcome, "a folder was not trusted");
-        }
-    }));
-    Some(Outcome::Accepted)
 }
 
 /// What comes of `intent` on a Codex thread: it goes to the app-server as the Codex TUI's own
@@ -1184,7 +827,7 @@ fn trust_pressed(threads: &Threads, state: &ThreadState, intent: &Intent) -> Opt
 /// error: the card shows who settled it. A reason given with an answer goes as the person's
 /// next words into the turn, since a Codex decision carries none.
 fn shared(
-    who: &Who<'_>,
+    client: ClientId,
     codex: &Codex,
     state: &ThreadState,
     id: IntentId,
@@ -1210,8 +853,7 @@ fn shared(
             if !offered && slopty_proto::thread::detail::Answer::read(questions, choice).is_none() {
                 return refused("the answer does not answer each question".to_owned());
             }
-            let by = Answerer { client: Some(who.client), name: "Slopty".to_owned() };
-            codex.answer(thread, ask.clone(), choice.clone(), by, id);
+            codex.answer(thread, ask.clone(), choice.clone(), answerer(client), id);
             if let Some(why) = message.as_deref().map(str::trim).filter(|w| !w.is_empty()) {
                 codex.send(thread, why.to_owned(), Vec::new(), Delivery::Steer, id);
             }
@@ -1306,30 +948,6 @@ fn not_while_exited(state: &ThreadState, intent: &Intent) -> Option<Outcome> {
             | Intent::SetMode { .. }
     );
     (!(resumable && waits)).then(|| refused("Codex isn't running this thread".to_owned()))
-}
-
-/// An answer or a hand-back taken, or why not: someone answered first (another device a moment
-/// before), the prompt went back to the agent's own terminal, or it was never shown here.
-fn answered(taken: bool) -> Outcome {
-    if taken {
-        Outcome::Done
-    } else {
-        refused("this was answered already, or went back to the agent's own terminal".to_owned())
-    }
-}
-
-/// The held prompt a request made from it names.
-fn held(ask: &AskId) -> Option<u64> {
-    ask.0.parse().ok()
-}
-
-/// Whether `ask` is open on the thread and answered only in the agent's own terminal: it
-/// offers nothing here.
-fn asked_in_terminal(state: &ThreadState, ask: &AskId) -> bool {
-    state
-        .requests
-        .iter()
-        .any(|r| r.id == *ask && r.is_open() && r.options.is_empty() && r.questions.is_empty())
 }
 
 /// The thread table as the server is told of it: every row first, then what changed. The
@@ -1488,50 +1106,22 @@ impl Threads {
         &self.host
     }
 
-    /// Codex's TUI on thread `native`, found in terminal `session` by the agent scan, runs
-    /// there (`running`) or has gone ([`Codex::tui_runs`]).
-    pub(crate) fn codex_tui(&self, native: &str, session: SessionId, running: bool) {
-        self.codex.tui_runs(native, session, running);
-    }
-
-    /// How many turns run now in threads this worker drives itself (pi, an ACP agent): their
-    /// agents are this daemon's children, so they end with it, where a terminal's agent goes on
-    /// in ptyd and Codex in its own daemon. An update says so before it ends them.
+    /// How many turns run now in threads whose agents are this daemon's children (pi, an ACP
+    /// agent), so they end with it, where Claude Code goes on in ptyd's custody and Codex in its
+    /// own daemon. An update says so before it ends them.
     pub fn driven_turns(&self) -> usize {
         let TableFrame::Snapshot { rows, .. } = self.host.table(None) else { return 0 };
-        rows.iter()
-            .filter(|row| {
-                ends_with_daemon(&row.drive, row.parent.is_some(), row.status.liveness)
-                    && mid_turn(row.status.phase)
-            })
-            .count()
+        rows.iter().filter(|row| ends_with_daemon(row) && mid_turn(row.status.phase)).count()
     }
 
     /// The whole of `content`, clipped in `thread`, from the adapter that made it.
     async fn expand(&self, thread: ThreadId, content: ContentRef) -> Expanded {
-        let meta = self.host.state(thread).map(|(state, _)| state.meta);
-        match meta.and_then(|m| m.terminal.filter(|_| m.agent.is(AgentId::CLAUDE_CODE))) {
-            Some(session) => self.claude.expand(session, content).await,
-            None => Expanded::Gone,
+        match self.host.state(thread) {
+            Some((state, _)) if claude::is_claude(&state) => {
+                self.claude.expand(thread, content).await
+            }
+            _ => Expanded::Gone,
         }
-    }
-}
-
-/// A terminal for an agent's own TUI: `command` in `cwd`, with `env`, titled by its program
-/// until the program titles it.
-fn opening(
-    command: Vec<String>,
-    cwd: String,
-    env: Vec<(String, String)>,
-) -> slopty_proto::terminal::OpenSession {
-    let program = command.first().map(|p| p.rsplit('/').next().unwrap_or(p).to_owned());
-    slopty_proto::terminal::OpenSession {
-        size: slopty_proto::terminal::TermSize::default(),
-        cwd: Some(cwd),
-        command,
-        env,
-        title: program,
-        attach: false,
     }
 }
 
@@ -1544,7 +1134,7 @@ impl orchestrate::SeatedThreads for Threads {
     ) -> orchestrate::BoxFuture<'_, Result<ThreadId, Failure>> {
         Box::pin(async move {
             let orchestrate::SeatedThread { start, seat, facts, system } = thread;
-            let relay = slopty_agent::hooks::relay_beside_this_binary()
+            let relay = slopty_agent::mcp::cli_beside_this_binary()
                 .map(|relay| relay.to_string_lossy().into_owned());
             let seated = Seated { seat, facts, system, relay };
             let agent = start.agent.clone();
@@ -1552,7 +1142,7 @@ impl orchestrate::SeatedThreads for Threads {
             let outcome = if agent.is(AgentId::PI) {
                 self.pi.start_seated(Box::new(start), seated).await
             } else if agent.is(AgentId::CLAUDE_CODE) {
-                self.claude_start.start_seated(start, seated).await
+                self.claude.start_seated(Box::new(start), seated).await
             } else if agent.is(AgentId::CODEX) {
                 self.codex.start_seated(start, seated).await
             } else if slopty_agent::acp::name_of(&agent).is_some() {
@@ -1593,8 +1183,7 @@ fn started(agent: &AgentId, outcome: Outcome) -> Result<ThreadId, Failure> {
 }
 
 impl Threads {
-    /// End `state`'s agent, its session kept to take up again: each adapter ends its own, and
-    /// an agent in a terminal ends with it, as a seat's terminal is closed.
+    /// End `state`'s agent, its session kept to take up again: each adapter ends its own.
     async fn end(&self, state: &ThreadState) -> Result<(), String> {
         let thread = state.meta.id;
         if codex::is_shared(state) {
@@ -1603,24 +1192,16 @@ impl Threads {
             self.pi.close(thread).await;
         } else if acp::is_acp(state) {
             self.acp.close(thread).await;
-        } else if let Some(terminal) = state.meta.terminal {
-            self.worker.close(terminal).await.map_err(|e| e.to_string())?;
+        } else if claude::is_claude(state) {
+            self.claude.close(thread).await;
+        } else {
+            return Err(format!("{} threads are not driven here", state.meta.agent.0));
         }
         Ok(())
     }
 
-    /// The thread the server started at `seat`, when one runs in no terminal of its own:
-    /// what the server delivers to the seat goes to it as a message.
-    #[must_use]
-    pub fn seated_without_terminal(&self, seat: SessionId) -> Option<ThreadId> {
-        let thread = self.host.seated_at(seat)?;
-        let (state, _) = self.host.state(thread)?;
-        state.meta.terminal.is_none().then_some(thread)
-    }
-
-    /// Send `text` to the thread seated at `seat`, once for delivery `batch`: queued behind the
-    /// turn under way where its agent queues, else steered into it. The words are the reports
-    /// block a terminal agent's hooks hand it.
+    /// Send `text`, Slopty's reports, to the thread seated at `seat`, once for delivery
+    /// `batch`: queued behind the turn under way where its agent queues, else steered into it.
     pub fn deliver(&self, seat: SessionId, batch: u64, text: &str) -> Outcome {
         let Some(thread) = self.host.seated_at(seat) else {
             return refused("no thread is seated there".to_owned());
@@ -1642,10 +1223,10 @@ impl Threads {
                 self.pi.decide(state, id, &intent, by)
             } else if acp::is_acp(state) {
                 self.acp.decide(state, id, &intent, by)
+            } else if claude::is_claude(state) {
+                self.claude.report(thread, text.to_owned())
             } else {
-                return self.composer.decide(state, id, &intent).unwrap_or_else(|| {
-                    (refused("its agent takes no message here".to_owned()), Vec::new())
-                });
+                refused("its agent takes no message here".to_owned())
             };
             (outcome, Vec::new())
         });
@@ -1653,11 +1234,14 @@ impl Threads {
     }
 }
 
-/// Whether a thread driven as `drive`, under another thread when `nested`, with `liveness`,
-/// runs as this daemon's child and so ends with it: a driven thread's agent, live, counted once
-/// for its family (a subagent runs in its parent's process).
-fn ends_with_daemon(drive: &Drive, nested: bool, liveness: Liveness) -> bool {
-    drive.is(Drive::DRIVEN) && !nested && matches!(liveness, Liveness::Live)
+/// Whether `row`'s thread runs as this daemon's child and so ends with it: a driven thread's
+/// agent, live, counted once for its family (a subagent runs in its parent's process), and not
+/// Claude Code, which ptyd keeps.
+fn ends_with_daemon(row: &ThreadRow) -> bool {
+    row.drive.is(Drive::DRIVEN)
+        && !row.agent.is(AgentId::CLAUDE_CODE)
+        && row.parent.is_none()
+        && matches!(row.status.liveness, Liveness::Live)
 }
 
 /// Whether a thread at `phase` is in the middle of a turn: working, waiting on its own work, or
@@ -1670,19 +1254,36 @@ const fn mid_turn(phase: Phase) -> bool {
 mod tests {
     use super::*;
 
-    /// Only a live driven thread's turn ends with the daemon: a terminal's agent (observed)
-    /// goes on in ptyd and Codex (shared) in its own daemon, a subagent is its parent's, and a
-    /// thread at rest or ended loses nothing.
+    /// A thread of no agent's in particular, as a test starts it.
+    fn a_thread() -> ThreadState {
+        slopty_agent::claude::history::replay(&[])
+    }
+
+    /// Only a live driven thread's turn ends with the daemon: Claude Code goes on in ptyd's
+    /// custody and Codex (shared) in its own daemon, a subagent is its parent's, and a thread at
+    /// rest or ended loses nothing.
     #[test]
     fn only_a_driven_thread_mid_turn_ends_with_the_daemon() {
-        let live = Liveness::Live;
-        let driven = Drive::named(Drive::DRIVEN);
-        assert!(ends_with_daemon(&driven, false, live));
-        assert!(!ends_with_daemon(&driven, true, live), "a subagent is its parent's");
-        for other in [Drive::OBSERVED, Drive::SHARED] {
-            assert!(!ends_with_daemon(&Drive::named(other), false, live), "{other}");
-        }
-        assert!(!ends_with_daemon(&driven, false, Liveness::Exited { resumable: true }));
+        let mut row = a_thread().row(slopty_core::WallMs::now());
+        row.agent = AgentId::named(AgentId::PI);
+        row.drive = Drive::named(Drive::DRIVEN);
+        row.status.liveness = Liveness::Live;
+        assert!(ends_with_daemon(&row));
+        let nested = ThreadRow {
+            parent: Some(slopty_proto::thread::Link {
+                thread: ThreadId::new(),
+                item: slopty_proto::thread::ItemId("toolu_1".to_owned()),
+            }),
+            ..row.clone()
+        };
+        assert!(!ends_with_daemon(&nested), "a subagent is its parent's");
+        let claude = ThreadRow { agent: AgentId::named(AgentId::CLAUDE_CODE), ..row.clone() };
+        assert!(!ends_with_daemon(&claude), "ptyd keeps Claude Code");
+        let shared = ThreadRow { drive: Drive::named(Drive::SHARED), ..row.clone() };
+        assert!(!ends_with_daemon(&shared), "Codex runs in its own daemon");
+        let mut ended = row;
+        ended.status.liveness = Liveness::Exited { resumable: true };
+        assert!(!ends_with_daemon(&ended));
         let mid = [Phase::Working, Phase::Waiting, Phase::NeedsYou];
         assert!(mid.into_iter().all(mid_turn));
         let resting = [Phase::Idle, Phase::Done, Phase::Failed, Phase::Stopped];
@@ -1695,14 +1296,7 @@ mod tests {
     /// up again takes nothing.
     #[test]
     fn an_exited_codex_thread_still_takes_a_message() {
-        let now = slopty_core::WallMs::now();
-        let mut observed =
-            slopty_agent::observed::Observed::provisional("", SessionId::new(), "/w", now);
-        let Some(slopty_agent::observed::Out::Begin(meta)) = observed.drain().into_iter().next()
-        else {
-            panic!("a thread begins")
-        };
-        let mut state = ThreadState::new(*meta);
+        let mut state = a_thread();
         state.meta.agent = AgentId::named(AgentId::CODEX);
         state.meta.drive = Drive::named(Drive::SHARED);
         assert!(codex::is_shared(&state));
@@ -1720,30 +1314,6 @@ mod tests {
         assert!(not_while_exited(&state, &send).is_some(), "not resumable");
         state.status.liveness = Liveness::Live;
         assert_eq!(not_while_exited(&state, &Intent::Interrupt), None);
-    }
-
-    /// "Trust this folder" goes through on a Claude Code held at its trust dialog, whose thread
-    /// declares no approvals since no hook has spoken; any other answer there is beyond it.
-    #[test]
-    fn trust_is_pressed_before_any_hook_declares_approvals() {
-        let now = slopty_core::WallMs::now();
-        let mut observed =
-            slopty_agent::observed::Observed::provisional("", SessionId::new(), "/w", now);
-        let Some(slopty_agent::observed::Out::Begin(meta)) = observed.drain().into_iter().next()
-        else {
-            panic!("a thread begins")
-        };
-        let state = ThreadState::new(*meta);
-        assert!(!state.meta.can(Cap::APPROVALS), "no hook has spoken");
-        let answer = |ask: &str, choice: &str| Intent::Answer {
-            ask: AskId(ask.to_owned()),
-            choice: choice.to_owned(),
-            message: None,
-        };
-        let trust =
-            answer(slopty_agent::observed::UNHEARD_ASK, slopty_agent::observed::TRUST_CHOICE);
-        assert!(!beyond_caps(&state, &trust), "the trust press goes");
-        assert!(beyond_caps(&state, &answer("tool-1", "allow")), "an approval does not");
     }
 
     /// A review asked for again stops the one still being read, and the stream's end stops the

@@ -92,6 +92,7 @@ mod pi {
                 effort: None,
                 attachments: Vec::new(),
                 args: vec!["--offline".to_owned()],
+                options: std::collections::BTreeMap::new(),
                 worktree: None,
             })
         }
@@ -252,9 +253,6 @@ mod pi {
         };
         let (_, maybe) = rig.intent(&pi, thread, &answer("maybe", None));
         assert!(matches!(maybe, Outcome::Refused { .. }), "only what the gate offers: {maybe:?}");
-        let release = Intent::Release { ask: ask.clone() };
-        let (_, released) = rig.intent(&pi, thread, &release);
-        assert!(matches!(released, Outcome::Refused { .. }), "no prompt to give it to");
         assert_eq!(rig.intent(&pi, thread, &answer("allow", None)).1, Outcome::Done);
         let state = rig.until(thread, "the allowed turn", turn_ended(2, TurnState::Complete)).await;
         assert_eq!(

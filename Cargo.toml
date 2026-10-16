@@ -134,14 +134,6 @@ serde_json = "1.0.151"
 # same postcard bytes, one copy instead of a call per byte (kitty images, cursor shapes).
 serde_bytes = "0.11.19"
 similar = "3.2.0"
-# Syntax colouring for file cards, fenced code and the settings (`slopty_ui::highlight`): bat's
-# grammars (two-face) on syntect's pure-Rust regex engine; no onig, no C.
-syntect = { version = "5.3.0", default-features = false, features = [
-    "parsing",
-    "regex-fancy",
-    "dump-load",
-] }
-two-face = { version = "0.5.2", default-features = false, features = [ "syntect-fancy" ] }
 # The design system's fonts and assets (`slopty-kit`): the installed families' metrics, and the
 # file icons embedded in the binary on every build (iOS reads no source tree at run time).
 fontdb = "0.23.0"

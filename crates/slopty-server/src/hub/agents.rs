@@ -140,12 +140,7 @@ fn mode_for(agent: &AgentId, autonomy: Autonomy) -> Option<String> {
 }
 
 /// `row`'s agent as the fleet has it.
-fn entry_of(worker: WorkerId, row: &ThreadRow, state: &State) -> AgentEntry {
-    let branch = row.facts.get("branch").cloned().or_else(|| {
-        let seat = seat_of(row)?;
-        let held = state.workers.get(&worker)?.branches.get(&seat)?;
-        held.worktree.as_ref()?.branch.clone()
-    });
+fn entry_of(worker: WorkerId, row: &ThreadRow) -> AgentEntry {
     AgentEntry {
         id: row.id,
         parent: parent_of(row),
@@ -153,7 +148,7 @@ fn entry_of(worker: WorkerId, row: &ThreadRow, state: &State) -> AgentEntry {
         agent: row.agent.clone(),
         title: row.title.clone(),
         folder: row.cwd.clone(),
-        branch,
+        branch: row.facts.get("branch").cloned(),
         phase: row.status.phase,
         wait: row.status.wait.clone(),
         ended: !there(row),
@@ -585,6 +580,7 @@ impl Hub {
             effort,
             attachments: Vec::new(),
             args: Vec::new(),
+            options: BTreeMap::new(),
             worktree: worktree.map(NewWorktree::named),
         };
         // A repeat under the same key takes the same seat, which the worker answers with the
@@ -687,7 +683,7 @@ impl Hub {
                     let Some((worker, row)) = state.board.row(*agent) else {
                         return unknown_agent(*agent);
                     };
-                    entries.push(entry_of(worker, row, &state));
+                    entries.push(entry_of(worker, row));
                 }
                 let met = if all {
                     entries.iter().all(|e| e.rests)
@@ -713,7 +709,7 @@ impl Hub {
                 let state = self.inner.state.lock();
                 let agents = agents
                     .iter()
-                    .filter_map(|a| state.board.row(*a).map(|(w, r)| entry_of(w, r, &state)))
+                    .filter_map(|a| state.board.row(*a).map(|(w, r)| entry_of(w, r)))
                     .collect();
                 return Outcome::Agents { agents, timed_out: true };
             }
@@ -769,7 +765,7 @@ impl Hub {
             .board
             .agent_rows()
             .filter(|(_, r)| there(r) || parent_of(r).is_some())
-            .map(|(worker, r)| entry_of(worker, r, &state))
+            .map(|(worker, r)| entry_of(worker, r))
             .collect();
         drop(state);
         agents.sort_by_key(|a| (a.parent, a.since_ms, a.id));

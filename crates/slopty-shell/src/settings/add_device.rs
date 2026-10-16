@@ -515,42 +515,27 @@ impl AddDeviceDialog {
         for (ix, node) in nodes.iter().enumerate() {
             let at = node.at.clone();
             let detail = node.note.clone().unwrap_or_else(|| node.at.clone());
-            let mut row = div()
+            let glyph = if server { crate::icons::REMOTE_SERVER } else { crate::icons::MONITOR };
+            // zeron's picker row: the whole row acts, its hover fading in; a node that cannot be
+            // joined says why and does not act.
+            let mut row = popover::picker_row(theme, false, false, format!("add-device-found-{ix}"))
                 .id(("add-device-found", ix))
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(8.0))
-                .px(px(8.0))
-                .py(px(6.0))
-                .rounded(px(8.0))
+                .debug_selector(move || format!("add-device-found-{ix}"))
+                .child(popover::picker_icon_slot(
+                    crate::icons::icon(glyph).size(px(14.0)).text_color(theme.text_muted).into_any_element(),
+                ))
+                .child(div().flex_none().max_w(px(180.0)).truncate().child(node.name.clone()))
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
-                        .child(
-                            div()
-                                .text_size(crate::typography::ui_rems(13.0))
-                                .text_color(theme.text)
-                                .truncate()
-                                .child(node.name.clone()),
-                        )
-                        .child(
-                            div()
-                                .text_size(crate::typography::ui_rems(12.0))
-                                .text_color(theme.text_muted)
-                                .truncate()
-                                .child(detail),
-                        ),
+                        .truncate()
+                        .text_size(crate::typography::ui_rems(12.0))
+                        .text_color(theme.text_muted)
+                        .child(detail),
                 );
             if node.ready {
-                row = row.child(
-                    widgets::text_action(
-                        theme,
-                        widgets::ActionTone::Filled,
-                        if server { "Connect" } else { "Install" },
-                    )
-                    .id(("add-device-found-go", ix))
+                row = row
                     .tab_index(0)
                     .role(gpui::Role::Button)
                     .aria_label(format!(
@@ -558,10 +543,18 @@ impl AddDeviceDialog {
                         if server { "Connect to" } else { "Install on" },
                         node.name
                     ))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(crate::typography::ui_rems(12.0))
+                            .text_color(theme.text_muted)
+                            .child(if server { "Connect" } else { "Install" }),
+                    )
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.press_found(server, at.clone(), window, cx);
-                    })),
-                );
+                    }));
+            } else {
+                row = row.cursor_default().opacity(0.6);
             }
             list = list.child(row);
         }
@@ -587,6 +580,16 @@ impl AddDeviceDialog {
                     .rounded_full()
                     .bg(theme.warning)
                     .into_any_element(),
+                // The run's share, on the step under way.
+                Mark::Running if share_on(&progress.steps, progress.share) == Some(ix) => {
+                    let percent = progress.share.map_or(0, |share| share_percent(share));
+                    crate::loaders::upload_progress_arc(
+                        percent,
+                        14.0,
+                        theme.text_muted.opacity(0.25),
+                        theme.text,
+                    )
+                }
                 Mark::Running => crate::loaders::mini_mono_spinner(
                     SharedString::from(format!("add-device-step-{ix}")),
                     2.0,
@@ -655,50 +658,41 @@ impl AddDeviceDialog {
                     .children(fix),
             );
         }
-        if let Some(share) = progress.share {
-            list = list.child(
-                div()
-                    .mt(px(6.0))
-                    .h(px(2.0))
-                    .w_full()
-                    .rounded_full()
-                    .bg(theme.text_muted.opacity(0.15))
-                    .child(
-                        div()
-                            .h_full()
-                            .rounded_full()
-                            .bg(theme.accent)
-                            .w(gpui::relative(share.clamp(0.0, 1.0))),
-                    ),
-            );
-        }
         for (ix, choose) in progress.choices.iter().enumerate().filter(|_| waits) {
             let at = choose.at.clone();
             list = list.child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(8.0))
-                    .pl(px(24.0))
+                popover::picker_row(theme, false, false, format!("add-device-choose-{ix}"))
+                    .id(("add-device-choose", ix))
+                    .debug_selector(move || format!("add-device-choose-{ix}"))
+                    .tab_index(0)
+                    .role(gpui::Role::Button)
+                    .aria_label(format!("Join {}", choose.name))
+                    .child(popover::picker_icon_slot(
+                        crate::icons::icon(crate::icons::REMOTE_SERVER)
+                            .size(px(14.0))
+                            .text_color(theme.text_muted)
+                            .into_any_element(),
+                    ))
+                    .child(div().flex_none().max_w(px(180.0)).truncate().child(choose.name.clone()))
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
-                            .text_size(crate::typography::ui_rems(13.0))
                             .truncate()
-                            .child(format!("{} \u{b7} {}", choose.name, choose.at)),
+                            .text_size(crate::typography::ui_rems(12.0))
+                            .text_color(theme.text_muted)
+                            .child(choose.at.clone()),
                     )
                     .child(
-                        widgets::text_action(theme, widgets::ActionTone::Filled, "Join")
-                            .id(("add-device-choose", ix))
-                            .tab_index(0)
-                            .role(gpui::Role::Button)
-                            .aria_label(format!("Join {}", choose.name))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.answer_with("choose", at.clone(), cx);
-                            })),
-                    ),
+                        div()
+                            .flex_none()
+                            .text_size(crate::typography::ui_rems(12.0))
+                            .text_color(theme.text_muted)
+                            .child("Join"),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.answer_with("choose", at.clone(), cx);
+                    })),
             );
         }
         list.into_any_element()
@@ -706,32 +700,27 @@ impl AddDeviceDialog {
 
     fn render_failure(&self, theme: &Theme, failure: &Failure, cx: &App) -> AnyElement {
         let mono = crate::typography::code_effective_family_name(cx);
-        let mut block = div()
-            .mt(px(14.0))
-            .px(px(12.0))
-            .py(px(10.0))
-            .rounded(px(10.0))
-            .border_1()
-            .border_color(theme.danger.opacity(0.2))
-            .bg(theme.danger.opacity(0.06))
-            .flex()
-            .flex_col()
-            .gap(px(4.0))
-            .text_size(crate::typography::ui_rems(12.5))
-            .child(div().text_color(theme.danger_muted.opacity(0.9)).child(failure.title.clone()));
+        let mut details: Vec<AnyElement> = Vec::new();
         if let Some(hint) = failure.hint.clone() {
-            block = block.child(div().text_color(theme.text_muted).child(hint));
+            details.push(div().text_color(theme.text_muted).child(hint).into_any_element());
         }
         for line in failure.lines.iter().take(8) {
-            block = block.child(
+            details.push(
                 div()
                     .font_family(mono.clone())
                     .text_size(crate::typography::ui_rems(11.5))
                     .text_color(theme.text_muted)
-                    .child(line.clone()),
+                    .child(line.clone())
+                    .into_any_element(),
             );
         }
-        block.into_any_element()
+        widgets::error_strip_with(theme, failure.title.clone(), details)
+            .mt(px(14.0))
+            .id("add-device-failure")
+            .debug_selector(|| "add-device-failure".into())
+            .role(gpui::Role::Alert)
+            .aria_label(failure.title.clone())
+            .into_any_element()
     }
 
     fn render_ask(&self, theme: &Theme, cx: &App) -> Option<AnyElement> {
@@ -772,6 +761,11 @@ impl AddDeviceDialog {
 impl Render for AddDeviceDialog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).for_popup();
+        // gpui-base's Input is unstyled: its caret and selection are the shell's, as rename's.
+        let style = crate::files::editor_adapter::editor_style(&theme);
+        for input in [&self.target, &self.address, &self.password] {
+            input.update(cx, |input, _| input.set_editor_style(style.clone()));
+        }
         let running = self.running();
         let progress = self.progress.clone();
         let added = self.added().map(str::to_owned);
@@ -787,25 +781,22 @@ impl Render for AddDeviceDialog {
         });
         let serve_toggle = (self.choice == Choice::Ssh && !running).then(|| {
             let serve = self.serve;
-            div()
-                .id("add-device-serve")
-                .mt(px(8.0))
-                .text_size(crate::typography::ui_rems(12.5))
-                .text_color(theme.text_muted)
-                .cursor_pointer()
-                .hover(|s| s.text_color(theme.text))
-                .tab_index(0)
-                .role(gpui::Role::Button)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.serve = !serve;
-                    this.progress = None;
-                    cx.notify();
-                }))
-                .child(if serve {
-                    "Install a machine there instead"
-                } else {
-                    "Set up the server there instead"
-                })
+            let label =
+                if serve { "Install a machine there instead" } else { "Set up the server there instead" };
+            // A quiet action, its words on the body's edge.
+            div().mt(px(8.0)).ml(px(-10.0)).flex().child(
+                widgets::text_action(&theme, widgets::ActionTone::Quiet, label)
+                    .id("add-device-serve")
+                    .tab_index(0)
+                    .role(gpui::Role::Button)
+                    .aria_label(label)
+                    .focus_visible(|s| s.border_2().border_color(theme.accent))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.serve = !serve;
+                        this.progress = None;
+                        cx.notify();
+                    })),
+            )
         });
         let found = progress.is_none().then(|| self.render_found(&theme, cx)).flatten();
         let steps = progress.as_ref().map(|p| self.render_steps(&theme, p, cx));
@@ -915,9 +906,106 @@ impl Render for AddDeviceDialog {
     }
 }
 
+/// The step the run's share is drawn on: the first under way.
+fn share_on(steps: &[Step], share: Option<f32>) -> Option<usize> {
+    share.and_then(|_| steps.iter().position(|step| step.mark == Mark::Running))
+}
+
+/// A share of 0 to 1 as a whole percent, a share out of range held to it.
+fn share_percent(share: f32) -> u8 {
+    (share.clamp(0.0, 1.0) * 100.0).round() as u8
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn step(mark: Mark) -> Step {
+        Step { title: "Copy".to_owned(), detail: None, mark, fix: None }
+    }
+
+    fn node(name: &str, at: &str, ready: bool) -> Node {
+        let note = (!ready).then(|| "Runs an older build".to_owned());
+        Node { name: name.to_owned(), at: at.to_owned(), ready, note }
+    }
+
+    fn dialog(cx: &mut gpui::TestAppContext) -> (Entity<AddDeviceDialog>, &mut gpui::VisualTestContext) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+        });
+        let (dialog, cx) = cx.add_window_view(|window, cx| {
+            let state = cx.new(|_| AppState::new());
+            AddDeviceDialog::new(state, Choice::Server, window, cx)
+        });
+        cx.update(|window, _| window.activate_window());
+        (dialog, cx)
+    }
+
+    /// A server the tailnet offers is one picker row, pressed anywhere along it; one that cannot
+    /// be joined says why and does not act.
+    #[gpui::test]
+    fn a_found_server_is_a_row_pressed_anywhere(cx: &mut gpui::TestAppContext) {
+        let (dialog, cx) = dialog(cx);
+        dialog.update(cx, |dialog, cx| {
+            dialog.found = Some(Found {
+                looking: false,
+                running: true,
+                servers: vec![node("studio", "100.64.0.1", true), node("old", "100.64.0.2", false)],
+                workers: Vec::new(),
+            });
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let row = cx.debug_bounds("add-device-found-0").expect("the server's row");
+        assert!(f32::from(row.size.height) >= popover::PICKER_ROW_HEIGHT - 0.5, "{row:?}");
+        let refused = cx.debug_bounds("add-device-found-1").expect("the older server's row");
+        cx.simulate_click(refused.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        let typed = dialog.read_with(cx, |dialog, cx| dialog.address.read(cx).value().to_string());
+        assert_eq!(typed, "", "a node that cannot be joined does not act");
+        // Near its left edge, far from any word that says what it does.
+        let at = gpui::point(row.origin.x + gpui::px(4.0), row.center().y);
+        cx.simulate_click(at, gpui::Modifiers::default());
+        cx.run_until_parked();
+        let typed = dialog.read_with(cx, |dialog, cx| dialog.address.read(cx).value().to_string());
+        assert_eq!(typed, "100.64.0.1");
+    }
+
+    /// A run that failed shows the strip with its title, its hint and its output.
+    #[gpui::test]
+    fn a_failure_is_the_error_strip(cx: &mut gpui::TestAppContext) {
+        let (dialog, cx) = dialog(cx);
+        dialog.update(cx, |dialog, cx| {
+            dialog.progress = Some(Progress {
+                failure: Some(Failure {
+                    title: "Could not reach nohost".to_owned(),
+                    hint: Some("Check its name".to_owned()),
+                    lines: vec!["ssh: Could not resolve hostname nohost".to_owned()],
+                    ..Failure::default()
+                }),
+                ..Progress::default()
+            });
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let strip = cx.debug_bounds("add-device-failure").expect("the error strip");
+        assert!(f32::from(strip.size.height) > 40.0, "title, hint and output: {strip:?}");
+    }
+
+    /// The run's share rides the step under way, not a bar of its own; with no step under way,
+    /// or no share, it is drawn nowhere.
+    #[test]
+    fn the_share_is_drawn_on_the_running_step() {
+        let steps = [step(Mark::Done), step(Mark::Running), step(Mark::Waiting)];
+        assert_eq!(share_on(&steps, Some(0.4)), Some(1));
+        assert_eq!(share_on(&steps, None), None);
+        assert_eq!(share_on(&[step(Mark::Done), step(Mark::Failed)], Some(0.4)), None);
+        assert_eq!(share_percent(0.426), 43);
+        assert_eq!(share_percent(1.7), 100, "held to whole");
+        assert_eq!(share_percent(-0.2), 0);
+        assert_eq!(share_percent(f32::NAN), 0);
+    }
 
     /// A frame of this Mac's checklist, as the view model sends it, reads whole: a line that
     /// needs the person with its fix, and the servers to choose between.

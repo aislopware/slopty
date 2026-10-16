@@ -144,6 +144,21 @@ fn queue_latest_shortcut_visible(
     index.checked_add(1) == Some(count) && reveal_requested && action_available
 }
 
+// slopty: one of the queue's keys: its glyphs, then what it does.
+fn queue_key_hint(theme: &Theme, keys: &str, what: &str) -> gpui::Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(4.0))
+        .child(crate::popover::kbd_hint(theme, keys))
+        .child(
+            div()
+                .text_size(crate::typography::ui_rems(11.0))
+                .text_color(theme.text_muted.opacity(0.5))
+                .child(SharedString::from(what.to_owned())),
+        )
+}
+
 fn latest_queued_message(items: &[QueuedMessage]) -> Option<&QueuedMessage> {
     items.last()
 }
@@ -497,7 +512,21 @@ impl Composer {
                 gpui::MouseButton::Left,
                 cx.listener(|this, _, _, cx| this.cancel_queue_drag(cx)),
             )
-            .child(rows);
+            .child(rows)
+            // slopty: with the modifier held, the queue's keys show under its rows.
+            .when(show_latest_shortcut && editing.is_none(), |panel| {
+                panel.child(
+                    div()
+                        .id("message-queue-keys")
+                        .px(px(12.0))
+                        .pb(px(6.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(12.0))
+                        .child(queue_key_hint(&theme, "⌥↑", "Edit last"))
+                        .child(queue_key_hint(&theme, "⌘⇧↵", "Steer first")),
+                )
+            });
         Some(crate::frost::frosted(PANEL_RADIUS, crate::frost::MENU_BLUR, panel).into_any_element())
     }
 
@@ -1441,6 +1470,49 @@ impl Composer {
         self.activate_queued_primary(id, action, cx);
     }
 
+    // slopty: ⌥↑ takes the newest queued message into the composer to edit.
+    /// Edit the newest queued message, as its row's edit does.
+    pub(crate) fn edit_latest_queued(&mut self, cx: &mut Context<Self>) {
+        let latest = latest_queued_message(&self.state.read(cx).queue).map(|item| item.id.clone());
+        if let Some(id) = latest {
+            self.begin_queue_edit(id, cx);
+        }
+    }
+
+    // slopty: ⌘⇧↵ steers the oldest queued message in now, as its row's action does.
+    /// Deliver the oldest queued message now with the action its row shows.
+    pub(crate) fn steer_oldest_queued(&mut self, cx: &mut Context<Self>) {
+        if self.editing_queued.is_some() {
+            return;
+        }
+        let (id, delivery_blocked, host_supports_actions, has_attachments) = {
+            let state = self.state.read(cx);
+            let Some(chat_id) = state.selected_chat.as_deref() else {
+                return;
+            };
+            let Some(item) = state.queue.first() else {
+                return;
+            };
+            (
+                item.id.clone(),
+                item.delivery_gate.is_some(),
+                state.chat_host_supports(
+                    chat_id,
+                    slopty_view_proto::capabilities::MESSAGE_QUEUE_ACTIONS_V1,
+                ),
+                !item.attachments.is_empty(),
+            )
+        };
+        if let Some(action) = available_queue_primary_action(
+            delivery_blocked,
+            host_supports_actions,
+            has_attachments,
+            self.pickers().read(cx).steers_mid_turn(cx),
+        ) {
+            self.activate_queued_primary(id, action, cx);
+        }
+    }
+
     /// Borrow the composer while the leased row reserves its queue position.
     pub(crate) fn begin_queue_edit(&mut self, id: String, cx: &mut Context<Self>) {
         if self.queue_edit_pending_id.is_some()
@@ -1654,9 +1726,12 @@ impl Composer {
     /// saved as its plain label.
     pub(crate) fn queue_edit_text(&self, cx: &gpui::App) -> String {
         let attached: Vec<u32> = self.staged().iter().filter_map(|att| att.mention).collect();
-        slopty_view_proto::attachment_mentions::demote_unattached_mentions(
-            self.input.read(cx).text(),
-            &attached,
+        // slopty: quotes and terminal context leave as their Markdown, as a send's do.
+        crate::composer::expand_context_chips(
+            &slopty_view_proto::attachment_mentions::demote_unattached_mentions(
+                self.input.read(cx).text(),
+                &attached,
+            ),
         )
     }
 

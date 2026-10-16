@@ -152,6 +152,8 @@ impl Task {
         let Process { mut child, stdout, stderr } = pi;
         let mut lines = BufReader::new(stdout).split(b'\n');
         let mut worker_gone = false;
+        // Alive while pi runs: stamped until its output ends or it is ended.
+        let lease = self.host.lease(self.thread);
         while !self.done() {
             let deadline = self.driven.deadline();
             let expiry = async {
@@ -185,6 +187,7 @@ impl Task {
                 }
             }
         }
+        lease.stop();
         // Closing stdin asks pi to end; one that does not in time is killed.
         drop(self.stdin.take());
         let status = if let Ok(status) = tokio::time::timeout(SHUTDOWN, child.wait()).await {

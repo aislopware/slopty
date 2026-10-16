@@ -42,7 +42,14 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value, json};
 
-use crate::hooks::Outcome;
+/// What editing the settings did.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Outcome {
+    /// The document changed and was written.
+    Changed,
+    /// It already said what we wanted.
+    Unchanged,
+}
 
 /// The variable that moves Claude Code's configuration directory.
 pub const CONFIG_DIR_ENV: &str = "CLAUDE_CONFIG_DIR";

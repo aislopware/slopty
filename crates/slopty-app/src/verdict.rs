@@ -116,8 +116,7 @@ pub async fn answer_press(caller: &ServerCaller, press: Press) -> Answered {
 /// the choice that allows or denies once, or for the request a pick answers, then answer with
 /// it.
 pub async fn answer(caller: &ServerCaller, verdict: Verdict) -> Answered {
-    let read =
-        Verb::ReadThread { of: verdict.of, view: ThreadView::Messages, after: None, hold: false };
+    let read = Verb::ReadThread { of: verdict.of, view: ThreadView::Messages, after: None };
     let choice = match caller.call(read).await {
         Outcome::Thread(read) => read
             .requests

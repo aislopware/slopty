@@ -260,9 +260,6 @@ impl Pi {
                     by,
                 }
             }
-            Intent::Release { .. } => {
-                return refused("pi has no prompt of its own while Slopty drives it");
-            }
             Intent::SetModel { model } => {
                 if !state.meta.models.iter().any(|m| m.id == *model) {
                     return refused(&format!("There is no model {model} here"));

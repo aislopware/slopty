@@ -237,7 +237,8 @@ async fn an_agent_reaches_only_its_own_tree() {
         fleet.lease.handle(ToServer::Reply { id, outcome: Outcome::Done });
     }
     assert_eq!(stopping.await.unwrap(), Outcome::Done);
-    assert_eq!(closed, [grandchild.terminal.unwrap(), child.terminal.unwrap()], "deepest first");
+    let seats = [&grandchild, &child].map(|r| ladder::seat_of(r).unwrap());
+    assert_eq!(closed, seats, "deepest first");
 
     let Outcome::Agents { agents, .. } = fleet.hub.dispatch(Verb::Agents).await else { panic!() };
     let parent_of = |id| agents.iter().find(|a| a.id == id).and_then(|a| a.parent);

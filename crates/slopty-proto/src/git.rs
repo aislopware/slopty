@@ -94,6 +94,9 @@ pub enum GitOp {
     Changes {
         /// What the working tree is compared with.
         against: Against,
+        /// Whitespace does not count, as `git diff -w` reads it: a line that differs only in
+        /// spaces is no change, and a file left with no change is left out.
+        ignore_whitespace: bool,
     },
     /// The commits of `head` since it left `base`, as committed, with no checkout and no
     /// working tree ([`GitDone::Changes`], scoped [`crate::thread::wire::ReviewScope::Range`]):
@@ -142,6 +145,8 @@ pub enum GitOp {
         from: Option<String>,
         /// Its blob on the new side; `None` when it was removed.
         to: Option<String>,
+        /// Whitespace does not count, as `git diff -w` reads it.
+        ignore_whitespace: bool,
     },
     /// One blob's bytes, as a review named it
     /// ([`FileDiff::from`](crate::thread::wire::FileDiff::from)
@@ -180,6 +185,21 @@ pub enum GitOp {
     Switch {
         /// The branch, with no remote's prefix.
         branch: String,
+    },
+    /// What one turn of a thread changed in the working tree, from its snapshot at the turn's
+    /// start to its snapshot at the end, or to the working tree now while it runs
+    /// ([`GitDone::Changes`], scoped [`crate::thread::wire::ReviewScope::Turn`]). The snapshots are
+    /// the ones the worker takes of every turn ([`crate::thread::Turn::before`],
+    /// [`crate::thread::Turn::after`]). Nothing in the repository moves; its index is not touched.
+    Turn {
+        /// The turn.
+        turn: crate::thread::TurnId,
+        /// The tree when it began.
+        before: crate::thread::TreeRef,
+        /// The tree when it ended; none while it runs.
+        after: Option<crate::thread::TreeRef>,
+        /// Whitespace does not count, as `git diff -w` reads it.
+        ignore_whitespace: bool,
     },
 }
 

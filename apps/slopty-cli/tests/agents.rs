@@ -127,7 +127,22 @@ mod tests {
         serde_json::from_slice(&out.stdout).unwrap()
     }
 
-    /// What the stub started with `prompt` recorded, once it has.
+    /// The texts of the user messages a stand-in's record says it was sent, in order.
+    fn messages(record: &Value) -> Vec<String> {
+        let received = record["received"].as_array().into_iter().flatten();
+        received
+            .filter(|line| line["type"] == "user")
+            .filter_map(|line| match &line["message"]["content"] {
+                Value::String(text) => Some(text.clone()),
+                Value::Array(blocks) => {
+                    Some(blocks.iter().filter_map(|b| b["text"].as_str()).collect())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// What the stand-in whose first message was `prompt` recorded, once it has.
     fn record_of(dir: &Path, prompt: &str) -> Option<Value> {
         std::fs::read_dir(dir).ok()?.flatten().find_map(|entry| {
             let name = entry.file_name().to_string_lossy().into_owned();
@@ -135,19 +150,18 @@ mod tests {
                 return None;
             }
             let record: Value = serde_json::from_slice(&std::fs::read(entry.path()).ok()?).ok()?;
-            let argv = record["argv"].as_array()?;
-            (argv.last()?.as_str()? == prompt).then_some(record)
+            (messages(&record).first()? == prompt).then_some(record)
         })
     }
 
-    /// The messages the inbox of the agent in terminal `session` took.
-    fn inbox_of(dir: &Path, session: &str) -> Vec<String> {
-        let text =
-            std::fs::read_to_string(dir.join(format!("{session}.inbox"))).unwrap_or_default();
-        text.lines()
-            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-            .filter_map(|got| got["content"].as_str().map(str::to_owned))
-            .collect()
+    /// The messages the agent seated at `seat` was sent, from its record.
+    fn told_to(dir: &Path, seat: &str) -> Vec<String> {
+        let at = dir.join(format!("{seat}.record.json"));
+        std::fs::read(at)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .map(|record| messages(&record))
+            .unwrap_or_default()
     }
 
     /// The JSON an MCP tool result carries as its text.
@@ -162,11 +176,10 @@ mod tests {
 
     /// The person starts a lead agent; the lead, through Slopty's tools, starts a child on the
     /// machine, waits until it comes to rest, reads its turn and tells it more. The child takes
-    /// the words through its own hooks, marked as an agent's, and once it rests again the lead
-    /// hears it through its hooks, unasked. The fleet's list names the lead as the child's
-    /// parent.
+    /// the words as a message of its own, marked as an agent's, and once it rests again the lead
+    /// hears it as a message, unasked. The fleet's list names the lead as the child's parent.
     #[tokio::test(flavor = "multi_thread")]
-    async fn an_agent_starts_a_child_waits_reads_it_and_hears_it_through_its_hooks() {
+    async fn an_agent_starts_a_child_waits_reads_it_and_hears_it_as_messages() {
         let dir = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(dir.path()).unwrap();
         let agents = root.join("agents");
@@ -175,12 +188,6 @@ mod tests {
         std::fs::create_dir_all(&folder).unwrap();
         let folder = folder.to_string_lossy().into_owned();
         let at = |what: &str| agents.join(what).to_string_lossy().into_owned();
-        // Where Claude Code keeps the folder's conversations, under the daemons' home: where the
-        // worker finds what an agent said.
-        let escaped: String =
-            folder.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
-        let transcripts = root.join("home/.claude/projects").join(escaped);
-        std::fs::create_dir_all(&transcripts).unwrap();
         let turns = json!({
             "Lead": [
                 {
@@ -200,11 +207,6 @@ mod tests {
         });
         let env = [
             ("STUB_RECORD".to_owned(), at("{session}.record.json")),
-            (
-                "STUB_TRANSCRIPT".to_owned(),
-                transcripts.join("{conversation}.jsonl").to_string_lossy().into_owned(),
-            ),
-            ("STUB_INBOX".to_owned(), at("{session}.inbox")),
             ("STUB_TURNS".to_owned(), turns.to_string()),
         ];
 
@@ -254,21 +256,23 @@ mod tests {
         assert_eq!(tool_answer(&calls[3]), json!({ "ok": true }));
         let lead_turn = begun.elapsed();
 
-        // The child took the words through its hooks, marked as the lead's.
+        // The child took the words as a message, marked as the lead's.
         let child_record = record_of(&agents, "Fix the login").expect("the child's record");
         let child_seat = child_record["env"]["SLOPTY_SESSION"].as_str().unwrap().to_owned();
         let told = until("the child takes the lead's words", || {
-            inbox_of(&agents, &child_seat).into_iter().find(|m| m.contains("Now the logout too."))
+            told_to(&agents, &child_seat).into_iter().find(|m| m.contains("Now the logout too."))
         })
         .await;
         assert!(told.contains("an agent, not the person") && told.contains(&lead), "{told}");
 
-        // Once the child rests again, the lead hears it through its own hooks.
+        // Once the child rests again, the lead hears it as a message of its own.
         let lead_record = record_of(&agents, "Lead").unwrap();
         let lead_seat = lead_record["env"]["SLOPTY_SESSION"].as_str().unwrap().to_owned();
         let heard_at = Instant::now();
         let heard = until("the lead hears the child rest", || {
-            inbox_of(&agents, &lead_seat).into_iter().find(|m| m.contains("came to rest"))
+            told_to(&agents, &lead_seat)
+                .into_iter()
+                .find(|m| m.contains("came to rest") && m.contains("Now the logout too."))
         })
         .await;
         assert!(heard.contains(&child) && heard.contains("Now the logout too."), "{heard}");

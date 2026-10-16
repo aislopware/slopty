@@ -518,10 +518,10 @@ impl History {
         let (Some(dir), Some(cwd)) = (self.stores.claude.as_deref(), cwd) else {
             return Vec::new();
         };
-        let escaped = slopty_agent::discover::escape(Path::new(cwd));
+        let escaped = slopty_agent::claude::sessions::escape(Path::new(cwd));
         let transcript = dir.join("projects").join(escaped).join(format!("{native}.jsonl"));
-        if slopty_agent::resume::is_session_id(native) && transcript.is_file() {
-            vec![slopty_agent::resume::RESUME_FLAG.to_owned(), native.to_owned()]
+        if slopty_agent::claude::is_session_id(native) && transcript.is_file() {
+            vec![slopty_agent::claude::RESUME_FLAG.to_owned(), native.to_owned()]
         } else {
             Vec::new()
         }

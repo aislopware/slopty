@@ -15,9 +15,9 @@
 //! approval buttons (`notify::APPROVAL`): "Allow" and "Deny" answer it where the note is,
 //! "Show" opens its tile as a tap does. The row shows the request a moment after the agent's
 //! status says it waits, so the note already up is replaced, silently, once the request comes,
-//! and again without the buttons once it is gone (the terminal asks by then). A request this
-//! client answered takes its note away instead: the agent still reads as waiting until its
-//! worker's table moves past it, and the answer is not news.
+//! and again without the buttons once it is gone. A request this client answered takes its note
+//! away instead: the agent still reads as waiting until its worker's table moves past it, and
+//! the answer is not news.
 //!
 //! Nothing notifies either while the person is at another of their devices
 //! ([`Attention::set_present_elsewhere`]): at the Mac, the phone in their pocket stays quiet, and
@@ -60,8 +60,7 @@ use super::agents::{agent_ask_text, agent_status_word};
 use super::approvals::answerable;
 use super::{Finished, WorkspaceView};
 
-/// What a note's answer says when its request was no longer open: answered elsewhere, or the
-/// terminal asks by now.
+/// What a note's answer says when its request was no longer open: answered elsewhere.
 pub(super) const NO_LONGER_WAITING: &str = "That prompt is no longer waiting";
 
 /// How long after a program's record sounded or notified another of the same program's may.
@@ -88,13 +87,13 @@ fn note_buttons(card: Option<&RequestCard>) -> (Option<String>, Vec<NoteChoice>)
     }
 }
 
-/// What a note is about: a terminal, whose agent or shell it speaks of, or a thread driven
-/// over a protocol with no terminal.
+/// What a note is about: a terminal, whose shell or program it speaks of, or an agent's
+/// thread.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum About {
     /// A terminal's session.
     Session(SessionId),
-    /// A thread with no terminal.
+    /// An agent's thread.
     Thread(ThreadId),
 }
 
@@ -617,45 +616,25 @@ impl WorkspaceView {
     #[must_use]
     pub fn attention_look(&self) -> Look {
         let asking = self
-            .needs_you()
+            .threads_waiting()
             .into_iter()
             .filter_map(|w| {
-                let agent = self.agent_state(w.session)?;
-                let route =
-                    Route { worker: w.worker, item: None, about: About::Session(w.session) };
-                let body = agent_ask_text(agent).unwrap_or_else(|| agent_status_word(agent));
-                let (approval, picks) = note_buttons(self.session_request(w.session));
-                let answered = self
-                    .session_thread(w.session)
-                    .and_then(|t| self.thread_answered_here(t))
-                    .map(|ask| ask.0.clone());
-                let title = self.route_title(route);
-                Some(Asking { route, title, body, approval, picks, answered, own: false })
-            })
-            .chain(self.threads_waiting().into_iter().filter_map(|w| {
                 let stand = self.thread_stand(w.thread)?;
-                let asks = stand.asks.as_ref().map(|a| slopty_kit::markdown::plain_line(&a.title));
-                let body = asks
-                    .filter(|a| !a.trim().is_empty())
-                    .or_else(|| stand.word().map(str::to_owned))
-                    .unwrap_or_default();
+                let body = agent_ask_text(stand).unwrap_or_else(|| agent_status_word(stand));
                 let route = Route { worker: w.worker, item: None, about: About::Thread(w.thread) };
                 let title = self.thread_title(w.thread);
                 let (approval, picks) = note_buttons(stand.asks.as_ref());
                 let answered = self.thread_answered_here(w.thread).map(|ask| ask.0.clone());
                 Some(Asking { route, title, body, approval, picks, answered, own: false })
-            }))
+            })
             .collect();
         let turns = self
             .agent_turns()
-            .filter_map(|about| {
-                let (route, title) = match about {
-                    About::Session(session) => self.attention_route(session)?,
-                    About::Thread(thread) => {
-                        let worker = self.thread_stand(thread)?.worker;
-                        (Route { worker, item: None, about }, self.thread_title(thread))
-                    }
-                };
+            .filter_map(|thread| {
+                let about = About::Thread(thread);
+                let worker = self.thread_stand(thread)?.worker;
+                let (route, title) =
+                    (Route { worker, item: None, about }, self.thread_title(thread));
                 let done = self.finished.get(&about)?;
                 // One found unread as its worker was first heard was told by whoever heard it.
                 if !done.turn.is_some_and(|t| t.fresh) {
@@ -681,9 +660,7 @@ impl WorkspaceView {
         // A program's records are posted here as they come; the server only pushes them.
         let Subject::Thread(at) = &notice.about else { return None };
         let worker = super::keys::worker_key(at.worker);
-        let about =
-            notice.tile.map_or(About::Thread(at.thread), |tile| About::Session(tile.session));
-        let route = Route { worker, item: None, about };
+        let route = Route { worker, item: None, about: About::Thread(at.thread) };
         let title = Some(notice.title.trim())
             .filter(|t| !t.is_empty())
             .map_or_else(|| self.route_title(route), str::to_owned);
@@ -738,13 +715,10 @@ impl WorkspaceView {
     }
 
     /// The chat a tapped note is about, as the interface knows it: its agent's thread; `None`
-    /// for a note about a terminal with no agent's thread in it.
+    /// for a note about a terminal.
     #[must_use]
     pub fn tapped_chat(&self, tap: &Tap) -> Option<String> {
-        let thread = match Route::of_tap(tap)?.about {
-            About::Session(session) => self.session_thread(session)?,
-            About::Thread(thread) => thread,
-        };
+        let About::Thread(thread) = Route::of_tap(tap)?.about else { return None };
         Some(self.chat_id(thread))
     }
 
@@ -752,7 +726,7 @@ impl WorkspaceView {
     #[must_use]
     pub fn route_title(&self, route: Route) -> String {
         let thread = match route.about {
-            About::Session(session) => self.session_thread(session),
+            About::Session(_) => None,
             About::Thread(thread) => Some(thread),
         };
         thread

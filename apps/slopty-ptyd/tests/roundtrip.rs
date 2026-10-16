@@ -263,59 +263,6 @@ mod roundtrip {
         client.shutdown().await.unwrap();
     }
 
-    /// Input handed to ptyd whole is typed whole though the worker that sent it is gone in the
-    /// middle of it, and the next worker sending it again, unsure whether it went, types it
-    /// no second time.
-    #[tokio::test]
-    async fn a_delivery_finishes_without_its_worker_and_is_typed_once() {
-        use slopty_pty::protocol::Part;
-        let daemon = start().await;
-        let out = tempfile::tempdir().unwrap();
-        let said = out.path().join("said");
-        let (mut first, _exits) = PtydClient::connect(&daemon.socket).await.unwrap();
-        let id = SessionId::new();
-        let spec = SpawnSpec {
-            command: vec![
-                "/bin/sh".into(),
-                "-c".into(),
-                "read a; read b; echo \"$a,$b\" > said".into(),
-            ],
-            cwd: Some(out.path().to_path_buf()),
-            env: Vec::new(),
-            size: size(),
-        };
-        first.spawn(id, spec).await.unwrap();
-        let _held = first.attach(id).await.unwrap();
-        let brief = || {
-            vec![
-                Part { after_ms: 0, bytes: b"one".to_vec() },
-                Part { after_ms: 300, bytes: b"\r".to_vec() },
-            ]
-        };
-        first.deliver(id, 1, brief()).await.unwrap();
-        // The worker goes before the Enter, as one killed in its pause does.
-        drop(first);
-        let (mut next, _exits) = PtydClient::connect(&daemon.socket).await.unwrap();
-        // Unsure whether its delivery went, the next worker sends it again.
-        next.deliver(id, 1, brief()).await.unwrap();
-        let listed = next.list().await.unwrap();
-        let info = listed.iter().find(|s| s.id == id).expect("listed");
-        assert_eq!(info.delivered, [1], "ptyd says which it took");
-        tokio::time::sleep(Duration::from_millis(600)).await;
-        next.deliver(id, 2, vec![Part { after_ms: 0, bytes: b"two\r".to_vec() }]).await.unwrap();
-        let deadline = tokio::time::Instant::now().checked_add(Duration::from_secs(10)).unwrap();
-        let line = loop {
-            if let Ok(line) = std::fs::read_to_string(&said)
-                && line.ends_with('\n')
-            {
-                break line;
-            }
-            assert!(tokio::time::Instant::now() < deadline, "the program never read two lines");
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        };
-        assert_eq!(line.trim(), "one,two", "typed whole, and once");
-    }
-
     /// A child's exit status reaches the worker as ptyd sends it, with no request of the worker's
     /// to carry it: the worker tells its viewers the real status, not a guess made at EOF.
     #[tokio::test]
@@ -519,70 +466,6 @@ mod roundtrip {
         assert_eq!(exit, (alone, Exit::with(7)), "with its status");
         assert!(exits.try_recv().is_err(), "nothing exited on the way");
         worker.shutdown().await.unwrap();
-    }
-
-    /// A delivery part-way typed when ptyd hands its sessions to a new build is finished by
-    /// the new build, from the part it had not typed, and the new build knows it took it: sent
-    /// again by a worker unsure it went, it is typed no second time.
-    #[tokio::test]
-    async fn a_delivery_goes_on_across_a_handover_and_is_typed_once() {
-        use slopty_pty::protocol::Part;
-        let daemon = start().await;
-        let out = tempfile::tempdir().unwrap();
-        let said = out.path().join("said");
-        let (mut client, _exits) = PtydClient::connect(&daemon.socket).await.unwrap();
-        let id = SessionId::new();
-        let spec = SpawnSpec {
-            command: vec![
-                "/bin/sh".into(),
-                "-c".into(),
-                "read a; read b; echo \"$a,$b\" > said".into(),
-            ],
-            cwd: Some(out.path().to_path_buf()),
-            env: Vec::new(),
-            size: size(),
-        };
-        client.spawn(id, spec).await.unwrap();
-        let brief = || {
-            vec![
-                Part { after_ms: 0, bytes: b"one\r".to_vec() },
-                Part { after_ms: 1500, bytes: b"two\r".to_vec() },
-            ]
-        };
-        client.deliver(id, 1, brief()).await.unwrap();
-
-        let (mut asker, _) = PtydClient::connect(&daemon.socket).await.unwrap();
-        let program = PathBuf::from(env!("CARGO_BIN_EXE_slopty-ptyd"));
-        asker.succeed(program).await.expect("no answer: the new build runs");
-        // The old image may still take a connection as it goes; the new build's answers.
-        let (mut next, listed) = tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                if let Ok((mut next, _)) = PtydClient::connect(&daemon.socket).await
-                    && let Ok(listed) = next.list().await
-                {
-                    break (next, listed);
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("the new build listens");
-        let info = listed.into_iter().find(|s| s.id == id).expect("kept");
-        assert_eq!(info.delivered, [1], "the delivery taken came across");
-        next.deliver(id, 1, brief()).await.unwrap();
-
-        let deadline = tokio::time::Instant::now().checked_add(Duration::from_secs(10)).unwrap();
-        let line = loop {
-            if let Ok(line) = std::fs::read_to_string(&said)
-                && line.ends_with('\n')
-            {
-                break line;
-            }
-            assert!(tokio::time::Instant::now() < deadline, "the second part never came");
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        };
-        assert_eq!(line.trim(), "one,two", "finished by the new build, and typed once");
-        next.shutdown().await.unwrap();
     }
 
     /// A handover that cannot happen is refused with why, and leaves every session as it was,

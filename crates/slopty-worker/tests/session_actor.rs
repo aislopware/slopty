@@ -1526,48 +1526,6 @@ done"#
         let _killed = child.kill().await;
     }
 
-    /// The line that resumes an agent after a reboot waits for the shell's first prompt: a
-    /// line editor holding the tty is not enough until the shell has reported its directory.
-    #[tokio::test]
-    async fn a_line_is_typed_at_the_first_prompt_and_not_before() {
-        let script = "stty -icanon -echo; echo ready; \
-            if IFS= read -r -t 1 early; then echo \"early:$early\"; else echo quiet; fi; \
-            printf '\\033]7;file://localhost/tmp\\007'; IFS= read -r line; echo \"got:$line\"; \
-            sleep 30";
-        let (session, mut child) = start(&["/bin/sh", "-c", script]);
-        let me = ClientId::new();
-        let (tx, mut rx) = viewer(64);
-        session.attach(me, size(40, 6), tx).unwrap();
-        wait_for(&mut rx, |_, s| text(s).contains("ready")).await;
-        session.type_at_first_prompt("claude --resume abc".to_owned()).unwrap();
-        let (_, screen) = wait_for(&mut rx, |_, s| text(s).contains("got:")).await;
-        let screen = text(&screen);
-        assert!(screen.contains("quiet") && screen.contains("got:claude --resume abc"), "{screen}");
-        session.close();
-        let _killed = child.kill().await;
-    }
-
-    /// A viewer that types before the first prompt keeps the terminal to itself: the waiting
-    /// line is dropped, not typed after theirs.
-    #[tokio::test]
-    async fn a_viewer_typing_first_drops_the_waiting_line() {
-        let script = "stty -icanon -echo; echo ready; IFS= read -r line; echo \"got:$line\"; \
-            printf '\\033]7;file://localhost/tmp\\007'; \
-            if IFS= read -r -t 2 more; then echo \"more:$more\"; else echo done; fi; sleep 30";
-        let (session, mut child) = start(&["/bin/sh", "-c", script]);
-        let me = ClientId::new();
-        let (tx, mut rx) = viewer(64);
-        session.attach(me, size(40, 6), tx).unwrap();
-        wait_for(&mut rx, |_, s| text(s).contains("ready")).await;
-        session.type_at_first_prompt("claude --resume abc".to_owned()).unwrap();
-        session.request(me, TermRequest::Raw(b"mine\r".to_vec())).unwrap();
-        let (_, screen) = wait_for(&mut rx, |_, s| text(s).contains("done")).await;
-        let screen = text(&screen);
-        assert!(screen.contains("got:mine") && !screen.contains("more:"), "{screen}");
-        session.close();
-        let _killed = child.kill().await;
-    }
-
     /// A program that stops reading has 16 MiB of input queued for it and no more: the request
     /// past that is refused whole, the viewer that sent it is told, and the actor goes on
     /// answering.

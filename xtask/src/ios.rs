@@ -394,7 +394,7 @@ settings:
               - UISceneConfigurationName: Default Configuration
                 UISceneDelegateClassName: SloptySceneDelegate
         UILaunchScreen: {{}}
-        UIStatusBarHidden: true
+        UIStatusBarHidden: false
         UIViewControllerBasedStatusBarAppearance: false
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait

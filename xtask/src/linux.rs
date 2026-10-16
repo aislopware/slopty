@@ -444,7 +444,6 @@ fn e2e(sh: &Shell, bins: &Utf8Path) -> Result<()> {
         sh.push_env("SLOPTY_LINUX_WORKER", &stack.addr),
         sh.push_env("SLOPTY_LINUX_CONTAINER", &stack.container.name),
         sh.push_env("SLOPTY_LINUX_USER", USER),
-        sh.push_env("SLOPTY_LINUX_BIN_DIR", BIN_DIR),
         sh.push_env("DOCKER_CONTEXT", CONTEXT),
         // These tests spawn nothing on this Mac: nextest's setup script would otherwise build
         // every binary of the workspace with its tests first.

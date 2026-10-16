@@ -47,7 +47,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use serde_json::Value;
-use slopty_core::{SessionId, WallMs};
+use slopty_core::WallMs;
 use slopty_proto::thread::detail::{
     AgentDetail, Answer, Clip, EditDetail, ExecDetail, ExecStatus, McpDetail, Offered, Question,
 };
@@ -70,11 +70,10 @@ use crate::attach::Attached;
 use crate::queue::Queue;
 
 /// What a Codex thread can do through Slopty.
-pub const CAPS: [&str; 12] = [
+pub const CAPS: [&str; 11] = [
     Cap::APPROVALS,
     Cap::FORK,
     Cap::INTERRUPT,
-    Cap::LIVE_TUI,
     Cap::QUEUE,
     Cap::REVIEW,
     Cap::SCHEDULE,
@@ -135,19 +134,6 @@ pub const RESUME: &str = "resume";
 #[must_use]
 pub fn resume_args(native: &str) -> Vec<String> {
     vec![RESUME.to_owned(), native.to_owned()]
-}
-
-/// The command that opens Codex's own TUI on the daemon's thread `native`, run as `program`:
-/// `codex resume <native>`, with nothing else on its line.
-///
-/// Codex's TUI joins the person's daemon only when its command line holds nothing that keeps
-/// it off it: `--no-daemon`, `--oss`, `--profile`, a configuration override (`-c`, `--enable`,
-/// `--disable`, `--search`), `--strict-config` (`codex-rs/tui/src/daemon_startup.rs`,
-/// `exclusion`). Anything of those would run the TUI on an app-server of its own, a second
-/// writer of the same session, so the TUI takes the thread's settings from the daemon instead.
-#[must_use]
-pub fn tui(program: String, native: &str) -> Vec<String> {
-    vec![program, RESUME.to_owned(), native.to_owned()]
 }
 
 /// The Codex thread a start's `args` take up again, when they are [`resume_args`].
@@ -371,10 +357,9 @@ pub struct Shared {
 }
 
 impl Shared {
-    /// Codex thread `thread`, its TUI (when Slopty runs one) in terminal `terminal`, with the
-    /// actions that begin it from what Codex holds of it.
+    /// Codex thread `thread`, with the actions that begin it from what Codex holds of it.
     #[must_use]
-    pub fn new(thread: &p::Thread, terminal: Option<SessionId>) -> (Self, Vec<Action>) {
+    pub fn new(thread: &p::Thread) -> (Self, Vec<Action>) {
         let id = thread_of(&thread.id);
         let mut caps: Vec<Cap> = CAPS.iter().map(|c| Cap::named(c)).collect();
         caps.sort();
@@ -414,7 +399,6 @@ impl Shared {
             native: thread.id.clone(),
             cwd: thread.cwd.clone(),
             title: title_of(thread),
-            terminal,
             parent: None,
             origin: origin.to_owned(),
             forked_from,
@@ -755,6 +739,7 @@ impl Shared {
                 label: Some(m.display_name.clone())
                     .filter(|n| !n.trim().is_empty())
                     .unwrap_or_else(|| m.model.clone()),
+                options: Vec::new(),
             })
             .collect();
         meta.efforts = model
@@ -1144,16 +1129,6 @@ impl Shared {
             config: Some(unclaimed()),
             ..p::ThreadForkParams::default()
         })
-    }
-
-    /// The terminal Codex's own TUI runs in on this thread, opened by the worker, or none once
-    /// it closed: the thread names it, so a client can show it.
-    pub fn set_terminal(&mut self, terminal: Option<SessionId>) -> Vec<Action> {
-        if self.meta.terminal == terminal {
-            return Vec::new();
-        }
-        self.meta.terminal = terminal;
-        vec![Action::Meta(Box::new(self.meta.clone()))]
     }
 
     /// What asks Codex's own reviewer for the changes commit `sha` makes, in this thread
@@ -2146,22 +2121,6 @@ mod tests {
         assert_eq!(config["mcp_servers.slopty.env"], vars);
         let bare = seated(&env, None);
         assert!(bare.keys().all(|k| k.starts_with("shell_environment_policy.")), "{bare:?}");
-    }
-
-    /// The person's TUI on a thread is `codex resume <thread>` alone: no word that keeps
-    /// Codex's TUI off the daemon (as `daemon_startup.rs` lists them), so it joins the
-    /// daemon's thread as one more client rather than loading the session a second time.
-    #[test]
-    fn the_tui_on_a_thread_joins_the_daemon() {
-        let native = "019a0000-0000-7000-8000-000000000001";
-        let command = tui("/opt/homebrew/bin/codex".to_owned(), native);
-        assert_eq!(command, ["/opt/homebrew/bin/codex", "resume", native]);
-        let off = ["--no-daemon", "--oss", "--profile", "-c", "--config", "--enable"];
-        let off = off.into_iter().chain(["--disable", "--search", "--strict-config"]);
-        for word in off {
-            assert!(!command.iter().any(|w| w == word || w.starts_with(&format!("{word}="))));
-        }
-        assert_eq!(resumed(&command[1..]), Some(native), "the thread named is the one joined");
     }
 
     /// The shell Codex wraps a command in is taken off, its quoting undone; a command it did

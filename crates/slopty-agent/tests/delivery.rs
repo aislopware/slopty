@@ -8,7 +8,7 @@
 mod tests {
     use slopty_agent::driven::caps;
     use slopty_agent::pi::driven::Driven;
-    use slopty_agent::{acp, codex, observed, pi};
+    use slopty_agent::{acp, claude, codex, pi};
     use slopty_core::WallMs;
     use slopty_proto::thread::wire::Intent;
     use slopty_proto::thread::{Delivery, ThreadMeta};
@@ -29,7 +29,7 @@ mod tests {
     #[test]
     fn every_adapter_takes_a_message_sent_now_or_after_the_turn() {
         let adapters: [(&str, &[&str]); 4] = [
-            ("Claude Code", &observed::CAPS),
+            ("Claude Code", &claude::driven::CAPS),
             ("Codex", &codex::shared::CAPS),
             ("pi", &pi::driven::CAPS),
             ("ACP", &acp::driven::CAPS),

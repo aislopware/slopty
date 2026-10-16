@@ -347,6 +347,8 @@ mod tests {
             started_at: Some(now),
             updated_at: now,
             running_subagents: 0,
+            status_since: None, // slopty: new field.
+            waiting_on: None, // slopty: new field.
         };
         state.apply_sessions(vec![working("run-new"), working("run-old")]);
         let folded = subagents(&state, "main", false, now);

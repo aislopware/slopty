@@ -208,6 +208,7 @@ mod codex {
             effort: None,
             attachments: Vec::new(),
             args: Vec::new(),
+            options: std::collections::BTreeMap::new(),
             worktree: None,
         }
     }
@@ -281,15 +282,6 @@ mod codex {
         assert_eq!(state.meta.facts.get("sandbox").map(String::as_str), Some("readOnly"));
         assert_eq!(state.meters.limits[0].name, "five-hour");
         assert_eq!(state.meters.limits[0].used_bp, 3_000);
-        // A Codex TUI on the thread that the worker did not open, found by the agent scan in a
-        // terminal: the thread names that terminal while it runs, and none once it has gone.
-        // Another terminal's end leaves it named.
-        let tile = SessionId::new();
-        handle.tui_runs(&native, tile, true);
-        polled(&host, thread, |s| s.meta.terminal == Some(tile)).await;
-        handle.tui_runs(&native, SessionId::new(), false);
-        handle.tui_runs(&native, tile, false);
-        polled(&host, thread, |s| s.meta.terminal.is_none()).await;
 
         served.abort();
         let _done = tokio::time::timeout(BOUND, server).await;

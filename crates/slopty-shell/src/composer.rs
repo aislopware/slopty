@@ -42,6 +42,11 @@ use crate::settings::{ComposerSendBehavior, platform_combo};
 use crate::state::{AppState, Indicator};
 use crate::theme::Theme;
 
+// slopty: approvals, prompt history and drafts, and the composer's notices.
+mod approval;
+mod history;
+mod notices;
+pub(crate) use history::insert_quote;
 mod chip;
 pub use chip::ChipKind;
 use chip::*;
@@ -49,6 +54,7 @@ pub(crate) use chip::{
     CHIP_PAD_FAMILY, ChipIcon, chip_icon, chip_pad_ranges, chip_text, paint_chip,
     text_chip_label_offset,
 };
+pub(crate) use chip::{expand_context_chips, quote_link}; // slopty: quotes and terminal context.
 
 // ---------------------------------------------------------------------------
 // Constants + pure decision logic
@@ -599,6 +605,17 @@ fn escape_dismisses_completion(key: &str, completion_open: bool) -> bool {
     key == "escape" && completion_open
 }
 
+// slopty: where the keyboard starts on a page: an approval that defaults to deny on its deny.
+fn initial_focus(question: &UserInputQuestion) -> Option<usize> {
+    if question.options.is_empty() {
+        return None;
+    }
+    match question.deny_option {
+        Some(ix) if question.deny_first && ix < question.options.len() => Some(ix),
+        _ => Some(0),
+    }
+}
+
 fn wizard_escape_goes_back(key: &str, input_focused: bool, input_empty: bool) -> bool {
     key == "escape" && (!input_focused || input_empty)
 }
@@ -675,6 +692,10 @@ pub struct Wizard {
     pub page: usize,
     picked: Vec<Vec<usize>>,
     typed: Vec<String>,
+    // slopty: the keyboard's place among the options (Enter takes it), and whether a read-gated
+    // body has been scrolled through.
+    focused: Option<usize>,
+    read_through: bool,
 }
 
 impl Wizard {
@@ -684,13 +705,55 @@ impl Wizard {
             .iter()
             .map(|q| q.prefill.clone().unwrap_or_default())
             .collect();
+        let focused = questions.first().and_then(initial_focus);
         Self {
             request_id,
             questions,
             page: 0,
             picked: vec![Vec::new(); n],
             typed,
+            focused,
+            read_through: false,
         }
+    }
+
+    // slopty: an approval's keys follow Claude desktop's rules.
+    /// Enter: the focused choice of a choice-only page, else the page's answer. A click-only
+    /// page takes no key.
+    pub fn press_enter(&mut self) -> WizardStep {
+        let Some(question) = self.questions.get(self.page) else {
+            return WizardStep::Stay;
+        };
+        if question.click_only {
+            return WizardStep::Stay;
+        }
+        match self.focused {
+            Some(ix) if question.choices_only => self.select(ix),
+            _ if question.choices_only => WizardStep::Stay,
+            _ => self.advance(),
+        }
+    }
+
+    /// ↑/↓ among the options, wrapping.
+    pub fn move_focus(&mut self, delta: isize) {
+        let Some(count) = self.current().map(|q| q.options.len()).filter(|n| *n > 0) else {
+            return;
+        };
+        let at = self.focused.map_or(0, |ix| ix as isize + delta);
+        self.focused = Some(at.rem_euclid(count as isize) as usize);
+    }
+
+    /// The focused option, if the keyboard is among them.
+    pub fn focused(&self) -> Option<usize> {
+        self.focused
+    }
+
+    /// Whether option `ix` is held back: a read-gated page allows only once read through, and
+    /// its deny is never held back.
+    pub fn allow_blocked(&self, ix: usize) -> bool {
+        self.current().is_some_and(|q| {
+            q.read_gate && !self.read_through && q.deny_option != Some(ix)
+        })
     }
 
     pub fn counter(&self) -> String {
@@ -717,7 +780,7 @@ impl Wizard {
         let Some(question) = self.questions.get(self.page) else {
             return WizardStep::Stay;
         };
-        if option_ix >= question.options.len() {
+        if option_ix >= question.options.len() || self.allow_blocked(option_ix) {
             return WizardStep::Stay;
         }
         let multi = question.multi_select;
@@ -745,7 +808,8 @@ impl Wizard {
 
     /// Number key 1-9.
     pub fn press_number(&mut self, number: usize) -> WizardStep {
-        if number == 0 {
+        // slopty: a click-only page takes no digit.
+        if number == 0 || self.current().is_some_and(|q| q.click_only) {
             return WizardStep::Stay;
         }
         self.select(number - 1)
@@ -761,6 +825,9 @@ impl Wizard {
     pub fn advance(&mut self) -> WizardStep {
         if self.page + 1 < self.questions.len() {
             self.page += 1;
+            // slopty: the next page's keyboard place and read gate start over.
+            self.focused = self.questions.get(self.page).and_then(initial_focus);
+            self.read_through = false;
             WizardStep::Stay
         } else {
             WizardStep::Done(self.answers())
@@ -771,6 +838,8 @@ impl Wizard {
     pub fn back(&mut self) -> bool {
         if self.page > 0 {
             self.page -= 1;
+            self.focused = self.questions.get(self.page).and_then(initial_focus); // slopty
+            self.read_through = false;
             true
         } else {
             false
@@ -1241,6 +1310,14 @@ impl TextProjection {
                     attachment: None,
                 }),
         );
+        // slopty: quotes from the transcript and a terminal's context are chips too.
+        links.extend(context_chip_links(raw).into_iter().map(|link| FileMentionLink {
+            range: link.range,
+            basename: link.label,
+            path: link.text.chars().take(300).collect(),
+            kind: link.kind,
+            attachment: None,
+        }));
         links.extend(
             slopty_view_proto::attachment_mentions::attachment_mentions(raw)
                 .into_iter()
@@ -1416,7 +1493,10 @@ fn mention_display_labels(links: &[FileMentionLink]) -> Vec<String> {
                         .filter(|other| other.path != link.path)
                         .collect();
                     // A chat's "path" is its id: always show its title.
-                    if duplicates.is_empty() || link.kind == ChipKind::Chat {
+                    // slopty: a quote's or a terminal's chip is its own words, never a path.
+                    if duplicates.is_empty()
+                        || matches!(link.kind, ChipKind::Chat | ChipKind::Quote | ChipKind::Context)
+                    {
                         return link.basename.clone();
                     }
                     let parts: Vec<_> = link.path.split('/').collect();
@@ -1471,6 +1551,8 @@ fn has_mention_scheme(raw: &str) -> bool {
         || raw.contains(slopty_view_proto::attachment_mentions::IMAGE_MENTION_SCHEME)
         || raw.contains(slopty_view_proto::attachment_mentions::ATTACHMENT_MENTION_SCHEME)
         || raw.contains(slopty_view_proto::chat_mentions::CHAT_MENTION_SCHEME)
+        || raw.contains(QUOTE_SCHEME) // slopty: quotes and terminal context.
+        || raw.contains(CONTEXT_SCHEME)
 }
 
 /// Project a sent message's raw Markdown for transcript display: mention links
@@ -1758,6 +1840,9 @@ pub fn init(cx: &mut App, send_behavior: ComposerSendBehavior) {
         palette_bindings.push(KeyBinding::new(&format!("{prefix}-z"), Undo, palette));
         palette_bindings.push(KeyBinding::new(&format!("shift-{prefix}-z"), Redo, palette));
     }
+    // slopty: ⌥↑ edits the newest queued message, ⌘⇧↵ steers the oldest, ⌘⇧↑/↓ step the
+    // new session's machine.
+    message_bindings.extend(history::bindings(MESSAGE_COMPOSER_CONTEXT));
     cx.bind_keys(palette_bindings);
     cx.bind_keys(generic_bindings);
     cx.bind_keys(message_bindings);
@@ -5770,6 +5855,8 @@ pub struct Composer {
     account_usage: Entity<crate::account_usage::AccountUsage>,
     /// A side chat's composer: its footer keeps only the context ring.
     side_chat: bool,
+    // slopty: prompt history, saved drafts, the approval's scroll and the notices' clocks.
+    extras: history::Extras,
     _picker_focus: Subscription,
     _input_events: Subscription,
     // slopty: dictation removed.
@@ -5847,6 +5934,12 @@ impl Composer {
         });
         let pickers = cx.new(|cx| Pickers::new(state.clone(), cx));
         let account_usage = cx.new(|cx| crate::account_usage::AccountUsage::new(state.clone(), cx));
+        // slopty: the context card's Compact goes through the agent's own `/compact`.
+        cx.subscribe(
+            &account_usage,
+            |this: &mut Self, _, _: &crate::account_usage::CompactRequested, cx| this.compact(cx),
+        )
+        .detach();
         // The footer toolbar (checkout kind + ref picker) is rendered INLINE
         // by the composer from picker state — a pickers-side notify (refs
         // loaded, popover toggled, pick made) must repaint the composer too.
@@ -5918,6 +6011,7 @@ impl Composer {
         })
         .detach();
         // slopty: dictation removed.
+        Self::serve_quotes(cx); // slopty: a quote from the transcript finds this composer.
         let current_key = state.read(cx).selected_chat.clone().unwrap_or_default();
         let mut composer = Self {
             state,
@@ -6000,6 +6094,7 @@ impl Composer {
             _pickers_observe: pickers_observe,
             account_usage,
             side_chat: false,
+            extras: Default::default(),
             _picker_focus: picker_focus,
             _input_events: input_events,
             // slopty: dictation removed.
@@ -6241,7 +6336,11 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let put = self.input.update(cx, |input, cx| input.insert_context(text, window, cx));
+        // slopty: a terminal's fenced block lands as one chip, "Terminal · 24 lines".
+        let put = self.input.update(cx, |input, cx| match context_link(text) {
+            Some(link) => input.insert_reference(&link, cx),
+            None => input.insert_context(text, window, cx),
+        });
         if put {
             let focus = self.input.read(cx).focus_handle.clone();
             window.focus(&focus, cx);
@@ -6900,6 +6999,7 @@ impl Composer {
             }
             return;
         }
+        self.schedule_draft_save(cx); // slopty: the draft is kept on the chat's machine.
         let input = self.input.read(cx);
         if !input.selected_range.is_empty() || input.marked_range.is_some() {
             if self.mention.token.is_some() {
@@ -7705,11 +7805,12 @@ impl Composer {
     }
 
     fn on_state_changed(&mut self, cx: &mut Context<Self>) {
-        {
+        let stopped = {
             let state = self.state.read(cx);
             // AppState also notifies at clock-only transitions, so a run that
             // goes stale drops its interrupt at the cutoff.
             let now = crate::state::clock_now();
+            let asked: Vec<String> = self.interrupting.iter().cloned().collect(); // slopty
             retain_live_interrupts(&mut self.interrupting, |chat_id| {
                 matches!(
                     state.indicator_for(chat_id, now),
@@ -7718,6 +7819,11 @@ impl Composer {
             });
             self.queue_removing
                 .retain(|id| state.queue.iter().any(|item| item.id == *id));
+            // slopty: an asked stop the run came to rest under is confirmed: "Stopped".
+            asked.into_iter().filter(|id| !self.interrupting.contains(id)).collect::<Vec<_>>()
+        };
+        for chat in stopped {
+            self.note_stopped(chat, cx);
         }
         self.interrupt_tasks
             .retain(|chat_id, _| self.interrupting.contains(chat_id));
@@ -7794,7 +7900,14 @@ impl Composer {
                     self.drafts.insert(self.current_key.clone(), old_text);
                 }
             }
-            let draft = self.drafts.get(&key).cloned().unwrap_or_default();
+            let mut draft = self.drafts.get(&key).cloned().unwrap_or_default();
+            // slopty: a chat opened with no draft here takes the one its machine keeps.
+            if draft.is_empty()
+                && let Some(kept) = self.kept_draft(&key, cx)
+            {
+                draft = kept;
+            }
+            self.extras.history = None;
             self.current_key = key;
             // `failure` deliberately survives navigation: chat-scoped
             // failures render only under their own chat (see `failure_key`),
@@ -8002,6 +8115,10 @@ impl Composer {
             return;
         }
         if self.wizard.is_some() {
+            // slopty: a click-only page takes no Enter.
+            if self.wizard.as_ref().and_then(Wizard::current).is_some_and(|q| q.click_only) {
+                return;
+            }
             // Enter inside the panel's free-text input submits the page.
             let typed = self.input.read(cx).text().to_string();
             if let Some(w) = self.wizard.as_mut() {
@@ -8194,6 +8311,8 @@ impl Composer {
             .filter_map(|att| att.mention)
             .collect();
         let text = slopty_view_proto::attachment_mentions::demote_unattached_mentions(&text, &attached);
+        // slopty: a quote leaves as a `>` quote, a terminal's context as its fenced block.
+        let text = expand_context_chips(&text);
         let text = crate::comments::with_comments(&text, &comments);
         self.preview = None;
         let message_id = uuid::Uuid::new_v4().to_string();
@@ -8932,6 +9051,24 @@ impl Composer {
         cx.notify();
     }
 
+    // slopty: Enter on the panel: the focused choice of an approval, the page's answer of a
+    // question, nothing on a click-only page.
+    fn wizard_enter(&mut self, cx: &mut Context<Self>) {
+        let Some(wizard) = self.wizard.as_mut() else {
+            return;
+        };
+        if !wizard.current().is_some_and(|q| q.choices_only || q.click_only) {
+            self.wizard_advance(cx);
+            return;
+        }
+        match wizard.press_enter() {
+            WizardStep::Done(answers) => self.wizard_finish(answers, cx),
+            WizardStep::AutoAdvance => self.schedule_auto_advance(cx),
+            WizardStep::Stay => {}
+        }
+        cx.notify();
+    }
+
     fn schedule_auto_advance(&mut self, cx: &mut Context<Self>) {
         self.advance_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor()
@@ -9059,9 +9196,16 @@ impl Composer {
             }
         } else if key == "enter" {
             if !input_focused {
-                self.wizard_advance(cx);
+                self.wizard_enter(cx); // slopty: an approval's Enter follows its rules.
                 cx.stop_propagation();
             }
+        } else if matches!(key, "up" | "down") && !input_focused {
+            // slopty: arrows walk the options; Enter takes the focused one.
+            if let Some(wizard) = self.wizard.as_mut() {
+                wizard.move_focus(if key == "up" { -1 } else { 1 });
+            }
+            cx.notify();
+            cx.stop_propagation();
         } else if key == "escape" {
             if wizard_escape_goes_back(key, input_focused, input_empty) {
                 self.wizard_back(cx);
@@ -9108,13 +9252,48 @@ impl Composer {
         let last = page + 1 >= wizard.questions.len();
         let typed_empty = self.input.read(cx).is_empty();
         let can_advance = wizard.page_has_pick() || !typed_empty || question.multiline;
+        // slopty: a plan's choices stand under "Plan ready" (its card is in the transcript), more
+        // than one open request says which this is, every shown string draws its hidden
+        // characters, and a read-gated approval holds its allow until read through.
+        let (plan, open) = {
+            let transcript = &self.state.read(cx).transcript;
+            (approval::is_plan(&question, transcript), approval::open_requests(transcript))
+        };
+        if question.read_gate && !wizard.read_through {
+            self.recheck_read_through(cx);
+        }
+        let wizard = self.wizard.clone().unwrap_or(wizard);
+        let header = approval::visible_escapes(&question.header);
+        let body = if plan {
+            approval::PLAN_READY.to_owned()
+        } else {
+            approval::visible_escapes(&question.question)
+        };
+        let title: String =
+            body.lines().next().unwrap_or(header.as_str()).chars().take(160).collect();
+        let gate_holds = (0..question.options.len()).any(|ix| wizard.allow_blocked(ix));
+        let focused = wizard.focused();
+        let click_only = question.click_only;
+        let keys_pick = question.choices_only && !click_only;
 
         let options = question.options.iter().enumerate().map(|(ix, label)| {
             // Selection reads on the row only while no typed override exists
             // (typed answers win — slopty question-panel.tsx `isSel`).
             let picked = wizard.is_picked(ix) && typed_empty;
+            let blocked = wizard.allow_blocked(ix); // slopty
+            // slopty: the keyboard's place, where Enter would take it.
+            let keyed = keys_pick && focused == Some(ix) && !picked;
+            let label = approval::visible_escapes(label); // slopty
             div()
                 .id(("wizard-option", ix))
+                // slopty: each choice names itself; a held-back allow says so.
+                .role(Role::Button)
+                .aria_label(SharedString::from(if blocked {
+                    format!("{label} (scroll to allow)")
+                } else {
+                    label.clone()
+                }))
+                .when(blocked, |el| el.opacity(0.4).cursor_default())
                 .flex()
                 .flex_row()
                 .items_center()
@@ -9123,8 +9302,8 @@ impl Composer {
                 .py(px(10.0))
                 .rounded(px(12.0))
                 .border_1()
-                .border_color(if picked {
-                    crate::theme::ink(0.16)
+                .border_color(if picked || keyed {
+                    crate::theme::ink(if keyed { 0.12 } else { 0.16 })
                 } else {
                     gpui::transparent_black()
                 })
@@ -9139,7 +9318,7 @@ impl Composer {
                     )
                 })
                 .on_hover(motion::hover_listener(format!("wizard-option-{ix}")))
-                .cursor_pointer()
+                .when(!blocked, |el| el.cursor_pointer())
                 .on_click(cx.listener(move |this, _, _, cx| this.wizard_select(ix, cx)))
                 .child(
                     div()
@@ -9154,7 +9333,8 @@ impl Composer {
                         })
                         .child(SharedString::from(label.clone())),
                 )
-                .when(ix < 9, |el| {
+                // slopty: a click-only page shows no digits it would not take.
+                .when(ix < 9 && !click_only, |el| {
                     el.child(
                         // Number kbd chip: `size-[22px] rounded-md text-[11px]`.
                         div()
@@ -9185,6 +9365,9 @@ impl Composer {
         // show through unblurred.
         let panel = div()
             .id("question-panel")
+            // slopty: the panel names its question to the accessibility tree.
+            .role(Role::Group)
+            .aria_label(SharedString::from(title))
             .track_focus(&self.wizard_focus)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 this.on_wizard_key(event, window, cx)
@@ -9216,9 +9399,28 @@ impl Composer {
                                     .font_weight(gpui::FontWeight::MEDIUM)
                                     .text_color(theme.text_muted.opacity(0.6))
                                     .child(SharedString::from(crate::popover::tracked_upper(
-                                        &question.header,
+                                        &header,
                                     ))),
                             )
+                            // slopty: several requests open: which of them this is.
+                            .when(open > 1, |el| {
+                                el.child(
+                                    div()
+                                        .id("wizard-request-count")
+                                        .role(Role::Status)
+                                        .aria_label(SharedString::from(format!("1 of {open}")))
+                                        .h(px(20.0))
+                                        .px(px(6.0))
+                                        .flex()
+                                        .items_center()
+                                        .rounded(px(6.0))
+                                        .bg(crate::theme::ink(0.06))
+                                        .text_size(crate::typography::ui_rems(10.0))
+                                        .font_weight(gpui::FontWeight::MEDIUM)
+                                        .text_color(theme.text_muted.opacity(0.6))
+                                        .child(SharedString::from(format!("1 of {open}"))),
+                                )
+                            })
                             .when(wizard.questions.len() > 1, |el| {
                                 el.child(
                                     div()
@@ -9235,17 +9437,35 @@ impl Composer {
                                 )
                             }),
                     )
-                    // slopty: a request its title says whole asks no line more.
-                    .when(!question.question.is_empty(), |el| {
-                        el.child(
-                            div()
-                                .mt(px(6.0))
-                                .text_size(crate::typography::ui_rems(15.0))
-                                .line_height(px(20.0))
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(theme.text)
-                                .child(SharedString::from(question.question.clone())),
-                        )
+                    // slopty: a request its title says whole asks no line more. A read-gated
+                    // body scrolls in place, and an edit shows its change.
+                    .when(!body.is_empty(), |el| {
+                        let text = div()
+                            .text_size(crate::typography::ui_rems(15.0))
+                            .line_height(px(20.0))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .child(SharedString::from(body.clone()));
+                        if question.read_gate {
+                            el.child(
+                                div()
+                                    .id("wizard-gated-body")
+                                    .mt(px(6.0))
+                                    .max_h(px(approval::GATED_BODY_MAX_HEIGHT))
+                                    .overflow_y_scroll()
+                                    .track_scroll(&self.extras.wizard_scroll)
+                                    .on_scroll_wheel(cx.listener(|this, _, _, cx| {
+                                        this.recheck_read_through(cx);
+                                        cx.notify();
+                                    }))
+                                    .child(text),
+                            )
+                        } else {
+                            el.child(div().mt(px(6.0)).child(text))
+                        }
+                    })
+                    .when_some(question.proposed.clone().filter(|_| !plan), |el, diff| {
+                        el.child(approval::proposed_change(&diff, &theme))
                     })
                     .when(question.multi_select, |el| {
                         el.child(
@@ -9264,6 +9484,20 @@ impl Composer {
                             .gap(px(4.0))
                             .children(options),
                     )
+                    // slopty: why the allow is held back.
+                    .when(gate_holds, |el| {
+                        el.child(
+                            div()
+                                .id("wizard-read-gate")
+                                .role(Role::Status)
+                                .aria_label(approval::READ_GATE_NOTE)
+                                .mt(px(8.0))
+                                .px(px(4.0))
+                                .text_size(crate::typography::ui_rems(12.0))
+                                .text_color(theme.text_muted.opacity(0.65))
+                                .child(SharedString::from(approval::READ_GATE_NOTE)),
+                        )
+                    })
                     // Free-text override over a hairline (shares the composer
                     // input entity).
                     // slopty: a choice-only request takes a click, never words.
@@ -9324,6 +9558,27 @@ impl Composer {
         // Slopty composer-actions.tsx: a size-7 filled circle — up-arrow to
         // send/queue, a dark rounded square on the same light circle to stop.
         match mode {
+            // slopty: a stop asked and not yet confirmed: "Stopping…", and no second press.
+            SendButtonMode::Stop if self.stopping(cx) => div()
+                .id("composer-stopping")
+                .role(Role::Button)
+                .aria_label("Stopping…")
+                .size(px(28.0))
+                .flex_none()
+                .rounded_full()
+                .bg(theme.text.opacity(0.12))
+                .flex()
+                .items_center()
+                .justify_center()
+                .tooltip(crate::settings::widgets::text_tooltip("Stopping…"))
+                .child(crate::loaders::mini_mono_spinner(
+                    "composer-stopping",
+                    3.0,
+                    theme.text,
+                    cx.entity_id(),
+                    cx,
+                ))
+                .into_any_element(),
             SendButtonMode::Stop => div()
                 .id("composer-stop")
                 .size(px(28.0))
@@ -9586,6 +9841,17 @@ impl Render for Composer {
                 (text, offline)
             })
         };
+        // slopty: the footer's context card asks the same catalog as the `/` menu.
+        let catalog = self.state.read(cx).selected_chat.is_some().then(|| self.catalog_params(cx));
+        self.account_usage.update(cx, |usage, _| usage.set_catalog(catalog));
+        // slopty: a chat's notice names its machine and when it was last heard, after a grace,
+        // with Retry and Wake; a usage limit says when it lifts.
+        let road = self
+            .road_notice(cx)
+            .map(|notice| self.render_road_notice(notice, &theme, cx));
+        let queue_notice = queue_notice.filter(|_| self.state.read(cx).selected_chat.is_none());
+        let limit = self.limit_notice(cx).map(|words| self.render_limit_notice(words, &theme));
+        let stopped = self.stopped_notice(cx).map(|words| self.render_limit_notice(words, &theme));
         // The shell owns the width and its route animation. A route-dependent
         // cap here would cut a wide composer before its return glide finishes.
         let container = div()
@@ -9646,7 +9912,10 @@ impl Render for Composer {
                         .child(div().size(px(5.0)).rounded_full().bg(dot))
                         .child(div().min_w_0().truncate().child(notice)),
                 ))
-            });
+            })
+            .children(road)
+            .children(limit)
+            .children(stopped);
 
         if wizard_active {
             let wizard = self.render_wizard(cx);
@@ -9688,6 +9957,31 @@ impl Render for Composer {
         // Escape backs out of a queue-row edit (the row keeps its old text).
         // Bound here rather than in the input: the input's own Escape belongs
         // to the mention/slash popups, which outrank this while they're open.
+        // slopty: ↑/↓ at the draft's edge walk the chat's earlier prompts; the queue's and the
+        // canvas's keys.
+        let container = container
+            .capture_action(cx.listener(|this, _: &Up, _, cx| {
+                if this.walk_history(true, cx) {
+                    cx.stop_propagation();
+                }
+            }))
+            .capture_action(cx.listener(|this, _: &Down, _, cx| {
+                if this.walk_history(false, cx) {
+                    cx.stop_propagation();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &history::EditLatestQueued, _, cx| {
+                this.edit_latest_queued(cx)
+            }))
+            .on_action(cx.listener(|this, _: &history::SteerOldestQueued, _, cx| {
+                this.steer_oldest_queued(cx)
+            }))
+            .on_action(cx.listener(|this, _: &history::PreviousMachine, window, cx| {
+                this.step_machine(false, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &history::NextMachine, window, cx| {
+                this.step_machine(true, window, cx)
+            }));
         let container = container.when(self.editing_queued.is_some(), |el| {
             el.on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
                 if event.keystroke.key == "escape"
@@ -11289,6 +11583,8 @@ mod tests {
                 started_at: Some(updated),
                 updated_at: updated,
                 running_subagents: 0,
+                status_since: None, // slopty: new field.
+                waiting_on: None, // slopty: new field.
             }];
             state.selected_chat = Some("c".into());
             state.watch_clock_transitions(cx);
@@ -13822,6 +14118,11 @@ mod tests {
             multiline: false,
             multi_select: multi,
             choices_only: false, // slopty: one-click choices
+            deny_first: false, // slopty: new field.
+            click_only: false, // slopty: new field.
+            read_gate: false, // slopty: new field.
+            deny_option: None, // slopty: new field.
+            proposed: None, // slopty: new field.
         }
     }
 

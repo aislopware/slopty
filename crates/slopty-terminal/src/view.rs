@@ -6,6 +6,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use find::{Query, Tally, Toggle};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, AppContext as _, Autocapitalize, Bounds, Context, CursorStyle, Entity, EntityInputHandler,
@@ -13,19 +14,14 @@ use gpui::{
     KeyDownEvent, KeyUpEvent, Keystroke, LongPressEvent, ModifiersChangedEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Render, ScrollDelta,
     ScrollWheelEvent, SharedString, StatefulInteractiveElement as _, Styled as _, TextInputAction,
-    TextInputConfiguration, TouchPhase, UTF16Selection, Window, anchored, deferred, div, point, px,
-    relative, size,
+    TextInputConfiguration, TouchPhase, UTF16Selection, Window, div, point, px, size,
 };
-use gpui_kit::component::input::{self, InputEvent, InputState};
 use slopty_client::clip::{ClipFiles, ClipSync, ShellPaste};
-use slopty_client::term::{BlockHead, CommandBlock, TermImage};
+use slopty_client::term::{CommandBlock, TermImage};
 use slopty_client::{Effect, TermState, WorkerKey};
 use slopty_core::{ClientId, SessionId};
 use slopty_grid::{CellWidth, Cursor, LineFlags, LineIndex, TermModes};
-use slopty_kit::colors::{hsla, hsla_alpha};
 use slopty_kit::keys;
-use slopty_kit::kit::FindBar;
-use slopty_kit::kit::find::{PLACEHOLDER as FIND_PLACEHOLDER, Query, Tally, Toggle};
 use slopty_predict::{Policy, Prediction, Predictor};
 use slopty_proto::ClientMsg;
 use slopty_proto::input::{KeyAction, MouseAction, MouseButton as ProtoButton, MouseEvent};
@@ -33,12 +29,14 @@ use slopty_proto::terminal::{
     PasteChord, Placement, PointerShape, SearchMatch, TermEvent, TermRequest, TermSize,
 };
 use slopty_proto::transfer::ClipMsg;
-use slopty_theme::{Colors, Theme, alpha};
+use slopty_shell::composer::{ComposerInput, ComposerInputEvent};
+use slopty_shell::live::chrome;
+use slopty_shell::{icons, popover};
+use slopty_theme::Theme;
 use tokio::sync::mpsc;
 
 use crate::copy_mode::{self, Command, Motion};
-use crate::element::{CellMetrics, FailedLook, RowCache, TerminalElement};
-use crate::scrollbar::Visibility;
+use crate::element::{CellMetrics, RowCache, TerminalElement};
 use crate::{latency, url};
 
 /// Hits asked for per search; the worker counts every hit regardless.
@@ -58,12 +56,25 @@ const BELL_FLASH: Duration = Duration::from_millis(150);
 #[cfg(test)]
 const BELL_HALF: Duration = Duration::from_millis(75);
 const AUTOSCROLL_MAX: i64 = 8;
+/// How far the floats over the grid (the find bar, a held paste, a link's target) stand off
+/// its edges.
+const FLOAT_INSET: f32 = 8.0;
+/// How far the foot pills stand above the grid's foot: zeron's jump pill over a transcript.
+const FOOT_INSET: f32 = 12.0;
 /// The action on the pill that counts the lines below a view scrolled up into its history.
 pub const BACK_TO_LIVE: &str = "Back to live";
 /// What the pill of a view sized by another client says, and what a click on it does.
 const SIZED_ELSEWHERE: &str = "Sized for another screen";
 /// The action on that pill: this client's size becomes the PTY's.
 const TAKE: &str = "Take";
+/// What the foot says while the session's worker is out of reach.
+const OUT_OF_REACH: &str = "Out of reach \u{b7} Reconnecting\u{2026}";
+/// What a session reopened after its shell was lost says.
+const RESTORED: &str = "Restored";
+/// The toast's button that runs a restored session's command again.
+const RUN_AGAIN: &str = "Run again";
+/// How long the restored toast waits on its button.
+const RESTORED_LASTS: Duration = Duration::from_secs(12);
 /// How far a ⌘-press on a path moves, in points, before it is a drag of the file rather than
 /// a click that opens it.
 const DRAG_OUT_SLOP: f32 = 4.0;
@@ -260,7 +271,7 @@ pub fn escape() -> Keystroke {
 
 /// The open search bar.
 struct Search {
-    input: Entity<InputState>,
+    input: Entity<ComposerInput>,
     /// What is asked: the field's text and the toggles.
     query: Query,
     /// The pattern last sent for it ([`Query::source`]), which the worker's answers name.
@@ -358,7 +369,7 @@ pub enum TerminalViewEvent {
     Exited(Option<i32>),
     /// Something the human should read in the top bar for a moment (a picture refused).
     Notice(String),
-    /// The program's progress report changed ([`TerminalView::progress`]): the tile's header
+    /// The program's progress report changed ([`TerminalView::progress`]): the shell's tab
     /// draws it.
     Progress,
     /// A shell command finished (shell integration marks): what was typed, its status, and how
@@ -579,12 +590,17 @@ pub struct TerminalView {
     /// bell restarts it (dropping the old task cancels it).
     bell_flash: bool,
     bell_task: Option<gpui::Task<()>>,
-    /// The scrollbar's thumb is held: the pointer's offset from the thumb's top.
-    thumb_drag: Option<Pixels>,
-    /// Whether the overlay scrollbar shows, and the wait for its linger to end (dropped,
-    /// cancelled, with the view).
-    scrollbar: Visibility,
-    scrollbar_task: Option<gpui::Task<()>>,
+    /// The overlay scrollbar: the shell's rail, its hover, its drag and its fade.
+    rail: popover::MenuScrollbarState,
+    /// Scroll requests a drag on the rail made, sent once the view next draws.
+    rail_requests: Vec<TermRequest>,
+    /// How many times the viewport has moved: the rail's sign of scrolling, which output
+    /// arriving under a still viewport does not change.
+    scroll_moves: u32,
+    /// The top line the last frame showed while scrolled up (`None` while following).
+    shown_top: Option<LineIndex>,
+    /// The element's place in the window as last drawn: the rail's track.
+    drawn_bounds: Option<Bounds<Pixels>>,
     /// A marker answer the outbound queue had no room for, and the wait for room to send it.
     /// Only the newest waits: answering it answers every marker before it.
     unsent_reached: Option<u64>,
@@ -594,9 +610,6 @@ pub struct TerminalView {
     /// requests, and a picture paste's offer ahead of its chord.
     unsent: VecDeque<ClientMsg>,
     unsent_task: Option<gpui::Task<()>>,
-    /// The top line the last frame drew while scrolled up (`None` while following): a frame
-    /// that draws another has scrolled. Output arriving under a view scrolled up moves neither.
-    drawn_top: Option<LineIndex>,
     /// The fraction of a line the wheel has moved short of a whole one (a trackpad scrolls
     /// in fractions; they add up).
     wheel_remainder: f32,
@@ -604,20 +617,14 @@ pub struct TerminalView {
     /// held through its momentum until the next one starts. `None` while a gesture has yet to
     /// move; a mouse wheel never reads or writes it.
     wheel_gesture: Option<bool>,
-    /// The command-block menu a right click opened, and where.
-    block_menu: Option<BlockMenu>,
+    /// The command-block menu a right click opened, and where, with its closing motion.
+    block_menu: popover::Popup<BlockMenu>,
     /// When the running shell command left its prompt.
     command_started: Option<Instant>,
-    /// How long each finished command took, by the row it was typed at: for the caption at
-    /// the right end of that row (only from [`TOOK_MIN`]) and the facts a hovered block shows.
-    /// Rows are numbered per epoch, so a new epoch empties it (`took_epoch` remembers which
-    /// one filled it).
-    took: HashMap<LineIndex, Duration>,
-    took_epoch: Option<u32>,
     /// The cell under the pointer, for the ⌘-hover link underline.
     hover: Option<(u16, u16)>,
-    /// Where the pointer is over the grid's element, wherever it is covered (the block facts,
-    /// the sticky header): which block is hovered, followed through a scroll. A cell, so that
+    /// Where the pointer is over the grid's element, wherever it is covered (a float over the
+    /// grid): which block is hovered, followed through a scroll. A cell, so that
     /// a move is kept without updating the view: it is news for the view only when it moves
     /// the hover to another block, which then updates it.
     pointer_at: Cell<Option<gpui::Point<Pixels>>>,
@@ -634,13 +641,12 @@ pub struct TerminalView {
     /// What waits on a confirmation at the tile's foot: a paste held back by paste
     /// protection, or the close of a shell whose command is still running.
     pending: Option<Pending>,
-    /// The tile shows a pill of its own at the body's foot (the worker away, the program
-    /// exited), which says more than the lines below and takes their pill's place.
-    covered: bool,
-    /// The program's progress report as the tile's header last heard of it.
-    progress_told: Option<slopty_kit::kit::progress::Progress>,
-    /// The person ran the restored session's command again or put its chip away.
+    /// The program's progress report as the shell's tab last heard of it.
+    progress_told: Option<slopty_shell::live::Progress>,
+    /// A restored session's toast was raised.
     restored_seen: bool,
+    /// Waits for the link's other end to go, to say the worker is out of reach.
+    link_watch: Option<gpui::Task<()>>,
 }
 
 impl std::fmt::Debug for TerminalView {
@@ -703,6 +709,7 @@ impl TerminalView {
             }
         })
         .detach();
+        let out_watch = out.clone();
         Self {
             session,
             state: TermState::new(size),
@@ -735,10 +742,8 @@ impl TerminalView {
             sticky_alt: false,
             pointer_hidden: false,
             sticky_command: false,
-            block_menu: None,
+            block_menu: popover::Popup::default(),
             command_started: None,
-            took: HashMap::new(),
-            took_epoch: None,
             selection: None,
             selecting: false,
             selected_by_press: false,
@@ -763,60 +768,71 @@ impl TerminalView {
             blink_task: None,
             bell_flash: false,
             bell_task: None,
-            thumb_drag: None,
-            scrollbar: Visibility::default(),
-            scrollbar_task: None,
+            rail: popover::MenuScrollbarState::default(),
+            rail_requests: Vec::new(),
+            scroll_moves: 0,
+            shown_top: None,
+            drawn_bounds: None,
             unsent_reached: None,
             reached_task: None,
             unsent: VecDeque::new(),
             unsent_task: None,
-            drawn_top: None,
             wheel_remainder: 0.0,
             wheel_gesture: None,
             search: None,
             find_toggles: Query::default(),
             pending: None,
-            covered: false,
             progress_told: None,
             restored_seen: false,
+            link_watch: Some(Self::watch_link(&out_watch, cx)),
         }
+    }
+
+    /// Wait for the other end of the link `out` sends on to go (the worker out of reach), then
+    /// draw again: the foot says so until [`Self::relink`].
+    fn watch_link(out: &mpsc::Sender<ClientMsg>, cx: &Context<Self>) -> gpui::Task<()> {
+        let out = out.clone();
+        cx.spawn(async move |this, cx| {
+            out.closed().await;
+            let _gone = this.update(cx, |_, cx| cx.notify());
+        })
     }
 
     /// Type `text` into this session and run it: a paste (bracketed when the shell asks, as
     /// any paste, so a multi-line block arrives whole), then ↩ as a key, the way the human
     /// would have. Shared by the block menu's "rerun" and the workspace's "run in shell".
     pub fn run_text(&mut self, text: String, cx: &mut Context<Self>) {
-        self.paste(text, cx);
+        self.type_text(text, cx);
         if let Ok(enter) = Keystroke::parse("enter") {
             self.press(enter, cx);
         }
     }
 
-    /// Type `text` into this session as a paste, without ↩ (the conversation face's
-    /// composer). Like any paste it ends the predictor's guesses.
-    #[expect(
-        clippy::same_name_method,
-        reason = "the composer's paste; the inherent method wins over `EntityInputHandler::paste`"
-    )]
-    pub fn paste(&mut self, text: String, cx: &Context<Self>) {
+    /// Type `text` into this session as a paste, and leave it at the prompt for the person to
+    /// run: a line that should be read before it runs.
+    pub fn type_text(&mut self, text: String, cx: &Context<Self>) {
         self.send(TermRequest::Paste { text, confirmed: true }, cx);
     }
 
     /// ⌘F: open the search bar, or put the caret back in it with the text selected.
     pub fn find(&mut self, _: &Find, window: &mut Window, cx: &mut Context<Self>) {
         if self.search.is_none() {
-            let input = cx.new(|cx| InputState::new(window, cx).placeholder(FIND_PLACEHOLDER));
-            let subscription = cx.subscribe(&input, |this, _input, event, cx| match event {
-                InputEvent::Change => this.search_changed(cx),
-                InputEvent::PressEnter { shift, .. } => {
-                    if *shift {
-                        this.step_match(-1, cx);
-                    } else {
+            // The shell's own field, as the Files search draws it: one line, 11.5 pt.
+            let input = cx.new(|cx| {
+                ComposerInput::new(find::PLACEHOLDER, cx)
+                    .with_single_line()
+                    .with_accessibility_role(gpui::Role::SearchInput)
+                    .with_text_metrics(11.5, 16.0)
+            });
+            let subscription =
+                cx.subscribe_in(&input, window, |this, _input, event, window, cx| match event {
+                    ComposerInputEvent::Edited => this.search_changed(cx),
+                    ComposerInputEvent::Submitted | ComposerInputEvent::MentionAccept => {
                         this.step_match(1, cx);
                     }
-                }
-                InputEvent::Focus | InputEvent::Blur => {}
-            });
+                    ComposerInputEvent::MentionDismiss => this.close_find(&CloseFind, window, cx),
+                    _ => {}
+                });
             self.search = Some(Search {
                 input,
                 query: self.find_toggles.clone(),
@@ -832,10 +848,9 @@ impl TerminalView {
             });
         }
         if let Some(search) = &self.search {
-            search.input.update(cx, |input, cx| {
-                input.focus(window, cx);
-                input.select_all(window, cx);
-            });
+            let focus = search.input.focus_handle(cx);
+            window.focus(&focus, cx);
+            search.input.update(cx, ComposerInput::select_all_text);
         }
         cx.notify();
     }
@@ -866,11 +881,11 @@ impl TerminalView {
 
     fn search_changed(&mut self, cx: &mut Context<Self>) {
         let Some(search) = &mut self.search else { return };
-        let needle = search.input.read(cx).value().to_string();
-        if needle == search.query.needle {
+        let needle = search.input.read(cx).text().to_owned();
+        if needle == search.query.needle() {
             return;
         }
-        search.query.needle = needle;
+        search.query = search.query.with_needle(needle);
         self.restart_search(cx);
     }
 
@@ -925,7 +940,7 @@ impl TerminalView {
     /// search, once however many frames come meanwhile, so the end of a burst is searched too.
     fn refresh_search(&mut self, cx: &mut Context<Self>) {
         let Some(search) = &mut self.search else { return };
-        if search.query.needle.is_empty() || search.refresh.is_some() {
+        if search.query.needle().is_empty() || search.refresh.is_some() {
             return;
         }
         let now = cx.background_executor().now();
@@ -1108,91 +1123,75 @@ impl TerminalView {
         }
     }
 
-    /// The strip that asks before a paste that could run: what it holds, Paste and Cancel.
-    fn render_confirm(&self, cx: &Context<Self>) -> Option<gpui::Div> {
+    /// The card that asks before a paste that could run, at the grid's bottom-left: what it
+    /// holds, a Primary "Paste" and a Ghost "Cancel", on the shell's frosted floating card. It
+    /// takes no keyboard: ↩ in the grid sends the paste as before, and typing goes on.
+    fn render_confirm(&self, cx: &Context<Self>) -> Option<gpui::AnyElement> {
         let pending = self.pending.as_ref()?;
-        let theme = &self.theme;
-        let (s, spacing, radii) = (&theme.surfaces, theme.spacing, theme.radii);
-        let (what, selector, accept, accept_id, cancel_id) = match pending {
+        let theme = chrome::theme(cx).for_popup();
+        let what = match pending {
             Pending::Paste(text) => {
                 let lines = text.lines().count().max(1);
-                let what = if lines == 1 {
+                if lines == 1 {
                     "Paste a line that would run?".to_owned()
                 } else {
                     format!("Paste {lines} lines that would run?")
-                };
-                (what, "paste-confirm", "Paste", "terminal-paste-confirm", "terminal-paste-cancel")
+                }
             }
         };
-        let button = move |id: &'static str, label: &'static str, accent: bool| {
-            let row = div()
-                .id(id)
-                .debug_selector(move || id.to_owned())
-                .role(gpui::accesskit::Role::Button)
-                .aria_label(label)
-                .px(px(spacing.sm))
-                .py(px(spacing.xxs))
-                .rounded(px(radii.xs))
-                .cursor_pointer()
-                .when(accent, |el| slopty_kit::kit::tinted(el, theme))
-                .when(!accent, |el| {
-                    el.text_color(hsla(s.text_secondary))
-                        .hover(move |el| el.bg(hsla_alpha(s.text, alpha::FAINT)))
-                })
-                .child(label);
-            slopty_kit::a11y::tab_stop(row, s.focus)
-        };
+        let card = popover::popover_card(&theme)
+            .id("paste-confirm")
+            .debug_selector(|| "paste-confirm".to_owned())
+            .role(gpui::Role::Dialog)
+            .aria_label(SharedString::from(what.clone()))
+            .occlude()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.0))
+            .pl(px(12.0))
+            .font_family(theme.font_sans.clone())
+            .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
+            .child(div().flex_1().min_w_0().truncate().child(SharedString::from(what)))
+            .child(
+                chrome::button("terminal-paste-cancel", "Cancel", chrome::Tone::Ghost, &theme)
+                    .on_click(cx.listener(|this, _ev, _window, cx| this.cancel_pending(cx))),
+            )
+            .child(
+                chrome::button("terminal-paste-confirm", "Paste", chrome::Tone::Primary, &theme)
+                    .on_click(cx.listener(|this, _ev, _window, cx| this.confirm_pending(cx))),
+            );
         Some(
             div()
-                .debug_selector(move || selector.to_owned())
                 .absolute()
-                .bottom(px(spacing.xs))
-                .left(px(spacing.xs))
-                .occlude()
-                .flex()
-                .items_center()
-                .gap(px(spacing.xs))
-                .px(px(spacing.sm))
-                .py(px(spacing.xs))
-                .rounded(px(radii.sm))
-                .map(|el| slopty_kit::kit::elevate(el, theme))
-                .text_size(px(theme.typography.small()))
-                .text_color(hsla(s.text))
-                .font_family(theme.typography.ui_family.clone())
-                .child(SharedString::from(what))
-                .child(
-                    button(accept_id, accept, true)
-                        .on_click(cx.listener(|this, _ev, _window, cx| this.confirm_pending(cx))),
-                )
-                .child(
-                    button(cancel_id, "Cancel", false)
-                        .on_click(cx.listener(|this, _ev, _window, cx| this.cancel_pending(cx))),
-                ),
+                .bottom(px(FLOAT_INSET))
+                .left(px(FLOAT_INSET))
+                .max_w(gpui::relative(1.0))
+                .child(slopty_shell::frost::frosted(
+                    popover::CARD_RADIUS,
+                    slopty_shell::frost::MENU_BLUR,
+                    card,
+                ))
+                .into_any_element(),
         )
     }
 
-    /// The chip at the tile's bottom-left naming the ⌘-hovered link's target.
-    fn render_link_preview(&self) -> Option<gpui::Div> {
+    /// The ⌘-hovered link's target, at the grid's bottom-left in the shell's hint card.
+    fn render_link_preview(&self, cx: &Context<Self>) -> Option<gpui::AnyElement> {
         let target = self.link_target()?;
-        let theme = &self.theme;
-        let (s, spacing, radii) = (&theme.surfaces, theme.spacing, theme.radii);
+        let theme = chrome::theme(cx);
         Some(
             div()
                 .debug_selector(|| "link-preview".to_owned())
                 .absolute()
-                .bottom(px(spacing.xs))
-                .left(px(spacing.xs))
+                .bottom(px(FLOAT_INSET))
+                .left(px(FLOAT_INSET))
                 .max_w_full()
-                .px(px(spacing.sm))
-                .py(px(spacing.xs))
-                .rounded(px(radii.xs))
-                .map(|el| slopty_kit::kit::elevate(el, theme))
-                .text_size(px(theme.typography.small()))
-                .text_color(hsla(s.text_muted))
-                .font_family(theme.typography.ui_family.clone())
-                .overflow_hidden()
                 .whitespace_nowrap()
-                .child(SharedString::from(target)),
+                .overflow_hidden()
+                .font_family(theme.font_sans.clone())
+                .child(chrome::tooltip_card(target, theme))
+                .into_any_element(),
         )
     }
 
@@ -1589,10 +1588,19 @@ impl TerminalView {
 
     /// Close the block menu and give the program the keyboard back.
     fn close_block_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.block_menu.take().is_some() {
+        if self.dismiss_block_menu(cx) {
             self.focus.focus(window, cx);
             cx.notify();
         }
+    }
+
+    /// Start the block menu's closing motion, when it is open; it goes once that has played.
+    fn dismiss_block_menu(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.block_menu.begin_close() {
+            return false;
+        }
+        popover::reap_popup(cx, |view: &mut Self| &mut view.block_menu);
+        true
     }
 
     /// One of the block's own items.
@@ -1730,258 +1738,66 @@ impl TerminalView {
         })
     }
 
-    /// The command whose block the viewport's top row is inside while every row of its
-    /// prompt has scrolled above: what the sticky header shows. `None` on a prompt row, off
-    /// a block, or for a block without a typed command. Read every frame, so only the block's
-    /// head (its prompt rows), never its output.
-    #[must_use]
-    pub fn block_header(&self) -> Option<BlockHead> {
-        let top = self.state.index_at_row(0);
-        if self.state.line(top).is_none_or(|line| line.mark.is_prompt()) {
-            return None;
-        }
-        // Whether it shows is read from the marks; the command's text only once it does.
-        let (prompt, typed) = self.state.block_prompt(top)?;
-        if prompt >= top || !typed {
-            return None;
-        }
-        self.state.block_head(top)
-    }
-
-    /// Whether the tile's header already says `command`: it is the command running now, which
-    /// names the tile, or the title the program set. The block's row would say it again one
-    /// line under the header.
-    fn titled_by(&self, command: &str) -> bool {
-        let command = command.trim();
-        self.state.running_command().map(str::trim) == Some(command)
-            || self.title().map(str::trim) == Some(command)
-    }
-
-    /// One row over the grid's top naming the command whose output the viewport is inside,
-    /// so a long output is never anonymous; a click scrolls its prompt back to the top. It sits
-    /// on the head surface the prompt rows had in the grid. Its
-    /// text starts at the grid's first column, and a failed block carries its bar and its
-    /// head's wash on up into it: the header stands for the head scrolled away. Under the pointer
-    /// it shows the block's facts in place of the duration.
-    fn render_block_header(
+    /// The menu a right click opened, at the click: the shell's context menu (frosted, its
+    /// motion, over everything but a dialog). The block's own items first, then the terminal's,
+    /// each group parted by a hairline, with the keys that do the same.
+    fn render_block_menu(
         &self,
-        block: &BlockHead,
+        menu: &BlockMenu,
+        closing: Option<Instant>,
+        window: &Window,
         cx: &Context<Self>,
-    ) -> Option<gpui::AnyElement> {
-        let metrics = self.metrics?;
-        let command = block.command.clone()?;
-        if self.titled_by(&command) {
-            return None;
-        }
-        let theme = &self.theme;
-        let s = &theme.surfaces;
-        let prompt = block.prompt;
-        // The family the grid resolved, so the header's text is the grid's.
-        let family = self.font_family.clone().unwrap_or_else(|| {
-            theme.typography.mono_families.first().cloned().unwrap_or_default().into()
-        });
-        let inset = px(theme.spacing.inset());
-        // The block's duration at the right end, as its prompt row would show it.
-        let right = if self.hovered_block() == Some(prompt) {
-            Some(self.render_block_facts(prompt, cx).into_any_element())
-        } else {
-            self.took(prompt).map(|elapsed| {
-                slopty_kit::kit::tabular(div())
-                    .debug_selector(|| "block-header-took".to_owned())
-                    .flex_none()
-                    .pl(px(theme.spacing.sm))
-                    .child(SharedString::from(slopty_kit::kit::duration(elapsed)))
-                    .into_any_element()
-            })
-        };
-        let failed = block.exit.is_some_and(|code| code != 0).then(|| {
-            let look = FailedLook::new(theme);
-            [
-                div().absolute().inset_0().bg(look.wash),
-                div().absolute().top_0().bottom_0().left_0().w(look.bar_width).bg(look.bar),
-            ]
-        });
-        Some(
-            div()
-                .id("block-header")
-                .debug_selector(|| "block-header".to_owned())
-                .occlude()
-                .role(gpui::accesskit::Role::Button)
-                .aria_label(command.clone())
-                .absolute()
-                .top_0()
-                .left_0()
-                .w_full()
-                .h(metrics.line_height)
-                .flex()
-                .items_center()
-                .justify_between()
-                .px(inset)
-                // The grid's own background, the program's when it set one: the header stands
-                // where the top row was, parted from the output under it by the block hairline.
-                .bg(hsla(Colors::new(&theme.terminal, self.state.colors()).theme.bg))
-                .border_b(slopty_kit::kit::HAIR)
-                .border_color(super::element::separator_color(theme))
-                .font_family(family)
-                .text_size(px(theme.typography.small()))
-                .text_color(hsla(s.text_muted))
-                .cursor_pointer()
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _ev, _window, cx| {
-                        cx.stop_propagation();
-                        this.jump_to(prompt, cx);
-                    }),
-                )
-                .children(failed.into_iter().flatten())
-                .child(div().overflow_hidden().child(command))
-                .children(right)
-                .into_any_element(),
-        )
-    }
-
-    /// What the block typed at `prompt` says about itself, in order, each in its tone: its
-    /// status once the next prompt reported it ("Exit 1" in the error tone after a failure,
-    /// "Running" before), then how long it ran when that is known.
-    #[must_use]
-    pub fn block_facts(&self, prompt: LineIndex) -> Vec<(SharedString, slopty_theme::Rgb)> {
-        let s = &self.theme.surfaces;
-        let status = match self.state.block_exit(prompt) {
-            Some(0) => Some((SharedString::from("Exit 0"), s.text_muted)),
-            Some(code) => Some((SharedString::from(format!("Exit {code}")), s.error)),
-            None if self.state.prompt_after(prompt).is_none() => {
-                Some((SharedString::from("Running"), s.text_muted))
-            }
-            None => None,
-        };
-        let took = self
-            .duration(prompt)
-            .map(|d| (SharedString::from(slopty_kit::kit::duration(d)), s.text_muted));
-        status.into_iter().chain(took).collect()
-    }
-
-    /// A hovered block's facts ([`Self::block_facts`]) joined by "·", and "…" for the block
-    /// menu.
-    fn render_block_facts(
-        &self,
-        prompt: LineIndex,
-        cx: &Context<Self>,
-    ) -> gpui::Stateful<gpui::Div> {
-        let theme = &self.theme;
-        let s = &theme.surfaces;
-        let facts = self.block_facts(prompt);
-        let line = self.metrics.map_or_else(|| theme.icon(), |m| f32::from(m.line_height));
-        let button = 2.0_f32.mul_add(theme.spacing.xs, theme.icon());
-        // No taller than the line it ends.
-        let more = slopty_kit::kit::icon_button(
-            theme,
-            "block-more",
-            slopty_kit::icons::Symbol::Ellipsis,
-            "Block actions",
-        )
-        .size(px(button.min(line)))
-        .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
-        .on_click(cx.listener(move |this, ev: &gpui::ClickEvent, _window, cx| {
-            cx.stop_propagation();
-            let block = this.state.command_block(prompt);
-            this.open_block_menu(block, ev.position(), cx);
-        }));
-        let mut row = slopty_kit::kit::tabular(div())
-            .id("block-facts")
-            .debug_selector(|| "block-facts".to_owned())
-            .flex_none()
-            .h(px(line))
-            .flex()
-            .items_center()
-            .gap(px(theme.spacing.xs))
-            .pl(px(theme.spacing.sm))
-            .font_family(theme.typography.ui_family.clone())
-            .text_size(px(theme.typography.small()))
-            .line_height(px(line));
-        for (i, (text, tone)) in facts.into_iter().enumerate() {
-            if i > 0 {
-                row = row.child(div().text_color(hsla(s.text_muted)).child("·"));
-            }
-            row = row.child(div().text_color(hsla(tone)).child(text));
-        }
-        row.child(more)
-    }
-
-    /// The hovered block's facts at the right end of its prompt row, when that row is on
-    /// screen (above it, the sticky header carries them).
-    fn render_hovered_block(
-        &self,
-        header: Option<&BlockHead>,
-        cx: &Context<Self>,
-    ) -> Option<gpui::AnyElement> {
-        let prompt = self.hovered_block()?;
-        if header.is_some_and(|h| h.prompt == prompt) {
-            return None;
-        }
-        let m = self.metrics?;
-        let theme = &self.theme;
-        let rows = prompt.0.saturating_sub(self.state.index_at_row(0).0);
-        let row = u16::try_from(rows).unwrap_or(u16::MAX).min(m.rows.saturating_sub(1));
-        let inset = px(theme.spacing.inset());
-        // Over a failed block's head the facts sit on its wash itself: a chip of its own there
-        // would be a patch cut out of the one mark that says the command failed. Elsewhere they
-        // sit on an element's fill, which stands off the grid's own ground.
-        let on_band = self.state.block_exit(prompt).is_some_and(|code| code != 0);
-        Some(
-            div()
-                .debug_selector(|| "block-chip".to_owned())
-                .absolute()
-                .top(inset + m.line_height * f32::from(row))
-                .right(inset)
-                .h(m.line_height)
-                .flex()
-                .items_center()
-                .occlude()
-                .pr(px(theme.spacing.xxs))
-                .rounded(px(theme.radii.xs))
-                .when(!on_band, |el| {
-                    slopty_kit::kit::raised(el, theme).bg(hsla(theme.surfaces.element))
-                })
-                .child(self.render_block_facts(prompt, cx))
-                .into_any_element(),
-        )
-    }
-
-    /// The block menu, drawn late and anchored where the right click landed.
-    fn render_block_menu(&self, menu: &BlockMenu, cx: &Context<Self>) -> gpui::AnyElement {
+    ) -> gpui::AnyElement {
+        use slopty_shell::live::menu::{Menu, MenuItem, MenuPanel};
         let has_selection = self.selection_has_text();
         let items = Self::block_menu_items(menu.block.as_ref(), has_selection, menu.attach);
         let this = cx.entity().downgrade();
-        let mut rows = slopty_kit::kit::Menu::new();
+        let mut rows = Menu::new();
+        let mut group = None;
         for item in items {
+            if group.is_some_and(|was| was != item.group()) {
+                rows.separator();
+            }
+            group = Some(item.group());
             let (this, block) = (this.clone(), menu.block.clone());
-            rows.push(slopty_kit::kit::MenuItem::new(
-                item.key(),
-                item.label(),
-                move |window, cx| {
-                    let _gone = this.update(cx, |v, cx| {
-                        v.block_menu_pick(item, block.clone(), window, cx);
-                    });
-                },
-            ));
+            let mut row = MenuItem::new(item.key(), item.label(), move |window, cx| {
+                let _gone = this.update(cx, |v, cx| {
+                    v.block_menu_pick(item, block.clone(), window, cx);
+                });
+            });
+            if let Some(keys) = item.action().and_then(|a| self.shortcut(a.as_ref(), window)) {
+                row = row.shortcut(keys);
+            }
+            rows.push(row);
         }
         let label = if menu.block.is_some() { "Command block" } else { "Terminal" };
-        let panel =
-            slopty_kit::kit::MenuPanel::new("block-menu", label, Rc::new(rows), &self.theme, {
-                move |window, cx| {
-                    let _gone = this.update(cx, |v, cx| v.close_block_menu(window, cx));
+        let panel = MenuPanel::new("block-menu", label, Rc::new(rows), move |window, cx| {
+            let _gone = this.update(cx, |v, cx| v.close_block_menu(window, cx));
+        })
+        .closing(closing.is_some());
+        popover::menu_at("block-menu", menu.at, panel.into_any_element(), closing)
+    }
+
+    /// The keys bound to `action` in the grid, as a Mac menu writes them ("⌘C"): what the
+    /// menu shows beside its row, so a rebinding in the settings file shows there too.
+    fn shortcut(&self, action: &dyn gpui::Action, window: &Window) -> Option<String> {
+        let binding = window.highest_precedence_binding_for_action_in(action, &self.focus)?;
+        let mut out = String::new();
+        for (n, stroke) in binding.keystrokes().iter().enumerate() {
+            if n > 0 {
+                out.push(' ');
+            }
+            let held = stroke.modifiers();
+            for (on, glyph) in
+                [(held.control, '⌃'), (held.alt, '⌥'), (held.shift, '⇧'), (held.platform, '⌘')]
+            {
+                if on {
+                    out.push(glyph);
                 }
-            });
-        deferred(
-            anchored()
-                .position(menu.at)
-                .snap_to_window_with_margin(px(self.theme.spacing.sm))
-                .child(panel),
-        )
-        .with_priority(slopty_kit::layer::Layer::Submenu.priority())
-        .into_any_element()
+            }
+            out.push_str(&key_glyph(stroke.key()));
+        }
+        Some(out)
     }
 
     /// ⌘⇧C: the last command's output (shell integration marks it) to the clipboard.
@@ -2131,7 +1947,7 @@ impl TerminalView {
         cx: &mut Context<Self>,
     ) {
         let attach = self.can_attach(cx);
-        self.block_menu = Some(BlockMenu { block, at, attach });
+        self.block_menu.open(BlockMenu { block, at, attach });
         cx.notify();
     }
 
@@ -2146,6 +1962,7 @@ impl TerminalView {
         clip: Option<ClipHook>,
         cx: &mut Context<Self>,
     ) {
+        let _was = self.link_watch.replace(Self::watch_link(&out, cx));
         self.out = out;
         self.clip_hook = clip;
         self.state.relinked();
@@ -2280,8 +2097,8 @@ impl TerminalView {
     }
 
     /// Record the resolved family. The element resolves it while the window draws, after the
-    /// view built what it measures by the family (the block header, the hovered block's chip):
-    /// the next frame builds them again with it.
+    /// view built what it measures by the family (the exit trailer): the next frame builds it
+    /// again with it.
     pub fn set_font_family(&mut self, family: SharedString, cx: &mut Context<Self>) {
         if self.font_family.as_ref() != Some(&family) {
             self.font_family = Some(family);
@@ -2326,6 +2143,12 @@ impl TerminalView {
     #[must_use]
     pub const fn keyed_paint(&self) -> bool {
         self.keyed_paint
+    }
+
+    /// Paint the grid's rows under keys, drawn again from the last frame while unchanged (the
+    /// default), or afresh every frame: what keyed paint is measured and checked against.
+    pub const fn set_keyed_paint(&mut self, on: bool) {
+        self.keyed_paint = on;
     }
 
     /// Times this view was rendered rather than replayed from the view cache.
@@ -2602,10 +2425,6 @@ impl TerminalView {
                 tracing::debug!(session = %self.session, ?outcome, "prediction miss");
             }
         }
-        if self.state.epoch() != self.took_epoch {
-            self.took.clear();
-            self.took_epoch = self.state.epoch();
-        }
         self.advance_copy(cx);
         for effect in effects {
             match effect {
@@ -2641,7 +2460,7 @@ impl TerminalView {
                     tracing::info!(session = %self.session, %command, "command started");
                     self.command_started = Some(Instant::now());
                 }
-                Effect::CommandFinished { prompt, command, exit, took } => {
+                Effect::CommandFinished { command, exit, took, .. } => {
                     let started = self.command_started.take();
                     // The worker's time from the marks, which a command too quick to be seen
                     // running between two frames has too; this view's own only for a block the
@@ -2657,13 +2476,11 @@ impl TerminalView {
                         timed = took.is_some() || started.is_some(),
                         "command finished"
                     );
-                    if let Some(prompt) = prompt {
-                        self.set_took(prompt, elapsed);
-                    }
                     cx.emit(TerminalViewEvent::CommandFinished { command, exit, elapsed });
                 }
             }
         }
+        self.tell_restored(cx);
         let progress = self.progress();
         if progress != self.progress_told {
             self.progress_told = progress;
@@ -2672,11 +2489,28 @@ impl TerminalView {
         cx.notify();
     }
 
-    /// The program's progress report (`OSC 9;4`) in the kit's language, which the tile's
-    /// header draws; `None` while nothing is reported.
+    /// The program's progress report (`OSC 9;4`), which the shell's tab draws; `None` while
+    /// nothing is reported.
     #[must_use]
-    pub fn progress(&self) -> Option<slopty_kit::kit::progress::Progress> {
+    pub fn progress(&self) -> Option<slopty_shell::live::Progress> {
         super::progress::shown(self.state.progress())
+    }
+
+    /// How the program ended, once it has: `Some` with its status when it said one.
+    #[must_use]
+    #[expect(clippy::option_option, reason = "ended or not, then the status if it said one")]
+    pub const fn exited(&self) -> Option<Option<i32>> {
+        match self.state.exited() {
+            Some(exit) => Some(exit.0),
+            None => None,
+        }
+    }
+
+    /// Whether the program asks for files dropped on it now: a drop goes to it, not as typed
+    /// paths.
+    #[must_use]
+    pub const fn takes_drops(&self) -> bool {
+        self.state.drop_target()
     }
 
     /// The command a restored session was opened to run, as it would be typed; `None` for a
@@ -2690,76 +2524,35 @@ impl TerminalView {
         })
     }
 
-    /// Run the restored session's command again, as typed: only ever from the person's click
-    /// on its chip, never on the restore itself. The chip goes with it.
+    /// Run the restored session's command again, as typed: only ever from the person's press
+    /// on its toast, never on the restore itself.
     fn run_restored(&mut self, cx: &mut Context<Self>) {
         let Some(command) = self.restored_command() else { return };
-        self.restored_seen = true;
         self.run_text(command, cx);
         cx.notify();
     }
 
-    fn dismiss_restored(&mut self, cx: &mut Context<Self>) {
-        self.restored_seen = true;
-        cx.notify();
-    }
-
-    /// The chip at the top-right of a session reopened after its shell was lost: "Restored",
-    /// and what it was opened to run offered again, until the person runs it or puts the chip
-    /// away.
-    fn render_restored(&self, cx: &Context<Self>) -> Option<gpui::Div> {
+    /// A session reopened after its shell was lost says so once, as a notice that waits on one
+    /// choice: the shell's toast, with "Run again" when it was opened to run something.
+    fn tell_restored(&mut self, cx: &mut Context<Self>) {
         if self.restored_seen || self.state.restored().is_none() {
-            return None;
+            return;
         }
-        let theme = &self.theme;
-        let (s, spacing, radii) = (&theme.surfaces, theme.spacing, theme.radii);
-        let run = self.restored_command().map(|command| {
-            let label = SharedString::from(format!("Run again: {command}"));
-            let button = div()
-                .id("terminal-run-again")
-                .debug_selector(|| "terminal-run-again".to_owned())
-                .role(gpui::accesskit::Role::Button)
-                .aria_label(label.clone())
-                .min_w_0()
-                .overflow_hidden()
-                .text_ellipsis()
-                .px(px(spacing.xs))
-                .rounded(px(radii.xs))
-                .cursor_pointer()
-                .text_color(hsla(s.accent))
-                .hover(move |el| el.bg(hsla_alpha(s.text, alpha::FAINT)))
-                .child(label)
-                .on_click(cx.listener(|this, _ev, _window, cx| this.run_restored(cx)));
-            slopty_kit::a11y::tab_stop(button, s.focus)
-        });
-        let dismiss = div()
-            .id("terminal-restored-dismiss")
-            .debug_selector(|| "terminal-restored-dismiss".to_owned())
-            .role(gpui::accesskit::Role::Button)
-            .aria_label("Dismiss")
-            .flex_none()
-            .px(px(spacing.xs))
-            .rounded(px(radii.xs))
-            .cursor_pointer()
-            .text_color(hsla(s.text_muted))
-            .hover(move |el| el.bg(hsla_alpha(s.text, alpha::FAINT)).text_color(hsla(s.text)))
-            .child("✕")
-            .on_click(cx.listener(|this, _ev, _window, cx| this.dismiss_restored(cx)));
-        Some(
-            slopty_kit::kit::pill_frame(theme)
-                .debug_selector(|| "terminal-restored".to_owned())
-                .absolute()
-                .top(px(spacing.xs))
-                .right(px(spacing.xs))
-                .max_w(relative(0.6))
-                .occlude()
-                .pr(px(spacing.xxs))
-                .map(|el| slopty_kit::kit::elevate(el, theme))
-                .font_family(theme.typography.ui_family.clone())
-                .child(div().flex_none().text_color(hsla(s.text_secondary)).child("Restored"))
-                .children(run)
-                .child(slopty_kit::a11y::tab_stop(dismiss, s.focus)),
-        )
+        self.restored_seen = true;
+        let Some(command) = self.restored_command() else {
+            slopty_shell::toast::info(cx, RESTORED);
+            return;
+        };
+        let this = cx.entity().downgrade();
+        let _offered = slopty_shell::toast::offer(
+            cx,
+            format!("{RESTORED}: {command}"),
+            RUN_AGAIN,
+            RESTORED_LASTS,
+            move |cx| {
+                let _gone = this.update(cx, Self::run_restored);
+            },
+        );
     }
 
     /// Lines between the bottom of the view and the newest output: 0 while following it.
@@ -2769,13 +2562,16 @@ impl TerminalView {
     }
 
     /// The pill at the foot of a view scrolled up: how many lines are below and a way back to
-    /// them, the whole pill one button (as ⇧⇲ is). It sits where the tile's state pill would,
-    /// and gives way to it. It appears and goes with the scroll, with no motion of its own.
-    /// In copy mode the foot says so instead ([`Self::render_copy_mode`]); following the
-    /// output in a view another client sizes, it offers to take the size ([`Self::render_take`]).
-    fn render_lines_below(&self, cx: &Context<Self>) -> Option<gpui::Div> {
+    /// them, the whole pill one button (as ⇧⇲ is). In copy mode the foot says so instead
+    /// ([`Self::render_copy_mode`]); with the worker out of reach it says that
+    /// ([`Self::render_out_of_reach`]); following the output in a view another client sizes,
+    /// it offers to take the size ([`Self::render_take`]).
+    fn render_lines_below(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        if let Some(away) = self.render_out_of_reach(cx) {
+            return Some(away);
+        }
         if self.copy_mode.is_some() {
-            return self.render_copy_mode(cx);
+            return Some(self.render_copy_mode(cx));
         }
         let below = self.lines_below();
         if below == 0 {
@@ -2785,112 +2581,164 @@ impl TerminalView {
             if below == 1 { "1 line below".into() } else { format!("{below} lines below").into() };
         let pill = FootPill {
             id: "lines-below",
-            icon: slopty_kit::icons::Symbol::ArrowDown,
+            icon: icons::ALT_ARROW_DOWN,
             words: count,
             act: BACK_TO_LIVE,
         };
-        self.render_foot_pill(pill, cx, |this, window, cx| {
+        Some(self.render_foot_pill(&pill, cx, |this, window, cx| {
             this.scroll_to_bottom(&ScrollToBottom, window, cx);
-        })
+        }))
     }
 
     /// The pill of a view whose PTY another client sizes, once it shows output: the grid is
     /// laid out for that client's screen, and a click makes it this one's ([`Self::drive`]).
     /// Typing alone takes the size only from a client that has gone quiet.
-    fn render_take(&self, cx: &Context<Self>) -> Option<gpui::Div> {
+    fn render_take(&self, cx: &Context<Self>) -> Option<gpui::AnyElement> {
         if self.state.driving() || self.state.frames() == 0 {
             return None;
         }
         let pill = FootPill {
             id: "take-size",
-            icon: slopty_kit::icons::Symbol::Display,
+            icon: icons::MONITOR,
             words: SIZED_ELSEWHERE.into(),
             act: TAKE,
         };
-        self.render_foot_pill(pill, cx, |this, _window, cx| this.drive(cx))
+        Some(self.render_foot_pill(&pill, cx, |this, _window, cx| this.drive(cx)))
     }
 
-    /// A pill at the foot of the grid: what is so, then in the accent what a click on it does.
-    /// It gives way to the tile's own pill there.
-    fn render_foot_pill(
-        &self,
-        pill: FootPill,
-        cx: &Context<Self>,
-        click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
-    ) -> Option<gpui::Div> {
-        if self.covered {
+    /// While the link to the session's worker is gone, the foot says so with the shell's
+    /// spinner, until the worker is back ([`Self::relink`]).
+    fn render_out_of_reach(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        if !self.out.is_closed() || self.exited().is_some() {
             return None;
         }
-        let theme = &self.theme;
-        let s = &theme.surfaces;
+        let theme = chrome::theme(cx).clone();
+        let view = cx.entity_id();
+        let spinner = slopty_shell::loaders::mini_mono_spinner(
+            "terminal-out-of-reach-spinner",
+            3.0,
+            theme.for_popup().text_muted,
+            view,
+            cx,
+        )
+        .into_any_element();
+        let pill = slopty_shell::live::floating_pill(
+            "terminal-out-of-reach",
+            None,
+            &theme,
+            move |popup| {
+                (Some(spinner), chrome::pill_words(OUT_OF_REACH, popup).into_any_element())
+            },
+            |pill| {
+                pill.debug_selector(|| "terminal-out-of-reach".to_owned())
+                    .role(gpui::Role::Status)
+                    .aria_label(OUT_OF_REACH)
+                    .occlude()
+            },
+        );
+        Some(self.foot(pill))
+    }
+
+    /// A pill at the foot of the grid, zeron's jump pill: its glyph in the quiet ink, then what
+    /// is so and what a click on it does, the whole pill one button.
+    fn render_foot_pill(
+        &self,
+        pill: &FootPill,
+        cx: &Context<Self>,
+        click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+    ) -> gpui::AnyElement {
+        let theme = chrome::theme(cx);
         let label = SharedString::from(format!("{} · {}", pill.words, pill.act));
-        let small = px(theme.typography.small());
-        let id = pill.id;
-        let element = div()
-            .id(id)
-            .debug_selector(move || id.to_owned())
-            .role(gpui::accesskit::Role::Button)
-            .aria_label(label)
-            .occlude()
+        let (id, icon) = (pill.id, pill.icon);
+        let shown = label.clone();
+        let element = slopty_shell::live::floating_pill(
+            id,
+            Some(SharedString::from(format!("{id}-hover"))),
+            theme,
+            move |popup| {
+                (
+                    Some(chrome::pill_glyph(icon, popup)),
+                    chrome::pill_words(shown, popup).into_any_element(),
+                )
+            },
+            |el| {
+                let accent = theme.accent;
+                el.debug_selector(move || id.to_owned())
+                    .role(gpui::Role::Button)
+                    .aria_label(label)
+                    .tab_index(0)
+                    .occlude()
+                    .cursor_pointer()
+                    .focus_visible(move |style| style.border_2().border_color(accent))
+                    .map(chrome::keep_keyboard)
+                    .on_click(cx.listener(move |this, _ev, window, cx| click(this, window, cx)))
+            },
+        );
+        self.foot(element)
+    }
+
+    /// The inset between the view's edges and the grid: the host's, else the theme's.
+    fn pad(&self) -> f32 {
+        self.frame.map_or_else(|| self.theme.spacing.inset(), |frame| frame.padding)
+    }
+
+    /// `pill` centred at the grid's foot, [`FOOT_INSET`] above its padding.
+    fn foot(&self, pill: gpui::AnyElement) -> gpui::AnyElement {
+        let pad = self.pad();
+        div()
+            .absolute()
+            .left_0()
+            .right_0()
+            .bottom(px(pad + FOOT_INSET))
             .flex()
-            .items_center()
-            .gap(px(theme.spacing.sm))
-            .px(px(theme.spacing.md))
-            .py(px(theme.spacing.xs))
-            .rounded(px(theme.radii.md))
-            .map(|el| slopty_kit::kit::elevate(el, theme))
-            .text_size(px(theme.typography.small()))
-            .font_family(theme.typography.ui_family.clone())
-            .text_color(hsla(s.text_secondary))
-            .cursor_pointer()
-            .hover(move |el| el.bg(hsla(s.hover)))
-            .child(
-                slopty_kit::icons::icon(theme, pill.icon, hsla(s.text_secondary))
-                    .size(px(theme.icon())),
-            )
-            .child(slopty_kit::chrome_text::ChromeText::new(pill.words, small))
-            .child(
-                div()
-                    .text_color(hsla(s.accent))
-                    .child(slopty_kit::chrome_text::ChromeText::new(pill.act, small)),
-            )
-            .on_click(cx.listener(move |this, _ev, window, cx| click(this, window, cx)));
+            .justify_center()
+            .child(pill)
+            .into_any_element()
+    }
+
+    /// Zeron's dim trailer under a program that ended, "[process exited 3]", on the line
+    /// under the last it printed, while the view follows the output.
+    fn render_exit_trailer(&self, cx: &App) -> Option<gpui::AnyElement> {
+        let status = self.exited()?;
+        let m = self.metrics?;
+        if self.state.view_offset() != 0 {
+            return None;
+        }
+        let words = SharedString::from(exit_words(status));
+        let row = self.state.cursor().row.saturating_add(1).min(m.rows.saturating_sub(1));
+        let theme = &self.theme;
+        let family = self.font_family.clone().unwrap_or_else(|| {
+            theme.typography.mono_families.first().cloned().unwrap_or_default().into()
+        });
+        let look = slopty_shell::live::TerminalLook::from_theme(chrome::theme(cx));
         Some(
             div()
+                .id("terminal-exited")
+                .debug_selector(|| "terminal-exited".to_owned())
+                .role(gpui::Role::Status)
+                .aria_label(words.clone())
                 .absolute()
-                .left_0()
-                .right_0()
-                .bottom(px(theme.spacing.lg))
+                .left(px(self.pad()))
+                .top(px(self.pad()) + m.line_height * f32::from(row))
+                .h(m.line_height)
                 .flex()
-                .justify_center()
-                .child(slopty_kit::a11y::tab_stop(element, s.focus)),
+                .items_center()
+                .whitespace_nowrap()
+                .font_family(family)
+                .text_size(px(theme.typography.mono_size))
+                .text_color(look.faint)
+                // The grid's own background, so the trailer reads as a row of it.
+                .bg(slopty_kit::colors::hsla(theme.terminal.bg))
+                .child(words)
+                .into_any_element(),
         )
-    }
-
-    /// A command typed at `prompt` took `elapsed`.
-    pub fn set_took(&mut self, prompt: LineIndex, elapsed: Duration) {
-        self.took.insert(prompt, elapsed);
-    }
-
-    /// How long the command typed at `prompt` took, when it was long enough for its row's
-    /// caption (from `TOOK_MIN`: a quick command says nothing worth a caption).
-    #[must_use]
-    pub fn took(&self, prompt: LineIndex) -> Option<Duration> {
-        self.duration(prompt).filter(|&elapsed| elapsed >= TOOK_MIN)
-    }
-
-    /// How long the command typed at `prompt` took, however short: what its block's facts say
-    /// under the pointer.
-    #[must_use]
-    pub fn duration(&self, prompt: LineIndex) -> Option<Duration> {
-        self.took.get(&prompt).copied()
     }
 
     /// The prompt row of the command block under the pointer: one with a typed command that
     /// has finished or is running (the line being typed at is not a block yet). Nothing on
     /// the alternate screen.
     #[must_use]
-    pub fn hovered_block(&self) -> Option<LineIndex> {
+    fn hovered_block(&self) -> Option<LineIndex> {
         self.block_at_row(self.pointer_row(self.pointer_at.get())?)
     }
 
@@ -2921,17 +2769,19 @@ impl TerminalView {
     }
 
     /// Whether the pointer's move is news for the view beyond the block it hovers: a key hid
-    /// it, or it came near the right edge or left it.
-    pub(super) const fn pointer_news(&self, near: bool) -> bool {
-        self.pointer_hidden || self.scrollbar.near_edge() != near
+    /// it.
+    pub(super) const fn pointer_news(&self) -> bool {
+        self.pointer_hidden
     }
 
     /// The pointer moved over the grid's element (`Some`, wherever it is covered) or left it.
-    /// Whether that hovers another block, which the view is to be drawn again for.
+    /// Whether that changes the pointer's hand in the gutter beside a block, which the view is
+    /// to be drawn again for.
     pub(super) fn pointer_over(&self, at: Option<gpui::Point<Pixels>>) -> bool {
-        let before = (self.hovered_block(), self.pointer_in_gutter());
+        let hand = |v: &Self| v.pointer_in_gutter() && v.hovered_block().is_some();
+        let before = hand(self);
         self.pointer_at.set(at);
-        (self.hovered_block(), self.pointer_in_gutter()) != before
+        hand(self) != before
     }
 
     /// The images the view shows, each with its texture: the latest frame's, and scrolled back,
@@ -3405,39 +3255,8 @@ impl TerminalView {
         if cfg!(target_os = "ios") {
             window.request_virtual_keyboard();
         }
-        if self.block_menu.take().is_some() {
+        if self.dismiss_block_menu(cx) {
             cx.notify();
-        }
-        // The scrollbar, when it shows, takes the clicks over it: the thumb is dragged, the
-        // track beside it pages towards the click.
-        let now = cx.background_executor().now();
-        if event.button == MouseButton::Left
-            && let Some(thumb) = self.thumb(now, slopty_kit::kit::motion(cx))
-        {
-            if thumb.contains(&event.position) {
-                self.thumb_drag = Some(event.position.y - thumb.origin.y);
-                self.scrollbar.hold(true, now);
-                cx.notify();
-                return;
-            }
-            let track_x = event.position.x >= thumb.origin.x
-                && event.position.x < thumb.origin.x + thumb.size.width;
-            if track_x && let Some(m) = self.metrics {
-                if let Some(prompt) = self.tick_at(&m, event.position.y) {
-                    // A block's mark goes to its prompt.
-                    for effect in self.state.scroll_to_line(prompt) {
-                        if let Effect::Request(req) = effect {
-                            self.send(req, cx);
-                        }
-                    }
-                    cx.notify();
-                    return;
-                }
-                let page = i64::from(m.rows).max(1);
-                let up = event.position.y < thumb.origin.y;
-                self.scroll_lines(if up { page } else { page.saturating_neg() }, cx);
-                return;
-            }
         }
         if event.button == MouseButton::Left
             && !event.modifiers.modified()
@@ -3571,8 +3390,8 @@ impl TerminalView {
     }
 
     /// The pointer moved over the grid: the hover for the ⌘ underline (a drag is followed by
-    /// [`Self::drag_move`], and the way to the scrollbar by [`Self::pointer_near_scrollbar`],
-    /// both of which the element registers on the window so they see the pointer leave).
+    /// [`Self::drag_move`], which the element registers on the window so it sees the pointer
+    /// leave).
     fn mouse_move(&mut self, event: &MouseMoveEvent, _window: &mut Window, cx: &mut Context<Self>) {
         // A move with no button down, which a program tracking every move (1003) hears of;
         // ⇧ keeps the pointer the human's.
@@ -3587,66 +3406,9 @@ impl TerminalView {
         self.pointer_hidden = false;
     }
 
-    /// The pointer came near the grid's right edge, or left it: the scrollbar shows while it
-    /// is there and lingers once it goes.
-    pub(super) fn pointer_near_scrollbar(&mut self, near: bool, cx: &mut Context<Self>) {
-        let now = cx.background_executor().now();
-        if !self.scrollbar.pointer(near, now) || self.state.history_len() == 0 {
-            return;
-        }
-        if !near {
-            self.wake_scrollbar(cx);
-        }
-        cx.notify();
-    }
-
-    /// A frame is being drawn: a viewport moved since the last one (the wheel, a key, the
-    /// thumb, a jump to a prompt or a hit) brings the scrollbar up.
-    pub(super) fn viewport_drawn(&mut self, now: Instant, cx: &Context<Self>) {
-        let top = (self.state.view_offset() != 0).then(|| self.state.index_at_row(0));
-        if top == self.drawn_top {
-            return;
-        }
-        self.drawn_top = top;
-        self.scrollbar.scrolled(now);
-        self.wake_scrollbar(cx);
-    }
-
-    /// Wait out the scrollbar's linger, however often it starts over, then draw once more:
-    /// that frame finds the bar fading and asks for the next frames itself.
-    fn wake_scrollbar(&mut self, cx: &Context<Self>) {
-        if self.scrollbar_task.is_some() {
-            return;
-        }
-        self.scrollbar_task = Some(cx.spawn(async move |this, cx| {
-            loop {
-                let left = this.update(cx, |view, cx| {
-                    view.scrollbar.linger_left(cx.background_executor().now())
-                });
-                let Ok(Some(left)) = left else { break };
-                cx.background_executor().timer(left).await;
-            }
-            // A gone view has no bar to fade.
-            let _gone = this.update(cx, |view, cx| {
-                view.scrollbar_task = None;
-                cx.notify();
-            });
-        }));
-    }
-
-    /// The thumb was let go.
-    fn release_thumb(&mut self, cx: &Context<Self>) -> bool {
-        if self.thumb_drag.take().is_none() {
-            return false;
-        }
-        self.scrollbar.hold(false, cx.background_executor().now());
-        self.wake_scrollbar(cx);
-        true
-    }
-
-    /// A drag with the left button, wherever the pointer is: the thumb held scrolls the
-    /// viewport with it; a selection follows the pointer, and past the grid's top or bottom
-    /// it keeps scrolling (`AUTOSCROLL_TICK`) at a pace set by how far past the pointer is.
+    /// A drag with the left button, wherever the pointer is: a selection follows the pointer, and
+    /// past the grid's top or bottom it keeps scrolling (`AUTOSCROLL_TICK`) at a pace set by
+    /// how far past the pointer is.
     pub(super) fn drag_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
         // A drag with a button whose press went to the program is the program's.
         if self.program_buttons != 0 {
@@ -3664,24 +3426,10 @@ impl TerminalView {
         }
         if event.pressed_button != Some(MouseButton::Left) {
             self.selecting = false;
-            self.release_thumb(cx);
             self.autoscroll = None;
             return;
         }
         let Some(m) = self.metrics else { return };
-        if let Some(grab) = self.thumb_drag {
-            let history = self.state.history_len();
-            let offset = super::element::offset_for_thumb(&m, history, event.position.y - grab);
-            if offset != self.state.view_offset() {
-                for effect in self.state.scroll_to(offset) {
-                    if let Effect::Request(req) = effect {
-                        self.send(req, cx);
-                    }
-                }
-                cx.notify();
-            }
-            return;
-        }
         if !self.selecting {
             return;
         }
@@ -3748,29 +3496,6 @@ impl TerminalView {
         cx.notify();
     }
 
-    /// The prompt of the block whose scrollbar mark is at `y` (half a row of slack either side,
-    /// a mark being thinner than a finger or a pointer's aim).
-    fn tick_at(&self, m: &CellMetrics, y: Pixels) -> Option<LineIndex> {
-        if self.state.modes().contains(TermModes::ALT_SCREEN) {
-            return None;
-        }
-        let height = px(slopty_theme::stroke::MARK);
-        let slack = m.line_height / 2.0;
-        let ticks = super::element::block_ticks(
-            m,
-            self.state.block_marks(),
-            self.state.scrollback().oldest(),
-            self.state.history_len(),
-            height,
-        );
-        ticks
-            .iter()
-            .filter(|t| y >= t.bounds.origin.y - slack && y < t.bounds.bottom() + slack)
-            .map(|t| (f32::from(t.bounds.center().y - y).abs(), t.prompt))
-            .min_by(|a, b| a.0.total_cmp(&b.0))
-            .map(|(_, prompt)| prompt)
-    }
-
     /// The command block beside `at` when it is in the gutter, level with a row of a block the
     /// pointer would hover ([`Self::block_at_row`]): what a click there selects.
     fn gutter_block(&self, at: gpui::Point<Pixels>) -> Option<CommandBlock> {
@@ -3780,30 +3505,6 @@ impl TerminalView {
         }
         let (_, row) = m.cell_at(point(m.origin.x, at.y))?;
         self.state.command_block(self.block_at_row(row)?)
-    }
-
-    /// The scrollbar's thumb, while any of the bar shows (`moves`: [`slopty_kit::kit::motion`]).
-    fn thumb(&self, now: Instant, moves: bool) -> Option<Bounds<Pixels>> {
-        if self.scrollbar_opacity(now, moves) <= 0.0 {
-            return None;
-        }
-        let m = self.metrics?;
-        super::element::scrollbar_thumb(&m, self.state.history_len(), self.state.view_offset())
-    }
-
-    /// The thumb is held by the pointer (drawn stronger).
-    pub(super) const fn thumb_held(&self) -> bool {
-        self.thumb_drag.is_some()
-    }
-
-    /// How much of the overlay scrollbar shows at `now`, 0 to 1: none without history, else
-    /// as [`Visibility`] rules. Where chrome may not move (`moves` is [`slopty_kit::kit::motion`]),
-    /// it goes at once after its linger rather than fading.
-    pub(super) fn scrollbar_opacity(&self, now: Instant, moves: bool) -> f32 {
-        if self.state.history_len() == 0 {
-            return 0.0;
-        }
-        self.scrollbar.opacity(now, !moves)
     }
 
     fn mouse_up(&mut self, event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
@@ -3835,10 +3536,6 @@ impl TerminalView {
         self.autoscroll = None;
         if let Some((span, armed, _)) = self.path_press.take() {
             Self::open_path(&span, armed, cx);
-            return;
-        }
-        if self.release_thumb(cx) {
-            cx.notify();
             return;
         }
         let selecting = std::mem::take(&mut self.selecting);
@@ -3900,18 +3597,20 @@ impl TerminalView {
     /// Open the find bar on `query` (a search of the open tiles chose this one): the field
     /// holds its needle, the toggles are its own, and the newest hit is revealed when the
     /// worker answers.
-    pub fn find_with(&mut self, query: &Query, window: &mut Window, cx: &mut Context<Self>) {
+    #[cfg(test)]
+    fn find_with(&mut self, query: &Query, window: &mut Window, cx: &mut Context<Self>) {
         self.find(&Find, window, cx);
         let Some(search) = &mut self.search else { return };
-        search.input.update(cx, |input, cx| input.set_value(query.needle.clone(), window, cx));
+        search.input.update(cx, |input, cx| input.set_text(query.needle().to_owned(), cx));
         search.query = query.clone();
-        self.find_toggles = Query { needle: String::new(), ..query.clone() };
+        self.find_toggles = query.with_needle("");
         self.restart_search(cx);
     }
 
     /// The find bar's query, when the bar is open.
+    #[cfg(test)]
     #[must_use]
-    pub fn search_query(&self) -> Option<&Query> {
+    fn search_query(&self) -> Option<&Query> {
         self.search.as_ref().map(|s| &s.query)
     }
 
@@ -3934,40 +3633,6 @@ impl TerminalView {
     #[must_use]
     pub fn has_selection(&self) -> bool {
         self.selection_has_text()
-    }
-
-    /// Whether the newest finished command failed and its block shows in the grid, barred and
-    /// its head washed: the tile's header then leaves the failure to the grid rather than mark
-    /// it twice.
-    /// Two prompt lookups, so a frame can ask it of every tile.
-    #[must_use]
-    pub fn failure_in_view(&self) -> bool {
-        let state = &self.state;
-        if state.modes().contains(TermModes::ALT_SCREEN) {
-            return false;
-        }
-        let Some(newest) = state.prompt_before(LineIndex(u64::MAX)) else { return false };
-        if state.line(newest).and_then(|l| l.mark.exit()).is_none_or(|code| code == 0) {
-            return false;
-        }
-        let Some(start) = state.prompt_before(newest) else { return false };
-        let top = state.index_at_row(0);
-        let bottom = state.index_at_row(state.size().rows.saturating_sub(1));
-        start <= bottom && newest > top
-    }
-
-    /// Paint the grid's rows under keys, drawn again from the last frame while unchanged (the
-    /// default), or afresh every frame: what keyed paint is measured and checked against.
-    pub const fn set_keyed_paint(&mut self, on: bool) {
-        self.keyed_paint = on;
-    }
-
-    /// Whether the tile draws its own pill at the body's foot, which hides the lines-below
-    /// pill. Returns whether that changed: a cached drawing of this view is then stale.
-    pub const fn set_covered(&mut self, covered: bool) -> bool {
-        let changed = self.covered != covered;
-        self.covered = covered;
-        changed
     }
 
     /// Whether a key hid the pointer and it has not moved since.
@@ -4138,9 +3803,11 @@ impl EntityInputHandler for TerminalView {
 }
 
 impl TerminalView {
-    /// The find bar over the top-right corner of the grid.
-    fn render_search(&self, search: &Search, cx: &Context<Self>) -> gpui::AnyElement {
-        let tally = if search.query.needle.is_empty() {
+    /// The find bar over the top-right corner of the grid: the shell's floating card, frosted,
+    /// holding its search field (the Files search's), the toggles as chips, the tally and the
+    /// steps and close as a surface toolbar's icon buttons.
+    fn render_search(search: &Search, cx: &Context<Self>) -> gpui::AnyElement {
+        let tally = if search.query.needle().is_empty() {
             Tally::Quiet
         } else if let Some(why) = &search.invalid {
             Tally::Bad(why.clone())
@@ -4151,30 +3818,214 @@ impl TerminalView {
                 more: search.total > SEARCH_MAX,
             }
         };
-        let this = cx.entity().downgrade();
-        let (stepping, closing) = (this.clone(), this.clone());
-        let bar = FindBar::new("terminal-find", "Find", &search.input, tally, &self.theme)
-            .toggles(&search.query, move |toggle, _window, cx| {
-                let _gone = this.update(cx, |v, cx| v.toggle_search(toggle, cx));
+        let theme = chrome::theme(cx).for_popup();
+        let words = tally.words();
+        let bad = matches!(tally, Tally::Bad(_));
+        let value = match &tally {
+            Tally::Bad(why) => SharedString::from(why.clone()),
+            _ => SharedString::from(words.clone()),
+        };
+        let toggle = |name: &str, face: &'static str, label: &'static str, on: bool, which| {
+            let id = SharedString::from(format!("terminal-find-{name}"));
+            let selector = id.to_string();
+            chrome::chip(gpui::ElementId::Name(id), on, &theme)
+                .debug_selector(move || selector)
+                .aria_label(label)
+                .aria_toggled(if on { gpui::Toggled::True } else { gpui::Toggled::False })
+                .w(px(chrome::CONTROL_SIZE))
+                .justify_center()
+                .text_size(px(11.5))
+                .tooltip(slopty_shell::settings::widgets::text_tooltip(label))
+                .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
+                .on_click(cx.listener(move |this, _ev, _window, cx| this.toggle_search(which, cx)))
+                .child(face)
+        };
+        let step = |name: &str, icon: &'static str, label: &'static str, by: i64| {
+            chrome::icon_button(format!("terminal-find-{name}"), icon, label, &theme)
+                .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
+                .on_click(cx.listener(move |this, _ev, _window, cx| this.step_match(by, cx)))
+        };
+        let focus = search.input.focus_handle(cx);
+        let field = chrome::field()
+            .id("terminal-find-field")
+            .debug_selector(|| "terminal-find-field".to_owned())
+            .overflow_hidden()
+            .cursor_text()
+            // A press on the field's padding puts the caret in it too.
+            .on_mouse_down(MouseButton::Left, move |_ev, window, cx| {
+                window.focus(&focus, cx);
+                cx.stop_propagation();
             })
-            .on_step(move |delta, _window, cx| {
-                let _gone = stepping.update(cx, |v, cx| v.step_match(i64::from(delta), cx));
-            })
-            .on_close(move |window, cx| {
-                let _gone = closing.update(cx, |v, cx| v.close_find(&CloseFind, window, cx));
-            });
-        let spacing = self.theme.spacing;
+            .child(
+                icons::icon(icons::MAGNIFER)
+                    .size(px(chrome::ICON_SIZE))
+                    .flex_none()
+                    .text_color(theme.text_muted),
+            )
+            .child(div().flex_1().min_w_0().child(search.input.clone()));
+        let count = div()
+            .id("terminal-find-count")
+            .debug_selector(|| "terminal-find-count".to_owned())
+            .flex_none()
+            .px(px(4.0))
+            .font_features(slopty_kit::kit::tabular_figures())
+            .text_size(px(11.5))
+            .text_color(if bad { theme.danger } else { theme.text_muted })
+            .role(gpui::Role::Label)
+            .aria_label("Matches")
+            .aria_value(value)
+            .child(SharedString::from(words));
+        let card = popover::popover_card(&theme)
+            .id("terminal-find")
+            .debug_selector(|| "terminal-find".to_owned())
+            .role(gpui::Role::Search)
+            .aria_label("Find")
+            .w(px(find::WIDTH))
+            .max_w_full()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(chrome::CONTROL_GAP))
+            .font_family(theme.font_sans.clone())
+            // Over what it finds in: the pointer there is the bar's, not the text's.
+            .occlude()
+            .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
+            .child(field)
+            .child(toggle(
+                "case",
+                find::CASE_FACE,
+                find::MATCH_CASE,
+                search.query.is_on(Toggle::MatchCase),
+                Toggle::MatchCase,
+            ))
+            .child(toggle(
+                "word",
+                find::WORD_FACE,
+                find::WHOLE_WORD,
+                search.query.is_on(Toggle::WholeWord),
+                Toggle::WholeWord,
+            ))
+            .child(toggle(
+                "regex",
+                find::REGEX_FACE,
+                find::REGEX,
+                search.query.is_on(Toggle::Regex),
+                Toggle::Regex,
+            ))
+            .child(count)
+            .child(step("previous", icons::ALT_ARROW_UP, "Previous match", -1))
+            .child(step("next", icons::ALT_ARROW_DOWN, "Next match", 1))
+            .child(
+                chrome::icon_button("terminal-find-close", icons::CLOSE, "Close find", &theme)
+                    .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
+                    .on_click(cx.listener(|this, _ev, window, cx| {
+                        this.close_find(&CloseFind, window, cx);
+                    })),
+            );
+        let card = slopty_shell::frost::frosted(
+            popover::CARD_RADIUS,
+            slopty_shell::frost::MENU_BLUR,
+            card,
+        );
         div()
             .key_context(SEARCH_CTX)
             .absolute()
-            .top(px(spacing.sm))
+            .top(px(FLOAT_INSET))
             // A phone-wide terminal can be wider than the screen; its left edge is the part
             // that is on screen (the "take" pill sits there for the same reason).
-            .when(cfg!(target_os = "ios"), |el| el.left(px(spacing.sm)))
-            .when(!cfg!(target_os = "ios"), |el| el.right(px(spacing.sm)))
+            .when(cfg!(target_os = "ios"), |el| el.left(px(FLOAT_INSET)))
+            .when(!cfg!(target_os = "ios"), |el| el.right(px(FLOAT_INSET)))
             .on_action(cx.listener(Self::close_find))
-            .child(bar)
+            // ⇧↩ steps back, as ↩ steps on: the field is one line, so its newline is the
+            // previous match, taken before the field would put it in.
+            .capture_action(cx.listener(|this, _: &slopty_shell::composer::Newline, _, cx| {
+                cx.stop_propagation();
+                this.step_match(-1, cx);
+            }))
+            .child(card)
             .into_any_element()
+    }
+}
+
+impl popover::ScrollRailHost for TerminalView {
+    fn rail_bar(&mut self) -> &mut popover::MenuScrollbarState {
+        &mut self.rail
+    }
+
+    /// The grid's history stands in for a scroll handle: the viewport is the view's height, the
+    /// content that and the history above it, the place how far down the history the view is.
+    fn rail_metrics(&mut self) -> Option<popover::MenuScrollbarMetrics> {
+        let (metrics, _) = self.rail_frame()?;
+        self.rail
+            .note_scroll_offset(f32::from(u16::try_from(self.scroll_moves % 0x8000).unwrap_or(0)));
+        Some(metrics)
+    }
+
+    fn rail_press(&mut self, pointer_y: Pixels) -> bool {
+        let Some((metrics, top)) = self.rail_frame() else { return false };
+        self.rail.begin_press_in(&metrics, top, pointer_y);
+        self.rail_drag(pointer_y);
+        true
+    }
+
+    fn rail_drag_to(&mut self, pointer_y: Pixels) -> bool {
+        self.rail_drag(pointer_y)
+    }
+}
+
+impl TerminalView {
+    /// The rail's geometry and its track's top in the window; `None` with no history.
+    fn rail_frame(&self) -> Option<(popover::MenuScrollbarMetrics, Pixels)> {
+        let (bounds, m) = (self.drawn_bounds?, self.metrics?);
+        let line = f32::from(m.line_height);
+        #[expect(clippy::cast_precision_loss, reason = "a scroll position in points")]
+        let (history, offset) = (self.state.history_len() as f32, self.state.view_offset() as f32);
+        let viewport = f32::from(bounds.size.height);
+        let metrics = popover::MenuScrollbarMetrics::from_parts(
+            viewport,
+            history.mul_add(line, viewport),
+            (history - offset).max(0.0) * line,
+        )?;
+        Some((metrics, bounds.top()))
+    }
+
+    /// A held rail moved to `pointer_y`: the viewport goes where the thumb is, the lines it
+    /// needs asked for when the view next draws.
+    fn rail_drag(&mut self, pointer_y: Pixels) -> bool {
+        let Some((metrics, top)) = self.rail_frame() else { return false };
+        let Some(fraction) = self.rail.drag_target_in(&metrics, top, pointer_y) else {
+            return false;
+        };
+        #[expect(clippy::cast_precision_loss, reason = "a line count in a fraction")]
+        let history = self.state.history_len() as f32;
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "0..=history")]
+        let offset = ((1.0 - fraction) * history).round().max(0.0) as u64;
+        if offset == self.state.view_offset() {
+            return false;
+        }
+        for effect in self.state.scroll_to(offset) {
+            if let Effect::Request(req) = effect {
+                self.rail_requests.push(req);
+            }
+        }
+        true
+    }
+
+    /// The element was laid out at `bounds` in the window.
+    pub(super) const fn set_drawn_bounds(&mut self, bounds: Bounds<Pixels>) {
+        self.drawn_bounds = Some(bounds);
+    }
+
+    /// Before drawing: send what a drag on the rail asked for, and count a viewport that moved.
+    fn before_drawing(&mut self, cx: &Context<Self>) {
+        for req in std::mem::take(&mut self.rail_requests) {
+            self.send(req, cx);
+        }
+        let top = (self.state.view_offset() != 0).then(|| self.state.index_at_row(0));
+        if top != self.shown_top {
+            self.shown_top = top;
+            self.scroll_moves = self.scroll_moves.wrapping_add(1);
+        }
     }
 }
 
@@ -4185,16 +4036,20 @@ impl Render for TerminalView {
             self.file_drag_left(cx);
         }
         self.watch_keyboard(window, cx);
+        self.before_drawing(cx);
         let focused = self.focus.is_focused(window);
         #[cfg(any(test, feature = "e2e"))]
         {
             self.renders = self.renders.saturating_add(1);
             self.drawn_focused = Some(focused);
         }
-        let search = self.search.as_ref().map(|s| self.render_search(s, cx));
-        let block = self.block_header();
-        let hovered = self.render_hovered_block(block.as_ref(), cx);
-        let header = block.and_then(|block| self.render_block_header(&block, cx));
+        let search = self.search.as_ref().map(|s| Self::render_search(s, cx));
+        let exited = self.render_exit_trailer(cx);
+        let confirm = self.render_confirm(cx);
+        let foot = self.render_lines_below(cx);
+        let link = self.render_link_preview(cx);
+        let shell = chrome::theme(cx).clone();
+        let rail = popover::rail(self, "terminal-scrollbar", &shell, cx);
         div()
             .id("terminal")
             .debug_selector(|| "terminal".to_owned())
@@ -4223,16 +4078,21 @@ impl Render for TerminalView {
             .on_action(cx.listener(Self::scroll_to_bottom))
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::copy_mode))
-            // The Edit menu names the text fields' actions, which every field answers; the grid
-            // answers them as its own.
-            .on_action(cx.listener(|this, _: &input::Copy, window, cx| {
+            // The shell's Edit menu sends its text fields' actions to what has the keyboard; the
+            // grid answers them as its own.
+            .on_action(cx.listener(|this, _: &slopty_shell::composer::Copy, window, cx| {
                 this.copy(&Copy, window, cx);
             }))
-            .on_action(cx.listener(|this, _: &input::Paste, window, cx| {
+            .on_action(cx.listener(|this, _: &slopty_shell::composer::Paste, window, cx| {
                 this.paste_clipboard(&Paste, window, cx);
             }))
-            .on_action(cx.listener(|this, _: &input::SelectAll, window, cx| {
+            .on_action(cx.listener(|this, _: &slopty_shell::composer::SelectAll, window, cx| {
                 this.select_all(&SelectAll, window, cx);
+            }))
+            .on_hover(cx.listener(|this, hovered: &bool, _window, cx| {
+                if this.rail.set_list_hovered(*hovered) {
+                    cx.notify();
+                }
             }))
             .on_key_down(cx.listener(Self::key_down))
             .on_key_up(cx.listener(Self::key_up))
@@ -4270,14 +4130,17 @@ impl Render for TerminalView {
                 }
                 el.child(grid).child(self.spot.element())
             })
-            .children(self.render_restored(cx))
-            .children(hovered)
-            .children(header)
+            .children(exited)
             .children(search)
-            .children(self.render_link_preview())
-            .children(self.render_confirm(cx))
-            .children(self.render_lines_below(cx))
-            .children(self.block_menu.as_ref().map(|m| self.render_block_menu(m, cx)))
+            .children(link)
+            .children(confirm)
+            .children(foot)
+            .children(rail)
+            .children(
+                self.block_menu.get().map(|m| {
+                    self.render_block_menu(m, self.block_menu.closing_since(), window, cx)
+                }),
+            )
     }
 }
 
@@ -4404,11 +4267,17 @@ impl SelectionText {
 struct FootPill {
     /// Its element id and debug selector.
     id: &'static str,
-    icon: slopty_kit::icons::Symbol,
+    /// Its Solar glyph ([`slopty_shell::icons`]).
+    icon: &'static str,
     /// What is so.
     words: SharedString,
-    /// What a click does, in the accent.
+    /// What a click does.
     act: &'static str,
+}
+
+/// What zeron's terminal writes under a program that ended.
+fn exit_words(status: Option<i32>) -> String {
+    status.map_or_else(|| "[process exited]".to_owned(), |code| format!("[process exited {code}]"))
 }
 
 /// A ⌘C waiting for history to arrive.
@@ -4465,9 +4334,6 @@ enum BlockMenuItem {
     ClearScreen,
 }
 
-/// The shortest command whose row gets a "took" caption.
-pub const TOOK_MIN: Duration = Duration::from_secs(1);
-
 /// A command block as context for an agent's message: what was run and how it ended, then
 /// its output fenced (with a fence longer than any run of backticks in it).
 #[must_use]
@@ -4510,7 +4376,58 @@ pub(super) fn selection_context(text: &str, block: Option<&CommandBlock>) -> Str
     format!("{from}\n{fence}\n{text}\n{fence}\n")
 }
 
+/// A key as a Mac menu shows it: a letter in capitals, an arrow or a return as its glyph.
+fn key_glyph(key: &str) -> String {
+    match key {
+        "enter" => "↩".to_owned(),
+        "escape" => "⎋".to_owned(),
+        "up" => "↑".to_owned(),
+        "down" => "↓".to_owned(),
+        "left" => "←".to_owned(),
+        "right" => "→".to_owned(),
+        "backspace" => "⌫".to_owned(),
+        "delete" => "⌦".to_owned(),
+        "tab" => "⇥".to_owned(),
+        "space" => "Space".to_owned(),
+        "home" => "↖".to_owned(),
+        "end" => "↘".to_owned(),
+        "pageup" => "⇞".to_owned(),
+        "pagedown" => "⇟".to_owned(),
+        other => other.to_uppercase(),
+    }
+}
+
 impl BlockMenuItem {
+    /// Which group of the menu it is in, a separator between two: the block's own items, the
+    /// clipboard's, then the terminal's.
+    const fn group(self) -> u8 {
+        match self {
+            Self::CopyCommand
+            | Self::CopyOutput
+            | Self::Rerun
+            | Self::Attach
+            | Self::SelectBlock => 0,
+            Self::Copy | Self::AttachSelection | Self::Paste => 1,
+            Self::Find | Self::ClearScreen => 2,
+        }
+    }
+
+    /// The command the item runs, when one does: its keys are the row's shortcut.
+    fn action(self) -> Option<Box<dyn gpui::Action>> {
+        Some(match self {
+            Self::Copy => Box::new(Copy),
+            Self::Paste => Box::new(Paste),
+            Self::Find => Box::new(Find),
+            Self::ClearScreen => Box::new(ClearScreen),
+            Self::AttachSelection => Box::new(AttachSelection),
+            Self::CopyCommand
+            | Self::CopyOutput
+            | Self::Rerun
+            | Self::Attach
+            | Self::SelectBlock => return None,
+        })
+    }
+
     const fn key(self) -> &'static str {
         match self {
             Self::CopyCommand => "copy-command",
@@ -4551,6 +4468,7 @@ fn texture_of(pixels: &TermImage) -> Option<Arc<gpui::RenderImage>> {
 
 mod copy;
 mod file_drag;
+mod find;
 mod keyboard;
 
 pub use copy::{COPY_MODE, COPY_MODE_DONE};
@@ -4566,7 +4484,6 @@ mod tests {
     use slopty_proto::terminal::{Frame, ProgressState, TermRequest};
 
     use super::*;
-    use crate::element::separator_color;
 
     /// A focused terminal in a headless window with the Terminal bindings, drawn once.
     fn terminal(
@@ -4574,7 +4491,7 @@ mod tests {
     ) -> (Entity<TerminalView>, mpsc::Receiver<ClientMsg>, &mut VisualTestContext) {
         let (tx, rx) = mpsc::channel(64);
         cx.update(|cx| {
-            gpui_kit::init(cx);
+            cx.set_global(slopty_shell::theme::Theme::default());
             cx.bind_keys(key_bindings());
         });
         let (view, cx) = cx.add_window_view(|window, cx| {
@@ -4725,164 +4642,18 @@ mod tests {
         view.read_with(cx, |view, _| view.state.index_at_row(0))
     }
 
-    /// The view rows (0 = top) that carry a command-block separator, with its colour: the
-    /// 1 px quads spanning the element edge to edge, read from the scene.
-    fn separators(
-        view: &Entity<TerminalView>,
-        cx: &mut VisualTestContext,
-    ) -> Vec<(u16, gpui::Hsla)> {
-        let bounds = cx.debug_bounds("terminal").expect("the terminal is drawn");
-        let metrics = view.read_with(cx, |view, _| view.metrics.expect("laid out"));
-        let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
-        let near = |scaled: gpui::ScaledPixels, logical: Pixels| {
-            f32::from(logical).mul_add(-scale, scaled.0).abs() < 0.5
-        };
-        let mut out = Vec::new();
-        for q in &quads {
-            let hair = slopty_kit::kit::hair_painted(scale);
-            if !(near(q.bounds.size.height, hair)
-                && near(q.bounds.size.width, bounds.size.width)
-                && near(q.bounds.origin.x, bounds.origin.x))
-            {
-                continue;
-            }
-            assert!(q.bounds.origin.y.0 >= f32::from(bounds.origin.y) * scale, "inside the view");
-            let row = (0..metrics.rows)
-                .find(|&row| {
-                    near(q.bounds.origin.y, metrics.origin.y + metrics.line_height * f32::from(row))
-                })
-                .expect("a separator sits on a row's top edge");
-            out.push((row, q.background.as_solid().expect("a solid fill")));
-        }
-        out.sort_by_key(|(row, _)| *row);
-        out
-    }
-
-    /// View rows as `(first row, rows)` bands.
-    type Bands = Vec<(u16, u16)>;
-
-    /// The view rows a failed block covers: the error bar down the element's left edge, and
-    /// the wash edge to edge over its head, as the block separators run, read from the scene.
-    /// The bars, then the washes.
-    fn failed_marks(view: &Entity<TerminalView>, cx: &mut VisualTestContext) -> (Bands, Bands) {
-        let bounds = cx.debug_bounds("terminal").expect("the terminal is drawn");
-        let metrics = view.read_with(cx, |view, _| view.metrics.expect("laid out"));
-        let look = FailedLook::new(&Theme::default());
-        let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
-        let near = |scaled: gpui::ScaledPixels, logical: Pixels| {
-            f32::from(logical).mul_add(-scale, scaled.0).abs() < 0.5
-        };
-        let row_at = |y: gpui::ScaledPixels| {
-            (0..=metrics.rows)
-                .find(|&row| near(y, metrics.origin.y + metrics.line_height * f32::from(row)))
-                .expect("a band sits on row edges")
-        };
-        let (mut bars, mut washes) = (Vec::new(), Vec::new());
-        for q in &quads {
-            if !near(q.bounds.origin.x, bounds.origin.x) {
-                continue;
-            }
-            let color = q.background.as_solid();
-            let bar = near(q.bounds.size.width, look.bar_width) && color == Some(look.bar);
-            let wash = near(q.bounds.size.width, bounds.size.width) && color == Some(look.wash);
-            if !(bar || wash) {
-                continue;
-            }
-            let first = row_at(q.bounds.origin.y);
-            let bottom = gpui::ScaledPixels(q.bounds.origin.y.0 + q.bounds.size.height.0);
-            let rows = row_at(bottom).saturating_sub(first);
-            let band = (first, rows);
-            if bar { bars.push(band) } else { washes.push(band) }
-        }
-        (bars, washes)
-    }
-
-    /// The view rows the failed blocks' bars cover; a block with only its head in view is
-    /// washed where it is barred.
-    fn failed_bands(view: &Entity<TerminalView>, cx: &mut VisualTestContext) -> Vec<(u16, u16)> {
-        let (bars, washes) = failed_marks(view, cx);
-        assert_eq!(bars, washes, "a head alone is washed where it is barred");
-        bars
-    }
-
-    /// A failed block is marked quietly: the error bar runs down its left edge over every row
-    /// of it, and only its head (the prompt and the command) is washed; its output keeps the
-    /// program's own background, so a long failure never fills the tile with the error tone.
+    /// ⌘↑ / ⌘↓ put the previous / next prompt at the top of the viewport.
     #[gpui::test]
-    fn a_failed_blocks_output_keeps_its_background(cx: &mut TestAppContext) {
-        let (view, _rx, cx) = terminal(cx);
-        let prompt = |exit| SemanticMark::Prompt { exit, input: Some(2) };
-        let screen =
-            [("$ make", prompt(None)), ("error: x", SemanticMark::Output), ("$ ", prompt(Some(2)))];
-        view.update_in(cx, |view, _window, cx| {
-            view.apply(
-                TermEvent::Frame(Frame {
-                    seq: 1,
-                    full: true,
-                    epoch: 0,
-                    cols: 10,
-                    rows: 3,
-                    cursor: Cursor::default(),
-                    modes: TermModes::empty(),
-                    oldest_line: LineIndex(0),
-                    first_visible_line: LineIndex(0),
-                    total_lines: 3,
-                    input_ack: 0,
-                    above: None,
-                    blocks: None,
-                    images: Vec::new(),
-                    updates: screen
-                        .iter()
-                        .enumerate()
-                        .map(|(row, (text, mark))| RowUpdate {
-                            row: u16::try_from(row).unwrap(),
-                            line: marked(text, *mark).into(),
-                        })
-                        .collect(),
-                }),
-                cx,
-            );
-        });
-        cx.run_until_parked();
-        let (bars, washes) = failed_marks(&view, cx);
-        assert_eq!(bars, vec![(0, 2)], "the bar down the whole block");
-        assert_eq!(washes, vec![(0, 1)], "the wash over its head only");
-    }
-
-    /// ⌘↑ / ⌘↓ put the previous / next prompt at the top of the viewport. A hairline is drawn
-    /// over each prompt below another row, never on the top edge; a block whose command failed
-    /// wears the error bar and wash over its rows, with the status from the prompt below it
-    /// even when that prompt is out of view.
-    #[gpui::test]
-    fn cmd_up_and_down_walk_the_prompts_and_separators_follow(cx: &mut TestAppContext) {
+    fn cmd_up_and_down_walk_the_prompts(cx: &mut TestAppContext) {
         let (view, _rx, cx) = terminal(cx);
         with_command_blocks(&view, cx);
-        let theme = Theme::default();
-        let rule = separator_color(&theme);
-        assert_eq!(rule, hsla(theme.surfaces.stroke), "the list's quiet hairline");
-        let look = FailedLook::new(&theme);
-        assert_eq!(look.bar, hsla(theme.surfaces.error_fill));
-        assert_eq!(look.wash, hsla_alpha(theme.surfaces.error_fill, alpha::FAINT));
-        assert_eq!(look.bar_width, px(slopty_theme::stroke::BAR), "Warp's 3 pt bar");
-
         assert_eq!(top_line(&view, cx), LineIndex(6), "following output");
-        assert_eq!(separators(&view, cx), vec![(2, rule)], "over the newest prompt");
-        assert_eq!(failed_bands(&view, cx), vec![], "`seq 2` succeeded");
-
         cx.simulate_keystrokes("cmd-up");
         assert_eq!(top_line(&view, cx), LineIndex(4), "`$ seq 2` at the top");
-        assert_eq!(separators(&view, cx), vec![], "none on the top edge");
-        assert_eq!(failed_bands(&view, cx), vec![], "`false` is above the view");
-
         cx.simulate_keystrokes("cmd-up");
         assert_eq!(top_line(&view, cx), LineIndex(3));
-        assert_eq!(separators(&view, cx), vec![(1, rule)], "over `seq 2`'s prompt");
-        assert_eq!(failed_bands(&view, cx), vec![(0, 1)], "`false` failed: its one row");
-
         cx.simulate_keystrokes("cmd-up");
         assert_eq!(top_line(&view, cx), LineIndex(0));
-        assert_eq!(separators(&view, cx), vec![], "never on the very first line");
-        assert_eq!(failed_bands(&view, cx), vec![], "`ls` succeeded; `false` is below the view");
         cx.simulate_keystrokes("cmd-up");
         assert_eq!(top_line(&view, cx), LineIndex(0), "nothing above: stays");
 
@@ -4895,11 +4666,10 @@ mod tests {
         assert!(view.read_with(cx, |view, _| view.state.view_offset() == 0), "following again");
     }
 
-    /// A block's rows keep the program's background: no band under its prompt, in any shade.
-    /// A hairline lies over each prompt that follows a row, output or another prompt, and over
-    /// none on the grid's top row; a continued prompt row and an `Input` row get none.
+    /// A block's rows are the program's own: no band under a prompt, no rule over it, no
+    /// error bar or wash on a failed one, in any shade; the grid is the terminal's, as zeron's.
     #[gpui::test]
-    fn a_block_paints_no_band_and_a_hairline_parts_it(cx: &mut TestAppContext) {
+    fn a_block_paints_no_band_rule_or_bar(cx: &mut TestAppContext) {
         let (view, _rx, cx) = terminal(cx);
         let prompt = |exit, input| SemanticMark::Prompt { exit, input };
         let screen = [
@@ -4908,7 +4678,7 @@ mod tests {
             ("hi", SemanticMark::Output),
             ("~/src", prompt(Some(0), None)),
             ("$ cd a", SemanticMark::PromptContinuation { input: Some(2) }),
-            ("$ ", prompt(Some(0), None)),
+            ("$ ", prompt(Some(2), None)),
             ("out", SemanticMark::Output),
             ("stray", SemanticMark::Input),
         ];
@@ -4943,93 +4713,41 @@ mod tests {
         });
         cx.run_until_parked();
         let theme = Theme::default();
-        let rule = separator_color(&theme);
-        assert_eq!(separators(&view, cx), vec![(3, rule), (5, rule)]);
-        // Nothing edge to edge but the hairlines: the rows are the grid's background.
         let bounds = cx.debug_bounds("terminal").expect("the terminal is drawn");
         let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
+        let inside = |q: &&gpui::Quad| {
+            q.bounds.origin.x.0 >= f32::from(bounds.origin.x).mul_add(scale, -0.5)
+                && q.bounds.origin.y.0 >= f32::from(bounds.origin.y).mul_add(scale, -0.5)
+        };
+        // Nothing edge to edge but the grid's own background: no band, no hairline.
         let spanning = quads
             .iter()
+            .filter(inside)
             .filter(|q| {
                 f32::from(bounds.size.width).mul_add(-scale, q.bounds.size.width.0).abs() < 0.5
             })
-            .filter(|q| q.bounds.size.height.0 > scale * 1.5)
             .filter_map(|q| q.background.as_solid())
-            .filter(|c| *c != hsla(theme.terminal.bg))
+            .filter(|c| *c != slopty_kit::colors::hsla(theme.terminal.bg))
             .collect::<Vec<_>>();
-        assert_eq!(spanning, vec![], "no band under a prompt");
-    }
-
-    /// A block whose prompt rows have scrolled above the viewport keeps its command in a
-    /// sticky header over the top row; on a prompt row there is none, and a click on the
-    /// header brings the prompt back to the top.
-    #[gpui::test]
-    fn a_block_scrolled_past_its_prompt_keeps_its_command_in_a_sticky_header(
-        cx: &mut TestAppContext,
-    ) {
-        let (view, _rx, cx) = terminal(cx);
-        with_command_blocks(&view, cx);
-        cx.update(|window, _cx| window.set_a11y_active(true));
-        cx.run_until_parked();
-
-        assert_eq!(top_line(&view, cx), LineIndex(6), "inside `seq 2`'s output");
-        let header = cx.debug_bounds("block-header").expect("the header is drawn");
-        let terminal = cx.debug_bounds("terminal").expect("the terminal is drawn");
-        let line_height = view.read_with(cx, |view, _| view.metrics.expect("laid out").line_height);
-        assert_eq!(header.origin, terminal.origin, "over the top row");
-        assert_eq!(header.size.width, terminal.size.width);
-        assert_eq!(header.size.height, line_height, "one row high");
-        let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
-        assert!(
-            tree.iter().any(|n| n.role == "Button" && n.label.as_deref() == Some("seq 2")),
-            "the header names the command: {tree:?}"
-        );
-        let command = view.read_with(cx, |view, _| view.block_header().and_then(|b| b.command));
-        assert_eq!(command.as_deref(), Some("seq 2"));
-        // The block's duration, once known, sits at the header's right end.
-        assert!(cx.debug_bounds("block-header-took").is_none(), "nothing known yet");
-        view.update(cx, |v, cx| {
-            v.set_took(LineIndex(4), Duration::from_millis(3_260));
-            cx.notify();
-        });
-        cx.run_until_parked();
-        let took = cx.debug_bounds("block-header-took").expect("the header says how long");
-        assert!(took.right() <= header.right() && took.left() > header.center().x, "{took:?}");
-
-        cx.simulate_keystrokes("cmd-up");
-        assert_eq!(top_line(&view, cx), LineIndex(4), "`$ seq 2` at the top");
-        assert!(cx.debug_bounds("block-header").is_none(), "the prompt itself is visible");
-
-        cx.simulate_keystrokes("cmd-down");
-        assert_eq!(top_line(&view, cx), LineIndex(6));
-        assert!(cx.debug_bounds("block-header").is_some(), "back inside the output");
-        cx.simulate_click(header.center(), gpui::Modifiers::default());
-        cx.run_until_parked();
-        assert_eq!(top_line(&view, cx), LineIndex(4), "a click scrolls to the prompt");
-        assert!(cx.debug_bounds("block-header").is_none());
-    }
-
-    /// The sticky header names the block only when the tile's header does not already: under a
-    /// title that is the block's command it would say the same words one line lower.
-    #[gpui::test]
-    fn a_sticky_header_does_not_repeat_the_title(cx: &mut TestAppContext) {
-        let (view, _rx, cx) = terminal(cx);
-        with_command_blocks(&view, cx);
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("block-header").is_some(), "inside `seq 2`'s output");
-        view.update_in(cx, |view, _window, cx| view.apply(TermEvent::Title("seq 2".into()), cx));
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("block-header").is_none(), "the title says `seq 2` already");
-        view.update_in(cx, |view, _window, cx| view.apply(TermEvent::Title("~/src".into()), cx));
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("block-header").is_some(), "another title: the header names it");
+        assert_eq!(spanning, vec![], "no band or rule across a block");
+        // Nothing down the left edge but the cells: no error bar.
+        let bars = quads
+            .iter()
+            .filter(inside)
+            .filter(|q| {
+                f32::from(bounds.origin.x).mul_add(-scale, q.bounds.origin.x.0).abs() < 0.5
+                    && q.bounds.size.width.0 < 4.0 * scale
+                    && q.bounds.size.height.0 > scale * 1.5
+            })
+            .count();
+        assert_eq!(bars, 0, "no bar down a block");
     }
 
     /// What making the texture of a 12 MiB image (the largest the worker ships) costs the UI
     /// thread: `placed_images` on a new generation, against the RGBA → premultiplied BGRA
     /// conversion it made before the worker sent the texture's format. Prints the numbers
     /// MEASUREMENTS records; run by hand, in release:
-    /// `cargo test -p slopty-ui --release --lib image_texture_cost -- --ignored --nocapture`.
+    /// `cargo test -p slopty-terminal --release --lib image_texture_cost -- --ignored --nocapture`.
     #[gpui::test]
     #[ignore = "measurement, run by hand"]
     fn image_texture_cost(cx: &mut TestAppContext) {
@@ -5592,6 +5310,21 @@ mod tests {
         assert!(pastes(&mut rx).is_empty() && pending(cx).is_none(), "Esc drops it");
 
         held(cx, &run);
+        let card = cx.debug_bounds("paste-confirm").expect("the card");
+        let paste = cx.debug_bounds("terminal-paste-confirm").expect("its Paste");
+        let cancel = cx.debug_bounds("terminal-paste-cancel").expect("its Cancel");
+        assert!(cancel.right() <= paste.left(), "Cancel, then Paste");
+        assert!(paste.right() <= card.right(), "inside the card");
+        cx.simulate_click(paste.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(pastes(&mut rx), [(run.clone(), true)], "Paste sends it confirmed");
+        held(cx, &run);
+        let cancel = cx.debug_bounds("terminal-paste-cancel").expect("its Cancel");
+        cx.simulate_click(cancel.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert!(pastes(&mut rx).is_empty() && pending(cx).is_none(), "Cancel drops it");
+
+        held(cx, &run);
         cx.simulate_keystrokes("x");
         cx.run_until_parked();
         assert!(pastes(&mut rx).is_empty(), "another key drops it");
@@ -5688,23 +5421,12 @@ mod tests {
         assert_eq!(drain_words(&mut rx), ["clear"]);
     }
 
-    /// Under the pointer a finished block says how it ended and how long it ran at the right
-    /// end of its prompt row ("Exit 1" in the error tone), with "…" for the block menu; with
-    /// its prompt scrolled above, the sticky header says it. The pointer leaving takes it away,
-    /// and the line being typed at shows nothing.
+    /// A hovered block is the gutter's and the palette's to act on, and draws nothing over the
+    /// grid: no facts, no chip, no "…" (a right click opens its menu).
     #[gpui::test]
-    fn a_hovered_block_shows_its_status_duration_and_menu(cx: &mut TestAppContext) {
+    fn a_hovered_block_draws_nothing_over_the_grid(cx: &mut TestAppContext) {
         let (view, _rx, cx) = terminal(cx);
         with_command_blocks(&view, cx);
-        let s = Theme::default().surfaces;
-        let facts = |cx: &mut VisualTestContext, prompt: u64| {
-            view.read_with(cx, |v, _| {
-                v.block_facts(LineIndex(prompt))
-                    .into_iter()
-                    .map(|(text, tone)| (text.to_string(), tone))
-                    .collect::<Vec<_>>()
-            })
-        };
         let (m, terminal) = (
             view.read_with(cx, |v, _| v.metrics.expect("laid out")),
             cx.debug_bounds("terminal").expect("the terminal is drawn"),
@@ -5715,40 +5437,18 @@ mod tests {
             cx.run_until_parked();
         };
         let hovered = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.hovered_block());
-        view.update(cx, |v, _| v.set_took(LineIndex(3), Duration::from_millis(40)));
-
         cx.simulate_keystrokes("cmd-up cmd-up");
         assert_eq!(top_line(&view, cx), LineIndex(3), "`$ false`, `$ seq 2`, `1`");
-        assert!(cx.debug_bounds("block-facts").is_none(), "nothing before the pointer comes");
+        let unhovered = cx.update(|window, _| window.painted_quads().len());
         over_row(cx, 0.0);
         assert_eq!(hovered(cx), Some(LineIndex(3)));
-        assert_eq!(
-            facts(cx, 3),
-            [("Exit 1".to_owned(), s.error), ("40 ms".to_owned(), s.text_muted)],
-            "`false` failed, and how long it ran however short"
-        );
-        let shown = cx.debug_bounds("block-facts").expect("the facts are drawn");
-        assert!(
-            shown.top() >= m.origin.y && shown.bottom() <= m.origin.y + m.line_height,
-            "on the prompt row: {shown:?}, {m:?}"
-        );
-        assert!(shown.left() > terminal.center().x, "at the prompt row's right end: {shown:?}");
-
         over_row(cx, 2.0);
         assert_eq!(hovered(cx), Some(LineIndex(4)), "`seq 2`'s output is its block");
-        assert_eq!(facts(cx, 4), [("Exit 0".to_owned(), s.text_muted)], "no duration known");
-        let shown = cx.debug_bounds("block-facts").expect("the facts follow the pointer");
-        let row1 = m.origin.y + m.line_height;
-        assert!(shown.top() >= row1 && shown.bottom() <= row1 + m.line_height, "{shown:?}");
-
-        // "…" opens the block's menu, as a right click on it would.
-        let more = cx.debug_bounds("block-more").expect("the menu affordance");
-        cx.simulate_click(more.center(), gpui::Modifiers::default());
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("block-menu-rerun").is_some(), "the block's own items");
-        cx.simulate_keystrokes("escape");
-        cx.run_until_parked();
-
+        for part in ["block-facts", "block-chip", "block-more", "block-header"] {
+            assert!(cx.debug_bounds(part).is_none(), "{part} is not drawn");
+        }
+        let quads = cx.update(|window, _| window.painted_quads().len());
+        assert_eq!(quads, unhovered, "the hover paints nothing");
         cx.simulate_mouse_move(
             terminal.bottom_right() + point(px(8.0), px(8.0)),
             None,
@@ -5756,62 +5456,9 @@ mod tests {
         );
         cx.run_until_parked();
         assert_eq!(hovered(cx), None, "the pointer left");
-        assert!(cx.debug_bounds("block-facts").is_none());
-
-        // With the prompt scrolled above, the sticky header carries the facts, not the caption.
-        view.update(cx, |v, _| v.set_took(LineIndex(4), Duration::from_secs(2)));
         cx.simulate_keystrokes("cmd-down cmd-down");
-        assert_eq!(top_line(&view, cx), LineIndex(6));
-        assert!(cx.debug_bounds("block-header-took").is_some(), "the caption, unhovered");
-        over_row(cx, 1.0);
-        assert_eq!(hovered(cx), Some(LineIndex(4)));
-        let header = cx.debug_bounds("block-header").expect("the sticky header");
-        let shown = cx.debug_bounds("block-facts").expect("in the header");
-        assert!(header.contains(&shown.center()), "{shown:?} in {header:?}");
-        assert!(cx.debug_bounds("block-header-took").is_none(), "the facts say it instead");
-
-        // The line being typed at is no block yet.
         over_row(cx, 2.0);
-        assert_eq!(hovered(cx), None, "the open prompt");
-    }
-
-    /// The quads the last frame painted exactly over `at`.
-    fn quads_over(cx: &mut VisualTestContext, at: Bounds<Pixels>) -> Vec<gpui::Quad> {
-        let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
-        let same = |scaled: gpui::ScaledPixels, logical: Pixels| {
-            f32::from(logical).mul_add(-scale, scaled.0).abs() < 0.5
-        };
-        quads
-            .into_iter()
-            .filter(|q| {
-                same(q.bounds.origin.x, at.origin.x)
-                    && same(q.bounds.origin.y, at.origin.y)
-                    && same(q.bounds.size.width, at.size.width)
-                    && same(q.bounds.size.height, at.size.height)
-            })
-            .collect()
-    }
-
-    /// A hovered block's facts sit on a raised chip (an element's fill), except over a failed
-    /// block, where they sit on the band itself: a lighter patch there would cut into the one
-    /// mark that says the command failed.
-    #[gpui::test]
-    fn a_failed_blocks_facts_sit_on_its_band_without_a_chip(cx: &mut TestAppContext) {
-        let (view, _rx, cx) = terminal(cx);
-        with_command_blocks(&view, cx);
-        let hover = hsla(Theme::default().surfaces.element);
-        let m = view.read_with(cx, |v, _| v.metrics.expect("laid out"));
-        let chip_fill = |cx: &mut VisualTestContext, row: f32| {
-            let at = m.origin + point(m.cell_width * 1.5, m.line_height * (row + 0.5));
-            cx.simulate_mouse_move(at, None, gpui::Modifiers::default());
-            cx.run_until_parked();
-            let chip = cx.debug_bounds("block-chip").expect("the facts are drawn");
-            quads_over(cx, chip).iter().any(|q| q.background.as_solid() == Some(hover))
-        };
-        cx.simulate_keystrokes("cmd-up cmd-up");
-        assert_eq!(top_line(&view, cx), LineIndex(3), "`$ false`, `$ seq 2`, `1`");
-        assert!(!chip_fill(cx, 0.0), "`false` failed: its facts sit on the wash");
-        assert!(chip_fill(cx, 1.0), "`seq 2` succeeded: its facts are on a chip");
+        assert_eq!(hovered(cx), None, "the line being typed at is no block yet");
     }
 
     /// Dotted and dashed underlines are drawn in pieces on the device's pixels, in the
@@ -5885,22 +5532,27 @@ mod tests {
         );
     }
 
-    /// Unfocused, the cursor is a hollow block in the muted text tone, not the cursor colour:
-    /// a background pane's caret is a place marker and does not draw the eye.
+    /// The cursor is zeron's: translucent over its glyph, and unfocused the same colour's
+    /// outline, a place marker that does not blink.
     #[gpui::test]
-    fn an_unfocused_cursor_is_a_muted_hollow_block(cx: &mut TestAppContext) {
+    fn an_unfocused_cursor_is_a_hollow_block_in_the_same_ink(cx: &mut TestAppContext) {
         let (_view, _rx, cx) = terminal(cx);
-        let theme = Theme::default();
-        let outlined = |cx: &mut VisualTestContext, ink: gpui::Hsla| {
+        let ink =
+            slopty_shell::live::TerminalLook::from_theme(&slopty_shell::theme::Theme::default())
+                .cursor;
+        assert!(ink.a < 1.0, "translucent over the glyph: {ink:?}");
+        let outlined = |cx: &mut VisualTestContext| {
             let quads = cx.update(|window, _| window.painted_quads());
             quads.iter().any(|q| q.border_widths.top.0 > 0.0 && q.border_color == ink)
         };
-        let muted = hsla(theme.surfaces.text_muted);
-        assert!(!outlined(cx, muted), "focused: the program's cursor, not a muted outline");
+        let filled = |cx: &mut VisualTestContext| {
+            let quads = cx.update(|window, _| window.painted_quads());
+            quads.iter().any(|q| q.background.as_solid() == Some(ink))
+        };
+        assert!(filled(cx) && !outlined(cx), "focused: a filled block");
         cx.update(Window::blur);
         cx.run_until_parked();
-        assert!(outlined(cx, muted), "unfocused: a muted hollow block");
-        assert!(!outlined(cx, hsla(theme.terminal.cursor)), "never the cursor colour");
+        assert!(outlined(cx) && !filled(cx), "unfocused: its outline");
     }
 
     /// Selected text off every block is "From the terminal", and a fence outruns the backticks
@@ -5917,8 +5569,7 @@ mod tests {
     /// to its last output row, and is not the program's; the palette's "Copy block output"
     /// copies that block's output and "Attach block to agent" hands the workspace the block as
     /// context while an agent would take it (and is not offered otherwise), and with nothing
-    /// selected both take the last block. While the scrollbar shows, a click on a block's mark
-    /// scrolls its prompt to the top.
+    /// selected both take the last block.
     #[gpui::test]
     fn a_gutter_click_selects_a_block_and_the_palette_acts_on_it(cx: &mut TestAppContext) {
         let (view, mut rx, cx) = terminal(cx);
@@ -5994,54 +5645,6 @@ mod tests {
         cx.write_to_clipboard(gpui::ClipboardItem::new_string(String::new()));
         dispatch(cx, Box::new(CopyBlockOutput));
         assert_eq!(clipboard(cx).as_deref(), Some("1\n2"));
-
-        // The marks: `ls` at line 0, `false` (failed) at 3, `seq 2` at 4, over 6 lines of
-        // history and the 3-row screen.
-        view.update_in(cx, |view, window, cx| {
-            let mark = |line, exit| slopty_proto::terminal::BlockMark {
-                prompt: LineIndex(line),
-                end: Some(slopty_proto::terminal::BlockEnd { exit, took_ms: None }),
-            };
-            let marks = vec![mark(0, Some(0)), mark(3, Some(1)), mark(4, Some(0))];
-            let blocks = Some(slopty_proto::terminal::Blocks { whole: true, marks });
-            let frame = Frame {
-                seq: 2,
-                full: false,
-                epoch: 0,
-                cols: 10,
-                rows: 3,
-                cursor: Cursor::default(),
-                modes: TermModes::empty(),
-                oldest_line: LineIndex(0),
-                first_visible_line: LineIndex(6),
-                total_lines: 9,
-                input_ack: 0,
-                above: None,
-                blocks,
-                images: Vec::new(),
-                updates: Vec::new(),
-            };
-            view.apply(TermEvent::Frame(frame), cx);
-            view.pointer_near_scrollbar(true, cx);
-            window.refresh();
-        });
-        cx.run_until_parked();
-        let tick = view.read_with(cx, |v, _| {
-            let m = v.metrics.expect("laid out");
-            let ticks = crate::element::block_ticks(
-                &m,
-                v.state.block_marks(),
-                LineIndex(0),
-                v.state.history_len(),
-                px(slopty_theme::stroke::MARK),
-            );
-            ticks.iter().find(|t| t.prompt == LineIndex(3)).map(|t| (t.bounds.center(), t.failed))
-        });
-        let (at, failed) = tick.expect("a mark for the failed block");
-        assert!(failed);
-        cx.simulate_click(at, gpui::Modifiers::default());
-        cx.run_until_parked();
-        assert_eq!(top_line(&view, cx), LineIndex(3), "its prompt at the top");
     }
 
     /// A right click off any block (no shell integration, a program's output) still offers
@@ -6096,7 +5699,17 @@ mod tests {
             let bounds = cx.debug_bounds(selector).unwrap_or_else(|| panic!("{key} in the menu"));
             cx.simulate_click(bounds.center(), gpui::Modifiers::default());
             cx.run_until_parked();
-            assert!(cx.debug_bounds("block-menu").is_none(), "the menu closes after {key}");
+            let open = view.read_with(cx, |v, _| v.block_menu.is_open());
+            assert!(!open, "the menu closes after {key}");
+            // Its closing motion plays out on the wall clock, then it goes.
+            // The reap waits a little past the motion's span.
+            let out =
+                slopty_shell::motion::MENU_OUT.total().saturating_add(Duration::from_millis(30));
+            #[expect(clippy::disallowed_methods, reason = "the shell's popup closes on real time")]
+            std::thread::sleep(out);
+            cx.background_executor.advance_clock(out);
+            cx.run_until_parked();
+            assert!(cx.debug_bounds("block-menu").is_none(), "gone after its motion");
         };
 
         right_click(cx);
@@ -6105,6 +5718,19 @@ mod tests {
         let items: Vec<_> =
             tree.iter().filter(|n| n.role == "MenuItem").filter_map(|n| n.label.clone()).collect();
         assert_eq!(items, ["Paste", "Find…", "Clear screen"]);
+        // The shell's menu rows, a separator between the clipboard's and the terminal's, each
+        // row with its keys.
+        let row = |cx: &mut VisualTestContext, key: &str| {
+            let selector: &'static str = Box::leak(format!("block-menu-{key}").into_boxed_str());
+            cx.debug_bounds(selector).unwrap_or_else(|| panic!("{key} in the menu"))
+        };
+        let (paste, find, clear) = (row(cx, "paste"), row(cx, "find"), row(cx, "clear"));
+        assert_eq!(paste.size.height, find.size.height, "the shell's menu rows");
+        assert!(find.top() - paste.bottom() > clear.top() - find.bottom(), "a separator");
+        let keys = cx.update(|window, cx| {
+            view.read(cx).shortcut(&Paste, window).zip(view.read(cx).shortcut(&ClearScreen, window))
+        });
+        assert_eq!(keys, Some(("⌘V".to_owned(), "⌘K".to_owned())), "the bound keys, as a Mac says");
         assert!(drain_input(&mut rx).is_empty(), "a right click is not reported");
         pick(cx, "clear");
         assert_eq!(drain_words(&mut rx), ["clear"], "the worker clears, nothing typed");
@@ -6126,6 +5752,12 @@ mod tests {
         pick(cx, "copy");
         let text = cx.update(|_, cx| cx.read_from_clipboard().and_then(|i| i.text()));
         assert_eq!(text.as_deref(), Some("second"));
+        let keyboard = cx.update(|window, cx| view.read(cx).focus.is_focused(window));
+        assert!(keyboard, "the menu gave the terminal the keyboard back");
+        assert!(
+            view.read_with(cx, |v, _| v.selection.is_some_and(|s| s.head == (LineIndex(1), 5))),
+            "the copy kept the selection"
+        );
 
         // ⇧-arrows move the selection's head; the shell sees none of them. Without a
         // selection the same keys are the shell's.
@@ -6153,62 +5785,28 @@ mod tests {
         assert!(view.read_with(cx, |v, _| v.search.is_some()), "the find field opened");
     }
 
-    /// A finished command's row says how long it took, at its right end, once it took a
-    /// second or more; the caption follows the row through history and a new epoch (a
-    /// reflow renumbers the rows) forgets them all.
+    /// The Edit menu's items (the shell's composer actions, which the menu bar sends to what
+    /// has focus) are the terminal's own Select All, Copy and Paste.
     #[gpui::test]
-    fn a_slow_commands_row_says_how_long_it_took(cx: &mut TestAppContext) {
-        let (view, _rx, cx) = terminal(cx);
-        with_command_blocks(&view, cx);
-        let captions = |cx: &mut VisualTestContext| {
-            view.update(cx, |_v, cx| cx.notify());
-            cx.run_until_parked();
-            cx.update(|_window, cx| crate::captions_drawn(cx))
-        };
-        assert_eq!(captions(cx), Vec::<String>::new());
-        view.update(cx, |v, _cx| {
-            v.set_took(LineIndex(0), Duration::from_millis(3_260));
-            v.set_took(LineIndex(3), Duration::from_millis(400));
-            v.set_took(LineIndex(4), Duration::from_secs(2));
-        });
-        assert_eq!(view.read_with(cx, |v, _| v.took(LineIndex(3))), None, "under a second");
-        assert!(captions(cx).is_empty(), "the captioned rows are above the viewport");
-        // Ten columns: `$ seq 2` reaches the caption's cells, so the text wins.
-        cx.simulate_keystrokes("cmd-up");
-        assert_eq!(top_line(&view, cx), LineIndex(4));
-        assert!(captions(cx).is_empty(), "`$ seq 2` at the top: its text reaches the caption");
-        cx.simulate_keystrokes("cmd-up");
-        cx.simulate_keystrokes("cmd-up");
-        assert_eq!(top_line(&view, cx), LineIndex(0));
-        assert_eq!(captions(cx), ["3.2 s"], "`$ ls` leaves room: its row says how long it took");
-        // A new epoch renumbers the rows: nothing said before applies.
+    fn the_edit_menu_selects_copies_and_pastes_in_the_grid(cx: &mut TestAppContext) {
+        let (view, mut rx, cx) = terminal(cx);
         view.update_in(cx, |view, _window, cx| {
-            let prompt = SemanticMark::Prompt { exit: Some(0), input: Some(2) };
-            let mut frame = Frame {
-                seq: 9,
-                full: true,
-                epoch: 1,
-                cols: 20,
-                rows: 3,
-                cursor: Cursor::default(),
-                modes: TermModes::empty(),
-                oldest_line: LineIndex(0),
-                first_visible_line: LineIndex(0),
-                total_lines: 3,
-                input_ack: 0,
-                above: None,
-                blocks: None,
-                images: Vec::new(),
-                updates: vec![RowUpdate {
-                    row: 0,
-                    line: Line::from_text("$ ", 20, Style::DEFAULT).into(),
-                }],
-            };
-            Arc::make_mut(&mut frame.updates[0].line).mark = prompt;
-            view.apply(TermEvent::Frame(frame), cx);
+            view.apply(history_frame(0, &["hello wor", "second", "third row"]), cx);
         });
-        assert_eq!(view.read_with(cx, |v, _| v.took(LineIndex(4))), None, "a new epoch forgets");
-        assert_eq!(captions(cx), Vec::<String>::new());
+        cx.run_until_parked();
+        drain_input(&mut rx);
+        let dispatch = |cx: &mut VisualTestContext, action: Box<dyn gpui::Action>| {
+            cx.update(|window, cx| window.dispatch_action(action, cx));
+            cx.run_until_parked();
+        };
+        dispatch(cx, Box::new(slopty_shell::composer::SelectAll));
+        assert!(view.read_with(cx, |v, _| v.selection.is_some()), "the grid is selected");
+        dispatch(cx, Box::new(slopty_shell::composer::Copy));
+        let text = cx.update(|_, cx| cx.read_from_clipboard().and_then(|i| i.text()));
+        assert_eq!(text.as_deref(), Some("hello wor\nsecond\nthird row"), "copied");
+        cx.update(|_, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string("hi".into())));
+        dispatch(cx, Box::new(slopty_shell::composer::Paste));
+        assert_eq!(drain_input(&mut rx), ["paste:hi"], "pasted into the program");
     }
 
     /// A block as an agent's context says what ran and how it ended, then fences its output
@@ -7042,138 +6640,80 @@ mod tests {
         assert_eq!(wheels(&mut rx), [-1], "the alternate screen: the worker makes it a key");
     }
 
-    /// Under Reduce Motion the scrollbar a scroll brought up goes at once when its linger ends:
-    /// it draws once to go, and no frame of a fade is asked for.
+    /// The scrollbar is the shell's rail: none without history, hidden at rest and while output
+    /// arrives under a view that follows it, a 3-wide thumb down the right edge once the
+    /// viewport scrolls, and a drag on it moves the viewport through the whole history
+    /// without selecting the text under it.
     #[gpui::test]
-    fn the_scrollbar_goes_without_a_fade_under_reduce_motion(cx: &mut TestAppContext) {
-        use crate::scrollbar::{FADE, LINGER};
+    fn the_rail_shows_on_a_scroll_and_drags_the_viewport(cx: &mut TestAppContext) {
+        use slopty_shell::popover::{MENU_SCROLLBAR_THUMB_WIDTH, MENU_SCROLLBAR_TRACK_INSET};
         let (view, _rx, cx) = terminal(cx);
-        cx.update(|_w, cx| cx.set_reduce_motion(true));
-        view.update_in(cx, |view, _window, cx| {
-            view.apply(history_frame(30, &["hello wor", "second", "third row"]), cx);
-        });
+        let rows = ["hello wor", "second", "third row"];
+        view.update_in(cx, |view, _window, cx| view.apply(history_frame(0, &rows), cx));
         cx.run_until_parked();
-        let m = view.read_with(cx, |v, _| v.metrics.expect("laid out"));
-        let at = point(m.origin.x + m.cell_width, m.origin.y + m.line_height * 1.5);
+        let frame = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.rail_frame());
+        assert!(frame(cx).is_none(), "no history, no rail");
+
+        view.update_in(cx, |view, _window, cx| view.apply(history_frame(30, &rows), cx));
+        cx.run_until_parked();
+        let (metrics, top) = frame(cx).expect("history: a rail");
+        assert!((metrics.thumb_top - metrics.travel()).abs() < 0.01, "following: at the end");
+        let terminal = cx.debug_bounds("terminal").expect("the terminal is drawn");
+        // The thumbs drawn down the right edge, by width in points.
+        let thumbs = |cx: &mut VisualTestContext| {
+            let (scale, quads) =
+                cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
+            let right = f32::from(terminal.right()) * scale;
+            quads
+                .iter()
+                .filter(|q| {
+                    let end = q.bounds.origin.x.0 + q.bounds.size.width.0;
+                    end <= right + 0.5 && end >= 12.0_f32.mul_add(-scale, right)
+                })
+                .map(|q| q.bounds.size.width.0 / scale)
+                .filter(|w| *w <= 6.0)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(thumbs(cx), Vec::<f32>::new(), "hidden at rest");
+        view.update_in(cx, |view, _window, cx| view.apply(moved_frame(2, 31, &rows), cx));
+        cx.run_until_parked();
+        assert_eq!(thumbs(cx), Vec::<f32>::new(), "output under a view following it");
+
         cx.simulate_event(ScrollWheelEvent {
-            position: at,
+            position: cell_center(&view, cx, 1.0, 1.0),
             delta: ScrollDelta::Lines(point(0.0, 1.0)),
             modifiers: gpui::Modifiers::default(),
             touch_phase: TouchPhase::Started,
             momentum_phase: None,
         });
         cx.run_until_parked();
-        let shown = |cx: &mut VisualTestContext| {
-            view.read_with(cx, |v, cx| {
-                v.scrollbar_opacity(cx.background_executor().now(), slopty_kit::kit::motion(cx))
-            })
-        };
-        let renders = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.renders());
-        assert!(shown(cx) >= 1.0, "a scroll brings it up");
-        cx.executor().advance_clock(LINGER);
-        cx.run_until_parked();
-        assert!(shown(cx) <= 0.0, "gone as the linger ends");
-        let gone = renders(cx);
-        cx.executor().advance_clock(FADE);
-        cx.run_until_parked();
-        assert_eq!(renders(cx), gone, "no frame of a fade");
-    }
-
-    /// The scrollbar is an overlay: with history it is still hidden at rest, comes up while
-    /// the pointer is near the right edge or the viewport scrolls, and is gone once the linger
-    /// and the fade have run. Its thumb drags the viewport, a click on the track beside it
-    /// pages, and the text under the bar is not selected by those clicks.
-    #[gpui::test]
-    fn the_scrollbar_drags_and_pages_the_viewport(cx: &mut TestAppContext) {
-        use crate::scrollbar::{FADE, LINGER};
-        let (view, _rx, cx) = terminal(cx);
-        view.update_in(cx, |view, _window, cx| {
-            view.apply(history_frame(0, &["hello wor", "second", "third row"]), cx);
-        });
-        cx.run_until_parked();
-        let shown = |cx: &mut VisualTestContext| {
-            view.read_with(cx, |v, cx| v.scrollbar_opacity(cx.background_executor().now(), true))
-        };
-        let thumb = |cx: &mut VisualTestContext| {
-            view.read_with(cx, |v, cx| v.thumb(cx.background_executor().now(), true))
-        };
-        let mods = gpui::Modifiers::default();
-        let m = view.read_with(cx, |v, _| v.metrics.expect("laid out"));
-        let edge = point(
-            m.origin.x + m.cell_width * (f32::from(m.cols) - 0.5),
-            m.origin.y + m.line_height * 1.5,
-        );
-        cx.simulate_mouse_move(edge, None, mods);
-        cx.run_until_parked();
-        assert!(shown(cx) <= 0.0, "no history, no bar");
-
-        view.update_in(cx, |view, _window, cx| {
-            view.apply(history_frame(30, &["hello wor", "second", "third row"]), cx);
-        });
-        cx.run_until_parked();
-        assert!(shown(cx) >= 1.0, "history, and the pointer at the right edge: up");
-        let thumb_now = thumb(cx).expect("a thumb");
-        let rows = m.rows;
-        let track_bottom = m.origin.y + m.line_height * f32::from(rows);
-        assert!(
-            thumb_now.origin.y + thumb_now.size.height <= track_bottom + px(0.01),
-            "at the bottom of the history the thumb sits at the track's end: {thumb_now:?}"
-        );
-        assert!(
-            thumb_now.origin.x + thumb_now.size.width
-                <= m.origin.x + m.cell_width * f32::from(m.cols) + px(0.01)
-        );
-        cx.simulate_mouse_move(cell_center(&view, cx, 1.0, 1.0), None, mods);
-        cx.run_until_parked();
-        assert!(shown(cx) >= 1.0, "it lingers after the pointer leaves");
-        cx.executor().advance_clock(LINGER.saturating_add(FADE));
-        cx.run_until_parked();
-        assert!(shown(cx) <= 0.0, "then it is gone: history alone is not a reason");
-        assert_eq!(thumb(cx), None, "and a click there is the text's");
-
-        // A scroll brings it up wherever the pointer is.
-        cx.simulate_event(ScrollWheelEvent {
-            position: cell_center(&view, cx, 1.0, 1.0),
-            delta: ScrollDelta::Lines(point(0.0, 1.0)),
-            modifiers: mods,
-            touch_phase: TouchPhase::Started,
-            momentum_phase: None,
-        });
-        cx.run_until_parked();
         assert_eq!(view.read_with(cx, |v, _| v.state.view_offset()), 1);
-        assert!(shown(cx) >= 1.0, "scrolling shows it");
-        view.update_in(cx, |view, _window, cx| view.scroll_lines(-1, cx));
-        cx.simulate_mouse_move(edge, None, mods);
-        cx.run_until_parked();
-        let thumb_now = thumb(cx).expect("a thumb");
+        assert_eq!(thumbs(cx), [MENU_SCROLLBAR_THUMB_WIDTH], "a scroll brings the thumb up");
 
-        // Clicking the track above the thumb pages up one screen.
-        let track_above = point(thumb_now.center().x, m.origin.y + px(1.0));
-        cx.simulate_mouse_down(track_above, MouseButton::Left, mods);
-        cx.simulate_mouse_up(track_above, MouseButton::Left, mods);
-        cx.run_until_parked();
-        assert_eq!(view.read_with(cx, |v, _| v.state.view_offset()), u64::from(rows));
-        assert_eq!(view.read_with(cx, |v, _| v.selection), None, "the track does not select");
-
-        // Dragging the thumb to the top of the track shows the oldest lines.
-        let grab = thumb(cx).expect("a thumb").center();
+        // Grabbed by its middle and dragged past the top: the whole history; past the bottom,
+        // back to following.
+        let (metrics, top_now) = frame(cx).expect("a rail");
+        assert_eq!(top_now, top);
+        let grab = point(
+            terminal.right() - px(4.0),
+            top + px(MENU_SCROLLBAR_TRACK_INSET + metrics.thumb_top + metrics.thumb_height / 2.0),
+        );
+        let mods = gpui::Modifiers::default();
         cx.simulate_mouse_down(grab, MouseButton::Left, mods);
         cx.run_until_parked();
-        assert!(view.read_with(cx, |v, _| v.thumb_held()));
-        cx.simulate_mouse_move(point(grab.x, m.origin.y - px(50.0)), MouseButton::Left, mods);
+        // The shell's rail is a GPUI drag: a move past its threshold picks the thumb up.
+        cx.simulate_mouse_move(grab - point(px(0.0), px(4.0)), MouseButton::Left, mods);
         cx.run_until_parked();
-        assert_eq!(view.read_with(cx, |v, _| v.state.view_offset()), 30, "the whole history");
-        cx.simulate_mouse_move(point(grab.x, track_bottom + px(50.0)), MouseButton::Left, mods);
+        cx.simulate_mouse_move(point(grab.x, terminal.top() - px(50.0)), MouseButton::Left, mods);
         cx.run_until_parked();
-        assert_eq!(view.read_with(cx, |v, _| v.state.view_offset()), 0, "and back to the bottom");
-        cx.simulate_mouse_up(point(grab.x, track_bottom + px(50.0)), MouseButton::Left, mods);
+        assert_eq!(view.read_with(cx, |v, _| v.state.view_offset()), 31, "the whole history");
+        let below = point(grab.x, terminal.bottom() + px(50.0));
+        cx.simulate_mouse_move(below, MouseButton::Left, mods);
         cx.run_until_parked();
-        assert!(!view.read_with(cx, |v, _| v.thumb_held()));
-        assert_eq!(view.read_with(cx, |v, _| v.selection), None, "the thumb does not select");
-        assert!(shown(cx) >= 1.0, "let go off the edge, it lingers");
-        cx.executor().advance_clock(LINGER.saturating_add(FADE));
+        assert_eq!(view.read_with(cx, |v, _| v.state.view_offset()), 0, "back to the bottom");
+        cx.simulate_mouse_up(below, MouseButton::Left, mods);
         cx.run_until_parked();
-        assert!(shown(cx) <= 0.0, "then it is gone");
+        assert_eq!(view.read_with(cx, |v, _| v.selection), None, "the rail does not select");
     }
 
     /// Every key the terminal received, oldest first, with the paste texts in between.
@@ -7855,6 +7395,7 @@ mod tests {
         };
 
         // Not asking: the drag is the tile's, and the paths are typed.
+        assert!(!view.read_with(cx, |v, _| v.takes_drops()));
         let (a, b) = (cell(cx, 2, 1), cell(cx, 4, 1));
         drag(cx, &[a, b]);
         cx.simulate_event(FileDropEvent::Submit { position: b });
@@ -7864,6 +7405,7 @@ mod tests {
         // Asking: told of the drag's files, then per cell, then the drop, then where they
         // landed.
         view.update(cx, |view, cx| view.apply(TermEvent::DropTarget { accepts: true }, cx));
+        assert!(view.read_with(cx, |v, _| v.takes_drops()), "the program asks");
         drag(cx, &[a, a, b]);
         cx.simulate_event(FileDropEvent::Submit { position: b });
         assert_eq!(drag_requests(&mut rx), ["enter a b.txt", "over 2,1", "over 4,1", "drop 4,1"]);
@@ -8179,6 +7721,40 @@ mod tests {
         assert_eq!(view.read_with(cx, |v, _| v.selected_text()).as_deref(), Some("third"));
     }
 
+    /// In the find field ↩ steps to the next hit and ⇧↩ back to the one before, round the
+    /// ends; ⇧↩ puts no newline in the one-line field.
+    #[gpui::test]
+    fn shift_return_in_the_find_field_steps_back(cx: &mut TestAppContext) {
+        use slopty_proto::terminal::SearchMatch;
+        let (view, _rx, cx) = terminal(cx);
+        cx.update(|_, cx| {
+            cx.bind_keys([
+                gpui::KeyBinding::new("enter", slopty_shell::composer::Submit, None),
+                gpui::KeyBinding::new("shift-enter", slopty_shell::composer::Newline, None),
+            ]);
+        });
+        cx.simulate_keystrokes("cmd-f");
+        cx.run_until_parked();
+        view.update(cx, |v, _| {
+            let search = v.search.as_mut().expect("the find bar");
+            search.matches =
+                (0..3).map(|line| SearchMatch { line: LineIndex(line), col: 0, len: 1 }).collect();
+            search.current = Some(0);
+        });
+        let current = |cx: &mut VisualTestContext| {
+            view.read_with(cx, |v, _| v.search.as_ref().and_then(|s| s.current))
+        };
+        cx.simulate_keystrokes("enter");
+        assert_eq!(current(cx), Some(1), "\u{21a9} the next");
+        cx.simulate_keystrokes("shift-enter");
+        assert_eq!(current(cx), Some(0), "\u{21e7}\u{21a9} the one before");
+        cx.simulate_keystrokes("shift-enter");
+        assert_eq!(current(cx), Some(2), "round the top");
+        let text = view
+            .read_with(cx, |v, cx| v.search.as_ref().map(|s| s.input.read(cx).text().to_owned()));
+        assert_eq!(text.as_deref(), Some(""), "no newline in the field");
+    }
+
     /// A long press held and dragged above the grid scrolls into history a tick at a time, as
     /// the pointer's drag does, the head riding the top row; lifting the finger ends it.
     #[gpui::test]
@@ -8233,7 +7809,7 @@ mod tests {
     fn a_closed_terminal_drops_its_textures(cx: &mut TestAppContext) {
         use slopty_proto::terminal::PixelRect;
         let (tx, _rx) = mpsc::channel(64);
-        cx.update(gpui_kit::init);
+        cx.update(|cx| cx.set_global(slopty_shell::theme::Theme::default()));
         let (holder, cx) = cx.add_window_view(|_window, cx| {
             let size = TermSize { cols: 10, rows: 3, ..TermSize::default() };
             Holder(Some(
@@ -8385,7 +7961,7 @@ mod tests {
     #[gpui::test]
     fn a_screen_shown_again_shapes_nothing(cx: &mut TestAppContext) {
         let (tx, _rx) = mpsc::channel(4096);
-        cx.update(gpui_kit::init);
+        cx.update(|cx| cx.set_global(slopty_shell::theme::Theme::default()));
         let (view, cx) = cx.add_window_view(|window, cx| {
             let size = TermSize { cols: 100, rows: 40, ..TermSize::default() };
             let view = TerminalView::new(SessionId::new(), size, tx, Theme::default(), cx);
@@ -8416,110 +7992,6 @@ mod tests {
              words reshaped on the return {reshaped}"
         );
         assert_eq!(reshaped, 0, "the first screen is still shaped");
-    }
-
-    /// What command blocks cost a frame: a 100 × 40 screen of ten four-row blocks, every other
-    /// one failed, redrawn with nothing changed, in alternating blocks with the pointer away and
-    /// over a failed block (the first round warms up). Each sample is one notify and the draw
-    /// it brings. Prints the numbers MEASUREMENTS records; run by
-    /// hand, in release:
-    /// `cargo test -p slopty-ui --release --lib failed_blocks_cost -- --ignored --nocapture`.
-    #[gpui::test]
-    #[ignore = "measurement, run by hand"]
-    fn failed_blocks_cost(cx: &mut TestAppContext) {
-        const BLOCKS: u16 = 10;
-        const ROUNDS: usize = 11;
-        const BLOCK: usize = 200;
-        const WARM: usize = 20;
-        let (tx, _rx) = mpsc::channel(1 << 10);
-        cx.update(gpui_kit::init);
-        let (view, cx) = cx.add_window_view(|window, cx| {
-            let size = TermSize { cols: 100, rows: 40, ..TermSize::default() };
-            let view = TerminalView::new(SessionId::new(), size, tx, Theme::default(), cx);
-            window.focus(&view.focus, cx);
-            view
-        });
-        cx.simulate_resize(size(px(1000.0), px(900.0)));
-        cx.run_until_parked();
-        let text = prose(0x2545_f491, 40, 90);
-        let updates = (0..BLOCKS * 4)
-            .map(|row| {
-                let (block, at) = (row / 4, row % 4);
-                let mark = if at == 0 {
-                    // The status of the block above: every odd block failed.
-                    let exit = (block > 0).then_some(u8::from(block % 2 == 0));
-                    SemanticMark::Prompt { exit, input: Some(2) }
-                } else {
-                    SemanticMark::Output
-                };
-                let text =
-                    if at == 0 { format!("$ run {block}") } else { text[usize::from(row)].clone() };
-                let mut line = Line::from_text(&text, 100, Style::DEFAULT);
-                line.mark = mark;
-                RowUpdate { row, line: line.into() }
-            })
-            .collect();
-        view.update_in(cx, |view, _window, cx| {
-            view.apply(
-                TermEvent::Frame(Frame {
-                    seq: 1,
-                    full: true,
-                    epoch: 0,
-                    cols: 100,
-                    rows: 40,
-                    cursor: Cursor::default(),
-                    modes: TermModes::empty(),
-                    oldest_line: LineIndex(0),
-                    first_visible_line: LineIndex(0),
-                    total_lines: 40,
-                    input_ack: 0,
-                    above: None,
-                    blocks: None,
-                    images: Vec::new(),
-                    updates,
-                }),
-                cx,
-            );
-        });
-        cx.run_until_parked();
-        let metrics = view.read_with(cx, |view, _| view.metrics.expect("laid out"));
-        let over = point(
-            metrics.origin.x + metrics.cell_width * 20.0,
-            metrics.origin.y + metrics.line_height * 5.5,
-        );
-        // Off the window: over the grid's padding it would still hover the top block.
-        let away = point(px(4000.0), px(4000.0));
-        let (mut rest, mut hovered) = (Vec::new(), Vec::new());
-        let renders = view.read_with(cx, |v, _| v.renders());
-        for round in 0..ROUNDS {
-            for (at, samples) in [(away, &mut rest), (over, &mut hovered)] {
-                cx.simulate_mouse_move(at, None, gpui::Modifiers::default());
-                cx.run_until_parked();
-                for n in 0..WARM + BLOCK {
-                    let started = Instant::now();
-                    view.update(cx, |_, cx| cx.notify());
-                    cx.run_until_parked();
-                    if round > 0 && n >= WARM {
-                        samples.push(started.elapsed());
-                    }
-                }
-            }
-        }
-        let drawn = view.read_with(cx, |v, _| v.renders()).saturating_sub(renders);
-        let frames = 2 * ROUNDS * (WARM + BLOCK);
-        assert!(usize::try_from(drawn).is_ok_and(|d| d >= frames), "every frame drew");
-        let row = |samples: &mut Vec<Duration>| {
-            samples.sort_unstable();
-            let at = |q: usize| samples[(samples.len().saturating_sub(1)).saturating_mul(q) / 100];
-            format!("{:?} / {:?} / {:?} / {:?}", at(50), at(95), at(99), at(100))
-        };
-        println!(
-            "MEASURE command blocks, 100 × 40, {BLOCKS} blocks, a notify and its draw \
-             (p50 / p95 / p99 / max, {} frames each): pointer away {} · over a failed block {}",
-            rest.len(),
-            row(&mut rest),
-            row(&mut hovered),
-        );
     }
 
     /// `count` rows of dense coloured text `cols` wide, from `seed`: what `ls --color`, a
@@ -8567,7 +8039,7 @@ mod tests {
     /// redrawn unchanged with every cell on a background (a full-screen program's theme). Each
     /// sample is the frame applied and drawn. Prints the numbers MEASUREMENTS records; run by
     /// hand, in release:
-    /// `cargo test -p slopty-ui --release --lib dense_screen_cost -- --ignored --nocapture`.
+    /// `cargo test -p slopty-terminal --release --lib dense_screen_cost -- --ignored --nocapture`.
     #[gpui::test]
     #[ignore = "measurement, run by hand"]
     fn dense_screen_cost(cx: &mut TestAppContext) {
@@ -8577,7 +8049,7 @@ mod tests {
         const WARM: usize = 60;
         let rows = usize::from(ROWS);
         let (tx, _rx) = mpsc::channel(1 << 16);
-        cx.update(gpui_kit::init);
+        cx.update(|cx| cx.set_global(slopty_shell::theme::Theme::default()));
         let (view, cx) = cx.add_window_view(|window, cx| {
             let size = TermSize { cols: COLS, rows: ROWS, ..TermSize::default() };
             let view = TerminalView::new(SessionId::new(), size, tx, Theme::default(), cx);
@@ -8709,12 +8181,12 @@ mod tests {
         cx.run_until_parked();
     }
 
-    /// A report is the tile header's to draw, in the kit's progress language: the terminal
+    /// A report is the shell tab's to draw, in the shell's progress language: the terminal
     /// draws no line of its own along its edge, and an unknown share asks for no frame of the
     /// terminal's while it lasts.
     #[gpui::test]
     fn a_progress_report_is_told_not_drawn_on_the_edge(cx: &mut TestAppContext) {
-        use slopty_kit::kit::progress::Progress;
+        use slopty_shell::live::Progress;
         let (view, _rx, cx) = terminal(cx);
         let progress = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.progress());
         assert_eq!(progress(cx), None, "nothing reported");
@@ -8727,7 +8199,7 @@ mod tests {
         assert_eq!(progress(cx), Some(Progress::Busy));
         let renders = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.renders());
         let before = renders(cx);
-        cx.background_executor.advance_clock(slopty_kit::icons::SPIN_STEP.saturating_mul(6));
+        cx.background_executor.advance_clock(Duration::from_millis(600));
         cx.run_until_parked();
         assert_eq!(renders(cx), before, "the terminal draws nothing for it");
         report(&view, cx, ProgressState::None, None);
@@ -8747,15 +8219,20 @@ mod tests {
         cx.run_until_parked();
     }
 
-    /// A restored session says so, and offers what it ran again: typed and run only on the
-    /// person's click, after which the chip goes.
+    /// A restored session says so once, in the shell's toast, and offers what it ran again:
+    /// typed and run only on the person's press on "Run again", never on the restore itself.
     #[gpui::test]
     fn a_restored_session_runs_its_command_again_only_on_a_click(cx: &mut TestAppContext) {
         let (view, mut rx, cx) = terminal(cx);
         drain_words(&mut rx);
+        let toasts =
+            |cx: &mut VisualTestContext| cx.update(|_window, cx| slopty_shell::toast::messages(cx));
         restore(&view, cx, &["claude", "--resume"]);
-        assert!(cx.debug_bounds("terminal-restored").is_some(), "the chip");
+        assert_eq!(toasts(cx), [format!("{RESTORED}: claude --resume")], "told in a toast");
+        assert!(cx.debug_bounds("terminal-restored").is_none(), "no chip over the grid");
         assert!(drain_words(&mut rx).is_empty(), "nothing runs on the restore");
+        restore(&view, cx, &["claude", "--resume"]);
+        assert_eq!(toasts(cx).len(), 1, "told once");
         let pasted = |rx: &mut mpsc::Receiver<ClientMsg>| {
             std::iter::from_fn(|| rx.try_recv().ok())
                 .filter_map(|msg| match msg {
@@ -8767,26 +8244,23 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
         };
-        let at = cx.debug_bounds("terminal-run-again").expect("the action").center();
-        cx.simulate_click(at, gpui::Modifiers::none());
+        // What the toast's "Run again" runs.
+        view.update(cx, TerminalView::run_restored);
         cx.run_until_parked();
         assert_eq!(pasted(&mut rx), ["claude --resume", "Enter"], "typed, then ↩");
-        assert!(cx.debug_bounds("terminal-restored").is_none(), "the chip goes");
     }
 
-    /// A login shell restored has nothing to run again: the chip says so and can be put away.
+    /// A login shell restored has nothing to run again: its toast only says so.
     #[gpui::test]
-    fn a_restored_login_shell_has_nothing_to_run_and_is_dismissed(cx: &mut TestAppContext) {
+    fn a_restored_login_shell_has_nothing_to_run(cx: &mut TestAppContext) {
         let (view, mut rx, cx) = terminal(cx);
         restore(&view, cx, &[]);
-        assert!(cx.debug_bounds("terminal-restored").is_some());
-        assert!(cx.debug_bounds("terminal-run-again").is_none(), "nothing to run");
-        let at = cx.debug_bounds("terminal-restored-dismiss").expect("dismiss").center();
+        let toasts = cx.update(|_window, cx| slopty_shell::toast::messages(cx));
+        assert_eq!(toasts, [RESTORED]);
         drain_words(&mut rx);
-        cx.simulate_click(at, gpui::Modifiers::none());
+        view.update(cx, TerminalView::run_restored);
         cx.run_until_parked();
-        assert!(cx.debug_bounds("terminal-restored").is_none(), "put away");
-        assert!(drain_words(&mut rx).is_empty(), "and nothing typed");
+        assert!(drain_words(&mut rx).is_empty(), "nothing typed");
     }
 
     /// Every message the worker received that types or clears, oldest first, as one word each.
@@ -8802,44 +8276,6 @@ mod tests {
             });
         }
         out
-    }
-
-    /// The newest failure shows in the grid while its block is in view: at the live bottom,
-    /// and not once the view scrolls above it. A success is never one.
-    #[gpui::test]
-    fn the_newest_failure_is_in_view_while_its_block_is(cx: &mut TestAppContext) {
-        let (view, _rx, cx) = terminal(cx);
-        with_command_blocks(&view, cx);
-        let in_view = |cx: &VisualTestContext| view.read_with(cx, |v, _| v.failure_in_view());
-        assert!(!in_view(cx), "the newest command, `seq 2`, succeeded");
-        view.update_in(cx, |view, _window, cx| {
-            let failed = SemanticMark::Prompt { exit: Some(1), input: Some(2) };
-            view.apply(
-                TermEvent::Frame(Frame {
-                    seq: 2,
-                    full: false,
-                    epoch: 0,
-                    cols: 10,
-                    rows: 3,
-                    cursor: Cursor::default(),
-                    modes: TermModes::empty(),
-                    oldest_line: LineIndex(0),
-                    first_visible_line: LineIndex(6),
-                    total_lines: 9,
-                    input_ack: 0,
-                    above: None,
-                    blocks: None,
-                    images: Vec::new(),
-                    updates: vec![RowUpdate { row: 2, line: marked("$ ", failed).into() }],
-                }),
-                cx,
-            );
-        });
-        cx.run_until_parked();
-        assert!(in_view(cx), "`seq 2` failed and its output is on screen");
-        cx.simulate_keystrokes("cmd-up cmd-up cmd-up");
-        assert_eq!(top_line(&view, cx), LineIndex(0));
-        assert!(!in_view(cx), "scrolled above it: only the header can say so");
     }
 
     /// A key hides the pointer once it is sent, and the next keys leave it be until the
@@ -8909,34 +8345,69 @@ mod tests {
         assert_eq!(attached.borrow().len(), 1);
     }
 
-    /// The tile's own pill (the worker away, the program exited) takes the place of the
-    /// lines below: covered, the view draws none, and uncovered it draws it again.
+    /// With the link to the worker gone, the foot says the worker is out of reach, with the
+    /// shell's spinner, in place of the lines below; relinked, the lines below are back. A
+    /// program that ended says so on its own trailer instead.
     #[gpui::test]
-    fn the_lines_below_give_way_to_the_tiles_pill(cx: &mut TestAppContext) {
-        let (view, _rx, cx) = terminal(cx);
+    fn out_of_reach_takes_the_place_of_the_lines_below(cx: &mut TestAppContext) {
+        let (view, rx, cx) = terminal(cx);
         view.update_in(cx, |view, _window, cx| {
             view.apply(moved_frame(1, 10, &["a", "b", "c"]), cx);
             view.scroll_lines(2, cx);
         });
         cx.run_until_parked();
         assert!(cx.debug_bounds("lines-below").is_some());
-        let changed = view.update_in(cx, |view, _window, cx| {
-            cx.notify();
-            view.set_covered(true)
-        });
+        assert!(cx.debug_bounds("terminal-out-of-reach").is_none(), "the worker is there");
+        drop(rx);
         cx.run_until_parked();
-        assert!(changed, "a cached drawing is stale");
-        assert!(cx.debug_bounds("lines-below").is_none(), "covered");
-        view.update_in(cx, |view, _window, cx| {
-            cx.notify();
-            view.set_covered(false)
-        });
+        let away = cx.debug_bounds("terminal-out-of-reach").expect("out of reach, told");
+        assert!(cx.debug_bounds("lines-below").is_none(), "in place of the lines below");
+        let below = cx.debug_bounds("terminal").expect("the terminal").bottom();
+        assert!(away.bottom() < below, "at the foot");
+        cx.update(|window, _cx| window.set_a11y_active(true));
         cx.run_until_parked();
-        assert!(cx.debug_bounds("lines-below").is_some(), "uncovered");
+        let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
+        assert!(tree.iter().any(|n| n.is("Status", Some(OUT_OF_REACH))), "{tree:#?}");
+        let (tx, _rx) = mpsc::channel(64);
+        view.update(cx, |view, cx| view.relink(tx, None, cx));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("terminal-out-of-reach").is_none(), "relinked");
+        assert!(cx.debug_bounds("lines-below").is_some(), "the lines below are back");
     }
 
-    /// The terminal's find bar takes the kit bar's toggles: each one asks again, its rule
-    /// written into the pattern the worker compiles, and the next bar opens with them.
+    /// A program that ended leaves zeron's dim trailer under its last line, "[process exited
+    /// 3]", read as that by a screen reader, while the view follows the output.
+    #[gpui::test]
+    fn an_ended_program_leaves_its_trailer(cx: &mut TestAppContext) {
+        let (view, _rx, cx) = terminal(cx);
+        cx.update(|window, _cx| window.set_a11y_active(true));
+        view.update_in(cx, |view, _window, cx| {
+            view.apply(moved_frame(1, 10, &["a", "b", "c"]), cx);
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("terminal-exited").is_none(), "still running");
+        assert_eq!(view.read_with(cx, |v, _| v.exited()), None);
+        view.update_in(cx, |view, _window, cx| {
+            view.apply(TermEvent::Exited { status: Some(3) }, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |v, _| v.exited()), Some(Some(3)));
+        let trailer = cx.debug_bounds("terminal-exited").expect("the trailer");
+        let m = view.read_with(cx, |v, _| v.metrics.expect("laid out"));
+        assert_eq!(trailer.size.height, m.line_height, "one row");
+        let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
+        assert!(tree.iter().any(|n| n.is("Status", Some("[process exited 3]"))), "{tree:#?}");
+        assert!(cx.debug_bounds("terminal-out-of-reach").is_none(), "ended, not away");
+        view.update_in(cx, |view, _window, cx| view.scroll_lines(2, cx));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("terminal-exited").is_none(), "scrolled up: the history's");
+        assert_eq!(exit_words(None), "[process exited]");
+    }
+
+    /// The find bar is the shell's: its field 24 tall in a frosted card at the top right, the
+    /// toggles chips, the steps and the close icon buttons, each with its name. Each toggle
+    /// asks again, its rule written into the pattern the worker compiles, and the next bar
+    /// opens with them.
     #[gpui::test]
     fn the_find_bars_toggles_ask_the_worker_again(cx: &mut TestAppContext) {
         let (view, mut rx, cx) = terminal(cx);
@@ -8950,10 +8421,23 @@ mod tests {
             }
             last
         };
-        let ok = Query { needle: "a.b".to_owned(), ..Query::default() };
+        let ok = Query::default().with_needle("a.b");
         view.update_in(cx, |view, window, cx| view.find_with(&ok, window, cx));
         cx.run_until_parked();
         assert_eq!(asked(), Some((r"(?im)a\.b".to_owned(), true)), "text, any case");
+        let field = cx.debug_bounds("terminal-find-field").expect("the field");
+        assert_eq!(field.size.height, px(chrome::CONTROL_SIZE), "the shell's field");
+        let (bar, grid) = (
+            cx.debug_bounds("terminal-find").expect("the bar"),
+            cx.debug_bounds("terminal").expect("the terminal"),
+        );
+        assert!(bar.right() < grid.right() && bar.top() > grid.top(), "inset at the top right");
+        for part in ["previous", "next", "close", "case", "word", "regex"] {
+            let selector: &'static str =
+                Box::leak(format!("terminal-find-{part}").into_boxed_str());
+            let at = cx.debug_bounds(selector).unwrap_or_else(|| panic!("{part}"));
+            assert_eq!(at.size.height, px(chrome::CONTROL_SIZE), "{part}: a toolbar control");
+        }
         for part in ["terminal-find-case", "terminal-find-word"] {
             let at = cx.debug_bounds(part).expect("the toggle");
             cx.simulate_click(at.center(), gpui::Modifiers::default());
@@ -8965,7 +8449,12 @@ mod tests {
             view.find(&Find, window, cx);
         });
         let kept = view.read_with(cx, |v, _| v.search_query().cloned());
-        assert!(kept.is_some_and(|q| q.match_case && q.whole_word && !q.regex), "remembered");
+        assert!(
+            kept.is_some_and(|q| {
+                q.is_on(Toggle::MatchCase) && q.is_on(Toggle::WholeWord) && !q.is_on(Toggle::Regex)
+            }),
+            "remembered"
+        );
     }
 
     /// With the find bar open, output searches again at most every [`SEARCH_REFRESH`], and
@@ -8984,7 +8473,7 @@ mod tests {
         };
         searches();
         view.update_in(cx, |view, window, cx| {
-            view.find_with(&Query { needle: "ok".to_owned(), ..Query::default() }, window, cx);
+            view.find_with(&Query::default().with_needle("ok"), window, cx);
         });
         cx.run_until_parked();
         assert_eq!(searches(), 1, "the needle");
@@ -9000,10 +8489,10 @@ mod tests {
     }
 
     /// What the lines-below pill costs a frame: a 100 × 40 shell flooding one line a frame,
-    /// drawn while following, scrolled up with the pill hidden (`covered`), and scrolled up with
-    /// it shown, in alternating blocks. Each sample is the frame applied and drawn. Prints the
-    /// numbers MEASUREMENTS records; run by hand, in release:
-    /// `cargo test -p slopty-ui --release --lib lines_below_cost -- --ignored --nocapture`.
+    /// drawn while following and scrolled up with the pill shown, in alternating blocks. Each
+    /// sample is the frame applied and drawn. Prints the numbers MEASUREMENTS records; run by
+    /// hand, in release:
+    /// `cargo test -p slopty-terminal --release --lib lines_below_cost -- --ignored --nocapture`.
     #[gpui::test]
     #[ignore = "measurement, run by hand"]
     fn lines_below_cost(cx: &mut TestAppContext) {
@@ -9011,7 +8500,7 @@ mod tests {
         const BLOCK: usize = 50;
         const ROUNDS: u64 = 10;
         let (tx, _rx) = mpsc::channel(1 << 16);
-        cx.update(gpui_kit::init);
+        cx.update(|cx| cx.set_global(slopty_shell::theme::Theme::default()));
         let (view, cx) = cx.add_window_view(|window, cx| {
             let size = TermSize { cols: 100, rows: 40, ..TermSize::default() };
             let view = TerminalView::new(SessionId::new(), size, tx, Theme::default(), cx);
@@ -9048,21 +8537,17 @@ mod tests {
         for _ in 0..60 {
             draw(cx);
         }
-        let (mut following, mut hidden, mut shown) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut following, mut shown) = (Vec::new(), Vec::new());
         for _ in 0..ROUNDS {
             view.update_in(cx, |view, _window, cx| view.scroll_lines(i64::MIN, cx));
             following.extend(std::iter::repeat_with(|| draw(cx)).take(BLOCK));
-            view.update_in(cx, |view, _window, cx| {
-                view.scroll_lines(20, cx);
-                view.set_covered(true);
-            });
-            hidden.extend(std::iter::repeat_with(|| draw(cx)).take(BLOCK));
+            view.update_in(cx, |view, _window, cx| view.scroll_lines(20, cx));
             let renders = view.read_with(cx, |v, _| v.renders());
-            view.update_in(cx, |view, _window, _cx| view.set_covered(false));
             shown.extend(std::iter::repeat_with(|| draw(cx)).take(BLOCK));
             let drawn = view.read_with(cx, |v, _| v.renders()).saturating_sub(renders);
             assert!(usize::try_from(drawn).is_ok_and(|d| d >= BLOCK), "every frame drew: {drawn}");
-            assert!(cx.debug_bounds("lines-below").is_some(), "the pill is up");
+            // A release build draws no debug selectors: the count the pill shows stands for it.
+            assert!(view.read_with(cx, |v, _| v.lines_below()) > 0, "the pill is up");
         }
         let row = |samples: &mut Vec<Duration>| {
             samples.sort_unstable();
@@ -9071,10 +8556,9 @@ mod tests {
         };
         println!(
             "MEASURE lines-below pill, frame applied and drawn (p50 / p95 / p99 / max, {} frames \
-             each): following {} · scrolled, pill hidden {} · scrolled, pill shown {}",
+             each): following {} · scrolled, pill shown {}",
             following.len(),
             row(&mut following),
-            row(&mut hidden),
             row(&mut shown),
         );
     }
@@ -9090,7 +8574,7 @@ mod tests {
     /// scene as on the glass; each with the grid's stretches keyed, and painted afresh every
     /// frame as before keyed paint. Prints the numbers MEASUREMENTS records; run by hand, in
     /// release:
-    /// `cargo test -p slopty-ui --release --lib terminal_frames_cost -- --ignored --nocapture`.
+    /// `cargo test -p slopty-terminal --release terminal_frames_cost -- --ignored --nocapture`.
     #[test]
     #[ignore = "measurement, run by hand"]
     fn terminal_frames_cost() {
@@ -9127,7 +8611,7 @@ mod tests {
         let rows = usize::from(ROWS);
         let last = rows.saturating_sub(1);
         let (tx, _rx) = mpsc::channel(1 << 16);
-        cx.update(gpui_kit::init);
+        cx.update(|cx| cx.set_global(slopty_shell::theme::Theme::default()));
         let (view, cx) = cx.add_window_view(|window, cx| {
             let size = TermSize { cols: COLS, rows: ROWS, ..TermSize::default() };
             let mut view = TerminalView::new(SessionId::new(), size, tx, Theme::default(), cx);

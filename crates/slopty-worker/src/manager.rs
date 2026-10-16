@@ -9,13 +9,13 @@ use parking_lot::Mutex;
 use slopty_core::{SessionId, WallMs};
 use slopty_proto::ptyd::PtydError;
 use slopty_proto::terminal::{OpenSession, Restored, SessionState, SessionSummary, TermSize};
-use slopty_pty::protocol::{Exit, Part, SessionInfo, socket_path};
+use slopty_pty::protocol::{Exit, SessionInfo, socket_path};
 use slopty_pty::{PtyError, PtydClient, SpawnSpec};
 use tokio::sync::{Notify, mpsc};
 
 use crate::WorkerError;
 use crate::orchestrate::Agents;
-use crate::restore::{AgentLaunch, Keeper, Recipe};
+use crate::restore::{Keeper, Recipe};
 use crate::session::{self, Probe, SessionHandle, SessionStart, Tap};
 
 /// Scrollback lines the engine retains per session.
@@ -132,9 +132,6 @@ struct Inner {
     session_env: Mutex<Vec<(String, String)>>,
     /// Where each session's presence file goes (`CLAUDE_CLIENT_PRESENCE_FILE`), once set.
     presence: Mutex<Option<PathBuf>>,
-    /// The `slopty` binary agents report through and are served Slopty's tools by
-    /// ([`Worker::set_relay`]).
-    relay: Mutex<Option<PathBuf>>,
     /// The key each session's token is made under ([`slopty_agent::vouch`]), once set.
     session_key: Mutex<Option<slopty_agent::vouch::SessionKey>>,
     /// Sessions whose output named a local server ([`SessionStart::port_hints`]).
@@ -218,8 +215,10 @@ impl Worker {
         let existing = client.list().await?;
         let (keeper, mut recipes) = Keeper::open(kept)
             .map_err(|source| PtyError::Os { context: "open the kept sessions", source })?;
+        // A piped session is an agent's, not a terminal: whoever drives it attaches it.
         let held: Vec<(SessionInfo, Option<Recipe>)> = existing
             .into_iter()
+            .filter(|info| !info.piped)
             .map(|info| {
                 let recipe = recipes.remove(&info.id);
                 (info, recipe)
@@ -243,7 +242,6 @@ impl Worker {
                 opened: Notify::new(),
                 session_env: Mutex::new(Vec::new()),
                 presence: Mutex::new(None),
-                relay: Mutex::new(slopty_agent::hooks::relay_beside_this_binary()),
                 session_key: Mutex::new(None),
                 port_hints,
                 moves,
@@ -317,6 +315,12 @@ impl Worker {
         }
     }
 
+    /// Where ptyd listens.
+    #[must_use]
+    pub fn ptyd_socket(&self) -> &Path {
+        &self.inner.socket
+    }
+
     /// The daemon's agent table.
     #[must_use]
     pub fn agents(&self) -> &dyn Agents {
@@ -329,35 +333,12 @@ impl Worker {
         Arc::clone(&self.inner.agents)
     }
 
-    /// Record a child exit reported by ptyd, and tell the session's viewers. A clean exit
-    /// takes any conversation kept with the session with it: the person ended the program the
-    /// agent ran in, or the agent itself. A signal (what a reboot sends) does not.
+    /// Record a child exit reported by ptyd, and tell the session's viewers.
     pub fn on_exit(&self, id: SessionId, exit: Exit) {
         if let Some(e) = self.inner.sessions.lock().get_mut(&id) {
             e.exited = Some(exit);
             e.handle.exited(exit);
         }
-        if exit.status == Some(0) {
-            self.inner.keeper.agent(id, None);
-        }
-    }
-
-    /// What the daemon's agent tick knows of the Claude Code conversation in session `id`,
-    /// kept so a reboot can resume it ([`crate::restore`]).
-    pub fn keep_agent(&self, id: SessionId, agent: slopty_agent::resume::Resumable) {
-        use slopty_agent::resume::Resumable;
-        match agent {
-            Resumable::Unknown => {}
-            Resumable::No => self.inner.keeper.agent(id, None),
-            Resumable::Yes(conversation) => self.inner.keeper.agent(id, Some(conversation)),
-        }
-    }
-
-    /// The Codex or pi session the person typed into session `id`, as the daemon's agent tick
-    /// found it: `None` once no such agent runs there. Kept so a reboot takes it up again
-    /// ([`crate::restore`]).
-    pub fn keep_typed(&self, id: SessionId, typed: Option<slopty_agent::typed::Typed>) {
-        self.inner.keeper.typed(id, typed);
     }
 
     /// Environment variables every future session is spawned with, in addition to the
@@ -377,12 +358,6 @@ impl Worker {
     /// is focused on it.
     pub fn set_presence_dir(&self, dir: PathBuf) {
         *self.inner.presence.lock() = Some(dir);
-    }
-
-    /// Name the `slopty` binary the agents this worker starts report through and get Slopty's
-    /// tools from; the one beside this binary until told otherwise, none when there is none.
-    pub fn set_relay(&self, relay: Option<PathBuf>) {
-        *self.inner.relay.lock() = relay;
     }
 
     /// What a terminal opened under `seat` would find in its environment: for a seated thread
@@ -426,10 +401,9 @@ impl Worker {
         req: &OpenSession,
     ) -> Result<SessionHandle, WorkerError> {
         let _opening = Opening::new(&self.inner, id);
-        let (command, extra) = self.as_agent(req).await;
-        let env = self.env_for(id, &extra);
+        let env = self.env_for(id, &req.env);
         let spec = SpawnSpec {
-            command,
+            command: req.command.clone(),
             // `~` is this worker's home: a client types it without knowing the path.
             cwd: req.cwd.as_deref().map(|cwd| crate::file::expand_home(Path::new(cwd))),
             env,
@@ -443,8 +417,6 @@ impl Worker {
             size: req.size,
             saved_ms: WallMs::ZERO,
             restored: None,
-            agent: None,
-            typed: None,
         };
         let pid = self.inner.ptyd.lock().await.spawn(id, spec).await?;
         let cwd = recipe.cwd.clone();
@@ -453,49 +425,10 @@ impl Worker {
         self.adopt(id, req.size, adoption).await
     }
 
-    /// What a request runs, and with what environment. One whose program is Claude Code itself
-    /// and which Slopty has not wired yet (a tile opened on `claude`, ⌘⇧T) is started the way
-    /// the worker starts an agent of its own: with the hook relay, so its status and its
-    /// permission prompts reach the app; with Slopty's tools, else (where managed settings keep
-    /// them out) the pointer to Slopty's CLI; with the mod; and
-    /// pinned to a conversation id, so it can come back after a reboot. It is the person's own,
-    /// so the mode that asks no permission is not locked. The request's
-    /// arguments and variables are kept, and the mod's variables go last. Anything else, Codex
-    /// included, runs as asked: a configuration override on Codex's line would keep its TUI off
-    /// the person's daemon, where the worker follows its thread.
-    async fn as_agent(&self, req: &OpenSession) -> (Vec<String>, Vec<(String, String)>) {
-        let unchanged = (req.command.clone(), req.env.clone());
-        let Some(program) = req.command.first() else { return unchanged };
-        let name = program.rsplit('/').next().unwrap_or(program);
-        if name != "claude" || !slopty_agent::detect::is_claude(name, &req.command) {
-            return unchanged;
-        }
-        let args = req.command.get(1..).unwrap_or_default().to_vec();
-        let launch = self.agent_launch();
-        let Some(relay) = launch.relay.clone() else { return unchanged };
-        let cwd = req.cwd.as_deref().map_or_else(slopty_platform::dirs::home, |cwd| {
-            crate::file::expand_home(Path::new(cwd))
-        });
-        // Reads the person's settings files for their status line: blocking I/O.
-        let wired =
-            tokio::task::spawn_blocking(move || slopty_agent::hooks::wired(args, &relay, &cwd))
-                .await;
-        let Ok(Some(args)) = wired else { return unchanged };
-        let (args, env) = match &launch.claude_mod {
-            Some(installed) => (
-                installed.args(args),
-                req.env.iter().cloned().chain(installed.agent_env()).collect(),
-            ),
-            None => (args, req.env.clone()),
-        };
-        (std::iter::once(program.clone()).chain(args).collect(), env)
-    }
-
     /// Reopen every kept session whose shell was lost (ptyd did not hold it when this worker
     /// connected), under its old id so its items keep their tiles: a new shell in the
     /// directory the old one was last in, below the old screen and a divider. The old
-    /// command runs again only when it was a shell itself ([`Recipe::reopen_command`]), and a
-    /// Claude Code conversation it held is resumed ([`Recipe::reopen`]).
+    /// command runs again only when it was a shell itself ([`Recipe::reopen_command`]).
     /// Returns the sessions reopened; one that fails stays kept for the next start.
     ///
     /// Call it once [`Self::set_session_env`] has said what every session gets.
@@ -506,12 +439,9 @@ impl Worker {
             return Vec::new();
         }
         let shells = crate::restore::system_shells();
-        let mut launch = self.agent_launch();
-        let sessions = slopty_agent::roster::sessions_dir(&slopty_platform::dirs::home());
-        launch.background = crate::restore::background(sessions, lost.iter().map(|(_, r)| r)).await;
         let mut reopened = Vec::with_capacity(lost.len());
         for (id, recipe) in lost {
-            match self.reopen(id, &recipe, &shells, &launch).await {
+            match self.reopen(id, &recipe, &shells).await {
                 Ok(_handle) => {
                     tracing::info!(session = %id, cwd = ?recipe.cwd, "restored a session whose shell was lost");
                     reopened.push(id);
@@ -522,35 +452,14 @@ impl Worker {
         reopened
     }
 
-    /// What an agent resumed after a reboot is given besides its own flags: the relay beside
-    /// this binary, and the mod every session is told of.
-    fn agent_launch(&self) -> AgentLaunch {
-        let env = self.inner.session_env.lock().clone();
-        let var = |name: &str| env.iter().find(|(k, _v)| k == name).map(|(_k, v)| PathBuf::from(v));
-        let claude_mod = var(slopty_agent::claude_mod::DIR_ENV)
-            .zip(var(slopty_agent::claude_mod::SOCKET_ENV))
-            .map(|(dir, socket)| slopty_agent::claude_mod::Installed { dir, socket });
-        AgentLaunch {
-            relay: self
-                .inner
-                .relay
-                .lock()
-                .as_ref()
-                .map(|relay| relay.to_string_lossy().into_owned()),
-            claude_mod,
-            background: Vec::new(),
-        }
-    }
-
     async fn reopen(
         &self,
         id: SessionId,
         recipe: &Recipe,
         shells: &str,
-        launch: &AgentLaunch,
     ) -> Result<SessionHandle, WorkerError> {
         let _opening = Opening::new(&self.inner, id);
-        let plan = recipe.reopen(id, shells, &slopty_platform::dirs::home(), launch);
+        let plan = recipe.reopen(shells);
         let screen = self.inner.keeper.screen(id).await;
         let env = self.env_for(id, &recipe.env);
         let spec = SpawnSpec {
@@ -567,7 +476,6 @@ impl Worker {
                 command: plan.command.clone(),
                 cwd: cwd.clone(),
                 restored: Some(plan.restored.clone()),
-                agent: plan.agent,
                 ..recipe.clone()
             },
         );
@@ -579,13 +487,7 @@ impl Worker {
             screen: Some(screen),
             cwd,
         };
-        let handle = self.adopt(id, recipe.size, adoption).await?;
-        if let Some(line) = plan.launch
-            && let Err(e) = handle.type_at_first_prompt(line)
-        {
-            tracing::warn!(session = %id, error = %e, "agent not resumed");
-        }
-        Ok(handle)
+        self.adopt(id, recipe.size, adoption).await
     }
 
     /// Write every session's newest screen to disk now, as the worker goes down.
@@ -702,23 +604,6 @@ impl Worker {
         tokio::time::timeout(within, adopted).await.map_err(|_elapsed| WorkerError::NoSuchSession)
     }
 
-    /// Have ptyd type `parts` into session `id`, whole, as delivery `delivery`
-    /// ([`slopty_pty::protocol::PtydRequest::Deliver`]): once ptyd has it, it is typed whatever
-    /// becomes of this worker.
-    ///
-    /// # Errors
-    ///
-    /// The link to ptyd failing, with nothing typed.
-    pub async fn deliver(
-        &self,
-        id: SessionId,
-        delivery: u64,
-        parts: Vec<Part>,
-    ) -> Result<(), WorkerError> {
-        self.inner.ptyd.lock().await.deliver(id, delivery, parts).await?;
-        Ok(())
-    }
-
     /// Summaries for the session list.
     pub async fn summaries(&self) -> Vec<SessionSummary> {
         let entries: Vec<Listed> =
@@ -792,7 +677,11 @@ impl Worker {
     /// process trees `ListPorts` walks.
     pub async fn pids(&self) -> Result<Vec<(SessionId, u32)>, WorkerError> {
         let infos = self.inner.ptyd.lock().await.list().await?;
-        Ok(infos.into_iter().filter(|i| i.exited.is_none()).map(|i| (i.id, i.pid)).collect())
+        Ok(infos
+            .into_iter()
+            .filter(|i| i.exited.is_none() && !i.piped)
+            .map(|i| (i.id, i.pid))
+            .collect())
     }
 
     /// The exited sessions no client has watched for `after` by `now`: the ones to close.
@@ -1005,7 +894,13 @@ impl Worker {
                 self.hand_back(
                     id,
                     &handle,
-                    slopty_pty::Adoptee { pid, size: TermSize::default(), started_ms, term },
+                    slopty_pty::Adoptee {
+                        pid,
+                        size: TermSize::default(),
+                        started_ms,
+                        term,
+                        piped: false,
+                    },
                 )
                 .await
             };

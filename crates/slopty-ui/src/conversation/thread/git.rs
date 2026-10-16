@@ -395,7 +395,7 @@ fn missed(
     match op {
         GitOp::Status => repo.unread = Some(words),
         GitOp::PullStatus => repo.pull_unread = Some(words),
-        GitOp::Changes { against } => {
+        GitOp::Changes { against, .. } => {
             let review = Review {
                 scope: ReviewScope::WorkingTree(against.clone()),
                 from: None,
@@ -433,7 +433,7 @@ fn missed(
         }
         // A file that could not be read whole says why where it was asked, as a picture's side
         // does.
-        GitOp::FileDiff { from, to } => {
+        GitOp::FileDiff { from, to, .. } => {
             repo.whole.insert((from.clone(), to.clone()), Whole::Failed(words));
         }
         GitOp::Blob { blob } => {
@@ -455,6 +455,7 @@ const fn changes(op: &GitOp) -> bool {
             | GitOp::PullStatus
             | GitOp::PullComments { .. }
             | GitOp::Changes { .. }
+            | GitOp::Turn { .. }
             | GitOp::Range { .. }
             | GitOp::Branches
             | GitOp::Worktrees

@@ -23,11 +23,6 @@ use super::Host;
 /// Why a scheduled message that was going as the worker stopped is held.
 pub const CUT_OFF: &str = "It was being sent when the worker stopped, so it may have gone";
 
-/// Why a message a restart caught being typed into its agent's terminal waits: until its
-/// agent's transcript is read again, which shows whether it went
-/// ([`super::Host::settle_checking`]).
-pub const CHECKING: &str = "It was being sent when the worker stopped; checking whether it went";
-
 /// Sends a scheduled message's words to its thread as `intent` (in the agent's queue, or as a
 /// steer where it has none), the way a client's message goes, and says how it went.
 pub type Fire = Arc<dyn Fn(ThreadId, IntentId, Intent) -> Outcome + Send + Sync>;

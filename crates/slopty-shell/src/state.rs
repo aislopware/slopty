@@ -29,6 +29,7 @@ use gpui_tokio::Tokio;
 use serde::de::DeserializeOwned;
 
 use crate::comments::ReviewComment;
+mod slow_calls; // slopty: a call that runs long says so
 use slopty_view_doc::{SessionMessageEntry, TranscriptDesync, TranscriptFrame};
 // slopty: the embedded engine is cut; its service comes in through the boot config.
 use slopty_view_proto::{
@@ -153,6 +154,8 @@ impl EngineBackend for ServiceEngine {
 pub struct EngineHandle {
     inner: Arc<dyn EngineBackend>,
     engine_info: EngineInfo,
+    // slopty: what the service's slow-call watch says, taken once by the state that attaches it.
+    slow_calls: Arc<std::sync::Mutex<Option<futures::channel::mpsc::UnboundedReceiver<slow_calls::SlowCall>>>>,
     // slopty: the embedded engine and voice media are cut.
 }
 
@@ -168,6 +171,8 @@ impl EngineHandle {
         service: Option<Arc<dyn RpcService>>,
     ) -> anyhow::Result<EngineHandle> {
         let service = service.ok_or_else(|| anyhow::anyhow!("no engine service is installed"))?;
+        // slopty: every call passes the slow-call watch.
+        let (service, slow) = slow_calls::SlowCallWatch::wrap(service, slow_calls::SLOW_AFTER);
         let client = memory_client(service.clone());
         let engine_info = query_engine_info(&client).await?;
         Ok(EngineHandle {
@@ -175,6 +180,7 @@ impl EngineHandle {
                 client,
             }),
             engine_info,
+            slow_calls: Arc::new(std::sync::Mutex::new(Some(slow))),
             // slopty: the embedded engine and voice media are cut.
         })
     }
@@ -192,6 +198,7 @@ impl EngineHandle {
                 cursor_sdk_version: None,
                 capabilities: Vec::new(),
             },
+            slow_calls: Arc::default(), // slopty: no watch on a test client
             // slopty: the embedded engine and voice media are cut.
         }
     }
@@ -439,6 +446,10 @@ pub struct AppState {
     /// chat's doc holds them (every device sees the same queue).
     pub queue: Vec<slopty_view_doc::QueuedMessage>,
     pub context_usage: Option<slopty_view_proto::ContextUsage>,
+    // slopty: the plan's rate windows and the limit's reset, read-only, as the selected chat's
+    // agent reports them (the usage ring, its card and the composer's limit notice).
+    pub usage_limits: Vec<slopty_view_proto::AgentUsageWindow>,
+    pub limit_resets_at: Option<chrono::DateTime<chrono::Utc>>,
     /// The selected chat has a transcript from a `WatchDocMessages` reset
     /// (including a retained reset from an earlier visit). An
     /// empty transcript is otherwise indistinguishable from the pre-replay
@@ -571,6 +582,8 @@ impl AppState {
             transcript: Vec::new(),
             queue: Vec::new(),
             context_usage: None,
+            usage_limits: Vec::new(),
+            limit_resets_at: None,
             transcript_replayed: false,
             transcript_baselines: HashMap::new(),
             transcript_cache: Default::default(),
@@ -1254,6 +1267,12 @@ impl AppState {
         }
         if self.context_usage != update.context_usage {
             self.context_usage = update.context_usage;
+            cx.notify();
+        }
+        // slopty: the rate windows ride the same update.
+        if self.usage_limits != update.limits || self.limit_resets_at != update.limit_resets_at {
+            self.usage_limits = update.limits;
+            self.limit_resets_at = update.limit_resets_at;
             cx.notify();
         }
         Ok(())
@@ -2224,6 +2243,21 @@ impl AppState {
             self.harness_updates.clear();
         }
         self.engine = Some(handle.clone());
+        // slopty: a call that runs long says so in a toast, until it answers.
+        let slow = handle.slow_calls.lock().ok().and_then(|mut slow| slow.take());
+        if let Some(mut slow) = slow {
+            cx.spawn(async move |this, cx| {
+                use futures::StreamExt as _;
+                let mut calls = slow_calls::SlowCalls::default();
+                while let Some(event) = slow.next().await {
+                    let attached = this.update(cx, |state, cx| calls.apply(event, state, cx));
+                    if attached.is_err() {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
         let mut watch_tasks = Vec::with_capacity(10);
         // slopty: the embedded engine and voice media are cut.
         watch_tasks.extend([
@@ -2472,6 +2506,7 @@ impl AppState {
         self.auto_selected = true;
         self.transcript.clear();
         self.context_usage = None;
+        self.limit_resets_at = None; // slopty: another chat's limit is not this one's.
         self.transcript_revision = self.transcript_revision.wrapping_add(1);
         self.transcript_replayed = false;
         if let Some(cached) = cached {
@@ -3196,6 +3231,7 @@ mod tests {
             space_id: None,
             last_seen_at: None,
             room_gen: None,
+            draft: None, // slopty: new field.
         }
     }
 
@@ -3230,6 +3266,8 @@ mod tests {
             status,
             started_at: None,
             updated_at: now - TimeDelta::seconds(updated_secs_ago),
+            status_since: None, // slopty: new field.
+            waiting_on: None, // slopty: new field.
         }
     }
 
@@ -3256,6 +3294,8 @@ mod tests {
                 frame: TranscriptFrame::reset(&[user_entry(id)]),
                 context_usage: None,
                 replay_baseline: None,
+                limits: Vec::new(), // slopty: new field.
+                limit_resets_at: None, // slopty: new field.
             };
             state.select_chat(Some("whale".into()), cx);
             state
@@ -3461,6 +3501,7 @@ mod tests {
             cursor_sdk_version: None,
             capabilities: Vec::new(),
             actions: Vec::new(),
+            ssh_host: None, // slopty: new field.
         }
     }
 
@@ -3476,6 +3517,8 @@ mod tests {
             status: SessionStatus::Working,
             started_at: Some(now),
             updated_at: now,
+            status_since: None, // slopty: new field.
+            waiting_on: None, // slopty: new field.
         };
         assert!(state.apply_sessions_at(vec![row.clone()], now));
         row.updated_at = now + TimeDelta::seconds(30);
@@ -3508,6 +3551,8 @@ mod tests {
             status: SessionStatus::Working,
             started_at: Some(now),
             updated_at: now,
+            status_since: None, // slopty: new field.
+            waiting_on: None, // slopty: new field.
         }];
         let mut row = device("host", "Host");
         row.last_seen_at = Some(now);
@@ -4969,6 +5014,7 @@ mod tests {
             cursor_sdk_version: None,
             capabilities: Vec::new(),
             actions: Vec::new(),
+            ssh_host: None, // slopty: new field.
         }];
         assert!(s.device_version_at_least("d1", (0, 2, 12)));
         assert!(!s.device_version_at_least("d1", (0, 2, 13)));
@@ -4993,6 +5039,7 @@ mod tests {
                 cursor_sdk_version: None,
                 capabilities: vec![slopty_view_proto::capabilities::MESSAGE_QUEUE_V1.into()],
                 actions: Vec::new(),
+                ssh_host: None, // slopty: new field.
             },
             Device {
                 id: "upstream".into(),
@@ -5004,6 +5051,7 @@ mod tests {
                 cursor_sdk_version: None,
                 capabilities: Vec::new(),
                 actions: Vec::new(),
+                ssh_host: None, // slopty: new field.
             },
         ];
 
@@ -5032,6 +5080,7 @@ mod tests {
             cursor_sdk_version: None,
             capabilities: Vec::new(),
             actions: Vec::new(),
+            ssh_host: None, // slopty: new field.
         }];
         s.connectivity.state = ConnectivityState::Connected;
         s.connectivity.chats = vec![ChatConnectivity {

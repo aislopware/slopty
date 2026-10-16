@@ -15,6 +15,7 @@
 
 pub mod live;
 pub mod rows;
+pub mod text;
 pub mod transcript;
 
 use std::collections::HashMap;
@@ -29,8 +30,8 @@ use slopty_view_doc::{
     QueuedMessage, SessionMessageEntry, TranscriptBaseline, TranscriptFrame, TranscriptUpdate,
 };
 use slopty_view_proto::{
-    Chat, Connectivity, Device, EngineInfo, ServerPresence, Session, SidebarPreferencesState,
-    Space, WorkspaceScope,
+    AgentUsageWindow, Chat, ChatConnectivity, Connectivity, ConnectivityState, Device, EngineInfo,
+    ServerPresence, Session, SidebarPreferencesState, Space, TransferProgress, WorkspaceScope,
 };
 use slopty_view_rpc::{RpcError, RpcReply, RpcService, methods};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -81,8 +82,14 @@ pub struct Feed {
     spaces: watch::Sender<Option<Arc<[Space]>>>,
     chats: watch::Sender<Option<Arc<[Chat]>>>,
     sessions: watch::Sender<Arc<[Session]>>,
-    /// The link to the server, for the sidebar's foot.
+    /// The link to the server, for the sidebar's foot, and each chat's link to its worker.
     connectivity: watch::Sender<Connectivity>,
+    /// Whether any worker is linked now, `None` with none at all: the whole's state where no
+    /// server is followed.
+    workers_up: Mutex<Option<bool>>,
+    /// The files on their way to a machine to go with a message, by the upload id the composer
+    /// gave each.
+    transfers: watch::Sender<Arc<[TransferProgress]>>,
     /// This machine's own worker as a device id, once the app knows whether it has one.
     local: watch::Sender<Local>,
     /// Each followed chat's transcript, `None` until its thread has come.
@@ -134,13 +141,24 @@ pub struct Transcript {
     /// Older turns are still on their way: the entries are the latest ones, which the shell
     /// shows as it waits for the whole history (zeron's opening tail).
     pub history_pending: bool,
+    /// The plan's rate windows as the agent last said them, the most used first, for the
+    /// shell's usage ring.
+    pub limits: Vec<AgentUsageWindow>,
+    /// When the usage limit holding the agent lifts, while one does.
+    pub limit_resets_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl Transcript {
     /// The whole of a transcript of `entries`, with nothing more to say.
     #[must_use]
     pub const fn of(entries: Vec<SessionMessageEntry>) -> Self {
-        Self { entries, context_usage: None, history_pending: false }
+        Self {
+            entries,
+            context_usage: None,
+            history_pending: false,
+            limits: Vec::new(),
+            limit_resets_at: None,
+        }
     }
 }
 
@@ -152,6 +170,8 @@ impl Feed {
             chats: watch::Sender::new(None),
             sessions: watch::Sender::new(Arc::default()),
             connectivity: watch::Sender::new(Connectivity::default()),
+            workers_up: Mutex::new(None),
+            transfers: watch::Sender::new(Arc::default()),
             local: watch::Sender::new(Local::Unknown),
             transcripts: Mutex::new(HashMap::new()),
             queues: Mutex::new(HashMap::new()),
@@ -233,16 +253,44 @@ impl Feed {
     }
 
     /// The server this client follows, and whether it is linked now; `None` without one.
-    /// Only the server is said: the edge state stays `Disabled`, since a chat's delivery goes
-    /// to its worker over its own link, which the devices' presence already tells.
     pub fn server(&self, server: Option<ServerPresence>) {
+        let workers = *self.workers_up.lock();
         self.connectivity.send_if_modified(|now| {
-            if now.server == server {
+            let state = edge(server.as_ref(), workers);
+            if now.server == server && now.state == state {
                 return false;
             }
             now.server = server;
+            now.state = state;
             true
         });
+    }
+
+    /// How this client reaches the workers: whether any is linked now (`None` with none at
+    /// all), which stands for the whole where no server is followed, and each chat by its
+    /// worker's link (`chats`). Unchanged, it wakes no watch.
+    pub fn links(&self, workers: Option<bool>, chats: Vec<ChatConnectivity>) {
+        *self.workers_up.lock() = workers;
+        self.connectivity.send_if_modified(|now| {
+            let state = edge(now.server.as_ref(), workers);
+            if now.state == state && now.chats == chats {
+                return false;
+            }
+            now.state = state;
+            now.chats = chats;
+            true
+        });
+    }
+
+    /// The files on their way to a machine with a message, each by its upload id.
+    pub fn transfers(&self, transfers: Vec<TransferProgress>) {
+        publish(&self.transfers, transfers);
+    }
+
+    /// The connectivity as last said.
+    #[cfg(test)]
+    pub(crate) fn said_connectivity(&self) -> Connectivity {
+        self.connectivity.borrow().clone()
     }
 
     /// The chats followed now: the workspace keeps their threads open and publishes them.
@@ -315,6 +363,17 @@ impl Feed {
     }
 }
 
+/// The whole's link, as the shell's pill and composer read it: the server's where one is
+/// followed, else whether any worker is linked; nothing to show with neither.
+const fn edge(server: Option<&ServerPresence>, workers: Option<bool>) -> ConnectivityState {
+    match (server, workers) {
+        (Some(server), _) if server.online => ConnectivityState::Connected,
+        (Some(_), _) | (None, Some(false)) => ConnectivityState::Reconnecting,
+        (None, Some(true)) => ConnectivityState::Connected,
+        (None, None) => ConnectivityState::Disabled,
+    }
+}
+
 /// Replace a list, waking its watches only when it changed.
 fn publish<T: PartialEq>(sender: &watch::Sender<Arc<[T]>>, list: Vec<T>) {
     sender.send_if_modified(|now| {
@@ -348,9 +407,10 @@ pub struct ViewModel {
 
 /// What the shell may ask of Slopty, on this device and on every worker.
 ///
-/// Its composer's chips, put in each agent's words on the way, and the thread's queue of
-/// messages sent while the agent works. The rest of zeron's host features (a projectless scratch
-/// folder, the cleaned text of a queued attachment, updating an agent) Slopty does not do.
+/// Its composer's chips, put in each agent's words on the way; the thread's queue of messages
+/// sent while the agent works, whose files stay chips beside the words; and a chat with no
+/// project in a dated scratch folder of its own, which the view model makes on its machine
+/// before the agent starts there. Updating an agent Slopty does not do.
 #[must_use]
 pub fn capabilities() -> Vec<String> {
     use slopty_view_proto::capabilities as can;
@@ -359,7 +419,9 @@ pub fn capabilities() -> Vec<String> {
         can::MESSAGE_QUEUE_V1,
         can::MESSAGE_QUEUE_ACTIONS_V1,
         can::MESSAGE_QUEUE_ATTACHMENTS_V1,
+        can::MESSAGE_QUEUE_CLEAN_ATTACHMENT_TEXT_V1,
         can::MESSAGE_QUEUE_EDIT_LEASE_V1,
+        can::PROJECTLESS_SCRATCH_V1,
     ]
     .into_iter()
     .map(str::to_owned)
@@ -432,8 +494,8 @@ impl Drop for Closing {
 ///
 /// While older turns are on their way the latest ones go as zeron's opening tail
 /// (`historyPending`), and the whole history, once here, as one reset the shell takes as
-/// history: older turns put in front never arrive as live ones. How full the context is rides
-/// every frame.
+/// history: older turns put in front never arrive as live ones. How full the context is, the
+/// plan's rate windows and when a usage limit lifts ride every frame.
 fn transcript_frames(
     said: watch::Receiver<Option<Arc<Transcript>>>,
     closing: Closing,
@@ -454,14 +516,26 @@ fn transcript_frames(
                     replay_baseline: Some(TranscriptBaseline::capture(&next.entries)),
                     frame: TranscriptFrame::reset(&next.entries),
                     context_usage: next.context_usage,
+                    limits: next.limits.clone(),
+                    limit_resets_at: next.limit_resets_at,
                 }
             } else {
                 let last = last.as_ref()?;
                 let frame = slopty_view_doc::diff_transcript(&last.entries, &next.entries);
-                if frame.is_empty_delta() && last.context_usage == next.context_usage {
+                if frame.is_empty_delta()
+                    && last.context_usage == next.context_usage
+                    && last.limits == next.limits
+                    && last.limit_resets_at == next.limit_resets_at
+                {
                     continue;
                 }
-                TranscriptUpdate { replay_baseline: None, frame, context_usage: next.context_usage }
+                TranscriptUpdate {
+                    replay_baseline: None,
+                    frame,
+                    context_usage: next.context_usage,
+                    limits: next.limits.clone(),
+                    limit_resets_at: next.limit_resets_at,
+                }
             };
             let mut value = serde_json::to_value(&update).ok()?;
             if next.history_pending
@@ -654,7 +728,9 @@ impl RpcService for ViewModel {
             methods::WATCH_CONNECTIVITY => {
                 Ok(RpcReply::Stream(value_frames(self.feed.connectivity.subscribe())))
             }
-            methods::WATCH_TRANSFERS => still(&Vec::<serde_json::Value>::new()),
+            methods::WATCH_TRANSFERS => {
+                Ok(RpcReply::Stream(list_frames(self.feed.transfers.subscribe())))
+            }
             methods::AUTH_STATUS => still(&serde_json::json!({ "_tag": "SignedOut" })),
             _ => self.ask(method, params).await,
         }

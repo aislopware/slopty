@@ -285,6 +285,7 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
     let (out, mut out_rx) = mpsc::channel::<WorkerMsg>(CONTROL_DEPTH);
     let writer: JoinHandle<Result<(), NetError>> = tokio::spawn(async move {
         while let Some(msg) = out_rx.recv().await {
+            crate::stall::hold().await;
             tx.send(&msg).await?;
         }
         Ok(())
@@ -310,8 +311,6 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
     };
     let mut greeting = vec![WorkerMsg::HelloAck(ack), WorkerMsg::Items(daemon.items.snapshot())];
     // Collected first: the lock must not be held across the sends.
-    let branches = daemon.agents.lock().branches();
-    greeting.extend(branches.into_iter().map(WorkerMsg::AgentBranch));
     let known = daemon.ports.lock().known();
     greeting.extend(known.into_iter().map(|(session, ports)| WorkerMsg::Ports { session, ports }));
     // A curtain up is said at once, so a client linking (or linking again) knows it is drawn.
@@ -354,6 +353,8 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
     tasks.spawn(crate::files::watch(hello.client, conn.clone(), out.clone(), watched));
     let (watch_folders, folders) = watch::channel(Vec::new());
     tasks.spawn(crate::files::watch_folders(hello.client, out.clone(), folders));
+    let (watch_repos, repos) = watch::channel(Vec::new());
+    tasks.spawn(crate::files::watch_repos(hello.client, out.clone(), repos));
     let (told, mut told_rx) = mpsc::unbounded_channel();
     let posted = in_order(out.clone());
     daemon.clip.attach(link, clip_sink(posted.clone()));
@@ -393,6 +394,7 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
         told,
         watch_files,
         watch_folders,
+        watch_repos,
         downloads: HashMap::new(),
         held: None,
         link,
@@ -404,7 +406,6 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
         saves,
         curtain: daemon.curtain.as_ref().map(|c| c.link(hello.client)),
         lease: InputLease::new(tokio::time::Instant::now()),
-        lost: false,
     };
     daemon.wake.lock().client_joined();
     // A client back on a new link leaves its old one behind, which may still hold keys down
@@ -417,7 +418,7 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
 
     let result = loop {
         tokio::select! {
-            msg = rx.recv() => {
+            msg = async { crate::stall::hold().await; rx.recv().await } => {
                 let msg = match msg {
                     Ok(m) => m,
                     Err(NetError::Closed) => break Ok("control stream closed"),
@@ -465,13 +466,6 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
             }
         }
     };
-    // A link that times out ends its control stream at the same moment, and `select!` takes
-    // either branch first: the connection's own reason says whether it was lost, whichever
-    // ended the loop. When the loop took the stream's error, a lost link counted as closed and
-    // its held prompts went back to the TUI at once.
-    if let Some(reason) = peer.conn.close_reason() {
-        peer.lost = matches!(reason, noq::ConnectionError::TimedOut);
-    }
     let InputOrder { taken, late, .. } = peer.order;
     let ScreenOrder { taken: window_taken, late: window_late, .. } = peer.screen_order;
     tracing::info!(client = %peer.client, taken, late, window_taken, window_late, "input copies");
@@ -722,22 +716,28 @@ async fn report(out: &mpsc::Sender<WorkerMsg>, client: ClientId, session: Sessio
 }
 
 /// Queue `msg` for the client without making the loop wait: a client whose control queue is
-/// full must not hold every other terminal on the connection. A pong is dropped then, as the
-/// next ping asks again; everything else the loop answers (a terminal's error, the items after a
-/// refused change, a clipboard fetch) goes on in order through `posted` ([`in_order`]) once
-/// there is room, since the client waits on it.
+/// full must not hold every other terminal on the connection. Everything the loop answers (a
+/// terminal's error, the items after a refused change, a clipboard fetch) goes on in order
+/// through `posted` ([`in_order`]) once there is room, since the client waits on it. A pong
+/// goes straight into the queue when it has room, ahead of what waits for it, since the client
+/// judges the link by how soon its pings come back (`slopty_net::liveness`); with none it
+/// waits in order too, as a pong lost is a ping missed.
 fn post(
     (out, posted): (&mpsc::Sender<WorkerMsg>, &mpsc::UnboundedSender<WorkerMsg>),
     client: ClientId,
     msg: WorkerMsg,
 ) {
-    if !matches!(msg, WorkerMsg::Pong { .. }) {
-        let _gone = posted.send(msg);
-        return;
-    }
-    if let Err(mpsc::error::TrySendError::Full(msg)) = out.try_send(msg) {
-        tracing::debug!(%client, ?msg, "control queue full; pong dropped");
-    }
+    let msg = match msg {
+        WorkerMsg::Pong { .. } => match out.try_send(msg) {
+            Err(mpsc::error::TrySendError::Full(msg)) => {
+                tracing::debug!(%client, "control queue full; the pong waits for room");
+                msg
+            }
+            Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => return,
+        },
+        msg => msg,
+    };
+    let _gone = posted.send(msg);
 }
 
 /// Send the worker's events to one client until the connection ends, waiting on the client as
@@ -804,8 +804,6 @@ async fn resync(
     msgs.push(WorkerMsg::Items(daemon.items.snapshot()));
     msgs.push(WorkerMsg::Caps(daemon.caps.borrow().clone()));
     // Collected first: the lock must not be held across the sends.
-    let branches = daemon.agents.lock().branches();
-    msgs.extend(branches.into_iter().map(WorkerMsg::AgentBranch));
     let ports = daemon.ports.lock().known();
     msgs.extend(ports.into_iter().map(|(session, ports)| WorkerMsg::Ports { session, ports }));
     // A curtain that moved among what was missed: where it stands now.
@@ -975,6 +973,9 @@ struct Peer<'d> {
     watch_files: watch::Sender<Vec<String>>,
     /// The directories behind this client's folder tiles, for the task that watches them.
     watch_folders: watch::Sender<Vec<String>>,
+    /// The folders whose repositories this client shows the status and diffs of, for the task
+    /// that watches them.
+    watch_repos: watch::Sender<Vec<String>>,
     /// Files going down, by transfer.
     downloads: HashMap<XferId, JoinHandle<()>>,
     /// Window and shell input waiting for a paste's clipboard.
@@ -997,9 +998,6 @@ struct Peer<'d> {
     curtain: Option<crate::CurtainLink>,
     /// The lease on the input the client holds down through its streams.
     lease: InputLease,
-    /// The connection was lost (it went silent and timed out), not closed: the prompts held
-    /// for this client wait for it a while ([`crate::threads::hold::LOST_HOLD`]).
-    lost: bool,
 }
 
 impl Drop for Peer<'_> {
@@ -1022,12 +1020,6 @@ impl Drop for Peer<'_> {
         for session in unwatched {
             let _sent = self.daemon.presence.send((session, false));
         }
-        let released = if self.lost {
-            crate::threads::hold::lost(self.daemon, self.link)
-        } else {
-            self.daemon.follows.lock().holds.leave(self.link)
-        };
-        crate::threads::hold::release(self.daemon, released);
         self.daemon.wake.lock().client_left();
         if let Some(curtain) = &self.curtain {
             let daemon = self.daemon.clone();
@@ -1145,7 +1137,7 @@ impl Peer<'_> {
                             .unwrap_or_else(|_| Listing::Missing {
                                 error: "list failed".to_owned(),
                             });
-                    tracing::info!(%client, %path, "list folder");
+                    tracing::debug!(%client, %path, "list folder");
                     let _sent = out.send(WorkerMsg::Folder { path, listing }).await;
                 });
             }
@@ -1176,6 +1168,9 @@ impl Peer<'_> {
             ClientMsg::WatchFolders { paths } => {
                 self.watch_folders.send_replace(paths);
             }
+            ClientMsg::WatchRepos { paths } => {
+                self.watch_repos.send_replace(paths);
+            }
             ClientMsg::WriteFile { path, text, base_modified_ms } => {
                 let save =
                     crate::files::Save::File { path, text: text.into_bytes(), base_modified_ms };
@@ -1193,7 +1188,6 @@ impl Peer<'_> {
                     daemon: self.daemon,
                     conn: &self.conn,
                     out: &self.out,
-                    link: self.link,
                     client: self.client,
                     tasks: &mut self.tasks,
                 };
@@ -1836,10 +1830,10 @@ mod tests {
     }
 
     /// What the loop answers a client whose control queue is full is not lost: a terminal's
-    /// error and the items after a refused change reach it once there is room, in order, while
-    /// a pong is dropped, the next ping asking again.
+    /// error, a pong and the items after a refused change reach it once there is room, in
+    /// order; with room, a pong goes at once.
     #[tokio::test]
-    async fn an_answer_to_a_full_queue_waits_for_room_and_a_pong_is_dropped() {
+    async fn an_answer_to_a_full_queue_waits_for_room_and_a_pong_is_never_lost() {
         use slopty_proto::terminal::{TermError, TermEvent};
 
         let (out, mut client) = tokio::sync::mpsc::channel(1);
@@ -1856,14 +1850,17 @@ mod tests {
         let items = WorkerMsg::Items(ItemSync::Snapshot { version: 1, items: Vec::new() });
         super::post((&out, &posted), client_id, items);
         let mut heard = Vec::new();
-        while heard.len() < 3 {
+        while heard.len() < 4 {
             heard.push(client.recv().await.expect("the queue stays open"));
         }
         assert!(matches!(heard[0], WorkerMsg::SessionClosed { .. }), "{heard:?}");
         assert!(matches!(heard[1], WorkerMsg::Term { .. }), "the error, first: {heard:?}");
-        assert!(matches!(heard[2], WorkerMsg::Items(_)), "then the items: {heard:?}");
-        let more = tokio::time::timeout(std::time::Duration::from_millis(50), client.recv()).await;
-        assert!(more.is_err(), "the pong went nowhere: {more:?}");
+        assert!(matches!(heard[2], WorkerMsg::Pong { .. }), "then the pong: {heard:?}");
+        assert!(matches!(heard[3], WorkerMsg::Items(_)), "then the items: {heard:?}");
+        let pong = WorkerMsg::Pong { sent_at: slopty_core::MonoTime::now() };
+        super::post((&out, &posted), client_id, pong);
+        let at_once = client.try_recv();
+        assert!(matches!(at_once, Ok(WorkerMsg::Pong { .. })), "with room, at once: {at_once:?}");
     }
 
     fn key(code: KeyCode, mods: Mods) -> ScreenInput {

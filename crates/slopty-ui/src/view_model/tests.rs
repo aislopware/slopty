@@ -24,6 +24,7 @@ fn device(
         cursor_sdk_version: None,
         capabilities: Vec::new(),
         actions: Vec::new(),
+        ssh_host: None,
     }
 }
 
@@ -97,8 +98,7 @@ fn an_edit_carries_its_counts() {
     assert!(stats.iter().any(|s| s.additions + s.deletions > 0));
 }
 
-/// A thread's phase reads as the shell's session status; one waiting on its background work is
-/// at rest.
+/// A thread's phase reads as the shell's session status, each of its own.
 #[test]
 fn a_threads_phase_reads_as_a_session() {
     use slopty_proto::thread::Phase;
@@ -112,13 +112,14 @@ fn a_threads_phase_reads_as_a_session() {
     let now = Utc::now();
     for (phase, status) in [
         (Phase::Working, SessionStatus::Working),
-        (Phase::Waiting, SessionStatus::Idle),
+        (Phase::Waiting, SessionStatus::Waiting),
         (Phase::NeedsYou, SessionStatus::AwaitingInput),
         (Phase::Failed, SessionStatus::Errored),
         (Phase::Idle, SessionStatus::Idle),
-        (Phase::Done, SessionStatus::Idle),
+        (Phase::Done, SessionStatus::Done),
+        (Phase::Stopped, SessionStatus::Stopped),
     ] {
-        assert_eq!(rows::session(&row(phase), "w", 0, now).status, status, "{phase:?}");
+        assert_eq!(rows::session(&row(phase), "w", 0, now, None).status, status, "{phase:?}");
     }
 }
 
@@ -441,17 +442,31 @@ fn an_open_turn_of_a_thread_at_rest_reads_as_finished() {
     assert!(entries.iter().all(|e| e.status != Some(MessageStatus::Streaming)));
 }
 
-/// The shell may queue messages and send its chips: Slopty answers both.
+/// The shell may queue messages with their files kept as chips, send its chips, and start a
+/// chat with no project in a scratch folder of its own: Slopty answers each. A scratch folder
+/// is no project.
 #[test]
 fn the_shell_is_told_what_slopty_answers() {
-    let can = super::capabilities();
+    use slopty_view_proto::capabilities as can;
+    let claimed = super::capabilities();
     for capability in [
-        slopty_view_proto::capabilities::COMPOSER_REFERENCES_V1,
-        slopty_view_proto::capabilities::MESSAGE_QUEUE_V1,
-        slopty_view_proto::capabilities::MESSAGE_QUEUE_ACTIONS_V1,
+        can::COMPOSER_REFERENCES_V1,
+        can::MESSAGE_QUEUE_V1,
+        can::MESSAGE_QUEUE_ACTIONS_V1,
+        can::MESSAGE_QUEUE_CLEAN_ATTACHMENT_TEXT_V1,
+        can::PROJECTLESS_SCRATCH_V1,
     ] {
-        assert!(can.iter().any(|c| c == capability), "{capability}");
+        assert!(claimed.iter().any(|c| c == capability), "{capability}");
     }
+    let scratch = slopty_view_proto::projectless::scratch_cwd("c-1", Utc::now());
+    assert_eq!(rows::place(Some(&scratch), None, Some("/Users/me"), &[]), None, "as written");
+    let expanded = scratch.replacen('~', "/Users/me", 1);
+    assert_eq!(rows::place(Some(&expanded), None, Some("/Users/me"), &[]), None, "expanded");
+    assert_eq!(
+        rows::place(Some("/Users/me/dev/app"), None, Some("/Users/me"), &[]).as_deref(),
+        Some("/Users/me/dev/app"),
+        "a folder of its own is a project"
+    );
 }
 
 /// A stop leaves no mark of its own (the answer says it was stopped); what a command printed
@@ -710,7 +725,7 @@ fn a_failed_turn_says_its_error_once_at_its_end() {
         entries
             .iter()
             .flat_map(|e| e.parts.iter().enumerate().map(move |(ix, p)| (ix, ix + 1 == e.parts.len(), p)))
-            .filter(|(_, _, p)| matches!(p, MessagePart::Error { message, .. } if message == "Overloaded"))
+            .filter(|(_, _, p)| matches!(p, MessagePart::Error { detail: Some(raw), .. } if raw == "Overloaded"))
             .map(|(ix, last, _)| (ix, last))
             .collect()
     };
@@ -787,8 +802,13 @@ async fn older_turns_arrive_as_history() {
     let all = transcript::entries(&fixtures::thread("tools"), &transcript::Look::new("w"));
     let tail = all.get(1..).expect("more than one entry").to_vec();
     let usage = slopty_view_proto::ContextUsage { tokens: Some(50), window: Some(200) };
-    let said =
-        super::Transcript { entries: tail, context_usage: Some(usage), history_pending: true };
+    let said = super::Transcript {
+        entries: tail,
+        context_usage: Some(usage),
+        history_pending: true,
+        limits: Vec::new(),
+        limit_resets_at: None,
+    };
     feed.transcript("c", said);
     let value = watch.recv().await.expect("the tail");
     assert_eq!(value["historyPending"], true);
@@ -798,6 +818,8 @@ async fn older_turns_arrive_as_history() {
             entries: all.clone(),
             context_usage: Some(usage),
             history_pending: false,
+            limits: Vec::new(),
+            limit_resets_at: None,
         },
     );
     let value = watch.recv().await.expect("the whole history");
@@ -849,4 +871,395 @@ fn a_chat_belongs_to_its_project_folder() {
         url: None,
     });
     assert_eq!(rows::repository_id(&row).as_deref(), Some("commit:abc"), "clones group by it");
+}
+
+/// A thread waiting on its own background work reads as waiting, since when, and on what, with
+/// no live indicator (so no Stop); one that needs the person says which request, its words cut
+/// to a line with what would hide or reorder them taken out.
+#[test]
+fn a_waiting_thread_reads_as_waiting_and_offers_no_stop() {
+    use slopty_proto::thread::{Phase, Wait};
+    use slopty_view_proto::view::{Indicator, effective_indicator};
+    use slopty_view_proto::{SessionStatus, SessionWait};
+    let state = fixtures::thread("tools");
+    let since = slopty_core::WallMs::from_millis(1_760_000_000_000);
+    let mut row = state.row(slopty_core::WallMs::ZERO);
+    row.status.phase = Phase::Waiting;
+    row.status.since_ms = since;
+    row.status.wait = Some(Wait { kind: Wait::TASK.to_owned(), text: "1 subagent".to_owned() });
+    let now = Utc::now();
+    let session = rows::session(&row, "w", 1, now, None);
+    assert_eq!(session.status, SessionStatus::Waiting);
+    assert_eq!(session.status_since, Some(rows::time(since)));
+    assert_eq!(session.waiting_on.as_ref().map(|w| w.kind.as_str()), Some(Wait::TASK));
+    assert_eq!(effective_indicator(Some(&session), now), Indicator::None, "nothing to stop");
+
+    row.status.phase = Phase::NeedsYou;
+    let long = format!("Wants to run\n\tcargo test \u{202E}{}", "x".repeat(80));
+    row.status.wait = Some(Wait { kind: "permission".to_owned(), text: long });
+    let asking = rows::session(&row, "w", 0, now, None);
+    assert_eq!(asking.status, SessionStatus::AwaitingInput);
+    let wait = asking.waiting_on.expect("what it waits on");
+    assert_eq!(wait.kind, SessionWait::APPROVAL);
+    let summary = wait.summary.expect("its line");
+    assert!(summary.starts_with("Wants to run cargo test x"), "{summary}");
+    assert!(!summary.contains('\u{202E}'), "no bidi");
+    assert_eq!(summary.chars().count(), 61, "60 and the ellipsis");
+}
+
+/// A turn stands as of its worker's last word that its agent lives: a lease 50 s old reads as
+/// no longer known to run, a fresh one as working, whatever this client heard last.
+#[test]
+fn a_turn_whose_lease_is_old_goes_stale() {
+    use slopty_proto::thread::Phase;
+    use slopty_view_proto::view::{Indicator, effective_indicator};
+    let state = fixtures::thread("tools");
+    let now = Utc::now();
+    let mut row = state.row(slopty_core::WallMs::ZERO);
+    row.status.phase = Phase::Working;
+    row.lease_ms = Some(slopty_core::WallMs::from_millis(1));
+    let stale = rows::session(&row, "w", 0, now, Some(now - chrono::TimeDelta::seconds(50)));
+    assert_eq!(effective_indicator(Some(&stale), now), Indicator::None, "its lease ran out");
+    let fresh = rows::session(&row, "w", 0, now, Some(now - chrono::TimeDelta::seconds(5)));
+    assert_eq!(effective_indicator(Some(&fresh), now), Indicator::Working);
+    let heard = rows::session(&row, "w", 0, now, None);
+    assert_eq!(heard.updated_at, now, "no lease: as heard");
+}
+
+/// The plan's rate windows ride the transcript's frames, the most used first, and a change in
+/// them alone is a frame.
+#[tokio::test]
+async fn the_plans_rate_windows_ride_the_transcript() {
+    use slopty_proto::thread::Limit;
+    let windows = |five: u32, week: u32| {
+        rows::limits(&[
+            Limit { name: "seven-day".to_owned(), used_bp: week, resets_ms: None },
+            Limit {
+                name: "five-hour".to_owned(),
+                used_bp: five,
+                resets_ms: Some(slopty_core::WallMs::from_millis(1_760_000_000_000)),
+            },
+        ])
+    };
+    let first = windows(9_000, 2_500);
+    assert_eq!(first[0].label, "Session");
+    assert!((first[0].used_fraction - 0.9).abs() < 1e-6, "most used first");
+    assert_eq!(first[1].label, "Week");
+
+    let (view_model, feed, mut asks) = ViewModel::new("me".to_owned());
+    let client = memory_client(view_model);
+    let mut watch = client
+        .subscribe_scoped(methods::WATCH_DOC_MESSAGES, serde_json::json!({ "chatId": "c" }))
+        .await
+        .expect("the watch");
+    // The watch is open once the workspace is asked to follow the chat.
+    assert!(matches!(asks.recv().await, Some(Ask::Follow(_))));
+    let entries = transcript::entries(&fixtures::thread("tools"), &transcript::Look::new("w"));
+    let said = |limits| super::Transcript { limits, ..super::Transcript::of(entries.clone()) };
+    feed.transcript("c", said(first.clone()));
+    let update: TranscriptUpdate =
+        serde_json::from_value(watch.recv().await.expect("a frame")).expect("the shell's frame");
+    assert_eq!(update.limits, first);
+    let second = windows(9_500, 2_500);
+    feed.transcript("c", said(second.clone()));
+    let update: TranscriptUpdate =
+        serde_json::from_value(watch.recv().await.expect("a frame")).expect("the shell's frame");
+    assert_eq!(update.limits, second, "the windows moved: a frame of its own");
+}
+
+/// A plan reads as its own card in the transcript, its markdown whole, and the question panel
+/// asks only for its choices.
+#[test]
+fn a_plan_reads_as_markdown_and_asks_only_its_choices() {
+    use slopty_proto::thread::detail::Clipped;
+    use slopty_proto::thread::{Effect, ItemId, Request};
+    let mut state = fixtures::thread("tools");
+    let call = state
+        .items
+        .iter()
+        .find(|item| matches!(item.body, slopty_proto::thread::ItemBody::Tool(_)))
+        .map(|item| item.id.clone())
+        .expect("a call");
+    let mut plan = request(
+        Request::PLAN,
+        &[("yes", "Approve", Effect::Allow), ("no", "Keep planning", Effect::Deny)],
+    );
+    plan.item = Some(ItemId(call.0.clone()));
+    plan.text = Some(Clipped::whole("# Plan\n\n1. Read\n2. Write"));
+    state.requests.push(plan);
+    let mut entries = transcript::entries(&state, &transcript::Look::new("w"));
+    let at = entries.iter().position(|e| e.id == "plan-card:ask-1").expect("its card");
+    let after_call = entries
+        .iter()
+        .position(|e| e.parts.iter().any(|p| p.id() == call.0))
+        .expect("the call's answer");
+    assert!(at > after_call, "after the call that asked");
+    assert!(matches!(
+        &*entries[at].parts,
+        [MessagePart::Text { id, text }] if id == "plan:ask-1" && text.starts_with("# Plan")
+    ));
+    transcript::asks(&state, "w", &mut entries);
+    let (_, questions) = served(&entries).expect("the panel serves it");
+    assert_eq!(questions[0].header, "Plan ready");
+    assert!(questions[0].question.is_empty(), "its text is the card's");
+    assert_eq!(questions[0].options, ["Approve", "Keep planning"]);
+}
+
+/// What another agent told this one reads as a message from that agent, and a child's news as
+/// one quiet line; nothing of Slopty's frame shows.
+#[test]
+fn an_agents_words_read_as_from_that_agent() {
+    use slopty_proto::thread::detail::Clipped;
+    use slopty_proto::thread::{ItemBody, Notice};
+    let mut state = fixtures::thread("tools");
+    let report = "<slopty-reports>\nThe person says:\n  ship it\nAgent ui-lane (t-7) says (an \
+                  agent, not the person):\n  done with the sidebar\n  tests pass\nui-lane came to \
+                  rest\n</slopty-reports>";
+    let last = state.items.last_mut().expect("an item");
+    last.body = ItemBody::Notice(Notice::new(Notice::REPORT, Clipped::whole(report)));
+    let id = last.id.0.clone();
+    let entries = transcript::entries(&state, &transcript::Look::new("w"));
+    let of = |n: usize| entries.iter().find(|e| e.id == format!("{id}:report:{n}")).expect("one");
+    let text = |n: usize| match &*of(n).parts {
+        [MessagePart::Text { text, .. }] => text.clone(),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(of(0).role, MessageRole::User);
+    assert_eq!(text(0), "ship it");
+    assert_eq!(of(1).role, MessageRole::User);
+    assert!(text(1).starts_with("[Message from Slopty chat ui-lane (t-7)."), "{}", text(1));
+    assert!(text(1).ends_with("]\n\ndone with the sidebar\ntests pass"));
+    assert!(matches!(
+        &*of(2).parts,
+        [MessagePart::Marker { text, .. }] if text == "ui-lane came to rest"
+    ));
+    let all = format!("{:?}", entries.iter().flat_map(|e| &e.parts).collect::<Vec<_>>());
+    assert!(!all.contains("slopty-reports"), "no frame shows");
+}
+
+/// A chat forked off another shows the seam after the turns it shares, naming its source.
+#[test]
+fn a_fork_shows_where_it_was_cut() {
+    use slopty_proto::thread::Fork;
+    let mut state = fixtures::thread("tools");
+    let source = slopty_proto::thread::ThreadId::new();
+    let first = state.turns.first().map(|turn| turn.id).expect("a turn");
+    state.meta.forked_from = Some(Fork { thread: source, turn: Some(first) });
+    let look = transcript::Look::new("w")
+        .source(|thread| (thread == source).then(|| ("c-src".to_owned(), "Sidebar".to_owned())));
+    let entries = transcript::entries(&state, &look);
+    let seam = entries
+        .iter()
+        .position(|e| matches!(&*e.parts, [MessagePart::Fork { .. }]))
+        .expect("the seam");
+    assert!(matches!(
+        &*entries[seam].parts,
+        [MessagePart::Fork { source_chat_id, source_title, .. }]
+            if source_chat_id == "c-src" && source_title == "Sidebar"
+    ));
+    // Everything of the turns it shares is above the seam, everything after below.
+    let holds = |entry: &slopty_view_doc::SessionMessageEntry, item: &str| {
+        entry.id == item || entry.parts.iter().any(|p| p.id().split(':').next() == Some(item))
+    };
+    for item in &state.items {
+        let Some(at) = entries.iter().position(|e| holds(e, &item.id.0)) else { continue };
+        assert_eq!(at < seam, item.turn <= first, "{} of {:?}", item.id.0, item.turn);
+    }
+    let plain = transcript::entries(&fixtures::thread("tools"), &transcript::Look::new("w"));
+    assert!(!plain.iter().any(|e| matches!(&*e.parts, [MessagePart::Fork { .. }])));
+}
+
+/// A compaction leaves a divider saying what it did, and a thread compacting says so.
+#[test]
+fn a_compaction_shows_while_it_runs_and_leaves_a_marker() {
+    use slopty_proto::thread::{Compaction, ItemBody, Phase, Wait};
+    let mut state = fixtures::thread("tools");
+    let last = state.items.last_mut().expect("an item");
+    last.body = ItemBody::Compaction(Compaction {
+        trigger: Some("auto".to_owned()),
+        before_tokens: Some(143_200),
+        after_tokens: Some(12_000),
+        summary: None,
+    });
+    let id = last.id.0.clone();
+    let entries = transcript::entries(&state, &transcript::Look::new("w"));
+    let marker = entries.iter().find(|e| e.id == id).expect("its divider");
+    assert_eq!(marker.role, MessageRole::System);
+    assert!(matches!(
+        &*marker.parts,
+        [MessagePart::Marker { text, .. }] if text == "Compacted · 143k tokens → summary"
+    ));
+    let mut row = state.row(slopty_core::WallMs::ZERO);
+    row.status.phase = Phase::Working;
+    row.status.wait = Some(Wait { kind: Wait::COMPACTING.to_owned(), text: String::new() });
+    let session = rows::session(&row, "w", 0, Utc::now(), None);
+    let wait = session.waiting_on.expect("compacting");
+    assert_eq!(wait.kind, slopty_view_proto::SessionWait::COMPACTING);
+    assert_eq!(wait.summary, None);
+}
+
+/// The fixture's first command call made to run `command`, and an approval of it.
+fn approval_of(
+    state: &mut slopty_proto::thread::ThreadState,
+    command: &str,
+) -> slopty_proto::thread::Request {
+    use slopty_proto::thread::detail::Clipped;
+    use slopty_proto::thread::{Effect, ItemBody, ToolDetail};
+    let item = state
+        .items
+        .iter_mut()
+        .find(|item| {
+            matches!(&item.body, ItemBody::Tool(call) if matches!(call.detail, Some(ToolDetail::Exec(_))))
+        })
+        .expect("a command call");
+    if let ItemBody::Tool(call) = &mut item.body
+        && let Some(ToolDetail::Exec(exec)) = &mut call.detail
+    {
+        exec.command = Clipped::whole(command);
+    }
+    let mut approval = request(
+        slopty_proto::thread::Request::APPROVAL,
+        &[("allow", "Allow", Effect::Allow), ("deny", "Deny", Effect::Deny)],
+    );
+    approval.item = Some(item.id.clone());
+    approval.text = Some(Clipped::whole(command));
+    approval
+}
+
+/// The panel's one question for `state` with `approval` open.
+fn asked_of(
+    state: &mut slopty_proto::thread::ThreadState,
+    approval: slopty_proto::thread::Request,
+) -> slopty_view_proto::UserInputQuestion {
+    state.requests = vec![approval];
+    let mut entries = transcript::entries(state, &transcript::Look::new("w"));
+    transcript::asks(state, "w", &mut entries);
+    served(&entries).expect("the panel serves it").1.remove(0)
+}
+
+/// A long command starts on its deny, takes no key and is read through before it can be
+/// allowed; a destructive one starts on its deny too; a plain read is allowed at a key.
+#[test]
+fn a_long_command_defaults_to_deny_and_ignores_enter() {
+    let mut state = fixtures::thread("tools");
+    let long = format!("echo {}", "a".repeat(700));
+    let approval = approval_of(&mut state, &long);
+    let asked = asked_of(&mut state, approval);
+    assert!(asked.deny_first && asked.click_only && asked.read_gate, "{asked:?}");
+    assert_eq!(asked.deny_option, Some(1), "Deny");
+
+    let approval = approval_of(&mut state, "rm -rf target");
+    let asked = asked_of(&mut state, approval);
+    assert!(asked.deny_first && asked.click_only && !asked.read_gate, "{asked:?}");
+
+    let approval = approval_of(&mut state, "git status");
+    let asked = asked_of(&mut state, approval);
+    assert!(!asked.deny_first && !asked.click_only && !asked.read_gate, "{asked:?}");
+
+    let approval = approval_of(&mut state, "cargo test");
+    let asked = asked_of(&mut state, approval);
+    assert!(!asked.deny_first && asked.click_only, "not a known read: a click");
+
+    state.meters.mode = Some("plan".to_owned());
+    let approval = approval_of(&mut state, "git status");
+    assert!(asked_of(&mut state, approval).click_only, "in plan mode: a click");
+}
+
+/// An approval shows a bidi override or a zero-width character as its code, and its answer
+/// still goes as the agent's own choice.
+#[test]
+fn an_approval_shows_bidi_overrides_as_visible_escapes() {
+    let mut state = fixtures::thread("tools");
+    let mut approval = approval_of(&mut state, "cat notes\u{202E}txt.sh");
+    approval.options[0].label = "Allow \u{200B}once".to_owned();
+    let asked = asked_of(&mut state, approval.clone());
+    assert_eq!(asked.question, "cat notes[U+202E]txt.sh");
+    assert_eq!(asked.options[0], "Allow [U+200B]once");
+    assert_eq!(
+        transcript::answer(&approval, &[picked(&asked.id, &asked.options[0])]),
+        Ok(("allow".to_owned(), None))
+    );
+}
+
+/// An approval of an edit carries the change it would make.
+#[test]
+fn an_edit_approval_shows_its_diff() {
+    use slopty_proto::thread::{Effect, ItemBody, Request, ToolDetail};
+    let mut state = fixtures::thread("edit");
+    let edit = state
+        .items
+        .iter()
+        .find(|item| {
+            matches!(&item.body, ItemBody::Tool(call) if matches!(call.detail, Some(ToolDetail::Edit(_))))
+        })
+        .map(|item| item.id.clone())
+        .expect("an edit");
+    let mut approval = request(
+        Request::APPROVAL,
+        &[("allow", "Allow", Effect::Allow), ("deny", "Deny", Effect::Deny)],
+    );
+    approval.item = Some(edit);
+    let asked = asked_of(&mut state, approval);
+    let diff = asked.proposed.expect("its change");
+    assert_ne!(diff.path, "");
+    assert!(!diff.new_text.is_empty() || diff.old_text.is_some());
+}
+
+/// A failure reads in one grammar, naming its machine, with the agent's words behind it; the
+/// failed last turn offers to try it again, an earlier one does not.
+#[test]
+fn a_failure_reads_in_one_grammar_and_offers_retry() {
+    use slopty_proto::thread::{Notice, TurnState};
+    let (copy, raw) =
+        transcript::error_words(Notice::API_ERROR, "529 Overloaded", Some("studio"), None);
+    assert_eq!(copy, "The model's service returned an error on studio. Try again.");
+    assert_eq!(raw.as_deref(), Some("529 Overloaded"));
+    for kind in [Notice::LIMIT, Notice::DECLINED, Notice::HOOK] {
+        let (copy, raw) = transcript::error_words(kind, "said", None, None);
+        assert_ne!(copy, "said", "{kind}");
+        assert_eq!(raw.as_deref(), Some("said"));
+    }
+    assert_eq!(transcript::error_words("something-new", "as said", None, None).0, "as said");
+
+    let mut state = fixtures::thread("tools");
+    for turn in &mut state.turns {
+        turn.state = TurnState::Failed { error: "Overloaded".to_owned(), until_ms: None };
+    }
+    let entries = transcript::entries(&state, &transcript::Look::new("w").host("studio"));
+    let errors: Vec<(String, bool)> = entries
+        .iter()
+        .flat_map(|e| &e.parts)
+        .filter_map(|p| match p {
+            MessagePart::Error { message, detail: Some(raw), retry, .. } if raw == "Overloaded" => {
+                Some((message.clone(), *retry))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_ne!(errors.len(), 0, "the failed turns say so");
+    assert!(errors.iter().all(|(message, _)| message == "The turn failed on studio. Try again."));
+    assert_eq!(errors.iter().filter(|(_, retry)| *retry).count(), 1, "the last turn's alone");
+    assert!(errors.last().is_some_and(|(_, retry)| *retry));
+}
+
+/// The files on their way to a machine are watched by their upload ids.
+#[tokio::test]
+async fn a_files_way_up_is_watched_by_its_upload() {
+    let (view_model, feed, _asks) = ViewModel::new("me".to_owned());
+    let client = memory_client(view_model);
+    let mut watch = client
+        .subscribe_scoped(methods::WATCH_TRANSFERS, serde_json::json!({}))
+        .await
+        .expect("the watch");
+    assert_eq!(watch.recv().await, Some(serde_json::json!([])));
+    let going = |done| slopty_view_proto::TransferProgress {
+        upload_id: "u-1".to_owned(),
+        file_name: "shot.png".to_owned(),
+        done,
+        total: 4_000_000,
+    };
+    feed.transfers(vec![going(1_000_000)]);
+    let read: Vec<slopty_view_proto::TransferProgress> =
+        serde_json::from_value(watch.recv().await.expect("a frame")).expect("transfers");
+    assert_eq!(read, vec![going(1_000_000)]);
 }

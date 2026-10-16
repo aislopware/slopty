@@ -701,6 +701,10 @@ enum SettingScope {
     Card,
 }
 
+// slopty: the option the view model offers an agent's modes as.
+/// The model option that is the agent's mode.
+const MODE_OPTION: &str = "mode";
+
 /// A model whose options pick what it runs (Devin Fusion: `lead` and
 /// `sidekick`, plus effort and fast mode) is configured from a card that
 /// opens when its row is hovered.
@@ -1481,6 +1485,71 @@ impl Pickers {
         if self.open_kind() != Some(PickerKind::HarnessModel) {
             self.toggle(PickerKind::HarnessModel, window, cx);
         }
+    }
+
+    // slopty: the branch picker's shortcut opens it where its chip is shown (a project with git).
+    /// Open the branch picker; whether there was one to open.
+    pub fn open_branch_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let git = self
+            .state
+            .read(cx)
+            .selected_space_row()
+            .is_some_and(|space| space.git_detected);
+        if !git {
+            return false;
+        }
+        if self.open_kind() != Some(PickerKind::Branch) {
+            self.toggle(PickerKind::Branch, window, cx);
+        }
+        true
+    }
+
+    // slopty: the agent's mode (Claude Code's permission modes, an ACP agent's session modes),
+    // which the view model offers as the model option `mode`; its chip sits left of the model's,
+    // as Claude desktop's composer row has it.
+    /// The chosen mode's label, where the chosen model offers more than one mode.
+    pub fn mode_label(&self, cx: &App) -> Option<SharedString> {
+        if self.title.is_some() {
+            return None;
+        }
+        let model = self.selected_model(cx)?;
+        let option = model
+            .options
+            .iter()
+            .find(|option| option.id == MODE_OPTION && option.choices.len() > 1)?;
+        let resolved = self.resolved(cx);
+        let picked = resolved
+            .model_options
+            .get(MODE_OPTION)
+            .and_then(|value| value.as_str())
+            .unwrap_or(&option.default_choice);
+        let choice = option.choices.iter().find(|choice| choice.id == picked)?;
+        Some(choice.label.clone().into())
+    }
+
+    /// Open the model menu at its Mode choices; whether the model offers modes.
+    pub fn open_mode_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.mode_label(cx).is_none() {
+            return false;
+        }
+        self.open_model_menu(window, cx);
+        self.open_setting(SettingScope::Tray, ModelSetting::Option(MODE_OPTION.into()), cx);
+        true
+    }
+
+    // slopty: the effort shortcut steps the model's effort up, wrapping to the lowest.
+    /// Set the next effort level of the chosen model; its label, or `None` where the model has
+    /// no effort to choose.
+    pub fn step_effort(&mut self, cx: &mut Context<Self>) -> Option<SharedString> {
+        let effort = self.compact_effort(cx)?;
+        if effort.labels.len() < 2 {
+            return None;
+        }
+        let next = (effort.selected + 1) % effort.labels.len();
+        let label = effort.labels[next].clone();
+        self.pick_compact_effort(effort, next, cx);
+        cx.notify();
+        Some(label)
     }
 
     fn toggle(&mut self, kind: PickerKind, window: &mut Window, cx: &mut Context<Self>) {
@@ -6462,7 +6531,45 @@ impl Render for Pickers {
             // instead of truncating (user report).
             .min_w_0()
             .gap(px(4.0))
+            .children(self.mode_chip(&theme, cx)) // slopty: the agent's mode, left of the model
             .child(model_chip)
+    }
+}
+
+impl Pickers {
+    // slopty: the mode chip, a ghost pill as the footer's chips are.
+    /// The chosen mode as a chip that opens the model menu at its Mode choices; `None` where the
+    /// model offers no modes.
+    fn mode_chip(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let label = self.mode_label(cx)?;
+        let id: SharedString = format!("picker-mode-{}", cx.entity_id()).into();
+        Some(
+            div()
+                .id(id.clone())
+                .debug_selector(|| "picker-mode".into())
+                .role(gpui::Role::Button)
+                .aria_label(SharedString::from(format!("Mode: {label}")))
+                .h(px(32.0))
+                .min_w_0()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
+                .px(px(10.0))
+                .rounded(px(8.0))
+                .text_size(crate::typography::ui_rems(12.0))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(motion::hover_blend(&id, theme.text_muted, theme.text))
+                .bg(motion::hover_blend(&id, gpui::transparent_black(), theme.element_hover))
+                .on_hover(motion::hover_listener(id.clone()))
+                .cursor_pointer()
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.open_mode_menu(window, cx);
+                }))
+                .child(crate::icons::icon(crate::icons::LOCK).size(px(16.0)).flex_none())
+                .child(div().min_w_0().truncate().child(label))
+                .into_any_element(),
+        )
     }
 }
 
@@ -7688,6 +7795,52 @@ mod tests {
         }
     }
 
+    // slopty: the agent's modes as a chip left of the model's, opening the menu at its choices.
+    #[gpui::test]
+    fn a_mode_chip_names_the_mode_and_opens_its_choices(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(Theme::dark());
+            crate::composer::init(cx, Default::default());
+        });
+        let handle = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Pickers::new(state, cx)
+        });
+        handle
+            .update(cx, |pickers, window, cx| {
+                let mut model = bare_model("opus", "Opus");
+                model.options = vec![ModelOption {
+                    id: MODE_OPTION.into(),
+                    label: "Mode".into(),
+                    default_choice: "default".into(),
+                    choices: [("default", "Ask permissions"), ("plan", "Plan")]
+                        .map(|(id, label)| ModelOptionChoice { id: id.into(), label: label.into() })
+                        .into(),
+                }];
+                pickers.config.harness = Some(HarnessId::CLAUDE_CODE);
+                pickers.harnesses =
+                    Loadable::Ready(vec![descriptor(HarnessId::CLAUDE_CODE, "Claude Code")]);
+                pickers.models.insert(
+                    HarnessId::CLAUDE_CODE,
+                    Loadable::Ready(vec![model, bare_model("haiku", "Haiku")]),
+                );
+                pickers.pick_model("opus".into(), cx);
+                assert_eq!(pickers.mode_label(cx).as_deref(), Some("Ask permissions"));
+                assert!(pickers.open_mode_menu(window, cx));
+                assert!(pickers.is_open());
+                assert_eq!(pickers.setting_menu, Some(ModelSetting::Option(MODE_OPTION.into())));
+                pickers.setting_active = 1;
+                pickers.activate_setting_choice(cx);
+                assert_eq!(pickers.mode_label(cx).as_deref(), Some("Plan"));
+                assert_eq!(pickers.resolved(cx).model_options[MODE_OPTION], "plan");
+                // A model with no modes has no chip, and its menu is not opened for one.
+                pickers.pick_model("haiku".into(), cx);
+                assert_eq!(pickers.mode_label(cx), None);
+                assert!(!pickers.open_mode_menu(window, cx));
+            })
+            .unwrap();
+    }
+
     #[gpui::test]
     fn nested_model_settings_navigate_and_preserve_independent_choices(
         cx: &mut gpui::TestAppContext,
@@ -8563,6 +8716,7 @@ mod tests {
             name: name.into(),
             installed: true,
             can_install: false,
+            usage: None, // slopty
             enabled: Some(true),
             reasoning_levels: Vec::new(),
             steering_mode: slopty_view_proto::SteeringMode::StepBoundary,
@@ -9806,6 +9960,7 @@ mod tests {
             reasoning_levels: vec![],
             installed: true,
             can_install: false,
+            usage: None, // slopty
             enabled: None,
         };
         let mixed = vec![
@@ -9833,6 +9988,7 @@ mod tests {
             reasoning_levels: vec![],
             installed: true,
             can_install: false,
+            usage: None, // slopty
             enabled,
         };
         let catalog = |claude: Option<bool>, codex: Option<bool>, grok: Option<bool>| {
@@ -9886,6 +10042,7 @@ mod tests {
                 reasoning_levels: vec![],
                 installed,
                 can_install: false,
+                usage: None, // slopty
                 enabled,
             };
         // Enabled-but-missing-CLI agents stay out of the rail; an installed

@@ -465,7 +465,7 @@ pub async fn read_thread<D: Dispatch>(
 ) -> Result<ThreadRead, ToolError> {
     let of = thread_of(res, arg).await?;
     // The server says whether the read holds prompts: the person's alone.
-    let verb = Verb::ReadThread { of, view, after: after.map(TurnId), hold: false };
+    let verb = Verb::ReadThread { of, view, after: after.map(TurnId) };
     match res.dispatch().call(verb).await {
         Outcome::Thread(read) => Ok(*read),
         other => Err(ToolError::unexpected(other)),

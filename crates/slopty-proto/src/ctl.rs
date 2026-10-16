@@ -3,16 +3,14 @@
 //! One [`CtlRequest`] and one [`CtlReply`] go per connection, with a clipboard's raw bytes after
 //! the line that announces them ([`ClipAsk`]).
 //!
-//! Three kinds of process speak it to `slopty-worker`: the `slopty` CLI (status, doctor, the
-//! screen bench), the `slopty hook` relay (hooks and permission requests) and the app, which
-//! reads the doctor for "Use this Mac as a worker". Unlike the rest of this crate it is JSON,
-//! not postcard: [`Decision::AllowAlways`] carries Claude Code's permission updates as the JSON
-//! they arrived as, and the enums are tagged by field.
+//! Two kinds of process speak it to `slopty-worker`: the `slopty` CLI (status, doctor, the
+//! screen bench, and the `open`, `edit` and clipboard shims a session's programs find) and the
+//! app, which reads the doctor for "Use this Mac as a worker". Unlike the rest of this crate it
+//! is JSON, not postcard: the shims are small and the enums are tagged by field.
 
 use std::net::IpAddr;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use slopty_core::{SessionId, WorkerId};
 
 use crate::handoff::{EditOutcome, OfferReason};
@@ -27,8 +25,8 @@ pub const SERVER_ENV: &str = "SLOPTY_SERVER";
 
 /// Environment variable naming the session a process runs in (its [`SessionId`]).
 ///
-/// The worker sets it in every shell it spawns, and the `slopty hook` relay reads it to say
-/// where a hook fired ([`CtlRequest::Hook`]).
+/// The worker sets it in every shell it spawns, and Slopty's CLI there reads it to say which
+/// session it speaks from.
 pub const SESSION_ENV: &str = "SLOPTY_SESSION";
 
 /// Environment variable holding the token of the session a process runs in.
@@ -50,34 +48,6 @@ pub enum CtlRequest {
     /// Live screen streams and their worker-side counters (`slopty-probe screen` reads the
     /// capture and encode latency through this on loopback).
     Screens,
-    /// A coding-agent hook fired inside a session (relayed by `slopty hook`).
-    Hook {
-        /// The session the hook ran in (`SLOPTY_SESSION`).
-        session: SessionId,
-        /// The hook's stdin, verbatim JSON.
-        payload: String,
-    },
-    /// A `PermissionRequest` hook, the one the relay waits on: taken in as [`Self::Hook`] is,
-    /// then answered with [`CtlReply::Permission`], at once and undecided unless a client
-    /// follows the session, and within `wait_ms` whatever happens. The relay sends it instead
-    /// of a [`Self::Hook`], never beside one, and keeps its end open while it waits; closing it
-    /// withdraws the question.
-    Permission(PermissionAsk),
-    /// A hook that hands the reports kept for a session over to its agent (`slopty hook
-    /// reports`), answered with [`CtlReply::Reports`]. It shows the session's token
-    /// ([`SESSION_TOKEN_ENV`]): only the session's own hooks take its reports or say where its
-    /// inbox is, so no other program reads them, acknowledges them unread or redirects them.
-    Reports(ReportsAsk),
-    /// The hook of a [`Self::Reports`] printed batch `batch`: the worker lets it go and tells
-    /// the server it was read. Until then it stays, for the next hook to hand over.
-    ReportsHanded {
-        /// The session (`SLOPTY_SESSION`).
-        session: SessionId,
-        /// Its token ([`SESSION_TOKEN_ENV`]).
-        token: String,
-        /// The batch printed.
-        batch: u64,
-    },
     /// Open a web page for a program in a session (`BROWSER`, the `open` shim) in the browser
     /// of the client in front of that session; answered with [`CtlReply::Handoff`] (`Taken`,
     /// `Offered` or `Nobody`), or an error for an address that is not
@@ -367,21 +337,10 @@ pub enum CtlReply {
         /// Closed recently, oldest first, with their final counters.
         closed: Vec<ScreenSummary>,
     },
-    /// The decision on a [`CtlRequest::Permission`].
-    Permission(PermissionAnswer),
     /// How a [`CtlRequest::Open`] or [`CtlRequest::Edit`] went.
     Handoff(Handed),
     /// The answer to [`CtlRequest::Wake`].
     Wake(Awake),
-    /// The answer to [`CtlRequest::Reports`]: what the hook prints, when it hands anything
-    /// over.
-    Reports {
-        /// The batch handed over, when one waits.
-        batch: Option<u64>,
-        /// The hook's output, JSON; none when the agent read the batch already, through its
-        /// inbox.
-        print: Option<String>,
-    },
     /// The types a [`ClipAsk::Types`] found, best first.
     ClipTypes {
         /// The types.
@@ -401,82 +360,6 @@ pub enum CtlReply {
     Error {
         /// Why.
         message: String,
-    },
-}
-
-/// The `slopty hook` relay's question on a `PermissionRequest` hook (the contract is laid out
-/// in `slopty_agent::permission`).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PermissionAsk {
-    /// The terminal session the agent runs in (`SLOPTY_SESSION`).
-    pub session: SessionId,
-    /// The `PermissionRequest` hook as the relay forwards it (`slopty_agent::Hook::trimmed`):
-    /// the tool, its input and the suggested permission updates. The worker reads it once, for
-    /// the agent's status and for the prompt.
-    pub payload: String,
-    /// How long the relay waits; the worker answers before then.
-    pub wait_ms: u64,
-}
-
-/// The `slopty hook reports` relay's question ([`CtlRequest::Reports`]).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReportsAsk {
-    /// The terminal session the agent runs in (`SLOPTY_SESSION`).
-    pub session: SessionId,
-    /// Its token ([`SESSION_TOKEN_ENV`]).
-    pub token: String,
-    /// The hook's stdin, verbatim JSON.
-    pub payload: String,
-    /// The inbox Claude Code takes other programs' messages on in this session, when it has
-    /// one (`CLAUDE_CODE_MESSAGING_SOCKET`).
-    pub inbox: Option<InboxAt>,
-}
-
-/// Where a session's agent takes messages from other programs.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InboxAt {
-    /// Its socket.
-    pub socket: String,
-    /// The token a message shows (`CLAUDE_CODE_MESSAGING_TOKEN`), when the session gave one.
-    pub token: Option<String>,
-}
-
-/// The worker's answer to a [`PermissionAsk`].
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PermissionAnswer {
-    /// What to tell Claude Code.
-    pub decision: Decision,
-}
-
-/// A decision on one permission request.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum Decision {
-    /// No decision: Claude Code shows its own dialog.
-    Pass,
-    /// Allow this call.
-    Allow {
-        /// The call's input to use instead of the model's: `AskUserQuestion`'s with the
-        /// person's answers, or `ExitPlanMode`'s own. Claude Code takes an allow for a tool that
-        /// asks the person only with an input, and shows its own dialog otherwise.
-        updated_input: Option<Value>,
-    },
-    /// Allow this call and apply these permission updates, normally what the request's
-    /// `permission_suggestions` offered (an allow rule, a mode, a directory): "Always allow",
-    /// or a plan approved and edits accepted from then on.
-    AllowAlways {
-        /// The call's input, for a tool that asks the person (`ExitPlanMode`'s own), as
-        /// [`Decision::Allow`] carries it.
-        updated_input: Option<Value>,
-        /// The updates, as Claude Code's `updatedPermissions` entries.
-        updated_permissions: Vec<Value>,
-    },
-    /// Refuse the call.
-    Deny {
-        /// Why, for the model.
-        message: String,
-        /// Also stop the turn.
-        interrupt: bool,
     },
 }
 
@@ -685,34 +568,7 @@ impl Quantiles {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
-
     use super::*;
-
-    /// The relay's lines, as `slopty_agent::permission` documents them, are these variants.
-    #[test]
-    fn a_permission_request_and_its_decision_are_single_json_lines() {
-        let session = SessionId::nil();
-        let ask = CtlRequest::Permission(PermissionAsk {
-            session,
-            payload: "{}".to_owned(),
-            wait_ms: 1_000,
-        });
-        let line =
-            json!({ "cmd": "permission", "session": session, "payload": "{}", "wait_ms": 1_000 });
-        assert_eq!(serde_json::to_value(&ask).ok(), Some(line.clone()));
-        assert_eq!(serde_json::from_value::<CtlRequest>(line).ok(), Some(ask));
-        let reply = CtlReply::Permission(PermissionAnswer {
-            decision: Decision::Deny { message: "no".to_owned(), interrupt: false },
-        });
-        assert_eq!(
-            serde_json::to_value(&reply).ok(),
-            Some(json!({
-                "reply": "permission",
-                "decision": { "kind": "deny", "message": "no", "interrupt": false },
-            }))
-        );
-    }
 
     #[test]
     fn quantiles_read_any_order() {

@@ -3,9 +3,8 @@
 //!
 //! It is the system's clock, unless something pins it to one moment: the self-test does, so a
 //! frame that shows a time shows the same one whenever it is drawn, and a golden holding it
-//! never moves with the hour it was taken at. The working marks are pinned with it, to the
-//! moment they stand upright and whole ([`crate::icons::PINNED_STEPS`]). What is kept or sent (a
-//! backup's time, a visit counted) reads the system's clock itself.
+//! never moves with the hour it was taken at. What is kept or sent (a backup's time, a visit
+//! counted) reads the system's clock itself.
 
 use std::time::{Duration, Instant};
 
@@ -25,11 +24,10 @@ pub fn since(started: Instant, cx: &App) -> Duration {
     if pinned { Duration::ZERO } else { started.elapsed() }
 }
 
-/// Draw every readout as at `at` from now on, and every working mark still, or by the system's
-/// clock again for `None`. The caller draws the window again: nothing that showed a time was told.
+/// Draw every readout as at `at` from now on, or by the system's clock again for `None`. The
+/// caller draws the window again: nothing that showed a time was told.
 pub fn pin(at: Option<WallMs>, cx: &mut App) {
     cx.set_global(Pinned(at));
-    crate::icons::pin_steps(at.map(|_| crate::icons::PINNED_STEPS), cx);
 }
 
 #[cfg(test)]

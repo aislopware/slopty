@@ -466,14 +466,17 @@ fn group(id: ShortcutId) -> &'static str {
         ShortcutId::ToggleSidebar
         | ShortcutId::ToggleChanges
         | ShortcutId::ToggleFiles
-        | ShortcutId::ToggleTerminal => "Panels",
+        | ShortcutId::ToggleTerminal
+        | ShortcutId::ReopenClosedTab => "Panels", // slopty: the right pane's last closed tab
         ShortcutId::NewProject => "Projects",
         // slopty: dictation removed.
         ShortcutId::OpenModelPicker
         | ShortcutId::NewSession
         | ShortcutId::NextSession
         | ShortcutId::PrevSession
-        | ShortcutId::ArchiveSession => "Sessions",
+        | ShortcutId::ArchiveSession
+        | ShortcutId::OpenBranchPicker // slopty: the composer's branch
+        | ShortcutId::NextEffort => "Sessions", // slopty: and its effort
         ShortcutId::JumpSession(_) => "Jump to session",
     }
 }

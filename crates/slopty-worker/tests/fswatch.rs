@@ -19,7 +19,7 @@ mod follow {
 
     use slopty_testkit::stats::Spread;
     use slopty_worker::fswatch::{
-        CONTENT_HOLD, Changes, HOLD, Limits, Status, follow, follow_folders,
+        CONTENT_HOLD, CONTENT_QUIET, Changes, HOLD, Limits, Status, follow, follow_folders,
     };
     use tokio::sync::watch;
 
@@ -359,11 +359,16 @@ mod follow {
     }
 
     /// The listing of `folders` again once their contents stream is up, for what changed inside
-    /// them while it started (macOS).
+    /// them while it started (macOS). fseventsd can hand the stream a write the setup made just
+    /// before it started, after it is up, under load: that is one more listing at most.
     async fn contents_up(changes: &mut Changes, folders: &[&Path]) {
         let got = next(changes, STREAM_UP).await;
         assert_eq!(got, Some(folders.iter().map(|p| key(p)).collect()), "listed once up");
-        assert!(quiet(changes, CONTENT_HOLD * 2).await, "listed once");
+        let mut more = 0_u32;
+        while next(changes, CONTENT_HOLD * 2).await.is_some() {
+            more += 1;
+        }
+        assert!(more <= 1, "listed once, and once more for a late write at most: {more} more");
     }
 
     /// The ways a folder's entries change under its tile, in the order a round does them.
@@ -414,9 +419,9 @@ mod follow {
     }
 
     /// A write inside one of a folder's files changes the size its listing shows: the folder is
-    /// reported, after [`CONTENT_HOLD`], and a file that keeps growing reports it at that rate
-    /// at most. So is an entry made inside one of its subfolders, whose count the listing shows
-    /// (macOS; on Linux the subfolder's own entries are not watched).
+    /// reported, [`CONTENT_QUIET`] after the write, and a file that keeps growing reports it
+    /// once each [`CONTENT_HOLD`] at most. So is an entry made inside one of its subfolders, whose
+    /// count the listing shows (macOS; on Linux the subfolder's own entries are not watched).
     #[tokio::test(flavor = "multi_thread")]
     async fn a_write_inside_a_file_of_the_folder_is_reported_for_its_size() {
         let root = tempfile::tempdir().unwrap();
@@ -429,7 +434,7 @@ mod follow {
         write_in_place(&file, "two, longer\n");
         assert_eq!(next(&mut changes, WITHIN).await, Some(vec![key(&dir)]), "the size moved");
         let took = at.elapsed();
-        assert!(took >= CONTENT_HOLD, "paced, not at once: {took:?}");
+        assert!(took >= CONTENT_QUIET, "paced, not at once: {took:?}");
         assert!(quiet(&mut changes, CONTENT_HOLD * 2).await, "one write, one report");
 
         let started = Instant::now();

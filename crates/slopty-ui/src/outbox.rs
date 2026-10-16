@@ -113,6 +113,8 @@ enum Latest {
     WatchFiles,
     /// The whole set of folders watched.
     WatchFolders,
+    /// The whole set of repositories watched.
+    WatchRepos,
     /// The handoffs this client takes.
     HandoffCaps,
     /// A liveness probe: one waiting says as much as several.
@@ -128,6 +130,7 @@ impl Latest {
         Some(match msg {
             ClientMsg::WatchFiles { .. } => Self::WatchFiles,
             ClientMsg::WatchFolders { .. } => Self::WatchFolders,
+            ClientMsg::WatchRepos { .. } => Self::WatchRepos,
             ClientMsg::HandoffCaps(_) => Self::HandoffCaps,
             ClientMsg::Ping { .. } => Self::Ping,
             ClientMsg::Term { session, req: TermRequest::Resize(_) } => Self::TermSize(*session),

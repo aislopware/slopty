@@ -1,173 +1,68 @@
-//! Answering Claude Code's permission prompts from the conversation face.
+//! Answering the permissions a driven Claude Code asks for.
 //!
-//! Claude Code runs the `PermissionRequest` hook when it is about to ask the person for
-//! permission to use a tool. A hook that prints a decision answers for them; one that prints
-//! nothing leaves the TUI to show its own dialog. So `slopty hook` is registered for that event
-//! synchronously ([`crate::hooks`]): instead of posting the hook as it does every other event, it
-//! asks the worker for a decision over the control socket and waits, up to [`WAIT`], for one of
-//! - allow once;
+//! Run with `--permission-prompt-tool=stdio`, Claude Code asks about each tool call it may not
+//! run alone with a `can_use_tool` control request, and waits for the answer for as long as it
+//! takes. The answer is the permission result Claude Code's SDK defines ([`result`]):
+//! - allow once, with the call's input;
 //! - answer an `AskUserQuestion`, or approve an `ExitPlanMode` plan: an allow that carries the
 //!   call's input, with the answers for a question;
 //! - allow always, handing back the permission updates Claude Code suggested;
-//! - deny, with a message for the model;
-//! - no decision: the TUI's dialog appears, as it would with no hook at all.
-//!
-//! **The socket contract.** The request is one line of JSON, `{"cmd": "permission",
-//! "session": <SessionId>, "payload": <the forwarded hook, as a JSON string>, "wait_ms": <u64>}`
-//! ([`CtlRequest::Permission`] carrying a [`PermissionAsk`]), and the reply one line,
-//! `{"reply": "permission", "decision": {"kind": "pass" | "allow" | "allow_always" | "deny", …}}`
-//! ([`CtlReply::Permission`] carrying a [`PermissionAnswer`]); the types are the control
-//! protocol's, in [`slopty_proto::ctl`]. The relay keeps its end of the socket open while it
-//! waits, so the worker knows the question is withdrawn when Claude Code gives up on the hook.
-//! The worker holds the reply while a client follows the session and answers from the prompt
-//! it is shown ([`prompt`], [`decision`]); with no follower, or when the last one leaves, it
-//! answers [`Decision::Pass`], and it never holds past `wait_ms`. The ask is the only request
-//! this hook makes: the worker parses the payload once, takes it in as any hook (the tracker, the
-//! followers' board), then holds it for the answer.
-//!
-//! [`CtlRequest::Permission`]: slopty_proto::ctl::CtlRequest::Permission
-//! [`CtlReply::Permission`]: slopty_proto::ctl::CtlReply::Permission
-//! [`PermissionAsk`]: slopty_proto::ctl::PermissionAsk
-//! [`PermissionAnswer`]: slopty_proto::ctl::PermissionAnswer
-//!
-//! A worker that is not running reads nothing; the relay then prints nothing, at once.
-//!
-//! **Auto mode's declines.** In auto mode a classifier stands in for the person, and when it
-//! turns a call down Claude Code runs `PermissionDenied`, synchronously too. Its one answer is
-//! `hookSpecificOutput.retry: true`, which tells the model it may try the call again; the
-//! decline itself stands. So the same ask carries that hook: the worker shows the decline on
-//! the thread, and holds a yes or no ("Let it try again") for whoever can answer it, as it holds
-//! an approval. An allow prints the retry; anything else prints nothing, and the decline stands.
-//! A decline the classifier reached no verdict on is shown and not held, since Claude Code
-//! ignores the retry for it ([`retryable`]).
-
-use std::time::Duration;
+//! - deny, with a message for the model, and stop the turn when the person says so.
 
 use serde_json::{Value, json};
-use slopty_core::{SessionId, WallMs};
-use slopty_proto::ctl::Decision;
 
-use crate::conversation::{Declined, Grant, PermissionPrompt, Suggestion, Verdict};
-use crate::{Hook, HookEvent};
+use crate::conversation::{Grant, Suggestion, Verdict};
 
-/// The hooks the relay asks the worker with and waits on, registered without `async`: a
-/// permission request, and auto mode's decline, which may be let try again.
-pub const HELD: [HookEvent; 2] = [HookEvent::PermissionRequest, HookEvent::PermissionDenied];
-
-/// The `timeout` the [`HELD`] entries are registered with, in seconds.
-///
-/// Claude Code's own default for command hooks. Past it, Claude Code cancels the hook and shows
-/// its dialog, or lets the decline stand.
-pub const HOOK_TIMEOUT_S: u32 = 600;
-
-/// How long the relay waits for a decision: the hook's timeout less a margin, so the relay
-/// answers "no decision" itself before Claude Code gives up on it.
-pub const WAIT: Duration = Duration::from_secs(HOOK_TIMEOUT_S as u64 - 5);
-
-/// The start of the `reason` of a decline the classifier reached no verdict on, as Claude Code's
-/// hooks reference spells it.
-pub const NO_VERDICT: &str = "Auto mode could not evaluate this action";
-
-/// The whole `reason` of a decline because the classifier could not be reached.
-pub const CLASSIFIER_UNAVAILABLE: &str = "Classifier unavailable";
-
-/// Whether the `PermissionDenied` `hook` is a decline the person may let the model try again.
-///
-/// Claude Code ignores `retry` when the classifier produced no verdict (its reply did not
-/// parse, or a safety check refused the classifier's own request); a classifier that could not
-/// be reached gave none either.
-#[must_use]
-pub fn retryable(hook: &Hook) -> bool {
-    let reason = hook.reason.as_deref().unwrap_or_default().trim();
-    hook.event == HookEvent::PermissionDenied
-        && !reason.starts_with(NO_VERDICT)
-        && reason != CLASSIFIER_UNAVAILABLE
+/// What Claude Code is told of a permission.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Decision {
+    /// Run the call with this input.
+    Allow {
+        /// The input it runs with.
+        updated_input: Value,
+    },
+    /// Run it, and apply these permission updates.
+    AllowAlways {
+        /// The input it runs with.
+        updated_input: Value,
+        /// The updates, as Claude Code suggested them.
+        updated_permissions: Vec<Value>,
+    },
+    /// Refuse it.
+    Deny {
+        /// Why, for the model.
+        message: String,
+        /// Also stop the turn.
+        interrupt: bool,
+    },
 }
 
-/// The decline a `PermissionDenied` `hook` in terminal `session`, heard at `at_ms`, tells the
-/// thread.
-#[must_use]
-pub fn declined(session: SessionId, hook: &Hook, at_ms: WallMs) -> Declined {
-    Declined {
-        session,
-        call: hook.tool_use_id.clone(),
-        tool: hook.tool_name.clone().unwrap_or_default(),
-        line: hook.tool_detail(),
-        reason: hook.reason.clone().unwrap_or_default(),
-        retryable: retryable(hook),
-        at_ms,
-    }
-}
-
-/// What the hook for `event` prints for Claude Code on `decision`; `None` prints nothing.
-///
-/// For `PermissionRequest`, `hookSpecificOutput.decision` as the hooks reference defines it,
-/// and nothing for no decision. For `PermissionDenied`, an allow is `retry: true` and anything
-/// else nothing: the decline stands.
-#[must_use]
-pub fn hook_output(event: HookEvent, decision: &Decision) -> Option<Value> {
-    if event == HookEvent::PermissionDenied {
-        return matches!(decision, Decision::Allow { .. } | Decision::AllowAlways { .. })
-            .then(|| json!({ "hookSpecificOutput": { "hookEventName": event, "retry": true } }));
-    }
-    let output = match decision {
-        Decision::Pass => return None,
-        Decision::Allow { updated_input: None } => json!({ "behavior": "allow" }),
-        Decision::Allow { updated_input: Some(input) } => {
-            json!({ "behavior": "allow", "updatedInput": input })
-        }
-        Decision::AllowAlways { updated_input: None, updated_permissions } => {
-            json!({ "behavior": "allow", "updatedPermissions": updated_permissions })
-        }
-        Decision::AllowAlways { updated_input: Some(input), updated_permissions } => {
-            json!({
-                "behavior": "allow",
-                "updatedInput": input,
-                "updatedPermissions": updated_permissions,
-            })
-        }
-        Decision::Deny { message, interrupt: false } => {
-            json!({ "behavior": "deny", "message": message })
-        }
-        Decision::Deny { message, interrupt: true } => {
-            json!({ "behavior": "deny", "message": message, "interrupt": true })
-        }
-    };
-    Some(json!({
-        "hookSpecificOutput": { "hookEventName": HookEvent::PermissionRequest, "decision": output }
-    }))
-}
-
-/// The tools whose permission prompt is the person's answer rather than a yes or no: Claude
-/// Code takes an allow for them from a hook only with an `updatedInput`, and shows its own
-/// dialog when the allow comes without one.
+/// The tools whose permission is the person's answer rather than a yes or no.
 const ASKS_THE_PERSON: [&str; 2] = ["AskUserQuestion", "ExitPlanMode"];
 
-/// Whether the `PermissionRequest` `hook` is a yes or no that "Allow" or "Deny" answers whole.
+/// Whether a permission for `tool` is a yes or no that "Allow" or "Deny" answers whole.
 ///
 /// Such a prompt may be answered from a notification or the inbox, without the conversation in
 /// view. A question wants its answers and a plan wants reading, so those wait for the
-/// conversation face (a pocketed phone's among them, opened from its note) or the TUI.
+/// conversation face.
 #[must_use]
-pub fn approvable(hook: &Hook) -> bool {
-    hook.tool_name.as_deref().is_some_and(|tool| !ASKS_THE_PERSON.contains(&tool))
+pub fn approvable(tool: &str) -> bool {
+    !tool.is_empty() && !ASKS_THE_PERSON.contains(&tool)
 }
 
-/// The decision a person's verdict on the `PermissionRequest` `hook` makes.
+/// The decision a person's verdict on a permission for a call with `input` makes.
 ///
-/// "Allow always" hands back every one of the hook's `permission_suggestions`, as Claude
-/// Code's own "Yes, and always …" does. An allow for a tool that asks the person carries the
-/// call's own input back, and an answer carries it with the answers, keyed by each question's
-/// text as `AskUserQuestion` reads them. A denial without words gets some.
+/// `suggestions` are the updates Claude Code suggested.
+///
+/// "Allow always" hands back every suggestion, as Claude Code's own "Yes, and always …" does. An
+/// answer carries the call's input with the answers, keyed by each question's text as
+/// `AskUserQuestion` reads them. A denial without words gets some.
 #[must_use]
-pub fn decision(verdict: &Verdict, hook: &Hook) -> Decision {
-    let input = || hook.tool_input.clone().unwrap_or_else(|| json!({}));
-    let asks_the_person =
-        || hook.tool_name.as_deref().is_some_and(|tool| ASKS_THE_PERSON.contains(&tool));
+pub fn decision(verdict: &Verdict, input: &Value, suggestions: &Value) -> Decision {
     match verdict {
-        Verdict::Allow => Decision::Allow { updated_input: asks_the_person().then(input) },
+        Verdict::Allow => Decision::Allow { updated_input: input.clone() },
         Verdict::Answer { answers } => {
-            let mut input = input();
+            let mut input = input.clone();
             let answers: serde_json::Map<String, Value> = answers
                 .iter()
                 .map(|a| (a.question.clone(), Value::String(a.answer.clone())))
@@ -175,16 +70,11 @@ pub fn decision(verdict: &Verdict, hook: &Hook) -> Decision {
             if let Some(fields) = input.as_object_mut() {
                 fields.insert("answers".to_owned(), Value::Object(answers));
             }
-            Decision::Allow { updated_input: Some(input) }
+            Decision::Allow { updated_input: input }
         }
         Verdict::AllowAlways => Decision::AllowAlways {
-            updated_input: asks_the_person().then(input),
-            updated_permissions: hook
-                .permission_suggestions
-                .as_ref()
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default(),
+            updated_input: input.clone(),
+            updated_permissions: suggestions.as_array().cloned().unwrap_or_default(),
         },
         Verdict::Deny { message, interrupt } => Decision::Deny {
             message: if message.trim().is_empty() {
@@ -197,33 +87,24 @@ pub fn decision(verdict: &Verdict, hook: &Hook) -> Decision {
     }
 }
 
-/// The prompt a follower is shown for a `PermissionRequest` hook.
-///
-/// It carries the call as the conversation will show it ([`crate::conversation::proposed`]),
-/// the call it is about when the worker matched one (`call`, from the hooks before it), and what
-/// "allow always" would grant.
+/// The permission result Claude Code takes for `decision`.
 #[must_use]
-pub fn prompt(
-    session: SessionId,
-    ask: u64,
-    (hook, call): (&Hook, Option<String>),
-    asked_ms: WallMs,
-    until_ms: WallMs,
-) -> PermissionPrompt {
-    let tool = hook.tool_name.clone().unwrap_or_default();
-    let input = hook.tool_input.clone().unwrap_or(Value::Null);
-    PermissionPrompt {
-        session,
-        ask,
-        call: hook.tool_use_id.clone().or(call),
-        detail: crate::conversation::proposed(&tool, &input),
-        tool,
-        suggestions: hook.permission_suggestions.as_ref().map(suggestions).unwrap_or_default(),
-        mode: hook.permission_mode.clone(),
-        asked_ms,
-        until_ms,
-        declined: (hook.event == HookEvent::PermissionDenied)
-            .then(|| hook.reason.clone().unwrap_or_default()),
+pub fn result(decision: &Decision) -> Value {
+    match decision {
+        Decision::Allow { updated_input } => {
+            json!({ "behavior": "allow", "updatedInput": updated_input })
+        }
+        Decision::AllowAlways { updated_input, updated_permissions } => json!({
+            "behavior": "allow",
+            "updatedInput": updated_input,
+            "updatedPermissions": updated_permissions,
+        }),
+        Decision::Deny { message, interrupt: false } => {
+            json!({ "behavior": "deny", "message": message })
+        }
+        Decision::Deny { message, interrupt: true } => {
+            json!({ "behavior": "deny", "message": message, "interrupt": true })
+        }
     }
 }
 
@@ -282,184 +163,60 @@ mod tests {
     use super::*;
     use crate::conversation::Answer;
 
-    /// A decision prints what the hooks reference defines, and no decision prints nothing.
-    /// (The socket lines are pinned beside `CtlRequest` in `slopty-proto`.)
-    #[test]
-    fn a_decision_is_the_output_the_hooks_reference_defines() {
-        let asked = HookEvent::PermissionRequest;
-        assert_eq!(hook_output(asked, &Decision::Pass), None);
-        let stop = Decision::Deny { message: "stop".to_owned(), interrupt: true };
-        assert_eq!(
-            hook_output(asked, &stop).map(|o| o["hookSpecificOutput"]["decision"].clone()),
-            Some(json!({ "behavior": "deny", "message": "stop", "interrupt": true }))
-        );
-    }
-
-    /// A tool call is a yes or no an approver answers; a question, a plan and a request that
-    /// names no tool are not.
+    /// A tool call is a yes or no an approver answers; a question and a plan are not.
     #[test]
     fn only_a_tool_call_is_approvable_from_outside_the_conversation() {
-        let asking =
-            |tool: Option<&str>| Hook { tool_name: tool.map(str::to_owned), ..Hook::default() };
-        assert!(approvable(&asking(Some("Bash"))));
-        assert!(approvable(&asking(Some("mcp__github__create_issue"))));
-        assert!(!approvable(&asking(Some("AskUserQuestion"))));
-        assert!(!approvable(&asking(Some("ExitPlanMode"))));
-        assert!(!approvable(&asking(None)));
+        assert!(approvable("Bash"));
+        assert!(approvable("mcp__github__create_issue"));
+        assert!(!approvable("AskUserQuestion"));
+        assert!(!approvable("ExitPlanMode"));
+        assert!(!approvable(""));
     }
 
-    /// The suggestions of the `permission` capture, and the kinds the SDK documents besides,
-    /// typed; "allow always" hands them back as they came.
+    /// The suggestions Claude Code makes, typed; "allow always" hands them back as they came,
+    /// with the call's input, and a silent denial gets words.
     #[test]
-    fn a_prompt_words_the_call_and_what_always_would_grant() {
-        let hook = Hook::parse(
-            &json!({
-                "hook_event_name": "PermissionRequest", "permission_mode": "default",
-                "tool_name": "Edit",
-                "tool_input": {
-                    "file_path": "/work/a.rs", "old_string": "fn a() {\n    1\n}",
-                    "new_string": "fn a() {\n    2\n}"
-                },
-                "permission_suggestions": [
-                    { "type": "addDirectories", "directories": ["/work"], "destination": "session" },
-                    { "type": "setMode", "mode": "acceptEdits", "destination": "session" },
-                    { "type": "addRules", "behavior": "allow", "destination": "localSettings",
-                      "rules": [{ "toolName": "Bash", "ruleContent": "npm test:*" }, { "toolName": "Read" }] },
-                    { "type": "removeDirectories", "directories": ["/tmp"] }
-                ]
-            })
-            .to_string(),
-        )
-        .expect("hook");
-        let prompt = prompt(
-            SessionId::nil(),
-            7,
-            (&hook, None),
-            WallMs::from_millis(1_000),
-            WallMs::from_millis(2_000),
-        );
+    fn always_hands_back_what_claude_code_suggested() {
+        let given = json!([
+            { "type": "addDirectories", "directories": ["/work"], "destination": "session" },
+            { "type": "setMode", "mode": "acceptEdits", "destination": "session" },
+            { "type": "addRules", "behavior": "allow", "destination": "localSettings",
+              "rules": [{ "toolName": "Bash", "ruleContent": "npm test:*" }, { "toolName": "Read" }] },
+            { "type": "removeDirectories", "directories": ["/tmp"] }
+        ]);
+        let typed = suggestions(&given);
+        assert_eq!(typed.len(), 4);
         assert_eq!(
-            (prompt.tool.as_str(), prompt.ask, prompt.mode.as_deref()),
-            ("Edit", 7, Some("default"))
-        );
-        let crate::conversation::ToolDetail::Edit(edit) = &prompt.detail else {
-            panic!("an edit: {:?}", prompt.detail);
-        };
-        assert_eq!(
-            (edit.path.as_str(), edit.patch.added, edit.patch.removed),
-            ("/work/a.rs", 1, 1)
-        );
-        assert_eq!(
-            edit.patch.hunks.first().map(|h| h.lines.clone()),
-            Some(vec![
-                " fn a() {".to_owned(),
-                "-    1".to_owned(),
-                "+    2".to_owned(),
-                " }".to_owned()
-            ])
-        );
-        let session = Some("session".to_owned());
-        assert_eq!(
-            prompt.suggestions,
-            [
-                Suggestion {
-                    grant: Grant::Directories { directories: vec!["/work".to_owned()] },
-                    destination: session.clone()
-                },
-                Suggestion {
-                    grant: Grant::Mode { mode: "acceptEdits".to_owned() },
-                    destination: session
-                },
-                Suggestion {
-                    grant: Grant::Rules {
-                        behavior: "allow".to_owned(),
-                        rules: vec!["Bash(npm test:*)".to_owned(), "Read".to_owned()]
-                    },
-                    destination: Some("localSettings".to_owned())
-                },
-                Suggestion {
-                    grant: Grant::Other { kind: "removeDirectories".to_owned() },
-                    destination: None
-                },
-            ]
-        );
-        let given = hook.permission_suggestions.as_ref();
-        let always = decision(&Verdict::AllowAlways, &hook);
-        assert_eq!(
-            always,
-            Decision::AllowAlways {
-                updated_input: None,
-                updated_permissions: given.and_then(Value::as_array).cloned().unwrap_or_default()
+            typed[2].grant,
+            Grant::Rules {
+                behavior: "allow".to_owned(),
+                rules: vec!["Bash(npm test:*)".to_owned(), "Read".to_owned()]
             }
         );
+        assert_eq!(typed[3].grant, Grant::Other { kind: "removeDirectories".to_owned() });
+        let input = json!({ "command": "npm test" });
+        let always = result(&decision(&Verdict::AllowAlways, &input, &given));
+        assert_eq!(always["updatedPermissions"], given);
+        assert_eq!(always["updatedInput"], input);
+        let silent = Verdict::Deny { message: " ".to_owned(), interrupt: true };
+        let denied = result(&decision(&silent, &input, &Value::Null));
         assert_eq!(
-            decision(&Verdict::Allow, &hook),
-            Decision::Allow { updated_input: None },
-            "an edit's allow leaves its input to the model"
+            (denied["behavior"].as_str(), denied["interrupt"].as_bool()),
+            (Some("deny"), Some(true))
         );
-        let silent = decision(&Verdict::Deny { message: " ".to_owned(), interrupt: false }, &hook);
-        assert!(
-            matches!(silent, Decision::Deny { message, interrupt: false } if !message.trim().is_empty())
-        );
+        assert_ne!(denied["message"].as_str().unwrap_or_default().trim(), "");
     }
 
     /// An answer to `AskUserQuestion` is an allow whose input is the call's own with the
-    /// answers keyed by each question's text; a plan's approval hands its input back, without
-    /// which Claude Code would show its own dialog.
+    /// answers keyed by each question's text.
     #[test]
-    fn an_answer_and_a_plan_approval_carry_the_calls_input() {
-        let questions = json!([{
-            "question": "Which layout?", "header": "Layout", "multiSelect": false,
-            "options": [{ "label": "Split", "description": "Side by side" }, { "label": "Stacked" }]
-        }, {
-            "question": "Which panes?", "header": "Panes", "multiSelect": true,
-            "options": [{ "label": "Files" }, { "label": "Terminal" }]
-        }]);
-        let hook = Hook::parse(
-            &json!({
-                "hook_event_name": "PermissionRequest", "tool_name": "AskUserQuestion",
-                "tool_input": { "questions": questions }
-            })
-            .to_string(),
-        )
-        .expect("hook");
-        let answers = vec![
-            Answer { question: "Which layout?".to_owned(), answer: "Split".to_owned() },
-            Answer { question: "Which panes?".to_owned(), answer: "Files, Terminal".to_owned() },
-        ];
-        let answered = decision(&Verdict::Answer { answers }, &hook);
-        assert_eq!(
-            hook_output(HookEvent::PermissionRequest, &answered)
-                .map(|o| o["hookSpecificOutput"]["decision"].clone()),
-            Some(json!({
-                "behavior": "allow",
-                "updatedInput": {
-                    "questions": questions,
-                    "answers": { "Which layout?": "Split", "Which panes?": "Files, Terminal" }
-                }
-            }))
-        );
-
-        let plan = json!({ "plan": "1. Split the view" });
-        let hook = Hook::parse(
-            &json!({
-                "hook_event_name": "PermissionRequest", "tool_name": "ExitPlanMode",
-                "tool_input": plan
-            })
-            .to_string(),
-        )
-        .expect("hook");
-        assert_eq!(
-            hook_output(HookEvent::PermissionRequest, &decision(&Verdict::Allow, &hook))
-                .map(|o| o["hookSpecificOutput"]["decision"].clone()),
-            Some(json!({ "behavior": "allow", "updatedInput": plan }))
-        );
-        let keep = Verdict::Deny { message: "Keep the old layout".to_owned(), interrupt: false };
-        assert_eq!(
-            hook_output(HookEvent::PermissionRequest, &decision(&keep, &hook))
-                .map(|o| o["hookSpecificOutput"]["decision"].clone()),
-            Some(json!({ "behavior": "deny", "message": "Keep the old layout" })),
-            "keep planning is a denial that lets the turn go on"
-        );
+    fn an_answer_carries_the_calls_input() {
+        let input = json!({ "questions": [{ "question": "Which layout?", "options": [] }] });
+        let answers =
+            vec![Answer { question: "Which layout?".to_owned(), answer: "Split".to_owned() }];
+        let answered = result(&decision(&Verdict::Answer { answers }, &input, &Value::Null));
+        assert_eq!(answered["behavior"], "allow");
+        assert_eq!(answered["updatedInput"]["answers"]["Which layout?"], "Split");
+        assert_eq!(answered["updatedInput"]["questions"], input["questions"]);
     }
 }

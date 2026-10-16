@@ -646,7 +646,10 @@ impl Workspace {
         let Some(caller) =
             self.server.as_ref().and_then(|s| s.task.as_ref()).map(ServerTask::caller)
         else {
-            Self::show_notice(format!("Could not wake {name}: the server does not answer yet"), cx);
+            Self::show_failure(
+                format!("Could not wake {name}: the server does not answer yet"),
+                cx,
+            );
             return;
         };
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -655,7 +658,10 @@ impl Workspace {
         });
         cx.spawn(async move |this, cx| {
             let Ok(outcome) = rx.await else { return };
-            let _gone = this.update(cx, |_, cx| Self::show_notice(wake_notice(&name, outcome), cx));
+            let _gone = this.update(cx, |_, cx| match wake_notice(&name, outcome) {
+                Ok(sent) => Self::show_notice(sent, cx),
+                Err(failed) => Self::show_failure(failed, cx),
+            });
         })
         .detach();
     }
@@ -687,15 +693,17 @@ fn older_server_notice(notice: &UpdateNotice, deploys: bool) -> String {
 pub(crate) const OLDER_SERVER: &str = "The server runs an older build";
 
 /// What the person hears of a wake sent for the worker called `name`.
-fn wake_notice(name: &str, outcome: Outcome) -> String {
+/// The words for a wake's outcome: `Ok` for a wake sent, `Err` for one that did not go, which
+/// shows as a failure.
+fn wake_notice(name: &str, outcome: Outcome) -> Result<String, String> {
     match outcome {
         Outcome::WakeSent { by, .. } => {
-            format!("{by} sent {name} a wake; it shows online once it is up")
+            Ok(format!("{by} sent {name} a wake; it shows online once it is up"))
         }
-        Outcome::Error { message, .. } => format!("Could not wake {name}: {message}"),
+        Outcome::Error { message, .. } => Err(format!("Could not wake {name}: {message}")),
         other => {
             tracing::warn!(?other, "a wake answered with something else");
-            format!("Could not wake {name}: the server answered something else")
+            Err(format!("Could not wake {name}: the server answered something else"))
         }
     }
 }
@@ -829,6 +837,20 @@ mod tests {
         assert_eq!(one["dst"], serde_json::json!(["100.64.0.9"]), "one node, by its address");
     }
 
+    /// A wake that cannot go says so as a failure, not as a neutral notice.
+    #[gpui::test]
+    fn a_wake_with_no_server_is_a_failure(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let (ws, cx) = crate::tests::shell(cx, &runtime, &dir, false);
+        ws.update(cx, |ws, cx| ws.wake_worker(WorkerId::new(), cx));
+        cx.run_until_parked();
+        let shown = cx.update(|_, cx| slopty_shell::toast::shown(cx));
+        let (kind, words) = shown.last().expect("a toast");
+        assert_eq!(*kind, slopty_shell::toast::ToastKind::Error, "{words}");
+        assert!(words.starts_with("Could not wake"), "{words}");
+    }
+
     /// The server's Copy grant puts the grant on the clipboard, as the policy file takes it, and
     /// says so.
     #[gpui::test]
@@ -889,7 +911,7 @@ mod tests {
         let sent = Outcome::WakeSent { by: "hub".to_owned(), to: vec!["en0".to_owned()] };
         assert_eq!(
             wake_notice("studio", sent),
-            "hub sent studio a wake; it shows online once it is up"
+            Ok("hub sent studio a wake; it shows online once it is up".to_owned())
         );
         let refused = Outcome::Error {
             code: ErrorCode::ServerUnreachable,
@@ -897,7 +919,7 @@ mod tests {
         };
         assert_eq!(
             wake_notice("studio", refused),
-            "Could not wake studio: the link to the server has stopped"
+            Err("Could not wake studio: the link to the server has stopped".to_owned())
         );
     }
 }

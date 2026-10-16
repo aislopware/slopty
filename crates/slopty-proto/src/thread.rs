@@ -31,7 +31,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
-use slopty_core::{ClientId, SessionId, WallMs};
+use slopty_core::{ClientId, WallMs};
 use uuid::Uuid;
 
 pub mod attention;
@@ -204,17 +204,14 @@ impl AgentId {
     }
 }
 
-/// How Slopty reaches an agent. Open; the known ones are [`Drive::OBSERVED`],
-/// [`Drive::SHARED`] and [`Drive::DRIVEN`].
+/// How Slopty reaches an agent. Open; the known ones are [`Drive::SHARED`] and
+/// [`Drive::DRIVEN`].
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 pub struct Drive(pub String);
 
 impl Drive {
-    /// Slopty runs the agent over its protocol, and its TUI takes over by a handoff at idle.
+    /// Slopty runs the agent over its protocol.
     pub const DRIVEN: &'static str = "driven";
-    /// Its own TUI runs in a terminal and Slopty reads what it publishes (hooks, transcript,
-    /// mod), typing into the TUI only on the person's word.
-    pub const OBSERVED: &'static str = "observed";
     /// Slopty is a second live client of the agent's own server, beside its TUI.
     pub const SHARED: &'static str = "shared";
 
@@ -239,12 +236,13 @@ pub struct Cap(pub String);
 impl Cap {
     /// Requests are answered through Slopty ([`wire::Intent::Answer`]).
     pub const APPROVALS: &'static str = "approvals";
+    /// [`wire::Intent::End`]: the agent's process is ended, its background work with it, and
+    /// its conversation kept to be taken up again.
+    pub const END: &'static str = "end";
     /// [`wire::Intent::Fork`]: a new thread branched off this one.
     pub const FORK: &'static str = "fork";
     /// [`wire::Intent::Interrupt`].
     pub const INTERRUPT: &'static str = "interrupt";
-    /// The agent's own TUI is live beside the face.
-    pub const LIVE_TUI: &'static str = "live-tui";
     /// [`wire::Intent::Send`] with [`Delivery::Queue`], held until the turn ends, and the
     /// editing of what is held.
     pub const QUEUE: &'static str = "queue";
@@ -260,6 +258,8 @@ impl Cap {
     pub const SET_MODE: &'static str = "set-mode";
     /// [`wire::Intent::SetModel`].
     pub const SET_MODEL: &'static str = "set-model";
+    /// [`wire::Intent::SetOption`].
+    pub const SET_OPTION: &'static str = "set-option";
     /// The worker snapshots the working tree at each turn edge ([`Action::Snapshot`]).
     pub const SNAPSHOTS: &'static str = "snapshots";
     /// [`wire::Intent::Send`] with [`Delivery::Steer`]: a message taken mid-turn.
@@ -289,8 +289,6 @@ pub struct ThreadMeta {
     pub cwd: String,
     /// What it is about, from the task or the first prompt.
     pub title: String,
-    /// The terminal its TUI runs in, when it has one.
-    pub terminal: Option<SessionId>,
     /// For a subagent: the thread and the call that started it.
     pub parent: Option<Link>,
     /// How it came to be. Open: [`ThreadMeta::PERSON`], [`ThreadMeta::SUBAGENT`],
@@ -371,6 +369,32 @@ impl ThreadMeta {
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Model {
     /// The agent's own name for it, as its switch takes it (`opus`, a full model id).
+    pub id: String,
+    /// Its name for people.
+    pub label: String,
+    /// The settings of its own it offers beside it (Codex's service tiers, Claude Code's fast
+    /// mode), each a choice of a few ([`wire::Intent::SetOption`], [`wire::Start::options`]).
+    #[serde(default)]
+    pub options: Vec<OptionOffer>,
+}
+
+/// A setting a model offers, as its agent names it ([`Model::options`]).
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct OptionOffer {
+    /// The agent's own name for it.
+    pub id: String,
+    /// Its name for people.
+    pub label: String,
+    /// What it can be set to, in the agent's order.
+    pub choices: Vec<OptionChoice>,
+    /// The choice it has unless one is made, by its id.
+    pub default: String,
+}
+
+/// One choice of an [`OptionOffer`].
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct OptionChoice {
+    /// The agent's own name for it.
     pub id: String,
     /// Its name for people.
     pub label: String,
@@ -478,7 +502,8 @@ impl Phase {
 /// What a thread waits on, in words.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Wait {
-    /// Open: `permission`, `question`, `plan`, `input`, `task`, `command`, `wakeup`, `limit`.
+    /// Open: `permission`, `question`, `plan`, `input`, `task`, `command`, `wakeup`, `limit`,
+    /// `stopping`, `compacting`, `stalled`.
     pub kind: String,
     /// What it waits for, worded by the adapter ("Wants to run cargo test").
     pub text: String,
@@ -488,9 +513,20 @@ impl Wait {
     /// At rest with only commands left running in the background (a dev server, say), named
     /// in its text: nothing of the agent's own work holds it.
     pub const COMMAND: &'static str = "command";
+    /// At work compacting its context: the turn waits on the summary, not on the model's next
+    /// word.
+    pub const COMPACTING: &'static str = "compacting";
     /// Stopped on the plan's usage limit, failed until it lifts: its windows in the row's
     /// meters say when.
     pub const LIMIT: &'static str = "limit";
+    /// A turn under way that has shown no progress for long (no event of its agent, no hook,
+    /// no transcript write, no terminal output): its text names the last thing it was doing,
+    /// when that is known. Nothing is done about it but saying so.
+    pub const STALLED: &'static str = "stalled";
+    /// A stop under way ([`wire::Intent::Interrupt`] answered
+    /// [`Accepted`](wire::Outcome::Accepted)): the worker is ending the turn, rung by rung,
+    /// and the phase leaves working once it ended. Its text says how far it went.
+    pub const STOPPING: &'static str = "stopping";
     /// At rest with work of its own left running in the background: a subagent, a monitor, a
     /// scheduled prompt, or work the adapter cannot tell apart.
     pub const TASK: &'static str = "task";
@@ -702,7 +738,8 @@ pub struct Compaction {
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Notice {
     /// Open: [`Notice::API_ERROR`], [`Notice::COMMAND`], [`Notice::DECLINED`], [`Notice::INFO`],
-    /// [`Notice::HOOK`], [`Notice::INTERRUPTED`], [`Notice::LIMIT`], [`Notice::REWOUND`].
+    /// [`Notice::HOOK`], [`Notice::INTERRUPTED`], [`Notice::LIMIT`], [`Notice::REPORT`],
+    /// [`Notice::REWOUND`].
     pub kind: String,
     /// What it says.
     pub text: Clipped,
@@ -737,6 +774,9 @@ impl Notice {
     pub const INTERRUPTED: &'static str = "interrupted";
     /// The agent stopped on a usage limit: its words, and the turn says when it resets.
     pub const LIMIT: &'static str = "limit";
+    /// Slopty's own reports handed to the agent with a turn (`slopty-server`'s deliveries, in
+    /// their `<slopty-reports>` frame), kept as they were framed.
+    pub const REPORT: &'static str = "report";
     /// The person went back to an earlier message; what came after it is gone.
     pub const REWOUND: &'static str = "rewound";
 
@@ -987,10 +1027,43 @@ pub struct Pending {
 }
 
 impl Pending {
+    /// What a refused message's reason begins with: the agent, or its own door, said no, and
+    /// the rest is its words. It never goes on its own: the person sends it again, as a new
+    /// [`wire::Intent::Send`].
+    pub const REFUSED: &'static str = "Not taken: ";
     /// Why a queued message waits once the person stopped the turn: a stop is their word to
     /// halt, so nothing queued goes on its own until they send again ([`wire::Intent::Send`]
     /// or [`wire::Intent::Promote`]), which lets the rest go after it in their order.
     pub const STOPPED: &'static str = "Held since you stopped the turn";
+    /// Why a message is held when it may or may not have reached its agent: the agent's door
+    /// went away (its process ended, its mod stopped answering, the worker restarted) after it
+    /// was handed over and before the agent said it began. It never goes on its own;
+    /// the person sends it again, as a new [`wire::Intent::Send`].
+    pub const UNKNOWN: &'static str = "It may not have reached the agent";
+
+    /// The reason of a message its agent refused, saying `why`.
+    #[must_use]
+    pub fn refused(why: &str) -> String {
+        format!("{}{why}", Self::REFUSED)
+    }
+
+    /// Whether its agent refused it ([`Self::REFUSED`]).
+    #[must_use]
+    pub fn is_refused(&self) -> bool {
+        matches!(&self.state, PendingState::Held { reason } if reason.starts_with(Self::REFUSED))
+    }
+
+    /// Whether it may or may not have reached its agent ([`Self::UNKNOWN`]).
+    #[must_use]
+    pub fn is_unknown(&self) -> bool {
+        matches!(&self.state, PendingState::Held { reason } if reason == Self::UNKNOWN)
+    }
+
+    /// Whether it waits for its moment and nothing holds it: what a queue picks from.
+    #[must_use]
+    pub fn is_waiting(&self) -> bool {
+        self.state == PendingState::Waiting
+    }
 
     /// Whether it waits on the person's stop ([`Self::STOPPED`]).
     #[must_use]
@@ -1276,6 +1349,18 @@ pub enum Action {
         /// The words as the person wrote them.
         words: String,
     },
+    /// The worker last heard the thread's agent alive at this moment, by its own clock, while a
+    /// turn was under way ([`wire::ThreadRow::lease_ms`]): the agent's own word (Claude Code's
+    /// mod beats every few seconds), else the worker's check that its process lives. A client
+    /// that sees it go stale shows the turn as no longer known to run.
+    Lease(WallMs),
+}
+
+/// The first of `pending` a queue sends next: the oldest that waits for its moment, not held
+/// for any reason (a stop, a refusal, a doubt whether it went) and not on its way.
+#[must_use]
+pub fn next_queued(pending: &[Pending]) -> Option<&Pending> {
+    pending.iter().find(|p| p.delivery == Delivery::Queue && p.is_waiting())
 }
 
 /// A window or display on the thread's worker that its agent drives.

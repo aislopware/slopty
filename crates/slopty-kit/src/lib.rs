@@ -1,21 +1,19 @@
-//! Slopty's chrome kit: what every surface is drawn with, below any view of its own.
+//! Slopty's chrome kit: the small parts every view shares, below any view of its own.
 //!
-//! * [`kit`] — gpui-kit's theme kept on the same tokens, and the chrome's parts (buttons, pills,
-//!   menus, hints, motion).
-//! * [`icons`] — the chrome's glyphs, the agents' marks, drawn by us.
+//! * [`kit`] — figures of one width, durations and sizes in words, motion's gate, the sparkline.
+//! * [`icons`] — how a thing stands ([`icons::Status`]).
 //! * [`colors`] — theme tokens → GPUI colours.
-//! * [`a11y`] — the keyboard ring and, for tests, the accessibility tree.
-//! * [`highlight`] — syntax colouring for a fenced code block.
-//! * [`markdown`] — the one `TextView` style every Markdown surface draws by.
+//! * [`a11y`] — for tests, the accessibility tree.
+//! * [`markdown`] — a line of Markdown said as plain words.
 //! * [`fonts`] — bundled `IBM Plex Sans`, `Lilex` and Nerd symbols, registered at startup.
 //! * [`frames`] — the UI frame-time probe (draw percentiles, cadence, drops).
 //! * [`shown`] — work timed at the instant a paint reached the display.
 //! * [`keys`] — GPUI keystrokes → protocol key events.
-//! * [`layer`] — where every floating layer (a popover, a menu, a dialog, a notice) stacks.
-//! * [`clock`], [`chrome_text`], [`file_types`] — the small pieces the views share.
+//! * [`clock`] — the wall clock the readouts are drawn by.
 //! * `retained` — the oracle: the frame shown against the same state drawn from scratch (tests).
 //!
-//! zeron's own design system is the shell's (`slopty-shell`).
+//! zeron's design system is the shell's (`slopty-shell`): what Slopty's views draw is drawn with
+//! it (`slopty_shell::live`), never again here.
 //!
 //! The views (`slopty-ui`) sit on it; nothing here reaches up to them
 //! (`docs/decisions/ui.md`, "The chrome kit is a crate of its own").
@@ -27,17 +25,13 @@
 )]
 
 pub mod a11y;
-pub mod chrome_text;
 pub mod clock;
 pub mod colors;
-pub mod file_types;
 pub mod fonts;
 pub mod frames;
-pub mod highlight;
 pub mod icons;
 pub mod keys;
 pub mod kit;
-pub mod layer;
 pub mod markdown;
 #[cfg(any(test, feature = "e2e"))]
 pub mod retained;

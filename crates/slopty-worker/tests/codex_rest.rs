@@ -88,6 +88,7 @@ mod codex_rest {
                     effort: None,
                     attachments: Vec::new(),
                     args: Vec::new(),
+                    options: std::collections::BTreeMap::new(),
                     worktree: None,
                 };
                 let outcome = handle.start(IntentId::new(), start).await;

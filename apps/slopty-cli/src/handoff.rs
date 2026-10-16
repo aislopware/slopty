@@ -25,12 +25,12 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::time::Duration;
 
-use anyhow::{Result, bail};
+use anyhow::{Context as _, Result, bail};
 use slopty_proto::ctl::{CtlReply, CtlRequest, EditAsk, Handed};
 use slopty_proto::handoff::{EditOutcome, is_openable, page};
 use slopty_pty::shell_integration::{BIN, BROWSER_SHIM, CLIPBOARD_COMMANDS, EDITOR_SHIM, OPENER};
 
-use crate::{hook, workerctl};
+use crate::workerctl;
 
 /// How long a page may take to be handed over: the worker asks each client in turn, a few
 /// seconds each.
@@ -104,12 +104,12 @@ pub async fn browse(data_dir: &Path, targets: &[String]) -> Result<ExitCode> {
 /// opened here too.
 async fn hand_over(data_dir: &Path, urls: &[String]) -> Vec<String> {
     let socket = workerctl::socket(data_dir);
-    let session = hook::session().ok().flatten();
+    let session = session().ok().flatten();
     let mut here = Vec::new();
     for (nth, url) in urls.iter().enumerate() {
         let request = CtlRequest::Open { session, url: url.clone() };
         let host = page(url).map_or_else(|| url.clone(), |p| p.host);
-        match tokio::time::timeout(OPEN_WAIT, hook::exchange(&socket, &request)).await {
+        match tokio::time::timeout(OPEN_WAIT, exchange(&socket, &request)).await {
             Ok(Ok(CtlReply::Handoff(Handed::Taken { .. }))) => {}
             Ok(Ok(CtlReply::Handoff(Handed::Offered { client, why }))) => {
                 eprintln!("slopty: {host} is offered on {client}, not opened: {why}");
@@ -242,12 +242,12 @@ pub async fn edit(data_dir: &Path, wait: bool, args: Vec<OsString>) -> Result<Ex
     };
     let path = std::path::absolute(&path)?;
     let ask = EditAsk {
-        session: hook::session().ok().flatten(),
+        session: session().ok().flatten(),
         path: path.to_string_lossy().into_owned(),
         line,
         wait,
     };
-    let reply = hook::exchange(&workerctl::socket(data_dir), &CtlRequest::Edit(ask)).await;
+    let reply = exchange(&workerctl::socket(data_dir), &CtlRequest::Edit(ask)).await;
     match reply {
         Ok(CtlReply::Handoff(
             Handed::Edited { outcome: EditOutcome::Done } | Handed::Taken { .. },
@@ -276,6 +276,32 @@ fn fallback(wait: bool, args: &[OsString], why: &str) -> Result<ExitCode> {
     eprintln!("slopty: {why}; editing in {FALLBACK_EDITOR} here");
     let e = Command::new(FALLBACK_EDITOR).args(args).exec();
     bail!("run {FALLBACK_EDITOR}: {e}")
+}
+
+/// One line out, one line back, on the control socket. The sending half stays open until the
+/// reply is in: the worker reads its closing as the edit given up.
+async fn exchange(socket: &Path, request: &CtlRequest) -> Result<CtlReply> {
+    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
+    let stream = tokio::net::UnixStream::connect(socket).await?;
+    let (rd, mut wr) = stream.into_split();
+    let mut line = serde_json::to_vec(request)?;
+    line.push(b'\n');
+    wr.write_all(&line).await?;
+    let mut reply = String::new();
+    BufReader::new(rd).read_line(&mut reply).await?;
+    drop(wr);
+    if reply.trim().is_empty() {
+        bail!("the worker closed without a reply");
+    }
+    Ok(serde_json::from_str(reply.trim())?)
+}
+
+/// The session named by `SLOPTY_SESSION`; `None` outside one.
+fn session() -> Result<Option<slopty_core::SessionId>> {
+    let Some(session) = std::env::var_os(slopty_proto::ctl::SESSION_ENV) else {
+        return Ok(None);
+    };
+    Ok(Some(session.to_string_lossy().parse().context("SLOPTY_SESSION is not a session id")?))
 }
 
 #[cfg(test)]

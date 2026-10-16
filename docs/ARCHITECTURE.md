@@ -23,7 +23,7 @@ This file is the map. Rulings and their evidence live under [docs/decisions/](DE
                      │  ┌────────────┐  fd     ┌───────────────────────────────────────┐    │
    shells/agents ◀──▶│  │ PTY keeper │ ──────▶ │ sessions · VT engine (libghostty-vt)  │    │
                      │  │ (tiny,     │ SCM_    │ frame diff · replay · fan-out          │    │
-                     │  │  outlives  │ RIGHTS  │ agent status (hooks/JSONL/mod)         │    │
+                     │  │  outlives  │ RIGHTS  │ agent threads (driven, one writer)     │    │
                      │  │  worker)   │         │ screen: SCK → VT HEVC → FEC → datagrams│    │
                      │  └────────────┘         │ input: CGEvent injection               │    │
                      │                         └──────────────┬────────────────────────┘    │
@@ -305,19 +305,25 @@ it lost (20 ms doubling to 2 s), checks the custody file names the peer's pid, a
 every session it held: `Reclaim` where ptyd still lists it, else `Adopt` with a dup of the
 master it kept, whose child ptyd then watches by pid and the kernel's start mark.
 
+**Piped sessions.** A program driven over its standard streams rather than a terminal (Claude
+Code as `claude -p` speaking stream-json) is spawned with `PtydRequest::SpawnPiped`
+(`slopty_pty::pty::spawn_piped`): one end of a Unix stream socket pair is its standard input and
+output, its standard error goes to a file the worker names (`0600`, else `/dev/null`), it runs in
+a session and process group of its own with no terminal and none of a terminal's variables, and
+ptyd keeps the other end where a PTY's master would be. Everything above holds for it: the ring
+while nobody holds it, `Attach` handing the socket over with the backlog, the taps and
+checkpoints (bytes the driver chooses), the handover to a new build (`Heir.piped`) and `Adopt`.
+So the program and a turn it runs outlive the worker driving it. A resize does nothing, and
+`Close` sends the process group `SIGTERM`, then `SIGKILL` 5 s later. `SessionInfo.piped` marks
+one, and the worker's terminals leave it to whoever spawned it (`apps/slopty-ptyd/tests/piped.rs`).
+
 **After a reboot.** ptyd's end takes the shells with it, so the worker keeps each session on
 disk itself (`slopty_worker::restore::Keeper`: a recipe and the newest checkpoint under
 `<data dir>/sessions/`). A worker that finds a recipe ptyd no longer holds reopens the session
 under its old id: a new shell in the old directory, under the old screen and a divider, and
-nothing it ran started again, except a Claude Code conversation the person left running. The
-daemon's agent tick hands the keeper what `AgentTable::resumable` says of each session: the
-conversation id (from the hooks, else the transcript's file name), the agent's directory and
-the flags of its command line that shape the session (`slopty_agent::resume`; never a prompt,
-settings or a system prompt), with the permission mode its hooks last reported. A tile opened on
-`claude` then runs `claude --resume <id> …` as its command. A shell the person typed `claude`
-into gets that line typed at its first prompt (`SessionHandle::type_at_first_prompt`: its OSC 7
-seen and its line editor holding the tty), unless a viewer types first. A conversation whose
-transcript or directory is gone comes back as the shell alone.
+nothing it ran started again. Agents are threads, not terminals: a driven Claude Code that ptyd
+no longer holds leaves its thread exited and resumable, and its next message starts it again
+with `--resume`.
 
 **The shell's environment.** Every child gets `TERM`, `COLORTERM=truecolor`, `TERM_PROGRAM`,
 `TERM_PROGRAM_VERSION` and the shell integration's `ZDOTDIR`, on top of ptyd's own. `TERM` is
@@ -382,7 +388,8 @@ and the server's hub keeps each listed terminal's agent current from the `Agent`
 `ListTerminals` (and `slopty workers`, which counts the agents waiting on a human from it)
 answers without asking each worker. `slopty-worker::orchestrate::Orchestrator`
 answers the verbs the server forwards. It opens terminals through the same path a client's
-`OpenSession` takes, types through the session's key and paste encoders, and reads text views
+`OpenSession` takes, types through the session's key and paste encoders (never into a terminal a
+coding agent runs in, `orchestrate::may_type`: an agent is driven as a thread), and reads text views
 of the engine on the session's thread (`GhosttyEngine::screen_text`, `text_lines`,
 `text_since`, `commands`). `WaitFor` sleeps on the session's `Activity` watch channel and
 matches output from a per-session mark, as `expect` does. `slopty-worker::ports` finds the TCP
@@ -424,9 +431,8 @@ task, plan or outcome of its own. The hub answers the agents' verbs itself
 - What a child comes to (a rest after 10 s, a wait on the person after 30 s, an end at once)
   and words told to an agent wait per recipient in `slopty-server::deliver`, kept in
   `deliveries.json` across restarts. A batch goes to the recipient's worker
-  (`FromServer::Deliver`), whose hooks hand it over (`slopty hook reports`,
-  `slopty_agent::reports`) or, for a thread with no terminal, as a message; the worker answers
-  `AgentReport::Delivered`. Nothing is typed into a terminal. `AgentWait` watches the agents'
+  (`FromServer::Deliver`), which sends it to the thread at that seat as a message of its own;
+  the worker answers `AgentReport::Delivered`. Nothing is typed into a terminal. `AgentWait` watches the agents'
   rows and answers once one (or each) rests, needs the person or ends; a parent that saw a
   rest is not told it again.
 - Each worker reports open facts (`ToServer::Facts`: agents, toolchains, GPUs, power and its
@@ -436,7 +442,7 @@ task, plan or outcome of its own. The hub answers the agents' verbs itself
 - `BranchBring` has the source worker bundle the branch (`Verb::BundleBranch`), reads it in
   4 MiB parts, uploads it to the target worker and has it fetched there (`Verb::FetchBundle`).
 
-The worker's seated starts add `--mcp-config=` naming `slopty mcp` (`slopty_agent::hooks`),
+The worker's seated starts add `--mcp-config=` naming `slopty mcp` (`slopty_agent::mcp`),
 which serves the eight tools (`slopty_tools::tools`: `machines`, `agent_start`, `agent_tell`,
 `agent_read`, `agent_wait`, `agent_stop`, `agents`, `branch_bring`), each also a `slopty`
 command. Every session gets `SLOPTY_SERVER`, so `slopty mcp` and the CLI inside it find the
@@ -759,7 +765,10 @@ sent at −1: above files, below video.
   128 MiB (`MEDIA_BYTES`, `FileRead::Media`). Past `INLINE_FILE_BYTES` either follows on a bulk
   stream (`FileRead::Streamed` with its `Body`, `Purpose::FileBody`). `WatchFiles` follows each
   watched file on kqueue or inotify (`slopty_worker::fswatch`) and sends a changed one again,
-  `WatchFolders` does the same for folder tiles' listings (`files::watch_folders`), and `WriteFile { path, text, base_modified_ms }` saves an edit
+  `WatchFolders` does the same for folder tiles' listings (`files::watch_folders`),
+  `WatchRepos` follows the repositories behind a git status or a diff and says `RepoMoved` once
+  a burst when something git reports on changed (`slopty_worker::repowatch`), so the view model
+  asks git again only then, and `WriteFile { path, text, base_modified_ms }` saves an edit
   (`slopty_worker::file::write`). The save writes a temporary file beside the target, fsyncs
   it and renames it over, keeping the mode and writing through a symbolic link. A file whose
   modification time is newer than `base_modified_ms` is a `Conflict` and stays as it was. A
@@ -972,12 +981,14 @@ thread. Each thread has a log under `threads/<id>/` (a snapshot plus a tail of f
 compacted at turn ends), the last few thousand actions are kept in memory for followers coming
 back, and per-thread intent outcomes are deduplicated by id. A `Follower` turns a cursor into
 frames, gathering batches within the client's latency budget and merging runs of appends.
-Claude Code is mapped into it by its observed adapter: a sans-IO codec,
-`slopty_agent::observed`, over the transcript decoder, the tracker's status, the held prompts,
-the status line and the mod's board. Its IO, `slopty_worker::thread::claude`, runs one task per
-terminal session beside the face's own path, and makes one thread per Claude Code session,
-named by the session's id, with a linked thread per subagent. Codex is mapped from its
-app-server, as one more client of the user's daemon beside the Codex TUI:
+Claude Code is driven as Claude's desktop app drives it, `claude -p` over stream-json with the
+control protocol: a sans-IO codec, `slopty_agent::claude::driven`, over the transcript decoder
+(`slopty_agent::claude::history`, which also reads a session again from its transcript), and
+its IO, `slopty_worker::thread::claude`, one task per running Claude Code, the session's one
+writer, with Claude Code itself in ptyd's custody as a piped session
+(`thread::claude::custody`), so a turn outlives the worker. One thread per session, named by
+the session's id, with a linked thread per subagent. Codex is mapped from its app-server, as
+one more client of the user's daemon:
 `slopty_agent::codex::protocol` holds the wire's types, generated by `cargo xtask codex schema`
 from the pinned build's JSON Schema, `codex::rpc` reads and writes its JSON-RPC frames, and
 `codex::shared` is the sans-IO codec from a Codex thread to Actions and from intents back to
@@ -993,11 +1004,11 @@ records. `cargo xtask pi fixtures` records the pinned pi against a canned model.
 carries the requests and the control stream carries the table (`WorkerMsg::Threads`) and each
 intent's outcome (`WorkerMsg::IntentDone`). A followed thread streams on a unidirectional
 stream of its own (`UniHead::Thread`), one task per thread on the worker
-(`apps/slopty-worker/src/threads.rs`), which also carries its pages and expansions. Following a
-thread holds its terminal's permission prompts, as following its conversation does. What is
-sent to an observed agent (a message, steered or queued, an interrupt, a model) is typed into
-its terminal by the worker's composer (`slopty_worker::thread::compose`), under the draft
-guard orchestration's input uses, with each waiting message on the thread's pending list. Each
+(`apps/slopty-worker/src/threads.rs`), which also carries its pages and expansions. What is
+sent to an agent (a message, steered or queued, an answer, an interrupt, a model) goes through
+its adapter's own door, with each waiting message on the thread's pending list. While an
+agent's process lives, the worker stamps its thread alive (`Action::Lease`, every
+`LEASE_EVERY`), and stops the moment it is gone. Each
 turn's edges are snapshotted (`git add -A` through an index of the thread's own, into
 `refs/slopty/threads/<thread>/<turn>-{before,after}`, `slopty_worker::thread::review`), off
 the turn's path. A review is a diff between two snapshots, cut into hunks on the worker, and
@@ -1012,146 +1023,42 @@ per thread, tile, worker, tree (an agent and every agent it started, across mach
 (`ToServer::Presence`: desk or handheld, active, the tiles on screen). A thread that comes to
 need them, fails or finishes is a `FromServer::Notice` to the clients they are at (a finish
 of an agent another started goes to that agent, not the person), none while
-its tile is on screen and no handheld while they are at a desk. Claude Code reaches it as
-described below.
+its tile is on screen and no handheld while they are at a desk.
 
-Claude Code runs through its own TUI, which stays the source of truth. The worker observes
-each session into the thread model (`slopty_worker::thread::claude`, `slopty_agent::observed`):
-it reads the transcript and every subagent's file (`slopty_agent::conversation::Transcripts`,
-on the blocking pool, every 250 ms and at each hook), one thread per session and per subagent,
-and a client sees it as any thread, on a thread stream. A composer types into the same PTY
-(`slopty_worker::thread::compose`). A status-line wrapper (`slopty hook statusline`) forwards
-the context, cost and rate-limit meters and still prints the person's own line, and the
-worktree that line is given (`WorkerMsg::AgentBranch`). A pull request is the thread's, read
-from the forge by the worker (`thread::pulls`).
+Claude Code's drive (`docs/decisions/agents.md`, "Each agent's drive"): each message goes as a
+user message under its intent's id and is the person's once Claude Code echoes that id; one
+not acknowledged in 120 s goes again under the same id, then is held as one that may not have
+reached it. A stop is the `interrupt` control request, and one not acknowledged in 1.5 s ends
+the process. Approvals are `can_use_tool` requests answered by their own id, and the
+`initialize` a worker sends whenever it takes a session up names those still open, so nothing
+asked is lost across a restart. Model, permission mode, effort and fast mode apply live;
+slash commands and skills go as messages; compaction, the usage limit (messages held until it
+resets), a stop under way and a turn with no progress for 16 minutes (a wake from sleep never
+counts) are waits. A worker that goes leaves Claude Code running in ptyd; the next one takes
+the session back, reads the thread again from the transcript and then what Claude Code wrote
+meanwhile. A pull request is the thread's, read from the forge by the worker
+(`thread::pulls`). Tests drive `slopty-stub-claude` (`slopty_testkit::claude_stream`), which
+speaks the same protocol and fails on cue, never a signed-in `claude`.
 
-Permission prompts are answered through the blocking `PermissionRequest` hook
-(`slopty_agent::permission`). The relay's `CtlRequest::Permission` is held on the worker
-(`apps/slopty-worker/src/threads/hold.rs`, `slopty_worker::conversation::Holds`) while a
-client follows the session's thread, or, for a plain yes-or-no tool call, while a client keeps
-the thread table (at most `APPROVAL_HOLD`), since every thread's requests show in its rows:
-that is what lets a notification's Allow and Deny, or a row under the navigator's *Needs you*,
-answer it. A held prompt is told to the session's thread observer
-(`thread::claude::Driver::permission`), which opens a request on the thread; the first
-`Intent::Answer` is the decision the relay prints. The last follower letting the thread go,
-nobody left who could answer, the wait running out, the relay going away or an
-`Intent::Release` (sent when the session's TUI is the tile in front) hands it back undecided,
-so the TUI shows its own dialog.
-
-Where Claude Code runs Slopty's mod (a plugin whose TypeScript function hooks the worker embeds
-and writes under its data dir, `slopty_agent::claude_mod`), the thread also gets what the model
-is writing before the transcript has it. The mod posts its events over HTTP to the worker's mod
-socket (`worker.mod.sock`, `apps/slopty-worker/src/modsock.rs`). They are heard only after its
-hello names a recorded Claude Code (`slopty_agent::live::gate`, `MOD_CLAUDE_VERSIONS`), and they
-become live items on the thread, each gone once the transcript's entry settles it
-(`slopty_agent::live::Overlay`). Agents the worker starts load the mod, and so does a `claude`
-typed in a Slopty shell: the shell integration's `claude` function asks `slopty hook wire` for
-the words, which wire it as the worker wires its own (the relay, the tools with a server, a
-pinned conversation, the mod). Everywhere else, the hooks, the transcript and the status line
-are the whole thread (decisions, "Slopty's Claude Code mod is the live channel").
-
-The bar's "+ agent" pill and ⌘⇧T (`NewAgent`) open a terminal running `claude` (a bare name,
-resolved on the worker through the login shell), which, like ⌘N's shell, starts in the active
-terminal's directory when there is one (`WorkspaceView::active_cwd`, the session's OSC 7 cwd as
-the worker last reported it), else the worker's default; the palette's "New agent in <dir>" line
-does the same for a directory typed in. Four signals, in precedence order: hooks
-(delivered to `slopty-worker` over its control socket by `slopty hook`, the relay Claude Code
-runs for each event) → JSONL transcript tail → terminal title/OSC → foreground-process
-presence. All four are built, and `AgentEvent.source` (`AgentSource::{Process, Title,
-Transcript, Hook}`) says which one a status came from, so a `claude` the human started by
-hand gets the same pill, badges and attention as a hooked one.
-
-**The three signals below the hooks** are read by `slopty-worker`'s own tick (`agents::watch`,
-every 750 ms) and merged by `slopty_agent::Tracker::observe`, which never lets a weaker signal
-overwrite what a stronger one said. The tick broadcasts what it found before it reads any file
-and drops anything the table has moved past (`AgentTable::is_current`), so a hook arriving
-while it works is never overwritten by the older poll. `slopty_worker`'s session actor answers a `Probe` with the
-title, the OSC 7 cwd and the tty's foreground process; `slopty_pty::process` names that
-process (`tcgetpgrp` for the foreground group, then `proc_pidinfo PROC_PIDTBSDINFO` for the
-name and start time, the `KERN_PROCARGS2` sysctl for `argv` and `PROC_PIDVNODEPATHINFO` for
-its cwd), and `slopty_agent::detect` decides from the name and `argv` alone whether it is
-Claude Code — the native launcher, a `node`/`bun`/`deno` whose *script* is the npm `cli.js`,
-or a shell running either (the kernel rewrites `argv` for a `#!` script, and `slopty_pty::pty`
-itself starts an unfound `claude` as `zsh -lic claude`). Present → `Idle`; gone → the agent is
-cleared; replaced by another process → attributed again from scratch, since a tracker follows
-a pid and its start time, not a terminal. `slopty_agent::title` maps the OSC 0/2 title to working-vs-idle from two tables: the
-spinning circle Claude Code paints while a turn runs (`◐◑◒◓`) and the sparkle it paints in
-front of the conversation's summary between turns (`✳`, or the bare name before there is a
-summary) — the frames in the pane itself (`·✢∗✻✽`) never reach the title and mean nothing
-there. `slopty_agent::discover` finds the conversation from the session's own working
-directory — Claude Code writes `~/.claude/projects/<cwd with every non-alphanumeric character
-replaced by `-`>/<session uuid>.jsonl`, and the live file is the newest one modified at or
-after the process started — and `transcript::progress` reads `Working` / `Tool` / `Done` out
-of its newest record. That lookup is repeated every eighth tick (`AgentTable::discoveries`
-carries the file being read): `/clear` and `/resume` start a new file, and the tail moves to
-it and starts over rather than freezing on the old conversation's last record. The transcript
-can never report `Blocked`: a permission prompt is only written once it has been answered, so
-blocking stays a hook-only signal. Once a hook has spoken for a session, the tick fills gaps
-only (the transcript path) and never changes the status; it ends the
-agent only when a `claude` the worker actually watched in the foreground has been gone for four
-probes, which is how a killed agent loses its pill without a `SessionEnd`. The app offers no
-install for a session attributed without hooks: a `claude` typed into a Slopty shell is wired by
-the shell integration and an agent Slopty starts gets the relay on its command line, so only a
-`claude` reached by path or through a wrapper goes unhooked. Slopty never writes the person's
-own `~/.claude/settings.json`.
-
-The worker spawns every session with `SLOPTY_SESSION=<id>` and `SLOPTY_WORKER_SOCKET=<path>`;
-the relay forwards its stdin plus those two to the daemon as `CtlRequest::Hook` and always
-exits 0. A `PermissionRequest` goes instead as one `CtlRequest::Permission`, which the worker
-takes in as a hook and then holds for a decision. `slopty-agent` keeps one `Tracker` per session that turns the hook stream into
-`AgentStatus` (`Idle`, `Working`, `Tool`, `Blocked{Permission|Question|Elicitation|IdlePrompt}`,
-`Done`) and flags `attention` on the transitions worth a sound. A block is a ledger of the
-calls waiting on the human (`tool_use_id`s), so a concurrent call finishing beside a pending
-permission does not release it; and a hook naming another agent session (a nested `claude -p`
-inherits the terminal's session) is dropped while the tracker is busy. An Esc interrupt fires
-no hook; the transcript's `[Request interrupted by user]` record takes the agent to `Idle`
-instead. `AgentEvent.detail` says what
-the agent wants: the tool call awaiting permission, the question it asked, the elicitation's
-message, or on `Done` the last line it said (`last_assistant_message` from the `Stop` payload).
-A question or elicitation that arrives without its text, as a notification does, makes the
-daemon read the JSONL tail (`slopty_agent::transcript`) off the blocking pool to fill it in. The daemon
-hands each change to the observed Claude Code thread (`Daemon::heard`), whose row in the thread
-table is the one account of the agent that clients and the server read. The workspace shows the status
-as a pill in the terminal tile's header and outlines the tile when the agent needs the human.
-A blocked badge (permission, question or elicitation) is itself the button: a click reveals
-and focuses the terminal so the human answers Claude Code's own prompt there; Slopty never
-answers for them. Finding them: ⌘⇧A (the "Next Thing Needing You" menu item) reveals and focuses the
-next rung of the attention ladder on any worker, cycling from the active item: a waiting agent,
-then a finish not yet looked at, failed ones first; the bell's badge counts
-the agents that wait and the turns left to review, and the bell (⌘⇧U) shows the navigator at
-them, under *Needs you* and *To review* (the phone's way in).
-`slopty hook report working|blocked|done|idle|gone [message]`, run from inside a session by any
-program (a wrapper around another agent), is the same relay with the agent's own word, and
-gets the same pill, badge, attention and banner.
-On macOS the count is also the Dock badge, an attention event bounces the Dock icon when the
-app is not active, and (bundled app only) a notification-centre banner
-is posted; clicking it activates the app and reveals the session
-(`WorkspaceView::notification_response`).
-
-**Attribution tests.** Unit: `slopty_agent::detect` (the executable name, `argv[0]`, runtimes
-and shells), `slopty_agent::title` (every frame of both tables, and the in-pane spinner
-reading as nothing), `slopty_agent::discover` (the escaped project directory, the newest
-recent `.jsonl` in a temp home, and the file moving after a `/clear`),
-`transcript::progress` (which record means what), and the precedence merge itself
-(`a_hand_started_claude_is_attributed_from_the_process_and_the_title`,
-`hooks_outrank_everything_and_decide_when_the_agent_ends`,
-`a_transcript_read_for_the_first_time_is_not_an_alert`); `slopty_pty::process` reads its own
-process out of the process table and the foreground process of a PTY it spawned. App self-test:
-`an_agent_started_without_hooks_is_attributed_from_what_the_worker_can_see`, which puts a fake
-`claude` first on ptyd's `PATH` with a `HOME` of its own
-(`Stack::launch_with_fake_claude`), opens it with ⌘⇧T and walks it from stage to stage with
-marker files — the agent is played by the program in the session and by the harness's
-environment, never by typing into the shell under test.
+Finding what needs the person: ⌘⇧A (the "Next Thing Needing You" menu item) reveals and
+focuses the next rung of the attention ladder on any worker, cycling from the active item: a
+waiting agent, then a finish not yet looked at, failed ones first; the bell's badge counts the
+agents that wait and the turns left to review, and the bell (⌘⇧U) shows the navigator at them,
+under *Needs you* and *To review* (the phone's way in). On macOS the count is also the Dock
+badge, an attention event bounces the Dock icon when the app is not active, and (bundled app
+only) a notification-centre banner is posted; clicking it activates the app and reveals the
+thread (`WorkspaceView::notification_response`).
 
 ## 6. UI
 
 GPUI (fork: `aislopware/gpui-fast`, GPUI imported flat out of zed with longbridge's Retained
 Mode, with our iOS commits and the zed imports merged in; the bases live in
-`xtask/upstream.toml`) plus gpui-kit (fork: `aislopware/gpui-kit`, upstream main plus one commit
-re-pointing deps at gpui-fast). `cargo xtask upstream check` shows the drift, `cargo xtask
-upstream sync` merges or rebases, pushes and moves the `Cargo.lock` pins. The iOS backend is zed PR
-
-#63068's `gpui_ios` on top of the pin, extended in the fork for the surface element (zero-copy
+`xtask/upstream.toml`) plus gpui-kit (fork: `aislopware/gpui-kit`, upstream main plus our
+commits, one of them re-pointing deps at gpui-fast). `cargo xtask upstream check` shows the drift,
+`cargo xtask upstream sync` merges or rebases, pushes and moves the `Cargo.lock` pins. The iOS
+backend is the fork's own `gpui_ios`, grown from zed PR #63068's August draft (zed merged a
+rewrite of it that lacks what follows; the fork keeps its own, `docs/decisions/tooling.md`),
+extended in the fork for the surface element (zero-copy
 video), `Window::insets()` (safe area, keyboard), a native pinch recognizer, hardware keyboards and
 pointers, a VoiceOver bridge (`gpui_ios/src/ios/a11y.rs`: GPUI's accesskit tree mirrored as
 `UIAccessibilityElement`s on the Metal view) and `Window::a11y_tree()` / `set_a11y_active()` under
@@ -1467,7 +1374,7 @@ same deploy with `--update` runs from a wrong-build tile's "Update"
 | `slopty-capture` | the capture seam (`CaptureSource`); ScreenCaptureKit on macOS | worker |
 | `slopty-codec` | the encoder seam (`VideoEncoder`, `AudioEncoder`); VideoToolbox encode (worker) / decode (all) | split |
 | `slopty-input` | the input and clipboard seams (`InputSink`, `Board`); CGEvent injection for remote-window input (keymap, pointer/scroll/keys, owner activation, a thread per stream, held input let go at the end) and `NSPasteboard` on macOS | worker |
-| `slopty-agent` | Claude Code hook payloads → per-session `AgentStatus` | worker |
+| `slopty-agent` | each agent's drive as a sans-IO codec (Claude Code's stream-json, Codex's app-server, pi's RPC, ACP), the transcript decoder and the thread mapping, and what a terminal shows of an agent run by hand (`AgentTable`) | worker |
 | `slopty-worker` | session manager, mux, fan-out, the orchestration verbs, worker capabilities, listening ports | worker |
 | `slopty-tailnet` | the local Tailscale daemon's `LocalAPI`: peers and paths, `whois` and grants, admission policy | all |
 | `slopty-tools` | the orchestration verbs as one contract: name resolution, each verb, bulk files, JSON/text views, and the agents' MCP tools | all |
@@ -1486,7 +1393,7 @@ same deploy with `--update` runs from a wrong-build tile's "Update"
 | `apps/slopty-server` | server daemon (LaunchAgent, systemd user unit on Linux) | server |
 | `apps/slopty` | macOS app: logging, runtime, window options, then `slopty_app::open_workspace` | client |
 | `apps/slopty-ios` | iOS static library, called from a UIKit shim: `slopty_ios_did_finish_launching` at launch (logging, the notification delegate), then `slopty_ios_run` once the scene connects; `cargo xtask ios sim [--sim iphone\|ipad]\|device` generates the Xcode project | client |
-| `apps/slopty-cli` | `slopty` CLI: worker ctl and install, `add`/`workers`/`forget`, the orchestration verbs (`--json`), `slopty mcp`, raw-mode reference client (`open`/`attach`), hook relay | all |
+| `apps/slopty-cli` | `slopty` CLI: worker ctl and install, `add`/`workers`/`forget`, the orchestration verbs (`--json`), `slopty mcp`, raw-mode reference client (`open`/`attach`) | all |
 | `xtask` | all scripts (build, gates, bundle, sign, icon from `assets/icon.svg`, `e2e app|ios|worker|screen|input|all` for the self-test and the gated live tests) | dev |
 
 Dependency direction is strictly downward in that table; `slopty-ui` never sees `slopty-worker`.

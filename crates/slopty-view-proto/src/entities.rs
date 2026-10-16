@@ -99,6 +99,10 @@ pub struct Device {
     // app offers it; the Devices page shows each and calls `DeviceAction` with its id.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub actions: Vec<DeviceAction>,
+    // slopty: where this client reaches the machine (its tailnet name or address), for the
+    // person's own tools: an editor's SSH remote. None for this machine's own worker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_host: Option<String>,
 }
 
 // slopty: one thing the person can do to a machine or the server, named by the app.
@@ -264,6 +268,10 @@ pub struct Chat {
     /// terminal, its checkout), not an agent started on its own.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub in_parent: bool,
+    // slopty: what the person was writing to it and has not sent, as a device last kept it on
+    // its machine; the composer restores it on open.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft: Option<String>,
 }
 
 impl Chat {
@@ -323,6 +331,40 @@ pub enum SessionStatus {
     Working,
     AwaitingInput,
     Errored,
+    // slopty: an agent's phases stay apart instead of folding into Idle.
+    /// At its prompt, waiting on its own background work or a wakeup, not on the person:
+    /// nothing to stop, and it works again when what it waits on wakes it.
+    Waiting,
+    /// It finished what it was asked.
+    Done,
+    /// The person stopped it.
+    Stopped,
+}
+
+// slopty: what a session waits on, for the sidebar's reason line.
+/// What a session waits on: while it awaits the person, the request it holds open; while it
+/// works, a wait of its own such as `compacting`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionWait {
+    /// Open: `question` (the agent asks), `plan` (a plan to approve), `approval` (a call to
+    /// allow), `compacting` (its context is being summarised); any other awaits input.
+    pub kind: String,
+    /// The request's tool in a line ("run cargo test"), control and bidi characters taken
+    /// out, at most 60 graphemes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+}
+
+impl SessionWait {
+    /// The agent asks the person questions.
+    pub const QUESTION: &'static str = "question";
+    /// A plan waits for approval.
+    pub const PLAN: &'static str = "plan";
+    /// A call waits to be allowed.
+    pub const APPROVAL: &'static str = "approval";
+    /// The agent's context is being summarised.
+    pub const COMPACTING: &'static str = "compacting";
 }
 
 /// Live run status for a chat — drives the Working indicator and sidebar status dots.
@@ -346,6 +388,13 @@ pub struct Session {
     /// has not opened; read it through `view::running_subagents`.
     #[serde(default)]
     pub running_subagents: u32,
+    // slopty: since when its status stands, on its machine's clock, and what it waits on.
+    /// When the status last changed, as the worker says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_since: Option<DateTime<Utc>>,
+    /// What it waits on, while it waits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting_on: Option<SessionWait>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1295,6 +1344,17 @@ pub enum AgentLoginStatus {
     Pending,
     Done,
     Error,
+}
+
+// slopty: an agent's plan windows on the Agents page, from what its threads published.
+/// An agent's plan windows, the freshest any machine heard, and when it heard them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentUsage {
+    /// Its windows, the most used first.
+    pub windows: Vec<AgentUsageWindow>,
+    /// When its agent said them.
+    pub fetched_at: Option<DateTime<Utc>>,
 }
 
 /// CLI plan rate-limit window (accounts settings meters) — NOT app token accounting.

@@ -2,10 +2,11 @@
 //! its own.
 //!
 //! Item-level events (`FileEvents`), delivered without waiting out the latency after a quiet
-//! spell (`NoDefer`), and told when a watched root itself moves (`WatchRoot`). Two users: a
+//! spell (`NoDefer`), and told when a watched root itself moves (`WatchRoot`). Three users: a
 //! worktree's quick-open index (`find::watch`), which hears every path made or removed however
-//! deep, and a folder tile's follower on macOS (`fswatch`), which hears a write inside a file,
-//! which a kqueue watch on the folder cannot.
+//! deep, a folder tile's follower on macOS (`fswatch`), which hears a write inside a file,
+//! which a kqueue watch on the folder cannot, and a repository's follower (`repowatch`), which
+//! hears everything its status and diffs could change on, however deep.
 //!
 //! `FSEventStreamStart` waits on fseventsd: 0.3 to 2.7 s a start on macOS 27, where a macOS
 //! 26.6 runner made two in a 134 ms test. Meanwhile any other `FSEvents` call of the process
@@ -30,7 +31,8 @@ use objc2_core_services::{
 pub use objc2_core_services::{
     FSEventStreamEventFlags as Flags, kFSEventStreamEventFlagItemChangeOwner,
     kFSEventStreamEventFlagItemCloned, kFSEventStreamEventFlagItemCreated,
-    kFSEventStreamEventFlagItemInodeMetaMod, kFSEventStreamEventFlagItemModified,
+    kFSEventStreamEventFlagItemInodeMetaMod, kFSEventStreamEventFlagItemIsDir,
+    kFSEventStreamEventFlagItemIsFile, kFSEventStreamEventFlagItemModified,
     kFSEventStreamEventFlagItemRemoved, kFSEventStreamEventFlagItemRenamed,
     kFSEventStreamEventFlagKernelDropped, kFSEventStreamEventFlagMustScanSubDirs,
     kFSEventStreamEventFlagRootChanged, kFSEventStreamEventFlagUnmount,
@@ -140,6 +142,10 @@ impl Stream {
     }
 }
 
+/// What a [`Starting`] calls once, from the queue it starts on: when the stream is up, or when
+/// `FSEvents` refused it.
+pub type Callback = Box<dyn FnOnce() + Send>;
+
 /// A stream started off the caller's thread, which says when it is up. It hears every event
 /// after the last one the stream it takes over from had heard, or what happens from the moment
 /// its start begins when it takes over from none, so the two leave no gap between them. Dropping
@@ -166,17 +172,23 @@ impl Starting {
     /// Ask for the stream `wanted`, taking over from `after`, started on a global dispatch
     /// queue, which then calls `up` unless the stream was dropped first. A stream `FSEvents`
     /// refuses is said in the log, and `up` is not called.
-    pub fn spawn(wanted: Wanted, after: Option<&Self>, up: Box<dyn FnOnce() + Send>) -> Self {
-        let queue = GlobalQueueIdentifier::QualityOfService(DispatchQoS::UserInitiated);
-        Self::spawn_on(&DispatchQueue::global_queue(queue), wanted, after, up)
+    pub fn spawn(wanted: Wanted, after: Option<&Self>, up: Callback) -> Self {
+        Self::spawn_or(wanted, after, up, Box::new(|| {}))
     }
 
-    /// [`Starting::spawn`] on `queue`.
+    /// [`Starting::spawn`], calling `refused` instead of `up` when `FSEvents` refuses the
+    /// stream, unless it was dropped first.
+    pub fn spawn_or(wanted: Wanted, after: Option<&Self>, up: Callback, refused: Callback) -> Self {
+        let queue = GlobalQueueIdentifier::QualityOfService(DispatchQoS::UserInitiated);
+        Self::spawn_on(&DispatchQueue::global_queue(queue), wanted, after, (up, refused))
+    }
+
+    /// [`Starting::spawn_or`] on `queue`.
     fn spawn_on(
         queue: &DispatchQueue,
         wanted: Wanted,
         after: Option<&Self>,
-        up: Box<dyn FnOnce() + Send>,
+        (up, refused): (Callback, Callback),
     ) -> Self {
         let Wanted { paths, latency, label, handler } = wanted;
         let slot = Arc::new(Mutex::new(None));
@@ -199,6 +211,9 @@ impl Starting {
             let roots: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
             let Some(stream) = Stream::start(&roots, after, latency, label, handler) else {
                 tracing::info!(label, "no FSEvents stream");
+                if kept.strong_count() > 0 {
+                    refused();
+                }
                 return;
             };
             // Dropped meanwhile, the stream is stopped here as it goes out of scope.
@@ -424,9 +439,12 @@ mod tests {
                 }),
             },
             None,
-            Box::new(move || {
-                let _sent = said.try_send(());
-            }),
+            (
+                Box::new(move || {
+                    let _sent = said.try_send(());
+                }),
+                Box::new(|| {}),
+            ),
         );
         drop(starting);
         open.send(()).unwrap();

@@ -11,21 +11,21 @@
 //! opened then, and its head written, so the next start reads the head alone.
 //!
 //! A thread opened goes back to its head once it has rested ([`Host::rest`]): nobody follows it,
-//! nothing used it for a while, and it holds nothing the worker alone knows (a message typed and
-//! not yet seen, a first message, one scheduled). Its next use opens it again, the same, so a
+//! nothing used it for a while, and it holds nothing the worker alone knows (a message
+//! scheduled). Its next use opens it again, the same, so a
 //! worker that runs for weeks holds the threads in use and not every thread ever opened.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
 use slopty_core::{SessionId, WallMs};
-use slopty_proto::thread::wire::{Outcome, Page, Start, TableFrame, ThreadRow};
+use slopty_proto::thread::wire::{Outcome, Page, Start, TableFrame};
 use slopty_proto::thread::{
     Action, AgentId, Cursor, Edge, Fork, IntentId, ItemBody, ItemId, Link, Pending, PendingState,
-    Phase, ThreadId, ThreadMeta, ThreadState, ToolCall, ToolState, TreeRef, TurnId, UserMessage,
+    Phase, ThreadId, ThreadMeta, ThreadState, ToolCall, ToolState, TreeRef, TurnId,
 };
 use tokio::sync::{broadcast, watch};
 
@@ -125,8 +125,6 @@ struct Inner {
     seat_env: Option<EnvOf>,
     /// Told whenever a scheduled message is added or changed ([`Host::schedule_changed`]).
     scheduling: Arc<tokio::sync::Notify>,
-    /// The threads whose start is held at Claude Code's trust dialog ([`Host::hold_start`]).
-    held: Vec<ThreadId>,
     /// The starts under way, as kept ([`Host::start_under_way`]).
     under_way: Vec<UnderWay>,
 }
@@ -142,10 +140,6 @@ impl std::fmt::Debug for EnvOf {
 
 /// The file in a thread's directory that keeps the seat it was started at ([`Seated`]).
 const SEAT_FILE: &str = "seat.json";
-
-/// The file in a thread's directory that keeps its start while Claude Code is held at its
-/// trust dialog ([`HeldStart`]).
-const HELD_START_FILE: &str = "held-start.json";
 
 /// The file in the threads' directory that keeps the starts under way ([`UnderWay`]).
 const UNDER_WAY_FILE: &str = "starts-under-way.json";
@@ -166,22 +160,6 @@ pub struct UnderWay {
     pub begun: bool,
 }
 
-/// A Claude Code start held at its trust dialog, kept in its thread's directory so the person's
-/// "Trust this folder" still opens it again after the worker restarts ([`Host::hold_start`]).
-///
-/// It holds nothing secret: what the start gave `claude` (the session, the model, the mode, the
-/// first message, a seat's system text), never the relay, a token or a seat's variables, which are
-/// given afresh where it opens again.
-#[derive(Clone, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
-pub struct HeldStart {
-    /// What `claude` was opened with.
-    pub args: Vec<String>,
-    /// The session it was opened on.
-    pub native: String,
-    /// The folder it was opened in.
-    pub cwd: String,
-}
-
 #[derive(Debug)]
 struct Hosted {
     log: Log,
@@ -198,8 +176,6 @@ impl Hosted {
     fn resting(&self, before: std::time::Instant) -> bool {
         self.used <= before
             && self.feed.receiver_count() == 0
-            && self.own.typed.is_empty()
-            && self.own.first.is_none()
             && self.own.scheduled.is_empty()
             && self.trees_kept()
     }
@@ -245,8 +221,6 @@ impl Hosted {
 /// ([`Host::reset`]) gets them back as the adapter tells its items and turns again.
 #[derive(Debug, Default)]
 struct Own {
-    /// Messages typed and not yet seen in the thread.
-    typed: VecDeque<Typed>,
     /// The intent each of the person's items came from.
     sent: HashMap<ItemId, IntentId>,
     /// Each turn's snapshots.
@@ -267,91 +241,6 @@ struct Own {
     /// The messages the worker holds until their moment ([`super::schedule`]), which no
     /// adapter knows: put back in every pending list an adapter tells.
     scheduled: Vec<Pending>,
-    /// The start's first message, given on the agent's command line: on its way in the
-    /// pending list until the agent's item for it shows ([`Host::first_message`]).
-    first: Option<IntentId>,
-}
-
-/// Messages typed whose items are waited for; past it the oldest is given up.
-const TYPED: usize = 64;
-
-/// A message typed into its agent's terminal, until the agent's item for it shows.
-#[derive(Debug)]
-struct Typed {
-    intent: IntentId,
-    /// The person's words.
-    words: String,
-    /// What was typed: the words with the paths of the files sent with them after.
-    text: String,
-}
-
-impl Typed {
-    /// Whether `message`, an item the agent made of something typed, is this message.
-    ///
-    /// The agent keeps the head of a long one ([`slopty_proto::thread::Clipped::is_clipped`]),
-    /// which is this one's when it begins this one's text and counts its characters. Of a whole
-    /// one, its words count, the spacing aside: a command as its name and arguments, the
-    /// pictures Claude Code took from the paths typed (`[Image #1]`) left out, and of the paths
-    /// typed only those it kept in its text.
-    fn is(&self, message: &UserMessage) -> bool {
-        let shown = &message.text;
-        if shown.is_clipped() {
-            let head = spaced(shown.text.strip_suffix('…').unwrap_or(&shown.text));
-            let counted = |text: &str| {
-                let whole = u32::try_from(text.chars().count()).unwrap_or(u32::MAX);
-                let trimmed = u32::try_from(text.trim().chars().count()).unwrap_or(u32::MAX);
-                shown.chars == whole || shown.chars == trimmed
-            };
-            return [&self.text, &self.words]
-                .into_iter()
-                .any(|text| counted(text) && spaced(text).starts_with(&head));
-        }
-        let said = said(message);
-        let (words, text) = (spaced(&self.words), spaced(&self.text));
-        if said == text || said == words {
-            return true;
-        }
-        // The paths typed after the words, of which the agent kept some in its text.
-        let Some(rest) = said.strip_prefix(&words) else { return false };
-        let paths: Vec<&str> =
-            text.strip_prefix(&words).unwrap_or_default().split_whitespace().collect();
-        rest.split_whitespace().all(|kept| paths.contains(&kept))
-    }
-}
-
-/// `text`'s words, each run of spaces one space, the ends trimmed.
-fn spaced(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-/// What `message` says as a person typed it ([`spaced`]): a command with its name, without the
-/// placeholders Claude Code puts for the pictures it took from paths typed.
-fn said(message: &UserMessage) -> String {
-    let mut text = String::with_capacity(message.text.text.len());
-    let mut rest = message.text.text.as_str();
-    while let Some((before, after)) = rest.split_once("[Image #") {
-        text.push_str(before);
-        match after.split_once(']') {
-            Some((number, tail))
-                if !number.is_empty() && number.chars().all(|c| c.is_ascii_digit()) =>
-            {
-                text.push(' ');
-                rest = tail;
-            }
-            _ => {
-                text.push_str("[Image #");
-                rest = after;
-            }
-        }
-    }
-    text.push_str(rest);
-    let text = spaced(&text);
-    match message.command.as_deref() {
-        Some("!") => format!("!{text}"),
-        Some(command) if text.is_empty() => command.to_owned(),
-        Some(command) => format!("{command} {text}"),
-        None => text,
-    }
 }
 
 impl Own {
@@ -387,42 +276,7 @@ impl Own {
                 _ => p.clone(),
             })
             .collect();
-        Self {
-            typed: VecDeque::new(),
-            sent,
-            trees,
-            fork,
-            seat,
-            seated: None,
-            aside,
-            parent,
-            scheduled,
-            first: None,
-        }
-    }
-
-    /// Wait for the agent's item for message `intent`, the person's `words` typed as `text`.
-    fn typed(&mut self, intent: IntentId, words: &str, text: &str) {
-        if self.typed.len() >= TYPED {
-            self.typed.pop_front();
-        }
-        self.typed.retain(|typed| typed.intent != intent);
-        let (words, text) = (words.to_owned(), text.to_owned());
-        self.typed.push_back(Typed { intent, words, text });
-    }
-
-    /// The start's first message, once `actions` show the agent's item for it: it leaves the
-    /// pending list.
-    fn took_first(&mut self, actions: &[Action]) -> Option<IntentId> {
-        let first = self.first?;
-        let shown = actions.iter().any(|action| {
-            matches!(
-                action,
-                Action::ItemStarted(item) | Action::ItemUpdated(item) | Action::ItemCompleted(item)
-                    if matches!(&item.body, ItemBody::User(m) if m.intent == Some(first))
-            )
-        });
-        shown.then(|| self.first.take()).flatten()
+        Self { sent, trees, fork, seat, seated: None, aside, parent, scheduled }
     }
 
     /// `pending`, an adapter's list, with the messages the worker holds put back after it.
@@ -476,12 +330,7 @@ impl Own {
                         self.sent.insert(item.id.clone(), intent);
                         continue;
                     }
-                    message.intent = self.sent.get(&item.id).copied().or_else(|| {
-                        let at = self.typed.iter().position(|typed| typed.is(message))?;
-                        let typed = self.typed.remove(at)?;
-                        self.sent.insert(item.id.clone(), typed.intent);
-                        Some(typed.intent)
-                    });
+                    message.intent = self.sent.get(&item.id).copied();
                 }
                 Action::TurnStarted(turn) => {
                     if let Some((before, after)) = self.trees.get(&turn.id) {
@@ -518,7 +367,6 @@ impl Host {
     pub fn open(dir: &Path, limits: Limits) -> io::Result<Self> {
         std::fs::create_dir_all(dir)?;
         let mut cold = HashMap::new();
-        let mut held = Vec::new();
         let mut table = Table::new(ThreadId::new().as_uuid().as_u64_pair().1);
         for entry in std::fs::read_dir(dir)? {
             // One entry the OS will not list is one thread lost, not every thread.
@@ -532,12 +380,8 @@ impl Host {
             if !path.is_dir() {
                 continue;
             }
-            let held_start = path.join(HELD_START_FILE).is_file();
             if let Some(head) = Log::head(&path) {
                 table.put(head.row.clone());
-                if held_start {
-                    held.push(head.row.id);
-                }
                 cold.insert(head.row.id, head);
                 continue;
             }
@@ -548,9 +392,6 @@ impl Host {
                 Ok(mut hosted) => {
                     let row = hosted.log.state().row(WallMs::now());
                     table.put(row.clone());
-                    if held_start {
-                        held.push(row.id);
-                    }
                     match hosted.log.write_head(&row) {
                         Ok(head) => {
                             cold.insert(row.id, head);
@@ -591,79 +432,10 @@ impl Host {
                 },
                 seat_env: None,
                 scheduling: Arc::default(),
-                held,
                 under_way,
             })),
         };
-        host.settle_cut_off();
         Ok(host)
-    }
-
-    /// Each start's first message an earlier worker left on its way, settled: gone from the
-    /// list once its thread shows the agent took it, else held saying it may have gone
-    /// ([`super::schedule::CUT_OFF`]), for the person to withdraw or send again; its item still
-    /// takes it off the list if it shows later. It went on the agent's command line, not through
-    /// ptyd, so nothing would type it again, and a message the composer was typing waits to go
-    /// again as a read again leaves it (ptyd types it only if it never took it).
-    fn settle_cut_off(&self) {
-        let sending = self.visit(|s| {
-            let sending: Vec<IntentId> = s
-                .pending
-                .iter()
-                .filter(|p| p.state == PendingState::Sending)
-                .map(|p| p.intent)
-                .collect();
-            (!sending.is_empty()).then_some((s.meta.id, sending))
-        });
-        for (thread, intents) in sending {
-            let first: Vec<IntentId> = {
-                let inner = self.inner.lock();
-                intents.into_iter().filter(|i| inner.starts.started(*i, thread)).collect()
-            };
-            if first.is_empty() {
-                continue;
-            }
-            self.update(thread, |state| {
-                let took = |intent: IntentId| {
-                    state
-                        .items
-                        .iter()
-                        .any(|i| matches!(&i.body, ItemBody::User(m) if m.intent == Some(intent)))
-                };
-                let pending = state
-                    .pending
-                    .iter()
-                    .filter(|p| !(first.contains(&p.intent) && took(p.intent)))
-                    .map(|p| {
-                        if first.contains(&p.intent) {
-                            let reason = super::schedule::CUT_OFF.to_owned();
-                            Pending { state: PendingState::Held { reason }, ..p.clone() }
-                        } else {
-                            p.clone()
-                        }
-                    })
-                    .collect();
-                (vec![Action::PendingSet(pending)], ())
-            });
-            // Its item, when the agent's transcript is read again, still takes it off the list:
-            // that item is known as it as any message typed is.
-            let mut inner = self.inner.lock();
-            let Some(hosted) = inner.hosted(thread) else { continue };
-            let held: Vec<Pending> = hosted
-                .log
-                .state()
-                .pending
-                .iter()
-                .filter(|p| first.contains(&p.intent))
-                .cloned()
-                .collect();
-            for pending in held {
-                let paths = pending.attachments.iter().map(String::as_str);
-                let text = slopty_agent::attach::with_paths(&pending.text, paths);
-                hosted.own.typed(pending.intent, &pending.text, &text);
-                hosted.own.first.get_or_insert(pending.intent);
-            }
-        }
     }
 
     /// Host a new thread.
@@ -826,8 +598,7 @@ impl Host {
         // What waits to be sent, whether the tree is to review and the person's own marks
         // (how far they have seen it, what they were writing, their name for it and their own
         // words for its messages) are the worker's, which no agent's session has: they stay.
-        // One that was being sent went to ptyd whole or not at all, under a delivery named for
-        // it: it waits to go again, and ptyd types it only if it never took it.
+        // One that was being sent waits to go again: its adapter says once it went.
         let mut state = state;
         hosted.own.meta(&mut state.meta);
         state.pending.clone_from(&hosted.log.state().pending);
@@ -836,8 +607,7 @@ impl Host {
         state.draft.clone_from(&hosted.log.state().draft);
         state.named.clone_from(&hosted.log.state().named);
         state.said.clone_from(&hosted.log.state().said);
-        let first = hosted.own.first;
-        for pending in state.pending.iter_mut().filter(|p| Some(p.intent) != first) {
+        for pending in &mut state.pending {
             if pending.state == PendingState::Sending {
                 pending.state = PendingState::Waiting;
             }
@@ -864,7 +634,6 @@ impl Host {
     pub fn remove(&self, thread: ThreadId) -> io::Result<()> {
         let mut inner = self.inner.lock();
         inner.table.remove(thread);
-        inner.held.retain(|t| *t != thread);
         if inner.cold.remove(&thread).is_some() {
             return std::fs::remove_dir_all(inner.dir.join(thread.to_string()));
         }
@@ -936,57 +705,6 @@ impl Host {
             .collect()
     }
 
-    /// `thread`'s start is held at Claude Code's trust dialog: kept in its directory until it is
-    /// taken ([`Self::take_held_start`]) or the thread goes. One that cannot be written is
-    /// warned of, and is kept for this run alone.
-    pub fn hold_start(&self, thread: ThreadId, start: &HeldStart) {
-        let mut inner = self.inner.lock();
-        inner.load(thread);
-        if !inner.threads.contains_key(&thread) {
-            return;
-        }
-        let dir = inner.dir.join(thread.to_string());
-        if let Err(e) = write_atomic(&dir, HELD_START_FILE, start) {
-            tracing::warn!(%thread, "its held start could not be kept: {e}");
-        }
-        if !inner.held.contains(&thread) {
-            inner.held.push(thread);
-        }
-    }
-
-    /// The start `thread` holds at Claude Code's trust dialog, taken: it is kept no more.
-    #[must_use]
-    pub fn take_held_start(&self, thread: ThreadId) -> Option<HeldStart> {
-        let mut inner = self.inner.lock();
-        let at = inner.held.iter().position(|t| *t == thread)?;
-        inner.held.remove(at);
-        let path = inner.dir.join(thread.to_string()).join(HELD_START_FILE);
-        drop(inner);
-        let start = std::fs::read(&path).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok());
-        if let Err(e) = std::fs::remove_file(&path)
-            && e.kind() != io::ErrorKind::NotFound
-        {
-            tracing::warn!(%thread, "its held start could not be let go: {e}");
-        }
-        start
-    }
-
-    /// Every start held at Claude Code's trust dialog, as kept: across a restart too.
-    #[must_use]
-    pub fn held_starts(&self) -> Vec<(ThreadId, HeldStart)> {
-        let (dir, held) = {
-            let inner = self.inner.lock();
-            (inner.dir.clone(), inner.held.clone())
-        };
-        held.into_iter()
-            .filter_map(|thread| {
-                let bytes =
-                    std::fs::read(dir.join(thread.to_string()).join(HELD_START_FILE)).ok()?;
-                Some((thread, serde_json::from_slice(&bytes).ok()?))
-            })
-            .collect()
-    }
-
     /// The seat `thread` was started at, if it was ([`Self::seated`]).
     #[must_use]
     pub fn seated_of(&self, thread: ThreadId) -> Option<Seated> {
@@ -1018,81 +736,6 @@ impl Host {
             })
         };
         open.map(|(thread, _)| *thread).or_else(|| cold().map(|(thread, _)| *thread))
-    }
-
-    /// The person's `words` were typed for intent `id` into `thread`'s agent as `text` (with
-    /// the paths of the files sent with them): the item the agent makes of it is marked with the
-    /// intent ([`slopty_proto::thread::UserMessage::intent`]).
-    pub fn typed(&self, thread: ThreadId, id: IntentId, words: &str, text: &str) {
-        let mut inner = self.inner.lock();
-        inner.load(thread);
-        let Some(hosted) = inner.threads.get_mut(&thread) else { return };
-        hosted.own.typed(id, words, text);
-    }
-
-    /// Settle the messages a restart caught being typed into `thread`'s agent
-    /// ([`super::schedule::CHECKING`]): once its transcript was read again they wait to go
-    /// (`went_on`, the agent back in the terminal they were typed into, whose delivery names
-    /// guard them, and the transcript's copy of one that went takes it off the list); else, its
-    /// agent back elsewhere or not back at all, each waits for the person as cut off.
-    pub fn settle_checking(&self, thread: ThreadId, went_on: bool) {
-        let mut guard = self.inner.lock();
-        let inner = &mut *guard;
-        inner.load(thread);
-        let Some(hosted) = inner.threads.get_mut(&thread) else { return };
-        let checking = |p: &Pending| matches!(&p.state, PendingState::Held { reason } if reason == super::schedule::CHECKING);
-        if !hosted.log.state().pending.iter().any(checking) {
-            return;
-        }
-        let now = if went_on {
-            PendingState::Waiting
-        } else {
-            PendingState::Held { reason: super::schedule::CUT_OFF.to_owned() }
-        };
-        let pending =
-            hosted
-                .log
-                .state()
-                .pending
-                .iter()
-                .map(|p| {
-                    if checking(p) {
-                        Pending { state: now.clone(), ..p.clone() }
-                    } else {
-                        p.clone()
-                    }
-                })
-                .collect();
-        apply(hosted, &mut inner.table, &inner.heard, vec![Action::PendingSet(pending)]);
-    }
-
-    /// Whether `thread` was last in a terminal other than `terminal`.
-    #[must_use]
-    pub fn moved(&self, thread: ThreadId, terminal: SessionId) -> bool {
-        let mut inner = self.inner.lock();
-        inner.load(thread);
-        inner
-            .threads
-            .get(&thread)
-            .and_then(|h| h.log.state().meta.terminal)
-            .is_some_and(|was| was != terminal)
-    }
-
-    /// The first message of the start that opened `thread`'s agent, `pending`, given on the
-    /// agent's command line rather than typed: it shows in the thread's pending list, on its way,
-    /// from the start until the agent's item for it shows, so a client sees what was sent while
-    /// the agent is still opening (or held at a dialog of its own). Typed text matches it to its
-    /// item as [`Self::typed`] says.
-    pub fn first_message(&self, thread: ThreadId, pending: Pending) {
-        let mut guard = self.inner.lock();
-        let inner = &mut *guard;
-        inner.load(thread);
-        let Some(hosted) = inner.threads.get_mut(&thread) else { return };
-        hosted.own.first = Some(pending.intent);
-        let mut list = hosted.log.state().pending.clone();
-        list.retain(|p| p.intent != pending.intent);
-        list.insert(0, pending);
-        apply(hosted, &mut inner.table, &inner.heard, vec![Action::PendingSet(list)]);
     }
 
     /// Every turn edge any thread reaches from now on.
@@ -1144,13 +787,6 @@ impl Host {
     #[must_use]
     pub fn state(&self, thread: ThreadId) -> Option<(ThreadState, Cursor)> {
         self.inner.lock().hosted(thread).map(|h| (h.log.state().clone(), h.log.cursor()))
-    }
-
-    /// The row of the thread whose agent runs in terminal `session`, hanging from no other:
-    /// the latest to change, when several did.
-    #[must_use]
-    pub fn at_terminal(&self, session: SessionId) -> Option<ThreadRow> {
-        self.inner.lock().table.at_terminal(session).cloned()
     }
 
     /// The table rows a client holding `have` lacks.
@@ -1312,7 +948,7 @@ impl Host {
     }
 
     /// Note that intent `id` came to `outcome`, for a start whose thread began on its own (an
-    /// observed or shared agent's, which the adapter begins when the agent first speaks). A
+    /// shared agent's, which the adapter begins when the agent first speaks). A
     /// repeat of the id gets the first outcome back.
     pub fn record_start(&self, id: IntentId, outcome: Outcome) -> Outcome {
         let mut inner = self.inner.lock();
@@ -1467,19 +1103,7 @@ impl Inner {
         let Some(head) = self.cold.remove(&thread) else { return };
         let dir = self.dir.join(thread.to_string());
         match Log::open(&dir, self.limits).and_then(|log| Hosted::open(&dir, log)) {
-            Ok(mut hosted) => {
-                // The start's first message, still on its way: its agent's item for it takes it
-                // off the list, after a restart too.
-                hosted.own.first = hosted
-                    .log
-                    .state()
-                    .pending
-                    .iter()
-                    .find(|p| {
-                        matches!(p.state, PendingState::Sending | PendingState::Held { .. })
-                            && self.starts.started(p.intent, thread)
-                    })
-                    .map(|p| p.intent);
+            Ok(hosted) => {
                 self.table.put(hosted.log.state().row(head.row.updated_ms));
                 self.threads.insert(thread, hosted);
             }
@@ -1531,15 +1155,6 @@ fn apply(
 ) -> Cursor {
     let edges = &heard.edges;
     hosted.own.mark(&mut actions);
-    if let Some(first) = hosted.own.took_first(&actions) {
-        let told = actions.iter().rev().find_map(|action| match action {
-            Action::PendingSet(pending) => Some(pending.clone()),
-            _ => None,
-        });
-        let mut pending = told.unwrap_or_else(|| hosted.log.state().pending.clone());
-        pending.retain(|p| p.intent != first);
-        actions.push(Action::PendingSet(pending));
-    }
     let first = hosted.log.cursor();
     let was_working = hosted.log.state().status.phase == Phase::Working;
     match hosted.log.append(&actions) {
@@ -1587,4 +1202,57 @@ fn apply(
     let _no_follower =
         hosted.feed.send(Arc::new(Batch { epoch: first.epoch, seq: first.seq, actions }));
     hosted.log.cursor()
+}
+
+/// How often a thread whose agent's process runs is stamped alive ([`Host::lease`]): well inside
+/// the time a client waits before it shows the turn as no longer known to run.
+pub const LEASE_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// A thread stamped alive for as long as this is held ([`Host::lease`]).
+#[derive(Debug)]
+pub struct Lease {
+    task: tokio::task::AbortHandle,
+    /// Set once let go: a stamp under way when it is let go is the last.
+    over: Arc<Mutex<bool>>,
+}
+
+impl Lease {
+    /// Stamp no more: the agent's process is gone. A stamp under way finishes first, so the
+    /// end told after this comes after the last stamp.
+    pub fn stop(&self) {
+        *self.over.lock() = true;
+        self.task.abort();
+    }
+}
+
+impl Drop for Lease {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+impl Host {
+    /// Stamp `thread` alive ([`Action::Lease`]) now and every [`LEASE_EVERY`] for as long as
+    /// the lease is held: its agent's process runs. Every drive holds one while its agent's
+    /// process lives and lets it go the moment the process is gone, before it tells the
+    /// thread how it ended, so no stamp comes after the end.
+    #[must_use]
+    pub fn lease(&self, thread: ThreadId) -> Lease {
+        let over = Arc::new(Mutex::new(false));
+        let (host, ended) = (self.clone(), Arc::clone(&over));
+        let task = tokio::spawn(async move {
+            let mut every = tokio::time::interval(LEASE_EVERY);
+            every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                every.tick().await;
+                let ended = ended.lock();
+                if *ended {
+                    return;
+                }
+                host.apply(thread, vec![Action::Lease(WallMs::now())]);
+                drop(ended);
+            }
+        });
+        Lease { task: task.abort_handle(), over }
+    }
 }

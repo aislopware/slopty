@@ -1,0 +1,27 @@
+Window
+Group │ Settings
+Button │ Back
+TabList │ Settings sections
+Tab │ General
+Tab │ Appearance
+Tab │ Notifications
+Tab │ Shortcuts
+Tab │ Providers
+Tab │ Devices
+Tab │ Files
+Tab │ Archived sessions
+Button │ Server: e2e-server, Connected
+Button │ Close settings
+Button │ Connect a phone or iPad
+Button │ Change server
+Button │ Copy device ID e9f40ba7495a0133207565d661dd6a9c
+Button │ Add device
+Dialog │ Add device
+TabList
+Tab │ This Mac
+Tab │ Over SSH
+Tab │ A server
+Button │ Set up the server there instead
+Alert │ Add a device from Slopty on a Mac: it installs over ssh from there
+Button
+Button │ Try again (focused)

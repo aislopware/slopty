@@ -101,6 +101,9 @@ pub struct RenderOptions {
     /// scroll state, keyed by the same element discriminator passed to
     /// [`render_block`]. `None` keeps non-chat Markdown surfaces unchanged.
     pub code: Option<HashMap<usize, CodeUi>>,
+    // slopty: a one-line shell fence's Run, which hands the line to the chat's terminal.
+    /// `None` offers no Run (previews, and a window whose shell takes no runs).
+    pub run: Option<Rc<dyn Fn(String, &mut Window, &mut gpui::App)>>,
 }
 
 #[derive(Clone)]
@@ -411,6 +414,7 @@ impl RenderOptions {
             link: None,
             workspace_root: None,
             code: None,
+            run: None, // slopty: no Run outside the transcript.
         }
     }
 }
@@ -756,7 +760,11 @@ pub fn render_block(
             header,
             rows,
             align,
-        } => render_table(header, rows, align, top_ix, ix, opts, theme, window),
+        } => {
+            // slopty: a table copies as Markdown or as CSV from its hover.
+            let table = render_table(header, rows, align, top_ix, ix, opts, theme, window);
+            table_with_copy(table, header, rows, ix, opts, theme)
+        }
         Block::Rule => div()
             .h(px(1.0))
             .w_full()
@@ -1256,6 +1264,12 @@ pub(super) fn flat_text_presented_element(
                     ));
                 }
             }
+            // slopty: find in thread washes its matches here too.
+            super::find::paint(window, surface, &sel_key, &flat_text, &layout, &|range| {
+                offsets
+                    .as_ref()
+                    .map_or_else(|| range.clone(), |map| map.displayed_range(range.clone()))
+            });
             // Register this element into the frame's document-ordered
             // registry (paint order IS document order), then the frame's
             // mouse listeners.
@@ -1385,6 +1399,7 @@ fn paint_text_selection_with_wash(
             ));
         }
     }
+    super::find::paint(window, surface, key, text, layout, &|range| range); // slopty: find.
     REGISTRY.with(|r| {
         r.borrow_mut().push(RegEntry {
             surface,
@@ -2250,6 +2265,147 @@ fn code_block_header(
     )
 }
 
+// slopty: Run in terminal, and a table's copy.
+/// The command a fence holds when it is one line of a shell language, prompt sign taken off.
+pub fn runnable_line(language: Option<&str>, code: &str) -> Option<String> {
+    let language = language?.trim().to_ascii_lowercase();
+    if !matches!(
+        language.as_str(),
+        "sh" | "bash" | "zsh" | "shell" | "console" | "shellsession" | "fish"
+    ) {
+        return None;
+    }
+    let mut lines = code.lines().filter(|line| !line.trim().is_empty());
+    let line = lines.next()?.trim();
+    if lines.next().is_some() {
+        return None;
+    }
+    let line = line
+        .strip_prefix("$ ")
+        .or_else(|| line.strip_prefix("% "))
+        .unwrap_or(line)
+        .trim();
+    (!line.is_empty()).then(|| line.to_owned())
+}
+
+fn cell_text(cell: &[InlineRun]) -> String {
+    cell.iter().map(|run| run.text.as_str()).collect::<String>().replace('\n', " ")
+}
+
+/// A table as GitHub Markdown.
+pub fn table_markdown(header: &[Vec<InlineRun>], rows: &[Vec<Vec<InlineRun>>]) -> String {
+    let cols = std::iter::once(header.len())
+        .chain(rows.iter().map(Vec::len))
+        .max()
+        .unwrap_or(0);
+    let line = |cells: &[Vec<InlineRun>]| {
+        let mut out = String::from("|");
+        for c in 0..cols {
+            let text = cells.get(c).map(|cell| cell_text(cell)).unwrap_or_default();
+            out.push(' ');
+            out.push_str(&text.replace('|', "\\|"));
+            out.push_str(" |");
+        }
+        out
+    };
+    let mut out = vec![line(header), format!("|{}", " --- |".repeat(cols))];
+    out.extend(rows.iter().map(|row| line(row)));
+    out.join("\n")
+}
+
+/// A table as CSV (RFC 4180: a field with a comma, quote or line break is quoted).
+pub fn table_csv(header: &[Vec<InlineRun>], rows: &[Vec<Vec<InlineRun>>]) -> String {
+    let field = |cell: &Vec<InlineRun>| {
+        let text = cell_text(cell);
+        if text.contains([',', '"', '\n', '\r']) {
+            format!("\"{}\"", text.replace('"', "\"\""))
+        } else {
+            text
+        }
+    };
+    std::iter::once(header)
+        .filter(|header| !header.is_empty())
+        .map(|header| header as &[Vec<InlineRun>])
+        .chain(rows.iter().map(Vec::as_slice))
+        .map(|row| row.iter().map(field).collect::<Vec<_>>().join(","))
+        .collect::<Vec<_>>()
+        .join("\r\n")
+}
+
+/// The ix a table's copy reports to [`CopyUi`], apart from its code blocks'.
+const TABLE_COPY_IX: usize = 1 << 40;
+
+fn table_with_copy(
+    table: AnyElement,
+    header: &[Vec<InlineRun>],
+    rows: &[Vec<Vec<InlineRun>>],
+    ix: usize,
+    opts: &RenderOptions,
+    theme: &Theme,
+) -> AnyElement {
+    let Some(copy) = opts.copy.clone() else {
+        return table;
+    };
+    let group: SharedString = format!("{}-table-copy{ix}", opts.row_key).into();
+    let button = |kind: usize, label: &'static str, text: String| {
+        let handler = copy.handler.clone();
+        let copied = copy.copied_ix == Some(TABLE_COPY_IX + ix * 2 + kind);
+        let id: SharedString = format!("{group}-{kind}").into();
+        let text: SharedString = text.into();
+        div()
+            .id(id)
+            .h(px(CODE_ACTION_SIZE))
+            .px(px(6.0))
+            .rounded(px(5.0))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(4.0))
+            .cursor_pointer()
+            .hover(|s| s.bg(crate::theme::ink(0.08)))
+            .text_size(px(10.5))
+            .text_color(theme.text_muted)
+            .on_click(move |_, window, cx| {
+                cx.stop_propagation();
+                handler(TABLE_COPY_IX + ix * 2 + kind, text.clone(), window, cx);
+            })
+            .child(
+                crate::icons::icon(if copied {
+                    crate::icons::CHECK
+                } else {
+                    crate::icons::COPY
+                })
+                .size(px(12.0))
+                .text_color(theme.text_muted),
+            )
+            .child(SharedString::from(if copied { "Copied" } else { label }))
+    };
+    div()
+        .relative()
+        .w_full()
+        .group(group.clone())
+        .child(table)
+        .child(
+            div()
+                .absolute()
+                .top(px(-CODE_ACTION_SIZE - 4.0))
+                .right_0()
+                .flex()
+                .flex_row()
+                .gap(px(2.0))
+                .p(px(2.0))
+                .rounded(px(7.0))
+                .bg(crate::popover::surface_bg(theme))
+                .border_1()
+                .border_color(theme.border)
+                .invisible()
+                .group_hover(group.clone(), |s| s.visible())
+                .child(button(0, "Markdown", table_markdown(header, rows)))
+                .child(button(1, "CSV", table_csv(header, rows))),
+        )
+        .into_any_element()
+}
+
 /// Shared visual shell for ordinary code and generated diagram fences.
 fn code_block_frame(
     id: SharedString,
@@ -2403,6 +2559,16 @@ fn render_code_block_source_with_actions(
     let mut actions = Vec::new();
     actions.extend(fit_button.map(IntoElement::into_any_element));
     actions.append(&mut extra_actions);
+    // slopty: a one-line shell command runs in the chat's terminal on the person's click.
+    if let (Some(run), Some(line)) = (opts.run.clone(), runnable_line(language, code)) {
+        actions.push(code_icon_action(
+            format!("{}-run{ix}", opts.row_key).into(),
+            "Run in terminal",
+            crate::icons::ACTION_PLAY,
+            Rc::new(move |window, cx| run(line.clone(), window, cx)),
+            theme,
+        ));
+    }
     actions.extend(code_copy_button(code, ix, opts, theme));
 
     let lines = div()

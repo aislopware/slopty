@@ -47,7 +47,12 @@ pub fn effective_indicator(session: Option<&Session>, now: DateTime<Utc>) -> Ind
         return Indicator::None;
     };
     match session.status {
-        SessionStatus::Idle => Indicator::None,
+        // slopty: an agent at rest, waiting on its own work, or done or stopped shows no live
+        // state; the sidebar reads which from the session itself.
+        SessionStatus::Idle
+        | SessionStatus::Waiting
+        | SessionStatus::Done
+        | SessionStatus::Stopped => Indicator::None,
         SessionStatus::Errored => Indicator::Errored,
         SessionStatus::Working | SessionStatus::AwaitingInput => {
             let age_ms = now
@@ -244,6 +249,8 @@ mod gate_tests {
             started_at: None,
             updated_at,
             running_subagents: running,
+            status_since: None, // slopty: new field.
+            waiting_on: None,   // slopty: new field.
         }
     }
 

@@ -1,13 +1,13 @@
 //! Coding agents: what starts one, how it stands, and where its work lands
 //! (`docs/decisions/projects.md`).
 //!
-//! What an agent is doing travels as its thread's row ([`crate::thread::wire::ThreadRow`]);
-//! the worker's hook tracker that feeds the row keeps its own vocabulary off the wire. An agent
+//! What an agent is doing travels as its thread's row ([`crate::thread::wire::ThreadRow`]),
+//! fed by the worker's drive of it. An agent
 //! that starts another ([`crate::orchestration::Verb::AgentStart`]) is its parent: the child's
 //! row says so ([`PARENT_FACT`]), so every device draws the same tree.
 
 use serde::{Deserialize, Serialize};
-use slopty_core::{SessionId, WallMs, WorkerId};
+use slopty_core::{WallMs, WorkerId};
 
 use crate::thread::{AgentId, Phase, ThreadId, Wait};
 
@@ -76,18 +76,6 @@ pub struct AgentEntry {
     /// [`crate::orchestration::Verb::AgentWait`] waits for. An agent idle before its first
     /// turn ended is starting, not at rest.
     pub rests: bool,
-}
-
-/// Where an agent's work lands, as its status line names it: the worktree it runs in.
-///
-/// Its branch's pull request is its thread's, which the worker reads from the forge
-/// ([`crate::thread::wire::ThreadRow::pull`]), never what the status line says of one.
-#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
-pub struct AgentBranch {
-    /// The terminal session the agent runs in.
-    pub session: SessionId,
-    /// The worktree, when the agent runs in one Claude Code made (`--worktree`).
-    pub worktree: Option<Worktree>,
 }
 
 /// A worktree Claude Code made for a session.

@@ -1,5 +1,5 @@
-//! Threads for the tests: the conversations recorded under `slopty-agent`'s fixtures, mapped by
-//! the worker's own observed adapter into the thread a follower mirrors.
+//! Threads for the tests: the conversations recorded under `slopty-agent`'s fixtures, rebuilt by
+//! the worker's own Claude Code history into the thread a follower mirrors.
 
 use std::collections::BTreeMap;
 
@@ -17,11 +17,10 @@ pub(crate) fn empty() -> ThreadState {
         native: "s1".to_owned(),
         cwd: "/w".to_owned(),
         title: "Fix the build".to_owned(),
-        terminal: None,
         parent: None,
         origin: ThreadMeta::PERSON.to_owned(),
         forked_from: None,
-        drive: Drive::named(Drive::OBSERVED),
+        drive: Drive::named(Drive::DRIVEN),
         caps: Vec::new(),
         models: Vec::new(),
         facts: BTreeMap::new(),
@@ -29,9 +28,9 @@ pub(crate) fn empty() -> ThreadState {
     })
 }
 
-/// What the worker's transcript decoder reads from the recorded session `name` under
-/// `slopty-agent`'s fixtures: its main transcript, then each subagent's.
-fn changes(name: &str) -> Vec<slopty_agent::conversation::Change> {
+/// The records of the recorded session `name` under `slopty-agent`'s fixtures, as Claude Code
+/// wrote them: its main transcript's, then each subagent's.
+fn records(name: &str) -> Vec<serde_json::Value> {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../slopty-agent/tests/fixtures/conversation")
         .join(name);
@@ -42,35 +41,19 @@ fn changes(name: &str) -> Vec<slopty_agent::conversation::Change> {
         agents.sort();
         files.extend(agents);
     }
-    let mut decoder = slopty_agent::conversation::Conversation::default();
-    let mut changes = vec![slopty_agent::conversation::Change::Reset { thread: None }];
-    for file in files {
-        let mut tail = slopty_agent::transcript::Tail::default();
-        changes.extend(decoder.read(&mut tail, &file).expect("a recorded transcript"));
-    }
-    changes
+    files
+        .iter()
+        .flat_map(|file| {
+            let text = std::fs::read_to_string(file).expect("a recorded transcript");
+            text.lines()
+                .filter(|line| !line.trim().is_empty())
+                .map(|line| serde_json::from_str(line).expect("a record"))
+                .collect::<Vec<serde_json::Value>>()
+        })
+        .collect()
 }
 
-/// The main thread of the recorded session `name`, as the worker hosts it.
+/// The main thread of the recorded session `name`, as the worker rebuilds it from its record.
 pub(crate) fn thread(name: &str) -> ThreadState {
-    let mut observed =
-        slopty_agent::observed::Observed::new("s1", "2.1.0", None, "/w", WallMs::ZERO);
-    let main = observed.main();
-    let mut outs = observed.drain();
-    outs.extend(observed.transcript(&changes(name), &[]));
-    let mut state = empty();
-    for out in outs {
-        match out {
-            slopty_agent::observed::Out::Begin(meta) if meta.id == main => {
-                state = ThreadState::new(*meta);
-            }
-            slopty_agent::observed::Out::Actions(id, actions) if id == main => {
-                for action in &actions {
-                    state.apply(action);
-                }
-            }
-            _ => {}
-        }
-    }
-    state
+    slopty_agent::claude::history::replay(&records(name))
 }

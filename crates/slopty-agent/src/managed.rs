@@ -4,18 +4,16 @@
 //! **Managed settings** rank above everything else Claude Code reads, and some of their keys
 //! make it refuse a run Slopty wired: with `disableSideloadFlags` it exits on `--plugin-dir` or
 //! `--mcp-config`. So [`ManagedSettings::read`] reads the system file and the server-delivered
-//! cache before every wiring, and [`crate::hooks::wired`], [`crate::hooks::with_mcp`] and
-//! [`crate::claude_mod::Installed::args`] leave out what the policy forbids or would ignore.
-//! Only the keys listed on [`ManagedSettings`] are read; of the `env` block only the two names
-//! that silence Slopty, and only whether they are set. Nothing else of the files is kept.
+//! cache before every wiring, and [`crate::mcp::with_mcp`] leaves out what the policy forbids.
+//! Only the keys listed on [`ManagedSettings`] are read; nothing else of the files is kept.
 //!
 //! **A managed launcher** answers `claude`, checks in with its control plane on every run, and
 //! starts the real client as its child (`docs/decisions/claude-code.md`, "A managed `claude`").
 //! Running it in the background costs a control-plane round trip and on a machine not enrolled
 //! opens a browser, so the worker never asks it `--version` or `agents`: it asks once whether it
 //! is one ([`MANAGED_HELP`], which such a launcher answers before any I/O), takes the version
-//! from the client's path ([`artifact_version`]) or its artifacts ([`newest_artifact`]), and the
-//! live sessions from Claude Code's own registry ([`crate::roster::registered`]).
+//! from the client's path ([`artifact_version`]) or its artifacts ([`newest_artifact`]). A
+//! driven run hands its flags through the launcher to the client unchanged.
 
 use std::path::{Path, PathBuf};
 
@@ -35,12 +33,6 @@ const SYSTEM_FILE: &str = "/Library/Application Support/ClaudeCode/managed-setti
 /// The system-wide managed settings file, where Claude Code reads it.
 #[cfg(not(target_os = "macos"))]
 const SYSTEM_FILE: &str = "/etc/claude-code/managed-settings.json";
-
-/// The variable that blocks a plugin's requests, the mod's own included.
-const NONESSENTIAL_TRAFFIC: &str = "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC";
-
-/// The variable that stops Claude Code titling its terminal.
-const TERMINAL_TITLE: &str = "CLAUDE_CODE_DISABLE_TERMINAL_TITLE";
 
 /// What a surface of Claude Code `strictPluginOnlyCustomization` may confine to plugins.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -94,10 +86,6 @@ pub struct ManagedSettings {
     /// `disableSideloadFlags`: Claude Code refuses to start with `--plugin-dir` or
     /// `--mcp-config`.
     pub disable_sideload_flags: bool,
-    /// `disableAllHooks`.
-    pub disable_all_hooks: bool,
-    /// `allowManagedHooksOnly`: only hooks the managed settings name run.
-    pub allow_managed_hooks_only: bool,
     /// `strictPluginOnlyCustomization`.
     pub plugin_only: PluginOnly,
     /// `allowManagedMcpServersOnly`: only the managed allow list admits a server.
@@ -106,8 +94,6 @@ pub struct ManagedSettings {
     pub allowed_mcp_servers: Option<Vec<McpMatch>>,
     /// `deniedMcpServers`.
     pub denied_mcp_servers: Vec<McpMatch>,
-    /// `disableAgentView`: `claude agents` is off.
-    pub disable_agent_view: bool,
     /// `availableModels`; `None` when no list is given.
     pub available_models: Option<Vec<String>>,
     /// `enforceAvailableModels`.
@@ -117,10 +103,6 @@ pub struct ManagedSettings {
     /// `permissions.disableAutoMode` is `"disable"`: auto mode is off, and a session that would
     /// start in it starts in Manual.
     pub disable_auto_mode: bool,
-    /// `env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` is set, which blocks the mod's requests.
-    pub disables_nonessential_traffic: bool,
-    /// `env.CLAUDE_CODE_DISABLE_TERMINAL_TITLE` is set, which stops the title's heartbeat.
-    pub disables_terminal_title: bool,
 }
 
 impl ManagedSettings {
@@ -161,10 +143,7 @@ impl ManagedSettings {
     pub fn add(&mut self, doc: &Value) {
         let flag = |key: &str| doc.get(key).and_then(Value::as_bool).unwrap_or(false);
         self.disable_sideload_flags |= flag("disableSideloadFlags");
-        self.disable_all_hooks |= flag("disableAllHooks");
-        self.allow_managed_hooks_only |= flag("allowManagedHooksOnly");
         self.allow_managed_mcp_servers_only |= flag("allowManagedMcpServersOnly");
-        self.disable_agent_view |= flag("disableAgentView");
         self.enforce_available_models |= flag("enforceAvailableModels");
         self.plugin_only = match (doc.get("strictPluginOnlyCustomization"), &self.plugin_only) {
             (_, PluginOnly::All) | (Some(Value::Bool(true)), _) => PluginOnly::All,
@@ -195,13 +174,6 @@ impl ManagedSettings {
             .iter()
             .any(|key| doc.pointer(key).and_then(Value::as_str) == Some("disable"));
         self.disable_auto_mode |= auto_off;
-        let set = |name: &str| {
-            doc.get("env").and_then(|env| env.get(name)).is_some_and(|value| {
-                value.as_str().is_some_and(|v| !v.is_empty()) || value.is_number()
-            })
-        };
-        self.disables_nonessential_traffic |= set(NONESSENTIAL_TRAFFIC);
-        self.disables_terminal_title |= set(TERMINAL_TITLE);
     }
 
     /// Whether a run may carry `--plugin-dir` and `--mcp-config`: Claude Code refuses to start
@@ -209,50 +181,6 @@ impl ManagedSettings {
     #[must_use]
     pub const fn sideloads(&self) -> bool {
         !self.disable_sideload_flags
-    }
-
-    /// Whether hooks Slopty registers on a run (`--settings`) run: not while every hook is off,
-    /// only managed ones run, or hooks come only from plugins.
-    #[must_use]
-    pub fn runs_own_hooks(&self) -> bool {
-        !self.disable_all_hooks
-            && !self.allow_managed_hooks_only
-            && !self.plugin_only.confines("hooks")
-    }
-
-    /// Whether the mod can load and be heard: a plugin directory is allowed, its function hooks
-    /// load (they are hooks, under the same switches, though a plugin's), and its requests are
-    /// not blocked ([`Self::mod_off`]).
-    #[must_use]
-    pub const fn hears_mod(&self) -> bool {
-        self.mod_off(None).is_none()
-    }
-
-    /// Why the mod could not be heard in a run of Claude Code under these settings whose own
-    /// environment holds `inherited` as `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` (`None` for
-    /// an agent the worker starts, which sets it empty); `None` when it can be.
-    ///
-    /// Claude Code's plugin network gate refuses a sideloaded plugin's every request while that
-    /// variable is set to anything but empty, so a mod loaded under it never says hello.
-    /// Slopty clears it only for the agents it starts; a `claude` the person typed keeps
-    /// theirs, and the mod is left out of it.
-    #[must_use]
-    pub const fn mod_off(&self, inherited: Option<&str>) -> Option<ModOff> {
-        if self.disable_sideload_flags {
-            Some(ModOff::SideloadingOff)
-        } else if self.disable_all_hooks {
-            Some(ModOff::HooksOff)
-        } else if self.allow_managed_hooks_only {
-            Some(ModOff::ManagedHooksOnly)
-        } else if self.disables_nonessential_traffic {
-            Some(ModOff::QuietByPolicy)
-        } else if let Some(value) = inherited
-            && !value.is_empty()
-        {
-            Some(ModOff::QuietByEnvironment)
-        } else {
-            None
-        }
     }
 
     /// Whether the stdio MCP server `name`, run as `command`, may serve a run.
@@ -283,41 +211,6 @@ fn mcp_matches(list: &[Value]) -> impl Iterator<Item = McpMatch> + '_ {
         }
         entry.get("serverUrl").and_then(Value::as_str).map(|url| McpMatch::Url(url.to_owned()))
     })
-}
-
-/// Why Slopty's Claude Code mod is left out of a run, where it could not be heard: the thread
-/// then follows the hooks, the transcript and the status line alone.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ModOff {
-    /// `disableSideloadFlags`: Claude Code would refuse the run for `--plugin-dir`.
-    SideloadingOff,
-    /// `disableAllHooks`: a plugin's function hooks are hooks.
-    HooksOff,
-    /// `allowManagedHooksOnly`: only the hooks the managed settings name run.
-    ManagedHooksOnly,
-    /// The managed settings set `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`, which blocks a
-    /// plugin's requests.
-    QuietByPolicy,
-    /// The run's own environment sets `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`.
-    QuietByEnvironment,
-}
-
-impl std::fmt::Display for ModOff {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::SideloadingOff => "the managed settings turn sideloading off (disableSideloadFlags)",
-            Self::HooksOff => "the managed settings turn hooks off (disableAllHooks)",
-            Self::ManagedHooksOnly => {
-                "the managed settings run only their own hooks (allowManagedHooksOnly)"
-            }
-            Self::QuietByPolicy => {
-                "the managed settings set CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, which blocks a plugin's requests"
-            }
-            Self::QuietByEnvironment => {
-                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC is set here, which blocks a plugin's requests"
-            }
-        })
-    }
 }
 
 /// What `claude` is on a machine.

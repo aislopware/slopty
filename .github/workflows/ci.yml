@@ -27,7 +27,7 @@ env:
   # rust-analyzer, rust-src, the iOS and musl standard libraries; 1.9 GB on a runner). Each job
   # installs what it uses (`dtolnay/rust-toolchain`), and `gate::tests` holds the version to
   # the file's.
-  RUSTUP_TOOLCHAIN: 1.99.0
+  RUSTUP_TOOLCHAIN: 1.99.1
   # `.cargo/config.toml` wraps rustc in sccache; where it keeps its units is
   # .github/actions/sccache's call.
 
@@ -88,7 +88,7 @@ jobs:
       # Each lane's own triples, and clippy only where it lints: a test shard needs neither.
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.99.0
+          toolchain: 1.99.1
           components: ${{ matrix.lane != 'tests' && 'rustfmt, clippy' || '' }}
           targets: ${{ matrix.targets }}
       # The canonical formatter is nightly rustfmt; only the tools lane formats.
@@ -302,7 +302,7 @@ jobs:
           actions-cache: "false"
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.99.0
+          toolchain: 1.99.1
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: gate
@@ -490,7 +490,7 @@ jobs:
           r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.99.0
+          toolchain: 1.99.1
           targets: >-
             aarch64-apple-darwin, aarch64-unknown-linux-gnu, x86_64-unknown-linux-gnu,
             aarch64-unknown-linux-musl, x86_64-unknown-linux-musl

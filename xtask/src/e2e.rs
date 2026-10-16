@@ -272,11 +272,12 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
         // The app carries the `e2e` feature (renderer access for `Render`), which also makes
         // the `slopty-app-e2e` bin the tests start. `--bins`, not `--bin slopty-app-e2e`: a
         // `--bin` filter applies to every selected package and would leave the daemons stale.
+        // The worker carries its own `e2e` feature, the seam that stalls its control streams.
         step(
             "build daemons and app",
             &cmd!(
                 sh,
-                "cargo build -p slopty-ptyd -p slopty-workerd -p slopty-serverd -p slopty-cli -p slopty -p slopty-e2e -p slopty-testkit --bins --features slopty/e2e --features {LIVE}"
+                "cargo build -p slopty-ptyd -p slopty-workerd -p slopty-serverd -p slopty-cli -p slopty -p slopty-e2e -p slopty-testkit --bins --features slopty/e2e --features slopty-workerd/e2e --features {LIVE}"
             ),
         )?;
         std::fs::create_dir_all(&reuse)?;

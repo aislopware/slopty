@@ -1,15 +1,17 @@
 //! The Changes surface: a thread's diff, the working tree's live and the branch's or the latest
 //! turn's on asking, cut by the worker's own review ([`GitOp::Changes`], [`ReviewScope`]) and
 //! written as the unified patch the shell reads, with each file's two sides whole for its
-//! highlighting.
+//! highlighting. A working tree is diffed again only when the worker says its repository moved
+//! (`WorkerMsg::RepoMoved`), or the link came back.
 
 use std::collections::{HashMap, VecDeque};
 use std::hash::{DefaultHasher, Hash as _, Hasher as _};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
-use futures::StreamExt as _;
+use futures::FutureExt as _;
 use gpui::{AsyncApp, Context, Task, WeakEntity};
 use slopty_client::WorkerKey;
 use slopty_proto::git::{GitDone, GitOp, GitOutcome};
@@ -18,11 +20,12 @@ use slopty_proto::thread::wire::{Against, FileDiff, FileKind, Review, ReviewScop
 use slopty_view_proto::{CheckoutDiff, CheckoutFileDiffText, DiffFileSummary};
 use slopty_view_rpc::{RpcError, RpcReply};
 
-use super::{ask, param, unanswered, value, within};
+use super::{ask, param, unanswered, value, watched, within};
 use crate::workspace::WorkspaceView;
 
-/// How often a watched working tree is diffed again.
-const REDIFF: Duration = Duration::from_secs(2);
+/// How often a diff watch looks at which chats it follows, to diff a chat's folder once it is
+/// followed. A look at the workspace's own state, never a question to a worker.
+const PLACES_EVERY: Duration = Duration::from_secs(1);
 
 /// The most files a diff fetches whole when the review clipped their hunks.
 const WHOLE_FILES: usize = 16;
@@ -196,9 +199,14 @@ async fn diff_of(
     cwd: String,
     op: GitOp,
 ) -> Result<CheckoutDiff, RpcError> {
+    let ignore_whitespace = matches!(
+        op,
+        GitOp::Changes { ignore_whitespace: true, .. }
+            | GitOp::Turn { ignore_whitespace: true, .. }
+    );
     let repo = cwd.clone();
     let mut review = review_of(ask(this, cx, |v| v.surface_git(key, repo, op)).await?)?;
-    whole(this, cx, key, &cwd, &mut review).await;
+    whole(this, cx, key, &cwd, &mut review, ignore_whitespace).await;
     finish(this, cx, key, &cwd, &review)
 }
 
@@ -217,17 +225,20 @@ fn finish(
     Ok(diff)
 }
 
-/// Fetch whole the files whose hunks the review clipped, a few at most.
+/// Fetch whole the files whose hunks the review clipped, a few at most, whitespace counting or
+/// not as the review was asked.
 async fn whole(
     this: &WeakEntity<WorkspaceView>,
     cx: &mut AsyncApp,
     key: WorkerKey,
     cwd: &str,
     review: &mut Review,
+    ignore_whitespace: bool,
 ) {
     let clipped = review.files.iter_mut().filter(|file| file.patch.clipped_lines > 0);
     for file in clipped.take(WHOLE_FILES) {
-        let op = GitOp::FileDiff { from: file.from.clone(), to: file.to.clone() };
+        let (from, to) = (file.from.clone(), file.to.clone());
+        let op = GitOp::FileDiff { from, to, ignore_whitespace };
         let repo = cwd.to_owned();
         if let Ok(GitOutcome::Done(GitDone::FileDiff { patch, .. })) =
             ask(this, cx, |v| v.surface_git(key, repo, op)).await
@@ -235,6 +246,24 @@ async fn whole(
             file.patch = *patch;
         }
     }
+}
+
+/// The turn of `state` whose message the transcript shows as the user entry `entry`: the id the
+/// shell gave the message where it sent it (`named`, by its intent), else the item's own.
+fn turn_of_entry(
+    state: &slopty_proto::thread::ThreadState,
+    entry: &str,
+    named: &HashMap<slopty_proto::thread::IntentId, String>,
+) -> Option<slopty_proto::thread::TurnId> {
+    state
+        .items
+        .iter()
+        .find(|item| {
+            let slopty_proto::thread::ItemBody::User(message) = &item.body else { return false };
+            let shown = message.intent.and_then(|intent| named.get(&intent));
+            shown.map_or(item.id.0.as_str(), String::as_str) == entry
+        })
+        .map(|item| item.turn)
 }
 
 /// One blob's text, `None` when it is not text or could not be read.
@@ -258,7 +287,7 @@ async fn blob_text(
 
 impl WorkspaceView {
     /// The folders whose working trees a diff watch on `device` follows: those of the chats
-    /// the interface follows there, each once.
+    /// the interface follows there, each once, in order.
     fn diff_places(&self, device: Option<WorkerKey>, cx: &gpui::App) -> Vec<(WorkerKey, String)> {
         let mut places: Vec<(WorkerKey, String)> = Vec::new();
         for (key, thread) in self.view_model.followed.values() {
@@ -268,54 +297,88 @@ impl WorkspaceView {
             let cwd = self.held_hub(*key).and_then(|hub| {
                 hub.read(cx).threads().rows().rows.get(thread).and_then(|row| row.cwd.clone())
             });
-            if let Some(cwd) = cwd.filter(|cwd| !cwd.is_empty())
-                && !places.iter().any(|(k, c)| k == key && *c == cwd)
-            {
+            if let Some(cwd) = cwd.filter(|cwd| !cwd.is_empty()) {
                 places.push((*key, cwd));
             }
         }
+        places.sort();
+        places.dedup();
         places
     }
 
     /// `WatchCheckoutDiffs`: the working trees of the chats followed on the device named,
-    /// diffed against `HEAD` now and every [`REDIFF`] while the watch is open, each list sent
-    /// when it changed.
+    /// diffed against `HEAD` now, again when the worker says one's repository moved and when a
+    /// chat is followed, each list sent when it changed.
     pub(super) fn watch_diffs(
-        &self,
+        &mut self,
         params: &serde_json::Value,
         cx: &Context<Self>,
     ) -> Task<Result<RpcReply, RpcError>> {
         let device = self.surface_device(params);
-        let (tx, rx) = futures::channel::mpsc::unbounded::<serde_json::Value>();
+        let (tx, reply, mut gone) = watched();
+        let id = self.view_model.surfaces.next_watch();
+        let bell = Rc::new(tokio::sync::Notify::new());
         cx.spawn(async move |this, cx| {
             let mut last: Option<Vec<(String, String)>> = None;
-            while !tx.is_closed() {
+            let mut followed: Option<Vec<(WorkerKey, String)>> = None;
+            'watch: loop {
                 let Ok(places) = this.update(cx, |view, cx| view.diff_places(device, cx)) else {
                     return;
                 };
+                if followed.as_ref() != Some(&places) {
+                    let follow = |view: &mut Self| view.follow_repos(id, &bell, &places);
+                    if this.update(cx, |view, _| follow(view)).is_err() {
+                        return;
+                    }
+                    followed = Some(places.clone());
+                }
                 let mut diffs = Vec::with_capacity(places.len());
+                let mut unanswered = false;
                 for (key, cwd) in places {
-                    let op = GitOp::Changes { against: Against::Head };
-                    match diff_of(&this, cx, key, cwd.clone(), op).await {
+                    let op = GitOp::Changes { against: Against::Head, ignore_whitespace: false };
+                    // The shell letting the watch go ends it at once, a diff still out or not.
+                    let mut asked = std::pin::pin!(diff_of(&this, cx, key, cwd.clone(), op).fuse());
+                    let answer = futures::select_biased! {
+                        _ = gone => break 'watch,
+                        answer = asked => answer,
+                    };
+                    match answer {
                         Ok(diff) => diffs.push(diff),
                         Err(RpcError::Closed) => return,
+                        Err(error) if super::is_unanswered(&error) => unanswered = true,
                         Err(error) => tracing::debug!(%error, %cwd, "a working tree's diff failed"),
                     }
                 }
                 let sums: Vec<_> =
                     diffs.iter().map(|d| (d.checkout_id.clone(), d.checksum.clone())).collect();
-                if last.as_ref() != Some(&sums) {
+                // A worker that did not answer, its link down: what the shell shows stands.
+                if !unanswered && last.as_ref() != Some(&sums) {
                     last = Some(sums);
-                    let Ok(frame) = serde_json::to_value(&diffs) else { return };
-                    if tx.unbounded_send(frame).is_err() {
-                        return;
+                    let sent =
+                        serde_json::to_value(&diffs).is_ok_and(|f| tx.unbounded_send(f).is_ok());
+                    if !sent {
+                        break;
                     }
                 }
-                cx.background_executor().timer(REDIFF).await;
+                loop {
+                    let look = cx.background_executor().timer(PLACES_EVERY);
+                    futures::select_biased! {
+                        _ = gone => break 'watch,
+                        () = bell.notified().fuse() => continue 'watch,
+                        () = look.fuse() => {}
+                    }
+                    let Ok(now) = this.update(cx, |view, cx| view.diff_places(device, cx)) else {
+                        return;
+                    };
+                    if followed.as_ref() != Some(&now) {
+                        continue 'watch;
+                    }
+                }
             }
+            let _closing = this.update(cx, |view, _| view.unfollow_repos(id));
         })
         .detach();
-        Task::ready(Ok(RpcReply::Stream(rx.boxed())))
+        Task::ready(Ok(reply))
     }
 
     /// `GetCheckoutDiff`: the branch's changes against a base, or the latest turn's.
@@ -337,12 +400,17 @@ impl WorkspaceView {
         };
         let mode = param(params, "mode").unwrap_or("workingTree").to_owned();
         let base = param(params, "baseRef").map(str::to_owned);
+        // `git diff -w`: the worker reads lines with their spaces taken out.
+        let ignore_whitespace =
+            params.get("ignoreWhitespace").and_then(serde_json::Value::as_bool).unwrap_or(false);
         if mode == "turn" {
             let thread = chat.as_deref().and_then(|chat| self.chat_thread_in(chat, cx));
             let Some((key, thread)) = thread else {
                 return Task::ready(Err(RpcError::Failed("this chat has no turns yet".into())));
             };
-            return self.turn_diff(key, thread, cwd, cx);
+            // The turn the person's message `turn` began (a user entry's id), else the latest.
+            let entry = param(params, "turn").map(str::to_owned);
+            return self.turn_diff(key, thread, cwd, (entry, ignore_whitespace), cx);
         }
         let against = match (mode.as_str(), base) {
             ("workingTree", _) => Against::Head,
@@ -351,29 +419,50 @@ impl WorkspaceView {
             _ => return Task::ready(Err(RpcError::Failed(format!("no {mode} diff in Slopty")))),
         };
         cx.spawn(async move |this, cx| {
-            let diff = diff_of(&this, cx, key, cwd, GitOp::Changes { against }).await?;
+            let op = GitOp::Changes { against, ignore_whitespace };
+            let diff = diff_of(&this, cx, key, cwd, op).await?;
             value(&diff)
         })
     }
 
-    /// The latest turn's changes in `thread`, as its worker reviews them.
+    /// One turn's changes in `thread`: the turn the person's message `entry` (a user entry's id)
+    /// began, else the latest. Between the snapshots the worker took of it, whitespace counting
+    /// or not; a turn with no snapshot is asked of the thread's own review, which says why.
     fn turn_diff(
         &mut self,
         key: WorkerKey,
         thread: ThreadId,
         cwd: String,
+        (entry, ignore_whitespace): (Option<String>, bool),
         cx: &mut Context<Self>,
     ) -> Task<Result<RpcReply, RpcError>> {
         let hub = self.thread_hub(key, cx);
-        let turn = hub
+        let named = &self.view_model.named;
+        let picked = hub
             .read(cx)
             .threads()
             .mirror(thread)
             .and_then(slopty_client::threads::Mirror::state)
-            .and_then(|state| state.turns.last().map(|turn| turn.id));
-        let Some(turn) = turn else {
-            return Task::ready(Err(RpcError::Failed("this chat has no turns yet".into())));
+            .and_then(|state| {
+                let turn = match &entry {
+                    Some(entry) => turn_of_entry(state, entry, named)?,
+                    None => state.turns.last()?.id,
+                };
+                let turn = state.turns.iter().find(|t| t.id == turn)?;
+                Some((turn.id, turn.before.clone(), turn.after.clone()))
+            });
+        let Some((turn, before, after)) = picked else {
+            let why = if entry.is_some() {
+                "that turn is not in this chat"
+            } else {
+                "this chat has no turns yet"
+            };
+            return Task::ready(Err(RpcError::Failed(why.into())));
         };
+        if let Some(before) = before {
+            let op = GitOp::Turn { turn, before, after, ignore_whitespace };
+            return cx.spawn(async move |this, cx| value(&diff_of(&this, cx, key, cwd, op).await?));
+        }
         let scope = ReviewScope::Turn(turn);
         let before = hub.read(cx).review(thread, &scope).cloned();
         hub.update(cx, |hub, cx| hub.ask_review(thread, scope.clone(), cx));
@@ -385,7 +474,7 @@ impl WorkspaceView {
                     now.filter(|now| before.as_ref().is_none_or(|before| !Arc::ptr_eq(before, now)))
                 {
                     let mut review = Review::clone(&review);
-                    whole(&this, cx, key, &cwd, &mut review).await;
+                    whole(&this, cx, key, &cwd, &mut review, false).await;
                     return value(&finish(&this, cx, key, &cwd, &review)?);
                 }
                 if deadline.is_none_or(|deadline| std::time::Instant::now() > deadline) {

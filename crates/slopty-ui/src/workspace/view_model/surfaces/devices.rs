@@ -70,6 +70,20 @@ impl Filed {
     }
 }
 
+/// The host of an address as the app dials it: `100.64.0.5:7400` is `100.64.0.5`,
+/// `[fd7a::1]:7400` is `fd7a::1`, `studio.tail.ts.net` is itself; `None` for nothing.
+fn host_of(address: &str) -> Option<String> {
+    let address = address.trim();
+    let host = if let Some(rest) = address.strip_prefix('[') {
+        rest.split_once(']').map_or(rest, |(host, _)| host)
+    } else if address.matches(':').count() == 1 {
+        address.split_once(':').map_or(address, |(host, _)| host)
+    } else {
+        address
+    };
+    (!host.is_empty()).then(|| host.to_owned())
+}
+
 /// The id `DeviceAction` names the server by.
 const SERVER: &str = "server";
 
@@ -113,7 +127,27 @@ impl WorkspaceView {
             cursor_sdk_version: None,
             capabilities: crate::view_model::capabilities(),
             actions: self.device_actions.get(&key).cloned().unwrap_or_default(),
+            // An editor reaches a folder there over SSH by it; this machine's own needs none.
+            ssh_host: worker.address.clone().filter(|_| !self.surface_is_local(key)),
         })
+    }
+
+    /// Whether `key` is this machine's own worker.
+    fn surface_is_local(&self, key: WorkerKey) -> bool {
+        let local = self.view_model.feed.as_ref().and_then(|feed| feed.local_worker());
+        local.is_some_and(|local| local == key.to_string())
+    }
+
+    /// Where this client reaches `key`'s machine, as the app dials it (`host:port`, `[v6]:port`
+    /// or a bare host): its host, which an editor's SSH remote names.
+    pub fn set_worker_address(&mut self, key: WorkerKey, address: &str, cx: &mut Context<Self>) {
+        let host = host_of(address);
+        let Some(worker) = self.workers.get_mut(&key) else { return };
+        if worker.address.as_deref() == host.as_deref() {
+            return;
+        }
+        worker.address = host;
+        cx.notify();
     }
 
     /// What Settings → Devices offers to do to `key`'s machine: each action's id comes back
@@ -220,6 +254,16 @@ impl WorkspaceView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An address as the app dials it gives the host an editor's SSH remote names.
+    #[test]
+    fn an_address_gives_its_host() {
+        assert_eq!(host_of("100.64.0.5:7400").as_deref(), Some("100.64.0.5"));
+        assert_eq!(host_of("[fd7a:115c::1]:7400").as_deref(), Some("fd7a:115c::1"));
+        assert_eq!(host_of("studio.tail.ts.net").as_deref(), Some("studio.tail.ts.net"));
+        assert_eq!(host_of("fd7a:115c::1").as_deref(), Some("fd7a:115c::1"));
+        assert_eq!(host_of(" ").as_deref(), None);
+    }
 
     #[test]
     fn a_build_says_its_version() {

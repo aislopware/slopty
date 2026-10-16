@@ -14,7 +14,6 @@ use std::time::Duration;
 
 use gpui::Context;
 use slopty_client::WorkerKey;
-use slopty_core::SessionId;
 use slopty_proto::thread::wire::{Intent, TurnEnded};
 use slopty_proto::thread::{ThreadId, TurnId};
 
@@ -39,10 +38,7 @@ impl WorkspaceView {
     #[must_use]
     pub fn bell_count(&self) -> usize {
         use slopty_proto::thread::attention::Rung;
-        let on = |rung: Rung| {
-            let sessions = self.agent_sessions().filter(|(_, stand)| stand.rung == rung).count();
-            sessions.saturating_add(self.threads_on(rung).len())
-        };
+        let on = |rung: Rung| self.threads_on(rung).len();
         self.needs_you_count()
             .saturating_add(on(Rung::Failed))
             .saturating_add(on(Rung::ToReview))
@@ -61,16 +57,14 @@ impl WorkspaceView {
     /// ([`super::attention::Look::turns`]). One no longer unread (seen on another device, or a
     /// new turn under way) leaves them all. `first` is the worker's first table here.
     pub(super) fn turns_heard(&mut self, key: WorkerKey, first: bool, cx: &mut Context<Self>) {
-        let stands: Vec<(ThreadId, Option<SessionId>, Option<TurnEnded>, TurnId)> = self
-            .table_stands(key)
-            .map(|(id, stand)| (id, stand.terminal, stand.ended, stand.seen))
-            .collect();
+        let stands: Vec<(ThreadId, Option<TurnEnded>, TurnId)> =
+            self.table_stands(key).map(|(id, stand)| (id, stand.ended, stand.seen)).collect();
         let mut moved = false;
-        for (thread, terminal, ended, row_seen) in stands {
+        for (thread, ended, row_seen) in stands {
             if self.turns.seen.get(&thread).is_some_and(|here| *here <= row_seen) {
                 self.turns.seen.remove(&thread);
             }
-            let about = terminal.map_or(About::Thread(thread), About::Session);
+            let about = About::Thread(thread);
             let seen = self.seen_through(thread, row_seen);
             let unread = ended.filter(|e| {
                 e.answered && e.turn > seen && Duration::from_millis(e.ran_ms) >= self.slow_command
@@ -114,14 +108,11 @@ impl WorkspaceView {
         });
     }
 
-    /// What an unread finish of is an agent's turn: a terminal's, or a thread's its worker's
-    /// table still holds.
-    pub(super) fn agent_turns(&self) -> impl Iterator<Item = About> + '_ {
-        self.finished.iter().filter(|(_, done)| done.turn.is_some()).map(|(a, _)| *a).filter(
-            |about| match about {
-                About::Session(_) => true,
-                About::Thread(thread) => self.thread_stand(*thread).is_some(),
-            },
-        )
+    /// The threads whose unread finish is an agent's turn its worker's table still holds.
+    pub(super) fn agent_turns(&self) -> impl Iterator<Item = ThreadId> + '_ {
+        self.finished.iter().filter(|(_, done)| done.turn.is_some()).filter_map(|(about, _)| {
+            let About::Thread(thread) = *about else { return None };
+            self.thread_stand(thread).is_some().then_some(thread)
+        })
     }
 }

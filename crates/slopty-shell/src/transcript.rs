@@ -1,4 +1,4 @@
-// Derived from zeron (MIT, github.com/zeronsh/zeron @ 75b7260), see THIRD_PARTY_NOTICES.md
+// Derived from zeron (MIT, github.com/zeronsh/zeron @ 3b2f780), see THIRD_PARTY_NOTICES.md
 //! The conversation view: virtualized transcript with block-granularity rows,
 //! stick-to-bottom, tool-group folding, and streaming markdown.
 //!
@@ -55,6 +55,12 @@ use crate::state::AppState;
 use crate::syntax_cache::{DocumentHighlightKey, SyntaxHighlightCache};
 use crate::theme::Theme;
 use slopty_syntax::LanguageId as Lang;
+
+// slopty: Slopty's own rows, and find in thread.
+mod extras;
+pub(crate) mod find;
+pub use extras::serve_terminal_runs;
+pub use find::{FindInThread, FindNext, FindPrevious};
 
 // ---------------------------------------------------------------------------
 // Constants (mugen ports)
@@ -1026,6 +1032,7 @@ pub enum RowKind {
         name: String,
         mime_type: String,
     },
+    // slopty: no agent visuals.
     User {
         /// Visible prompt (attachment-ref trailer already stripped). When the
         /// prompt carries file mentions this is the *projected* display text —
@@ -1083,6 +1090,26 @@ pub enum RowKind {
     ForkMarker {
         source_chat_id: SharedString,
         source_title: SharedString,
+    },
+    // slopty: Slopty's own rows (`transcript/extras.rs`): an error that says what the agent
+    // said and can be tried again, a quiet divider, a plan's card, what a turn changed.
+    ErrorCard {
+        message: SharedString,
+        detail: Option<SharedString>,
+        retry: bool,
+    },
+    Marker {
+        text: SharedString,
+    },
+    PlanHeader {
+        copy: SharedString,
+    },
+    PlanFold {
+        fold: SharedString,
+        hidden_lines: usize,
+    },
+    TurnChanges {
+        files: Arc<Vec<extras::TurnFile>>,
     },
 }
 
@@ -1564,6 +1591,11 @@ pub fn rows_for_entry(
                         }
                         let key = format!("{}#{}", entry.id, part_id);
                         let tree = parse(&key, text);
+                        // slopty: a proposed plan is a card, folded past its first lines.
+                        if extras::is_plan_part(part_id) {
+                            extras::plan_rows(&mut rows, entry, &key, text, &tree, streaming);
+                            continue;
+                        }
                         // Live and completed parts split identically — one row
                         // per top-level block, same ids, so the live→complete
                         // handoff never changes row identity. The version is a
@@ -1626,6 +1658,7 @@ pub fn rows_for_entry(
                             },
                         });
                     }
+                    // slopty: no agent visuals.
                     MessagePart::Input {
                         id: part_id,
                         questions,
@@ -1654,9 +1687,19 @@ pub fn rows_for_entry(
                             compact_fold: None,
                         });
                     }
+                    // slopty: an error with the agent's own words or a retry is a card.
                     MessagePart::Error {
                         id: part_id,
                         message,
+                        detail,
+                        retry,
+                    } if detail.is_some() || *retry => {
+                        rows.push(extras::error_card_row(&entry.id, part_id, message, detail.as_deref(), *retry));
+                    }
+                    MessagePart::Error {
+                        id: part_id,
+                        message,
+                        ..
                     } => {
                         rows.push(Row {
                             id: format!("{}#{}", entry.id, part_id).into(),
@@ -1690,6 +1733,10 @@ pub fn rows_for_entry(
                             copy_text: None,
                             compact_fold: None,
                         });
+                    }
+                    // slopty: a quiet divider.
+                    MessagePart::Marker { id: part_id, text } => {
+                        rows.push(extras::marker_row(&entry.id, part_id, text));
                     }
                     // Tools and thoughts are grouped by the outer arms;
                     // nothing reaches here.
@@ -1766,6 +1813,10 @@ pub fn rows_for_entry(
         );
     }
 
+    // slopty: a settled turn says what it changed.
+    if !streaming && let Some(row) = extras::turn_changes_row(entry) {
+        rows.push(row);
+    }
     if let Some(first) = rows.first_mut() {
         first.turn_start = true;
     }
@@ -3344,8 +3395,12 @@ pub struct Transcript {
     /// In-flight ReadAttachmentChunk loads, keyed by device, path and validation
     /// policy; results land in the global attachment cache.
     attachment_loads: HashMap<crate::attachments::AttachmentKey, Task<()>>,
+    // slopty: no agent visuals.
     /// Scheduled retry wake-ups for errored sources (the 2s→15s ladder).
     attachment_retries: HashMap<(String, String), Task<()>>,
+    // slopty: Slopty's own rows' state, and find in thread.
+    extras: extras::ExtrasState,
+    find: find::FindState,
     /// Sidecar blob fetches keyed by doc ref (`chatId/partId[.diff]`,
     /// chat2-sync A3). `Ready` holds the UPGRADED detail, built once on
     /// arrival — render swaps it in per chip; rows never rebuild for it.
@@ -3472,6 +3527,7 @@ impl Transcript {
     }
 
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+        Self::install_find(cx); // slopty: find's keys reach the main transcript.
         Self::build(state, None, true, cx)
     }
 
@@ -3640,7 +3696,10 @@ impl Transcript {
             image_menu_focus: cx.focus_handle(),
             image_copy: None,
             attachment_loads: HashMap::new(),
+            // slopty: no agent visuals.
             attachment_retries: HashMap::new(),
+            extras: Default::default(), // slopty: Slopty's own rows.
+            find: Default::default(),
             blob_details: HashMap::new(),
             blob_fetch_order: HashMap::new(),
             blob_fetch_counter: 0,
@@ -3987,6 +4046,7 @@ impl Transcript {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.withdraw_quote(cx); // slopty: a new press drops the last selection's quote.
         // Text listeners claim the drag before it bubbles here. Stop following
         // immediately: a stream commit can otherwise virtualize the anchor
         // before the first mouse move. Keep the user bubble's long-press timer.
@@ -4003,10 +4063,11 @@ impl Transcript {
 
     fn on_selection_mouse_up(
         &mut self,
-        _event: &MouseUpEvent,
+        event: &MouseUpEvent,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.offer_quote(event.position, cx); // slopty: a selection can be quoted to the agent.
         let was_selecting = self.selection_drag_position.is_some();
         self.stop_selection_scroll();
         if let Some(_text) = crate::markdown::selection::end_active_drag() {
@@ -4812,7 +4873,8 @@ impl Transcript {
                 if !self.compact_mode
                     && let Some(rows) = prepared.and_then(|p| p.rows.get(&entry.id))
                 {
-                    new_rows.extend(rows.iter().cloned());
+                    // slopty: a plan's fold hides its rows here too.
+                    new_rows.extend(rows.iter().filter(|row| self.fold_shows(row)).cloned());
                 } else {
                     new_rows.extend(self.rows_for(entry, false));
                 }
@@ -5262,18 +5324,22 @@ impl Transcript {
                 },
             );
         }
-        rows.retain(|row| match &row.compact_fold {
+        rows.retain(|row| self.fold_shows(row)); // slopty: shared with the prepared rows.
+        rows
+    }
+
+    /// A row shows unless its fold is closed. A closing fold keeps its body mounted through
+    /// the TOOL_FOLD tween; the shell's settle sweep drops the rows afterwards.
+    fn fold_shows(&self, row: &Row) -> bool {
+        match &row.compact_fold {
             None => true,
-            // A closing fold keeps its body mounted through the TOOL_FOLD
-            // tween; the shell's settle sweep drops the rows afterwards.
             Some(id) => self.folds.get(id).is_some_and(|fold| {
                 fold.open == Some(true)
                     || fold
                         .toggled_at
                         .is_some_and(|at| at.elapsed() < FOLD_TWEEN_WINDOW)
             }),
-        });
-        rows
+        }
     }
 
     /// Fetch a sidecar blob (full tool output or diff) and build its upgraded
@@ -6695,6 +6761,7 @@ impl Transcript {
         }
     }
 
+    // slopty: no agent visuals.
     /// The right-aligned thumbnail strip above a user bubble.
     fn render_user_attachments(
         &mut self,
@@ -6981,16 +7048,33 @@ impl Transcript {
                 self.compact_last_elapsed.insert(entry_id, elapsed_secs);
             }
         }
+        // slopty: the call under way, or the newest thought, in place of the flavour word.
+        let step = (!queued && !sending)
+            .then(|| {
+                let state = self.state.read(cx);
+                let entries = match &self.doc_override {
+                    Some(doc_id) => state.sub_transcript(doc_id),
+                    None => state.transcript.as_slice(),
+                };
+                entries.last().and_then(extras::working_step)
+            })
+            .flatten();
         let word = if queued {
             "Queued — will send automatically"
         } else if sending {
             "Sending"
+        } else if let Some(step) = step.as_deref() {
+            step
         } else {
             flavour_word(seed, elapsed_secs)
         };
         let theme = Theme::of(cx).clone();
         Some(
             div()
+                // slopty: the working line says what it shows: the step, or the word.
+                .id("working-line")
+                .role(gpui::Role::Status)
+                .aria_label(SharedString::from(word.to_owned()))
                 .flex()
                 .flex_row()
                 .items_center()
@@ -7178,6 +7262,7 @@ impl Transcript {
                     link,
                     workspace_root: workspace_root.clone(),
                     code,
+                    run: self.run_ui(cx), // slopty: Run in terminal.
                 };
                 let highlight = self.code_highlight_for(&row.id, &tree, Some(*block_ix), cx);
                 render::render_block(
@@ -7248,6 +7333,7 @@ impl Transcript {
                     link,
                     workspace_root: workspace_root.clone(),
                     code,
+                    run: self.run_ui(cx), // slopty: Run in terminal.
                 };
                 if seed_history && let Some(veil) = &veil {
                     let historical = &self.historical_markdown[&row.id];
@@ -7325,9 +7411,18 @@ impl Transcript {
                 name,
                 mime_type,
             } => self.render_generated_image(&row.id, owner, path, name, mime_type, cx),
+            // slopty: no agent visuals.
             RowKind::ErrorChip { message } => error_chip(message.clone(), &theme),
             RowKind::ForkMarker { source_title, .. } => fork_marker(source_title.clone(), &theme),
+            // slopty: Slopty's own rows.
+            RowKind::ErrorCard { .. }
+            | RowKind::Marker { .. }
+            | RowKind::PlanHeader { .. }
+            | RowKind::PlanFold { .. }
+            | RowKind::TurnChanges { .. } => self.render_extra_row(&row, &theme, cx),
         };
+        // slopty: a plan's rows draw as one card.
+        let (inner, top_gap) = self.plan_card_segment(ix, inner, top_gap, &theme);
         // Diagram fences this row just requested start rendering after layout.
         self.ensure_diagram_worker(cx);
 
@@ -8035,6 +8130,10 @@ impl Transcript {
         // the same gutter as the rounded task-tree elbows below it.
         let header = div()
             .id(SharedString::from(format!("{row_id}-hdr")))
+            // slopty: the group reads as a button named by its summary, open or not.
+            .role(gpui::Role::Button)
+            .aria_label(summary.clone())
+            .aria_expanded(open)
             .relative()
             .flex()
             .flex_row()
@@ -8265,7 +8364,15 @@ impl Transcript {
                                     .flex_none()
                                     .when(!collapses, |line| line.bg(crate::theme::hairline(0.06))),
                             )
-                            .child(detail_body(invocation, None, &format!("{key}-call"), theme));
+                            .child(if matches!(tool.call, ToolCall::Exec { .. }) {
+                                // slopty: a command reads highlighted, as the shell would show it.
+                                extras::command_body(invocation, &format!("{key}-call"), theme)
+                                    .unwrap_or_else(|| {
+                                        detail_body(invocation, None, &format!("{key}-call"), theme)
+                                    })
+                            } else {
+                                detail_body(invocation, None, &format!("{key}-call"), theme)
+                            });
                     }
                     if let Some(images) = chip_images[ix].clone() {
                         panel = panel.child(
@@ -9799,6 +9906,12 @@ fn subagent_chip(
         .child(
             div()
                 .id(id)
+                // slopty: the chip reads as a link to its subagent, named as it shows.
+                .role(gpui::Role::Link)
+                .aria_label({
+                    let (label, detail) = slopty_view_proto::view::tool_chip_content(&tool.call);
+                    SharedString::from(format!("{label} {detail}").trim().to_owned())
+                })
                 .when(rail, |el| el.ml(px(12.0)))
                 .h(px(CHIP_CARD_HEIGHT))
                 .min_w_0()
@@ -9879,8 +9992,18 @@ fn entry_fingerprint(entry: &SessionMessageEntry, pending: bool) -> u64 {
                 acc.push(0);
             }
         }
+        // slopty: no agent visuals.
         if let MessagePart::Input { resolved, .. } = part {
             acc.push(0x10 | *resolved as u8);
+        }
+        // slopty: an error's retry and a divider's words change in place.
+        match part {
+            MessagePart::Error { message, retry, .. } => {
+                acc.push(0x20 | *retry as u8);
+                acc.extend_from_slice(message.as_bytes());
+            }
+            MessagePart::Marker { text, .. } => acc.extend_from_slice(text.as_bytes()),
+            _ => {}
         }
     }
     fnv1a(&acc)
@@ -10126,9 +10249,14 @@ impl Render for Transcript {
             .child(crate::markdown::render::selection_frame_reset_for(
                 cx.entity_id().as_u64(),
             ))
+            // slopty: find's per-row counts start again each frame, before any row paints.
+            .child(crate::markdown::find::frame_reset(cx.entity_id().as_u64()))
             .child(content)
             .child(rail);
         let root = root.children(self.render_image_menu(cx));
+        // slopty: find in thread, over the transcript's top right, and a selection's Quote.
+        let root = root.children(self.render_find_bar(cx));
+        let root = root.children(self.render_quote_offer(cx));
         // Full-size viewer for a clicked user-bubble thumbnail
         // (AttachmentPreviewDialog: bare lightbox, click closes).
         if let Some(preview) = self.attachment_preview.clone() {
@@ -10341,6 +10469,8 @@ mod tests {
                                 frame,
                                 replay_baseline,
                                 context_usage: None,
+                                limits: Vec::new(), // slopty: new field.
+                                limit_resets_at: None, // slopty: new field.
                             },
                             cx,
                         )
@@ -10454,6 +10584,8 @@ mod tests {
                 frame: slopty_view_doc::TranscriptFrame::reset(&original),
                 context_usage: None,
                 replay_baseline: Some(slopty_view_doc::TranscriptBaseline::capture(&original)),
+                limits: Vec::new(), // slopty: new field.
+                limit_resets_at: None, // slopty: new field.
             })
             .unwrap();
         let mut changed = original.clone();
@@ -10466,6 +10598,8 @@ mod tests {
                 frame: slopty_view_doc::diff_transcript(&original, &changed),
                 context_usage: None,
                 replay_baseline: None,
+                limits: Vec::new(), // slopty: new field.
+                limit_resets_at: None, // slopty: new field.
             })
             .unwrap();
         assert!(Arc::ptr_eq(&first.rows["b"], &next.rows["b"]));
@@ -10486,6 +10620,8 @@ mod tests {
                 replay_baseline: Some(slopty_view_doc::TranscriptBaseline::capture(&entries)),
                 frame: slopty_view_doc::TranscriptFrame::Reset { reset: entries },
                 context_usage: None,
+                limits: Vec::new(), // slopty: new field.
+                limit_resets_at: None, // slopty: new field.
             };
             let start = Instant::now();
             let prepared = TranscriptPreparation::default().prepare(&update).unwrap();
@@ -10572,6 +10708,8 @@ mod tests {
                                     entries,
                                 )),
                                 context_usage: None,
+                                limits: Vec::new(), // slopty: new field.
+                                limit_resets_at: None, // slopty: new field.
                             },
                             pending,
                             cx,
@@ -10626,6 +10764,8 @@ mod tests {
                             frame: slopty_view_doc::diff_transcript(&full, &live),
                             replay_baseline: None,
                             context_usage: None,
+                            limits: Vec::new(), // slopty: new field.
+                            limit_resets_at: None, // slopty: new field.
                         },
                         cx,
                     )
@@ -10666,6 +10806,8 @@ mod tests {
                             frame,
                             context_usage: None,
                             replay_baseline: Some(slopty_view_doc::TranscriptBaseline::capture(&history)),
+                            limits: Vec::new(), // slopty: new field.
+                            limit_resets_at: None, // slopty: new field.
                         },
                         cx,
                     )
@@ -10677,6 +10819,8 @@ mod tests {
                             frame: slopty_view_doc::diff_transcript(&history, &live),
                             context_usage: None,
                             replay_baseline: None,
+                            limits: Vec::new(), // slopty: new field.
+                            limit_resets_at: None, // slopty: new field.
                         },
                         cx,
                     )
@@ -10712,6 +10856,8 @@ mod tests {
                                 frame,
                                 replay_baseline: baseline,
                                 context_usage: None,
+                                limits: Vec::new(), // slopty: new field.
+                                limit_resets_at: None, // slopty: new field.
                             },
                             cx,
                         )
@@ -10769,6 +10915,8 @@ mod tests {
                             frame: slopty_view_doc::TranscriptFrame::reset(&[]),
                             context_usage: None,
                             replay_baseline: Some(Default::default()),
+                            limits: Vec::new(), // slopty: new field.
+                            limit_resets_at: None, // slopty: new field.
                         },
                         cx,
                     )
@@ -10787,6 +10935,8 @@ mod tests {
                             frame: slopty_view_doc::diff_transcript(&[], &live),
                             context_usage: None,
                             replay_baseline: None,
+                            limits: Vec::new(), // slopty: new field.
+                            limit_resets_at: None, // slopty: new field.
                         },
                         cx,
                     )
@@ -10821,6 +10971,8 @@ mod tests {
                             frame,
                             context_usage: None,
                             replay_baseline: None,
+                            limits: Vec::new(), // slopty: new field.
+                            limit_resets_at: None, // slopty: new field.
                         },
                         cx,
                     )
@@ -12221,6 +12373,8 @@ mod tests {
                 MessagePart::Error {
                     id: "e1".into(),
                     message: "boom".into(),
+                    detail: None, // slopty: new field.
+                    retry: false, // slopty: new field.
                 },
                 tool_part("t1", "pwd"),
                 text_part("r0", "the answer"),
@@ -13026,6 +13180,8 @@ mod tests {
                                     replay_baseline: Some(slopty_view_doc::TranscriptBaseline::capture(
                                         &history,
                                     )),
+                                    limits: Vec::new(), // slopty: new field.
+                                    limit_resets_at: None, // slopty: new field.
                                 },
                                 cx,
                             )
@@ -13056,6 +13212,8 @@ mod tests {
                                     replay_baseline: Some(slopty_view_doc::TranscriptBaseline::capture(
                                         &cutoff,
                                     )),
+                                    limits: Vec::new(), // slopty: new field.
+                                    limit_resets_at: None, // slopty: new field.
                                 },
                                 cx,
                             )
@@ -13109,6 +13267,8 @@ mod tests {
                                     replay_baseline: Some(slopty_view_doc::TranscriptBaseline::capture(
                                         &history,
                                     )),
+                                    limits: Vec::new(), // slopty: new field.
+                                    limit_resets_at: None, // slopty: new field.
                                 },
                                 cx,
                             )
@@ -13119,6 +13279,8 @@ mod tests {
                                     frame: slopty_view_doc::diff_transcript(&history, &live),
                                     context_usage: None,
                                     replay_baseline: None,
+                                    limits: Vec::new(), // slopty: new field.
+                                    limit_resets_at: None, // slopty: new field.
                                 },
                                 cx,
                             )
@@ -13171,6 +13333,8 @@ mod tests {
                                     replay_baseline: Some(slopty_view_doc::TranscriptBaseline::capture(
                                         &next_history,
                                     )),
+                                    limits: Vec::new(), // slopty: new field.
+                                    limit_resets_at: None, // slopty: new field.
                                 },
                                 cx,
                             )
@@ -13278,6 +13442,8 @@ mod tests {
                                         replay_baseline: Some(
                                             slopty_view_doc::TranscriptBaseline::capture(&updated),
                                         ),
+                                        limits: Vec::new(), // slopty: new field.
+                                        limit_resets_at: None, // slopty: new field.
                                     },
                                     cx,
                                 )
@@ -13521,6 +13687,8 @@ mod tests {
                             status: slopty_view_proto::SessionStatus::Working,
                             started_at: Some(chrono::Utc::now()),
                             updated_at: chrono::Utc::now(),
+                            status_since: None, // slopty: new field.
+                            waiting_on: None, // slopty: new field.
                         })
                     });
                     this.on_own_send("chat".into(), "prompt".into(), cx);

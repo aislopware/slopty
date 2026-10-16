@@ -132,11 +132,8 @@ impl Threads {
     /// as answered.
     #[must_use]
     pub fn answering(&self, thread: ThreadId, ask: &AskId) -> Option<&Sent> {
-        self.unshown(thread).find(|s| {
-            !s.failed()
-                && matches!(&s.intent,
-                    Intent::Answer { ask: a, .. } | Intent::Release { ask: a } if a == ask)
-        })
+        self.unshown(thread)
+            .find(|s| !s.failed() && matches!(&s.intent, Intent::Answer { ask: a, .. } if a == ask))
     }
 
     /// Whether the link is up.

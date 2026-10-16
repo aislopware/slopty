@@ -6,21 +6,18 @@
 //! (`threads/<id>/`), numbered by epoch and sequence. A client follows a thread from the cursor
 //! it holds ([`Follower`]) and is sent only what it missed, or a snapshot when the log no
 //! longer holds the gap. The [`table`] keeps a row per thread for the lists that follow
-//! nothing. Every intent is acted on once per id ([`intents`], [`Host::intent`]); what an
-//! observed agent is sent is typed into its terminal by the [`Composer`]. A Codex thread is
-//! followed over the person's Codex daemon instead ([`codex`]), and what it is sent goes there.
-//! A pi thread is started here and driven over pi's RPC mode ([`pi`]), and the thread of any other
-//! agent that speaks the Agent Client Protocol over ACP ([`acp`]). A Claude Code thread is
-//! started by opening the person's `claude` in one of the worker's [`terminals`] and observing
-//! it ([`claude::start`]); a Codex thread by asking the person's Codex daemon for one. The
-//! person's past prompts, as the agents record them, are searched by [`history`]. The windows
-//! and displays an agent drives are named from its tool calls by [`screens`].
+//! nothing. Every intent is acted on once per id ([`intents`], [`Host::intent`]). Each agent is
+//! driven through its own published door: Claude Code as `claude -p` over stream-json, held in
+//! ptyd's custody so a turn outlives the worker ([`claude`]); Codex over the person's Codex
+//! daemon ([`codex`]); pi over its RPC mode ([`pi`]); any other agent that speaks the Agent
+//! Client Protocol over ACP ([`acp`]). The person's past prompts, as the agents record them, are
+//! searched by [`history`]. The windows and displays an agent drives are named from its tool
+//! calls by [`screens`].
 
 pub mod acp;
 pub mod attach;
 pub mod claude;
 pub mod codex;
-pub mod compose;
 pub mod follow;
 pub mod fork;
 pub mod history;
@@ -35,9 +32,7 @@ pub mod review;
 pub mod schedule;
 pub mod screens;
 pub mod table;
-pub mod terminals;
 
-pub use compose::Composer;
 pub use follow::Follower;
 pub use host::Host;
 
@@ -51,8 +46,7 @@ pub use host::Host;
 /// the seat, its token among them, are added where the agent runs ([`Host::env_of`]).
 #[derive(Clone, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Seated {
-    /// The seat: the session its Slopty tools speak as, and the terminal an agent that runs
-    /// in one runs in.
+    /// The seat: the session its Slopty tools speak as.
     pub seat: slopty_core::SessionId,
     /// Open facts its row carries from the start ([`slopty_proto::agent::PARENT_FACT`]).
     pub facts: Vec<(String, String)>,

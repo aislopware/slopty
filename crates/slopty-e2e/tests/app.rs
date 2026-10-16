@@ -22,6 +22,10 @@ mod hangs;
 mod interface;
 
 #[cfg(test)]
+#[path = "app/liveness.rs"]
+mod liveness;
+
+#[cfg(test)]
 #[path = "app/pair.rs"]
 mod pair;
 
@@ -44,3 +48,7 @@ mod surfaces_files;
 #[cfg(test)]
 #[path = "app/surfaces_live.rs"]
 mod surfaces_live;
+
+#[cfg(test)]
+#[path = "app/transcript.rs"]
+mod transcript;

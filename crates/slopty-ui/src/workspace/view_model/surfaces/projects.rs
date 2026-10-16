@@ -576,7 +576,7 @@ mod served {
         assert!(added.git_detected);
     }
 
-    /// A project renamed shows its new name at once, not at the next heartbeat.
+    /// A project renamed shows its new name at once, not at some later publish.
     #[gpui::test]
     fn a_project_renamed_shows_at_once(cx: &mut gpui::TestAppContext) {
         let (workspace, cx, feed) = serving(vec![project("p1", "/w/app", Some(1))], cx);

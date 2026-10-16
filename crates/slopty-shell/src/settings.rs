@@ -1,4 +1,4 @@
-// Derived from zeron (MIT, github.com/zeronsh/zeron @ 75b7260), see THIRD_PARTY_NOTICES.md
+// Derived from zeron (MIT, github.com/zeronsh/zeron @ 3b2f780), see THIRD_PARTY_NOTICES.md
 //! UI settings persisted to a small JSON file in the data dir — pane widths and
 //! collapse flags (slopty persisted the same set in localStorage).
 //!
@@ -570,6 +570,8 @@ pub enum SidebarOrganization {
     ByDevice,
     #[default]
     InOneList,
+    // slopty: Needs you, Working and Done (`shell/sidebar_status.rs`).
+    ByStatus,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -700,8 +702,8 @@ pub struct SavedTabs {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum SavedSurface {
-    /// A terminal, by its session; `agent` when it is the chat's agent's own TUI.
-    Terminal { id: String, agent: bool },
+    /// A terminal, by its session.
+    Terminal { id: String },
     /// A file, owned by chat `chat`.
     File { chat: String, path: String },
     /// A web page.
@@ -757,6 +759,8 @@ pub struct UiSettings {
     pub sidebar_show_pull_request: bool,
     /// The project filter row at the top of the sidebar.
     pub sidebar_show_project_filter: bool,
+    /// The Archived accordion below the active session list.
+    pub sidebar_show_archived: bool,
     // slopty: no Star on GitHub banner.
     /// The last selected space — restored on boot when the row still exists;
     /// also the new-tab default when the sidebar filter is "All".
@@ -852,6 +856,11 @@ pub struct UiSettings {
     pub diff_split: bool,
     /// Changes pane: wrap long source lines instead of scrolling horizontally.
     pub diff_wrap: bool,
+    // slopty: the review aids' last choices, kept across launches.
+    /// Changes pane: leave whitespace-only changes out of the diff.
+    pub diff_ignore_whitespace: bool,
+    /// Changes pane: the changed files' tree beside the diff.
+    pub diff_show_tree: bool,
     /// Agent-sent Markdown fences: wrap long lines to the chat width instead
     /// of exposing their horizontal scroll plane.
     pub code_fences_fit_content: bool,
@@ -924,6 +933,7 @@ impl Default for UiSettings {
             sidebar_show_branch: true,
             sidebar_show_pull_request: true,
             sidebar_show_project_filter: true,
+            sidebar_show_archived: true,
             // slopty: no Star on GitHub banner.
             last_space_id: None,
             last_project_action_by_space_id: std::collections::HashMap::new(),
@@ -967,6 +977,8 @@ impl Default for UiSettings {
             theme_selection: slopty_shell_theme::ThemeSelection::default(),
             diff_split: false,
             diff_wrap: false,
+            diff_ignore_whitespace: false, // slopty
+            diff_show_tree: false,         // slopty
             code_fences_fit_content: false,
             transcript_width: TRANSCRIPT_WIDTH_DEFAULT,
             open_web_links_in_slopty: true,
@@ -1038,11 +1050,15 @@ pub enum ShortcutId {
     NextSession,
     PrevSession,
     ArchiveSession,
+    // slopty: the right pane's last closed tab, and the composer's branch and effort.
+    ReopenClosedTab,
+    OpenBranchPicker,
+    NextEffort,
     JumpSession(usize),
 }
 
 impl ShortcutId {
-    pub const ALL: [ShortcutId; 13 + JUMP_SLOTS] = [ // slopty: dictation and appshots removed.
+    pub const ALL: [ShortcutId; 16 + JUMP_SLOTS] = [ // slopty: dictation and appshots removed.
         ShortcutId::RandomWallpaper,
         ShortcutId::SaveFile,
         ShortcutId::BrowserReload,
@@ -1056,6 +1072,9 @@ impl ShortcutId {
         ShortcutId::NextSession,
         ShortcutId::PrevSession,
         ShortcutId::ArchiveSession,
+        ShortcutId::ReopenClosedTab, // slopty
+        ShortcutId::OpenBranchPicker, // slopty
+        ShortcutId::NextEffort, // slopty
         ShortcutId::JumpSession(0),
         ShortcutId::JumpSession(1),
         ShortcutId::JumpSession(2),
@@ -1087,6 +1106,9 @@ impl ShortcutId {
             ShortcutId::NextSession => "Next session or right pane tab",
             ShortcutId::PrevSession => "Previous session or right pane tab",
             ShortcutId::ArchiveSession => "Archive session",
+            ShortcutId::ReopenClosedTab => "Reopen closed tab", // slopty
+            ShortcutId::OpenBranchPicker => "Open branch picker", // slopty
+            ShortcutId::NextEffort => "Next effort level", // slopty
             ShortcutId::JumpSession(slot) => JUMP_LABELS.get(slot).copied().unwrap_or(""),
         }
     }
@@ -1130,6 +1152,11 @@ impl ShortcutId {
             // Mod+A is the composer's Select all, so archiving takes the
             // shifted combo.
             ShortcutId::ArchiveSession => "mod-shift-a",
+            // slopty: ⌘⇧G is Find previous and ⌘⇧B the sidebar's fallback when an older map
+            // migrates, so the branch picker takes ⌥⌘B.
+            ShortcutId::ReopenClosedTab => "mod-shift-t",
+            ShortcutId::OpenBranchPicker => "mod-alt-b",
+            ShortcutId::NextEffort => "mod-shift-e",
             ShortcutId::JumpSession(slot) => JUMP_DEFAULTS.get(slot).copied().unwrap_or(""),
         }
     }
@@ -1162,6 +1189,10 @@ pub struct KeymapConfig {
     pub next_session: String,
     pub prev_session: String,
     pub archive_session: String,
+    // slopty: the right pane's last closed tab, and the composer's branch and effort.
+    pub reopen_closed_tab: String,
+    pub open_branch_picker: String,
+    pub next_effort: String,
     /// One combo per jump slot, in slot order. A list rather than nine fields:
     /// [`UiSettings::load`] discards the WHOLE file on a parse error, so a
     /// fixed-length array would let one malformed entry reset every unrelated
@@ -1227,6 +1258,9 @@ impl Default for KeymapConfig {
             next_session: ShortcutId::NextSession.default_combo().into(),
             prev_session: ShortcutId::PrevSession.default_combo().into(),
             archive_session: ShortcutId::ArchiveSession.default_combo().into(),
+            reopen_closed_tab: ShortcutId::ReopenClosedTab.default_combo().into(), // slopty
+            open_branch_picker: ShortcutId::OpenBranchPicker.default_combo().into(), // slopty
+            next_effort: ShortcutId::NextEffort.default_combo().into(), // slopty
             jump_session: JUMP_DEFAULTS.iter().map(|c| (*c).to_string()).collect(),
         }
     }
@@ -1249,6 +1283,9 @@ impl KeymapConfig {
             ShortcutId::NextSession => &self.next_session,
             ShortcutId::PrevSession => &self.prev_session,
             ShortcutId::ArchiveSession => &self.archive_session,
+            ShortcutId::ReopenClosedTab => &self.reopen_closed_tab, // slopty
+            ShortcutId::OpenBranchPicker => &self.open_branch_picker, // slopty
+            ShortcutId::NextEffort => &self.next_effort, // slopty
             ShortcutId::JumpSession(slot) => self
                 .jump_session
                 .get(slot)
@@ -1273,6 +1310,9 @@ impl KeymapConfig {
             ShortcutId::NextSession => self.next_session = combo,
             ShortcutId::PrevSession => self.prev_session = combo,
             ShortcutId::ArchiveSession => self.archive_session = combo,
+            ShortcutId::ReopenClosedTab => self.reopen_closed_tab = combo, // slopty
+            ShortcutId::OpenBranchPicker => self.open_branch_picker = combo, // slopty
+            ShortcutId::NextEffort => self.next_effort = combo, // slopty
             ShortcutId::JumpSession(slot) => {
                 if slot < JUMP_SLOTS {
                     if self.jump_session.len() < JUMP_SLOTS {
@@ -1557,6 +1597,7 @@ impl UiSettings {
             sidebar_show_branch,
             sidebar_show_pull_request,
             sidebar_show_project_filter,
+            sidebar_show_archived,
             // slopty: no Star on GitHub banner.
             last_space_id,
             last_project_action_by_space_id,
@@ -1596,6 +1637,8 @@ impl UiSettings {
             theme_selection,
             diff_split,
             diff_wrap,
+            diff_ignore_whitespace, // slopty
+            diff_show_tree,         // slopty
             code_fences_fit_content,
             transcript_width,
             open_web_links_in_slopty,
@@ -2480,6 +2523,7 @@ mod tests {
             sidebar_show_branch: false,
             sidebar_show_pull_request: false,
             sidebar_show_project_filter: false,
+            sidebar_show_archived: false,
             // slopty: no Star on GitHub banner.
             last_space_id: Some("space-1".into()),
             last_project_action_by_space_id: std::collections::HashMap::from([(
@@ -2540,6 +2584,8 @@ mod tests {
             },
             diff_split: true,
             diff_wrap: true,
+            diff_ignore_whitespace: true, // slopty
+            diff_show_tree: true,         // slopty
             code_fences_fit_content: true,
             transcript_width: 960.0,
             open_web_links_in_slopty: false,
@@ -2683,11 +2729,13 @@ mod tests {
         assert!(settings.sidebar_show_project_icon);
         assert!(settings.sidebar_show_project_label);
         assert!(settings.sidebar_show_project_filter);
+        assert!(settings.sidebar_show_archived);
         let customized = UiSettings {
             sidebar_compact: false,
             sidebar_show_project_icon: false,
             sidebar_show_project_label: false,
             sidebar_show_project_filter: false,
+            sidebar_show_archived: false,
             sidebar_organization: SidebarOrganization::ByProject,
             ..settings
         };

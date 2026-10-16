@@ -19,9 +19,9 @@ fork = "https://github.com/aislopware/gpui-fast.git"
 branch = "main"
 checkout = ".research/gpui-fast"
 strategy = "merge"
-base = "371769f1ff378bc0bd886440e0f97fc94aaeae5d"
-base_date = "2026-10-13"
-checked = "2026-10-13"
+base = "eeccb27f7b7b437e0d99277af2b696e6c71fb6ef"
+base_date = "2026-10-15"
+checked = "2026-10-16"
 check_every_days = 0
 
 # zed is not forked: the gpui-fast fork imports it (its `UPSTREAM` file and
@@ -31,9 +31,9 @@ check_every_days = 0
 upstream = "https://github.com/zed-industries/zed.git"
 upstream_branch = "main"
 checkout = ".research/zed-main"
-base = "36682547bea1c3d4fa60c08d341cf60081853941"
-base_date = "2026-10-13"
-checked = "2026-10-13"
+base = "28d0a3547f16b9609b301b48ab363bfca649c864"
+base_date = "2026-10-15"
+checked = "2026-10-16"
 check_every_days = 7
 
 [gpui-kit]
@@ -43,9 +43,9 @@ fork = "https://github.com/aislopware/gpui-kit.git"
 branch = "main"
 checkout = ".research/gpui-kit"
 strategy = "rebase"
-base = "c5f8eca4a0759f8c0c7ed624eddfd03f1c93a5f2"
-base_date = "2026-10-13"
-checked = "2026-10-13"
+base = "1b6059c13315dc5c304759ad3aa666e0b6e301d8"
+base_date = "2026-10-15"
+checked = "2026-10-16"
 # It lands several changes a day, so every gate asks.
 check_every_days = 0
 
@@ -66,9 +66,9 @@ fork = "https://github.com/aislopware/ghostty.git"
 branch = "main"
 checkout = "vendor/ghostty"
 strategy = "merge"
-base = "1f80eec05f24e1ba108d466fb59360729f15c9c2"
-base_date = "2026-10-13"
-checked = "2026-10-13"
+base = "b3dc3d794513c11633e7c3347935693957744e83"
+base_date = "2026-10-15"
+checked = "2026-10-16"
 check_every_days = 1
 paths = [
     "src/terminal/",
@@ -90,7 +90,7 @@ checkout = ".research/libghostty-rs"
 strategy = "rebase"
 base = "d2036baeb605d31d09a9e2ba6d0c923e04c34d54"
 base_date = "2026-10-09"
-checked = "2026-10-13"
+checked = "2026-10-16"
 check_every_days = 7
 
 # noq is vendored, not forked: `vendor/noq-proto` is the published noq-proto 1.3.0 (tag
@@ -100,7 +100,7 @@ check_every_days = 7
 upstream = "https://github.com/n0-computer/noq.git"
 upstream_branch = "main"
 vendored = "vendor/noq-proto"
-base = "c1f411562e6078852749b8bcf1190523096a107f"
+base = "1fe2a3424043959909a128e1acbe3697e3082080"
 
 # zeron is the source Slopty's interface was copied from, not a fork and not a dependency: its UI
 # crate and the data types that crate compiles against live in `crates/slopty-shell` and its
@@ -113,4 +113,4 @@ upstream = "https://github.com/zeronsh/zeron.git"
 upstream_branch = "main"
 checkout = ".research/zeron"
 map = "xtask/zeron.toml"
-base = "75b72602a0348f5697c7affc9f84afe367b763fb"
+base = "3b2f78027a2c31622c39c35716da4d6e1af8de15"

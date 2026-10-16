@@ -201,6 +201,12 @@ paths = [
     "crates/ui/build.rs",
     # zeron's mark: the shell draws Slopty's (`crates/slopty-shell/assets/icons/slopty-logo.svg`).
     "crates/ui/assets/icons/zeron-logo.svg",
+    # Agent visuals (#900): a Luau sandbox (mlua) and a wgpu renderer of their own, fed by the
+    # engine's `show_visual` MCP tool and `PublishVisual` upload; Slopty drives agents through
+    # their published doors and has no engine MCP server to carry them.
+    "crates/visual/",
+    "crates/visual-gpu/",
+    "crates/ui/src/visuals.rs",
     # The repository's own files: Slopty has its own.
     "Cargo.toml",
     "Cargo.lock",

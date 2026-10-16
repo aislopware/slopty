@@ -120,7 +120,8 @@ impl InputHighlighter for SloptyInputHighlighter {
     }
 }
 
-pub(super) fn editor_style(theme: &Theme) -> InputEditorStyle {
+// slopty: the Add device dialog's fields wear it too.
+pub(crate) fn editor_style(theme: &Theme) -> InputEditorStyle {
     InputEditorStyle {
         foreground: theme.text.opacity(0.93),
         muted_foreground: theme.text_faint,

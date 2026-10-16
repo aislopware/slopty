@@ -2144,3 +2144,36 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     that fixes it (lane A), and the raw chain stays in the log.
   - Tests: `a_peer_outside_the_admitted_ranges_is_refused_before_the_handshake` and
     `an_address_with_nothing_behind_it_fails_in_seconds` (slopty-net `tests/loopback.rs`).
+
+- ✅ **A link is alive while its control stream answers** (2026-10-16, stability study lane L,
+  MEASUREMENTS "a stalled control stream").
+  - **The defect.** The app judged a worker's link by its count of received QUIC datagrams, and
+    the server judged a worker's lease by QUIC's idle timeout. Both count packets, which keep
+    coming while a control stream's reader or writer has stopped: the link looked alive and
+    carried nothing, so a start or a stop sent into it waited for good.
+  - **Ping and Pong on the stream.** The judging side sends a `Ping` down the control stream
+    every 2 s and counts the link alive only while the `Pong`s come back (`slopty_net::liveness`,
+    one `Beat` per link, looked at every 500 ms). One ping unanswered shows the worker silent;
+    6 s without an answer relinks it at once, its tiles kept and set back until the new link
+    lands. The app pings each worker (`ClientMsg::Ping`, `workers::Supervisor`); a worker pings
+    its server (`ToServer::Ping`, approved in slopty-proto), which answers ahead of its queue and
+    ends the lease after 6 s of nothing from the worker, so the directory follows the stream.
+    The datagram count now only answers a resume's probe; QUIC's keep-alive stays for NAT
+    bindings.
+  - **A side that was away blames nobody.** Two looks more than a ping apart mean this side did
+    not run in between (the machine asleep, an iOS app suspended, a clock leap): the silence
+    counts as it stood before the gap, and a ping goes at once.
+  - **Redials back off further during long outages.** 250 ms doubling to 2 s for the first
+    minute of failures, then 4 s doubling to 30 s, every wait spread by up to a fifth (within the
+    first minute only earlier, so a peer that comes back is still dialled within 2 s), so a
+    laptop with a dead link stops waking its radio every 2 s and workers that lost a restarted
+    server together do not dial it together. A link that held for 10 s, a resume, the worker
+    back online or moved, or the server going away starts the schedule again; a worker daemon,
+    which hears no resume, takes the wall clock running ahead of the monotonic one over a wait
+    as its machine waking, and dials at once.
+  - **The proof.** `link_with_datagrams_but_a_stalled_stream` (app e2e) stalls every control
+    stream of a real worker through its e2e-only seam (`SLOPTY_E2E_STALL_CONTROL`, the worker's
+    `e2e` feature, which `cargo xtask e2e` builds) while its connection lives; the server's
+    `a_worker_whose_stream_stalls_turns_unreachable_within_six_seconds` and the worker's
+    `a_server_that_stops_answering_its_pings_is_dialled_again` do the same to each side of the
+    worker's server link.

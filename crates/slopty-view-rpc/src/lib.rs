@@ -1,4 +1,4 @@
-// Derived from zeron (MIT, github.com/zeronsh/zeron @ 75b7260), see THIRD_PARTY_NOTICES.md
+// Derived from zeron (MIT, github.com/zeronsh/zeron @ 3b2f780), see THIRD_PARTY_NOTICES.md
 //! slopty-view-rpc — the typed control plane (UiRpc / ControlRpc) over WebSocket + in-memory
 //! transports, plus the device-room relay transport ({s,k,to,from} frames — `device_room`; slopty: cut).
 //!
@@ -54,6 +54,15 @@ pub mod methods {
     /// fresh chat2 socket, host nudge, drain pass, and a new delivery escort
     /// per pending command. Params `{chatId}`; IPC-only.
     pub const RETRY_DELIVERY: &str = "RetryDelivery";
+    // slopty: a failed turn tried again, with the person's own words: `{chatId}` → `{}`.
+    pub const RETRY_TURN: &str = "RetryTurn";
+    // slopty: the person's unsent words, kept on the chat's machine for every device:
+    // `{chatId, text}` → `{}`; empty words clear them.
+    pub const SAVE_DRAFT: &str = "SaveDraft";
+    // slopty: what the chats said, searched: `{query, limit}` →
+    // `[{chatId, role: "user"|"agent", excerpt, matchStart, matchEnd}]`, byte offsets into
+    // the excerpt.
+    pub const SEARCH_CHATS: &str = "SearchChats";
     pub const FORK_SIDE_CHAT: &str = "ForkSideChat";
     pub const WATCH_DOC_MESSAGES: &str = "WatchDocMessages";
     /// Explicit user navigation, `{chatId}`. Prioritizes this device's sync
@@ -211,6 +220,7 @@ pub mod methods {
     pub const UPLOAD_CHUNK: &str = "UploadChunk";
     pub const UPLOAD_COMMIT: &str = "UploadCommit";
     pub const READ_ATTACHMENT_CHUNK: &str = "ReadAttachmentChunk";
+    // slopty: no agent visuals.
     /// Lazy full-tool-output fetch from the R2 sidecar by doc-resident ref
     /// (chat2-sync A3). Edge-direct from any device — never relay-forwarded.
     pub const FETCH_TOOL_BLOB: &str = "FetchToolBlob";

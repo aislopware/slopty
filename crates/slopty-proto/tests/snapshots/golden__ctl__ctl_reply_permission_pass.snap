@@ -1,5 +1,0 @@
----
-source: crates/slopty-proto/tests/golden.rs
-expression: line
----
-{"reply":"permission","decision":{"kind":"pass"}}

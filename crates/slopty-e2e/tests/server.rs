@@ -402,9 +402,9 @@ mod tests {
         ensure!(refused.is_err(), "an online worker stays: {refused:?}");
         clock.lap("events, resize");
 
-        // 8b. Another agent, played through the real hook relay: its thread read, its
-        //     permission prompt held for orchestration and answered over the CLI; and a still
-        //     picture refused, or asked of a window no worker has, so nothing is ever captured.
+        // 8b. An agent's thread: its permission prompt held for the person and answered over
+        //     the CLI; and a still picture refused, or asked of a window no worker has, so
+        //     nothing is ever captured.
         agent_reached(stack, &worker).await?;
         clock.lap("thread read, answer, still");
 
@@ -495,88 +495,18 @@ mod tests {
         Ok(())
     }
 
-    /// `slopty hook` as Claude Code runs it for `session`, `payload` on its stdin, returned
-    /// running: a `PermissionRequest` relay waits for its answer.
-    fn relay(stack: &ServerStack, session: &str, payload: &Value) -> Result<tokio::process::Child> {
-        use tokio::io::AsyncWriteExt as _;
-        let slopty = slopty_e2e::harness::bin_dir()?.join("slopty");
-        let mut child = tokio::process::Command::new(slopty);
-        slopty_testkit::env::scrub(child.as_std_mut(), &stack.path("hook-data").join("home"));
-        let mut child = child
-            .arg("--data-dir")
-            .arg(stack.path("hook-data"))
-            .arg("hook")
-            .env("SLOPTY_SESSION", session)
-            .env("SLOPTY_WORKER_SOCKET", stack.worker.ctl_socket())
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::inherit())
-            .kill_on_drop(true)
-            .spawn()
-            .context("spawn slopty hook")?;
-        let mut stdin = child.stdin.take().context("the hook's stdin")?;
-        let bytes = payload.to_string().into_bytes();
-        tokio::spawn(async move {
-            let _written = stdin.write_all(&bytes).await;
-        });
-        Ok(child)
-    }
-
-    /// A played agent in a quiet shell: its thread read over the CLI, which makes orchestration
-    /// follow it; a permission prompt the relay asks is held, shown as the thread's request on
-    /// the next read, refused when an agent answers it over MCP, answered by the person over
-    /// the CLI under a key (and again, answering the first), and the relay prints the denial.
-    /// Then a still picture of a window no worker has, so nothing is captured.
+    /// A Claude Code thread (the stand-in) asked to run a command: its permission prompt is the
+    /// thread's request on the next read, refused when an agent answers it over MCP, answered
+    /// by the person over the CLI under a key (and again, answering the first), and the agent
+    /// hears the denial with its words. Then a still picture of a window no worker has, so
+    /// nothing is captured.
     async fn agent_reached(stack: &ServerStack, worker: &str) -> Result<()> {
-        let term = open_bash(stack, "e2e agent").await?;
-        let session = term.rsplit('/').next().context("a session in the term")?.to_owned();
-        // Named for its session, as Claude Code names a transcript.
-        let transcript = stack.path("e2e.jsonl");
-        let records = [
-            json!({
-                "type": "user", "uuid": "u1", "parentUuid": null,
-                "timestamp": "2026-09-28T03:15:25.849Z",
-                "message": { "role": "user", "content": "tidy the build folder" },
-            }),
-            json!({
-                "type": "user", "uuid": "u2", "parentUuid": "u1",
-                "timestamp": "2026-09-28T03:15:27.000Z",
-                "message": { "role": "user", "content": "and keep the logs" },
-            }),
-        ];
-        let mut jsonl = String::new();
-        for record in &records {
-            jsonl.push_str(&record.to_string());
-            jsonl.push('\n');
-        }
-        std::fs::write(&transcript, jsonl)?;
-        let hook = |event: &str| {
-            json!({
-                "hook_event_name": event, "session_id": "e2e",
-                "transcript_path": transcript.to_string_lossy(),
-            })
-        };
-        let mut prompted = relay(stack, &session, &hook("UserPromptSubmit"))?;
-        let status = tokio::time::timeout(STEP, prompted.wait()).await??;
-        ensure!(status.success(), "the relay exits 0: {status}");
-
-        // Read as the person, over the CLI: from now on its prompts wait for an answer here.
-        let read = until("the prompts in the agent's thread", STEP, async || {
-            // Until the worker's table shows the thread, the server finds none in the terminal.
-            let Ok(read) = stack.slopty(&["agent", "read", "--term", &term]).await else {
-                return Ok(None);
-            };
-            Ok(read.to_string().contains("tidy the build folder").then_some(read))
-        })
-        .await?;
-        ensure!(read["agent"] == "claude-code" && read["requests"] == json!([]), "{read}");
-        let thread = str_of(&read, "thread")?.to_owned();
-
-        let mut asking = hook("PermissionRequest");
-        asking["tool_name"] = json!("Bash");
-        asking["tool_input"] = json!({ "command": "rm -rf build" });
-        asking["permission_mode"] = json!("default");
-        let asked = relay(stack, &session, &asking)?;
+        let folder = stack.path("agent-folder");
+        std::fs::create_dir_all(&folder)?;
+        let folder = folder.to_string_lossy().into_owned();
+        let start = ["agent", "start", worker, "--folder", &folder, "bash", "rm", "-rf", "build"];
+        let started = stack.slopty(&start).await?;
+        let thread = str_of(&started, "agent")?.to_owned();
         let request = until("the prompt held as the thread's request", STEP, async || {
             let read = stack.slopty(&["agent", "read", "--thread", &thread]).await?;
             Ok(read["requests"].as_array().and_then(|r| r.first()).cloned())
@@ -597,15 +527,15 @@ mod tests {
             Ok(said) => said["error"].is_object() || said["result"]["isError"] == json!(true),
         };
         ensure!(refused, "an agent cannot answer a request: {by_agent:?}");
-        let still = stack.slopty(&["agent", "read", "--term", &term]).await?;
+        let still = stack.slopty(&["agent", "read", "--thread", &thread]).await?;
         ensure!(still["requests"][0]["ask"] == json!(ask), "the prompt still waits: {still}");
         let answer = [
             "--idempotency-key",
             "e2e-answer",
             "agent",
             "answer",
-            "--term",
-            term.as_str(),
+            "--thread",
+            thread.as_str(),
             ask.as_str(),
             "deny",
             "--message",
@@ -613,16 +543,17 @@ mod tests {
         ];
         let done = stack.slopty(&answer).await?;
         ensure!(done == json!({ "ok": true }), "{done}");
-        let out = tokio::time::timeout(STEP, asked.wait_with_output()).await??;
-        let printed: Value = serde_json::from_slice(&out.stdout).with_context(|| {
-            format!("the relay printed {:?}", String::from_utf8_lossy(&out.stdout))
-        })?;
-        let decision = &printed["hookSpecificOutput"]["decision"];
-        ensure!(decision["behavior"] == "deny", "{printed}");
-        ensure!(decision["message"] == "not the build folder", "{printed}");
+        // The stand-in's call ends in the denial's words, as an error.
+        until("the agent hears the denial", STEP, async || {
+            let read = stack.slopty(&["agent", "read", "--thread", &thread, "--activity"]).await?;
+            let heard =
+                read["requests"] == json!([]) && read.to_string().contains("not the build folder");
+            Ok(heard.then_some(()))
+        })
+        .await?;
         let again = stack.slopty(&answer).await?;
         ensure!(again == json!({ "ok": true }), "the same key answers the first: {again}");
-        let late = stack.slopty(&["agent", "answer", "--term", &term, &ask, "allow"]).await;
+        let late = stack.slopty(&["agent", "answer", "--thread", &thread, &ask, "allow"]).await;
         ensure!(late.is_err(), "a second answer finds nothing: {late:?}");
 
         // A window no worker has: whether or not this one may record its screen, it answers
@@ -639,8 +570,8 @@ mod tests {
             ])
             .await;
         ensure!(cli.is_err(), "no picture is taken: {cli:?}");
-        let closed = stack.slopty(&["close", &term]).await?;
-        ensure!(closed == json!({ "ok": true }), "{closed}");
+        let stopped = stack.slopty(&["agent", "stop", &thread]).await?;
+        ensure!(stopped == json!({ "ok": true }), "{stopped}");
         Ok(())
     }
 }

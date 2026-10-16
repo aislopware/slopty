@@ -8,7 +8,8 @@ mod review {
     use std::process::Command;
     use std::time::Duration;
 
-    use slopty_agent::observed::{Observed, Out};
+    use slopty_agent::claude::driven::Driven;
+    use slopty_agent::claude::history::Out;
     use slopty_core::WallMs;
     use slopty_proto::thread::wire::{Intent, Outcome, Pick, Review, ReviewScope};
     use slopty_proto::thread::{
@@ -60,8 +61,9 @@ mod review {
         fn new(dir: &Path, cwd: &Path) -> Self {
             let host = Host::open(&dir.join("threads"), Limits::default()).unwrap();
             let cwd = cwd.to_string_lossy();
-            let mut observed = Observed::new("s1", "", None, &cwd, WallMs::ZERO);
-            let Some(Out::Begin(meta)) = observed.drain().into_iter().next() else { panic!() };
+            let session = "11111111-2222-4333-8444-555555555555";
+            let mut driven = Driven::new(session, &cwd, WallMs::ZERO);
+            let Some(Out::Begin(meta)) = driven.drain().into_iter().next() else { panic!() };
             let thread = meta.id;
             host.create(*meta).unwrap();
             let snapshots = Snapshots::new(host.clone(), &dir.join("snapshots"), Some(git()));
@@ -486,7 +488,7 @@ mod review {
         let changes = async |against| match apply(
             &programs,
             &folder,
-            GitOp::Changes { against },
+            GitOp::Changes { against, ignore_whitespace: false },
             &[],
         )
         .await
@@ -534,14 +536,27 @@ mod review {
         );
         std::fs::write(alone.join("draft.txt"), "draft\n").unwrap();
         let folder = alone.to_string_lossy().into_owned();
-        let none =
-            match apply(&programs, &folder, GitOp::Changes { against: Against::Base }, &[]).await {
-                GitOutcome::Done(GitDone::Changes(review)) => *review,
-                other => panic!("{other:?}"),
-            };
+        let none = match apply(
+            &programs,
+            &folder,
+            GitOp::Changes { against: Against::Base, ignore_whitespace: false },
+            &[],
+        )
+        .await
+        {
+            GitOutcome::Done(GitDone::Changes(review)) => *review,
+            other => panic!("{other:?}"),
+        };
         assert_eq!(none.absent.as_deref(), Some(NO_BASE), "no main, no master, no origin");
         let against = Against::Branch("trunk".to_owned());
-        let trunk = match apply(&programs, &folder, GitOp::Changes { against }, &[]).await {
+        let trunk = match apply(
+            &programs,
+            &folder,
+            GitOp::Changes { against, ignore_whitespace: false },
+            &[],
+        )
+        .await
+        {
             GitOutcome::Done(GitDone::Changes(review)) => *review,
             other => panic!("{other:?}"),
         };
@@ -549,8 +564,13 @@ mod review {
         let outside = dir.path().join("outside");
         std::fs::create_dir_all(&outside).unwrap();
         let folder = outside.to_string_lossy().into_owned();
-        let refused =
-            apply(&programs, &folder, GitOp::Changes { against: Against::Head }, &[]).await;
+        let refused = apply(
+            &programs,
+            &folder,
+            GitOp::Changes { against: Against::Head, ignore_whitespace: false },
+            &[],
+        )
+        .await;
         assert!(matches!(refused, GitOutcome::Refused { .. }), "{refused:?}");
     }
 
@@ -693,7 +713,7 @@ mod review {
         std::fs::write(repo.join("Cargo.lock"), lines(lock, "lock")).unwrap();
         let programs = Programs { git: Some(git()), gh: None, glab: None, path: None };
         let folder = repo.to_string_lossy().into_owned();
-        let op = GitOp::Changes { against: Against::Head };
+        let op = GitOp::Changes { against: Against::Head, ignore_whitespace: false };
         let review = match apply(&programs, &folder, op, &[]).await {
             GitOutcome::Done(GitDone::Changes(review)) => *review,
             other => panic!("{other:?}"),
@@ -707,7 +727,8 @@ mod review {
         assert_eq!(shown("small.rs"), 5, "and a light one after it");
         assert_eq!(file("Cargo.lock").patch.clipped_lines, lock, "the lock, read last, waits");
 
-        let whole = GitOp::FileDiff { from: None, to: file("big.rs").to.clone() };
+        let whole =
+            GitOp::FileDiff { from: None, to: file("big.rs").to.clone(), ignore_whitespace: false };
         let (asked, patch) = match apply(&programs, &folder, whole, &[]).await {
             GitOutcome::Done(GitDone::FileDiff { to, patch, .. }) => (to, *patch),
             other => panic!("{other:?}"),
@@ -716,7 +737,11 @@ mod review {
         let lines_whole = patch.hunks.iter().map(|h| h.lines.len()).sum::<usize>();
         assert_eq!((lines_whole, patch.clipped_lines), (big as usize, 0), "the file whole");
 
-        let bad = GitOp::FileDiff { from: Some("--output=/tmp/x".to_owned()), to: None };
+        let bad = GitOp::FileDiff {
+            from: Some("--output=/tmp/x".to_owned()),
+            to: None,
+            ignore_whitespace: false,
+        };
         let refused = apply(&programs, &folder, bad, &[]).await;
         assert!(matches!(refused, GitOutcome::Failed { .. }), "{refused:?}");
     }

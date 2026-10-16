@@ -68,7 +68,6 @@ mod golden_thread {
             native: "5e55105e".to_owned(),
             cwd: "/work".to_owned(),
             title: "Fix the build".to_owned(),
-            terminal: Some(SessionId::from_uuid(Uuid::from_u128(0x5e55))),
             parent: Some(Link {
                 thread: ThreadId::from_uuid(Uuid::from_u128(0x9a)),
                 item: ItemId("toolu_1".to_owned()),
@@ -78,9 +77,13 @@ mod golden_thread {
                 thread: ThreadId::from_uuid(Uuid::from_u128(0xf0)),
                 turn: Some(TurnId(2)),
             }),
-            drive: Drive::named(Drive::OBSERVED),
+            drive: Drive::named(Drive::DRIVEN),
             caps: vec![Cap::named(Cap::QUEUE), Cap::named(Cap::STEER)],
-            models: vec![Model { id: "opus".to_owned(), label: "Opus".to_owned() }],
+            models: vec![Model {
+                id: "opus".to_owned(),
+                label: "Opus".to_owned(),
+                options: Vec::new(),
+            }],
             modes: vec![Mode {
                 id: "plan".to_owned(),
                 label: "Plan".to_owned(),
@@ -338,6 +341,7 @@ mod golden_thread {
                     effort: Some("high".to_owned()),
                     attachments: vec!["/work/shot.png".to_owned()],
                     args: vec!["--yolo".to_owned()],
+                    options: BTreeMap::new(),
                     worktree: None,
                 }),
             },
@@ -357,6 +361,7 @@ mod golden_thread {
                     effort: None,
                     attachments: Vec::new(),
                     args: Vec::new(),
+                    options: BTreeMap::new(),
                     worktree: Some(NewWorktree::named("claude-3f9a2c")),
                 }),
             },
@@ -425,7 +430,6 @@ mod golden_thread {
                 message: Some("fine".to_owned()),
             }),
         );
-        snap("intent_release", &send(Intent::Release { ask: AskId("ask-1".to_owned()) }));
         snap("intent_set_model", &send(Intent::SetModel { model: "claude-opus-5-5".to_owned() }));
         snap("intent_set_mode", &send(Intent::SetMode { mode: "plan".to_owned() }));
         snap("intent_set_effort", &send(Intent::SetEffort { effort: "high".to_owned() }));
@@ -1000,8 +1004,7 @@ mod golden_thread {
         let session = SessionId::from_uuid(Uuid::from_u128(0x5e55));
         let tile = TermRef { worker, session };
         let at = ThreadAt { worker, thread: thread() };
-        let ranked =
-            Ranked { at, rung: Rung::NeedsYou, since_ms: ms(1_500), terminal: Some(session) };
+        let ranked = Ranked { at, rung: Rung::NeedsYou, since_ms: ms(1_500) };
         let standing = Standing {
             rung: Rung::NeedsYou,
             counts: Counts {
@@ -1059,7 +1062,6 @@ mod golden_thread {
             let notice = Notice {
                 kind,
                 about: Subject::Thread(at),
-                tile: Some(tile),
                 title: "Fix the ladder".to_owned(),
                 text: "Wants to run cargo test".to_owned(),
                 worked_ms,
@@ -1101,7 +1103,6 @@ mod golden_thread {
         let notice = Notice {
             kind: NoticeKind::NeedsYou,
             about: Subject::Thread(ThreadAt { worker, thread: thread() }),
-            tile: Some(TermRef { worker, session }),
             title: "Fix the ladder".to_owned(),
             text: "Run cargo test?".to_owned(),
             worked_ms: None,
@@ -1116,7 +1117,6 @@ mod golden_thread {
         let program = Notice {
             kind: NoticeKind::NeedsYou,
             about: Subject::Terminal(TermRef { worker, session }),
-            tile: Some(TermRef { worker, session }),
             title: "deploy".to_owned(),
             text: "Approve the production rollout?".to_owned(),
             worked_ms: None,
@@ -1126,7 +1126,6 @@ mod golden_thread {
             "push_body_program",
             &PushBody { notice: program, ask: None, picks: Vec::new(), quiet: false },
         );
-        snap("push_answerable", &slopty_proto::server::FromServer::Pushes(true));
         snap("push_pushable", &slopty_proto::server::FromServer::Pushable(false));
     }
 }

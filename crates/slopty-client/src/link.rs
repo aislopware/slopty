@@ -119,7 +119,17 @@ pub struct WorkerLink {
     clips: Arc<ClipCache>,
     /// Frames shown from their datagram copy, ahead of the session stream.
     copies_taken: Arc<AtomicU64>,
+    /// The control stream's answers to [`Self::ping_stream`].
+    pongs: Arc<Pongs>,
     tasks: JoinSet<()>,
+}
+
+/// What the control stream's pongs said: how many came, and the last one's round trip.
+#[derive(Debug, Default)]
+struct Pongs {
+    count: AtomicU64,
+    /// Microseconds.
+    rtt: AtomicU64,
 }
 
 impl WorkerLink {
@@ -160,6 +170,8 @@ impl WorkerLink {
         let control_drags = Arc::clone(&drag_outs);
         let forwards = Arc::new(Mutex::new(Forwards::new(quic.clone())));
         let shared_forwards = forward.then(|| Arc::clone(&forwards));
+        let pongs = Arc::new(Pongs::default());
+        let control_pongs = Arc::clone(&pongs);
         tasks.spawn(async move {
             loop {
                 let msg = match rx.recv().await {
@@ -181,6 +193,14 @@ impl WorkerLink {
                     control_drags.heard(event);
                 }
                 let event = match msg {
+                    // Counted here, off the owner's thread: the owner's supervisor reads them
+                    // ([`WorkerLink::pongs`]), and nothing else does.
+                    WorkerMsg::Pong { sent_at } => {
+                        let rtt = sent_at.elapsed().as_micros();
+                        control_pongs.rtt.store(rtt, Ordering::Relaxed);
+                        control_pongs.count.fetch_add(1, Ordering::Release);
+                        continue;
+                    }
                     WorkerMsg::Xfer(x) if control_table.on_control(&x) => continue,
                     WorkerMsg::Clip(c) if control_clips.on_control(&c) => continue,
                     WorkerMsg::File { path, read } => {
@@ -348,6 +368,7 @@ impl WorkerLink {
             xfers,
             clips,
             copies_taken,
+            pongs,
             tasks,
         }
     }
@@ -482,6 +503,29 @@ impl WorkerLink {
     /// reset, which ends the link.
     pub fn ping(&self) {
         slopty_net::endpoint::ping(&self.conn);
+    }
+
+    /// Ask the worker over the control stream whether it still carries both ways
+    /// (`ClientMsg::Ping`); its `Pong` moves [`Self::pongs`]. Nothing goes while the stream's
+    /// queue is full, which waits on the worker already. Whether it went.
+    pub fn ping_stream(&self) -> bool {
+        let ping = ClientMsg::Ping { sent_at: slopty_core::MonoTime::now() };
+        self.out.try_send(ping).is_ok()
+    }
+
+    /// The control stream's pongs so far: one that moves is the stream carrying both ways, the
+    /// liveness the app's supervisor judges the link by (`slopty_net::liveness`).
+    #[must_use]
+    pub fn pongs(&self) -> u64 {
+        self.pongs.count.load(Ordering::Acquire)
+    }
+
+    /// The last pong's round trip through the control stream, the worker's loop included;
+    /// `None` before the first.
+    #[must_use]
+    pub fn stream_rtt(&self) -> Option<std::time::Duration> {
+        (self.pongs() > 0)
+            .then(|| std::time::Duration::from_micros(self.pongs.rtt.load(Ordering::Relaxed)))
     }
 
     /// Where the worker is and the round trip to it, for diagnostics.

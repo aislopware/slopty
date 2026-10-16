@@ -48,7 +48,7 @@ pub fn check(root: &Utf8Path, lane: &str, sha: &str, crates: &[String]) -> Resul
     let tree = crate::gate::snapshot_commit(root, &dir, sha)?;
     let sh = Shell::new()?;
     sh.change_dir(&tree);
-    sh.set_var("CARGO_TARGET_DIR", dir.join("target"));
+    target_by_config(&dir)?;
     // `.cargo/config.toml` names it relative to the tree: the checkout's is the one every build
     // shares.
     sh.set_var("LIBGHOSTTY_VT_SYS_PREBUILT_DIR", root.join("target").join(crate::prune::PREBUILT));
@@ -73,6 +73,23 @@ pub fn check(root: &Utf8Path, lane: &str, sha: &str, crates: &[String]) -> Resul
     }
     let passed = lint.is_ok() && tests.is_some_and(|t| t.is_ok());
     Ok(Outcome { passed, took: started.elapsed(), thermal, load })
+}
+
+/// Point cargo at `<dir>/target` through `<dir>/.cargo/config.toml`, which cargo finds above the
+/// lane's tree, and never through `CARGO_TARGET_DIR`: sccache keys every unit by each `CARGO_*`
+/// variable in rustc's environment, so a variable per lane kept every lane from reading the
+/// dependencies another had compiled (0.25 % Rust hits over 12,772 compiles, 2026-10-16;
+/// `docs/decisions/tooling.md`, "One compile cache key space").
+fn target_by_config(dir: &Utf8Path) -> Result<()> {
+    let config = dir.join(".cargo");
+    std::fs::create_dir_all(&config).with_context(|| format!("create {config}"))?;
+    let path = config.join("config.toml");
+    let text = "# Written by `xtask local`: the lane's target dir, kept out of rustc's environment.\n\
+                [build]\ntarget-dir = \"target\"\n";
+    if std::fs::read_to_string(&path).ok().as_deref() != Some(text) {
+        std::fs::write(&path, text).with_context(|| format!("write {path}"))?;
+    }
+    Ok(())
 }
 
 /// Set in a local check's environment: `xtask check` then tests with the profile a busy Mac

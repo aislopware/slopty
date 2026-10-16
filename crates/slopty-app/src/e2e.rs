@@ -30,7 +30,6 @@ use slopty_e2e::{
     Button, Command, Dump, FaceInfo, FrameInfo, ItemInfo, LatencyInfo, Reply, ScreenInfo,
     TerminalInfo, WindowInfo, WorkerInfo,
 };
-use slopty_kit::icons::Status;
 use slopty_proto::items::ItemKind;
 use slopty_ui::screen::ScreenView;
 use slopty_ui::workspace::WorkerStatus;
@@ -913,19 +912,6 @@ const fn a11y_nodes(_window: &Window) -> Vec<slopty_e2e::A11yNode> {
     Vec::new()
 }
 
-/// The agent's state as one word, as the dump lists it: its mark in the status vocabulary.
-const fn agent_line(status: Status) -> &'static str {
-    match status {
-        Status::Idle => "idle",
-        Status::Working => "working",
-        Status::Running => "waiting",
-        Status::NeedsYou => "needs-you",
-        Status::Done => "done",
-        Status::Failed => "failed",
-        Status::Away => "away",
-    }
-}
-
 /// Everything a test may want to know about one remote window, timings in microseconds.
 fn screen_info(item: ItemId, view: &ScreenView, window: &Window) -> ScreenInfo {
     let us = |d: std::time::Duration| u64::try_from(d.as_micros()).unwrap_or(u64::MAX);
@@ -1134,8 +1120,6 @@ impl Workspace {
                     rows: terminal.rows(),
                     lines: terminal.lines(),
                     epoch: terminal.state().epoch(),
-                    agent: view.agent(session).map(|(status, _)| agent_line(status).to_owned()),
-                    agent_detail: view.agent(session).map(|(_, said)| said),
                     latency: latency_info(&terminal.latency()),
                     face: terminal.metrics().map(|m| face_info(&m)),
                     driving: terminal.driving(),

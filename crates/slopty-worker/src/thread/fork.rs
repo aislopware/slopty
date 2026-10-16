@@ -40,7 +40,6 @@ mod tests {
             native: "s".to_owned(),
             cwd: "/w".to_owned(),
             title: String::new(),
-            terminal: None,
             parent: None,
             origin: ThreadMeta::PERSON.to_owned(),
             forked_from: None,

@@ -620,13 +620,13 @@ fn a_tile_left_a_while_lets_the_source_go(cx: &mut gpui::TestAppContext) {
     );
 }
 
-/// Under gpui-kit's window root, Tab and ⇧Tab, which the kit binds there to walk the focus, go
-/// to the worker as keys, and the remote window keeps the keyboard.
+/// Under the window root (`gpui_base::Root`), Tab and ⇧Tab, which it binds there to walk the focus,
+/// go to the worker as keys, and the remote window keeps the keyboard.
 #[gpui::test]
 fn the_kits_tab_around_a_remote_window_goes_to_the_worker(cx: &mut gpui::TestAppContext) {
     let (out, mut rx) = mpsc::channel(256);
     cx.update(|cx| {
-        gpui_kit::init(cx);
+        gpui_base::init(cx);
         crate::key_takers::release(cx);
     });
     let opened = Opened {
@@ -647,7 +647,7 @@ fn the_kits_tab_around_a_remote_window_goes_to_the_worker(cx: &mut gpui::TestApp
     let (_root, cx) = cx.add_window_view(|window, cx| {
         let focus = held.read(cx).focus.clone();
         window.focus(&focus, cx);
-        gpui_kit::component::Root::new(held, window, cx)
+        gpui_base::Root::new(held, window, cx)
     });
     cx.run_until_parked();
     view.update(cx, |v, _| v.keyboard_focused());

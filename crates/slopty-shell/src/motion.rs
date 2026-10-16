@@ -63,8 +63,10 @@ const PULSE_TICK: Duration = Duration::from_millis(33);
 /// the view drops off, letting the clock park.
 const PULSE_LEASE: Duration = Duration::from_millis(300);
 
+// slopty: one process-wide epoch (`locked_phase`), so the clock's default is derived.
+#[derive(Default)]
 struct PulseClock {
-    epoch: Instant,
+    // slopty: no epoch of its own: phases count from [`process_epoch`].
     leases: HashMap<EntityId, PulseLease>,
     tick: u64,
     running: bool,
@@ -94,15 +96,25 @@ impl PulseLease {
 
 impl Global for PulseClock {}
 
-impl Default for PulseClock {
-    fn default() -> Self {
-        Self {
-            epoch: Instant::now(),
-            leases: HashMap::new(),
-            tick: 0,
-            running: false,
-        }
+// slopty: one clock for every repeating status animation in the process (Claude desktop
+// re-anchors its infinite animations to `t mod period` of one clock), so every running dot in
+// every row and every window moves in unison, whenever it mounted and whichever window drew it.
+/// The instant every repeating animation's phase counts from, the same for the whole process.
+fn process_epoch() -> Instant {
+    static EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    *EPOCH.get_or_init(Instant::now)
+}
+
+/// The phase `[0,1)` at `now` of a repeating animation lasting `period`, on the process's one
+/// clock: two animations of one period agree at any instant, however far apart they mounted.
+pub fn locked_phase(period: Duration, now: Instant) -> f32 {
+    if period.is_zero() {
+        return 0.0;
     }
+    let elapsed = now.saturating_duration_since(process_epoch()).as_secs_f64();
+    #[expect(clippy::cast_possible_truncation, reason = "a phase in [0,1)")]
+    let phase = (elapsed / period.as_secs_f64()).fract() as f32;
+    phase
 }
 
 /// Current phase `[0,1)` of a repeating spec, plus a lease that keeps the
@@ -129,8 +141,9 @@ fn pulse_delta_every(spec: &MotionSpec, view: EntityId, stride: u64, cx: &mut Ap
 }
 
 fn pulse_phase(spec: &MotionSpec, cx: &mut App) -> f32 {
-    let clock = cx.default_global::<PulseClock>();
-    (clock.epoch.elapsed().as_secs_f32() / spec.total().as_secs_f32()).fract()
+    // slopty: on the process's one clock ([`locked_phase`]), not the clock's first use.
+    let _ = cx;
+    locked_phase(spec.total(), Instant::now())
 }
 
 /// Activity feedback uses a slow, uniform brightness pulse when the system
@@ -1352,6 +1365,28 @@ fn refresh_system(_cx: &mut App) {}
 
 #[cfg(test)]
 mod tests {
+
+    // slopty: two status animations mounted 300 ms apart, even in two apps (two windows' worth
+    // of pulse clocks), report one phase at one frame time.
+    #[test]
+    fn status_animations_mounted_apart_move_in_unison() {
+        let first = process_epoch();
+        std::thread::sleep(Duration::from_millis(30));
+        let frame = Instant::now() + Duration::from_millis(300);
+        assert_eq!(first, process_epoch(), "one clock, whenever each started");
+        for spec in [&GRADIENT_SPIN, &SLOPTY_PULSE] {
+            let early = locked_phase(spec.total(), frame);
+            let late = locked_phase(spec.total(), frame);
+            assert_eq!(early, late);
+            assert!((0.0..1.0).contains(&early));
+        }
+        // A period later the phase is back where it was.
+        let period = GRADIENT_SPIN.total();
+        let now = Instant::now() + Duration::from_secs(5);
+        let again = locked_phase(period, now + period);
+        assert!((locked_phase(period, now) - again).abs() < 1e-3);
+        assert_eq!(locked_phase(Duration::ZERO, now), 0.0);
+    }
 
     #[test]
     fn indicator_slide_is_interruptible_and_snaps_when_reduced() {

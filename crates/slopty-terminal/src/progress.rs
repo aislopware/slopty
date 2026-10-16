@@ -1,12 +1,11 @@
-//! What a program's progress report (`OSC 9;4`) says, in the kit's progress language
-//! ([`slopty_kit::kit::progress`]).
+//! What a program's progress report (`OSC 9;4`) says, in the shell's progress language
+//! ([`slopty_shell::live::Progress`]).
 //!
-//! The terminal draws no chrome of its own for it. A report used to be a square line along the
-//! terminal's top edge, which read as a stray rule. Now the tile's header shows it, where a tile
-//! says how it stands: the kit's bar with its figure, beside the title.
+//! The terminal draws no chrome of its own for it: the shell's terminal tab shows it, as a
+//! ring in the tab's icon slot.
 
-use slopty_kit::kit::progress::Progress;
 use slopty_proto::terminal::{Progress as Report, ProgressState};
+use slopty_shell::live::Progress;
 
 /// What `report` shows, or `None` when nothing is reported.
 ///
@@ -26,8 +25,8 @@ pub fn shown(report: Report) -> Option<Progress> {
 
 #[cfg(test)]
 mod tests {
-    use slopty_kit::kit::progress::Progress;
     use slopty_proto::terminal::{Progress as Report, ProgressState};
+    use slopty_shell::live::Progress;
 
     use super::shown;
 
@@ -38,7 +37,7 @@ mod tests {
     /// Each state shows as its kind of progress, a figure is the share, never past the whole,
     /// and an unknown share is under way.
     #[test]
-    fn a_report_shows_as_the_kits_progress() {
+    fn a_report_shows_as_the_shells_progress() {
         assert_eq!(shown(Report::default()), None, "nothing reported");
         assert_eq!(shown(report(ProgressState::Set, Some(50))), Some(Progress::Share(0.5)));
         assert_eq!(shown(report(ProgressState::Set, Some(250))), Some(Progress::Share(1.0)));

@@ -123,20 +123,31 @@ async fn applied(programs: &Programs, repo: &str, op: GitOp, terminals: &[PathBu
             super::pull::merge(programs, &root, &method, head.as_deref(), flags).await
         }
         GitOp::MarkReady => super::pull::ready(programs, &root).await,
-        GitOp::Changes { against } => super::snapshot::working_tree(git, &root, against)
-            .await
-            .map(|review| GitDone::Changes(Box::new(review)))
-            .map_err(|failed| GitOutcome::Failed { said: failed.0 }),
+        GitOp::Changes { against, ignore_whitespace } => {
+            super::snapshot::working_tree_with(git, &root, against, ignore_whitespace)
+                .await
+                .map(|review| GitDone::Changes(Box::new(review)))
+                .map_err(|failed| GitOutcome::Failed { said: failed.0 })
+        }
+        GitOp::Turn { turn, before, after, ignore_whitespace } => {
+            super::snapshot::turn(git, &root, (turn, before, after), ignore_whitespace)
+                .await
+                .map(|review| GitDone::Changes(Box::new(review)))
+                .map_err(|failed| GitOutcome::Failed { said: failed.0 })
+        }
         GitOp::Range { base, head } => super::snapshot::range(git, &root, &base, &head)
             .await
             .map(|review| GitDone::Changes(Box::new(review)))
             .map_err(|failed| GitOutcome::Failed { said: failed.0 }),
-        GitOp::FileDiff { from, to } => {
-            super::snapshot::file_diff(git, &root, from.as_deref(), to.as_deref())
-                .await
-                .map(|patch| GitDone::FileDiff { from, to, patch: Box::new(patch) })
-                .map_err(|failed| GitOutcome::Failed { said: failed.0 })
-        }
+        GitOp::FileDiff { from, to, ignore_whitespace } => super::snapshot::file_diff(
+            git,
+            &root,
+            (from.as_deref(), to.as_deref()),
+            ignore_whitespace,
+        )
+        .await
+        .map(|patch| GitDone::FileDiff { from, to, patch: Box::new(patch) })
+        .map_err(|failed| GitOutcome::Failed { said: failed.0 }),
         GitOp::Blob { blob } => super::snapshot::blob(git, &root, &blob)
             .await
             .map(|bytes| GitDone::Blob { blob, bytes })
@@ -455,6 +466,9 @@ pub(super) async fn run(
         .env("NO_PROMPT", "1")
         .env("NO_COLOR", "1")
         .env("GIT_EDITOR", "true")
+        // A status never writes the index back: the write would be a change to the repository
+        // its watch reports (`repowatch`), which would ask for the status again.
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

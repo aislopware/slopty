@@ -221,7 +221,6 @@ impl Driven {
             native: session.to_owned(),
             cwd: cwd.to_owned(),
             title: String::new(),
-            terminal: None,
             parent: None,
             origin: ThreadMeta::PERSON.to_owned(),
             forked_from: None,
@@ -540,6 +539,7 @@ impl Driven {
             .map(|m| Model {
                 id: model_id(&m.provider, &m.id),
                 label: m.name.clone().unwrap_or_else(|| m.id.clone()),
+                options: Vec::new(),
             })
             .collect();
         vec![Action::Meta(Box::new(self.meta.clone()))]

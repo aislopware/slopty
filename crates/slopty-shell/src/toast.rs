@@ -37,6 +37,9 @@ const STEP_SCALE: f32 = 0.05;
 const MOVE: Duration = Duration::from_millis(400);
 const EXIT: Duration = Duration::from_millis(200);
 const SWIPE_THRESHOLD: f32 = 45.0;
+// slopty: a toast's button, and at most the line of words it sits on, which it overhangs.
+const ACTION_HEIGHT: f32 = 24.0;
+const LINE_HEIGHT: f32 = 16.0;
 /// Sonner's `cubic-bezier(.215, .61, .355, 1)`.
 const EASE: CubicBezier = CubicBezier::new(0.215, 0.61, 0.355, 1.0);
 
@@ -104,6 +107,10 @@ struct Toast {
     message: SharedString,
     // slopty: its button, if any.
     action: Option<Action>,
+    // slopty: something still under way: `Some(None)` spins, `Some(Some(f))` fills a ring to f.
+    progress: Option<Option<f32>>,
+    // slopty: an error's words were copied from it.
+    copied: bool,
     created: Instant,
     /// Countdown left, and when it last resumed (`None` while paused).
     remaining: Duration,
@@ -201,6 +208,8 @@ fn push_for(
             kind,
             message,
             action,
+            progress: None,
+            copied: false,
             created: now,
             remaining: lasts,
             resumed: (!hovered).then_some(now),
@@ -251,6 +260,70 @@ pub fn offer(
     push_for(cx, ToastKind::Info, message.into(), Some(action), lasts)
 }
 
+// slopty: a toast that moves in place: its words and progress change, it keeps its spot and
+// its countdown (a transfer's bytes, a clone's phase).
+/// Change toast `id`'s words and progress in place; `progress` is how far, 0 to 1, or `None`
+/// for under way with no measure. A toast already gone is left gone.
+pub fn update(cx: &mut App, id: u64, message: impl Into<SharedString>, progress: Option<f32>) {
+    let message: SharedString = message.into().trim().to_owned().into();
+    let progress = progress.map(|f| f.clamp(0.0, 1.0));
+    let Some(store) = cx.try_global::<ToastStore>() else { return };
+    let Some(toast) = store.toasts.iter().find(|t| t.id == id && t.closing.is_none()) else {
+        return;
+    };
+    let same_words = message.is_empty() || toast.message == message;
+    // Whole percents only: a redraw for a change no one can see is waste.
+    let same_progress = toast.progress.is_some_and(|was| match (was, progress) {
+        (Some(a), Some(b)) => (a * 100.0).round() == (b * 100.0).round(),
+        (None, None) => true,
+        _ => false,
+    });
+    if same_words && same_progress {
+        return;
+    }
+    if let Some(toast) =
+        cx.global_mut::<ToastStore>().toasts.iter_mut().find(|t| t.id == id)
+    {
+        if !message.is_empty() {
+            toast.message = message;
+        }
+        toast.progress = Some(progress);
+    }
+    cx.refresh_windows();
+}
+
+// slopty: a neutral notice for something under way (a slow call, a clone), with a spinner; its
+// id moves it ([`update`]) or takes it down ([`withdraw`]).
+/// A neutral notice with a spinner, lasting `lasts`.
+pub fn working(cx: &mut App, message: impl Into<SharedString>, lasts: Duration) -> Option<u64> {
+    let id = push_for(cx, ToastKind::Info, message.into(), None, lasts)?;
+    if let Some(toast) =
+        cx.global_mut::<ToastStore>().toasts.iter_mut().find(|t| t.id == id)
+    {
+        toast.progress = Some(None);
+    }
+    Some(id)
+}
+
+// slopty: a notice that waits on a choice and shows how far it is ([`update`] moves it).
+/// [`offer`] with a progress lead: `progress` as in [`update`].
+pub fn offer_progress(
+    cx: &mut App,
+    message: impl Into<SharedString>,
+    label: impl Into<SharedString>,
+    lasts: Duration,
+    progress: Option<f32>,
+    run: impl Fn(&mut App) + 'static,
+) -> Option<u64> {
+    let id = offer(cx, message, label, lasts, run)?;
+    if let Some(toast) =
+        cx.global_mut::<ToastStore>().toasts.iter_mut().find(|t| t.id == id)
+    {
+        toast.progress = Some(progress.map(|f| f.clamp(0.0, 1.0)));
+    }
+    Some(id)
+}
+
 // slopty: whether toast `id` is still up, so a caller keeping ids lets go of the rest.
 /// Whether toast `id` is up and not on its way out.
 pub fn showing(cx: &App, id: u64) -> bool {
@@ -296,6 +369,37 @@ pub fn messages(cx: &App) -> Vec<SharedString> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+// slopty: the app's tests read each toast's kind too.
+/// The live toasts' kinds and messages, oldest first.
+pub fn shown(cx: &App) -> Vec<(ToastKind, SharedString)> {
+    cx.try_global::<ToastStore>()
+        .map(|store| {
+            store
+                .toasts
+                .iter()
+                .filter(|toast| toast.closing.is_none())
+                .map(|toast| (toast.kind, toast.message.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// An error's words, put on the clipboard from its toast.
+fn copy_error(id: u64, cx: &mut App) {
+    let Some(toast) = cx
+        .global_mut::<ToastStore>()
+        .toasts
+        .iter_mut()
+        .find(|toast| toast.id == id)
+    else {
+        return;
+    };
+    toast.copied = true;
+    let words = toast.message.to_string();
+    cx.write_to_clipboard(gpui::ClipboardItem::new_string(words));
+    cx.refresh_windows();
 }
 
 fn dismiss(id: u64, cx: &mut App) {
@@ -378,6 +482,58 @@ fn schedule_wake(window: &Window, cx: &mut App) {
         }
     };
     cx.global_mut::<ToastStore>().wake = wake;
+}
+
+// slopty: a toast under way leads with its progress, not its kind.
+fn lead(kind: ToastKind, progress: Option<Option<f32>>, id: u64, theme: &Theme) -> AnyElement {
+    match progress {
+        Some(Some(fraction)) => {
+            #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "0..=100")]
+            let percent = (fraction * 100.0).round() as u8;
+            div()
+                .flex_none()
+                .size(px(16.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(crate::loaders::upload_progress_arc(
+                    percent,
+                    14.0,
+                    theme.text.opacity(0.14),
+                    theme.text_muted,
+                ))
+                .into_any_element()
+        }
+        Some(None) => div()
+            .flex_none()
+            .size(px(16.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(ToastSpinner { id, tint: theme.text_muted })
+            .into_any_element(),
+        None => kind_icon(kind, theme),
+    }
+}
+
+/// The mono spinner of a toast under way.
+#[derive(gpui::IntoElement)]
+struct ToastSpinner {
+    id: u64,
+    tint: gpui::Hsla,
+}
+
+impl gpui::RenderOnce for ToastSpinner {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let view = window.current_view();
+        crate::loaders::mini_mono_spinner(
+            SharedString::from(format!("toast-spinner-{}", self.id)),
+            2.0,
+            self.tint,
+            view,
+            cx,
+        )
+    }
 }
 
 fn kind_icon(kind: ToastKind, theme: &Theme) -> AnyElement {
@@ -525,18 +681,27 @@ pub fn render_toaster(window: &mut Window, cx: &mut App) -> Option<AnyElement> {
         }
         let kind = toast.kind;
         let message = toast.message.clone();
-        // slopty: its button, after the words.
+        let progress = toast.progress;
+        let copied = toast.copied;
+        // slopty: its button, after the words: sonner's small action (24 tall, 12 px, a quiet
+        // fill), its overhang taken back so the toast keeps the height of its line.
         let action = toast.action.clone().map(|action| {
             let label = action.label.clone();
             crate::settings::widgets::text_action(
                 &theme,
-                crate::settings::widgets::ActionTone::Solid,
+                crate::settings::widgets::ActionTone::Filled,
                 label.clone(),
             )
             .id(("toast-action", id as usize))
             .debug_selector(move || format!("toast-action-{label}"))
             .flex_none()
-            .min_h(px(26.0))
+            .min_h(px(ACTION_HEIGHT))
+            .h(px(ACTION_HEIGHT))
+            .my(px(-(ACTION_HEIGHT - LINE_HEIGHT) / 2.0))
+            .px(px(8.0))
+            .py(px(0.0))
+            .rounded(px(6.0))
+            .text_size(crate::typography::ui_rems(12.0))
             .on_click(move |_, _, cx| {
                 (action.run)(cx);
                 dismiss(id, cx);
@@ -553,8 +718,15 @@ pub fn render_toaster(window: &mut Window, cx: &mut App) -> Option<AnyElement> {
             .py(px(13.0))
             .text_size(crate::typography::ui_rems(13.0))
             .text_color(theme.text)
-            .child(kind_icon(kind, &theme))
-            .child(div().flex_1().min_w_0().child(message.clone()))
+            .child(lead(kind, progress, id, &theme))
+            // slopty: an error clamps at four lines and shows whole while the stack is hovered.
+            .child({
+                let words = div().flex_1().min_w_0().child(message.clone());
+                if kind == ToastKind::Error && !expanded { words.line_clamp(4) } else { words }
+            })
+            .children((kind == ToastKind::Error).then(|| {
+                error_copy_button(id, copied, &theme).into_any_element()
+            }))
             .children(action)
             .child(
                 // Measure the natural height for the stack's layout.
@@ -598,7 +770,13 @@ pub fn render_toaster(window: &mut Window, cx: &mut App) -> Option<AnyElement> {
                 ToastKind::Error => gpui::Role::Alert,
                 _ => gpui::Role::Status,
             })
-            .aria_label(message)
+            .aria_label(message);
+        // slopty: how far a toast under way is, as its value ("42%").
+        let toast_el = match progress.flatten() {
+            Some(fraction) => toast_el.aria_value(format!("{}%", (fraction * 100.0).round())),
+            None => toast_el,
+        };
+        let toast_el = toast_el
             .absolute()
             .left(px(inset + swipe.max(0.0)))
             .right(px(inset - swipe.max(0.0)))
@@ -684,6 +862,39 @@ pub fn render_toaster(window: &mut Window, cx: &mut App) -> Option<AnyElement> {
     )
 }
 
+// slopty: an error's words are one click from the clipboard (zeron's icon control, 24/6/14).
+fn error_copy_button(id: u64, copied: bool, theme: &Theme) -> impl IntoElement {
+    let (glyph, label) = if copied {
+        (crate::icons::CHECK, "Copied")
+    } else {
+        (crate::icons::COPY, "Copy error")
+    };
+    let rest = theme.ink(0.0);
+    let hover = theme.ink(0.05);
+    div()
+        .id(("toast-copy", id as usize))
+        .debug_selector(move || format!("toast-copy-{id}"))
+        .role(gpui::Role::Button)
+        .aria_label(SharedString::from(label))
+        .flex_none()
+        .size(px(24.0))
+        .rounded(px(6.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(rest)
+        .hover(move |style| style.bg(hover))
+        .cursor_pointer()
+        .text_color(theme.text_muted)
+        .child(crate::icons::icon(glyph).size(px(14.0)))
+        .tooltip(crate::settings::widgets::text_tooltip(label))
+        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(move |_, _, cx| {
+            cx.stop_propagation();
+            copy_error(id, cx);
+        })
+}
+
 fn release_swipe(id: u64, cx: &mut App) {
     let Some(toast) = cx
         .global_mut::<ToastStore>()
@@ -718,6 +929,8 @@ mod tests {
             kind: ToastKind::Error,
             message: message.to_owned().into(),
             action: None,
+            progress: None,
+            copied: false,
             created: now,
             remaining: DURATION,
             resumed: Some(now),
@@ -815,6 +1028,106 @@ mod tests {
         let id = cx.update(|_, cx| offer(cx, "again", "Open", lasts, |_| {}));
         cx.update(|_, cx| withdraw(cx, id.expect("shown")));
         cx.update(|_, cx| assert!(messages(cx).is_empty(), "withdrawn"));
+    }
+
+    // slopty: an update moves a toast's words and progress where it stands: same id, same
+    // place in the stack, its countdown untouched; a gone toast stays gone.
+    #[gpui::test]
+    fn an_update_keeps_its_place(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(Theme::dark());
+            cx.set_reduce_motion(true);
+        });
+        let (_, cx) = cx.add_window_view(|_, _| Host);
+        let lasts = Duration::from_secs(60);
+        let id = cx.update(|_, cx| {
+            let id = offer_progress(cx, "Sending a.txt to studio", "Stop", lasts, Some(0.1), |_| {});
+            info(cx, "Later news");
+            id.expect("shown")
+        });
+        cx.run_until_parked();
+        cx.update(|_, cx| update(cx, id, "Sending a.txt to studio · 42%", Some(0.42)));
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            let store = cx.global::<ToastStore>();
+            assert_eq!(store.toasts[0].id, id, "still the older one, not moved to the front");
+            assert_eq!(store.toasts[0].progress, Some(Some(0.42)));
+            assert!(store.toasts[0].remaining > Duration::from_secs(30), "countdown kept");
+            assert_eq!(messages(cx)[0], "Sending a.txt to studio · 42%");
+        });
+        // Out of range clamps; an empty message keeps the words.
+        cx.update(|_, cx| update(cx, id, "", Some(7.0)));
+        cx.update(|_, cx| {
+            let store = cx.global::<ToastStore>();
+            assert_eq!(store.toasts[0].progress, Some(Some(1.0)));
+            assert_eq!(messages(cx)[0], "Sending a.txt to studio · 42%");
+        });
+        cx.update(|_, cx| withdraw(cx, id));
+        cx.update(|_, cx| update(cx, id, "back?", None));
+        cx.update(|_, cx| assert_eq!(messages(cx), ["Later news"], "a withdrawn toast stays gone"));
+        // A spinner toast, and an id never shown, change nothing.
+        let spin = cx.update(|_, cx| working(cx, "Waiting on studio", lasts).expect("shown"));
+        cx.update(|_, cx| update(cx, spin + 99, "nobody", None));
+        cx.update(|_, cx| {
+            let store = cx.global::<ToastStore>();
+            let toast = store.toasts.iter().find(|t| t.id == spin).expect("up");
+            assert_eq!(toast.progress, Some(None), "spins with no measure");
+        });
+    }
+
+    // slopty: an error toast copies its words; other kinds offer no copy.
+    #[gpui::test]
+    fn an_error_toast_copies_its_words(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(Theme::dark());
+            cx.set_reduce_motion(true);
+        });
+        let (_, cx) = cx.add_window_view(|_, _| Host);
+        cx.update(|window, _| window.activate_window());
+        cx.update(|_, cx| {
+            success(cx, "Link copied");
+            error(cx, "studio: permission denied (publickey)");
+        });
+        cx.run_until_parked();
+        let ids: Vec<u64> =
+            cx.update(|_, cx| cx.global::<ToastStore>().toasts.iter().map(|t| t.id).collect());
+        assert!(cx.debug_bounds(Box::leak(format!("toast-copy-{}", ids[0]).into_boxed_str())).is_none(), "not on success");
+        let button = cx
+            .debug_bounds(Box::leak(format!("toast-copy-{}", ids[1]).into_boxed_str()))
+            .expect("an error's copy button")
+            .center();
+        cx.simulate_click(button, gpui::Modifiers::default());
+        cx.run_until_parked();
+        let copied = cx.read_from_clipboard().and_then(|item| item.text());
+        assert_eq!(copied.as_deref(), Some("studio: permission denied (publickey)"));
+        cx.update(|_, cx| {
+            assert!(cx.global::<ToastStore>().toasts[1].copied);
+            assert_eq!(shown(cx)[1].0, ToastKind::Error);
+        });
+    }
+
+    // slopty: a toast with a button is as tall as one without, its button sonner's 24.
+    #[gpui::test]
+    fn an_offer_keeps_the_height_of_its_line(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(Theme::dark());
+            cx.set_reduce_motion(true);
+        });
+        let (_, cx) = cx.add_window_view(|_, _| Host);
+        cx.update(|window, _| window.activate_window());
+        cx.update(|_, cx| {
+            info(cx, "Copied");
+            offer(cx, "Sending notes.txt to studio", "Stop", Duration::from_secs(20), |_| {});
+        });
+        cx.run_until_parked();
+        cx.run_until_parked();
+        let heights: Vec<f32> =
+            cx.update(|_, cx| cx.global::<ToastStore>().toasts.iter().map(|t| t.height).collect());
+        assert_eq!(heights.len(), 2);
+        assert!(heights[0] > 0.0, "measured: {heights:?}");
+        assert!((heights[0] - heights[1]).abs() < 0.5, "same height with a button: {heights:?}");
+        let button = cx.debug_bounds("toast-action-Stop").expect("its button");
+        assert!((f32::from(button.size.height) - ACTION_HEIGHT).abs() < 0.5, "{button:?}");
     }
 
     #[test]

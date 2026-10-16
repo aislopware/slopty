@@ -1,13 +1,12 @@
 ---
 source: crates/slopty-agent/tests/conversation.rs
-assertion_line: 91
 expression: "decode(\"interrupt\").snapshot()"
 ---
 - id: Main
   origin: ~
   entries:
     - id: 00000000-0000-4000-8000-000000000003
-      at_ms: 1791610983129
+      at_ms: 1792130321066
       body:
         Prompt:
           text:
@@ -18,7 +17,7 @@ expression: "decode(\"interrupt\").snapshot()"
           images: []
           command: ~
     - id: toolu_01
-      at_ms: 1791610984463
+      at_ms: 1792130322650
       body:
         Tool:
           name: Bash
@@ -45,27 +44,27 @@ expression: "decode(\"interrupt\").snapshot()"
               lines: 1
               chars: 225
               full: ~
-            at_ms: 1791610984517
+            at_ms: 1792130322679
             images: []
-    - id: 00000000-0000-4000-8000-000000000018
-      at_ms: 1791610984520
+    - id: 00000000-0000-4000-8000-000000000019
+      at_ms: 1792130322682
       body:
         Interrupted:
           during_tool: true
   tasks: []
   turns:
     - prompt: 00000000-0000-4000-8000-000000000003
-      started_ms: 1791610983129
+      started_ms: 1792130321066
       ended_ms: ~
       models:
         - claude-haiku-5-5
       requests: 1
       usage:
         input: 2
-        cache_read: 10979
+        cache_read: 11093
         cache_write: 7232
         output: 79
         thinking: 0
-      context_tokens: 18213
+      context_tokens: 18327
       mode: default
       stop: tool_use

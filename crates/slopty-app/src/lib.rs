@@ -52,7 +52,7 @@ use slopty_terminal::TerminalViewEvent;
 use slopty_theme::Theme;
 use slopty_ui::workspace::attention::Attention;
 use slopty_ui::workspace::{Finished, WorkerLink, WorkerStatus, WorkspaceEvent, WorkspaceView};
-use workers::{Hearing, Tick, WorkerSlot};
+use workers::{Supervisor, Tick, WorkerSlot};
 
 /// A finger drives this build: the key bar the soft keyboard lacks (Esc, Tab, Control, arrows,
 /// shell symbols), a Paste where the Mac has ⌘V, full-width primary actions.
@@ -472,7 +472,6 @@ impl Workspace {
         if self.reduce_motion != on {
             tracing::info!(on, "reduce motion");
             self.reduce_motion = on;
-            slopty_kit::icons::motion_setting_changed(cx);
             cx.set_reduce_motion(on);
             cx.refresh_windows();
         }
@@ -526,9 +525,6 @@ impl Workspace {
         if theme == self.theme {
             return;
         }
-        // gpui-kit's widgets (a terminal's find field) read gpui-kit's theme: keep it on the
-        // same tokens.
-        slopty_kit::kit::sync(&theme, cx);
         self.view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
         self.theme = theme;
         cx.refresh_windows();
@@ -549,20 +545,30 @@ impl Workspace {
             goes
         });
         for row in rows {
-            if self.transfer_toasts.contains_key(&row.xfer) {
-                continue;
-            }
             let text = if row.up {
                 format!("Sending {} to {}", row.name, row.machine)
             } else {
                 format!("Bringing {} from {}", row.name, row.machine)
             };
+            // How far it is, moved in place on the toast already up.
+            let text =
+                if row.words.is_empty() { text } else { format!("{text} \u{b7} {}", row.words) };
+            if let Some(&toast) = self.transfer_toasts.get(&row.xfer) {
+                slopty_shell::toast::update(cx, toast, text, row.fraction);
+                continue;
+            }
             let (view, xfer) = (self.view.downgrade(), row.xfer);
             let stop = move |cx: &mut App| {
                 let _gone = view.update(cx, |v, cx| v.cancel_transfer(xfer, cx));
             };
-            if let Some(toast) = slopty_shell::toast::offer(cx, text, "Stop", TRANSFER_LASTS, stop)
-            {
+            if let Some(toast) = slopty_shell::toast::offer_progress(
+                cx,
+                text,
+                "Stop",
+                TRANSFER_LASTS,
+                row.fraction,
+                stop,
+            ) {
                 self.transfer_toasts.insert(xfer, toast);
             }
         }
@@ -619,16 +625,28 @@ impl Workspace {
     /// Start (or refresh) a worker the directory lists: its items wait in the workspace and a
     /// connect loop of its own brings them to life.
     fn add_worker(&mut self, id: WorkerId, name: String, cx: &mut Context<Self>) {
+        // Where it is dialled, which an editor's SSH remote names too.
+        let address = self.directory.get(id).map(|w| w.address.clone());
         if let Some(slot) = self.slot_mut(id) {
             slot.name.clone_from(&name);
             let key = slot.key;
-            self.view.update(cx, |v, cx| v.add_worker(key, name, cx));
+            self.view.update(cx, |v, cx| {
+                v.add_worker(key, name, cx);
+                if let Some(address) = &address {
+                    v.set_worker_address(key, address, cx);
+                }
+            });
             return;
         }
         let slot = WorkerSlot::new(id, name.clone());
         let key = slot.key;
         self.workers.push(slot);
-        self.view.update(cx, |v, cx| v.add_worker(key, name, cx));
+        self.view.update(cx, |v, cx| {
+            v.add_worker(key, name, cx);
+            if let Some(address) = &address {
+                v.set_worker_address(key, address, cx);
+            }
+        });
         self.spawn_worker_loop(id, cx);
     }
 
@@ -786,7 +804,11 @@ impl Workspace {
                         });
                         }
                         view.update(cx, |v, cx| v.set_worker_status(key, status, cx));
-                        wait_or_wake(cx, &wake, delay).await;
+                        if wait_or_wake(cx, &wake, delay).await {
+                            // Something says to try now (a resume, the worker back or moved,
+                            // an update): the schedule starts again from its first wait.
+                            redial.reset();
+                        }
                         continue;
                     }
                 };
@@ -834,23 +856,24 @@ impl Workspace {
                     link.abandon("worker dropped");
                     break;
                 }
-                // Twice a keep-alive: RTT for the bar and the predictors, and whether the
-                // worker is heard (`workers::Hearing`). The bar says "silent" long before the
-                // transport's idle timeout, and past the drop bar the link is given up so the
-                // redial takes over. A wake while the link is up is the server saying the worker
-                // is back or moved: a link that is silent then is the dead one, given up at once.
+                // The link's supervisor (`workers::Supervisor`), every half second: the RTT for
+                // the bar and the predictors, a ping down the control stream every two seconds,
+                // and the link judged by its pongs, not by the datagrams beside them, which flow
+                // under a stream that has stopped. One ping unanswered shows the link silent; two
+                // relink it at once, its views kept, set back, until the new link lands (`relink`).
+                // A wake while the link is up is the server saying the worker is back or moved: a
+                // link in doubt then is the dead one, relinked at once.
                 // A resume (the Mac woke, the path moved) probes the link at once rather than
-                // waiting for its silence: an answer keeps it, none has it dialled again at once
-                // while its views keep what they show (`relink`).
+                // waiting for its silence: an answer keeps it, none relinks it the same way.
                 let rtt_link = std::sync::Arc::downgrade(&link);
                 let rtt_view = view.clone();
                 let rtt_wake = std::sync::Arc::clone(&wake);
                 let relink = std::sync::Arc::new(tokio::sync::Notify::new());
                 let relink_asked = std::sync::Arc::clone(&relink);
                 cx.spawn(async move |cx| {
-                    let mut hearing = Hearing::new(std::time::Instant::now());
+                    let mut supervisor = Supervisor::new(std::time::Instant::now(), link_pongs(&rtt_link));
                     // The handshake has measured the path already: the predictors draw from the
-                    // first key, not from the first tick 500 ms on.
+                    // first key, not from the first look 500 ms on.
                     if let Some(link) = rtt_link.upgrade() {
                         let rtt = link.rtt();
                         rtt_view.update(cx, |v, cx| v.set_rtt(key, rtt, cx));
@@ -858,7 +881,7 @@ impl Workspace {
                     let mut listening = true;
                     loop {
                         let (woken, resumed) = tokio::select! {
-                            woken = wait_or_wake(cx, &rtt_wake, workers::HEARING_TICK) => (woken, None),
+                            woken = wait_or_wake(cx, &rtt_wake, slopty_net::liveness::LOOK_EVERY) => (woken, None),
                             resume = resumes.recv(), if listening => {
                                 listening = resume.is_some();
                                 (false, resume)
@@ -871,10 +894,11 @@ impl Workspace {
                                 rtt_wake.notify_one();
                                 break;
                             };
+                            // A pong that comes while the probe runs is the stream's own word.
+                            let _queued = link.ping_stream();
                             if probe(cx, &link, resume, &rtt_view, key).await {
                                 // Resumes that came while it ran are answered by this one.
                                 while resumes.try_recv().is_ok() {}
-                                hearing = Hearing::new(std::time::Instant::now());
                                 continue;
                             }
                             tracing::warn!(worker = %id, resume = resume.name(), path = %link.path(), "no answer after a resume; relinking");
@@ -895,21 +919,22 @@ impl Workspace {
                             break;
                         };
                         let rtt = link.rtt();
-                        let received = link.received_datagrams();
-                        tracing::debug!(worker = %id, path = %link.path(), received, "link path");
-                        let heard = hearing.sample(received, std::time::Instant::now());
-                        let status = match heard.tick(woken) {
+                        let pongs = link.pongs();
+                        tracing::trace!(worker = %id, path = %link.path(), pongs, stream_rtt = ?link.stream_rtt(), "link look");
+                        let look = supervisor.look(pongs, woken, std::time::Instant::now());
+                        if look.ping_stream && !link.ping_stream() {
+                            tracing::debug!(worker = %id, "control stream queue full; ping skipped");
+                        }
+                        let status = match look.tick {
                             Tick::Show(status) => status,
                             Tick::Ping(status) => {
                                 link.ping();
                                 status
                             }
-                            Tick::GiveUp { at_once } => {
-                                tracing::warn!(worker = %id, ?heard, woken, path = %link.path(), "worker silent; reconnecting");
-                                link.abandon("worker silent");
-                                if at_once {
-                                    rtt_wake.notify_one();
-                                }
+                            Tick::Relink => {
+                                tracing::warn!(worker = %id, pongs, woken, path = %link.path(), "the worker's control stream stopped answering; relinking");
+                                relink_asked.notify_one();
+                                rtt_wake.notify_one();
                                 break;
                             }
                         };
@@ -955,13 +980,15 @@ impl Workspace {
                 // Dropping the link closes the connection; the endpoint stays for the retry.
                 if replacing {
                     // Dialled again at once; its items stay, set back, until that lands.
-                    link.abandon("no answer to a probe after a resume");
+                    link.abandon("its control stream stopped answering");
                     drop(link);
                     view.update(cx, |v, cx| v.set_worker_status(key, WorkerStatus::Relinking, cx));
                     continue;
                 }
                 drop(link);
-                wait_or_wake(cx, &wake, redial.next(std::time::Instant::now())).await;
+                if wait_or_wake(cx, &wake, redial.next(std::time::Instant::now())).await {
+                    redial.reset();
+                }
             }
         })
         .detach();
@@ -1058,6 +1085,11 @@ fn network_dialer(runtime: tokio::runtime::Handle) -> Dialer {
                 .unwrap_or_else(|_| Err(net::DialFailed::Other("connection task died".to_owned())))
         })
     }))
+}
+
+/// How often `link`'s control stream has answered, 0 for a link gone.
+fn link_pongs(link: &std::sync::Weak<slopty_client::WorkerLink>) -> u64 {
+    link.upgrade().map_or(0, |link| link.pongs())
 }
 
 /// Wait `delay`, or less if `wake` is notified first; whether it was.
@@ -1203,11 +1235,11 @@ fn apply_link_event(
             | WorkerMsg::Written { .. }
             | WorkerMsg::FoundFiles { .. }
             | WorkerMsg::FoundFolders { .. }
+            | WorkerMsg::RepoMoved { .. }
             | WorkerMsg::Folder { .. }
             | WorkerMsg::FolderPage { .. }
             | WorkerMsg::Search(_)
             | WorkerMsg::FsDone { .. }
-            | WorkerMsg::AgentBranch(_)
             | WorkerMsg::RepoCloning { .. }
             | WorkerMsg::RepoCloned { .. }
             | WorkerMsg::Sessions(_)

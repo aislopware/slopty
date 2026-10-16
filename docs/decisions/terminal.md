@@ -419,6 +419,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   header's bounds (`debug_bounds("block-header")`, the terminal's origin and width, one line
   high), its a11y Button label, its absence once ⌘↑ puts the prompt at the top, and the
   click.
+  Superseded 2026-10-16 by **Slopty's own views draw with the shell's helpers** (`ui.md`): the
+  terminal draws zeron's plain grid, and this paint is gone.
 
 - ✅ **⌘K clears the screen and the history, protocol 31** (2026-09-12). Every Mac terminal
   has it; here the engine lives on the host, so it is a request. Rulings: (1) the scrollback
@@ -470,6 +472,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   through a test-only counter on the shape cache),
   `a_block_scrolled_past_its_prompt_keeps_its_command_in_a_sticky_header` (the header's
   caption), `prompt` in the client's command test.
+  Superseded 2026-10-16 by **Slopty's own views draw with the shell's helpers** (`ui.md`): the
+  terminal draws zeron's plain grid, and this paint is gone.
 
 - ✅ **⌘⇧↩ reruns the last command** (2026-09-12). The block menu's "Rerun" needs a right
   click on the block; the command a human reruns most is the one that just finished, and
@@ -1716,6 +1720,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `cmd_up_and_down_walk_the_prompts_and_separators_follow` (bars and washes read from the
   scene), `a_hovered_block_shows_its_status_duration_and_menu` (headless); golden
   `terminal-failed-block`.
+  Superseded 2026-10-16 by **Slopty's own views draw with the shell's helpers** (`ui.md`): the
+  terminal draws zeron's plain grid, and this paint is gone.
 
 - ✅ **The branch follows a shell to the navigator** (2026-09-26). The worker's
   `TermEvent::Cwd` carries the branch. `Effect::Cwd` and `TerminalViewEvent::Cwd` pass it on,
@@ -1930,6 +1936,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     from the scene, rule painted over its band).
   - Superseded in part on 2026-09-28 (next entry): the band is `surfaces.band`, not `panel`,
     and a rule is drawn only between heads that touch.
+  Superseded 2026-10-16 by **Slopty's own views draw with the shell's helpers** (`ui.md`): the
+  terminal draws zeron's plain grid, and this paint is gone.
 
 - ✅ **The head band is seen, and the rule parts only heads** (2026-09-28,
   `.research/design-critique-round3-2026-09-28.md` §2 #2, #14). The band of the entry above
@@ -3666,6 +3674,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Tests: view `a_block_paints_no_band_and_a_hairline_parts_it` (no edge-to-edge fill but
     the grid's background, hairlines at the prompts),
     `cmd_up_and_down_walk_the_prompts_and_separators_follow`.
+  Superseded 2026-10-16 by **Slopty's own views draw with the shell's helpers** (`ui.md`): the
+  terminal draws zeron's plain grid, and this paint is gone.
 
 - ✅ **A silent driver hands the seat to the viewer that types** (2026-10-04, readiness A21c).
   The driver stayed the first attacher for as long as its connection lived. A Mac whose lid

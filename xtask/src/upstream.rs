@@ -20,10 +20,9 @@
 //! The checkouts live under the main checkout of this repository (shared by every worktree),
 //! cloned with `--filter=blob:none` on first use.
 //!
-//! `check` also names the newest Claude Code on npm beside the one Slopty's mod was recorded on
-//! (`crates/slopty-agent/tests/fixtures/mod/recorded.json`, which a test holds to
-//! `MOD_CLAUDE_VERSIONS`): a newer one is trusted only provisionally until
-//! `cargo xtask fixtures claude-mod --version <it>` records it.
+//! `check` also names the newest Claude Code on npm beside the one Slopty's recordings and its
+//! stream-json stand-in are made with (`crate::claude::VERSION`): a newer one is moved to by
+//! pinning it there and recording again with `cargo xtask fixtures claude`.
 
 mod ghostty;
 mod watch;
@@ -374,7 +373,7 @@ pub fn run(sh: &Shell, cmd: &UpstreamCmd) -> Result<()> {
                     )?;
                 }
             }
-            claude_check(&root);
+            claude_check();
             toolchain_check(sh, &root);
             Ok(())
         }
@@ -395,8 +394,6 @@ pub fn run(sh: &Shell, cmd: &UpstreamCmd) -> Result<()> {
     }
 }
 
-/// Print the newest Claude Code on npm beside the one the mod was recorded on. A registry that
-/// does not answer is said, not failed on: the forks' report stands without it.
 /// The pinned toolchain against the newest stable rustup has (after `rustup update`).
 fn toolchain_check(sh: &Shell, root: &Utf8Path) {
     let file = std::fs::read_to_string(root.join("rust-toolchain.toml")).unwrap_or_default();
@@ -414,25 +411,22 @@ fn toolchain_check(sh: &Shell, root: &Utf8Path) {
     }
 }
 
-fn claude_check(root: &Utf8Path) {
-    let recorded =
-        std::fs::read_to_string(root.join("crates/slopty-agent/tests/fixtures/mod/recorded.json"))
-            .ok()
-            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-            .and_then(|doc| doc.get("claude")?.as_str().map(str::to_owned));
-    let Some(recorded) = recorded else {
-        println!("claude-code: no recording of the mod found");
-        return;
-    };
+/// Print the newest Claude Code on npm beside the one the recordings and the stream-json
+/// stand-in are made with. A registry that does not answer is said, not failed on: the forks'
+/// report stands without it.
+fn claude_check() {
+    let pinned = crate::claude::VERSION;
     match crate::claude::latest() {
-        Ok(latest) if latest == recorded => {
-            println!("claude-code: {latest} on npm, the mod recorded on it");
+        Ok(latest) if latest == pinned => {
+            println!("claude-code: {latest} on npm, the recordings made with it");
         }
         Ok(latest) => println!(
-            "claude-code: {latest} on npm, the mod recorded on {recorded}; record it with \
-             `cargo xtask fixtures claude-mod --version {latest}`"
+            "claude-code: {latest} on npm, the recordings made with {pinned}; pin it in \
+             `xtask/src/claude.rs` (`VERSION`) and record again with `cargo xtask fixtures claude`"
         ),
-        Err(e) => println!("claude-code: npm did not say its latest ({e:#}); recorded {recorded}"),
+        Err(e) => {
+            println!("claude-code: npm did not say its latest ({e:#}); recordings on {pinned}");
+        }
     }
 }
 
@@ -1184,12 +1178,14 @@ fn build_checks(name: &str) -> &'static [(&'static str, &'static str)] {
         ],
         // The whole workspace, story and examples included: a sync that built only the kit once
         // pushed a head whose shell and story did not compile. `too_many_arguments` is allowed
-        // because upstream's own functions trip it.
+        // because upstream's own functions trip it. `gpui-webview` is built on longbridge's
+        // window composition, which the gpui-fast fork does its own way: the fork keeps it a
+        // member only for the shell's optional `webview` feature to resolve.
         "gpui-kit" => &[
             (
                 "clippy gpui-kit workspace",
-                "cargo clippy --workspace --all-targets --locked -- --deny warnings -A \
-                 clippy::too_many_arguments",
+                "cargo clippy --workspace --exclude gpui-webview --all-targets --locked -- \
+                 --deny warnings -A clippy::too_many_arguments",
             ),
             (
                 "test gpui-kit story + recipes",

@@ -1,4 +1,4 @@
-// Derived from zeron (MIT, github.com/zeronsh/zeron @ 75b7260), see THIRD_PARTY_NOTICES.md
+// Derived from zeron (MIT, github.com/zeronsh/zeron @ 3b2f780), see THIRD_PARTY_NOTICES.md
 //! Shared scaffolding for the settings pages — a centered page column, large
 //! title, small section labels over filled blocks of hairline-split rows,
 //! badges and small buttons, so every page reads as the same product surface.
@@ -1516,14 +1516,15 @@ impl<V: 'static> Select<V> {
 
 /// Settings actions share one size, corner radius, and hover language. Use
 /// outlined for selectors, quiet for secondary actions, filled for row
-/// actions on a block (the dropdown trigger's glass wash), and solid for
-/// commits.
+/// actions on a block (the dropdown trigger's glass wash), solid for
+/// commits, and danger for destructive actions behind a confirmation.
 #[derive(Clone, Copy)]
 pub enum ActionTone {
     Quiet,
     Outlined,
     Filled,
     Solid,
+    Danger,
 }
 
 pub fn action_button(theme: &Theme, tone: ActionTone) -> gpui::Div {
@@ -1560,6 +1561,11 @@ pub fn action_button(theme: &Theme, tone: ActionTone) -> gpui::Div {
             .font_weight(gpui::FontWeight::MEDIUM)
             .text_color(theme.on_solid)
             .hover(|s| s.opacity(0.9)),
+        // The dialogs' destructive fill (`popover::btn_danger`).
+        ActionTone::Danger => button
+            .bg(theme.danger_strong)
+            .text_color(gpui::white())
+            .hover(|s| s.opacity(0.9)),
     }
 }
 
@@ -1575,6 +1581,18 @@ pub fn ghost_action(theme: &Theme) -> gpui::Div {
 /// border-red-400/20 bg-red-400/[0.06] text-red-300/90` with a leading
 /// `DangerTriangle mt-0.5 size-4`).
 pub fn error_strip(theme: &Theme, message: impl Into<SharedString>) -> gpui::Div {
+    // slopty: one anatomy with [`error_strip_with`].
+    error_strip_with(theme, message, Vec::new())
+}
+
+// slopty: the same strip holding more than its message: a failure's hint and the output lines
+// that explain it, under the title.
+/// [`error_strip`] with `details` under its message.
+pub fn error_strip_with(
+    theme: &Theme,
+    message: impl Into<SharedString>,
+    details: Vec<AnyElement>,
+) -> gpui::Div {
     let red = theme.danger; // red-400
     let red_text = theme.danger_muted; // red-300
     div()
@@ -1598,7 +1616,15 @@ pub fn error_strip(theme: &Theme, message: impl Into<SharedString>) -> gpui::Div
                     .text_color(red_text.opacity(0.9)),
             ),
         )
-        .child(div().min_w_0().child(message.into()))
+        .child(
+            div()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(4.0))
+                .child(message.into())
+                .children(details),
+        )
 }
 
 /// The amber warning strip (`flex items-start gap-2 border-amber-400/20
@@ -1679,19 +1705,8 @@ impl Render for TextTooltip {
         _window: &mut gpui::Window,
         cx: &mut gpui::Context<Self>,
     ) -> impl IntoElement {
-        let theme = Theme::of(cx);
-        let card = div()
-            .max_w(px(320.0))
-            .px(px(9.0))
-            .py(px(6.0))
-            .rounded(px(6.0))
-            .border_1()
-            .border_color(theme.border)
-            .bg(crate::popover::surface_bg(theme))
-            .text_size(px(11.0))
-            .text_color(theme.text_muted)
-            .child(self.text.clone());
-        let card = crate::frost::frosted(6.0, crate::frost::MENU_BLUR, card);
+        // slopty: the card is `live::chrome::tooltip_card`, which Slopty's own views draw too.
+        let card = crate::live::chrome::tooltip_card(self.text.clone(), Theme::of(cx));
         if !self.above {
             return card.into_any_element();
         }

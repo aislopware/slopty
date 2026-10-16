@@ -20,7 +20,6 @@ fn state() -> ThreadState {
         native: "s1".to_owned(),
         cwd: "/work".to_owned(),
         title: "Fix the build".to_owned(),
-        terminal: None,
         parent: None,
         origin: ThreadMeta::ORCHESTRATED.to_owned(),
         forked_from: None,

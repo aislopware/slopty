@@ -94,11 +94,21 @@ fn install_hint(harness: HarnessId, enabled: bool, can_install: bool) -> String 
     } else {
         format!("Install the {} CLI to enable", cli_name(harness))
     };
-    if !can_install && let Some(command) = crate::catalog::harness::install::manual_command(harness) {
-        format!("{hint}. Install with `{command}`")
+    // slopty: the command is drawn in its own mono span ([`install_command`]), not quoted.
+    if install_command(harness, can_install).is_some() {
+        format!("{hint}. Install with")
     } else {
         hint
     }
+}
+
+// slopty: the command a hint names, set in the code face beside it rather than in backticks.
+/// The command the person runs to install `harness`, where Slopty does not install it.
+fn install_command(harness: HarnessId, can_install: bool) -> Option<&'static str> {
+    if harness == HarnessId::ANTIGRAVITY || can_install {
+        return None;
+    }
+    crate::catalog::harness::install::manual_command(harness)
 }
 
 fn install_label(name: &str) -> String {
@@ -925,14 +935,41 @@ impl HarnessesPage {
                             .into_any_element(),
                     );
                 } else if !installed {
+                    // slopty: the command in the code face, after the words.
+                    let command = install_command(harness, descriptor.can_install).map(|command| {
+                        div()
+                            .font_family(crate::typography::code_effective_family_name(cx))
+                            .text_color(theme.text_muted)
+                            .child(SharedString::from(command))
+                    });
                     meta.push(
                         div()
+                            .flex()
+                            .flex_row()
+                            .flex_wrap()
+                            .items_baseline()
+                            .gap_x(px(4.0))
                             .text_color(theme.text_muted.opacity(0.75))
                             .child(SharedString::from(install_hint(
                                 harness,
                                 enabled,
                                 descriptor.can_install,
                             )))
+                            .children(command)
+                            .into_any_element(),
+                    );
+                }
+                // slopty: the plan windows its agent last published, zeron's meters.
+                if let Some(usage) = descriptor.usage.as_ref().filter(|u| installed && !u.windows.is_empty()) {
+                    let now = chrono::Utc::now();
+                    meta.push(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .ml(px(-8.0))
+                            .children(usage.windows.iter().map(|window| {
+                                crate::account_usage::render_usage_meter(window, now, &theme)
+                            }))
                             .into_any_element(),
                     );
                 }
@@ -1377,6 +1414,7 @@ mod tests {
             reasoning_levels: Vec::new(),
             installed: true,
             can_install: false,
+            usage: None, // slopty
             enabled: Some(true),
         };
         window
@@ -1455,12 +1493,45 @@ fn install_phase_copy_and_cancel_target_match_install() {
             serde_json::to_value(&target).unwrap()
         );
     }
+    // slopty: the command stands on its own, with no backticks around it.
     assert_eq!(
         install_hint(HarnessId::CODEX, false, false),
-        "Install the codex CLI to enable. Install with `npm install -g @openai/codex`"
+        "Install the codex CLI to enable. Install with"
     );
+    assert_eq!(install_command(HarnessId::CODEX, false), Some("npm install -g @openai/codex"));
+    assert_eq!(install_command(HarnessId::CODEX, true), None, "Slopty installs it");
+    assert_eq!(install_command(HarnessId::ANTIGRAVITY, false), None);
+    assert!(!install_hint(HarnessId::CODEX, false, false).contains('`'));
     assert!(
         install_hint(HarnessId::CODEX, true, false)
             .starts_with("codex CLI not installed — turn it off or install it.")
     );
+}
+
+// slopty: an agent's plan windows reach its row as the view model lists them.
+#[cfg(test)]
+#[test]
+fn an_agents_listing_carries_its_plan_windows() {
+    let listed: Vec<crate::catalog::registry::HarnessDescriptor> =
+        serde_json::from_value(serde_json::json!([
+            {
+                "id": "claude-code", "name": "Claude Code", "supportsSteering": true,
+                "steeringMode": "step-boundary", "reasoningLevels": [], "installed": true,
+                "usage": {
+                    "windows": [{ "label": "5h", "usedFraction": 0.4, "resetsAt": null }],
+                    "fetchedAt": "2026-10-16T09:00:00Z"
+                }
+            },
+            {
+                "id": "codex", "name": "Codex", "supportsSteering": true,
+                "steeringMode": "step-boundary", "reasoningLevels": [], "installed": true,
+                "usage": null
+            }
+        ]))
+        .unwrap();
+    let usage = listed[0].usage.as_ref().expect("its windows");
+    assert_eq!(usage.windows[0].label, "5h");
+    assert!((usage.windows[0].used_fraction - 0.4).abs() < 1e-6);
+    assert!(usage.fetched_at.is_some());
+    assert!(listed[1].usage.is_none(), "an agent that said nothing has no meters");
 }

@@ -88,23 +88,17 @@ async fn click(drv: &mut Driver, role: &str, label: &str) {
 
 /// A stand-in agent's thread in a repository with changes: ⌘1 selects it, ⌘R opens the right
 /// pane, whose Diffs surface shows the working tree's two changed files with their hunks; ⌘E
-/// opens the files column on the thread's folder, and the titlebar's switch shows the agent's
-/// own TUI beside the chat and puts it away. Then ⌘, opens Settings, whose Providers page
+/// opens the files column on the thread's folder, and the titlebar has no TUI switch: an agent
+/// is driven, never shown as a terminal. Then ⌘, opens Settings, whose Providers page
 /// lists the machine's agents and the autonomy setting, its Appearance page, Devices with Add
 /// device's dialog, and Archived with the thread archived by ⌘⇧A, which Unarchive brings back.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
 async fn changes_files_and_settings_show_the_threads_work() {
-    // The stand-in takes its prompt's turn as Claude Code does (`UserPromptSubmit`, the prompt
-    // and its reply in its transcript, `Stop`), so its thread has a turn to show.
-    let mut stack = ServedApp::launch_rooted(MACHINE, &[], |root| {
-        let transcripts = root.join("transcripts");
-        std::fs::create_dir_all(&transcripts).unwrap();
-        let transcript = transcripts.join("{conversation}.jsonl");
-        vec![
-            ("STUB_TRANSCRIPT".to_owned(), transcript.to_string_lossy().into_owned()),
-            ("STUB_TURNS".to_owned(), serde_json::json!({ PROMPT: [] }).to_string()),
-        ]
+    // The stand-in takes its prompt's turn as Claude Code driven does, so its thread has a turn
+    // to show.
+    let mut stack = ServedApp::launch_rooted(MACHINE, &[], |_root| {
+        vec![("STUB_TURNS".to_owned(), serde_json::json!({ PROMPT: [] }).to_string())]
     })
     .await
     .unwrap();
@@ -118,7 +112,7 @@ async fn changes_files_and_settings_show_the_threads_work() {
     let agent = started["agent"].as_str().unwrap_or_default().to_owned();
     assert!(!agent.is_empty(), "an agent started: {started}");
 
-    // The worker has the agent's thread, with its prompt, once the stand-in's hooks fired; the
+    // The worker has the agent's thread, with its prompt, once the driven stand-in took it; the
     // shell's sidebar then lists it.
     let listed = std::time::Instant::now();
     loop {
@@ -149,30 +143,12 @@ async fn changes_files_and_settings_show_the_threads_work() {
         .unwrap();
     tokio::time::sleep(SETTLE).await;
     goldens(drv, &renders, "surface-files-tree").await;
-
-    // The stand-in's own TUI beside the chat, on its session, in the right pane: the titlebar's
-    // switch is lit while it is in front, and puts it away again, the Diffs surface back.
-    click(drv, "Button", "Claude Code's TUI beside the chat").await;
-    let shown = drv
-        .wait_for("the agent's TUI in front", STEP, |d| {
-            node(d, "Button", "Hide Claude Code's TUI").is_some()
-        })
-        .await
-        .unwrap();
-    let tab = shown.a11y.iter().any(|n| n.label.as_deref() == Some("Claude Code"));
-    assert!(tab, "a right-pane tab named for the agent:\n{}", slopty_e2e::frame_text(&shown.a11y));
-    // Its body is the agent's own terminal, never a failure in its place.
-    drv.wait_for("the agent's terminal drawn", STEP, |d| {
-        d.a11y.iter().any(|n| n.role == "Terminal")
-    })
-    .await
-    .unwrap();
-    click(drv, "Button", "Hide Claude Code's TUI").await;
-    drv.wait_for("the TUI put away", STEP, |d| {
-        node(d, "Button", "Claude Code's TUI beside the chat").is_some()
-    })
-    .await
-    .unwrap();
+    let tree = drv.dump().await.unwrap();
+    assert!(
+        node(&tree, "Button", "Claude Code's TUI beside the chat").is_none(),
+        "no TUI switch:\n{}",
+        slopty_e2e::frame_text(&tree.a11y)
+    );
 
     // Settings: the Agents page (Providers, as zeron names it) with the autonomy setting, then
     // Appearance.

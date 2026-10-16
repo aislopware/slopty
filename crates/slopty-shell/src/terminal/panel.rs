@@ -149,6 +149,8 @@ struct TerminalTab {
     shown_title: Option<SharedString>,
     failure: Option<SharedString>,
     exited: Option<i32>,
+    /// slopty: how far the program says it has got (`OSC 9;4`), drawn on the tab.
+    progress: Option<live::Progress>,
     /// slopty: hears the view's title and end.
     _watch: Option<Subscription>,
     /// The open; dropping it cancels it.
@@ -356,6 +358,7 @@ impl TerminalPanel {
             shown_title: None,
             failure: None,
             exited: None,
+            progress: None,
             _watch: None,
             _run: None,
         });
@@ -386,7 +389,6 @@ impl TerminalPanel {
             target_device_id,
             Some(session),
             None,
-            false,
             None,
             cx,
         );
@@ -531,61 +533,41 @@ impl TerminalPanel {
         let target = self.chat_target(&chat, cx);
         let cwd = self.state.read(cx).terminal_open_cwd_for(&chat);
         let run =
-            Self::spawn_session(chat.clone(), key, engine, target, None, cwd, false, None, cx);
+            Self::spawn_session(chat.clone(), key, engine, target, None, cwd, None, cx);
         if let Some(tab) = self.tab_mut(&chat, key) {
             tab._run = Some(run);
         }
         cx.notify();
     }
 
-    /// slopty: a tab on the selected chat's agent's own terminal (Claude Code's TUI, on the
-    /// session the chat shows), never a shell: when that is not here to show, the tab says so.
-    pub fn open_agent_tab_for_selected(&mut self, cx: &mut Context<Self>) -> Option<u64> {
+    /// slopty: a tab of the selected chat on terminal `id` again, which it showed when the app
+    /// last ran. A terminal that has ended takes its tab with it.
+    pub fn reopen_tab_for_selected(&mut self, id: String, cx: &mut Context<Self>) -> Option<u64> {
         let chat = self.selected_chat(cx);
         let engine = self.engine(cx)?;
-        let key = self.reserve_tab_for_chat(chat.clone(), "Claude Code", cx);
+        let title =
+            format!("Terminal {}", self.chats.get(&chat).map_or(1, |entry| entry.tabs.len() + 1));
+        let key = self.reserve_tab_for_chat(chat.clone(), title, cx);
         let target = self.chat_target(&chat, cx);
         let run =
-            Self::spawn_session(chat.clone(), key, engine, target, None, None, true, None, cx);
+            Self::spawn_session(chat.clone(), key, engine, target, None, None, Some(id), cx);
         if let Some(tab) = self.tab_mut(&chat, key) {
             tab._run = Some(run);
         }
-        self.request_focus(cx);
         Some(key)
     }
 
-    /// slopty: a tab of the selected chat on terminal `id` again, which it showed when the app
-    /// last ran (`agent`: its agent's own TUI). A terminal that has ended takes its tab with it.
-    pub fn reopen_tab_for_selected(
-        &mut self,
-        id: String,
-        agent: bool,
-        cx: &mut Context<Self>,
-    ) -> Option<u64> {
+    /// slopty: the name of the machine chat `chat`'s terminals open on.
+    fn connecting_to(&self, chat: &str, cx: &App) -> Option<String> {
+        let state = self.state.read(cx);
+        let device = self.chat_target(chat, cx).or_else(|| state.local_device_id.clone())?;
+        state.device_name(&device).map(str::to_owned)
+    }
+
+    /// slopty: how far tab `key`'s program says it has got, for the right pane's chip.
+    pub fn tab_progress(&self, key: u64, cx: &App) -> Option<live::Progress> {
         let chat = self.selected_chat(cx);
-        let engine = self.engine(cx)?;
-        let title = if agent {
-            "Claude Code".to_owned()
-        } else {
-            format!("Terminal {}", self.chats.get(&chat).map_or(1, |entry| entry.tabs.len() + 1))
-        };
-        let key = self.reserve_tab_for_chat(chat.clone(), title, cx);
-        let target = self.chat_target(&chat, cx);
-        let run = Self::spawn_session(
-            chat.clone(),
-            key,
-            engine,
-            target,
-            None,
-            None,
-            agent,
-            Some(id),
-            cx,
-        );
-        if let Some(tab) = self.tab_mut(&chat, key) {
-            tab._run = Some(run);
-        }
-        Some(key)
+        self.chats.get(&chat)?.tabs.iter().find(|tab| tab.key == key)?.progress
     }
 
     /// slopty: the session tab `key` of chat `chat` shows, once it is attached.
@@ -595,11 +577,10 @@ impl TerminalPanel {
     }
 
     /// OpenTerminal, then show the session's view. slopty: the view streams
-    /// its own session; nothing is subscribed here. `agent` asks for the
-    /// chat's agent's own terminal alone; `again` names a terminal the tab
-    /// showed when the app last ran, which it shows again, or closes when it
-    /// has ended.
-    #[expect(clippy::too_many_arguments, reason = "slopty: zeron's open plus the agent's")]
+    /// its own session; nothing is subscribed here. `again` names a terminal
+    /// the tab showed when the app last ran, which it shows again, or closes
+    /// when it has ended.
+    #[expect(clippy::too_many_arguments, reason = "slopty: zeron's open plus the one again")]
     fn spawn_session(
         chat: String,
         key: u64,
@@ -607,7 +588,6 @@ impl TerminalPanel {
         target: Option<String>,
         existing_session: Option<TerminalSession>,
         cwd: Option<String>,
-        agent: bool,
         again: Option<String>,
         cx: &mut Context<Self>,
     ) -> Task<()> {
@@ -619,9 +599,6 @@ impl TerminalPanel {
                     let mut params = serde_json::json!({ "chatId": chat, "cols": 80, "rows": 24 });
                     if let (Some(cwd), Some(object)) = (cwd, params.as_object_mut()) {
                         object.insert("cwd".into(), serde_json::Value::String(cwd));
-                    }
-                    if agent {
-                        params["agent"] = serde_json::Value::Bool(true);
                     }
                     let again = match (again, params.as_object_mut()) {
                         (Some(id), Some(object)) => {
@@ -726,10 +703,13 @@ impl TerminalPanel {
         let look = TerminalLook::of(cx);
         let hosted = live::terminal(&id, &look, cx);
         if let Some(tab) = self.tab_mut(chat, key) {
-            let (title, ended) = hosted.map_or((None, false), |h| (h.title, h.ended));
+            let (title, ended, exit, progress) = hosted
+                .map_or((None, false, None, None), |h| (h.title, h.ended, h.exit, h.progress));
             tab.shown_title = title;
+            tab.progress = progress;
+            // The status the program ended with, when it said one.
             if ended && tab.exited.is_none() {
-                tab.exited = Some(0);
+                tab.exited = Some(exit.unwrap_or(0));
             }
             cx.notify();
         }
@@ -836,7 +816,7 @@ impl TerminalPanel {
                         // fixed "Terminal N" fallback.
                         let title = Self::display_title(tab);
                         let exited = tab.exited.is_some();
-                        (ix, key, title, selected, exited)
+                        (ix, key, title, selected, exited, tab.progress)
                     })
                     .collect()
             })
@@ -884,7 +864,7 @@ impl TerminalPanel {
             .children(
                 tab_elements
                     .into_iter()
-                    .map(|(ix, key, title, selected, exited)| {
+                    .map(|(ix, key, title, selected, exited, progress)| {
                         let chat_select = chat_owned.clone();
                         let chat_close = chat_owned.clone();
                         let chat_close2 = chat_owned.clone();
@@ -968,11 +948,18 @@ impl TerminalPanel {
                                 },
                             )
                             .when(exited, |el| el.opacity(0.55))
-                            .child(
-                                crate::icons::icon(crate::icons::TERMINAL)
-                                    .size(px(16.0))
-                                    .text_color(text_color.opacity(glyph_alpha)),
-                            )
+                            // slopty: the tab is named for a screen reader as for the eye.
+                            .role(gpui::Role::Tab)
+                            .aria_label(title.clone())
+                            .aria_selected(selected)
+                            .child(tab_glyph(
+                                key,
+                                progress,
+                                text_color.opacity(glyph_alpha),
+                                &theme,
+                                cx.entity_id(),
+                                cx,
+                            ))
                             .child(div().flex_1().min_w_0().truncate().child(title))
                             .child(close_btn);
 
@@ -1063,6 +1050,64 @@ impl TerminalPanel {
     }
 }
 
+/// slopty: a tab's leading glyph. While its program reports progress (`OSC 9;4`) the slot holds
+/// it, as a sending chip's icon well does: an arc for a share (the danger's while failed, muted
+/// while paused), the mono spinner while under way, named "Progress" with its percent for a
+/// screen reader; otherwise zeron's terminal glyph.
+fn tab_glyph(
+    key: u64,
+    progress: Option<live::Progress>,
+    ink: gpui::Hsla,
+    theme: &Theme,
+    view: gpui::EntityId,
+    cx: &mut App,
+) -> gpui::AnyElement {
+    let Some(progress) = progress else {
+        return crate::icons::icon(crate::icons::TERMINAL)
+            .size(px(16.0))
+            .flex_none()
+            .text_color(ink)
+            .into_any_element();
+    };
+    let percent = progress.percent();
+    let arc = match progress {
+        live::Progress::Failed(_) => theme.danger,
+        live::Progress::Paused(_) => theme.text_muted,
+        live::Progress::Share(_) | live::Progress::Busy => theme.text,
+    };
+    let mark = match percent {
+        Some(percent) => crate::loaders::upload_progress_arc(
+            percent,
+            14.0,
+            theme.text_muted.opacity(0.25),
+            arc,
+        ),
+        None => crate::loaders::mini_mono_spinner(
+            SharedString::from(format!("terminal-tab-progress-{key}")),
+            2.0,
+            arc,
+            view,
+            cx,
+        )
+        .into_any_element(),
+    };
+    div()
+        .id(("terminal-tab-progress", key))
+        .size(px(16.0))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .role(gpui::Role::ProgressIndicator)
+        .aria_label("Progress")
+        .when_some(percent, |el, percent| {
+            el.aria_numeric_value(f64::from(percent))
+                .aria_value(SharedString::from(format!("{percent} %")))
+        })
+        .child(mark)
+        .into_any_element()
+}
+
 impl Render for TerminalPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
@@ -1102,6 +1147,8 @@ impl Render for TerminalPanel {
         // replace the internal bar.
         let tab_bar: Option<gpui::AnyElement> =
             (!self.embedded).then(|| self.render_tab_bar(&chat, cx).into_any_element());
+        // slopty: what a drop of files on the terminal does, as its view says.
+        let drop = hosted.as_ref().and_then(|hosted| hosted.drop.clone());
         let body = match (hosted, failure) {
             (Some(hosted), _) => hosted.view.into_any_element(),
             (None, Some(failure)) => div()
@@ -1111,7 +1158,14 @@ impl Render for TerminalPanel {
                 .text_color(theme.terminal.ansi[1])
                 .child(failure)
                 .into_any_element(),
-            (None, None) => gpui::Empty.into_any_element(),
+            // slopty: on its way, zeron's loading anatomy names the machine it opens on.
+            (None, None) => {
+                let caption = self.connecting_to(&chat, cx).map_or_else(
+                    || "Connecting…".to_owned(),
+                    |name| format!("Connecting to {name}…"),
+                );
+                live::chrome::loading(caption, &theme, cx.entity_id(), cx).into_any_element()
+            }
         };
         div()
             .size_full()
@@ -1139,10 +1193,31 @@ impl Render for TerminalPanel {
                             cx.stop_propagation();
                         }
                     })
-                    .child(body),
+                    .child(body)
+                    .children(drop.map(|words| drop_overlay(words, &theme))),
             )
             .into_any_element()
     }
+}
+
+/// slopty: the hint while files are carried over a terminal, zeron's attachment overlay
+/// (`shell/chat_dropzone.rs`) in the view's own words: the drop is the view's, so the overlay only
+/// shows, under no pointer.
+fn drop_overlay(words: SharedString, theme: &Theme) -> gpui::AnyElement {
+    div()
+        .id("terminal-drop-overlay")
+        .absolute()
+        .inset_0()
+        .opacity(0.0)
+        .bg(theme.scrim().opacity(0.4 / 0.6))
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_size(crate::typography::ui_rems(13.0))
+        .text_color(theme.text)
+        .drag_over::<gpui::ExternalPaths>(|style, _, _, _| style.opacity(1.0))
+        .child(words)
+        .into_any_element()
 }
 
 #[cfg(test)]

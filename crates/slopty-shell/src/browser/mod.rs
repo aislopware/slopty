@@ -506,7 +506,16 @@ impl BrowserSurface {
                 if page.error.is_some() {
                     page.loading = false;
                 }
-                if page.url != self.page.url || (!self.page.loading && page.loading) {
+                // slopty: a same-document move (history push, fragment) keeps its icon and
+                // asks the page again, as a page may change its icon with its route.
+                let same_document = page.url != self.page.url
+                    && page.url.is_some()
+                    && self.page.url.is_some()
+                    && !page.loading
+                    && !self.page.loading;
+                if (page.url != self.page.url && !same_document)
+                    || (!self.page.loading && page.loading)
+                {
                     if let Some(image) = self.favicon.take() {
                         cx.defer(move |cx| gpui::ImageSource::Image(image).evict(None, cx));
                     }
@@ -523,8 +532,8 @@ impl BrowserSurface {
                     self.address_edited = false;
                 }
                 native.present(self.presentation);
-                if finished && let Some(url) = &page.url {
-                    native.discover_favicon(url.clone());
+                if (finished || same_document) && page.url.is_some() {
+                    native.discover_favicon();
                 }
                 if page != self.page {
                     self.page = page;
@@ -552,9 +561,36 @@ impl BrowserSurface {
                     cx.notify();
                 }
             }
-            native::NativeEvent::Favicon { page, url } => {
-                // slopty: no HTTP client of the shell's own; a page keeps the default icon.
-                let _ = (page, url);
+            // slopty: the page drew its own icon (`macos::FAVICON_SCRIPT`); zeron fetched the
+            // link with reqwest. Decoded off the main thread, kept only for the page it is of.
+            native::NativeEvent::Favicon { page, data } => {
+                if self.page.url.as_deref() != Some(&page) {
+                    return;
+                }
+                let generation = self.favicon_generation;
+                let decode = cx.background_spawn(async move { favicon_png(&data) });
+                self.favicon_task = Some(cx.spawn(async move |this, cx| {
+                    let Some(bytes) = decode.await else {
+                        return;
+                    };
+                    let _ = this.update(cx, |this, cx| {
+                        if this.favicon_generation == generation
+                            && this.page.url.as_deref() == Some(&page)
+                        {
+                            if let Some(image) = this.favicon.take() {
+                                cx.defer(move |cx| {
+                                    gpui::ImageSource::Image(image).evict(None, cx);
+                                });
+                            }
+                            this.favicon = Some(std::sync::Arc::new(gpui::Image::from_bytes(
+                                gpui::ImageFormat::Png,
+                                bytes,
+                            )));
+                            cx.emit(BrowserEvent::Changed);
+                            cx.notify();
+                        }
+                    });
+                }));
             }
         }
     }
@@ -809,5 +845,111 @@ pub(crate) fn preview_url(service: &slopty_view_proto::PreviewService, proxy_por
         format!("http://{}", service.hostname)
     } else {
         service.url(proxy_port)
+    }
+}
+
+/// slopty: the most a favicon message may carry before it is even parsed.
+#[cfg(any(target_os = "macos", test))]
+const FAVICON_MESSAGE_MAX: usize = 512 * 1024;
+/// slopty: the side a page's icon is kept at (the tab chip draws it at 12 pt).
+#[cfg(any(target_os = "macos", test))]
+const FAVICON_SIDE: u32 = 32;
+
+/// slopty: the page and icon a `FAVICON_SCRIPT` message names; any other message, or one too
+/// large, is `None`.
+#[cfg(any(target_os = "macos", test))]
+fn favicon_message(body: &str) -> Option<(String, String)> {
+    if body.len() > FAVICON_MESSAGE_MAX {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    let page = value.get("sloptyFavicon")?.as_str()?.to_owned();
+    let data = value.get("data")?.as_str()?.to_owned();
+    Some((page, data))
+}
+
+/// slopty: a page's icon as the PNG the tab chip shows: only a PNG `data:` URL (what the page's
+/// canvas makes), at most 256 px a side, scaled down to [`FAVICON_SIDE`]. Anything else is `None`
+/// and the tab keeps the default icon.
+#[cfg(any(target_os = "macos", test))]
+fn favicon_png(data: &str) -> Option<Vec<u8>> {
+    use base64::Engine as _;
+    let encoded = data.strip_prefix("data:image/png;base64,")?;
+    if encoded.len() > FAVICON_MESSAGE_MAX {
+        return None;
+    }
+    let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).ok()?;
+    let mut reader =
+        image::ImageReader::with_format(std::io::Cursor::new(bytes), image::ImageFormat::Png);
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(256);
+    limits.max_image_height = Some(256);
+    limits.max_alloc = Some(1024 * 1024);
+    reader.limits(limits);
+    let icon = reader.decode().ok()?;
+    let icon = if icon.width() > FAVICON_SIDE || icon.height() > FAVICON_SIDE {
+        icon.thumbnail(FAVICON_SIDE, FAVICON_SIDE)
+    } else {
+        icon
+    };
+    let mut png = std::io::Cursor::new(Vec::new());
+    icon.write_to(&mut png, image::ImageFormat::Png).ok()?;
+    Some(png.into_inner())
+}
+
+// slopty: the page's icon is taken only as a small PNG, and anything else leaves the globe.
+#[cfg(test)]
+mod favicon_tests {
+    use super::{FAVICON_SIDE, favicon_message, favicon_png};
+    use base64::Engine as _;
+
+    fn png_url(side: u32) -> String {
+        let image = image::RgbaImage::from_pixel(side, side, image::Rgba([200, 30, 30, 255]));
+        let mut png = std::io::Cursor::new(Vec::new());
+        image.write_to(&mut png, image::ImageFormat::Png).unwrap();
+        format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(png.into_inner())
+        )
+    }
+
+    fn side_of(bytes: &[u8]) -> (u32, u32) {
+        let icon = image::load_from_memory_with_format(bytes, image::ImageFormat::Png).unwrap();
+        (icon.width(), icon.height())
+    }
+
+    #[test]
+    fn a_pages_icon_is_kept_small() {
+        let large = favicon_png(&png_url(64)).expect("a 64 px canvas");
+        assert_eq!(side_of(&large), (FAVICON_SIDE, FAVICON_SIDE));
+        let small = favicon_png(&png_url(16)).expect("a 16 px icon");
+        assert_eq!(side_of(&small), (16, 16), "never scaled up");
+    }
+
+    #[test]
+    fn anything_but_a_small_png_leaves_the_default_icon() {
+        assert!(favicon_png("https://example.com/favicon.ico").is_none(), "a link, not data");
+        assert!(favicon_png("data:image/svg+xml;base64,PHN2Zz4=").is_none(), "not a PNG");
+        assert!(favicon_png("data:image/png;base64,!!!").is_none(), "not base64");
+        let not_png = base64::engine::general_purpose::STANDARD.encode(b"GIF89a....");
+        assert!(favicon_png(&format!("data:image/png;base64,{not_png}")).is_none(), "lies");
+        assert!(favicon_png(&png_url(300)).is_none(), "past 256 px a side");
+        let huge = format!("data:image/png;base64,{}", "A".repeat(600 * 1024));
+        assert!(favicon_png(&huge).is_none(), "past the byte cap");
+    }
+
+    #[test]
+    fn only_the_favicon_message_is_taken() {
+        let body =
+            r#"{"sloptyFavicon":"http://localhost:5173/","data":"data:image/png;base64,AA"}"#;
+        assert_eq!(
+            favicon_message(body),
+            Some(("http://localhost:5173/".into(), "data:image/png;base64,AA".into()))
+        );
+        assert_eq!(favicon_message(r#"{"data":"x"}"#), None, "another page message");
+        assert_eq!(favicon_message("not json"), None);
+        assert_eq!(favicon_message(r#"{"sloptyFavicon":3,"data":"x"}"#), None);
+        let huge = format!(r#"{{"sloptyFavicon":"p","data":"{}"}}"#, "A".repeat(600 * 1024));
+        assert_eq!(favicon_message(&huge), None, "past the message cap");
     }
 }

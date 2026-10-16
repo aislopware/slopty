@@ -94,6 +94,7 @@ impl WorkspaceView {
             sized.lost();
         }
         self.declare_handoffs(key);
+        self.surfaces_relinked(key);
         self.desktop_relinked(key);
         self.reset_remote(key, &known, cx);
         self.relink_terminals(key, &known, cx);

@@ -23,26 +23,6 @@ const STARTUP: Duration = Duration::from_secs(30);
 /// Socket poll interval.
 const POLL: Duration = Duration::from_millis(50);
 
-/// A Claude Code transcript in the JSONL shape the hooks name: one exchange with thinking, a
-/// tool call, its result and the answer (a fixture, never a real session's file).
-pub const TRANSCRIPT: &str = concat!(
-    r#"{"type":"user","timestamp":"2026-09-05T10:00:00.000Z","message":{"role":"user","content":"fix the failing test"}}"#,
-    "\n",
-    r#"{"type":"assistant","timestamp":"2026-09-05T10:00:02.000Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"The assertion compares the wrong field."},{"type":"text","text":"Looking at the test."},{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"cargo test -p demo"}}]}}"#,
-    "\n",
-    r#"{"type":"user","timestamp":"2026-09-05T10:00:05.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"running 2 tests\ntest a ... ok\ntest b ... FAILED"}]}}"#,
-    "\n",
-    r#"{"type":"assistant","timestamp":"2026-09-05T10:00:09.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Fixed: `b` compared **id** with *name*.\n\n- one edit\n- both tests pass"}]}}"#,
-    "\n",
-);
-
-/// [`TRANSCRIPT`] plus the record that ends the turn, for an agent whose state is read off
-/// its transcript rather than its hooks: `stop_reason` is what says a turn finished.
-pub const TRANSCRIPT_DONE: &str = concat!(
-    r#"{"type":"assistant","timestamp":"2026-09-05T10:00:10.000Z","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"Both tests pass now."}]}}"#,
-    "\n",
-);
-
 /// A stack's temporary root, named for the test that made it.
 ///
 /// Goldens show paths under it (a shell's prompt, a tile's title, the breadcrumb), so a random
@@ -361,40 +341,6 @@ fn pinned(cache: &Path, runs: &Path, run: &str) -> Option<PathBuf> {
 /// the `e2e` feature). A plain build of the workspace's tests rebuilds `slopty-app` itself
 /// without it, and that app never opens the test socket.
 pub const APP: &str = "slopty-app-e2e";
-
-/// A Claude Code hook a test plays: `event` in terminal `session`, with `fields` (more JSON
-/// members, each led by a comma).
-struct Hook<'a> {
-    session: &'a str,
-    event: &'a str,
-    fields: &'a str,
-}
-
-/// Write [`TRANSCRIPT`] to `transcript` and hand the worker at `socket` the payload for `hook`
-/// naming it, exactly what `slopty hook` relays from the agent's shell.
-async fn play_hook(socket: &Path, transcript: &Path, hook: Hook<'_>) -> Result<()> {
-    let Hook { session, event, fields } = hook;
-    std::fs::write(transcript, TRANSCRIPT)?;
-    let payload = format!(
-        r#"{{"hook_event_name":"{event}","session_id":"{}","transcript_path":"{}"{fields}}}"#,
-        agent_session(session),
-        transcript.display()
-    );
-    let request = json!({ "cmd": "hook", "session": session, "payload": payload });
-    let reply = ctl(socket, &request).await?;
-    anyhow::ensure!(
-        reply.get("reply").and_then(Value::as_str) == Some("ok"),
-        "the worker refused the hook: {reply}"
-    );
-    Ok(())
-}
-
-/// The Claude Code session id a played hook in terminal `session` carries: one per test's
-/// terminal, so no two tests' agents share a session the worker keeps state for.
-#[must_use]
-pub fn agent_session(session: &str) -> String {
-    format!("e2e-{session}")
-}
 
 /// Where the build put the binaries.
 fn built_dir() -> Result<PathBuf> {
@@ -744,51 +690,6 @@ fn loopback_address(listen: &str) -> Result<String> {
     Ok(format!("127.0.0.1:{}", listen.port()))
 }
 
-/// A stand-in for the `claude` binary, written into a run's own directory and put first on
-/// ptyd's `PATH` so "+ agent" starts it instead of a real agent.
-///
-/// It behaves like Claude Code where Slopty looks: it paints the spinning title while a turn
-/// runs, the sparkle and a summary when it ends, and writes its conversation as JSONL under
-/// `$HOME/.claude/projects/<escaped cwd>`, with the same escaping the real one uses. It moves from
-/// stage to stage when the test creates the marker file it is waiting for, so the run never depends
-/// on a sleep, and it registers no hooks at all — which is the whole point.
-const FAKE_CLAUDE: &str = r#"#!/bin/sh
-set -e
-# A run's directory goes when its test ends: a stage still waiting then would spin forever.
-stage() {
-    while [ ! -f "$SLOPTY_FAKE_CLAUDE_DIR/$1" ]; do
-        [ -d "$SLOPTY_FAKE_CLAUDE_DIR" ] || exit 1
-        sleep 0.05
-    done
-}
-# The worker asks for the version and for the live sessions at start-up. Waiting on a stage
-# there outlived the killed worker as an orphan; answer them at once instead.
-[ "$1" = "--version" ] && exit 1
-if [ "$1" = "agents" ]; then echo '[]'; exit 0; fi
-echo "fake claude in $PWD"
-# Its conversation's file is named for its session, as Claude Code's is: the id Slopty pinned
-# with `--session-id`, when it did.
-id=fake-session
-pinned=
-for arg in "$@"; do
-    [ "$pinned" = "--session-id" ] && id="$arg"
-    pinned="$arg"
-done
-stage working
-# OSC 2 with U+25D0 CIRCLE WITH LEFT HALF BLACK, one of the frames Claude Code paints into
-# the title while a turn runs (`slopty_agent::title::WORKING`).
-printf '\033]2;\342\227\220 Claude Code\007'
-stage transcript
-project="$HOME/.claude/projects/$(printf '%s' "$PWD" | sed 's/[^a-zA-Z0-9]/-/g')"
-mkdir -p "$project"
-cat "$SLOPTY_FAKE_CLAUDE_DIR/transcript.jsonl" > "$project/$id.jsonl"
-stage done
-cat "$SLOPTY_FAKE_CLAUDE_DIR/transcript-done.jsonl" >> "$project/$id.jsonl"
-# U+2733 EIGHT SPOKED ASTERISK and the conversation's summary: the title between turns.
-printf '\033]2;\342\234\263 fix the tests\007'
-stage quit
-"#;
-
 /// Start one app process named `name` under `root` (its data directory is `root/<name>`, its
 /// test socket `root/<name>.sock`) and connect to its socket. `env` overrides the defaults.
 /// The grants every app is told its workers hold unless a test says otherwise: all of them, the
@@ -985,51 +886,6 @@ impl Stack {
     /// When a binary is missing, a process dies, or the app does not come up in time.
     pub async fn launch(worker_name: &str) -> Result<Self> {
         Self::launch_with(worker_name, &[]).await
-    }
-
-    /// [`Self::launch`] with a fake `claude` (`FAKE_CLAUDE`) first on the daemons' `PATH`
-    /// and a `HOME` of their own, so "+ agent" opens a session the worker must attribute
-    /// without any hook ever firing. Drive it with [`Self::fake_claude_stage`].
-    ///
-    /// # Errors
-    ///
-    /// As [`Self::launch`], plus when the fake cannot be written.
-    pub async fn launch_with_fake_claude(worker_name: &str) -> Result<Self> {
-        let dir = StackDir::new("slopty-e2e-agent-")?;
-        let root = dir.path().to_path_buf();
-        let home = root.join("home");
-        let fake = root.join("fake");
-        std::fs::create_dir_all(&home)?;
-        std::fs::create_dir_all(&fake)?;
-        let claude = fake.join("claude");
-        std::fs::write(&claude, FAKE_CLAUDE)?;
-        let mode = std::os::unix::fs::PermissionsExt::from_mode(0o755);
-        std::fs::set_permissions(&claude, mode)?;
-        std::fs::write(fake.join("transcript.jsonl"), TRANSCRIPT)?;
-        std::fs::write(fake.join("transcript-done.jsonl"), TRANSCRIPT_DONE)?;
-        let path = slopty_testkit::env::path_with(&fake);
-        let (home, fake_dir) = (home.to_string_lossy(), fake.to_string_lossy());
-        let path = path.to_string_lossy();
-        let env = [("HOME", &*home), ("PATH", &*path), ("SLOPTY_FAKE_CLAUDE_DIR", &*fake_dir)];
-        Self::launch_in(dir, worker_name, &env).await
-    }
-
-    /// The private `HOME` the daemons run with, when the launch gave them one (the
-    /// fake-claude launch does): where the fake `claude` writes its transcripts.
-    #[must_use]
-    pub fn home(&self) -> Option<String> {
-        self.app_env.iter().find(|(k, _v)| k == "HOME").map(|(_k, v)| v.clone())
-    }
-
-    /// Let the fake `claude` move past the stage it is waiting on (`working`, `transcript`,
-    /// `done`, `quit`).
-    ///
-    /// # Errors
-    ///
-    /// When the marker file cannot be written.
-    pub fn fake_claude_stage(&self, stage: &str) -> Result<()> {
-        std::fs::write(self.dir.path().join("fake").join(stage), b"")?;
-        Ok(())
     }
 
     /// [`Self::launch`] with extra environment for the daemons and the app (`SLOPTY_PREDICT`,
@@ -1366,7 +1222,22 @@ impl Stack {
         simulator: Simulator,
         env: &[(&str, &str)],
     ) -> Result<Self> {
-        let mut stack = Self::spawn_on_simulator(worker_name, simulator, env, true).await?;
+        let mut stack = Self::spawn_on_simulator(worker_name, simulator, env, true, false).await?;
+        linked(&mut stack.driver).await?;
+        Ok(stack)
+    }
+
+    /// [`Self::launch_on_simulator`] with the stand-in `claude` ([`stand_in_path`]) on the
+    /// daemons' `PATH`, so an agent started on the worker is a Claude Code thread a test drives.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::launch_on_simulator`], plus when the stand-in cannot be had.
+    pub async fn launch_on_simulator_with_claude(
+        worker_name: &str,
+        simulator: Simulator,
+    ) -> Result<Self> {
+        let mut stack = Self::spawn_on_simulator(worker_name, simulator, &[], true, true).await?;
         linked(&mut stack.driver).await?;
         Ok(stack)
     }
@@ -1381,24 +1252,27 @@ impl Stack {
         worker_name: &str,
         simulator: Simulator,
     ) -> Result<Self> {
-        let mut stack = Self::spawn_on_simulator(worker_name, simulator, &[], false).await?;
+        let mut stack = Self::spawn_on_simulator(worker_name, simulator, &[], false, false).await?;
         stack.driver.ok(&crate::Command::Ping).await?;
         Ok(stack)
     }
 
     /// The daemons here and the app in the simulator, its settings naming the server when it
-    /// `follows` it.
+    /// `follows` it, the stand-in `claude` on the daemons' `PATH` with `claude`.
     async fn spawn_on_simulator(
         worker_name: &str,
         simulator: Simulator,
         env: &[(&str, &str)],
         follows: bool,
+        claude: bool,
     ) -> Result<Self> {
         let dir = StackDir::new("slopty-e2e-ios-")?;
         let root = dir.path();
         let log = log_level();
+        let path = if claude { Some(stand_in_path(root).await?) } else { None };
+        let daemon_env: Vec<(&str, &str)> = path.iter().map(|p| ("PATH", p.as_str())).collect();
         let Daemons { server, children, listed, .. } =
-            daemons(root, worker_name, &log, &[], false).await?;
+            daemons(root, worker_name, &log, &daemon_env, false).await?;
         if follows {
             follow(&root.join("app"), &server)?;
         }
@@ -1437,97 +1311,6 @@ impl Stack {
     #[must_use]
     pub fn worker_pid(&self) -> Option<u32> {
         self.children.get(1).and_then(Child::id)
-    }
-
-    /// The transcript a played agent in `session` writes ([`Self::play_hook`]): named for the
-    /// agent's session, `<session id>.jsonl`, as Claude Code names its own, since the worker
-    /// takes a session's id from either and two that differ would be two sessions.
-    #[must_use]
-    pub fn transcript_path(&self, session: &str) -> PathBuf {
-        self.path(&format!("{}.jsonl", agent_session(session)))
-    }
-
-    /// Run the real relay, `slopty hook` (with `args`, such as `statusline --command true`),
-    /// for `session` as Claude Code runs it: `payload` on its stdin, the worker's control socket
-    /// in its environment, a home and a Claude config directory of the run's own. It is
-    /// returned running, since a `PermissionRequest`'s relay waits for the answer; dropping it
-    /// kills it. Its stdout, what Claude Code would read back, is piped: a few hundred bytes,
-    /// which no pipe holds back.
-    ///
-    /// # Errors
-    ///
-    /// When the CLI is not built or does not start.
-    pub fn relay_hook(&self, session: &str, args: &[&str], payload: &Value) -> Result<Child> {
-        let home = self.path("home");
-        std::fs::create_dir_all(&home)?;
-        let mut child = scrubbed(bin("slopty")?, &home)
-            .arg("--data-dir")
-            .arg(self.path("hook-data"))
-            .arg("hook")
-            .args(args)
-            .env("SLOPTY_SESSION", session)
-            .env("SLOPTY_WORKER_SOCKET", self.path("worker.sock"))
-            .env("CLAUDE_CONFIG_DIR", self.path("claude-config"))
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .kill_on_drop(true)
-            .spawn()
-            .context("spawn slopty hook")?;
-        let mut stdin = child.stdin.take().context("the hook's stdin")?;
-        let bytes = payload.to_string().into_bytes();
-        tokio::spawn(async move {
-            // A relay that exits before reading all of it is the relay's to report.
-            let _written = stdin.write_all(&bytes).await;
-        });
-        Ok(child)
-    }
-
-    /// Post one batch of Slopty's Claude Code mod events to the worker's mod socket
-    /// (`worker.mod.sock`, beside its control socket) as the mod does: `POST /v1/events` over
-    /// HTTP/1.1. Returns the answer's status, `204` once the events are on the board.
-    ///
-    /// # Errors
-    ///
-    /// When the socket cannot be reached or does not answer within the start-up bound.
-    pub async fn post_mod(&self, batch: &Value) -> Result<u16> {
-        let body = batch.to_string();
-        let head = format!(
-            "POST /v1/events HTTP/1.1\r\nhost: slopty\r\ncontent-type: application/json\r\n\
-             content-length: {}\r\nconnection: close\r\n\r\n",
-            body.len()
-        );
-        let socket = self.path("worker.mod.sock");
-        let exchange = async {
-            let mut stream = UnixStream::connect(&socket).await?;
-            stream.write_all(head.as_bytes()).await?;
-            stream.write_all(body.as_bytes()).await?;
-            let mut answer = Vec::new();
-            tokio::io::AsyncReadExt::read_to_end(&mut stream, &mut answer).await?;
-            anyhow::Ok(answer)
-        };
-        let answer = tokio::time::timeout(STARTUP, exchange)
-            .await
-            .with_context(|| format!("{} did not answer", socket.display()))??;
-        let answer = String::from_utf8_lossy(&answer);
-        answer
-            .split_whitespace()
-            .nth(1)
-            .and_then(|code| code.parse().ok())
-            .with_context(|| format!("no HTTP status: {answer:?}"))
-    }
-
-    /// Play a Claude Code hook in `session` (the id from the dump): write [`TRANSCRIPT`] under
-    /// the run's directory and hand the worker the payload for `event` (plus `fields`, more JSON
-    /// members) naming it over its control socket, exactly what `slopty hook` relays from the
-    /// agent's shell. Nothing is typed into the shell: the agent is simulated from the test.
-    ///
-    /// # Errors
-    ///
-    /// When the transcript cannot be written or the worker refuses the hook.
-    pub async fn play_hook(&self, session: &str, event: &str, fields: &str) -> Result<()> {
-        let hook = Hook { session, event, fields };
-        play_hook(&self.path("worker.sock"), &self.transcript_path(session), hook).await
     }
 
     /// Open a window on this machine that never draws, for the refresh-storm guard: the helper
@@ -1983,7 +1766,7 @@ impl Worker {
         &self.address
     }
 
-    /// The worker's control socket: what `slopty` and the hook relay talk to.
+    /// The worker's control socket: what `slopty` talks to.
     #[must_use]
     pub fn ctl_socket(&self) -> PathBuf {
         self.root.join("worker.sock")
@@ -2075,7 +1858,6 @@ pub struct SecondWorker {
     relay: std::sync::Arc<slopty_shape::relay::Relay>,
     _relay_task: RelayTask,
     address: String,
-    home: PathBuf,
     // Last, so the root goes after the daemons in it are killed.
     dir: StackDir,
 }
@@ -2140,7 +1922,7 @@ impl SecondWorker {
             let relay = std::sync::Arc::clone(&relay);
             async move { relay.run().await }
         });
-        Ok(Self { worker, relay, _relay_task: RelayTask(task), address, home, dir })
+        Ok(Self { worker, relay, _relay_task: RelayTask(task), address, dir })
     }
 
     /// Where the server's directory lists it: the relay, `[::1]:<port>`.
@@ -2190,65 +1972,6 @@ impl SecondWorker {
     /// When the worker does not come back up.
     pub async fn restart_worker(&mut self) -> Result<()> {
         self.worker.restart_worker().await
-    }
-
-    /// Play a Claude Code hook in `session` (the id from the dump) through the real relay:
-    /// write [`TRANSCRIPT`] under the root as the session's transcript, then run `slopty hook`
-    /// with the session and the worker's control socket in its environment and the payload for
-    /// `event` (plus `fields`, more JSON members) on its stdin, exactly what Claude Code does.
-    /// Nothing is typed into a shell and no agent is started.
-    ///
-    /// # Errors
-    ///
-    /// When the transcript cannot be written or the relay does not run to the end. The relay
-    /// exits 0 even when the worker refuses (it must never block an agent), so the effect is
-    /// the app's to show.
-    pub async fn play_hook(&self, session: &str, event: &str, fields: &str) -> Result<()> {
-        let mut hook = self.spawn_hook(session, event, fields).await?;
-        let status = tokio::time::timeout(STARTUP, hook.wait())
-            .await
-            .context("slopty hook did not finish")??;
-        ensure!(status.success(), "slopty hook failed: {status}");
-        Ok(())
-    }
-
-    /// Play a hook the worker holds for the person's answer (a `PermissionRequest`), as
-    /// [`Self::play_hook`] does, and hand back the relay still waiting: dropping it kills it,
-    /// as Claude Code's own hook timeout would.
-    ///
-    /// # Errors
-    ///
-    /// When the transcript cannot be written or the relay does not start.
-    pub async fn hold_hook(&self, session: &str, event: &str, fields: &str) -> Result<Child> {
-        self.spawn_hook(session, event, fields).await
-    }
-
-    /// `slopty hook` started with the payload for `event` written to its stdin. The transcript
-    /// is named for the agent's session, `<session id>.jsonl`, as Claude Code names its own:
-    /// the worker takes a session's id from either, and two that differ would be two sessions.
-    async fn spawn_hook(&self, session: &str, event: &str, fields: &str) -> Result<Child> {
-        let transcript = self.dir.path().join(format!("{}.jsonl", agent_session(session)));
-        std::fs::write(&transcript, TRANSCRIPT)?;
-        let payload = format!(
-            r#"{{"hook_event_name":"{event}","session_id":"{}","transcript_path":"{}"{fields}}}"#,
-            agent_session(session),
-            transcript.display()
-        );
-        let mut hook = scrubbed(bin("slopty")?, &self.home)
-            .arg("hook")
-            .env("SLOPTY_SESSION", session)
-            .env("SLOPTY_WORKER_SOCKET", self.worker.ctl_socket())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
-            .kill_on_drop(true)
-            .spawn()
-            .context("spawn slopty hook")?;
-        let mut stdin = hook.stdin.take().context("the hook's stdin")?;
-        stdin.write_all(payload.as_bytes()).await?;
-        stdin.shutdown().await?;
-        drop(stdin);
-        Ok(hook)
     }
 
     /// Kill both daemons; the relay stops and the root goes as the rest drops, after them.
@@ -2400,7 +2123,9 @@ impl ServerStack {
         let server_dir = root.join("server");
         std::fs::create_dir_all(&server_dir)?;
         let server = ServerDaemon::start(&server_dir, "e2e-server", &log).await?;
-        let env = [("BASH_SILENCE_DEPRECATION_WARNING", "1")];
+        // The stand-in `claude` first on its `PATH`: an agent started there is a thread to drive.
+        let path = stand_in_path(root).await?;
+        let env = [("BASH_SILENCE_DEPRECATION_WARNING", "1"), ("PATH", path.as_str())];
         let worker =
             Worker::start(&root.join("worker"), worker_name, Some(server.address()), &log, &env)
                 .await?;
@@ -2608,6 +2333,19 @@ pub async fn stub_claude() -> Result<PathBuf> {
     Ok(path)
 }
 
+/// `root/programs` holding the stand-in `claude` ([`stub_claude`]), and the `PATH` that finds it
+/// ahead of the system's: how a test's worker gets a Claude Code to drive.
+///
+/// # Errors
+///
+/// When the stand-in is missing and cannot be built, or the link cannot be made.
+pub async fn stand_in_path(root: &Path) -> Result<String> {
+    let programs = root.join("programs");
+    std::fs::create_dir_all(&programs)?;
+    std::os::unix::fs::symlink(stub_claude().await?, programs.join("claude"))?;
+    Ok(slopty_testkit::env::path_with(&programs).to_string_lossy().into_owned())
+}
+
 /// The app with a server and one registered worker behind it, as agents across machines need.
 ///
 /// The worker runs with `slopty-stub-claude` first on its `PATH` as `claude` and a `HOME` of its
@@ -2658,7 +2396,7 @@ impl ServedApp {
     }
 
     /// [`Self::launch_with`], the worker's added environment made from the run's root: a stand-in
-    /// agent's script that names paths under it (`STUB_HOOKS` with a worktree's `cwd`).
+    /// agent's script that names paths under it (`STUB_RECORD` in the run's folder).
     ///
     /// # Errors
     ///
@@ -2797,17 +2535,6 @@ impl ServedApp {
     /// As [`slopty_json`].
     pub async fn slopty(&self, args: &[&str]) -> Result<Value> {
         slopty_json(self.server.address(), &self.path("cli"), args, b"").await
-    }
-
-    /// Play a Claude Code hook in `session` on the worker, as [`Stack::play_hook`] does.
-    ///
-    /// # Errors
-    ///
-    /// When the transcript cannot be written or the worker refuses the hook.
-    pub async fn play_hook(&self, session: &str, event: &str, fields: &str) -> Result<()> {
-        let transcript = self.path(&format!("{}.jsonl", agent_session(session)));
-        let hook = Hook { session, event, fields };
-        play_hook(&self.worker.ctl_socket(), &transcript, hook).await
     }
 
     /// Ask the app to quit, then kill it, the worker and the server.

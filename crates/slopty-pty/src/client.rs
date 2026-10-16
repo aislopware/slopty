@@ -18,7 +18,7 @@ use crate::{PtyError, fdpass};
 /// A master handed over by ptyd.
 #[derive(Debug)]
 pub struct Attached {
-    /// The PTY master.
+    /// The PTY master, or a piped session's socket.
     pub master: OwnedFd,
     /// The last worker's terminal state (empty if none); replay it before `backlog`.
     pub checkpoint: Vec<u8>,
@@ -46,6 +46,8 @@ pub struct Adoptee {
     pub started_ms: slopty_core::WallMs,
     /// The terminfo name the child was given as `TERM`.
     pub term: String,
+    /// A piped session ([`PtydClient::spawn_piped`]): the descriptor is its socket.
+    pub piped: bool,
 }
 
 /// A reply, with the fd that rode on it.
@@ -106,6 +108,21 @@ impl PtydClient {
         }
     }
 
+    /// Spawn a session on a pipe rather than a PTY ([`PtydRequest::SpawnPiped`]), its standard
+    /// error into `stderr` (else `/dev/null`); returns the child pid. [`Self::attach`] then
+    /// hands over the session's socket as its master.
+    pub async fn spawn_piped(
+        &mut self,
+        id: SessionId,
+        spec: SpawnSpec,
+        stderr: Option<PathBuf>,
+    ) -> Result<u32, PtyError> {
+        match self.call(&PtydRequest::SpawnPiped { id, spec, stderr }).await?.0 {
+            PtydEvent::Spawned { pid, .. } => Ok(pid),
+            other => Self::unexpected(other),
+        }
+    }
+
     /// Take the master.
     pub async fn attach(&mut self, id: SessionId) -> Result<Attached, PtyError> {
         match self.call(&PtydRequest::Attach { id }).await? {
@@ -143,18 +160,6 @@ impl PtydClient {
         self.send(&codec::encode(&PtydRequest::Resize { id, size })?).await
     }
 
-    /// Hand ptyd input to type whole, `parts` in order under the name `delivery`
-    /// ([`PtydRequest::Deliver`]), and return once ptyd took it: from then it is typed whether
-    /// or not this worker stays, before anything typed into the master after the pauses.
-    pub async fn deliver(
-        &mut self,
-        id: SessionId,
-        delivery: u64,
-        parts: Vec<crate::protocol::Part>,
-    ) -> Result<(), PtyError> {
-        self.expect_ok(&PtydRequest::Deliver { id, delivery, parts }).await
-    }
-
     /// Kill and forget.
     pub async fn close(&mut self, id: SessionId) -> Result<(), PtyError> {
         self.expect_ok(&PtydRequest::Close { id }).await
@@ -186,8 +191,8 @@ impl PtydClient {
         master: BorrowedFd<'_>,
         child: Adoptee,
     ) -> Result<(), PtyError> {
-        let Adoptee { pid, size, started_ms, term } = child;
-        let req = PtydRequest::Adopt { id, pid, size, started_ms, term };
+        let Adoptee { pid, size, started_ms, term, piped } = child;
+        let req = PtydRequest::Adopt { id, pid, size, started_ms, term, piped };
         match self.call_with(&req, Some(master)).await?.0 {
             PtydEvent::Ok => Ok(()),
             other => Self::unexpected(other),

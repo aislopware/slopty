@@ -282,7 +282,6 @@ impl Session {
             native: String::new(),
             cwd: cwd.to_owned(),
             title: String::new(),
-            terminal: None,
             parent: None,
             origin: ThreadMeta::PERSON.to_owned(),
             forked_from: None,
@@ -400,7 +399,7 @@ impl Session {
     /// them only for the session it opened.
     pub fn serve_tools(&mut self, relay: &str, env: &[(String, String)]) {
         let env = env.iter().map(|(n, v)| acp::EnvVariable::new(n.clone(), v.clone())).collect();
-        let server = acp::McpServerStdio::new(crate::hooks::MCP_SERVER_NAME, relay)
+        let server = acp::McpServerStdio::new(crate::mcp::MCP_SERVER_NAME, relay)
             .args(vec!["mcp".to_owned()])
             .env(env);
         self.tools = vec![acp::McpServer::Stdio(server)];
@@ -1283,7 +1282,12 @@ impl Session {
             });
         meta.models = model
             .as_ref()
-            .map(|o| select_choices(o).into_iter().map(|(id, label)| Model { id, label }).collect())
+            .map(|o| {
+                select_choices(o)
+                    .into_iter()
+                    .map(|(id, label)| Model { id, label, options: Vec::new() })
+                    .collect()
+            })
             .unwrap_or_default();
         if let Some(model) = &model {
             let current = select_current(model);

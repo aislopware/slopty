@@ -138,7 +138,7 @@ mod tests {
         }
     }
 
-    fn row(id: ThreadId, phase: Phase, since: u64, terminal: SessionId) -> ThreadRow {
+    fn row(id: ThreadId, phase: Phase, since: u64, seat: SessionId) -> ThreadRow {
         ThreadRow {
             id,
             agent: AgentId::named(AgentId::CLAUDE_CODE),
@@ -154,11 +154,10 @@ mod tests {
             last_line: None,
             doing: None,
             changed: Changed::default(),
-            terminal: Some(terminal),
             parent: None,
-            drive: Drive::named(Drive::OBSERVED),
+            drive: Drive::named(Drive::DRIVEN),
             caps: Vec::new(),
-            facts: BTreeMap::new(),
+            facts: BTreeMap::from([(slopty_proto::agent::SEAT_FACT.to_owned(), seat.to_string())]),
             to_review: false,
             pull: None,
             meters: Meters::default(),
@@ -166,6 +165,7 @@ mod tests {
             began_ms: None,
             seen: slopty_proto::thread::TurnId::BEFORE,
             draft: None,
+            lease_ms: None,
             created_ms: WallMs::from_millis(since),
             updated_ms: WallMs::from_millis(since),
             cwd: None,

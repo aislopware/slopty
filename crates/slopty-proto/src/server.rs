@@ -122,10 +122,6 @@ pub struct InstalledAgent {
     pub version: String,
     /// What a new thread of it can be started with here.
     pub offers: crate::thread::Offers,
-    /// Claude Code only: this machine's managed settings keep the hooks Slopty registers from
-    /// running (every hook off, only managed hooks, or hooks only from plugins), so its threads
-    /// are followed without them and the person is told why. `false` for every other agent.
-    pub managed_hooks_off: bool,
 }
 
 /// What a worker can do, sent at registration and whenever it changes.
@@ -307,6 +303,13 @@ pub enum ToServer {
         /// Where and how to push to it.
         device: Option<crate::push::PushDevice>,
     },
+    /// A worker asks whether its control stream still carries both ways; the server answers
+    /// [`FromServer::Pong`] at once. A worker pings every 2 s, so a server that hears nothing
+    /// from it for 6 s ends its lease (`slopty_net::liveness`).
+    Ping {
+        /// The sender's monotonic clock, echoed back untouched.
+        sent_at: slopty_core::MonoTime,
+    },
 }
 
 /// Server → dialer.
@@ -358,8 +361,8 @@ pub enum FromServer {
         /// Its 1-minute load average.
         load: f32,
     },
-    /// For a worker: news for the agent in `session` (its children's, words told it), which
-    /// its hooks hand it as context (`slopty hook reports`) and then acknowledge as
+    /// For a worker: news for the agent seated in `session` (its children's, words told it),
+    /// which the worker sends its thread as a message of its own and then acknowledges as
     /// [`AgentReport::Delivered`]. A later batch for the session replaces one not yet handed
     /// over, and holds its words too; the worker leaves out each one its agent read already
     /// ([`ReportBlock::id`]).
@@ -379,19 +382,17 @@ pub enum FromServer {
     Present(Vec<crate::thread::attention::Present>),
     /// For a client: a notice the server picked it to show, from where the person is.
     Notice(Box<crate::thread::attention::Notice>),
-    /// For a worker: whether a phone the server pushes to can answer while no client is linked
-    /// (pushing is set up, and a phone is known). While it can, the worker holds any prompt
-    /// nobody follows for it, up to the hook's own wait: a yes or no takes the answer the
-    /// phone's note sends through the server ([`crate::orchestration::Verb::AnswerRequest`]),
-    /// and a plan or a question is answered in the thread the note opens. Sent after the
-    /// welcome and on every change.
-    Pushes(bool),
     /// For a client that said it is a phone ([`ToServer::PushDevice`]): whether the server
     /// can push to it while the person is away from every client (pushing is set up here, and
     /// the phone it last said is kept). False too once it said no phone, or APNs said its token
     /// is gone. Sent after the link's first [`ToServer::PushDevice`] and on every change after;
     /// never to a client that sent none. Each replaces the last.
     Pushable(bool),
+    /// The answer to [`ToServer::Ping`].
+    Pong {
+        /// The worker's timestamp from the ping.
+        sent_at: slopty_core::MonoTime,
+    },
 }
 
 /// Why the server refused a hello.
@@ -493,12 +494,10 @@ pub struct WorkerFacts {
 }
 
 /// What a worker tells the server of an agent beyond its thread's row.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum AgentReport {
-    /// Where an agent's work lands: its worktree.
-    Branch(crate::agent::AgentBranch),
-    /// A batch of news ([`FromServer::Deliver`]) reached the agent in a session through its
-    /// hooks.
+    /// A batch of news ([`FromServer::Deliver`]) reached the agent seated at a session, as a
+    /// message of its own.
     Delivered {
         /// The session.
         session: SessionId,

@@ -99,6 +99,7 @@ mod acp {
                 effort: None,
                 attachments: Vec::new(),
                 args: Vec::new(),
+                options: BTreeMap::new(),
                 worktree: None,
             })
         }
@@ -384,9 +385,6 @@ mod acp {
         };
         let (_, maybe) = rig.intent(&acp, thread, &answer("allow"));
         assert!(matches!(maybe, Outcome::Refused { .. }), "only what the agent offers: {maybe:?}");
-        let release = Intent::Release { ask: ask.clone() };
-        let (_, released) = rig.intent(&acp, thread, &release);
-        assert!(matches!(released, Outcome::Refused { .. }), "no prompt to give it to");
         assert_eq!(rig.intent(&acp, thread, &answer("once")).1, Outcome::Done);
 
         // The allowed turn ends, and the message that waited goes as the next.

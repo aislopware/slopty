@@ -106,6 +106,13 @@ impl DevicesPage {
         self.open_add_device_on(Choice::ThisMac, cx);
     }
 
+    // slopty: the sidebar's server menu opens the server's code straight.
+    /// Show the server's code for a phone or iPad to scan, while the server offers one.
+    pub fn open_invite(&mut self, cx: &mut Context<Self>) {
+        self.inviting = true;
+        cx.notify();
+    }
+
     /// Open the Add device dialog on `choice` (the menu's Add worker, Connect to server).
     pub fn open_add_device_on(&mut self, choice: Choice, cx: &mut Context<Self>) {
         self.add_wanted = Some(choice);
@@ -217,6 +224,27 @@ pub fn platform_label(platform: &str) -> &str {
     }
 }
 
+// slopty: a machine row's tile, by what it runs.
+/// The glyph that leads a machine's row: a laptop for a Mac (Slopty's own kind), a phone or
+/// tablet for a handheld, a server for Linux or a machine that has not said.
+pub fn platform_icon(platform: &str) -> &'static str {
+    match platform {
+        "macos" | "darwin" => crate::icons::LAPTOP,
+        "windows" => crate::icons::MONITOR,
+        "ios" | "android" => crate::icons::SMARTPHONE,
+        _ => crate::icons::REMOTE_SERVER,
+    }
+}
+
+// slopty: the confirmed removal reads as destructive; asking first and the rest stay quiet.
+/// The tone of a machine action's button, by its id.
+fn action_tone(id: &str) -> widgets::ActionTone {
+    match id {
+        "remove" => widgets::ActionTone::Danger,
+        _ => widgets::ActionTone::Quiet,
+    }
+}
+
 /// Short device id for the click-to-copy chip (`abcd1234…wxyz`).
 pub fn short_id(id: &str) -> String {
     if id.len() > 12 {
@@ -283,8 +311,9 @@ impl Render for DevicesPage {
                                     crate::toast::info(cx, "Link copied");
                                 }))
                         }))
+                        // slopty: a dialog commits with the solid button, as Add device does.
                         .child(
-                            widgets::text_action(&theme, widgets::ActionTone::Filled, "Done")
+                            widgets::text_action(&theme, widgets::ActionTone::Solid, "Done")
                                 .id("invite-done")
                                 .tab_index(0)
                                 .role(gpui::Role::Button)
@@ -346,7 +375,7 @@ impl Render for DevicesPage {
             // slopty: what the app offers to do to the machine, before Copy ID.
             let actions = device.actions.iter().enumerate().map(|(n, action)| {
                 let (id, run) = (device.id.clone(), action.id.clone());
-                widgets::text_action(&theme, widgets::ActionTone::Quiet, action.label.clone())
+                widgets::text_action(&theme, action_tone(&action.id), action.label.clone())
                     .id(SharedString::from(format!("device-action-{ix}-{n}")))
                     .tab_index(0)
                     .role(gpui::Role::Button)
@@ -357,6 +386,8 @@ impl Render for DevicesPage {
                     }))
             });
             widgets::card_row(&theme, first)
+                // slopty: every row leads with its tile, so the blocks share one text edge.
+                .child(widgets::row_tile(&theme, platform_icon(&device.platform)))
                 .child(
                     div()
                         .flex_1()
@@ -592,6 +623,24 @@ mod tests {
             format_last_seen(Some(now - TimeDelta::days(2)), now),
             "2d ago"
         );
+    }
+
+    // slopty: one tile per machine row, by platform; an unknown platform still gets one.
+    #[test]
+    fn every_machine_row_has_a_tile_by_platform() {
+        assert_eq!(platform_icon("macos"), crate::icons::LAPTOP);
+        assert_eq!(platform_icon("darwin"), crate::icons::LAPTOP);
+        assert_eq!(platform_icon("linux"), crate::icons::REMOTE_SERVER);
+        assert_eq!(platform_icon("ios"), crate::icons::SMARTPHONE);
+        assert_eq!(platform_icon(""), crate::icons::REMOTE_SERVER, "not said yet");
+    }
+
+    // slopty: only the confirmed removal is red; asking first is quiet.
+    #[test]
+    fn only_remove_now_is_destructive() {
+        assert!(matches!(action_tone("remove"), widgets::ActionTone::Danger));
+        assert!(matches!(action_tone("ask-remove"), widgets::ActionTone::Quiet));
+        assert!(matches!(action_tone("update"), widgets::ActionTone::Quiet));
     }
 
     #[test]

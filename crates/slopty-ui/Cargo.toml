@@ -27,7 +27,6 @@ futures.workspace = true
 gpui.workspace = true
 # A stream's `VideoLayer` (`screen::glass`).
 gpui_apple.workspace = true
-gpui-kit.workspace = true
 # The formats the model reads, for fitting a pasted picture (`terminal::attachment`); GPUI
 # already builds these decoders, so the binary grows by nothing.
 image = { workspace = true, features = [ "gif", "jpeg", "webp" ] }
@@ -52,6 +51,9 @@ slopty-proto.workspace = true
 # The settings form's rows: every key of `settings.toml` with its type, default and range
 # (`settings_form`).
 slopty-settings.workspace = true
+# The shell's own parts a remote window's floats are drawn with (`screen`): its cards, menus,
+# pills, buttons, icons and tooltips.
+slopty-shell.workspace = true
 slopty-theme.workspace = true
 # The device's layout, saved as `layout.json`, and its drafts, as `drafts.json` (`workspace`).
 serde.workspace = true
@@ -73,8 +75,10 @@ e2e = [ "gpui/test-support", "slopty-kit/e2e" ]
 
 [dev-dependencies]
 gpui = { workspace = true, features = [ "test-support" ] }
+# The window root every view sits in, which binds Tab and ⇧Tab (`screen::keyboard` tests).
+gpui-base.workspace = true
 slopty-client = { workspace = true, features = [ "headless" ] }
-# The kit's test reach (`a11y::tree`, the retained-frame oracle, the held spin clock).
+# The kit's test reach (`a11y::tree`, the retained-frame oracle).
 slopty-kit = { workspace = true, features = [ "e2e" ] }
 # The terminal's test reach (its paint probe's counters, how often a view was drawn).
 slopty-terminal = { workspace = true, features = [ "e2e" ] }

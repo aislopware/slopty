@@ -173,7 +173,7 @@ impl Directory {
             | FromServer::Request { .. }
             | FromServer::Reply { .. }
             | FromServer::Deliver { .. }
-            | FromServer::Pushes(_) => Vec::new(),
+            | FromServer::Pong { .. } => Vec::new(),
             FromServer::Pushable(now) => vec![Change::Pushable(now)],
             FromServer::Ladder(ladder) => vec![Change::Ladder(ladder)],
             FromServer::Present(present) => vec![Change::Present(present)],
@@ -358,13 +358,12 @@ mod tests {
     }
 
     /// The server's word on whether it can push to this phone is a change of its own, each
-    /// replacing the last; the workers' `Pushes` is not this client's.
+    /// replacing the last.
     #[test]
     fn whether_the_server_can_push_here_is_a_change() {
         let mut d = linked();
         assert_eq!(d.apply(FromServer::Pushable(false)), vec![Change::Pushable(false)]);
         assert_eq!(d.apply(FromServer::Pushable(true)), vec![Change::Pushable(true)]);
-        assert_eq!(d.apply(FromServer::Pushes(true)), Vec::<Change>::new());
         assert_eq!(d.workers().count(), 0, "the directory is untouched");
     }
 

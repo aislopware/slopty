@@ -6,29 +6,29 @@
 //! cursor. Shaping is cached across frames and views by the content hash of each word, least
 //! recently used first out under a glyph budget.
 
+use std::collections::VecDeque;
 use std::collections::hash_map::Entry;
-use std::collections::{BTreeMap, VecDeque};
 use std::hash::{Hash as _, Hasher as _};
 use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    App, BorderStyle, BorrowAppContext as _, Bounds, Corners, DispatchPhase, Edges, Element,
-    ElementId, ElementInputHandler, Entity, Focusable as _, Font, FontId, GlobalElementId, GlyphId,
-    Hitbox, HitboxBehavior, Hsla, InspectorElementId, IntoElement, LayoutId, LongPressEvent,
+    App, BorderStyle, BorrowAppContext as _, Bounds, Corners, DispatchPhase, Element, ElementId,
+    ElementInputHandler, Entity, Focusable as _, Font, FontId, GlobalElementId, GlyphId, Hitbox,
+    HitboxBehavior, Hsla, InspectorElementId, IntoElement, LayoutId, LongPressEvent,
     MouseExitEvent, MouseMoveEvent, PathBuilder, Pixels, Point, RenderImage, ShapedLine,
     SharedString, Size, Style, TextAlign, TextRun, TouchPhase, TransformationMatrix,
-    UnderlineStyle, Window, fill, point, px, quad, relative, size,
+    UnderlineStyle, Window, fill, point, px, relative, size,
 };
 use rustc_hash::{FxHashMap, FxHasher};
 use slopty_grid::{
     Cell, CellWidth, CursorShape, LineIndex, Style as CellStyle, StyleFlags, Underline,
 };
-use slopty_kit::colors::{hsla, hsla_alpha};
+use slopty_kit::colors::hsla;
 use slopty_kit::fonts;
 use slopty_predict::Prediction;
 use slopty_proto::terminal::{Placement, TermSize};
-use slopty_theme::{Colors, Rgb, Theme, alpha};
+use slopty_theme::{Colors, Rgb};
 
 use crate::metrics::{self, Grid};
 use crate::sprite;
@@ -117,33 +117,18 @@ pub struct Prepared {
     grid: Grid,
     rows: Vec<PreparedRow>,
     cursor: Option<(Bounds<Pixels>, CursorShape, Hsla)>,
-    /// The cells a block cursor covers and the colour their text takes there.
-    cursor_text: Option<CursorText>,
     background: Hsla,
     /// Colour of the ⌘-hover link underline.
     link: Hsla,
-    /// The scrollbar's thumb over the grid's right edge, while the bar shows.
-    scrollbar: Option<(Bounds<Pixels>, Hsla)>,
-    /// The command blocks' marks on the scrollbar's track, under the thumb, while it shows.
-    block_ticks: Vec<(Bounds<Pixels>, Hsla)>,
-    /// The tops of the hairlines over the prompts that follow a row, their colour and width.
-    rules: Vec<Pixels>,
-    rule: Hsla,
-    rule_width: Pixels,
-    /// The failed blocks' rows as `(top, height)` bands: a bar at the left edge.
-    failed: Vec<(Pixels, Pixels)>,
-    /// The failed blocks' heads (their prompt and command rows) as `(top, height)` bands,
-    /// washed edge to edge.
-    failed_heads: Vec<(Pixels, Pixels)>,
-    /// The failed blocks' wash and bar colours, and the bar's width.
-    failed_look: FailedLook,
-    /// Text drawn over the grid: the input method's composition and the "took" captions.
+    /// Text drawn over the grid: the input method's composition.
     overlay: Vec<(Point<Pixels>, ShapedLine)>,
     /// The keys whose guesses the overlay shows (the predictor stamps each with the key's
     /// sequence number), for the keystroke → paint meter.
     shown: Vec<u64>,
     /// The font size to paint the words at.
     font_size: Pixels,
+    /// The visual bell's wash over the grid, while it rings.
+    bell: Option<Hsla>,
     /// The frame holds a blinking cursor or SGR 5 text: the view's blink clock must run.
     blinking: bool,
     /// Images the program placed (kitty graphics), clipped to the grid.
@@ -177,30 +162,8 @@ struct PreparedImage {
     over_text: bool,
 }
 
-/// The columns `start..end` of screen row `row` sit under a block cursor: their text is
-/// painted in `color`, the theme's text-under-cursor colour.
-#[derive(Clone, Copy, PartialEq, Debug)]
-struct CursorText {
-    row: u16,
-    start: u16,
-    end: u16,
-    color: Hsla,
-}
-
-impl CursorText {
-    /// The colour of text at column `col` of screen row `row` that is otherwise `color`.
-    fn over(this: Option<Self>, row: u16, col: u16, color: Hsla) -> Hsla {
-        match this {
-            Some(c) if c.row == row && (c.start..c.end).contains(&col) && color.a > 0.0 => c.color,
-            _ => color,
-        }
-    }
-}
-
 #[derive(Debug)]
 struct PreparedRow {
-    /// The screen row (0 = the top of the viewport).
-    row: u16,
     y: Pixels,
     /// What the row's cells make, kept across frames ([`RowCache`]).
     parts: Rc<RowParts>,
@@ -585,80 +548,6 @@ fn cursor_span(line: Option<&slopty_grid::Line>, col: u16) -> u16 {
     if wide { 2 } else { 1 }
 }
 
-/// The rows of `runs` (the failed blocks' rows in view) that are a block's head: a prompt's
-/// rows and the command typed at it, as `marks` (each view row's) say, in runs.
-fn head_runs(
-    runs: &[std::ops::Range<u16>],
-    marks: &[Option<slopty_grid::SemanticMark>],
-) -> Vec<std::ops::Range<u16>> {
-    use slopty_grid::SemanticMark;
-    let head = |row: u16| {
-        marks
-            .get(usize::from(row))
-            .copied()
-            .flatten()
-            .is_some_and(|mark| mark.is_prompt() || matches!(mark, SemanticMark::Input))
-    };
-    let mut out: Vec<std::ops::Range<u16>> = Vec::new();
-    for row in runs.iter().flat_map(Clone::clone).filter(|row| head(*row)) {
-        match out.last_mut() {
-            Some(last) if last.end == row => last.end = row.saturating_add(1),
-            _ => out.push(row..row.saturating_add(1)),
-        }
-    }
-    out
-}
-
-/// The hairline over a prompt that follows a row: the quieter hairline inside one region, as a
-/// list parts its rows. A block's rows otherwise keep the program's own background: a band
-/// under the prompt painted over what the program drew. A failed block says so with its own
-/// bar, and a wash over its head ([`FailedLook`]).
-#[must_use]
-pub(super) fn separator_color(theme: &Theme) -> Hsla {
-    hsla(theme.surfaces.stroke)
-}
-
-/// The view rows a block's hairline goes over: each row a prompt starts on, below a row with a
-/// line. Not on the grid's top row, and not on the first line there is, with nothing above it.
-fn rule_rows(marks: impl Iterator<Item = Option<slopty_grid::SemanticMark>>) -> Vec<u16> {
-    let mut above = false;
-    let mut rows = Vec::new();
-    for (row, mark) in (0..u16::MAX).zip(marks) {
-        if above && mark.is_some_and(slopty_grid::SemanticMark::starts_prompt) {
-            rows.push(row);
-        }
-        above = mark.is_some();
-    }
-    rows
-}
-
-/// How a block whose command failed is drawn: a thin bar of the error fill down the block's
-/// left edge, and a faint wash of it over the block's head only (its prompt and command rows),
-/// edge to edge as its rules run. The output keeps the program's own background: washed whole,
-/// a long failure turned the tile into one pink slab, louder than anything that needs the
-/// person, and its red text sat on red.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(super) struct FailedLook {
-    /// Over the block's head rows, edge to edge.
-    pub wash: Hsla,
-    /// Down the element's left edge, in the inset beside the text.
-    pub bar: Hsla,
-    /// The bar's width.
-    pub bar_width: Pixels,
-}
-
-impl FailedLook {
-    /// The look by `theme`.
-    #[must_use]
-    pub(super) fn new(theme: &Theme) -> Self {
-        Self {
-            wash: hsla_alpha(theme.surfaces.error_fill, alpha::FAINT),
-            bar: hsla(theme.surfaces.error_fill),
-            bar_width: px(slopty_theme::stroke::BAR),
-        }
-    }
-}
-
 /// How far a row's paint reaches outside its cell box, `(above, below)`, in painted points.
 ///
 /// The cell box is the row's layout, not its ink: with a reduced line height
@@ -858,8 +747,6 @@ struct Probe {
     rows_prepared: usize,
     /// How many of those it built from their cells rather than took from the row cache.
     rows_built: usize,
-    /// The "took" captions the last prepaint drew, top row first.
-    captions: Vec<String>,
     /// Words shaped since the app started.
     shaped: usize,
     /// Sprite masks written since the app started.
@@ -1181,8 +1068,6 @@ impl Word {
 struct Glyph {
     font: FontId,
     id: GlyphId,
-    /// The column of the cell it belongs to, counted from the word's first.
-    col: u16,
     position: Point<Pixels>,
     emoji: bool,
     color: Hsla,
@@ -1277,7 +1162,6 @@ fn place(
             glyphs.push(Glyph {
                 font: run.font_id,
                 id: glyph.id,
-                col,
                 position: point(
                     cell_width * f32::from(col) + (glyph.position.x - first),
                     glyph.position.y,
@@ -1442,7 +1326,7 @@ impl Element for TerminalElement {
 
     fn prepaint(
         &mut self,
-        id: Option<&GlobalElementId>,
+        _id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
         _request: &mut (),
@@ -1526,21 +1410,19 @@ impl Element for TerminalElement {
                 cell_height: whole_u16(base_derived.cell_height, 16),
             },
         };
-        self.view.update(cx, |view, cx| view.fitted(fitted, metrics, cx));
-        // The pointer can leave the right edge without a move this element hears: to another
-        // app (the window going inactive), or by the tile moving under a still pointer. Here the
-        // bar is only ever let go; a real move is what brings it up. Where the pointer is, is
-        // not read: that would build the view again for every move over the window.
-        let active = window.is_window_active();
-        let left = id.is_some_and(|id| {
-            window.with_element_state(id, |was: Option<(bool, Bounds<Pixels>)>, _| {
-                let (was_active, was_at) = was.unwrap_or((active, bounds));
-                ((was_active && !active) || was_at != bounds, (active, bounds))
-            })
+        self.view.update(cx, |view, cx| {
+            view.set_drawn_bounds(bounds);
+            view.fitted(fitted, metrics, cx);
         });
-        if left {
-            self.view.update(cx, |view, cx| view.pointer_near_scrollbar(false, cx));
-        }
+        // What the shell's theme gives a terminal's marks: the selection, the cursor and a
+        // find's hits, translucent over whatever the program painted.
+        let shell_look =
+            slopty_shell::live::TerminalLook::from_theme(slopty_shell::live::chrome::theme(cx));
+        let bell = self
+            .view
+            .read(cx)
+            .bell_flashing()
+            .then(|| slopty_shell::live::chrome::theme(cx).wash(0.09));
 
         // Shaping reads the view's rows in place (no copy of the grid per frame) while the
         // cache is out of the app: put it back before anything else touches `cx`.
@@ -1559,13 +1441,6 @@ impl Element for TerminalElement {
         let sprite_thickness = (f32::from(grid.underline.thickness) * scale).round().max(1.0);
         // Textures for the placed images are made (and stale ones dropped) before the read.
         let placed = self.view.update(cx, |view, _cx| view.placed_images(window));
-        #[cfg(any(test, feature = "e2e"))]
-        let mut caption_texts: Vec<String> = Vec::new();
-        // A viewport that moved since the last frame brings the scrollbar up in this one.
-        let now = cx.background_executor().now();
-        self.view.update(cx, |view, cx| view.viewport_drawn(now, cx));
-        let moves = slopty_kit::kit::motion(cx);
-        let fading;
         let prepared = {
             let view = self.view.read(cx);
             let theme = view.theme();
@@ -1588,33 +1463,6 @@ impl Element for TerminalElement {
             let grid_cols = state.size().cols;
             let (matches, current) = view.search_highlights().unwrap_or((&[], None));
             let link = view.link_highlight();
-            let shown = view.scrollbar_opacity(now, moves);
-            fading = shown > 0.0 && shown < 1.0;
-            let scrollbar = (shown > 0.0).then(|| {
-                let held = view.thumb_held();
-                let alpha = if held { alpha::PRESSED } else { alpha::TINT };
-                (hsla_alpha(palette.theme.fg, alpha * shown), state.history_len(), view_offset)
-            });
-            // The alternate screen has no blocks; its numbering names none of the primary's.
-            let alt = modes.contains(slopty_grid::TermModes::ALT_SCREEN);
-            let block_ticks = if shown > 0.0 && !alt {
-                let (mark, failure) = (
-                    hsla_alpha(palette.theme.fg, alpha::PRESSED * shown),
-                    hsla_alpha(theme.surfaces.error_fill, shown),
-                );
-                block_ticks(
-                    &metrics,
-                    state.block_marks(),
-                    state.scrollback().oldest(),
-                    state.history_len(),
-                    px(slopty_theme::stroke::MARK),
-                )
-                .into_iter()
-                .map(|tick| (tick.bounds, if tick.failed { failure } else { mark }))
-                .collect()
-            } else {
-                Vec::new()
-            };
             let faces = cache.faces(&family, ligatures);
             let look = |blink_off| Look { faces: &faces, palette, blink_off };
 
@@ -1629,37 +1477,6 @@ impl Element for TerminalElement {
             // Rows above the oldest line the worker still has: a `~` filler, shaped once.
             let mut filler: Option<Rc<RowParts>> = None;
             let mut prepared_rows = Vec::with_capacity(rows_view.len());
-            // "took 3.2 s" at the right end of a prompt row whose command took a while.
-            let mut captions: Vec<(Point<Pixels>, ShapedLine)> = Vec::new();
-            let hovered = view.hovered_block();
-            let runs = state.failed_runs(&rows_view);
-            let band = |run: &std::ops::Range<u16>| {
-                let top = origin.y + line_height * f32::from(run.start);
-                (top, line_height * f32::from(run.end.saturating_sub(run.start)))
-            };
-            // A host's chrome (`GridFrame`) draws no blocks: no hairline over a prompt, no
-            // failed block's bar or wash, as the host's own terminals draw none.
-            let blocks = frame.is_none();
-            let failed = if blocks { runs.iter().map(band).collect() } else { Vec::new() };
-            let marks: Vec<Option<slopty_grid::SemanticMark>> =
-                rows_view.iter().map(|row| row.line.map(|line| line.mark)).collect();
-            let failed_heads = if blocks {
-                head_runs(&runs, &marks).iter().map(band).collect()
-            } else {
-                Vec::new()
-            };
-            let failed_look = FailedLook::new(theme);
-            // The alternate screen has no blocks, whatever marks a program leaves on it. From
-            // their own pass, not the row loop: deciding them there cost the dense screen's
-            // frame about 100 µs (MEASUREMENTS, "the head band on its own step").
-            let rules = if !blocks || modes.contains(slopty_grid::TermModes::ALT_SCREEN) {
-                Vec::new()
-            } else {
-                rule_rows(rows_view.iter().map(|row| row.line.map(|line| line.mark)))
-                    .into_iter()
-                    .map(|row| origin.y + line_height * f32::from(row))
-                    .collect()
-            };
             for (i, row) in rows_view.iter().enumerate() {
                 let screen_row = u16::try_from(i).unwrap_or(u16::MAX);
                 let y = origin.y + line_height * f32::from(screen_row);
@@ -1684,13 +1501,7 @@ impl Element for TerminalElement {
                         Rc::new(RowParts { segments, ..RowParts::default() }.sealed(words.finish()))
                     });
                     let parts = Rc::clone(filler);
-                    prepared_rows.push(PreparedRow {
-                        row: screen_row,
-                        y,
-                        parts,
-                        marks: Vec::new(),
-                        link: None,
-                    });
+                    prepared_rows.push(PreparedRow { y, parts, marks: Vec::new(), link: None });
                     continue;
                 };
                 let typing_at = shell_cursor.filter(|c| c.row == screen_row).map(|c| c.col);
@@ -1846,7 +1657,7 @@ impl Element for TerminalElement {
                 let index = row.index;
                 let mut marks = Vec::new();
                 if let Some(range) = selection.and_then(|s| s.columns(index, grid_cols)) {
-                    marks.push((range.start, range.end, hsla(palette.theme.selection)));
+                    marks.push((range.start, range.end, shell_look.selection));
                 }
                 // Search hits, sorted by line: the slice for this row by binary search.
                 let first = matches.partition_point(|m| m.line < index);
@@ -1855,11 +1666,11 @@ impl Element for TerminalElement {
                         break;
                     }
                     let color = if current == Some(first.saturating_add(k)) {
-                        palette.theme.search_current
+                        shell_look.search_current
                     } else {
-                        palette.theme.search_match
+                        shell_look.search_match
                     };
-                    marks.push((m.col, m.col.saturating_add(m.len).min(grid_cols), hsla(color)));
+                    marks.push((m.col, m.col.saturating_add(m.len).min(grid_cols), color));
                 }
                 // A link wrapped over rows is underlined on each, edge to edge in between.
                 let link = link
@@ -1870,43 +1681,7 @@ impl Element for TerminalElement {
                             if last == index { end.min(grid_cols) } else { grid_cols },
                         )
                     });
-                // A hovered block says how long it took in its own facts, drawn over this row.
-                if line.mark.starts_prompt()
-                    && hovered != Some(index)
-                    && let Some(elapsed) = view.took(index)
-                {
-                    let text = slopty_kit::kit::duration(elapsed);
-                    let width = u16::try_from(text.chars().count()).unwrap_or(u16::MAX);
-                    // The columns the command's text reaches, trailing blanks aside.
-                    let typed =
-                        line.cells.iter().rposition(|cell| !plain_space(cell)).map_or(0, |last| {
-                            u16::try_from(last).unwrap_or(u16::MAX).saturating_add(1)
-                        });
-                    // Flush with the right edge, a cell clear of the command's text.
-                    if let Some(col) = grid_cols.checked_sub(width)
-                        && typed < col
-                    {
-                        let style = &CellStyle::DEFAULT;
-                        let mut run = text_run(text.len(), style, look(false), &mut cache.contrast);
-                        run.color = hsla_alpha(palette.theme.fg, alpha::TINT);
-                        #[cfg(any(test, feature = "e2e"))]
-                        caption_texts.push(text.clone());
-                        let shaped = text_system.shape_line(
-                            SharedString::from(text),
-                            font_size,
-                            &[run],
-                            Some(cell_width),
-                        );
-                        captions.push((point(origin.x + cell_width * f32::from(col), y), shaped));
-                    }
-                }
-                prepared_rows.push(PreparedRow {
-                    row: screen_row,
-                    y,
-                    parts: Rc::clone(&parts),
-                    marks,
-                    link,
-                });
+                prepared_rows.push(PreparedRow { y, parts: Rc::clone(&parts), marks, link });
                 rows_after.0.insert(address, (Arc::clone(line), key, parts));
             }
 
@@ -1942,24 +1717,9 @@ impl Element for TerminalElement {
                         cursor.shape
                     };
                     let width = cell_width * f32::from(span);
-                    // An unfocused pane's hollow block is a place marker, not the caret: muted,
-                    // so a background terminal does not draw the eye.
-                    let color = if focused {
-                        hsla(palette.theme.cursor)
-                    } else {
-                        hsla(theme.surfaces.text_muted)
-                    };
-                    (Bounds::new(point(x, y), size(width, line_height)), shape, color)
-                });
-            // A block hides its cell's text: that text is drawn over it in the cursor-text
-            // colour, as ghostty does.
-            let cursor_text = cursor_prepared
-                .filter(|(_, shape, _)| *shape == CursorShape::Block)
-                .map(|_| CursorText {
-                    row: cursor_row,
-                    start: cursor_col,
-                    end: cursor_col.saturating_add(span),
-                    color: hsla(palette.theme.cursor_text),
+                    // zeron's cursor: translucent over the glyph, which keeps its own colour,
+                    // and unfocused the same colour's outline.
+                    (Bounds::new(point(x, y), size(width, line_height)), shape, shell_look.cursor)
                 });
 
             // The input method's composition, underlined at the cursor (what Terminal.app does).
@@ -1984,7 +1744,6 @@ impl Element for TerminalElement {
                 );
                 overlay.push((at, shaped));
             }
-            overlay.extend(captions);
 
             let grid_bounds = Bounds::new(
                 origin,
@@ -2010,19 +1769,9 @@ impl Element for TerminalElement {
                 font_size,
                 rows: prepared_rows,
                 cursor: cursor_prepared,
-                cursor_text,
                 background: hsla(palette.theme.bg),
                 link: hsla(palette.theme.fg),
-                scrollbar: scrollbar.and_then(|(color, history, offset)| {
-                    scrollbar_thumb(&metrics, history, offset).map(|thumb| (thumb, color))
-                }),
-                block_ticks,
-                rules,
-                rule: separator_color(theme),
-                rule_width: slopty_kit::kit::hair_painted(window.scale_factor()),
-                failed,
-                failed_heads,
-                failed_look,
+                bell,
                 overlay,
                 shown: predicted
                     .map(|guesses| guesses.pending.iter().map(|p| p.seq).collect())
@@ -2058,7 +1807,6 @@ impl Element for TerminalElement {
             let masks = cache.sprites.len().saturating_sub(sprite_masks);
             let probe = cx.global_mut::<Probe>();
             probe.rows_prepared = prepared.rows.len();
-            probe.captions = caption_texts;
             probe.shaped = probe.shaped.saturating_add(shaped);
             probe.rows_built = built;
             probe.sprite_masks = probe.sprite_masks.saturating_add(masks);
@@ -2068,9 +1816,6 @@ impl Element for TerminalElement {
         self.view.update(cx, |view, _cx| view.put_row_cache(rows_after));
         // The clock ticks only while a painted frame has something to blink.
         self.view.update(cx, |view, cx| view.blinking(prepared.blinking, cx));
-        if fading {
-            window.request_animation_frame();
-        }
         prepared
     }
 
@@ -2112,8 +1857,7 @@ impl Element for TerminalElement {
             }
         });
         // A drag is followed wherever the pointer goes (the div's own move listener stops at
-        // its edge): the selection keeps growing and scrolls past the top or bottom. So is
-        // the pointer's way to the scrollbar and away from it, off the tile too.
+        // its edge): the selection keeps growing and scrolls past the top or bottom.
         let view = self.view.clone();
         let grid_hitbox = prepared.hitbox.clone();
         window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
@@ -2124,9 +1868,8 @@ impl Element for TerminalElement {
                 view.update(cx, |view, cx| view.drag_move(event, cx));
             }
             let inside = bounds.contains(&event.position);
-            let near = inside && near_scrollbar(&m, event.position);
-            // Over the grid the hovered block follows the pointer. Where something covers the
-            // grid it holds, so the block's own facts and the sticky header over it keep it.
+            // Over the grid the hovered block follows the pointer. Where a float covers the
+            // grid it holds.
             let over = if inside {
                 grid_hitbox.is_hovered(window).then_some(Some(event.position))
             } else {
@@ -2136,12 +1879,11 @@ impl Element for TerminalElement {
             // whenever the strip around it is.
             let (news, block) = {
                 let v = view.read(cx);
-                (v.pointer_news(near), over.is_some_and(|at| v.pointer_over(at)))
+                (v.pointer_news(), over.is_some_and(|at| v.pointer_over(at)))
             };
             if news || block {
                 view.update(cx, |view, cx| {
                     view.pointer_moved();
-                    view.pointer_near_scrollbar(near, cx);
                     if block {
                         cx.notify();
                     }
@@ -2153,7 +1895,6 @@ impl Element for TerminalElement {
         window.on_mouse_event(move |_: &MouseExitEvent, phase, _window, cx| {
             if phase == DispatchPhase::Bubble {
                 view.update(cx, |view, cx| {
-                    view.pointer_near_scrollbar(false, cx);
                     if view.pointer_over(None) {
                         cx.notify();
                     }
@@ -2161,24 +1902,6 @@ impl Element for TerminalElement {
             }
         });
         window.paint_quad(fill(bounds, prepared.background));
-        let look = prepared.failed_look;
-        // A block spans the tile, as Warp's do: its head's wash and its hairline run edge to
-        // edge, so they end together whatever width the grid's last column leaves.
-        for &(top, height) in &prepared.failed_heads {
-            let band = Bounds::new(point(bounds.origin.x, top), size(bounds.size.width, height));
-            window.paint_quad(fill(band, look.wash));
-        }
-        for &(top, height) in &prepared.failed {
-            let bar = Bounds::new(point(bounds.origin.x, top), size(look.bar_width, height));
-            window.paint_quad(fill(bar, look.bar));
-        }
-        for &top in &prepared.rules {
-            let rule = Bounds::new(
-                point(bounds.origin.x, top),
-                size(bounds.size.width, prepared.rule_width),
-            );
-            window.paint_quad(fill(rule, prepared.rule));
-        }
         // Each pass over the rows paints a row as a stretch under a key, which GPUI draws
         // again from the last frame while the key holds: a row that did not change, or only
         // moved, is copied rather than painted. What else a frame paints (the cursor, the
@@ -2253,27 +1976,16 @@ impl Element for TerminalElement {
             thickness: f32::from(grid.underline.thickness),
             scale: m.pixel_scale,
         };
-        let cursor_text = prepared.cursor_text;
-        // The text under a block cursor takes its colour on the cursor's row alone.
-        let under_cursor = |row: &PreparedRow| {
-            let mut h = FxHasher::default();
-            if let Some(c) = cursor_text.filter(|c| c.row == row.row) {
-                (c.start, c.end).hash(&mut h);
-                hash_color(c.color, &mut h);
-            }
-            h.finish()
-        };
         // One layer for them, as for the glyphs below.
         if prepared.rows.iter().any(|row| !row.parts.sprites.is_empty()) {
             window.paint_layer(bounds, |window| {
                 for row in prepared.rows.iter().filter(|row| !row.parts.sprites.is_empty()) {
-                    let key = key_of(Pass::Sprites, row, under_cursor(row));
+                    let key = key_of(Pass::Sprites, row, 0);
                     stretch(window, key, at(row), |window| {
                         for sprite in &row.parts.sprites {
                             let x = m.origin.x + m.cell_width * f32::from(sprite.col);
                             let origin = point(x, row.y);
-                            let color =
-                                CursorText::over(cursor_text, row.row, sprite.col, sprite.fg);
+                            let color = sprite.fg;
                             let Some(tile) = &sprite.tile else {
                                 paint_sprite(window, origin, cell, sprite.ch, color);
                                 continue;
@@ -2297,9 +2009,9 @@ impl Element for TerminalElement {
         let font_size = prepared.font_size;
         window.paint_layer(bounds, |window| {
             for row in prepared.rows.iter().filter(|row| !row.parts.segments.is_empty()) {
-                let key = key_of(Pass::Glyphs, row, under_cursor(row));
+                let key = key_of(Pass::Glyphs, row, 0);
                 stretch(window, key, at(row), |window| {
-                    paint_words(window, &m, row, grid.baseline, cursor_text, font_size);
+                    paint_words(window, &m, row, grid.baseline, font_size);
                 });
             }
         });
@@ -2327,7 +2039,7 @@ impl Element for TerminalElement {
             }
         }
         for (at, line) in &prepared.overlay {
-            // Cover whatever the worker currently shows there, then draw the preview or caption.
+            // Cover whatever the worker currently shows there, then draw the preview.
             window.paint_quad(fill(
                 Bounds::new(*at, size(line.width.max(m.cell_width), m.line_height)),
                 prepared.background,
@@ -2336,23 +2048,9 @@ impl Element for TerminalElement {
                 tracing::debug!(error = %e, "paint overlay text");
             }
         }
-        for &(tick, color) in &prepared.block_ticks {
-            window.paint_quad(fill(tick, color));
-        }
-        if let Some((thumb, color)) = prepared.scrollbar {
-            let radius = thumb.size.width / 2.0;
-            window.paint_quad(quad(
-                thumb,
-                radius,
-                color,
-                Edges::default(),
-                Hsla::transparent_black(),
-                BorderStyle::default(),
-            ));
-        }
-        if self.view.read(cx).bell_flashing() {
-            // The visual bell: the text colour laid thinly over the whole grid.
-            window.paint_quad(fill(bounds, Hsla { a: alpha::FAINT, ..prepared.link }));
+        if let Some(wash) = prepared.bell {
+            // The visual bell: the state wash laid thinly over the whole grid.
+            window.paint_quad(fill(bounds, wash));
         }
         // Keystroke → paint is timed when this frame reaches the glass, not now.
         if self.view.read(cx).latency_waiting() {
@@ -2413,13 +2111,6 @@ pub(super) fn placement_bounds(
     );
     Some((Bounds::new(point(left, top), shown), whole))
 }
-
-/// The scrollbar thumb's least height, in rows. It is Zed's [`slopty_theme::stroke::SCROLLBAR`]
-/// across, whatever the cell.
-const THUMB_MIN_ROWS: f32 = 1.5;
-/// How far left of the grid's right edge the pointer brings the scrollbar up, in cells: about
-/// the width of a macOS overlay scroller's track.
-const SCROLLBAR_REACH_CELLS: f32 = 2.0;
 
 /// Paint one cell-drawn glyph's geometry at `origin` in `fg` (see [`sprite`]).
 fn paint_sprite(
@@ -2487,14 +2178,12 @@ fn paint_sprite(
     }
 }
 
-/// Paint one row's words on the baseline `baseline` below its top, at `font_size`; those under
-/// a block cursor in its text colour.
+/// Paint one row's words on the baseline `baseline` below its top, at `font_size`.
 fn paint_words(
     window: &mut Window,
     m: &CellMetrics,
     row: &PreparedRow,
     baseline: Pixels,
-    cursor_text: Option<CursorText>,
     font_size: Pixels,
 ) {
     let baseline = row.y + baseline;
@@ -2502,8 +2191,7 @@ fn paint_words(
         let origin = point(m.origin.x + m.cell_width * f32::from(*col), baseline);
         for glyph in &word.glyphs {
             let at = origin + glyph.position;
-            let cell = col.saturating_add(glyph.col);
-            let color = CursorText::over(cursor_text, row.row, cell, glyph.color);
+            let color = glyph.color;
             let painted = if glyph.emoji {
                 window.paint_emoji(at, glyph.font, glyph.id, font_size)
             } else {
@@ -2551,118 +2239,6 @@ fn paint_decorations(window: &mut Window, m: &CellMetrics, row: &PreparedRow, la
     }
 }
 
-/// The scrollbar's thumb over the grid's right edge: none without history. The track is the
-/// grid's height; the thumb's share of it is the screen's share of the whole (screen plus
-/// history), at least `THUMB_MIN_ROWS` tall; its top sits where the viewport is in the whole.
-#[must_use]
-pub(super) fn scrollbar_thumb(
-    m: &CellMetrics,
-    history: u64,
-    offset: u64,
-) -> Option<Bounds<Pixels>> {
-    if history == 0 || m.rows == 0 {
-        return None;
-    }
-    #[expect(clippy::cast_precision_loss, reason = "line counts, far below 2^52")]
-    let (rows, history_f) = (f64::from(m.rows), history as f64);
-    let line = f64::from(f32::from(m.line_height));
-    let track = line * rows;
-    let height =
-        (track * rows / (rows + history_f)).max(line * f64::from(THUMB_MIN_ROWS)).min(track);
-    #[expect(clippy::cast_precision_loss, reason = "line counts, far below 2^52")]
-    let above = (history.saturating_sub(offset)) as f64;
-    let top = (track - height) * above / history_f;
-    let width = px(slopty_theme::stroke::SCROLLBAR);
-    let x = m.origin.x + m.cell_width * f32::from(m.cols) - width;
-    #[expect(clippy::cast_possible_truncation, reason = "points, well inside f32")]
-    let (y, h) = (px(top as f32), px(height as f32));
-    Some(Bounds::new(point(x, m.origin.y + y), size(width, h)))
-}
-
-/// A command block's mark on the scrollbar's track.
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub(super) struct Tick {
-    /// Where it is drawn: the thumb's column, at its prompt's place in the whole.
-    pub bounds: Bounds<Pixels>,
-    /// The prompt a click on it goes to.
-    pub prompt: LineIndex,
-    /// It, or a block sharing its mark, failed.
-    pub failed: bool,
-}
-
-/// The marks of the command blocks `marks` lists (prompt line and status) on the scrollbar's
-/// track, `height` tall, each at its prompt's place in the whole (the `history` lines from
-/// `oldest`, then the screen) as the thumb maps its top. Blocks closer than a mark share the
-/// first one, which shows a failure among them, and goes to the first failed.
-#[must_use]
-pub(super) fn block_ticks(
-    m: &CellMetrics,
-    marks: &BTreeMap<LineIndex, Option<u8>>,
-    oldest: LineIndex,
-    history: u64,
-    height: Pixels,
-) -> Vec<Tick> {
-    if history == 0 || m.rows == 0 {
-        return Vec::new();
-    }
-    #[expect(clippy::cast_precision_loss, reason = "line counts, far below 2^52")]
-    let whole = history.saturating_add(u64::from(m.rows)) as f64;
-    let track = f64::from(f32::from(m.line_height)) * f64::from(m.rows);
-    let width = px(slopty_theme::stroke::SCROLLBAR);
-    let x = m.origin.x + m.cell_width * f32::from(m.cols) - width;
-    let lowest = m.origin.y + m.line_height * f32::from(m.rows) - height;
-    let mut out: Vec<Tick> = Vec::new();
-    for (&prompt, &exit) in marks.range(oldest..) {
-        #[expect(clippy::cast_precision_loss, reason = "line counts, far below 2^52")]
-        let along = prompt.0.saturating_sub(oldest.0) as f64 / whole;
-        #[expect(clippy::cast_possible_truncation, reason = "points, well inside f32")]
-        let y = (m.origin.y + px((track * along) as f32)).min(lowest);
-        let failed = exit.is_some_and(|code| code != 0);
-        if let Some(last) = out.last_mut()
-            && y < last.bounds.origin.y + height
-        {
-            if failed && !last.failed {
-                last.failed = true;
-                last.prompt = prompt;
-            }
-            continue;
-        }
-        out.push(Tick { bounds: Bounds::new(point(x, y), size(width, height)), prompt, failed });
-    }
-    out
-}
-
-/// Whether `at` is where the pointer brings the scrollbar up: level with the grid, within
-/// `SCROLLBAR_REACH_CELLS` of its right edge or anywhere right of it (the tile's inset).
-#[must_use]
-pub(super) fn near_scrollbar(m: &CellMetrics, at: Point<Pixels>) -> bool {
-    let right = m.origin.x + m.cell_width * f32::from(m.cols);
-    let bottom = m.origin.y + m.line_height * f32::from(m.rows);
-    at.x >= right - m.cell_width * SCROLLBAR_REACH_CELLS && at.y >= m.origin.y && at.y < bottom
-}
-
-/// The viewport offset (lines from the bottom) that puts the thumb's top at `y`: the inverse
-/// of [`scrollbar_thumb`], clamped to the track.
-#[must_use]
-pub(super) fn offset_for_thumb(m: &CellMetrics, history: u64, y: Pixels) -> u64 {
-    let Some(thumb) = scrollbar_thumb(m, history, 0) else { return 0 };
-    let travel = f64::from(f32::from(m.line_height))
-        .mul_add(f64::from(m.rows), -f64::from(f32::from(thumb.size.height)));
-    if travel <= 0.0 {
-        return 0;
-    }
-    let along = f64::from(f32::from(y - m.origin.y)).clamp(0.0, travel) / travel;
-    #[expect(clippy::cast_precision_loss, reason = "line counts, far below 2^52")]
-    let above = (along * history as f64).round();
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "0 ≤ above ≤ history"
-    )]
-    let above = above as u64;
-    history.saturating_sub(above)
-}
-
 /// How many rows past the grid's top (positive) or bottom (negative) a pointer at `y` is;
 /// zero inside the grid.
 #[must_use]
@@ -2706,17 +2282,12 @@ pub(super) fn rows_built(cx: &App) -> usize {
     cx.try_global::<Probe>().map_or(0, |probe| probe.rows_built)
 }
 
-/// The "took" captions the last prepaint drew, top row first (tests).
-#[cfg(test)]
-pub(crate) fn captions_drawn(cx: &App) -> Vec<String> {
-    cx.try_global::<Probe>().map_or_else(Vec::new, |probe| probe.captions.clone())
-}
-
 #[cfg(test)]
 mod tests {
     use std::time::Instant;
 
     use slopty_grid::Line;
+    use slopty_theme::Theme;
 
     use super::*;
 
@@ -2782,81 +2353,16 @@ mod tests {
         assert_eq!(placement_bounds(&m, &none, (16, 32), LineIndex(0)), None);
     }
 
-    /// The thumb is the screen's share of the whole, never thinner than a row and a half,
-    /// riding the track from the oldest line (top) to the newest (bottom); the drag maps back
-    /// to the offset that put it there, clamped to the track; a pointer past the grid's edge
-    /// counts rows past it.
+    /// A pointer past the grid's edge counts the rows past it: what a drag selecting past
+    /// the top or the bottom scrolls by.
     #[test]
-    fn the_scrollbar_thumb_tracks_the_viewport_and_maps_back() {
+    fn a_pointer_past_the_edge_counts_its_rows() {
         let m = metrics(1.0);
-        assert_eq!(scrollbar_thumb(&m, 0, 0), None, "no history, no thumb");
-        let track = f32::from(m.line_height) * 24.0;
-        // 24 rows over 24 + 24: half the track, at its end while following output.
-        let thumb = scrollbar_thumb(&m, 24, 0).expect("a thumb");
-        assert!((f32::from(thumb.size.height) - track / 2.0).abs() < 0.01);
-        assert!((f32::from(thumb.origin.y - m.origin.y) - track / 2.0).abs() < 0.01);
-        assert!((f32::from(thumb.origin.x + thumb.size.width - m.origin.x) - 640.0).abs() < 0.01);
-        assert_eq!(thumb.size.width, px(slopty_theme::stroke::SCROLLBAR), "Zed's 6 across");
-        // Scrolled all the way up: at the top.
-        let top = scrollbar_thumb(&m, 24, 24).expect("a thumb");
-        assert_eq!(top.origin.y, m.origin.y);
-        // A huge history: the least height, and the round trip holds within a line.
-        let tiny = scrollbar_thumb(&m, 100_000, 40_000).expect("a thumb");
-        assert!(
-            f32::mul_add(f32::from(m.line_height), -THUMB_MIN_ROWS, f32::from(tiny.size.height))
-                .abs()
-                < 0.01
-        );
-        let back = offset_for_thumb(&m, 100_000, tiny.origin.y);
-        assert!(back.abs_diff(40_000) <= 100_000 / 400, "{back}");
-        assert_eq!(offset_for_thumb(&m, 24, m.origin.y - px(500.0)), 24, "above the track: oldest");
-        assert_eq!(offset_for_thumb(&m, 24, m.origin.y + px(9_000.0)), 0, "below: newest");
-        assert_eq!(offset_for_thumb(&m, 0, m.origin.y), 0, "no history: nowhere to go");
-
         assert_eq!(rows_past_edge(&m, m.origin.y + px(5.0)), 0);
         assert_eq!(rows_past_edge(&m, m.origin.y - px(1.0)), 1);
         assert_eq!(rows_past_edge(&m, m.origin.y - px(17.5)), 2);
         assert_eq!(rows_past_edge(&m, m.origin.y + px(17.0 * 24.0)), -1, "the first row below");
         assert_eq!(rows_past_edge(&m, m.origin.y + px(17.0 * 25.5)), -2);
-    }
-
-    /// A block's mark sits where the thumb's top would be with its prompt at the view's top;
-    /// marks closer than one share it, showing a failure among them; none without history.
-    #[test]
-    fn block_marks_sit_on_the_track_where_their_prompts_are() {
-        let m = metrics(1.0);
-        let track = f32::from(m.line_height) * 24.0;
-        let h = px(2.0);
-        let marks: BTreeMap<LineIndex, Option<u8>> =
-            [(100, Some(0)), (110, None), (124, Some(1)), (130, Some(0)), (147, Some(2))]
-                .into_iter()
-                .map(|(line, exit)| (LineIndex(line), exit))
-                .collect();
-        // 24 lines of history from line 100, then the screen: 48 in the whole.
-        let ticks = block_ticks(&m, &marks, LineIndex(100), 24, h);
-        let at: Vec<(u64, bool, f32)> = ticks
-            .iter()
-            .map(|t| (t.prompt.0, t.failed, f32::from(t.bounds.origin.y - m.origin.y)))
-            .collect();
-        let y = |line: f32| track * (line - 100.0) / 48.0;
-        assert_eq!(at.len(), 5, "{at:?}");
-        assert_eq!(at[0], (100, false, 0.0));
-        assert!((at[1].2 - y(110.0)).abs() < 0.01 && !at[1].1, "running: {at:?}");
-        assert!((at[2].2 - y(124.0)).abs() < 0.01 && at[2].1, "{at:?}");
-        assert!((at[4].2 - y(147.0)).abs() < 0.01, "{at:?}");
-        let thumb = scrollbar_thumb(&m, 24, 0).expect("a thumb");
-        assert!((f32::from(thumb.origin.y - m.origin.y) - at[2].2).abs() < 0.01);
-        assert_eq!(ticks[0].bounds.size, size(thumb.size.width, h));
-        assert_eq!(ticks[0].bounds.origin.x, thumb.origin.x);
-
-        // A long history packs them: one mark, which a failure shows through.
-        let ticks = block_ticks(&m, &marks, LineIndex(100), 100_000, h);
-        assert_eq!(ticks.len(), 1);
-        assert_eq!((ticks[0].prompt, ticks[0].failed), (LineIndex(124), true));
-
-        assert!(block_ticks(&m, &marks, LineIndex(100), 0, h).is_empty(), "no history");
-        let later = block_ticks(&m, &marks, LineIndex(125), 24, h);
-        assert_eq!(later.first().map(|t| t.prompt), Some(LineIndex(130)), "left the history");
     }
 
     /// A pixel mouse report is in the units the worker measures in: device pixels of the *fitted*
@@ -3151,7 +2657,6 @@ mod tests {
         let glyph = Glyph {
             font: FontId(0),
             id: GlyphId(0),
-            col: 0,
             position: point(px(0.0), px(0.0)),
             emoji: false,
             color: Hsla::default(),
@@ -3314,104 +2819,6 @@ mod tests {
         assert_eq!(faint_prompt(&row, 0), None, "no prompt before the command");
         let blank = Line::from_text("", 8, CellStyle::DEFAULT).cells;
         assert_eq!(faint_prompt(&blank, u16::MAX), None, "blanks cost no copy");
-    }
-
-    /// Under a block cursor a glyph takes the cursor-text colour; beside it, or hidden, not.
-    #[test]
-    fn text_under_a_block_cursor_takes_the_cursor_text_colour() {
-        let (red, blue) = (gpui::red(), gpui::blue());
-        let under = Some(CursorText { row: 2, start: 4, end: 6, color: blue });
-        assert_eq!(CursorText::over(under, 2, 4, red), blue);
-        assert_eq!(CursorText::over(under, 2, 5, red), blue, "both halves of a wide cell");
-        assert_eq!(CursorText::over(under, 2, 6, red), red, "the next cell");
-        assert_eq!(CursorText::over(under, 1, 4, red), red, "another row");
-        assert_eq!(CursorText::over(None, 2, 4, red), red, "no block cursor");
-        let hidden = Hsla { a: 0.0, ..red };
-        assert_eq!(CursorText::over(under, 2, 4, hidden), hidden, "invisible text stays so");
-    }
-
-    /// The pointer can leave the grid's right edge without a move over the grid: out of the
-    /// window, to another app (⌘-tab), or by the tile moving away under a still pointer. Each
-    /// lets the scrollbar go (it lingers and fades as after any leave) instead of holding it up.
-    #[gpui::test]
-    fn the_scrollbar_lets_go_when_the_pointer_leaves_without_a_move(cx: &mut gpui::TestAppContext) {
-        use slopty_grid::{LineIndex, RowUpdate, Style, TermModes};
-        use slopty_proto::terminal::{Frame, TermEvent};
-
-        use crate::scrollbar::{FADE, LINGER};
-
-        cx.update(gpui_kit::init);
-        let (tx, _rx) = tokio::sync::mpsc::channel(64);
-        let (view, cx) = cx.add_window_view(|window, cx| {
-            let grid = TermSize { cols: 10, rows: 3, ..TermSize::default() };
-            let view =
-                TerminalView::new(slopty_core::SessionId::new(), grid, tx, Theme::default(), cx);
-            window.focus(&view.focus_handle(cx), cx);
-            view
-        });
-        cx.simulate_resize(size(px(400.0), px(300.0)));
-        cx.update(|window, _| window.activate_window());
-        cx.run_until_parked();
-        let history = TermEvent::Frame(Frame {
-            seq: 1,
-            full: true,
-            epoch: 0,
-            cols: 10,
-            rows: 3,
-            cursor: slopty_grid::Cursor::default(),
-            modes: TermModes::empty(),
-            oldest_line: LineIndex(0),
-            first_visible_line: LineIndex(30),
-            total_lines: 33,
-            input_ack: 0,
-            above: None,
-            blocks: None,
-            images: Vec::new(),
-            updates: ["one", "two", "three"]
-                .iter()
-                .zip(0_u16..)
-                .map(|(text, row)| RowUpdate {
-                    row,
-                    line: Line::from_text(text, 10, Style::DEFAULT).into(),
-                })
-                .collect(),
-        });
-        view.update(cx, |view, cx| view.apply(history, cx));
-        cx.run_until_parked();
-        let shown = |cx: &mut gpui::VisualTestContext| {
-            view.read_with(cx, |v, cx| v.scrollbar_opacity(cx.background_executor().now(), true))
-        };
-        let gone = |cx: &mut gpui::VisualTestContext| {
-            cx.executor().advance_clock(LINGER.saturating_add(FADE));
-            cx.run_until_parked();
-            shown(cx) <= 0.0
-        };
-        let m = view.read_with(cx, |v, _| v.metrics().expect("laid out"));
-        let edge = point(
-            m.origin.x + m.cell_width * (f32::from(m.cols) - 0.5),
-            m.origin.y + m.line_height * 1.5,
-        );
-        let mods = gpui::Modifiers::default();
-        let to_edge = |cx: &mut gpui::VisualTestContext| {
-            cx.simulate_mouse_move(edge, None, mods);
-            cx.run_until_parked();
-            assert!(shown(cx) >= 1.0, "the pointer at the right edge brings it up");
-        };
-
-        to_edge(cx);
-        cx.simulate_event(MouseExitEvent { position: edge, pressed_button: None, modifiers: mods });
-        assert!(gone(cx), "out of the window");
-
-        to_edge(cx);
-        cx.deactivate_window();
-        assert!(gone(cx), "another app came to the front");
-        cx.update(|window, _| window.activate_window());
-        cx.run_until_parked();
-
-        to_edge(cx);
-        cx.simulate_resize(size(px(600.0), px(300.0)));
-        cx.run_until_parked();
-        assert!(gone(cx), "the edge moved away from a still pointer");
     }
 
     /// At a fractional cell width, where cells round to unequal widths on the device, every

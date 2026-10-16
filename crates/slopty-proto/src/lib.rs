@@ -18,8 +18,8 @@
 //!   audio packet, or a cursor update. A keystroke's input request and the small frame that answers
 //!   it also go once as a datagram each, taken only in order, so a lost packet costs a datagram's
 //!   trip rather than QUIC's probe timeout.
-//! * **The worker's control socket** — local only, between the worker and the CLI, the hook relay
-//!   and the app on the same Mac: one line of JSON each way ([`ctl`]).
+//! * **The worker's control socket** — local only, between the worker and the CLI and the app on
+//!   the same Mac: one line of JSON each way ([`ctl`]).
 //! * **The drag helper's pipes** — local only, between the worker and the drag helper it starts
 //!   (`slopty-worker dnd`), framed by [`codec`] ([`dnd`]).
 //!
@@ -202,6 +202,14 @@ pub enum ClientMsg {
         /// How many the answer holds at most.
         limit: u16,
     },
+    /// The folders whose repositories this client shows the status and diffs of, the whole set
+    /// each time it changes: the worker follows each repository's working tree and its git
+    /// directory on the file system's events and says `WorkerMsg::RepoMoved` when something git
+    /// reports on changed, so the client asks again only then. Empty when nothing is shown.
+    WatchRepos {
+        /// Folders in repositories: absolute, or `~/…`.
+        paths: Vec<String>,
+    },
 }
 
 impl ClientMsg {
@@ -232,6 +240,7 @@ impl ClientMsg {
             Self::Git { .. } => "Git",
             Self::CloneRepo { .. } => "CloneRepo",
             Self::FindFolders { .. } => "FindFolders",
+            Self::WatchRepos { .. } => "WatchRepos",
         }
     }
 }
@@ -341,9 +350,6 @@ pub enum WorkerMsg {
     /// A program in a shell asks this client to open a web page or edit a file, or gives an
     /// edit up; answered with `ClientMsg::Handoff`.
     Handoff(handoff::HandoffEvent),
-    /// The pull request and worktree an agent's status line names, the whole of it each time
-    /// it changes; both `None` once the agent has neither or is gone.
-    AgentBranch(agent::AgentBranch),
     /// The worker's thread table, whole or the rows changed since the client's cursor
     /// (`ClientMsg::Thread`'s `Table`), and each change after it.
     Threads(thread::wire::TableFrame),
@@ -409,6 +415,14 @@ pub enum WorkerMsg {
         /// An index of the folders is still being made: asked again, more may be found.
         indexing: bool,
     },
+    /// Something git reports on changed in the repository of a folder `ClientMsg::WatchRepos`
+    /// named: a file of its working tree written, made or removed (what it ignores left out),
+    /// or its `HEAD`, index or branches moved. Also said once when the worker starts following
+    /// the repository, since what changed before then is not known. A burst of changes is one.
+    RepoMoved {
+        /// The folder, as `WatchRepos` named it.
+        repo: String,
+    },
 }
 
 impl WorkerMsg {
@@ -437,7 +451,6 @@ impl WorkerMsg {
             Self::Load(_) => "Load",
             Self::Search(_) => "Search",
             Self::Handoff(_) => "Handoff",
-            Self::AgentBranch(_) => "AgentBranch",
             Self::Threads(_) => "Threads",
             Self::IntentDone(_) => "IntentDone",
             Self::SettingUp { .. } => "SettingUp",
@@ -448,6 +461,7 @@ impl WorkerMsg {
             Self::RepoCloning { .. } => "RepoCloning",
             Self::RepoCloned { .. } => "RepoCloned",
             Self::FoundFolders { .. } => "FoundFolders",
+            Self::RepoMoved { .. } => "RepoMoved",
         }
     }
 }
