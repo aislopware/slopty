@@ -77,13 +77,13 @@ pub enum WorkspaceEvent {
     /// How many agents are waiting on the human right now, across every worker (the Dock
     /// badge).
     NeedsYou(usize),
-    /// A note's "Allow" or "Deny" found no prompt to answer while the app was away: the app
-    /// says `why` in a note of its own about `route`'s session.
+    /// A note's "Allow", "Deny" or pick found no prompt to answer, or was not taken, while the
+    /// app was away: the app says `why` in a note of its own about `route`'s session.
     Unanswered {
         /// The note's agent.
         route: attention::Route,
-        /// What to say.
-        why: &'static str,
+        /// What to say: the app's words, or those of whoever turned the answer down.
+        why: String,
     },
     /// The person stopped or started sharing the clipboard with a machine: the app keeps it in
     /// the settings by the machine's name.

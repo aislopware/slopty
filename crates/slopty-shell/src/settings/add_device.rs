@@ -499,16 +499,17 @@ impl AddDeviceDialog {
         } else {
             None
         };
-        let mut list = div()
-            .mt(px(12.0))
-            .flex()
-            .flex_col()
-            .gap(px(2.0))
-            .child(widgets::section_label(theme, "On your tailnet"));
+        // slopty: its label and words start on the paragraph's edge above them, one left edge
+        // down the dialog; the rows keep their own inset, as a picker's do.
+        let mut list = div().mt(px(12.0)).flex().flex_col().gap(px(2.0)).child(
+            widgets::section_label(theme, "On your tailnet")
+                .px(px(0.0))
+                .debug_selector(|| "add-device-found-label".to_owned()),
+        );
         if let Some(words) = words {
             list = list.child(
                 div()
-                    .px(px(4.0))
+                    .debug_selector(|| "add-device-found-words".to_owned())
                     .text_size(crate::typography::ui_rems(12.5))
                     .text_color(theme.text_muted)
                     .child(words),
@@ -870,7 +871,12 @@ impl Render for AddDeviceDialog {
             }))
             .child(popover::dialog_title(&theme, "Add device"))
             .child(tabs)
-            .child(div().mt(px(12.0)).child(popover::dialog_body(&theme, self.choice.blurb())))
+            .child(
+                div()
+                    .mt(px(12.0))
+                    .debug_selector(|| "add-device-blurb".to_owned())
+                    .child(popover::dialog_body(&theme, self.choice.blurb())),
+            )
             .children(field)
             .children(serve_toggle)
             .children(found)
@@ -979,6 +985,31 @@ mod tests {
         cx.run_until_parked();
         let typed = dialog.read_with(cx, |dialog, cx| dialog.address.read(cx).value().to_string());
         assert_eq!(typed, "100.64.0.1");
+    }
+
+    /// The server step's paragraph, its "On your tailnet" label and the words under it share
+    /// one left edge.
+    #[gpui::test]
+    fn the_server_step_keeps_one_left_edge(cx: &mut gpui::TestAppContext) {
+        let (dialog, cx) = dialog(cx);
+        dialog.update(cx, |dialog, cx| {
+            dialog.found = Some(Found {
+                looking: false,
+                running: true,
+                servers: Vec::new(),
+                workers: Vec::new(),
+            });
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let mut left = |name: &'static str| {
+            cx.debug_bounds(name).map(|b| f32::from(b.origin.x)).unwrap_or_else(|| panic!("{name}"))
+        };
+        let blurb = left("add-device-blurb");
+        let label = left("add-device-found-label");
+        assert!((label - blurb).abs() < 0.5, "the label on the paragraph's edge: {label} {blurb}");
+        let words = left("add-device-found-words");
+        assert!((words - blurb).abs() < 0.5, "the words on the paragraph's edge: {words} {blurb}");
     }
 
     /// A run that failed shows the strip with its title, its hint and its output.

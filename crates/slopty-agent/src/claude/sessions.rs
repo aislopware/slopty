@@ -133,14 +133,16 @@ pub fn expand(home: &Path, cwd: &Path, session: &str, content: &ContentRef) -> E
 /// middle being read.
 pub const GLANCE_BYTES: u64 = 64 * 1024;
 
-/// Claude Code's past sessions for an agent run in `cwd`, the last written first, at most
+/// Claude Code's past sessions for an agent run in `cwd`, the last active first, at most
 /// `limit`.
 ///
-/// Each comes from its transcript's name and modification time, and what the two ends of the
-/// transcript say of it ([`GLANCE_BYTES`]): its title (the one the person gave it, else Claude
-/// Code's own, else its summary, else its first prompt), its last prompt, and the branch it was
-/// on (the fact [`BRANCH_FACT`](super::history::BRANCH_FACT)). A transcript that cannot be read
-/// is listed by its name alone. A folder Claude Code never ran in has none.
+/// Each comes from its transcript's name and what the two ends of the transcript say of it
+/// ([`GLANCE_BYTES`]): its title (the one the person gave it, else Claude Code's own, else its
+/// summary, else its first prompt), its last prompt, the branch it was on (the fact
+/// [`BRANCH_FACT`](super::history::BRANCH_FACT)), and when it was last active, the time of its
+/// last record ([`last_active`]). The `limit` most recently written transcripts are taken; one
+/// that cannot be read is listed by its name and its file's time alone. A folder Claude Code
+/// never ran in has none.
 ///
 /// # Errors
 ///
@@ -164,7 +166,7 @@ pub fn sessions(home: &Path, cwd: &Path, limit: usize) -> std::io::Result<Vec<Pa
     found.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
     found.truncate(limit);
     let folder = cwd.to_string_lossy();
-    Ok(found
+    let mut listed: Vec<PastSession> = found
         .into_iter()
         .map(|(modified, id)| {
             let glance = glance(&dir.join(format!("{id}.jsonl"))).unwrap_or_default();
@@ -177,14 +179,51 @@ pub fn sessions(home: &Path, cwd: &Path, limit: usize) -> std::io::Result<Vec<Pa
                 cwd: Some(folder.clone().into_owned()),
                 title: glance.title(),
                 prompts: glance.last_prompt().into_iter().collect(),
-                updated_ms: modified.map(WallMs::of),
+                // When its last record was written, as Claude Code stamped it: the file's own
+                // time moves when the file is copied or touched.
+                updated_ms: glance.at.or_else(|| modified.map(WallMs::of)),
                 thread: None,
                 resume: vec![super::RESUME_FLAG.to_owned(), id.clone()],
                 facts,
                 native: id,
             }
         })
-        .collect())
+        .collect();
+    listed.sort_by(|a, b| b.updated_ms.cmp(&a.updated_ms).then_with(|| a.native.cmp(&b.native)));
+    Ok(listed)
+}
+
+/// When the session whose transcript is at `path` was last active.
+///
+/// It is the time Claude Code wrote on its last record that carries one, read from the
+/// transcript's tail ([`GLANCE_BYTES`]); `None` when no record in the tail carries a time, or
+/// the file cannot be read.
+///
+/// Every surface that says when a past session was active says this time: the folder's
+/// listing ([`sessions`]), a search over the person's prompts, and the thread once it is open.
+#[must_use]
+pub fn last_active(path: &Path) -> Option<WallMs> {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let from = len.saturating_sub(GLANCE_BYTES);
+    file.seek(SeekFrom::Start(from)).ok()?;
+    let mut tail = Vec::new();
+    file.take(GLANCE_BYTES).read_to_end(&mut tail).ok()?;
+    let mut lines = tail.split(|b| *b == b'\n');
+    if from > 0 {
+        // The window's first line is cut.
+        lines.next();
+    }
+    lines
+        .rev()
+        .filter_map(|line| serde_json::from_slice::<serde_json::Value>(line).ok())
+        .find_map(|record| stamped(&record))
+}
+
+/// The time Claude Code wrote on `record`, when it carries one (`timestamp`).
+fn stamped(record: &serde_json::Value) -> Option<WallMs> {
+    record.get("timestamp")?.as_str().and_then(crate::conversation::parse_ms)
 }
 
 /// What the two ends of a transcript say of its session.
@@ -204,6 +243,8 @@ struct Glance {
     last: Option<(String, Option<WallMs>)>,
     /// The branch the last record that names one was written on (`gitBranch`).
     branch: Option<String>,
+    /// When the last record that carries a time was written (`timestamp`).
+    at: Option<WallMs>,
 }
 
 impl Glance {
@@ -254,6 +295,9 @@ impl Glance {
         }
         if let Some(branch) = text("gitBranch").filter(|b| !b.is_empty()) {
             self.branch = Some(branch);
+        }
+        if let Some(at) = stamped(record) {
+            self.at = Some(at);
         }
     }
 }
@@ -552,5 +596,49 @@ mod tests {
         assert_eq!(live[1].session, "9d2e7a10-5c4b");
         assert_eq!(live[1].started.as_deref(), Some("Fri Oct 16 16:35:24 2026"));
         assert_eq!(live[1].cwd.as_deref(), Some("/w"));
+    }
+
+    /// A past session's time is its last record's, as Claude Code stamped it, never its file's:
+    /// a transcript copied or touched today still reads as the day it was last active, and the
+    /// listing puts the last active first. A record with no time (a title) is passed over; a
+    /// transcript with no time at all falls back to its file's.
+    #[test]
+    fn a_past_sessions_time_is_its_last_records() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let cwd = tempfile::tempdir().expect("cwd");
+        let dir = project_dir(home.path(), cwd.path());
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let at = |id: &str, text: &str, stamp: &str| {
+            serde_json::json!({
+                "type": "user", "sessionId": id, "timestamp": stamp,
+                "message": { "role": "user", "content": text },
+            })
+            .to_string()
+        };
+        let title =
+            serde_json::json!({ "type": "ai-title", "aiTitle": "Parser", "sessionId": "old" });
+        let old = [
+            at("old", "Explain the parser", "2026-10-14T09:00:00.000Z"),
+            at("old", "Now add tests", "2026-10-15T10:01:00.000Z"),
+            title.to_string(),
+        ];
+        std::fs::write(dir.join("old.jsonl"), format!("{}\n", old.join("\n"))).expect("old");
+        let newer = at("newer", "Fix the build", "2026-10-16T08:00:00.000Z");
+        std::fs::write(dir.join("newer.jsonl"), format!("{newer}\n")).expect("newer");
+        // Written last, so its file is the newest; its records say otherwise.
+        std::fs::write(dir.join("old.jsonl"), format!("{}\n", old.join("\n"))).expect("touched");
+        std::fs::write(dir.join("bare.jsonl"), "{\"type\":\"summary\"}\n").expect("bare");
+
+        let stamp = |text: &str| crate::conversation::parse_ms(text).expect("a time");
+        let listed = sessions(home.path(), cwd.path(), 10).expect("listed");
+        let old_at = listed.iter().find(|s| s.native == "old").and_then(|s| s.updated_ms);
+        assert_eq!(old_at, Some(stamp("2026-10-15T10:01:00.000Z")), "its last record's");
+        assert_eq!(last_active(&dir.join("old.jsonl")), old_at, "one time for every surface");
+        let order: Vec<&str> = listed.iter().map(|s| s.native.as_str()).collect();
+        assert_eq!(order, ["bare", "newer", "old"], "the last active first");
+        let bare = listed.iter().find(|s| s.native == "bare").expect("bare");
+        assert!(bare.updated_ms.is_some(), "no time in it: its file's");
+        assert_eq!(last_active(&dir.join("bare.jsonl")), None);
+        assert_eq!(last_active(&dir.join("absent.jsonl")), None);
     }
 }

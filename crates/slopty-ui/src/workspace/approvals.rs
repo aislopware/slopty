@@ -15,8 +15,10 @@
 //! A note's answer is done when its worker says it took it, not when it leaves: the tap settles
 //! ([`WorkspaceEvent::TapsSettled`]) once each answer sent for one is acknowledged, turned down,
 //! or out of time. One turned down, or never acknowledged within [`HOLD_VERDICT`], says
-//! [`ANSWER_NOT_SENT`], apart from a request that no longer waits, and may be answered again.
-//! Through the server, a lost link is tried again within the same time.
+//! [`ANSWER_NOT_SENT`], or the worker's own words when it turned it down, apart from a request
+//! that no longer waits, and may be answered again. A request only the person at its card
+//! answers, or one that offers no answer the button gives, says so and is not sent. Through the
+//! server, a lost link is tried again within the same time.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -25,10 +27,10 @@ use gpui::Context;
 use slopty_client::WorkerKey;
 use slopty_core::ClientId;
 use slopty_platform::notify::Pressed;
-use slopty_proto::orchestration::{ErrorCode, Outcome, ThreadOf, ThreadView, Verb};
+use slopty_proto::orchestration::{ErrorCode, Outcome, ThreadOf, ThreadRead, ThreadView, Verb};
 use slopty_proto::thread::attention::Rung;
 use slopty_proto::thread::wire::{Intent, RequestCard};
-use slopty_proto::thread::{AskId, Delivery, IntentId, ThreadId};
+use slopty_proto::thread::{AskId, Delivery, IntentId, Request, ThreadId};
 
 use crate::workspace::attention::{About, NO_LONGER_WAITING, Route};
 use crate::workspace::{WorkspaceEvent, WorkspaceView};
@@ -50,6 +52,11 @@ pub(in crate::workspace) const REPLY_NOT_SENT: &str = "Your reply was not sent";
 /// What a note's answer says when it did not reach the agent: turned down, or never taken in
 /// time. The request may still wait, unlike [`NO_LONGER_WAITING`].
 pub(in crate::workspace) const ANSWER_NOT_SENT: &str = "Your answer was not sent";
+
+/// What a note's answer says when the request still waits but offers no answer the button
+/// gives: it changed since the note was posted.
+pub(in crate::workspace) const NO_SUCH_ANSWER: &str =
+    "That prompt offers no such answer: answer it at its card";
 
 /// How long a call through the server waits before it is tried again after the link to the
 /// server dropped.
@@ -118,6 +125,33 @@ pub(in crate::workspace) fn tapped_choice(card: &RequestCard, pressed: Pressed) 
             answerable(card).then(|| pressed.choice(&card.options, &card.buttons))?
         }
         Pressed::Pick(_) => pressed.choice(&card.options, &card.buttons),
+    }
+}
+
+/// What a note's `pressed` answers request `ask` with, on the thread as the server read it.
+///
+/// Else what the note says instead: the request no longer waits, it waits for the person at
+/// its card ([`Request::NEEDS_PRESENCE`]), or it offers no answer the button gives.
+fn read_choice(read: &ThreadRead, ask: &AskId, pressed: Pressed) -> Result<String, &'static str> {
+    match read.requests.iter().find(|r| r.ask == *ask) {
+        None => Err(NO_LONGER_WAITING),
+        Some(r) if r.needs_presence => Err(Request::NEEDS_PRESENCE),
+        Some(r) => pressed.choice(&r.choices, &r.picks).ok_or(NO_SUCH_ANSWER),
+    }
+}
+
+/// What a note says of an answer the server came back from with an error.
+///
+/// It is the words of whoever turned it down, or [`ANSWER_NOT_SENT`] when it never reached
+/// them.
+fn refusal_words(code: ErrorCode, message: String) -> String {
+    match code {
+        ErrorCode::UnknownWorker
+        | ErrorCode::WorkerUnreachable
+        | ErrorCode::ServerUnreachable
+        | ErrorCode::Interrupted
+        | ErrorCode::OtherBuild => ANSWER_NOT_SENT.to_owned(),
+        _ => message,
     }
 }
 
@@ -251,7 +285,16 @@ impl WorkspaceView {
             if let Some(thread) = thread
                 && self.thread_request(thread).is_some_and(|a| a.id == tap.ask && a.needs_presence)
             {
-                Self::unanswered(tap.route, slopty_proto::thread::Request::NEEDS_PRESENCE, cx);
+                Self::unanswered(tap.route, Request::NEEDS_PRESENCE, cx);
+                continue;
+            }
+            // One still open here that takes no answer the button gives: said so, not sent.
+            if let Some(thread) = thread
+                && self
+                    .thread_request(thread)
+                    .is_some_and(|a| a.id == tap.ask && tapped_choice(a, tap.pressed).is_none())
+            {
+                Self::unanswered(tap.route, NO_SUCH_ANSWER, cx);
                 continue;
             }
             if let Some(thread) = thread
@@ -291,9 +334,11 @@ impl WorkspaceView {
         for awaited in std::mem::take(&mut self.approvals.awaiting) {
             let hold = HOLD_VERDICT.saturating_sub(now.saturating_duration_since(awaited.at));
             match self.answer_heard(&awaited, cx) {
-                Some(true) => {}
-                Some(false) => self.answer_not_sent(&awaited, cx),
-                None if hold.is_zero() => self.answer_not_sent(&awaited, cx),
+                Some(Ok(())) => {}
+                Some(Err(why)) => self.answer_not_sent(&awaited, why, cx),
+                None if hold.is_zero() => {
+                    self.answer_not_sent(&awaited, ANSWER_NOT_SENT.to_owned(), cx);
+                }
                 None => {
                     due = Some(due.map_or(hold, |due| due.min(hold)));
                     self.approvals.awaiting.push(awaited);
@@ -311,30 +356,33 @@ impl WorkspaceView {
         });
     }
 
-    /// What the worker said of `awaited`'s answer: `Some(true)` once it took it, `Some(false)`
-    /// once it turned it down, `None` while it has said nothing.
-    fn answer_heard(&mut self, awaited: &Awaited, cx: &mut Context<Self>) -> Option<bool> {
+    /// What the worker said of `awaited`'s answer: `Some(Ok(()))` once it took it,
+    /// `Some(Err(why))` once it turned it down, in its words, `None` while it has said nothing.
+    fn answer_heard(
+        &mut self,
+        awaited: &Awaited,
+        cx: &mut Context<Self>,
+    ) -> Option<Result<(), String>> {
         let hub = self.thread_hub(awaited.route.worker, cx);
         let hub = hub.read(cx);
-        if hub.refusals(awaited.thread).any(|r| r.id == awaited.id) {
-            return Some(false);
+        if let Some(refusal) = hub.refusals(awaited.thread).find(|r| r.id == awaited.id) {
+            return Some(Err(refusal.words.clone()));
         }
         // Gone from the outbox without a refusal: taken, and the thread shows it.
-        let sent = hub.threads().outbox().all().iter().find(|s| s.id == awaited.id);
-        match sent.map(|s| (s.outcome.is_some(), s.failed())) {
-            None | Some((true, false)) => Some(true),
-            Some((true, true)) => Some(false),
-            Some((false, _)) => None,
-        }
+        let Some(sent) = hub.threads().outbox().all().iter().find(|s| s.id == awaited.id) else {
+            return Some(Ok(()));
+        };
+        sent.outcome.as_ref()?;
+        Some(sent.failure().map_or(Ok(()), Err))
     }
 
-    /// `awaited`'s answer did not reach the agent: said so, and its request may be answered
-    /// again.
-    fn answer_not_sent(&mut self, awaited: &Awaited, cx: &mut Context<Self>) {
+    /// `awaited`'s answer did not reach the agent, for `why`: said so, and its request may be
+    /// answered again.
+    fn answer_not_sent(&mut self, awaited: &Awaited, why: String, cx: &mut Context<Self>) {
         if self.approvals.sent.get(&awaited.thread) == Some(&awaited.ask) {
             self.approvals.sent.remove(&awaited.thread);
         }
-        Self::unanswered(awaited.route, ANSWER_NOT_SENT, cx);
+        Self::unanswered(awaited.route, why, cx);
     }
 
     /// A worker's threads moved: a note's answer waiting for it may have been taken.
@@ -361,8 +409,10 @@ impl WorkspaceView {
     /// Answer `tap` on `thread` through the server: read the thread's open requests there for
     /// the choice that allows or denies once, or find the request a pick answers, then answer
     /// with it, once. A lost link to the server is tried again until [`HOLD_VERDICT`] from the
-    /// tap. A request the server no longer finds is one that no longer waits; a call that
-    /// fails is an answer not sent, and the request may be answered again.
+    /// tap. A request the server no longer finds is one that no longer waits; one only the
+    /// person at its card answers is said so and not sent ([`read_choice`]); a call that fails
+    /// is an answer not sent, in the words of whoever turned it down, and the request may be
+    /// answered again.
     fn answer_through_server(&mut self, tap: Tapped, thread: ThreadId, cx: &Context<Self>) {
         let Some(caller) = self.server.clone() else { return };
         if self.approvals.sent.get(&thread) == Some(&tap.ask) {
@@ -388,34 +438,31 @@ impl WorkspaceView {
                 view: ThreadView::Messages,
                 after: None,
             };
+            // What the note says, and whether the request may be answered again.
             let why = match call(read).await {
-                Outcome::Thread(read) => {
-                    let choice = read
-                        .requests
-                        .iter()
-                        .find(|r| r.ask == ask)
-                        .and_then(|r| pressed.choice(&r.choices, &r.picks));
-                    match choice {
-                        Some(choice) => {
-                            let verb = Verb::AnswerRequest {
-                                of: ThreadOf::Thread(thread),
-                                ask: ask.clone(),
-                                choice,
-                                message: None,
-                            };
-                            match call(verb).await {
-                                Outcome::Error { .. } => Some(ANSWER_NOT_SENT),
-                                _ => None,
+                Outcome::Thread(read) => match read_choice(&read, &ask, pressed) {
+                    Ok(choice) => {
+                        let verb = Verb::AnswerRequest {
+                            of: ThreadOf::Thread(thread),
+                            ask: ask.clone(),
+                            choice,
+                            message: None,
+                        };
+                        match call(verb).await {
+                            Outcome::Error { code, message } => {
+                                Some((refusal_words(code, message), true))
                             }
+                            _ => None,
                         }
-                        None => Some(NO_LONGER_WAITING),
                     }
-                }
-                _ => Some(ANSWER_NOT_SENT),
+                    Err(NO_LONGER_WAITING) => Some((NO_LONGER_WAITING.to_owned(), false)),
+                    Err(why) => Some((why.to_owned(), true)),
+                },
+                _ => Some((ANSWER_NOT_SENT.to_owned(), true)),
             };
             let _gone = this.update(cx, |this, cx| {
-                if let Some(why) = why {
-                    if why == ANSWER_NOT_SENT && this.approvals.sent.get(&thread) == Some(&ask) {
+                if let Some((why, again)) = why {
+                    if again && this.approvals.sent.get(&thread) == Some(&ask) {
                         this.approvals.sent.remove(&thread);
                     }
                     Self::unanswered(route, why, cx);
@@ -429,9 +476,11 @@ impl WorkspaceView {
         .detach();
     }
 
-    /// A note's verdict found no request to answer: the app says it in a note of its own.
-    fn unanswered(route: Route, why: &'static str, cx: &mut Context<Self>) {
-        tracing::info!(about = ?route.about, why, "a note's answer found no request");
+    /// A note's verdict found no request to answer, or was not taken: the app says `why` in a
+    /// note of its own.
+    fn unanswered(route: Route, why: impl Into<String>, cx: &mut Context<Self>) {
+        let why = why.into();
+        tracing::info!(about = ?route.about, %why, "a note's answer was not taken");
         cx.emit(WorkspaceEvent::Unanswered { route, why });
     }
 
@@ -499,5 +548,60 @@ mod tests {
         for pressed in [Pressed::Allow, Pressed::Deny, Pressed::Pick(0)] {
             assert_eq!(tapped_choice(&present, pressed), None, "{pressed:?}");
         }
+    }
+
+    /// The thread as the server reads it, waiting on `card` alone.
+    fn read(card: &RequestCard) -> ThreadRead {
+        ThreadRead {
+            worker: slopty_core::WorkerId::new(),
+            thread: ThreadId::new(),
+            agent: slopty_proto::thread::AgentId::named(slopty_proto::thread::AgentId::CLAUDE_CODE),
+            title: String::new(),
+            parent: None,
+            phase: slopty_proto::thread::Phase::NeedsYou,
+            wait: None,
+            turns: Vec::new(),
+            requests: vec![slopty_proto::orchestration::RequestRead {
+                ask: card.id.clone(),
+                kind: card.kind.clone(),
+                title: card.title.clone(),
+                choices: card.options.clone(),
+                questions: Vec::new(),
+                picks: card.buttons.clone(),
+                needs_presence: card.needs_presence,
+            }],
+            next: slopty_proto::thread::TurnId(0),
+            truncated: false,
+            skipped: false,
+        }
+    }
+
+    /// Through the server, a note's Allow, Deny and pick on a request only the person at its
+    /// card answers say so and send nothing, rather than that the prompt no longer waits,
+    /// which Allow and the pick said before; one the server no longer holds no longer waits.
+    #[test]
+    fn through_the_server_a_note_says_the_request_needs_the_person() {
+        let ask = AskId("a".to_owned());
+        let open = read(&card(false));
+        assert_eq!(read_choice(&open, &ask, Pressed::Allow).as_deref(), Ok("allow"));
+        assert_eq!(read_choice(&open, &ask, Pressed::Pick(0)).as_deref(), Ok("allow"));
+        assert_eq!(read_choice(&open, &ask, Pressed::Pick(3)), Err(NO_SUCH_ANSWER));
+        let present = read(&card(true));
+        for pressed in [Pressed::Allow, Pressed::Deny, Pressed::Pick(0)] {
+            assert_eq!(read_choice(&present, &ask, pressed), Err(Request::NEEDS_PRESENCE));
+        }
+        let gone = AskId("b".to_owned());
+        assert_eq!(read_choice(&present, &gone, Pressed::Allow), Err(NO_LONGER_WAITING));
+    }
+
+    /// An answer the worker turned down says its words; one that never reached it says it was
+    /// not sent.
+    #[test]
+    fn a_turned_down_answer_says_the_workers_words() {
+        let why = || "the agent has exited".to_owned();
+        assert_eq!(refusal_words(ErrorCode::Failed, why()), why());
+        assert_eq!(refusal_words(ErrorCode::Forbidden, why()), why());
+        assert_eq!(refusal_words(ErrorCode::WorkerUnreachable, why()), ANSWER_NOT_SENT);
+        assert_eq!(refusal_words(ErrorCode::ServerUnreachable, why()), ANSWER_NOT_SENT);
     }
 }

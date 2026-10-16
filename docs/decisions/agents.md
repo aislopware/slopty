@@ -3784,3 +3784,32 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `claude::driven::tests::a_claude_code_gone_mid_turn_cuts_its_turn`; `slopty-worker`
     `claude::an_end_by_a_signal_says_what_kind_it_was` (the stand-in killed and terminated
     mid-turn through ptyd), `claude::a_crash_mid_turn_fails_the_turn_with_why`.
+- ✅ **A press on a note for a request that needs the person says so, wherever it lands
+  (2026-10-17).** Claude Code's `requires_user_interaction` asks a host to offer no one-tap
+  answer, so a note for such a request keeps offering no button, as ruled on 2026-10-16. A
+  press can still come: a note posted before the request said so, or one a phone kept. In the
+  app it said "Needs you at the card", but through the server, which a phone's background
+  answer and an app whose worker is not linked use, Allow and a pick found no choice in the
+  thread read and said "That prompt is no longer waiting" while the prompt still waited, and
+  Deny reached the worker, whose refusal read as "Couldn't reach" the machine. The thread read
+  now carries `RequestRead::needs_presence`, and both paths refuse such a press without asking
+  the worker, in its words ("Needs you at the card: …"). Any answer the worker turns down says
+  the worker's words; only a link that failed says the machine was not reached. A press for an
+  answer the request does not offer says so ("That prompt offers no such answer") rather than
+  calling the prompt gone.
+  - Tests: `slopty-app` `verdict::tests::{a_press_on_a_request_that_needs_the_person_says_so,
+    a_refusal_says_the_workers_words}`; `slopty-ui`
+    `workspace::approvals::tests::{through_the_server_a_note_says_the_request_needs_the_person,
+    a_turned_down_answer_says_the_workers_words}`; e2e
+    `app::dock::a_request_that_needs_the_person_is_refused_from_a_note`.
+- ✅ **A past session's time is its last record's (2026-10-17).** The sidebar's History rows
+  said when the transcript file was last written, so a session copied or touched today read
+  "now", while the ⇧⌘O search said when its last prompt was sent and the thread once open said
+  its last record's time. Every surface now says one time: the time Claude Code wrote on the
+  session's last record that carries one, read from the transcript's tail
+  (`slopty_agent::claude::sessions::last_active`). A folder's listing sorts by it; a search
+  over the person's prompts reads the tail of each session it found, which ends its rule of
+  never reading a transcript; a session with no transcript there keeps its last prompt's time,
+  and a transcript with no time in it its file's.
+  - Tests: `slopty-agent` `claude::sessions::tests::a_past_sessions_time_is_its_last_records`;
+    `slopty-worker` `history::a_found_sessions_time_is_its_last_records`.

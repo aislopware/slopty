@@ -8,7 +8,8 @@
 //! behind a remote window that has the keyboard so the stream keeps the screen. One that is
 //! offered is a notice naming its host with an Open button ([`WorkspaceEvent::Offer`]), never
 //! opened unasked. A page on the worker's own loopback (a dev server's `localhost:5173`) is
-//! the worker's: it opens at the port that forwards it here, or the notice says none does.
+//! the worker's: the notice names the address with its port and the worker it is on, and says
+//! the port that forwards it here, where it opens, or that none does yet ([`loopback_offer`]).
 //!
 //! A path ⌘-clicked in a shell opens where a transcript's file link opens: in the Files pane of
 //! the chat the shell was opened for ([`WorkspaceEvent::OpenFile`]), made absolute against the
@@ -36,6 +37,28 @@ use super::{WorkspaceEvent, WorkspaceView};
 
 /// How long a held-back page's notice stays: longer than a word, since it waits on a choice.
 pub const OFFER_FOR: Duration = Duration::from_secs(20);
+
+/// What the notice says of a page on worker `machine`'s own loopback that `asker` wants.
+///
+/// `host` and `port` are as the address names them, and `forward` the port on this device
+/// that forwards it here, if one does yet.
+fn loopback_offer(
+    asker: &str,
+    machine: &str,
+    host: &str,
+    port: u16,
+    forward: Option<u16>,
+) -> String {
+    let wants = if asker.is_empty() || asker == machine {
+        format!("{machine} wants to open its own {host}:{port}")
+    } else {
+        format!("{asker} wants to open {host}:{port} on {machine}")
+    };
+    match forward {
+        Some(here) => format!("{wants}; it opens here at localhost:{here}"),
+        None => format!("{wants}; nothing forwards that port here yet"),
+    }
+}
 
 /// The page `url` names on a worker's loopback: its port, and the rest after the host.
 fn on_loopback(url: &str) -> Option<(u16, String)> {
@@ -90,13 +113,20 @@ impl WorkspaceView {
             Todo::Offer { url, host, open, why, reply } => {
                 // The worker's own loopback is not this machine's: the page it means is at the
                 // port that forwards it here, offered all the same.
-                let local = matches!(why, OfferReason::Wary(Wary::Loopback))
-                    .then(|| self.forwarded(key, &url))
-                    .flatten();
+                let loopback = matches!(why, OfferReason::Wary(Wary::Loopback));
+                let local = loopback.then(|| self.forwarded(key, &url)).flatten();
                 let Some(w) = self.workers.get_mut(&key) else { return };
                 w.send(reply);
                 let asker = self.asker(key, open.session);
-                let text = format!("{asker} wants to open {host} ({why})");
+                let port = loopback.then(|| on_loopback(&url)).flatten().map(|(port, _)| port);
+                let text = match port {
+                    Some(port) => {
+                        let machine = self.workers.get(&key).map(|w| w.name.clone());
+                        let forward = self.forward_port(key, port);
+                        loopback_offer(&asker, &machine.unwrap_or_default(), &host, port, forward)
+                    }
+                    None => format!("{asker} wants to open {host} ({why})"),
+                };
                 cx.emit(WorkspaceEvent::Offer {
                     worker: key,
                     id: open.id,
@@ -298,14 +328,18 @@ impl WorkspaceView {
     /// The page `url` on `key`'s loopback, at the port that forwards it here.
     fn forwarded(&self, key: WorkerKey, url: &str) -> Option<String> {
         let (port, path) = on_loopback(url)?;
-        let local = self
-            .ports
+        let local = self.forward_port(key, port)?;
+        Some(format!("http://localhost:{local}{path}"))
+    }
+
+    /// The port on this device that forwards `key`'s loopback port `port` here, if one does.
+    fn forward_port(&self, key: WorkerKey, port: u16) -> Option<u16> {
+        self.ports
             .iter()
             .filter(|(session, _)| self.worker_of_session(**session) == Some(key))
             .flat_map(|(_, forwards)| forwards)
             .find(|f| f.port.number == port)?
-            .local?;
-        Some(format!("http://localhost:{local}{path}"))
+            .local
     }
 
     /// Open `url` in the person's browser: in front, unless a remote window or desktop has the
@@ -430,9 +464,27 @@ mod tests {
     use slopty_proto::orchestration::Port;
     use slopty_theme::Theme;
 
-    use super::{absolute, escaped, on_loopback};
+    use super::{absolute, escaped, loopback_offer, on_loopback};
     use crate::workspace::WorkspaceView;
     use crate::workspace::rig::{KEY, hear, link, mac, shell};
+
+    /// A page on a worker's loopback is named with its port and the worker it is on, never as
+    /// this device's own, with the port that forwards it here or that none does yet.
+    #[test]
+    fn a_loopback_offer_names_its_port_its_machine_and_its_forward() {
+        assert_eq!(
+            loopback_offer("vite", "studio", "localhost", 5173, Some(15173)),
+            "vite wants to open localhost:5173 on studio; it opens here at localhost:15173"
+        );
+        assert_eq!(
+            loopback_offer("studio", "studio", "localhost", 5173, None),
+            "studio wants to open its own localhost:5173; nothing forwards that port here yet"
+        );
+        assert_eq!(
+            loopback_offer("", "studio", "[::1]", 8080, None),
+            "studio wants to open its own [::1]:8080; nothing forwards that port here yet"
+        );
+    }
 
     /// A page on the loopback keeps its path and query; one elsewhere is not the worker's.
     #[test]
@@ -502,8 +554,16 @@ mod tests {
         hand(page(3, session, "http://localhost:5173/app?x=1", None), cx);
         let why = OfferReason::Wary(Wary::Loopback);
         assert_eq!(sent(), [ClientMsg::Handoff(HandoffReply::Offered { id: 3, why })]);
-        let opens = heard.borrow().offers.last().map(|o| o.1.clone());
-        assert_eq!(opens.as_deref(), Some("http://localhost:15173/app?x=1"), "at its forward");
+        let offer = heard.borrow().offers.last().cloned().expect("offered");
+        assert_eq!(
+            offer,
+            (
+                "studio wants to open its own localhost:5173; it opens here at localhost:15173"
+                    .to_owned(),
+                "http://localhost:15173/app?x=1".to_owned()
+            ),
+            "at its forward"
+        );
 
         let edit =
             EditFile { id: 4, session: Some(session), path: "/r/x".into(), line: None, wait: true };

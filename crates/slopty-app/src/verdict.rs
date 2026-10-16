@@ -14,16 +14,18 @@
 //! the time it grants.
 //!
 //! An answer that did not land is said in a note in place of the one pressed ([`missed_note`]),
-//! so the person does not walk away believing it went: the machine was not reached, or the
-//! prompt no longer waits. A tap on it goes to the agent, as the pressed note's did.
+//! so the person does not walk away believing it went: the machine was not reached, the prompt
+//! no longer waits, or it was turned down, in the words of whoever turned it down. A request
+//! only the person at its card answers is turned down here, without asking. A tap on the note
+//! goes to the agent, as the pressed note's did.
 
 use std::time::Duration;
 
 use slopty_client::server::ServerCaller;
 use slopty_core::{SessionId, WorkerId};
 use slopty_platform::notify::{self, Note, Pressed, Tap, info};
-use slopty_proto::orchestration::{Outcome, TermRef, ThreadOf, ThreadView, Verb};
-use slopty_proto::thread::{AskId, ThreadId};
+use slopty_proto::orchestration::{ErrorCode, Outcome, TermRef, ThreadOf, ThreadView, Verb};
+use slopty_proto::thread::{AskId, Request, ThreadId};
 
 /// The most a background answer takes before it gives up: well inside the half minute iOS
 /// grants an app it woke for a notification's button.
@@ -96,8 +98,27 @@ pub enum Answered {
     Sent,
     /// The request is no longer open there: answered elsewhere, or ended.
     Gone,
+    /// It was turned down, in the words of whoever turned it down: the worker, or this device
+    /// for a request only the person at its card answers ([`Request::NEEDS_PRESENCE_REFUSED`]).
+    /// The request still waits.
+    Refused(String),
     /// The server could not be asked, in its words.
     Failed(String),
+}
+
+impl Answered {
+    /// How a call that came back with an error went: not reached, or turned down in the words
+    /// of whoever turned it down.
+    const fn of_error(code: ErrorCode, message: String) -> Self {
+        match code {
+            ErrorCode::UnknownWorker
+            | ErrorCode::WorkerUnreachable
+            | ErrorCode::ServerUnreachable
+            | ErrorCode::Interrupted
+            | ErrorCode::OtherBuild => Self::Failed(message),
+            _ => Self::Refused(message),
+        }
+    }
 }
 
 /// Do `press` through the server `caller` reaches: a verdict as [`answer`] does, a reply sent
@@ -106,30 +127,34 @@ pub async fn answer_press(caller: &ServerCaller, press: Press) -> Answered {
     match press {
         Press::Verdict(verdict) => answer(caller, verdict).await,
         Press::Reply { of, text } => match caller.call(Verb::SendMessage { of, text }).await {
-            Outcome::Error { message, .. } => Answered::Failed(message),
+            Outcome::Error { code, message } => Answered::of_error(code, message),
             _ => Answered::Sent,
         },
     }
 }
 
-/// Answer `verdict` through the server `caller` reaches: read the thread's open requests for
-/// the choice that allows or denies once, or for the request a pick answers, then answer with
-/// it.
+/// Answer `verdict` through the server `caller` reaches.
+///
+/// It reads the thread's open requests for the choice that allows or denies once, or for the
+/// request a pick answers, then answers with it. A request only the person at its card answers
+/// is refused here, whatever was pressed, as its worker would refuse it.
 pub async fn answer(caller: &ServerCaller, verdict: Verdict) -> Answered {
     let read = Verb::ReadThread { of: verdict.of, view: ThreadView::Messages, after: None };
     let choice = match caller.call(read).await {
-        Outcome::Thread(read) => read
-            .requests
-            .iter()
-            .find(|r| r.ask == verdict.ask)
-            .and_then(|r| verdict.pressed.choice(&r.choices, &r.picks)),
+        Outcome::Thread(read) => match read.requests.iter().find(|r| r.ask == verdict.ask) {
+            Some(r) if r.needs_presence => {
+                return Answered::Refused(Request::NEEDS_PRESENCE_REFUSED.to_owned());
+            }
+            Some(r) => verdict.pressed.choice(&r.choices, &r.picks),
+            None => None,
+        },
         Outcome::Error { message, .. } => return Answered::Failed(message),
         _ => None,
     };
     let Some(choice) = choice else { return Answered::Gone };
     let verb = Verb::AnswerRequest { of: verdict.of, ask: verdict.ask, choice, message: None };
     match caller.call(verb).await {
-        Outcome::Error { message, .. } => Answered::Failed(message),
+        Outcome::Error { code, message } => Answered::of_error(code, message),
         _ => Answered::Sent,
     }
 }
@@ -158,13 +183,19 @@ pub fn missed_note(tap: &Tap, answered: &Answered, machine: Option<&str>) -> Opt
             silent: true,
             ..note
         }),
+        Answered::Refused(why) => {
+            let (pressed, category) = pressed(tap);
+            tracing::info!(why, "a background answer was turned down");
+            Some(Note {
+                title: format!("{pressed} was not taken"),
+                body: why.clone(),
+                category,
+                urgent: category.is_none(),
+                ..note
+            })
+        }
         Answered::Failed(why) => {
-            let (pressed, category) = match tap.action.as_deref() {
-                Some(notify::REPLY) => ("Your reply", Some(notify::REPLYING)),
-                Some(notify::DENY) => ("Deny", None),
-                Some(action) if action.starts_with(notify::PICK) => ("Your answer", None),
-                _ => ("Allow", None),
-            };
+            let (pressed, category) = pressed(tap);
             let title = machine.map_or_else(
                 || "Couldn't reach your server".to_owned(),
                 |name| format!("Couldn't reach {name}"),
@@ -182,6 +213,17 @@ pub fn missed_note(tap: &Tap, answered: &Answered, machine: Option<&str>) -> Opt
                 ..note
             })
         }
+    }
+}
+
+/// What `tap` pressed, as a missed note names it, and the note's buttons: a reply keeps its
+/// field, to be sent again; an answer gets none, so none answers twice.
+fn pressed(tap: &Tap) -> (&'static str, Option<notify::Category>) {
+    match tap.action.as_deref() {
+        Some(notify::REPLY) => ("Your reply", Some(notify::REPLYING)),
+        Some(notify::DENY) => ("Deny", None),
+        Some(action) if action.starts_with(notify::PICK) => ("Your answer", None),
+        _ => ("Allow", None),
     }
 }
 
@@ -395,6 +437,7 @@ mod tests {
             choices: vec![choice("yes", Effect::Allow), choice("no", Effect::Deny)],
             questions: Vec::new(),
             picks: Vec::new(),
+            needs_presence: false,
         };
         let held = ThreadRead {
             worker: WorkerId::new(),
@@ -481,6 +524,7 @@ mod tests {
                     choice: picked.to_owned(),
                 },
             ],
+            needs_presence: false,
         };
         let held = ThreadRead {
             worker: WorkerId::new(),
@@ -519,5 +563,114 @@ mod tests {
         let missed = missed_note(&pressed, &failed, Some("studio")).expect("said");
         assert_eq!(missed.body, "Your answer was not sent. The agent is still waiting.");
         assert!(missed.picks.is_empty(), "no pick to press again");
+    }
+
+    /// The next verb `queue` holds, once the answer under way has sent it.
+    async fn next_call(
+        queue: &mut slopty_client::server::CallQueue,
+    ) -> (Verb, tokio::sync::oneshot::Sender<Outcome>) {
+        loop {
+            if let Some(next) = queue.try_next() {
+                break next;
+            }
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// The thread `thread`, waiting on `request` alone.
+    fn waiting(thread: ThreadId, request: RequestRead) -> Outcome {
+        Outcome::Thread(Box::new(ThreadRead {
+            worker: WorkerId::new(),
+            thread,
+            agent: slopty_proto::thread::AgentId::named(slopty_proto::thread::AgentId::CLAUDE_CODE),
+            title: String::new(),
+            parent: None,
+            phase: slopty_proto::thread::Phase::NeedsYou,
+            wait: None,
+            turns: Vec::new(),
+            requests: vec![request],
+            next: slopty_proto::thread::TurnId(0),
+            truncated: false,
+            skipped: false,
+        }))
+    }
+
+    /// A question only the person at its card answers (Claude Code's `AskUserQuestion`, which
+    /// it marks `requires_user_interaction`): a note's Allow, Deny or pick pressed anyway is
+    /// turned down with the worker's own words, without asking it, and the note says so in
+    /// place of "no longer waiting", since the question still waits. Before, Allow and the pick
+    /// found no choice and called the request gone.
+    #[tokio::test]
+    async fn a_press_on_a_request_that_needs_the_person_says_so() {
+        let thread = ThreadId::new();
+        let question = || RequestRead {
+            ask: AskId("a3".into()),
+            kind: "question".to_owned(),
+            title: "Which colour?".to_owned(),
+            choices: vec![choice("cancel", Effect::Deny)],
+            questions: vec!["Which colour?".to_owned()],
+            picks: Vec::new(),
+            needs_presence: true,
+        };
+        for pressed in [Pressed::Allow, Pressed::Deny, Pressed::Pick(0)] {
+            let verdict =
+                Verdict { of: ThreadOf::Thread(thread), ask: AskId("a3".into()), pressed };
+            let (caller, mut queue) = ServerCaller::queued();
+            let answering = tokio::spawn(async move { answer(&caller, verdict).await });
+            let read = next_call(&mut queue).await;
+            assert!(matches!(read.0, Verb::ReadThread { .. }), "{:?}", read.0);
+            let _sent = read.1.send(waiting(thread, question()));
+            let answered = answering.await.ok();
+            assert_eq!(
+                answered,
+                Some(Answered::Refused(Request::NEEDS_PRESENCE_REFUSED.to_owned())),
+                "{pressed:?}"
+            );
+            assert!(queue.try_next().is_none(), "{pressed:?} asked the worker nothing");
+        }
+
+        let tapped =
+            tap(notify::ALLOW, &[(info::THREAD, thread.to_string()), (info::ASK, "a3".to_owned())]);
+        let refused = Answered::Refused(Request::NEEDS_PRESENCE_REFUSED.to_owned());
+        let note = missed_note(&tapped, &refused, Some("studio")).expect("said");
+        assert_eq!(note.title, "Allow was not taken");
+        assert_eq!(note.body, Request::NEEDS_PRESENCE_REFUSED);
+        assert!(note.urgent && note.category.is_none(), "it still waits, with no button");
+        assert!(!note.info.contains_key(info::ASK), "a tap opens the agent at its card");
+    }
+
+    /// An answer the worker turns down says the worker's words, not that it was not reached;
+    /// one that never reached it says so.
+    #[tokio::test]
+    async fn a_refusal_says_the_workers_words() {
+        let thread = ThreadId::new();
+        let request = RequestRead {
+            ask: AskId("a1".into()),
+            kind: "permission".to_owned(),
+            title: "Run cargo test".to_owned(),
+            choices: vec![choice("yes", Effect::Allow), choice("no", Effect::Deny)],
+            questions: Vec::new(),
+            picks: Vec::new(),
+            needs_presence: false,
+        };
+        for (code, said) in [
+            (ErrorCode::Failed, Answered::Refused("the agent has exited".to_owned())),
+            (ErrorCode::WorkerUnreachable, Answered::Failed("the agent has exited".to_owned())),
+        ] {
+            let verdict = Verdict {
+                of: ThreadOf::Thread(thread),
+                ask: AskId("a1".into()),
+                pressed: Pressed::Allow,
+            };
+            let (caller, mut queue) = ServerCaller::queued();
+            let answering = tokio::spawn(async move { answer(&caller, verdict).await });
+            let read = next_call(&mut queue).await;
+            let _sent = read.1.send(waiting(thread, request.clone()));
+            let sent = next_call(&mut queue).await;
+            assert!(matches!(sent.0, Verb::AnswerRequest { .. }), "{:?}", sent.0);
+            let message = "the agent has exited".to_owned();
+            let _sent = sent.1.send(Outcome::Error { code, message });
+            assert_eq!(answering.await.ok(), Some(said), "{code:?}");
+        }
     }
 }

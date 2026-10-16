@@ -1239,4 +1239,9 @@ pub struct RequestRead {
     /// ([`NoteChoice::of`](crate::thread::wire::NoteChoice::of)): a note's pick, pressed,
     /// answers with the choice at its place here.
     pub picks: Vec<crate::thread::wire::NoteChoice>,
+    /// Only the person at its card answers it ([`crate::thread::Request::needs_presence`]): an
+    /// answer from here is refused, so a caller says so without asking
+    /// ([`crate::thread::Request::NEEDS_PRESENCE_REFUSED`]).
+    #[serde(default)]
+    pub needs_presence: bool,
 }

@@ -1510,3 +1510,131 @@ mod tests {
         assert_eq!(shell_title(""), "terminal");
     }
 }
+
+// slopty: a running program's progress (`OSC 9;4`) reaches its drawer tab: the tab reads it
+// again each time its view says something new of itself, and lets it go when the report ends.
+#[cfg(test)]
+mod progress_tests {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::sync::Arc;
+
+    use gpui::AppContext as _;
+    use slopty_view_rpc::{RpcError, RpcReply, methods};
+
+    use super::TerminalPanel;
+    use crate::live::{Hosted, Progress};
+
+    /// A machine that opens terminal 7 for every tab.
+    struct Machine;
+
+    #[async_trait::async_trait]
+    impl slopty_view_rpc::RpcService for Machine {
+        async fn handle(&self, method: &str, _: serde_json::Value) -> Result<RpcReply, RpcError> {
+            let answer = match method {
+                methods::OPEN_TERMINAL => {
+                    serde_json::json!({ "id": "7", "cwd": "/w", "shell": "zsh" })
+                }
+                methods::CLOSE_TERMINAL => serde_json::json!({}),
+                _ => return Err(RpcError::Failed(format!("not asked here: {method}"))),
+            };
+            Ok(RpcReply::Value(answer))
+        }
+    }
+
+    struct Blank;
+
+    impl gpui::Render for Blank {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            gpui::div()
+        }
+    }
+
+    type Heard = Rc<RefCell<Vec<Box<dyn FnMut(&mut gpui::App)>>>>;
+
+    #[gpui::test]
+    fn a_running_programs_progress_reaches_its_tab(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let _guard = runtime.enter();
+        let dir = tempfile::tempdir().unwrap();
+        let reported = Rc::new(RefCell::new(None::<Progress>));
+        let heard: Heard = Rc::default();
+        cx.update(|cx| {
+            crate::settings::init(Default::default(), dir.path(), cx);
+            gpui_base::init(cx);
+            cx.set_global(crate::theme::Theme::default());
+            let (reported, heard) = (Rc::clone(&reported), Rc::clone(&heard));
+            crate::live::install(
+                cx,
+                move |id, _, cx| {
+                    (id == "7").then(|| Hosted {
+                        view: cx.new(|_| Blank).into(),
+                        focus: cx.focus_handle(),
+                        title: None,
+                        ended: false,
+                        exit: None,
+                        progress: *reported.borrow(),
+                        drop: None,
+                    })
+                },
+                |_, _| None,
+                move |_, changed, _| {
+                    heard.borrow_mut().push(changed);
+                    None
+                },
+            );
+        });
+        let engine = crate::state::EngineHandle::from_test_client(slopty_view_rpc::memory_client(
+            Arc::new(Machine) as Arc<dyn slopty_view_rpc::RpcService>,
+        ));
+        let (panel, cx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| {
+                let mut state = crate::state::AppState::new();
+                state.set_test_engine(engine);
+                state
+            });
+            TerminalPanel::new(state, cx)
+        });
+        let settle = |cx: &mut gpui::VisualTestContext,
+                      done: &dyn Fn(&mut gpui::VisualTestContext) -> bool| {
+            for _ in 0..300 {
+                cx.run_until_parked();
+                runtime.block_on(async {
+                    for _ in 0..20 {
+                        tokio::task::yield_now().await;
+                    }
+                });
+                cx.run_until_parked();
+                if done(cx) {
+                    return;
+                }
+            }
+            panic!("the panel never settled");
+        };
+        let tab = |cx: &mut gpui::VisualTestContext| {
+            panel.update(cx, |panel, cx| {
+                let chat = panel.selected_chat(cx);
+                let key = panel.chats.get(&chat)?.tabs.first()?.key;
+                Some((key, panel.terminal_id(&chat, key)?.to_owned(), panel.tab_progress(key, cx)))
+            })
+        };
+        panel.update(cx, |panel, cx| panel.set_open(true, cx));
+        settle(cx, &|cx| tab(cx).is_some());
+        assert_eq!(tab(cx).map(|(_, id, progress)| (id, progress)), Some(("7".to_owned(), None)));
+
+        // The program reports 40 %: its view says so, and the tab shows it.
+        *reported.borrow_mut() = Some(Progress::Share(0.4));
+        cx.update(|_, cx| heard.borrow_mut().iter_mut().for_each(|changed| changed(cx)));
+        settle(cx, &|cx| tab(cx).is_some_and(|(_, _, progress)| progress.is_some()));
+        assert_eq!(tab(cx).and_then(|(_, _, progress)| progress), Some(Progress::Share(0.4)));
+
+        // The report ends (the program cleared it, or the shell's next prompt did): it goes.
+        *reported.borrow_mut() = None;
+        cx.update(|_, cx| heard.borrow_mut().iter_mut().for_each(|changed| changed(cx)));
+        settle(cx, &|cx| tab(cx).is_some_and(|(_, _, progress)| progress.is_none()));
+    }
+}

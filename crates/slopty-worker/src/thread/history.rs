@@ -4,7 +4,9 @@
 //!
 //! The prompts come from each agent's own record of them ([`slopty_agent::history`]): Claude
 //! Code's prompt history, Codex's prompt history and the rollouts of threads its TUI did not run,
-//! and pi's session files. Nothing is written to them, and no Claude Code transcript is read.
+//! and pi's session files. Nothing is written to them. Of a Claude Code transcript only the
+//! tail of a session found is read, for when it was last active: its last record's time, which
+//! every surface says of a past session ([`slopty_agent::claude::sessions::last_active`]).
 //!
 //! **The index.** Every file read is kept in memory with how far it was read and what it held.
 //! The records are only ever appended to, so a later search reads only what was added since,
@@ -483,13 +485,13 @@ impl History {
         found
             .into_iter()
             .map(|((agent, native), session)| {
-                let resume = match agent {
+                let (resume, active) = match agent {
                     Agent::Claude => self.claude_resumes(native, session.cwd),
                     Agent::Codex if rollouts.contains_key(native) => {
-                        slopty_agent::codex::shared::resume_args(native)
+                        (slopty_agent::codex::shared::resume_args(native), None)
                     }
-                    Agent::Codex => Vec::new(),
-                    Agent::Pi => slopty_agent::pi::sessions::resume_args(native),
+                    Agent::Codex => (Vec::new(), None),
+                    Agent::Pi => (slopty_agent::pi::sessions::resume_args(native), None),
                 };
                 let (cwd, first, last) = (session.cwd, session.first, session.last);
                 let prompts = session
@@ -502,7 +504,7 @@ impl History {
                     native: native.to_owned(),
                     cwd: cwd.map(str::to_owned),
                     title: first.map(|p| slopty_agent::driven::title_of(&p.text)),
-                    updated_ms: last.and_then(|p| p.at_ms),
+                    updated_ms: active.or_else(|| last.and_then(|p| p.at_ms)),
                     thread: None,
                     resume,
                     facts: std::collections::BTreeMap::new(),
@@ -513,17 +515,18 @@ impl History {
     }
 
     /// The words that take Claude Code session `native` up again, when its transcript is
-    /// there to take up: looked at, never opened.
-    fn claude_resumes(&self, native: &str, cwd: Option<&str>) -> Vec<String> {
+    /// there to take up, and when it was last active, from its transcript's tail.
+    fn claude_resumes(&self, native: &str, cwd: Option<&str>) -> (Vec<String>, Option<WallMs>) {
         let (Some(dir), Some(cwd)) = (self.stores.claude.as_deref(), cwd) else {
-            return Vec::new();
+            return (Vec::new(), None);
         };
         let escaped = slopty_agent::claude::sessions::escape(Path::new(cwd));
         let transcript = dir.join("projects").join(escaped).join(format!("{native}.jsonl"));
         if slopty_agent::claude::is_session_id(native) && transcript.is_file() {
-            vec![slopty_agent::claude::RESUME_FLAG.to_owned(), native.to_owned()]
+            let resume = vec![slopty_agent::claude::RESUME_FLAG.to_owned(), native.to_owned()];
+            (resume, slopty_agent::claude::sessions::last_active(&transcript))
         } else {
-            Vec::new()
+            (Vec::new(), None)
         }
     }
 }

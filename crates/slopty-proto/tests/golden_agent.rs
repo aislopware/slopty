@@ -231,6 +231,7 @@ mod golden_agent {
                 }],
                 questions: Vec::new(),
                 picks: Vec::new(),
+                needs_presence: false,
             }],
             next: TurnId(4),
             truncated: true,

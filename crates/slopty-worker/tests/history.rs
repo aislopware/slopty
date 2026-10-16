@@ -159,6 +159,33 @@ mod history {
         assert!(history.search(&ask).absent.is_some_and(|why| why.contains("gemini")));
     }
 
+    /// A session found by its prompts says when it was last active as its folder's listing and
+    /// its open thread do: its transcript's last record's time, not its last prompt's; one with
+    /// no transcript here says its last prompt's.
+    #[test]
+    fn a_found_sessions_time_is_its_last_records() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join(".claude");
+        let project = dir.join("projects").join("-w");
+        fs::create_dir_all(&project).unwrap();
+        let lines = [line("fix the parser", "s-1", 1_000), line("and the docs", "s-2", 2_000)];
+        fs::write(dir.join("history.jsonl"), lines.concat()).unwrap();
+        let answered = serde_json::json!({
+            "type": "assistant", "sessionId": "s-1", "timestamp": "2026-10-15T10:01:00.000Z",
+            "message": { "role": "assistant", "content": [{ "type": "text", "text": "Done." }] },
+        });
+        fs::write(project.join("s-1.jsonl"), format!("{answered}\n")).unwrap();
+        let history = History::new(claude_only(home.path()), Limits::default());
+        let found = search(&history, "");
+        let at = |native: &str| {
+            found.sessions.iter().find(|s| s.native == native).and_then(|s| s.updated_ms)
+        };
+        let last = slopty_agent::claude::sessions::last_active(&project.join("s-1.jsonl"));
+        assert!(last.is_some());
+        assert_eq!(at("s-1"), last, "its transcript's last record");
+        assert_eq!(at("s-2"), Some(slopty_core::WallMs::from_millis(2_000)), "its last prompt");
+    }
+
     /// A cold search and a warm one over this machine's own records: how long each takes and
     /// how much they hold, as counts only; no prompt is printed.
     ///

@@ -26,8 +26,13 @@ use tokio::sync::mpsc;
 use crate::ssh::{self, Bar, Deployer, Kind, Mark, Progress, Said};
 use crate::{Workspace, net, this_mac};
 
-/// What a run says where this app cannot put Slopty on a machine.
+/// What a run says where this app cannot put Slopty on a machine: there is no `ssh` here.
+#[cfg(not(target_os = "macos"))]
 const NO_SSH: &str = "Add a device from Slopty on a Mac: it installs over ssh from there";
+/// What a run says on a Mac whose build installs on no machine (Slopty's self-test), once the
+/// machine named is found.
+#[cfg(target_os = "macos")]
+const INSTALLS_NOTHING: &str = "This build of Slopty installs on no machine: it is its self-test";
 /// What a This Mac run says where there is no Mac to share.
 const NO_THIS_MAC: &str = "Only Slopty on a Mac shares that Mac";
 /// The fix that starts a server on this Mac rather than join one.
@@ -107,6 +112,50 @@ fn stopped(why: impl Into<String>) -> AddProgress {
     AddProgress { failure: Some(failure), ..AddProgress::default() }
 }
 
+/// A run where this app puts Slopty on no machine: there is no `ssh` here, which it says.
+#[cfg(not(target_os = "macos"))]
+fn undeployed(frames: &mpsc::UnboundedSender<AddProgress>, _to: &Target, _cx: &gpui::App) {
+    send(frames, stopped(NO_SSH));
+}
+
+/// A run on a Mac whose build installs on no machine (its self-test).
+///
+/// The machine is looked up as `ssh` would, and the run says why it stopped: no machine has
+/// that name, in a deploy's own words, else that this build installs nothing.
+#[cfg(target_os = "macos")]
+fn undeployed(frames: &mpsc::UnboundedSender<AddProgress>, to: &Target, cx: &gpui::App) {
+    let frames = frames.clone();
+    let (host, port) = (to.host.clone(), to.port.unwrap_or(22));
+    cx.background_executor()
+        .spawn(async move {
+            let found = std::net::ToSocketAddrs::to_socket_addrs(&(host.as_str(), port))
+                .map(drop)
+                .map_err(|e| e.to_string());
+            send(&frames, unnamed_or_undeployed(&host, found));
+        })
+        .detach();
+}
+
+/// The frame that stops a run on a Mac that installs on no machine.
+///
+/// `host` named no machine (`found` is the lookup's error), said as a deploy says it, else
+/// this build installs nothing.
+#[cfg(target_os = "macos")]
+fn unnamed_or_undeployed(host: &str, found: Result<(), String>) -> AddProgress {
+    match found {
+        Err(why) => AddProgress {
+            failure: Some(AddFailure {
+                title: format!("No machine is named {host}"),
+                hint: Some("Check the name, and that Tailscale or your VPN is up.".to_owned()),
+                lines: vec![why],
+                ..AddFailure::default()
+            }),
+            ..AddProgress::default()
+        },
+        Ok(()) => stopped(INSTALLS_NOTHING),
+    }
+}
+
 /// A one-step run's frame: `title` at `mark`.
 fn one_step(title: String, mark: AddMark) -> AddProgress {
     let step = AddStep { title, detail: None, mark, fix: None };
@@ -131,12 +180,12 @@ impl Workspace {
                 cx.spawn(async move |this, cx| this_mac_run(this, cx, host, run).await).detach();
             }
             AddKind::Ssh | AddKind::ServeSsh => {
-                let Some(deployer) = self.deployer.clone() else {
-                    return send(&run.frames, stopped(NO_SSH));
-                };
                 let to = match target(&run.target) {
                     Ok(to) => to,
                     Err(why) => return send(&run.frames, stopped(why)),
+                };
+                let Some(deployer) = self.deployer.clone() else {
+                    return undeployed(&run.frames, &to, cx);
                 };
                 if run.kind == AddKind::ServeSsh {
                     cx.spawn(async move |this, cx| serve_run(this, cx, deployer, to, run).await)
@@ -931,6 +980,25 @@ mod tests {
         assert_eq!((to.host.as_str(), to.user, to.port), ("build-box", None, None));
         target("").unwrap_err();
         target("-oProxyCommand=x").unwrap_err();
+    }
+
+    /// On a Mac that installs on no machine, a machine with no such name says so, in a deploy's
+    /// own words with the lookup's, never that only a Mac installs; one that is found says this
+    /// build installs nothing.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_mac_that_installs_nothing_says_the_real_reason() {
+        let found = std::net::ToSocketAddrs::to_socket_addrs(&("nohost.invalid", 22))
+            .map(drop)
+            .map_err(|e| e.to_string());
+        let why = found.clone().expect_err("no machine is named nohost.invalid");
+        let frame = unnamed_or_undeployed("nohost.invalid", found);
+        let failure = frame.failure.expect("it stopped");
+        assert_eq!(failure.title, "No machine is named nohost.invalid");
+        assert_eq!(failure.lines, [why], "the lookup's own words");
+        assert!(failure.hint.is_some_and(|hint| hint.contains("Check the name")));
+        let found = unnamed_or_undeployed("localhost", Ok(())).failure.expect("it stopped");
+        assert_eq!(found.title, INSTALLS_NOTHING);
     }
 
     #[test]
