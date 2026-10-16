@@ -611,7 +611,6 @@ mod tests {
             state.chats = vec![chat("pin"), chat("regular"), chat("other")];
         });
         shell.settings.space_filter = None;
-        shell.settings.sidebar_organization = SidebarOrganization::InOneList;
         shell
             .settings
             .sidebar_pins_mut("local".into())

@@ -34,6 +34,8 @@ mod blobs;
 mod delivery_tests;
 #[cfg(target_vendor = "apple")]
 mod pages;
+// slopty: Claude Code's past sessions, listed, searched and taken up again.
+mod past;
 mod surfaces;
 mod work;
 
@@ -205,6 +207,8 @@ pub(super) struct Bridge {
     /// slopty: the pages agents show inline, hosted per window ([`pages`]).
     #[cfg(target_vendor = "apple")]
     pages: pages::Pages,
+    /// slopty: what Claude Code's past sessions wait on from the machines ([`past`]).
+    past: past::Past,
 }
 
 impl std::fmt::Debug for Bridge {
@@ -1759,6 +1763,7 @@ impl WorkspaceView {
     /// `key`'s answer to any intent: a Stop waiting for it hears how it went, and what was kept
     /// to be sent again is let go.
     pub(super) fn view_intent_done(&mut self, done: &IntentDone) {
+        self.past_done(done); // slopty: a past session being opened.
         if !self.view_model.starts.contains_key(&done.id) {
             self.view_model.unanswered.remove(&done.id);
         }

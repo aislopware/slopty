@@ -47,7 +47,11 @@ pub fn field() -> Div {
 /// the selected wash when on and a hover wash when off.
 #[must_use]
 pub fn chip(id: impl Into<gpui::ElementId>, on: bool, theme: &Theme) -> gpui::Stateful<Div> {
-    crate::surface_chrome::tab(id, on, theme).map(keep_keyboard)
+    // slopty: never narrower than tall, so a one-letter chip ("W") is a touch target on an iPad.
+    crate::surface_chrome::tab(id, on, theme)
+        .min_w(px(CONTROL_SIZE))
+        .justify_center()
+        .map(keep_keyboard)
 }
 
 /// `el` pressed by the pointer without taking the keyboard: a float over a terminal or a remote
@@ -319,4 +323,54 @@ pub fn tooltip_card(text: impl Into<SharedString>, theme: &Theme) -> crate::fros
         .text_color(theme.text_muted)
         .child(text.into());
     crate::frost::frosted(6.0, crate::frost::MENU_BLUR, card)
+}
+
+// slopty: a float's controls are touch targets on an iPad: none under 24 pt either way.
+#[cfg(test)]
+mod tests {
+    use gpui::{Render, div};
+
+    use super::*;
+
+    /// What the iPad's floats are built of: a toolbar button, a toggle chip with one letter, the
+    /// shortest dialog button and a pill.
+    struct Floats;
+
+    impl Render for Floats {
+        fn render(&mut self, _: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+            let theme = theme(cx).clone();
+            div()
+                .flex()
+                .items_start()
+                .gap(px(8.0))
+                .child(icon_button("float-close", crate::icons::CLOSE, "Close", &theme))
+                .child(chip("float-chip", false, &theme).debug_selector(|| "float-chip".into()).child("W"))
+                .child(button("float-ok", "OK", Tone::Ghost, &theme))
+                .child(floating_pill(
+                    "float-pill",
+                    None,
+                    &theme,
+                    |popup| (None, pill_words("Back", popup).into_any_element()),
+                    |pill| pill.debug_selector(|| "float-pill".into()),
+                ))
+        }
+    }
+
+    #[gpui::test]
+    fn a_float_s_controls_are_touch_targets(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+        });
+        let (_floats, cx) = cx.add_window_view(|_, _| Floats);
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear(cx);
+        });
+        for id in ["float-close", "float-chip", "float-ok", "float-pill"] {
+            let bounds = cx.debug_bounds(id).unwrap_or_else(|| panic!("{id} drawn"));
+            let (w, h) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
+            assert!(w >= 24.0 && h >= 24.0, "{id} is {w}x{h}");
+        }
+    }
 }

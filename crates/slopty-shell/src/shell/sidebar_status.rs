@@ -19,6 +19,18 @@ use crate::icons::{self, icon};
 use crate::state::{AppState, SESSION_STALE_MS, format_time_ago};
 use crate::theme::Theme;
 
+/// An agent as the hover card names it.
+fn agent_name(harness: slopty_view_proto::HarnessId) -> &'static str {
+    use slopty_view_proto::HarnessId;
+    match harness {
+        HarnessId::CLAUDE_CODE => "Claude Code",
+        HarnessId::CODEX => "Codex",
+        HarnessId::PI => "pi",
+        // Any other agent by its harness's name.
+        other => other.as_str(),
+    }
+}
+
 /// The groups "By status" sorts rows into, in the order they show.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(super) enum StatusGroup {
@@ -197,7 +209,7 @@ pub(super) fn chat_card(state: &AppState, chat_id: &str, now: DateTime<Utc>) -> 
         .filter(|branch| !branch.is_empty())
         .map(str::to_owned);
     let agent = chat.config.as_ref().map(|config| {
-        let mut words = vec![super::harness_updates::agent_name(config.harness).to_owned()];
+        let mut words = vec![agent_name(config.harness).to_owned()];
         words.extend(config.model.clone().filter(|model| !model.is_empty()));
         words.extend(config.reasoning.map(|level| crate::pickers::reasoning_label(level).to_owned()));
         words.join(" \u{b7} ")
@@ -585,7 +597,7 @@ mod tests {
     // the server shows its code; Devices opens Settings → Devices.
     #[gpui::test]
     fn the_server_menu_has_rows(cx: &mut gpui::TestAppContext) {
-        let (shell, cx) = sidebar(cx, crate::settings::SidebarOrganization::InOneList);
+        let (shell, cx) = sidebar(cx, crate::settings::SidebarOrganization::ByStatus);
         cx.update(|window, _| window.activate_window());
         shell.update(cx, |shell, cx| {
             shell.state.update(cx, |state, _| {
@@ -623,6 +635,46 @@ mod tests {
         cx.simulate_click(trigger, gpui::Modifiers::default());
         redraw(cx);
         assert!(cx.debug_bounds("user-menu-connect-phone").is_some(), "the code is offered");
+    }
+
+    // Every row wears its machine's kind, in each layout, and names the machine; a chat whose
+    // machine the app does not know wears none rather than a guess.
+    #[gpui::test]
+    fn every_row_says_which_machine_it_runs_on(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) = sidebar(cx, crate::settings::SidebarOrganization::ByStatus);
+        let device = |id: &str, name: &str, platform: &str| -> slopty_view_proto::Device {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "name": name, "platform": platform, "lastSeenAt": null,
+            }))
+            .unwrap()
+        };
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                state.devices = vec![device("local", "studio", "macos"), device("box", "box", "linux")];
+                if let Some(chat) = state.chats.iter_mut().find(|chat| chat.id == "working") {
+                    chat.device_id = "box".into();
+                }
+                if let Some(chat) = state.chats.iter_mut().find(|chat| chat.id == "finished") {
+                    chat.device_id = "gone".into();
+                }
+            });
+        });
+        for (compact, label) in [(true, false), (false, true), (false, false)] {
+            shell.update(cx, |shell, cx| {
+                shell.settings.sidebar_compact = compact;
+                shell.settings.sidebar_show_project_label = label;
+                cx.notify();
+            });
+            redraw(cx);
+            for id in ["approval", "question", "working"] {
+                let selector: &'static str = Box::leak(format!("chat-{id}-machine").into_boxed_str());
+                assert!(cx.debug_bounds(selector).is_some(), "{id} wears its machine ({compact}, {label})");
+            }
+            assert!(cx.debug_bounds("chat-finished-machine").is_none(), "an unknown machine is not guessed");
+        }
+        assert_eq!(super::super::spaces::device_glyph("linux"), crate::icons::REMOTE_SERVER);
+        assert_eq!(super::super::spaces::device_glyph("macos"), crate::icons::LAPTOP);
+        assert_eq!(super::super::spaces::device_glyph("ios"), crate::icons::SMARTPHONE);
     }
 
     #[test]

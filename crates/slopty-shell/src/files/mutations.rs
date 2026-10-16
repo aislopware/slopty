@@ -39,9 +39,11 @@ impl MutationIntent {
 
 impl FilesSurface {
     pub(crate) fn interaction_origin(&self, cx: &gpui::App) -> Option<WorkspaceInteractionOrigin> {
+        // slopty: no unwrap: no context is no origin.
+        let context = self.request_context.clone()?;
         self.is_current_target(cx)
             .then(|| WorkspaceInteractionOrigin {
-                context: self.request_context.clone().unwrap(),
+                context,
                 surface_id: self.surface_id,
                 generation: self.interaction_generation,
                 checkout_id: self.effective_checkout_id.clone().or_else(|| {
@@ -85,12 +87,13 @@ impl FilesSurface {
     }
 
     pub(crate) fn prepare_mutation(&mut self, intent: MutationIntent, cx: &mut Context<Self>) {
-        self.pending_mutation = Some(intent);
+        // slopty: the intent is read before it is kept, with no unwrap.
         for (path, document) in &mut self.preview.documents {
-            if self.pending_mutation.as_ref().unwrap().affects(path) {
+            if intent.affects(path) {
                 document.autosave_task = None;
             }
         }
+        self.pending_mutation = Some(intent);
         self.mutation_error = None;
         cx.notify();
     }
@@ -109,7 +112,10 @@ impl FilesSurface {
         let paths = self.preview.documents.keys().cloned().collect::<Vec<_>>();
         for path in paths {
             if self.mutation_blocks_path(&path) {
-                self.preview.documents.get_mut(&path).unwrap().autosave_task = None;
+                // slopty: no unwrap.
+                if let Some(document) = self.preview.documents.get_mut(&path) {
+                    document.autosave_task = None;
+                }
             } else {
                 self.schedule_autosave(path, cx);
             }
@@ -185,10 +191,11 @@ impl FilesSurface {
                 destination,
             });
         }
-        match intents.len() {
-            0 => {}
-            1 => cx.emit(FilesEvent::Mutate(intents.pop().unwrap())),
-            _ => cx.emit(FilesEvent::MutateMany(intents)),
+        // slopty: no unwrap.
+        if intents.len() > 1 {
+            cx.emit(FilesEvent::MutateMany(intents));
+        } else if let Some(intent) = intents.pop() {
+            cx.emit(FilesEvent::Mutate(intent));
         }
     }
 

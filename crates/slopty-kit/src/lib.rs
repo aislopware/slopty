@@ -5,7 +5,7 @@
 //! * [`colors`] — theme tokens → GPUI colours.
 //! * [`a11y`] — for tests, the accessibility tree.
 //! * [`markdown`] — a line of Markdown said as plain words.
-//! * [`fonts`] — bundled `IBM Plex Sans`, `Lilex` and Nerd symbols, registered at startup.
+//! * [`fonts`] — the bundled Nerd symbol face, registered at startup, and the terminal's fallbacks.
 //! * [`frames`] — the UI frame-time probe (draw percentiles, cadence, drops).
 //! * [`shown`] — work timed at the instant a paint reached the display.
 //! * [`keys`] — GPUI keystrokes → protocol key events.

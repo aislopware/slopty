@@ -55,6 +55,35 @@ pub fn places(state: &AppState) -> Vec<Place> {
     places
 }
 
+/// How long the page waits before it subscribes again after its `attempt`th failure in a row:
+/// 1 s, doubling, at most 15 s, as the Agents page's watch does.
+pub fn retry_after(attempt: u32) -> std::time::Duration {
+    std::time::Duration::from_secs(1_u64.checked_shl(attempt).unwrap_or(u64::MAX).min(15))
+}
+
+/// The updates of the rules that did not read.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Skipped {
+    /// How many.
+    pub count: u32,
+    /// Why the last did not.
+    pub last: Option<String>,
+}
+
+impl Skipped {
+    fn note(&mut self, why: String) {
+        self.count = self.count.saturating_add(1);
+        self.last = Some(why);
+    }
+
+    /// What the page says of them; `None` while there are none.
+    pub fn words(&self) -> Option<String> {
+        let last = self.last.as_deref()?;
+        let what = if self.count == 1 { "1 update".to_owned() } else { format!("{} updates", self.count) };
+        Some(format!("{what} of the rules could not be read and are not shown: {last}"))
+    }
+}
+
 /// The scope a rule from `source` lives in, as `slopty.ChangeRule` names it: the scope whose id
 /// begins the source (`localSettings` is `local`), else the source itself.
 pub fn scope_of(rules: &PermissionRules, source: &str) -> String {
@@ -81,6 +110,11 @@ pub struct PermissionsPage {
     /// A change under way, by its rule.
     busy: Option<String>,
     error: Option<SharedString>,
+    /// Why the rules cannot be read now, while the page asks again ([`retry_after`]).
+    unreachable: Option<SharedString>,
+    /// Updates of the rules that did not read, since the place was shown, and the last one's
+    /// reason: said under the rules, never dropped silently.
+    skipped: Skipped,
     _observe: Subscription,
 }
 
@@ -106,6 +140,8 @@ impl PermissionsPage {
             new_scope: 0,
             busy: None,
             error: None,
+            unreachable: None,
+            skipped: Skipped::default(),
             _observe: observe,
         };
         let first = page.default_place(cx);
@@ -130,10 +166,13 @@ impl PermissionsPage {
             .or_else(|| places.into_iter().next())
     }
 
-    /// Watch `place`'s rules.
+    /// Watch `place`'s rules: subscribed again with a growing wait ([`retry_after`]) while the
+    /// subscribe fails or the stream ends, and every update that does not read counted and said.
     fn show(&mut self, place: Place, cx: &mut Context<Self>) {
         self.rules = None;
         self.error = None;
+        self.unreachable = None;
+        self.skipped = Skipped::default();
         self.place = Some(place.clone());
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             self.watch = None;
@@ -144,28 +183,45 @@ impl PermissionsPage {
             params["cwd"] = serde_json::Value::String(cwd.clone());
         }
         self.watch = Some(cx.spawn(async move |this, cx| {
-            let mut rx = match engine.client().subscribe_checked(calls::WATCH_RULES, params).await {
-                Ok(rx) => rx,
-                Err(err) => {
-                    this.update(cx, |page, cx| {
-                        page.error = Some(format!("Couldn't read the rules: {err}").into());
-                        cx.notify();
-                    })
-                    .ok();
-                    return;
-                }
-            };
-            while let Some(value) = rx.recv().await {
-                let Ok(rules) = serde_json::from_value::<PermissionRules>(value) else { continue };
+            let mut attempt = 0_u32;
+            loop {
+                let why: SharedString =
+                    match engine.client().subscribe_checked(calls::WATCH_RULES, params.clone()).await {
+                        Ok(mut rx) => {
+                            while let Some(value) = rx.recv().await {
+                                attempt = 0;
+                                let read = serde_json::from_value::<PermissionRules>(value);
+                                let gone = this
+                                    .update(cx, |page, cx| {
+                                        page.unreachable = None;
+                                        match read {
+                                            Ok(rules) => page.rules = Some(rules),
+                                            Err(err) => page.skipped.note(err.to_string()),
+                                        }
+                                        cx.notify();
+                                    })
+                                    .is_err();
+                                if gone {
+                                    return;
+                                }
+                            }
+                            "The machine stopped saying its rules".into()
+                        }
+                        Err(err) => format!("Couldn't read the rules: {err}").into(),
+                    };
+                let wait = retry_after(attempt);
+                attempt = attempt.saturating_add(1);
+                let words: SharedString = format!("{why}. Trying again in {}s.", wait.as_secs()).into();
                 if this
                     .update(cx, |page, cx| {
-                        page.rules = Some(rules);
+                        page.unreachable = Some(words);
                         cx.notify();
                     })
                     .is_err()
                 {
-                    break;
+                    return;
                 }
+                cx.background_executor().timer(wait).await;
             }
         }));
         cx.notify();
@@ -364,9 +420,20 @@ impl Render for PermissionsPage {
                 .render(&self.place_select, cx)
         });
         let mut body: Vec<AnyElement> = Vec::new();
+        // slopty: why the rules are not read now, and what was skipped, each said where the
+        // rules are.
+        if let Some(why) = self.unreachable.clone().filter(|_| self.rules.is_some()) {
+            body.push(notice("permissions-unreachable", why, &theme));
+        }
+        if let Some(words) = self.skipped.words() {
+            body.push(notice("permissions-skipped", words.into(), &theme));
+        }
         match self.rules.clone() {
             None if places.is_empty() => body.push(empty(&theme, "No machines yet", "Add a machine to see its agents' rules.")),
-            None => body.push(empty(&theme, "Reading the rules…", "")),
+            None => match self.unreachable.clone() {
+                Some(why) => body.push(empty(&theme, "Couldn't read the rules", &why)),
+                None => body.push(empty(&theme, "Reading the rules…", "")),
+            },
             Some(rules) if !rules.known => body.push(empty(
                 &theme,
                 "No rules said yet",
@@ -465,6 +532,15 @@ impl Render for PermissionsPage {
     }
 }
 
+/// A line above the rules saying what is amiss with them, in the settings' error strip.
+fn notice(id: &'static str, words: SharedString, theme: &Theme) -> AnyElement {
+    widgets::error_strip(theme, words.clone())
+        .id(id)
+        .role(gpui::Role::Status)
+        .aria_label(words)
+        .into_any_element()
+}
+
 /// A quiet centred note in place of the rules.
 fn empty(theme: &Theme, title: &str, words: &str) -> AnyElement {
     div()
@@ -501,8 +577,90 @@ fn empty(theme: &Theme, title: &str, words: &str) -> AnyElement {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
     use super::*;
     use slopty_view_doc::rules::RuleScope;
+
+    /// A machine that turns the first watch away, then says its rules after an update that does
+    /// not read.
+    struct Rules(Arc<AtomicU32>);
+
+    #[async_trait::async_trait]
+    impl slopty_view_rpc::RpcService for Rules {
+        async fn handle(
+            &self,
+            method: &str,
+            _: serde_json::Value,
+        ) -> Result<slopty_view_rpc::RpcReply, slopty_view_rpc::RpcError> {
+            use futures::StreamExt as _;
+            assert_eq!(method, calls::WATCH_RULES);
+            if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Err(slopty_view_rpc::RpcError::Failed("the machine is away".into()));
+            }
+            let rules = PermissionRules { chat_id: "c".into(), known: true, ..PermissionRules::default() };
+            let frames = [serde_json::json!({ "known": "not a flag" }), serde_json::to_value(rules).unwrap()];
+            let frames = futures::stream::iter(frames).chain(futures::stream::pending()).boxed();
+            Ok(slopty_view_rpc::RpcReply::Stream(frames))
+        }
+    }
+
+    /// The page asks again after 1 s, doubling to 15 s; a watch turned away says why and when it
+    /// asks again, and an update that does not read is counted and said, not dropped.
+    #[gpui::test]
+    fn the_rules_are_asked_again_and_what_did_not_read_is_said(cx: &mut gpui::TestAppContext) {
+        let waits: Vec<u64> = (0..6).map(|attempt| retry_after(attempt).as_secs()).collect();
+        assert_eq!(waits, [1, 2, 4, 8, 15, 15]);
+        assert_eq!(retry_after(u32::MAX).as_secs(), 15);
+
+        // The machine answers on this thread, between the app's turns: a current-thread runtime
+        // driven here, so nothing wakes the app's executor from elsewhere.
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let _guard = runtime.enter();
+        let asked = Arc::new(AtomicU32::new(0));
+        let engine = crate::state::EngineHandle::from_test_client(slopty_view_rpc::memory_client(
+            Arc::new(Rules(Arc::clone(&asked))),
+        ));
+        let state = cx.new(|_| {
+            let mut state = AppState::new();
+            state.set_test_engine(engine);
+            state
+        });
+        let page = cx.new(|cx| PermissionsPage::new(state, cx));
+        let place = Place { device_id: "m".into(), cwd: Some("/w".into()), label: "w · m".into() };
+        page.update(cx, |page, cx| page.show(place, cx));
+        let settle = |cx: &mut gpui::TestAppContext, done: &dyn Fn(&PermissionsPage) -> bool| {
+            for _ in 0..300 {
+                cx.run_until_parked();
+                runtime.block_on(async {
+                    for _ in 0..20 {
+                        tokio::task::yield_now().await;
+                    }
+                });
+                cx.run_until_parked();
+                if page.read_with(cx, |page, _| done(page)) {
+                    return;
+                }
+            }
+            panic!("the page never settled");
+        };
+        settle(cx, &|page| page.unreachable.is_some());
+        page.read_with(cx, |page, _| {
+            let why = page.unreachable.as_deref().unwrap_or_default();
+            assert!(why.contains("the machine is away") && why.contains("again in 1s"), "{why}");
+            assert!(page.rules.is_none());
+        });
+        cx.executor().advance_clock(retry_after(0));
+        settle(cx, &|page| page.rules.is_some());
+        assert_eq!(asked.load(Ordering::SeqCst), 2, "asked again once");
+        page.read_with(cx, |page, _| {
+            assert_eq!(page.unreachable, None, "reading again");
+            assert_eq!(page.skipped.count, 1);
+            let said = page.skipped.words().unwrap_or_default();
+            assert!(said.starts_with("1 update of the rules could not be read"), "{said}");
+        });
+    }
 
     /// A rule's scope is the one its source names, else the source as given.
     #[test]

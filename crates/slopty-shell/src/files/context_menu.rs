@@ -123,7 +123,10 @@ impl FilesSurface {
                             break;
                         }
                     }
-                    self.tree_context_menu.open_mut().unwrap().active = next;
+                    // slopty: no unwrap.
+                    if let Some(open) = self.tree_context_menu.open_mut() {
+                        open.active = next;
+                    }
                     cx.notify();
                 }
             }
@@ -183,7 +186,12 @@ impl FilesSurface {
                 cx.write_to_clipboard(ClipboardItem::new_string(text));
                 self.tree_focus.focus(window, cx);
             }
-            2 => self.begin_tree_rename(paths[0].clone(), window, cx),
+            // slopty: no index: a rename with no path does nothing.
+            2 => {
+                if let Some(path) = paths.first() {
+                    self.begin_tree_rename(path.clone(), window, cx);
+                }
+            }
             3 => self.begin_tree_delete(paths, window, cx),
             _ => {}
         }

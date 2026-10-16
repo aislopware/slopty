@@ -51,7 +51,7 @@ use crate::settings::shortcuts::{ShortcutsEvent, ShortcutsPage};
 use crate::settings::{
     self, CHAT_PANEL_MIN, ComposerSendBehavior, FILES_PANEL_MIN, JUMP_SLOTS, KeymapConfig,
     RIGHT_PANE_MIN, SIDEBAR_DEFAULT, SIDEBAR_MAX, SIDEBAR_MIN, SavePolicy, ShortcutId,
-    SidebarOrganization, SidebarSort, TERMINAL_DEFAULT_HEIGHT, TERMINAL_MAX_VH,
+    SidebarOrganization, TERMINAL_DEFAULT_HEIGHT, TERMINAL_MAX_VH,
     TERMINAL_MIN_HEIGHT, UiSettings, badge_combo, jump_hints_visible, modifier_send_hint_visible,
     platform_combo, sidebar_pin_profile_key,
 };
@@ -72,7 +72,6 @@ mod chat_rename_tests;
 mod command_palette;
 mod file_mutations;
 mod files_panel;
-mod harness_updates;
 mod navigation_focus;
 #[cfg(test)]
 mod navigation_tests;
@@ -101,6 +100,7 @@ mod closed_tabs; // slopty: the right pane's closed tabs, opened again
 mod open_in; // slopty: a chat's folder in the person's editor
 mod subagent_drill; // slopty: a subagent drilled into from its card
 mod terminal_runs; // slopty: a transcript's Run in the chat's own shell terminal
+mod past_sessions; // slopty: Claude Code's past sessions: History, and Resume a session…
 // slopty: voice removed.
 
 use spaces::{AddSpaceFlow, RenameSpaceDialog};
@@ -1312,7 +1312,6 @@ type SidebarKeyedRow = (String, f32, AnyElement);
 
 struct SidebarSessionRows {
     custom_count: usize,
-    regular_count: usize,
     rows: Vec<SidebarKeyedRow>,
     pinned_count: usize,
     moving_row: Option<(AnyElement, f32)>,
@@ -1713,7 +1712,6 @@ pub struct Shell {
     new_thread_artwork_ready: crate::new_thread_background_effects::Readiness,
     /// Session-transient disclosure state, matching the Archived shelf.
     pub(super) pinned_open: bool,
-    pub(super) sessions_open: bool,
     /// The sidebar's archived accordion (t3code Sidebar): OPEN by default
     /// (user request), session-transient. `archived_shown` pages the
     /// expanded list ("Show more" reveals another page).
@@ -1754,6 +1752,8 @@ pub struct Shell {
     run_tabs: std::collections::HashMap<String, u64>,
     // slopty: the Open in menu (`open_in`).
     open_in: popover::Popup<open_in::OpenInMenu>,
+    // slopty: Claude Code's past sessions (`past_sessions`).
+    past_sessions: past_sessions::PastSessions,
     /// Host-owned project Actions cached per (device, space).
     project_actions: crate::project_actions::ProjectActionsController,
     /// Diff surfaces by id — each tab its own [`Changes`] viewer with its own
@@ -1893,18 +1893,7 @@ pub struct Shell {
     /// Persistent across AppState observer callbacks so simultaneous session
     /// failures and connectivity degradation produce one attention sound.
     attention_sound_gate: crate::sound::AttentionSoundGate,
-    /// `{device,harness,latest}` discoveries already delivered as a desktop
-    /// banner during this viewport lifetime.
-    harness_update_seen: std::collections::HashSet<String>,
-    /// Short debounce that aggregates providers finishing the same check at
-    /// slightly different times into one banner.
-    harness_update_banner_task: Option<Task<()>>,
-    /// Independent watches retain device identity across selection changes.
-    harness_update_devices: std::collections::BTreeMap<String, harness_updates::DeviceUpdates>,
-    harness_update_expanded: bool,
-    harness_update_transition: Option<WidthTween>,
-    harness_update_geometry: [Option<WidthTween>; 2],
-    harness_update_scroll: settings::widgets::PageScroll,
+    // slopty: no agent-update island; agents update themselves on their machines.
     user_menu: popover::Popup<()>,
     /// Inline sidebar error strip (mutation failures); click dismisses.
     sidebar_notice: Option<SharedString>,
@@ -2080,6 +2069,10 @@ impl Shell {
             this.on_state_changed(&state, cx);
             cx.notify();
         });
+        // slopty: a settings file that could not be read was moved aside; say so once.
+        cx.defer(|cx| {
+            settings::announce_set_aside(cx);
+        });
         // slopty: a mod's pane the composer asks for becomes a tab (S2).
         cx.observe_global::<crate::composer::PaneAsk>(Self::on_pane_ask).detach();
         // slopty: a page a card moves into the pane becomes a tab (M).
@@ -2228,7 +2221,6 @@ impl Shell {
             new_thread_artwork_ready: Default::default(),
             archived_open: true,
             pinned_open: true,
-            sessions_open: true,
             archived_shown: 0,
             sidebar_collapsed_groups: std::collections::HashSet::new(),
             sidebar_reveal_motions: std::collections::HashSet::new(),
@@ -2242,6 +2234,7 @@ impl Shell {
             last_archive: None,            // slopty
             run_tabs: std::collections::HashMap::new(), // slopty
             open_in: popover::Popup::default(), // slopty
+            past_sessions: past_sessions::PastSessions::default(), // slopty
             project_actions: crate::project_actions::ProjectActionsController::default(),
             diffs: std::collections::HashMap::new(),
             files: std::collections::HashMap::new(),
@@ -2334,13 +2327,6 @@ impl Shell {
             sound_prev: std::collections::HashMap::new(),
             connectivity_notifications: Default::default(),
             attention_sound_gate: Default::default(),
-            harness_update_seen: std::collections::HashSet::new(),
-            harness_update_banner_task: None,
-            harness_update_devices: Default::default(),
-            harness_update_expanded: false,
-            harness_update_transition: None,
-            harness_update_geometry: [None; 2],
-            harness_update_scroll: settings::widgets::PageScroll::default(),
             user_menu: popover::Popup::default(),
             sidebar_notice: None,
             // slopty: no self-updater.
@@ -2431,7 +2417,6 @@ impl Shell {
     fn on_state_changed(&mut self, state: &Entity<AppState>, cx: &mut Context<Self>) {
         // slopty: voice removed.
         self.prune_file_explorers(cx);
-        self.refresh_harness_update_watch(cx);
         self.sync_search_warm(cx);
         if state.read(cx).engine().is_none() {
             self.side_chats.clear();
@@ -2595,75 +2580,6 @@ impl Shell {
                     crate::notify::post("Connection unavailable", body, None);
                 }
             }
-        }
-        // Agent release discoveries finish independently (bounded provider
-        // concurrency), so debounce the transition and deliver one aggregate
-        // banner. Versioned releases deduplicate by version. Versionless
-        // availability deduplicates until a confirmed Current/Updated status;
-        // transient checks, disconnections and cancellation do not reset it.
-        let has_unseen_harness_update = {
-            let state = state.read(cx);
-            let device = state.local_device_id.as_deref().unwrap_or("local");
-            for status in &state.harness_updates {
-                if matches!(
-                    status.phase,
-                    slopty_view_proto::HarnessUpdatePhase::Current
-                        | slopty_view_proto::HarnessUpdatePhase::Updated
-                ) {
-                    self.harness_update_seen.remove(
-                        &harness_updates::versionless_notification_key(device, status.harness),
-                    );
-                }
-            }
-            state.harness_updates.iter().any(|status| {
-                harness_updates::notification_key(device, status)
-                    .is_some_and(|key| !self.harness_update_seen.contains(&key))
-            })
-        };
-        if has_unseen_harness_update && self.harness_update_banner_task.is_none() {
-            self.harness_update_banner_task = Some(cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(Duration::from_secs(1)).await;
-                this.update(cx, |this, cx| {
-                    this.harness_update_banner_task = None;
-                    let new: Vec<String> = {
-                        let state = this.state.read(cx);
-                        let device = state.local_device_id.as_deref().unwrap_or("local");
-                        state
-                            .harness_updates
-                            .iter()
-                            .filter_map(|status| harness_updates::notification_key(device, status))
-                            .filter(|key| !this.harness_update_seen.contains(key))
-                            .collect()
-                    };
-                    if new.is_empty() {
-                        return;
-                    }
-                    let count = new.len();
-                    for key in &new {
-                        this.harness_update_seen.insert(key.clone());
-                    }
-                    let focused = cx.active_window().is_some();
-                    if this.settings.notifications_enabled
-                        && this.settings.agent_update_notifications
-                        && !(this.settings.notifications_background_only && focused)
-                    {
-                        let body = if count == 1 {
-                            "A coding agent update is ready"
-                        } else {
-                            "Coding agent updates are ready"
-                        };
-                        crate::notify::post(
-                            &format!(
-                                "{count} agent update{} available",
-                                if count == 1 { "" } else { "s" }
-                            ),
-                            body,
-                            Some(crate::notify::AGENT_UPDATES_TARGET),
-                        );
-                    }
-                })
-                .ok();
-            }));
         }
         // An explicit projectless canvas must be visible in the sidebar:
         // retaining a project filter would hide the session on its first send.
@@ -4844,6 +4760,57 @@ impl Shell {
         page.update(cx, |page, cx| page.open_add_device_with_server(address, cx));
     }
 
+    // slopty: a `slopty://new?prompt=…&machine=…&folder=…` link (the app's `invite.rs`).
+    /// The new-session canvas with `prompt` in the composer, on the project `folder` names on
+    /// `machine` (its name or id) when one is known, else on the machine alone; nothing is sent,
+    /// sending stays the person's press. A folder no project holds is said, and left out.
+    pub fn open_new_session_with_prompt(
+        &mut self,
+        prompt: String,
+        machine: Option<String>,
+        folder: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let folder = folder.map(|folder| folder.trim_end_matches('/').to_owned());
+        let (project, device) = {
+            let state = self.state.read(cx);
+            let device = machine.as_deref().and_then(|machine| {
+                state
+                    .devices
+                    .iter()
+                    .find(|device| device.id == machine || device.name.eq_ignore_ascii_case(machine))
+                    .map(|device| device.id.clone())
+            });
+            let project = folder.as_deref().and_then(|folder| {
+                state
+                    .spaces
+                    .iter()
+                    .find(|space| {
+                        space.path.trim_end_matches('/') == folder
+                            && device.as_deref().is_none_or(|device| space.device_id == device)
+                    })
+                    .map(|space| space.id.clone())
+            });
+            (project, device)
+        };
+        self.open_new_session(project.clone(), cx);
+        if project.is_none() {
+            if let Some(device) = device {
+                self.state.update(cx, |state, cx| {
+                    state.select_space(None, cx);
+                    state.select_device(device, cx);
+                });
+            }
+            if let Some(folder) = folder {
+                let on = machine.map(|machine| format!(" on {machine}")).unwrap_or_default();
+                crate::toast::info(cx, format!("No project holds {folder}{on}, so the session starts without one"));
+            }
+        }
+        let input = self.composer.read(cx).input.clone();
+        input.update(cx, |input, cx| input.set_text(prompt, cx));
+        cx.notify();
+    }
+
     // slopty: the app's menu (Settings…): Settings where they were left.
     pub fn open_settings_from_menu(&mut self, cx: &mut Context<Self>) {
         self.open_last_settings(cx);
@@ -5061,7 +5028,6 @@ impl Shell {
                             self.settings.sound_attention_enabled,
                             self.settings.notifications_enabled,
                             self.settings.notifications_background_only,
-                            self.settings.agent_update_notifications,
                             cx,
                         )
                     });
@@ -5076,7 +5042,6 @@ impl Shell {
                                 attention_sound,
                                 desktop,
                                 background_only,
-                                agent_updates,
                             } = *event;
                             this.settings.sound_enabled = sound;
                             this.settings.sound_completion_enabled = completion_sound;
@@ -5084,7 +5049,6 @@ impl Shell {
                             this.settings.sound_attention_enabled = attention_sound;
                             this.settings.notifications_enabled = desktop;
                             this.settings.notifications_background_only = background_only;
-                            this.settings.agent_update_notifications = agent_updates;
                             this.schedule_save(cx);
                             cx.notify();
                         },
@@ -5636,6 +5600,7 @@ impl Shell {
             || self.add_space.is_some()
             || self.composer.read(cx).pickers().read(cx).is_open()
             || self.open_side_chat_pickers(cx).is_some()
+            || self.past_sessions.picker_open() // slopty: Resume a session…
     }
 
     /// The pickers of a side chat whose picker popover is open.
@@ -6820,15 +6785,29 @@ impl Shell {
             .map(|chat| chat.device_id.clone());
         let compact = search_query.is_none() && self.settings.sidebar_compact;
         let show_label = search_query.is_some() || self.settings.sidebar_show_project_label;
-        let remote = self
-            .state
-            .read(cx)
-            .chats
-            .iter()
-            .find(|chat| chat.id == id)
-            .is_some_and(|chat| {
-                self.state.read(cx).local_device_id.as_deref() != Some(chat.device_id.as_str())
-            });
+        // slopty: every row says which machine it runs on by that machine's kind (laptop,
+        // server, phone), so where a chat runs reads without the hover card.
+        let machine = pr_device.as_deref().and_then(|device_id| {
+            self.state.read(cx).devices.iter().find(|device| device.id == device_id).map(|device| {
+                (
+                    spaces::device_glyph(&device.platform),
+                    SharedString::from(format!("On {}", device.name)),
+                )
+            })
+        });
+        // slopty: the machine glyph, one element wherever the row draws it.
+        let machine_id = SharedString::from(format!("{row_id}-machine"));
+        let machine_mark = |(glyph, on): (&'static str, SharedString), color: gpui::Hsla| {
+            let selector = machine_id.to_string();
+            div()
+                .id(machine_id.clone())
+                .debug_selector(move || selector)
+                .role(gpui::Role::Image)
+                .aria_label(on)
+                .flex_none()
+                .child(icon(glyph).size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE)).text_color(color))
+                .into_any_element()
+        };
         let project_icon = (project_icon && search_query.is_none())
             .then(|| self.render_project_icon(&id, SIDEBAR_ACTIVE_HARNESS_ICON_SIZE, selected, cx));
         let corner_hovered = !preview && self.chat_status_hover.as_deref() == Some(row_id.as_str());
@@ -7015,14 +6994,8 @@ impl Shell {
                 })
                 .into_any_element()
         } else if compact {
-            if remote {
-                icon(icons::REMOTE_SERVER)
-                    .size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE))
-                    .text_color(theme.text_muted.opacity(0.5))
-                    .into_any_element()
-            } else {
-                div().into_any_element()
-            }
+            // slopty: compact rows draw their own trailing cluster, the machine's kind in it.
+            div().into_any_element()
         } else {
             match status_label {
                 Some(label) => {
@@ -7115,11 +7088,7 @@ impl Shell {
                     if archived { "Unarchive" } else { "Archive" }
                 } else {
                     if compact {
-                        if remote {
-                            "Remote session"
-                        } else {
-                            "Session actions"
-                        }
+                        "Session actions" // slopty: the machine's kind trails the row itself
                     } else {
                         status_label.unwrap_or("Idle")
                     }
@@ -7342,6 +7311,9 @@ impl Shell {
                         .flex_row()
                         .items_center()
                         .gap(px(Theme::SPACE_SM))
+                        // slopty: the machine's kind leads the place line, and stays when a
+                        // waiting reason takes the place's words.
+                        .children(machine.clone().map(|mark| machine_mark(mark, subline)))
                         .child(sidebar_faded_label(
                             format!("chat-device-{content_id}").into(),
                             true,
@@ -7413,13 +7385,9 @@ impl Shell {
                         )
                         .into_any_element(),
                     })
-                    .when(!compact && !show_label && remote, |el| {
-                        el.child(
-                            icon(icons::REMOTE_SERVER)
-                                .size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE))
-                                .flex_none()
-                                .text_color(subline),
-                        )
+                    // slopty: the machine's kind trails the title when no place line shows.
+                    .when_some(machine.clone().filter(|_| !compact && !show_label), |el, mark| {
+                        el.child(machine_mark(mark, subline))
                     })
                     .when(!compact && !show_label, |el| {
                         el.child(
@@ -7453,7 +7421,9 @@ impl Shell {
                             .then(|| subagent_pill("compact"))
                             .flatten();
                         let archive_id = id.clone();
-                        el.children(change_request.clone().map(|summary| {
+                        // slopty: the machine's kind, before the PR badge and the time.
+                        el.children(machine.clone().map(|mark| machine_mark(mark, subline)))
+                        .children(change_request.clone().map(|summary| {
                             if preview {
                                 crate::change_requests::pull_request_badge_preview(
                                     format!("{row_id}-compact-pr").into(),
@@ -7809,25 +7779,9 @@ impl Shell {
             .map(|(row, height)| self.render_moving_sidebar_session(row, height, theme));
         let pinned_count = session_rows.pinned_count;
         let custom_count = session_rows.custom_count;
-        let regular_start = pinned_count + custom_count;
         let keyed = session_rows.rows;
-        let regular_count = session_rows.regular_count;
-        let ungrouped = self.settings.sidebar_organization == SidebarOrganization::InOneList;
-        let regular_body_height = spaces::SIDEBAR_DISCLOSURE_BODY_INSET
-            + keyed
-                .iter()
-                .skip(regular_start)
-                .map(|(_, height, _)| height)
-                .sum::<f32>()
-            + SIDEBAR_LIST_GAP * keyed.len().saturating_sub(regular_start + 1) as f32;
-        let regular_body_height =
-            if keyed.len() == regular_start && self.sidebar_session_transfer.is_some() {
-                spaces::SIDEBAR_DISCLOSURE_BODY_INSET
-                    + 48.0
-                    + self.sidebar_transfer_extra_gap("regular")
-            } else {
-                regular_body_height
-            };
+        // slopty: every organisation groups (by status or by project): no ungrouped "Sessions"
+        // disclosure.
         let pinned_body_height = spaces::SIDEBAR_DISCLOSURE_BODY_INSET
             + self.sidebar_transfer_extra_gap("pinned")
             + keyed
@@ -7858,25 +7812,6 @@ impl Shell {
             ));
         }
         for (ix, (key, height, _)) in keyed.iter().enumerate() {
-            if ungrouped && ix == regular_start {
-                order.push((
-                    "sidebar-sessions-header".into(),
-                    spaces::SIDEBAR_DISCLOSURE_HEADER_HEIGHT
-                        + if show_pinned_section || custom_count > 0 {
-                            12.0
-                        } else {
-                            0.0
-                        }
-                        + if self.sessions_open {
-                            spaces::SIDEBAR_DISCLOSURE_BODY_INSET - SIDEBAR_LIST_GAP
-                        } else {
-                            0.0
-                        },
-                ));
-            }
-            if ungrouped && ix >= regular_start && !self.sessions_open {
-                continue;
-            }
             if ix < pinned_count && !self.pinned_open {
                 continue;
             }
@@ -7991,6 +7926,7 @@ impl Shell {
 
         // t3code's archived accordion, below the active list.
         let archived_section = self.render_archived_section(theme, cx);
+        let history_section = self.render_sidebar_history(theme, cx); // slopty: past_sessions
 
         // The space filter lives ABOVE the scroll region (fixed) so its
         // dropdown can float without being clipped by the list's overflow.
@@ -8014,7 +7950,6 @@ impl Shell {
                     !regular_items.is_empty() || self.sidebar_session_transfer.is_some(),
                     |el| {
                         el.child(
-                            self.render_sessions_section(
                                 div()
                                     .id("sidebar-regular-sessions")
                                     .debug_selector(|| "sidebar-regular-sessions".into())
@@ -8075,14 +8010,7 @@ impl Shell {
                                             .text_size(crate::typography::ui_rems(12.0))
                                             .child("Drop here to unpin")
                                     })
-                                    .children(regular_items)
-                                    .into_any_element(),
-                                regular_body_height,
-                                regular_count,
-                                show_pinned_section || custom_count > 0,
-                                theme,
-                                cx,
-                            ),
+                                    .children(regular_items),
                         )
                     },
                 )
@@ -8153,6 +8081,7 @@ impl Shell {
                     // is the whole column; a little air stands in.
                     .pt(px(SIDEBAR_LIST_PAD_TOP))
                     .child(active_list)
+                    .children(history_section) // slopty
                     .children(archived_section)
                     .children(moving_row),
             )),
@@ -8526,10 +8455,6 @@ impl Shell {
         {
             return true;
         }
-        if self.harness_update_expanded {
-            self.set_harness_updates_expanded(false, cx);
-            return true;
-        }
         if self.chat_rename.is_some() {
             self.finish_rename_chat(false, cx);
             return true;
@@ -8828,6 +8753,7 @@ impl Shell {
         if let Some(overlay) = self.render_command_palette(viewport, window, cx) {
             overlays.push(overlay);
         }
+        overlays.extend(self.render_resume_picker(viewport, window, cx)); // slopty: past_sessions
         if let Some(overlay) = self.render_add_space_overlay(viewport, window, cx) {
             overlays.push(overlay);
         }
@@ -9200,22 +9126,6 @@ impl Shell {
             Empty.into_any_element()
         };
 
-        // Share the dock's choreography: release the bottom chip early on
-        // departure, reveal it with the Home selectors on return. Absolute
-        // mounting keeps it out of composer measurements and centering.
-        let chip_opacity = if has_selection {
-            1.0 - crate::composer_dock::stage(dock_frame.dissolve(), 0.0, 0.22)
-        } else {
-            dock_frame.selectors()
-        } * self.composer_dock.borrow().opacity();
-        if has_selection {
-            self.set_harness_updates_expanded(false, cx);
-        }
-        let harness_update_card = if chip_opacity > 0.001 && (!has_selection || dock_frame.active) {
-            self.render_harness_update_card(window, main_content_width, cx)
-        } else {
-            None
-        };
         let status = div()
             .relative()
             .left(px(-session_reserve / 2.0))
@@ -9305,36 +9215,6 @@ impl Shell {
             )
             .children(session_card)
             .children(drill_breadcrumb) // slopty: a subagent's way back.
-            .when_some(harness_update_card, |column, chip| {
-                // Home notices stay anchored to the window bottom, behind the
-                // dock. Clip paint and hitboxes at the same measured terminal
-                // edge as the transcript, including during open/close motion;
-                // draw order alone would show them through the terminal glass.
-                column.child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .child(crate::terminal::dock::above_terminal(
-                            div().size_full().overflow_hidden().child(
-                                div().relative().w_full().h(px(self.viewport_height)).child(
-                                    div()
-                                        .absolute()
-                                        .left_0()
-                                        .right_0()
-                                        .bottom(px(24.0 - 8.0 * (1.0 - chip_opacity)))
-                                        .opacity(chip_opacity)
-                                        .flex()
-                                        .justify_center()
-                                        .child(chip)
-                                        .when(has_selection, |el| {
-                                            el.child(div().absolute().inset_0().occlude())
-                                        }),
-                                ),
-                            ),
-                            terminal_geometry.clone(),
-                        )),
-                )
-            })
             // The glass chrome stack, floating over the transcript's bottom:
             // reserved status strip (h-6, the WorkingIndicator — the composer
             // below never shifts), composer, terminal dock. A paint-time
@@ -13573,6 +13453,27 @@ mod exit_regressions {
                 shell.settings.space_filter = Some("one".into());
                 shell.open_new_session(Some("two".into()), cx);
                 assert_eq!(shell.state.read(cx).selected_space.as_deref(), Some("two"));
+
+                // slopty: a `slopty://new` link fills the composer on the project its folder
+                // names, and sends nothing; a folder no project holds is said and left out.
+                let typed = |shell: &Shell, cx: &App| {
+                    shell.composer.read(cx).input.read(cx).text().to_owned()
+                };
+                shell.settings.space_filter = None;
+                shell.open_new_session_with_prompt(
+                    "Fix the flaky test".into(),
+                    None,
+                    Some("/one/".into()),
+                    cx,
+                );
+                assert_eq!(shell.state.read(cx).selected_space.as_deref(), Some("one"));
+                assert!(shell.state.read(cx).selected_chat.is_none(), "a new session, not sent");
+                assert_eq!(typed(shell, cx), "Fix the flaky test");
+                crate::toast::clear(cx);
+                shell.open_new_session_with_prompt("Again".into(), None, Some("/nowhere".into()), cx);
+                assert_eq!(typed(shell, cx), "Again");
+                let shown = crate::toast::shown(cx);
+                assert!(shown.iter().any(|(_, words)| words.contains("/nowhere")), "{shown:?}");
             })
             .unwrap();
     }
@@ -14341,72 +14242,6 @@ mod right_tab_mouse_regressions {
     }
 
     #[gpui::test]
-    fn update_banner_fires_during_continuous_state_changes(cx: &mut TestAppContext) {
-        let (shell, cx) = setup(cx);
-        shell.update(cx, |shell, cx| {
-            shell.settings.notifications_enabled = false;
-            shell.state.update(cx, |state, _| {
-                state.harness_updates = vec![
-                    serde_json::from_value(serde_json::json!({
-                        "harness": "codex", "phase": "available", "latestVersion": "2.0.0",
-                        "policy": "notify", "source": "unknown", "canApply": true
-                    }))
-                    .unwrap(),
-                    serde_json::from_value(serde_json::json!({
-                        "harness": "hermes", "phase": "available",
-                        "policy": "notify", "source": "unknown", "canApply": true
-                    }))
-                    .unwrap(),
-                ];
-            });
-        });
-        for _ in 0..12 {
-            shell.update(cx, |shell, cx| {
-                shell.on_state_changed(&shell.state.clone(), cx)
-            });
-            cx.run_until_parked();
-            cx.executor().advance_clock(Duration::from_millis(100));
-        }
-        cx.run_until_parked();
-        shell.read_with(cx, |shell, _| {
-            assert_eq!(shell.harness_update_seen.len(), 2);
-            assert!(shell.harness_update_banner_task.is_none());
-        });
-        // Rechecks and repeated versionless availability remain deduplicated.
-        for phase in [
-            slopty_view_proto::HarnessUpdatePhase::Checking,
-            slopty_view_proto::HarnessUpdatePhase::Available,
-        ] {
-            shell.update(cx, |shell, cx| {
-                shell
-                    .state
-                    .update(cx, |state, _| state.harness_updates[1].phase = phase);
-                shell.on_state_changed(&shell.state.clone(), cx);
-                assert!(shell.harness_update_banner_task.is_none());
-            });
-        }
-        // A confirmed current state ends the availability episode, permitting
-        // another commit-only update to notify even if the version is unchanged.
-        shell.update(cx, |shell, cx| {
-            shell.state.update(cx, |state, _| {
-                state.harness_updates[1].phase = slopty_view_proto::HarnessUpdatePhase::Current
-            });
-            shell.on_state_changed(&shell.state.clone(), cx);
-            assert_eq!(shell.harness_update_seen.len(), 1);
-            shell.state.update(cx, |state, _| {
-                state.harness_updates[1].phase = slopty_view_proto::HarnessUpdatePhase::Available
-            });
-            shell.on_state_changed(&shell.state.clone(), cx);
-        });
-        cx.run_until_parked();
-        cx.executor().advance_clock(Duration::from_secs(1));
-        cx.run_until_parked();
-        shell.read_with(cx, |shell, _| {
-            assert_eq!(shell.harness_update_seen.len(), 2)
-        });
-    }
-
-    #[gpui::test]
     fn surface_close_press_does_not_start_parent_drag(cx: &mut TestAppContext) {
         let (shell, cx) = setup(cx);
         let start = cx.debug_bounds("right-surface-close-0").unwrap().center();
@@ -14920,8 +14755,7 @@ mod settings_modal_regressions {
         let keymap = KeymapConfig::default();
         cx.update(|cx| apply_keymap(cx, &keymap, ComposerSendBehavior::default()));
         let window = cx.add_window(|_, cx| {
-            let mut shell = test_shell(dir.path(), cx);
-            shell.settings.sidebar_organization = SidebarOrganization::InOneList;
+            let shell = test_shell(dir.path(), cx);
             shell.state.update(cx, |state, _| {
                 state.workspace_scope = Some(WorkspaceScope::Local);
                 state.local_device_id = Some("local".into());
@@ -15059,7 +14893,6 @@ mod settings_modal_regressions {
             shell.debug_gate = Some(GatePhase::Ready);
             shell.splash = SplashPhase::Gone;
             shell.reduced_motion = true;
-            shell.settings.sidebar_organization = SidebarOrganization::InOneList;
             shell.state.update(cx, |state, _| {
                 state.workspace_scope = Some(WorkspaceScope::Local);
                 state.local_device_id = Some("local".into());

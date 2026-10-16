@@ -372,6 +372,7 @@ impl Section {
 enum Command {
     NewChat,
     NewProject,
+    ResumeSession, // slopty: a past Claude Code session (`past_sessions`)
     Settings,
     Theme(AppearanceMode),
     ArchiveThread,
@@ -382,6 +383,7 @@ impl Command {
         match self {
             Self::NewChat => "New chat",
             Self::NewProject => "New project",
+            Self::ResumeSession => super::past_sessions::RESUME, // slopty
             Self::Settings => "Open settings",
             Self::Theme(AppearanceMode::System) => "Switch to system theme",
             Self::Theme(AppearanceMode::Light) => "Switch to light theme",
@@ -394,6 +396,7 @@ impl Command {
         match self {
             Self::NewChat => icons::PEN_NEW_SQUARE,
             Self::NewProject => icons::FOLDER,
+            Self::ResumeSession => icons::CLOCK_CIRCLE, // slopty
             Self::Settings => icons::SETTINGS,
             Self::Theme(mode) => mode.icon(),
             Self::ArchiveThread => icons::ARCHIVE_MINIMALISTIC,
@@ -487,6 +490,7 @@ fn commands_for(query: &str, is_dark: bool, can_archive: bool) -> Vec<Command> {
     [
         Command::NewChat,
         Command::NewProject,
+        Command::ResumeSession, // slopty
         Command::Settings,
         Command::Theme(if is_dark {
             AppearanceMode::Light
@@ -1071,6 +1075,7 @@ impl Shell {
         match row.kind {
             RowKind::Command(Command::NewChat) => self.open_new_session(None, cx),
             RowKind::Command(Command::NewProject) => self.open_add_space(cx),
+            RowKind::Command(Command::ResumeSession) => self.toggle_resume_picker(window, cx), // slopty
             RowKind::Command(Command::Settings) => self.open_last_settings(cx),
             RowKind::Command(Command::Theme(_)) => unreachable!(),
             RowKind::Command(Command::ArchiveThread) => self.archive_selected_chat(cx),
@@ -1122,6 +1127,7 @@ impl Shell {
         let id = match command {
             Command::NewChat => ShortcutId::NewSession,
             Command::NewProject => ShortcutId::NewProject,
+            Command::ResumeSession => ShortcutId::ResumeSession, // slopty
             Command::Settings => return Some(crate::settings::badge_combo("mod-,")),
             Command::ArchiveThread => ShortcutId::ArchiveSession,
             Command::Theme(_) => return None,
@@ -3026,7 +3032,6 @@ mod tests {
         let (window, _) = palette_window(cx);
         window
             .update(cx, |shell, _, cx| {
-                shell.settings.sidebar_organization = SidebarOrganization::InOneList;
                 shell.state.update(cx, |state, _| {
                     state.connection = slopty_view_proto::view::ConnectionStatus::Ready;
                     state.workspace_scope = Some(WorkspaceScope::Local);
@@ -3171,6 +3176,7 @@ mod tests {
             vec![
                 Command::NewChat,
                 Command::NewProject,
+                Command::ResumeSession, // slopty
                 Command::Settings,
                 Command::Theme(AppearanceMode::Light)
             ]

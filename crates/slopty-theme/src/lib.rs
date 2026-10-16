@@ -489,10 +489,7 @@ impl From<&TerminalPalette> for Colors {
     }
 }
 
-/// Type tokens.
-///
-/// The chrome scale hangs off `ui_size` ([`Self::caption`], [`Self::small`], [`Self::roles`]),
-/// so a settings change moves every label together.
+/// Type tokens: the terminal's face and the chrome's, as the app dresses them in the shell's.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Typography {
     /// Monospace family for terminals and code; the first installed one wins, and the bundled
@@ -505,234 +502,23 @@ pub struct Typography {
     /// Terminal line height as a multiple of the one the font asks for (ghostty's
     /// `adjust-cell-height`). `1.0` is the font's own, which is what a terminal wants.
     pub mono_line_height: f32,
-    /// Line height of Markdown (a note, a code block, a plan), as a multiple of the font size.
-    pub markdown_line_height: f32,
-    /// Line height of the conversation's prose, read at length: Delta's, 15/21 (measured from
-    /// the signed-in app, `.research/delta-signed-in-2026-10-12.md` §2.4).
-    pub prose_line_height: f32,
-    /// Line height of the composer's text: the prose's, since Delta's composer is the next
-    /// turn's row, set as the turns are.
-    pub composer_line_height: f32,
     /// The interface family: the chrome, the prose and the composer.
     pub ui_family: String,
-    /// The chrome's label size: Zed's default label, 14 at its 16 rem. The smaller labels and
-    /// the icons hang off it.
+    /// The chrome's label size, the shell's.
     pub ui_size: f32,
-    /// What is read at length, in points: an agent's answers and the person's messages, and
-    /// the composer they are written in. Its own setting, so reading can grow while the chrome
-    /// keeps its size.
-    pub prose_size: f32,
-}
-
-impl Typography {
-    /// Markdown's strong words and a few titles: Zed's `SemiBold`. Zed bundles no medium weight,
-    /// so a state is said by its tone, never by a heavier cut.
-    pub const STRONG_WEIGHT: f32 = 600.0;
-
-    /// The smallest chrome size (base − 4): Zed's extra-small label, 10, for HUD readouts,
-    /// timestamps and counts.
-    #[must_use]
-    pub fn caption(&self) -> f32 {
-        (self.ui_size - 4.0).max(6.0)
-    }
-
-    /// Secondary chrome (base − 2): Zed's small label, 12, for bar labels, folds, tool
-    /// summaries, section labels, a row's second line, a bar's readouts and a status word.
-    #[must_use]
-    pub fn small(&self) -> f32 {
-        (self.ui_size - 2.0).max(7.0)
-    }
-
-    /// Prose read at length: an assistant's answer and the prompt it answers, at the regular
-    /// weight on [`Self::prose_line_height`]; [`Self::prose_size`], never under 6.
-    #[must_use]
-    pub const fn prose(&self) -> f32 {
-        self.prose_size.max(6.0)
-    }
-
-    /// Every icon's slot (base + 2): a row's lead, a tile's kind, a status mark, a bar button,
-    /// 16 at the default size.
-    #[must_use]
-    pub fn icon(&self) -> f32 {
-        self.ui_size + 2.0
-    }
-
-    /// A glyph's drawing inside its slot (base): 14 at the default size, where Octicons' 1.5
-    /// line on its 16 grid is the 1.31 px stem of the words beside it, with a point of air
-    /// round it in the slot, as Zed sets its 12 px figure in a 16 slot.
-    #[must_use]
-    pub const fn glyph(&self) -> f32 {
-        self.ui_size
-    }
-
-    /// A small glyph (base − 2): a thread's fold disclosure, Zed's `IconSize::Small`, 12 at the
-    /// default size.
-    #[must_use]
-    pub fn icon_small(&self) -> f32 {
-        self.ui_size - 2.0
-    }
-}
-
-/// A type role: a size, the line it sits on, and its weight, in points at zoom 1.
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub struct TypeRole {
-    /// The text's size.
-    pub size: f32,
-    /// The height of its line.
-    pub line: f32,
-    /// Its weight: [`Typography::REGULAR_WEIGHT`] or [`Typography::STRONG_WEIGHT`].
-    pub weight: f32,
-}
-
-/// The type roles: what a piece of text is, each its size, line and weight, for a pointer or a
-/// finger ([`Typography::roles`]).
-///
-/// A role says what the text is, and its numbers follow: the desktop's Zed's label and headline
-/// ladder from the 14 pt chrome, the touch ones a step larger so a label has the presence its
-/// 44 pt row gives it. Each follows the chrome size setting, and prose its own. Every role is the
-/// regular weight but a panel's and a page's title: Zed sets nearly everything at 400.
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub struct TypeRoles {
-    /// A timestamp or a dense diagnostic figure, which can be left out: Zed's extra-small
-    /// label, 10/14. Never a reason or a scope the person must read.
-    pub caption: TypeRole,
-    /// Facts about a thing: where it is, when, its counts. Zed's small label, 12/16.
-    pub metadata: TypeRole,
-    /// A menu's, a picker's, a tab's, a page's and a dialog's words: Zed's default label, 14/20.
-    pub chrome: TypeRole,
-    /// The window's own rows: a list row and its section heads, a header's title, a toast. Delta's
-    /// small label, 12/16, measured from the signed-in app
-    /// (`.research/delta-signed-in-2026-10-12.md` §3.1).
-    pub row: TypeRole,
-    /// A notice's words, which may run to a second line: the row's 12 on Delta's toast's 19,
-    /// measured from the signed-in app (`.research/delta-signed-in-2026-10-12.md` §2.10).
-    pub notice: TypeRole,
-    /// The same, for what acts or is chosen: 14/20. Chosen is said by tone, not weight.
-    pub action: TypeRole,
-    /// What a piece of work is called where it is the thing to act on: a task, a request
-    /// put to the person. 14/20, told by its place and tone.
-    pub task_title: TypeRole,
-    /// A section's heading in a list or a panel: 12/16, a tier under the words it heads in
-    /// tone. It leads its group by its place and its tone, not by weight.
-    pub section: TypeRole,
-    /// A panel's or a dialog's title: Zed's large label, 16/22 at the strong weight.
-    pub panel_title: TypeRole,
-    /// Code where it is read (a thread's well, a diff, the review), in the code face: Delta's
-    /// 15/21, measured from the signed-in app (`.research/delta-signed-in-2026-10-12.md` §3.4).
-    pub code: TypeRole,
-    /// What is read at length, at [`Typography::prose_size`]: Delta's 15/21.
-    pub prose: TypeRole,
-    /// What the person writes in the composer, at [`Typography::prose_size`]: 15/21.
-    pub composer: TypeRole,
-    /// A page's heading inside the window (a settings page, the empty workspace's question):
-    /// Delta's settings title, 16/22 at the regular weight
-    /// (`.research/delta-re-2026-10-12.md` §2.2).
-    pub page_heading: TypeRole,
-    /// The heading of a page that is the whole window, the first run: Zed's extra-large
-    /// headline, 23/30 at the regular weight.
-    pub first_run: TypeRole,
-}
-
-impl Typography {
-    /// The regular weight.
-    pub const REGULAR_WEIGHT: f32 = 400.0;
-
-    /// The type roles for a pointer (`touch` false) or a finger.
-    #[must_use]
-    pub fn roles(&self, touch: bool) -> TypeRoles {
-        let base = self.ui_size;
-        // (size over the chrome size, leading) for a pointer, then for a finger.
-        let role = |desk: (f32, f32), finger: (f32, f32), weight: f32| {
-            let (step, leading) = if touch { finger } else { desk };
-            let size = (base + step).max(6.0);
-            TypeRole { size, line: size + leading, weight }
-        };
-        let (regular, strong) = (Self::REGULAR_WEIGHT, Self::STRONG_WEIGHT);
-        let prose = self.prose() + if touch { 2.0 } else { 0.0 };
-        TypeRoles {
-            caption: role((-4.0, 4.0), (-2.0, 4.0), regular),
-            metadata: role((-2.0, 4.0), (-1.0, 5.0), regular),
-            chrome: role((0.0, 6.0), (3.0, 5.0), regular),
-            row: role((-2.0, 4.0), (3.0, 5.0), regular),
-            notice: role((-2.0, 7.0), (3.0, 5.0), regular),
-            action: role((0.0, 6.0), (3.0, 5.0), regular),
-            task_title: role((0.0, 6.0), (3.0, 5.0), regular),
-            section: role((-2.0, 4.0), (-1.0, 7.0), regular),
-            panel_title: role((2.0, 6.0), (5.0, 5.0), strong),
-            code: role((1.0, 6.0), (-1.0, 7.0), regular),
-            prose: TypeRole {
-                size: prose,
-                line: (prose * self.prose_line_height).round(),
-                weight: regular,
-            },
-            composer: TypeRole {
-                size: prose,
-                line: (prose * self.composer_line_height).round(),
-                weight: regular,
-            },
-            page_heading: role((2.0, 6.0), (8.0, 6.0), regular),
-            first_run: role((9.0, 7.0), (14.0, 6.0), regular),
-        }
-    }
 }
 
 impl Default for Typography {
     fn default() -> Self {
         Self {
-            // Zed's `.ZedMono`, bundled, so nothing after it is ever reached.
-            mono_families: vec!["Lilex".to_owned()],
+            mono_families: vec!["Geist Mono".to_owned()],
             mono_size: 13.0,
             ligatures: true,
             mono_line_height: 1.0,
-            markdown_line_height: 1.5,
-            // Delta's 15/21, measured from the signed-in app, for the turns and the next
-            // turn's row alike.
-            prose_line_height: 1.4,
-            composer_line_height: 1.4,
-            // Zed's `.ZedSans`, bundled with its four weights.
-            ui_family: "IBM Plex Sans".to_owned(),
+            // The shell's faces, which the app sets again from the shell's settings.
+            ui_family: "Geist".to_owned(),
             ui_size: 14.0,
-            // Delta's prose default, a point over the chrome's labels.
-            prose_size: 15.0,
         }
-    }
-}
-
-/// Corner radii, in points: GPUI's ladder as Zed spends it, 2, 4, 6 and 8.
-///
-/// Structure is square, with no token: bars, tabs, panes, panels and every row of a list or a
-/// tree meet along a line. Controls are [`Self::sm`], cards [`Self::md`], and everything that
-/// floats [`Self::lg`].
-#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
-pub struct Radii {
-    /// Tiny boxes: a checkbox, a key cap, a fold toggle, a small chip in a row.
-    pub xs: f32,
-    /// A control: a button, an icon button, a field, a chip, a row that opts into rounding.
-    pub sm: f32,
-    /// A card: a tool call's, a question's.
-    pub md: f32,
-    /// Everything that floats: menus, popovers, tooltips, the palette, pickers, toasts.
-    pub lg: f32,
-    /// A dialog, which is a float like the rest: the same as [`Self::lg`].
-    pub xl: f32,
-    /// A capsule, for a switch, a count badge, a dot, a scrollbar's thumb and a one-line
-    /// message bubble only. Larger than any side it rounds, so the ends are half circles.
-    pub full: f32,
-}
-
-impl Radii {
-    /// The radius of what sits `inset` inside a `card` of radius `card` whose border is
-    /// `border` wide, so the two corners share a centre and the gap between them is even: a
-    /// menu's rows inside the menu, a field inside the composer. Never under zero.
-    #[must_use]
-    pub fn nested(card: f32, border: f32, inset: f32) -> f32 {
-        (card - border - inset).max(0.0)
-    }
-}
-
-impl Default for Radii {
-    fn default() -> Self {
-        Self { xs: 2.0, sm: 4.0, md: 6.0, lg: 8.0, xl: 8.0, full: 9_999.0 }
     }
 }
 
@@ -1371,104 +1157,6 @@ impl Surfaces {
     }
 }
 
-/// One layer of a shadow, in points: the elevation's shade at `alpha`, `y` down, blurred over
-/// `blur`, its shape grown by `spread` (drawn in by a negative one).
-#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
-pub struct Shadow {
-    /// How far down it falls.
-    pub y: f32,
-    /// How far it blurs.
-    pub blur: f32,
-    /// How far its shape grows past the surface's, before the blur; negative draws it in, so
-    /// a soft layer falls below a float rather than haloing round it.
-    pub spread: f32,
-    /// Its opacity.
-    pub alpha: f32,
-}
-
-impl Shadow {
-    /// No layer: a stack with fewer layers than its slots fills the rest with it, and nothing
-    /// is drawn for it.
-    pub const NONE: Self = Self { y: 0.0, blur: 0.0, spread: 0.0, alpha: 0.0 };
-
-    /// Whether it draws anything.
-    #[must_use]
-    pub fn shows(self) -> bool {
-        self.alpha > 0.0
-    }
-}
-
-/// The finish of what is sunk: a field, a segmented control's track, a meter. Shade is held
-/// inside its top edge, where light does not reach the floor of a hollow.
-#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
-pub struct Sunk {
-    /// The black shade's opacity inside the top edge.
-    pub shade: f32,
-    /// A code well's shade inside it, soft and a point down: Delta's `0 1 4` inset.
-    pub well: Shadow,
-}
-
-/// What floats and what dims the window under a modal, in both variants alike.
-///
-/// Nothing at rest wears a shadow, a rim or a highlight: a card is its ring on its plane, as
-/// Zed's surfaces are. Only what floats has a shadow, Zed's crisp layers in black: menus, popovers,
-/// the palette and toasts its elevated surface's two, a dialog its modal surface's four. Both are
-/// drawn only by the kit.
-#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
-pub struct Elevation {
-    /// The colour of the shadow and of the scrim: black.
-    pub shade: Rgb,
-    /// How much the scrim under a modal dims the window.
-    pub scrim: f32,
-    /// The shadow under a menu, a popover, the palette or a toast, tightest first: Zed's
-    /// elevated surface.
-    pub float: [Shadow; 2],
-    /// The shadow under a dialog, tightest first: Zed's modal surface.
-    pub dialog: [Shadow; 4],
-    /// What is sunk.
-    pub sunk: Sunk,
-}
-
-impl Elevation {
-    /// Dark.
-    pub const DARK: Self = Self {
-        shade: Rgb::hex(0),
-        scrim: alpha::SCRIM,
-        float: [Self::layer(1.0, 0.0, 0.06), Self::layer(2.0, 3.0, 0.12)],
-        dialog: [
-            Self::layer(1.0, 0.0, 0.12),
-            Self::layer(2.0, 3.0, 0.12),
-            Self::layer(3.0, 6.0, 0.08),
-            Self::layer(6.0, 12.0, 0.04),
-        ],
-        sunk: Sunk { shade: 0.18, well: Self::layer(1.0, 4.0, 0.20) },
-    };
-    /// Light.
-    pub const LIGHT: Self = Self {
-        shade: Rgb::hex(0),
-        scrim: alpha::SCRIM_LIGHT,
-        float: [Self::layer(1.0, 0.0, 0.03), Self::layer(2.0, 3.0, 0.12)],
-        dialog: [
-            Self::layer(1.0, 0.0, 0.04),
-            Self::layer(2.0, 3.0, 0.06),
-            Self::layer(3.0, 6.0, 0.06),
-            Self::layer(6.0, 12.0, 0.04),
-        ],
-        sunk: Sunk { shade: 0.05, well: Self::layer(1.0, 4.0, 0.032) },
-    };
-
-    /// One of Zed's layers: `y` down, blurred over `blur`, black at `alpha`, with no spread.
-    const fn layer(y: f32, blur: f32, alpha: f32) -> Shadow {
-        Shadow { y, blur, spread: 0.0, alpha }
-    }
-
-    /// The elevation for chrome over `content`.
-    #[must_use]
-    pub const fn of(content: Rgb) -> Self {
-        if content.is_light() { Self::LIGHT } else { Self::DARK }
-    }
-}
-
 /// A timing curve: CSS's `cubic-bezier(x1, y1, x2, y2)`, from (0, 0) to (1, 1).
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Curve {
@@ -1609,46 +1297,6 @@ impl Default for Motion {
     }
 }
 
-/// How roomy the chrome is: row and header heights and the least side of anything tapped.
-///
-/// Two sets, one per input: a pointer's is Zed's density, a finger needs the 44 pt Apple's HIG
-/// asks for. Visual sizes (icons, type) are the same in both; only the hit area and the rows
-/// round it grow.
-#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
-pub struct Density {
-    /// A one-line row: a worker's header, a list row.
-    pub row: f32,
-    /// A menu's row (a thing's own menu, the bar's menus, the effort menu): Delta's 23.
-    pub menu: f32,
-    /// An icon button's side: Zed's default button, 22 on the Mac.
-    pub button: f32,
-    /// A text button's, a dropdown's or a field's height, in a page, a dialog or a foot:
-    /// Delta's 28 on the Mac, a row's, so a button in a row fills it. Icon buttons stay
-    /// [`Self::button`].
-    pub control: f32,
-    /// The least side of anything tapped or clicked: an icon button, a key cap, a close box.
-    pub hit: f32,
-    /// How much larger a glyph and its slot are than the chrome's ([`Theme::glyph`],
-    /// [`Theme::icon`]): none on a pointer; a finger's 4, a glyph 18 in a slot of 20
-    /// (`.research/design-polish-2026-10-12.md` §4.12).
-    pub glyph_step: f32,
-}
-
-impl Density {
-    /// A pointer: the Mac.
-    pub const COMPACT: Self =
-        Self { row: 28.0, menu: 23.0, button: 22.0, control: 28.0, hit: 22.0, glyph_step: 0.0 };
-    /// A finger: the iPhone and the iPad.
-    pub const TOUCH: Self =
-        Self { row: 44.0, menu: 44.0, button: 44.0, control: 44.0, hit: 44.0, glyph_step: 4.0 };
-}
-
-impl Default for Density {
-    fn default() -> Self {
-        Self::COMPACT
-    }
-}
-
 /// Dark or light.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default, Serialize, Deserialize)]
 pub enum Variant {
@@ -1715,14 +1363,8 @@ pub struct Theme {
     pub behaviour: Behaviour,
     /// Chrome colours: the variant's, until the app dresses them in the shell's.
     pub surfaces: Surfaces,
-    /// The shadow of what floats and the scrim under a modal.
-    pub elevation: Elevation,
-    /// How roomy the chrome is for the input at hand.
-    pub density: Density,
     /// Type.
     pub typography: Typography,
-    /// Corner radii.
-    pub radii: Radii,
     /// The spacing scale.
     pub spacing: Spacing,
 }
@@ -1734,33 +1376,6 @@ impl Default for Theme {
 }
 
 impl Theme {
-    /// The type roles at this theme's density: a finger's when its targets are a finger's.
-    #[must_use]
-    pub fn roles(&self) -> TypeRoles {
-        self.typography.roles(self.density.hit > Density::COMPACT.hit)
-    }
-
-    /// Every icon's slot at this theme's density: [`Typography::icon`], 16 at the default
-    /// size, and 20 for a finger ([`Density::glyph_step`]).
-    #[must_use]
-    pub fn icon(&self) -> f32 {
-        self.typography.icon() + self.density.glyph_step
-    }
-
-    /// A glyph's drawing inside its slot at this theme's density: [`Typography::glyph`], 14 at
-    /// the default size, and 18 for a finger.
-    #[must_use]
-    pub const fn glyph(&self) -> f32 {
-        self.typography.glyph() + self.density.glyph_step
-    }
-
-    /// A small glyph's drawing (a chevron, the small cross) at this theme's density:
-    /// [`Typography::small`], 12 at the default size, and 14 for a finger.
-    #[must_use]
-    pub fn glyph_small(&self) -> f32 {
-        self.density.glyph_step.mul_add(0.5, self.typography.small())
-    }
-
     /// The theme for `variant` with default typography.
     #[must_use]
     pub fn new(variant: Variant) -> Self {
@@ -1772,10 +1387,7 @@ impl Theme {
             terminal,
             behaviour: Behaviour::default(),
             surfaces: Surfaces::new(variant),
-            elevation: Elevation::of(terminal.bg),
-            density: Density::default(),
             typography: Typography::default(),
-            radii: Radii::default(),
             spacing: Spacing::default(),
         }
     }
@@ -1851,7 +1463,6 @@ mod tests {
         let light = Theme::new(Variant::Light);
         assert_eq!(light.variant(), Variant::Light);
         assert_eq!(light.surfaces, Surfaces::new(Variant::Light));
-        assert_eq!(light.elevation, Elevation::LIGHT);
         assert_eq!(light.typography, Typography::default());
         assert_ne!(light.terminal.palette(0), light.terminal.bg, "ANSI black is visible on white");
     }
@@ -1913,37 +1524,6 @@ mod tests {
                 && luma(light.text_secondary) > luma(light.text)
         );
 
-        let r = Radii::default();
-        assert_eq!(
-            (r.xs, r.sm, r.md, r.lg, r.xl),
-            (2.0, 4.0, 6.0, 8.0, 8.0),
-            "GPUI's, as Zed spends it"
-        );
-        assert!(r.lg < r.full, "a capsule past every corner");
-        assert!((Radii::nested(r.lg, 0.0, 2.0) - r.md).abs() < f32::EPSILON, "a float's rows nest");
-        assert!((Radii::nested(r.lg, 1.0, r.xs) - 5.0).abs() < f32::EPSILON, "inside a border");
-        assert!(Radii::nested(r.xs, 1.0, r.md).abs() < f32::EPSILON, "never under zero");
-
-        // Zed's labels, 14, 12 and 10, and its headlines by their roles.
-        let mut t = Typography::default();
-        let roles = t.roles(false);
-        assert_eq!(
-            (
-                t.caption(),
-                t.small(),
-                t.ui_size,
-                t.icon(),
-                roles.panel_title.size,
-                roles.page_heading.size,
-                roles.first_run.size
-            ),
-            (10.0, 12.0, 14.0, 16.0, 16.0, 16.0, 23.0),
-            "one name per size; a page's heading is a panel's title at the regular weight"
-        );
-        const { assert!(Typography::STRONG_WEIGHT <= 600.0, "semibold at the most") };
-        t.ui_size = 8.0;
-        let title = t.roles(false).panel_title.size;
-        assert_eq!((t.caption(), t.small(), title), (6.0, 7.0, 10.0), "clamped at the floor");
         let s = Spacing::default();
         assert!(s.xxs < s.xs && s.xs < s.sm && s.sm < s.md && s.md < s.lg && s.lg < s.xl);
         assert!(s.xl < s.xxl && s.xxl < s.xxxl, "the page steps follow");
@@ -2018,67 +1598,6 @@ mod tests {
                 assert!(ratio >= NON_TEXT, "{variant:?} on {ground}: {ratio:.2}");
             }
         }
-    }
-
-    /// The type roles: Zed's labels and headlines from the 14 pt chrome, the touch ones a step
-    /// larger, each following the chrome size, prose its own; a touch theme picks the touch ones.
-    /// Every role is the regular weight but a panel's and a page's title.
-    #[test]
-    fn the_type_roles_are_zeds_labels_and_headlines() {
-        let t = Typography::default();
-        let at = |r: TypeRole| (r.size, r.line, r.weight);
-        let desk = t.roles(false);
-        assert_eq!(at(desk.caption), (10.0, 14.0, 400.0));
-        assert_eq!(at(desk.metadata), (12.0, 16.0, 400.0));
-        assert_eq!(at(desk.chrome), (14.0, 20.0, 400.0));
-        assert_eq!(at(desk.row), (12.0, 16.0, 400.0), "the window's rows, Delta's 12");
-        assert_eq!(at(desk.action), (14.0, 20.0, 400.0));
-        assert_eq!(at(desk.task_title), (14.0, 20.0, 400.0));
-        assert_eq!(at(desk.section), (12.0, 16.0, 400.0));
-        assert_eq!(at(desk.panel_title), (16.0, 22.0, 600.0));
-        assert_eq!(at(desk.code), (15.0, 21.0, 400.0), "Delta's code");
-        assert_eq!(at(desk.prose), (15.0, 21.0, 400.0), "Delta's prose");
-        assert_eq!(at(desk.composer), (15.0, 21.0, 400.0));
-        assert_eq!(at(desk.page_heading), (16.0, 22.0, 400.0), "Delta's settings title");
-        assert_eq!(at(desk.first_run), (23.0, 30.0, 400.0));
-        let touch = t.roles(true);
-        assert_eq!(at(touch.metadata), (13.0, 18.0, 400.0));
-        assert_eq!(at(touch.chrome), (17.0, 22.0, 400.0));
-        assert_eq!(at(touch.row), (17.0, 22.0, 400.0), "a finger's row keeps the body size");
-        assert_eq!(at(desk.notice), (12.0, 19.0, 400.0), "Delta's toast");
-        assert_eq!(at(touch.notice), at(touch.row));
-        assert_eq!(at(touch.panel_title), (19.0, 24.0, 600.0));
-        assert_eq!(at(touch.prose), (17.0, 24.0, 400.0));
-        assert_eq!(at(touch.first_run), (28.0, 34.0, 400.0));
-        let larger = Typography { ui_size: 16.0, ..Typography::default() }.roles(false);
-        assert_eq!(at(larger.chrome), (16.0, 22.0, 400.0), "it follows the chrome size");
-        assert_eq!(larger.prose, desk.prose, "prose keeps its own size");
-        for roles in [desk, touch] {
-            let strong = |r: TypeRole| (r.weight - Typography::STRONG_WEIGHT).abs() < f32::EPSILON;
-            let regular = [
-                roles.caption,
-                roles.metadata,
-                roles.chrome,
-                roles.row,
-                roles.notice,
-                roles.action,
-                roles.task_title,
-                roles.section,
-                roles.prose,
-                roles.composer,
-                roles.page_heading,
-                roles.first_run,
-            ];
-            assert!(
-                regular
-                    .iter()
-                    .all(|r| (r.weight - Typography::REGULAR_WEIGHT).abs() < f32::EPSILON)
-            );
-            assert!(strong(roles.panel_title), "a panel's title is strong");
-        }
-        let finger = Theme { density: Density::TOUCH, ..Theme::default() };
-        assert_eq!(finger.roles(), touch);
-        assert_eq!(Theme::default().roles(), desk);
     }
 
     /// The planes chrome text sits on: the work, the sidebar, what floats, a tab bar, a
@@ -2390,44 +1909,6 @@ mod tests {
                 assert!(ratio >= AA, "{variant:?}: text on a {name} line {ratio:.2}");
             }
         }
-    }
-
-    /// Only what floats wears a shadow, in black: menus, popovers, the palette and toasts Zed's
-    /// two crisp layers, tightest first, and a dialog its modal four, none blurred past 12 pt.
-    /// The scrim under a modal is black at 0.40 in dark and 0.24 in light. A finger gets
-    /// Apple's 44 pt; a pointer Zed's density: 28 pt rows, 23 pt menu rows and 22 pt buttons.
-    #[test]
-    fn elevation_and_density() {
-        let (dark, light) = (Theme::new(Variant::Dark), Theme::new(Variant::Light));
-        for theme in [&dark, &light] {
-            let e = theme.elevation;
-            let v = theme.variant();
-            assert_eq!(e.shade, Rgb::hex(0), "{v:?}: black");
-            let scrim = match v {
-                Variant::Dark => alpha::SCRIM,
-                Variant::Light => alpha::SCRIM_LIGHT,
-            };
-            assert!((e.scrim - scrim).abs() < f32::EPSILON, "{v:?}: the scrim");
-            let [near, far] = e.float;
-            assert!(near.blur < far.blur && near.y < far.y, "{v:?}: tightest first");
-            let deepest = e.dialog.iter().map(|l| l.blur).fold(0.0, f32::max);
-            assert!(deepest > far.blur, "{v:?}: a dialog's reaches further");
-            assert!(deepest <= 12.0, "{v:?}: crisp, never a soft blur");
-            assert!(
-                e.float.iter().chain(&e.dialog).all(|l| l.y > 0.0 && l.spread == 0.0),
-                "{v:?}: below the top edge, unspread"
-            );
-            assert!(e.dialog.windows(2).all(|w| w[0].y < w[1].y), "{v:?}: tightest first");
-        }
-        let (compact, touch) = (Density::COMPACT, Density::TOUCH);
-        assert!(touch.hit >= 44.0 && touch.row >= 44.0 && touch.menu >= 44.0);
-        assert!(touch.control >= 44.0 && touch.button >= 44.0, "a finger's buttons");
-        assert_eq!(
-            (compact.row, compact.menu, compact.button, compact.control, compact.hit),
-            (28.0, 23.0, 22.0, 28.0, 22.0),
-            "Delta's rows, menu rows and controls, Zed's icon buttons"
-        );
-        assert_eq!(Theme::default().density, compact, "the Mac is the default");
     }
 
     /// Slopty's green in OKLCH is the brand's sRGB, give or take a rounding step.

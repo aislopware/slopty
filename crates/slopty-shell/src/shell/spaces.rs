@@ -987,12 +987,6 @@ mod pinned_session_tests {
                     .map(|space| space.id.as_str())
                     .collect();
                 assert_eq!(members, ["local-clone", "remote-clone"]);
-
-                shell.settings.sidebar_organization = SidebarOrganization::ByDevice;
-                assert_eq!(
-                    shell.sidebar_visible_order(cx),
-                    ids(&["other-mid", "local-old", "remote-new"])
-                );
             })
             .unwrap();
         cx.run_until_parked();
@@ -1231,7 +1225,6 @@ mod pinned_session_tests {
                     },
                     cx,
                 );
-                shell.settings.sidebar_organization = SidebarOrganization::InOneList;
                 shell.settings.sidebar_show_branch = true;
                 shell.settings.sidebar_compact = compact;
                 shell.settings.sidebar_show_project_label = show_label;
@@ -1307,25 +1300,13 @@ mod pinned_session_tests {
         assert!(cx.debug_bounds("archived-toggle").is_some());
         assert!(cx.debug_bounds("chat-archived").is_some());
 
-        // Sessions owns all unpinned rows, including their keyboard traversal.
-        for open in [false, true] {
-            let toggle = cx.debug_bounds("sessions-toggle").unwrap().center();
-            cx.simulate_mouse_down(toggle, MouseButton::Left, gpui::Modifiers::default());
-            cx.simulate_mouse_up(toggle, MouseButton::Left, gpui::Modifiers::default());
-            shell.update(cx, |shell, cx| {
-                assert_eq!(shell.sessions_open, open);
-                assert_eq!(
-                    shell.sidebar_visible_order(cx),
-                    if open {
-                        ids(&["newer", "older"])
-                    } else {
-                        Vec::new()
-                    }
-                );
-                shell.sidebar_disclosure_motion.clear();
-                cx.notify();
-            });
-        }
+        // slopty: by status, the default: the rows sit in their group, newest session first,
+        // and keyboard traversal follows them; no Sessions disclosure.
+        assert!(cx.debug_bounds("sessions-toggle").is_none());
+        shell.update(cx, |shell, cx| {
+            assert_eq!(shell.settings.sidebar_organization, SidebarOrganization::ByStatus);
+            assert_eq!(shell.sidebar_visible_order(cx), ids(&["newer", "older"]));
+        });
         if compact {
             let status = cx.debug_bounds("chat-status-older").unwrap();
             let time = cx.debug_bounds("chat-time-older").unwrap();
@@ -1368,7 +1349,8 @@ mod pinned_session_tests {
         cx.simulate_mouse_move(target, Some(MouseButton::Left), gpui::Modifiers::default());
         shell.read_with(cx, |shell, cx| {
             let drag = shell.sidebar_session_transfer.as_ref().unwrap();
-            assert_eq!(drag.preview.as_ref().unwrap().group, "regular");
+            // slopty: the rows sit in their status group.
+            assert_eq!(drag.preview.as_ref().unwrap().group, "regular:status:done");
             assert!(drag.siblings["newer"].to > 0.0);
             assert!(shell.active_sidebar_pins(cx).is_empty());
         });
@@ -1406,15 +1388,18 @@ mod pinned_session_tests {
             cx.debug_bounds("session-slot-older").unwrap().size.height,
             px(0.0)
         );
-        // Only the surviving row (and minimum list spacing) remains, not a
-        // second card-sized vacancy at the source.
+        // Only the surviving row (and minimum list spacing) remains under its group's header,
+        // not a second card-sized vacancy at the source.
         assert!(
             cx.debug_bounds("sidebar-regular-sessions")
                 .unwrap()
                 .size
                 .height
                 <= cx.debug_bounds("session-slot-newer").unwrap().size.height
-                    + px(SIDEBAR_LIST_GAP)
+                    + px(SIDEBAR_LIST_GAP
+                        + SIDEBAR_SECTION_GAP
+                        + SIDEBAR_DISCLOSURE_HEADER_HEIGHT
+                        + SIDEBAR_DISCLOSURE_BODY_INSET)
         );
         cx.simulate_mouse_up(target, MouseButton::Left, gpui::Modifiers::default());
         shell.update(cx, |shell, cx| {
@@ -1440,7 +1425,7 @@ mod pinned_session_tests {
         let target = gpui::point(slot.center().x, slot.top() + px(3.0));
         cx.simulate_mouse_move(target, Some(MouseButton::Left), gpui::Modifiers::default());
         shell.read_with(cx, |shell, cx| {
-            assert!(shell.sidebar_transfer_extra_gap("regular") > 0.0);
+            assert!(shell.sidebar_transfer_extra_gap("regular:status:done") > 0.0);
             assert!(shell.sidebar_session_transfer.as_ref().unwrap().siblings["newer"].to > 0.0);
             assert_eq!(shell.active_sidebar_pins(cx), ids(&["older"]));
         });
@@ -1469,7 +1454,7 @@ mod pinned_session_tests {
             cx.notify();
         });
 
-        // A live activity update still wins while the normal session is dragged.
+        // slopty: a live activity update moves nothing, while a session is dragged or not.
         let from = cx.debug_bounds("chat-older").unwrap().center();
         cx.simulate_mouse_down(from, MouseButton::Left, gpui::Modifiers::default());
         cx.simulate_mouse_move(
@@ -1493,7 +1478,7 @@ mod pinned_session_tests {
         cx.simulate_mouse_up(target, MouseButton::Left, gpui::Modifiers::default());
         shell.update(cx, |shell, cx| {
             assert!(shell.active_sidebar_pins(cx).is_empty());
-            assert_eq!(shell.sidebar_visible_order(cx), ids(&["older", "newer"]));
+            assert_eq!(shell.sidebar_visible_order(cx), ids(&["newer", "older"]));
             assert!(shell.sidebar_session_return.is_some());
         });
 
@@ -1656,7 +1641,8 @@ mod pinned_session_tests {
             assert!(shell.sidebar_session_return.is_none());
         });
 
-        // Suppressing a completed drag must not disable later activity-driven glides.
+        // slopty: unpinned, the rows go back to their start order, and a new message moves
+        // neither of them: nothing to glide.
         shell.update(cx, |shell, cx| {
             let key = shell.active_sidebar_pin_profile_key(cx).unwrap();
             for id in shell.active_sidebar_pins(cx) {
@@ -1669,7 +1655,7 @@ mod pinned_session_tests {
             cx.notify();
         });
         let epoch = shell.update(cx, |shell, cx| {
-            assert_eq!(shell.sidebar_visible_order(cx), ids(&["older", "newer"]));
+            assert_eq!(shell.sidebar_visible_order(cx), ids(&["newer", "older"]));
             shell.resort_epoch
         });
         shell.update(cx, |shell, cx| {
@@ -1677,7 +1663,7 @@ mod pinned_session_tests {
                 state
                     .chats
                     .iter_mut()
-                    .find(|chat| chat.id == "newer")
+                    .find(|chat| chat.id == "older")
                     .unwrap()
                     .last_message_at = Some(Utc::now() + chrono::Duration::seconds(1));
             });
@@ -1685,39 +1671,7 @@ mod pinned_session_tests {
         });
         shell.update(cx, |shell, cx| {
             assert_eq!(shell.sidebar_visible_order(cx), ids(&["newer", "older"]));
-            assert!(shell.resort_epoch > epoch);
-            assert!(!shell.sidebar_resort.is_empty());
-        });
-        // A collapsed Sessions header remains an unpin target and opens on drop.
-        shell.update(cx, |shell, cx| {
-            let key = shell.active_sidebar_pin_profile_key(cx).unwrap();
-            *shell.settings.sidebar_pins_mut(key) = ids(&["older"]);
-            shell.sidebar_session_return = None;
-            shell.sidebar_resort.clear();
-            shell.sidebar_disclosure_motion.clear();
-            cx.notify();
-        });
-        let toggle = cx.debug_bounds("sessions-toggle").unwrap().center();
-        cx.simulate_mouse_down(toggle, MouseButton::Left, gpui::Modifiers::default());
-        cx.simulate_mouse_up(toggle, MouseButton::Left, gpui::Modifiers::default());
-        shell.update(cx, |shell, cx| {
-            assert!(!shell.sessions_open);
-            shell.sidebar_disclosure_motion.clear();
-            cx.notify();
-        });
-        let from = cx.debug_bounds("chat-older").unwrap().center();
-        cx.simulate_mouse_down(from, MouseButton::Left, gpui::Modifiers::default());
-        cx.simulate_mouse_move(
-            from + gpui::point(px(8.0), px(0.0)),
-            Some(MouseButton::Left),
-            gpui::Modifiers::default(),
-        );
-        let target = cx.debug_bounds("sessions-toggle").unwrap().center();
-        cx.simulate_mouse_move(target, Some(MouseButton::Left), gpui::Modifiers::default());
-        cx.simulate_mouse_up(target, MouseButton::Left, gpui::Modifiers::default());
-        shell.read_with(cx, |shell, cx| {
-            assert!(shell.sessions_open);
-            assert!(shell.active_sidebar_pins(cx).is_empty());
+            assert_eq!(shell.resort_epoch, epoch, "no resort");
         });
     }
 
@@ -1755,7 +1709,6 @@ mod pinned_session_tests {
                     },
                     cx,
                 );
-                shell.settings.sidebar_organization = SidebarOrganization::InOneList;
                 shell.reduced_motion = true;
                 shell.state.update(cx, |state, _| {
                     state.workspace_scope = Some(WorkspaceScope::Local);
@@ -1815,11 +1768,10 @@ mod pinned_session_tests {
                 cx.notify();
             });
             cx.run_until_parked();
-            // Its Archived-section copy shares the row key and must not stay lit.
-            assert_eq!(
-                crate::motion::hover_t(&format!("chat-{archived}-hover")),
-                0.0
-            );
+            // Its Archived-section copy shares the row key and must not stay lit. slopty: grouped
+            // by status the row's fade is in its last frame here, not lit.
+            let lit = crate::motion::hover_t(&format!("chat-{archived}-hover"));
+            assert!(lit < 0.01, "chat-{archived} still lit at {lit}");
             let expected = next.map(|(next, _)| format!("chat-{next}"));
             shell.read_with(cx, |shell, _| {
                 assert_eq!(shell.chat_status_hover, expected);
@@ -2065,19 +2017,13 @@ struct ActiveChatRow {
     reason: bool,
 }
 
+// slopty: rows keep the order their sessions started in, newest first, so nothing moves on its
+// own; the Sort choice is gone (`docs/decisions/ui.md`, "The sidebar groups by status").
 pub(super) fn compare_sidebar_chats(
-    sort: SidebarSort,
     left: &slopty_view_proto::Chat,
     right: &slopty_view_proto::Chat,
 ) -> std::cmp::Ordering {
-    let primary = match sort {
-        SidebarSort::Created => right.created_at.cmp(&left.created_at),
-        SidebarSort::LastUpdated => right
-            .last_message_at
-            .unwrap_or(right.created_at)
-            .cmp(&left.last_message_at.unwrap_or(left.created_at)),
-    };
-    primary.then_with(|| left.id.cmp(&right.id))
+    right.created_at.cmp(&left.created_at).then_with(|| left.id.cmp(&right.id))
 }
 
 /// The space-filter dropdown, `Some` while open. The same searchable-menu
@@ -2135,10 +2081,7 @@ enum SidebarViewRow {
     Compact,
     ShowProjectIcon,
     ShowProjectLabel,
-    ByDevice,
-    InOneList,
-    LastUpdated,
-    Created,
+    // slopty: no By device, no one list, no Sort.
     ShowBranch,
     ShowPullRequest,
     ShowHarness,
@@ -2152,27 +2095,18 @@ impl SidebarViewRow {
     fn closes_submenu(self) -> bool {
         matches!(
             self,
-            Self::ByProject
-                | Self::ByDevice
-                | Self::InOneList
-                | Self::ByStatus // slopty
-                | Self::LastUpdated
-                | Self::Created
+            Self::ByProject | Self::ByStatus // slopty
         )
     }
 }
 
-// slopty: By status joins Organize.
-const SIDEBAR_VIEW_GROUPS: [(&str, std::ops::Range<usize>); 3] =
-    [("Organize", 0..4), ("Sort", 4..6), ("Show", 6..13)];
+// slopty: Organize is by status or by project; no Sort, rows keep their start order.
+const SIDEBAR_VIEW_GROUPS: [(&str, std::ops::Range<usize>); 2] =
+    [("Organize", 0..2), ("Show", 2..9)];
 
-const SIDEBAR_VIEW_ROWS: [SidebarViewRow; 13] = [
-    SidebarViewRow::ByDevice,
-    SidebarViewRow::ByProject,
+const SIDEBAR_VIEW_ROWS: [SidebarViewRow; 9] = [
     SidebarViewRow::ByStatus,
-    SidebarViewRow::InOneList,
-    SidebarViewRow::LastUpdated,
-    SidebarViewRow::Created,
+    SidebarViewRow::ByProject,
     SidebarViewRow::ShowBranch,
     SidebarViewRow::ShowPullRequest,
     SidebarViewRow::ShowHarness,
@@ -2194,29 +2128,6 @@ const SIDEBAR_DISCLOSURE_SECTION_HEIGHT: f32 =
 /// [`ARCHIVED_PAGE_ROWS`].
 const ARCHIVED_INITIAL_ROWS: usize = 10;
 const ARCHIVED_PAGE_ROWS: usize = 25;
-
-/// Put this machine's device group first without disturbing the recency-based
-/// order of any remote groups. A targeted promotion is more truthful than a
-/// full name sort: local context leads, then the user's chosen chat sort wins.
-fn promote_local_device_group<T>(
-    groups: &mut Vec<(Option<(String, String)>, Vec<T>)>,
-    local_device_id: Option<&str>,
-) {
-    let Some(local_device_id) = local_device_id else {
-        return;
-    };
-    let Some(index) = groups.iter().position(|(group, _)| {
-        group
-            .as_ref()
-            .is_some_and(|(device_id, _)| device_id == local_device_id)
-    }) else {
-        return;
-    };
-    if index > 0 {
-        let local = groups.remove(index);
-        groups.insert(0, local);
-    }
-}
 
 /// Project-mode group of a chat as (key, label). Projects sharing a
 /// repository identity fold into one group named for their representative
@@ -2690,9 +2601,10 @@ enum CrumbTarget {
     More,
 }
 
-fn device_glyph(platform: &str) -> &'static str {
+pub(super) fn device_glyph(platform: &str) -> &'static str {
     match platform {
         "macos" | "darwin" => icons::LAPTOP,
+        "linux" => icons::REMOTE_SERVER, // slopty: a worker on Linux is a server
         "web" => icons::GLOBAL,
         "ios" | "android" => icons::SMARTPHONE,
         _ => icons::MONITOR,
@@ -3409,8 +3321,6 @@ impl Shell {
         self.cancel_pinned_session_drag(cx);
         if matches!(target, SidebarSessionDrop::Pinned(_)) {
             self.pinned_open = true;
-        } else {
-            self.sessions_open = true;
         }
         // Membership changes preserve each group's live activity sort.
         // Drag previews already animated this move. Establish a fresh layout
@@ -3904,17 +3814,9 @@ impl Shell {
             SidebarViewRow::ShowProjectIcon => {
                 self.settings.sidebar_show_project_icon = !self.settings.sidebar_show_project_icon
             }
-            SidebarViewRow::ByDevice => {
-                self.settings.sidebar_organization = SidebarOrganization::ByDevice
-            }
-            SidebarViewRow::InOneList => {
-                self.settings.sidebar_organization = SidebarOrganization::InOneList
-            }
             SidebarViewRow::ByStatus => {
                 self.settings.sidebar_organization = SidebarOrganization::ByStatus
             }
-            SidebarViewRow::LastUpdated => self.settings.sidebar_sort = SidebarSort::LastUpdated,
-            SidebarViewRow::Created => self.settings.sidebar_sort = SidebarSort::Created,
             SidebarViewRow::ShowBranch => {
                 self.settings.sidebar_show_branch = !self.settings.sidebar_show_branch
             }
@@ -4092,18 +3994,13 @@ impl Shell {
         let on_left = menu_state.submenu_on_left;
         let focus = menu_state.focus.clone();
         let organization = self.settings.sidebar_organization;
-        let sort = self.settings.sidebar_sort;
         let show_harness = self.settings.sidebar_show_harness;
         let show_branch = self.settings.sidebar_show_branch;
         let show_pr = self.settings.sidebar_show_pull_request;
 
         let labels = [
-            "By device",
-            "By project",
             "By status",
-            "None",
-            "Last updated",
-            "Created",
+            "By project",
             "Branch",
             "Pull request",
             "Harness",
@@ -4113,12 +4010,8 @@ impl Shell {
             "Archived",
         ];
         let icons = [
-            icons::LAPTOP,
+            icons::CLOCK_CIRCLE,
             icons::FOLDER,
-            icons::CLOCK_CIRCLE,
-            icons::LIST,
-            icons::CLOCK_CIRCLE,
-            icons::CALENDAR,
             icons::GIT_BRANCH,
             icons::PULL_REQUEST,
             icons::BOT,
@@ -4129,12 +4022,8 @@ impl Shell {
             icons::ARCHIVE_MINIMALISTIC,
         ];
         let selected = [
-            organization == SidebarOrganization::ByDevice,
-            organization == SidebarOrganization::ByProject,
             organization == SidebarOrganization::ByStatus,
-            organization == SidebarOrganization::InOneList,
-            sort == SidebarSort::LastUpdated,
-            sort == SidebarSort::Created,
+            organization == SidebarOrganization::ByProject,
             show_branch,
             show_pr,
             show_harness,
@@ -4143,13 +4032,10 @@ impl Shell {
             self.settings.sidebar_show_project_filter,
             self.settings.sidebar_show_archived,
         ];
-        let values = [
-            labels[selected[..4].iter().position(|v| *v).unwrap_or(0)].to_string(),
-            labels[4 + selected[4..6].iter().position(|v| *v).unwrap_or(0)].to_string(),
-        ];
+        let values = [labels[selected[..2].iter().position(|v| *v).unwrap_or(0)].to_string()];
         let mut groups: Vec<AnyElement> = Vec::new();
         for (group, (label, range)) in SIDEBAR_VIEW_GROUPS.iter().enumerate() {
-            if group == 2 {
+            if group == 1 {
                 groups.push(popover::menu_separator().into_any_element());
             }
             let open = submenu == Some(group);
@@ -4892,7 +4778,7 @@ impl Shell {
             .into_iter()
             .map(|(status, chat)| (status, chat.clone()))
             .collect();
-        rows.sort_by(|left, right| compare_sidebar_chats(self.settings.sidebar_sort, &left.1, &right.1));
+        rows.sort_by(|left, right| compare_sidebar_chats(&left.1, &right.1));
         // slopty: by status, the order the rows draw in (`render_active_rows`).
         if self.settings.sidebar_organization == SidebarOrganization::ByStatus {
             super::sidebar_status::order_by_status(&mut rows, state, now);
@@ -4925,40 +4811,32 @@ impl Shell {
                     .any(|section| section.session_ids.contains(&chat.id))
             })
             .collect();
-        let ordered = if self.settings.sidebar_organization != SidebarOrganization::InOneList {
-            let mut groups: Vec<(Option<(String, String)>, Vec<slopty_view_proto::Chat>)> = Vec::new();
+        // slopty: every organisation groups, by status or by project.
+        let ordered = {
+            let mut groups: Vec<(String, Vec<slopty_view_proto::Chat>)> = Vec::new();
             for chat in chats {
-                let key = Some((
-                    match self.settings.sidebar_organization {
-                        SidebarOrganization::ByProject => sidebar_project_group(state, &chat).0,
-                        // slopty: its status group, as drawn.
-                        SidebarOrganization::ByStatus => super::sidebar_status::StatusGroup::of(
-                            statuses.get(&chat.id).copied().unwrap_or(ChatIndicator::Idle),
-                            state.session_for(&chat.id),
-                            now,
-                        )
-                        .key()
-                        .to_owned(),
-                        _ => chat.device_id.clone(),
-                    },
-                    String::new(),
-                ));
+                let key = match self.settings.sidebar_organization {
+                    SidebarOrganization::ByProject => sidebar_project_group(state, &chat).0,
+                    // slopty: its status group, as drawn.
+                    SidebarOrganization::ByStatus => super::sidebar_status::StatusGroup::of(
+                        statuses.get(&chat.id).copied().unwrap_or(ChatIndicator::Idle),
+                        state.session_for(&chat.id),
+                        now,
+                    )
+                    .key()
+                    .to_owned(),
+                };
                 if let Some((_, existing)) = groups.iter_mut().find(|(group, _)| group == &key) {
                     existing.push(chat);
                 } else {
                     groups.push((key, vec![chat]));
                 }
             }
-            if self.settings.sidebar_organization == SidebarOrganization::ByDevice {
-                promote_local_device_group(&mut groups, state.local_device_id.as_deref());
-            }
             groups
                 .into_iter()
                 .flat_map(|(_, rows)| rows)
                 .map(|chat| chat.id)
                 .collect::<Vec<_>>()
-        } else {
-            chats.into_iter().map(|chat| chat.id).collect()
         };
         let ordered = pinned_chats
             .into_iter()
@@ -4967,11 +4845,6 @@ impl Shell {
             .chain(ordered)
             .collect::<Vec<_>>();
         let mut visible = project_pinned_first(&ordered, pinned_order);
-        if !self.sessions_open
-            && self.settings.sidebar_organization == SidebarOrganization::InOneList
-        {
-            visible.retain(|id| pinned_order.contains(id) || custom_order.contains(id));
-        }
         if !self.pinned_open {
             let pins: HashSet<&str> = pinned_order.iter().map(String::as_str).collect();
             visible.retain(|id| !pins.contains(id.as_str()));
@@ -4979,13 +4852,10 @@ impl Shell {
         visible
     }
 
-    /// The group a chat's row sits under when the sidebar groups by device or
-    /// by project; `None` in one list.
+    /// The group a chat's row sits under: its status's or its project's.
     fn sidebar_group_key(&self, state: &AppState, chat: &slopty_view_proto::Chat) -> Option<String> {
         match self.settings.sidebar_organization {
-            SidebarOrganization::ByDevice => Some(chat.device_id.clone()),
             SidebarOrganization::ByProject => Some(sidebar_project_group(state, chat).0),
-            SidebarOrganization::InOneList => None,
             // slopty: its status group.
             SidebarOrganization::ByStatus => {
                 let now = Utc::now();
@@ -5002,9 +4872,7 @@ impl Shell {
     /// A device/project group's key in `sidebar_collapsed_groups`.
     fn sidebar_group_collapse_key(&self, group: &str) -> String {
         let organization = match self.settings.sidebar_organization {
-            SidebarOrganization::ByDevice => "device",
             SidebarOrganization::ByProject => "project",
-            SidebarOrganization::InOneList => "list",
             SidebarOrganization::ByStatus => "status", // slopty
         };
         format!("{organization}:{group}")
@@ -5063,9 +4931,6 @@ impl Shell {
                 if self.sidebar_collapsed_groups.remove(&collapse_key) {
                     self.queue_sidebar_reveal(&format!("group:{collapse_key}"));
                 }
-            } else if !self.sessions_open {
-                self.sessions_open = true;
-                self.queue_sidebar_reveal("sessions");
             }
         } else if let Some(index) = archived {
             if !self.settings.sidebar_show_archived {
@@ -5152,9 +5017,7 @@ impl Shell {
         let now = Utc::now();
         let session = state.session_for(&chat.id);
         let group = match self.settings.sidebar_organization {
-            SidebarOrganization::ByDevice => Some((chat.device_id.clone(), device)),
             SidebarOrganization::ByProject => Some(sidebar_project_group(state, &chat)),
-            SidebarOrganization::InOneList => None,
             // slopty: Needs you, Working, Done.
             SidebarOrganization::ByStatus => {
                 let group = super::sidebar_status::StatusGroup::of(status, session, now);
@@ -5201,7 +5064,7 @@ impl Shell {
                 .map(|(status, chat)| (status, chat.clone()))
                 .collect();
             chats.sort_by(|left, right| {
-                compare_sidebar_chats(self.settings.sidebar_sort, &left.1, &right.1)
+                compare_sidebar_chats(&left.1, &right.1)
             });
             // slopty: by status, rows keep the order they started in, inside their group.
             if self.settings.sidebar_organization == SidebarOrganization::ByStatus {
@@ -5295,18 +5158,10 @@ impl Shell {
                     .position(|id| id == &row.chat.id)
             });
         }
-        if self.settings.sidebar_organization == SidebarOrganization::ByDevice {
-            let local_device_id = self.state.read(cx).local_device_id.clone();
-            promote_local_device_group(&mut regular_groups, local_device_id.as_deref());
-        }
         let mut sections = Vec::with_capacity(regular_groups.len() + usize::from(pinned_count > 0));
         if !pinned_rows.is_empty() {
             sections.push((None, pinned_rows));
         }
-        let custom_sessions = custom_groups
-            .iter()
-            .map(|(_, rows)| rows.len())
-            .sum::<usize>();
         sections.extend(custom_groups);
         sections.extend(regular_groups);
 
@@ -5638,6 +5493,8 @@ impl Shell {
             let motion_key = format!("group:{collapse_key}");
             let collapsed = self.sidebar_collapsed_groups.contains(&collapse_key);
             let row_count = rendered_rows.len();
+            // slopty: the project's past Claude Code sessions close its group (`past_sessions`).
+            rendered_rows.extend(project_group.then(|| self.project_history(&key, theme, cx)).flatten());
             let extra_gap = self.sidebar_transfer_extra_gap(&drag_group);
             let body_height = SIDEBAR_DISCLOSURE_BODY_INSET
                 + extra_gap
@@ -5762,9 +5619,6 @@ impl Shell {
         }
         SidebarSessionRows {
             custom_count,
-            regular_count: base_ids
-                .len()
-                .saturating_sub(pinned_count + custom_sessions),
             rows: rendered,
             pinned_count,
             moving_row,
@@ -5843,87 +5697,6 @@ impl Shell {
             .into_any_element()
     }
 
-    pub(super) fn render_sessions_section(
-        &mut self,
-        content: AnyElement,
-        body_height: f32,
-        count: usize,
-        follows_pinned: bool,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        if self.settings.sidebar_organization != SidebarOrganization::InOneList {
-            return content;
-        }
-        let open = self.sessions_open;
-        self.begin_queued_sidebar_reveal("sessions", open, body_height);
-        let chevron = self.sidebar_disclosure_chevron("sessions", open, theme);
-        let header = sidebar_disclosure_header(
-            theme,
-            None,
-            "Sessions".into(),
-            (!open).then_some(count),
-            None,
-            chevron,
-        )
-            .id("sessions-toggle")
-            .debug_selector(|| "sessions-toggle".into())
-            .on_drag_move::<SidebarSessionDrag>(cx.listener(
-                |this, event: &gpui::DragMoveEvent<SidebarSessionDrag>, _, _| {
-                    if event.bounds.contains(&event.event.position) {
-                        let top = f32::from(
-                            event.bounds.bottom()
-                                - this.sidebar_scroll.bounds().top()
-                                - this.sidebar_scroll.offset().y,
-                        ) + SIDEBAR_DISCLOSURE_BODY_INSET;
-                        if let Some(drag) = this.sidebar_session_transfer.as_mut() {
-                            drag.preview = Some(SidebarSessionGap {
-                                group: "regular".into(),
-                                index: 0,
-                                pinned: false,
-                                top,
-                            });
-                        }
-                    }
-                },
-            ))
-            .on_drop::<SidebarSessionDrag>(cx.listener(|this, payload, _, cx| {
-                this.finish_sidebar_session_transfer(payload, SidebarSessionDrop::Regular, cx);
-            }))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.cancel_sidebar_session_transfer(cx);
-                let was_open = this.sessions_open;
-                this.begin_sidebar_disclosure_motion(
-                    "sessions",
-                    if was_open { body_height } else { 0.0 },
-                    if was_open { 0.0 } else { body_height },
-                );
-                this.sessions_open = !was_open;
-                this.sidebar_prev_order.clear();
-                this.sidebar_resort.clear();
-                this.sidebar_new_keys.clear();
-                cx.notify();
-            }));
-        let content = div()
-            .pt(px(SIDEBAR_DISCLOSURE_BODY_INSET))
-            .child(content)
-            .into_any_element();
-        let body = self.render_sidebar_disclosure_body("sessions", open, body_height, content);
-        div()
-            .id("sidebar-sessions-section")
-            .debug_selector(|| "sidebar-sessions-section".into())
-            .flex()
-            .flex_col()
-            .pt(px(if follows_pinned {
-                SIDEBAR_SECTION_GAP
-            } else {
-                0.0
-            }))
-            .child(header)
-            .child(body)
-            .into_any_element()
-    }
-
     /// The Archived shelf's chats under the project filter, in sidebar order.
     fn archived_sidebar_chats(&self, cx: &App) -> Vec<slopty_view_proto::Chat> {
         let state = self.state.read(cx);
@@ -5937,7 +5710,7 @@ impl Shell {
             .filter(|chat| in_filter(chat))
             .cloned()
             .collect();
-        rows.sort_by(|left, right| compare_sidebar_chats(self.settings.sidebar_sort, left, right));
+        rows.sort_by(|left, right| compare_sidebar_chats(left, right));
         rows
     }
 
@@ -8030,12 +7803,7 @@ impl Shell {
 mod tests {
     use chrono::{TimeZone as _, Utc};
 
-    use super::{compare_sidebar_chats, promote_local_device_group};
-    use crate::settings::SidebarSort;
-
-    fn group(device: &str, value: u8) -> (Option<(String, String)>, Vec<u8>) {
-        (Some((device.into(), device.into())), vec![value])
-    }
+    use super::compare_sidebar_chats;
 
     fn chat(id: &str) -> slopty_view_proto::Chat {
         slopty_view_proto::Chat {
@@ -8067,35 +7835,14 @@ mod tests {
     fn equal_sidebar_timestamps_sort_by_stable_chat_id() {
         let alpha = chat("alpha");
         let beta = chat("beta");
-        assert!(compare_sidebar_chats(SidebarSort::Created, &alpha, &beta).is_lt());
-        assert!(compare_sidebar_chats(SidebarSort::LastUpdated, &alpha, &beta).is_lt());
-    }
-
-    #[test]
-    fn current_device_is_promoted_without_resorting_remote_groups() {
-        let mut groups = vec![
-            group("recent-remote", 1),
-            group("local", 2),
-            group("older-remote", 3),
-        ];
-
-        promote_local_device_group(&mut groups, Some("local"));
-
-        let order: Vec<_> = groups
-            .iter()
-            .map(|(group, _)| group.as_ref().unwrap().0.as_str())
-            .collect();
-        assert_eq!(order, ["local", "recent-remote", "older-remote"]);
-    }
-
-    #[test]
-    fn missing_current_device_leaves_group_order_untouched() {
-        let mut groups = vec![group("first", 1), group("second", 2)];
-        let before = groups.clone();
-
-        promote_local_device_group(&mut groups, Some("not-present"));
-
-        assert_eq!(groups, before);
+        assert!(compare_sidebar_chats(&alpha, &beta).is_lt());
+        // slopty: newer sessions first, and a new message moves nothing.
+        let mut newer = chat("zeta");
+        newer.created_at = Utc.timestamp_opt(6, 0).unwrap();
+        assert!(compare_sidebar_chats(&newer, &alpha).is_lt());
+        let mut busy = chat("aardvark");
+        busy.last_message_at = Some(Utc.timestamp_opt(99, 0).unwrap());
+        assert!(compare_sidebar_chats(&alpha, &busy).is_gt(), "by id, not by its last message");
     }
 }
 

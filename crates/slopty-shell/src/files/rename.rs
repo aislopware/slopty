@@ -93,7 +93,10 @@ impl FilesSurface {
         let Some(origin) = self.interaction_origin(cx) else {
             return;
         };
-        let entry = self.tree.node(&path).unwrap().entry.clone();
+        // slopty: no unwrap: an entry gone meanwhile is nothing to rename.
+        let Some(entry) = self.tree.node(&path).map(|node| node.entry.clone()) else {
+            return;
+        };
         let input = cx.new(|cx| InputState::new(window, cx).default_value(entry.name.clone()));
         input.update(cx, |state, cx| {
             state.set_selected_range(
@@ -168,7 +171,10 @@ impl FilesSurface {
             cx.notify();
             return;
         }
-        self.tree_rename.as_mut().unwrap().submitted = true;
+        // slopty: no unwrap.
+        if let Some(rename) = self.tree_rename.as_mut() {
+            rename.submitted = true;
+        }
         self.request_mutation(&path, Some(destination), cx);
     }
     pub(super) fn render_tree_rename(

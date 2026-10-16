@@ -476,7 +476,8 @@ fn group(id: ShortcutId) -> &'static str {
         | ShortcutId::PrevSession
         | ShortcutId::ArchiveSession
         | ShortcutId::OpenBranchPicker // slopty: the composer's branch
-        | ShortcutId::NextEffort => "Sessions", // slopty: and its effort
+        | ShortcutId::NextEffort // slopty: and its effort
+        | ShortcutId::ResumeSession => "Sessions", // slopty: a past Claude Code session
         ShortcutId::JumpSession(_) => "Jump to session",
     }
 }

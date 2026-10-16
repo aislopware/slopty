@@ -44,7 +44,6 @@ fn setup(cx: &mut TestAppContext) -> (Entity<Shell>, &mut VisualTestContext) {
                 },
                 cx,
             );
-            shell.settings.sidebar_organization = SidebarOrganization::InOneList;
             shell.reduced_motion = true;
             shell.state.update(cx, |state, _| {
                 state.workspace_scope = Some(WorkspaceScope::Local);
@@ -235,15 +234,16 @@ fn rename_opens_a_collapsed_pinned_section_with_its_motion(cx: &mut TestAppConte
 #[gpui::test]
 fn rename_opens_collapsed_sessions_groups_and_the_sidebar(cx: &mut TestAppContext) {
     let (shell, cx) = setup(cx);
+    // slopty: by status, the default: the chat's collapsed status group opens.
     shell.update(cx, |shell, cx| {
-        shell.sessions_open = false;
+        shell.sidebar_collapsed_groups.insert("status:status:done".into());
         shell.settings.sidebar_collapsed = true;
         cx.notify();
     });
     redraw(cx);
     rename(&shell, cx, "newer");
     shell.read_with(cx, |shell, _| {
-        assert!(shell.sessions_open);
+        assert!(!shell.sidebar_collapsed_groups.contains("status:status:done"));
         assert!(!shell.settings.sidebar_collapsed);
     });
     assert_eq!(editing(&shell, cx).as_deref(), Some("newer"));

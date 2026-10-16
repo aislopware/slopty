@@ -54,9 +54,13 @@ use slopty_ui::workspace::attention::Attention;
 use slopty_ui::workspace::{Finished, WorkerLink, WorkerStatus, WorkspaceEvent, WorkspaceView};
 use workers::{Supervisor, Tick, WorkerSlot};
 
-/// A finger drives this build: the key bar the soft keyboard lacks (Esc, Tab, Control, arrows,
-/// shell symbols), a Paste where the Mac has ⌘V, full-width primary actions.
-pub(crate) const TOUCH: bool = cfg!(target_os = "ios");
+/// What a terminal's block or selection sent to a chat that is not open says.
+const ATTACH_NEEDS_CHAT: &str = "Open the chat to attach to it";
+
+/// What a forgotten worker's confirmation says, as a success toast.
+fn forgot(name: &str) -> String {
+    format!("Forgot {name}")
+}
 
 /// Link events applied per foreground turn at most (see the link loop).
 const LINK_BATCH: usize = 256;
@@ -266,7 +270,7 @@ impl Workspace {
                 let (chat, text) = (chat.clone(), text.clone());
                 cx.defer(move |cx| {
                     if !slopty_shell::live::attach(&chat, &text, cx) {
-                        slopty_shell::toast::error(cx, "Open the shell's chat to attach to it");
+                        slopty_shell::toast::error(cx, ATTACH_NEEDS_CHAT);
                     }
                 });
             }
@@ -673,7 +677,7 @@ impl Workspace {
                 slopty_proto::orchestration::Outcome::Error { message, .. } => {
                     Self::show_failure(format!("Could not forget {name}: {message}"), cx);
                 }
-                _forgotten => Self::show_notice(format!("Forgot {name}"), cx),
+                _forgotten => slopty_shell::toast::success(cx, forgot(&name)),
             });
         })
         .detach();
@@ -1370,6 +1374,15 @@ pub const fn self_test() -> bool {
     false
 }
 
+/// The Nerd symbol face a prompt's powerline and devicon glyphs fall to, registered beside the
+/// shell's Geist faces before the window opens (`docs/decisions/ui.md`, "The symbol face is
+/// registered at startup"). A refusal leaves those glyphs to the system's fallbacks, and says so.
+fn install_symbol_face(cx: &App) {
+    if let Err(error) = slopty_kit::fonts::install(cx) {
+        tracing::warn!(%error, "the symbol face did not register; prompt glyphs fall to the system's");
+    }
+}
+
 /// Open the app's window and start a link loop per added worker on `handle`'s runtime.
 ///
 /// The window is the shell on the workspace (`interface`). Call once from inside the
@@ -1397,6 +1410,7 @@ pub fn open_workspace(cx: &mut App, handle: tokio::runtime::Handle) {
     })
     .detach();
     slopty_kit::frames::install(cx, frame_nominal());
+    install_symbol_face(cx);
     let settings_path = slopty_settings::path();
     let settings_seen = settings::Seen::of(&settings_path);
     let loaded = Settings::load(&settings_path);
@@ -1681,6 +1695,48 @@ mod tests {
         let view = cx.new(|_| WorkspaceView::new(Theme::default()));
         let seen = settings::Seen::of(&path);
         cx.new(|cx| Workspace::new(view, handle, path, seen, cache, cx))
+    }
+
+    /// A worker the server forgot is said as done, with the check a confirmation wears, and a
+    /// refusal as a failure; a block sent to a chat not open names the chat, not the shell.
+    #[gpui::test]
+    fn forgetting_a_worker_is_a_success_and_a_refusal_a_failure(cx: &mut TestAppContext) {
+        use slopty_proto::orchestration::{ErrorCode, Outcome, Verb};
+        use slopty_shell::toast::{self, ToastKind};
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let (ws, cx) = shell(cx, &runtime, &dir, false);
+        let hub = slopty_net::HostAddr::new("hub", slopty_net::endpoint::SERVER_PORT);
+        let (slot, mut queue) = server::ServerSlot::answered_by(hub);
+        ws.update(cx, |ws, _cx| ws.server = Some(slot));
+        let refused = Outcome::Error { code: ErrorCode::Conflict, message: "it is online".into() };
+        for (outcome, kind) in [(Outcome::Done, ToastKind::Success), (refused, ToastKind::Error)] {
+            let id = WorkerId::new();
+            ws.update(cx, |ws, cx| ws.forget_worker(id, cx));
+            let (verb, answer) = runtime.block_on(async {
+                loop {
+                    if let Some(next) = queue.try_next() {
+                        break next;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            });
+            assert_eq!(verb, Verb::ForgetWorker { worker: id });
+            let _sent = answer.send(outcome);
+            runtime.block_on(async {
+                for _ in 0..8 {
+                    tokio::task::yield_now().await;
+                }
+            });
+            cx.run_until_parked();
+            let shown = cx.update(|_, cx| toast::shown(cx));
+            let (said, words) = shown.last().expect("a toast");
+            assert_eq!(*said, kind, "{words}");
+            if kind == ToastKind::Success {
+                assert_eq!(words.as_ref(), forgot(&id.to_string()));
+            }
+        }
+        assert!(!ATTACH_NEEDS_CHAT.contains("shell"), "{ATTACH_NEEDS_CHAT}");
     }
 
     /// A dial a worker answers from another build shows as its status, with both builds and the

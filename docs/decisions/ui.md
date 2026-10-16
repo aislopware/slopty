@@ -12789,3 +12789,88 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   1.5 s after the card appears, as t3code's `composerTypingGuard` does. A held key goes on to
   the composer as typed text, and a click is never held.
   - Tests: `slopty-shell` `composer::tests::a_key_typed_as_a_request_lands_answers_nothing`.
+- ✅ **The sidebar groups by status (2026-10-16).** This supersedes the Organize menu's "In one
+  list" and "By device" and the sidebar's sort choices (`.research/goal-reaudit-2026-10-16.md`
+  item 10). The sidebar now groups by status by default (Needs you, Working, Done), or by
+  project. Inside a group, rows keep a stable order: the newest started first, then by id. A
+  new message or a republish moves no row. One list duplicated the status grouping without its
+  reasons. By device duplicated what each row's machine glyph now says. The sorts only
+  reordered rows the person had placed. A settings file naming a deleted organisation loads
+  as by status and keeps the rest of the file. The Sessions disclosure went with one list.
+  - Every row wears its machine's kind (a laptop for a Mac, a server for Linux, a phone),
+    named "On studio" for assistive tech. It trails the title when no place line shows, and
+    leads the place line otherwise, so it stays when a waiting reason takes that line. A
+    machine the app does not know gets no glyph rather than a guess (item 15).
+  - Tests: `slopty-shell` `settings::tests::project_organization_survives_loading`,
+    `shell::sidebar_status::tests::every_row_says_which_machine_it_runs_on`,
+    `shell::spaces` drag and order tests,
+    `shell::chat_rename_tests::rename_opens_collapsed_sessions_groups_and_the_sidebar`.
+- ✅ **The symbol face is registered at startup; Plex and Lilex are gone (2026-10-16).** This
+  supersedes "Fonts are bundled, never system-resolved" for the faces it names. The shell
+  bundles and registers zeron's Geist and Geist Mono. `slopty-kit` keeps one face beside them,
+  Symbols Nerd Font Mono, which the app registers before the first window opens, so a prompt's
+  powerline and devicon glyphs resolve on every client. IBM Plex Sans and Lilex, and their
+  licences, are deleted: nothing drew with them since zeron's faces replaced them. A
+  terminal's fallback chain is unchanged (symbols, then Menlo, then Apple Color Emoji). The
+  text system alone never served it. It loads no family that lacks an `m`, and CoreText's
+  fallback cascade names its faces and sees only fonts registered with CoreText, so a prompt's
+  arrow fell to a system face (an em of 1,000 where the symbol face has 2,048). On Apple's
+  platforms the face is now also registered with CoreText for the process
+  (`CTFontManagerRegisterGraphicsFont`). Tests: `slopty-kit`
+  `fonts::tests::the_prompt_glyphs_resolve_to_the_symbol_face`, which shapes the three glyphs
+  in Menlo and checks the face they land in by its em, ascent and descent.
+- ✅ **A large diff opens collapsed (2026-10-16).** Item 18. A file over 1,500 changed lines,
+  or one that would take the diff past 4,000 lines, opens folded. Its header says "Large diff ·
+  N lines · Load" and names itself "path, N lines not loaded" for assistive tech; a click loads
+  it. Files held back spend nothing, so the smaller files after one still open, and collapsing
+  or expanding all forgets what was held. Before this, a generated lockfile's diff laid out
+  every row before the first one drew. Tests: `slopty-shell`
+  `changes::tests::a_large_diff_opens_with_files_past_the_budget_collapsed`.
+- ✅ **A settings file that does not read is set aside and said (2026-10-16).** Item 6.
+  `ui-settings.json` that fails to parse, is not UTF-8, or cannot be read is renamed to
+  `ui-settings.json.bak`. The app starts from defaults and says so once, in an error toast that
+  names the kept file. The next save writes a new file, and the `.bak` stays as it was. A missing
+  file is simply the defaults. Before this, a bad file was dropped silently and the first save
+  overwrote what the person had. Tests: `slopty-shell`
+  `settings::tests::a_corrupt_file_is_moved_aside_and_said`.
+- ✅ **Agents are installed from Settings (2026-10-16).** This supersedes "Slopty installs
+  nothing" (`slopty-ui` `view_model::surfaces::settings`), item 20. A core agent (Claude Code,
+  Codex, pi) missing on a reachable machine offers Install. Install runs the vendor's documented
+  line in a terminal of its own on that machine: the person's login shell runs it in their home,
+  so the installer finds their `npm` and `curl`. The terminal stands under the agent's row, so
+  the person watches and answers it as on the machine itself; Cancel ends it. Once it ends, its
+  status is said and the agents are listed again every 1.5 s, at most ten times, until the
+  agent shows. The worker sees the install as it sees any other, so no worker verb exists for
+  it. Close ends the terminal. A refused install is said, and nothing is left running.
+  Slopty still updates nothing and touches no credential: the installers sign nothing in.
+  - Tests: `slopty-shell` `settings::harnesses::install_tests::
+    install_shows_the_installer_and_lists_the_agent_once_it_ends`; `slopty-ui`
+    `view_model::surfaces::settings::tests::an_install_runs_the_vendor_line_or_says_why_not`.
+- ✅ **No agent-update island, no update policy, no theme metric system (2026-10-16).** Item 22.
+  The island that announced agent updates, its notification setting, and Settings → Agents'
+  update policy, Check now and update line are deleted. Agents update themselves on their
+  machines, and no machine advertises `HARNESS_UPDATES_V1`, so none of it ever showed.
+  `slopty-theme`'s type roles, radii, shadows, elevation and density are deleted too, with the
+  app's density write. The shell draws with zeron's tokens, and nothing read these. Spacing and
+  motion stay.
+- ✅ **Permissions asks again and says what it skipped (2026-10-16).** Item 26. A rules watch
+  that is turned away or closes asks again after 1 s, doubling to at most 15 s. Meanwhile the
+  page says why in a status strip: "… Trying again in 4s." An update that does not read is
+  counted and said ("1 update of the rules could not be read and are not shown: …"), not
+  dropped silently. Tests: `slopty-shell`
+  `settings::permissions::tests::the_rules_are_asked_again_and_what_did_not_read_is_said`.
+- ✅ **A link starts a session, never sends it (2026-10-16).** T41.
+  `slopty://new?prompt=…&machine=…&folder=…` opens a new session in the project that holds the
+  folder on that machine, with the prompt in its composer for the person to send. A link sends
+  nothing for them. A folder no project holds starts the session without one, and says so. The
+  link is strict: only these keys, none twice, a prompt up to 64 KiB, and `+` read as a space. The
+  app takes the system's URL events (`on_open_urls`). Tests: `slopty-app`
+  `invite::tests::a_new_session_link_carries_its_words_and_place`; `slopty-shell`
+  `shell::tests::new_session_in_project_homes_the_canvas_on_that_project`.
+- ✅ **Two words, and a float's touch targets (2026-10-16).** A9: attaching without a chat
+  says "Open the chat to attach to it". A10: forgetting a worker is a success toast, and a
+  refusal is an error toast. B6: every control a float is built of (a toolbar button, a toggle
+  chip, a dialog button, a pill) is at least 24 pt each way, so an iPad's floats are touch
+  targets. Tests: `slopty-app`
+  `tests::forgetting_a_worker_is_a_success_and_a_refusal_a_failure`; `slopty-shell`
+  `live::chrome::tests::a_float_s_controls_are_touch_targets`.

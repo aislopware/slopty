@@ -222,6 +222,8 @@ pub struct SettingsStore {
     /// changes, including a change back to its previous value.
     code_fences_generation: u64,
     save_task: Option<Task<()>>,
+    // slopty: a file [`UiSettings::load`] moved aside, until [`announce_set_aside`] says so.
+    set_aside: Option<Option<PathBuf>>,
 }
 
 impl Global for SettingsStore {}
@@ -252,15 +254,17 @@ impl SettingsStore {
 }
 
 pub fn init(settings: UiSettings, data_dir: impl Into<PathBuf>, cx: &mut App) {
-    let data_dir = data_dir.into();
+    let data_dir: PathBuf = data_dir.into();
     // slopty: dictation removed.
+    let set_aside = take_set_aside(&data_dir);
     cx.set_global(SettingsStore {
         current: settings,
-        data_dir: data_dir.into(),
+        data_dir,
         revision: 0,
         saved_revision: 0,
         code_fences_generation: 0,
         save_task: None,
+        set_aside,
     });
 }
 
@@ -564,23 +568,17 @@ fn flush_latest(cx: &mut App) {
     }
 }
 
+// slopty: two organisations, by status (Needs you, Working, Done; `shell/sidebar_status.rs`) the
+// default, and by project; one list and by device are gone, and rows keep the order their
+// sessions started in, so nothing moves on its own (`docs/decisions/ui.md`, "The sidebar groups by
+// status"). A file naming a gone organisation reads as the default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub enum SidebarOrganization {
     ByProject,
-    ByDevice,
     #[default]
-    InOneList,
-    // slopty: Needs you, Working and Done (`shell/sidebar_status.rs`).
+    #[serde(other)]
     ByStatus,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub enum SidebarSort {
-    #[default]
-    LastUpdated,
-    Created,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -743,13 +741,8 @@ pub struct UiSettings {
     pub compact_model_picker: bool,
     pub sidebar_width: f32,
     pub sidebar_collapsed: bool,
-    /// Legacy: the grouped-by-project toggle predates spaces (which group by
-    /// folder inherently). Kept for file compatibility; no longer read.
-    pub sidebar_grouped: bool,
     /// How active sessions are partitioned in the sidebar.
     pub sidebar_organization: SidebarOrganization,
-    /// Timestamp used to order active sessions (newest first).
-    pub sidebar_sort: SidebarSort,
     /// Optional harness branding and repository metadata shown below each
     /// session title.
     pub sidebar_show_project_label: bool,
@@ -810,9 +803,6 @@ pub struct UiSettings {
     /// the foreground case).
     pub notifications_background_only: bool,
     pub files_panel_width: f32,
-    /// Desktop banners for newly discovered agent CLI releases. In-app chips
-    /// remain enabled independently of this preference.
-    pub agent_update_notifications: bool,
     pub right_pane_width: f32,
     /// Width of the pull request pane beside the board.
     pub pull_request_pane_width: f32,
@@ -924,9 +914,7 @@ impl Default for UiSettings {
             window_geometry: None,
             sidebar_width: SIDEBAR_DEFAULT,
             sidebar_collapsed: false,
-            sidebar_grouped: false,
-            sidebar_organization: SidebarOrganization::InOneList,
-            sidebar_sort: SidebarSort::LastUpdated,
+            sidebar_organization: SidebarOrganization::ByStatus,
             sidebar_show_project_label: true,
             sidebar_compact: true,
             sidebar_show_project_icon: true,
@@ -951,7 +939,6 @@ impl Default for UiSettings {
             notifications_enabled: true,
             notifications_background_only: true,
             files_panel_width: FILES_PANEL_DEFAULT,
-            agent_update_notifications: true,
             right_pane_width: RIGHT_PANE_DEFAULT,
             pull_request_pane_width: PULL_REQUEST_PANE_DEFAULT,
             right_pane_open: false,
@@ -1055,11 +1042,12 @@ pub enum ShortcutId {
     ReopenClosedTab,
     OpenBranchPicker,
     NextEffort,
+    ResumeSession, // slopty: Claude Code's past sessions (`shell::past_sessions`)
     JumpSession(usize),
 }
 
 impl ShortcutId {
-    pub const ALL: [ShortcutId; 16 + JUMP_SLOTS] = [ // slopty: dictation and appshots removed.
+    pub const ALL: [ShortcutId; 17 + JUMP_SLOTS] = [ // slopty: dictation and appshots removed.
         ShortcutId::RandomWallpaper,
         ShortcutId::SaveFile,
         ShortcutId::BrowserReload,
@@ -1076,6 +1064,7 @@ impl ShortcutId {
         ShortcutId::ReopenClosedTab, // slopty
         ShortcutId::OpenBranchPicker, // slopty
         ShortcutId::NextEffort, // slopty
+        ShortcutId::ResumeSession, // slopty
         ShortcutId::JumpSession(0),
         ShortcutId::JumpSession(1),
         ShortcutId::JumpSession(2),
@@ -1110,6 +1099,7 @@ impl ShortcutId {
             ShortcutId::ReopenClosedTab => "Reopen closed tab", // slopty
             ShortcutId::OpenBranchPicker => "Open branch picker", // slopty
             ShortcutId::NextEffort => "Next effort level", // slopty
+            ShortcutId::ResumeSession => "Resume a session", // slopty
             ShortcutId::JumpSession(slot) => JUMP_LABELS.get(slot).copied().unwrap_or(""),
         }
     }
@@ -1158,6 +1148,7 @@ impl ShortcutId {
             ShortcutId::ReopenClosedTab => "mod-shift-t",
             ShortcutId::OpenBranchPicker => "mod-alt-b",
             ShortcutId::NextEffort => "mod-shift-e",
+            ShortcutId::ResumeSession => "mod-shift-o", // slopty
             ShortcutId::JumpSession(slot) => JUMP_DEFAULTS.get(slot).copied().unwrap_or(""),
         }
     }
@@ -1194,6 +1185,7 @@ pub struct KeymapConfig {
     pub reopen_closed_tab: String,
     pub open_branch_picker: String,
     pub next_effort: String,
+    pub resume_session: String, // slopty: Claude Code's past sessions
     /// One combo per jump slot, in slot order. A list rather than nine fields:
     /// [`UiSettings::load`] discards the WHOLE file on a parse error, so a
     /// fixed-length array would let one malformed entry reset every unrelated
@@ -1262,6 +1254,7 @@ impl Default for KeymapConfig {
             reopen_closed_tab: ShortcutId::ReopenClosedTab.default_combo().into(), // slopty
             open_branch_picker: ShortcutId::OpenBranchPicker.default_combo().into(), // slopty
             next_effort: ShortcutId::NextEffort.default_combo().into(), // slopty
+            resume_session: ShortcutId::ResumeSession.default_combo().into(), // slopty
             jump_session: JUMP_DEFAULTS.iter().map(|c| (*c).to_string()).collect(),
         }
     }
@@ -1287,6 +1280,7 @@ impl KeymapConfig {
             ShortcutId::ReopenClosedTab => &self.reopen_closed_tab, // slopty
             ShortcutId::OpenBranchPicker => &self.open_branch_picker, // slopty
             ShortcutId::NextEffort => &self.next_effort, // slopty
+            ShortcutId::ResumeSession => &self.resume_session, // slopty
             ShortcutId::JumpSession(slot) => self
                 .jump_session
                 .get(slot)
@@ -1314,6 +1308,7 @@ impl KeymapConfig {
             ShortcutId::ReopenClosedTab => self.reopen_closed_tab = combo, // slopty
             ShortcutId::OpenBranchPicker => self.open_branch_picker = combo, // slopty
             ShortcutId::NextEffort => self.next_effort = combo, // slopty
+            ShortcutId::ResumeSession => self.resume_session = combo, // slopty
             ShortcutId::JumpSession(slot) => {
                 if slot < JUMP_SLOTS {
                     if self.jump_session.len() < JUMP_SLOTS {
@@ -1588,9 +1583,7 @@ impl UiSettings {
             compact_model_picker,
             sidebar_width,
             sidebar_collapsed,
-            sidebar_grouped,
             sidebar_organization,
-            sidebar_sort,
             sidebar_show_project_label,
             sidebar_compact,
             sidebar_show_project_icon,
@@ -1615,7 +1608,6 @@ impl UiSettings {
             notifications_enabled,
             notifications_background_only,
             files_panel_width,
-            agent_update_notifications,
             right_pane_width,
             pull_request_pane_width,
             right_pane_open,
@@ -1723,7 +1715,9 @@ impl UiSettings {
         self
     }
 
-    /// Load from `{data_dir}/ui-settings.json`; defaults on any failure.
+    /// Load from `{data_dir}/ui-settings.json`; defaults when there is none. A file that cannot
+    /// be read or parsed gives the defaults too, and is moved aside as `ui-settings.json.bak`
+    /// first ([`announce_set_aside`] says so once the window is up).
     pub fn load(data_dir: &Path) -> Self {
         match std::fs::read_to_string(Self::path(data_dir)) {
             Ok(text) => {
@@ -1815,12 +1809,22 @@ impl UiSettings {
                 }) {
                     Ok(settings) => settings.migrated().clamped(),
                     Err(err) => {
+                        // slopty: a file that does not parse is moved aside and said, never
+                        // overwritten by the next save.
                         tracing::warn!(error = %err, "ui-settings corrupt; using defaults");
+                        set_aside(data_dir);
                         Self::default()
                     }
                 }
             }
-            Err(_) => Self::default(),
+            // slopty: none yet is the defaults; one that cannot be read (not UTF-8, refused)
+            // is moved aside as a corrupt one is.
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Self::default(),
+            Err(err) => {
+                tracing::warn!(error = %err, "ui-settings unreadable; using defaults");
+                set_aside(data_dir);
+                Self::default()
+            }
         }
     }
 
@@ -1848,6 +1852,63 @@ impl UiSettings {
     pub fn path(data_dir: &Path) -> PathBuf {
         data_dir.join(FILE_NAME)
     }
+}
+
+// slopty: a settings file that could not be read, moved aside rather than overwritten.
+/// Settings files [`UiSettings::load`] could not read, by the data directory they were in, with
+/// where each was moved (`None` when the move failed too), until [`init`] for that directory
+/// takes them.
+static SET_ASIDE: std::sync::Mutex<Vec<(PathBuf, Option<PathBuf>)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Where a settings file that could not be read goes: beside it, so nothing writes over it.
+pub fn backup_path(data_dir: &Path) -> PathBuf {
+    UiSettings::path(data_dir).with_extension("json.bak")
+}
+
+/// Move `data_dir`'s settings file aside as [`backup_path`], replacing an older one, and note it
+/// for [`init`].
+fn set_aside(data_dir: &Path) {
+    let backup = backup_path(data_dir);
+    let moved = match std::fs::rename(UiSettings::path(data_dir), &backup) {
+        Ok(()) => Some(backup),
+        Err(err) => {
+            tracing::warn!(error = %err, "the unreadable ui-settings could not be moved aside");
+            None
+        }
+    };
+    if let Ok(mut noted) = SET_ASIDE.lock() {
+        noted.push((data_dir.to_path_buf(), moved));
+    }
+}
+
+/// The note [`set_aside`] left for `data_dir`, taken.
+fn take_set_aside(data_dir: &Path) -> Option<Option<PathBuf>> {
+    let mut noted = SET_ASIDE.lock().ok()?;
+    let at = noted.iter().position(|(dir, _)| dir == data_dir)?;
+    Some(noted.remove(at).1)
+}
+
+/// Say, once, as an error toast, that the settings file could not be read and where it went;
+/// whether there was one to say.
+pub fn announce_set_aside(cx: &mut App) -> bool {
+    let Some(set_aside) = cx
+        .try_global::<SettingsStore>()
+        .is_some()
+        .then(|| cx.global_mut::<SettingsStore>().set_aside.take())
+        .flatten()
+    else {
+        return false;
+    };
+    let words = match set_aside {
+        Some(backup) => format!(
+            "Settings could not be read, so Slopty started from its defaults. The old file is kept as {}.",
+            backup.file_name().map_or_else(|| backup.display().to_string(), |name| name.to_string_lossy().into_owned()),
+        ),
+        None => "Settings could not be read, so Slopty started from its defaults.".to_owned(),
+    };
+    crate::toast::error(cx, words);
+    true
 }
 
 fn clamp_or(value: f32, min: f32, max: f32, default: f32) -> f32 {
@@ -2514,9 +2575,7 @@ mod tests {
             window_geometry: None,
             sidebar_width: 300.0,
             sidebar_collapsed: true,
-            sidebar_grouped: true,
-            sidebar_organization: SidebarOrganization::ByDevice,
-            sidebar_sort: SidebarSort::Created,
+            sidebar_organization: SidebarOrganization::ByProject,
             sidebar_compact: true,
             sidebar_show_project_icon: false,
             sidebar_show_project_label: false,
@@ -2556,7 +2615,6 @@ mod tests {
             notifications_enabled: false,
             notifications_background_only: false,
             files_panel_width: 310.0,
-            agent_update_notifications: false,
             right_pane_width: 700.0,
             pull_request_pane_width: 820.0,
             right_pane_open: true,
@@ -2651,6 +2709,7 @@ mod tests {
             saved_revision: 0,
             code_fences_generation: 0,
             save_task: None,
+            set_aside: None,
         };
 
         store.current.sidebar_width = 300.0;
@@ -2709,6 +2768,7 @@ mod tests {
             saved_revision: 0,
             code_fences_generation: 0,
             save_task: None,
+            set_aside: None,
         };
 
         assert!(store.update_current(|settings| settings.sidebar_width = 300.0));
@@ -2758,6 +2818,19 @@ mod tests {
             UiSettings::load(dir.path()).sidebar_organization,
             SidebarOrganization::ByProject
         );
+        // slopty: by status is the default, and a gone organisation reads as it, keeping the
+        // rest of the file.
+        assert_eq!(UiSettings::default().sidebar_organization, SidebarOrganization::ByStatus);
+        for gone in ["inOneList", "byDevice"] {
+            std::fs::write(
+                UiSettings::path(dir.path()),
+                format!(r#"{{"sidebarOrganization":"{gone}","sidebarSort":"created","sidebarWidth":300}}"#),
+            )
+            .unwrap();
+            let loaded = UiSettings::load(dir.path());
+            assert_eq!(loaded.sidebar_organization, SidebarOrganization::ByStatus, "{gone}");
+            assert_eq!(loaded.sidebar_width, 300.0, "{gone}: the rest of the file kept");
+        }
     }
 
     /// A settings file written before light mode existed has no `appearance`
@@ -2900,12 +2973,35 @@ mod tests {
         assert_eq!(loaded.sidebar_width, 300.0);
     }
 
-    #[test]
-    fn missing_and_corrupt_files_yield_defaults() {
+    // slopty: a file that cannot be read is moved aside and said, and the next save never
+    // writes over it; none at all is quietly the defaults.
+    #[gpui::test]
+    fn a_corrupt_file_is_moved_aside_and_said(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(UiSettings::load(dir.path()), UiSettings::default());
-        std::fs::write(UiSettings::path(dir.path()), "{not json").unwrap();
-        assert_eq!(UiSettings::load(dir.path()), UiSettings::default());
+        cx.update(|cx| {
+            init(UiSettings::default(), dir.path(), cx);
+            assert!(!announce_set_aside(cx), "no file is nothing to say");
+        });
+        for bad in [b"{not json".as_slice(), &[0xff, 0xfe, b'{', b'}']] {
+            std::fs::write(UiSettings::path(dir.path()), bad).unwrap();
+            assert_eq!(UiSettings::load(dir.path()), UiSettings::default());
+            assert!(!UiSettings::path(dir.path()).exists(), "moved, not left to be saved over");
+            assert_eq!(std::fs::read(backup_path(dir.path())).unwrap(), bad, "kept whole");
+            cx.update(|cx| {
+                crate::toast::clear(cx);
+                init(UiSettings::default(), dir.path(), cx);
+                assert!(announce_set_aside(cx));
+                let shown = crate::toast::shown(cx);
+                assert_eq!(shown.len(), 1, "{shown:?}");
+                assert_eq!(shown[0].0, crate::toast::ToastKind::Error);
+                assert!(shown[0].1.contains("ui-settings.json.bak"), "{shown:?}");
+                assert!(!announce_set_aside(cx), "said once");
+                update(SavePolicy::Immediate, cx, |settings| settings.sidebar_width = 300.0);
+            });
+            assert_eq!(UiSettings::load(dir.path()).sidebar_width, 300.0, "saved anew");
+            assert_eq!(std::fs::read(backup_path(dir.path())).unwrap(), bad, "the old one kept");
+        }
     }
 
     fn signed_in(user_id: &str, org_id: Option<&str>) -> AuthState {
@@ -3387,7 +3483,6 @@ mod tests {
         std::fs::write(UiSettings::path(dir.path()), r#"{"sidebarWidth": 300}"#).unwrap();
         let loaded = UiSettings::load(dir.path());
         assert_eq!(loaded.keymap, KeymapConfig::default());
-        assert!(!loaded.sidebar_grouped);
         assert!(!loaded.escape_stops_active_agent);
     }
 

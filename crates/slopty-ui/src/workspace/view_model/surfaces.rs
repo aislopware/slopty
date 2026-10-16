@@ -262,6 +262,10 @@ impl WorkspaceView {
         if let Some(answer) = self.composer_call(method, params, cx) {
             return Some(answer);
         }
+        // slopty: Claude Code's past sessions (`past`).
+        if let Some(answer) = self.past_call(method, params, cx) {
+            return Some(answer);
+        }
         let params = params.clone();
         let answer = match method {
             methods::WATCH_CHECKOUT_DIFFS => self.watch_diffs(&params, cx),
@@ -305,6 +309,9 @@ impl WorkspaceView {
     /// A worker's message, heard before the workspace's own handling: an answer to a surface's
     /// request is taken. Whether it was the surfaces' alone, so nothing else is to hear it.
     pub fn surface_heard(&mut self, key: WorkerKey, msg: &WorkerMsg) -> bool {
+        if self.past_heard(key, msg) {
+            return true;
+        }
         if self.clone_heard(key, msg) {
             return true;
         }

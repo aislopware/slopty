@@ -667,6 +667,37 @@ pub fn truncate_file_lines(file: &mut FileDiff, max_lines: usize) {
         .unwrap_or(0);
 }
 
+// slopty: a large diff opens with its files collapsed past a budget, each loaded by a click on
+// its header, as Claude desktop does ("Files are collapsed for large diffs"; `docs/decisions/
+// ui.md`, "A large diff opens collapsed").
+/// A file with more diff lines than this opens collapsed.
+pub const LARGE_FILE_LINES: usize = 1_500;
+/// The diff lines a diff opens with across its files: a file that would pass it opens collapsed.
+pub const DIFF_LINE_BUDGET: usize = 4_000;
+
+/// A file's diff lines, every hunk's.
+pub fn diff_lines(file: &FileDiff) -> usize {
+    file.hunks.iter().map(|hunk| hunk.lines.len()).sum()
+}
+
+/// Which of `files` open collapsed, in order: one past [`LARGE_FILE_LINES`], and one that would
+/// take the lines the open files before it spent past [`DIFF_LINE_BUDGET`]. A smaller file after
+/// a held one still opens while it fits.
+pub fn held_back(files: &[FileDiff]) -> Vec<bool> {
+    let mut spent = 0_usize;
+    files
+        .iter()
+        .map(|file| {
+            let lines = diff_lines(file);
+            let held = lines > LARGE_FILE_LINES || spent.saturating_add(lines) > DIFF_LINE_BUDGET;
+            if !held {
+                spent = spent.saturating_add(lines);
+            }
+            held
+        })
+        .collect()
+}
+
 /// Analytic expanded-body height — drives the 180 ms fold tween without
 /// measurement.
 pub fn body_height(file: &FileDiff) -> f32 {
@@ -1231,20 +1262,22 @@ impl FileHorizontalState {
                     _ => false,
                 }
         });
-        if !current {
-            *cached = Some(MeasuredDiffWidth {
-                key,
-                highlights: highlights.cloned(),
-                width: max_shaped_text_width(
+        // slopty: the width measured now or kept, with no unwrap.
+        let width = match cached.as_ref() {
+            Some(kept) if current => kept.width,
+            _ => {
+                let width = max_shaped_text_width(
                     file,
                     highlights.map(AsRef::as_ref),
                     theme,
                     text_system,
-                ),
-            });
-        }
+                );
+                *cached = Some(MeasuredDiffWidth { key, highlights: highlights.cloned(), width });
+                width
+            }
+        };
         DiffHorizontalMetrics {
-            max_text_width: cached.as_ref().unwrap().width,
+            max_text_width: width,
             max_gutter_width: self.geometry.max_gutter_width,
         }
     }
@@ -1564,6 +1597,8 @@ pub(crate) fn sticky_file_header_paint(theme: &Theme) -> StickyFileHeaderPaint {
 #[derive(Default, Clone, Copy)]
 struct FileFold {
     collapsed: bool,
+    // slopty: collapsed because the diff is large ([`held_back`]), until loaded.
+    held: bool,
     /// Bumped per toggle — keys the height tween + chevron transition.
     epoch: usize,
     from: f32,
@@ -2250,6 +2285,14 @@ impl Changes {
                 let horizontal = files.iter().map(FileHorizontalState::new).collect();
                 changes.folds.clear();
                 changes.highlights.clear();
+                // slopty: a large diff opens with files past the budget collapsed.
+                let held = held_back(&files);
+                for (file, _) in files.iter().zip(&held).filter(|(_, held)| **held) {
+                    changes.folds.insert(
+                        file.path.clone(),
+                        FileFold { collapsed: true, held: true, ..FileFold::default() },
+                    );
+                }
                 let staged = changes.staged_comments(cx);
                 let draft = changes.draft_anchor();
                 let (rows, ranges) = flatten_rows(
@@ -2259,7 +2302,7 @@ impl Changes {
                         .as_ref()
                         .map(|(path, side, line)| (path.as_str(), *side, *line)),
                     changes.mode,
-                    |_| false,
+                    |ix| held.get(ix).copied().unwrap_or(false),
                 );
                 changes.comment_key = comment_state_key(&staged, draft.as_ref());
                 // The uniform hint keeps offsets for never-rendered rows
@@ -2300,8 +2343,11 @@ impl Changes {
         // Only splice the rows that moved: `ListState::splice` clamps the
         // scroll anchor to the range start when the anchored row is inside it,
         // so replacing a whole body jumped the pane to the top of the file.
+        // slopty: a span past the rows (a stale range) splices nothing rather than panicking.
         let (prefix, suffix) = {
-            let old = &self.rows[body.clone()];
+            let Some(old) = self.rows.get(body.clone()) else {
+                return;
+            };
             let prefix = old
                 .iter()
                 .zip(&new_body)
@@ -2353,6 +2399,7 @@ impl Changes {
             };
             let fold = self.folds.entry(file.path.clone()).or_default();
             fold.collapsed = collapsed;
+            fold.held = false; // slopty: loaded
             fold.toggled_at = None;
             self.replace_file_body(file_ix, body);
             cx.notify();
@@ -2378,6 +2425,7 @@ impl Changes {
             0.0
         };
         fold.collapsed = !currently_collapsed;
+        fold.held = false; // slopty: loaded
         fold.epoch += 1;
         fold.toggled_at = Some(std::time::Instant::now());
         // The body tweens as ONE clipped stand-in row; the settle sweep
@@ -2491,6 +2539,7 @@ impl Changes {
         for file in files.iter() {
             let fold = self.folds.entry(file.path.clone()).or_default();
             fold.collapsed = collapse;
+            fold.held &= collapse; // slopty: expanding all loads every file
             fold.toggled_at = None;
         }
         let staged = self.staged_comments(cx);
@@ -2805,7 +2854,10 @@ impl Changes {
             return;
         };
         self.open_draft(comment.path.clone(), side, line, window, cx);
-        let draft = self.draft.as_mut().unwrap();
+        // slopty: no unwrap.
+        let Some(draft) = self.draft.as_mut() else {
+            return;
+        };
         draft.editing_id = Some(comment.id);
         if let comments::CommentSource::Diff { old_path, .. } = comment.source {
             draft.old_path = old_path;
@@ -3129,7 +3181,11 @@ impl Changes {
         let highlight = files
             .get(row.file())
             .and_then(|file| self.request_highlight(file, &parsed_key, cx));
-        let horizontal = &self.parsed.as_ref().unwrap().horizontal[row.file()];
+        // slopty: no unwrap or index: a row past the parse draws nothing.
+        let Some(horizontal) = self.parsed.as_ref().and_then(|parsed| parsed.horizontal.get(row.file()))
+        else {
+            return gpui::Empty.into_any_element();
+        };
         let code_width = match files.get(row.file()) {
             Some(file) if !self.wrap_lines => DiffCodeWidth::Scrollable(horizontal.metrics(
                 file,
@@ -3477,8 +3533,18 @@ impl Changes {
         // +N / −N counts on a slightly raised wash. The header carries the
         // section separator (the per-file wrapper it used to hang on is
         // gone — rows are flat now).
+        // slopty: a header names its file and whether it is open; a file a large diff held back
+        // says how many lines a click loads.
+        let held_lines = (fold.held && collapsed).then(|| diff_lines(file));
+        let header_label = match held_lines {
+            Some(lines) => format!("{path}, {lines} lines not loaded. Load"),
+            None if collapsed => format!("{path}, collapsed"),
+            None => format!("{path}, expanded"),
+        };
         div()
             .id(presentation.element_id(ix))
+            .role(gpui::Role::Button)
+            .aria_label(SharedString::from(header_label))
             .w_full()
             .h(px(FILE_HEADER_HEIGHT))
             .when(
@@ -3529,6 +3595,16 @@ impl Changes {
                         .text_size(px(10.0))
                         .text_color(theme.text_faint)
                         .child(SharedString::from("BIN")),
+                )
+            })
+            // slopty: what a held file's click loads.
+            .when_some(held_lines, |el, lines| {
+                el.child(
+                    div()
+                        .flex_none()
+                        .text_size(px(11.0))
+                        .text_color(theme.text_faint)
+                        .child(SharedString::from(format!("Large diff · {lines} lines · Load"))),
                 )
             })
             .when(adds > 0 || !file.binary, |el| {
@@ -5611,6 +5687,36 @@ rename to new_name.rs
                 }
             }
         }
+    }
+
+    // slopty: a large diff opens with a file past the file budget collapsed, and every file that
+    // would take the open ones past the diff budget; each header then loads its own body alone.
+    #[test]
+    fn a_large_diff_opens_with_files_past_the_budget_collapsed() {
+        let patch_of = |name: &str, lines: usize| {
+            format!("diff --git a/{name} b/{name}\n--- a/{name}\n+++ b/{name}\n@@ -0,0 +1,{lines} @@\n")
+                + &"+x\n".repeat(lines)
+        };
+        let sizes = [10, LARGE_FILE_LINES + 1, 1_400, 1_400, 1_400, 900];
+        let patch: String = sizes
+            .iter()
+            .enumerate()
+            .map(|(ix, lines)| patch_of(&format!("f{ix}.rs"), *lines))
+            .collect();
+        let files = parse_patch(&patch);
+        assert_eq!(files.iter().map(diff_lines).collect::<Vec<_>>(), sizes);
+        // Spent: 10; the large one held; 1 410; 2 810; 4 210 would pass the budget; 3 710 fits.
+        let held = held_back(&files);
+        assert_eq!(held, [false, true, false, false, true, false]);
+        let (rows, ranges) = flatten_rows(&files, &[], None, DiffMode::Unified, |ix| held[ix]);
+        for (ix, range) in ranges.iter().enumerate() {
+            assert_eq!(range.len() == 1, held[ix], "f{ix}: a held file is its header alone");
+        }
+        let open: usize = files.iter().zip(&held).filter(|(_, h)| !**h).map(|(f, _)| diff_lines(f)).sum();
+        assert!(open <= DIFF_LINE_BUDGET, "{open} lines open");
+        assert!(rows.len() < open + 3 * files.len(), "{} rows", rows.len());
+        // A diff within both budgets holds nothing back.
+        assert_eq!(held_back(&parse_patch(&patch_of("a.rs", LARGE_FILE_LINES))), [false]);
     }
 
     #[test]

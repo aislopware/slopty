@@ -874,7 +874,7 @@ mod tests {
         let (host, cx) = cx.add_window_view(move |_, cx| {
             PhoneHost(cx.new(|cx| {
                 let state = cx.new(|_| crate::state::AppState::new());
-                let mut shell = Shell::new(
+                let shell = Shell::new(
                     state,
                     crate::state::EngineBootConfig {
                         data_dir: path.clone(),
@@ -882,7 +882,6 @@ mod tests {
                     },
                     cx,
                 );
-                shell.settings.sidebar_organization = crate::settings::SidebarOrganization::InOneList;
                 shell.state.update(cx, |state, _| {
                     state.workspace_scope = Some(slopty_view_proto::WorkspaceScope::Local);
                     state.local_device_id = Some("local".into());

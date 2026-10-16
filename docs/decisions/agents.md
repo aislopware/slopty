@@ -3622,3 +3622,43 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   to bypass permissions mid-session ("not launched with --dangerously-skip-permissions"): every
   driven run now starts with `--allow-dangerously-skip-permissions`, which only allows the mode,
   as the desktop app's runs do; the person still picks it.
+
+- ⏳ **Past Claude Code sessions are seen and continued in the GUI (2026-10-16, lane R).** The TUI
+  and Slopty's `claude -p` share Claude Code's own store on each machine, so a session run in a
+  terminal is one Slopty can show and go on with. Claude desktop's Code tab, t3code and zeron
+  each keep history apart from live work and reachable from a search; Slopty does both.
+  - **History, per project.** A project group of the sidebar ends with a quiet "History"
+    disclosure, shut at first; a sidebar organised by status has one History for every project
+    (the filtered one's while filtered), above Archived, each row naming its project. Opened, it
+    asks the project's machines (`slopty.PastSessions`, through `ThreadRequest::Sessions`) for
+    two things at once: Claude Code's own list of the sessions in the folder, newest first (the
+    TUI's and `claude -p`'s alike), and the person's prompts there, from Claude Code's prompt
+    history. The list decides which sessions and in what order; the prompts give each its title
+    (its first prompt) and last prompt. A session that is a chat here already is left out. It
+    pages by 20 behind "Show more", keeps its rows while it asks again, and says in a line of
+    its own when it is reading, has nothing, or failed (the machine's words, with Try again).
+    Each row's height is fixed by what it shows, so the group it closes is never clipped.
+  - **Resume a session… (⇧⌘O, and the palette).** A picker in the palette's anatomy searches
+    the person's past prompts on the open chat's machine, in its project or in every folder
+    (Tab), with the worker's prompt search, and shows the prompt that matched with its words
+    lit. With no words it lists the project's sessions as History does, or the machine's last
+    prompted.
+  - **Opening.** A session the machine keeps a thread of opens that chat. Any other is a start
+    of Claude Code with `--resume <id>` in the folder it ran in, which reads the whole
+    conversation from its transcript before anything runs; the shell opens the chat once the
+    machine says it started, so it shows the conversation at once. A message there goes to the
+    same session, so the TUI and the GUI write one history. A refusal is said in the machine's
+    words, in the picker's row or a notice.
+  - **A session running elsewhere.** Claude Code records each live process in
+    `~/.claude/sessions/<pid>.json` (pid, `sessionId`, `cwd`, `kind`). Its own resume refuses a
+    session another live process holds ("this session is running in another terminal", offering
+    a copy), since two writers interleave their records in one transcript and each goes on from
+    its own copy of the conversation. Slopty does the same: such a session is marked "In a
+    terminal" (or "Running") in History and the picker, opens read from its transcript with the
+    plain words that it runs in another terminal, and no message starts a second Claude Code on
+    it. The marking and the refusal are the worker's (`PAST_RUNNING`), from Claude Code's live
+    records, the worker's own children left out.
+  - Tests: e2e `app::past_sessions` (`a_tui_session_is_listed_opened_and_continued`,
+    `history_says_why_it_has_nothing`, `a_session_running_elsewhere_is_shown_not_taken`);
+    `slopty-ui` `workspace::view_model::past::tests`; `slopty-shell`
+    `shell::past_sessions::tests`.

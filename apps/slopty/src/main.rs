@@ -29,6 +29,9 @@ pub fn main() -> Result<()> {
 
     // The shell's application: its icons and fonts, its image fetches and its Dock-icon reopen.
     let app = slopty_shell::application(handle.clone());
+    // A `slopty://` link the system opened the app with goes to the workspace, held until it
+    // listens (`slopty_app::open_link`): a server to connect to, or a session to start.
+    app.on_open_urls(|urls| urls.into_iter().for_each(slopty_app::open_link));
     app.run(move |cx| {
         gpui_kit::init(cx);
         slopty_app::open_workspace(cx, handle);

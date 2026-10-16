@@ -112,14 +112,12 @@ impl SearchTreeModel {
                         best_score: result.score,
                         children: Vec::new(),
                     });
+                // slopty: no expect; an ancestor is inserted before its children.
                 if let Some(parent) = parent.as_ref() {
-                    let children = &mut self
-                        .nodes
-                        .get_mut(parent)
-                        .expect("search ancestor must exist")
-                        .children;
-                    if !children.contains(&path) {
-                        children.push(path.clone());
+                    if let Some(node) = self.nodes.get_mut(parent)
+                        && !node.children.contains(&path)
+                    {
+                        node.children.push(path.clone());
                     }
                 } else if !self.roots.contains(&path) {
                     self.roots.push(path.clone());
@@ -202,8 +200,10 @@ fn sort_search_branch(path: &str, nodes: &mut HashMap<String, SearchTreeNode>) {
 
 fn sort_search_paths(paths: &mut [String], nodes: &HashMap<String, SearchTreeNode>) {
     paths.sort_by(|left, right| {
-        let left = nodes.get(left).expect("search node must exist");
-        let right = nodes.get(right).expect("search node must exist");
+        // slopty: a path with no node sorts by itself instead of panicking.
+        let (Some(left), Some(right)) = (nodes.get(left), nodes.get(right)) else {
+            return left.cmp(right);
+        };
         right
             .best_score
             .cmp(&left.best_score)

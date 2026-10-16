@@ -81,7 +81,6 @@ fn setup(cx: &mut TestAppContext) -> (Entity<Shell>, &mut VisualTestContext) {
                 },
                 cx,
             );
-            shell.settings.sidebar_organization = SidebarOrganization::InOneList;
             shell.state.update(cx, |state, _| {
                 state.workspace_scope = Some(WorkspaceScope::Local);
                 state.local_device_id = Some("local".into());

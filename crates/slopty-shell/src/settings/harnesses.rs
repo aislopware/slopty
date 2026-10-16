@@ -26,7 +26,7 @@ use gpui::{
 
 use crate::catalog::registry::{HarnessDescriptor, descriptor_enabled};
 
-use slopty_view_proto::{HarnessId, HarnessUpdatePhase, HarnessUpdatePolicy, HarnessUpdateStatus};
+use slopty_view_proto::HarnessId;
 
 use slopty_view_rpc::methods;
 
@@ -45,32 +45,12 @@ mod completion;
 /// padding, brand tile and gap, so the details start on the title's edge.
 const DETAILS_INSET: f32 = 4.0 + 36.0 + 12.0;
 
-/// Update policies in menu order: the short label, and the note shown under
-/// the row title for the chosen one.
 // slopty: how freely agents act (`[agents] autonomy`): the value, its label, and the note under
 // the row title for the chosen one.
 const AUTONOMY: [(&str, &str, &str); 3] = [
     ("auto", "Auto", "Each agent's own judgement decides what needs you."),
     ("full", "Full", "Agents never stop to ask permission."),
     ("ask", "Ask", "Agents ask before what their harness guards."),
-];
-
-const UPDATE_POLICIES: [(HarnessUpdatePolicy, &str, &str); 3] = [
-    (
-        HarnessUpdatePolicy::Notify,
-        "Notify",
-        "Install only when you choose Update.",
-    ),
-    (
-        HarnessUpdatePolicy::AutoWhenIdle,
-        "Auto when idle",
-        "Install automatically after active runs finish.",
-    ),
-    (
-        HarnessUpdatePolicy::Off,
-        "Off",
-        "Don't check for new versions.",
-    ),
 ];
 
 fn offers_install(harness: HarnessId, installed: bool, can_install: bool) -> bool {
@@ -111,6 +91,22 @@ fn install_command(harness: HarnessId, can_install: bool) -> Option<&'static str
     crate::catalog::harness::install::manual_command(harness)
 }
 
+// slopty: how tall the installer's terminal stands under its row.
+const INSTALL_TERMINAL_HEIGHT: f32 = 240.0;
+// slopty: how often, and how many times, the agents are listed again after an installer ends.
+const RELIST_EVERY: std::time::Duration = std::time::Duration::from_millis(1_500);
+const RELIST_TRIES: u32 = 10;
+
+// slopty: the installer's terminal, by the agent it installs.
+struct InstallRun {
+    harness: HarnessId,
+    /// The terminal's id (`InstallHarness`'s `terminalId`).
+    id: String,
+    /// The status it ended with, once it ended.
+    ended: Option<i32>,
+    _watch: Option<gpui::Subscription>,
+}
+
 fn install_label(name: &str) -> String {
     format!("Installing {name}…")
 }
@@ -137,62 +133,14 @@ pub fn cli_name(harness: HarnessId) -> &'static str {
     }
 }
 
-/// A provider's version line: the installed version, plus only what the
-/// Update button doesn't already say (progress, a failure), all in one muted
-/// tone. Up-to-date providers, checks in flight and providers whose updates
-/// aren't monitored show just the version, so rows don't flash through
-/// states while checks run.
-fn harness_update_label(status: &HarnessUpdateStatus, theme: &Theme) -> (SharedString, gpui::Hsla) {
-    let installed = status
-        .installed_version
-        .as_deref()
-        .map(|version| format!("v{version}"));
-    let with = |detail: &str| match &installed {
-        Some(version) => format!("{version} · {detail}"),
-        None => detail.to_owned(),
-    };
-    let version_only = || installed.clone().unwrap_or_default();
-    let label = match status.phase {
-        HarnessUpdatePhase::Dormant
-        | HarnessUpdatePhase::Checking
-        | HarnessUpdatePhase::Current => version_only(),
-        // The row's Update button already says it; one Slopty can only
-        // describe (a command to run yourself) is just the version too.
-        HarnessUpdatePhase::Available | HarnessUpdatePhase::ManualActionRequired
-            if status.can_apply =>
-        {
-            version_only()
-        }
-        HarnessUpdatePhase::Available => match status.latest_version.as_deref() {
-            Some(latest) => with(&format!("v{latest} available")),
-            None => with("Update available"),
-        },
-        HarnessUpdatePhase::ManualActionRequired => version_only(),
-        HarnessUpdatePhase::WaitingForIdle => with("Waiting for agent to be idle"),
-        HarnessUpdatePhase::Preparing => with("Preparing update…"),
-        HarnessUpdatePhase::Downloading => with("Downloading…"),
-        HarnessUpdatePhase::Installing => with("Installing…"),
-        HarnessUpdatePhase::Verifying => with("Verifying…"),
-        HarnessUpdatePhase::Updated => with("Updated"),
-        HarnessUpdatePhase::Failed => with("Couldn't check for updates"),
-    };
-    let color = match status.phase {
-        HarnessUpdatePhase::Failed => theme.danger_muted,
-        _ => theme.text_muted.opacity(0.75),
-    };
-    (label.into(), color)
-}
-
 pub struct HarnessesPage {
     state: Entity<AppState>,
     scroll: widgets::PageScroll,
     harnesses: Loadable<Vec<HarnessDescriptor>>,
-    updates: Loadable<Vec<HarnessUpdateStatus>>,
     /// Which device's harnesses are shown/edited; `None` = this device (no
     /// passthrough). Retargeted by the page-header device switcher.
     target_device: Option<String>,
     device_select: widgets::SelectState,
-    policy_selects: std::collections::HashMap<HarnessId, widgets::SelectState>,
     /// Last refused/failed toggle (engine guards), shown in the error strip.
     error: Option<String>,
     load_task: Option<Task<()>>,
@@ -201,14 +149,11 @@ pub struct HarnessesPage {
     pending_toggle: Option<(HarnessId, bool)>,
     installing: Option<HarnessId>,
     install_task: Option<Task<()>>,
+    // slopty: the installer's terminal on the target machine, while the page shows it.
+    install_run: Option<InstallRun>,
 
     expanded_harness: Option<HarnessId>,
-    // slopty: no agent accounts: Slopty never touches a credential.
-    update_task: Option<Task<()>>,
-    update_action_task: Option<Task<()>>,
-    /// "Check now" is running: the button says so, since rows no longer
-    /// show "Checking…" while a check is in flight.
-    checking_updates: bool,
+    // slopty: no agent accounts, and no update island: agents update themselves.
     // slopty: the person's one autonomy setting (`[agents] autonomy`), its index in AUTONOMY.
     autonomy: Option<usize>,
     autonomy_select: widgets::SelectState,
@@ -221,22 +166,18 @@ impl HarnessesPage {
             state,
             scroll: widgets::PageScroll::default(),
             harnesses: Loadable::Idle,
-            updates: Loadable::Idle,
             target_device: None,
             device_select: widgets::SelectState::default(),
-            policy_selects: Default::default(),
             error: None,
             load_task: None,
             toggle_task: None,
             pending_toggle: None,
             installing: None,
             install_task: None,
+            install_run: None, // slopty
 
             expanded_harness: None,
-            // slopty: no agent accounts: Slopty never touches a credential.
-            update_task: None,
-            update_action_task: None,
-            checking_updates: false,
+            // slopty: no agent accounts, and no update island: agents update themselves.
             autonomy: None, // slopty
             autonomy_select: widgets::SelectState::default(), // slopty
             autonomy_task: None, // slopty
@@ -279,78 +220,12 @@ impl HarnessesPage {
             .flex()
             .flex_col()
             .gap(px(20.0))
-            .child(self.render_completion_for(harness, theme, cx))
-            .children(self.render_updates_for(harness, theme, cx)); // slopty: no agent accounts: Slopty never touches a credential.
+            .child(self.render_completion_for(harness, theme, cx)); // slopty: no accounts or updates.
         if motion::reduced_motion(cx) {
             content.into_any_element()
         } else {
             motion::menu_in(format!("agent-details-{harness:?}"), content).into_any_element()
         }
-    }
-
-    /// The expanded provider's Updates section: the update policy, short
-    /// labels in the menu and the chosen one explained under the title.
-    fn render_updates_for(
-        &self,
-        harness: HarnessId,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        let Loadable::Ready(statuses) = &self.updates else {
-            return None;
-        };
-        let status = statuses.iter().find(|status| status.harness == harness)?;
-        let selected = UPDATE_POLICIES
-            .iter()
-            .position(|(policy, ..)| *policy == status.policy)
-            .unwrap_or(0);
-        let closed = widgets::SelectState::default();
-        let policy_select = widgets::select(
-            format!("harness-update-policy-{harness:?}"),
-            "Update policy",
-            theme,
-            move |page: &mut Self| page.policy_selects.entry(harness).or_default(),
-        )
-        .options(
-            UPDATE_POLICIES
-                .iter()
-                .map(|(_, label, _)| widgets::SelectOption::new(*label)),
-            selected,
-        )
-        // Fits the longest label, so switching never resizes the trigger.
-        .width(136.0)
-        .on_select(move |page, selected, _, cx| {
-            if let Some((policy, ..)) = UPDATE_POLICIES.get(selected) {
-                page.set_update_policy(harness, *policy, cx);
-            }
-        })
-        .render(self.policy_selects.get(&harness).unwrap_or(&closed), cx);
-        let row = div()
-            .min_h(px(52.0))
-            .py(px(10.0))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(16.0))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .child(widgets::row_title(theme, "Update policy"))
-                    .child(widgets::meta_line(
-                        theme,
-                        vec![div().child(UPDATE_POLICIES[selected].2).into_any_element()],
-                    )),
-            )
-            .child(policy_select);
-        Some(
-            div()
-                .flex()
-                .flex_col()
-                .child(widgets::details_label(theme, "Updates"))
-                .child(row)
-                .into_any_element(),
-        )
     }
 
     // slopty: read `[agents] autonomy`, after writing `set` (an index in AUTONOMY) when given.
@@ -439,31 +314,6 @@ impl HarnessesPage {
 
     // slopty: no agent accounts: Slopty never touches a credential.
 
-    fn supports_updates(&self, cx: &Context<Self>) -> bool {
-        let state = self.state.read(cx);
-        let Some(engine) = state.engine() else {
-            return false;
-        };
-        self.target_device.as_deref().map_or_else(
-            || {
-                engine
-                    .engine_info()
-                    .supports(slopty_view_proto::capabilities::HARNESS_UPDATES_V1)
-            },
-            |device| state.device_supports(device, slopty_view_proto::capabilities::HARNESS_UPDATES_V1),
-        )
-    }
-
-    fn can_control_updates(&self, cx: &Context<Self>) -> bool {
-        self.supports_updates(cx)
-            && matches!(self.updates, Loadable::Ready(_))
-            && self.target_device.as_ref().is_none_or(|device| {
-                self.state
-                    .read(cx)
-                    .device_online(device, chrono::Utc::now())
-            })
-    }
-
     /// Retarget the page at another device: a different device is a different
     /// install/enablement world, so drop the rows and reload through it.
 
@@ -476,14 +326,11 @@ impl HarnessesPage {
         }
         self.installing = None;
         self.install_task = None;
-        self.policy_selects.clear();
+        self.close_install(cx); // slopty: the installer's terminal is the old machine's
         self.target_device = target;
         // slopty: no agent accounts: Slopty never touches a credential.
         self.error = None;
         self.harnesses = Loadable::Idle;
-        self.updates = Loadable::Idle;
-        self.update_task = None;
-        self.update_action_task = None;
         self.load(cx);
         cx.notify();
     }
@@ -496,73 +343,8 @@ impl HarnessesPage {
         };
         self.load_autonomy(engine.clone(), None, cx); // slopty
         let params = self.with_target(serde_json::json!({}));
-        let update_params = params.clone();
-        let supports_updates = self.supports_updates(cx);
 
         self.harnesses = Loadable::Loading;
-        self.updates = if supports_updates {
-            Loadable::Loading
-        } else {
-            Loadable::Ready(Vec::new())
-        };
-        self.update_task = supports_updates.then(|| {
-            let update_engine = engine.clone();
-            cx.spawn(async move |this, cx| {
-                let mut retry = 1;
-                loop {
-                    let subscribed = update_engine
-                        .client()
-                        .subscribe_checked(methods::WATCH_HARNESS_UPDATES, update_params.clone())
-                        .await;
-                    match subscribed {
-                        Ok(mut stream) => {
-                            while let Some(value) = stream.recv().await {
-                                retry = 1;
-                                let parsed =
-                                    serde_json::from_value::<Vec<HarnessUpdateStatus>>(value)
-                                        .map_err(|error| error.to_string());
-                                if this
-                                    .update(cx, |page, cx| {
-                                        page.updates = match parsed {
-                                            Ok(statuses) => Loadable::Ready(statuses),
-                                            Err(error) => Loadable::Error(error),
-                                        };
-                                        cx.notify();
-                                    })
-                                    .is_err()
-                                {
-                                    return;
-                                }
-                            }
-                        }
-                        Err(error) => {
-                            this.update(cx, |page, cx| {
-                                page.updates = Loadable::Error(error.to_string());
-                                cx.notify();
-                            })
-                            .ok();
-                        }
-                    }
-                    if this
-                        .update(cx, |page, cx| {
-                            if !matches!(page.updates, Loadable::Error(_)) {
-                                page.updates = Loadable::Error(
-                                    "Connection closed. Reconnecting to device…".into(),
-                                );
-                            }
-                            cx.notify();
-                        })
-                        .is_err()
-                    {
-                        return;
-                    }
-                    cx.background_executor()
-                        .timer(std::time::Duration::from_secs(retry))
-                        .await;
-                    retry = (retry * 2).min(15);
-                }
-            })
-        });
         self.load_task = Some(cx.spawn(async move |this, cx| {
             let result = engine.client().call(methods::LIST_HARNESSES, params).await;
             this.update(cx, |page, cx| {
@@ -586,34 +368,21 @@ impl HarnessesPage {
         self.set_enabled(harness, enabled, cx);
     }
 
+    // slopty: Cancel while the installer runs, Close once it ended: its terminal ends and goes.
     fn cancel_install(&mut self, cx: &mut Context<Self>) {
-        let Some(harness) = self.installing else {
-            return;
-        };
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            return;
-        };
-        let target = self.target_device.clone();
-        let params = install_params(harness, &target);
-        cx.spawn(async move |this, cx| {
-            if let Err(error) = engine.client().call(methods::CANCEL_INSTALL, params).await {
-                this.update(cx, |page, cx| {
-                    if page.target_device == target && page.installing == Some(harness) {
-                        page.error = Some(format!("Cancellation failed — {error}"));
-                        cx.notify();
-                    }
-                })
-                .ok();
-            }
-        })
-        .detach();
+        self.close_install(cx);
+        self.installing = None;
+        self.install_task = None;
+        cx.notify();
     }
 
+    // slopty: Install runs the vendor's installer in a terminal on the target machine
+    // (`InstallHarness` answers its `terminalId`), which the row shows until the person closes it.
     fn install(&mut self, harness: HarnessId, cx: &mut Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
-        if self.installing.is_some() {
+        if self.installing.is_some() || self.install_run.is_some() {
             return;
         }
         let params = install_params(harness, &self.target_device);
@@ -621,32 +390,192 @@ impl HarnessesPage {
         self.installing = Some(harness);
         self.error = None;
         self.install_task = Some(cx.spawn(async move |this, cx| {
-            let result = engine
-                .client()
-                .call(methods::INSTALL_HARNESS, params)
-                .await
-                .map_err(|error| error.to_string())
-                .and_then(|value| {
-                    serde_json::from_value::<Vec<HarnessDescriptor>>(value)
-                        .map_err(|error| error.to_string())
-                });
+            let result = engine.client().call(methods::INSTALL_HARNESS, params).await;
             this.update(cx, |page, cx| {
-                if page.target_device != target {
+                if page.target_device != target || page.installing != Some(harness) {
                     return;
                 }
-                page.installing = None;
-                match result {
-                    Ok(list) => {
-                        page.harnesses = Loadable::Ready(list);
-                        crate::pickers::bump_harness_catalog(cx);
+                let terminal = result.map_err(|error| error.to_string()).and_then(|value| {
+                    value
+                        .get("terminalId")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                        .ok_or_else(|| "its terminal did not open".to_owned())
+                });
+                match terminal {
+                    Ok(id) => page.show_install(harness, id, cx),
+                    Err(error) => {
+                        page.installing = None;
+                        page.error = Some(format!("Installation failed — {error}"));
                     }
-                    Err(error) => page.error = Some(format!("Installation failed — {error}")),
                 }
                 cx.notify();
             })
             .ok();
         }));
         cx.notify();
+    }
+
+    // slopty: follow the installer's terminal: once it ends, ask the machine again what it has.
+    fn show_install(&mut self, harness: HarnessId, id: String, cx: &mut Context<Self>) {
+        let page = cx.weak_entity();
+        let watch = crate::live::watch(
+            &id,
+            Box::new(move |cx| {
+                let _ = page.update(cx, |page, cx| page.follow_install(cx));
+            }),
+            cx,
+        );
+        self.install_run = Some(InstallRun { harness, id, ended: None, _watch: watch });
+        self.follow_install(cx);
+    }
+
+    // slopty: what the installer's terminal says of itself now.
+    fn follow_install(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.install_run.as_ref().map(|run| run.id.clone()) else {
+            return;
+        };
+        let look = crate::live::TerminalLook::of(cx);
+        let ended = crate::live::terminal(&id, &look, cx)
+            .filter(|hosted| hosted.ended)
+            .map(|hosted| hosted.exit.unwrap_or(0));
+        if let Some(run) = self.install_run.as_mut()
+            && run.ended.is_none()
+            && let Some(exit) = ended
+        {
+            run.ended = Some(exit);
+            self.installing = None;
+            self.install_task = None;
+            self.relist(RELIST_TRIES, cx);
+        }
+        cx.notify();
+    }
+
+    // slopty: list the machine's agents again until the one installed shows, its worker seeing
+    // the install a beat after the installer ends; `tries` more times at most.
+    fn relist(&mut self, tries: u32, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let Some(harness) = self.install_run.as_ref().map(|run| run.harness) else {
+            return;
+        };
+        let params = self.with_target(serde_json::json!({}));
+        self.load_task = Some(cx.spawn(async move |this, cx| {
+            let listed = engine.client().call(methods::LIST_HARNESSES, params).await;
+            let list = listed.ok().and_then(|value| {
+                serde_json::from_value::<Vec<HarnessDescriptor>>(value).ok()
+            });
+            let arrived = list
+                .as_ref()
+                .is_some_and(|list| list.iter().any(|d| d.id == harness && d.installed));
+            let again = this
+                .update(cx, |page, cx| {
+                    if let Some(list) = list {
+                        page.harnesses = Loadable::Ready(list);
+                    }
+                    if arrived {
+                        crate::pickers::bump_harness_catalog(cx);
+                    }
+                    cx.notify();
+                    !arrived && tries > 0 && page.install_run.is_some()
+                })
+                .unwrap_or(false);
+            if again {
+                cx.background_executor().timer(RELIST_EVERY).await;
+                this.update(cx, |page, cx| page.relist(tries - 1, cx)).ok();
+            }
+        }));
+    }
+
+    // slopty: end the installer's terminal on its machine (`CloseTerminal`) and stop showing it.
+    fn close_install(&mut self, cx: &mut Context<Self>) {
+        let Some(run) = self.install_run.take() else {
+            return;
+        };
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let params = serde_json::json!({ "terminalId": run.id });
+        cx.spawn(async move |this, cx| {
+            if let Err(error) = engine.client().call(methods::CLOSE_TERMINAL, params).await {
+                this.update(cx, |page, cx| {
+                    page.error = Some(format!("The installer did not stop — {error}"));
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    // slopty: the installer's terminal under its agent's row, and once it ended, what it ended
+    // with and Close.
+    fn render_install(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let run = self.install_run.as_ref()?;
+        let look = crate::live::TerminalLook::of(cx);
+        let hosted = crate::live::terminal(&run.id, &look, cx);
+        let body = match hosted {
+            Some(hosted) => hosted.view.into_any_element(),
+            None => crate::live::chrome::loading("Opening the installer…", theme, cx.entity_id(), cx)
+                .into_any_element(),
+        };
+        let footer = run.ended.map(|exit| {
+            let said = match exit {
+                0 => "The installer finished".to_owned(),
+                status => format!("The installer ended with status {status}"),
+            };
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .gap(px(12.0))
+                .child(
+                    div()
+                        .id("harness-install-ended")
+                        .debug_selector(|| "harness-install-ended".into())
+                        .role(gpui::Role::Status)
+                        .aria_label(said.clone())
+                        .text_size(crate::typography::ui_rems(12.0))
+                        .text_color(if exit == 0 { theme.text_muted } else { theme.danger })
+                        .child(said),
+                )
+                .child(
+                    widgets::ghost_action(theme)
+                        .id("harness-install-close")
+                        .flex_none()
+                        .role(gpui::Role::Button)
+                        .aria_label("Close the installer")
+                        .on_click(cx.listener(|this, _, _, cx| this.cancel_install(cx)))
+                        .child("Close"),
+                )
+        });
+        Some(
+            div()
+                .mx(px(16.0))
+                .pl(px(DETAILS_INSET))
+                .pb(px(16.0))
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .id("harness-install-terminal")
+                        .debug_selector(|| "harness-install-terminal".into())
+                        .role(gpui::Role::Group)
+                        .aria_label("Installer")
+                        .h(px(INSTALL_TERMINAL_HEIGHT))
+                        .overflow_hidden()
+                        .rounded(px(8.0))
+                        .border_1()
+                        .border_color(theme.wash(0.08))
+                        .bg(look.background)
+                        .child(body),
+                )
+                .children(footer)
+                .into_any_element(),
+        )
     }
 
     fn set_enabled(&mut self, harness: HarnessId, enabled: bool, cx: &mut Context<Self>) {
@@ -683,116 +612,6 @@ impl HarnessesPage {
                         crate::pickers::bump_harness_catalog(cx);
                     }
                     Err(err) => page.error = Some(err.to_string()),
-                }
-                cx.notify();
-            })
-            .ok();
-        }));
-    }
-
-    fn check_updates(&mut self, cx: &mut Context<Self>) {
-        if !self.can_control_updates(cx) {
-            return;
-        }
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            return;
-        };
-        let params = self.with_target(serde_json::json!({}));
-        self.error = None;
-        self.checking_updates = true;
-        cx.notify();
-        self.update_action_task = Some(cx.spawn(async move |this, cx| {
-            let result = engine
-                .client()
-                .call(methods::CHECK_HARNESS_UPDATES, params)
-                .await;
-            this.update(cx, |page, cx| {
-                page.checking_updates = false;
-                match result {
-                    Ok(value) => match serde_json::from_value::<Vec<HarnessUpdateStatus>>(value) {
-                        Ok(statuses) => page.updates = Loadable::Ready(statuses),
-                        Err(error) => page.error = Some(error.to_string()),
-                    },
-                    Err(error) => page.error = Some(error.to_string()),
-                }
-                cx.notify();
-            })
-            .ok();
-        }));
-    }
-
-    fn apply_harness_update(&mut self, harness: HarnessId, cx: &mut Context<Self>) {
-        if !self.can_control_updates(cx) {
-            return;
-        }
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            return;
-        };
-        let params = self.with_target(serde_json::json!({ "harness": harness }));
-        self.error = None;
-        self.update_action_task = Some(cx.spawn(async move |this, cx| {
-            let result = engine
-                .client()
-                .call(methods::APPLY_HARNESS_UPDATE, params)
-                .await;
-            this.update(cx, |page, cx| {
-                if let Err(error) = result {
-                    page.error = Some(error.to_string());
-                }
-                cx.notify();
-            })
-            .ok();
-        }));
-    }
-
-    fn cancel_harness_update(&mut self, harness: HarnessId, cx: &mut Context<Self>) {
-        if !self.can_control_updates(cx) {
-            return;
-        }
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            return;
-        };
-        let params = self.with_target(serde_json::json!({ "harness": harness }));
-        self.update_action_task = Some(cx.spawn(async move |this, cx| {
-            let result = engine
-                .client()
-                .call(methods::CANCEL_HARNESS_UPDATE, params)
-                .await;
-            this.update(cx, |page, cx| {
-                if let Err(error) = result {
-                    page.error = Some(error.to_string());
-                }
-                cx.notify();
-            })
-            .ok();
-        }));
-    }
-
-    fn set_update_policy(
-        &mut self,
-        harness: HarnessId,
-        policy: HarnessUpdatePolicy,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.can_control_updates(cx) {
-            return;
-        }
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            return;
-        };
-        let params = self.with_target(serde_json::json!({
-            "harness": harness,
-            "policy": policy,
-        }));
-        self.error = None;
-        self.update_action_task = Some(cx.spawn(async move |this, cx| {
-            let result = engine
-                .client()
-                .call(methods::SET_HARNESS_UPDATE_POLICY, params)
-                .await;
-            this.update(cx, |page, cx| {
-                if let Err(error) = result {
-                    page.error = Some(error.to_string());
                 }
                 cx.notify();
             })
@@ -907,13 +726,6 @@ impl HarnessesPage {
                 let interactive = !last_enabled && (enabled || installed);
                 let (icon_path, tint) = crate::pickers::harness_brand_icon(harness);
 
-                let update = match &self.updates {
-                    Loadable::Ready(statuses) => {
-                        statuses.iter().find(|status| status.harness == harness)
-                    }
-                    _ => None,
-                };
-
                 let mut meta: Vec<gpui::AnyElement> = Vec::new();
                 // Installing REPLACES the not-installed hint in place, so the
                 // row's text never shifts while the install runs.
@@ -973,43 +785,6 @@ impl HarnessesPage {
                             .into_any_element(),
                     );
                 }
-                // Not installed: the hint above says all there is.
-                if let Some(status) = update.filter(|_| installed) {
-                    let (text, color) = harness_update_label(status, &theme);
-                    // Next to an Update button the version reads as the
-                    // jump it would make: v1.2 → v1.3.
-                    let next = status
-                        .latest_version
-                        .as_deref()
-                        .filter(|_| {
-                            status.can_apply
-                                && matches!(
-                                    status.phase,
-                                    HarnessUpdatePhase::Available
-                                        | HarnessUpdatePhase::ManualActionRequired
-                                )
-                        })
-                        .filter(|latest| status.installed_version.as_deref() != Some(*latest));
-                    if let Some(next) = next.filter(|_| !text.is_empty()) {
-                        meta.push(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(4.0))
-                                .text_color(color)
-                                .child(text)
-                                .child(
-                                    crate::icons::icon(crate::icons::ARROW_RIGHT)
-                                        .size(px(11.0))
-                                        .text_color(color),
-                                )
-                                .child(format!("v{next}"))
-                                .into_any_element(),
-                        );
-                    } else if !text.is_empty() {
-                        meta.push(div().text_color(color).child(text).into_any_element());
-                    }
-                }
                 // widgets::row_tile with the brand tint honored (the Claude
                 // mark keeps its orange, like the picker rail).
                 let tile = div()
@@ -1026,58 +801,6 @@ impl HarnessesPage {
                             .text_color(tint.unwrap_or(theme.text_muted)),
                     );
                 let expanded = enabled && self.expanded_harness == Some(harness);
-                // The row's one update action sits inside the trigger, before
-                // the chevron, so it appearing never moves the chevron; the
-                // update policy lives in the expanded details.
-                let update_action = update.and_then(|status| {
-                    let (id, label, primary) = match status.phase {
-                        HarnessUpdatePhase::Available
-                        | HarnessUpdatePhase::ManualActionRequired
-                            if status.can_apply =>
-                        {
-                            ("harness-update", "Update", true)
-                        }
-                        HarnessUpdatePhase::WaitingForIdle
-                        | HarnessUpdatePhase::Preparing
-                        | HarnessUpdatePhase::Downloading => {
-                            ("harness-update-cancel", "Cancel", false)
-                        }
-                        _ => return None,
-                    };
-                    Some(
-                        div()
-                            .id((id, ix))
-                            .flex_none()
-                            .px(px(9.0))
-                            .py(px(5.0))
-                            .rounded(px(6.0))
-                            .text_size(crate::typography::ui_rems(11.0))
-                            .cursor_pointer()
-                            .map(|button| {
-                                if primary {
-                                    button
-                                        .bg(theme.accent_wash)
-                                        .font_weight(gpui::FontWeight::MEDIUM)
-                                        .text_color(theme.accent)
-                                        .hover(|style| style.bg(theme.accent.opacity(0.16)))
-                                } else {
-                                    button
-                                        .text_color(theme.text_muted)
-                                        .hover(|style| style.bg(crate::theme::ink(0.05)))
-                                }
-                            })
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                // Inside the details trigger: act, don't expand.
-                                cx.stop_propagation();
-                                if primary {
-                                    this.apply_harness_update(harness, cx)
-                                } else {
-                                    this.cancel_harness_update(harness, cx)
-                                }
-                            }))
-                            .child(label),
-                    )
-                });
                 let header = widgets::card_row(&theme, ix == 0)
                     .id(("harness-row", ix))
                     .when(!installed && self.installing != Some(harness), |el| {
@@ -1135,7 +858,6 @@ impl HarnessesPage {
                                         label.child(widgets::meta_line(&theme, meta))
                                     }),
                             )
-                            .children(update_action)
                             // Install / Cancel sit with the row's other
                             // action, before the caret, so carets line up.
                             .when(
@@ -1146,6 +868,8 @@ impl HarnessesPage {
                                         widgets::ghost_action(&theme)
                                             .id(("harness-install", ix))
                                             .flex_none()
+                                            .role(gpui::Role::Button) // slopty
+                                            .aria_label(format!("Install {}", descriptor.name))
                                             .when(self.installing.is_none(), |el| {
                                                 el.on_click(cx.listener(move |this, _, _, cx| {
                                                     cx.stop_propagation();
@@ -1161,6 +885,8 @@ impl HarnessesPage {
                                     widgets::ghost_action(&theme)
                                         .id(("harness-cancel-install", ix))
                                         .flex_none()
+                                        .role(gpui::Role::Button) // slopty
+                                        .aria_label(format!("Cancel installing {}", descriptor.name))
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             cx.stop_propagation();
                                             this.cancel_install(cx)
@@ -1236,6 +962,10 @@ impl HarnessesPage {
                     .when(expanded, |row| {
                         row.child(self.render_agent_details(harness, &theme, cx))
                     })
+                    // slopty: the installer's terminal, under the agent it installs.
+                    .when(self.install_run.as_ref().is_some_and(|run| run.harness == harness), |row| {
+                        row.children(self.render_install(&theme, cx))
+                    })
                     .into_any_element()
             })
             .collect()
@@ -1260,7 +990,6 @@ impl popover::ScrollRailHost for HarnessesPage {
 impl Render for HarnessesPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).for_settings_surface();
-        let supports_updates = self.supports_updates(cx);
 
         let body: gpui::AnyElement = match &self.harnesses {
             Loadable::Idle | Loadable::Loading => widgets::section_card(&theme)
@@ -1300,50 +1029,8 @@ impl Render for HarnessesPage {
             }
         };
         crate::toast::take_error(&mut self.error, cx);
-        let update_error = match &self.updates {
-            Loadable::Error(message) => Some(
-                div()
-                    .child(widgets::error_strip(
-                        &theme,
-                        format!("Agent updates: {message}"),
-                    ))
-                    .child(
-                        widgets::ghost_action(&theme)
-                            .id("harness-updates-retry")
-                            .mt(px(8.0))
-                            .on_click(cx.listener(|page, _, _, cx| {
-                                page.load(cx);
-                                cx.notify();
-                            }))
-                            .child("Retry updates"),
-                    )
-                    .into_any_element(),
-            ),
-            _ => None,
-        };
         let switcher = self.render_device_switcher(&theme, cx);
         let autonomy = self.render_autonomy(&theme, cx); // slopty
-
-        let can_control = self.can_control_updates(cx);
-        let check = div()
-            .id("check-harness-updates")
-            .flex_none()
-            .px(px(9.0))
-            .py(px(5.0))
-            .rounded(px(6.0))
-            .text_size(crate::typography::ui_rems(11.0))
-            .text_color(theme.text_muted)
-            .cursor_pointer()
-            .hover(|style| style.bg(crate::theme::ink(0.05)))
-            .opacity(if can_control { 1.0 } else { 0.4 })
-            .when(can_control, |button| {
-                button.on_click(cx.listener(|this, _, _, cx| this.check_updates(cx)))
-            })
-            .child(if self.checking_updates {
-                "Checking…"
-            } else {
-                "Check now"
-            });
 
         let scrollbar = popover::rail(self, "harnesses-page-scrollbar", &theme, cx);
 
@@ -1376,11 +1063,9 @@ impl Render for HarnessesPage {
                                                 .flex()
                                                 .items_center()
                                                 .gap(px(6.0))
-                                                .when(supports_updates, |el| el.child(check))
                                                 .child(switcher),
                                         ),
                                 )
-                                .children(update_error)
                                 .child(body)
                                 .child(autonomy), // slopty
                         ),
@@ -1443,6 +1128,186 @@ mod tests {
         cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx))
             .unwrap();
         // slopty: no agent accounts: Slopty never touches a credential.
+    }
+}
+
+// slopty: Install runs the vendor's installer in a terminal on the machine, shown under the row;
+// once it ends the agent arrives in the list, and Close ends the terminal. An install the
+// machine refuses is said, and nothing is left running.
+#[cfg(test)]
+mod install_tests {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    use gpui::AppContext as _;
+    use slopty_view_proto::HarnessId;
+    use slopty_view_rpc::{RpcError, RpcReply, methods};
+
+    use super::HarnessesPage;
+
+    /// A machine without Codex: its first install is refused, its second opens terminal 7, and
+    /// Codex is there once `arrived`.
+    #[derive(Default)]
+    struct Machine {
+        asked: Mutex<Vec<(String, serde_json::Value)>>,
+        refused: AtomicBool,
+        arrived: AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl slopty_view_rpc::RpcService for Machine {
+        async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
+            self.asked.lock().unwrap().push((method.to_owned(), params.clone()));
+            let answer = match method {
+                methods::LIST_HARNESSES => serde_json::json!([{
+                    "id": "codex", "name": "Codex", "supportsSteering": true,
+                    "steeringMode": "step-boundary", "reasoningLevels": [],
+                    "installed": self.arrived.load(Ordering::SeqCst), "canInstall": true,
+                    "enabled": self.arrived.load(Ordering::SeqCst),
+                }]),
+                methods::GET_AGENT_SETTINGS => serde_json::json!({ "autonomy": "auto" }),
+                methods::INSTALL_HARNESS if !self.refused.swap(true, Ordering::SeqCst) => {
+                    return Err(RpcError::Failed("studio is out of reach".into()));
+                }
+                methods::INSTALL_HARNESS => serde_json::json!({ "terminalId": "7" }),
+                methods::CLOSE_TERMINAL => serde_json::json!({}),
+                other => panic!("the page asked {other}"),
+            };
+            Ok(RpcReply::Value(answer))
+        }
+    }
+
+    struct Blank;
+
+    impl gpui::Render for Blank {
+        fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+            gpui::div()
+        }
+    }
+
+    type Heard = Rc<RefCell<Vec<Box<dyn FnMut(&mut gpui::App)>>>>;
+
+    #[gpui::test]
+    fn install_shows_the_installer_and_lists_the_agent_once_it_ends(cx: &mut gpui::TestAppContext) {
+        // The machine answers on this thread, between the app's turns: a current-thread runtime
+        // driven here, so nothing wakes the app's executor from elsewhere.
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let _guard = runtime.enter();
+        let dir = tempfile::tempdir().unwrap();
+        let ended = Rc::new(RefCell::new(None::<i32>));
+        let heard: Heard = Rc::default();
+        cx.update(|cx| {
+            crate::settings::init(Default::default(), dir.path(), cx);
+            gpui_base::init(cx);
+            cx.set_global(crate::theme::Theme::default());
+            let (ended, heard) = (Rc::clone(&ended), Rc::clone(&heard));
+            crate::live::install(
+                cx,
+                move |id, _, cx| {
+                    assert_eq!(id, "7", "the terminal the machine opened");
+                    let exit = *ended.borrow();
+                    Some(crate::live::Hosted {
+                        view: cx.new(|_| Blank).into(),
+                        focus: cx.focus_handle(),
+                        title: None,
+                        ended: exit.is_some(),
+                        exit,
+                        progress: None,
+                        drop: None,
+                    })
+                },
+                |_, _| None,
+                move |_, changed, _| {
+                    heard.borrow_mut().push(changed);
+                    None
+                },
+            );
+        });
+        let machine = Arc::new(Machine::default());
+        let engine = crate::state::EngineHandle::from_test_client(slopty_view_rpc::memory_client(
+            Arc::clone(&machine) as Arc<dyn slopty_view_rpc::RpcService>,
+        ));
+        let (page, cx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| {
+                let mut state = crate::state::AppState::new();
+                state.set_test_engine(engine);
+                state
+            });
+            HarnessesPage::new(state, cx)
+        });
+        let settle = |cx: &mut gpui::VisualTestContext, done: &dyn Fn(&HarnessesPage) -> bool| {
+            for _ in 0..300 {
+                cx.run_until_parked();
+                runtime.block_on(async {
+                    for _ in 0..20 {
+                        tokio::task::yield_now().await;
+                    }
+                });
+                cx.run_until_parked();
+                if page.read_with(cx, |page, _| done(page)) {
+                    return;
+                }
+            }
+            panic!("the page never settled");
+        };
+        let draw = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear(cx);
+            });
+        };
+        let codex = |page: &HarnessesPage| {
+            page.harnesses.ready().and_then(|list| list.iter().find(|d| d.id == HarnessId::CODEX).cloned())
+        };
+        settle(cx, &|page| codex(page).is_some_and(|d| !d.installed && d.can_install));
+
+        // Refused: said, and nothing runs.
+        page.update(cx, |page, cx| page.install(HarnessId::CODEX, cx));
+        settle(cx, &|page| page.installing.is_none());
+        page.update(cx, |page, cx| {
+                let said = page.error.clone().or_else(|| {
+                    crate::toast::shown(cx).into_iter().map(|(_, text)| text.to_string()).last()
+                });
+                let said = said.unwrap_or_default();
+                assert!(said.contains("Installation failed") && said.contains("out of reach"), "{said}");
+                assert!(page.install_run.is_none());
+            });
+
+        // Opened: the installer's terminal stands under the row while it runs.
+        page.update(cx, |page, cx| page.install(HarnessId::CODEX, cx));
+        settle(cx, &|page| page.install_run.is_some());
+        draw(cx);
+        let terminal = cx.debug_bounds("harness-install-terminal").expect("the installer shows");
+        assert!(f32::from(terminal.size.height) >= super::INSTALL_TERMINAL_HEIGHT - 1.0);
+        assert!(cx.debug_bounds("harness-install-ended").is_none(), "still running");
+        let install = machine.asked.lock().unwrap().iter().rev().find(|(m, _)| m == methods::INSTALL_HARNESS).cloned();
+        assert_eq!(install.map(|(_, params)| params["harness"].clone()), Some("codex".into()));
+
+        // Ended: its worker sees Codex a beat later, and the row lists it installed.
+        *ended.borrow_mut() = Some(0);
+        machine.arrived.store(true, Ordering::SeqCst);
+        cx.update(|_, cx| heard.borrow_mut().iter_mut().for_each(|changed| changed(cx)));
+        settle(cx, &|page| codex(page).is_some_and(|d| d.installed));
+        page.read_with(cx, |page, _| {
+                assert_eq!(page.install_run.as_ref().and_then(|run| run.ended), Some(0));
+                assert_eq!(page.installing, None);
+            });
+        draw(cx);
+        assert!(cx.debug_bounds("harness-install-ended").is_some(), "the end is said");
+
+        // Close: the terminal ends on its machine and the row lets it go.
+        page.update(cx, |page, cx| page.cancel_install(cx));
+        let closed = || {
+            machine.asked.lock().unwrap().iter().any(|(m, params)| {
+                m == methods::CLOSE_TERMINAL && params["terminalId"] == "7"
+            })
+        };
+        settle(cx, &|page| page.install_run.is_none() && closed());
+        assert!(closed(), "the installer's terminal was closed");
+        draw(cx);
+        assert!(cx.debug_bounds("harness-install-terminal").is_none());
     }
 }
 

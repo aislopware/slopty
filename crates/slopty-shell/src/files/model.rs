@@ -279,11 +279,10 @@ impl FileTreeModel {
                     self.remove_subtree(&child);
                 }
             }
-            self.nodes
-                .get_mut(&directory)
-                .unwrap()
-                .children
-                .retain(|path| incoming.contains(path));
+            // slopty: no panic on a path that went meanwhile.
+            if let Some(node) = self.nodes.get_mut(&directory) {
+                node.children.retain(|path| incoming.contains(path));
+            }
         }
 
         let mut known_children = self
@@ -546,8 +545,10 @@ impl FileTreeModel {
         if !self.nodes.contains_key(old) {
             return false;
         }
-        let old_parent = parent_path(old).unwrap();
-        let new_parent = parent_path(new).unwrap();
+        // slopty: the root has no parent and cannot move; no panic for it.
+        let (Some(old_parent), Some(new_parent)) = (parent_path(old), parent_path(new)) else {
+            return false;
+        };
         if let Some(parent) = self.nodes.get_mut(&old_parent) {
             parent.children.retain(|p| p != old);
         }
@@ -593,7 +594,10 @@ impl FileTreeModel {
                 node.load = DirectoryLoadState::Unloaded;
                 let mut children = std::mem::take(&mut node.children);
                 children.sort_by(|a, b| compare_paths(&self.nodes, a, b));
-                self.nodes.get_mut(parent).unwrap().children = children;
+                // slopty: no unwrap; the node was just there.
+                if let Some(node) = self.nodes.get_mut(parent) {
+                    node.children = children;
+                }
             }
         }
         self.rebuild_visible_rows();
@@ -829,8 +833,11 @@ fn root_entry() -> WorkspaceEntry {
 }
 
 fn compare_paths(nodes: &HashMap<String, TreeNode>, left: &str, right: &str) -> std::cmp::Ordering {
-    let left = &nodes[left].entry;
-    let right = &nodes[right].entry;
+    // slopty: a child not (yet) in the map sorts by its path instead of panicking.
+    let (Some(left), Some(right)) = (nodes.get(left), nodes.get(right)) else {
+        return left.cmp(right);
+    };
+    let (left, right) = (&left.entry, &right.entry);
     entry_rank(left.kind)
         .cmp(&entry_rank(right.kind))
         .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))

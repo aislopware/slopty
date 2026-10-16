@@ -8,7 +8,7 @@ use std::path::Path;
 
 pub use slopty_settings::follow::{POLL, Seen};
 use slopty_settings::{Loaded, OptionAsAlt, Settings, SettingsError, bounds};
-use slopty_theme::{Density, Theme, Variant};
+use slopty_theme::{Theme, Variant};
 
 /// The text the in-app editor opens on: the file, or the commented defaults when there is
 /// none (or it cannot be read; saving then overwrites it, which is what fixing it means).
@@ -67,19 +67,12 @@ pub fn with_clipboard_shared(
     }
 }
 
-/// The chrome's density: a finger's 44 pt targets, or a pointer's compact rows.
-#[must_use]
-pub const fn density(touch: bool) -> Density {
-    if touch { Density::TOUCH } else { Density::COMPACT }
-}
-
 /// The theme in the dark variant or the light one, with the terminal behaviour `settings` asks
 /// for: its contrast floor, copy on select, Option as Alt and secure entry.
 #[must_use]
 pub fn theme_for(settings: &Settings, dark: bool) -> Theme {
     let mut theme = Theme::new(if dark { Variant::Dark } else { Variant::Light });
     theme.terminal.minimum_contrast = hundredths(settings.terminal.minimum_contrast);
-    theme.density = density(crate::TOUCH);
     theme.behaviour.copy_on_select = settings.terminal.copy_on_select;
     theme.behaviour.option_as_alt = match settings.terminal.option_as_alt {
         OptionAsAlt::False => slopty_theme::OptionAsAlt::False,
@@ -212,15 +205,5 @@ mod tests {
         assert!(!seen.changed(&path), "seen once");
         save(&path, "[terminal\n", &mut seen).unwrap_err();
         assert!(!seen.changed(&path), "a save that did not parse wrote nothing");
-    }
-
-    /// A finger gets 44 pt targets and a pointer the compact rows; the Mac is always compact,
-    /// and the touch build only once the chrome follows the density.
-    #[test]
-    fn a_finger_gets_the_touch_density() {
-        assert_eq!(density(true), Density::TOUCH);
-        assert_eq!(density(false), Density::COMPACT);
-        assert_eq!(theme_for(&Settings::default(), true).density, density(crate::TOUCH));
-        assert_eq!(theme_for(&Settings::default(), false).density, density(crate::TOUCH));
     }
 }

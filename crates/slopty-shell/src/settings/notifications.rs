@@ -22,7 +22,6 @@ pub enum NotificationsEvent {
         attention_sound: bool,
         desktop: bool,
         background_only: bool,
-        agent_updates: bool,
     },
 }
 
@@ -34,7 +33,6 @@ pub struct NotificationsPage {
     attention_sound: bool,
     desktop: bool,
     background_only: bool,
-    agent_updates: bool,
 }
 
 impl EventEmitter<NotificationsEvent> for NotificationsPage {}
@@ -82,7 +80,6 @@ impl NotificationsPage {
         attention_sound: bool,
         desktop: bool,
         background_only: bool,
-        agent_updates: bool,
         _cx: &mut Context<Self>,
     ) -> Self {
         Self {
@@ -93,7 +90,6 @@ impl NotificationsPage {
             attention_sound,
             desktop,
             background_only,
-            agent_updates,
         }
     }
 
@@ -105,7 +101,6 @@ impl NotificationsPage {
             attention_sound: self.attention_sound,
             desktop: self.desktop,
             background_only: self.background_only,
-            agent_updates: self.agent_updates,
         });
     }
 

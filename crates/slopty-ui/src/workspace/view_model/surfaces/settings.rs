@@ -5,10 +5,17 @@
 //!
 //! An agent is offered wherever its program is installed, unless the person switched it off
 //! here: the agents switched off are kept in `interface/agents-off.json` under Slopty's data
-//! directory, and no picker of this app offers them. Slopty installs nothing and updates
-//! nothing; the person installs an agent on the machine, and its worker says so.
+//! directory, and no picker of this app offers them.
+//!
+//! An agent missing on a machine is installed from here as its vendor documents it: Install runs
+//! the vendor's installer in a terminal on that machine, through the person's login shell, and
+//! the page shows that terminal, so the person watches it and answers it as on the machine
+//! itself. Its worker sees the agent arrive as it sees any install, and offers it. Slopty
+//! updates nothing: agents update themselves (`docs/decisions/ui.md`, "Agents are installed
+//! from Settings").
 
 use gpui::{Context, Task};
+use slopty_proto::git::RunScript;
 use slopty_proto::orchestration::{Outcome, Verb};
 use slopty_proto::settings::SettingEdit;
 use slopty_proto::thread::AgentId;
@@ -20,12 +27,36 @@ use super::value;
 use crate::workspace::WorkspaceView;
 
 /// The agents every machine is offered with, as the shell names them, with the agent ids their
-/// workers give; an ACP agent is offered where it is installed, by its registry's name.
-const AGENTS: [(HarnessId, &str, &str); 3] = [
-    (HarnessId::CLAUDE_CODE, "Claude Code", AgentId::CLAUDE_CODE),
-    (HarnessId::CODEX, "Codex", AgentId::CODEX),
-    (HarnessId::PI, "pi", AgentId::PI),
+/// workers give and the vendor's documented install line; an ACP agent is offered where it is
+/// installed, by its registry's name.
+const AGENTS: [(HarnessId, &str, &str, &str); 3] = [
+    (
+        HarnessId::CLAUDE_CODE,
+        "Claude Code",
+        AgentId::CLAUDE_CODE,
+        "curl -fsSL https://claude.ai/install.sh | bash",
+    ),
+    (HarnessId::CODEX, "Codex", AgentId::CODEX, "npm install -g @openai/codex"),
+    (
+        HarnessId::PI,
+        "pi",
+        AgentId::PI,
+        "npm install -g --ignore-scripts @earendil-works/pi-coding-agent",
+    ),
 ];
+
+/// The terminal that installs `name` with `line`: the person's login shell runs it in their
+/// home, so the installer finds the tools (`npm`, `curl`) their own terminal does.
+fn installer(name: &str, line: &str) -> RunScript {
+    let start = r#"s="${SHELL:-/bin/sh}"; SHELL="$s" exec "$s" -l -i -c "$1""#;
+    RunScript {
+        name: format!("Install {name}"),
+        line: line.to_owned(),
+        command: ["/bin/sh", "-c", start, "sh", line].map(str::to_owned).to_vec(),
+        cwd: "~".to_owned(),
+        env: Vec::new(),
+    }
+}
 
 /// The efforts each agent takes.
 pub(super) fn efforts(harness: HarnessId) -> Vec<ReasoningLevel> {
@@ -43,13 +74,11 @@ impl WorkspaceView {
         &mut self,
         method: &str,
         params: &serde_json::Value,
-        cx: &Context<Self>,
+        cx: &mut Context<Self>,
     ) -> Option<Task<Result<RpcReply, RpcError>>> {
         let answer = match method {
             methods::LIST_HARNESSES => {
-                return Some(
-                    self.once_known(params, cx, |view, params, _| value(&view.harnesses(params))),
-                );
+                self.once_known(params, cx, |view, params, _| value(&view.harnesses(params)))
             }
             methods::SET_HARNESS_ENABLED => {
                 let harness = super::param(params, "harness").map(str::to_owned);
@@ -63,26 +92,19 @@ impl WorkspaceView {
                 if self.view_model.surfaces.agents_off.file(&path, harness, !enabled) {
                     self.view_model.surfaces.agents_off.keep(path, cx);
                 }
-                return Some(
-                    self.once_known(params, cx, |view, params, _| value(&view.harnesses(params))),
-                );
+                self.once_known(params, cx, |view, params, _| value(&view.harnesses(params)))
             }
-            methods::INSTALL_HARNESS | methods::CANCEL_INSTALL => {
-                Err(RpcError::Failed("Install the agent on the machine itself".to_owned()))
-            }
-            // Agents update themselves on their machines; there is nothing to watch or check.
-            methods::WATCH_HARNESS_UPDATES => return Some(still_empty()),
-            methods::CHECK_HARNESS_UPDATES => value(&Vec::<serde_json::Value>::new()),
-            methods::GET_AGENT_SETTINGS => return Some(self.agent_settings(None, cx)),
+            methods::INSTALL_HARNESS => self.install_agent(params, cx),
+            methods::GET_AGENT_SETTINGS => self.agent_settings(None, cx),
             methods::SET_AGENT_SETTINGS => {
                 let Some(autonomy) = super::param(params, "autonomy") else {
                     return Some(Task::ready(Err(RpcError::BadParams("autonomy".to_owned()))));
                 };
-                return Some(self.agent_settings(Some(autonomy), cx));
+                self.agent_settings(Some(autonomy), cx)
             }
             _ => return None,
         };
-        Some(Task::ready(answer))
+        Some(answer)
     }
 
     /// The agents of the machine a page targets (the first one linked when it names none), each
@@ -93,17 +115,19 @@ impl WorkspaceView {
         });
         let startable = key.map(|key| self.startable_on(key)).unwrap_or_default();
         let off = self.view_model.surfaces.agents_off.set(&agents_off_path());
-        let core = AGENTS.iter().map(|(harness, name, agent)| {
+        let reachable =
+            key.and_then(|key| self.workers.get(&key)).is_some_and(|worker| worker.link.is_some());
+        let core = AGENTS.iter().map(|(harness, name, agent, _)| {
             let installed = startable.iter().any(|id| id.is(agent));
-            (*harness, (*name).to_owned(), installed, (*agent).to_owned())
+            (*harness, (*name).to_owned(), installed, reachable, (*agent).to_owned())
         });
         let acp = startable.iter().filter_map(|id| {
             let name = id.acp_name()?;
-            Some((HarnessId::named(name), name.to_owned(), true, id.0.clone()))
+            Some((HarnessId::named(name), name.to_owned(), true, false, id.0.clone()))
         });
         let now = slopty_core::WallMs::now();
         core.chain(acp)
-            .map(|(harness, name, installed, agent)| {
+            .map(|(harness, name, installed, can_install, agent)| {
                 let on = !off.contains(harness.as_str());
                 // slopty: the plan windows its threads last published, the newest reading.
                 let usage = self.faces.threads.usage_of(&agent, now);
@@ -114,7 +138,7 @@ impl WorkspaceView {
                     "steeringMode": SteeringMode::StepBoundary,
                     "reasoningLevels": efforts(harness),
                     "installed": installed,
-                    "canInstall": false,
+                    "canInstall": can_install,
                     "enabled": installed && on,
                     "usage": usage,
                 })
@@ -128,13 +152,32 @@ fn agents_off_path() -> std::path::PathBuf {
     slopty_platform::dirs::data_dir().join("interface").join("agents-off.json")
 }
 
-/// A watch of an empty list that stays open, so the page does not ask again.
-fn still_empty() -> Task<Result<RpcReply, RpcError>> {
-    use futures::StreamExt as _;
-    let frames = futures::stream::once(async { serde_json::json!([]) })
-        .chain(futures::stream::pending())
-        .boxed();
-    Task::ready(Ok(RpcReply::Stream(frames)))
+impl WorkspaceView {
+    /// `InstallHarness`: the vendor's installer for `params.harness`, in a terminal of its own on
+    /// the machine the page targets; answers `{terminalId}`, which the page shows and closes
+    /// (`CloseTerminal`) to cancel.
+    fn install_agent(
+        &mut self,
+        params: &serde_json::Value,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<RpcReply, RpcError>> {
+        let harness = super::param(params, "harness").unwrap_or_default();
+        let Some((_, name, _, line)) = AGENTS.iter().find(|(id, ..)| id.as_str() == harness) else {
+            return Task::ready(Err(RpcError::BadParams(format!("no installer for {harness}"))));
+        };
+        let Some(key) = self.surface_device(params) else {
+            return Task::ready(Err(RpcError::Failed("No machine to install it on".to_owned())));
+        };
+        let script = installer(name, line);
+        let opened = self.live_open_session(&serde_json::json!({}), Some((key, script)), cx);
+        cx.spawn(async move |_, _| {
+            let RpcReply::Value(terminal) = opened.await? else {
+                return Err(RpcError::Failed("the installer's terminal did not open".to_owned()));
+            };
+            let id = terminal.get("id").cloned().unwrap_or_default();
+            value(&serde_json::json!({ "terminalId": id }))
+        })
+    }
 }
 
 /// The autonomies `[agents] autonomy` takes, as the file writes them.
@@ -191,6 +234,31 @@ mod tests {
     use slopty_proto::settings::{DaemonSettings, SettingEdit};
 
     use crate::workspace::WorkspaceView;
+
+    /// An installer runs the vendor's line through the person's login shell in their home; an
+    /// agent with no installer, or no machine to run it on, is refused before anything opens.
+    #[gpui::test]
+    fn an_install_runs_the_vendor_line_or_says_why_not(cx: &mut gpui::TestAppContext) {
+        let script = super::installer("Codex", "npm install -g @openai/codex");
+        assert_eq!(script.name, "Install Codex");
+        assert_eq!(script.cwd, "~");
+        assert_eq!(script.command.first().map(String::as_str), Some("/bin/sh"));
+        assert_eq!(script.command.last().map(String::as_str), Some("npm install -g @openai/codex"));
+        assert!(script.command.iter().any(|part| part.contains("-l -i -c")), "a login shell");
+        let workspace = cx.new(|_| WorkspaceView::new(slopty_theme::Theme::default()));
+        let cx = cx.add_empty_window();
+        let refused = |harness: &str, cx: &mut gpui::VisualTestContext| {
+            let asked = serde_json::json!({ "harness": harness });
+            let answer = workspace.update(cx, |v, cx| v.install_agent(&asked, cx));
+            cx.run_until_parked();
+            match futures::FutureExt::now_or_never(answer).expect("answered at once") {
+                Err(error) => format!("{error:?}"),
+                Ok(_) => panic!("{harness} opened a terminal"),
+            }
+        };
+        assert!(refused("cursor", cx).contains("no installer for cursor"));
+        assert!(refused("codex", cx).contains("No machine"));
+    }
 
     /// Autonomy is the server's own setting, read and written through it, wherever it runs.
     #[gpui::test]

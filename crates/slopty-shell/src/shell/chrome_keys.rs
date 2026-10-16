@@ -10,6 +10,7 @@
 //! - ⌥⌘B opens the branch picker and ⌘⇧E steps the model's effort. (⌘⇧G is Find previous, and
 //!   ⌘⇧B is where an older map's sidebar key moves.)
 //! - ⌘Z undoes the archive just made, while its toast is up.
+//! - ⇧⌘O opens "Resume a session…", the picker of Claude Code's past sessions (`past_sessions`).
 //!
 //! A terminal keeps every key it takes for itself (its own find, and anything its program
 //! reads), and the browser keeps its own ⌘T, ⌘[ and ⌘]: those bind in their contexts, and this
@@ -36,7 +37,8 @@ actions!(
         ReopenClosedTab,
         OpenBranchPicker,
         NextEffort,
-        UndoArchive
+        UndoArchive,
+        ResumeSession
     ]
 );
 
@@ -79,6 +81,7 @@ pub(super) fn bind_keys(cx: &mut App, keymap: &KeymapConfig) {
         (ShortcutId::ReopenClosedTab, Box::new(ReopenClosedTab) as Box<dyn gpui::Action>),
         (ShortcutId::OpenBranchPicker, Box::new(OpenBranchPicker)),
         (ShortcutId::NextEffort, Box::new(NextEffort)),
+        (ShortcutId::ResumeSession, Box::new(ResumeSession)),
     ] {
         let combo = platform_combo(keymap.get(id));
         if combo.is_empty() {
@@ -159,6 +162,13 @@ impl Shell {
             }
             let pickers = this.composer.read(cx).pickers().clone();
             pickers.update(cx, |pickers, cx| pickers.step_effort(cx));
+        }))
+        .on_action(cx.listener(|this, _: &ResumeSession, window, cx| {
+            // Over another overlay the key waits; the picker's own key shuts it.
+            if this.overlay_owns_keyboard(cx) && !this.past_sessions.picker_open() {
+                return;
+            }
+            this.toggle_resume_picker(window, cx);
         }))
         .on_action(cx.listener(|this, _: &UndoArchive, window, cx| {
             if in_own_keys(window) || !this.undo_last_archive(cx) {
