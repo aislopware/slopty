@@ -1725,7 +1725,7 @@ pub(crate) fn parse_ms(stamp: &str) -> Option<WallMs> {
 }
 
 /// `at` as an RFC 3339 UTC stamp (`2026-09-27T03:15:25.849Z`), as Claude Code stamps its
-/// records: the inverse of [`parse_ms`].
+/// records: the inverse of `parse_ms`.
 #[must_use]
 pub fn format_ms(at: WallMs) -> String {
     let ms = at.as_millis();

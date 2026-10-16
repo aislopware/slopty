@@ -3,7 +3,7 @@
 //!
 //! The person's own `claude` runs as `claude -p` speaking stream-json both ways with the control
 //! protocol ([`slopty_agent::claude::args`]), in ptyd's custody ([`custody`]), one task per
-//! running Claude Code carrying its lines ([`driven`]).
+//! running Claude Code carrying its lines (`driven`).
 //!
 //! - **The program.** `claude` is found as the person's terminal finds it (on the daemon's `PATH`,
 //!   else their login shell's: [`crate::facts::installed`]) and runs with that `PATH` and the

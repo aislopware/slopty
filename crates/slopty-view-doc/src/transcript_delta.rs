@@ -526,6 +526,8 @@ mod context_update_tests {
                 tokens: Some(0),
                 window: Some(200000),
             }),
+            limits: Vec::new(),
+            limit_resets_at: None,
         })
         .unwrap();
         assert_eq!(value["contextUsage"]["tokens"], 0);

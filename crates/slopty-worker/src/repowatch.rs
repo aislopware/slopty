@@ -6,7 +6,7 @@
 //!
 //! - In the working tree, any file or folder written, made, removed, renamed or given a new mode,
 //!   however deep and whether or not a folder of it is open anywhere, unless git ignores it
-//!   ([`Ignores`]: the folders' `.gitignore` files, `info/exclude` and the global excludes, as git
+//!   (`Ignores`: the folders' `.gitignore` files, `info/exclude` and the global excludes, as git
 //!   reads them) and git does not track it anyway. A `target/` or `node_modules/` churning costs a
 //!   match, and no report.
 //! - In the git directory, only what moves a status or a diff against `HEAD`: `HEAD`, the index,
