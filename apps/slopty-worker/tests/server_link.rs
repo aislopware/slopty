@@ -128,6 +128,8 @@ mod tests {
         next: u64,
         /// Cleared, the worker's pings go unanswered while everything else still flows.
         answering: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        /// When a ping was last answered: the worker's silence counts from there.
+        answered: tokio::sync::watch::Receiver<Option<std::time::Instant>>,
     }
 
     /// What the test sends the worker, beside the pongs.
@@ -163,6 +165,7 @@ mod tests {
             let pongs = to_worker.clone();
             let answering = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
             let answers = std::sync::Arc::clone(&answering);
+            let (last_answer, answered) = tokio::sync::watch::channel(None);
             tokio::spawn(async move {
                 while let Some(msg) = outgoing.recv().await {
                     if tx.send(&msg).await.is_err() {
@@ -177,6 +180,8 @@ mod tests {
                     match msg {
                         Ok(ToServer::Ping { sent_at }) => {
                             if answers.load(std::sync::atomic::Ordering::SeqCst) {
+                                // Noted before it goes, so the worker hears it no sooner.
+                                last_answer.send_replace(Some(std::time::Instant::now()));
                                 let _gone = pongs.send(FromServer::Pong { sent_at });
                             }
                         }
@@ -189,7 +194,8 @@ mod tests {
                 }
             });
             let (tx, rx) = (PeerTx(to_worker), PeerRx(from_worker));
-            let peer = Self { conn: link.conn, tx, rx, heard: Vec::new(), next: 1, answering };
+            let peer =
+                Self { conn: link.conn, tx, rx, heard: Vec::new(), next: 1, answering, answered };
             (peer, *registration)
         }
 
@@ -487,14 +493,17 @@ mod tests {
         );
 
         peer.answering.store(false, std::sync::atomic::Ordering::SeqCst);
-        let muted = std::time::Instant::now();
         let link = tokio::time::timeout(STEP, server.accept()).await.unwrap().unwrap();
-        let took = muted.elapsed();
+        // Counted from the last answer, as the worker counts its silence: a ping on its way
+        // when the answers stopped, or one a loaded runner read late, goes unanswered, so the
+        // last answer may be well over a ping before the mute.
+        let last = peer.answered.borrow().expect("pings were answered");
+        let took = last.elapsed();
         let (_peer, second) = Peer::welcome(link).await;
         assert_eq!(second.worker, first.worker, "the same worker registers again");
         println!("MEASURE a server that stopped answering, dialled again after {took:?}");
         let within = slopty_net::liveness::PONG_WITHIN;
-        assert!(took >= within.saturating_sub(slopty_net::liveness::PING_EVERY), "{took:?}");
+        assert!(took >= within, "given up only past its last answer's six seconds: {took:?}");
         assert!(took < within.saturating_add(Duration::from_secs(3)), "{took:?}");
         drop(peer);
     }
