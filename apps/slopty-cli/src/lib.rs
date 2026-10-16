@@ -13,7 +13,7 @@
 //! * `slopty ssh` is `ssh` with a terminal the far side knows; a Slopty shell's `ssh` runs it.
 //! * `slopty browse` and `slopty edit` hand a shell's web pages and files to the client in front of
 //!   it; a Slopty session's `BROWSER`, `EDITOR` and `open` are this binary under other names.
-//! * `slopty ui` reads and drives the person's window for an agent in a shell ([`ui`]).
+//! * `slopty ui` reads and drives the person's window for an agent in a shell (`ui`).
 //! * `slopty attach` is a real client over QUIC straight to a worker the server lists, or any
 //!   `host:port`: a raw-mode terminal that renders frames locally, without the GPUI apps.
 //!

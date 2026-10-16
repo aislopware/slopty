@@ -184,7 +184,7 @@ pub fn file(given: &str, line: Option<u32>, cwd: &Path) -> Result<UiTarget, UiFa
 ///
 /// # Errors
 ///
-/// As [`page`] and [`file`].
+/// As [`page()`] and [`file()`].
 pub fn target(given: &str, line: Option<u32>, cwd: &Path) -> Result<UiTarget, UiFailure> {
     if given.contains("://") { page(given) } else { file(given, line, cwd) }
 }
