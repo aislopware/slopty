@@ -714,6 +714,13 @@ pub struct WindowInfo {
     pub scale: f32,
     /// The window is the key window.
     pub active: bool,
+    /// The system's bottom edge, points: the home indicator's safe area (0 off iOS).
+    #[serde(default)]
+    pub safe_bottom: f32,
+    /// The band the keyboard's frame covers at the bottom, points, as the platform last reported
+    /// it (0 with no keyboard, and off iOS).
+    #[serde(default)]
+    pub keyboard_bottom: f32,
 }
 
 /// One added worker.

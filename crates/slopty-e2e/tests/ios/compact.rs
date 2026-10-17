@@ -36,6 +36,10 @@ async fn tap(drv: &mut Driver, role: &str, label: &str) {
     drv.ui_tap(left + width / 2.0, top + height / 2.0).await.unwrap();
 }
 
+/// How far above the safe area a chat's composer row may end, points: its own padding and the
+/// mode row's, never a keyboard's band.
+const REACHES: f32 = 64.0;
+
 /// Apple's least touch target, points a side.
 const TOUCH_TARGET: f32 = 44.0;
 
@@ -69,21 +73,24 @@ async fn goldens(drv: &mut Driver, dir: &Path, device: &str, state: &str) {
         let name = format!("ios-{device}-compact-{state}-{appearance}");
         let frame = drv.render(&dir.join(format!("{name}.png"))).await.unwrap();
         println!("A11Y {name}\n{}", slopty_e2e::frame_text(&frame.a11y));
-        // A finished turn's done line names when it ended in the person's time: a fact of the
-        // run, left out of the golden.
+        // A finished turn's done line, and a reply's row with its Copy (on touch it stays shown),
+        // name when they happened in the person's time: facts of the run, left out of the
+        // golden. The reply's row is masked across the window, its date left of the Copy.
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "pixels")]
+        let px = |v: f32| (v * frame.scale).max(0.0).round() as u32;
         let masks: Vec<PixelRect> = frame
             .a11y
             .iter()
-            .filter(|n| n.label.as_deref().is_some_and(|l| l.contains("Worked for ")))
-            .map(|n| {
+            .filter_map(|n| {
+                let label = n.label.as_deref()?;
                 let [x, y, w, h] = n.bounds;
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    clippy::cast_sign_loss,
-                    reason = "pixels"
-                )]
-                let px = |v: f32| (v * frame.scale).max(0.0).round() as u32;
-                [px(x - 4.0), px(y - 4.0), px(w + 8.0), px(h + 8.0)]
+                if label.contains("Worked for ") {
+                    Some([px(x - 4.0), px(y - 4.0), px(w + 8.0), px(h + 8.0)])
+                } else if n.role == "Button" && label == "Copy message" {
+                    Some([0, px(y - 4.0), frame.image.width(), px(h + 8.0)])
+                } else {
+                    None
+                }
             })
             .collect();
         assert_matches_masked(&name, &frame, TOLERANCE, &artifacts_dir(), &masks).unwrap();
@@ -270,6 +277,31 @@ async fn a_phones_chat_holds_the_dock_and_a_subagents_card() {
         }
     };
     tokio::time::sleep(SETTLE).await;
+    // The send let the composer go, so the page reaches the safe area again: no keyboard's band
+    // left below the composer, whatever keyboard frame UIKit last reported.
+    let sent = drv.dump().await.unwrap();
+    let floor = sent.window.height - sent.window.safe_bottom;
+    let lowest = sent
+        .a11y
+        .iter()
+        .filter(|n| n.role == "Button" || n.role == "MultilineTextInput")
+        .map(|n| n.bounds[1] + n.bounds[3])
+        .fold(0.0, f32::max);
+    println!(
+        "MEASURE phone-after-send: the composer's last control ends at {lowest:.1} pt, the safe \
+         area at {floor:.1} (window {:.1}, safe bottom {:.1}, keyboard {:.1}, focus {} {})",
+        sent.window.height,
+        sent.window.safe_bottom,
+        sent.window.keyboard_bottom,
+        sent.focused,
+        sent.focus_path
+    );
+    assert!(
+        floor - lowest <= REACHES,
+        "after a send the page stops {:.1} pt above the safe area:\n{}",
+        floor - lowest,
+        slopty_e2e::frame_text(&sent.a11y)
+    );
     goldens(drv, &dir, "phone", "chat").await;
     let card = chat.a11y_node("Button", Some("Subagent Look")).map(|n| n.bounds).unwrap();
     assert!(card[0] >= 0.0 && card[0] + card[2] <= chat.window.width + 0.5, "{card:?} on screen");

@@ -414,6 +414,29 @@ pub fn artifacts_dir() -> PathBuf {
     )
 }
 
+/// Say a measurement, on the test's output and in the artifacts.
+///
+/// The `MEASURE` line also goes to `measurements.txt` in [`artifacts_dir`], which comes back
+/// from a guest or a runner even when a passing test's output does not.
+#[expect(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "test helper; the measurement is what it prints"
+)]
+pub fn measure(line: &str) {
+    use std::io::Write as _;
+    println!("MEASURE {line}");
+    let dir = artifacts_dir();
+    let written = std::fs::create_dir_all(&dir).and_then(|()| {
+        let path = dir.join("measurements.txt");
+        let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+        writeln!(file, "MEASURE {line}")
+    });
+    if let Err(e) = written {
+        eprintln!("measurements.txt in {}: {e}", dir.display());
+    }
+}
+
 /// How long a killed process may take to be reaped before it is left behind.
 ///
 /// A process that coded video through a virtual Mac's encoder after the encoder stopped stalls

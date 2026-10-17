@@ -689,19 +689,21 @@ async fn twelve_pages_in_one_chat_stay_within_budget() {
             .iter()
             .find(|n| n.label == card.label && n.role == "Group")
             .map_or(f32::NAN, |n| n.bounds[1] - card.bounds[1]);
-        println!("MEASURE pages-wheel-over-card: the chat moved {moved:.0} pt for a 144 pt wheel");
+        slopty_e2e::harness::measure(&format!(
+            "pages-wheel-over-card: the chat moved {moved:.0} pt for a 144 pt wheel"
+        ));
     }
     stop.store(1, Ordering::SeqCst);
     let most_web_content = web_content.await.unwrap();
-    println!(
-        "MEASURE pages-stress: 12 page cards ({} seen), at most {most_natives} natives presented \
+    slopty_e2e::harness::measure(&format!(
+        "pages-stress: 12 page cards ({} seen), at most {most_natives} natives presented \
          and {most_live} cards live at once, at most {most_web_content} WebContent processes; \
          scroll draw p95 {:.2} ms with pages ({pages_frames} frames), {:.2} ms in words \
          ({words_frames} frames)",
         cards.len(),
         ms(pages_p95),
         ms(words_p95),
-    );
+    ));
     assert_eq!(cards.len(), 12, "every page has its card: {cards:?}");
     assert!(most_natives <= NATIVES, "at most {NATIVES} natives presented: {most_natives}");
     assert!(

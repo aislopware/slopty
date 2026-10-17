@@ -74,21 +74,10 @@ pub(crate) fn serve(
                     // A stream's picture is on a layer of its own, which the render cannot see:
                     // for this frame each stream draws it with GPUI too, over its layer.
                     cx.update(|cx| slopty_ui::screen::capture_pictures(true, cx));
-                    settle(window, cx).await;
-                    let (done_tx, done_rx) = oneshot::channel();
-                    // `update_window` (not `WindowHandle::update`): the root view must not be
-                    // leased while a dispatched action updates it.
-                    let scheduled = cx.update_window(window, |_root, window, _cx| {
-                        before_next_draw(window, move |window, cx| {
-                            let _sent = done_tx.send(render(window, cx, &path, scale));
-                        });
-                    });
-                    let rendered = match scheduled {
-                        Ok(()) => done_rx.await.unwrap_or_else(|_| Reply::Error {
-                            message: "window closed before the frame".into(),
-                        }),
-                        Err(e) => error(&e),
-                    };
+                    let rendered = on_settled_frame(window, cx, move |window, cx| {
+                        render(window, cx, &path, scale)
+                    })
+                    .await;
                     cx.update(|cx| slopty_ui::screen::capture_pictures(false, cx));
                     rendered
                 }
@@ -96,21 +85,11 @@ pub(crate) fn serve(
                     // Every dump also holds the frame the app draws against the same state
                     // drawn from scratch (`Dump::stale`), so any test's dump catches a view
                     // left showing an old state.
-                    settle(window, cx).await;
-                    let (done_tx, done_rx) = oneshot::channel();
                     let workspace = workspace.clone();
-                    let scheduled = cx.update_window(window, |_root, window, _cx| {
-                        before_next_draw(window, move |window, cx| {
-                            let dump = dump(&workspace, window, cx);
-                            let _sent = done_tx.send(Reply::Dump(Box::new(dump)));
-                        });
-                    });
-                    match scheduled {
-                        Ok(()) => done_rx.await.unwrap_or_else(|_| Reply::Error {
-                            message: "window closed before the frame".into(),
-                        }),
-                        Err(e) => error(&e),
-                    }
+                    on_settled_frame(window, cx, move |window, cx| {
+                        Reply::Dump(Box::new(dump(&workspace, window, cx)))
+                    })
+                    .await
                 }
                 Command::Quit => {
                     let _sent = reply.send(Reply::Ok);
@@ -180,13 +159,72 @@ fn before_next_draw(window: &Window, f: impl FnOnce(&mut Window, &mut App) + 'st
     });
 }
 
+/// `frame`, read before a frame is drawn, once the window has settled and still shows what it
+/// settled on. Something may arrive between [`settle`]'s last frame and this one (a toast whose
+/// first frame guesses its height and measures it in paint, ARCHITECTURE.md "Drawing under
+/// retention"): the app is still drawing toward that state, so settle again rather than judge
+/// the frame between, at most [`RESETTLES`] times.
+async fn on_settled_frame(
+    window: AnyWindowHandle,
+    cx: &mut gpui::AsyncApp,
+    frame: impl Fn(&mut Window, &mut App) -> Reply + Clone + 'static,
+) -> Reply {
+    let mut again = 0..RESETTLES;
+    loop {
+        let settled = settle(window, cx).await;
+        let last_try = again.next().is_none();
+        let (done_tx, done_rx) = oneshot::channel();
+        let frame = frame.clone();
+        // `update_window` (not `WindowHandle::update`): the root view must not be leased while
+        // a dispatched action updates it.
+        let scheduled = cx.update_window(window, |_root, window, _cx| {
+            before_next_draw(window, move |window, cx| {
+                let still = last_try || still_shows(window, settled.as_ref());
+                let _sent = done_tx.send(still.then(|| frame(window, cx)));
+            });
+        });
+        match scheduled {
+            Ok(()) => match done_rx.await {
+                Ok(Some(reply)) => return reply,
+                Ok(None) => {}
+                Err(_) => {
+                    return Reply::Error { message: "window closed before the frame".into() };
+                }
+            },
+            Err(e) => return error(&e),
+        }
+    }
+}
+
+/// How many times [`on_settled_frame`] settles again when a frame arrived after it settled.
+const RESETTLES: usize = 4;
+
+/// What a frame painted, as [`settle`] compares frames.
+#[cfg(feature = "e2e")]
+type Painted = Vec<String>;
+#[cfg(not(feature = "e2e"))]
+type Painted = ();
+
+/// Whether the window last painted what [`settle`] settled on (or it never settled: something in
+/// motion, judged as it is).
+#[cfg(feature = "e2e")]
+fn still_shows(window: &Window, settled: Option<&Painted>) -> bool {
+    settled.is_none_or(|settled| *settled == slopty_kit::retained::painted(window))
+}
+
+#[cfg(not(feature = "e2e"))]
+const fn still_shows(_window: &Window, _settled: Option<&Painted>) -> bool {
+    true
+}
+
 /// Once the window has drawn the frames the app asked for: a value measured while drawing (the
 /// composer stack the transcript clears, a fitted grid) reaches the views that read it in the
 /// frame after (ARCHITECTURE.md, "Drawing under retention"), so a frame is judged only after a
 /// frame that painted nothing new. The platform draws them, as a person's would be; at most
-/// [`SETTLE_FRAMES`], since something in motion never stops painting anew.
+/// [`SETTLE_FRAMES`], since something in motion never stops painting anew. Gives what the
+/// settled frame painted, or `None` when the window kept moving.
 #[cfg(feature = "e2e")]
-async fn settle(window: AnyWindowHandle, cx: &mut gpui::AsyncApp) {
+async fn settle(window: AnyWindowHandle, cx: &mut gpui::AsyncApp) -> Option<Painted> {
     let mut last = None;
     for _ in 0..SETTLE_FRAMES {
         let (done_tx, done_rx) = oneshot::channel();
@@ -196,17 +234,20 @@ async fn settle(window: AnyWindowHandle, cx: &mut gpui::AsyncApp) {
                 let _sent = done_tx.send(slopty_kit::retained::painted(window));
             });
         });
-        let (Ok(()), Ok(painted)) = (scheduled, done_rx.await) else { return };
+        let (Ok(()), Ok(painted)) = (scheduled, done_rx.await) else { return None };
         if last.as_ref() == Some(&painted) {
-            return;
+            return last;
         }
         last = Some(painted);
     }
+    None
 }
 
 #[cfg(not(feature = "e2e"))]
 #[expect(clippy::unused_async, reason = "one signature for both builds")]
-async fn settle(_window: AnyWindowHandle, _cx: &mut gpui::AsyncApp) {}
+async fn settle(_window: AnyWindowHandle, _cx: &mut gpui::AsyncApp) -> Option<Painted> {
+    None
+}
 
 /// How many frames [`settle`] waits at most.
 #[cfg(feature = "e2e")]
@@ -1055,6 +1096,8 @@ impl Workspace {
                 height: f32::from(viewport.height),
                 scale: window.scale_factor(),
                 active: window.is_window_active(),
+                safe_bottom: f32::from(window.insets().safe_area.bottom),
+                keyboard_bottom: f32::from(window.insets().ime.bottom),
             },
             workers,
             status,
