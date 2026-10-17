@@ -87,6 +87,12 @@ fn setup_with_shell(
         cx.set_global(Theme::default());
         crate::app_menus::init(cx);
         settings::init(UiSettings::default(), dir.path(), cx);
+        // slopty: every pane's tween snaps to its end. The shell takes its
+        // reduced motion from this global on each render (its own field is
+        // overwritten), and a tween left running moves the chat by wall time:
+        // on a loaded machine the drop's frame came long enough after the
+        // frame its point was read from that the chat had slid away from it.
+        crate::motion::set_reduced_motion(cx, true);
         // slopty: no History surface (ruled out).
     });
     let (host, cx) = cx.add_window_view(|_, cx| {
@@ -120,7 +126,6 @@ fn setup_with_shell(
             });
             shell.active_chat = "parent".into();
             shell.splash = SplashPhase::Gone;
-            shell.reduced_motion = true;
             shell
         });
         DropHost {
