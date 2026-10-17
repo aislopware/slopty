@@ -1,0 +1,24 @@
+Window
+Button │ Notes:
+Status │ Done
+Button │ History: past Claude Code sessions
+Button │ Server: e2e-server, Connected
+Button │ Settings
+Article │ You
+Paragraph │ wait 60
+Button │ Ran 1 command
+Status │ Interrupted │ interrupted
+Button │ Attach images
+MultilineTextInput │ Do anything… (focused)
+Button │ Send message
+Button │ Mode: Auto
+Button │ Context 1%
+Button │ Open in…
+Button │ Show chat details
+Button │ Show files panel
+Button │ Show side pane
+Button │ Hide sidebar
+Button │ Back
+Button │ Forward
+Button │ New chat
+Button │ Sidebar view options

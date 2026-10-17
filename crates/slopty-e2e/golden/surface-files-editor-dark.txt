@@ -1,0 +1,48 @@
+Window
+Button │ Tidy the greeting
+Button │ History: past Claude Code sessions
+Button │ Server: e2e-server, Connected
+Button │ Settings
+Article │ You
+Paragraph │ Tidy the greeting
+Article │ Claude
+Paragraph │ Done: Tidy the greeting
+MultilineTextInput │ Do anything…
+Button │ Attach images
+Button │ Send message
+Button │ Mode: Auto
+Button │ Context 1%
+Group │ Workspace files (focused)
+Button │ Reveal file in tree
+Button │ Turn on word wrap
+Button │ Comment on line 1
+Button │ Comment on line 2
+Button │ Comment on line 3
+Button │ Comment on line 4
+Button │ Comment on line 5
+Group │ Workspace files
+SearchInput │ Search files
+Button │ Show hidden files
+Tree │ Workspace file tree
+TreeItem │ src
+TreeItem │ main.rs
+TreeItem │ NOTES.md
+TreeItem │ README.md
+Button │ Expand Chats
+Button │ New side chat
+Button │ Fork this chat
+Button │ Fork
+Button │ New side chat
+Button │ Open in…
+Button │ Show chat details
+Button │ src/main.rs
+Button │ Close tab
+Button │ New tab
+Button │ Expand side pane
+Button │ Hide files panel
+Button │ Hide side pane
+Button │ Hide sidebar
+Button │ Back
+Button │ Forward
+Button │ New chat
+Button │ Sidebar view options

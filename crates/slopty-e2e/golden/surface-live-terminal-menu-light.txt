@@ -1,0 +1,21 @@
+Window
+Button │ Server: e2e-server, Connected
+Button │ Settings
+Tab │ Terminal 1
+Button │ Close terminal
+Button │ New terminal
+Button │ Hide terminal
+Group
+Terminal │ shell │ ~ %
+Button │ Hide sidebar
+Button │ Back
+Button │ Forward
+Button │ Sidebar view options
+Menu │ Command block (focused)
+MenuItem │ Copy command
+MenuItem │ Rerun
+MenuItem │ Attach to agent
+MenuItem │ Select block
+MenuItem │ Paste
+MenuItem │ Find…
+MenuItem │ Clear screen

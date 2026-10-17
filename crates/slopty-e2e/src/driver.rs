@@ -242,6 +242,18 @@ impl Driver {
         self.ok(&Command::UiInsertText { text: text.to_owned() }).await
     }
 
+    /// Put the picture `bytes` of `media_type` (`image/png`, …) on the simulator app's own
+    /// clipboard through GPUI, as a screenshot would be (iOS; the Mac app's clipboard is a named
+    /// pasteboard the test writes itself).
+    ///
+    /// # Errors
+    ///
+    /// When the app is the Mac's, the type is no picture's, or the socket breaks.
+    pub async fn clipboard_image(&mut self, media_type: &str, bytes: &[u8]) -> Result<()> {
+        let data = base64(bytes);
+        self.ok(&Command::Clipboard { media_type: media_type.to_owned(), data }).await
+    }
+
     /// The text system's `deleteBackward` (iOS).
     ///
     /// # Errors
@@ -359,8 +371,8 @@ impl Driver {
         }
     }
 
-    /// Poll [`Driver::dump`] until `pred` holds or `timeout` passes; the last dump is in the
-    /// error so a failure says what the app was showing.
+    /// Poll [`Driver::dump`] until `pred` holds or `timeout` passes; the last dump's words are in
+    /// the error so a failure says what the app was showing.
     ///
     /// # Errors
     ///
@@ -371,21 +383,26 @@ impl Driver {
         timeout: Duration,
         mut pred: impl FnMut(&Dump) -> bool,
     ) -> Result<Dump> {
-        let mut last: Option<Dump> = None;
-        let polled = tokio::time::timeout(timeout, async {
-            loop {
-                let dump = self.dump().await?;
-                if pred(&dump) {
-                    return Ok(dump);
-                }
-                last = Some(dump);
-                tokio::time::sleep(POLL).await;
+        // The deadline is checked between dumps, never inside one: a dump cut off mid-call would
+        // leave its answer on the socket, read as the answer to the next command.
+        let since = tokio::time::Instant::now();
+        loop {
+            let dump = self.dump().await?;
+            if pred(&dump) {
+                return Ok(dump);
             }
-        })
-        .await;
-        match polled {
-            Ok(result) => result,
-            Err(_elapsed) => bail!("timed out waiting for {what}; last state:\n{last:#?}"),
+            if since.elapsed() >= timeout {
+                let terminals: Vec<String> =
+                    dump.terminals.iter().map(|t| t.lines.join("\n")).collect();
+                bail!(
+                    "timed out waiting for {what}; the app ({}, focus {}) said:\n{}{}",
+                    dump.status,
+                    dump.focused,
+                    crate::frame_text(&dump.a11y),
+                    terminals.join("\n--\n")
+                );
+            }
+            tokio::time::sleep(POLL).await;
         }
     }
 
@@ -449,6 +466,40 @@ impl Driver {
             }
             Reply::Error { message } => bail!("render: {message}"),
             other => bail!("render: unexpected {other:?}"),
+        }
+    }
+}
+
+/// `bytes` in standard base64 with padding, as the test socket's [`Command::Clipboard`] takes
+/// them.
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3).saturating_mul(4));
+    for chunk in bytes.chunks(3) {
+        let n = chunk
+            .iter()
+            .chain(std::iter::repeat(&0))
+            .take(3)
+            .fold(0_u32, |n, byte| n.wrapping_shl(8) | u32::from(*byte));
+        for (at, shift) in [18_u32, 12, 6, 0].into_iter().enumerate() {
+            let sextet = usize::try_from(n.wrapping_shr(shift) & 63).unwrap_or_default();
+            match ALPHABET.get(sextet) {
+                Some(&letter) if at <= chunk.len() => out.push(char::from(letter)),
+                _ => out.push('='),
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn base64_pads_as_the_standard_does() {
+        for (bytes, said) in
+            [("", ""), ("M", "TQ=="), ("Ma", "TWE="), ("Man", "TWFu"), ("Many", "TWFueQ==")]
+        {
+            assert_eq!(super::base64(bytes.as_bytes()), said, "{bytes:?}");
         }
     }
 }

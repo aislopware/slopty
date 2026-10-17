@@ -7,11 +7,14 @@ Tab │ Appearance
 Tab │ Notifications
 Tab │ Shortcuts
 Tab │ Providers (focused)
+Tab │ Permissions
 Tab │ Devices
 Tab │ Files
-Tab │ Archived sessions
+Tab │ Archived chats
 Button │ Server: e2e-server, Connected
 Button │ Close settings
 Button │ Device: This device
 Button │ Claude Code preferences
+Button │ Install Codex
+Button │ Install pi
 Button │ Autonomy: Auto

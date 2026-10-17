@@ -1,7 +1,9 @@
 Window
 Button │ Server: e2e-server, Connected (focused)
 Button │ Settings
-Button │ Toggle left sidebar
+Button │ Hide sidebar
+Button │ Back
+Button │ Forward
 Button │ Sidebar view options
 MenuItem │ Devices
 MenuItem │ Connect a phone

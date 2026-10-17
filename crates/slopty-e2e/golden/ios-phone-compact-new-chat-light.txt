@@ -1,0 +1,4 @@
+Window (focused)
+Group │ Navigation
+Heading │ New chat
+Button │ Close

@@ -1061,6 +1061,13 @@ impl Workspace {
             dark: self.theme.variant() == slopty_theme::Variant::Dark,
             frames: frame_info(slopty_kit::frames::stats(cx)),
             pointer: cfg!(all(target_os = "ios", feature = "e2e")).then(pointer_look),
+            natives: window.presented_natives().map_or(0, |frame| frame.placements.len()),
+            focus_path: window
+                .context_stack()
+                .iter()
+                .map(|context| format!("{context:?}"))
+                .collect::<Vec<_>>()
+                .join(" > "),
             ..Dump::default()
         };
         let mut focused = if window.focused(cx).is_some() { "other" } else { "none" }.to_owned();

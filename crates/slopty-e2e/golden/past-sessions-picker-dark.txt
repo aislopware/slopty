@@ -1,0 +1,34 @@
+Window
+Button │ New chat in project
+Button │ Explain the parser
+Status │ Done
+Button │ Say hello
+Status │ Done
+Button │ History, open: past Claude Code sessions
+Button │ Past session: Rename the lexer module to scanner, 1d
+Button │ Past session: Profile the startup path, 1d
+Button │ Server: e2e-server, Connected
+Button │ Settings
+Article │ You
+Paragraph │ Keep going
+Button │ Thought process
+Article │ Claude
+Paragraph │ Done: Keep going
+Button │ Attach images
+MultilineTextInput │ Do anything…
+Button │ Send message
+Button │ Mode: Auto
+Button │ Context 1%
+Button │ Open in…
+Button │ Show chat details
+Button │ Show files panel
+Button │ Show side pane
+Button │ Hide sidebar
+Button │ Back
+Button │ Forward
+Button │ New chat
+Button │ Sidebar view options
+MultilineTextInput │ Search what you asked Claude Code… │ scanner (focused)
+Tab │ repo
+Tab │ Every folder
+Button │ Rename the lexer module to scanner, 1d

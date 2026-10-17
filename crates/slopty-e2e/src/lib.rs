@@ -597,6 +597,14 @@ pub struct Dump {
     /// `system`, `beam`, `beam-lying`, `hidden`, or `outline-<shape>`. `None` off iOS.
     #[serde(default)]
     pub pointer: Option<String>,
+    /// The natives the window last presented (a page's `WebView`, a video layer): each one placed
+    /// in its frame, to show or clipped away.
+    #[serde(default)]
+    pub natives: usize,
+    /// The key contexts from the window's root to the element that holds the keyboard, as GPUI
+    /// dispatches a key (`Workspace > Terminal > …`); empty when nothing does.
+    #[serde(default)]
+    pub focus_path: String,
 }
 
 /// The UI frame-time probe (`slopty_kit::frames`), in microseconds.

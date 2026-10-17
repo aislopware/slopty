@@ -7,17 +7,18 @@ Tab │ Appearance (focused)
 Tab │ Notifications
 Tab │ Shortcuts
 Tab │ Providers
+Tab │ Permissions
 Tab │ Devices
 Tab │ Files
-Tab │ Archived sessions
+Tab │ Archived chats
 Button │ Server: e2e-server, Connected
 Button │ Close settings
-Button
-Button
-Button
+Button │ System
+Button │ Light
+Button │ Dark
 Button │ Light theme: Slopty Light
 Button │ Dark theme: Slopty Dark
-Button │ Theme default
+Button │ Theme default · Default
 Button │ Slopty
 Button │ Orange
 Button │ Amber
@@ -26,6 +27,7 @@ Button │ Cyan
 Button │ Blue
 Button │ Pink
 Switch │ Match wallpaper colors
+Button │ Reset Glass to default
 Button │ Glass: Opaque
 Button
 Button

@@ -1,0 +1,26 @@
+Window
+Button │ Touch three files
+Status │ Input
+Button │ Survey the files
+Button │ History: past Claude Code sessions
+Button │ Server: e2e-server, Connected
+Button │ Settings
+Article │ You
+Paragraph │ Touch three files
+Button │ Ran 1 command
+Group │ touch refused.txt (focused)
+Button │ Allow
+Button │ Always allow (edits in $SCRATCH/work this session)
+Button │ Deny
+Button │ Deny and stop
+Button │ Allow, and say what's next…
+Button │ Say what to do instead…
+Button │ Open in…
+Button │ Show chat details
+Button │ Show files panel
+Button │ Show side pane
+Button │ Hide sidebar
+Button │ Back
+Button │ Forward
+Button │ New chat
+Button │ Sidebar view options

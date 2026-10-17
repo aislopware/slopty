@@ -1,0 +1,28 @@
+Window
+Button │ Output:
+Button │ History: past Claude Code sessions
+Button │ Server: e2e-server, Connected
+Button │ Settings
+Article │ You
+Paragraph │ Output:⏎⏎```ansi⏎\x1b[1;32m✓\x1b[0m 12 passed \x1b[2m(0.4s)\x1b[0m⏎\x1b[31merror\x1b[0m: \x1b[1mcannot find\x1b[0m `x` in this scope⏎\x1b[38;5;208mwarning\x1b[0m: unused import⏎```
+Button │ Expand message
+Button │ Thought process
+Article │ Claude
+Paragraph │ Done: Output:
+Paragraph │ ✓ 12 passed (0.4s)⏎error: cannot find `x` in this scope⏎warning: unused import
+Button │ Fit content
+Button │ Copy code
+Button │ Attach images
+MultilineTextInput │ Do anything… (focused)
+Button │ Send message
+Button │ Mode: Auto
+Button │ Context 1%
+Button │ Open in…
+Button │ Show chat details
+Button │ Show files panel
+Button │ Show side pane
+Button │ Hide sidebar
+Button │ Back
+Button │ Forward
+Button │ New chat
+Button │ Sidebar view options

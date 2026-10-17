@@ -7,9 +7,11 @@ Tab │ Appearance
 Tab │ Notifications
 Tab │ Shortcuts
 Tab │ Providers
+Tab │ Permissions
 Tab │ Devices
 Tab │ Files
-Tab │ Archived sessions (focused)
+Tab │ Archived chats (focused)
 Button │ Server: e2e-server, Connected
 Button │ Close settings
+Button │ Delete all archived chats
 Button │ Unarchive

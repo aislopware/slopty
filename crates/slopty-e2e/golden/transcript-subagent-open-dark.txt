@@ -1,0 +1,42 @@
+Window
+Button │ Survey the files
+Button │ History: past Claude Code sessions
+Button │ Server: e2e-server, Connected
+Button │ Settings
+Button │ Ran 3 commands · edited 1 file +2 −0 · searched 2 times · 1 failed
+Status │ Found 1 file
+Status │ Found 1 line
+Status │ exit code 2
+Link │ Running in the background · task b00000001, in the background tray
+Status │ Wrote 2 lines
+Button │ Subagent Count lines │ Done · 1 tool · 14.4k tokens · 6s (focused)
+Button │ Open subagent
+Group │ Transcript of Count lines
+Article │ You
+Paragraph │ Use the Read tool to read the file $SCRATCH/work/main.rs and count its lines. Reply with just the number of lines and nothing else.
+Button │ Read 1 file
+Article │ Claude
+Paragraph │ 4
+Button │ Updated todos
+Article │ Claude
+Paragraph │ done
+Button │ 1 file changed +2 −0
+Button │ Open diff
+Button │ Expand todo list │ 2/2
+Button │ Dismiss todo list
+Group │ Background work
+Button │ Expand background work │ 1 command
+Button │ Attach images
+MultilineTextInput │ Do anything…
+Button │ Send message
+Button │ Mode: Auto
+Button │ Context 1%
+Button │ Open in…
+Button │ Show chat details
+Button │ Show files panel
+Button │ Show side pane
+Button │ Hide sidebar
+Button │ Back
+Button │ Forward
+Button │ New chat
+Button │ Sidebar view options

@@ -213,7 +213,7 @@ async fn new_project_clones_a_repository_into_the_open_folder() {
         .await
         .unwrap();
     assert!(
-        labelled(&landed, "Could not clone").is_none(),
+        labelled(&landed, "Couldn't clone").is_none(),
         "{}",
         slopty_e2e::frame_text(&landed.a11y)
     );
@@ -262,23 +262,11 @@ impl Drop for GitDaemon {
 
 // The sidebar's server menu and a row's hover card, held to their words and their renders.
 
-/// Render the window in light and in dark and hold each against `golden/<name>-<appearance>`;
-/// the window is light again after.
-async fn goldens_both(
-    drv: &mut slopty_e2e::Driver,
-    path: impl Fn(&str) -> std::path::PathBuf,
-    name: &str,
-) {
-    for (dark, appearance) in [(false, "light"), (true, "dark")] {
-        drv.ok(&Command::Appearance { dark }).await.unwrap();
-        // The appearance's first frame, and its fades settled.
-        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
-        let golden = format!("{name}-{appearance}");
-        let frame = drv.render(&path(&format!("{golden}.png"))).await.unwrap();
-        println!("A11Y {golden}\n{}", slopty_e2e::frame_text(&frame.a11y));
-        assert_matches(&golden, &frame, TOLERANCE, &artifacts_dir()).unwrap();
-    }
-    drv.ok(&Command::Appearance { dark: false }).await.unwrap();
+/// Render the window in light and in dark and hold each against `golden/<name>-<appearance>`,
+/// a finished turn's moment left out ([`crate::served::goldens`]); the window is light again
+/// after.
+async fn goldens_both(drv: &mut slopty_e2e::Driver, dir: &std::path::Path, name: &str) {
+    crate::served::goldens(drv, dir, name, &[]).await;
 }
 
 /// The server pill's menu names the link and offers what to do about servers and machines:
@@ -309,7 +297,7 @@ async fn the_server_menu_offers_devices_and_a_server_change() {
         .collect();
     assert!(rows.iter().all(|r| r[1] + r[3] <= y + 0.5), "{rows:?} above {y}");
     assert!(rows.iter().all(|r| r[3] >= 24.0), "zeron's row height: {rows:?}");
-    goldens_both(drv, |name| dir.join(name), "sidebar-server-menu").await;
+    goldens_both(drv, &dir, "sidebar-server-menu").await;
     let [x, y, w, h] = menu.a11y_node("MenuItem", Some("Devices")).unwrap().bounds;
     drv.click(x + w / 2.0, y + h / 2.0).await.unwrap();
     drv.wait_for("Settings → Devices", STEP, |d| {
@@ -347,7 +335,7 @@ async fn a_rows_hover_card_names_where_it_runs() {
     let words = slopty_e2e::frame_text(&card.a11y);
     assert!(words.contains(&format!("@ {MACHINE}")), "where it runs: {words}");
     assert!(words.contains("repo"), "its folder {}: {words}", repo.display());
-    assert!(words.contains("Done") || words.contains("Last active"), "its age: {words}");
+    assert!(words.contains("Done") || words.contains("Active"), "its age: {words}");
     let [_, card_y, _, card_h] = card.a11y_node("Tooltip", None).unwrap().bounds;
     assert!(card_h >= 60.0 && card_y >= title[1], "under the pointer, whole: {card_y} {card_h}");
     stack.shutdown().await;
@@ -471,8 +459,20 @@ async fn open_in_hands_the_folder_to_an_editor() {
                 n.role == "MenuItem" && n.label.as_deref().is_some_and(|l| editors.contains(&l))
             })
         })
-        .await
-        .unwrap();
+        .await;
+    let menu = match menu {
+        Ok(menu) => menu,
+        Err(error) => {
+            // What the window showed instead, for the review.
+            let shown = artifacts_dir().join("open-in-no-menu.png");
+            let frame = drv.render(&shown).await.unwrap();
+            panic!(
+                "{error:#}\nthe frame ({}) said:\n{}",
+                shown.display(),
+                slopty_e2e::frame_text(&frame.a11y)
+            );
+        }
+    };
     let offered: Vec<_> = menu
         .a11y
         .iter()
@@ -575,5 +575,40 @@ async fn a_pages_icon_shows_on_its_tab() {
         .unwrap();
     let [_, _, w, h] = shown.a11y_node("Image", Some("Page icon")).unwrap().bounds;
     assert!((w - 12.0).abs() < 1.0 && (h - 12.0).abs() < 1.0, "the chip's 12 pt slot: {w}x{h}");
+    stack.shutdown().await;
+}
+
+/// A control's tooltip names its action and key, centred under it clear of the pointer
+/// (`docs/decisions/ui.md`, "Tooltips name the action and its key"): the chat's files toggle.
+#[tokio::test]
+#[ignore = "live: cargo xtask e2e app"]
+async fn the_files_toggles_tooltip_names_its_key_under_it() {
+    let mut stack = agent_stack().await;
+    let dir = stack.dir.path().to_path_buf();
+    let drv = &mut stack.driver;
+    drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
+    drv.keys("cmd-1").await.unwrap();
+    let toggle = |d: &slopty_e2e::Dump| {
+        d.a11y
+            .iter()
+            .find(|n| n.role == "Button" && n.label.as_deref() == Some("Show files panel"))
+            .map(|n| n.bounds)
+    };
+    let shown = drv.wait_for("the files toggle", STEP, |d| toggle(d).is_some()).await.unwrap();
+    let [x, y, w, h] = toggle(&shown).unwrap();
+    let pointer = (x + w / 2.0, y + h / 2.0);
+    drv.ok(&Command::Move { x: pointer.0, y: pointer.1 }).await.unwrap();
+    let tip = drv
+        .wait_for("its tooltip", STEP, |d| d.a11y_node("Tooltip", None).is_some())
+        .await
+        .unwrap();
+    let words = slopty_e2e::frame_text(&tip.a11y);
+    assert!(words.contains("Show files panel") && words.contains("⌘E"), "{words}");
+    let [tx, ty, tw, _] = tip.a11y_node("Tooltip", None).unwrap().bounds;
+    assert!(ty >= y + h + 3.5, "under the control, the pointer clear of it: {ty} vs {}", y + h);
+    // Centred under the control, or held 8 px inside the window where centring would cross it.
+    let held = (tx - 8.0).abs() <= 0.5 || (tx + tw - (WINDOW.0 - 8.0)).abs() <= 0.5;
+    assert!(((tx + tw / 2.0) - pointer.0).abs() <= 1.0 || held, "centred: {tx} {tw}");
+    goldens_both(drv, &dir, "tooltip-files-toggle").await;
     stack.shutdown().await;
 }

@@ -6,14 +6,14 @@ Tab │ Appearance
 Tab │ Notifications
 Tab │ Shortcuts
 Tab │ Providers
+Tab │ Permissions
 Tab │ Devices
 Tab │ Files
-Tab │ Archived sessions
+Tab │ Archived chats
 Button │ Server: e2e-server, Connected
 Button │ Close settings
-Button │ Connect a phone or iPad (focused)
+Button │ Connect a phone or iPad
 Button │ Change server
-Button │ Show in Finder e2e-invite
 Button │ Copy device ID bc12344ba6976680a329238068e2abab
 Button │ Add device
 Button │ Copy link

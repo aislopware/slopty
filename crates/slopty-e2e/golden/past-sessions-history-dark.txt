@@ -1,0 +1,18 @@
+Window
+Button │ New chat in project
+Button │ Say hello
+Status │ Done
+Button │ History, open: past Claude Code sessions
+Button │ Past session: Explain the parser, 1d
+Button │ Past session: Rename the lexer module to scanner, 1d
+Button │ Past session: Profile the startup path, 1d
+Button │ Server: e2e-server, Connected
+Button │ Settings
+MultilineTextInput │ Do anything… (focused)
+Button │ Attach images
+Button │ Mode: Auto
+Button │ Send message
+Button │ Hide sidebar
+Button │ Back
+Button │ Forward
+Button │ Sidebar view options

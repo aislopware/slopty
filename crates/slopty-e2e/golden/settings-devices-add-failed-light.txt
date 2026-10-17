@@ -7,9 +7,10 @@ Tab │ Appearance
 Tab │ Notifications
 Tab │ Shortcuts
 Tab │ Providers
+Tab │ Permissions
 Tab │ Devices
 Tab │ Files
-Tab │ Archived sessions
+Tab │ Archived chats
 Button │ Server: e2e-server, Connected
 Button │ Close settings
 Button │ Connect a phone or iPad
@@ -21,7 +22,8 @@ TabList
 Tab │ This Mac
 Tab │ Over SSH
 Tab │ A server
+TextInput │ Machine's name or address │ nohost.invalid
 Button │ Set up the server there instead
-Alert │ Add a device from Slopty on a Mac: it installs over ssh from there
-Button
+Alert │ No machine is named nohost.invalid
+Button │ Cancel
 Button │ Try again (focused)

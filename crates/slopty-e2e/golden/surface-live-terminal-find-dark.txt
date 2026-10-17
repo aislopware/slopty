@@ -1,0 +1,22 @@
+Window
+Button │ Server: e2e-server, Connected
+Button │ Settings
+Tab │ Terminal 1
+Button │ Close terminal
+Button │ New terminal
+Button │ Hide terminal
+Group
+Terminal │ shell │ ~ %
+Search │ Find
+SearchInput │ Find │ 29 (focused)
+Button │ Match case
+Button │ Match whole word
+Button │ Use regular expression
+Status │ Matches │ 13 of 13
+Button │ Previous match
+Button │ Next match
+Button │ Close find
+Button │ Hide sidebar
+Button │ Back
+Button │ Forward
+Button │ Sidebar view options

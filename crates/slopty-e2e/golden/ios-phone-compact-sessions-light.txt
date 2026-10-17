@@ -1,7 +1,0 @@
-Window (focused)
-Group │ Sessions
-Button │ New session
-TabList │ Tabs
-Tab │ Sessions
-Tab │ Settings
-Tab │ Search

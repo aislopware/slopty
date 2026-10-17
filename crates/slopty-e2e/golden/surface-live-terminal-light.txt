@@ -1,7 +1,13 @@
 Window
 Button │ Server: e2e-server, Connected
 Button │ Settings
+Tab │ Terminal 1
+Button │ Close terminal
+Button │ New terminal
+Button │ Hide terminal
 Group (focused)
 Terminal │ shell │ ~ %
-Button │ Toggle left sidebar
+Button │ Hide sidebar
+Button │ Back
+Button │ Forward
 Button │ Sidebar view options

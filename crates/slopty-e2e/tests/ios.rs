@@ -3,7 +3,7 @@
 //! Live (`#[ignore]`), run by `cargo xtask e2e ios [--sim iphone|ipad]`: the daemons
 //! run on the Mac as for the app self-test, the app runs in the booted simulator named by
 //! `SLOPTY_SIM_UDID` and binds its socket on the shared file system. The phone's anatomy (its
-//! Sessions page, a chat over the whole screen) is `compact`; its frames are compared with a
+//! Chats page, a chat over the whole screen) is `compact`; its frames are compared with a
 //! golden per device, `ios-phone-*.png` or `ios-pad-*.png`.
 
 #[cfg(test)]
@@ -104,7 +104,7 @@ mod tests {
     }
 }
 
-/// The phone's anatomy: its Sessions page, a chat over the whole screen.
+/// The phone's anatomy: its Chats page, a chat over the whole screen.
 #[cfg(test)]
 #[path = "ios/compact.rs"]
 mod compact;

@@ -1,5 +1,7 @@
 Window (focused)
 Button │ Server: e2e-server, Connected
 Button │ Settings
-Button │ Toggle left sidebar
+Button │ Hide sidebar
+Button │ Back
+Button │ Forward
 Button │ Sidebar view options

@@ -6,12 +6,24 @@
 //! `--screen-recording`.
 
 #[cfg(test)]
+#[path = "app/agent_ui.rs"]
+mod agent_ui;
+
+#[cfg(test)]
 #[path = "app/clipboard.rs"]
 mod clipboard;
 
 #[cfg(test)]
+#[path = "app/conversation.rs"]
+mod conversation;
+
+#[cfg(test)]
 #[path = "app/devices.rs"]
 mod devices;
+
+#[cfg(test)]
+#[path = "app/dock.rs"]
+mod dock;
 
 #[cfg(test)]
 #[path = "app/hangs.rs"]
@@ -26,8 +38,20 @@ mod interface;
 mod liveness;
 
 #[cfg(test)]
+#[path = "app/media.rs"]
+mod media;
+
+#[cfg(test)]
 #[path = "app/pair.rs"]
 mod pair;
+
+#[cfg(test)]
+#[path = "app/past_sessions.rs"]
+mod past_sessions;
+
+#[cfg(test)]
+#[path = "app/races.rs"]
+mod races;
 
 #[cfg(test)]
 #[path = "app/resume.rs"]
@@ -40,6 +64,14 @@ mod terminal_keys;
 #[cfg(test)]
 #[path = "app/through_server.rs"]
 mod through_server;
+
+#[cfg(test)]
+#[path = "app/served.rs"]
+mod served;
+
+#[cfg(test)]
+#[path = "app/sidebar_paging.rs"]
+mod sidebar_paging;
 
 #[cfg(test)]
 #[path = "app/surfaces_files.rs"]

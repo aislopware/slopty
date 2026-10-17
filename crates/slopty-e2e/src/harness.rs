@@ -20,6 +20,9 @@ use crate::driver::Driver;
 
 /// How long a daemon or the app may take to come up.
 const STARTUP: Duration = Duration::from_secs(30);
+/// How long `simctl launch` may take: the first launches on a simulator the run just booted
+/// and installed into took over 30 s on the runners (run 38989679319), the next 10 s.
+const SIMULATOR_LAUNCH: Duration = Duration::from_mins(2);
 /// Socket poll interval.
 const POLL: Duration = Duration::from_millis(50);
 
@@ -721,6 +724,9 @@ async fn spawn_app(
         // ends; GPUI then takes the presented handler as the glass. A display that reports
         // scan-out keeps its own times.
         .env("GPUI_PRESENTED_AT_CALLBACK", "1")
+        // A panic on the main thread aborts the app inside AppKit's callback, where nothing
+        // unwinds: its backtrace in the test's log is all that says where.
+        .env("RUST_BACKTRACE", "1")
         .envs(env.iter().copied())
         .env(PASTEBOARD_ENV, pasteboard_name(root, name))
         .stdin(Stdio::null())
@@ -846,9 +852,9 @@ async fn spawn_simulator_app(
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
         .status();
-    // `launch` blocks while the simulator is still booting; the xtask waits for
-    // `bootstatus` first, so a long wait here is a broken simulator, not a slow one.
-    let launched = tokio::time::timeout(STARTUP, launch)
+    // `launch` blocks while the simulator is still booting; the xtask waits for `bootstatus`
+    // first, but a freshly booted simulator's first launches are still slow.
+    let launched = tokio::time::timeout(SIMULATOR_LAUNCH, launch)
         .await
         .context("simctl launch did not return (is the simulator booted?)")?
         .context("xcrun simctl launch")?;
@@ -2316,20 +2322,29 @@ impl ServerFleet {
 ///
 /// When it is missing and cannot be built.
 pub async fn stub_claude() -> Result<PathBuf> {
-    const STUB: &str = "slopty-stub-claude";
+    testkit_bin("slopty-stub-claude").await
+}
+
+/// The test kit's binary `name` (a stand-in agent or MCP server), built beside the other
+/// binaries when it is not there yet.
+///
+/// # Errors
+///
+/// When it is missing and cannot be built.
+pub async fn testkit_bin(name: &str) -> Result<PathBuf> {
     let built = built_dir()?;
-    let path = built.join(STUB);
+    let path = built.join(name);
     if path.exists() {
         return Ok(path);
     }
     let target = built.parent().context("the binaries' directory has a parent")?;
     let mut build = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
-    build.args(["build", "-p", "slopty-testkit", "--bin", STUB]).arg("--target-dir").arg(target);
+    build.args(["build", "-p", "slopty-testkit", "--bin", name]).arg("--target-dir").arg(target);
     if built.ends_with("release") {
         build.arg("--release");
     }
     let status = build.status().await.context("run cargo")?;
-    ensure!(status.success() && path.exists(), "build {STUB}: {status}");
+    ensure!(status.success() && path.exists(), "build {name}: {status}");
     Ok(path)
 }
 

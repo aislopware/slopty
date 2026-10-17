@@ -1,4 +1,0 @@
-Window (focused)
-Group │ Navigation
-Heading │ New session
-Button │ Close

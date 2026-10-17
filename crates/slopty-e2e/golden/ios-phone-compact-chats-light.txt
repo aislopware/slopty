@@ -1,0 +1,7 @@
+Window (focused)
+Group │ Chats
+Button │ New chat
+TabList │ Tabs
+Tab │ Chats
+Tab │ Settings
+Tab │ Search

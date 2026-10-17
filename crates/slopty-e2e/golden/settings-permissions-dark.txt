@@ -1,0 +1,30 @@
+Window
+Group │ Settings
+Button │ Back
+TabList │ Settings sections
+Tab │ General
+Tab │ Appearance
+Tab │ Notifications
+Tab │ Shortcuts
+Tab │ Providers
+Tab │ Permissions (focused)
+Tab │ Devices
+Tab │ Files
+Tab │ Archived chats
+Button │ Server: e2e-server, Connected
+Button │ Close settings
+Button │ Folder: repo · surfaces
+List │ Allowed
+ListItem │ Bash(cargo test:*): This project, shared
+Button │ Remove Bash(cargo test:*)
+List │ Asks first
+ListItem │ Bash(git push:*): This project, shared
+Button │ Remove Bash(git push:*)
+List │ Denied
+ListItem │ Bash(rm -rf:*): This project, shared
+Button │ Remove Bash(rm -rf:*)
+Group │ Add a rule
+Button │ Behaviour: Allowed
+MultilineTextInput │ Bash(cargo test:*)
+Button │ Where it goes: This project, this machine
+Button │ Add rule

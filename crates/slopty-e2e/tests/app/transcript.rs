@@ -9,8 +9,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use serde_json::Value;
-use slopty_e2e::harness::{ServedApp, artifacts_dir};
-use slopty_e2e::snapshot::{MAC_TOLERANCE as TOLERANCE, assert_matches};
+use slopty_e2e::harness::ServedApp;
 use slopty_e2e::{A11yNode, Command, Driver, Dump};
 
 /// How long a worker round trip may take.
@@ -30,38 +29,40 @@ const TOOLS: &str = "Survey the files";
 /// The prompt that plays the `permission` recording: three commands, each asked for first.
 const PERMISSION: &str = "Touch three files";
 
-/// What the `tools` turn's group says of its calls, as zeron counts them.
-const GROUP: [&str; 6] = [
-    "Ran 3 commands",
-    "edited 1 file",
-    "searched 2 times",
-    "updated todos",
-    "called 1 tool",
-    "1 failed",
-];
+/// What the `tools` turn's groups say of their calls, each found by its first words: the agent's
+/// words between calls end a group, a directory listed is counted apart from commands (as the
+/// TUI's group line counts it), a failed call is counted as failed whatever its kind, the task
+/// list's update after the subagent's card is a group of its own, and the tool search is
+/// housekeeping that shows no chip, as in Claude Code's TUI.
+/// What the turn's calls add up to over every group's summary, as the summaries count them
+/// ("Ran 2 commands · searched 2 times · 1 failed", "Ran 1 command · edited 1 file +2 −0"):
+/// commands run, searches, failures and files edited. Where the groups split follows where the
+/// recorded agent spoke between calls, which a new recording may move.
+const CALLS: [(&str, u32); 4] = [("command", 3), ("searched", 2), ("failed", 1), ("edited", 1)];
+
+/// The counts `summary` (one group's line) gives for each of [`CALLS`]' kinds.
+fn counted(summary: &str) -> [u32; 4] {
+    let mut counts = [0_u32; 4];
+    for part in summary.split(" · ") {
+        let number = part.split_whitespace().find_map(|w| w.parse::<u32>().ok()).unwrap_or(0);
+        for (slot, (kind, _)) in counts.iter_mut().zip(CALLS) {
+            if part.contains(kind) {
+                *slot = (*slot).saturating_add(number);
+            }
+        }
+    }
+    counts
+}
 
 /// What the recorded agent worked on.
 const MAIN_RS: &str = "fn main() {\n    println!(\"hello\");\n}\n";
 
-/// Render the window in light and in dark and hold each against `golden/<name>-<appearance>.png`;
-/// the window is light again after. The frame's words, as the light render said them.
+/// Render the window in light and in dark against `golden/<name>-<appearance>.png`, the done
+/// line's moment left out ([`crate::served::goldens`]); the frame's words, as the light render
+/// said them.
 async fn goldens(drv: &mut Driver, renders: &Path, name: &str) -> String {
-    let mut words = String::new();
-    for (dark, appearance) in [(false, "light"), (true, "dark")] {
-        drv.ok(&Command::Appearance { dark }).await.unwrap();
-        // The appearance's first frame, and its hover and fade tweens settled.
-        tokio::time::sleep(Duration::from_millis(600)).await;
-        let golden = format!("{name}-{appearance}");
-        let frame = drv.render(&renders.join(format!("{golden}.png"))).await.unwrap();
-        let text = slopty_e2e::frame_text(&frame.a11y);
-        println!("A11Y {golden}\n{text}");
-        if !dark {
-            words = text;
-        }
-        assert_matches(&golden, &frame, TOLERANCE, &artifacts_dir()).unwrap();
-    }
-    drv.ok(&Command::Appearance { dark: false }).await.unwrap();
-    words
+    // A reply's hover line, where the pointer rests on it, says when it was sent.
+    crate::served::goldens_with(drv, renders, name, &[], &["Copy message"]).await
 }
 
 /// The first node of `dump`'s accessibility tree with role `role` whose label holds `words`.
@@ -69,6 +70,89 @@ fn labelled<'a>(dump: &'a Dump, role: &str, words: &str) -> Option<&'a A11yNode>
     dump.a11y
         .iter()
         .find(|n| n.role == role && n.label.as_deref().is_some_and(|l| l.contains(words)))
+}
+
+/// The subagent's card, "Subagent Count lines": a click opens its run in place (a group
+/// "Transcript of Count lines" under it), Escape folds it, and its Open drills into the run, the
+/// breadcrumb "… › Count lines" over it, a bar saying it runs inside its parent where the
+/// composer was, and Escape leads back. What the frames fail to say goes to `missing`.
+async fn subagent_card(drv: &mut Driver, renders: &Path, missing: &mut Vec<String>) {
+    const CARD: &str = "Subagent Count lines";
+    const RUN: &str = "Transcript of Count lines";
+    let shown = drv.dump().await.unwrap();
+    let Some(card) = shown.a11y_node("Button", Some(CARD)).cloned() else {
+        missing.push(format!("the card {CARD:?}"));
+        return;
+    };
+    let [x, y, w, h] = card.bounds;
+    drv.click(x + w / 2.0, y + h / 2.0).await.unwrap();
+    if let Err(e) = drv
+        .wait_for("the run open in place", STEP, |d| d.a11y_node("Group", Some(RUN)).is_some())
+        .await
+    {
+        // The wait's own error names why: no group, or a dump that bailed on a stale frame.
+        missing.push(format!("a click on the card opens {RUN:?} in place: {e:#}"));
+        return;
+    }
+    tokio::time::sleep(SETTLE).await;
+    goldens(drv, renders, "transcript-subagent-open").await;
+    drv.keys("escape").await.unwrap();
+    if drv
+        .wait_for("the run folded", STEP, |d| d.a11y_node("Group", Some(RUN)).is_none())
+        .await
+        .is_err()
+    {
+        missing.push("Escape folds the subagent's run".to_owned());
+    }
+    // Open, on the card's hover: the run as the session view, under its breadcrumb.
+    let shown = drv.dump().await.unwrap();
+    let card = shown.a11y_node("Button", Some(CARD)).cloned().unwrap_or(card);
+    let [x, y, w, h] = card.bounds;
+    drv.ok(&Command::Move { x: x + w / 2.0, y: y + h / 2.0 }).await.unwrap();
+    let Ok(hovered) = drv
+        .wait_for("Open subagent", STEP, |d| d.a11y_node("Button", Some("Open subagent")).is_some())
+        .await
+    else {
+        missing.push("the card's hover offers Open subagent".to_owned());
+        return;
+    };
+    let [x, y, w, h] = hovered.a11y_node("Button", Some("Open subagent")).unwrap().bounds;
+    drv.click(x + w / 2.0, y + h / 2.0).await.unwrap();
+    let drilled = drv
+        .wait_for("the breadcrumb", STEP, |d| {
+            d.a11y.iter().any(|n| {
+                n.role == "Navigation"
+                    && n.label.as_deref().is_some_and(|l| l.ends_with("› Count lines"))
+            })
+        })
+        .await;
+    match drilled {
+        Ok(drilled) => {
+            if !drilled.a11y.iter().any(|n| {
+                n.role == "Status"
+                    && n.label.as_deref().is_some_and(|l| l.starts_with("Runs inside"))
+            }) {
+                missing.push("the drilled-in run says it runs inside its parent".to_owned());
+            }
+            tokio::time::sleep(SETTLE).await;
+            goldens(drv, renders, "transcript-subagent-drilled").await;
+            drv.keys("escape").await.unwrap();
+            if drv
+                .wait_for("back in the parent", STEP, |d| {
+                    d.a11y_node("Button", Some(CARD)).is_some()
+                        && !d.a11y.iter().any(|n| {
+                            n.role == "Navigation"
+                                && n.label.as_deref().is_some_and(|l| l.ends_with("› Count lines"))
+                        })
+                })
+                .await
+                .is_err()
+            {
+                missing.push("Escape leads back to the parent's chat".to_owned());
+            }
+        }
+        Err(_) => missing.push("Open drills into the subagent's run".to_owned()),
+    }
 }
 
 /// Wait until the agent's thread, as the worker keeps it (`slopty agent read`), is `ready`.
@@ -95,12 +179,12 @@ async fn start(stack: &ServedApp, folder: &str, prompt: &str) -> String {
 }
 
 /// A recorded Claude Code turn reads as zeron draws it. The `tools` recording, played to its
-/// end: its calls fold under one summary that counts them by kind ("Ran 3 commands", the
-/// glob and grep as searches, the file written, the one that failed), the task list's tray
-/// counts what is done, and the subagent the turn ran is a chip; a click on the summary opens
-/// the group. The turn ends with what it changed, and ⌘F finds words in the thread, counted
-/// and stepped through. Then the `permission` recording, held at its first request: the composer
-/// asks for the command, which it names.
+/// end: its calls fold under a summary on each side of the subagent's card, counting them by
+/// kind ("Ran 2 commands", the glob and grep as searches, the one that failed; then the file
+/// written), the task list's tray counts what is done, and the subagent the turn ran is a card
+/// that opens in place and drills in; a click on a summary opens its group. The turn ends with what
+/// it changed, and ⌘F finds words in the thread, counted and stepped through. Then the `permission`
+/// recording, held at its first request: the composer asks for the command, which it names.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
 async fn a_recorded_turn_reads_as_zeron_draws_it() {
@@ -127,25 +211,46 @@ async fn a_recorded_turn_reads_as_zeron_draws_it() {
     // What the frames fail to say, gathered so every state is still drawn and judged.
     let mut missing: Vec<String> = Vec::new();
 
-    // One summary for the turn's calls, counted by kind: the three commands (one failed), the
-    // file written, the glob and the grep, the task list and the tool search.
-    let group = labelled(&summary, "Button", "Ran 3 commands");
-    let label = group.and_then(|g| g.label.clone()).unwrap_or_default();
-    for said in GROUP {
-        if !label.contains(said) {
-            missing.push(format!("the group's summary says {said:?} (it says {label:?})"));
+    // A summary for the calls on each side of the subagent's card, counted by kind: the
+    // commands (one failed), the glob and the grep and the task list before it, a command and the
+    // file written after it.
+    let groups: Vec<String> = summary
+        .a11y
+        .iter()
+        .filter(|n| n.role == "Button")
+        .filter_map(|n| n.label.clone())
+        .filter(|l| l.starts_with("Ran "))
+        .collect();
+    let total = groups.iter().map(|g| counted(g)).fold([0_u32; 4], |mut sum, counts| {
+        for (s, c) in sum.iter_mut().zip(counts) {
+            *s = (*s).saturating_add(c);
+        }
+        sum
+    });
+    for ((kind, want), got) in CALLS.into_iter().zip(total) {
+        if got != want {
+            missing
+                .push(format!("the groups' summaries count {want} {kind} (they say {groups:?})"));
         }
     }
+    if labelled(&summary, "Button", "Updated todos").is_none() {
+        missing.push("a group's summary says \"Updated todos\"".to_owned());
+    }
+    let group = labelled(&summary, "Button", "Ran ");
     // The task list's tray: both of the turn's tasks done.
     if !words.contains("2/2") {
         missing.push("the todo tray counts 2/2".to_owned());
     }
-    // The subagent the turn ran: a chip named for its task, and a row under its agent.
+    // The subagent the turn ran: a card in the transcript named for its task, no longer a row
+    // of the sidebar.
     if !words.contains("Count lines") {
-        missing.push("the subagent's chip names its task, Count lines".to_owned());
+        missing.push("the subagent's card names its task, Count lines".to_owned());
     }
-    if labelled(&summary, "Button", "Show 1 finished subagents").is_none() {
-        missing.push("the sidebar holds the finished subagent".to_owned());
+    if labelled(&summary, "Button", "Subagent Count lines").is_none() {
+        missing.push("the transcript holds the subagent's card".to_owned());
+    }
+    if labelled(&summary, "Button", "finished subagent").is_some() {
+        missing.push("the sidebar holds no subagent rows".to_owned());
     }
 
     // The group opens on a click: its calls are drawn under the summary.
@@ -157,6 +262,11 @@ async fn a_recorded_turn_reads_as_zeron_draws_it() {
         tokio::time::sleep(SETTLE).await;
         goldens(drv, &renders, "transcript-turn-open").await;
     }
+
+    // The subagent's card opens its run in place, Escape folds it, and its Open drills into the
+    // run under a breadcrumb that leads back.
+    let drv = &mut stack.driver;
+    subagent_card(drv, &renders, &mut missing).await;
 
     // What the turn changed closes it: the one file it wrote, with its line counts.
     let drv = &mut stack.driver;
@@ -175,36 +285,56 @@ async fn a_recorded_turn_reads_as_zeron_draws_it() {
         let (at, total) = label.split_once(" of ")?;
         Some((at.trim().parse().ok()?, total.trim().parse().ok()?))
     };
+    // A run the card step left open (it opened past its wait) is folded first, so find's golden
+    // is the turn as it reads folded, not a failed step's leftover.
+    let shown = drv.dump().await.unwrap();
+    if shown.a11y_node("Group", Some("Transcript of Count lines")).is_some() {
+        drv.keys("escape").await.unwrap();
+        let folded = drv
+            .wait_for("the run folded before find", STEP, |d| {
+                d.a11y_node("Group", Some("Transcript of Count lines")).is_none()
+            })
+            .await;
+        if folded.is_err() {
+            missing.push("Escape folds the subagent's run before find".to_owned());
+        }
+    }
     drv.keys("cmd-f").await.unwrap();
     drv.type_text("the").await.unwrap();
-    match drv.wait_for("the find tally", STEP, |d| tally(d).is_some()).await {
-        Ok(found) => {
-            let (at, total) = tally(&found).unwrap_or_default();
-            if at != 1 || total == 0 {
-                missing.push(format!("find lands on the first match (it says {at} of {total})"));
-            }
-            goldens(drv, &renders, "transcript-find").await;
-            drv.keys("enter").await.unwrap();
-            let next = if total > 1 { 2 } else { 1 };
-            if drv
-                .wait_for("find steps on", STEP, |d| tally(d) == Some((next, total)))
-                .await
-                .is_err()
-            {
-                missing.push(format!("Return steps find to {next} of {total}"));
-            }
-            drv.keys("escape").await.unwrap();
-            if drv
-                .wait_for("find closed", STEP, |d| {
-                    labelled(d, "Search", "Find in thread").is_none()
-                })
-                .await
-                .is_err()
-            {
-                missing.push("Escape closes find".to_owned());
-            }
+    if let Ok(found) = drv.wait_for("the find tally", STEP, |d| tally(d).is_some()).await {
+        let (at, total) = tally(&found).unwrap_or_default();
+        if at != 1 || total == 0 {
+            missing.push(format!("find lands on the first match (it says {at} of {total})"));
         }
-        Err(_) => missing.push("⌘F opens find with a tally".to_owned()),
+        // Its golden is the turn as the steps before left it: after a step that failed, that is
+        // the failure's leftover (a group or a run still open), not the turn to hold find to.
+        if missing.is_empty() {
+            goldens(drv, &renders, "transcript-find").await;
+        } else {
+            println!("transcript-find: no golden, a step before failed");
+        }
+        drv.keys("enter").await.unwrap();
+        let next = if total > 1 { 2 } else { 1 };
+        if drv.wait_for("find steps on", STEP, |d| tally(d) == Some((next, total))).await.is_err() {
+            missing.push(format!("Return steps find to {next} of {total}"));
+        }
+        drv.keys("escape").await.unwrap();
+        if drv
+            .wait_for("find closed", STEP, |d| labelled(d, "Search", "Find in chat").is_none())
+            .await
+            .is_err()
+        {
+            missing.push("Escape closes find".to_owned());
+        }
+    } else {
+        let shown = drv.dump().await.unwrap();
+        let said = slopty_e2e::frame_text(&shown.a11y);
+        // Find reaches the window its transcript draws in, key or not (`transcript/find.rs`):
+        // say whether it was key all the same.
+        let key = shown.a11y.iter().any(|n| n.role == "Window" && n.focused);
+        missing.push(format!(
+            "⌘F opens find with a tally (the window key: {key}); the frame said:\n{said}"
+        ));
     }
 
     // The `permission` turn stops at its first request, which the composer asks, naming the
@@ -212,9 +342,17 @@ async fn a_recorded_turn_reads_as_zeron_draws_it() {
     let asked = start(&stack, &folder, PERMISSION).await;
     let asking = |read: &Value| read["requests"].as_array().is_some_and(|r| !r.is_empty());
     thread_until(&stack, &asked, "asks the person", asking).await;
-    // The sidebar lists threads in the order they started: the second row is the new one.
+    // The new thread's row in the sidebar opens it.
     let drv = &mut stack.driver;
-    drv.keys("cmd-2").await.unwrap();
+    let row = drv
+        .wait_for("the new thread's row", STEP, |d| labelled(d, "Button", PERMISSION).is_some())
+        .await
+        .unwrap();
+    let [x, y, w, h] = labelled(&row, "Button", PERMISSION).unwrap().bounds;
+    drv.click(x + w / 2.0, y + h / 2.0).await.unwrap();
+    // The pointer leaves the row, whose hover card says since when the chat waits: a moment of
+    // the run.
+    drv.ok(&Command::Move { x: WINDOW.0 / 2.0, y: 60.0 }).await.unwrap();
     tokio::time::sleep(SETTLE.saturating_mul(2)).await;
     let words = goldens(drv, &renders, "transcript-question").await;
     if !words.contains("touch refused.txt") {

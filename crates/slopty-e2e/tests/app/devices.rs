@@ -36,6 +36,27 @@ async fn click(drv: &mut Driver, role: &str, label: &str) {
     drv.click(x + w / 2.0, y + h / 2.0).await.unwrap();
 }
 
+/// The choice `choice` just pressed hands the keyboard to its field, a text field in the
+/// accessibility tree: what is typed next lands there, not on the tab or the dialog's button.
+async fn field_has_keyboard(drv: &mut Driver, choice: &str) {
+    let typed_into = |d: &Dump| d.a11y.iter().any(|n| n.focused && n.role.ends_with("TextInput"));
+    if drv.wait_for("the field with the keyboard", STEP, typed_into).await.is_err() {
+        let shown = drv.dump().await.unwrap();
+        panic!(
+            "{choice} gives its field the keyboard, a focused text field; the frame said:\n{}",
+            slopty_e2e::frame_text(&shown.a11y)
+        );
+    }
+}
+
+/// Hold the window at the goldens' size: left to itself it opens clamped to the display's
+/// visible frame, whose height differs between machines by their menu bar and Dock (674, 675 and
+/// 677 pt on the runners).
+async fn pin_size(drv: &mut Driver) {
+    let (width, height) = crate::served::WINDOW;
+    drv.ok(&Command::Resize { width, height }).await.unwrap();
+}
+
 /// The device-pixel rectangles of the nodes `masked` picks, on a frame drawn at `scale`.
 fn masks(a11y: &[A11yNode], scale: f32, masked: impl Fn(&A11yNode) -> bool) -> Vec<PixelRect> {
     #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "pixels")]
@@ -88,6 +109,7 @@ async fn the_server_s_code_carries_this_mac_s_tailnet_name() {
     let address = format!("mac-studio.tail1234.ts.net:{port}");
     let renders = artifacts_dir().join("renders");
     let drv = &mut stack.driver;
+    pin_size(drv).await;
     drv.wait_for("the worker", STEP, |d| d.status == "connected").await.unwrap();
 
     drv.keys("cmd-,").await.unwrap();
@@ -139,6 +161,7 @@ async fn add_device_says_what_the_tailnet_holds_and_why_a_run_failed() {
             .unwrap();
     let renders = artifacts_dir().join("renders");
     let drv = &mut stack.driver;
+    pin_size(drv).await;
     drv.wait_for("the worker", STEP, |d| d.status == "connected").await.unwrap();
 
     drv.keys("cmd-,").await.unwrap();
@@ -151,6 +174,7 @@ async fn add_device_says_what_the_tailnet_holds_and_why_a_run_failed() {
     drv.wait_for("A server chosen", STEP, |d| node(d, "Button", "Connect").is_some())
         .await
         .unwrap();
+    field_has_keyboard(drv, "A server").await;
     tokio::time::sleep(SETTLE).await;
     goldens(drv, &renders, "settings-devices-add-server", |_| false).await;
 
@@ -159,6 +183,7 @@ async fn add_device_says_what_the_tailnet_holds_and_why_a_run_failed() {
     drv.wait_for("Over SSH chosen", STEP, |d| node(d, "Button", "Install").is_some())
         .await
         .unwrap();
+    field_has_keyboard(drv, "Over SSH").await;
     drv.type_text(NO_HOST).await.unwrap();
     click(drv, "Button", "Install").await;
     let failed = drv

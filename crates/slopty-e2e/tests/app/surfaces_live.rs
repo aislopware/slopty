@@ -86,9 +86,10 @@ async fn the_terminal_dock_holds_a_shell_of_the_worker() {
 }
 
 /// What floats over the dock's terminal is the shell's own: a program's progress (`OSC 9;4`) on
-/// its tab, the lines-below pill (zeron's 30 pt jump pill), the find field (a 24 pt surface
-/// field), the right-click menu (the shell's menu rows, one height) and the dim trailer a program
-/// that ended leaves. Each decides on its numbers, and each state is a golden in both appearances.
+/// its tab while it runs, the lines-below pill (zeron's 30 pt jump pill), the find field (a 24 pt
+/// surface field), the right-click menu (the shell's menu rows, one height) and the dim trailer a
+/// program that ended leaves. Each decides on its numbers, and each state is a golden in both
+/// appearances.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
 async fn the_terminal_s_floats_wear_the_shell() {
@@ -104,9 +105,10 @@ async fn the_terminal_s_floats_wear_the_shell() {
     .await
     .unwrap();
 
-    // A program's progress shows on its tab, as a share a screen reader reads, and goes when the
-    // program clears it.
-    drv.type_text("printf '\\e]9;4;1;40\\a'").await.unwrap();
+    // A program's progress shows on its tab, as a share a screen reader reads, while it runs
+    // (`read` holds it), and goes when the next prompt comes (`docs/decisions/terminal.md`, "The
+    // prompt ends it").
+    drv.type_text("printf '\\e]9;4;1;40\\a'; read -r answer").await.unwrap();
     drv.keys("enter").await.unwrap();
     let dump = drv
         .wait_for("the tab's progress", STEP, |d| {
@@ -116,7 +118,6 @@ async fn the_terminal_s_floats_wear_the_shell() {
         .unwrap();
     let progress = node(&dump, "ProgressIndicator", "Progress").unwrap();
     assert_eq!(progress.value.as_deref(), Some("40 %"), "{progress:?}");
-    drv.type_text("printf '\\e]9;4;0\\a'").await.unwrap();
     drv.keys("enter").await.unwrap();
     drv.wait_for("the progress cleared", STEP, |d| {
         node(d, "ProgressIndicator", "Progress").is_none() && d.prompts_settled()
@@ -152,15 +153,25 @@ async fn the_terminal_s_floats_wear_the_shell() {
         .unwrap();
     let field = node(&dump, "SearchInput", "Find").unwrap();
     assert!(field.bounds[3] <= 24.5, "the field sits in a 24 pt frame: {field:?}");
+    let before = drv.dump().await.unwrap();
+    println!("FOCUS terminal find opened: {} ({})", before.focus_path, before.focused);
     drv.type_text("29").await.unwrap();
-    drv.wait_for("the tally", STEP, |d| {
-        d.a11y.iter().any(|n| {
-            n.label.as_deref() == Some("Matches")
-                && n.value.as_deref().is_some_and(|v| !v.is_empty() && !v.starts_with('0'))
+    let tallied = drv
+        .wait_for("the tally", STEP, |d| {
+            d.a11y.iter().any(|n| {
+                n.label.as_deref() == Some("Matches")
+                    && n.value.as_deref().is_some_and(|v| !v.is_empty() && !v.starts_with('0'))
+            })
         })
-    })
-    .await
-    .unwrap();
+        .await;
+    if let Err(e) = tallied {
+        // Where the typed keys went: the element that holds the keyboard, by its key contexts.
+        let shown = drv.dump().await.unwrap();
+        panic!(
+            "{e:#}\nthe keyboard: {} ({}); when find opened: {} ({})",
+            shown.focus_path, shown.focused, before.focus_path, before.focused
+        );
+    }
     goldens(drv, &renders, "surface-live-terminal-find").await;
     drv.keys("escape").await.unwrap();
     drv.wait_for("the find bar closed", STEP, |d| node(d, "SearchInput", "Find").is_none())
@@ -176,7 +187,7 @@ async fn the_terminal_s_floats_wear_the_shell() {
     let rows: Vec<&A11yNode> = dump.a11y.iter().filter(|n| n.role == "MenuItem").collect();
     assert!(rows.len() >= 3, "{rows:?}");
     let height = rows[0].bounds[3];
-    assert!((26.0..=32.0).contains(&height), "a menu row of the shell's: {height}");
+    assert!((32.5..=33.5).contains(&height), "a menu row of zeron's (33 pt): {height}");
     assert!(rows.iter().all(|r| about(r.bounds[3], height)), "one row height: {rows:?}");
     goldens(drv, &renders, "surface-live-terminal-menu").await;
     drv.keys("escape").await.unwrap();
@@ -193,6 +204,49 @@ async fn the_terminal_s_floats_wear_the_shell() {
     .await
     .unwrap();
     goldens(drv, &renders, "surface-live-terminal-exited").await;
+    stack.shutdown().await;
+}
+
+/// A page a program in the dock's shell asks to open at a local address (`$BROWSER` with a dev
+/// server's `localhost`) is offered, never opened unasked: a notice says who wants to open which
+/// host and why, with Open, and the program is told where it went.
+#[tokio::test]
+#[ignore = "live: cargo xtask e2e app"]
+async fn a_local_page_a_shell_asks_for_is_offered() {
+    let mut stack = Stack::launch_at_home("e2e-worker").await.unwrap();
+    let renders = stack.path("");
+    let drv = &mut stack.driver;
+    drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
+    drv.wait_for("the worker", STEP, |d| d.status == "connected").await.unwrap();
+    drv.keys("cmd-j").await.unwrap();
+    drv.wait_for("a shell at its prompt", STEP, |d| {
+        d.terminals.iter().any(|t| t.at_prompt) && d.prompts_settled()
+    })
+    .await
+    .unwrap();
+
+    drv.type_text("\"$BROWSER\" http://localhost:5173/").await.unwrap();
+    drv.keys("enter").await.unwrap();
+    let offer = |d: &Dump| {
+        d.a11y.iter().any(|n| n.label.as_deref().is_some_and(|l| l.contains("wants to open")))
+    };
+    let shown = drv.wait_for("the offer", STEP, offer).await;
+    if let Err(e) = shown {
+        let said = drv.dump().await.unwrap();
+        panic!("{e:#}\nthe app said:\n{}", slopty_e2e::frame_text(&said.a11y));
+    }
+    let dump = drv
+        .wait_for("the program told", STEP, |d| {
+            !d.lines_containing("is offered").is_empty() && d.prompts_settled()
+        })
+        .await
+        .unwrap();
+    assert!(
+        node(&dump, "Button", "Open").is_some(),
+        "the notice offers Open:\n{}",
+        slopty_e2e::frame_text(&dump.a11y)
+    );
+    goldens(drv, &renders, "toast-offer").await;
     stack.shutdown().await;
 }
 

@@ -1,14 +1,36 @@
 Window (focused)
+Button │ Tidy the greeting
+Button │ History: past Claude Code sessions
 Button │ Server: e2e-server, Connected
 Button │ Settings
+Article │ You
+Paragraph │ Tidy the greeting
+Article │ Claude
+Paragraph │ Done: Tidy the greeting
 Button │ Attach images
 MultilineTextInput │ Do anything…
-Button │ Claude Code's TUI beside the chat
-Button │ Show session details
+Button │ Send message
+Button │ Mode: Auto
+Button │ Context 1%
+Button │ Find in diff
+Button │ Show file tree
+Button │ Ignore whitespace
+Button │ Split view
+Button │ Wrap long lines
+Button │ Collapse all files
+Button │ .claude/settings.json, expanded
+Button │ NOTES.md, expanded
+Button │ src/main.rs, expanded
+Button │ Open in…
+Button │ Show chat details
 Button │ Working tree
 Button │ Close tab
-Button │ Expand panel
+Button │ New tab
+Button │ Expand side pane
 Button │ Show files panel
-Button │ Toggle left sidebar
-Button │ New session
+Button │ Hide side pane
+Button │ Hide sidebar
+Button │ Back
+Button │ Forward
+Button │ New chat
 Button │ Sidebar view options

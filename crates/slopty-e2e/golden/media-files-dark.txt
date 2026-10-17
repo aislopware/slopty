@@ -1,0 +1,50 @@
+Window
+Button │ Chart:
+Status │ Done
+Button │ History: past Claude Code sessions
+Button │ Server: e2e-server, Connected
+Button │ Settings
+Button │ Called 1 tool
+Group │ Page: Report │ live
+Button │ Copy image
+Button │ Open in pane
+Image │ page 1 of 1 │ drawn
+Button │ Called 1 tool
+Button │ Copy table
+Button │ Open in pane
+Table │ Latency
+Row
+ColumnHeader │ region
+ColumnHeader │ p50
+ColumnHeader │ p99
+Row
+Cell │ us-east
+Cell │ 40
+Cell │ 180
+Row
+Cell │ eu-west
+Cell │ 41
+Cell │ 190
+Row
+Cell │ ap-south
+Cell │ 42
+Cell │ 200
+Row
+Cell │ sa-east
+Cell │ 43
+Cell │ 210
+Button │ Attach images
+MultilineTextInput │ Do anything… (focused)
+Button │ Send message
+Button │ Mode: Auto
+Button │ Context 1%
+Button │ Open in…
+Button │ Show chat details
+Button │ Show files panel
+Button │ Show side pane
+Button │ Hide sidebar
+Button │ Back
+Button │ Forward
+Button │ New chat
+Button │ Sidebar view options
+Button │ Back to your prompt: Show the files

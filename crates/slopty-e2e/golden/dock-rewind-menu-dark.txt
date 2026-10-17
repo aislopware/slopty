@@ -1,0 +1,30 @@
+Window
+Button │ write notes.txt first words
+Button │ History: past Claude Code sessions
+Button │ Server: e2e-server, Connected
+Button │ Settings
+Article │ You
+Paragraph │ write notes.txt first words
+Button │ Edited 1 file
+Article │ Claude
+Paragraph │ Done: wrote notes.txt.
+Button │ 1 file changed +1 −0
+Button │ Open diff
+Button │ Attach images
+MultilineTextInput │ Do anything…
+Button │ Send message
+Button │ Mode: Auto
+Button │ Context 1%
+Button │ Open in…
+Button │ Show chat details
+Button │ Show files panel
+Button │ Show side pane
+Button │ Hide sidebar
+Button │ Back
+Button │ Forward
+Button │ New chat
+Button │ Sidebar view options
+Menu │ Rewind to before this message (focused)
+MenuItem │ Code and conversation
+MenuItem │ Conversation only
+MenuItem │ Code only

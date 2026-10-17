@@ -1,0 +1,43 @@
+Window
+Group │ Settings
+Button │ Back
+TabList │ Settings sections
+Tab │ General
+Tab │ Appearance
+Tab │ Notifications
+Tab │ Shortcuts (focused)
+Tab │ Providers
+Tab │ Permissions
+Tab │ Devices
+Tab │ Files
+Tab │ Archived chats
+Button │ Server: e2e-server, Connected
+Button │ Close settings
+Button │ Restore defaults
+Button │ Change Random wallpaper shortcut: ⌘U
+Button │ Change Save file shortcut: ⌘S
+Button │ Change Reload page shortcut: ⇧⌘R
+Button │ Change Toggle sidebar shortcut: ⌘B
+Button │ Change Toggle side pane shortcut: ⌘R
+Button │ Change Toggle files panel shortcut: ⌘E
+Button │ Change Toggle terminal shortcut: ⌘J
+Button │ Change Reopen closed tab shortcut: ⇧⌘T
+Button │ Change New chat shortcut: ⌘N
+Button │ Change Open model picker shortcut: ⌘/
+Button │ Change Next chat or side pane tab shortcut: ⌃⇥
+Button │ Change Previous chat or side pane tab shortcut: ⌃⇧⇥
+Button │ Change Archive chat shortcut: ⇧⌘A
+Button │ Change Open branch picker shortcut: ⌥⌘B
+Button │ Change Next effort level shortcut: ⇧⌘E
+Button │ Change Resume a session shortcut: ⇧⌘O
+Button │ Change Next chat that needs you shortcut: ⌘.
+Button │ Change New project shortcut: ⇧⌘N
+Button │ Change Jump to chat 1 shortcut: ⌘1
+Button │ Change Jump to chat 2 shortcut: ⌘2
+Button │ Change Jump to chat 3 shortcut: ⌘3
+Button │ Change Jump to chat 4 shortcut: ⌘4
+Button │ Change Jump to chat 5 shortcut: ⌘5
+Button │ Change Jump to chat 6 shortcut: ⌘6
+Button │ Change Jump to chat 7 shortcut: ⌘7
+Button │ Change Jump to chat 8 shortcut: ⌘8
+Button │ Change Jump to chat 9 shortcut: ⌘9
