@@ -119,7 +119,9 @@ pub enum WorkspaceEvent {
         failure: bool,
     },
     /// A page a shell on `worker` handed over, held back: a notice saying `text` with an Open
-    /// button that opens `url`, for [`OFFER_FOR`].
+    /// button that opens `url`, for [`OFFER_FOR`]. A page on the worker's `loopback` opens at
+    /// the port that forwards it here when Open is pressed
+    /// ([`WorkspaceView::open_loopback_page`]).
     Offer {
         /// The worker whose shell asked.
         worker: WorkerKey,
@@ -129,6 +131,8 @@ pub enum WorkspaceEvent {
         text: String,
         /// What Open opens.
         url: String,
+        /// Whether `url` is on the worker's own loopback.
+        loopback: bool,
     },
     /// A path a person ⌘-clicked in a shell opened for `chat`: the shell opens `target` (a
     /// `file://` link, its line as `#L12`) in that chat's Files pane.

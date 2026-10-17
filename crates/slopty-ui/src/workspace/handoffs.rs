@@ -112,9 +112,8 @@ impl WorkspaceView {
             }
             Todo::Offer { url, host, open, why, reply } => {
                 // The worker's own loopback is not this machine's: the page it means is at the
-                // port that forwards it here, offered all the same.
+                // port that forwards it here when Open is pressed, offered all the same.
                 let loopback = matches!(why, OfferReason::Wary(Wary::Loopback));
-                let local = loopback.then(|| self.forwarded(key, &url)).flatten();
                 let Some(w) = self.workers.get_mut(&key) else { return };
                 w.send(reply);
                 let asker = self.asker(key, open.session);
@@ -127,12 +126,7 @@ impl WorkspaceView {
                     }
                     None => format!("{asker} wants to open {host} ({why})"),
                 };
-                cx.emit(WorkspaceEvent::Offer {
-                    worker: key,
-                    id: open.id,
-                    text,
-                    url: local.unwrap_or(url),
-                });
+                cx.emit(WorkspaceEvent::Offer { worker: key, id: open.id, text, url, loopback });
             }
             Todo::Edit { reply, .. } | Todo::Refuse { reply } => {
                 w.send(reply);
@@ -276,6 +270,12 @@ impl WorkspaceView {
     /// that forwards it here.
     pub(super) fn open_worker_page(&self, session: SessionId, url: &str, cx: &mut Context<Self>) {
         let Some(key) = self.worker_of_session(session) else { return };
+        self.open_loopback_page(key, url, cx);
+    }
+
+    /// Open the page `url` on `key`'s loopback at the port that forwards it here now, or say
+    /// that none does yet: never this device's own loopback, which is another machine's.
+    pub fn open_loopback_page(&self, key: WorkerKey, url: &str, cx: &mut Context<Self>) {
         if let Some(here) = self.forwarded(key, url) {
             self.open_page(&here, cx);
         } else {
@@ -560,10 +560,12 @@ mod tests {
             (
                 "studio wants to open its own localhost:5173; it opens here at localhost:15173"
                     .to_owned(),
-                "http://localhost:15173/app?x=1".to_owned()
+                "http://localhost:5173/app?x=1".to_owned()
             ),
-            "at its forward"
+            "the worker's page, opened at its forward when Open is pressed"
         );
+        workspace.update(cx, |v, cx| v.open_loopback_page(KEY, &offer.1, cx));
+        assert_eq!(cx.opened_url().as_deref(), Some("http://localhost:15173/app?x=1"));
 
         let edit =
             EditFile { id: 4, session: Some(session), path: "/r/x".into(), line: None, wait: true };

@@ -246,9 +246,16 @@ impl Workspace {
             WorkspaceEvent::Notice { text, failure: true } => {
                 slopty_shell::toast::error(cx, text.clone());
             }
-            WorkspaceEvent::Offer { worker, id, text, url } => {
-                let url = url.clone();
-                let open = move |cx: &mut App| cx.open_url(&url);
+            WorkspaceEvent::Offer { worker, id, text, url, loopback } => {
+                let (url, key, loopback) = (url.clone(), *worker, *loopback);
+                let view = ws.view.downgrade();
+                let open = move |cx: &mut App| {
+                    if !loopback {
+                        cx.open_url(&url);
+                    } else if let Some(view) = view.upgrade() {
+                        view.update(cx, |v, cx| v.open_loopback_page(key, &url, cx));
+                    }
+                };
                 let lasts = slopty_ui::workspace::OFFER_FOR;
                 if let Some(toast) =
                     slopty_shell::toast::offer(cx, text.clone(), "Open", lasts, open)
