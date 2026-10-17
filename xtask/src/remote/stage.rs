@@ -1,27 +1,34 @@
-//! What a check passed, staged as it passed it: `cargo xtask stage <name>…`.
+//! What a check passed, staged as it passed it: `cargo xtask stage <name>[@<sha>]…`.
 //!
 //! A lane's check snapshots the paths it names (`--only`) into a commit of their blobs. Staging
 //! those paths from the working tree after a green check took whatever the lane had saved since,
 //! and a later edit of a checked file (a call into a page not yet landed) turned the gate red
 //! (0d8fc67d). So each check records the blobs it checked, with its verdict once known, and
 //! `stage` puts exactly those into the index: never a check that failed, never one a later check
-//! of the same lane superseded, never over a path main or the index moved since.
+//! of the same lane took the same paths in with other content or failed on, never over a path
+//! main or the index moved since. Every check is kept (the last [`KEPT`] of a name), so a lane
+//! that checks again, narrower, before its checkpoint is staged names the one it means by sha.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result, bail, ensure};
 use camino::Utf8Path as Path;
 use xshell::{Shell, cmd};
 
-/// Where a check's record lives, beside its snapshot index: `target/remote/<name>/checked.json`.
-const RECORD: &str = "checked.json";
+/// Where a check's records live, beside its snapshot index: `target/remote/<name>/checked/`,
+/// one `<sha>.json` a check.
+const RECORDS: &str = "checked";
+
+/// How many of a name's checks are kept.
+const KEPT: usize = 20;
 
 /// `cargo xtask stage` options.
 #[derive(clap::Args, Clone, Debug)]
 pub struct StageOpts {
-    /// The checks' names (each lane's `SLOPTY_LANE`): each one's paths go into the index with the
-    /// blobs its last check passed.
+    /// The checks (each lane's `SLOPTY_LANE`), as `<name>` for its last check or `<name>@<sha>`
+    /// (the sha `remote` printed, or a prefix of it) for an earlier one: each one's paths go into
+    /// the index with the blobs that check passed.
     #[arg(required = true)]
     pub names: Vec<String>,
 }
@@ -59,8 +66,8 @@ fn now_ms() -> u128 {
 }
 
 /// Records that the check in `dir` began on the snapshot `sha` taken of `only` (none: a whole
-/// tree or `HEAD`, which `stage` refuses). It replaces the name's earlier record, so a check
-/// still running, or stopped, is never staged by an older verdict.
+/// tree or `HEAD`, which `stage` refuses). As the name's last check, it is what `stage <name>`
+/// means from now: while it runs, or once stopped, that refuses rather than take an older one.
 pub fn started(sh: &Shell, dir: &Path, sha: &str, only: &[String]) {
     let entries = if only.is_empty() { Ok(Vec::new()) } else { entries(sh, sha) };
     let parent = format!("{sha}^");
@@ -87,32 +94,59 @@ pub fn started(sh: &Shell, dir: &Path, sha: &str, only: &[String]) {
         },
     };
     write(dir, &record);
+    prune(dir);
 }
 
-/// Records the verdict of the check this process began in `dir`, if the record is still its own.
+/// Records the verdict of the check this process began in `dir`, and says how to stage it.
 pub fn verdict(dir: &Path, passed: bool) {
-    if let Some(mut record) = read(dir)
-        && record.pid == std::process::id()
-        && record.passed.is_none()
-    {
+    let mine = read_all(dir)
+        .into_iter()
+        .filter(|r| r.pid == std::process::id() && r.passed.is_none())
+        .max_by_key(|r| r.at);
+    if let Some(mut record) = mine {
         record.passed = Some(passed);
         write(dir, &record);
+        let name = dir.file_name().unwrap_or_default();
+        let short = record.sha.get(..10).unwrap_or(&record.sha);
+        if passed && !record.entries.is_empty() {
+            println!("  checked {short}: stage it with `cargo xtask stage {name}@{short}`");
+        } else {
+            println!("  checked {short}");
+        }
     }
 }
 
 fn write(dir: &Path, record: &Checked) {
-    let path = dir.join(RECORD);
-    let written = serde_json::to_vec_pretty(record)
+    let records = dir.join(RECORDS);
+    let path = records.join(format!("{}.json", record.sha));
+    let written = std::fs::create_dir_all(&records)
         .map_err(anyhow::Error::from)
+        .and_then(|()| serde_json::to_vec_pretty(record).map_err(Into::into))
         .and_then(|bytes| std::fs::write(&path, bytes).map_err(Into::into));
     if let Err(e) = written {
         println!("  what the check took is not recorded in {path}: {e}; `xtask stage` refuses it");
     }
 }
 
-fn read(dir: &Path) -> Option<Checked> {
-    let text = std::fs::read_to_string(dir.join(RECORD)).ok()?;
-    serde_json::from_str(&text).ok()
+/// Every check of the name in `dir` still kept.
+fn read_all(dir: &Path) -> Vec<Checked> {
+    let Ok(files) = dir.join(RECORDS).read_dir_utf8() else { return Vec::new() };
+    files
+        .filter_map(Result::ok)
+        .filter_map(|f| serde_json::from_str(&std::fs::read_to_string(f.path()).ok()?).ok())
+        .collect()
+}
+
+/// Drop all but the name's last [`KEPT`] checks.
+fn prune(dir: &Path) {
+    let mut all = read_all(dir);
+    if all.len() <= KEPT {
+        return;
+    }
+    all.sort_by_key(|r| std::cmp::Reverse(r.at));
+    for old in all.iter().skip(KEPT) {
+        let _gone = std::fs::remove_file(dir.join(RECORDS).join(format!("{}.json", old.sha)));
+    }
 }
 
 /// The paths `sha` changed against its parent, with the mode and blob each holds there.
@@ -158,49 +192,83 @@ fn blobs(sh: &Shell, rev: Option<&str>, paths: &[&str]) -> Result<BTreeMap<Strin
     Ok(blobs)
 }
 
-/// The records of every check under `remote` (`target/remote`), by name.
-fn records(remote: &Path) -> BTreeMap<String, Checked> {
-    let Ok(dirs) = remote.read_dir_utf8() else { return BTreeMap::new() };
+/// Every check kept under `remote` (`target/remote`), with its name.
+fn records(remote: &Path) -> Vec<(String, Checked)> {
+    let Ok(dirs) = remote.read_dir_utf8() else { return Vec::new() };
     dirs.filter_map(Result::ok)
-        .filter_map(|d| Some((d.file_name().to_owned(), read(d.path())?)))
+        .flat_map(|d| {
+            let name = d.file_name().to_owned();
+            read_all(d.path()).into_iter().map(move |r| (name.clone(), r))
+        })
         .collect()
 }
 
-/// Why `name`'s last check may not be staged, or what it stages.
+/// The check `spec` names: `<name>`, its last; `<name>@<sha>`, the one of that name whose sha
+/// starts so.
+fn chosen<'a>(spec: &str, all: &'a [(String, Checked)]) -> Result<(&'a str, &'a Checked)> {
+    let (name, sha) = spec.split_once('@').map_or((spec, None), |(n, s)| (n, Some(s)));
+    let mut of_name = all.iter().filter(|(n, _)| n == name).peekable();
+    if of_name.peek().is_none() {
+        bail!("{name}: no check of that name is recorded here (`cargo xtask remote --only …`)");
+    }
+    let found = match sha {
+        None => of_name.max_by_key(|(_, r)| r.at),
+        Some(sha) => {
+            ensure!(sha.len() >= 7, "{spec}: name at least 7 characters of the sha");
+            let matching: Vec<_> = of_name.filter(|(_, r)| r.sha.starts_with(sha)).collect();
+            ensure!(matching.len() <= 1, "{spec}: more than one of its checks starts so");
+            matching.into_iter().next()
+        }
+    };
+    let (name, record) = found.with_context(|| {
+        format!("{spec}: no such check of {name} is kept (the last {KEPT} are)")
+    })?;
+    Ok((name.as_str(), record))
+}
+
+/// Why the check `spec` names may not be staged, or what it stages.
 fn stageable(
     sh: &Shell,
-    name: &str,
-    all: &BTreeMap<String, Checked>,
+    spec: &str,
+    all: &[(String, Checked)],
     head: &str,
 ) -> Result<(Vec<Entry>, String)> {
-    let Some(record) = all.get(name) else {
-        bail!("{name}: no check of that name is recorded here (`cargo xtask remote --only …`)");
-    };
+    let (name, record) = chosen(spec, all)?;
     let short = record.sha.get(..10).unwrap_or(&record.sha);
     match record.passed {
-        None => bail!("{name}: its last check ({short}) has not ended, or was stopped"),
-        Some(false) => bail!("{name}: its last check ({short}) failed"),
+        None => bail!("{name}@{short}: that check has not ended, or was stopped"),
+        Some(false) => bail!("{name}@{short}: that check failed"),
         Some(true) => {}
     }
     if record.entries.is_empty() {
         bail!(
-            "{name}: its last check ({short}) took no `--only` paths, or checked `HEAD`: nothing \
-             to stage by blob"
+            "{name}@{short}: that check took no `--only` paths, or checked `HEAD`: nothing to \
+             stage by blob"
         );
     }
     let mine: Vec<&str> = record.entries.iter().map(|e| e.path.as_str()).collect();
-    // A later check of the same lane over any of these paths: the lane edited them since.
+    // A later check of the lane over any of these paths: one that took it in with other content
+    // (the lane edited it since), or that failed on it.
     for (other, later) in all {
-        if other != name
-            && super::lane(other) == super::lane(name)
-            && later.at > record.at
-            && let Some(path) = later.entries.iter().find(|e| mine.contains(&e.path.as_str()))
-        {
-            bail!(
-                "{name}: a later check of the lane, {other}, took {} too: stage that one, or check \
-                 again",
-                path.path
-            );
+        if super::lane(other) != super::lane(name) || later.at <= record.at {
+            continue;
+        }
+        let later_short = later.sha.get(..10).unwrap_or(&later.sha);
+        for entry in later.entries.iter().filter(|e| mine.contains(&e.path.as_str())) {
+            let ours = record.entries.iter().find(|e| e.path == entry.path);
+            if ours != Some(entry) {
+                bail!(
+                    "{name}@{short}: a later check, {other}@{later_short}, took {} with other \
+                     content: stage that one, or check again",
+                    entry.path
+                );
+            }
+            if later.passed == Some(false) {
+                bail!(
+                    "{name}@{short}: a later check, {other}@{later_short}, failed with {} as it is",
+                    entry.path
+                );
+            }
         }
     }
     // Main moved one of these paths since the check: what it passed is not what would land.
@@ -231,15 +299,16 @@ fn stage(sh: &Shell, root: &Path, names: &[String]) -> Result<Vec<String>> {
     let head = cmd!(sh, "git rev-parse HEAD").quiet().read()?;
     let mut taken: BTreeMap<String, (String, Entry)> = BTreeMap::new();
     let mut said = Vec::new();
-    for name in names {
-        let (entries, short) = stageable(sh, name, &all, &head)?;
+    for spec in names {
+        let (entries, short) = stageable(sh, spec, &all, &head)?;
+        let name = spec.split('@').next().unwrap_or(spec);
         for entry in &entries {
             if let Some((other, held)) = taken.get(&entry.path)
                 && held != entry
             {
                 bail!("{name} and {other} checked {} with different content", entry.path);
             }
-            taken.insert(entry.path.clone(), (name.clone(), entry.clone()));
+            taken.insert(entry.path.clone(), (name.to_owned(), entry.clone()));
         }
         said.push(format!(
             "staged {} path(s) of {name} as its check passed them ({short})",
@@ -305,7 +374,13 @@ mod tests {
     }
 
     /// A check of `paths` under `name`, as `remote` takes it: snapshot, record, verdict.
-    fn check(sh: &Shell, root: &Utf8Path, name: &str, paths: &[&str], passed: Option<bool>) {
+    fn check(
+        sh: &Shell,
+        root: &Utf8Path,
+        name: &str,
+        paths: &[&str],
+        passed: Option<bool>,
+    ) -> String {
         let dir = root.join("target").join("remote").join(name);
         std::fs::create_dir_all(&dir).expect("dir");
         let only: Vec<String> = paths.iter().map(|p| (*p).to_owned()).collect();
@@ -314,6 +389,7 @@ mod tests {
         if let Some(passed) = passed {
             super::verdict(&dir, passed);
         }
+        sha
     }
 
     fn staged(sh: &Shell, path: &str) -> String {
@@ -341,7 +417,7 @@ mod tests {
         write(&root, "a/one.rs", "checked\n");
         std::fs::remove_file(root.join("a/gone.rs")).expect("rm");
         write(&root, "a/new.rs", "new\n");
-        check(&sh, &root, "L", &["a"], Some(true));
+        let first = check(&sh, &root, "L", &["a"], Some(true));
         // Saved after the check: a call into something not landed.
         write(&root, "a/one.rs", "edited after\n");
         let said = super::stage(&sh, &root, &["L".to_owned()]).expect("stages");
@@ -368,7 +444,30 @@ mod tests {
         assert!(superseded.expect_err("later").to_string().contains("L-x"));
         std::fs::remove_dir_all(root.join("target/remote/L-x")).expect("rm");
 
+        // A narrower check of the same name after it, on the same content: the first stays
+        // stageable by its sha; once that narrower one fails on the same file, it is not.
+        write(&root, "a/one.rs", "checked\n");
+        let narrow = check(&sh, &root, "L", &["a/one.rs"], Some(true));
+        let at = |sha: &str| format!("L@{}", sha.get(..10).unwrap_or(sha));
+        let said = super::stage(&sh, &root, &[at(&first)]).expect("the earlier check, by sha");
+        let short = first.get(..10).unwrap_or_default();
+        assert!(said.iter().any(|s| s.contains(short)), "{said:?}");
+        assert_eq!(staged(&sh, "a/new.rs"), "new", "all of the first check's paths");
+        cmd!(sh, "git reset -q").run().expect("reset");
+        let dir = root.join("target/remote/L");
+        super::write(
+            &dir,
+            &super::Checked {
+                passed: Some(false),
+                ..super::read_all(&dir).into_iter().find(|r| r.sha == narrow).expect("narrow")
+            },
+        );
+        let red = super::stage(&sh, &root, &[at(&first)]);
+        assert!(red.expect_err("a later red").to_string().contains("failed with a/one.rs"));
+        assert!(super::stage(&sh, &root, &["L@nothing1".to_owned()]).is_err(), "no such sha");
+
         // Main moved a checked path since the check.
+        check(&sh, &root, "L", &["a"], Some(true));
         write(&root, "a/one.rs", "main's\n");
         cmd!(sh, "git commit -q -am main").run().expect("main moves");
         let moved = super::stage(&sh, &root, &["L".to_owned()]);

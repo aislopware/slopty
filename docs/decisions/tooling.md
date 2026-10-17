@@ -2268,6 +2268,13 @@ more full-window layer.
     is then not what would land; a path the index already holds with other content; two names
     that checked one path differently; and a check without `--only` or of `--head`, which names
     no lane's own paths. The files the tree holds otherwise now are named and left unstaged.
+  - **Every check is kept, and named by its sha.** A lane wrote a checkpoint off a green check,
+    then checked one file of it again before it was staged, and `stage` refused: the record
+    held only the last check. Each check now keeps its own record
+    (`target/remote/<name>/checked/<sha>.json`, the last 20 of a name), `remote` prints
+    `cargo xtask stage <name>@<sha>` with a green verdict, and the lane names that in its
+    checkpoint. A later check of the lane over the same paths no longer refuses an earlier one
+    by being later: only when it took a path in with other content, or failed on it.
   - Test: `remote::stage::tests::staging_takes_what_the_check_passed_and_refuses_the_rest`
     (`xtask`), on a scratch repository through `remote`'s own snapshot.
 - ❌ **No machine-wide jobserver, no cap on a lane's test threads** (2026-10-17,
