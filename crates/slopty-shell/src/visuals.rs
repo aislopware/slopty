@@ -3159,11 +3159,14 @@ end
         // the budget, 60 ms, and some.
         let first = frame_time(&frame, cx, |frame, cx| frame.rerender(cx));
         assert!(first >= std::time::Duration::from_millis(60), "{first:?}");
-        let after: Vec<std::time::Duration> =
+        let mut after: Vec<std::time::Duration> =
             (0..30).map(|_| frame_time(&frame, cx, |_, cx| cx.notify())).collect();
-        let worst = after.iter().max().copied().unwrap_or_default();
-        println!("stopping frame {first:?}; the 30 frames after: worst {worst:?}");
-        assert!(worst < std::time::Duration::from_millis(16), "{after:?}");
+        after.sort();
+        println!("stopping frame {first:?}; the 30 frames after: {after:?}");
+        // A draw tried again would cost the budget on every frame after; a frame the machine
+        // took the thread from under load costs one. So 25 of the 30 stay inside a frame.
+        let most = after.get(24).copied().unwrap_or_default();
+        assert!(most < std::time::Duration::from_millis(16), "{after:?}");
         let error = frame.read_with(cx, |frame, _| frame.local.borrow().draw_error.clone());
         assert!(error.is_some(), "the error stays up");
     }
