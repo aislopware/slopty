@@ -24,8 +24,12 @@ Tests make no sound on this Mac: the drawn screen's worker sounds only under `SL
    it judges, and only after a frame that painted nothing new (at most eight): a value measured
    while drawing reaches the views that read it a frame later (ARCHITECTURE.md, "Drawing under
    retention"), as when a narrower column flips the composer to two rows and the transcript
-   then clears the taller stack. A live app cannot hold the clock, so the self-test runs under GPUI's Reduce Motion
-   and a frame whose two scratch draws disagree is in motion and not judged.
+   then clears the taller stack. The scratch draws show the moment the frame shown showed
+   (`Window::repeat_frame_time`): every GPUI animation of a frame, and the loaders' shared pulse,
+   reads the frame's one moment (`App::frame_time`), so a fade a hair short of its end in the
+   frame shown is there in the frames from scratch too, though they are drawn after its end. What
+   reads the wall clock itself still moves between draws: the self-test runs under GPUI's Reduce
+   Motion, and a frame whose two scratch draws disagree is judged only on what holds still.
 3. **App self-test**, `cargo xtask e2e app` (`crates/slopty-e2e`):
    launches a server, ptyd, the worker registered with the server, and the app (built with
    `--features slopty/e2e`) following the server, in a temp dir, so the app reaches the worker

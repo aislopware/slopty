@@ -27,11 +27,13 @@ pub fn painted(window: &Window) -> Vec<String> {
 /// Where the frame the window shows differs from the same state drawn from scratch.
 ///
 /// Gives the lines only one of them painted, at most `limit` of each, or `None` when they
-/// agree. Draws a frame from scratch, which the window then shows. When they differ it draws
-/// another: something that moves on the wall clock (a fade, a spinner) paints differently a
-/// few milliseconds later however the frame was drawn, so two frames from scratch that differ
-/// say the window is in motion. Then only what both paint alike, what holds still, is judged:
-/// the frame shown must paint it too.
+/// agree. Draws a frame from scratch, which the window then shows, at the moment the frame shown
+/// showed ([`Window::repeat_frame_time`]): GPUI's animations stand where they stood in it, a fade
+/// a hair short of its end included, though the frame from scratch is drawn after that end.
+/// When they differ it draws another: something that moves on its own clock (a spinner stepping
+/// each paint, a view reading the wall clock) paints differently however the frame was drawn, so
+/// two frames from scratch that differ say the window is in motion. Then only what both paint
+/// alike, what holds still, is judged: the frame shown must paint it too.
 pub fn stale(window: &mut Window, cx: &mut App, limit: usize) -> Option<String> {
     // GPUI's fades run on the wall clock: a slow machine can paint one half way and draw the
     // frames from scratch after it has landed, and no comparison then holds.
@@ -92,8 +94,10 @@ fn cut(lines: &[String], limit: usize) -> String {
     text.join("\n  ")
 }
 
-/// What a frame drawn with every view built from scratch paints.
+/// What a frame drawn with every view built from scratch, at the moment the last frame showed,
+/// paints.
 fn from_scratch(window: &mut Window, cx: &mut App) -> Vec<String> {
+    window.repeat_frame_time();
     window.refresh();
     window.draw(cx).clear(cx);
     painted(window)

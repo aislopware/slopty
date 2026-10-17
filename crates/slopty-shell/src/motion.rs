@@ -141,9 +141,9 @@ fn pulse_delta_every(spec: &MotionSpec, view: EntityId, stride: u64, cx: &mut Ap
 }
 
 fn pulse_phase(spec: &MotionSpec, cx: &mut App) -> f32 {
-    // slopty: on the process's one clock ([`locked_phase`]), not the clock's first use.
-    let _ = cx;
-    locked_phase(spec.total(), Instant::now())
+    // slopty: on the process's one clock ([`locked_phase`]), not the clock's first use, at the
+    // moment of the frame being drawn, so a frame drawn again shows each cell where it stood.
+    locked_phase(spec.total(), cx.frame_time())
 }
 
 /// Activity feedback uses a slow, uniform brightness pulse when the system
