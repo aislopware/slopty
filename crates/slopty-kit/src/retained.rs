@@ -6,6 +6,12 @@
 //! showed. [`stale`] catches that: it reads what the window last painted, draws the same state
 //! again with every view built from scratch, and says where the two differ. The headless tests
 //! run it after each step of an interaction; the self-test runs it in every `dump`.
+//!
+//! [`check_every_frame`] has GPUI check every frame the same way, as it is drawn: a frame that
+//! drew something again from the last frame is drawn again from scratch at its moment, and what
+//! differs inside what it drew again is kept with the view that drew it (`gpui::RetainedCheck`).
+//! The window then shows the frame from scratch, so what the check found is no longer on screen
+//! for [`stale`] to see: [`stale`] reports it first.
 
 use gpui::{App, Window};
 
@@ -36,6 +42,29 @@ pub fn painted(window: &Window) -> Vec<String> {
 /// alike, what holds still, is judged: the frame shown must paint it too, at whatever depth what
 /// moves around it leaves it.
 pub fn stale(window: &mut Window, cx: &mut App, limit: usize) -> Option<String> {
+    let found = window.take_retained_check_reports();
+    let shown = compare(window, cx, limit);
+    if found.is_empty() {
+        return shown;
+    }
+    let mut text = found.join("\n");
+    if let Some(shown) = shown {
+        text.push('\n');
+        text.push_str(&shown);
+    }
+    Some(text)
+}
+
+/// Has GPUI check every frame of `window` that draws something again.
+///
+/// Each such frame is drawn again from scratch at its moment, and what differs is kept, named by
+/// the view that drew it, for [`stale`] to report.
+pub fn check_every_frame(window: &mut Window) {
+    window.set_check_retained(Some(gpui::RetainedCheck::Record));
+}
+
+/// [`stale`]'s comparison of the frame shown with frames from scratch.
+fn compare(window: &mut Window, cx: &mut App, limit: usize) -> Option<String> {
     // GPUI's fades run on the wall clock: a slow machine can paint one half way and draw the
     // frames from scratch after it has landed, and no comparison then holds.
     #[cfg(test)]
@@ -196,6 +225,32 @@ mod tests {
         assert_eq!(cx.update(|window, cx| stale(window, cx, 4)), None, "told, it is drawn anew");
     }
 
+    /// With GPUI checking every frame, the frame that draws the bar again untold is caught as
+    /// it is drawn, named by the bar's type, and [`stale`] reports it though the window then
+    /// shows the frame from scratch.
+    #[gpui::test]
+    fn a_view_changed_untold_is_named_by_the_frame_check(cx: &mut TestAppContext) {
+        use gpui::AppContext as _;
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let (both, cx) =
+            cx.add_window_view(|_, cx| Pair(cx.new(|_| Bar(10.0)), cx.new(|_| Bar(30.0))));
+        cx.update(|window, _| super::check_every_frame(window));
+        let (bar, other) = both.read_with(cx, |both, _| (both.0.clone(), both.1.clone()));
+        cx.run_until_parked();
+        assert_eq!(cx.update(|window, cx| stale(window, cx, 4)), None, "drawn as it is");
+        bar.update(cx, |bar, _| bar.0 = 20.0);
+        // The other bar is told of its change: the frame draws the first one again.
+        other.update(cx, |other, cx| {
+            other.0 = 40.0;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let found = cx.update(|window, cx| stale(window, cx, 4)).unwrap_or_default();
+        assert!(found.contains("retained::tests::Bar"), "{found}");
+        assert!(found.contains("drawn from the last frame without being notified"), "{found}");
+        assert_eq!(cx.update(|window, cx| stale(window, cx, 4)), None, "reported once");
+    }
+
     /// A mark that stands somewhere new every time it is drawn, as a spinner does. It steps on
     /// each paint rather than reading the wall clock, so two frames from scratch never land on
     /// the same place by chance and read as still.
@@ -237,6 +292,15 @@ mod tests {
         cx.run_until_parked();
         let found = cx.update(|window, cx| stale(window, cx, 4));
         assert!(found.is_some(), "the bar widened untold, beside the spinner");
+    }
+
+    /// Two bars side by side.
+    struct Pair(gpui::Entity<Bar>, gpui::Entity<Bar>);
+
+    impl Render for Pair {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().flex().child(self.0.clone()).child(self.1.clone())
+        }
     }
 
     /// A bar and a spinner side by side.

@@ -1,7 +1,8 @@
 // slopty: Slopty's own tests (not in zeron).
 //! slopty: the whole shell drawn under gpui-fast's view retention against the same state drawn
 //! from scratch, through what the self-test's `dump` judges (`slopty_kit::retained::stale`): ⌘1
-//! opening a chat whose turn runs, and that turn's spinner going on.
+//! opening a chat whose turn runs, and that turn's spinner going on. GPUI's retained check runs
+//! on every frame of them too (`Window::set_check_retained`).
 use super::*;
 use chrono::TimeDelta;
 use gpui::{TestAppContext, VisualTestContext};
@@ -167,6 +168,9 @@ fn shell(cx: &mut TestAppContext) -> (Entity<Shell>, &mut VisualTestContext) {
         shell
     });
     std::mem::forget(dir);
+    // slopty: GPUI checks every frame that draws a view again against one drawn from scratch at
+    // its moment, and panics naming the view a frame drew stale.
+    cx.update(|window, _| window.set_check_retained(Some(gpui::RetainedCheck::Panic)));
     cx.simulate_resize(gpui::size(px(WINDOW.0), px(WINDOW.1)));
     cx.run_until_parked();
     (shell, cx)

@@ -34,6 +34,28 @@ Tests make no sound on this Mac: the drawn screen's worker sounds only under `SL
    wall clock itself still moves between draws: the self-test runs under GPUI's Reduce Motion,
    and a frame whose two scratch draws disagree is judged only on what holds still, at whatever
    depth what moves leaves it.
+   **Every frame, as it is drawn.** The oracle judges the frames a test or a dump stops at, so a
+   view that is stale for a few frames between them goes unseen. GPUI's retained check
+   (`Window::set_check_retained`, gpui-fast's `fast::check_retained`) judges every frame, as
+   Chromium's under-invalidation check (`checkUnderInvalidation`) does. Each frame that drew
+   something again from the last one (a view, a stretch under a key, a scroll layer's tiles or a
+   list layer's rows) is drawn a second time right after it, from scratch at the same moment,
+   before any effect or event. Both frames see the same state. A difference inside what was drawn
+   again is reported with the view's type, its entity, its element id path (or the layer's
+   container), and the primitives each frame painted there. The window then shows the frame from
+   scratch, so the frame stays correct. A frame that asked for the next one has its findings wait
+   for that frame: a hover found too late, or the focus moving while it drew, is built then, and
+   only what that frame draws again too is reported. What the first frame built is not judged,
+   because a build reads values the frame before wrote as it drew. That case is still the
+   oracle's, on settled frames. The headless retention tests (`shell::retention_tests`) panic on
+   a finding. `retained::check_every_frame` turns the check on for a window, and
+   `retained::stale` reports what it kept ahead of its own comparison. The self-test doesn't
+   turn it on yet: on the phone's "Back to …" case, the check's second draw per frame left a
+   golden and the dock 1 px off where runs without it pass. Proof:
+   `fast::tests::check_retained` in gpui-fast catches an un-notified view and a
+   list layer composited over an untold change, and passes a notified view and a view beside an
+   animation. `retained::tests::a_view_changed_untold_is_named_by_the_frame_check` covers the
+   same in Slopty.
 3. **App self-test**, `cargo xtask e2e app` (`crates/slopty-e2e`):
    launches a server, ptyd, the worker registered with the server, and the app (built with
    `--features slopty/e2e`) following the server, in a temp dir, so the app reaches the worker
