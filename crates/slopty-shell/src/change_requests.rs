@@ -196,7 +196,8 @@ fn render_badge_model(
             el.role(gpui::Role::Link)
                 .aria_label(accessible_label)
                 .tab_index(0)
-                .focus_visible(|style| style.border_2().border_color(theme.accent))
+                // slopty: the shared ring, outside the chip: focus moves nothing.
+                .map(|el| crate::surface_chrome::focus_ring(el, theme))
                 .cursor_pointer()
                 .hover(move |style| style.bg(color.opacity(0.16)).text_color(color))
                 .on_click(move |_, _, cx| {
@@ -733,5 +734,46 @@ mod tests {
             assert_eq!(model.tone, tone);
             assert_eq!(model.title, "First line Second line");
         }
+    }
+
+    struct BadgeRow;
+
+    impl gpui::Render for BadgeRow {
+        fn render(&mut self, _: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+            let summary = snapshot("local", "/repo", "checkout").change_request.unwrap();
+            let theme = Theme::of(cx).clone();
+            div()
+                .flex()
+                .flex_row()
+                .child(pull_request_badge(
+                    "badge".into(),
+                    summary,
+                    ChangeRequestBadgeSurface::Composer,
+                    None,
+                    &theme,
+                ))
+                .child(div().debug_selector(|| "after".into()).size(px(10.0)))
+        }
+    }
+
+    /// slopty: a badge the keyboard reaches shows the shared ring outside itself: focus grows
+    /// nothing, so what sits after it stays put.
+    #[gpui::test]
+    fn a_focused_badge_moves_nothing(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::default()));
+        let (_, cx) = cx.add_window_view(|_, _| BadgeRow);
+        cx.run_until_parked();
+        let before = cx.debug_bounds("after").expect("the element after the badge");
+        // A key first, so the focus that follows is the keyboard's and shows its ring.
+        cx.simulate_keystrokes("a");
+        let focused = cx.update(|window, cx| {
+            window.focus_next(cx);
+            window.refresh();
+            window.draw(cx).clear(cx);
+            window.focused(cx).is_some() && window.last_input_was_keyboard()
+        });
+        assert!(focused, "the keyboard reaches the badge");
+        let after = cx.debug_bounds("after").expect("the element after the badge");
+        assert_eq!(before, after, "focus moved what sits after the badge");
     }
 }

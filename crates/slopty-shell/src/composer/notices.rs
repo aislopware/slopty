@@ -364,11 +364,11 @@ impl Composer {
     }
 }
 
-/// A status line's text action.
+/// A status line's text action: a keyboard stop with the shared ring, as a pane's control is.
 fn notice_action(id: &'static str, label: &'static str, theme: &Theme) -> gpui::Stateful<gpui::Div> {
     let fade: SharedString = format!("{id}-hover").into();
-    div()
-        .id(id)
+    let action = div().id(id);
+    crate::surface_chrome::key_stop(action, theme)
         .role(Role::Button)
         .aria_label(label)
         .flex_none()
@@ -445,5 +445,53 @@ mod tests {
         assert!(words.starts_with("Limit reached · resets "), "{words}");
         assert_eq!(limit_words(Some(now - chrono::TimeDelta::minutes(1)), now), None);
         assert_eq!(limit_words(None, now), None);
+    }
+
+    struct Line {
+        pressed: std::rc::Rc<std::cell::Cell<usize>>,
+    }
+
+    impl gpui::Render for Line {
+        fn render(&mut self, _: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+            let theme = Theme::of(cx).clone();
+            let pressed = self.pressed.clone();
+            div()
+                .flex()
+                .child(
+                    notice_action("composer-stall-keep", "Keep waiting", &theme)
+                        .on_click(move |_, _, _| pressed.set(pressed.get() + 1)),
+                )
+                .child(crate::context_usage::chip(None, false, &theme))
+        }
+    }
+
+    /// slopty: a status line's actions and the context meter are keyboard stops: Tab reaches
+    /// each in turn, and Enter presses the action it is on.
+    #[gpui::test]
+    fn the_notice_actions_and_the_meter_take_the_keyboard(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::default()));
+        let pressed = std::rc::Rc::new(std::cell::Cell::new(0));
+        let line = Line { pressed: pressed.clone() };
+        let (_, cx) = cx.add_window_view(|_, _| line);
+        let focused = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| {
+                window.set_a11y_active(true);
+                window.refresh();
+                window.draw(cx).clear(cx);
+                let tree = window.a11y_tree()?;
+                tree.nodes
+                    .iter()
+                    .find(|(id, _)| *id == tree.focus)
+                    .and_then(|(_, node)| node.label().map(str::to_owned))
+            })
+        };
+        cx.update(|window, cx| window.focus_next(cx));
+        assert_eq!(focused(cx).as_deref(), Some("Keep waiting"));
+        cx.simulate_keystrokes("enter");
+        cx.simulate_event(gpui::KeyUpEvent { keystroke: gpui::Keystroke::parse("enter").unwrap() });
+        cx.run_until_parked();
+        assert_eq!(pressed.get(), 1, "Enter presses it");
+        cx.update(|window, cx| window.focus_next(cx));
+        assert_eq!(focused(cx).as_deref(), Some("Context —"));
     }
 }

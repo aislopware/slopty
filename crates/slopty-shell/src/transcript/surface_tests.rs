@@ -5,6 +5,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use gpui::accesskit::{NodeId, Role};
 use gpui::{Entity, IntoElement, Pixels, Point, Render, VisualTestContext, Window, div, point, prelude::*, px};
@@ -318,7 +319,7 @@ fn display_formulas_typeset_once_settled(cx: &mut gpui::TestAppContext) {
 }
 
 /// slopty: a failed turn's card offers its error to copy, the agent's words with its detail, and
-/// the detail opens in a box that scrolls (T51).
+/// the detail opens in a box that scrolls (T51) and says it to the screen reader.
 #[gpui::test]
 fn an_error_card_copies_its_error_and_scrolls_its_detail(cx: &mut gpui::TestAppContext) {
     let detail = (1..=40).map(|n| format!("trace line {n}")).collect::<Vec<_>>().join("\n");
@@ -339,6 +340,7 @@ fn an_error_card_copies_its_error_and_scrolls_its_detail(cx: &mut gpui::TestAppC
     cx.simulate_click(details.center, gpui::Modifiers::default());
     let nodes = draw(cx);
     assert!(find(&nodes, Role::Button, "Hide details").is_some(), "the detail opened");
+    assert!(find(&nodes, Role::Paragraph, &detail).is_some(), "the detail says why");
 }
 
 /// A subagent's run open in its card is as tall as its rows, nothing under its last line; a run
@@ -375,4 +377,126 @@ fn a_subagent_run_open_in_its_card_is_as_tall_as_its_rows(cx: &mut gpui::TestApp
     let nodes = settled(cx);
     let run = find(&nodes, Role::Group, "Transcript of Count lines").expect("open in place");
     assert!((run.height - cap).abs() <= 1.5, "the card's room, {cap}: {run:?}");
+}
+
+/// A subagent's card clicked open before its run arrived (the run is fetched once the card
+/// opens) holds its run in place on every frame after, and takes the run's height once it
+/// arrives.
+fn opened_before_its_run(cx: &mut gpui::TestAppContext, running: bool) {
+    let progress = SubagentProgress {
+        running,
+        state: if running { SubagentProgress::RUNNING } else { SubagentProgress::DONE }.into(),
+        chat_id: Some("child-chat".into()),
+        row: running.then(|| "task:a1".into()),
+        ..SubagentProgress::default()
+    };
+    let (transcript, cx) = open(cx, entry(MessageStatus::Complete, vec![spawn(progress)]));
+    let nodes = draw(cx);
+    let card = find(&nodes, Role::Button, "Subagent Count lines").expect("the card").clone();
+    cx.simulate_click(card.center, gpui::Modifiers::default());
+    for frame in 0..4 {
+        let nodes = draw(cx);
+        let run = find(&nodes, Role::Group, "Transcript of Count lines");
+        assert!(run.is_some_and(|run| run.height > 0.5), "frame {frame}: {run:?}");
+    }
+    let said = |n: usize| SessionMessageEntry {
+        id: format!("child:{n}"),
+        parts: vec![MessagePart::Text {
+            id: format!("child:{n}:t"),
+            text: format!("Line {n} of the run."),
+        }],
+        ..entry(MessageStatus::Complete, Vec::new())
+    };
+    let state = transcript.read_with(cx, |transcript, _| transcript.state.clone());
+    state.update(cx, |state, cx| {
+        state.set_subagent_snapshot("child-chat".into(), vec![said(0), said(1)]);
+        cx.notify();
+    });
+    for frame in 0..4 {
+        let nodes = draw(cx);
+        let run = find(&nodes, Role::Group, "Transcript of Count lines");
+        assert!(run.is_some_and(|run| run.height > 20.0), "its rows in, frame {frame}: {run:?}");
+    }
+}
+
+#[gpui::test]
+fn a_card_opened_before_its_ended_run_arrives_holds_it(cx: &mut gpui::TestAppContext) {
+    opened_before_its_run(cx, false);
+}
+
+#[gpui::test]
+fn a_card_opened_before_its_running_run_arrives_holds_it(cx: &mut gpui::TestAppContext) {
+    opened_before_its_run(cx, true);
+}
+
+/// slopty: the transcript's words are in the accessibility tree: the person's message is an
+/// article "You" holding a paragraph of their words, the reply an article "Claude" at its first
+/// block, and each of the reply's blocks a paragraph of its plain text.
+#[gpui::test]
+fn a_chats_words_are_articles_and_paragraphs(cx: &mut gpui::TestAppContext) {
+    let reply = entry(MessageStatus::Complete, vec![text("The ls **failed**.\n\nThen it was done.")]);
+    let (transcript, cx) = open(cx, reply.clone());
+    let asked = SessionMessageEntry {
+        id: "ask".into(),
+        role: MessageRole::User,
+        parts: vec![MessagePart::Text { id: "ask:t".into(), text: "Survey the files".into() }],
+        status: None,
+        ..reply.clone()
+    };
+    transcript.update(cx, |this, cx| {
+        this.state.update(cx, |state, _| {
+            state.transcript = vec![asked, reply];
+            state.transcript_revision += 1;
+        });
+        this.sync(cx);
+    });
+    let nodes = draw(cx);
+    let you = find(&nodes, Role::Article, "You").expect("the person's message").clone();
+    let said = descendants(&nodes, &you, Role::Paragraph);
+    assert!(said.iter().any(|p| p.label == "Survey the files"), "{said:?}");
+    let claude = find(&nodes, Role::Article, "Claude").expect("the reply").clone();
+    let first = descendants(&nodes, &claude, Role::Paragraph);
+    assert!(first.iter().any(|p| p.label == "The ls failed."), "plain text: {first:?}");
+    assert!(find(&nodes, Role::Paragraph, "Then it was done.").is_some(), "the second block");
+    let articles = nodes.values().filter(|n| n.role == Role::Article).count();
+    assert_eq!(articles, 2, "one article a message");
+}
+
+/// slopty: a link to a chat in a reply is a live chip: it says the chat's title and how it
+/// stands as they are now, and says the new ones once they change.
+#[gpui::test]
+fn a_link_to_a_chat_says_how_it_stands_now(cx: &mut gpui::TestAppContext) {
+    let link = crate::links::slopty_conversation_link("chat", "here");
+    let written = format!("See [that chat]({link}).");
+    let (transcript, cx) = open(cx, entry(MessageStatus::Complete, vec![text(&written)]));
+    let shown = |cx: &mut VisualTestContext| {
+        transcript.update(cx, |this, cx| {
+            let tree = Arc::new(crate::markdown::parse_full(&written));
+            let chipped = this.chat_chips(&"row".into(), tree, cx);
+            let crate::markdown::Block::Paragraph { runs } = &chipped.blocks[0].block else {
+                panic!("a paragraph");
+            };
+            runs.iter()
+                .map(|run| run.style.file_label.clone().unwrap_or_else(|| run.text.clone()))
+                .collect::<String>()
+        })
+    };
+    assert_eq!(shown(cx), "See Chat.");
+    let state = transcript.read_with(cx, |this, _| this.state.clone());
+    state.update(cx, |state, _| {
+        state.chats[0].title = Some("Fix the parser".into());
+        state.apply_sessions(vec![slopty_view_proto::Session {
+            last_completed_turn: None,
+            chat_id: "chat".into(),
+            device_id: "dev".into(),
+            status: slopty_view_proto::SessionStatus::Working,
+            started_at: None,
+            updated_at: chrono::Utc::now(),
+            running_subagents: 0,
+            status_since: None,
+            waiting_on: None,
+        }]);
+    });
+    assert_eq!(shown(cx), "See Fix the parser · Working.");
+    draw(cx);
 }

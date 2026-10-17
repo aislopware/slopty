@@ -697,6 +697,9 @@ impl Transcript {
         let detail_block = detail.filter(|_| open).map(|detail| {
             div()
                 .id(SharedString::from(format!("{}-detail", row.id)))
+                // slopty: the detail says why to the screen reader too: a paragraph of its words.
+                .role(gpui::Role::Paragraph)
+                .aria_label(detail.clone())
                 .w_full()
                 .max_h(px(240.0))
                 .overflow_y_scroll()

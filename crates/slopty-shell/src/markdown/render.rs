@@ -1097,7 +1097,14 @@ fn flatten_runs_weighted(runs: &[InlineRun], theme: &Theme, base_weight: FontWei
         // Links stay monochrome — foreground with an underline (slopty's md
         // theme underlines in the text color; indigo is reserved for primary
         // actions).
-        let is_link = run.style.link.is_some();
+        // slopty: a link to a chat shown as its chip (`chat_links.rs`) sits in the code wash,
+        // not underlined.
+        let chip = run.style.file_label.is_some()
+            && run.style.link.as_deref().is_some_and(super::chat_links::is_chat_link);
+        if chip {
+            code_ranges.push(start..text.len());
+        }
+        let is_link = run.style.link.is_some() && !chip;
         // Inline code uses the spectrum's code tone; everything else
         // stays the monochrome foreground.
         let color = if code {

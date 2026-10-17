@@ -1058,7 +1058,8 @@ impl Composer {
                     .role(gpui::Role::Button)
                     .aria_label(format!("Preview {}", label))
                     .tab_index(0)
-                    .focus_visible(move |style| style.border_color(accent))
+                    // slopty: the shared ring, outside the frame.
+                    .map(|el| crate::surface_chrome::focus_ring(el, Theme::of(cx)))
                     .hover(move |style| style.border_color(accent))
                     .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .cursor_pointer()
@@ -1077,12 +1078,12 @@ impl Composer {
             }
             _ => frame
                 .when(failed, |frame| {
-                    let accent = Theme::of(cx).accent;
                     frame
                         .role(gpui::Role::Button)
                         .aria_label(format!("Preview {label}"))
                         .tab_index(0)
-                        .focus_visible(move |style| style.border_color(accent))
+                        // slopty: the shared ring, outside the frame.
+                        .map(|el| crate::surface_chrome::focus_ring(el, Theme::of(cx)))
                         .cursor_pointer()
                         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(cx.listener(move |this, _, _, cx| {

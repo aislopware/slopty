@@ -250,6 +250,24 @@ pub const GLIDE_MAX_VIEWPORTS: f32 = 2.5;
 /// The titlebar overlays the full-height list, so its height is part of the
 /// inset; the extra 10px matches the first row's breathing room.
 pub(crate) const OWN_SEND_TOP_INSET_PX: f32 = Theme::TITLEBAR_HEIGHT + 10.0;
+/// slopty: what a markdown block says, as plain text: its texts as drawn (a relabelled link by
+/// its label), in paint order, a line each.
+fn block_words(block: &crate::markdown::Block) -> String {
+    let mut texts = Vec::new();
+    crate::markdown::find::block_texts(&crate::markdown::chat_links::as_drawn(block), &mut texts);
+    texts.join("\n")
+}
+
+/// slopty: `inner` as the start of a message `who` said, to the accessibility tree.
+fn message_article(row: &SharedString, who: &'static str, inner: AnyElement) -> AnyElement {
+    div()
+        .id(SharedString::from(format!("{row}-message")))
+        .role(gpui::Role::Article)
+        .aria_label(who)
+        .child(inner)
+        .into_any_element()
+}
+
 /// slopty: where a transcript fit to its rows tells their height: the card it is open in.
 #[derive(Clone)]
 struct Fit {
@@ -3600,6 +3618,9 @@ pub struct Transcript {
     /// frames reuse settled blocks' text+runs; the incremental parser's stable
     /// boundary invalidates only the live tail per commit.
     render_cache: Rc<RefCell<RenderCache>>,
+    /// slopty: what each row's chat chips last said (`markdown/chat_links.rs`): a row whose
+    /// chips say something new flattens again.
+    chip_words: HashMap<SharedString, String>,
     workspace_link: Option<render::LinkUi>,
     /// File-link roots per linking chat, valid for one
     /// `AppState::link_roots_revision`: every rendered row asks for them.
@@ -3884,6 +3905,37 @@ impl Transcript {
             .linked_tree(tree, roots, ui.source_local)
     }
 
+    /// slopty: `tree` with its links to chats shown as live chips, each saying the chat's
+    /// title and how it stands now (`markdown/chat_links.rs`). The flatten cache is kept per
+    /// row, so a row whose chips say something new since it last drew flattens again.
+    fn chat_chips(
+        &mut self,
+        row: &SharedString,
+        tree: Arc<BlockTree>,
+        cx: &gpui::App,
+    ) -> Arc<BlockTree> {
+        let state = self.state.read(cx);
+        let said = RefCell::new(String::new());
+        let label = |url: &str| {
+            let chat = crate::links::parse_slopty_conversation_link(url).ok()?.chat_id;
+            let found = state.chats.iter().find(|known| known.id == chat)?;
+            let status = state.session_for(&chat).map(|session| session.status);
+            let words = crate::markdown::chat_links::chip_label(found.title.as_deref(), status);
+            said.borrow_mut().push_str(&words);
+            said.borrow_mut().push('\n');
+            Some(words)
+        };
+        let Some(chipped) = crate::markdown::chat_links::labelled(&tree, &label) else {
+            return tree;
+        };
+        let said = said.into_inner();
+        if self.chip_words.get(row) != Some(&said) {
+            self.chip_words.insert(row.clone(), said);
+            self.render_cache.borrow_mut().invalidate_row(row);
+        }
+        Arc::new(chipped)
+    }
+
     /// File badges on tool chips open through the same workspace-link route
     /// as Markdown file links, so only chats with a link handler get
     /// clickable badges.
@@ -4013,6 +4065,7 @@ impl Transcript {
             veil_baseline: std::collections::HashSet::new(),
             veil_attach_pending: true,
             render_cache: Rc::new(RefCell::new(RenderCache::default())),
+            chip_words: HashMap::new(),
             workspace_link: None,
             file_link_roots: Default::default(),
             inline_code_links: Default::default(),
@@ -7199,7 +7252,8 @@ impl Transcript {
                     .aria_label("Preview generated image")
                     .tab_index(0)
                     .cursor_pointer()
-                    .focus_visible(move |style| style.border_2().border_color(theme.accent))
+                    // slopty: the shared ring, outside the picture: focus covers none of it.
+                    .map(|el| crate::surface_chrome::focus_ring(el, &theme))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.attachment_preview_return_focus = window.focused(cx);
                         preview.viewer.reset();
@@ -7761,13 +7815,13 @@ impl Transcript {
                     // left edge, and long prompts render as one clipped line
                     // instead of wrapping inside the 80% column cap.
                     // slopty: the person's own words are in the accessibility tree, as the
-                    // agent's are: the bubble is a labelled group.
+                    // agent's are: the bubble is a paragraph saying them.
                     let spoken = text.clone();
                     column = column.child(
                         div().w_full().flex().justify_end().child(
                             div()
                                 .id(SharedString::from(format!("{}-said", row.id)))
-                                .role(gpui::Role::Group)
+                                .role(gpui::Role::Paragraph)
                                 .aria_label(spoken)
                                 .min_w_0()
                                 .max_w(px(self.content_width * 0.8))
@@ -7790,6 +7844,7 @@ impl Transcript {
             RowKind::Markdown { tree, block_ix } => {
                 let link = self.link_ui(cx);
                 let tree = self.inline_code_tree(tree, link.as_ref(), cx);
+                let tree = self.chat_chips(&row.id, tree, cx); // slopty
                 let Some(top) = tree.blocks.get(*block_ix) else {
                     return gpui::Empty.into_any_element();
                 };
@@ -7825,6 +7880,7 @@ impl Transcript {
             RowKind::LiveMarkdown { tree, block_ix } => {
                 let link = self.link_ui(cx);
                 let tree = self.inline_code_tree(tree, link.as_ref(), cx);
+                let tree = self.chat_chips(&row.id, tree, cx); // slopty
                 let Some(top) = tree.blocks.get(*block_ix) else {
                     return gpui::Empty.into_any_element();
                 };
@@ -7974,6 +8030,37 @@ impl Transcript {
         };
         // slopty: a plan's rows draw as one card.
         let (inner, top_gap) = self.plan_card_segment(ix, inner, top_gap, &theme);
+        // slopty: the transcript's words in the accessibility tree: a markdown block is a
+        // paragraph saying its plain text, and a message opens at an article named for who said
+        // it ("You" round the person's bubble, "Claude" round the reply's first block).
+        let inner = match &row.kind {
+            RowKind::Markdown { tree, block_ix } | RowKind::LiveMarkdown { tree, block_ix } => {
+                // The words as drawn: a file link by its name, a chat link as its chip.
+                let link = self.link_ui(cx);
+                let tree = self.inline_code_tree(tree, link.as_ref(), cx);
+                let tree = self.chat_chips(&row.id, tree, cx);
+                let words = tree.blocks.get(*block_ix).map(|top| block_words(&top.block));
+                let paragraph = div()
+                    .id(SharedString::from(format!("{}-words", row.id)))
+                    .role(gpui::Role::Paragraph)
+                    .aria_label(SharedString::from(words.unwrap_or_default()))
+                    .child(inner);
+                let first = !self.rows[..ix]
+                    .iter()
+                    .rev()
+                    .take_while(|before| before.entry_id == row.entry_id)
+                    .any(|before| {
+                        matches!(before.kind, RowKind::Markdown { .. } | RowKind::LiveMarkdown { .. })
+                    });
+                if first {
+                    message_article(&row.id, "Claude", paragraph.into_any_element())
+                } else {
+                    paragraph.into_any_element()
+                }
+            }
+            RowKind::User { .. } => message_article(&row.id, "You", inner),
+            _ => inner,
+        };
         // Diagram fences this row just requested start rendering after layout.
         self.ensure_diagram_worker(cx);
         // slopty: and the images it showed are held, read when new.

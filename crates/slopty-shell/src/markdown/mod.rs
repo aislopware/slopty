@@ -30,6 +30,7 @@ pub mod veil;
 pub use parser::{Block, BlockTree, IncrementalParser, InlineRun, InlineStyle, parse_full};
 
 pub(crate) mod ansi; // slopty: terminal output in its colours.
+pub(crate) mod chat_links; // slopty: links to chats as live chips.
 pub(crate) mod math; // slopty: TeX math.
 pub mod mermaid;
 pub(crate) mod mermaid_cache;

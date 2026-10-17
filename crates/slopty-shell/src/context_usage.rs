@@ -43,8 +43,8 @@ pub(crate) fn ring_chip(
 ) -> gpui::Stateful<gpui::Div> {
     // slopty: each ring names itself to the accessibility tree ("Plan usage 64%").
     let name = if id == "account-usage" { "Plan usage" } else { "Context" };
-    div()
-        .id(id)
+    // slopty: a keyboard stop with the shared ring: Tab reaches it, Enter or Space opens it.
+    crate::surface_chrome::key_stop(div().id(id), theme)
         .role(gpui::Role::Button)
         .aria_label(SharedString::from(format!("{name} {label}")))
         .flex_none()
