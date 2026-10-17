@@ -275,7 +275,7 @@ fn boot(home: &Path, name: &str) -> Result<String> {
 /// case builds the app here, with it, and the guest runs `simctl`), the runners' iOS runtime, the
 /// two simulators booted once, no Spotlight indexing (it ran at a core after every boot), no crash
 /// dialog (a window left over a crashed test's app). About
-/// 25 minutes: the runtime's 8.5 GB download and the simulators' first boots.
+/// 28 minutes at this Mac's load: the runtime's 8.5 GB download and the simulators' first boots.
 fn make_base(home: &Path, base: &str) -> Result<()> {
     println!("  making the e2e base {base} from {ORIGIN}: Xcode and iOS runtime {IOS_RUNTIME}");
     let making = format!("{base}-making");
@@ -335,7 +335,7 @@ fn fill_base(home: &Path, making: &str) -> Result<()> {
              defaults write com.apple.CrashReporter DialogType none"
         ),
     )?;
-    // Each simulator's first boot migrates its data, 4–10 minutes: done once here, not in the
+    // Each simulator's first boot migrates its data, 1–14 minutes: done once here, not in the
     // first run of every clone.
     for sim in [crate::ios::SimKind::Iphone, crate::ios::SimKind::Ipad] {
         pristine(home, making, sim)?;
@@ -602,7 +602,7 @@ fn simctl(home: &Path, guest: &str, args: &[&str]) -> Result<String> {
 
 /// `guest`'s pristine simulator for `sim`, shut down: never booted by a run, only cloned. Made
 /// on the newest iOS runtime when there is none, and booted once, since a simulator's first boot
-/// (its data migrated) takes 4–10 minutes; its UDID.
+/// (its data migrated) takes 1–14 minutes; its UDID.
 fn pristine(home: &Path, guest: &str, sim: crate::ios::SimKind) -> Result<String> {
     let name = sim.name();
     let devices = simctl(home, guest, &["list", "devices", "available", "-j"])?;
@@ -796,7 +796,7 @@ mod tests {
     use camino::Utf8PathBuf;
 
     /// The base is made from the live lane's: Xcode, the runners' iOS runtime, both simulators.
-    /// Live: 25 minutes and an 8.5 GB download, past nextest's deadline for xtask (`cargo test -p
+    /// Live: 28 minutes and an 8.5 GB download, past nextest's deadline for xtask (`cargo test -p
     /// xtask --lib -- --ignored a_base_is_made`); it makes `slopty-26-xcode-test` and deletes it.
     #[test]
     #[ignore = "live: makes a macOS guest"]

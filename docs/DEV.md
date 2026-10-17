@@ -45,13 +45,12 @@ zed itself so it is never behind zed while longbridge lags.
   '<filterset>'` adds an e2e case (`-E failed`: only the tests the last run of that name
   failed). The `app` and `ios` cases run here, in the headless macOS guest `slopty-26-e2e`
   (tart, cloned from `slopty-26-xcode`, which is made once from the live lane's base with this
-  Mac's Xcode and the runners' iOS simulator runtime, about 25 minutes): the lane's tree is built
-  in `target/local/<lane>/e2e-target` (the simulator's app too, with this Mac's Xcode), the app's
-  tests run in the guest three at a time (`SLOPTY_E2E_THREADS`), the simulator's one at a time
-  in the guest's own simulator (`--sim iphone|ipad`), one lane's run at a time; `--place
-  runner` (or `SLOPTY_E2E_GUEST=0`) sends either to a runner Mac, and probes always go there;
-  `--goldens accept` (or `accept-all`) applies the run's goldens
-  to the tree, as `--accept-snapshots` does its insta snapshots (on runners: a patch of anything
+  Mac's Xcode and the runners' iOS simulator runtime, about half an hour): the lane's tree is
+  built in `target/local/<lane>/e2e-target` (the simulator's app too, with this Mac's Xcode),
+  the app's tests run in the guest three at a time (`SLOPTY_E2E_THREADS`), the simulator's one
+  at a time in a fresh clone of the guest's simulator (`--sim iphone|ipad`), one lane's run at
+  a time; `--place runner` (or `SLOPTY_E2E_GUEST=0`) sends either to a runner Mac, and probes
+  always go there; `--goldens accept` (or `accept-all`) applies the run's goldens to the tree, as `--accept-snapshots` does its insta snapshots (on runners: a patch of anything
   else, which no accept writes, is refused whole and its paths named), and `--goldens review`
   brings every changed frame's render and diff to `target/e2e/artifacts/`. `--workflow-ref
   <branch>` runs that branch's `check.yml`, to try a change to it. A newer check of the same name

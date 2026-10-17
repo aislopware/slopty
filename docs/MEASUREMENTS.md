@@ -17350,6 +17350,11 @@ both, iPad `columns` 0.735 % / 0.733 % on both and byte-identical renders; iPad 
 golden yet) 1,598 of 5,680,128 pixels (0.028 %) in one 308×85 region, which two guest runs at
 7ea1d3c1 differ in by 2,188 (0.039 %); accessibility text identical throughout.
 
+Making the base from the live lane's (`remote::guest::tests::a_base_is_made_from_the_live_lane_s`,
+`cargo test -p xtask --lib -- --ignored a_base_is_made`): 27 min 41 s, of which the iPhone
+simulator's first boot 862 s and the iPad's 86 s, at a load of 50–70 from other lanes (the
+iPad's first boot took 63 s on the hand-made base at a calmer moment).
+
 Memory: the VM process held 8.6–8.8 GB resident on the host during the iPad run and 10.0 GB
 after it; inside, 37–75 % of the guest's 6 GB stayed free. Making the base: the iOS runtime's
 8.52 GB downloaded in 3 min 36 s, the first iPhone boot 4 min 8 s, Xcode's 3.7 GB copied in

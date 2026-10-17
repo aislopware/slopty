@@ -2322,11 +2322,11 @@ more full-window layer.
   - **The guest has the runners' iOS runtime.** The runners run iOS 26.5 (23F77), the newest of
     their image's runtimes, under Xcode 26.6 (run 39017057929). The e2e guest is now cloned
     from `slopty-26-xcode`, which `remote` makes once from the live lane's base (`make_base`,
-    about 25 minutes): a 90 GB disk, this Mac's Xcode copied in (Xcode 27 needs macOS 26.6,
-    which the guest runs), that runtime by its build number through `xcodebuild
-    -downloadPlatform`, which needs no account, both simulators created and booted once (a
-    simulator's first boot takes 4–10 minutes), Spotlight indexing and the crash dialog off.
-    The guest has 6 GB.
+    28 minutes when its live test made one): a 90 GB disk, this Mac's Xcode copied in (Xcode 27
+    needs macOS 26.6, which the guest runs), that runtime by its build number through
+    `xcodebuild -downloadPlatform`, which needs no account, both simulators created and booted
+    once (a simulator's first boot takes 1–14 minutes with this Mac's load), Spotlight indexing
+    and the crash dialog off. The guest has 6 GB.
   - **The app is built here**, with this Mac's Xcode, into the lane's e2e target dir
     (`ios::build_for_simulator`, which now finds the static libraries wherever cargo's target
     dir is), copied into the guest beside the daemons and the `ios` test archive, and
