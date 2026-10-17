@@ -2428,5 +2428,5 @@ more full-window layer.
     command to run in the guest.
   - Names a shell could misread are never dropped.
   Test: `remote::guest::tests::the_guest_s_lanes_go_least_recently_used_first` (`xtask`). The
-  sizes behind the budget, and a live run, are in `docs/MEASUREMENTS.md` ("the e2e guest's
+  sizes behind the budget, and a live run (two lanes' directories dropped, 24.4 GiB free, 3.6 s), are in `docs/MEASUREMENTS.md` ("the e2e guest's
   disk").

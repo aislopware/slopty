@@ -17422,7 +17422,9 @@ is `df`'s:
 
 The data volume had 116 MiB free before and 22 GiB free after (40 GiB used). Xcode
 (≈9.8 GB) and the iOS runtime (≈8 GB) are the base's and stay. Budget: 4 lanes' directories,
-and 8 GiB free before a run's copy; a run writes at most ≈3 GB.
+and 8 GiB free before a run's copy; a run writes at most ≈3 GB. The first run with the prune
+(`--e2e app`, an empty filter, after C3's run) dropped C3's and E2's directories, the least
+recently used beyond 4 of 6, and left 24.4 GiB free, in 3.6 s; the copy after it took 4.2 s.
 
 ```sh
 # in the guest (ssh admin@$(tart ip slopty-26-e2e)):
