@@ -2876,7 +2876,7 @@ impl Shell {
             })
             .and_then(|drag| drag.section_gaps.get(group))
             .map_or(0.0, |gap| {
-                if self.reduced_motion {
+                if self.reduced_motion.get() {
                     gap.to
                 } else {
                     gap.current()
@@ -2930,7 +2930,7 @@ impl Shell {
         slide.retarget(target);
         let (from, to, epoch) = (slide.from, slide.to, slide.epoch);
         let frame = div().relative().child(row);
-        if !returning || self.reduced_motion {
+        if !returning || self.reduced_motion.get() {
             frame.top(px(to)).into_any_element()
         } else {
             frame
@@ -3086,7 +3086,7 @@ impl Shell {
         self.cancel_pinned_session_drag(cx);
         if let Some(mut transfer) = self.sidebar_session_transfer.take() {
             transfer.preview = None;
-            if !self.reduced_motion && self.sidebar_session_transfer_is_valid(&transfer.payload, cx)
+            if !self.reduced_motion.get() && self.sidebar_session_transfer_is_valid(&transfer.payload, cx)
             {
                 self.sidebar_session_return = Some(SidebarSessionReturn {
                     transfer,
@@ -3220,7 +3220,7 @@ impl Shell {
             .rounded(px(8.0))
             .child(row);
         // Anchored at the destination; a slide home eases its offset to zero.
-        let frame = if self.reduced_motion {
+        let frame = if self.reduced_motion.get() {
             frame.into_any_element()
         } else {
             frame
@@ -5356,7 +5356,7 @@ impl Shell {
                     0.0
                 };
                 drag.source_collapse.retarget(target);
-                let removed = if self.reduced_motion {
+                let removed = if self.reduced_motion.get() {
                     target
                 } else {
                     drag.source_collapse.current()

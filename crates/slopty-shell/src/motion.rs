@@ -1218,6 +1218,25 @@ pub fn reduced_motion(cx: &App) -> bool {
     cx.reduce_motion()
 }
 
+/// slopty: the global reduced-motion flag as a view read it for its render pass, kept for the
+/// code that runs without a `cx`. Only [`ReducedMotion::of`] makes one, from the flag: a view's
+/// copy is the flag's, so a test asks for reduced motion through [`set_reduced_motion`], never by
+/// writing the copy, which the next render would overwrite.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ReducedMotion(bool);
+
+impl ReducedMotion {
+    /// The flag now.
+    pub fn of(cx: &App) -> Self {
+        Self(reduced_motion(cx))
+    }
+
+    /// Whether motion is reduced.
+    pub const fn get(self) -> bool {
+        self.0
+    }
+}
+
 /// The user's reduced-motion preference. Persisted in `ui-settings.json`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

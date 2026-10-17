@@ -1079,10 +1079,10 @@ mod tests {
         });
         // An iPad's screen: the sidebar beside the chat, not the phone's pages.
         cx.simulate_resize(gpui::size(px(1366.0), px(1024.0)));
-        shell.update(cx, |shell, _| {
+        shell.update(cx, |shell, cx| {
             shell.debug_gate = Some(crate::state::GatePhase::Ready);
             shell.splash = super::super::SplashPhase::Gone;
-            shell.reduced_motion = true;
+            crate::motion::set_reduced_motion(cx, true);
         });
         (shell, cx)
     }

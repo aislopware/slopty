@@ -575,7 +575,7 @@ impl Shell {
                                         "toggle-changes",
                                         self.right_pane_open(cx) && fit.right,
                                         motion::GLYPH_STATE,
-                                        self.reduced_motion,
+                                        self.reduced_motion.get(),
                                     ),
                                     true,
                                     16.0,

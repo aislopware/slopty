@@ -2092,8 +2092,8 @@ pub struct Shell {
     terminal_drag_anchor: Option<(f32, f32)>,
     /// `motion::reduced_motion` snapshot, refreshed at the top of each render
     /// pass so [`Shell::eval_tween`] (called from `&self` render helpers) can
-    /// snap without a `cx`.
-    reduced_motion: bool,
+    /// snap without a `cx`. Only the global flag makes one.
+    reduced_motion: motion::ReducedMotion,
     /// Set by [`Shell::eval_tween`] when any tween is mid-flight this frame;
     /// render schedules the next animation frame off it.
     motion_active: std::cell::Cell<bool>,
@@ -2462,7 +2462,7 @@ impl Shell {
             button_layout_sub: None,
             terminal_tween_task: None,
             terminal_drag_anchor: None,
-            reduced_motion: false,
+            reduced_motion: motion::ReducedMotion::default(),
             motion_active: std::cell::Cell::new(false),
             render_time: None,
             #[cfg(test)]
@@ -4275,7 +4275,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         let x = f32::from(event.event.position.x);
-        let sample = sidebar_drag_sample(x, self.sidebar_resize_edge, self.reduced_motion);
+        let sample = sidebar_drag_sample(x, self.sidebar_resize_edge, self.reduced_motion.get());
         let was_collapsed = self.settings.sidebar_collapsed;
         self.settings.sidebar_width = sample.width;
         self.settings.sidebar_collapsed = false;
@@ -4349,7 +4349,7 @@ impl Shell {
                 RIGHT_PANE_MIN,
                 max,
                 self.right_resize_edge,
-                self.reduced_motion,
+                self.reduced_motion.get(),
             )
         } else {
             motion::ResizeDragSample {
@@ -5434,12 +5434,12 @@ impl Shell {
         }
         if hovered {
             if let Some(previous) = self.chat_status_hover.replace(row_id.clone()) {
-                motion::set_hover(&format!("{previous}-hover"), false, self.reduced_motion);
+                motion::set_hover(&format!("{previous}-hover"), false, self.reduced_motion.get());
             }
         } else {
             self.chat_status_hover = None;
         }
-        motion::set_hover(&format!("{row_id}-hover"), hovered, self.reduced_motion);
+        motion::set_hover(&format!("{row_id}-hover"), hovered, self.reduced_motion.get());
         cx.notify();
     }
 
@@ -5801,7 +5801,7 @@ impl Shell {
         else {
             return target;
         };
-        if self.reduced_motion {
+        if self.reduced_motion.get() {
             return target;
         }
         let raw = self.tween_elapsed(started).as_secs_f32() / duration.as_secs_f32();
@@ -5834,7 +5834,7 @@ impl Shell {
         let Some(bounce) = bounce else {
             return 0.0;
         };
-        if self.reduced_motion || !enabled {
+        if self.reduced_motion.get() || !enabled {
             return 0.0;
         }
         let total =
@@ -5878,14 +5878,14 @@ impl Shell {
 
     fn tween_active(&self, tween: Option<WidthTween>) -> bool {
         tween.is_some_and(|tween| {
-            !self.reduced_motion && self.tween_elapsed(tween.started) < tween.duration
+            !self.reduced_motion.get() && self.tween_elapsed(tween.started) < tween.duration
         })
     }
 
     fn active_tween_endpoints(&self, tween: Option<WidthTween>) -> Option<(f32, f32)> {
         tween
             .filter(|transition| {
-                !self.reduced_motion && self.tween_elapsed(transition.started) < transition.duration
+                !self.reduced_motion.get() && self.tween_elapsed(transition.started) < transition.duration
             })
             .map(|transition| (transition.from, transition.to))
     }
@@ -6105,7 +6105,7 @@ impl Shell {
                         "toggle-sidebar",
                         !self.settings.sidebar_collapsed,
                         motion::GLYPH_STATE,
-                        self.reduced_motion,
+                        self.reduced_motion.get(),
                     ),
                     false,
                     14.0, // slopty: a 24 control holds a 14 glyph
@@ -7333,7 +7333,7 @@ impl Shell {
                                 // in the Archived section): its wash is let go here, or it stays
                                 // lit there.
                                 if let Some(previous) = this.chat_status_hover.replace(hover_id.clone()) {
-                                    motion::set_hover(&format!("{previous}-hover"), false, this.reduced_motion);
+                                    motion::set_hover(&format!("{previous}-hover"), false, this.reduced_motion.get());
                                 }
                                 cx.notify();
                             }
@@ -8030,7 +8030,7 @@ impl Shell {
                             .copied()
                             .unwrap_or(61.0)
                             + SIDEBAR_LIST_GAP);
-                    if self.reduced_motion {
+                    if self.reduced_motion.get() {
                         return div()
                             .relative()
                             .top(px(target))
@@ -9124,7 +9124,7 @@ impl Shell {
                         cx.notify();
                     }
                     this.finish_pane_resize(kind);
-                    motion::set_hover(&release_key, false, this.reduced_motion);
+                    motion::set_hover(&release_key, false, this.reduced_motion.get());
                     window.refresh();
                 }),
             )
@@ -9132,7 +9132,7 @@ impl Shell {
                 MouseButton::Left,
                 cx.listener(move |this, _, window, _| {
                     this.finish_pane_resize(kind);
-                    motion::set_hover(&release_out_key, false, this.reduced_motion);
+                    motion::set_hover(&release_out_key, false, this.reduced_motion.get());
                     window.refresh();
                 }),
             )
@@ -9187,13 +9187,13 @@ impl Shell {
                 .map(|background| std::path::Path::new(&background.path)),
             new_thread_background_adjustment,
             new_thread_background_setting.is_some(),
-            self.reduced_motion,
+            self.reduced_motion.get(),
             frame_time,
         );
         let dock_frame =
             self.composer_dock
                 .borrow_mut()
-                .tick(has_selection, self.reduced_motion, frame_time);
+                .tick(has_selection, self.reduced_motion.get(), frame_time);
         if dock_frame.active {
             self.motion_active.set(true);
         }
@@ -9209,7 +9209,7 @@ impl Shell {
         // Panel open/close glides the composer width; a window resize or a
         // seam drag is direct manipulation, so the width tracks the pointer.
         let direct_width =
-            self.reduced_motion || self.viewport_resized || self.pane_resize_dragging.is_some();
+            self.reduced_motion.get() || self.viewport_resized || self.pane_resize_dragging.is_some();
         let composer_width = self.composer_dock.borrow_mut().layout_width(
             composer_target_width(
                 main_content_width - session_reserve,
@@ -9514,7 +9514,7 @@ impl Shell {
                                     }),
                                 self.composer_dock.clone(),
                                 self.viewport_height,
-                                self.reduced_motion,
+                                self.reduced_motion.get(),
                                 frame_time,
                             )
                             // Centered on the transcript, which keeps the
@@ -9688,7 +9688,7 @@ impl Shell {
                         cx.notify();
                     }
                     this.finish_pane_resize(PaneResizeKind::Terminal);
-                    motion::set_hover(handle_key, false, this.reduced_motion);
+                    motion::set_hover(handle_key, false, this.reduced_motion.get());
                     window.refresh();
                 }),
             )
@@ -9696,7 +9696,7 @@ impl Shell {
                 MouseButton::Left,
                 cx.listener(|this, _, window, _| {
                     this.finish_pane_resize(PaneResizeKind::Terminal);
-                    motion::set_hover(handle_key, false, this.reduced_motion);
+                    motion::set_hover(handle_key, false, this.reduced_motion.get());
                     window.refresh();
                 }),
             );
@@ -11099,7 +11099,7 @@ impl Render for Shell {
 
         self.sync_browser_profile(cx);
         // Manual tween drive bookkeeping for this pass (see [`WidthTween`]).
-        self.reduced_motion = motion::reduced_motion(cx);
+        self.reduced_motion = motion::ReducedMotion::of(cx);
         self.motion_active.set(false);
         self.track_horizontal_fit(cx);
         self.suspend_hidden_right_images(cx);
@@ -11492,7 +11492,7 @@ impl Render for Shell {
                 let panel_handoff = self.composer_dock.borrow_mut().observe_column(
                     self.state.read(cx).selected_chat.is_some(),
                     (self.sidebar_now(), main_target_width),
-                    on_chat && !self.reduced_motion,
+                    on_chat && !self.reduced_motion.get(),
                     self.render_time.unwrap_or_else(std::time::Instant::now),
                 );
                 if panel_handoff {
@@ -13012,7 +13012,9 @@ mod exit_regressions {
                     duration,
                     curve: RESIZE.curve,
                 });
-                shell.reduced_motion = false;
+                // Motion on, read as a render would before the tween's frame.
+                crate::motion::set_reduced_motion(cx, false);
+                shell.reduced_motion = motion::ReducedMotion::of(cx);
                 // The frame started halfway through the transition but rendering
                 // crossed its deadline. Every region must still use that frame.
                 shell.render_time = Some(started + duration.mul_f32(0.5));
@@ -15333,7 +15335,6 @@ mod settings_modal_regressions {
         shell.update(cx, |shell, cx| {
             shell.debug_gate = Some(GatePhase::Ready);
             shell.splash = SplashPhase::Gone;
-            shell.reduced_motion = true;
             shell.settings.sidebar_organization = SidebarOrganization::ByStatus;
             shell.state.update(cx, |state, _| {
                 state.workspace_scope = Some(WorkspaceScope::Local);
@@ -15395,7 +15396,7 @@ mod settings_modal_regressions {
         shell.update(cx, |shell, cx| {
             shell.debug_gate = Some(GatePhase::Ready);
             shell.splash = SplashPhase::Gone;
-            shell.reduced_motion = true;
+            crate::motion::set_reduced_motion(cx, true);
             shell.state.update(cx, |state, _| {
                 state.workspace_scope = Some(WorkspaceScope::Local);
                 state.local_device_id = Some("local".into());
