@@ -128,7 +128,8 @@ impl Drop for Mounted {
         // SAFETY: AppKit and UIKit rule: `removeFromSuperview` on a view in no superview does
         // nothing.
         let () = unsafe { msg_send![&*self.web, removeFromSuperview] };
-        crate::web::close_page(&self.web);
+        // Its delegates are gone, so the end is not heard as a crash.
+        crate::web::end_page(&self.web);
     }
 }
 

@@ -226,6 +226,8 @@ pub struct PageCardView {
     placed_live: bool,
     /// The pointer or the keyboard is in the card.
     engaged: bool,
+    /// The pointer is over the card, as its hover listener last heard.
+    hovered: bool,
     /// The person made the page tall (or it asked to be): the window's share, not the cap.
     expanded: bool,
     /// Answers sent, until the view model drops what they answered.
@@ -292,6 +294,7 @@ impl PageCardView {
             width: 0.0,
             placed_live: false,
             engaged: false,
+            hovered: false,
             expanded: false,
             answered: Default::default(),
             done: None,
@@ -438,7 +441,13 @@ impl PageCardView {
         if self.in_pane() {
             return actions;
         }
-        let reveal = crate::motion::hover_t(&self.hover_key());
+        // slopty: a card drawn from its last frame while hovered read no fade, and the fades let
+        // its key go: a card the pointer is still over says so again before it reads it.
+        let key = self.hover_key();
+        if self.hovered && !crate::motion::hover_known(&key) {
+            crate::motion::set_hover(&key, true, true);
+        }
+        let reveal = crate::motion::hover_t(&key);
         let fence = fence::is_fence(&self.card.page);
         match doc {
             Some(PageDoc::Table(_)) => actions.push(header_action(
@@ -912,7 +921,13 @@ impl Render for PageCardView {
         div()
             .id(SharedString::from(format!("{}-card", self.card.page)))
             .group("page-card")
-            .on_hover(crate::motion::hover_listener(self.hover_key()))
+            .on_hover(cx.listener({
+                let fade = crate::motion::hover_listener(self.hover_key());
+                move |this, hovered: &bool, window, cx| {
+                    this.hovered = *hovered;
+                    fade(hovered, window, cx);
+                }
+            }))
             .role(gpui::Role::Group)
             .aria_label(SharedString::from(format!("Page: {}", self.card.title)))
             .aria_value(value)

@@ -955,6 +955,13 @@ pub fn hover_t(key: &str) -> f32 {
     HOVER_FADES.with(|fades| fades.borrow_mut().value_at(key, hover_now()))
 }
 
+/// slopty: whether the fades hold `key`, hovered or fading. They let go of a key no frame read,
+/// taking it for an element gone, which a view the window draws from its last frame also reads
+/// none of: a view that knows it is hovered tells them again ([`set_hover`]).
+pub fn hover_known(key: &str) -> bool {
+    HOVER_FADES.with(|fades| fades.borrow().entries.contains_key(key))
+}
+
 /// Record a hover flip for `key` (reduced motion snaps).
 pub fn set_hover(key: &str, hovered: bool, reduced: bool) {
     HOVER_FADES.with(|fades| {

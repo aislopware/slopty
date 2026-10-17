@@ -17304,3 +17304,26 @@ at 84–190 % of one on the host, 2.0 GB resident idle (5.3 GB during a run).
 SLOPTY_REPO_ROOT=$tree SLOPTY_LOCAL_CHECK=1 xtask check -p slopty-worker --quick --part lint
 SLOPTY_REPO_ROOT=$tree SLOPTY_LOCAL_CHECK=1 xtask check -p slopty-worker --quick --part tests
 ```
+
+## 2026-10-17 — twelve pages in one chat: `WebContent` processes held at the cap
+
+`media::twelve_pages_in_one_chat_stay_within_budget` (the app's e2e case in the guest) samples
+the `WebContent` processes the app is responsible for every 200 ms while the chat is scrolled a
+step at a time past twelve page cards; the window mounts at most eight web views (`MOUNTED_CAP`).
+
+| page host | most `WebContent` at once |
+| --- | --- |
+| a cooled view closed (`_close`), after the view it made room for was mounted | 11 |
+| its process also ended at once (`_killWebContentProcessAndResetState`) | 9 |
+| and the cooled view goes before the new one mounts | 8 or fewer (two runs, the case's assert) |
+
+A probe of WebKit on this Mac (macOS 26, a swift script making twelve views with their own
+non-persistent stores, eight kept): the default process pool neither prewarms
+(`_WKProcessPoolConfiguration.prewarmsProcessesAutomatically` 0) nor caches processes
+(`usesWebProcessCache` 0, `_processCacheCapacity` 0), so the extra processes were the page host's
+own: a closed page's process lingering until WebKit reaped it, and the mount that came first.
+
+```sh
+SLOPTY_E2E_GUEST=1 cargo xtask remote -p slopty-e2e --e2e app \
+  -E 'test(=media::twelve_pages_in_one_chat_stay_within_budget)'
+```

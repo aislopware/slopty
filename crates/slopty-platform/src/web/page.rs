@@ -822,8 +822,12 @@ impl PageHost {
         changes
     }
 
+    /// Carry out `changes`, the pages going cold first: a view mounted past the cap waits for
+    /// the one it cools to end, so the window never holds more than [`MOUNTED_CAP`].
     fn apply(&self, changes: &[Change]) {
-        for change in changes {
+        let (cooling, rest): (Vec<&Change>, Vec<&Change>) =
+            changes.iter().partition(|change| change.to == Presence::Cold);
+        for change in cooling.into_iter().chain(rest) {
             match (change.from, change.to) {
                 (Presence::Cold, _) => self.mount_view(change.page),
                 (_, Presence::Cold) => self.unmount_view(change.page),

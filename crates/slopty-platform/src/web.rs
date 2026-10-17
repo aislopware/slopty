@@ -887,18 +887,25 @@ fn end_pages(worker: u128) {
         });
         ending
     });
-    let kill = kill_selector();
     for web in ending {
-        // SAFETY: `NSObject` rule: `respondsToSelector:` may be asked of any object.
-        let private: bool = unsafe { msg_send![&*web, respondsToSelector: kill] };
-        if private {
-            // SAFETY: WebKit rule (`WKWebViewPrivate.h`): `_killWebContentProcessAndResetState`
-            // takes no argument and ends the page's process at once; the page is closed next
-            // and never loads again.
-            let () = unsafe { (&*web).send_message(kill, ()) };
-        }
-        close_page(&web);
+        end_page(&web);
     }
+}
+
+/// End `web`'s process at once and close its page: for a view whose process is its own (its
+/// own data store, and no pop-up), which a closed page alone would leave running until `WebKit`
+/// reaps it.
+fn end_page(web: &AnyObject) {
+    let kill = kill_selector();
+    // SAFETY: `NSObject` rule: `respondsToSelector:` may be asked of any object.
+    let private: bool = unsafe { msg_send![web, respondsToSelector: kill] };
+    if private {
+        // SAFETY: WebKit rule (`WKWebViewPrivate.h`): `_killWebContentProcessAndResetState`
+        // takes no argument and ends the page's process at once; the page is closed next and
+        // never loads again.
+        let () = unsafe { web.send_message(kill, ()) };
+    }
+    close_page(web);
 }
 
 /// `-[WKWebView _killWebContentProcessAndResetState]` (`WKWebViewPrivate.h`, `WebKit`'s
