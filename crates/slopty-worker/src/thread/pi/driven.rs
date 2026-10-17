@@ -46,11 +46,11 @@ pub(super) fn start_pi(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let mut child = command.spawn().map_err(|e| format!("pi could not start: {e}"))?;
+    let mut child = command.spawn().map_err(|e| format!("Couldn't start pi: {e}"))?;
     let (Some(stdin), Some(stdout), Some(stderr)) =
         (child.stdin.take(), child.stdout.take(), child.stderr.take())
     else {
-        return Err("pi's pipes could not be opened".to_owned());
+        return Err("Couldn't open pi's pipes".to_owned());
     };
     let session = session.to_owned();
     let stderr = tokio::spawn(async move {

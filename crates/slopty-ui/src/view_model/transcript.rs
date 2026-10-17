@@ -1862,7 +1862,7 @@ fn shell_edits(thread: ThreadId, item: &str, call: &ToolCall) -> Vec<MessagePart
         said.push(format!("{} more {files} changed", edits.more));
     }
     if edits.unavailable {
-        said.push("The full diff could not be taken".to_owned());
+        said.push("Couldn't take the full diff".to_owned());
     }
     if edits.skipped {
         said.push("A git step moved the working tree, so no diff was taken".to_owned());

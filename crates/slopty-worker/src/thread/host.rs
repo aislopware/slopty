@@ -1006,9 +1006,7 @@ impl Host {
                 let thread = meta.id;
                 match create(&mut inner, meta) {
                     Ok(_) => Outcome::Started { thread },
-                    Err(e) => {
-                        Outcome::Refused { reason: format!("its log could not be made: {e}") }
-                    }
+                    Err(e) => Outcome::Refused { reason: format!("Couldn't make its log: {e}") },
                 }
             }
             Err(reason) => Outcome::Refused { reason },

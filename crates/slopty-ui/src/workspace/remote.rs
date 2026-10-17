@@ -810,7 +810,7 @@ impl WorkspaceView {
                 }
                 None => {
                     let port = moved.port.number;
-                    Self::show_failure(format!("Port {port} could not be forwarded"), cx);
+                    Self::show_failure(format!("Couldn't forward port {port}"), cx);
                 }
                 Some(_) => {}
             }

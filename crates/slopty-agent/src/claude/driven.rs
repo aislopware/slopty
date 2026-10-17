@@ -954,7 +954,7 @@ impl Driven {
                 Some(format!("Effort setting unavailable right now · nothing changed: {error}"))
             }
             Control::Fast(_) => Some(format!("Fast mode is not available: {error}")),
-            Control::Thinking(_) => Some(format!("Thinking could not be changed: {error}")),
+            Control::Thinking(_) => Some(format!("Couldn't change thinking: {error}")),
             _ => None,
         };
         if let Some(said) = said {
@@ -1237,8 +1237,8 @@ impl Driven {
                 if str_at(message, "compact_result") == Some("failed") {
                     let why = str_at(message, "compact_error").map(compact_failed);
                     let said = why.map_or_else(
-                        || "Could not compact".to_owned(),
-                        |why| format!("Could not compact · {why}"),
+                        || "Couldn't compact".to_owned(),
+                        |why| format!("Couldn't compact · {why}"),
                     );
                     outs.extend(self.history.notice(Notice::INFO, &said, now));
                 }

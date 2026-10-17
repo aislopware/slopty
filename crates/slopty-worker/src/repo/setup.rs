@@ -230,7 +230,7 @@ pub async fn run(
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(e) => {
-            setup.tail = vec![format!("could not start the setup: {e}")];
+            setup.tail = vec![format!("Couldn't start the setup: {e}")];
             return Err(failed(setup, None));
         }
     };

@@ -981,7 +981,10 @@ pub fn note_row(
         Notice::GOAL => {
             let (line, more) = text.split_once('\n').unwrap_or((text.as_str(), ""));
             let lower = line.to_lowercase();
-            let tone = if lower.contains("could not") || lower.contains("failed") {
+            let tone = if lower.contains("could not")
+                || lower.contains("couldn't")
+                || lower.contains("failed")
+            {
                 NoteLine::ERROR
             } else if lower.contains("not yet") || lower.contains("paused") {
                 NoteLine::INFO

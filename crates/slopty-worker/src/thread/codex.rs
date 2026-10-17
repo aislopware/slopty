@@ -1366,7 +1366,7 @@ impl Session {
                                 }
                                 Outcome::Started { thread: followed.id }
                             }
-                            None => refused("Codex's thread could not be kept here".to_owned()),
+                            None => refused("Couldn't keep Codex's thread here".to_owned()),
                         }
                     }
                     Err(e) => refused(format!("Codex's answer did not read: {e}")),
@@ -1405,7 +1405,7 @@ impl Session {
                                 self.host.forked(thread, Fork { thread: from, turn });
                                 Outcome::Started { thread }
                             }
-                            None => refused("Codex's fork could not be kept here".to_owned()),
+                            None => refused("Couldn't keep Codex's fork here".to_owned()),
                         }
                     }
                     Err(e) => refused(format!("Codex's answer did not read: {e}")),

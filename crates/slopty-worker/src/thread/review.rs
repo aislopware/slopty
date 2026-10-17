@@ -224,7 +224,7 @@ impl Snapshots {
             Some(to) => Some(to),
             None => self.take(thread, &repo).await,
         };
-        let Some(to) = to else { return absent("The tree could not be snapshotted now") };
+        let Some(to) = to else { return absent("Couldn't snapshot the tree now") };
         match repo.changes(&from, &to).await {
             Ok(files) => Review { scope, from: Some(from), to: Some(to), files, absent: None },
             Err(e) => absent(&e.to_string()),

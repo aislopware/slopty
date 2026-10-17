@@ -1285,8 +1285,8 @@ fn a_failed_compaction_says_why() {
     assert_eq!(
         said,
         [
-            "Could not compact · conversation too long · /clear to start fresh",
-            "Could not compact · Error during compaction: boom",
+            "Couldn't compact · conversation too long · /clear to start fresh",
+            "Couldn't compact · Error during compaction: boom",
         ]
     );
 }

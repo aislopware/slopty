@@ -104,7 +104,7 @@ pub fn change_rule(home: &Path, cwd: &Path, change: &RuleChange) -> Result<(), S
             .map_err(|e| format!("{} is not JSON: {e}", path.display()))?,
         Ok(_) => json!({}),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => json!({}),
-        Err(e) => return Err(format!("{} could not be read: {e}", path.display())),
+        Err(e) => return Err(format!("Couldn't read {}: {e}", path.display())),
     };
     let fields = doc.as_object_mut().ok_or_else(|| format!("{} is no object", path.display()))?;
     let permissions = fields.entry("permissions").or_insert_with(|| json!({}));

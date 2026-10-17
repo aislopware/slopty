@@ -52,7 +52,7 @@ pub const CATCH_WAIT: Duration = Duration::from_secs(30);
 const WIGGLE: f32 = 4.0;
 
 /// The catcher never showed under the pointer.
-const NO_CATCHER: &str = "the worker could not catch the drag";
+const NO_CATCHER: &str = "the worker couldn't catch the drag";
 /// The drag never reached the catcher.
 const NOT_REACHED: &str = "the drag did not reach the worker's catcher";
 /// The catch never said what it took.

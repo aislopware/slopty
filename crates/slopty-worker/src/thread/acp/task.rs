@@ -49,11 +49,11 @@ pub(super) fn start_agent(
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     let program = launch.program.display().to_string();
-    let mut child = command.spawn().map_err(|e| format!("{program} could not start: {e}"))?;
+    let mut child = command.spawn().map_err(|e| format!("Couldn't start {program}: {e}"))?;
     let (Some(stdin), Some(stdout), Some(stderr)) =
         (child.stdin.take(), child.stdout.take(), child.stderr.take())
     else {
-        return Err(format!("{program}'s pipes could not be opened"));
+        return Err(format!("Couldn't open {program}'s pipes"));
     };
     let stderr = tokio::spawn(async move {
         let mut kept = VecDeque::with_capacity(STDERR_LINES);

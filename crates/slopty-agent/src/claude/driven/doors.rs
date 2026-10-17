@@ -508,7 +508,7 @@ impl Driven {
     /// checkpoints; a turn whose message is not known says so at once.
     pub fn rewind(&mut self, turn: TurnId, now: WallMs) -> Vec<Out> {
         let Some(prompt) = self.history.prompt_of(turn) else {
-            let text = "The files could not be put back: that turn's message is not known";
+            let text = "Couldn't put the files back: that turn's message is not known";
             return self.history.notice(Notice::INFO, text, now);
         };
         let request = json!({ "subtype": "rewind_files", "user_message_id": prompt });
@@ -550,7 +550,7 @@ impl Driven {
             let why = str_at(said, "error").unwrap_or("no checkpoint for that message");
             return self.history.notice(
                 Notice::INFO,
-                &format!("The files could not be put back: {why}"),
+                &format!("Couldn't put the files back: {why}"),
                 now,
             );
         }

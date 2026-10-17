@@ -100,7 +100,7 @@ fn search_until(
                 drop(tx);
             });
         if let Err(e) = walking {
-            return Err(format!("The search could not start: {e}"));
+            return Err(format!("Couldn't start the search: {e}"));
         }
         Ok(page_out(&rx, cancel, emit))
     })?;

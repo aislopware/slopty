@@ -132,7 +132,7 @@ fn open_answer(request: RequestId, msg: WorkerMsg) -> Option<Result<SessionId>> 
     match msg {
         WorkerMsg::SessionOpened { request: r, summary } if r == request => Some(Ok(summary.id)),
         WorkerMsg::Failed { request: r, message, .. } if r == request => {
-            Some(Err(anyhow::anyhow!("the worker could not open it: {message}")))
+            Some(Err(anyhow::anyhow!("the worker couldn't open it: {message}")))
         }
         _other => None,
     }

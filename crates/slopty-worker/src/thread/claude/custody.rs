@@ -226,7 +226,7 @@ impl Custody {
     pub async fn take(&self, id: SessionId, pid: u32) -> Result<Taken, String> {
         let Attached { master, backlog, size, started_ms, term, .. } =
             self.with(async |c| c.attach(id).await).await?;
-        let kept = master.try_clone().map_err(|e| format!("its socket could not be kept: {e}"))?;
+        let kept = master.try_clone().map_err(|e| format!("Couldn't keep its socket: {e}"))?;
         let child = Adoptee { pid, size, started_ms, term, piped: true };
         self.inner.held.lock().insert(id, (kept, child));
         Ok(Taken { socket: master, backlog })

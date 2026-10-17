@@ -396,7 +396,7 @@ impl Served {
             return Ok(launcher.clone());
         }
         let gate = slopty_agent::pi::install(&self.data_dir)
-            .map_err(|e| format!("Slopty's gate for pi could not be written: {e}"))?;
+            .map_err(|e| format!("Couldn't write Slopty's gate for pi: {e}"))?;
         let pi = crate::facts::installed("pi", self.path.clone())
             .await
             .ok_or_else(|| "pi is not installed".to_owned())?;
@@ -691,7 +691,7 @@ pub async fn sessions(agent: &Path, cwd: &str, limit: u32) -> Result<Vec<PastSes
     let mut listing = match tokio::fs::read_dir(&dir).await {
         Ok(listing) => listing,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(format!("pi's sessions could not be listed: {e}")),
+        Err(e) => return Err(format!("Couldn't list pi's sessions: {e}")),
     };
     let mut found = Vec::new();
     while let Some(entry) = listing.next_entry().await.map_err(|e| e.to_string())? {

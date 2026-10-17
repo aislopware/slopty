@@ -827,7 +827,7 @@ mod claude {
         rig.send(&claude, thread, "Say more.");
         let state = rig
             .until(thread, "why it was kept", |s| {
-                notices(s).iter().any(|n| n.starts_with("Its transcript could not be read"))
+                notices(s).iter().any(|n| n.starts_with("Couldn't read its transcript"))
             })
             .await;
         assert_eq!(state.turns.len(), 1, "its turn kept: {:?}", state.turns);

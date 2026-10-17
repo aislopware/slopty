@@ -888,7 +888,7 @@ impl Served {
                 let records = match self.records(&state.meta).await {
                     Ok(records) => records,
                     Err(why) => {
-                        let why = format!("Its transcript could not be read: {why}");
+                        let why = format!("Couldn't read its transcript: {why}");
                         return self.host.record_start(id, refused(&why));
                     }
                 };
@@ -1121,7 +1121,7 @@ impl Served {
             Ok(taken) => taken,
             Err(why) => {
                 tracing::warn!(%thread, "Claude Code could not start: {why}");
-                let why = format!("Claude Code could not start: {why}");
+                let why = format!("Couldn't start Claude Code: {why}");
                 take(&self.host, driven.exited(Some(&why), WallMs::now()));
                 return;
             }
@@ -1366,7 +1366,7 @@ const HELD_CHECK: std::time::Duration = std::time::Duration::from_secs(1);
 const FREED: &str = "The other Claude Code on this session ended. A message here continues it.";
 
 /// What a thread says when its transcript cannot be read.
-const UNREAD: &str = "Its transcript could not be read, so the thread was kept as it was";
+const UNREAD: &str = "Couldn't read its transcript, so the thread was kept as it was";
 
 /// Say `text` on `thread`, a notice of the worker's own, its id from `kind` and the time.
 fn say(host: &Host, thread: ThreadId, kind: &str, text: &str) {

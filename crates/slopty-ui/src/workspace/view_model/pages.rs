@@ -817,7 +817,7 @@ impl WorkspaceView {
                 Some(bytes) => view.page_doc_load(&key, kind, bytes, cx),
                 None => view.page_state(
                     &key,
-                    |s| s.failed = Some("Its file could not be read".to_owned()),
+                    |s| s.failed = Some("Couldn't read its file".to_owned()),
                     cx,
                 ),
             });
@@ -1053,7 +1053,7 @@ impl WorkspaceView {
                 Some(html) => view.page_load(&key, title, html, false, cx),
                 None => view.page_state(
                     &key,
-                    |s| s.failed = Some("Its page could not be read".to_owned()),
+                    |s| s.failed = Some("Couldn't read its page".to_owned()),
                     cx,
                 ),
             });
@@ -1338,7 +1338,7 @@ impl WorkspaceView {
                 AppAnswer::Called { .. } => {
                     self.page_state(
                         &key,
-                        |s| s.failed = Some("Its view could not be read".to_owned()),
+                        |s| s.failed = Some("Couldn't read its view".to_owned()),
                         cx,
                     );
                 }
