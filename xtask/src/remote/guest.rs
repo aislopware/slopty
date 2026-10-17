@@ -108,6 +108,80 @@ pub struct Run<'a> {
     pub goldens: Goldens,
     /// The simulator case on this device, rather than the app's.
     pub ios: Option<crate::ios::SimKind>,
+    /// How many times the case runs in this one session.
+    pub repeat: Repeat,
+}
+
+/// How many times a run's case runs, in one guest session: booted and copied once, each time
+/// on a fresh simulator, its failures' artifacts kept apart ([`e2e`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Repeat {
+    /// This many times, every one, to see how often it fails (`--repeat`; one is a plain run).
+    Times(u32),
+    /// Up to this many times, stopping at the first failure (`--until-fail`): whether a fix
+    /// holds.
+    UntilFail(u32),
+}
+
+impl Repeat {
+    /// The most times the case runs.
+    const fn most(self) -> u32 {
+        match self {
+            Self::Times(n) | Self::UntilFail(n) => n,
+        }
+    }
+}
+
+/// The confidence a repeated run reports at, and [`clean_runs_for`] reaches.
+const CONFIDENCE: f64 = 0.95;
+
+/// The clean runs in a row after which a flake that failed `rate` of its runs (0 < rate < 1)
+/// is gone at [`CONFIDENCE`]: were it still there, that many would all pass with a chance of at
+/// most 5 %, `(1 - rate)^n <= 0.05`. A flake failing 1 run in 5 takes 14.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "a small positive count, rounded up"
+)]
+fn clean_runs_for(rate: f64) -> u32 {
+    (1.0 - CONFIDENCE).log(1.0 - rate).ceil().max(1.0) as u32
+}
+
+/// What `failed` failures in `ran` runs of `most` say, for [`Repeat`]'s last line.
+fn repeat_verdict(repeat: Repeat, failed: u32, ran: u32) -> String {
+    let most = repeat.most();
+    if failed == 0 {
+        // The rate a flake would need to fail none of `ran` runs with a 5 % chance.
+        let bound = 1.0 - (1.0 - CONFIDENCE).powf(1.0 / f64::from(ran));
+        return format!(
+            "0 of {ran} failed: a flake failing 1 run in {:.1} or more often would have shown, \
+             at 95 %; one seen failing 1 in 5 is fixed after {} clean runs in a row",
+            1.0 / bound,
+            clean_runs_for(0.2)
+        );
+    }
+    if let Repeat::UntilFail(_) = repeat {
+        if ran == 1 {
+            return format!(
+                "failed on the first run, of up to {most}: `--repeat <N>` shows how often it fails"
+            );
+        }
+        let needed = clean_runs_for(1.0 / f64::from(ran));
+        return format!(
+            "failed at run {ran} of up to {most}, about 1 in {ran}: a fix holds at 95 % after \
+             {needed} clean runs in a row (`--until-fail {needed}`)"
+        );
+    }
+    if failed == ran {
+        return format!("{failed} of {ran} failed: it fails every run, a bug rather than a flake");
+    }
+    let rate = f64::from(failed) / f64::from(ran);
+    let needed = clean_runs_for(rate);
+    format!(
+        "{failed} of {ran} failed, 1 in {:.1}: a fix holds at 95 % after {needed} clean runs in a \
+         row (`--until-fail {needed}`)",
+        1.0 / rate
+    )
 }
 
 /// How a run here went.
@@ -241,7 +315,7 @@ fn prune(home: &Path, ip: &str, dir: &Path) -> Result<()> {
         home,
         ip,
         &format!(
-            "pkill -9 -f '{target}/debug/[s]lopty' ; \
+            "pkill -9 -f '{target}/debug/[s]lopty|slopty-e2e-bin-[0-9a-f]+/[s]lopty' ; \
              find \"$(getconf DARWIN_USER_TEMP_DIR)\" /private/tmp -maxdepth 1 \\( -name 'Deleting-*' \
              -o -name 'slopty-e2e-*' -o -name 'stub-claude-*' \\) -exec rm -rf {{}} + ; \
              sudo mkdir -p '{dir}' && sudo chown {USER} '{dir}' && touch '{dir}' && cd '{lanes}' && \
@@ -623,66 +697,137 @@ pub fn e2e(root: &Path, lane: &str, sha: &str, run: &Run<'_>) -> Result<Outcome>
         Goldens::AcceptAll => Some("all"),
         Goldens::Review => Some("review"),
     };
-    // The simulator booted and the app installed in the session the tests run in.
-    let simulator = if let Some(sim) = run.ios {
-        Some(simulator(&home, sim, &stage.join("Slopty.app"))?)
-    } else {
+    let most = run.repeat.most();
+    ensure!(most >= 1, "a case runs at least once");
+    ensure!(
+        most == 1 || matches!(run.goldens, Goldens::Compare | Goldens::Review),
+        "a repeated run compares its frames or reviews them; an accept takes one run"
+    );
+    if run.ios.is_none() {
         // A booted simulator holds CoreAudio, and the app's audio player then takes tens of
         // seconds to open: no simulator stays up through the app's case.
         quiet(&home, None)?;
-        None
-    };
-    let (filter, env) = match &simulator {
-        Some(udid) => (
-            crate::e2e::ios_filterset(run.filter),
-            crate::e2e::ios_env(data.as_str(), debug.as_str(), accept, udid),
-        ),
-        None => (
-            crate::e2e::app_filterset(run.filter),
-            crate::e2e::app_env(data.as_str(), debug.as_str(), accept),
-        ),
-    };
-    let filter = filter.unwrap_or_default();
-    // One app in one simulator: its tests take turns.
-    let output = match if simulator.is_some() { 1 } else { threads() } {
-        1 => "--no-capture".to_owned(),
-        // Passing tests' output too: their MEASURE lines are what a run reports.
-        n => format!("--test-threads {n} --failure-output final --success-output final"),
-    };
-    let mut command = tart(&home);
-    command.args(["exec", GUEST, "/usr/bin/env"]);
-    for (key, value) in env {
-        command.arg(format!("{key}={value}"));
     }
-    command.arg(format!("INSTA_WORKSPACE_ROOT={tree}"));
-    command.args([
-        "/bin/sh",
-        "-c",
-        &format!(
-            "mkdir -p '{data}/run' '{data}/artifacts' && cd '{tree}' && exec '{stage}/cargo-nextest' \
-             nextest run --config-file '{stage}/nextest.toml' --archive-file '{archive}' \
-             --extract-to '{stage}/x' --extract-overwrite --workspace-remap '{tree}' \
-             --run-ignored only {output} --no-fail-fast -E \"$0\""
-        ),
-        &filter,
-    ]);
     let logs = root.join("target/remote").join(run.name).join("logs/logs-run");
     if logs.exists() {
         std::fs::remove_dir_all(&logs)?;
     }
     std::fs::create_dir_all(&logs)?;
     let log = logs.join("e2e.log");
+    // Each run's log, and a failed run's whole data directory and kept stack roots.
+    let kept = root.join("target/remote").join(run.name).join("repeat");
+    if most > 1 {
+        if kept.exists() {
+            std::fs::remove_dir_all(&kept)?;
+        }
+        std::fs::create_dir_all(&kept)?;
+    }
     println!(
-        "▶ e2e {case} in {GUEST}{}",
-        run.filter.map(|f| format!(" -E {f}")).unwrap_or_default()
+        "▶ e2e {case} in {GUEST}{}{}",
+        run.filter.map(|f| format!(" -E {f}")).unwrap_or_default(),
+        match run.repeat {
+            Repeat::Times(1) => String::new(),
+            Repeat::Times(n) => format!(", {n} times"),
+            Repeat::UntilFail(n) => format!(", up to {n} times until one fails"),
+        }
     );
-    let status = teed(command, &log);
+    let mut status = None;
+    let (mut ran, mut failed, mut first_failed) = (0_u32, 0_u32, None);
+    for at in 1..=most {
+        if at > 1 {
+            // This run starts as a run alone does: the last run's daemons gone, from `debug`
+            // or from the harness's copies of the binaries, and its data, stack roots and
+            // frames, kept if it failed, cleared. The copies stay.
+            ssh(
+                &home,
+                &ip,
+                &format!(
+                    "pkill -9 -f '{target}/debug/[s]lopty|slopty-e2e-bin-[0-9a-f]+/[s]lopty' ; rm -rf '{data}' ; find \"$(getconf DARWIN_USER_TEMP_DIR)\" /private/tmp -maxdepth 1 \
+                     -name 'slopty-e2e-*' ! -name 'slopty-e2e-bin-*' -exec rm -rf {{}} +"
+                ),
+            )?;
+        }
+        // The simulator booted and the app installed in the session the tests run in: a
+        // fresh clone each run, as a run alone starts.
+        let simulator = match run.ios {
+            Some(sim) => Some(simulator(&home, sim, &stage.join("Slopty.app"))?),
+            None => None,
+        };
+        let (filter, env) = match &simulator {
+            Some(udid) => (
+                crate::e2e::ios_filterset(run.filter),
+                crate::e2e::ios_env(data.as_str(), debug.as_str(), accept, udid),
+            ),
+            None => (
+                crate::e2e::app_filterset(run.filter),
+                crate::e2e::app_env(data.as_str(), debug.as_str(), accept),
+            ),
+        };
+        let filter = filter.unwrap_or_default();
+        // One app in one simulator: its tests take turns.
+        let output = match if simulator.is_some() { 1 } else { threads() } {
+            1 => "--no-capture".to_owned(),
+            // Passing tests' output too: their MEASURE lines are what a run reports.
+            n => format!("--test-threads {n} --failure-output final --success-output final"),
+        };
+        let mut command = tart(&home);
+        command.args(["exec", GUEST, "/usr/bin/env"]);
+        for (key, value) in env {
+            command.arg(format!("{key}={value}"));
+        }
+        command.arg(format!("INSTA_WORKSPACE_ROOT={tree}"));
+        command.args([
+            "/bin/sh",
+            "-c",
+            &format!(
+                "mkdir -p '{data}/run' '{data}/artifacts' && cd '{tree}' && exec '{stage}/cargo-nextest' \
+                 nextest run --config-file '{stage}/nextest.toml' --archive-file '{archive}' \
+                 --extract-to '{stage}/x' --extract-overwrite --workspace-remap '{tree}' \
+                 --run-ignored only {output} --retries 0 --no-fail-fast -E \"$0\""
+            ),
+            &filter,
+        ]);
+        if most > 1 {
+            println!(
+                "  run {at} of {}{most}",
+                if matches!(run.repeat, Repeat::UntilFail(_)) { "up to " } else { "" }
+            );
+        }
+        let this_log = if most == 1 { log.clone() } else { kept.join(format!("run-{at}.log")) };
+        let this = teed(command, &this_log);
+        ran = at;
+        let this = match this {
+            Ok(this) => this,
+            Err(error) => {
+                status = Some(Err(error));
+                break;
+            }
+        };
+        let passed = this.code() == Some(0)
+            || (run.filter.is_some() && this.code() == Some(crate::e2e::NO_TESTS_RUN));
+        if !passed && most > 1 {
+            failed = failed.saturating_add(1);
+            let _first = first_failed.get_or_insert(at);
+            let dir = kept.join(format!("run-{at}"));
+            keep_failed(&home, &ip, &data, &dir);
+            println!("  run {at} FAILED: its log, data, frames and stack roots kept in {dir}");
+        }
+        status = Some(Ok(this));
+        if !passed && (most == 1 || matches!(run.repeat, Repeat::UntilFail(_))) {
+            break;
+        }
+    }
+    if most > 1 {
+        // `-E failed` reads the first failed run's log, or the last run's when none failed.
+        let chosen = kept.join(format!("run-{}.log", first_failed.unwrap_or(ran)));
+        let _copied = std::fs::copy(&chosen, &log);
+    }
     if let Some(sim) = run.ios {
         // The run's simulator goes, and the next run's is made ready while the guest idles.
         let _dropped = drop_devices(&home, &run_device(sim));
         spare(&home, sim);
     }
-    let status = status?;
+    let status = status.context("no run")??;
     let tests = copying.elapsed();
     stop_when_idle(&home);
 
@@ -715,8 +860,11 @@ pub fn e2e(root: &Path, lane: &str, sha: &str, run: &Run<'_>) -> Result<Outcome>
         .find(|l| l.contains("Summary ["))
         .map_or_else(|| "no summary: see the log".to_owned(), |l| l.trim().to_owned());
     let code = status.code();
-    let passed =
-        code == Some(0) || (run.filter.is_some() && code == Some(crate::e2e::NO_TESTS_RUN));
+    let passed = failed == 0
+        && (code == Some(0) || (run.filter.is_some() && code == Some(crate::e2e::NO_TESTS_RUN)));
+    if most > 1 {
+        println!("  {}", repeat_verdict(run.repeat, failed, ran));
+    }
     if !passed {
         let failed = super::failed_tests(&text);
         for test in &failed {
@@ -725,6 +873,28 @@ pub fn e2e(root: &Path, lane: &str, sha: &str, run: &Run<'_>) -> Result<Outcome>
         println!("  every line: {log}; renders and diffs: {renders}");
     }
     Ok(Outcome { passed, build: built, tests, summary })
+}
+
+/// Keep a failed run's whole data directory (its log, dumps and frames) and every stack root it
+/// left in `dir` here, before the next run clears them. Every root, marked for inspection or
+/// not: the simulator case's shared root is never marked, and the run before cleared them all.
+fn keep_failed(home: &Path, ip: &str, data: &Path, dir: &Path) {
+    let gathered = ssh(
+        home,
+        ip,
+        &format!(
+            "mkdir -p '{data}/roots' && find \"$(getconf DARWIN_USER_TEMP_DIR)\" /private/tmp -maxdepth 1 \
+             -type d -name 'slopty-e2e-*' ! -name 'slopty-e2e-bin-*' -exec sh -c \
+             'mv \"$@\" \"$0\"' '{data}/roots' {{}} +"
+        ),
+    );
+    let from = format!("{ip}:{data}/");
+    let pulled = std::fs::create_dir_all(dir)
+        .map_err(anyhow::Error::from)
+        .and_then(|()| rsync(home, &["--no-specials", "--no-devices", &from, dir.as_str()], dir));
+    if let Err(error) = gathered.and(pulled) {
+        println!("  keeping the failed run's artifacts: {error:#}");
+    }
 }
 
 /// `simctl` in `guest`, through `tart exec`: in the session the tests run in, whose simulator
@@ -1076,6 +1246,29 @@ mod tests {
         assert_eq!(older, ["DEVLOOP", "C3", "E2"]);
         let _no_free = super::lanes_by_use("1760695200 E2\n", "B").unwrap_err();
         let _not_a_number = super::lanes_by_use("free lots\n", "B").unwrap_err();
+    }
+
+    /// A repeated run's verdict: how often it failed, and the clean runs in a row after which a
+    /// fix holds at 95 % for the rate it showed: 14 for a flake failing 1 run in 5.
+    #[test]
+    fn a_repeated_run_says_how_often_it_failed_and_what_a_fix_needs() {
+        use super::Repeat::{Times, UntilFail};
+        assert_eq!(super::clean_runs_for(0.2), 14);
+        assert_eq!(super::clean_runs_for(0.5), 5);
+        assert_eq!(super::clean_runs_for(0.1), 29);
+        assert_eq!(super::clean_runs_for(0.01), 299);
+        let said = super::repeat_verdict(Times(10), 2, 10);
+        assert!(said.starts_with("2 of 10 failed, 1 in 5.0") && said.contains("--until-fail 14"));
+        let said = super::repeat_verdict(Times(14), 0, 14);
+        assert!(said.starts_with("0 of 14 failed") && said.contains("1 run in 5.2"), "{said}");
+        let said = super::repeat_verdict(Times(4), 4, 4);
+        assert!(said.contains("fails every run"), "{said}");
+        let said = super::repeat_verdict(UntilFail(30), 1, 10);
+        assert!(
+            said.starts_with("failed at run 10 of up to 30") && said.contains("--until-fail 29")
+        );
+        let said = super::repeat_verdict(UntilFail(30), 1, 1);
+        assert!(said.contains("`--repeat <N>`"), "{said}");
     }
 
     /// Only the goldens whose bytes the run changed, or wrote anew, reach the tree; one the

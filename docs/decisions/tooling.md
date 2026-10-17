@@ -2186,8 +2186,8 @@ more full-window layer.
     clips none of which lies inside another, the innermost and the outermost are kept; WGPU and
     Windows draw no rounded clip (WGPU stays zed's). Each of Slopty's rounded elements with hidden
     overflow now cuts its children at the corners, so goldens with content under a rounded
-    corner move. Slopty's `rounded_clip` element does what `.rounded().overflow_hidden()` does
-    now.
+    corner move. Slopty's `rounded_clip` element did what `.rounded().overflow_hidden()` does
+    now, and is deleted.
   - Fades and clips inside a scroll layer's content no longer keep the layer from compositing
     its tiles: they move into the content's space with it, each tile carries its own copy, and what
     lists and overlays draw of the content into the frame moves them back. Only callbacks handed to
@@ -2460,3 +2460,25 @@ more full-window layer.
   Test: `remote::guest::tests::the_guest_s_lanes_go_least_recently_used_first` (`xtask`). The
   sizes behind the budget, and a live run (two lanes' directories dropped, 24.4 GiB free, 3.6 s), are in `docs/MEASUREMENTS.md` ("the e2e guest's
   disk").
+- ✅ **A flake is measured, and called fixed only after the clean runs that show it at 95 %**
+  (2026-10-18). Rerunning a red test until it passes does not separate a fix from luck.
+  `cargo xtask remote --e2e app|ios -E '<filterset>' --repeat N` runs the case N times in one
+  guest session: one boot and one copy, and every run starts on a fresh app, with the
+  simulator case on a fresh clone of the pristine simulator. Each run has its own data
+  directory and stack roots, and the last run's daemons are killed before it starts. A worker
+  the first run left kept the second run's worker from printing its address. nextest runs with `--retries 0`, so a retry cannot hide a failure.
+  - At the end it prints "k of N failed". For a flake that fails at rate p, it also prints the
+    clean runs in a row n with (1 − p)^n ≤ 5 %: 5 for 1 in 2, 14 for 1 in 5, 29 for 1 in 10,
+    299 for 1 in 100. Zero failures print the rate a flake would have to stay under to go
+    unseen at 95 %, about 1 in N/3.
+  - `--until-fail N` stops at the first failure: the fix's check, with N from the rate.
+  - Each failed run's log, its whole data directory (the app's dumps and frames) and every
+    stack root it left, marked for inspection or not, come back to
+    `target/remote/<name>/repeat/run-<i>/`.
+    `-E failed` then reads the first failed run's log.
+  - The rule: a flake is called fixed only after `--until-fail <n>` passes, with n taken from
+    the rate it showed (`--repeat`, or the gate's FLAKY counts). Name n and the rate in the
+    commit. Repeating is the guest's only, and an accept of goldens takes one run.
+  Tests: `remote::guest::tests::a_repeated_run_says_how_often_it_failed_and_what_a_fix_needs`
+  and `remote::tests::a_repeat_takes_an_e2e_case_and_one_way_of_repeating` (`xtask`), and the
+  runs in `docs/MEASUREMENTS.md` ("repeating a case in the guest").

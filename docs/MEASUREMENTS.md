@@ -17451,3 +17451,19 @@ The same within noise; #76 reports about 0.7 ms on Metal for its groups.
 # in .research/gpui-fast (the fork checkout, not Slopty's)
 cargo test -p gpui_apple --lib rounded_overflow_mask_cost -- --ignored --nocapture
 ```
+
+## 2026-10-18 — repeating a case in the guest (`--repeat`, `--until-fail`)
+
+Repeated runs, one guest session each (HEAD at the time, `--head`):
+
+| run | per run | verdict |
+| --- | --- | --- |
+| `--e2e app -E 'test(a_hang_of_the_main_thread_is_filed_like_a_crash)' --repeat 3` | tests 21.2 s, then 3.3 s and 2.8 s (no boot, no copy) | 0 of 3 failed |
+| `--e2e ios -E 'test(a_phones_chat_holds_the_dock_and_a_subagents_card)' --until-fail 3` | simulator 57.5 s, tests 69.6 s | failed on the first run |
+| the same, `--repeat 2` | run 1: spare taken 44.4 s, tests 124 s; run 2: fresh clone 61.9 s, tests 34.1 s | 2 of 2 failed |
+
+An iOS run after the first pays a fresh clone's boot (about 60 s), because there is no spare
+to take inside one session. An app run pays only its tests. Every failed run's log and data
+came back, and so did run 1's stack root (860 KB). Run 2's root did not, because the harness
+removes a root whose stack failed to start (`the worker did not print its address in time`)
+rather than keeping it.

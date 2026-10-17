@@ -52,7 +52,13 @@ zed itself so it is never behind zed while longbridge lags.
   a time; `--place runner` (or `SLOPTY_E2E_GUEST=0`) sends either to a runner Mac, and probes
   always go there; `--goldens accept` (or `accept-all`) applies the run's goldens to the tree, as `--accept-snapshots` does its insta snapshots (on runners: a patch of anything
   else, which no accept writes, is refused whole and its paths named), and `--goldens review`
-  brings every changed frame's render and diff to `target/e2e/artifacts/`. `--workflow-ref
+  brings every changed frame's render and diff to `target/e2e/artifacts/`. A flake gets
+  measured, not rerun by hand. `--repeat N` runs the guest's case N times in one session, with
+  one boot and one copy and a fresh app and simulator each time, and prints "k of N failed"
+  with the clean runs in a row a fix needs at 95 %. `--until-fail N` stops at the first failure.
+  Each failed run's log, data, frames and kept stack roots go to
+  `target/remote/<name>/repeat/run-<i>/`. A flake counts as fixed only after that many clean
+  runs (`docs/decisions/tooling.md`). `--workflow-ref
   <branch>` runs that branch's `check.yml`, to try a change to it. A newer check of the same name
   cancels the older one's run. A lane's directory is one check's at a time (a lock on
   `target/local/<lane>/.lock`): a second check of the lane waits, saying "waiting for <lane>'s

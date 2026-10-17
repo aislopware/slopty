@@ -318,6 +318,16 @@ pub struct RemoteOpts {
     /// The simulator the ios case uses: iphone or ipad.
     #[arg(long, default_value = "iphone", requires = "e2e")]
     pub sim: String,
+    /// Run the e2e case (in the guest) N times in one session, each on a fresh app and
+    /// simulator, keeping every failed run's artifacts, then say how often it failed and how many
+    /// clean runs in a row a fix needs at 95 %: the rate of a flake.
+    #[arg(long, value_name = "N", requires = "e2e", conflicts_with = "until_fail",
+          value_parser = clap::value_parser!(u32).range(1..))]
+    pub repeat: Option<u32>,
+    /// Run the e2e case (in the guest) up to N times, stopping at the first failure and keeping
+    /// its artifacts: whether a fix holds (N from `--repeat`'s rate).
+    #[arg(long, value_name = "N", requires = "e2e", value_parser = clap::value_parser!(u32).range(1..))]
+    pub until_fail: Option<u32>,
     /// Take the tree's edits under these paths only (files or directories, repeatable), on top
     /// of `HEAD`: another lane's unfinished edits elsewhere stay out of the check.
     #[arg(long = "only", value_name = "PATH")]
@@ -426,6 +436,11 @@ pub fn run(sh: &Shell, opts: &RemoteOpts) -> Result<()> {
         && !opts.accept_snapshots
         && e2e_in_guest()
         && guest::available();
+    ensure!(
+        in_guest || (opts.repeat.is_none() && opts.until_fail.is_none()),
+        "--repeat and --until-fail run in the e2e guest: the app or ios case, --place auto, no \
+         --run or --probe, and the guest there (`SLOPTY_E2E_GUEST` not 0)"
+    );
     let here = opts.attach.is_none()
         && (!opts.packages.is_empty() || in_guest)
         && opts.place == Place::Auto
@@ -496,6 +511,10 @@ pub fn run(sh: &Shell, opts: &RemoteOpts) -> Result<()> {
                     filter: opts.filter.as_deref(),
                     goldens: opts.goldens,
                     ios,
+                    repeat: match (opts.repeat, opts.until_fail) {
+                        (_, Some(n)) => guest::Repeat::UntilFail(n),
+                        (n, None) => guest::Repeat::Times(n.unwrap_or(1)),
+                    },
                 };
                 guest::e2e(&root, lane(&opts.name), &sha, &run)
             });
@@ -1450,6 +1469,27 @@ mod tests {
         }
         let line = std::iter::once("remote").chain(args.iter().copied());
         <Cli as clap::Parser>::try_parse_from(line).expect("the options parse").opts
+    }
+
+    /// `--repeat` and `--until-fail` take an e2e case and at least one run, and not each other.
+    #[test]
+    fn a_repeat_takes_an_e2e_case_and_one_way_of_repeating() {
+        #[derive(clap::Parser)]
+        struct Cli {
+            #[command(flatten)]
+            opts: RemoteOpts,
+        }
+        let parses = |args: &[&str]| {
+            <Cli as clap::Parser>::try_parse_from(
+                std::iter::once("remote").chain(args.iter().copied()),
+            )
+            .is_ok()
+        };
+        assert_eq!(opts(&["--e2e", "ios", "--repeat", "20"]).repeat, Some(20));
+        assert_eq!(opts(&["--e2e", "app", "--until-fail", "14"]).until_fail, Some(14));
+        assert!(!parses(&["--repeat", "20"]));
+        assert!(!parses(&["--e2e", "app", "--repeat", "0"]));
+        assert!(!parses(&["--e2e", "app", "--repeat", "5", "--until-fail", "14"]));
     }
 
     /// A check asks only what the dispatched `check.yml` can run: this tree's runs a full check
