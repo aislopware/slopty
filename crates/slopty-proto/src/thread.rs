@@ -44,7 +44,7 @@ pub use detail::{Clipped, ContentRef, Image, Patch, ToolDetail};
 pub use reduce::{RESOLVED_KEPT, TableState, ThreadState};
 pub use work::{
     Activity, AgentNote, CallNote, ContextCategory, ContextUsage, Goal, Rewound, Rule, RuleChange,
-    Rules, SubagentKind, Surface, SurfaceEvent, TaskNote, TaskUsage,
+    Rules, SideExchange, SubagentKind, Surface, SurfaceEvent, TaskNote, TaskUsage,
 };
 
 macro_rules! uuid_id {
@@ -274,6 +274,8 @@ impl Cap {
     /// [`wire::Intent::Shell`]: a command run on the agent's machine, its output given the agent
     /// as the TUI's `!` gives it.
     pub const SHELL: &'static str = "shell";
+    /// [`wire::Intent::Side`]: a side question, answered beside the conversation.
+    pub const SIDE: &'static str = "side";
     /// The worker snapshots the working tree at each turn edge ([`Action::Snapshot`]).
     pub const SNAPSHOTS: &'static str = "snapshots";
     /// [`wire::Intent::Send`] with [`Delivery::Steer`]: a message taken mid-turn.
@@ -1542,6 +1544,8 @@ pub enum Action {
     Notified(AgentNote),
     /// The prompt the agent guesses the person sends next; `None` once it no longer holds.
     Suggested(Option<String>),
+    /// A side question asked or answered, in place of any of its intent's.
+    Side(SideExchange),
     /// The agent's permission rules, as it lists them.
     RulesSet(Rules),
     /// The person's own status line, run on the worker as the agent's TUI runs it: its text,

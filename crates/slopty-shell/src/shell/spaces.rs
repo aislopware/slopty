@@ -1728,6 +1728,8 @@ mod pinned_session_tests {
                 shell
             }))
         });
+        // slopty: the hover fades run on the test's clock, which the test advances.
+        crate::motion::run_on(cx.executor());
         let shell = host.read_with(cx, |host, _| host.0.clone());
         let order = shell.update(cx, |shell, cx| shell.sidebar_visible_order(cx));
         assert_eq!(order, ids(&["a", "b", "c"]));
@@ -1767,6 +1769,9 @@ mod pinned_session_tests {
                 shell.sidebar_new_keys.clear();
                 cx.notify();
             });
+            cx.run_until_parked();
+            // slopty: the row's fade out, run to its end on the test's clock.
+            cx.executor().advance_clock(crate::motion::HOVER_FADE.total().mul_f32(crate::motion::speed_scale()));
             cx.run_until_parked();
             // Its Archived-section copy shares the row key and must not stay lit. slopty: grouped
             // by status the row's fade is in its last frame here, not lit.

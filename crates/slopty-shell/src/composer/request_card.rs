@@ -332,6 +332,19 @@ pub(crate) fn takes_no_words(question: &UserInputQuestion) -> bool {
     question.kind.starts_with(DIALOG) && question.options.is_empty()
 }
 
+/// Whether `question` is a form: an MCP server's request with fields to fill in. Its answers
+/// (Decline, Cancel) are buttons beside its Submit, never numbered options, and no key picks
+/// one.
+pub(crate) fn is_form(question: &UserInputQuestion) -> bool {
+    question.kind == ELICITATION && question.schema_json.as_deref().is_some_and(|schema| !form_fields(schema).is_empty())
+}
+
+/// Whether the card shows the composer's input as its answer box: a request that takes words,
+/// or a choice being revised in words.
+pub(crate) fn takes_words(question: &UserInputQuestion, revising: bool) -> bool {
+    (!question.choices_only || revising) && !takes_no_words(question)
+}
+
 /// The longest a URL's browser-ready form may be for the card to open it (the TUI's `iZe`).
 const URL_BROWSER_CHARS: usize = 8_000;
 
@@ -437,6 +450,84 @@ impl Composer {
             let guard = self.card.guard;
             self.card = CardState { request: Some(request_id.to_owned()), scopes, scopes_watch: watch, guard, ..CardState::default() };
         }
+    }
+
+    /// Whether a text field the card shows has the keyboard: its answer box, a form's field, a
+    /// note or a rule. What is typed there is the field's: no key answers the card from it.
+    pub(super) fn field_has_keyboard(&self, window: &Window, cx: &App) -> bool {
+        let answer_box = self
+            .wizard
+            .as_ref()
+            .is_some_and(|w| !w.folded && w.current().is_some_and(|q| takes_words(q, w.revising)));
+        (answer_box && self.input.read(cx).focus_handle.is_focused(window)) || self.card_field_focused(window, cx)
+    }
+
+    /// Whether one of the card's own fields (a form's, a note's, a rule's) has the keyboard.
+    pub(super) fn card_field_focused(&self, window: &Window, cx: &App) -> bool {
+        self.card
+            .inputs
+            .values()
+            .chain(self.card.rule.as_ref().map(|rule| &rule.input))
+            .any(|input| input.read(cx).focus_handle.is_focused(window))
+    }
+
+    /// A form field's input, by the field's name.
+    #[cfg(test)]
+    pub(crate) fn card_input(&self, name: &str) -> Option<Entity<ComposerInput>> {
+        self.card.inputs.get(name).cloned()
+    }
+
+    /// The answers a card puts in its footer, after any Skip: a form's own answers (Decline,
+    /// Cancel) and its Submit, or a dialog's Dismiss and OK. Every card's answers stand at the
+    /// footer's right, the one that goes ahead last.
+    pub(super) fn card_footer(&self, question: &UserInputQuestion, theme: &Theme, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        if is_form(question) {
+            let mut buttons: Vec<AnyElement> = question
+                .options
+                .iter()
+                .enumerate()
+                .map(|(ix, label)| {
+                    let id = SharedString::from(format!("wizard-form-answer-{ix}"));
+                    crate::surface_chrome::focus_ring(
+                        crate::popover::btn_ghost(theme, label, id.clone())
+                            .id(id)
+                            .tab_index(0)
+                            .px(px(12.0))
+                            .py(px(6.0)),
+                        theme,
+                    )
+                    .role(Role::Button)
+                    .aria_label(SharedString::from(label.clone()))
+                    .on_click(cx.listener(move |this, _, _, cx| this.wizard_select(ix, cx)))
+                    .into_any_element()
+                })
+                .collect();
+            buttons.push(
+                card_button(crate::popover::btn_primary(theme, "Submit"), "wizard-form-submit", theme)
+                    .role(Role::Button)
+                    .aria_label("Submit form")
+                    .px(px(16.0))
+                    .on_click(cx.listener(|this, _, _, cx| this.send_form(cx)))
+                    .into_any_element(),
+            );
+            return buttons;
+        }
+        if takes_no_words(question) {
+            return vec![
+                card_button(crate::popover::btn_ghost(theme, "Dismiss", "wizard-dialog-dismiss"), "wizard-dialog-dismiss", theme)
+                    .role(Role::Button)
+                    .aria_label("Dismiss")
+                    .on_click(cx.listener(|this, _, _, cx| this.answer_page_with(CANCEL.to_owned(), cx)))
+                    .into_any_element(),
+                card_button(crate::popover::btn_primary(theme, "OK"), "wizard-dialog-ok", theme)
+                    .role(Role::Button)
+                    .aria_label("OK")
+                    .px(px(16.0))
+                    .on_click(cx.listener(|this, _, _, cx| this.answer_page_with("{}".to_owned(), cx)))
+                    .into_any_element(),
+            ];
+        }
+        Vec::new()
     }
 
     /// Answer the open request's page with `label` (a form's object, a dialog's OK or dismiss).
@@ -774,9 +865,6 @@ impl Composer {
             let facts = question.schema_json.as_deref().map(|p| payload_facts(p, &shown)).unwrap_or_default();
             if !facts.is_empty() {
                 extras.push(render_facts(&facts, theme));
-            }
-            if takes_no_words(question) {
-                extras.push(self.render_dialog_answers(theme, cx));
             }
         }
         // slopty: notes on a design whose options have previews (the TUI's "Add notes on this
@@ -1163,16 +1251,6 @@ impl Composer {
             .flex_col()
             .gap(px(10.0))
             .children(rows)
-            .child(
-                div().flex().justify_end().child(
-                    crate::popover::btn_primary(theme, "Submit")
-                        .id("wizard-form-submit")
-                        .role(Role::Button)
-                        .aria_label("Submit form")
-                        .px(px(16.0))
-                        .on_click(cx.listener(|this, _, _, cx| this.send_form(cx))),
-                ),
-            )
             .into_any_element()
     }
 
@@ -1232,29 +1310,6 @@ impl Composer {
                     }))
                     .child(SharedString::from(label.clone()))
             }))
-            .into_any_element()
-    }
-
-    /// A dialog that offers no answers: OK gives it an empty result, Dismiss cancels it.
-    fn render_dialog_answers(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        div()
-            .mt(px(12.0))
-            .flex()
-            .justify_end()
-            .gap(px(6.0))
-            .child(
-                card_button(crate::popover::btn_ghost(theme, "Dismiss", "wizard-dialog-dismiss"), "wizard-dialog-dismiss", theme)
-                    .role(Role::Button)
-                    .aria_label("Dismiss")
-                    .on_click(cx.listener(|this, _, _, cx| this.answer_page_with(CANCEL.to_owned(), cx))),
-            )
-            .child(
-                card_button(crate::popover::btn_primary(theme, "OK"), "wizard-dialog-ok", theme)
-                    .role(Role::Button)
-                    .aria_label("OK")
-                    .px(px(16.0))
-                    .on_click(cx.listener(|this, _, _, cx| this.answer_page_with("{}".to_owned(), cx))),
-            )
             .into_any_element()
     }
 }

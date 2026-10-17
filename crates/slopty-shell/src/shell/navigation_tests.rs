@@ -681,6 +681,7 @@ fn a_drilled_in_subagent_leads_back_to_its_parent(cx: &mut TestAppContext) {
     );
     assert!(nodes.contains(&(A11y::Status, "Runs inside parent".to_owned())), "the bar");
     assert!(nodes.contains(&(A11y::Link, "Back to parent".to_owned())));
+    let bar = cx.debug_bounds("subagent-bar").expect("the bar drawn");
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
     shell.read_with(cx, |shell, cx| {
@@ -688,4 +689,8 @@ fn a_drilled_in_subagent_leads_back_to_its_parent(cx: &mut TestAppContext) {
     });
     let nodes = labels(cx);
     assert!(!nodes.contains(&(A11y::Status, "Runs inside parent".to_owned())), "back home");
+    // The bar stands in the composer's own column, edge for edge.
+    let pill = shell.read_with(cx, |shell, cx| shell.composer.read(cx).surface_bounds().get()).expect("the composer");
+    let edges = |b: gpui::Bounds<gpui::Pixels>| (f32::from(b.left()).round(), f32::from(b.right()).round());
+    assert_eq!(edges(bar), edges(pill), "bar {bar:?}, composer {pill:?}");
 }

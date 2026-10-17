@@ -163,6 +163,20 @@ fn mode_words(chip: &ModeChip) -> String {
     if chip.words.trim().is_empty() { chip.label.clone() } else { chip.words.clone() }
 }
 
+/// The footer's row of `segments`.
+fn footer_row(segments: Vec<AnyElement>) -> AnyElement {
+    div()
+        .id("dock-footer")
+        .flex_none()
+        .min_w_0()
+        .h(px(SEGMENT_HEIGHT))
+        .flex()
+        .items_center()
+        .gap(px(4.0))
+        .children(segments)
+        .into_any_element()
+}
+
 /// The colour of one of xterm's 256 colours, the first 16 from the terminal theme.
 pub(crate) fn ansi_color(index: u8, theme: &Theme) -> gpui::Hsla {
     const LEVELS: [u32; 6] = [0, 95, 135, 175, 215, 255];
@@ -316,14 +330,25 @@ impl Composer {
     pub(super) fn render_dock_footer(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         let chat = self.state.read(cx).selected_chat.clone();
         let dock: Option<ChatDock> = chat.as_deref().and_then(|chat| self.dock.dock_of(chat)).cloned();
-        let in_footer = dock.as_ref().is_some_and(|dock| dock.mode.is_some());
+        // slopty: a chat's mode is said in its footer, the agent's own while it runs, else the
+        // one its next run takes; only the new chat's canvas, which has no footer, keeps it in
+        // the composer.
+        let in_footer = chat.is_some();
         if self.pickers.read(cx).mode_in_footer != in_footer {
             self.pickers.update(cx, |pickers, cx| {
                 pickers.mode_in_footer = in_footer;
                 cx.notify();
             });
         }
-        let dock = dock?;
+        let picked = dock
+            .as_ref()
+            .is_none_or(|dock| dock.mode.is_none())
+            .then(|| self.pickers.read(cx).mode_label(cx))
+            .flatten()
+            .filter(|_| in_footer);
+        let Some(dock) = dock else {
+            return picked.map(|label| footer_row(vec![self.picked_mode_segment(label, theme, cx)]));
+        };
         // A switch the dock now shows is confirmed.
         if let (Some(pending), Some(chip)) = (&self.footer.pending_mode, &dock.mode)
             && *pending == chip.id
@@ -381,22 +406,40 @@ impl Composer {
         }
         if let Some(chip) = &dock.mode {
             segments.push(self.mode_segment(chip, dock.can.set_mode, theme, cx));
+        } else if let Some(label) = picked {
+            segments.push(self.picked_mode_segment(label, theme, cx));
         }
         if segments.is_empty() {
             return None;
         }
-        Some(
-            div()
-                .id("dock-footer")
-                .flex_none()
-                .min_w_0()
-                .h(px(SEGMENT_HEIGHT))
-                .flex()
-                .items_center()
-                .gap(px(4.0))
-                .children(segments)
-                .into_any_element(),
-        )
+        Some(footer_row(segments))
+    }
+
+    /// The mode the chat's next run takes, where its agent says none of its own: quiet, as the
+    /// recommended default reads; a click opens the model menu at its Mode choices.
+    fn picked_mode_segment(&self, label: SharedString, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .id("dock-picked-mode")
+            .role(Role::Button)
+            .aria_label(SharedString::from(format!("Mode: {label}")))
+            .flex_none()
+            .h(px(SEGMENT_HEIGHT))
+            .px(px(6.0))
+            .flex()
+            .items_center()
+            .rounded(px(Theme::CONTROL_RADIUS))
+            .text_size(crate::typography::ui_rems(11.0))
+            .text_color(theme.text_faint)
+            .cursor_pointer()
+            .tab_index(0)
+            .map(|el| crate::surface_chrome::focus_ring(el, theme))
+            .bg(motion::hover_blend("dock-picked-mode-hover", gpui::transparent_black(), crate::theme::ink(0.05)))
+            .on_hover(motion::hover_listener("dock-picked-mode-hover"))
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.pickers.update(cx, |pickers, cx| pickers.open_mode_menu(window, cx));
+            }))
+            .child(label)
+            .into_any_element()
     }
 
     /// "◎ /goal active (5h)": hover shows the condition, a click its card with Clear.

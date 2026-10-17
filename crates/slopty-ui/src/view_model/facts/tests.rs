@@ -65,9 +65,16 @@ fn a_calls_result_reads_as_the_tuis() {
         truncated: false,
     };
     assert_eq!(
-        result_of(&call("Grep", "search", Some(ToolDetail::Search(search)), done.clone()))
+        result_of(&call("Grep", "search", Some(ToolDetail::Search(search.clone())), done.clone()))
             .as_deref(),
         Some("Found 12 lines across 3 files")
+    );
+    // No files counted beside a line found: the files are unknown, never "across 0 files".
+    let unknown = SearchDetail { files: Some(0), matches: Some(1), ..search };
+    assert_eq!(
+        result_of(&call("Grep", "search", Some(ToolDetail::Search(unknown)), done.clone()))
+            .as_deref(),
+        Some("Found 1 line")
     );
     let fetch =
         FetchDetail { url: "https://x".into(), prompt: None, code: Some(200), bytes: Some(12_600) };
@@ -207,7 +214,7 @@ fn a_running_call_has_its_timer_and_task() {
     state.tasks = vec![task];
     let facts = tool_facts("m1", &monitor, &state, None).expect("facts");
     assert_eq!(facts.title.as_deref(), Some("Monitor(lane stall watch)"));
-    assert_eq!(facts.result.as_deref(), Some("Monitor started · task bcui · timeout 30m 0s"));
+    assert_eq!(facts.result.as_deref(), Some("Monitor started · task bcui · timeout 30m"));
 }
 
 /// A subagent's card reads its step and figures while it runs, says when it waits on the

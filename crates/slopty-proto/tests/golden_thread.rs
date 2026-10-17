@@ -26,9 +26,9 @@ mod golden_thread {
         ContextUsage, Cursor, Delivery, Drive, Edge, Effect, Effort, Fork, Goal, Image, IntentId,
         Item, ItemBody, ItemId, Limit, Link, Liveness, Meters, Mode, Model, Notice, PartKey, Patch,
         Pending, PendingState, Phase, Plan, Request, RequestState, Retry, Rule, RuleChange, Rules,
-        Status, Step, SubagentKind, Surface, SurfaceEvent, TaskNote, TaskUsage, ThreadId,
-        ThreadMeta, ThreadState, ToolCall, ToolDetail, ToolState, TreeRef, Turn, TurnId, TurnState,
-        Usage, UserMessage, Wait, kind,
+        SideExchange, Status, Step, SubagentKind, Surface, SurfaceEvent, TaskNote, TaskUsage,
+        ThreadId, ThreadMeta, ThreadState, ToolCall, ToolDetail, ToolState, TreeRef, Turn, TurnId,
+        TurnState, Usage, UserMessage, Wait, kind,
     };
     use uuid::Uuid;
 
@@ -809,6 +809,7 @@ mod golden_thread {
         );
         snap("intent_shell", &send(Intent::Shell { command: "pwd".to_owned() }));
         snap("intent_rewind", &send(Intent::Rewind { turn: TurnId(2) }));
+        snap("intent_side", &send(Intent::Side { question: "Which test covers this?".to_owned() }));
         snap(
             "intent_rule",
             &send(Intent::Rule(RuleChange {
@@ -880,6 +881,13 @@ mod golden_thread {
             }),
             Action::Suggested(Some("run the tests".to_owned())),
             Action::Suggested(None),
+            Action::Side(SideExchange {
+                intent: intent(),
+                question: "Which test covers this?".to_owned(),
+                answer: Some("the codec's round trip".to_owned()),
+                failed: None,
+                at_ms: ms(52),
+            }),
             Action::RulesSet(Rules {
                 rules: vec![Rule {
                     behavior: Rule::DENY.to_owned(),

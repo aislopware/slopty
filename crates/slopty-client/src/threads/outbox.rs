@@ -93,7 +93,8 @@ impl Sent {
             | Intent::Rewind { .. }
             | Intent::Unrewind { .. }
             | Intent::Rule(_)
-            | Intent::Surface { .. } => self.outcome.is_some(),
+            | Intent::Surface { .. }
+            | Intent::Side { .. } => self.outcome.is_some(),
         }
     }
 

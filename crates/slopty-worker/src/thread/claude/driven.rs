@@ -455,6 +455,10 @@ impl Task {
                 let outs = self.driven.rewind(turn, now);
                 self.take(outs);
             }
+            ThreadAsk::Side { question, intent, history } => {
+                let outs = self.driven.side(intent, &question, &history, now);
+                self.take(outs);
+            }
             // Written into its file by now: what Claude Code holds is read again.
             ThreadAsk::Rule { .. } => self.driven.list_rules(),
             ThreadAsk::Surface { surface, element, event } => {

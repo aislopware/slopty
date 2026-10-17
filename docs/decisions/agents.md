@@ -3741,19 +3741,37 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `ctl::tests::an_agents_ask_of_the_window_crosses_the_socket`; `slopty-tools` `ui::tests`
     and `tools::tests::the_window_tools_reach_the_window_through_their_carrier`; `slopty-cli`
     `ui::tests`.
-- ⏳ **A side question (`/btw`) goes through Claude Code's own `side_question` door (2026-10-17,
-  lane C2).** Claude Code answers a side question from the conversation so far, without tools,
-  without entering the conversation and without interrupting the turn under way
+- ✅ **A side question (`/btw`) goes through Claude Code's own `side_question` door (2026-10-17,
+  lanes C2, C3).** Claude Code answers a side question from the conversation so far, without
+  tools, without entering the conversation and without interrupting the turn under way
   (`interactive-mode.md`, "Side questions with /btw"). A driven session takes it as a stream-json
   control request, the one the Agent SDK's `askSideQuestion` sends and Claude desktop uses:
   `{"subtype":"side_question","question":…,"history":[{"question":…,"response":…}]}`, answered
   with `{"response":…|null,"synthetic":bool}` and timed out by Claude Code after 11 minutes
   (CHANGELOG). It is a published door, so Slopty uses it and never fakes one by sending `/btw`
   as a prompt. Slopty's own Aside (`Intent::Aside`) stays what it is: a fork of the whole
-  thread with tools, for going on with the work beside it. Left: the worker's intent carrying
-  the question and its answer (`slopty-agent`'s driven Claude, lane W), then the composer's
-  `/btw` routing to it with its answer shown in a dismissible card above the composer, the
-  newest twenty exchanges kept as Claude Code keeps them.
+  thread with tools, for going on with the work beside it.
+  - **The wire.** `Intent::Side { question }` (`Cap::SIDE`) asks it; `Action::Side` carries the
+    exchange (`SideExchange`: question, answer, why none came, when) under the intent's id, first
+    as asked, then answered or failed in its place. `ThreadState::side` keeps the newest twenty,
+    as Claude Code keeps them.
+  - **The worker** sends the answered exchanges as the request's `history`, read from the
+    thread's state, so a worker started again keeps the conversation's side history. A subagent
+    takes none, an empty question is refused, and a thread whose Claude Code ended resumably is
+    taken up for it, as a message is.
+  - **No answer is said why.** A refusal, a `null` response, a `synthetic` one (Claude Code's
+    own words in place of the model's) and Claude Code ending with the question open each fail
+    the exchange with their reason, said on the card and nowhere else.
+  - **The client.** The dock carries the exchanges (`ChatDock::side`, `DockCan::side`) and
+    `slopty.AskSide` asks one. A `/btw <question>` draft goes there and never as a message; the
+    newest exchange shows in a card above the composer (the agent at it, then its answer in
+    Markdown, or why none came) until dismissed, and the next question brings it back.
+  - Tests: `claude::driven::tests::a_side_question_is_asked_beside_and_answered`
+    (`slopty-agent`); `a_side_question_is_answered_beside_the_turn` (`slopty-worker/tests/claude.rs`,
+    against the stand-in's `side_question` door); `thread::tests::side_questions_keep_their_answers_and_the_newest`
+    and golden `intent_side` (`slopty-proto`); `view_model::work::tests::side_questions_reach_the_dock`
+    (`slopty-ui`); `composer::dock_tests::a_btw_draft_asks_beside_and_its_answer_shows_until_dismissed`
+    and `composer::side::tests::a_btw_draft_names_its_question` (`slopty-shell`).
 
 - ✅ **A Claude Code that ends unasked says what kind of end it was (2026-10-17).** From
   `.research/claude-desktop-2026-10-16.md` §d.7 and §d.13 (D7). A Claude Code that failed used to
@@ -3813,3 +3831,18 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   and a transcript with no time in it its file's.
   - Tests: `slopty-agent` `claude::sessions::tests::a_past_sessions_time_is_its_last_records`;
     `slopty-worker` `history::a_found_sessions_time_is_its_last_records`.
+
+- ✅ **A need left open is told again once, at 30 minutes (2026-10-17, D6).** From
+  `.research/claude-desktop-2026-10-16.md` §d.6: Claude desktop notifies an open prompt again
+  at 30 minutes, and never denies one the person attends. Slopty told a thread's need once, when
+  it came, so a notice missed (the person away from the desk, the phone in a pocket) left the
+  agent waiting unseen. Now the hub's ladder tells a thread that still needs the person 30
+  minutes after its wait began once more, where the person is now, by the same routes as the
+  first notice, with a fresh push to a phone that showed the first: "Still needs you after 30m ·
+  <what it asks>" (`slopty-server` `hub::ladder::Board::remind`, `REMIND_AFTER`). Once per wait:
+  an answer and a new ask is a new wait. A wait first seen already that old (a server started
+  again, a worker back) is no news, as its need was not. A wake is set for the next reminder due,
+  so a quiet fleet still ranks then. Desktop's "overdue" mark at an hour is not taken: the
+  sidebar already says how long a chat has waited on the person ("Waiting on you since"), and the
+  ladder sorts it first. Tests: `hub::ladder::tests::a_need_left_open_is_told_again_once_per_wait`
+  and `a_reminder_says_how_long_it_waited`.

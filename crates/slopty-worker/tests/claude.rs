@@ -1094,6 +1094,46 @@ mod claude {
         assert_eq!(heard(&rig.record(), "background_tasks").len(), 1);
     }
 
+    /// A side question (`/btw`) goes to Claude Code as its own `side_question` while the turn
+    /// works on, carrying the exchanges answered before it; its answer is the thread's, the
+    /// turn untouched. One Claude Code refuses says why, and an empty one is refused at once.
+    #[tokio::test]
+    async fn a_side_question_is_answered_beside_the_turn() {
+        let rig = Rig::new(&[]).await;
+        let (claude, _served) = rig.serve();
+        let thread = rig.started(&claude, "wait 20").await;
+        let call = slopty_proto::thread::ItemId("toolu_w1".to_owned());
+        rig.until(thread, "the call's progress", move |s| {
+            s.calls.get(&call).is_some_and(|n| n.elapsed_ms.is_some())
+        })
+        .await;
+        let ask = |question: &str| Intent::Side { question: question.to_owned() };
+        assert!(refused(&rig.intent(&claude, thread, &ask("  "))));
+        let answered = |n: usize| {
+            move |s: &ThreadState| s.side.len() == n && s.side.iter().all(|x| !x.pending())
+        };
+        assert_eq!(rig.intent(&claude, thread, &ask("Which file?")), Outcome::Done);
+        rig.until(thread, "the first answer", answered(1)).await;
+        assert_eq!(rig.intent(&claude, thread, &ask("Why that one?")), Outcome::Done);
+        assert_eq!(rig.intent(&claude, thread, &ask("refuse")), Outcome::Done);
+        let state = rig.until(thread, "the other two", answered(3)).await;
+        let said: Vec<(Option<&str>, Option<&str>)> =
+            state.side.iter().map(|x| (x.answer.as_deref(), x.failed.as_deref())).collect();
+        assert_eq!(
+            said,
+            [
+                (Some("Aside: Which file? (0 before)"), None),
+                (Some("Aside: Why that one? (1 before)"), None),
+                (None, Some("Side questions are not available")),
+            ]
+        );
+        assert_eq!(state.status.phase, slopty_proto::thread::Phase::Working, "{:?}", state.status);
+        let record = rig.record();
+        let asked = heard(&record, "side_question");
+        assert_eq!(asked[1]["request"]["history"][0]["response"], "Aside: Which file? (0 before)");
+        assert!(heard(&record, "interrupt").is_empty(), "the turn is never stopped");
+    }
+
     /// Work no call started is a task row of its own; what Claude Code says beside the
     /// conversation is the thread's: a notification, the goal, the rows it derives (memories,
     /// a permission retried, a fallback model, a hook that failed, long instructions) and the

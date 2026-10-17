@@ -272,15 +272,17 @@ pub fn duration_words(ms: u64) -> String {
     let secs = ms / 1_000;
     let (days, hours, minutes, seconds) =
         (secs / 86_400, secs / 3_600 % 24, secs / 60 % 60, secs % 60);
-    if days > 0 {
-        format!("{days}d {hours}h")
+    // Two units at most, and a second unit of nothing is left out: "1m", never "1m 0s".
+    let (big, unit, small, small_unit) = if days > 0 {
+        (days, "d", hours, "h")
     } else if hours > 0 {
-        format!("{hours}h {minutes}m")
+        (hours, "h", minutes, "m")
     } else if minutes > 0 {
-        format!("{minutes}m {seconds}s")
+        (minutes, "m", seconds, "s")
     } else {
-        format!("{seconds}s")
-    }
+        return format!("{seconds}s");
+    };
+    if small == 0 { format!("{big}{unit}") } else { format!("{big}{unit} {small}{small_unit}") }
 }
 
 #[cfg(test)]
@@ -312,5 +314,9 @@ mod tests {
         assert_eq!(duration_words(45_000), "45s");
         assert_eq!(duration_words(125_000), "2m 5s");
         assert_eq!(duration_words(6_710_000), "1h 51m");
+        // A second part of nothing is left out.
+        assert_eq!(duration_words(60_000), "1m");
+        assert_eq!(duration_words(7_200_000), "2h");
+        assert_eq!(duration_words(86_400_000), "1d");
     }
 }

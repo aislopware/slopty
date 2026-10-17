@@ -374,6 +374,8 @@ fn result(call: &ToolCall, task: Option<&BackgroundTask>) -> Option<(String, boo
         }
         Some(ToolDetail::Search(search)) if finished => {
             let mut line = match (search.matches, search.files) {
+                // No files beside lines found is a count the agent did not make, not zero.
+                (Some(m), Some(0)) if m > 0 => format!("Found {}", count(m, "line", "lines")),
                 (Some(m), Some(f)) if m != f && m > 0 => {
                     format!(
                         "Found {} across {}",

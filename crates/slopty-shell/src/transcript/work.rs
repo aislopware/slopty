@@ -672,7 +672,7 @@ mod tests {
             at: 1_000,
             timeout_ms: Some(120_000),
         };
-        assert_eq!(timer_words(&timer, 3_000), "12s · timeout 2m 0s");
+        assert_eq!(timer_words(&timer, 3_000), "12s · timeout 2m");
         let open = ToolTimer {
             elapsed_ms: 0,
             at: 5_000,

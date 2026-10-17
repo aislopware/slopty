@@ -587,6 +587,7 @@ pub fn refused_words(intent: &Intent, why: &str) -> String {
         Intent::Unrewind { .. } => "Couldn't undo the rewind".to_owned(),
         Intent::Rule(_) => "Couldn't change the rule".to_owned(),
         Intent::Surface { .. } => "The mod didn't take it".to_owned(),
+        Intent::Side { .. } => "Couldn't ask the side question".to_owned(),
     };
     format!("{what}: {why}")
 }

@@ -156,6 +156,13 @@ enum ThreadAsk {
     Rewind {
         turn: TurnId,
     },
+    /// Ask side question `question` for intent `intent`, after the exchanges `history`
+    /// (question, answer).
+    Side {
+        question: String,
+        intent: IntentId,
+        history: Vec<(String, String)>,
+    },
     /// Write a permission rule into its scope's file, then list the rules again.
     Rule {
         change: RuleChange,
@@ -411,6 +418,18 @@ impl Claude {
                 }
                 ThreadAsk::Rewind { turn: *turn }
             }
+            Intent::Side { .. } if subagent => return refused("A subagent takes no side question"),
+            Intent::Side { question } => {
+                if question.trim().is_empty() {
+                    return refused("There is no question to ask");
+                }
+                let history = state
+                    .side
+                    .iter()
+                    .filter_map(|s| Some((s.question.clone(), s.answer.clone()?)))
+                    .collect();
+                ThreadAsk::Side { question: question.trim().to_owned(), intent: id, history }
+            }
             Intent::Rule(change) => {
                 if let Err(why) = settings::checked(change) {
                     return refused(&why);
@@ -507,6 +526,7 @@ impl Claude {
             asked,
             ThreadAsk::Send { .. }
                 | ThreadAsk::Shell { .. }
+                | ThreadAsk::Side { .. }
                 | ThreadAsk::SetModel { .. }
                 | ThreadAsk::SetMode { .. }
                 | ThreadAsk::SetEffort { .. }

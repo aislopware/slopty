@@ -1348,3 +1348,76 @@ fn a_plugins_ask_names_the_plugin() {
     let asked = host.main(&driven).requests.last().expect("the ask").clone();
     assert_eq!(asked.reason.as_deref(), Some("Plugin deploy"));
 }
+
+/// A side question goes as Claude Code's own `side_question`, with the exchanges before it, and
+/// shows at once; its answer takes its place, and one refused, unanswered, made up in place of the
+/// model's, or left when Claude Code ends says why there is none.
+#[test]
+fn a_side_question_is_asked_beside_and_answered() {
+    let (mut driven, mut host) = driven();
+    drop(driven.take_writes());
+    let earlier = [("Which file?".to_owned(), "codec.rs".to_owned())];
+    host.take(driven.side(intent(1), "Why that one?", &earlier, at(10)));
+    let sent = written(&mut driven);
+    let [request] = sent.as_slice() else { panic!("one request: {sent:?}") };
+    assert_eq!(
+        request["request"],
+        json!({ "subtype": "side_question", "question": "Why that one?",
+                "history": [{ "question": "Which file?", "response": "codec.rs" }] })
+    );
+    let side = &host.main(&driven).side;
+    assert!(matches!(side.as_slice(), [s] if s.pending() && s.question == "Why that one?"));
+    let answer = |id: &Value, said: Value| {
+        json!({ "type": "control_response",
+                "response": { "subtype": "success", "request_id": id, "response": said } })
+    };
+    host.take(driven.incoming(
+        &answer(
+            &request["request_id"],
+            json!({
+        "response": "It holds the framing.", "synthetic": false }),
+        ),
+        at(20),
+    ));
+    let side = &host.main(&driven).side;
+    assert_eq!(side[0].answer.as_deref(), Some("It holds the framing."));
+    assert_eq!(side[0].intent, intent(1));
+    let ask = |n: u32, driven: &mut Driven, host: &mut Host| {
+        host.take(driven.side(intent(n), "And then?", &[], at(30)));
+        let (_, id) = last_control(driven).pop().expect("the side question");
+        Value::String(id)
+    };
+    let id = ask(2, &mut driven, &mut host);
+    let refused = json!({ "type": "control_response",
+        "response": { "subtype": "error", "request_id": id, "error": "not now" } });
+    host.take(driven.incoming(&refused, at(40)));
+    let id = ask(3, &mut driven, &mut host);
+    host.take(
+        driven.incoming(&answer(&id, json!({ "response": null, "synthetic": false })), at(41)),
+    );
+    let id = ask(4, &mut driven, &mut host);
+    let made_up = json!({ "response": "API Error: overloaded", "synthetic": true });
+    host.take(driven.incoming(&answer(&id, made_up), at(42)));
+    ask(5, &mut driven, &mut host);
+    host.take(driven.exited(None, at(50)));
+    let failed: Vec<(Option<&str>, Option<&str>)> = host
+        .main(&driven)
+        .side
+        .iter()
+        .map(|s| (s.answer.as_deref(), s.failed.as_deref()))
+        .collect();
+    assert_eq!(
+        failed,
+        [
+            (Some("It holds the framing."), None),
+            (None, Some("not now")),
+            (None, Some("Claude Code gave no answer")),
+            (None, Some("API Error: overloaded")),
+            (None, Some("Claude Code ended")),
+        ]
+    );
+    assert!(
+        notices(host.main(&driven)).iter().all(|(_, t)| !t.contains("not now")),
+        "said only on the card"
+    );
+}

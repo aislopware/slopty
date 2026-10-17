@@ -33,8 +33,9 @@ where
     Tz::Offset: std::fmt::Display,
 {
     let worked = duration_words(duration_ms.max(1_000));
-    let clock = chrono::DateTime::from_timestamp_millis(ended_ms)
-        .map(|utc| utc.with_timezone(tz).format("%-I:%M %p").to_string());
+    let clock = chrono::DateTime::from_timestamp_millis(ended_ms).map(|utc| {
+        utc.with_timezone(tz).format(slopty_shell::transcript::clock_format()).to_string()
+    });
     match clock {
         Some(clock) => format!("Worked for {worked} · done {clock}"),
         None => format!("Worked for {worked}"),
@@ -347,8 +348,15 @@ mod tests {
         let tz = chrono::FixedOffset::east_opt(0).expect("utc");
         // 2026-07-01 15:42 UTC.
         let ended = 1_782_920_520_000;
-        assert_eq!(done_words(65_000, ended, &tz), "Worked for 1m 5s · done 3:42 PM");
-        assert_eq!(done_words(200, ended, &tz), "Worked for 1s · done 3:42 PM");
+        // On the system's clock.
+        let clock = if slopty_shell::transcript::clock_format().contains('p') {
+            "3:42 PM"
+        } else {
+            "15:42"
+        };
+        assert_eq!(done_words(65_000, ended, &tz), format!("Worked for 1m 5s · done {clock}"));
+        assert_eq!(done_words(200, ended, &tz), format!("Worked for 1s · done {clock}"));
+        assert_eq!(done_words(60_000, ended, &tz), format!("Worked for 1m · done {clock}"));
     }
 
     fn spawn_card(id: &str, kind: &str, running: bool) -> MessagePart {

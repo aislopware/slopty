@@ -134,15 +134,17 @@ fn counted(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
 }
 
-/// A time as the TUI says it: "12s", "5m 3s", "1h 51m 50s".
+/// A time as the TUI says it, its parts of nothing left out: "12s", "5m 3s", "5m", "1h 51m 50s",
+/// "1h 3s".
 pub(super) fn span(ms: u64) -> String {
     let secs = ms / 1000;
     let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
-    match (h, m) {
-        (0, 0) => format!("{s}s"),
-        (0, m) => format!("{m}m {s}s"),
-        (h, m) => format!("{h}h {m}m {s}s"),
-    }
+    let parts: Vec<String> = [(h, "h"), (m, "m"), (s, "s")]
+        .into_iter()
+        .filter(|(n, _)| *n > 0)
+        .map(|(n, unit)| format!("{n}{unit}"))
+        .collect();
+    if parts.is_empty() { "0s".to_owned() } else { parts.join(" ") }
 }
 
 impl Driven {
@@ -838,6 +840,8 @@ mod tests {
         assert_eq!(span(12_400), "12s");
         assert_eq!(span(303_000), "5m 3s");
         assert_eq!(span(6_710_000), "1h 51m 50s");
+        assert_eq!(span(300_000), "5m", "a part of nothing is left out");
+        assert_eq!(span(3_603_000), "1h 3s");
         assert_eq!(task_kind("local_bash", Some("Monitor")), BackgroundTask::MONITOR);
         assert_eq!(task_kind("local_bash", Some("Bash")), BackgroundTask::SHELL);
         assert_eq!(task_kind("local_agent", None), BackgroundTask::AGENT);

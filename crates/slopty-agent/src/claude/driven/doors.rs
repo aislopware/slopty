@@ -23,7 +23,7 @@ use serde_json::{Value, json};
 use slopty_core::WallMs;
 use slopty_proto::thread::{
     Action, AgentNote, ContextCategory, ContextUsage, Delivery, IntentId, Notice, Pending,
-    PendingState, Rule, Rules, Surface, SurfaceEvent, TurnId,
+    PendingState, Rule, Rules, SideExchange, Surface, SurfaceEvent, TurnId,
 };
 use slopty_proto::visual::{AppAnswer, AppAsk, AppBody, McpApp};
 
@@ -193,10 +193,14 @@ impl Driven {
     /// A control request Claude Code did not answer, said nowhere: a page's ask is answered
     /// with its reason.
     pub(super) fn unanswered(&mut self, control: &Control, error: &str) -> Vec<Out> {
-        if let Control::App(app) = control {
-            self.app_answers.push((*app, AppAnswer::Refused(error.to_owned())));
+        match control {
+            Control::App(app) => {
+                self.app_answers.push((*app, AppAnswer::Refused(error.to_owned())));
+                Vec::new()
+            }
+            Control::Side(asked) => self.side_failed(asked.clone(), error),
+            _ => Vec::new(),
         }
-        Vec::new()
     }
 
     /// The context by category, as `get_context_usage` answered.
@@ -781,7 +785,55 @@ impl Driven {
         }
     }
 
-    /// Claude Code is gone: what pages asked of it is refused.
+    /// Ask Claude Code `question` beside the conversation, under intent `intent`, after the
+    /// exchanges `history` (question, answer) as Claude Code's `/btw` asks it: the question shows
+    /// at once, its answer once Claude Code gives it ([`Action::Side`]).
+    pub fn side(
+        &mut self,
+        intent: IntentId,
+        question: &str,
+        history: &[(String, String)],
+        now: WallMs,
+    ) -> Vec<Out> {
+        let asked = SideExchange {
+            intent,
+            question: question.to_owned(),
+            answer: None,
+            failed: None,
+            at_ms: now,
+        };
+        let history: Vec<Value> = history
+            .iter()
+            .map(|(question, response)| json!({ "question": question, "response": response }))
+            .collect();
+        let request =
+            json!({ "subtype": "side_question", "question": question, "history": history });
+        self.control(Control::Side(asked.clone()), &request);
+        self.history.tell(Action::Side(asked))
+    }
+
+    /// Claude Code's answer `said` to side question `asked`: a `response` given is its answer,
+    /// and none, or one Claude Code made up in place of the model's (`synthetic`), says why there
+    /// is none.
+    pub(super) fn side_answered(&mut self, asked: SideExchange, said: &Value) -> Vec<Out> {
+        let response = str_at(said, "response").map(str::trim).filter(|r| !r.is_empty());
+        match response {
+            Some(answer) if !bool_at(said, "synthetic") => {
+                let answer = Some(answer.to_owned());
+                self.history.tell(Action::Side(SideExchange { answer, ..asked }))
+            }
+            Some(why) => self.side_failed(asked, why),
+            None => self.side_failed(asked, "Claude Code gave no answer"),
+        }
+    }
+
+    fn side_failed(&mut self, asked: SideExchange, why: &str) -> Vec<Out> {
+        let failed = Some(why.to_owned());
+        self.history.tell(Action::Side(SideExchange { failed, ..asked }))
+    }
+
+    /// Claude Code is gone: what pages asked of it is refused, and a side question it was
+    /// answering gets no answer.
     pub(super) fn doors_gone(&mut self, _now: WallMs) -> Vec<Out> {
         let apps: Vec<u64> = self
             .controls
@@ -792,7 +844,14 @@ impl Driven {
         for app in apps {
             self.app_answers.push((app, AppAnswer::Refused("Claude Code ended".to_owned())));
         }
-        Vec::new()
+        let mut asked: Vec<SideExchange> = self
+            .controls
+            .values()
+            .filter_map(|c| if let Control::Side(asked) = c { Some(asked.clone()) } else { None })
+            .collect();
+        self.controls.retain(|_, c| !matches!(c, Control::Side(_)));
+        asked.sort_by_key(|a| a.at_ms);
+        asked.into_iter().flat_map(|a| self.side_failed(a, "Claude Code ended")).collect()
     }
 }
 

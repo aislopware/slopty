@@ -32,6 +32,11 @@ pub const BACKGROUND: &str = "slopty.Background";
 /// person's next message: `{ chatId, command }` → `{ commandId }`.
 pub const RUN_SHELL: &str = "slopty.RunShell";
 
+/// Ask the chat's agent a side question (`/btw`): answered from the conversation so far, without
+/// tools, never entering it and never stopping the turn under way: `{ chatId, question }` → `{}`.
+/// The question and its answer come in the dock ([`crate::dock::ChatDock::side`]).
+pub const ASK_SIDE: &str = "slopty.AskSide";
+
 /// Go back to before a message of the person's: `{ chatId, messageId, code, conversation }`.
 /// `code` puts the files back as they were before that message's turn; `conversation` branches
 /// a new chat sharing the turns before it. → `{ prompt, chatId?, undo? }`: the message's words,

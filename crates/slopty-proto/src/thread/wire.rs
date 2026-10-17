@@ -421,6 +421,14 @@ pub enum Intent {
         /// What they did.
         event: super::SurfaceEvent,
     },
+    /// Ask the agent `question` beside the conversation ([`Cap::SIDE`]): it answers from the
+    /// conversation so far, without tools, never entering it and never stopping the turn under
+    /// way (Claude Code's `/btw`). The question and its answer come as
+    /// [`Action::Side`] under this intent's id.
+    Side {
+        /// The question.
+        question: String,
+    },
 }
 
 /// A file's change as a review showed it, or some of its hunks.
@@ -482,6 +490,7 @@ impl Intent {
             Self::Rewind { .. } | Self::Unrewind { .. } => Cap::REWIND,
             Self::Rule(_) => Cap::RULES,
             Self::Surface { .. } => Cap::SURFACES,
+            Self::Side { .. } => Cap::SIDE,
         })
     }
 

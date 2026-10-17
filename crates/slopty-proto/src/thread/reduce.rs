@@ -75,6 +75,9 @@ pub struct ThreadState {
     pub notes: Vec<AgentNote>,
     /// The prompt the agent guesses the person sends next ([`Action::Suggested`]).
     pub suggestion: Option<String>,
+    /// The side questions asked and their answers, newest last, at most
+    /// [`SideExchange::KEPT`](super::SideExchange::KEPT) ([`Action::Side`]).
+    pub side: Vec<super::SideExchange>,
     /// Its agent's permission rules, once read ([`Action::RulesSet`]).
     pub rules: Option<Rules>,
     /// The person's own status line, as run for it ([`Action::StatusLine`]).
@@ -118,6 +121,7 @@ impl ThreadState {
             goal: None,
             notes: Vec::new(),
             suggestion: None,
+            side: Vec::new(),
             rules: None,
             status_line: None,
             rewound: None,
@@ -233,6 +237,14 @@ impl ThreadState {
                 self.notes.drain(..over);
             }
             Action::Suggested(suggestion) => self.suggestion.clone_from(suggestion),
+            Action::Side(exchange) => {
+                match self.side.iter_mut().find(|had| had.intent == exchange.intent) {
+                    Some(had) => *had = exchange.clone(),
+                    None => self.side.push(exchange.clone()),
+                }
+                let over = self.side.len().saturating_sub(super::SideExchange::KEPT);
+                self.side.drain(..over);
+            }
             Action::RulesSet(rules) => self.rules = Some(rules.clone()),
             Action::StatusLine(line) => self.status_line.clone_from(line),
             Action::Rewound(rewound) => self.rewound.clone_from(rewound),

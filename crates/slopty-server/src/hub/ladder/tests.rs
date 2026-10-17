@@ -1208,3 +1208,55 @@ async fn an_agent_that_ended_at_work_is_not_finished() {
     let note = pushed.try_recv().expect("a turn answered, then the agent ended");
     assert_eq!(body(&note).notice.kind, NoticeKind::Finished);
 }
+
+/// A thread still needing the person [`REMIND_AFTER`] after its wait began is told again, once
+/// per wait, saying how long it waited; a wait first seen that old is no news, and one answered
+/// and asked again is a new wait. A wake is set for when one falls due.
+#[tokio::test]
+async fn a_need_left_open_is_told_again_once_per_wait() {
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let worker = WorkerId::new();
+    let (tx, _rx) = mpsc::channel(8);
+    let lease = hub.register(registration(worker, Vec::new()), [100, 64, 0, 7].into(), tx).unwrap();
+    let mut mac = Client::sit(&hub, "mac");
+    mac.at(&hub, Seat::Desk, true, Vec::new());
+    hub.inner.state.lock().board.remind_after = Some(Duration::from_millis(200));
+    let now = || WallMs::now().as_millis();
+    let old = asking(row(Phase::NeedsYou, now().saturating_sub(60_000), None), "Long forgotten");
+    let thread = row(Phase::Working, now(), None);
+    lease.handle(snapshot(vec![old, thread.clone()]));
+    hub.rank_ladder();
+    let rank = |rows: Vec<ThreadRow>| {
+        lease.handle(delta(rows));
+        hub.rank_ladder();
+    };
+    rank(vec![asking(moved(&thread, Phase::NeedsYou, now()), "Run cargo test?")]);
+    assert_eq!(mac.notices().len(), 1, "the need itself");
+    hub.rank_ladder();
+    assert!(mac.notices().is_empty(), "not yet due, and the old wait is no news");
+    assert!(hub.inner.state.lock().board.remind_at.is_some(), "a wake is set");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    hub.rank_ladder();
+    let again = mac.notices();
+    assert_eq!(again.len(), 1, "told again: {again:?}");
+    assert_eq!(again[0].kind, NoticeKind::NeedsYou);
+    assert!(again[0].text.starts_with("Still needs you after "), "{}", again[0].text);
+    assert!(again[0].text.ends_with(" · Run cargo test?"), "{}", again[0].text);
+    hub.rank_ladder();
+    assert!(mac.notices().is_empty(), "once per wait");
+    rank(vec![moved(&thread, Phase::Working, now())]);
+    rank(vec![asking(moved(&thread, Phase::NeedsYou, now()), "Again?")]);
+    assert_eq!(mac.notices().len(), 1, "the new need");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    hub.rank_ladder();
+    let again = mac.notices();
+    assert!(matches!(again.as_slice(), [n] if n.text.ends_with(" · Again?")), "{again:?}");
+}
+
+/// A reminder says how long the thread waited in whole minutes and hours, zero parts dropped.
+#[test]
+fn a_reminder_says_how_long_it_waited() {
+    assert_eq!(still_words(30 * 60_000, "Run it?"), "Still needs you after 30m · Run it?");
+    assert_eq!(still_words(90 * 60_000, ""), "Still needs you after 1h 30m");
+    assert_eq!(still_words(120 * 60_000 + 59_000, "x"), "Still needs you after 2h · x");
+}

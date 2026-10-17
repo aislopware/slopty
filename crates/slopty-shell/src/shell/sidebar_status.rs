@@ -332,18 +332,20 @@ pub(super) fn chat_card(state: &AppState, chat_id: &str, now: DateTime<Utc>) -> 
     })
 }
 
-/// slopty: when `at` was, in the person's time: "14:05" today, "Oct 16, 14:05" before, the year
-/// too past this one.
+/// slopty: when `at` was, in the person's time on the system's clock: "2:05 PM" today, "Oct 16,
+/// 2:05 PM" before, the year too past this one.
 pub(crate) fn absolute_time(at: DateTime<Utc>, now: DateTime<Utc>) -> String {
     let (at, now) = (at.with_timezone(&Local), now.with_timezone(&Local));
+    // The system's clock, as the transcript's times read.
+    let clock = crate::transcript::clock_format();
     let format = if at.date_naive() == now.date_naive() {
-        "%H:%M"
+        clock.to_owned()
     } else if chrono::Datelike::year(&at) == chrono::Datelike::year(&now) {
-        "%b %-d, %H:%M"
+        format!("%b %-d, {clock}")
     } else {
-        "%b %-d %Y, %H:%M"
+        format!("%b %-d %Y, {clock}")
     };
-    at.format(format).to_string()
+    at.format(&format).to_string()
 }
 
 /// How long a chat has stood as it is, for its hover card.
@@ -361,7 +363,7 @@ fn status_words(chat: &Chat, status: ChatIndicator, session: Option<&Session>, n
         },
         ChatIndicator::AwaitingInput => match since {
             Some(since) => {
-                format!("Waiting on you since {}", since.with_timezone(&Local).format("%H:%M"))
+                format!("Waiting on you since {}", since.with_timezone(&Local).format(crate::transcript::clock_format()))
             }
             None => "Waiting on you".to_owned(),
         },
@@ -515,11 +517,12 @@ mod tests {
     fn a_time_says_when() {
         let now = Local::now();
         let local = |at: chrono::DateTime<Local>| at.with_timezone(&Utc);
-        assert_eq!(absolute_time(local(now), local(now)), now.format("%H:%M").to_string());
+        let clock = crate::transcript::clock_format();
+        assert_eq!(absolute_time(local(now), local(now)), now.format(clock).to_string());
         let before = now - TimeDelta::days(400);
         assert_eq!(
             absolute_time(local(before), local(now)),
-            before.format("%b %-d %Y, %H:%M").to_string()
+            before.format(&format!("%b %-d %Y, {clock}")).to_string()
         );
     }
 

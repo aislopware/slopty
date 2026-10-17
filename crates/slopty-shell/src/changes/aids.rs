@@ -711,5 +711,5 @@ fn clock(at_ms: i64) -> Option<String> {
         return None;
     }
     let at = chrono::DateTime::from_timestamp_millis(at_ms)?;
-    Some(at.with_timezone(&chrono::Local).format("%H:%M").to_string())
+    Some(at.with_timezone(&chrono::Local).format(crate::transcript::clock_format()).to_string())
 }

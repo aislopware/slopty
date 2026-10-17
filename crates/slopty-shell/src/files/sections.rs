@@ -155,9 +155,9 @@ where
     use chrono::Datelike as _;
     let local = then.with_timezone(zone);
     if local.year() == now.with_timezone(zone).year() {
-        local.format("%b %-d, %H:%M").to_string()
+        local.format(&format!("%b %-d, {}", crate::transcript::clock_format())).to_string()
     } else {
-        local.format("%b %-d %Y, %H:%M").to_string()
+        local.format(&format!("%b %-d %Y, {}", crate::transcript::clock_format())).to_string()
     }
 }
 
@@ -1081,10 +1081,16 @@ mod tests {
     fn a_relative_time_reads_in_full_on_hover() {
         let at = |text: &str| DateTime::parse_from_rfc3339(text).unwrap().with_timezone(&Utc);
         let now = at("2026-10-17T09:00:00Z");
-        assert_eq!(absolute_time_in(at("2026-10-16T14:05:00Z"), &Utc, now), "Oct 16, 14:05");
+        // slopty: the time of day as the system's clock says it, 12 or 24 hour.
+        let (afternoon, morning) = if crate::transcript::clock_format() == "%H:%M" {
+            ("14:05", "07:30")
+        } else {
+            ("2:05 PM", "7:30 AM")
+        };
+        assert_eq!(absolute_time_in(at("2026-10-16T14:05:00Z"), &Utc, now), format!("Oct 16, {afternoon}"));
         assert_eq!(
             absolute_time_in(at("2025-03-02T07:30:00Z"), &Utc, now),
-            "Mar 2 2025, 07:30"
+            format!("Mar 2 2025, {morning}")
         );
     }
 

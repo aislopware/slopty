@@ -184,6 +184,36 @@ impl AgentNote {
     pub const KEPT: usize = 16;
 }
 
+/// A side question the person asked the agent, and its answer.
+///
+/// Asked by [`super::wire::Intent::Side`] and told by [`super::Action::Side`]: answered from the
+/// conversation so far, without tools, outside the conversation and beside the turn under way
+/// (Claude Code's `/btw`).
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct SideExchange {
+    /// The intent that asked it.
+    pub intent: super::IntentId,
+    /// The question.
+    pub question: String,
+    /// The answer, once it came; `None` while the agent thinks, or when it failed.
+    pub answer: Option<String>,
+    /// Why no answer came, when none will.
+    pub failed: Option<String>,
+    /// When it was asked.
+    pub at_ms: WallMs,
+}
+
+impl SideExchange {
+    /// The most exchanges a thread keeps, newest last: as many as Claude Code keeps.
+    pub const KEPT: usize = 20;
+
+    /// Whether the agent is still at it.
+    #[must_use]
+    pub const fn pending(&self) -> bool {
+        self.answer.is_none() && self.failed.is_none()
+    }
+}
+
 /// The agent's permission rules as its own `/permissions` lists them, read from it
 /// ([`super::Action::RulesSet`]) and changed by [`super::wire::Intent::Rule`].
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]

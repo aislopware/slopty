@@ -65,7 +65,7 @@ pub fn format_reset(resets_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> Opt
     let at = resets_at?;
     let local = at.with_timezone(&Local);
     Some(if at.signed_duration_since(now).num_hours() < 22 {
-        format!("resets {}", local.format("%-I:%M %p"))
+        format!("resets {}", local.format(crate::transcript::clock_format()))
     } else if at.signed_duration_since(now).num_hours() < 24 * 7 {
         format!("resets {}", local.format("%a"))
     } else {
@@ -443,7 +443,9 @@ mod tests {
         let now = Utc::now();
         assert_eq!(format_reset(None, now), None);
         let soon = format_reset(Some(now + chrono::TimeDelta::hours(2)), now).unwrap();
-        assert!(soon.starts_with("resets ") && soon.contains('M'), "{soon}");
+        // On the system's clock.
+        let at = (now + chrono::TimeDelta::hours(2)).with_timezone(&chrono::Local);
+        assert_eq!(soon, format!("resets {}", at.format(crate::transcript::clock_format())));
         let later = format_reset(Some(now + chrono::TimeDelta::days(3)), now).unwrap();
         assert_eq!(later.len(), "resets Mon".len(), "{later}");
     }

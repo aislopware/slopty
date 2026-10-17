@@ -73,7 +73,7 @@ use model::{mode_words, switched_to};
 pub use work::{PROGRESS_EVERY, TAIL_EVERY};
 
 /// What a driven Claude Code can do through Slopty.
-pub const CAPS: [&str; 18] = [
+pub const CAPS: [&str; 19] = [
     Cap::APPROVALS,
     Cap::BACKGROUND,
     Cap::END,
@@ -88,6 +88,7 @@ pub const CAPS: [&str; 18] = [
     Cap::SET_MODEL,
     Cap::SET_OPTION,
     Cap::SHELL,
+    Cap::SIDE,
     Cap::SNAPSHOTS,
     Cap::STEER,
     Cap::STOP_TASK,
@@ -187,6 +188,8 @@ enum Control {
     Rewind(slopty_proto::thread::TurnId),
     /// One of the asks a mod's surfaces make.
     Ui(doors::Ui),
+    /// A side question, asked as it stands until answered.
+    Side(slopty_proto::thread::SideExchange),
 }
 
 /// A message given to Claude Code and not yet acknowledged.
@@ -926,6 +929,7 @@ impl Driven {
             }
             Control::Rewind(turn) => self.rewound(turn, &said, now),
             Control::Ui(ui) => self.ui_answered(&ui, &said, now),
+            Control::Side(asked) => self.side_answered(asked, &said),
         }
     }
 
@@ -960,7 +964,11 @@ impl Driven {
             Control::Rewind(_) => "to put the files back",
             Control::Rules => "to list its permission rules",
             Control::McpStatus => "to list its MCP servers",
-            Control::App(_) | Control::Ui(_) | Control::ContextUsage | Control::Settings => {
+            Control::App(_)
+            | Control::Ui(_)
+            | Control::Side(_)
+            | Control::ContextUsage
+            | Control::Settings => {
                 return self.unanswered(control, error);
             }
         };

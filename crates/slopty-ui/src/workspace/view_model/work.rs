@@ -217,6 +217,7 @@ impl WorkspaceView {
             calls::STOP_ALL_WORK,
             calls::BACKGROUND,
             calls::RUN_SHELL,
+            calls::ASK_SIDE,
             calls::REWIND,
             calls::UNDO_REWIND,
             calls::CHANGE_RULE,
@@ -252,6 +253,10 @@ impl WorkspaceView {
             calls::RUN_SHELL => match text("command").filter(|c| !c.trim().is_empty()) {
                 Some(command) => self.view_act(&chat, Intent::Shell { command }, cx),
                 None => Task::ready(Err(required("command"))),
+            },
+            calls::ASK_SIDE => match text("question").filter(|q| !q.trim().is_empty()) {
+                Some(question) => self.view_act(&chat, Intent::Side { question }, cx),
+                None => Task::ready(Err(required("question"))),
             },
             calls::REWIND => self.view_rewind(&chat, params, cx),
             calls::CHANGE_RULE => {

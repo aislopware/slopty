@@ -13131,3 +13131,53 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   GPUI gains letter spacing, the fork takes it at the next import. Test: `slopty-shell`
   `typography::tests::{tracked_caps_set_their_letters_a_tenth_of_an_em_apart,
   tracked_letters_are_capitals_with_no_hair_space}`.
+- ✅ **A text field keeps every key typed in it, and a card's answers stand at the right
+  (2026-10-17).** An MCP server's form drew its Decline and Cancel as numbered options above
+  its fields, with the keyboard's ring on Decline. The panel's keys read only whether the
+  composer's own input had the keyboard, so in a form's field a typed digit picked an option
+  (the 2 of "SLO-42" picked Cancel and ended the turn) and Enter took the ringed Decline. Now
+  no digit, Enter or arrow answers a card while any field it shows has the keyboard: its answer
+  box (empty or not, which drops t3code's empty-composer exception), a form's field, a note, a
+  rule. Digits pick only from the card itself, after the typing guard above. A form has no
+  numbered options at all: its answers are buttons beside its Submit, and Enter in a field is
+  that Submit, which says what is still missing. One placement holds for every card, as in
+  Claude desktop's question card and Zed's elicitation: Back alone at the left, the answers at
+  the right with the one that goes ahead last (Skip then Submit, Decline, Cancel then Submit,
+  Dismiss then OK). The footer's single right group sat at the left whenever no Back stood
+  before it.
+  - **A card that comes takes the keyboard.** It used to leave the keyboard in the composer's
+    input, behind the card, so a card's own keys worked only after a click. Now a card takes it
+    when it opens, a printable key typed at the card goes into its answer box when it takes
+    words, and its numbers pick at once, the typing guard aside.
+  - **One rule for number keys.** An approval drew no numbers while a question or a form did.
+    Now a card's choices show their numbers exactly where the numbers pick them: not on a
+    click-only card (a call not known safe, plan mode, a deny-first card: Claude desktop's rule,
+    `.research/claude-desktop-2026-10-16.md` §e item 2, and Claude Code's `default_to_no`,
+    `agents.md` "The TUI's words from Claude Code's own doors, second round"), not on a form,
+    and not while a field holds the keyboard. An approval that is not click-only
+    shows its numbers and takes them.
+  - Tests: `slopty-shell` `composer::dock_tests::{typing_in_a_form_field_answers_nothing,
+    a_card_that_comes_takes_the_keyboard, an_approvals_numbers_answer_it}`.
+- ✅ **Small things said once, alike everywhere (2026-10-17).**
+  - **The mode in one place.** A resumed chat showed its permission mode in the composer while
+    a live chat showed it in the footer. The footer holds it for both: the chat's own mode when
+    the agent says one, else the mode the pickers chose.
+  - **Durations drop their zero parts.** "1m 0s" reads "1m", "1h 0m" reads "1h", in every
+    surface that words a duration (`slopty_view_doc::work::duration_words` and the driven
+    Claude's spans).
+  - **One clock, the system's.** Times of day follow the system's 12 or 24 hour setting
+    (`transcript::clock_format`, read on macOS from the locale's `j` template), in the
+    transcript, the sidebar, the account's resets, the changes and the files.
+  - **Shell mode hides its `!`.** The draft keeps the `!` it was typed with, and the input draws
+    it hidden behind the Shell tag, so the tag says the mode once.
+  - **Titles are plain text.** A chat's title made from Markdown ("Read [the guide](…) and
+    **fix** `it`") reads as its words everywhere.
+  - **A grep's lines without files.** "Found 1 line across 0 files" reads "Found 1 line".
+  - **A drilled-in subagent's bar stands in the composer's column**, edge for edge, rather than
+    the column's padding wider. **A subagent's run open in its card is as tall as its rows**, up
+    to the card's room, rather than always that room.
+  - Tests: `slopty-shell` `composer::dock_tests::{the_footer_says_mode_and_goal,
+    a_bang_draft_is_shell_mode}`, `shell::navigation_tests::a_drilled_in_subagent_leads_back_to_its_parent`,
+    `transcript::surface_tests::a_subagent_run_open_in_its_card_is_as_tall_as_its_rows`;
+    `slopty-view-doc` `work::tests`; `slopty-ui` `view_model::tests::a_chat_is_made_when_its_thread_began`,
+    `view_model::facts::tests`.

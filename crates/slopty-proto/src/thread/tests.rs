@@ -599,6 +599,30 @@ fn notifications_keep_one_per_key_and_the_newest() {
     assert_eq!(words, ["Context low", "2 MCP servers failed"]);
 }
 
+/// A side question's answer takes the place of its question, and only the newest
+/// [`SideExchange::KEPT`] are kept.
+#[test]
+fn side_questions_keep_their_answers_and_the_newest() {
+    let asked = |n: u128, question: &str| SideExchange {
+        intent: IntentId::from_uuid(Uuid::from_u128(n)),
+        question: question.to_owned(),
+        answer: None,
+        failed: None,
+        at_ms: WallMs::ZERO,
+    };
+    let answered = SideExchange { answer: Some("In codec.rs".to_owned()), ..asked(1, "Where?") };
+    let state = run(&[Action::Side(asked(1, "Where?")), Action::Side(answered.clone())]);
+    assert_eq!(state.side, [answered], "one exchange, answered");
+    assert!(!state.side[0].pending());
+    let actions: Vec<Action> = (0..=SideExchange::KEPT as u128)
+        .map(|n| Action::Side(asked(n, &format!("q{n}"))))
+        .collect();
+    let state = run(&actions);
+    assert_eq!(state.side.len(), SideExchange::KEPT);
+    assert_eq!(state.side[0].question, "q1", "the oldest went");
+    assert!(state.side.iter().all(SideExchange::pending));
+}
+
 /// A call's note lands only on a call the state holds, goes with it, and travels with the
 /// window and the page it is in; a task's output lands on that task alone.
 #[test]

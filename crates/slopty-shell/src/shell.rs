@@ -80,6 +80,8 @@ mod panel_layout;
 use panel_layout::{AuxiliaryPanel, FitInputs, HorizontalPanelFit, panel_content_tween};
 #[cfg(test)]
 mod panel_interaction_tests;
+#[cfg(test)]
+mod retention_tests; // slopty: the whole shell under retention against a frame from scratch
 pub(crate) mod project_icon;
 mod session_info;
 mod side_chats;
@@ -6988,7 +6990,9 @@ impl Shell {
                 .flex()
                 .items_center()
                 .justify_center()
-                .aria_label(status_label.unwrap_or("Idle"))
+                // slopty: a node needs a role to be one of the tree a screen reader reads; an idle
+                // row has nothing to say.
+                .when_some(status_label, |el, label| el.role(gpui::Role::Status).aria_label(label))
                 .child(glyph)
                 .into_any_element()
         });
@@ -7088,6 +7092,11 @@ impl Shell {
                         .children(subagent_pill("label"))
                         .child(
                             div()
+                                // slopty: the status says itself to a screen reader, as the
+                                // compact row's does.
+                                .id(SharedString::from(format!("{row_id}-status")))
+                                .role(gpui::Role::Status)
+                                .aria_label(label)
                                 .flex()
                                 .flex_row()
                                 .items_center()
@@ -7267,7 +7276,13 @@ impl Shell {
                         this.chat_hover_resync = false;
                         if *hovered {
                             if this.chat_status_hover.as_deref() != Some(hover_id.as_str()) {
-                                this.chat_status_hover = Some(hover_id.clone());
+                                // slopty: the row the hover leaves hears no leave of its own when
+                                // it moved from under a still pointer (an archived row, landing
+                                // in the Archived section): its wash is let go here, or it stays
+                                // lit there.
+                                if let Some(previous) = this.chat_status_hover.replace(hover_id.clone()) {
+                                    motion::set_hover(&format!("{previous}-hover"), false, this.reduced_motion);
+                                }
                                 cx.notify();
                             }
                         } else if this.chat_status_hover.as_deref() == Some(hover_id.as_str()) {
@@ -9343,6 +9358,8 @@ impl Shell {
                 let measured_has_composer = self.bottom_stack_has_composer.clone();
                 let contains_composer = (has_spaces || no_project /* slopty: appshots removed */) && has_selection;
                 let composer = self.composer.clone();
+                // slopty: what the new height moves, told once the frame is drawn.
+                let (shell, transcript) = (cx.weak_entity(), self.transcript.clone());
                 div()
                     .flex_none()
                     .relative()
@@ -9350,7 +9367,7 @@ impl Shell {
                     .flex_col()
                     .child(
                         gpui::canvas(
-                            move |bounds, window, cx| {
+                            move |bounds, _window, cx| {
                                 // Reserve the destination footprint, never the animated height.
                                 let next_height = f32::from(bounds.size.height)
                                     + composer.read(cx).dock_clearance_correction();
@@ -9362,7 +9379,17 @@ impl Shell {
                                 if changed {
                                     measured.set(next_height);
                                     measured_has_composer.set(contains_composer);
-                                    window.request_animation_frame();
+                                    // slopty: a view notified while the window draws asks for no
+                                    // frame, so the shell and the transcript under the stack are
+                                    // told once this frame is drawn, which asks for the frame
+                                    // that shows them both at the new height.
+                                    cx.defer(move |cx| {
+                                        if contains_composer {
+                                            let stack_h = (next_height - term_h).max(0.0);
+                                            transcript.update(cx, |t, cx| t.set_bottom_clearance(stack_h, cx));
+                                        }
+                                        shell.update(cx, |_, cx| cx.notify()).ok();
+                                    });
                                 }
                             },
                             |_, _, _, _| {},

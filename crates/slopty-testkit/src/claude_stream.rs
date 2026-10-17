@@ -54,7 +54,7 @@
 //! `apply_flag_settings` (`effortLevel`, `fastMode`, shown in the next `init`), `stop_task` (a
 //! subagent or a background command), `get_context_usage`, and the doors' (`background_tasks`,
 //! `rewind_files`, `list_permission_rules`, `mcp_status`, `mcp_read_resource`, `mcp_call`,
-//! `ui_*`); any other subtype is answered with an error.
+//! `side_question`, `ui_*`); any other subtype is answered with an error.
 //!
 //! The conversation goes where Claude Code keeps it, `~/.claude/projects/<cwd with every
 //! character but letters and digits made '-'>/<session>.jsonl`, so `--resume <id>` (with

@@ -24,7 +24,8 @@ use crate::theme::Theme;
 
 /// The step line under a card's header.
 const STEP_LINE_HEIGHT: f32 = 20.0;
-/// The shortest and tallest a card's child transcript opens.
+/// The least and most room a card's child transcript may take; it takes only its rows' height
+/// within it.
 const CHILD_MIN_HEIGHT: f32 = 160.0;
 const CHILD_MAX_HEIGHT: f32 = 480.0;
 /// The share of the window's height a child transcript opens to, within those.
@@ -50,6 +51,8 @@ pub(super) struct SubagentsState {
 /// A child's transcript, open in its card.
 struct InlineChild {
     transcript: Entity<Transcript>,
+    /// Its rows' height as last laid out, which the card takes up to its room.
+    rows: std::rc::Rc<std::cell::Cell<Option<f32>>>,
     _events: Subscription,
 }
 
@@ -181,6 +184,12 @@ impl SubagentsState {
         open.sort();
         open
     }
+
+    /// The most room a child transcript open in a card takes: a share of the window's height.
+    pub(super) fn child_room(&self) -> f32 {
+        let viewport = f32::from(self.window.height);
+        (viewport * CHILD_VIEWPORT_SHARE).clamp(CHILD_MIN_HEIGHT, CHILD_MAX_HEIGHT)
+    }
 }
 
 impl Transcript {
@@ -221,9 +230,14 @@ impl Transcript {
     }
 
     /// The child `chat`'s transcript, open in place: watched from its first showing.
-    fn inline_child(&mut self, chat: &str, live: bool, cx: &mut Context<Self>) -> Entity<Transcript> {
+    fn inline_child(
+        &mut self,
+        chat: &str,
+        live: bool,
+        cx: &mut Context<Self>,
+    ) -> (Entity<Transcript>, Option<f32>) {
         if let Some(child) = self.subagents.open.get(chat) {
-            return child.transcript.clone();
+            return (child.transcript.clone(), child.rows.get());
         }
         let state = self.state.clone();
         state.update(cx, |state, cx| state.watch_subagent_doc(chat.to_owned(), cx));
@@ -235,14 +249,18 @@ impl Transcript {
         let events = cx.subscribe(&transcript, |_, _, event: &TranscriptEvent, cx| {
             cx.emit(event.clone());
         });
+        let rows = std::rc::Rc::default();
+        let card = cx.weak_entity();
+        transcript.update(cx, |child, _| child.fit_to(card, std::rc::Rc::clone(&rows)));
         self.subagents.open.insert(
             chat.to_owned(),
             InlineChild {
                 transcript: transcript.clone(),
+                rows,
                 _events: events,
             },
         );
-        transcript
+        (transcript, None)
     }
 
     /// Close the child `chat` open in place.
@@ -507,9 +525,12 @@ impl Transcript {
                 .child(SharedString::from(format!("Needs you · {ask}")))
         });
         let child = card.chat.clone().filter(|_| open).map(|chat| {
-            let transcript = self.inline_child(&chat, card.running, cx);
-            let viewport = f32::from(self.subagents.window.height);
-            let height = (viewport * CHILD_VIEWPORT_SHARE).clamp(CHILD_MIN_HEIGHT, CHILD_MAX_HEIGHT);
+            let (transcript, rows) = self.inline_child(&chat, card.running, cx);
+            // As tall as its rows, up to its room: a short run leaves no room under its last
+            // line. Before its rows laid out, the room.
+            // The hairline over it is its own pixel.
+            let room = self.subagents.child_room();
+            let height = rows.map_or(room, |rows| (rows + 1.0).min(room));
             div()
                 .id(SharedString::from(format!("{key}-child")))
                 .role(gpui::Role::Group)

@@ -14,7 +14,7 @@ use slopty_proto::thread::{
 use slopty_view_doc::{
     ActivityLine, ChatDock, ContextBreakdown, ContextSlice, DockCan, GoalLine, MainRow, ModSurface,
     ModeChip, ModeChoice, NoteLine, PermissionRuleRow, PermissionRules, RetryLine, RuleScope,
-    StatusSpan, SubagentKindRow, TurnTokens, WorkCounts, WorkRow, WorkTray, tokens_short,
+    SideLine, StatusSpan, SubagentKindRow, TurnTokens, WorkCounts, WorkRow, WorkTray, tokens_short,
 };
 
 use super::transcript::at;
@@ -604,8 +604,6 @@ pub fn dock(state: &ThreadState, counts: &WorkCounts, now_ms: i64) -> ChatDock {
         suggestion: state.suggestion.clone().filter(|s| !s.trim().is_empty()),
         status_line: state.status_line.as_deref().map(status_spans).unwrap_or_default(),
         mode: mode_chip(state),
-        background: *counts,
-        background_words: counts.summary(),
         waiting: waiting_words(state, counts),
         context: context(state),
         subagent_kinds: state
@@ -618,6 +616,17 @@ pub fn dock(state: &ThreadState, counts: &WorkCounts, now_ms: i64) -> ChatDock {
             })
             .collect(),
         surfaces,
+        side: state
+            .side
+            .iter()
+            .map(|s| SideLine {
+                id: s.intent.to_string(),
+                question: s.question.clone(),
+                answer: s.answer.clone(),
+                failed: s.failed.clone(),
+                at: at(s.at_ms),
+            })
+            .collect(),
         can: DockCan {
             stop_work: can(Cap::STOP_TASK),
             background: can(Cap::BACKGROUND),
@@ -627,6 +636,7 @@ pub fn dock(state: &ThreadState, counts: &WorkCounts, now_ms: i64) -> ChatDock {
             rules: can(Cap::RULES),
             surfaces: can(Cap::SURFACES),
             set_mode: can(Cap::SET_MODE) && !state.meta.modes.is_empty(),
+            side: can(Cap::SIDE),
         },
     }
 }

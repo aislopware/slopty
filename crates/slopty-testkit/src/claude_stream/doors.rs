@@ -1,7 +1,7 @@
 //! The stand-in's doors beside messages, each as Claude Code 2.1.301 answers it.
 //!
 //! The doors are its background work, its dialogs and forms, its file checkpoints, its MCP
-//! servers' apps, its permission rules and its mods' surfaces.
+//! servers' apps, its permission rules, its mods' surfaces and its side questions.
 //!
 //! - **Background work.** `background <cmd>` starts a background command (`task_started`,
 //!   `background_tasks_changed`) that runs until `stop_task` names it, then ends killed
@@ -25,6 +25,8 @@
 //! - **Surfaces.** With `STUB_UI` set, a mod `ship` draws a pane `deploy` and the band above the
 //!   prompt; pressing its button says a toast and a status segment and draws again; closing the
 //!   pane takes it off the roster. Without it nothing is hooked.
+//! - **Side questions.** `side_question` answers `Aside: <question> (<n> before)`, `n` the
+//!   exchanges its history holds; `refuse` is refused and `nothing` gets no answer.
 
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::path::{Path, PathBuf};
@@ -116,6 +118,7 @@ impl Stub {
                 }
             }
             "mcp_call" => self.mcp_call(id, request),
+            "side_question" => side(id, request),
             "ui_attach" => reply(id, Some(json!({ "surfaces": ["desktop"] }))),
             "ui_panes" => reply(id, Some(self.roster())),
             "ui_render" => {
@@ -747,4 +750,20 @@ fn mcp(server: &Value, method: &str, params: &Value) -> Result<Value, String> {
     drop(child.kill());
     drop(child.wait());
     result
+}
+
+/// A side question answered from the conversation as `request` gives it: its words and how many
+/// exchanges came before it, so a test reads what was sent; `refuse` is refused, and `nothing`
+/// gets no answer, as when Claude Code has none.
+fn side(id: &str, request: &Value) {
+    let question = request.get("question").and_then(Value::as_str).unwrap_or_default();
+    let before = request.get("history").and_then(Value::as_array).map_or(0, Vec::len);
+    match question {
+        "refuse" => refuse(id, "Side questions are not available"),
+        "nothing" => reply(id, Some(json!({ "response": null, "synthetic": false }))),
+        _ => {
+            let answer = format!("Aside: {question} ({before} before)");
+            reply(id, Some(json!({ "response": answer, "synthetic": false })));
+        }
+    }
 }

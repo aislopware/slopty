@@ -419,7 +419,39 @@ fn the_dock_drops_what_expired_and_counts_the_work() {
     assert_eq!(dock.notes.len(), 1);
     assert_eq!(dock.notes[0].tone, slopty_view_doc::NoteLine::WARNING);
     assert_eq!(dock.goal.as_ref().and_then(|g| g.tokens), Some(500));
-    assert_eq!(dock.background_words, "2 subagents");
     assert_eq!(dock.waiting.as_deref(), Some("Waiting for 2 subagents to finish"));
     assert!(dock.activity.is_none(), "no turn under way");
+}
+
+/// The side questions reach the dock as asked, answered or failed, by their intent; a chat whose
+/// agent cannot take one is offered none.
+#[test]
+fn side_questions_reach_the_dock() {
+    let mut state = thread_with(&[Cap::SIDE]);
+    let intent = slopty_proto::thread::IntentId::new();
+    state.side = vec![
+        slopty_proto::thread::SideExchange {
+            intent,
+            question: "Which file?".to_owned(),
+            answer: Some("`codec.rs`".to_owned()),
+            failed: None,
+            at_ms: ms(5),
+        },
+        slopty_proto::thread::SideExchange {
+            intent: slopty_proto::thread::IntentId::new(),
+            question: "And?".to_owned(),
+            answer: None,
+            failed: None,
+            at_ms: ms(6),
+        },
+    ];
+    let counts = tray(&state, &[], &chat_of).counts;
+    let dock = dock(&state, &counts, 0);
+    assert!(dock.can.side);
+    assert_eq!(dock.side.len(), 2);
+    assert_eq!(dock.side[0].id, intent.to_string());
+    assert_eq!(dock.side[0].answer.as_deref(), Some("`codec.rs`"));
+    assert_eq!(dock.side[0].at, super::at(ms(5)));
+    assert!(dock.side[1].pending());
+    assert!(!super::dock(&thread_with(&[]), &counts, 0).can.side);
 }

@@ -641,6 +641,12 @@ fn a_chat_is_made_when_its_thread_began() {
     let chat = rows::chat(&row, "w");
     assert_eq!(chat.created_at.timestamp_millis(), 1_760_000_000_000);
     assert_eq!(chat.last_message_at, None, "nothing to read yet");
+    row.title = "Read [the guide](https://example.com/guide) and **fix** `it`".to_owned();
+    assert_eq!(
+        rows::chat(&row, "w").title.as_deref(),
+        Some("Read the guide and fix it"),
+        "plain words"
+    );
 }
 
 /// The first item of `state` that is the agent's own words.
@@ -1539,6 +1545,17 @@ fn a_failure_reads_in_one_grammar_and_offers_retry() {
         assert_eq!(raw.as_deref(), Some("said"));
     }
     assert_eq!(transcript::error_words("something-new", "as said", None, None).0, "as said");
+    // An end of Claude Code's names its machine after what happened, before what to do.
+    let ended = "Claude Code ended with code 1: Error: bad. Send a message to start it again.";
+    assert_eq!(
+        transcript::error_words(Notice::ENDED, ended, Some("studio"), None),
+        (
+            "Claude Code ended with code 1: Error: bad (on studio). Send a message to start it again."
+                .to_owned(),
+            None
+        )
+    );
+    assert_eq!(transcript::error_words(Notice::ENDED, ended, None, None).0, ended);
 
     let mut state = fixtures::thread("tools");
     for turn in &mut state.turns {

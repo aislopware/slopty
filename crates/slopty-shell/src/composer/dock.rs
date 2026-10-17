@@ -63,6 +63,8 @@ pub(crate) struct DockFeed {
     /// The `!` command under way, or just done.
     pub shell: Option<ShellRun>,
     shell_task: Option<Task<()>>,
+    /// The side exchange the person dismissed, by chat: its card stays away until a newer one.
+    pub side_dismissed: HashMap<String, String>,
 }
 
 impl DockFeed {

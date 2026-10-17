@@ -145,7 +145,8 @@ pub fn chat(row: &ThreadRow, device: &str) -> Chat {
     Chat {
         id: row.id.to_string(),
         device_id: device.to_owned(),
-        title: Some(row.title.clone()).filter(|title| !title.is_empty()),
+        // A title is plain words everywhere it shows: a prompt's Markdown reads as its words.
+        title: Some(slopty_kit::markdown::plain_line(&row.title)).filter(|title| !title.is_empty()),
         archived: false,
         cwd: row.cwd.clone(),
         branch: row.facts.get("branch").cloned(),

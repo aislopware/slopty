@@ -244,14 +244,12 @@ fn a_reveal_opens_the_tray_at_its_row(cx: &mut TestAppContext) {
     assert_eq!(marked.selected, Some(true));
 }
 
-/// The footer says the mode and the goal, and leaves the background counts to the tray above
-/// it; a mode switch that cannot go goes back to the mode the agent is in.
+/// The footer says the mode and the goal (the tray above it counts the background work); a
+/// mode switch that cannot go goes back to the mode the agent is in.
 #[gpui::test]
-fn the_footer_says_mode_background_and_goal(cx: &mut TestAppContext) {
+fn the_footer_says_mode_and_goal(cx: &mut TestAppContext) {
     let dock = ChatDock {
         mode: Some(modes("default")),
-        background: WorkCounts { commands: 2, ..WorkCounts::default() },
-        background_words: "2 commands".into(),
         goal: Some(GoalLine {
             condition: "all tests pass".into(),
             set_at: chrono::Utc::now().timestamp_millis() - 5 * 3_600_000,
@@ -263,7 +261,6 @@ fn the_footer_says_mode_background_and_goal(cx: &mut TestAppContext) {
     let (composer, _, cx) = open(cx, dock, None);
     let nodes = draw(cx);
     assert!(find(&nodes, Role::Button, "Mode: Default").is_some(), "{:?}", labels(&nodes, Role::Button));
-    assert!(find(&nodes, Role::Button, "2 commands").is_none(), "the tray counts them, not the footer");
     let goal = find(&nodes, Role::Button, "/goal active (5h)").expect("the goal shows");
     assert!(goal.description.contains("all tests pass"));
 
@@ -397,6 +394,142 @@ fn a_form_says_what_it_still_needs(cx: &mut TestAppContext) {
     assert!(composer.read_with(cx, |composer, _| composer.wizard_open()), "nothing was sent");
 }
 
+/// Typing in a form's field fills it and answers nothing, long after the card came: no digit
+/// picks Decline or Cancel, and no Enter takes one. The form's answers are buttons beside its
+/// Submit, unnumbered, and Enter in a field is that Submit, which says what is still missing.
+#[gpui::test]
+fn typing_in_a_form_field_answers_nothing(cx: &mut TestAppContext) {
+    let (composer, state, cx) = open(cx, ChatDock { can: can(), ..ChatDock::default() }, None);
+    ask(
+        cx,
+        &state,
+        UserInputQuestion {
+            id: "choice".into(),
+            header: "tracker".into(),
+            question: "Which ticket?".into(),
+            options: vec!["Decline".into(), "Cancel".into()],
+            choices_only: true,
+            kind: "elicitation".into(),
+            schema_json: Some(
+                r#"{"type":"object","properties":{"ticket":{"type":"string","title":"Ticket"},"note":{"type":"string","minLength":3}},"required":["ticket","note"]}"#
+                    .into(),
+            ),
+            ..UserInputQuestion::default()
+        },
+    );
+    let nodes = draw(cx);
+    let buttons = labels(&nodes, Role::Button);
+    let at = |label: &str| buttons.iter().position(|b| b == label).unwrap_or_else(|| panic!("{label} in {buttons:?}"));
+    assert!(at("Decline") < at("Cancel") && at("Cancel") < at("Submit form"), "{buttons:?}");
+    assert!(nodes.iter().all(|n| n.label != "1" && n.label != "2"), "no numbered answers");
+    // The card has been up a while and the person has not typed in the composer.
+    composer.update(cx, |composer, _| {
+        composer.card.guard = request_card::KeyGuard { typed_at: None, shown_at: Some(Instant::now() - Duration::from_secs(10)) };
+    });
+    let field = composer.read_with(cx, |composer, _| composer.card_input("ticket")).expect("the Ticket field");
+    cx.update(|window, cx| {
+        let focus = field.read(cx).focus_handle.clone();
+        window.focus(&focus, cx);
+    });
+    draw(cx);
+    cx.simulate_input("SLO-42");
+    cx.simulate_keystrokes("up down");
+    assert_eq!(field.read_with(cx, |field, _| field.text().to_owned()), "SLO-42", "the field holds what was typed");
+    assert!(composer.read_with(cx, |composer, _| composer.wizard_open() && composer.answered_requests.is_empty()));
+    cx.simulate_keystrokes("enter");
+    let nodes = draw(cx);
+    assert!(find(&nodes, Role::Alert, "Fill in note").is_some(), "Enter is the form's Submit");
+    assert!(composer.read_with(cx, |composer, _| composer.wizard_open() && composer.answered_requests.is_empty()));
+}
+
+/// A card that comes while the composer holds the keyboard takes it: its number keys pick at
+/// once (once the typing guard lets them), and a letter typed goes to its answer box, which then
+/// keeps every key, digits included. An approval's options take their numbers alike.
+#[gpui::test]
+fn a_card_that_comes_takes_the_keyboard(cx: &mut TestAppContext) {
+    let (composer, state, cx) = open(cx, ChatDock { can: can(), ..ChatDock::default() }, None);
+    draw(cx);
+    let input = composer.read_with(cx, |composer, _| composer.input.clone());
+    cx.update(|window, cx| {
+        let focus = input.read(cx).focus_handle.clone();
+        window.focus(&focus, cx);
+    });
+    draw(cx);
+    let settled = |composer: &Entity<Composer>, cx: &mut VisualTestContext| {
+        composer.update(cx, |composer, _| {
+            composer.card.guard =
+                request_card::KeyGuard { typed_at: None, shown_at: Some(Instant::now() - Duration::from_secs(10)) };
+        });
+    };
+    ask(
+        cx,
+        &state,
+        UserInputQuestion {
+            id: "db".into(),
+            header: "Database".into(),
+            question: "Which one?".into(),
+            options: vec!["Postgres".into(), "SQLite".into()],
+            kind: "question".into(),
+            ..UserInputQuestion::default()
+        },
+    );
+    draw(cx);
+    let focused_input = |cx: &mut VisualTestContext| cx.update(|window, cx| input.read(cx).focus_handle.is_focused(window));
+    assert!(!focused_input(cx), "the card took the keyboard");
+    settled(&composer, cx);
+    cx.simulate_input("x");
+    assert!(focused_input(cx), "words went to the answer box");
+    cx.simulate_input("2");
+    assert_eq!(input.read_with(cx, |input, _| input.text().to_owned()), "x2", "the box keeps its digits");
+    assert!(composer.read_with(cx, |composer, _| composer.wizard.as_ref().is_some_and(|w| !w.page_has_pick())));
+    let card = composer.read_with(cx, |composer, _| composer.wizard_focus.clone());
+    cx.update(|window, cx| window.focus(&card, cx));
+    draw(cx);
+    // Typed just now, a digit is held back and goes to the box; once the typing settled, it picks.
+    cx.simulate_input("3");
+    assert_eq!(input.read_with(cx, |input, _| input.text().to_owned()), "x23", "held while typing");
+    cx.update(|window, cx| window.focus(&card, cx));
+    draw(cx);
+    settled(&composer, cx);
+    cx.simulate_input("1");
+    assert!(composer.read_with(cx, |composer, _| composer.wizard.as_ref().is_some_and(|w| w.is_picked(0))), "1 picked");
+}
+
+/// An approval that came while the composer held the keyboard answers to its numbers too.
+#[gpui::test]
+fn an_approvals_numbers_answer_it(cx: &mut TestAppContext) {
+    let (composer, state, cx) = open(cx, ChatDock { can: can(), ..ChatDock::default() }, None);
+    draw(cx);
+    let input = composer.read_with(cx, |composer, _| composer.input.clone());
+    cx.update(|window, cx| {
+        let focus = input.read(cx).focus_handle.clone();
+        window.focus(&focus, cx);
+    });
+    draw(cx);
+    ask(
+        cx,
+        &state,
+        UserInputQuestion {
+            id: "choice".into(),
+            header: "Read".into(),
+            question: "Read src/main.rs?".into(),
+            options: vec!["Allow".into(), "Deny".into()],
+            choices_only: true,
+            deny_option: Some(1),
+            allow_option: Some(0),
+            kind: "approval".into(),
+            ..UserInputQuestion::default()
+        },
+    );
+    draw(cx);
+    composer.update(cx, |composer, _| {
+        composer.card.guard =
+            request_card::KeyGuard { typed_at: None, shown_at: Some(Instant::now() - Duration::from_secs(10)) };
+    });
+    cx.simulate_input("2");
+    assert!(composer.read_with(cx, |composer, _| !composer.wizard_open() && composer.answered_requests.contains("1")), "2 denied it");
+}
+
 /// A dialog Slopty does not know shows its payload and takes OK or Dismiss, never words.
 #[gpui::test]
 fn an_unknown_dialog_shows_its_payload(cx: &mut TestAppContext) {
@@ -511,12 +644,20 @@ fn a_bang_draft_is_shell_mode(cx: &mut TestAppContext) {
     composer.update(cx, |composer, cx| composer.input.update(cx, |input, cx| input.set_text("!ls -la", cx)));
     let nodes = draw(cx);
     assert!(find(&nodes, Role::Status, "Shell mode").is_some());
+    // The tag says the mode: the draft is drawn without its `!`, which it still holds.
+    let (text, shown) = composer.read_with(cx, |composer, cx| {
+        let input = composer.input.read(cx);
+        (input.text().to_owned(), input.projection.display.clone())
+    });
+    assert_eq!((text.as_str(), shown.as_str()), ("!ls -la", "ls -la"));
     composer.update(cx, |composer, cx| {
         composer.dock.dock = Some(Arc::new(ChatDock::default()));
         cx.notify();
     });
     let nodes = draw(cx);
     assert!(find(&nodes, Role::Status, "Shell mode").is_none(), "no shell, no shell mode");
+    let shown = composer.read_with(cx, |composer, cx| composer.input.read(cx).projection.display.clone());
+    assert_eq!(shown, "!ls -la", "words, drawn as typed");
 }
 
 /// Messages a stop held say "Paused" with Resume; one held for another reason does not.
@@ -688,4 +829,55 @@ fn keys_land_in_the_draft_after_a_chat_switch(cx: &mut TestAppContext) {
     });
     let text = composer.read_with(cx, |composer, cx| composer.input.read(cx).text().to_owned());
     assert_eq!(text, "half a thought");
+}
+
+/// `/btw` asks the agent beside the conversation and is never sent as a message: the draft
+/// empties, and with no engine the composer says the question could not go. The newest exchange
+/// shows in a card above the composer, the agent at it and then its answer, until dismissed; a
+/// newer one brings it back. An agent that takes no side question gets no card.
+#[gpui::test]
+fn a_btw_draft_asks_beside_and_its_answer_shows_until_dismissed(cx: &mut TestAppContext) {
+    let dock = ChatDock { can: DockCan { side: true, ..can() }, ..ChatDock::default() };
+    let (composer, _, cx) = open(cx, dock.clone(), None);
+    composer.update(cx, |composer, cx| {
+        composer.input.update(cx, |input, cx| input.set_text("/btw which file?", cx));
+        composer.on_submit(cx);
+    });
+    let (draft, failure) =
+        composer.read_with(cx, |composer, cx| (composer.input.read(cx).text().to_owned(), composer.visible_failure()));
+    assert_eq!(draft, "", "taken as a side question");
+    assert!(failure.is_some_and(|f| f.starts_with("Couldn't ask the side question")), "the call went");
+    let line = |id: &str, answer: Option<&str>| slopty_view_doc::SideLine {
+        id: id.into(),
+        question: "Which file?".into(),
+        answer: answer.map(Into::into),
+        failed: None,
+        at: 0,
+    };
+    let set = |cx: &mut VisualTestContext, side: Vec<slopty_view_doc::SideLine>| {
+        let dock = ChatDock { side, ..dock.clone() };
+        composer.update(cx, |composer, cx| {
+            composer.dock.dock = Some(Arc::new(dock));
+            cx.notify();
+        });
+        draw(cx)
+    };
+    let nodes = set(cx, vec![line("1", None)]);
+    assert!(find(&nodes, Role::Group, "Side question: Which file?").is_some());
+    assert!(find(&nodes, Role::Status, "Answering").is_some());
+    let nodes = set(cx, vec![line("1", Some("In `codec.rs`."))]);
+    assert!(find(&nodes, Role::Group, "Side question: Which file?").is_some());
+    assert!(find(&nodes, Role::Status, "Answering").is_none(), "answered");
+    assert!(find(&nodes, Role::Button, "Dismiss the side answer").is_some());
+    composer.update(cx, |composer, cx| composer.dismiss_side(cx));
+    let nodes = draw(cx);
+    assert!(find(&nodes, Role::Group, "Side question: Which file?").is_none(), "dismissed");
+    let nodes = set(cx, vec![line("1", Some("In `codec.rs`.")), line("2", None)]);
+    assert!(find(&nodes, Role::Status, "Answering").is_some(), "the newer one shows");
+    let nodes = set(cx, Vec::new());
+    assert!(find(&nodes, Role::Group, "Side question: Which file?").is_none());
+    composer.update(cx, |composer, cx| {
+        composer.dock.dock = Some(Arc::new(ChatDock { can: can(), ..ChatDock::default() }));
+        assert!(!composer.ask_side("why?".into(), cx), "no side questions here");
+    });
 }

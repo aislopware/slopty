@@ -1048,6 +1048,75 @@ mod tests {
         assert!(focused, "the keyboard stays in the draft");
     }
 
+    /// Once an agent has put another chat on screen, the person's click in the composer and the
+    /// keys after it land in that chat's draft, however long after the ask they come.
+    #[gpui::test]
+    fn keys_after_a_chat_put_on_screen_land_in_its_draft(cx: &mut TestAppContext) {
+        let (_dir, shell, cx) = setup(cx);
+        shell.update(cx, |shell, cx| shell.open_chat("a1".into(), cx));
+        cx.run_until_parked();
+        // What the self-test's `dump` does between steps: the frame judged against two drawn from
+        // scratch (`slopty_kit::retained::stale`).
+        let dump = |cx: &mut VisualTestContext| {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                for _ in 0..2 {
+                    window.refresh();
+                    window.draw(cx).clear(cx);
+                }
+            });
+        };
+        dump(cx);
+        let done = asked(cx, ask(Act::Chat(Some("b2".into())))).unwrap();
+        assert_eq!(done.window.chat.map(|c| c.id).as_deref(), Some("b2"));
+        dump(cx);
+        dump(cx);
+        let input = shell.read_with(cx, |shell, cx| shell.composer.read(cx).input.clone());
+        let kept = cx.update(|window, cx| input.read(cx).focus_handle(cx).is_focused(window));
+        assert!(kept, "the keyboard stayed in the composer");
+        // The click and the keys come together, as the self-test's socket brings them, with no
+        // frame drawn between.
+        let at = input.read_with(cx, |input, _| input.drawn_bounds()).expect("the composer drawn").center();
+        cx.update(|window, cx| {
+            use gpui::{Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, PlatformInput};
+            let down = MouseDownEvent {
+                button: MouseButton::Left,
+                position: at,
+                modifiers: Modifiers::default(),
+                click_count: 1,
+                first_mouse: false,
+            };
+            let up = MouseUpEvent { button: MouseButton::Left, position: at, modifiers: Modifiers::default(), click_count: 1 };
+            let _down = window.dispatch_event(PlatformInput::MouseDown(down), cx);
+            let _up = window.dispatch_event(PlatformInput::MouseUp(up), cx);
+            for ch in "half a thought".chars() {
+                let keystroke = gpui::Keystroke {
+                    modifiers: Modifiers::default(),
+                    key: ch.to_string(),
+                    key_char: Some(ch.to_string()),
+                };
+                window.dispatch_keystroke(keystroke, cx);
+            }
+        });
+        cx.run_until_parked();
+        cx.simulate_input(", finished");
+        assert_eq!(input.read_with(cx, |input, _| input.text().to_owned()), "half a thought, finished");
+        let focused = cx.update(|window, cx| input.read(cx).focus_handle(cx).is_focused(window));
+        assert!(focused, "the composer holds the keyboard the person gave it");
+        // A screen reader, and the self-test reading the window, find the words in the field.
+        let read = cx.update(|window, cx| {
+            window.set_a11y_active(true);
+            window.refresh();
+            window.draw(cx).clear(cx);
+            window.a11y_tree().is_some_and(|update| {
+                update.nodes.iter().any(|(_, node)| {
+                    node.role() == gpui::Role::MultilineTextInput && node.value() == Some("half a thought, finished")
+                })
+            })
+        });
+        assert!(read, "the composer's words are its value in the accessibility tree");
+    }
+
     /// A path names a file on the agent's machine, so it opens only beside a chat there; a page
     /// and the diff need a chat on screen; a terminal needs the window's link to its machines
     /// and a place it opens in.

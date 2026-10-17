@@ -177,9 +177,11 @@ impl Shell {
                     cx.stop_propagation();
                 }
             }))
+            .debug_selector(|| "subagent-bar".into())
             .mx_auto()
             .mb(px(Theme::SPACE_MD))
-            .w(px(width))
+            // slopty: the composer's own column: its pill stands inside its padding.
+            .w(px((width - 2.0 * Theme::SPACE_LG).max(0.0)))
             .h(px(BAR_HEIGHT))
             .px(px(Theme::SPACE_MD))
             .flex()

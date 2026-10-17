@@ -340,3 +340,39 @@ fn an_error_card_copies_its_error_and_scrolls_its_detail(cx: &mut gpui::TestAppC
     let nodes = draw(cx);
     assert!(find(&nodes, Role::Button, "Hide details").is_some(), "the detail opened");
 }
+
+/// A subagent's run open in its card is as tall as its rows, nothing under its last line; a run
+/// longer than the card's room takes that room and scrolls in it.
+#[gpui::test]
+fn a_subagent_run_open_in_its_card_is_as_tall_as_its_rows(cx: &mut gpui::TestAppContext) {
+    let progress = SubagentProgress {
+        running: false,
+        state: SubagentProgress::DONE.into(),
+        chat_id: Some("child-chat".into()),
+        ..SubagentProgress::default()
+    };
+    let (transcript, cx) = open(cx, entry(MessageStatus::Complete, vec![spawn(progress)]));
+    let said = |n: usize| SessionMessageEntry {
+        id: format!("child:{n}"),
+        parts: vec![MessagePart::Text { id: format!("child:{n}:t"), text: format!("Line {n} of the run.") }],
+        ..entry(MessageStatus::Complete, Vec::new())
+    };
+    let state = transcript.read_with(cx, |transcript, _| transcript.state.clone());
+    state.update(cx, |state, _| state.set_subagent_snapshot("child-chat".into(), vec![said(0)]));
+    let nodes = draw(cx);
+    let card = find(&nodes, Role::Button, "Subagent Count lines").expect("the card").clone();
+    cx.simulate_click(card.center, gpui::Modifiers::default());
+    // Its rows lay out, then the card takes their height: a frame or two.
+    let settled = |cx: &mut VisualTestContext| (0..4).map(|_| draw(cx)).last().unwrap_or_default();
+    let nodes = settled(cx);
+    let run = find(&nodes, Role::Group, "Transcript of Count lines").expect("open in place").clone();
+    let cap = transcript.read_with(cx, |transcript, _| transcript.subagents.child_room());
+    assert!(run.height > 20.0 && run.height < 120.0, "one line's height, not the room's {cap}: {run:?}");
+    state.update(cx, |state, cx| {
+        state.set_subagent_snapshot("child-chat".into(), (0..60).map(said).collect());
+        cx.notify();
+    });
+    let nodes = settled(cx);
+    let run = find(&nodes, Role::Group, "Transcript of Count lines").expect("open in place");
+    assert!((run.height - cap).abs() <= 1.5, "the card's room, {cap}: {run:?}");
+}

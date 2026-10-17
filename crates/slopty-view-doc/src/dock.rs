@@ -4,17 +4,15 @@
 //! The view model serves it on `slopty.WatchDock` ([`crate::calls::WATCH_DOCK`]) for one chat:
 //! one [`ChatDock`] each time anything in it changes. It holds the turn's live line (the TUI's
 //! spinner row), the goal, the agent's passing notifications, the prompt it guesses comes next,
-//! the person's own status line, the permission mode, the background counts, the context by
-//! category, the subagent kinds `@` offers, the surfaces the agent's mods draw, and what the
-//! chat's agent can be asked from the dock ([`DockCan`]).
+//! the person's own status line, the permission mode, the context by category, the subagent
+//! kinds `@` offers, the surfaces the agent's mods draw, the side questions asked and their
+//! answers, and what the chat's agent can be asked from the dock ([`DockCan`]).
 //!
 //! Times are milliseconds since the epoch; whatever ticks (elapsed time, a retry's countdown,
 //! how long a goal has been active, the thinking words) is the shell's to tick from the times
 //! here, with the helpers on each shape so every surface words it alike.
 
 use serde::{Deserialize, Serialize};
-
-use crate::work::WorkCounts;
 
 /// A chat's dock.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -40,10 +38,6 @@ pub struct ChatDock {
     /// The permission mode, as its chip says it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<ModeChip>,
-    /// The live background work by kind, as the footer counts it; a click opens the tray.
-    pub background: WorkCounts,
-    /// The background counts in words ("3 commands · 1 monitor"); empty with none.
-    pub background_words: String,
     /// What the agent waits on now that its turn ended: "Waiting for 2 subagents to finish",
     /// "1 command still running"; the turn footer's line.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -57,6 +51,9 @@ pub struct ChatDock {
     /// What the agent's mods draw, in the order they came, toasts past their time left out.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub surfaces: Vec<ModSurface>,
+    /// The side questions asked (`/btw`, `slopty.AskSide`) and their answers, newest last.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub side: Vec<SideLine>,
     /// What the dock may ask of the chat's agent.
     pub can: DockCan,
 }
@@ -82,6 +79,37 @@ pub struct DockCan {
     pub surfaces: bool,
     /// Switch its permission mode (`slopty.SetMode`).
     pub set_mode: bool,
+    /// Ask it a side question (`slopty.AskSide`).
+    pub side: bool,
+}
+
+/// A side question the person asked beside the conversation, and its answer.
+///
+/// The agent answers it from the conversation so far, without tools, never entering it and never
+/// stopping the turn.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SideLine {
+    /// Its own id, kept as it is answered.
+    pub id: String,
+    /// The question.
+    pub question: String,
+    /// The answer, once it came, in Markdown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer: Option<String>,
+    /// Why none will come.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed: Option<String>,
+    /// When it was asked.
+    pub at: i64,
+}
+
+impl SideLine {
+    /// Whether the agent is still at it.
+    #[must_use]
+    pub const fn pending(&self) -> bool {
+        self.answer.is_none() && self.failed.is_none()
+    }
 }
 
 /// The turn under way, as the TUI's spinner row shows it: "Cogitating… (1m 5s · ↓ 2.3k tokens ·

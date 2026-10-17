@@ -54,6 +54,7 @@ mod notices;
 mod activity;
 mod dock;
 mod footer;
+mod side; // slopty: side questions (`/btw`).
 mod surfaces;
 mod request_card; // slopty: a request's card by its kind.
 pub use activity::working_line;
@@ -624,7 +625,8 @@ fn escape_dismisses_completion(key: &str, completion_open: bool) -> bool {
 
 // slopty: where the keyboard starts on a page: an approval that defaults to deny on its deny.
 fn initial_focus(question: &UserInputQuestion) -> Option<usize> {
-    if question.options.is_empty() {
+    // slopty: a form's answers are buttons beside its Submit: the keyboard is on none of them.
+    if question.options.is_empty() || request_card::is_form(question) {
         return None;
     }
     match question.deny_option {
@@ -765,7 +767,13 @@ impl Wizard {
 
     /// ↑/↓ among the options, wrapping.
     pub fn move_focus(&mut self, delta: isize) {
-        let Some(count) = self.current().map(|q| q.options.len()).filter(|n| *n > 0) else {
+        // slopty: a form's answers are no options to walk.
+        let Some(count) = self
+            .current()
+            .filter(|q| !request_card::is_form(q))
+            .map(|q| q.options.len())
+            .filter(|n| *n > 0)
+        else {
             return;
         };
         let at = self.focused.map_or(0, |ix| ix as isize + delta);
@@ -837,8 +845,8 @@ impl Wizard {
 
     /// Number key 1-9.
     pub fn press_number(&mut self, number: usize) -> WizardStep {
-        // slopty: a click-only page takes no digit.
-        if number == 0 || self.current().is_some_and(|q| q.click_only) {
+        // slopty: a click-only page takes no digit, nor a form, whose answers have none.
+        if number == 0 || self.current().is_some_and(|q| q.click_only || request_card::is_form(q)) {
             return WizardStep::Stay;
         }
         self.select(number - 1)
@@ -1299,20 +1307,23 @@ fn wrap_reference_chips(line: &mut WrappedLine, chips: &[Range<usize>], width: P
 
 impl TextProjection {
     fn new(raw: &str) -> Self {
-        Self::project(raw, None, false, None)
+        Self::project(raw, None, false, None, None)
     }
 
     /// `live` names the attachments the draft still holds; a chip outside it is
     /// a dangling reference and shows as its plain label.
+    #[cfg(test)] // slopty: the input projects through `project`, with shell mode's `!`.
     fn rich(raw: &str, active: Option<Range<usize>>, live: Option<&HashSet<u32>>) -> Self {
-        Self::project(raw, active, true, live)
+        Self::project(raw, active, true, live, None)
     }
 
+    // slopty: `hidden`, a span of the draft drawn as nothing: shell mode's `!`.
     fn project(
         raw: &str,
         active: Option<Range<usize>>,
         compact: bool,
         live: Option<&HashSet<u32>>,
+        hidden: Option<Range<usize>>,
     ) -> Self {
         let mut links = file_mention_links(raw);
         links.extend(
@@ -1409,6 +1420,9 @@ impl TextProjection {
                 }
             }
         }
+        if let Some(hidden) = hidden {
+            edits.push((hidden, String::new(), None));
+        }
         edits.sort_by_key(|(r, _, _)| r.start);
         let mut raw_at = 0;
         for (range, replacement, link) in edits {
@@ -1501,6 +1515,14 @@ impl TextProjection {
             .iter()
             .find_map(|(link, _)| (raw == link.range.start).then_some(link.range.end))
     }
+}
+
+// slopty: the `!` that puts a draft in shell mode, and the spaces after it.
+fn shell_bang(raw: &str) -> Option<Range<usize>> {
+    let start = raw.len() - raw.trim_start().len();
+    let rest = raw[start..].strip_prefix('!')?;
+    let spaces = rest.len() - rest.trim_start_matches(' ').len();
+    Some(start..start + 1 + spaces)
 }
 
 /// Basenames are compact in the common case. When the same basename appears
@@ -2021,6 +2043,9 @@ pub struct ComposerInput {
     /// File mentions are a composer feature, not a behavior of generic inputs
     /// (picker searches and rename fields also use this type).
     mentions_enabled: bool,
+    // slopty: shell mode draws its draft without the `!` that turned it on, which the Shell tag
+    // says instead.
+    hides_bang: bool,
     /// Bumped once per `layout_text` pass — the flip logic uses it to apply at
     /// most one compact↔expanded flip per layout (a flip is only re-evaluated
     /// after the input has been measured in the new mode).
@@ -2131,6 +2156,7 @@ impl ComposerInput {
             syntax_task: None,
             ghost: None,
             mentions_enabled: false,
+            hides_bang: false,
             layout_epoch: 0,
             display_is_placeholder: true,
             blink_anchor: Instant::now(),
@@ -2215,6 +2241,12 @@ impl ComposerInput {
         caret_visible(self.blink_anchor.elapsed().as_millis() as u64)
     }
 
+    /// Where the input was last drawn.
+    #[cfg(test)]
+    pub(crate) fn drawn_bounds(&self) -> Option<Bounds<Pixels>> {
+        self.last_bounds
+    }
+
     pub fn text(&self) -> &str {
         &self.content
     }
@@ -2255,10 +2287,12 @@ impl ComposerInput {
                 .attachment_chips
                 .as_ref()
                 .map(|images| images.keys().copied().collect());
-            TextProjection::rich(
+            TextProjection::project(
                 &self.content,
                 Some(self.editing_source_range()),
+                true,
                 live.as_ref(),
+                self.hides_bang.then(|| shell_bang(&self.content)).flatten(),
             )
         } else {
             TextProjection {
@@ -2523,6 +2557,16 @@ impl ComposerInput {
 
     /// Set (or clear) the inline completion preview. Only paints while the
     /// caret sits at the end of a non-empty draft — see the prepaint gate.
+    /// slopty: draw the draft's leading `!` (shell mode's) as nothing, or as typed.
+    pub(crate) fn set_hides_bang(&mut self, hides: bool, cx: &mut Context<Self>) {
+        if self.hides_bang == hides {
+            return;
+        }
+        self.hides_bang = hides;
+        self.refresh_projection();
+        cx.notify();
+    }
+
     pub fn set_ghost(&mut self, ghost: Option<SharedString>, cx: &mut Context<Self>) {
         if self.ghost == ghost {
             return;
@@ -5044,6 +5088,8 @@ impl Render for ComposerInput {
             .role(self.accessibility_role)
             .aria_label(self.placeholder.clone())
             .aria_placeholder(self.shown_placeholder())
+            // slopty: a screen reader reads the words in the field, not only its placeholder.
+            .when(!self.content.is_empty(), |el| el.aria_value(self.content.clone()))
             .key_context(self.key_context)
             .track_focus(&self.focus_handle)
             .cursor(CursorStyle::IBeam)
@@ -5848,6 +5894,9 @@ pub struct Composer {
     pub(crate) queue_edit_renew_task: Option<Task<()>>,
     /// Focus once on mount, navigation, or after opening/closing a queue edit.
     pub(crate) focus_pending: bool,
+    // slopty: a card just came while the composer held the keyboard: the card takes it, so its
+    // keys work at once and words typed go to its answer box.
+    card_focus_pending: bool,
     // slopty: dictation removed.
     /// Live drag over the queue panel: which row, and where it would land.
     pub(crate) queue_drag: Option<crate::queue::QueueDragState>,
@@ -6144,6 +6193,7 @@ impl Composer {
             queue_edit_task: None,
             queue_edit_renew_task: None,
             focus_pending: true,
+            card_focus_pending: false,
             // slopty: dictation removed.
             queue_drag: None,
             queue_scroll: gpui::ScrollHandle::new(),
@@ -8156,6 +8206,7 @@ impl Composer {
                     self.wizard = Some(Wizard::new(request_id, questions));
                     // slopty: its option keys wait while the person may still be typing.
                     self.card.guard.shown_at = Some(Instant::now());
+                    self.card_focus_pending = true;
                     self.input
                         .update(cx, |input, cx| input.set_text(prefill, cx));
                     self.advance_task = None;
@@ -8330,6 +8381,16 @@ impl Composer {
                 self.drafts.remove(&self.current_key);
                 self.on_input_edited(cx);
             }
+            return;
+        }
+        // slopty: `/btw` asks the agent beside the conversation; it is never sent as a message.
+        if let Some(question) = side::side_question(&text).map(str::to_owned)
+            && self.staged().is_empty()
+            && self.ask_side(question, cx)
+        {
+            self.input.update(cx, |input, cx| input.set_text("", cx));
+            self.drafts.remove(&self.current_key);
+            self.on_input_edited(cx);
             return;
         }
         if let Some(action) = self
@@ -9404,13 +9465,32 @@ impl Composer {
         true
     }
 
-    fn on_wizard_key(&mut self, event: &KeyDownEvent, window: &Window, cx: &mut Context<Self>) {
+    fn on_wizard_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         // Keys bubbling out of the free-text input must not double-handle:
-        // digits select options only while the input is empty, and Enter is the
-        // input's own Submit action when it has focus.
+        // Enter is the input's own Submit action when it has focus.
         let input_focused = self.input.read(cx).focus_handle.is_focused(window);
         let input_empty = self.input.read(cx).is_empty();
         let key = event.keystroke.key.as_str();
+        // slopty: a text field the card shows with the keyboard (its answer box, a form's field,
+        // a note, a rule) keeps every key typed in it: no digit, Enter or arrow answers the card
+        // from there. Enter in a form's field is its Submit.
+        if self.field_has_keyboard(window, cx) {
+            if key == "enter" && !event.keystroke.modifiers.modified() && self.card_field_focused(window, cx) {
+                if self.wizard.as_ref().and_then(Wizard::current).is_some_and(request_card::is_form) {
+                    self.send_form(cx);
+                }
+                cx.stop_propagation();
+            } else if key == "escape" {
+                if !self.card_escape(cx)
+                    && wizard_escape_goes_back(key, input_focused, input_empty)
+                    && !self.wizard_back(cx)
+                {
+                    self.fold_question(cx);
+                }
+                cx.stop_propagation();
+            }
+            return;
+        }
         // A BARE digit picks an option. With a modifier held the keystroke
         // belongs to an app shortcut — ⌘1..⌘9 jump to a sidebar row — and the
         // panel must not also consume it as a selection.
@@ -9420,10 +9500,11 @@ impl Composer {
         {
             // slopty: a key the person meant for the composer, typed as the card came or just
             // after, goes on to the input rather than answering (`request_card::KeyGuard`).
-            if (!input_focused || input_empty) && self.wizard_digit(digit, Instant::now(), cx) {
+            if self.wizard_digit(digit, Instant::now(), cx) {
                 // Consumed as a selection: stop the platform from also
                 // inserting the digit into the focused free-text input.
                 cx.stop_propagation();
+                return;
             }
         } else if key == "enter" {
             if !input_focused && !self.card.guard.holds(Instant::now()) {
@@ -9447,7 +9528,33 @@ impl Composer {
                 self.fold_question(cx);
             }
             cx.stop_propagation();
+            return;
         }
+        // slopty: a key the card took no answer from, typed while the card holds the keyboard, is
+        // words: they go into its answer box, which takes the keyboard from there.
+        self.card_words(event, window, cx);
+    }
+
+    // slopty: `event`'s character into the card's answer box, where the card takes words and no
+    // field has the keyboard; whether it went.
+    fn card_words(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let modifiers = &event.keystroke.modifiers;
+        let Some(text) = event.keystroke.key_char.clone().filter(|_| !(modifiers.platform || modifiers.control || modifiers.function))
+        else {
+            return false;
+        };
+        let takes = self
+            .wizard
+            .as_ref()
+            .is_some_and(|w| !w.folded && w.current().is_some_and(|q| request_card::takes_words(q, w.revising)));
+        if !takes || text.chars().any(char::is_control) {
+            return false;
+        }
+        let focus = self.input.read(cx).focus_handle.clone();
+        window.focus(&focus, cx);
+        self.input.update(cx, |input, cx| input.replace_text_in_range(None, &text, window, cx));
+        cx.stop_propagation();
+        true
     }
 
     // ---- render pieces ----
@@ -9457,7 +9564,8 @@ impl Composer {
     /// border-white/[0.08] bg-white/[0.03] shadow-xl`), uppercase header +
     /// "1/3" counter chip, option rows with number kbd chips, a free-text
     /// override over a hairline, and Back / Next-Submit footer.
-    fn render_wizard(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    // slopty: `keys_live`, whether no field the card shows holds the keyboard, so its keys pick.
+    fn render_wizard(&mut self, keys_live: bool, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = Theme::of(cx).clone();
         let Some(wizard) = self.wizard.clone() else {
             return gpui::Empty.into_any_element();
@@ -9517,8 +9625,10 @@ impl Composer {
         let header_chips = self.card_header_chips(&question, &theme);
         let extras = self.render_card_extras(&wizard.request_id, &question, plan, &theme, cx);
         let revising = wizard.revising;
-        let takes_words =
-            (!question.choices_only || revising) && !request_card::takes_no_words(&question);
+        let takes_words = request_card::takes_words(&question, revising);
+        // slopty: a form's answers stand in its footer, beside its Submit.
+        let form = request_card::is_form(&question);
+        let footer = self.card_footer(&question, &theme, cx);
         let descriptions = question.option_descriptions.clone(); // slopty
         // slopty: the option whose preview shows: the one the pointer is over, else the keyboard's,
         // else the one picked.
@@ -9531,7 +9641,7 @@ impl Composer {
             .unwrap_or(0);
         let preview = Self::render_previews(&question, preview_at, &self.card.preview_scroll, &theme);
         let proposed_scroll = self.card.proposed_scroll.clone(); // slopty
-        let options = question.options.iter().enumerate().map(|(ix, label)| {
+        let options = question.options.iter().enumerate().filter(|_| !form).map(|(ix, label)| {
             // slopty: what the option means, under it.
             let description = descriptions
                 .get(ix)
@@ -9615,8 +9725,9 @@ impl Composer {
                             )
                         }),
                 )
-                // slopty: a click-only page shows no digits it would not take.
-                .when(ix < 9 && !click_only, |el| {
+                // slopty: one rule for every card: a digit shows where it picks, never on a
+                // click-only page nor while a field the card shows holds the keyboard.
+                .when(ix < 9 && !click_only && keys_live, |el| {
                     el.child(
                         // Number kbd chip: `size-[22px] rounded-md text-[11px]`.
                         div()
@@ -9834,6 +9945,8 @@ impl Composer {
                     })
                     .child(
                         div()
+                            // slopty: every card's answers stand at the right, Back alone left.
+                            .ml_auto()
                             .flex()
                             .items_center()
                             .gap(px(6.0))
@@ -9847,6 +9960,7 @@ impl Composer {
                                         .on_click(cx.listener(|this, _, _, cx| this.wizard_skip(cx))),
                                 )
                             })
+                            .children(footer)
                             // slopty: a choice-only request goes on its click; a revision is sent.
                             .when(takes_words, |el| {
                                 el.child(
@@ -10023,6 +10137,13 @@ impl Render for Composer {
             let focus = self.input.focus_handle(cx);
             window.focus(&focus, cx);
         }
+        // slopty: a card that came while the composer held the keyboard takes it.
+        if std::mem::take(&mut self.card_focus_pending)
+            && self.wizard_open()
+            && self.input.focus_handle(cx).is_focused(window)
+        {
+            window.focus(&self.wizard_focus, cx);
+        }
         let theme = Theme::of(cx).clone();
         self.sync_dock(cx); // slopty: the selected chat's dock and work, watched.
         self.dock_tick(cx); // slopty: what the dock or a request draws ticks.
@@ -10043,6 +10164,8 @@ impl Render for Composer {
         // layout leaves the parent using the previous edit's height.
         // slopty: a `!` draft is a command for the chat's machine: shell mode.
         let shell_mode = self.shell_mode(cx);
+        // slopty: the Shell tag says the mode; the draft is drawn without its `!`.
+        self.input.update(cx, |input, cx| input.set_hides_bang(shell_mode, cx));
         self.input.update(cx, |input, cx| {
             if input.mono != shell_mode {
                 input.mono = shell_mode;
@@ -10229,7 +10352,8 @@ impl Render for Composer {
             });
 
         if wizard_active {
-            let wizard = self.render_wizard(cx);
+            let keys_live = !self.field_has_keyboard(window, cx);
+            let wizard = self.render_wizard(keys_live, cx);
             return container.child(motion::fade_quick("composer-wizard", div().child(wizard)));
         }
 
@@ -10259,6 +10383,7 @@ impl Render for Composer {
         });
         self.input.update(cx, |input, cx| input.set_hint(hint, cx));
         let dock_lines = self.render_dock_lines(&theme, cx);
+        let side = self.render_side_card(&theme, window, cx); // slopty: `/btw`'s answer.
         let folded = self.render_folded_question(&theme, cx);
         let bands = self.render_mod_bands(&theme, window, cx);
         // slopty: each grows into its room and shrinks out of it (`stack_section`).
@@ -10269,6 +10394,7 @@ impl Render for Composer {
         };
         let container = container
             .child(stack_section("composer-dock-lines", lines(dock_lines)))
+            .child(stack_section("composer-side", side))
             .child(stack_section("composer-folded-question", folded))
             .child(stack_section("composer-mod-bands", lines(bands)));
         // The checklist tray stacks above the queue (or directly above the

@@ -250,6 +250,59 @@ pub const GLIDE_MAX_VIEWPORTS: f32 = 2.5;
 /// The titlebar overlays the full-height list, so its height is part of the
 /// inset; the extra 10px matches the first row's breathing room.
 pub(crate) const OWN_SEND_TOP_INSET_PX: f32 = Theme::TITLEBAR_HEIGHT + 10.0;
+/// slopty: where a transcript fit to its rows tells their height: the card it is open in.
+#[derive(Clone)]
+struct Fit {
+    card: gpui::WeakEntity<Transcript>,
+    height: Rc<Cell<Option<f32>>>,
+}
+
+impl Fit {
+    /// After the list's layout, its rows' height from `list`: the card is drawn again when it
+    /// moves, so the card's height is always the one this frame measured.
+    fn measure(self, list: ListState) -> AnyElement {
+        gpui::canvas(
+            move |_, _, cx| {
+                let now = rows_height(&list);
+                let moved = match (self.height.get(), now) {
+                    (Some(had), Some(now)) => (had - now).abs() > 0.5,
+                    (had, now) => had.is_some() != now.is_some(),
+                };
+                if moved {
+                    self.height.set(now);
+                    let card = self.card.clone();
+                    cx.defer(move |cx| {
+                        card.update(cx, |_, cx| cx.notify()).ok();
+                    });
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_0()
+        .into_any_element()
+    }
+}
+
+/// slopty: the height `list`'s rows take as last laid out, to its last row's end; past its
+/// viewport, more than any room (`f32::MAX`), as rows not yet laid out are not measured, so the
+/// card takes its whole room and measures again; `None` before it laid out any.
+fn rows_height(list: &ListState) -> Option<f32> {
+    let count = list.item_count();
+    let last = count.checked_sub(1)?;
+    let viewport = list.viewport_bounds();
+    let shown = f32::from(viewport.size.height);
+    if shown <= 0.0 {
+        return None;
+    }
+    let past = f32::from(list.max_offset_for_scrollbar().y);
+    if past > 0.5 {
+        return Some(f32::MAX);
+    }
+    let end = list.bounds_for_item(last)?;
+    Some(f32::from(end.bottom() - viewport.top()))
+}
+
 /// Epsilon of extra height under the reservation. The runway ends AT the
 /// app's bottom — this is not scroll room (24px of it read as a janky
 /// overshoot-and-fight zone, user report) — it exists only to keep the held
@@ -1268,6 +1321,29 @@ pub struct Row {
     pub compact_fold: Option<SharedString>,
 }
 
+/// slopty: how a time of day reads everywhere, as the system's clock is set: "%-I:%M %p"
+/// ("11:12 PM") on a 12-hour clock, "%H:%M" ("23:12") on a 24-hour one. Read once.
+pub fn clock_format() -> &'static str {
+    static TWELVE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *TWELVE.get_or_init(system_twelve_hour) { "%-I:%M %p" } else { "%H:%M" }
+}
+
+/// Whether the system's clock is a 12-hour one: the hour of the locale's "j" template (the
+/// hour as the person's settings say it, System Settings' 24-hour switch included) has a day
+/// period.
+#[cfg(target_os = "macos")]
+fn system_twelve_hour() -> bool {
+    use objc2_foundation::{NSDateFormatter, NSLocale, ns_string};
+    let locale = NSLocale::currentLocale();
+    NSDateFormatter::dateFormatFromTemplate_options_locale(ns_string!("j"), 0, Some(&locale))
+        .is_none_or(|format| format.to_string().contains('a'))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn system_twelve_hour() -> bool {
+    true
+}
+
 /// Absolute hover-timestamp label, e.g. "Jul 1, 3:45 PM" — the exact
 /// `formatTimestamp` shape (utils.ts: short month, numeric day, hour,
 /// 2-digit minutes, no leading zero on the hour). Pure over an explicit
@@ -1279,7 +1355,8 @@ where
     match chrono::DateTime::from_timestamp_millis(ms) {
         Some(utc) => utc
             .with_timezone(tz)
-            .format("%b %-d, %-I:%M %p")
+            // slopty: the system's clock.
+            .format(&format!("%b %-d, {}", clock_format()))
             .to_string(),
         None => String::new(),
     }
@@ -2609,15 +2686,9 @@ pub fn sending_bridge(
 /// Compact elapsed formatting, using at most two units up to days.
 pub fn format_elapsed(secs: i64) -> String {
     let secs = secs.max(0);
-    if secs < 60 {
-        format!("{secs}s")
-    } else if secs < 3_600 {
-        format!("{}m {}s", secs / 60, secs % 60)
-    } else if secs < 86_400 {
-        format!("{}h {}m", secs / 3_600, (secs % 3_600) / 60)
-    } else {
-        format!("{}d {}h", secs / 86_400, (secs % 86_400) / 3_600)
-    }
+    // slopty: a second unit of nothing is left out ("1m", never "1m 0s"), as
+    // `slopty_view_doc::work::duration_words` says it.
+    slopty_view_doc::work::duration_words(u64::try_from(secs).unwrap_or_default().saturating_mul(1_000))
 }
 
 /// slopty: a timer that ticks: [`format_elapsed`] with its second unit padded ("1m 05s",
@@ -3621,6 +3692,9 @@ pub struct Transcript {
     /// transcript's bottom (measured last frame): the last row pads past it
     /// so pinned content rests above the glass chrome it scrolls under.
     bottom_clearance: f32,
+    /// slopty: a subagent's transcript open in its card (`transcript/subagents.rs`), which
+    /// takes the height its rows measure: told to the card after each layout.
+    fit: Option<Fit>,
     /// slopty: the list's viewport as this frame began. A page row reads it while the list lays
     /// out, when asking the list itself would borrow it twice.
     page_viewport: gpui::Bounds<Pixels>,
@@ -3973,6 +4047,7 @@ impl Transcript {
             selection_scroll_task: None,
             rail_enabled,
             bottom_clearance: 0.0,
+            fit: None,
             page_viewport: gpui::Bounds::default(),
             rail_hover: None,
             hovered_entry: None,
@@ -4043,14 +4118,23 @@ impl Transcript {
         self.rail_enabled
     }
 
+    /// slopty: measure the rows' height after each layout into `height`, and have `card`
+    /// drawn again when it moves (a subagent's card, which takes that height up to its room).
+    pub(crate) fn fit_to(&mut self, card: gpui::WeakEntity<Transcript>, height: Rc<Cell<Option<f32>>>) {
+        self.fit = Some(Fit { card, height });
+    }
+
     /// Shell-driven: the measured height of the bottom chrome stack the
     /// transcript scrolls under. Sub-pixel jitter is ignored so steady-state
     /// frames don't re-notify.
     pub fn set_bottom_clearance(&mut self, height: f32, cx: &mut Context<Self>) {
         if (self.bottom_clearance - height).abs() > 0.5 {
             self.bottom_clearance = height;
+            // slopty: the last row's pad is the clearance, so its measured height moves with it
+            // whether or not a turn of the person's own holds the runway: a list kept its old
+            // height, and a list pinned to its end then stood where a fresh frame does not.
+            self.remeasure_last_row();
             if self.own_turn.is_some() {
-                self.remeasure_last_row();
                 self.own_turn_kick = true;
             }
             cx.notify();
@@ -7610,7 +7694,10 @@ impl Transcript {
         // (the row's lowest content) renders half-faded (or hidden) when the
         // transcript is pinned to the bottom.
         let is_last = ix + 1 == self.rows.len();
-        let bottom_pad = if is_last {
+        let bottom_pad = if is_last && self.fit.is_some() {
+            // slopty: fit to its rows, nothing scrolls under it and no fade covers its end.
+            Theme::SPACE_SM
+        } else if is_last {
             self.bottom_clearance + Theme::TRANSCRIPT_FADE_BAND + 8.0
         } else {
             0.0
@@ -10857,7 +10944,8 @@ impl Render for Transcript {
             // slopty: find's per-row counts start again each frame, before any row paints.
             .child(crate::markdown::find::frame_reset(cx.entity_id().as_u64()))
             .child(content)
-            .child(rail);
+            .child(rail)
+            .children(self.fit.clone().map(|fit| fit.measure(self.list.clone()))); // slopty
         // slopty: the held prompt's card defers its paint above the top fade; added before the
         // menus, which defer theirs too, so they open over it.
         let root = root.children(self.render_sticky_prompt(window, cx));
@@ -16689,7 +16777,9 @@ mod tests {
         let ms = chrono::DateTime::parse_from_rfc3339("2026-07-01T19:45:00Z")
             .unwrap()
             .timestamp_millis();
-        assert_eq!(format_timestamp(ms, &tz), "Jul 1, 3:45 PM");
+        // On the system's clock.
+        let clock = if clock_format().contains('p') { "3:45 PM" } else { "15:45" };
+        assert_eq!(format_timestamp(ms, &tz), format!("Jul 1, {clock}"));
 
         // User entries carry the strip on their single row (pending too).
         let user = SessionMessageEntry {
@@ -16915,15 +17005,15 @@ mod tests {
             (-5, "0s"),
             (0, "0s"),
             (59, "59s"),
-            (60, "1m 0s"),
+            (60, "1m"),
             (92, "1m 32s"),
             (310, "5m 10s"),
             (3_599, "59m 59s"),
-            (3_600, "1h 0m"),
+            (3_600, "1h"),
             (4_800, "1h 20m"),
             (6_000, "1h 40m"),
             (86_399, "23h 59m"),
-            (86_400, "1d 0h"),
+            (86_400, "1d"),
             (183_845, "2d 3h"),
         ] {
             assert_eq!(format_elapsed(secs), expected, "elapsed seconds: {secs}");

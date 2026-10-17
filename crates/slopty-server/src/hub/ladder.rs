@@ -28,6 +28,9 @@
 //! that a turn finished is taken back once the person has seen the turn ([`Shown::finished`]).
 //! A thread first seen already needing the person is pushed to a phone not showing it
 //! ([`Told::first`]).
+//!
+//! A thread still needing the person [`REMIND_AFTER`] after its wait began is told again where
+//! the person is now, once per wait, saying how long it has waited ([`Board::remind`]).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
@@ -80,10 +83,21 @@ pub(super) struct Board {
     /// The workers whose link ended and has not come back: their rows say what they last said,
     /// which nothing keeps true, so none of them holds the machine awake.
     unlinked: HashSet<WorkerId>,
+    /// Each thread told again that it still needs the person, by when its wait began: once per
+    /// wait ([`Self::remind`]).
+    reminded: HashMap<ThreadAt, WallMs>,
+    /// When the next reminder falls due, once a wake is set for it.
+    remind_at: Option<WallMs>,
+    /// How long a wait goes before it is told again, when not [`REMIND_AFTER`] (tests).
+    remind_after: Option<Duration>,
 }
 
 /// How long a take-back the push queue could not take waits before it is tried again.
 pub(crate) const TAKE_BACK_RETRY: Duration = Duration::from_secs(2);
+
+/// How long a thread needs the person before it is told again, once per wait, as Claude
+/// desktop notifies an open prompt again at 30 minutes.
+pub(crate) const REMIND_AFTER: Duration = Duration::from_mins(30);
 
 /// The phones the server may push to, and where their pushes go.
 #[derive(Debug, Default)]
@@ -496,6 +510,88 @@ impl Board {
     }
 }
 
+impl Board {
+    /// The threads that have needed the person for [`REMIND_AFTER`] since their wait began, told
+    /// so again, once per wait, where the person is now: "Still needs you after 30m". A wait
+    /// first seen already that old is no news, as its need was not ([`Told::first`]). A wake is
+    /// set for the next one due.
+    fn remind(&mut self, ladder: &Ladder, now: WallMs) -> Vec<(Notice, Option<Ask>)> {
+        let waits: HashMap<ThreadAt, WallMs> = ladder
+            .threads
+            .iter()
+            .filter(|r| r.rung == Rung::NeedsYou)
+            .map(|r| (r.at, r.since_ms))
+            .collect();
+        self.reminded.retain(|at, since| waits.get(at) == Some(since));
+        let seen: HashSet<ThreadAt> = self
+            .published
+            .threads
+            .iter()
+            .filter(|r| r.rung == Rung::NeedsYou)
+            .map(|r| r.at)
+            .collect();
+        let after = self.remind_after.unwrap_or(REMIND_AFTER);
+        let after = u64::try_from(after.as_millis()).unwrap_or(u64::MAX);
+        let mut told = Vec::new();
+        let mut next: Option<u64> = None;
+        for (at, since) in waits {
+            if self.reminded.contains_key(&at) {
+                continue;
+            }
+            let due = since.as_millis().saturating_add(after);
+            if due > now.as_millis() {
+                next = Some(next.map_or(due, |n| n.min(due)));
+                continue;
+            }
+            self.reminded.insert(at, since);
+            if !seen.contains(&at) {
+                continue;
+            }
+            let Some((mut notice, ask)) = notice_of(self, at, (NoticeKind::NeedsYou, None)) else {
+                continue;
+            };
+            let waited = now.as_millis().saturating_sub(since.as_millis());
+            notice.text = still_words(waited, &notice.text);
+            told.push((notice, ask));
+        }
+        if let Some(due) = next {
+            self.wake_at(WallMs::from_millis(due), now);
+        }
+        told
+    }
+
+    /// Rank again at `due`, unless a ranking is already set for no later.
+    fn wake_at(&mut self, due: WallMs, now: WallMs) {
+        if self.remind_at.is_some_and(|at| at > now && at <= due) {
+            return;
+        }
+        self.remind_at = Some(due);
+        let wait = Duration::from_millis(due.as_millis().saturating_sub(now.as_millis()));
+        let wake = Arc::clone(&self.wake);
+        drop(tokio::spawn(async move {
+            tokio::time::sleep(wait).await;
+            wake.notify_one();
+        }));
+    }
+}
+
+/// A reminder's words: how long the thread has waited on the person, in whole minutes and
+/// hours, then what it asks.
+fn still_words(waited_ms: u64, asks: &str) -> String {
+    let minutes = waited_ms / 60_000;
+    let (hours, minutes) = (minutes / 60, minutes % 60);
+    let waited = match (hours, minutes) {
+        (0, m) => format!("{m}m"),
+        (h, 0) => format!("{h}h"),
+        (h, m) => format!("{h}h {m}m"),
+    };
+    if asks.is_empty() {
+        format!("Still needs you after {waited}")
+    } else {
+        format!("Still needs you after {waited} · {asks}")
+    }
+}
+
 /// A person's client link.
 #[derive(Debug)]
 struct Sitting {
@@ -894,6 +990,9 @@ impl Hub {
         board.phones.take_back(&ladder, &board.tables);
         follow_asks(board);
         board.retry_owed();
+        for (notice, ask) in board.remind(&ladder, WallMs::now()) {
+            tell_pushing(board, &notice, Pushing { ask: ask.as_ref(), ..Pushing::default() });
+        }
         if ladder == board.published {
             return;
         }

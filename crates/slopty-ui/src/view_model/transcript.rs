@@ -723,6 +723,17 @@ pub fn error_words(
         }
         Notice::HOOK => format!("A hook stopped this step{on}. Fix the hook, then try again."),
         TURN_FAILED => format!("The turn failed{on}. Try again."),
+        // slopty: an end of Claude Code's is said whole by the worker, what happened then what
+        // to do; its machine goes after what happened, which "that machine" then names.
+        Notice::ENDED => {
+            let raw = raw.trim();
+            let words = match (host, raw.rsplit_once(". ")) {
+                (Some(host), Some((happened, then))) => format!("{happened} (on {host}). {then}"),
+                (Some(host), None) => format!("{} (on {host}).", raw.trim_end_matches('.')),
+                (None, _) => raw.to_owned(),
+            };
+            return (words, None);
+        }
         _ => return (raw.to_owned(), None),
     };
     let raw = raw.trim();

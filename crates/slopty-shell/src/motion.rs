@@ -934,11 +934,25 @@ impl HoverFades {
 
 thread_local! {
     static HOVER_FADES: RefCell<HoverFades> = RefCell::new(HoverFades::default());
+    /// slopty: the clock hover fades read: the wall's, or a test's ([`run_on`]).
+    static HOVER_CLOCK: RefCell<Option<gpui::BackgroundExecutor>> = const { RefCell::new(None) };
+}
+
+/// slopty: the instant hover fades read now: a test's executor clock once [`run_on`] set it,
+/// else the wall's, so no test decides on how long the machine took.
+fn hover_now() -> Instant {
+    HOVER_CLOCK.with(|clock| clock.borrow().as_ref().map_or_else(Instant::now, gpui::BackgroundExecutor::now))
+}
+
+/// slopty: run this thread's hover fades on `executor`'s clock, which a test advances.
+#[cfg(test)]
+pub(crate) fn run_on(executor: gpui::BackgroundExecutor) {
+    HOVER_CLOCK.with(|clock| *clock.borrow_mut() = Some(executor));
 }
 
 /// Hover progress (0..1) for `key` this frame.
 pub fn hover_t(key: &str) -> f32 {
-    HOVER_FADES.with(|fades| fades.borrow_mut().value_at(key, Instant::now()))
+    HOVER_FADES.with(|fades| fades.borrow_mut().value_at(key, hover_now()))
 }
 
 /// Record a hover flip for `key` (reduced motion snaps).
@@ -946,7 +960,7 @@ pub fn set_hover(key: &str, hovered: bool, reduced: bool) {
     HOVER_FADES.with(|fades| {
         fades
             .borrow_mut()
-            .set_at(key, hovered, reduced, Instant::now())
+            .set_at(key, hovered, reduced, hover_now())
     });
 }
 
@@ -969,7 +983,7 @@ pub fn hover_listener(
 /// Frame-drive hook: call ONCE per window frame (the shell render tail); true
 /// while any hover fade is mid-flight and frames must keep coming.
 pub fn hover_fades_active() -> bool {
-    HOVER_FADES.with(|fades| fades.borrow_mut().tick_at(Instant::now()))
+    HOVER_FADES.with(|fades| fades.borrow_mut().tick_at(hover_now()))
 }
 
 /// Blend two colors by `t` the way the browser transitions them: component
