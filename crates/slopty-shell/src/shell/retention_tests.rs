@@ -18,7 +18,9 @@ fn painted(window: &Window) -> Vec<String> {
     lines
 }
 
+/// What a frame drawn from scratch, at the moment the last frame showed, paints.
 fn from_scratch(window: &mut Window, cx: &mut App) -> Vec<String> {
+    window.repeat_frame_time();
     window.refresh();
     window.draw(cx).clear(cx);
     painted(window)

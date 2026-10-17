@@ -1218,6 +1218,8 @@ mod tests {
             "Show side pane",
             "Settings",
         ];
+        // Under Reduce Motion every entrance has landed: the controls stand where they rest.
+        cx.update(|_, cx| crate::motion::set_reduced_motion(cx, true));
         let touch = buttons(cx);
         let mine: Vec<_> = touch.iter().filter(|(label, _, _)| ours.contains(&label.as_str())).collect();
         let small: Vec<_> = mine.iter().filter(|(_, w, h)| w.min(*h) < 43.9).collect();

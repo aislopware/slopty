@@ -182,8 +182,9 @@ impl IntoElement for RollText {
 }
 
 impl RollText {
-    fn elapsed(&self) -> f32 {
-        Instant::now()
+    // slopty: at the pulse's tick that drew it, so a frame between ticks shows it the same.
+    fn elapsed(&self, window: &Window, cx: &mut App) -> f32 {
+        crate::motion::pulse_moment(window.current_view(), cx)
             .saturating_duration_since(self.roll.started)
             .as_secs_f32()
             / speed_scale()
@@ -234,7 +235,7 @@ impl Element for RollText {
         };
         let from = shape(&self.roll.from);
         let to = shape(&self.roll.to);
-        let progress = layout_progress(self.elapsed());
+        let progress = layout_progress(self.elapsed(window, cx));
         // Rounded up like gpui's text element sizes the plain label, so the
         // settled width equals the label that replaces this element.
         let width = lerp(f32::from(from.width), f32::from(to.width), progress).ceil();
@@ -276,7 +277,7 @@ impl Element for RollText {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let elapsed = self.elapsed();
+        let elapsed = self.elapsed(window, cx);
         let duration = DURATION.as_secs_f32();
         let color = window.text_style().color;
         let font_size = shaped.font_size;

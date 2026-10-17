@@ -740,7 +740,7 @@ impl Pickers {
         let (height, moving) = ScalarTransition::sample(
             &mut self.compact_motion.height,
             target,
-            std::time::Instant::now(),
+            cx.frame_time(), // slopty: the frame's moment
             cx.reduce_motion(),
         );
         self.compact_motion.frame_height = height;
@@ -751,7 +751,7 @@ impl Pickers {
             CompactPage::Models => self.render_harness_model_popover(cx),
             CompactPage::Panel => self.render_compact_model_panel(window, cx),
         };
-        let now = std::time::Instant::now();
+        let now = cx.frame_time(); // slopty: the frame's moment
         if self.compact_motion.page.is_some_and(|last| last != page) {
             self.compact_motion.reveal = Some(ScalarTransition {
                 from: 0.0,
@@ -870,7 +870,7 @@ impl Pickers {
             .unwrap_or_else(|| "Default".into());
         let model_accessible: SharedString =
             format!("{} · {} · Change model", effort, label).into();
-        let now = std::time::Instant::now();
+        let now = cx.frame_time(); // slopty: the frame's moment
         let reduced = cx.reduce_motion();
         // Fast mode alone brings the fill to life: a sheen and speed streaks
         // racing toward the thumb, and a breathing glow.

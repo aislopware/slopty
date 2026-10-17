@@ -628,7 +628,7 @@ impl Shell {
             .size_full()
             .flex()
             .items_center()
-            .pt(px(Theme::TITLEBAR_TOP_PAD))
+            .pt(px(super::titlebar_top_pad())) // slopty: a finger's presses inside the window
             .gap(px(row_gap))
             .pl(px(row_left))
             .pr(px(right_pad))

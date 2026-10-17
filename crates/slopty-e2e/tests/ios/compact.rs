@@ -335,8 +335,9 @@ async fn a_phones_chat_holds_the_dock_and_a_subagents_card() {
     .await
     .unwrap();
 
-    // A screenshot pasted into the composer is staged as its attachment, its thumbnail in the
-    // composer with a way to take it off.
+    // A screenshot pasted into the composer is staged as its attachment, its chip in the draft
+    // where the caret stood (zeron's inline mention, `[Image 1](slopty-image:1)`), which the
+    // thumbnail strip then leaves out.
     let composer = drv.dump().await.unwrap();
     let [left, top, width, height] =
         composer.a11y.iter().find(|n| n.role == "MultilineTextInput").unwrap().bounds;
@@ -346,7 +347,8 @@ async fn a_phones_chat_holds_the_dock_and_a_subagents_card() {
     let staged = drv
         .wait_for("the pasted picture staged", STEP, |d| {
             d.a11y.iter().any(|n| {
-                n.role == "Button" && n.label.as_deref().is_some_and(|l| l.starts_with("Remove "))
+                n.role == "MultilineTextInput"
+                    && n.value.as_deref().is_some_and(|v| v.contains("](slopty-image:"))
             })
         })
         .await;

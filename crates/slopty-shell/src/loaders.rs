@@ -563,6 +563,55 @@ impl RenderOnce for Pending {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    /// What the window last painted, sorted.
+    fn painted(window: &Window) -> Vec<String> {
+        let mut lines = window.painted_primitives();
+        lines.sort_unstable();
+        lines
+    }
+
+    /// What the window paints drawn from scratch at the moment the last frame showed.
+    fn from_scratch(window: &mut Window, cx: &mut App) -> Vec<String> {
+        window.repeat_frame_time();
+        window.refresh();
+        window.draw(cx).clear(cx);
+        painted(window)
+    }
+
+    /// A spinner in a host that is drawn again for its own reasons.
+    struct Host;
+
+    impl Render for Host {
+        fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .child(mini_mono_spinner("spin", 4.0, gpui::black(), cx.entity_id(), cx))
+        }
+    }
+
+    /// slopty: the spinner is notified on the pulse's ticks and drawn from its last paint in
+    /// between: a frame between ticks, and one drawn again from scratch then, show it as its tick
+    /// drew it, and the next tick moves it on.
+    #[gpui::test]
+    fn a_spinner_drawn_between_ticks_shows_its_ticks_phase(cx: &mut gpui::TestAppContext) {
+        let (host, cx) = cx.add_window_view(|_, _| Host);
+        cx.run_until_parked();
+        let first = cx.update(|window, _| painted(window));
+        cx.executor().advance_clock(Duration::from_millis(20));
+        host.update(cx, |_, cx| cx.notify());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let shown = cx.update(|window, _| painted(window));
+        assert_eq!(shown, first, "drawn between ticks, the spinner is as its tick drew it");
+        assert_eq!(cx.update(from_scratch), shown, "and so is a frame from scratch then");
+        cx.executor().advance_clock(Duration::from_millis(200));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let moved = cx.update(|window, _| painted(window));
+        assert_ne!(moved, first, "the ticks move it on");
+        assert_eq!(cx.update(from_scratch), moved, "a frame from scratch after the ticks");
+    }
 
     #[test]
     fn mark_stagger_follows_flight_axis() {

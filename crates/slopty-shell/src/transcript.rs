@@ -7926,7 +7926,7 @@ impl Transcript {
                     row_key: row.id.clone(),
                     veil: None,
                     cache: (!render_cache_disabled()).then(|| self.render_cache.clone()),
-                    now: Instant::now(),
+                    now: cx.frame_time(), // slopty: the frame's moment
                     copy: Some(self.copy_ui_for(&row.id, cx)),
                     link,
                     workspace_root: workspace_root.clone(),
@@ -7999,7 +7999,7 @@ impl Transcript {
                     row_key: row.id.clone(),
                     veil: veil.clone(),
                     cache: (!render_cache_disabled()).then(|| self.render_cache.clone()),
-                    now: Instant::now(),
+                    now: motion::pulse_moment(cx.entity_id(), cx), // slopty: the veil's tick, which drew it
                     copy: Some(self.copy_ui_for(&row.id, cx)),
                     link,
                     workspace_root: workspace_root.clone(),
@@ -8317,7 +8317,7 @@ impl Transcript {
         let fold = self.folds.get(&work_id).copied().unwrap_or_default();
         let open = fold.open.unwrap_or(false);
         let reduce_motion = motion::reduced_motion(cx);
-        let now = Instant::now();
+        let now = cx.frame_time(); // slopty: the frame's moment
         let animating = !reduce_motion
             && fold
                 .toggled_at
@@ -8834,7 +8834,7 @@ impl Transcript {
             )
             .collect();
         let reduce_motion = cx.reduce_motion();
-        let now = Instant::now();
+        let now = cx.frame_time(); // slopty: the frame's moment
         let reveal_progress: Vec<f32> = (0..tools.len())
             .map(|ix| {
                 let start = self
@@ -8880,10 +8880,11 @@ impl Transcript {
         let target = if open { viewport_height } else { 0.0 };
         let shimmer_phase = if active && !reduce_motion {
             motion::pulse_lease(cx.entity_id(), cx);
+            let ticked = motion::pulse_moment(cx.entity_id(), cx); // slopty: the pulse's tick, which drew it
             self.tool_group_reveals
                 .get(row_id)
                 .and_then(|reveal| reveal.shimmer_started_at)
-                .map(|start| tool_title_shimmer_phase(start, now))
+                .map(|start| tool_title_shimmer_phase(start, ticked))
         } else {
             None
         };

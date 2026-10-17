@@ -33,7 +33,8 @@ pub fn painted(window: &Window) -> Vec<String> {
 /// When they differ it draws another: something that moves on its own clock (a spinner stepping
 /// each paint, a view reading the wall clock) paints differently however the frame was drawn, so
 /// two frames from scratch that differ say the window is in motion. Then only what both paint
-/// alike, what holds still, is judged: the frame shown must paint it too.
+/// alike, what holds still, is judged: the frame shown must paint it too, at whatever depth what
+/// moves around it leaves it.
 pub fn stale(window: &mut Window, cx: &mut App, limit: usize) -> Option<String> {
     // GPUI's fades run on the wall clock: a slow machine can paint one half way and draw the
     // frames from scratch after it has landed, and no comparison then holds.
@@ -49,14 +50,52 @@ pub fn stale(window: &mut Window, cx: &mut App, limit: usize) -> Option<String> 
         return diff(&shown, &scratch, limit);
     }
     let still = common(&scratch, &again);
-    let missed = only(&still, &shown);
+    // What moves over or under a primitive that holds still changes its depth, not whether it is
+    // painted: in motion, what holds still counts as painted at any depth.
+    let missed = only(&depthless(&still), &depthless(&shown));
     (!missed.is_empty()).then(|| {
+        // What the frame shown painted that neither frame from scratch does: where it drew
+        // what it missed, if it drew it at all, beside what moves.
+        let instead = only(&only(&shown, &scratch), &again);
+        // The depths a missed line stands at in each, for the first few: what moves around it.
+        let depths = |lines: &[String], line: &str| -> Vec<String> {
+            lines
+                .iter()
+                .filter_map(|l| l.split_once(' ').filter(|(_, rest)| *rest == line))
+                .map(|(depth, _)| depth.to_owned())
+                .collect()
+        };
+        let at: Vec<String> = missed
+            .iter()
+            .take(3)
+            .map(|line| {
+                format!(
+                    "depths from scratch {:?}, shown {:?}",
+                    depths(&still, line),
+                    depths(&shown, line)
+                )
+            })
+            .collect();
         format!(
-            "in motion, {} that holds still in a frame from scratch was not painted:\n  {}",
+            "in motion, {} that holds still in a frame from scratch was not painted:\n  {}\n\
+             ({})\n{} the frame shown painted that neither frame from scratch does:\n  {}",
             missed.len(),
-            cut(&missed, limit)
+            cut(&missed, limit),
+            at.join("; "),
+            instead.len(),
+            cut(&instead, limit)
         )
     })
+}
+
+/// `lines` without the depth each starts with ([`painted`]), sorted again.
+fn depthless(lines: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = lines
+        .iter()
+        .map(|line| line.split_once(' ').map_or_else(|| line.clone(), |(_, rest)| rest.to_owned()))
+        .collect();
+    out.sort_unstable();
+    out
 }
 
 /// The lines of sorted `a` that sorted `b` does not hold, a repeat counting once per copy.

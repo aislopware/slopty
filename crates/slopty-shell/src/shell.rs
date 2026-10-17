@@ -5764,6 +5764,15 @@ impl Shell {
         std::time::Instant::now()
     }
 
+    /// slopty: [`Self::motion_time`] while a frame is drawn: the frame's moment.
+    fn frame_motion_time(&self, cx: &App) -> std::time::Instant {
+        #[cfg(test)]
+        if let Some(now) = self.test_time {
+            return now;
+        }
+        cx.frame_time()
+    }
+
     fn panel_tween(&self, from: f32, to: f32) -> WidthTween {
         WidthTween {
             started: self.render_time.unwrap_or_else(|| self.motion_time()),
@@ -6057,7 +6066,7 @@ impl Shell {
             .flex()
             .flex_row()
             .items_center()
-            .pt(px(Theme::TITLEBAR_TOP_PAD))
+            .pt(px(titlebar_top_pad())) // slopty: a finger's presses inside the window
             .px(px(TITLEBAR_CLUSTER_PAD))
             .child(
                 div()
@@ -6186,7 +6195,7 @@ impl Shell {
                 .top_0()
                 .left(px(left))
                 .h(px(Theme::TITLEBAR_HEIGHT))
-                .pt(px(Theme::TITLEBAR_TOP_PAD))
+                .pt(px(titlebar_top_pad())) // slopty: a finger's presses inside the window
                 .flex()
                 .items_center()
                 .opacity(reveal)
@@ -10675,6 +10684,14 @@ fn window_control_button(
 
 /// [`window_control_button`] around a caller-drawn glyph (the morphing
 /// sidebar glyph).
+/// slopty: the titlebar row's top padding: [`Theme::TITLEBAR_TOP_PAD`], and on a touch screen
+/// enough more that its 24 pt controls' 44 pt presses start inside the window.
+pub(crate) fn titlebar_top_pad() -> f32 {
+    let center = (Theme::TITLEBAR_HEIGHT + Theme::TITLEBAR_TOP_PAD) * 0.5;
+    let over = (crate::surface_chrome::touch_reach(24.0) - (center - 12.0)).max(0.0);
+    Theme::TITLEBAR_TOP_PAD + 2.0 * over
+}
+
 fn window_control_button_with(
     id: &'static str,
     glyph: impl IntoElement,
@@ -11036,7 +11053,8 @@ impl Render for Shell {
         }
         self.focus_rename_chat(window, cx);
 
-        self.render_time = Some(self.motion_time());
+        // slopty: the frame's moment, so a frame drawn again stands where this one did.
+        self.render_time = Some(self.frame_motion_time(cx));
         if self.all_file_edits_flushed(cx)
             && let Some(action) = self.pending_exit.take()
         {

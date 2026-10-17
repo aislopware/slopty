@@ -3481,7 +3481,7 @@ impl Pickers {
         let (value, moving) = compact::ScalarTransition::sample(
             &mut self.chip_width,
             target,
-            std::time::Instant::now(),
+            cx.frame_time(), // slopty: the frame's moment
             cx.reduce_motion(),
         );
         self.chip_resizing = moving;

@@ -10236,7 +10236,7 @@ impl Render for Composer {
                 input.layout_epoch,
             )
         };
-        let now = Instant::now();
+        let now = cx.frame_time(); // slopty: the frame's moment
         // Only measurements taken *after* the last flip may drive the next one
         // (at most one flip per layout pass — a flip invalidates the widths).
         let measured_since_flip = epoch > self.flip_epoch && last_width > 0.0;
@@ -10313,10 +10313,13 @@ impl Render for Composer {
         let new_chat = self.state.read(cx).selected_chat.is_none();
         // Morph clock in ms; dividing by the measurement knob stretches the
         // timeline exactly like shell.rs eval_tween's scaled duration.
-        let now_ms = self.morph_clock.elapsed().as_secs_f32() * 1000.0 / motion::speed_scale();
+        // slopty: at the frame's moment, so a frame drawn again stands where this one did.
+        let now_ms = cx.frame_time().saturating_duration_since(self.morph_clock).as_secs_f32()
+            * 1000.0
+            / motion::speed_scale();
         let route_snap = self
             .route_snap_until
-            .is_some_and(|until| Instant::now() < until);
+            .is_some_and(|until| cx.frame_time() < until);
         let dock_height_changed = std::mem::take(&mut self.dock_height_changed);
         self.flip_morph = if dock_height_changed
             || self.dock_frame.is_some_and(|frame| frame.active)
@@ -11559,13 +11562,14 @@ mod tests {
             draw(cx);
         }
         handle
-            .update(cx, |composer, _, _| {
+            .update(cx, |composer, _, cx| {
                 assert!(
                     composer.expanded_mode,
                     "widening must wait for resize to settle before collapsing"
                 );
+                // slopty: on the frame's clock, which the composer reads.
                 composer.width_changed_at =
-                    Some(Instant::now() - Duration::from_millis(RESIZE_SETTLE_MS + 1));
+                    Some(cx.frame_time() - Duration::from_millis(RESIZE_SETTLE_MS + 1));
             })
             .unwrap();
         draw(cx);

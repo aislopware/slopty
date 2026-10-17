@@ -70,6 +70,16 @@ struct PulseClock {
     leases: HashMap<EntityId, PulseLease>,
     tick: u64,
     running: bool,
+    // slopty: the moment each leased view shows (`pulse_moment`), and when the last tick came.
+    shown: HashMap<EntityId, Shown>,
+    ticked_at: Option<Instant>,
+}
+
+/// slopty: the moment a leased view shows, until a tick it is notified of draws it again.
+struct Shown {
+    at: Instant,
+    /// A tick notified the view since it last drew.
+    due: bool,
 }
 
 struct PulseLease {
@@ -137,13 +147,31 @@ fn pulse_delta_every(spec: &MotionSpec, view: EntityId, stride: u64, cx: &mut Ap
         return 0.0;
     }
     pulse_lease_every(view, stride, cx);
-    pulse_phase(spec, cx)
+    pulse_phase(spec, view, cx)
 }
 
-fn pulse_phase(spec: &MotionSpec, cx: &mut App) -> f32 {
-    // slopty: on the process's one clock ([`locked_phase`]), not the clock's first use, at the
-    // moment of the frame being drawn, so a frame drawn again shows each cell where it stood.
-    locked_phase(spec.total(), cx.frame_time())
+fn pulse_phase(spec: &MotionSpec, view: EntityId, cx: &mut App) -> f32 {
+    // slopty: on the process's one clock ([`locked_phase`]), not the clock's first use.
+    locked_phase(spec.total(), pulse_moment(view, cx))
+}
+
+// slopty: what a pulse-driven view shows is the moment of the tick that drew it, not the frame's.
+// The clock notifies it at 30 Hz (15 at stride 2) and it is drawn from its last paint in between,
+// so a frame drawn between ticks, or one drawn again from scratch, must show it as that tick did.
+/// The moment `view`, leased on the pulse ([`pulse_lease`]), shows: the tick's that it last drew
+/// on after being notified of it, or the frame's when the clock is not running.
+pub fn pulse_moment(view: EntityId, cx: &mut App) -> Instant {
+    let frame = cx.frame_time();
+    let Some(clock) = cx.try_global::<PulseClock>().filter(|clock| clock.running) else {
+        return frame;
+    };
+    let tick = clock.ticked_at.unwrap_or(frame);
+    let clock = cx.default_global::<PulseClock>();
+    let shown = clock.shown.entry(view).or_insert(Shown { at: tick, due: false });
+    if std::mem::take(&mut shown.due) {
+        shown.at = tick;
+    }
+    shown.at
 }
 
 /// Activity feedback uses a slow, uniform brightness pulse when the system
@@ -183,8 +211,9 @@ fn activity_pulse_every(view: EntityId, stride: u64, cx: &mut App) -> ActivityPu
                 && !(state.pause_in_background && !state.active)
         });
     let phase = if animate {
-        schedule_pulse_every(view, if subtle { 2 } else { stride }, cx);
-        pulse_phase(if subtle { &SLOPTY_PULSE } else { &GRADIENT_SPIN }, cx)
+        let stride = if subtle { 2 } else { stride };
+        schedule_pulse_every(view, stride, cx);
+        pulse_phase(if subtle { &SLOPTY_PULSE } else { &GRADIENT_SPIN }, view, cx)
     } else {
         0.0
     };
@@ -206,8 +235,8 @@ fn pulse_lease_every(view: EntityId, stride: u64, cx: &mut App) {
 }
 
 fn schedule_pulse_every(view: EntityId, stride: u64, cx: &mut App) {
+    let now = cx.background_executor().now(); // slopty: the executor's clock, a test's too
     let clock = cx.default_global::<PulseClock>();
-    let now = Instant::now();
     clock
         .leases
         .entry(view)
@@ -218,6 +247,8 @@ fn schedule_pulse_every(view: EntityId, stride: u64, cx: &mut App) {
         .renew(now, stride);
     if !clock.running {
         clock.running = true;
+        // slopty: the clock's first tick is now.
+        clock.ticked_at = Some(now);
         cx.spawn(async move |cx| {
             #[cfg(windows)]
             let mut precise_clock = if cx
@@ -246,20 +277,31 @@ fn schedule_pulse_every(view: EntityId, stride: u64, cx: &mut App) {
                     cx.background_executor().timer(PULSE_TICK).await;
                 }
                 let parked = cx.update(|cx| {
+                    let now = cx.background_executor().now(); // slopty
                     let clock = cx.default_global::<PulseClock>();
-                    let now = Instant::now();
                     clock.leases.retain(|_, lease| lease.until > now);
                     if clock.leases.is_empty() {
                         clock.running = false;
+                        // slopty: parked, what reads the pulse's moment reads the frame's.
+                        clock.ticked_at = None;
+                        clock.shown.clear();
                         return true;
                     }
                     clock.tick = clock.tick.wrapping_add(1);
+                    clock.ticked_at = Some(now);
+                    let leases = &clock.leases;
+                    clock.shown.retain(|view, _| leases.contains_key(view));
                     let tick = clock.tick;
                     let views: Vec<EntityId> = clock
                         .leases
                         .iter_mut()
                         .filter_map(|(view, lease)| lease.take_tick(tick).then_some(*view))
                         .collect();
+                    for view in &views {
+                        if let Some(shown) = clock.shown.get_mut(view) {
+                            shown.due = true;
+                        }
+                    }
                     for view in views {
                         cx.notify(view);
                     }
