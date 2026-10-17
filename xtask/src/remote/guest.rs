@@ -1,4 +1,5 @@
-//! A check's app e2e case in a macOS guest on this Mac, instead of on a runner Mac.
+//! A check's app and simulator e2e cases in a macOS guest on this Mac, instead of on a runner
+//! Mac.
 //!
 //! On a runner an e2e case spent two thirds of its time compiling: about two minutes of setup,
 //! then a p50 of 501 s building the daemons and the app on three cores, for a p50 of 68 s of
@@ -16,6 +17,9 @@
 //! - One run at a time per guest, under a lock; a second lane waits and says so.
 //! - Renders and diffs come back to `target/e2e/artifacts/`; accepted goldens come back into the
 //!   tree, only those the run wrote; the log goes where `-E failed` reads it.
+//! - The simulator case (`ios`) builds the app for the simulator here too, with this Mac's Xcode,
+//!   and runs it in the guest's own simulator on the runners' iOS runtime ([`IOS_RUNTIME`]); the
+//!   base holds that Xcode and runtime ([`make_base`]).
 
 use std::fs::File;
 use std::process::{Command, Stdio};
@@ -27,14 +31,27 @@ use xshell::Shell;
 
 use super::Goldens;
 
-/// The guest that runs the e2e cases, a clone of the live lane's base (`cargo xtask vm create`).
+/// The guest that runs the e2e cases, a clone of [`BASE`].
 pub const GUEST: &str = "slopty-26-e2e";
 
-/// The base it is cloned from.
-const BASE: &str = "slopty-26";
+/// The base it is cloned from: [`ORIGIN`] with Xcode and the runners' iOS simulator runtime
+/// ([`make_base`]).
+const BASE: &str = "slopty-26-xcode";
+
+/// The live lane's base (`cargo xtask vm create`), which [`BASE`] is made from: the runners'
+/// macOS build.
+const ORIGIN: &str = "slopty-26";
+
+/// The iOS simulator runtime the runners' newest is (iOS 26.5, `macos-26` with Xcode 26.6, read on
+/// run 39017057929); downloaded into the base by build, anonymously (`xcodebuild
+/// -downloadPlatform`).
+const IOS_RUNTIME: &str = "23F77";
+
+/// The base's disk, in GB: macOS 12, Xcode 13, the runtime 8, and room for the runs.
+const DISK_GB: &str = "90";
 
 /// The guest's memory, in MB.
-const MEMORY_MB: &str = "4096";
+const MEMORY_MB: &str = "6144";
 
 /// The account the guest logs in as.
 const USER: &str = "admin";
@@ -89,6 +106,8 @@ pub struct Run<'a> {
     pub filter: Option<&'a str>,
     /// What it does with the goldens.
     pub goldens: Goldens,
+    /// The simulator case on this device, rather than the app's.
+    pub ios: Option<crate::ios::SimKind>,
 }
 
 /// How a run here went.
@@ -109,15 +128,21 @@ fn home() -> PathBuf {
         .map_or_else(|_| PathBuf::from("/Volumes/Lacie/vms"), PathBuf::from)
 }
 
-/// Whether this Mac can run the e2e guest: tart, and the base to clone it from.
+/// Whether this Mac can run the e2e guest: tart, and the base to clone it from, or the live
+/// lane's base to make that from.
 pub fn available() -> bool {
     cfg!(target_os = "macos")
         && tart(&home()).arg("list").output().is_ok_and(|out| {
             out.status.success()
                 && String::from_utf8_lossy(&out.stdout)
                     .lines()
-                    .any(|l| l.split_whitespace().nth(1) == Some(BASE))
+                    .any(|l| matches!(l.split_whitespace().nth(1), Some(BASE | ORIGIN)))
         })
+}
+
+/// Whether tart lists a guest `name`.
+fn has_guest(home: &Path, name: &str) -> Result<bool> {
+    Ok(tart_out(home, &["list"])?.lines().any(|l| l.split_whitespace().nth(1) == Some(name)))
 }
 
 fn tart(home: &Path) -> Command {
@@ -185,7 +210,6 @@ fn rsync(home: &Path, args: &[&str], cwd: &Path) -> Result<()> {
 }
 
 /// The guest booted, cloned from the base first if it is not there; its address.
-#[expect(clippy::disallowed_methods, reason = "xtask is a script, not a library; polling a guest")]
 fn up(home: &Path) -> Result<String> {
     let listed = tart_out(home, &["list"])?;
     let state = listed
@@ -196,20 +220,30 @@ fn up(home: &Path) -> Result<String> {
         Some("running") => return tart_out(home, &["ip", GUEST, "--wait", "60"]),
         Some(_) => {}
         None => {
+            if !has_guest(home, BASE)? {
+                make_base(home, BASE)?;
+            }
             println!("  making the e2e guest {GUEST} from {BASE}");
             tart_out(home, &["clone", BASE, GUEST])?;
-            // Half the base's memory: the guest runs one app and its daemons at a time, and this
-            // Mac's lanes build beside it with their swap full.
+            // Three quarters of the base's: one app and its daemons, or one simulator, at a
+            // time, while this Mac's lanes build beside it with their swap full.
             tart_out(home, &["set", GUEST, "--memory", MEMORY_MB])?;
         }
     }
-    let log = home.join("logs").join(format!("{GUEST}.log"));
+    boot(home, GUEST)
+}
+
+/// Boot `name` headless, as a process of its own; its address once a command runs in its
+/// logged-in session.
+#[expect(clippy::disallowed_methods, reason = "xtask is a script, not a library; polling a guest")]
+fn boot(home: &Path, name: &str) -> Result<String> {
+    let log = home.join("logs").join(format!("{name}.log"));
     let file = File::create(&log).with_context(|| format!("create {log}"))?;
     let started = Instant::now();
     let mut vm = {
         use std::os::unix::process::CommandExt as _;
         tart(home)
-            .args(["run", GUEST, "--no-graphics"])
+            .args(["run", name, "--no-graphics"])
             .stdin(Stdio::null())
             .stdout(file.try_clone()?)
             .stderr(file)
@@ -219,22 +253,94 @@ fn up(home: &Path) -> Result<String> {
     };
     loop {
         if let Some(status) = vm.try_wait()? {
-            bail!("tart run {GUEST} exited with {status}; see {log}");
+            bail!("tart run {name} exited with {status}; see {log}");
         }
         let ready = tart(home)
-            .args(["exec", GUEST, "/usr/bin/true"])
+            .args(["exec", name, "/usr/bin/true"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
             .is_ok_and(|s| s.success());
         if ready {
-            println!("  booted {GUEST} in {:.0?}", started.elapsed());
-            return tart_out(home, &["ip", GUEST, "--wait", "60"]);
+            println!("  booted {name} in {:.0?}", started.elapsed());
+            return tart_out(home, &["ip", name, "--wait", "60"]);
         }
-        ensure!(started.elapsed() < BOOT, "{GUEST} did not come up in {BOOT:?}; see {log}");
+        ensure!(started.elapsed() < BOOT, "{name} did not come up in {BOOT:?}; see {log}");
         std::thread::sleep(Duration::from_secs(2));
     }
+}
+
+/// Make [`BASE`] from [`ORIGIN`], once: a disk of [`DISK_GB`], this Mac's Xcode (the simulator
+/// case builds the app here, with it, and the guest runs `simctl`), the runners' iOS runtime, the
+/// two simulators booted once, no Spotlight indexing (it ran at a core after every boot), no crash
+/// dialog (a window left over a crashed test's app). About
+/// 25 minutes: the runtime's 8.5 GB download and the simulators' first boots.
+fn make_base(home: &Path, base: &str) -> Result<()> {
+    println!("  making the e2e base {base} from {ORIGIN}: Xcode and iOS runtime {IOS_RUNTIME}");
+    let making = format!("{base}-making");
+    let drop = |home: &Path| -> Result<()> {
+        if has_guest(home, &making)? {
+            let _stopped = tart_out(home, &["stop", &making, "--timeout", "30"]);
+            tart_out(home, &["delete", &making])?;
+        }
+        Ok(())
+    };
+    drop(home)?;
+    tart_out(home, &["clone", ORIGIN, &making])?;
+    if let Err(e) = fill_base(home, &making) {
+        // Half made is not made: the next run starts over.
+        let _dropped = drop(home);
+        return Err(e);
+    }
+    tart_out(home, &["stop", &making, "--timeout", "60"])?;
+    tart_out(home, &["rename", &making, base])?;
+    println!("  made {base}");
+    Ok(())
+}
+
+/// [`make_base`]'s work on the clone `making`, left running.
+fn fill_base(home: &Path, making: &str) -> Result<()> {
+    tart_out(home, &["set", making, "--disk-size", DISK_GB])?;
+    let ip = boot(home, making)?;
+    let developer = Command::new("xcode-select").arg("-p").output().context("xcode-select")?;
+    let developer = PathBuf::from(String::from_utf8(developer.stdout)?.trim());
+    let xcode = developer
+        .parent()
+        .and_then(Path::parent)
+        .context("xcode-select names no Xcode.app/Contents/Developer")?
+        .to_path_buf();
+    ssh(
+        home,
+        &ip,
+        // `repairDisk` may grow the container itself, and `resizeContainer` then refuses the size
+        // it already has: what counts is the size after.
+        "yes | sudo diskutil repairDisk disk0 >/dev/null 2>&1; \
+         sudo diskutil apfs resizeContainer disk0s2 0 >/dev/null 2>&1; \
+         df -g / | awk 'NR == 2 { exit ($2 < 80) }'",
+    )?;
+    let to = format!("{ip}:/Users/{USER}/");
+    rsync(home, &[xcode.as_str(), &to], home)?;
+    let name = xcode.file_name().context("Xcode's name")?;
+    ssh(
+        home,
+        &ip,
+        &format!(
+            "sudo rm -rf /Applications/Xcode.app && \
+             sudo mv '/Users/{USER}/{name}' /Applications/Xcode.app && \
+             sudo xcode-select -s /Applications/Xcode.app && sudo xcodebuild -license accept && \
+             sudo xcodebuild -runFirstLaunch >/dev/null && \
+             xcodebuild -downloadPlatform iOS -buildVersion {IOS_RUNTIME} >/dev/null && \
+             sudo mdutil -a -i off >/dev/null && \
+             defaults write com.apple.CrashReporter DialogType none"
+        ),
+    )?;
+    // Each simulator's first boot migrates its data, 4–10 minutes: done once here, not in the
+    // first run of every clone.
+    for sim in [crate::ios::SimKind::Iphone, crate::ios::SimKind::Ipad] {
+        pristine(home, making, sim)?;
+    }
+    Ok(())
 }
 
 /// The guest's lock, held for one run.
@@ -285,9 +391,12 @@ fn binaries(debug: &Path) -> Result<Vec<String>> {
     Ok(names)
 }
 
-/// Run the app's e2e case of commit `sha` in lane `lane`'s directory, in the guest.
+/// Run the app's e2e case, or the simulator's, of commit `sha` in lane `lane`'s directory, in
+/// the guest.
+#[expect(clippy::too_many_lines, reason = "one run, step by step")]
 pub fn e2e(root: &Path, lane: &str, sha: &str, run: &Run<'_>) -> Result<Outcome> {
     let started = Instant::now();
+    let case = if run.ios.is_some() { "ios" } else { "app" };
     crate::prune::before_build();
     let dir = crate::local::dir(root, lane);
     let tree = crate::gate::snapshot_commit(root, &dir, sha)?;
@@ -298,15 +407,24 @@ pub fn e2e(root: &Path, lane: &str, sha: &str, run: &Run<'_>) -> Result<Outcome>
     sh.set_var("LIBGHOSTTY_VT_SYS_PREBUILT_DIR", root.join("target").join(crate::prune::PREBUILT));
     let target_arg = format!("--target-dir={target}");
     crate::e2e::build_app(&sh, &[&target_arg])?;
+    // The simulator's app, built here with this Mac's Xcode into the same target dir.
+    let bundle = match run.ios {
+        Some(sim) => {
+            crate::ios::preflight(&sh, false)?;
+            let _target = sh.push_env("CARGO_TARGET_DIR", &target);
+            Some(crate::ios::build_for_simulator(&sh, sim, "info")?)
+        }
+        None => None,
+    };
     let stage = dir.join("guest");
     std::fs::create_dir_all(&stage)?;
-    let archive = stage.join("app.tar.zst");
+    let archive = stage.join(format!("{case}.tar.zst"));
     let live = crate::e2e::LIVE;
     crate::tools::step(
-        "archive slopty-e2e app",
+        &format!("archive slopty-e2e {case}"),
         &xshell::cmd!(
             sh,
-            "cargo nextest archive --cargo-profile dev {target_arg} -p slopty-e2e --test app --features {live} --archive-file {archive}"
+            "cargo nextest archive --cargo-profile dev {target_arg} -p slopty-e2e --test {case} --features {live} --archive-file {archive}"
         )
         .env(crate::gate::BINS_FRESH, "1"),
     )?;
@@ -357,6 +475,11 @@ pub fn e2e(root: &Path, lane: &str, sha: &str, run: &Run<'_>) -> Result<Outcome>
     let nextest = which("cargo-nextest")?;
     let to = format!("{ip}:{stage}/");
     rsync(&home, &[archive.as_str(), nextest.as_str(), config.as_str(), &to], &stage)?;
+    if let Some(bundle) = &bundle {
+        let from = format!("{bundle}/");
+        let to = format!("{ip}:{stage}/Slopty.app/");
+        rsync(&home, &["--delete", &from, &to], &stage)?;
+    }
     println!(
         "  copied {} binaries and the archive into {GUEST} ({:.1?})",
         bins.len(),
@@ -370,14 +493,31 @@ pub fn e2e(root: &Path, lane: &str, sha: &str, run: &Run<'_>) -> Result<Outcome>
         Goldens::AcceptAll => Some("all"),
         Goldens::Review => Some("review"),
     };
-    let filter = crate::e2e::app_filterset(run.filter).unwrap_or_default();
-    let output = match threads() {
+    // The simulator booted and the app installed in the session the tests run in.
+    let simulator = match run.ios {
+        Some(sim) => Some(simulator(&home, sim, &stage.join("Slopty.app"))?),
+        None => None,
+    };
+    let (filter, env) = match &simulator {
+        Some(udid) => (
+            crate::e2e::ios_filterset(run.filter),
+            crate::e2e::ios_env(data.as_str(), debug.as_str(), accept, udid),
+        ),
+        None => (
+            crate::e2e::app_filterset(run.filter),
+            crate::e2e::app_env(data.as_str(), debug.as_str(), accept),
+        ),
+    };
+    let filter = filter.unwrap_or_default();
+    // One app in one simulator: its tests take turns.
+    let output = match if simulator.is_some() { 1 } else { threads() } {
         1 => "--no-capture".to_owned(),
-        n => format!("--test-threads {n} --failure-output final"),
+        // Passing tests' output too: their MEASURE lines are what a run reports.
+        n => format!("--test-threads {n} --failure-output final --success-output final"),
     };
     let mut command = tart(&home);
     command.args(["exec", GUEST, "/usr/bin/env"]);
-    for (key, value) in crate::e2e::app_env(data.as_str(), debug.as_str(), accept) {
+    for (key, value) in env {
         command.arg(format!("{key}={value}"));
     }
     command.arg(format!("INSTA_WORKSPACE_ROOT={tree}"));
@@ -398,8 +538,16 @@ pub fn e2e(root: &Path, lane: &str, sha: &str, run: &Run<'_>) -> Result<Outcome>
     }
     std::fs::create_dir_all(&logs)?;
     let log = logs.join("e2e.log");
-    println!("▶ e2e app in {GUEST}{}", run.filter.map(|f| format!(" -E {f}")).unwrap_or_default());
-    let status = teed(command, &log)?;
+    println!(
+        "▶ e2e {case} in {GUEST}{}",
+        run.filter.map(|f| format!(" -E {f}")).unwrap_or_default()
+    );
+    let status = teed(command, &log);
+    if let Some(sim) = run.ios {
+        // The run's simulator goes: a booted one holds its memory and CoreAudio after the run.
+        let _dropped = drop_run_devices(&home, &run_device(sim));
+    }
+    let status = status?;
     let tests = copying.elapsed();
     stop_when_idle(&home);
 
@@ -442,6 +590,116 @@ pub fn e2e(root: &Path, lane: &str, sha: &str, run: &Run<'_>) -> Result<Outcome>
         println!("  every line: {log}; renders and diffs: {renders}");
     }
     Ok(Outcome { passed, build: built, tests, summary })
+}
+
+/// `simctl` in `guest`, through `tart exec`: in the session the tests run in, whose simulator
+/// service is the one their `simctl launch` reaches.
+fn simctl(home: &Path, guest: &str, args: &[&str]) -> Result<String> {
+    let mut all = vec!["exec", guest, "xcrun", "simctl"];
+    all.extend_from_slice(args);
+    tart_out(home, &all)
+}
+
+/// `guest`'s pristine simulator for `sim`, shut down: never booted by a run, only cloned. Made
+/// on the newest iOS runtime when there is none, and booted once, since a simulator's first boot
+/// (its data migrated) takes 4–10 minutes; its UDID.
+fn pristine(home: &Path, guest: &str, sim: crate::ios::SimKind) -> Result<String> {
+    let name = sim.name();
+    let devices = simctl(home, guest, &["list", "devices", "available", "-j"])?;
+    if let Some(udid) = named_device(&devices, name)? {
+        return Ok(udid);
+    }
+    let runtimes = simctl(home, guest, &["list", "runtimes", "-j"])?;
+    let runtime = newest_ios(&runtimes)?.with_context(|| format!("no iOS runtime in {guest}"))?;
+    println!("  creating simulator {name:?} on {runtime} in {guest}");
+    let started = Instant::now();
+    let udid = simctl(home, guest, &["create", name, sim.device_type(), &runtime])?;
+    simctl(home, guest, &["boot", &udid])?;
+    simctl(home, guest, &["bootstatus", &udid, "-b"])?;
+    simctl(home, guest, &["shutdown", &udid])?;
+    println!("  booted {name} once in {guest} ({:.1?})", started.elapsed());
+    Ok(udid)
+}
+
+/// The name of a run's simulator, cloned from the pristine one for `sim`.
+fn run_device(sim: crate::ios::SimKind) -> String {
+    format!("{} run", sim.name())
+}
+
+/// A simulator for one run in [`GUEST`], booted with `app` installed; its UDID. A clone of the
+/// pristine one, so every run starts as a runner's freshly made simulator does: no app data,
+/// notifications not yet asked, the keyboard, appearance and pasteboard as made (a simulator
+/// the runs kept kept the app's notification grant, and every iOS frame showed it). A clone of a
+/// migrated simulator boots in a reboot's time.
+fn simulator(home: &Path, sim: crate::ios::SimKind, app: &Path) -> Result<String> {
+    let started = Instant::now();
+    let source = pristine(home, GUEST, sim)?;
+    let name = run_device(sim);
+    drop_run_devices(home, &name)?;
+    let udid = simctl(home, GUEST, &["clone", &source, &name])?;
+    simctl(home, GUEST, &["boot", &udid])?;
+    simctl(home, GUEST, &["bootstatus", &udid, "-b"])?;
+    simctl(home, GUEST, &["install", &udid, app.as_str()])?;
+    println!(
+        "  booted a fresh {} in {GUEST} and installed the app ({:.1?})",
+        sim.name(),
+        started.elapsed()
+    );
+    Ok(udid)
+}
+
+/// Shut down and delete every simulator named `name` (a run's, a stopped run's).
+fn drop_run_devices(home: &Path, name: &str) -> Result<()> {
+    let devices = simctl(home, GUEST, &["list", "devices", "-j"])?;
+    for udid in named_devices(&devices, name)? {
+        let _shut = simctl(home, GUEST, &["shutdown", &udid]);
+        simctl(home, GUEST, &["delete", &udid])?;
+    }
+    Ok(())
+}
+
+/// The UDID of the first simulator named `name`, from `simctl list devices [available] -j`.
+fn named_device(json: &str, name: &str) -> Result<Option<String>> {
+    Ok(named_devices(json, name)?.into_iter().next())
+}
+
+/// The UDIDs of every simulator named `name`, from `simctl list devices [available] -j`.
+fn named_devices(json: &str, name: &str) -> Result<Vec<String>> {
+    #[derive(serde::Deserialize)]
+    struct List {
+        devices: std::collections::BTreeMap<String, Vec<Device>>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Device {
+        name: String,
+        udid: String,
+    }
+    let list: List = serde_json::from_str(json).context("simctl's device list")?;
+    Ok(list.devices.into_values().flatten().filter(|d| d.name == name).map(|d| d.udid).collect())
+}
+
+/// The newest available iOS runtime's identifier, from `simctl list runtimes -j`.
+fn newest_ios(json: &str) -> Result<Option<String>> {
+    #[derive(serde::Deserialize)]
+    struct List {
+        runtimes: Vec<Runtime>,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Runtime {
+        identifier: String,
+        version: String,
+        platform: String,
+        is_available: bool,
+    }
+    let version = |v: &str| -> Vec<u32> { v.split('.').map_while(|n| n.parse().ok()).collect() };
+    let list: List = serde_json::from_str(json).context("simctl's runtime list")?;
+    Ok(list
+        .runtimes
+        .into_iter()
+        .filter(|r| r.platform == "iOS" && r.is_available)
+        .max_by(|a, b| version(&a.version).cmp(&version(&b.version)))
+        .map(|r| r.identifier))
 }
 
 /// Copy into `tree_goldens` each file of `back` (the guest's goldens after the run) whose bytes
@@ -536,6 +794,58 @@ fn teed(mut command: Command, log: &Path) -> Result<std::process::ExitStatus> {
 #[cfg(test)]
 mod tests {
     use camino::Utf8PathBuf;
+
+    /// The base is made from the live lane's: Xcode, the runners' iOS runtime, both simulators.
+    /// Live: 25 minutes and an 8.5 GB download, past nextest's deadline for xtask (`cargo test -p
+    /// xtask --lib -- --ignored a_base_is_made`); it makes `slopty-26-xcode-test` and deletes it.
+    #[test]
+    #[ignore = "live: makes a macOS guest"]
+    fn a_base_is_made_from_the_live_lane_s() {
+        let home = super::home();
+        let base = "slopty-26-xcode-test";
+        if super::has_guest(&home, base).expect("tart") {
+            super::tart_out(&home, &["delete", base]).expect("delete the last test's");
+        }
+        super::make_base(&home, base).expect("made");
+        let ip = super::boot(&home, base).expect("boots");
+        let listed = super::tart_out(
+            &home,
+            &["exec", base, "xcrun", "simctl", "list", "devices", "available", "-j"],
+        )
+        .expect("simctl");
+        for sim in [crate::ios::SimKind::Iphone, crate::ios::SimKind::Ipad] {
+            assert!(super::named_device(&listed, sim.name()).expect("parses").is_some(), "{ip}");
+        }
+        let runtimes =
+            super::tart_out(&home, &["exec", base, "xcrun", "simctl", "runtime", "list"])
+                .expect("runtimes");
+        assert!(runtimes.contains(super::IOS_RUNTIME), "{runtimes}");
+        super::tart_out(&home, &["stop", base, "--timeout", "60"]).expect("stop");
+        super::tart_out(&home, &["delete", base]).expect("delete");
+    }
+
+    /// The guest's simulator is found by name across runtimes, and one is made on the newest
+    /// available iOS runtime, never a newer unavailable one or another platform's.
+    #[test]
+    fn the_simulator_is_found_by_name_or_made_on_the_newest_ios() {
+        let devices = r#"{"devices": {
+            "com.apple.CoreSimulator.SimRuntime.iOS-26-5": [
+                {"name": "Slopty iPad", "udid": "76FFF7A1-9F82-4F1D-8E6C-2FEDA6CCF705"},
+                {"name": "Slopty iPhone", "udid": "EAA99FB6-E2BE-4FFE-B921-2413AC6653E4"}
+            ]}}"#;
+        assert_eq!(
+            super::named_device(devices, "Slopty iPhone").expect("parses").as_deref(),
+            Some("EAA99FB6-E2BE-4FFE-B921-2413AC6653E4")
+        );
+        assert_eq!(super::named_device(devices, "Slopty Watch").expect("parses"), None);
+        let runtimes = r#"{"runtimes": [
+            {"identifier": "ios-26-2", "version": "26.2", "platform": "iOS", "isAvailable": true},
+            {"identifier": "ios-26-10", "version": "26.10", "platform": "iOS", "isAvailable": true},
+            {"identifier": "ios-27", "version": "27.0", "platform": "iOS", "isAvailable": false},
+            {"identifier": "tvos-28", "version": "28.0", "platform": "tvOS", "isAvailable": true}
+        ]}"#;
+        assert_eq!(super::newest_ios(runtimes).expect("parses").as_deref(), Some("ios-26-10"));
+    }
 
     /// Only the goldens whose bytes the run changed, or wrote anew, reach the tree; one the
     /// run left as it found it keeps whatever the tree holds (another lane's edit).

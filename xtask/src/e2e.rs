@@ -320,10 +320,13 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
             if suite.kept == Kept::Ignored { &["--run-ignored", "only"] } else { &[] };
         let output: Vec<String> = match opts.test_threads {
             None => vec!["--no-capture".to_owned()],
+            // Passing tests' output too: their MEASURE lines are what a run reports.
             Some(n) => vec![
                 "--test-threads".to_owned(),
                 n.to_string(),
                 "--failure-output".to_owned(),
+                "final".to_owned(),
+                "--success-output".to_owned(),
                 "final".to_owned(),
             ],
         };
@@ -416,6 +419,29 @@ pub fn build_app(sh: &Shell, args: &[&str]) -> Result<()> {
 pub fn app_filterset(filter: Option<&str>) -> Option<String> {
     let [first, _] = APP else { return None };
     filterset(first, filter, false)
+}
+
+/// The filterset the simulator case runs with `filter`, as [`run`] composes it.
+pub fn ios_filterset(filter: Option<&str>) -> Option<String> {
+    let [suite] = IOS else { return None };
+    filterset(suite, filter, false)
+}
+
+/// The environment the simulator case's suite runs in: the app's, but for the `VideoToolbox`
+/// refusal, which its suite does not take, and with the booted simulator `udid` the app runs in.
+pub fn ios_env(
+    data_dir: &str,
+    bin_dir: &str,
+    accept: Option<&str>,
+    udid: &str,
+) -> Vec<(String, String)> {
+    let mut env: Vec<(String, String)> = app_env(data_dir, bin_dir, accept)
+        .into_iter()
+        .filter(|(k, _)| k != NO_VIDEOTOOLBOX)
+        .collect();
+    env.push(("SLOPTY_SIM_UDID".to_owned(), udid.to_owned()));
+    env.push(("SLOPTY_SIM_BUNDLE_ID".to_owned(), crate::ios::BUNDLE_ID.to_owned()));
+    env
 }
 
 /// The environment the app's suites run in, with the data dir `data_dir` and the binaries in

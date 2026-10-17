@@ -17327,3 +17327,35 @@ own: a closed page's process lingering until WebKit reaped it, and the mount tha
 SLOPTY_E2E_GUEST=1 cargo xtask remote -p slopty-e2e --e2e app \
   -E 'test(=media::twelve_pages_in_one_chat_stay_within_budget)'
 ```
+
+## 2026-10-17 — the simulator's e2e case in the guest
+
+`--e2e ios --goldens review`, at eeb45097 unless said. Runner: `macos-26`, Xcode 26.6, iOS 26.5
+(23F77). Guest: `slopty-26-e2e` from `slopty-26-xcode` (4 cores, 6 GB, Xcode 27.0 copied from
+this Mac, iOS 26.5 23F77), the app built on this M1 Max.
+
+| | end to end | build | boot and install | tests |
+| --- | --- | --- | --- | --- |
+| runner, iPhone (run 39018464770) | 16 min 36 s | — | — | 125 s |
+| runner, iPad (run 39018464431) | 12 min 22 s | — | — | — |
+| guest, iPhone, first run of the lane dir | 28 min 31 s | 1420 s (cold iOS build, load ~70) | 129 s | 64 s |
+| guest, iPad, main moved, first iPad boot of the clone | 26 min 35 s | 637 s | 627 s | 27 s |
+| guest, iPhone, main moved (7ea1d3c1) | 6 min 38 s | 179 s | 34 s | 15 s |
+| guest, iPad, unchanged | 1 min 34 s | 15 s | 42 s | 20 s |
+| guest, iPad, unchanged, again | 1 min 28 s | 9 s | — | 20 s |
+
+Fidelity (guest against runner, eeb45097): the same failing test on the iPhone, all three
+passing on the iPad; frames against their goldens: iPhone four at 0 of 3,162,132 pixels on
+both, iPad `columns` 0.735 % / 0.733 % on both and byte-identical renders; iPad `chat` (no
+golden yet) 1,598 of 5,680,128 pixels (0.028 %) in one 308×85 region, which two guest runs at
+7ea1d3c1 differ in by 2,188 (0.039 %); accessibility text identical throughout.
+
+Memory: the VM process held 8.6–8.8 GB resident on the host during the iPad run and 10.0 GB
+after it; inside, 37–75 % of the guest's 6 GB stayed free. Making the base: the iOS runtime's
+8.52 GB downloaded in 3 min 36 s, the first iPhone boot 4 min 8 s, Xcode's 3.7 GB copied in
+2 min 42 s.
+
+```sh
+SLOPTY_LANE=DEVLOOP cargo xtask remote --head --e2e ios --sim iphone --goldens review
+SLOPTY_LANE=DEVLOOP-ripad cargo xtask remote --name DEVLOOP-ripad --head --place runner --e2e ios --sim ipad --goldens review
+```

@@ -417,7 +417,7 @@ pub fn run(sh: &Shell, opts: &RemoteOpts) -> Result<()> {
     // (`docs/decisions/tooling.md`, "An e2e case runs in a guest here").
     let in_guest = opts.attach.is_none()
         && opts.place == Place::Auto
-        && opts.e2e.as_deref() == Some("app")
+        && matches!(opts.e2e.as_deref(), Some("app" | "ios"))
         && opts.probe.is_none()
         && !opts.accept_snapshots
         && e2e_in_guest()
@@ -455,8 +455,19 @@ pub fn run(sh: &Shell, opts: &RemoteOpts) -> Result<()> {
         there.filter = None;
     }
     let remote = !there.packages.is_empty() || there.e2e.is_some() || there.probe.is_some();
-    let guest_said =
-        if in_guest { format!("; e2e app in the guest {}", guest::GUEST) } else { String::new() };
+    let case = opts.e2e.as_deref().unwrap_or("app");
+    let ios = if case == "ios" {
+        let sim = <crate::ios::SimKind as clap::ValueEnum>::from_str(&opts.sim, true)
+            .map_err(|e| anyhow::anyhow!("--sim {}: {e}", opts.sim))?;
+        Some(sim)
+    } else {
+        None
+    };
+    let guest_said = if in_guest {
+        format!("; e2e {case} in the guest {}", guest::GUEST)
+    } else {
+        String::new()
+    };
     println!(
         "▶ {} checked here (fmt, host clippy, shear, typos, the Mac's tests){guest_said}{}",
         opts.packages.join(" "),
@@ -477,6 +488,7 @@ pub fn run(sh: &Shell, opts: &RemoteOpts) -> Result<()> {
                     name: &opts.name,
                     filter: opts.filter.as_deref(),
                     goldens: opts.goldens,
+                    ios,
                 };
                 guest::e2e(&root, lane(&opts.name), &sha, &run)
             });
@@ -504,18 +516,20 @@ pub fn run(sh: &Shell, opts: &RemoteOpts) -> Result<()> {
         Err(e) => format!("FAILED: {}", e.to_string().lines().next().unwrap_or("")),
     });
     if let Some(said) = &e2e_said {
-        println!("  e2e app in the guest: {said}");
+        println!("  e2e {case} in the guest: {said}");
     }
     let e2e_passed = e2e.as_ref().is_none_or(|e| e.as_ref().is_ok_and(|o| o.passed));
     let took = started.elapsed().as_secs();
     let thermal = local.thermal.map_or_else(|| "unread".to_owned(), |t| t.to_string());
-    println!(
-        "  here: {} in {}m{:02}s; thermal pressure at most {thermal}, load at most {:.1}",
-        if local.passed { "passed" } else { "failed" },
-        local.took.as_secs() / 60,
-        local.took.as_secs() % 60,
-        local.load
-    );
+    if !opts.packages.is_empty() {
+        println!(
+            "  here: {} in {}m{:02}s; thermal pressure at most {thermal}, load at most {:.1}",
+            if local.passed { "passed" } else { "failed" },
+            local.took.as_secs() / 60,
+            local.took.as_secs() % 60,
+            local.load
+        );
+    }
     record(&root, opts, &local, runners.as_ref().map(Result::is_ok), took);
     if let Some(Ok(o)) = &e2e {
         record_e2e(&root, opts, o);
@@ -527,7 +541,7 @@ pub fn run(sh: &Shell, opts: &RemoteOpts) -> Result<()> {
     if !local.passed || runners_failed.is_some() || !e2e_passed {
         let here = if local.passed { "passed" } else { "FAILED" };
         let here = match &e2e_said {
-            Some(said) => format!("{here}; e2e app in the guest {said}"),
+            Some(said) => format!("{here}; e2e {case} in the guest {said}"),
             None => here.to_owned(),
         };
         let said = match (&runners, runners_failed) {
@@ -544,8 +558,12 @@ pub fn run(sh: &Shell, opts: &RemoteOpts) -> Result<()> {
     }
     let depth = if opts.full { "full" } else { "quick" };
     let and = if remote { " and on runners" } else { "" };
-    let crates = opts.packages.join(" ");
-    println!("✔ {depth} check {crates} passed here{and} ({}m{:02}s)", took / 60, took % 60);
+    let what = if opts.packages.is_empty() {
+        format!("e2e {case} in the guest")
+    } else {
+        format!("{depth} check {}", opts.packages.join(" "))
+    };
+    println!("✔ {what} passed here{and} ({}m{:02}s)", took / 60, took % 60);
     Ok(())
 }
 

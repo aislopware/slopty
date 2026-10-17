@@ -43,7 +43,7 @@ pub enum SimKind {
 
 impl SimKind {
     /// Simulator device name.
-    const fn name(self) -> &'static str {
+    pub const fn name(self) -> &'static str {
         match self {
             Self::Iphone => "Slopty iPhone",
             Self::Ipad => "Slopty iPad",
@@ -51,7 +51,7 @@ impl SimKind {
     }
 
     /// `simctl` device type.
-    const fn device_type(self) -> &'static str {
+    pub const fn device_type(self) -> &'static str {
         match self {
             Self::Iphone => "com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro",
             Self::Ipad => "com.apple.CoreSimulator.SimDeviceType.iPad-Pro-13-inch-M5-12GB",
@@ -173,7 +173,9 @@ pub fn preflight(sh: &Shell, simulator: bool) -> Result<()> {
 
 /// Build the static library and the app bundle; returns the `.app` path.
 fn build(sh: &Shell, sdk: Sdk, opts: &IosOpts) -> Result<Utf8PathBuf> {
-    let root = crate::tools::repo_root()?;
+    // Wherever cargo builds for `sh` (the checkout's `target`, or a lane's own dir), so a tree
+    // built elsewhere finds its libraries where cargo put them.
+    let target = crate::tools::target_dir(sh)?;
     let profile = if opts.release { "release" } else { "debug" };
     let triple = sdk.triple();
     let mut cargo_flags: Vec<&str> = Vec::new();
@@ -183,7 +185,7 @@ fn build(sh: &Shell, sdk: Sdk, opts: &IosOpts) -> Result<Utf8PathBuf> {
     if opts.e2e {
         cargo_flags.extend(["--features", "slopty-ios/e2e"]);
     }
-    let out = root.join("target").join("ios").join(sdk.dir());
+    let out = target.join("ios").join(sdk.dir());
     sh.create_dir(&out)?;
     let link_object = out.join("link.o");
     let (links, notify_links) = {
@@ -204,8 +206,8 @@ fn build(sh: &Shell, sdk: Sdk, opts: &IosOpts) -> Result<Utf8PathBuf> {
         )?;
         (links, notify_links)
     };
-    let lib = root.join("target").join(triple).join(profile).join("libslopty_ios.a");
-    let notify_lib = root.join("target").join(triple).join(profile).join("libslopty_notify.a");
+    let lib = target.join(triple).join(profile).join("libslopty_ios.a");
+    let notify_lib = target.join(triple).join(profile).join("libslopty_notify.a");
     for built in [&lib, &notify_lib] {
         if !built.exists() {
             bail!("static library missing: {built}");
@@ -486,6 +488,11 @@ settings:
 /// # Errors
 ///
 /// When the build, the boot or the install fails.
+/// The e2e build of the app for the simulator, in `sh`'s directory and target dir; its `.app`.
+pub fn build_for_simulator(sh: &Shell, sim: SimKind, log: &str) -> Result<Utf8PathBuf> {
+    build(sh, Sdk::Simulator, &IosOpts::for_e2e(sim, log))
+}
+
 pub fn install_on_simulator(sh: &Shell, opts: &IosOpts) -> Result<String> {
     let app = build(sh, Sdk::Simulator, opts)?;
     let udid = boot_and_install(sh, &app, opts.sim)?;

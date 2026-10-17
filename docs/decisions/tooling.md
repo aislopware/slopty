@@ -2219,7 +2219,8 @@ more full-window layer.
     `target/e2e/artifacts/`, accepted goldens into the tree (only those the run wrote, never
     another lane's edits there), and the log where `-E failed` reads it. A failure here first
     (fmt, clippy, a test) skips it, as it cancels a runner's half. `--place runner` keeps the
-    case on a runner; `ios` and probes stay there.
+    case on a runner; probes stay there (`ios` came after: "The simulator case runs in the
+    guest too").
   - **The guest runs the runners' macOS** (26.6.2, 25G83) on the same paravirtual GPU, so its
     frames are a runner's. At HEAD 73366704, review mode, the guest and a runner (run
     39007880769) failed the same 4 of 22 tests, and of the 26 frames the log measures against
@@ -2229,7 +2230,7 @@ more full-window layer.
     run, 0.01 % and 0.4 %) show what the machine's own network answered. So a golden accepted
     in the guest is one a runner accepts. Measured, it is the default; `SLOPTY_E2E_GUEST=0`
     or `--place runner` sends a case to a runner, which stays the fallback (no base guest, a
-    host that is not a Mac) and keeps `ios`.
+    host that is not a Mac).
   - **Measured** at HEAD 73366704, the app's whole suite of 22 tests: in the guest 1 min 50 s
     end to end, the tests 97 s at three at a time (a runner: 23 min 40 s end to end, run
     39007880769, the tests 272 s one at a time); two filtered tests 1 min 47 s end to end with
@@ -2315,3 +2316,56 @@ more full-window layer.
   are no longer what checks wait for. Not built: an undeclared read anywhere turns the gate
   red until declared, and GPUI, VideoToolbox and `xcrun` under a sandbox profile on a hosted
   runner are unproven, for about a minute on a quarter of the pushes.
+- ✅ **The simulator case runs in the guest too** (2026-10-17). The iPhone and iPad cases
+  (`--e2e ios`) still took a runner Mac for 12–17 minutes each, almost all of it building
+  the daemons, the iOS app and its static library on three cores.
+  - **The guest has the runners' iOS runtime.** The runners run iOS 26.5 (23F77), the newest of
+    their image's runtimes, under Xcode 26.6 (run 39017057929). The e2e guest is now cloned
+    from `slopty-26-xcode`, which `remote` makes once from the live lane's base (`make_base`,
+    about 25 minutes): a 90 GB disk, this Mac's Xcode copied in (Xcode 27 needs macOS 26.6,
+    which the guest runs), that runtime by its build number through `xcodebuild
+    -downloadPlatform`, which needs no account, both simulators created and booted once (a
+    simulator's first boot takes 4–10 minutes), Spotlight indexing and the crash dialog off.
+    The guest has 6 GB.
+  - **The app is built here**, with this Mac's Xcode, into the lane's e2e target dir
+    (`ios::build_for_simulator`, which now finds the static libraries wherever cargo's target
+    dir is), copied into the guest beside the daemons and the `ios` test archive, and
+    installed in a simulator booted through `tart exec`, in the session the tests' `simctl
+    launch` reaches. Its tests take turns, as on a runner: the harness relaunches the one app
+    per test in the one simulator, so three at a time would take three simulators (about 3 GB
+    each) and a harness that hands each test its own; this Mac's memory has no room for that,
+    and the tests take 15–20 s of a run.
+  - **Each run gets a fresh simulator, as a runner does.** A runner makes its simulator new in
+    every job; the guest's simulators were kept from run to run, and kept the app's
+    notification grant, so every iOS frame showed "The server can't send notifications to this
+    device…" where a runner's asks. Now each run clones the base's pristine simulator for its
+    device (booted once when the base was made, never by a run: no app, no grant, the keyboard,
+    appearance and pasteboard as made), boots the clone in a reboot's time, and deletes it after
+    the run. The guest's time zone (UTC) and locale (en_US) are a runner's.
+  - **Passing tests' output comes back** (`--success-output final` beside `--test-threads`, in
+    the guest and on a runner): their MEASURE lines were dropped with the rest of a passing
+    test's output.
+  - **Fidelity, at eeb45097, review mode, against runs 39018464770 (iPhone) and 39018464431
+    (iPad).** The same tests pass and fail: on the iPhone the same one of three fails both ways
+    (`a_phones_chat_holds_the_dock_and_a_subagents_card`, which stops at a different step
+    from run to run), on the iPad all three pass. Every frame the log measures against its
+    golden measures the same: the iPhone's four at 0 pixels on both, the iPad's two
+    `columns` frames at 0.735 % and 0.733 % on both, their renders byte-identical guest to
+    runner. The iPad's two `chat` frames, which have no golden yet, differ from the runner's
+    by 0.028 % in one 308×85 region that two guest runs of one commit differ in too (0.039 %):
+    a running time. Every frame's accessibility text is identical. So `--e2e ios` runs in the
+    guest by default; `--place runner` or `SLOPTY_E2E_GUEST=0` keeps it on a runner, the
+    fallback.
+  - **Measured**: on a runner 16 min 36 s (iPhone) and 12 min 22 s (iPad) end to end. In the
+    guest, a lane's first run builds the iOS app cold (23 minutes at this Mac's load of 70,
+    once per lane dir); then an iPad run of an unchanged tree takes 1 min 34 s (15 s of build,
+    42 s to boot the simulator and install the app, 20 s of tests), and an iPhone run after
+    main moved 6 min 38 s (179 s of build, 34 s of boot and install, 15 s of tests).
+  - The idle guest's `WindowServer` at 44–104 % of a core (measured on the 4 GB guest after many
+    runs) did not come back on the new one: 0.1–0.4 % of a core idle after 48 minutes and five
+    runs, the VM process at 0.2–3 % on the host. Its display stays 1024×768: the app case's
+    window sizes are drawn against it, and a smaller one would move the frames. Up, the guest
+    holds 9–10 GB of this Mac's memory after a simulator run; it stops after 20 idle minutes.
+  - Tests: `remote::guest::tests::{the_simulator_is_found_by_name_or_made_on_the_newest_ios,
+    a_base_is_made_from_the_live_lane_s}` (`xtask`; the second live, ignored), and the runs
+    above.
