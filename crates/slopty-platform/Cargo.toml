@@ -44,8 +44,11 @@ dispatch2.workspace = true
 parking_lot.workspace = true
 # A thread's QoS class (`user_interactive_thread`): pthread/qos.h, which rustix does not wrap.
 libc.workspace = true
-# A page's snapshot (`web::page`) and a PDF's pages (`pdf`), drawn into bitmaps of our own.
+# A page's snapshot (`web::page`) and a PDF's pages (`pdf`), drawn into bitmaps of our own;
+# `objc2` encodes its types for the messages that hand them over, which no other crate turns on
+# in an iOS extension's build.
 objc2-core-graphics = { workspace = true, features = [
+    "objc2",
     "CGBitmapContext",
     "CGColorSpace",
     "CGContext",
