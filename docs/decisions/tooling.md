@@ -2241,6 +2241,10 @@ more full-window layer.
     250 s in the guest, with the same tests failing each way. The check's e2e step, the
     scheduled `e2e.yml` and the guest run so; `SLOPTY_E2E_THREADS=1` in the guest, or no
     `--test-threads` locally, shows every line as it comes.
+  - **It stops when idle.** Up, the guest holds about 5 GB of this Mac's memory, whose swap the
+    lanes' builds already fill. Each run marks it used and leaves a detached watcher that stops
+    it 20 minutes after the last use, unless a run holds its lock then; the next run boots it
+    again (23 s on an idle Mac).
   - The run job of `check.yml` installs only what an e2e case builds (the Mac's target, no
     clippy, no nightly, the tests lane's tools) unless it runs a probe, and prints sccache's
     statistics.

@@ -52,6 +52,35 @@ fn threads() -> usize {
     std::env::var("SLOPTY_E2E_THREADS").ok().and_then(|v| v.parse().ok()).unwrap_or(3).max(1)
 }
 
+/// How long the guest stays up with no run, after which it is stopped: it holds 5 GB of this
+/// Mac's memory while up, whose swap the lanes' builds already fill, and boots again in 23 s on an
+/// idle Mac.
+const IDLE_STOP_S: u64 = 20 * 60;
+
+/// Mark the guest used now, and leave a detached watcher that stops it once it has been idle for
+/// [`IDLE_STOP_S`]: unused since, and no run holding its lock.
+fn stop_when_idle(home: &Path) {
+    use std::os::unix::process::CommandExt as _;
+    let stamp = home.join("locks").join(format!("{GUEST}.used"));
+    let lock = home.join("locks").join(format!("{GUEST}.lock"));
+    if std::fs::write(&stamp, b"").is_err() {
+        return;
+    }
+    let tart_home = home.join("tart");
+    let script = format!(
+        "sleep {IDLE_STOP_S}; now=$(date +%s); used=$(stat -f %m '{stamp}'); \
+         [ $((now - used)) -ge {IDLE_STOP_S} ] || exit 0; \
+         /usr/bin/lockf -t 0 '{lock}' /usr/bin/env TART_HOME='{tart_home}' tart stop {GUEST} --timeout 30"
+    );
+    let _watcher = Command::new("/bin/sh")
+        .args(["-c", &script])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn();
+}
+
 /// What one e2e run here asks.
 pub struct Run<'a> {
     /// The check's name, for where its log goes.
@@ -287,6 +316,7 @@ pub fn e2e(root: &Path, lane: &str, sha: &str, run: &Run<'_>) -> Result<Outcome>
 
     let home = home();
     let _held = lock(&home, lane)?;
+    stop_when_idle(&home);
     let copying = Instant::now();
     let ip = up(&home)?;
     // Whatever a stopped run left: its processes and the stack roots its failures kept.
@@ -371,6 +401,7 @@ pub fn e2e(root: &Path, lane: &str, sha: &str, run: &Run<'_>) -> Result<Outcome>
     println!("▶ e2e app in {GUEST}{}", run.filter.map(|f| format!(" -E {f}")).unwrap_or_default());
     let status = teed(command, &log)?;
     let tests = copying.elapsed();
+    stop_when_idle(&home);
 
     // Renders and diffs of changed frames, as a runner's come back.
     let renders = root.join("target/e2e/artifacts");
