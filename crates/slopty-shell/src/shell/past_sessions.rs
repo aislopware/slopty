@@ -786,11 +786,7 @@ impl Shell {
         self.past_sessions.opening = None;
         match self.past_sessions.picker.as_mut() {
             Some(picker) => picker.refused = Some((key.to_owned(), why.to_owned())),
-            None => self.show_notice(
-                crate::toast::ToastKind::Error,
-                format!("Couldn\u{2019}t open the Claude Code session. Try again. ({why})"),
-                cx,
-            ),
+            None => self.show_error_detail("Couldn\u{2019}t open the Claude Code session. Try again.", why.to_owned(), cx),
         }
         cx.notify();
     }

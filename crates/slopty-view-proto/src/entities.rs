@@ -23,7 +23,7 @@ pub fn validate_sidebar_pin_update(
         return Err("Sidebar pins must be non-empty and unique");
     }
     if next.len() > MAX_SIDEBAR_PINS && next.iter().any(|id| !current.contains(id)) {
-        return Err("You can pin up to 200 sessions");
+        return Err("You can pin up to 200 chats");
     }
     Ok(())
 }

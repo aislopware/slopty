@@ -75,6 +75,8 @@ pub struct DevicesPage {
     action_task: Option<Task<()>>,
     // slopty: the server's code is up ("Connect a phone").
     inviting: bool,
+    // slopty: the code's dialog holds the keyboard while it shows.
+    invite_focus: crate::surface_chrome::ModalFocus,
     _observe: Subscription,
 }
 
@@ -95,6 +97,7 @@ impl DevicesPage {
             error: None,
             action_task: None,
             inviting: false,
+            invite_focus: crate::surface_chrome::ModalFocus::new(cx),
             _observe: observe,
         }
     }
@@ -266,11 +269,14 @@ impl Render for DevicesPage {
         let server = self.state.read(cx).connectivity.server.clone();
         // slopty: the server's code, while it is up and the app still offers one.
         let invite = server.as_ref().and_then(|server| server.invite.clone());
+        self.invite_focus.sync(invite.is_some() && self.inviting, window, cx);
+        let invite_focus = self.invite_focus.handle().clone();
         let invite_dialog = invite.as_ref().filter(|_| self.inviting).map(|invite| {
             let link = invite.link.clone();
             let card = popover::dialog_card(&theme)
                 .w(px(360.0))
                 .id("invite-card")
+                .track_focus(&invite_focus)
                 .role(gpui::Role::Dialog)
                 .aria_label("Connect a phone or iPad")
                 .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
@@ -603,6 +609,68 @@ mod tests {
         cx.executor().advance_clock(crate::motion::COPIED_FOR);
         cx.run_until_parked();
         assert!(!cx.update(|cx| crate::motion::copied(&copied_key("studio"), cx)));
+    }
+
+    /// The server's code opens as a dialog that holds the keyboard, where Escape closes it, and
+    /// closing gives the keyboard back to what had it.
+    #[gpui::test]
+    fn the_invite_dialog_takes_the_keyboard_and_gives_it_back(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+        struct Host {
+            page: Entity<DevicesPage>,
+            before: gpui::FocusHandle,
+        }
+        impl Render for Host {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().track_focus(&self.before).child(self.page.clone())
+            }
+        }
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(crate::theme::Theme::default());
+        });
+        let (host, cx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| {
+                let mut state = AppState::new();
+                state.connectivity.server = Some(slopty_view_proto::ServerPresence {
+                    name: "studio".into(),
+                    online: true,
+                    invite: Some(slopty_view_proto::ServerInvite {
+                        link: Some("slopty://connect?server=studio:7400".into()),
+                        address: Some("studio:7400".into()),
+                        note: "Scan it with the phone".into(),
+                    }),
+                    ..Default::default()
+                });
+                state
+            });
+            Host { page: cx.new(|cx| DevicesPage::new(state, cx)), before: cx.focus_handle() }
+        });
+        let (page, before) = host.read_with(cx, |host, _| (host.page.clone(), host.before.clone()));
+        cx.update(|window, cx| {
+            window.set_a11y_active(true);
+            window.focus(&before, cx);
+        });
+        cx.run_until_parked();
+        page.update(cx, |page, cx| page.open_invite(cx));
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear(cx);
+        });
+        let (found, focused) = cx.update(|window, _| {
+            let update = window.a11y_tree().expect("a tree");
+            let dialog = update.nodes.iter().find(|(_, node)| {
+                node.role() == gpui::Role::Dialog && node.label() == Some("Connect a phone or iPad")
+            });
+            (dialog.is_some(), dialog.is_some_and(|(id, _)| *id == update.focus))
+        });
+        assert!(found, "the dialog has its node");
+        assert!(focused, "the dialog holds the keyboard");
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(!page.read_with(cx, |page, _| page.inviting), "Escape closes it");
+        cx.update(|window, _| assert!(before.is_focused(window), "the keyboard back where it was"));
     }
 
     #[test]

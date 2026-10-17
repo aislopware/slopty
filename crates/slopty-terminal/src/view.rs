@@ -304,6 +304,9 @@ struct Search {
     _subscription: gpui::Subscription,
 }
 
+/// The frames after ⌘F over which a keyboard gone astray comes back to the find field.
+const FIND_KEYBOARD_FRAMES: u8 = 4;
+
 /// A drag selection between two cells, in absolute line indices so it survives scrolling.
 /// Both ends are inclusive.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -862,8 +865,37 @@ impl TerminalView {
             let focus = search.input.focus_handle(cx);
             window.focus(&focus, cx);
             search.input.update(cx, ComposerInput::select_all_text);
+            // In the app something hands the keyboard on, in the same turn, to a handle no
+            // frame draws (e2e: an empty context path); the field takes it back once drawn.
+            Self::keep_find_keyboard(cx.entity().downgrade(), focus, FIND_KEYBOARD_FRAMES, window);
         }
         cx.notify();
+    }
+
+    /// For the next `frames` frames, while the find bar of `view` is open on `field`: a keyboard
+    /// that went where nothing drawn holds it (no handle, or one no frame drew) comes back to the
+    /// field, so what is typed next lands there.
+    fn keep_find_keyboard(
+        view: gpui::WeakEntity<Self>,
+        field: FocusHandle,
+        frames: u8,
+        window: &Window,
+    ) {
+        window.on_next_frame(move |window, cx| {
+            let open = view.upgrade().is_some_and(|view| {
+                view.read(cx).search.as_ref().is_some_and(|s| s.input.focus_handle(cx) == field)
+            });
+            if !open {
+                return;
+            }
+            let stray = window.focused(cx).is_none() || window.context_stack().is_empty();
+            if !field.is_focused(window) && stray {
+                window.focus(&field, cx);
+            }
+            if frames > 1 {
+                Self::keep_find_keyboard(view, field, frames.saturating_sub(1), window);
+            }
+        });
     }
 
     /// ⌘G / Enter.
@@ -7743,22 +7775,40 @@ mod tests {
         assert_eq!(text.as_deref(), Some(""), "no newline in the field");
     }
 
-    /// ⌘F gives the find field the keyboard: keys typed next land in it, never in the program,
-    /// and the field says its words on its accessibility node.
+    /// ⌘F gives the find field the keyboard, and takes it back from a handle nothing draws:
+    /// keys typed next land in it, never in the program, and the field says its words on its
+    /// accessibility node.
     #[gpui::test]
     fn keys_typed_after_cmd_f_land_in_the_find_field(cx: &mut TestAppContext) {
         let (view, mut rx, cx) = terminal(cx);
+        // As the app runs: a screen reader's tree on, frames drawn again from the last one.
+        cx.update(|window, _cx| window.set_a11y_active(true));
         cx.run_until_parked();
         drain_input(&mut rx);
         cx.simulate_keystrokes("cmd-f");
+        // As in the app: in the same turn the keyboard goes to a handle no frame draws.
+        let _stray = cx.update(|window, cx| {
+            let stray = cx.focus_handle();
+            window.focus(&stray, cx);
+            stray
+        });
         cx.run_until_parked();
+        // The card's entrance done and frames drawn and delivered after it, as when the person
+        // reads it (tests have no platform frame loop).
+        for _ in 0..4 {
+            cx.executor().advance_clock(Duration::from_millis(250));
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.draw(cx).clear(cx);
+                window.simulate_next_frame(cx);
+            });
+        }
         cx.simulate_keystrokes("2 9");
         cx.run_until_parked();
         let text = view
             .read_with(cx, |v, cx| v.search.as_ref().map(|s| s.input.read(cx).text().to_owned()));
         assert_eq!(text.as_deref(), Some("29"), "the field has what was typed");
         assert!(drain_input(&mut rx).is_empty(), "nothing typed reached the program");
-        cx.update(|window, _cx| window.set_a11y_active(true));
         cx.run_until_parked();
         let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
         let field = tree

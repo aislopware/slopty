@@ -1878,6 +1878,9 @@ pub struct Shell {
     chat_rename: Option<ChatRename>,
     /// Chat id awaiting delete confirmation.
     delete_confirm: Option<String>,
+    // slopty: the keyboard of the delete-chat and remove-project dialogs.
+    delete_focus: crate::surface_chrome::ModalFocus,
+    delete_space_focus: crate::surface_chrome::ModalFocus,
     /// Global confirmation/error dialog for the Changes-pane trash action. The
     /// RPC task is retained separately so rerenders do not cancel it.
     // slopty: no Discard changes (ruled out).
@@ -2341,6 +2344,8 @@ impl Shell {
             chat_copy_left: false,
             chat_rename: None,
             delete_confirm: None,
+            delete_focus: crate::surface_chrome::ModalFocus::new(cx),
+            delete_space_focus: crate::surface_chrome::ModalFocus::new(cx),
             // slopty: no Discard changes (ruled out).
             space_menu: popover::Popup::default(),
             rename_space_dialog: None,
@@ -4412,6 +4417,18 @@ impl Shell {
         let message = message.into();
         self.sidebar_notice = Some(message.clone());
         crate::toast::show(cx, kind, message);
+    }
+
+    // slopty: the words for the sidebar's notice and the toast; the raw reason behind Copy error.
+    pub(super) fn show_error_detail(
+        &mut self,
+        message: impl Into<SharedString>,
+        detail: impl Into<SharedString>,
+        cx: &mut App,
+    ) {
+        let message = message.into();
+        self.sidebar_notice = Some(message.clone());
+        crate::toast::error_with_detail(cx, message, detail);
     }
 
     fn set_chat_copy_open(&mut self, open: bool, cx: &mut Context<Self>) {
@@ -8904,6 +8921,7 @@ impl Shell {
             overlays.push(overlay);
         }
 
+        self.delete_focus.sync(self.delete_confirm.is_some(), window, cx);
         if let Some(chat_id) = self.delete_confirm.clone() {
             let title = transcript::single_line(
                 &self
@@ -8915,7 +8933,19 @@ impl Shell {
                     .and_then(|c| c.title.clone())
                     .unwrap_or_else(|| "New chat".into()),
             );
-            let card = popover::dialog_card(&theme)
+            let shell = cx.weak_entity();
+            let card = crate::surface_chrome::modal_card(
+                popover::dialog_card(&theme),
+                "delete-chat-card",
+                self.delete_focus.handle(),
+                "Delete chat?",
+                move |_, cx| {
+                    let _gone = shell.update(cx, |this, cx| {
+                        this.delete_confirm = None;
+                        cx.notify();
+                    });
+                },
+            )
                 .child(popover::dialog_title(&theme, "Delete chat?"))
                 .child(div().mt(px(6.0)).child(popover::dialog_body(
                     &theme,

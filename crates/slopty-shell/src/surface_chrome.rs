@@ -327,6 +327,69 @@ pub(crate) fn tab_chip(
         })
 }
 
+// slopty: a modal takes the keyboard as it opens and gives it back as it closes, so Escape and
+// Tab are the dialog's and the page behind it never holds the keyboard under it.
+/// The keyboard of one modal dialog: its card tracks [`Self::handle`], and its owner calls
+/// [`Self::sync`] each render with whether the dialog shows.
+pub(crate) struct ModalFocus {
+    focus: gpui::FocusHandle,
+    /// What had the keyboard when the dialog took it; `Some` while the dialog holds it.
+    restore: Option<Option<gpui::FocusHandle>>,
+}
+
+impl ModalFocus {
+    pub(crate) fn new(cx: &mut gpui::App) -> Self {
+        Self { focus: cx.focus_handle(), restore: None }
+    }
+
+    /// The handle the dialog's card tracks.
+    pub(crate) fn handle(&self) -> &gpui::FocusHandle {
+        &self.focus
+    }
+
+    /// The dialog shows (`shown`) or not, this render: as it opens it takes the keyboard, as
+    /// it closes it gives the keyboard back to what had it (or to nothing, when that is gone).
+    pub(crate) fn sync(&mut self, shown: bool, window: &mut gpui::Window, cx: &mut gpui::App) {
+        match (shown, self.restore.is_some()) {
+            (true, false) => {
+                self.restore = Some(window.focused(cx));
+                window.focus(&self.focus, cx);
+            }
+            (false, true) => {
+                if self.focus.contains_focused(window, cx) || window.focused(cx).is_none() {
+                    match self.restore.take().flatten() {
+                        Some(restore) => window.focus(&restore, cx),
+                        None => window.blur(cx),
+                    }
+                }
+                self.restore = None;
+            }
+            _ => {}
+        }
+    }
+}
+
+/// A modal's card as a screen reader and the keyboard take it: a Dialog named `title` that
+/// tracks `focus` (its [`ModalFocus`]); Escape inside it runs `close`.
+pub(crate) fn modal_card(
+    card: Div,
+    id: &'static str,
+    focus: &gpui::FocusHandle,
+    title: &'static str,
+    close: impl Fn(&mut gpui::Window, &mut gpui::App) + 'static,
+) -> gpui::Stateful<Div> {
+    card.id(id)
+        .track_focus(focus)
+        .role(gpui::Role::Dialog)
+        .aria_label(title)
+        .on_key_down(move |event: &gpui::KeyDownEvent, window, cx| {
+            if event.keystroke.key == "escape" {
+                close(window, cx);
+                cx.stop_propagation();
+            }
+        })
+}
+
 // slopty: a small control takes presses past what it draws (M25).
 /// The least a pointer's press target measures, either way.
 pub(crate) const POINTER_TARGET: f32 = 24.0;

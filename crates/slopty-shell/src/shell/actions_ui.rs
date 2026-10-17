@@ -28,7 +28,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         if let Some(error) = setup_error {
-            self.show_notice(crate::toast::ToastKind::Error, format!("Couldn\u{2019}t run the setup action. Check its command, then run it again. ({error})"), cx);
+            self.show_error_detail("Couldn\u{2019}t run the setup action. Check its command, then run it again.", error, cx);
         }
         let Some(run) = setup_action else {
             cx.notify();

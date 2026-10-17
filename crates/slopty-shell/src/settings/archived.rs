@@ -36,6 +36,8 @@ pub struct ArchivedPage {
     /// Archived ids captured when Delete all was clicked. The dialog deletes
     /// exactly these, never a chat archived while it was open.
     delete_all_confirm: Option<Vec<String>>,
+    /// Keyboard of the Delete all dialog, given back to what had it on close.
+    delete_all_focus: crate::surface_chrome::ModalFocus,
     /// In-flight Delete all; held so repeat clicks can't start a second run.
     delete_all_task: Option<Task<()>>,
     page: usize,
@@ -52,6 +54,7 @@ impl ArchivedPage {
             error: None,
             busy: None,
             delete_all_confirm: None,
+            delete_all_focus: crate::surface_chrome::ModalFocus::new(cx),
             delete_all_task: None,
             page: 0,
             task: None,
@@ -167,11 +170,24 @@ impl ArchivedPage {
         let count = self.delete_all_confirm.as_ref()?.len();
         let theme = Theme::of(cx).for_popup();
         // Same card as the sidebar's single "Delete chat?" confirmation.
-        let card = popover::dialog_card(&theme)
-            .child(popover::dialog_title(
-                &theme,
-                "Delete all archived chats?",
-            ))
+        let page = cx.weak_entity();
+        let card = crate::surface_chrome::modal_card(
+            popover::dialog_card(&theme),
+            "delete-archived-card",
+            self.delete_all_focus.handle(),
+            "Delete all archived chats?",
+            move |_, cx| {
+                page.update(cx, |this, cx| {
+                    this.delete_all_confirm = None;
+                    cx.notify();
+                })
+                .ok();
+            },
+        )
+        .child(popover::dialog_title(
+            &theme,
+            "Delete all archived chats?",
+        ))
             .child(
                 div()
                     .mt(px(6.0))
@@ -222,6 +238,8 @@ impl popover::ScrollRailHost for ArchivedPage {
 impl Render for ArchivedPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::toast::take_error(&mut self.error, cx);
+        self.delete_all_focus
+            .sync(self.delete_all_confirm.is_some(), window, cx);
         let dialog = self.render_delete_all_dialog(window.viewport_size(), cx);
         let theme = Theme::of(cx).for_settings_surface();
         let now = chrono::Utc::now();

@@ -105,6 +105,8 @@ struct Toast {
     id: u64,
     kind: ToastKind,
     message: SharedString,
+    // slopty: what went wrong in the words of what failed, behind Copy error, never shown (M31).
+    detail: Option<SharedString>,
     // slopty: its button, if any.
     action: Option<Action>,
     // slopty: something still under way: `Some(None)` spins, `Some(Some(f))` fills a ring to f.
@@ -205,6 +207,7 @@ fn push_for(
             id,
             kind,
             message,
+            detail: None,
             action,
             progress: None,
             created: now,
@@ -231,6 +234,20 @@ pub fn show(cx: &mut App, kind: ToastKind, message: impl Into<SharedString>) {
 /// A failure toast.
 pub fn error(cx: &mut App, message: impl Into<SharedString>) {
     push(cx, ToastKind::Error, message.into());
+}
+
+// slopty: the words say what failed and what to do next; the raw reason rides behind Copy error.
+/// A failure toast whose Copy error also copies `detail`, what failed said in its own words.
+pub fn error_with_detail(
+    cx: &mut App,
+    message: impl Into<SharedString>,
+    detail: impl Into<SharedString>,
+) {
+    let Some(id) = push_for(cx, ToastKind::Error, message.into(), None, DURATION) else { return };
+    let detail: SharedString = detail.into().trim().to_owned().into();
+    if let Some(toast) = cx.global_mut::<ToastStore>().toasts.iter_mut().find(|toast| toast.id == id) {
+        toast.detail = (!detail.is_empty()).then_some(detail);
+    }
 }
 
 /// A confirmation toast ("Link copied").
@@ -369,6 +386,22 @@ pub fn messages(cx: &App) -> Vec<SharedString> {
 }
 
 // slopty: the app's tests read each toast's kind too.
+// slopty: the raw reasons behind Copy error, for the tests of what pushes them.
+/// The live toasts' details, oldest first.
+#[cfg(test)]
+pub(crate) fn details(cx: &App) -> Vec<Option<SharedString>> {
+    cx.try_global::<ToastStore>()
+        .map(|store| {
+            store
+                .toasts
+                .iter()
+                .filter(|toast| toast.closing.is_none())
+                .map(|toast| toast.detail.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// The live toasts' kinds and messages, oldest first.
 pub fn shown(cx: &App) -> Vec<(ToastKind, SharedString)> {
     cx.try_global::<ToastStore>()
@@ -393,7 +426,11 @@ fn copy_error(id: u64, cx: &mut App) {
     else {
         return;
     };
-    let words = toast.message.to_string();
+    // slopty: the words, then what failed said in its own.
+    let words = match &toast.detail {
+        Some(detail) => format!("{}\n{detail}", toast.message),
+        None => toast.message.to_string(),
+    };
     cx.write_to_clipboard(gpui::ClipboardItem::new_string(words));
     // slopty: the house's copy span: the check for a while, then the copy glyph again.
     crate::motion::copy_feedback(copy_key(id), cx);
@@ -951,6 +988,7 @@ mod tests {
             id: store.next_id,
             kind: ToastKind::Error,
             message: message.to_owned().into(),
+            detail: None,
             action: None,
             progress: None,
             created: now,
@@ -1016,6 +1054,25 @@ mod tests {
         let id = cx.update(|_, cx| cx.global::<ToastStore>().toasts[1].id);
         cx.update(|_, cx| dismiss(id, cx));
         cx.update(|_, cx| assert_eq!(messages(cx), ["Couldn't save"]));
+    }
+
+    // slopty: an error's raw reason is never shown, and Copy error copies it after the words.
+    #[gpui::test]
+    fn copy_error_copies_the_detail_behind_the_words(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::dark()));
+        let (_, cx) = cx.add_window_view(|_, _| Host);
+        cx.update(|_, cx| {
+            error_with_detail(cx, "Couldn't open Zed. Check that it is installed.", "No such file (os error 2)");
+        });
+        cx.run_until_parked();
+        cx.update(|_, cx| assert_eq!(messages(cx), ["Couldn't open Zed. Check that it is installed."]));
+        let id = cx.update(|_, cx| cx.global::<ToastStore>().toasts[0].id);
+        cx.update(|_, cx| copy_error(id, cx));
+        let copied = cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()));
+        assert_eq!(
+            copied.as_deref(),
+            Some("Couldn't open Zed. Check that it is installed.\nNo such file (os error 2)")
+        );
     }
 
     // slopty: an offer's button runs once and takes it down; withdrawn, it goes untaken; it

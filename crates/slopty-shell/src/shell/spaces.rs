@@ -811,7 +811,7 @@ mod pinned_session_tests {
                     assert_eq!(shell.active_sidebar_pins(cx), saved);
                     assert_eq!(
                         shell.sidebar_notice.as_deref(),
-                        Some("You can pin up to 200 sessions")
+                        Some("You can pin up to 200 chats")
                     );
                     assert!(shell.sidebar_session_return.is_some());
                 }
@@ -6800,7 +6800,11 @@ impl Shell {
                         }
                     }
                     Err(error) => {
-                        crate::toast::error(cx, format!("Couldn\u{2019}t clone {name}. Check the address and your access, then try again. ({error})"));
+                        crate::toast::error_with_detail(
+                            cx,
+                            format!("Couldn\u{2019}t clone {name}. Check the address and your access, then try again."),
+                            error.to_string(),
+                        );
                     }
                 }
             })
@@ -7731,6 +7735,7 @@ impl Shell {
     ) -> Vec<AnyElement> {
         let theme = Theme::of(cx).for_popup();
         let mut overlays: Vec<AnyElement> = Vec::new();
+        self.delete_space_focus.sync(self.delete_space_confirm.is_some(), window, cx);
 
         if let Some((space_id, position)) = self.space_menu.get().cloned() {
             let closing = self.space_menu.closing_since();
@@ -7848,7 +7853,19 @@ impl Shell {
                     "Removing “{name}” permanently deletes its {count} chats on {device}. This can’t be undone."
                 )
             };
-            let card = popover::dialog_card(&theme)
+            let shell = cx.weak_entity();
+            let card = crate::surface_chrome::modal_card(
+                popover::dialog_card(&theme),
+                "delete-space-card",
+                self.delete_space_focus.handle(),
+                "Remove project?",
+                move |_, cx| {
+                    let _gone = shell.update(cx, |this, cx| {
+                        this.delete_space_confirm = None;
+                        cx.notify();
+                    });
+                },
+            )
                 .child(popover::dialog_title(&theme, "Remove project?"))
                 .child(div().mt(px(6.0)).child(popover::dialog_body(&theme, copy)))
                 .child(
@@ -8769,7 +8786,8 @@ mod home_folder_search_tests {
                 let said = crate::toast::messages(cx);
                 assert_eq!(said.len(), 1);
                 assert!(said[0].starts_with("Couldn\u{2019}t clone origin."), "{said:?}");
-                assert!(said[0].contains("fatal: repository not found"), "why, for Copy error: {said:?}");
+                let why = crate::toast::details(cx);
+                assert_eq!(why[0].as_deref(), Some("fatal: repository not found"), "why, behind Copy error");
             })
             .unwrap();
     }
