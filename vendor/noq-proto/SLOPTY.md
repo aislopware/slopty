@@ -1,4 +1,4 @@
-# noq-proto, vendored with twenty-two patches
+# noq-proto, vendored with thirty-two patches
 
 The published `noq-proto` 1.3.0 (crates.io, upstream tag `noq-proto-v1.3.0`, commit
 `c1f411562` of <https://github.com/n0-computer/noq>) with these commits on top:
@@ -241,6 +241,82 @@ The published `noq-proto` 1.3.0 (crates.io, upstream tag `noq-proto-v1.3.0`, com
    comparison never matched and a client that failed early sent no CONNECTION_CLOSE: the
    other side waited out its idle timeout. It now compares with `is_probably_same_path`.
 
+Patches 23 to 32 are noq `main`'s ports of quinn fixes (n0-computer/noq#823, through `58869bfb`,
+2026-10-17), cherry-picked onto this tree. The datagram ones touch Slopty's media path; the rest
+are correctness and denial-of-service bounds a peer could reach.
+
+23. `fix(proto): congestion: saturate CUBIC window increment to avoid overflow` (`d7f3a883`)
+
+   `SLOPTY_CC=cubic` is the one way Slopty runs CUBIC; an overflowing increment there wrapped.
+
+24. `fix(proto): pass CID length/lifetime to Connection::new directly` (`9fc7f708`) and
+    `refactor(proto): route locally-created CIDs via RouteDatagramTo` (`fdd40871`)
+
+   No behaviour; patch 25 is written on them.
+
+25. `fix(proto): Check limits when processing already retired CIDs` (`78a4b2ee`)
+
+   A NEW_CONNECTION_ID for a sequence already retired queued its retirement past
+   `MAX_PENDING_RETIRED_CIDS`, so a peer could grow the queue without bound. Both paths now go
+   through one bounded `Retransmits::retire_cids`.
+
+26. `refactor(proto): Factor out DatagramBuffer for queues in either direction` (`1c51be56`)
+
+   Patch 16's rule (a datagram exactly at the new limit stays) is kept in the factored
+   `drop_oversized`; its test reads the buffer's own count.
+
+27. `fix(proto): Limit total memory used to buffer incoming datagrams` (`2ea64e13`) and
+    `fix(proto): Limit total memory used to buffer outgoing datagrams` (`09dd4ee6`)
+
+   Both buffers count each queued datagram's bookkeeping beside its payload, so a flood of tiny
+   datagrams cannot hold many times the configured bytes. At Slopty's 4 MiB
+   (`slopty_net::endpoint::DATAGRAM_BUFFER`) and 1.2 kB video datagrams that is 2.6 % less
+   payload room, well above the keyframe burst the buffer is sized for.
+
+28. `fix(proto): Treat an equal-size delivery as evidence against a preceding loss burst`
+    (`dd77a46b`, quinn#2791)
+
+   Once one full-size packet was acknowledged, the black-hole detector never moved its
+   post-loss mark while every packet stayed full-size, which is a bulk transfer's steady state.
+   One ACK that confirmed newer packets and revealed a few older holes then read ordinary
+   congestion loss as a black hole and dropped the path to `min_mtu`. Slopty runs without MTU
+   discovery but keeps the detector, so on a lossy link a download could fall to 1200-byte
+   packets for no reason.
+
+29. `tests(proto): Test that CONNECTION_CLOSE is sent even when congestion blocked` (`a17c35e5`,
+    `f2683512`)
+
+30. `fix(proto): apply RFC 9000 §12.4 packet-type rules to CONNECTION_CLOSE` (`5fecec88`)
+
+   An Initial or Handshake packet may carry only a transport close (0x1c); an application close
+   there, which anyone who saw the handshake can forge, is a protocol violation now instead of
+   an application error handed up.
+
+31. `fix(proto): yield error on too many gaps in assembler` (`61302fd3`) and `fix(proto): bound
+    assembler chunk count regardless of over-allocation` (`b08b5e1a`)
+
+   Already here as patch 18, which also has quinn#2814 (small contiguous chunks coalesced while
+   defragmenting) that noq's port lacks. Not cherry-picked; patch 18 stays until noq has #2814.
+
+32. `chore(proto): fix typo` (`56a85081`)
+
+Not taken from #823: `fix(proto): Allow the cwnd to be filled exactly` (`9612584d`), which lets
+the packet that fills the window to the byte go (`>=` to `>`). On Slopty's simulated network it
+made the worst echoes beside a flood slower: on a 2 Mbit/s link with 100 ms of queue and 5 % loss,
+the 99th percentile of the 200 seeds' echo p99 went from 235 to 293 ms and the worst from 251 to
+315 ms, the median unchanged (docs/MEASUREMENTS.md, "noq #823 on the simulated network"). One more
+packet a window is worth nothing to Slopty; a keystroke's echo is. `perf(proto): replace the assembler BinaryHeap with a sorted VecDeque`
+(`4523eaa6`, quinn#2803) is written on noq's assembler without #2814's coalescing, which patch
+18 has, so it does not apply here; quinn `main` has both, on a later `RangeSet`. Its gain is an
+in-order frame's 50 to 108 ns down to 31 ns, which a stream holding one or two chunks (Slopty's
+usual) barely sees; it comes with the next noq release or the re-port. `feat(proto): Expose BBR
+bandwidth estimate in path stats` (`dcb8949c`) adds a field nothing in Slopty reads; Slopty's
+congestion snapshot takes BBR3's own state (patches 7 and 14). The `noq` crate's commits
+(surfacing `poll_recv` errors, ignoring the `EMSGSIZE` an ICMP Packet Too Big raises, reusing one
+receive buffer per batch) change noq's runtime and endpoint driver, which come from crates.io;
+Slopty's socket (`slopty_net::udp`) retries a failed receive as noq 1.3.0's runtime does, so the
+`EMSGSIZE` case they guard against does not arise here.
+
 A probe-up exit for an app-limited round (leaving `ProbeBW_UP` when a round ends
 app-limited) was tried beside patches 11 to 13 and not taken. The draft and Linux keep such a
 flow in `ProbeBW_UP`, and with patches 11 to 13 the simulated keyframe p99 already matches
@@ -251,7 +327,8 @@ Commits 2, 3 and 13 share `VideoSim` in the `bbr3` tests: a screen encoder's fra
 bottleneck, paced by noq's token bucket. `video_through_one_bottleneck` (ignored) prints what
 BBR3 does with that traffic (docs/MEASUREMENTS.md, "noq's BBR3 against the draft").
 
-Upstream `main` was read through `1fe2a342` (2026-10-15, still no release past 1.3.0). Patches 21
+Upstream `main` was read through `58869bfb` (2026-10-17, still no release past 1.3.0); what
+#823 brought is above. Before it, through `1fe2a342` (2026-10-15): patches 21
 and 22 are its two fixes that change what a Slopty link does. The rest is not taken: #838 moves
 imports to `core` and `alloc` (no behaviour, and it touches 54 files under the patches), #740 adds
 sent-packet counts nothing here reads, #827 fixes qlog output, which Slopty does not build, and

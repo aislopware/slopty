@@ -6,7 +6,7 @@ expression: "decode(\"edit\").snapshot()"
   origin: ~
   entries:
     - id: 00000000-0000-4000-8000-000000000003
-      at_ms: 1792130287142
+      at_ms: 1792208727288
       body:
         Prompt:
           text:
@@ -17,7 +17,7 @@ expression: "decode(\"edit\").snapshot()"
           images: []
           command: ~
     - id: toolu_01
-      at_ms: 1792130289071
+      at_ms: 1792208729258
       body:
         Tool:
           name: Read
@@ -32,12 +32,12 @@ expression: "decode(\"edit\").snapshot()"
           result:
             status: Ok
             text: ~
-            at_ms: 1792130289127
+            at_ms: 1792208729330
             images: []
             said: ~
           title: ~
     - id: toolu_02
-      at_ms: 1792130290343
+      at_ms: 1792208731192
       body:
         Tool:
           name: Edit
@@ -65,12 +65,12 @@ expression: "decode(\"edit\").snapshot()"
           result:
             status: Ok
             text: ~
-            at_ms: 1792130290375
+            at_ms: 1792208731240
             images: []
             said: ~
           title: ~
     - id: toolu_03
-      at_ms: 1792130291564
+      at_ms: 1792208732580
       body:
         Tool:
           name: Write
@@ -98,12 +98,12 @@ expression: "decode(\"edit\").snapshot()"
           result:
             status: Ok
             text: ~
-            at_ms: 1792130291592
+            at_ms: 1792208732627
             images: []
             said: ~
           title: ~
     - id: toolu_04
-      at_ms: 1792130293502
+      at_ms: 1792208734142
       body:
         Tool:
           name: Read
@@ -118,12 +118,12 @@ expression: "decode(\"edit\").snapshot()"
           result:
             status: Ok
             text: ~
-            at_ms: 1792130293528
+            at_ms: 1792208734175
             images: []
             said: ~
           title: Read notes.txt · lines 2-3
-    - id: "00000000-0000-4000-8000-000000000035:0"
-      at_ms: 1792130294388
+    - id: "00000000-0000-4000-8000-000000000036:0"
+      at_ms: 1792208735311
       body:
         Text:
           text: done
@@ -133,17 +133,17 @@ expression: "decode(\"edit\").snapshot()"
   tasks: []
   turns:
     - prompt: 00000000-0000-4000-8000-000000000003
-      started_ms: 1792130287142
-      ended_ms: 1792130294411
+      started_ms: 1792208727288
+      ended_ms: 1792208735340
       models:
         - claude-haiku-5-5
       requests: 5
       usage:
         input: 10
-        cache_read: 86060
-        cache_write: 8104
-        output: 549
-        thinking: 136
-      context_tokens: 19199
+        cache_read: 87276
+        cache_write: 8258
+        output: 572
+        thinking: 158
+      context_tokens: 19489
       mode: default
       stop: end_turn

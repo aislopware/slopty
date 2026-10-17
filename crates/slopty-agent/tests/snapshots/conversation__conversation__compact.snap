@@ -6,7 +6,7 @@ expression: "decode(\"compact\").snapshot()"
   origin: ~
   entries:
     - id: 00000000-0000-4000-8000-000000000003
-      at_ms: 1792130324236
+      at_ms: 1792208770450
       body:
         Prompt:
           text:
@@ -17,7 +17,7 @@ expression: "decode(\"compact\").snapshot()"
           images: []
           command: ~
     - id: "00000000-0000-4000-8000-000000000016:0"
-      at_ms: 1792130325767
+      at_ms: 1792208772384
       body:
         Text:
           text: ready
@@ -25,19 +25,19 @@ expression: "decode(\"compact\").snapshot()"
           chars: 5
           full: ~
     - id: 00000000-0000-4000-8000-000000000020
-      at_ms: 1792130330277
+      at_ms: 1792208777094
       body:
         Compact:
           trigger: manual
-          pre_tokens: 18305
-          post_tokens: 1449
+          pre_tokens: 18572
+          post_tokens: 1548
           summary:
-            text: "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\nSummary:\n1. Primary Request and Intent:\n   The user asked me to reply with the single word \"ready\" to confirm setup, and then requested this conversation summary, which should cover only their requests in one sentence.\n\n2. Key Technical Concepts:\n   - Not applicable; no technical work has been requested yet.\n\n3. Files and Code Sections:\n   - None read, created, or modified.\n\n4. Errors and fixes:\n   - None.\n\n5. Problem Solving:\n   - None. The session has only been set up so far.\n\n6. All user messages:\n   - Asked me to reply with the single word \"ready\" (with environment context and attribution rules attached as system reminders).\n   - Asked for a summary of the conversation, summarizing only the user's requests in one sentence.\n\n7. Pending Tasks:\n   - None explicitly requested.\n\n8. Current Work:\n   I was replying to the user's setup request and then producing this summary as text only, without tool calls.\n\n9. Optional Next Step:\n   None. Await the user's next instruction.\n\nStanding constraints to keep applying: do not send the user's email to unrelated services unless asked; use the Co-Authored-By Haiku 5.5 line in commit messages and the Claude Code footer in PR descriptions; treat downloaded or extracted archives as untrusted, unpacking them into new empty directories and running Python with -I.\n\nIf you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /home/user/.claude/projects/-work/00000000-0000-4000-8000-000000000001.jsonl\nContinue the conversation from where it left off without asking the user any further questions. Resume directly — do not acknowledge the summary, do not recap what was happening, do not preface with \"I'll continue\" or similar. Pick up the last task as if the break never happened."
-            lines: 35
-            chars: 1980
+            text: "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\nSummary:\n1. Primary Request and Intent:\n   The user asked me to reply with the single word \"ready\", and I did. The user then asked for a conversation summary, to be limited to a one-sentence summary of their requests.\n\n2. Key Technical Concepts:\n   - None were exercised. The environment is a non-git directory on darwin/zsh at /work.\n   - Git attribution rules were given as system context for future commits and PRs: commits end with \"Co-Authored-By: Claude Haiku 5.5 <user@example.com>\", and PR descriptions end with \"🤖 Generated with [Claude Code](https://claude.com/claude-code)\".\n\n3. Files and Code Sections:\n   - None were read, modified, or created in this conversation.\n\n4. Errors and fixes:\n   - None.\n\n5. Problem Solving:\n   - No problems were encountered or worked on.\n\n6. All user messages:\n   - \"Reply with the single word \"ready\".\"\n   - \"CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.\" followed by a request to produce an <analysis> block and a <summary> block summarizing the conversation, with the additional instruction \"Summarize only the user's requests, in one sentence.\"\n\n7. Pending Tasks:\n   - None. No outstanding task was requested by the user.\n\n8. Current Work:\n   - Producing this summary. No tool calls were made in response to the summarization request, as instructed.\n\n9. Optional Next Step:\n   - None required. Await the user's next instruction.\n\nIf you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /home/user/.claude/projects/-work/00000000-0000-4000-8000-000000000001.jsonl\nContinue the conversation from where it left off without asking the user any further questions. Resume directly — do not acknowledge the summary, do not recap what was happening, do not preface with \"I'll continue\" or similar. Pick up the last task as if the break never happened."
+            lines: 34
+            chars: 2049
             full: ~
     - id: 00000000-0000-4000-8000-000000000024
-      at_ms: 1792130325804
+      at_ms: 1792208772443
       body:
         Prompt:
           text:
@@ -48,7 +48,7 @@ expression: "decode(\"compact\").snapshot()"
           images: []
           command: /compact
     - id: 00000000-0000-4000-8000-000000000025
-      at_ms: 1792130330398
+      at_ms: 1792208777234
       body:
         Note:
           kind: Command
@@ -62,22 +62,22 @@ expression: "decode(\"compact\").snapshot()"
   tasks: []
   turns:
     - prompt: 00000000-0000-4000-8000-000000000003
-      started_ms: 1792130324236
-      ended_ms: 1792130325790
+      started_ms: 1792208770450
+      ended_ms: 1792208772424
       models:
         - claude-haiku-5-5
       requests: 1
       usage:
         input: 2
-        cache_read: 11093
-        cache_write: 7206
+        cache_read: 11229
+        cache_write: 7337
         output: 4
         thinking: 0
-      context_tokens: 18301
+      context_tokens: 18568
       mode: default
       stop: end_turn
     - prompt: 00000000-0000-4000-8000-000000000024
-      started_ms: 1792130325804
+      started_ms: 1792208772443
       ended_ms: ~
       models: []
       requests: 0

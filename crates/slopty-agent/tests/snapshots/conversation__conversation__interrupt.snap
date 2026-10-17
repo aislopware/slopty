@@ -6,7 +6,7 @@ expression: "decode(\"interrupt\").snapshot()"
   origin: ~
   entries:
     - id: 00000000-0000-4000-8000-000000000003
-      at_ms: 1792130321066
+      at_ms: 1792208766690
       body:
         Prompt:
           text:
@@ -17,7 +17,7 @@ expression: "decode(\"interrupt\").snapshot()"
           images: []
           command: ~
     - id: toolu_01
-      at_ms: 1792130322650
+      at_ms: 1792208768572
       body:
         Tool:
           name: Bash
@@ -44,29 +44,29 @@ expression: "decode(\"interrupt\").snapshot()"
               lines: 1
               chars: 225
               full: ~
-            at_ms: 1792130322679
+            at_ms: 1792208768609
             images: []
             said: ~
           title: ~
     - id: 00000000-0000-4000-8000-000000000019
-      at_ms: 1792130322682
+      at_ms: 1792208768612
       body:
         Interrupted:
           during_tool: true
   tasks: []
   turns:
     - prompt: 00000000-0000-4000-8000-000000000003
-      started_ms: 1792130321066
+      started_ms: 1792208766690
       ended_ms: ~
       models:
         - claude-haiku-5-5
       requests: 1
       usage:
         input: 2
-        cache_read: 11093
-        cache_write: 7232
+        cache_read: 11229
+        cache_write: 7363
         output: 79
         thinking: 0
-      context_tokens: 18327
+      context_tokens: 18594
       mode: default
       stop: tool_use

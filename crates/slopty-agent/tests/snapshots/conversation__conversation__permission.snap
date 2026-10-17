@@ -6,7 +6,7 @@ expression: "decode(\"permission\").snapshot()"
   origin: ~
   entries:
     - id: 00000000-0000-4000-8000-000000000003
-      at_ms: 1792130331865
+      at_ms: 1792208778529
       body:
         Prompt:
           text:
@@ -17,7 +17,7 @@ expression: "decode(\"permission\").snapshot()"
           images: []
           command: ~
     - id: toolu_01
-      at_ms: 1792130333428
+      at_ms: 1792208780334
       body:
         Tool:
           name: Bash
@@ -28,7 +28,7 @@ expression: "decode(\"permission\").snapshot()"
                 lines: 1
                 chars: 17
                 full: ~
-              description: Create refused.txt in the working directory
+              description: Create refused.txt file
               background: false
               task_id: ~
               status: Failed
@@ -44,12 +44,12 @@ expression: "decode(\"permission\").snapshot()"
               lines: 1
               chars: 23
               full: ~
-            at_ms: 1792130333486
+            at_ms: 1792208780523
             images: []
             said: ~
           title: ~
     - id: toolu_02
-      at_ms: 1792130334583
+      at_ms: 1792208781622
       body:
         Tool:
           name: Bash
@@ -60,7 +60,7 @@ expression: "decode(\"permission\").snapshot()"
                 lines: 1
                 chars: 17
                 full: ~
-              description: Create allowed.txt in the working directory
+              description: Create allowed.txt file
               background: false
               task_id: ~
               status: Done
@@ -72,12 +72,12 @@ expression: "decode(\"permission\").snapshot()"
           result:
             status: Ok
             text: ~
-            at_ms: 1792130334814
+            at_ms: 1792208781946
             images: []
             said: Done
           title: ~
     - id: toolu_03
-      at_ms: 1792130335827
+      at_ms: 1792208783172
       body:
         Tool:
           name: Bash
@@ -88,7 +88,7 @@ expression: "decode(\"permission\").snapshot()"
                 lines: 1
                 chars: 16
                 full: ~
-              description: Create always.txt in the working directory
+              description: Create always.txt file
               background: false
               task_id: ~
               status: Done
@@ -100,32 +100,32 @@ expression: "decode(\"permission\").snapshot()"
           result:
             status: Ok
             text: ~
-            at_ms: 1792130335909
+            at_ms: 1792208783277
             images: []
             said: Done
           title: ~
-    - id: "00000000-0000-4000-8000-000000000036:0"
-      at_ms: 1792130337737
+    - id: "00000000-0000-4000-8000-000000000035:0"
+      at_ms: 1792208785894
       body:
         Text:
-          text: "Two of the three ran. `touch refused.txt` was refused by the fixture, so I went on to the next one. The reply is below.\n\ndone"
+          text: "done\n\n`touch refused.txt` was refused, so that file was not created. `allowed.txt` and `always.txt` were created."
           lines: 3
-          chars: 125
+          chars: 113
           full: ~
   tasks: []
   turns:
     - prompt: 00000000-0000-4000-8000-000000000003
-      started_ms: 1792130331865
-      ended_ms: 1792130337754
+      started_ms: 1792208778529
+      ended_ms: 1792208785922
       models:
         - claude-haiku-5-5
       requests: 4
       usage:
         input: 8
-        cache_read: 66644
-        cache_write: 7731
-        output: 447
-        thinking: 145
-      context_tokens: 18826
+        cache_read: 67579
+        cache_write: 7849
+        output: 479
+        thinking: 193
+      context_tokens: 19080
       mode: default
       stop: end_turn

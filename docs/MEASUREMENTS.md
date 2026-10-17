@@ -17144,3 +17144,67 @@ target/local/M/target/debug/deps/main_thread-<hash> a_plotly_fence_draws_offline
 cargo test -p slopty-ui --lib -- pages::tests::a_burst_of_writes_reloads_once --nocapture
 cargo test -p slopty-shell --lib -- markdown::math::tests --nocapture
 ```
+
+## 2026-10-17 — gpui-fast with longbridge #71–#73 and zed `322cd509`: a frame's instructions
+
+Mac Studio M1 Max, `gpui_perf --headless --frames 300 --retention on` (73 scenarios, retired
+instructions per frame, median of three interleaved runs), both trees built in release with
+LTO off, other lanes building throughout. "Before" is the fork at `bf22e59a`; "merged" is
+upstream #71–#73 and zed `322cd509` merged in; "fixed" adds the fork's follow-up, which asks the
+clock whether hover is held once a frame instead of on every hover read, and reads hover as a
+frame draws it in the retained checks made as the frame begins. Millions of instructions:
+
+| scenario | before | merged | fixed |
+| --- | --- | --- | --- |
+| `scroll-child-view` | 0.821 | 0.969 (+18.0 %) | 0.843 (+2.6 %) |
+| `scroll-same-view` | 4.093 | 4.242 (+3.6 %) | 4.114 (+0.5 %) |
+| `scroll-list` | 3.542 | 3.606 (+1.8 %) | 3.560 (+0.5 %) |
+| `scroll-uniform-list` | 3.321 | 3.392 (+2.1 %) | 3.342 (+0.6 %) |
+| `form-hover` | 0.512 | 0.538 (+5.1 %) | 0.512 (−0.1 %) |
+| `chat-scroll-allsum-wheel` | 5.877 | 5.964 (+1.5 %) | 5.888 (+0.2 %) |
+| `chat-scroll` | 4.450 | 4.458 (+0.2 %) | 4.458 (+0.2 %) |
+| `list-variable-scroll` | 7.117 | 7.139 (+0.3 %) | 7.136 (+0.3 %) |
+| `workspace-hover` | 20.728 | 20.746 (+0.1 %) | 20.718 (0.0 %) |
+| `strip-scroll` | 7.845 | 7.847 (0.0 %) | 7.843 (0.0 %) |
+
+- #72 moved hover-freeze into hover itself, so every hover read while a frame was drawn asked
+  the clock (`scheduler::Instant::now`, #71). On a wheel frame of a small scrolled view that was
+  a sixth of the frame. Asked once a frame, the median scenario moves 0.1 % (max +2.7 %, the
+  three `scroll-child-view` variants, about 22 000 instructions: the cursor now follows the text
+  under a still pointer, which the old freeze skipped).
+- #73's carried element states cost nothing measurable on the list scenarios (+0.3 % or less).
+
+```sh
+# in .research/gpui-fast at each commit, CARGO_PROFILE_RELEASE_LTO=off
+cargo build --release -p gpui_perf
+./target/release/gpui_perf --headless --frames 300 --retention on --json <out>.json
+```
+
+## 2026-10-17 — noq #823 on the simulated network
+
+`cargo test --release -p slopty-net --test sim -- --include-ignored every_scenario narrower
+video_report` (`SLOPTY_SIM_SEEDS=50`), on an ubuntu-24.04-arm runner through `cargo xtask remote
+--probe`, once on `vendor/noq-proto` and `vendor/noq-udp` as of `8bb001ef` and once with noq
+`main`'s ports of quinn's fixes cherry-picked (`vendor/noq-proto/SLOPTY.md`, patches 23–32).
+Simulated times on tokio's paused clock, so the machine does not move them.
+
+| scenario (200 seeds unless named) | before | with #823 | with #823 and the exact cwnd fill |
+| --- | --- | --- | --- |
+| echo beside a flood (2 Mbit/s, 5 % lost), p99 per seed: p50 / p99 / max | 160 / 235 / 251 ms | 160 / 235 / 251 ms | 162 / 293 / 315 ms |
+| echo beside a flood, p50 per seed: p50 / p99 / max | 48 / 62 / 63 ms | 48 / 62 / 63 ms | 49 / 60 / 61 ms |
+| echo after a 30 s outage: p50 / p99 / max | 138 ms / 1.673 s / 3.697 s | same | same |
+| 256 kB over a path narrower than the packets (seeds 2–8) | 136 ms, MTU 1200, 1 black hole | same | 135 ms, same |
+| video beside keys, 50 seeds: keyframe p99 · echo p99 | 55 · 10 ms | same | same |
+
+- `fix(proto): Allow the cwnd to be filled exactly` (`>=` to `>`, one more packet a window) is
+  the only port that moved anything, and it moved the flooded echo's worst seeds by 58 and 64 ms.
+  It is not taken. "With #823" is the column that ships.
+- With the fill left out, every number is the one before #823, to the millisecond: the ports
+  that ship change no simulated timing here. The black-hole fix (patch 28) keeps the narrow path's
+  fall back to `MIN_MTU` after one black hole; the bulk-transfer case it fixes (an ACK revealing
+  older holes after full-size packets got through) is not one of these scenarios.
+
+```sh
+SLOPTY_SIM_SEEDS=50 cargo test --release -p slopty-net --test sim -- --include-ignored \
+  --nocapture --test-threads 1 every_scenario narrower video_report
+```

@@ -19,7 +19,7 @@ use crate::tools::repo_root;
 
 /// The Claude Code release the recordings and the stream-json stand-in are made with unless
 /// another is named. `cargo xtask upstream check` compares it with npm's latest.
-pub const VERSION: &str = "2.1.301";
+pub const VERSION: &str = "2.1.302";
 
 /// Names a `claude` binary to use instead of the downloaded one.
 const OVERRIDE: &str = "SLOPTY_CLAUDE";

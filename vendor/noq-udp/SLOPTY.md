@@ -1,4 +1,4 @@
-# noq-udp, vendored with three patches
+# noq-udp, vendored with five patches
 
 The published `noq-udp` 1.3.0 (crates.io, upstream tag `noq-udp-v1.3.0`, commit `c1f411562` of
 <https://github.com/n0-computer/noq>) with these commits on top. Each is a port of a quinn-udp
@@ -37,6 +37,22 @@ change noq has not taken, finished where quinn's is still open.
    enables the path only when both exist, which is the one condition the `unsafe`
    `set_apple_fast_path` leaves to its caller. noq's own runtime never enables the path, and
    Slopty's transport crate forbids `unsafe`.
+
+4. `fix(udp): handle EIO from sendmsg in the cmsg fallback` (noq `68e27fa8`, quinn
+   `89837617`)
+
+   The fallback that stops setting the ECN `cmsg` ran on `EINVAL` only. Some Android kernels
+   answer `EIO`, so every send kept failing there.
+
+5. `fix(udp): Read cmsg payloads unaligned` (noq `215f49ec`, quinn `d9919a18`)
+
+   A control buffer is aligned for the header only, and on musl less strictly than some
+   payloads, so an aligned read of one was unsound.
+
+noq `main` (#823, read through `58869bfb`, 2026-10-17) now has quinn#2727 as two commits
+(`9c42264c`, `49477cf0`): patch 1, taken here in July, so neither is cherry-picked. It also
+deprecates `UdpSocketState::send` (`31032ff1`), an API change with no behaviour, not taken while
+patch 2 rewrites `send`.
 
 The fast path is compiled in only on macOS, by `slopty-net`'s target-specific `noq` feature,
 and is on unless `SLOPTY_BATCHED_UDP=0` (docs/decisions/transport.md, "The batched Apple
