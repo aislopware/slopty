@@ -31,7 +31,7 @@ use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::ptr::NonNull;
 use std::rc::{Rc, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use block2::RcBlock;
 use objc2::MainThreadMarker;
@@ -1128,6 +1128,7 @@ fn compile(
         return done(Err("no content rule list store".to_owned()));
     };
     let done = Cell::new(Some(done));
+    let started = Instant::now();
     let handler = RcBlock::new(move |list: *mut WKContentRuleList, error: *mut NSError| {
         let Some(done) = done.take() else { return };
         // SAFETY: WebKit rule: the handler gets a list or an error, each nil or valid for the
@@ -1135,6 +1136,11 @@ fn compile(
         let list = unsafe { Retained::retain(list) };
         // SAFETY: as above, for the error.
         let why = unsafe { error.as_ref() }.map(|e| e.localizedDescription().to_string());
+        let after_ms = started.elapsed().as_millis();
+        match (&list, &why) {
+            (Some(_), _) => tracing::info!(after_ms, "the pages' rule list compiled"),
+            (None, why) => tracing::warn!(after_ms, ?why, "the pages' rule list did not compile"),
+        }
         done(list.ok_or_else(|| why.unwrap_or_else(|| "the rule list did not compile".to_owned())));
     });
     let identifier = NSString::from_str(&sandbox::rules_identifier(rules));

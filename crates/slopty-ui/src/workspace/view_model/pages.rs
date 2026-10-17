@@ -199,6 +199,10 @@ struct Page {
     width: Option<f32>,
     /// Its document and its name, once read: what `slopty.SavePage` saves.
     document: Option<(String, String)>,
+    /// When its card first opened it: what its log measures from.
+    opened: Instant,
+    /// Whether a picture of it came yet.
+    pictured: bool,
 }
 
 /// The card's watches of each page, by its key, each with its number.
@@ -224,6 +228,8 @@ pub(super) struct Pages {
     /// The watched files that changed, and the timer that reloads their pages.
     refresh: Refresh,
     refreshing: bool,
+    /// The pages a card asked for that could not open yet, each logged once with why.
+    unopened: HashMap<String, &'static str>,
 }
 
 impl Pages {
@@ -415,6 +421,8 @@ impl Page {
             asked: HashMap::new(),
             width: None,
             document: None,
+            opened: Instant::now(),
+            pictured: false,
         }
     }
 }
@@ -701,12 +709,25 @@ impl WorkspaceView {
             self.page_fence_load(key, &fence, cx);
             return Some(());
         }
-        let (thread, item) = page_of(key)?;
+        let Some((thread, item)) = page_of(key) else {
+            return self.page_unopened(key, "its key names no call");
+        };
         let item = item.to_owned();
-        let worker = self.worker_of_thread(thread, cx)?;
-        let call = self.view_tool_call(worker, thread, &item, cx)?;
-        let Some(ToolDetail::Page(detail)) = call.detail.clone() else { return None };
-        self.page_host(window_id, window, cx)?;
+        let Some(worker) = self.worker_of_thread(thread, cx) else {
+            return self.page_unopened(key, "its thread is on no machine's list");
+        };
+        let Some(call) = self.view_tool_call(worker, thread, &item, cx) else {
+            return self.page_unopened(key, "its call is not in its thread as read");
+        };
+        let Some(ToolDetail::Page(detail)) = call.detail.clone() else {
+            return self.page_unopened(key, "its call shows no page");
+        };
+        if self.page_host(window_id, window, cx).is_none() {
+            return self.page_unopened(key, "its window has no page host");
+        }
+        if let Some(why) = self.view_model.pages.unopened.remove(key) {
+            tracing::info!(page = key, waited_on = why, "a page opens, its call here now");
+        }
         let mut page =
             Page::new(window_id, Some(CallOf { key: worker, thread, item: item.clone() }));
         if let PageSource::App(app) = &detail.source {
@@ -753,6 +774,16 @@ impl WorkspaceView {
             }
         }
         Some(())
+    }
+
+    /// Page `key` could not open yet, for `why`: said once, as its card asks on each frame.
+    fn page_unopened(&mut self, key: &str, why: &'static str) -> Option<()> {
+        let unopened = &mut self.view_model.pages.unopened;
+        if unopened.get(key) != Some(&why) {
+            tracing::info!(page = key, why, "a page's card waits: the page cannot open yet");
+            unopened.insert(key.to_owned(), why);
+        }
+        None
     }
 
     /// Build fence page `key` from `fence`'s JSON and load it.
@@ -1066,13 +1097,17 @@ impl WorkspaceView {
                 Some(Expanded::Bytes(bytes)) => String::from_utf8(bytes.clone()).ok(),
                 Some(Expanded::Gone) | None => None,
             };
-            let _gone = this.update(cx, |view, cx| match html {
-                Some(html) => view.page_load(&key, title, html, false, cx),
-                None => view.page_state(
-                    &key,
-                    |s| s.failed = Some("Couldn't read its page".to_owned()),
-                    cx,
-                ),
+            let _gone = this.update(cx, |view, cx| {
+                let Some(html) = html else {
+                    tracing::info!(page = key, "a page's document did not come from its machine");
+                    view.page_state(
+                        &key,
+                        |s| s.failed = Some("Couldn't read its page".to_owned()),
+                        cx,
+                    );
+                    return;
+                };
+                view.page_load(&key, title, html, false, cx);
             });
         })
         .detach();
@@ -1105,7 +1140,14 @@ impl WorkspaceView {
         if let Some(width) = page.width {
             host.resize(id, f64::from(width));
         }
-        let _moved = host.mount(id);
+        let moved = host.mount(id);
+        tracing::info!(
+            page = key,
+            bytes = page.document.as_ref().map_or(0, |(_, html)| html.len()),
+            after_ms = page.opened.elapsed().as_millis(),
+            ?moved,
+            "a page's document went to its web view"
+        );
         self.page_changed(key, cx);
     }
 
@@ -1185,6 +1227,7 @@ impl WorkspaceView {
             PageEvent::Loaded | PageEvent::TornDown | PageEvent::Log { .. } => {}
             PageEvent::Refused(refusal) => tracing::debug!(?refusal, "a page's sandbox refused"),
             PageEvent::ViewLoaded => {
+                tracing::info!(page = key, after_ms = self.page_age(key), "a page's view loaded");
                 self.page_state(key, |s| s.loaded = true, cx);
                 if let Some(host) = host {
                     let _asked = host.snapshot(id);
@@ -1202,16 +1245,33 @@ impl WorkspaceView {
             PageEvent::Snapshot(snapshot) => {
                 if let Some(page) = self.view_model.pages.shown.get_mut(key) {
                     page.snapshot = picture(&snapshot);
+                    if !std::mem::replace(&mut page.pictured, true) {
+                        tracing::info!(
+                            page = key,
+                            after_ms = page.opened.elapsed().as_millis(),
+                            took_ms = snapshot.took.as_millis(),
+                            "a page's first picture came"
+                        );
+                    }
                 }
                 self.page_changed(key, cx);
             }
             PageEvent::NetworkSet(_) => self.page_state(key, |s| s.network = None, cx),
-            PageEvent::Failed(why) => self.page_state(key, |s| s.failed = Some(why), cx),
+            PageEvent::Failed(why) => {
+                tracing::info!(page = key, why, after_ms = self.page_age(key), "a page failed");
+                self.page_state(key, |s| s.failed = Some(why), cx);
+            }
             PageEvent::Crashed => {
+                tracing::info!(page = key, after_ms = self.page_age(key), "a page's process ended");
                 self.page_state(key, |s| s.failed = Some("The page stopped".to_owned()), cx);
             }
             PageEvent::Asked(request) => self.page_asked(key, request, cx),
         }
+    }
+
+    /// How long since page `key`'s card opened it, in milliseconds, for its log.
+    fn page_age(&self, key: &str) -> Option<u128> {
+        Some(self.view_model.pages.shown.get(key)?.opened.elapsed().as_millis())
     }
 
     /// Tell an MCP App's view the call it shows: its arguments and its result.
