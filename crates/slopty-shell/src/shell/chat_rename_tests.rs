@@ -35,7 +35,7 @@ fn setup(cx: &mut TestAppContext) -> (Entity<Shell>, &mut VisualTestContext) {
     let (host, cx) = cx.add_window_view(|_, cx| {
         SidebarHost(cx.new(|cx| {
             let state = cx.new(|_| AppState::new());
-            let mut shell = Shell::new(
+            let shell = Shell::new(
                 state,
                 EngineBootConfig {
                     data_dir: dir.path().into(),
@@ -44,7 +44,7 @@ fn setup(cx: &mut TestAppContext) -> (Entity<Shell>, &mut VisualTestContext) {
                 },
                 cx,
             );
-            shell.reduced_motion = true;
+            crate::motion::set_reduced_motion(cx, true);
             shell.state.update(cx, |state, _| {
                 state.workspace_scope = Some(WorkspaceScope::Local);
                 state.local_device_id = Some("local".into());

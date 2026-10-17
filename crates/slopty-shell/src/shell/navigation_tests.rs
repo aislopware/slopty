@@ -99,7 +99,7 @@ fn setup(cx: &mut TestAppContext) -> (Entity<Shell>, &mut VisualTestContext) {
                 state.selected_chat = Some("parent".into());
             });
             shell.active_chat = "parent".into();
-            shell.reduced_motion = true;
+            crate::motion::set_reduced_motion(cx, true);
             shell
                 .composer
                 .update(cx, |composer, _| composer.focus_pending = false);

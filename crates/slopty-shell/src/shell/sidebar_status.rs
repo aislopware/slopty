@@ -942,7 +942,7 @@ mod tests {
                 },
                 cx,
             );
-            shell.reduced_motion = true;
+            crate::motion::set_reduced_motion(cx, true);
             shell.settings.sidebar_organization = crate::settings::SidebarOrganization::ByStatus;
             shell.settings.sidebar_compact = compact;
             let now = Utc::now();

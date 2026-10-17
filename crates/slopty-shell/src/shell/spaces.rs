@@ -1614,7 +1614,7 @@ mod pinned_session_tests {
             assert_eq!(shell.active_sidebar_pins(cx), ids(&["older", "newer"]));
             shell.sidebar_resort.clear();
             shell.sidebar_new_keys.clear();
-            shell.reduced_motion = true;
+            crate::motion::set_reduced_motion(cx, true);
             cx.notify();
         });
 
@@ -1664,8 +1664,8 @@ mod pinned_session_tests {
         });
 
         // Existing pin-to-pin reordering still works with the shared payload.
-        shell.update(cx, |shell, cx| {
-            shell.reduced_motion = false;
+        shell.update(cx, |_, cx| {
+            crate::motion::set_reduced_motion(cx, false);
             cx.notify();
         });
         let from = cx.debug_bounds("chat-newer").unwrap().center();
@@ -1749,7 +1749,7 @@ mod pinned_session_tests {
         let (host, cx) = cx.add_window_view(|_, cx| {
             SidebarHost(cx.new(|cx| {
                 let state = cx.new(|_| AppState::new());
-                let mut shell = Shell::new(
+                let shell = Shell::new(
                     state,
                     EngineBootConfig {
                         data_dir: dir.path().into(),
@@ -1758,7 +1758,7 @@ mod pinned_session_tests {
                     },
                     cx,
                 );
-                shell.reduced_motion = true;
+                crate::motion::set_reduced_motion(cx, true);
                 shell.state.update(cx, |state, _| {
                     state.workspace_scope = Some(WorkspaceScope::Local);
                     state.local_device_id = Some("local".into());

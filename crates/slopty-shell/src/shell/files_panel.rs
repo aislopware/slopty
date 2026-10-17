@@ -705,7 +705,7 @@ mod tests {
             .update(cx, |shell, window, cx| {
                 shell.active_chat = "chat".into();
                 // Widths settle immediately so the assertions see end states.
-                shell.reduced_motion = true;
+                crate::motion::set_reduced_motion(cx, true);
                 // A fresh pane toggle lands on the surface host alone.
                 shell.toggle_right_pane(cx);
                 assert!(shell.right_pane_open(cx));

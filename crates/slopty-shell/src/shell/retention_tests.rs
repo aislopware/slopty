@@ -135,7 +135,6 @@ fn shell(cx: &mut TestAppContext) -> (Entity<Shell>, &mut VisualTestContext) {
         );
         shell.debug_gate = Some(GatePhase::Ready);
         shell.splash = SplashPhase::Gone;
-        shell.reduced_motion = true;
         let now = Utc::now();
         let chat = |id: &str, ago: i64| -> slopty_view_proto::Chat {
             serde_json::from_value(serde_json::json!({
