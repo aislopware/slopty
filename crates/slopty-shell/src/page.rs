@@ -222,6 +222,8 @@ pub struct PageCardView {
     bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     clear: Option<(f32, f32)>,
     width: f32,
+    /// The card drew a live page where it lies, so a scroll that moves it asks it to look again.
+    placed_live: bool,
     /// The pointer or the keyboard is in the card.
     engaged: bool,
     /// The person made the page tall (or it asked to be): the window's share, not the cap.
@@ -288,6 +290,7 @@ impl PageCardView {
             bounds: Rc::default(),
             clear: None,
             width: 0.0,
+            placed_live: false,
             engaged: false,
             expanded: false,
             answered: Default::default(),
@@ -310,6 +313,14 @@ impl PageCardView {
     /// composer's frost.
     pub fn set_clear_band(&mut self, top: f32, bottom: f32) {
         self.clear = Some((top, bottom));
+    }
+
+    /// Whether the card drew a live page where it lies: a scroll the window composites moves the
+    /// card without drawing it again, so its transcript builds it again to see whether it went
+    /// into a fade band.
+    #[must_use]
+    pub fn placed_live(&self) -> bool {
+        self.placed_live
     }
 
     fn engage(&mut self, cx: &mut Context<Self>) {
@@ -612,19 +623,26 @@ impl Render for PageCardView {
 
         // A live page that scrolled into a fade band or under the composer rests at once; one
         // in the pane is the pane's.
+        // slopty: asked once the frame is drawn. The host tells the card what changed; asked
+        // while the window draws, the card it tells would wait for whatever draws next.
+        let key = self.card.page.clone();
+        let ask = |act: PageAct, cx: &mut Context<Self>| {
+            let page = key.clone();
+            cx.defer(move |cx| live::page_act(&page, act, cx));
+        };
         if presence == Some(PagePresence::Live)
             && !in_pane
             && let (Some(bounds), Some((top, bottom))) = (self.bounds.get(), self.clear)
             && (f32::from(bounds.top()) < top || f32::from(bounds.bottom()) > bottom)
         {
-            live::page_act(&self.card.page, PageAct::Rest, cx);
+            ask(PageAct::Rest, cx);
         }
         if let Some(bounds) = self.bounds.get() {
             let width = f32::from(bounds.size.width);
             if (width - self.width).abs() > 0.5 {
                 self.width = width;
                 if !in_pane && doc.is_none() {
-                    live::page_act(&self.card.page, PageAct::Width(width), cx);
+                    ask(PageAct::Width(width), cx);
                 }
             }
         }
@@ -689,11 +707,28 @@ impl Render for PageCardView {
             },
         };
         let probe = self.bounds.clone();
+        // slopty: the card is built again when where it lies asks something of it (a live page
+        // gone into a fade band rests, a new width is told to the page), so the frame shown is
+        // the one a frame built from scratch, which reads the same bounds, draws.
+        let live_now = presence == Some(PagePresence::Live) && !in_pane;
+        self.placed_live = live_now;
+        let (clear, width, card) = (self.clear, self.width, cx.weak_entity());
         let measure = move |probe: Rc<Cell<Option<Bounds<Pixels>>>>| {
+            let card = card.clone();
             canvas(
-                move |bounds, _, _| {
+                move |bounds, _, cx| {
                     if probe.get() != Some(bounds) {
                         probe.set(Some(bounds));
+                        let out = clear.is_some_and(|(top, bottom)| {
+                            f32::from(bounds.top()) < top || f32::from(bounds.bottom()) > bottom
+                        });
+                        let resized = (f32::from(bounds.size.width) - width).abs() > 0.5;
+                        if (live_now && out) || resized {
+                            let card = card.clone();
+                            cx.defer(move |cx| {
+                                card.update(cx, |_, cx| cx.notify()).ok();
+                            });
+                        }
                     }
                 },
                 |_, _, _, _| (),

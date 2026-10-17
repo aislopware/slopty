@@ -519,7 +519,8 @@ impl WorkspaceView {
             }
             return;
         };
-        let _moved = match act {
+        let window = page.window;
+        let moved = match act {
             PageAct::Engage => host.engage(id),
             PageAct::Rest => host.rest(id),
             PageAct::Width(width) => {
@@ -533,7 +534,23 @@ impl WorkspaceView {
             }
             PageAct::Draw { .. } | PageAct::Reload => Vec::new(),
         };
+        // One page engaged past the device's cap rests another: its card hears it too.
+        let others: Vec<String> = self
+            .view_model
+            .pages
+            .shown
+            .iter()
+            .filter(|(other, page)| {
+                other.as_str() != key
+                    && page.window == window
+                    && page.id.is_some_and(|id| moved.iter().any(|change| change.page == id))
+            })
+            .map(|(other, _)| other.clone())
+            .collect();
         self.page_changed(key, cx);
+        for other in others {
+            self.page_changed(&other, cx);
+        }
     }
 
     /// Let page `key` go, its web view closed and what failed forgotten: the next draw of its

@@ -271,3 +271,43 @@ fn a_failed_page_offers_try_again(cx: &mut gpui::TestAppContext) {
     assert!(find(&nodes, Role::Button, "Try again").is_none(), "a failed call is not tried again");
 }
 
+
+struct Moved(gpui::AnyView, f32);
+
+impl Render for Moved {
+    fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+        div().size_full().pt(px(self.1)).child(self.0.clone())
+    }
+}
+
+/// A live page moved into a fade band by what is around it rests in the frames the window
+/// draws, though nothing told the card itself: a frame built from scratch, which rests it, draws
+/// nothing the shown one does not.
+#[gpui::test]
+fn a_live_page_moved_out_of_its_band_rests_in_the_frame_shown(cx: &mut gpui::TestAppContext) {
+    let stand = serve(cx, HostedPage { presence: PagePresence::Live, ..hosted(None) });
+    let view = cx.new(|cx| {
+        PageCardView::new(card(PageCard::HTML, "slopty-page:1/html", "Plot"), None, None, cx)
+    });
+    let shown = view.clone();
+    let (host, cx) = cx.add_window_view(|_, _| Moved(shown.into(), 200.0));
+    cx.simulate_resize(gpui::size(px(900.0), px(800.0)));
+    view.update(cx, |view, _| view.set_clear_band(100.0, 790.0));
+    let frame = |cx: &mut VisualTestContext| {
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.run_until_parked();
+    };
+    frame(cx);
+    frame(cx);
+    let rests = |stand: &Shared| stand.borrow().acts.iter().filter(|a| **a == PageAct::Rest).count();
+    assert_eq!(rests(&stand), 0, "in its band it stays live: {:?}", stand.borrow().acts);
+
+    host.update(cx, |host, cx| {
+        host.1 = 20.0;
+        cx.notify();
+    });
+    frame(cx);
+    frame(cx);
+    assert!(rests(&stand) > 0, "under the titlebar's fade it rests: {:?}", stand.borrow().acts);
+}

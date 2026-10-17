@@ -4403,6 +4403,14 @@ impl Transcript {
         // wheel/touch input. Neither operation reads the borrowed ListState.
         self.user_collapse_scroll = None;
         self.cancel_user_hold();
+        // slopty: a live page the scroll moved looks again at where it lies.
+        let fences: Vec<_> = self.fences.borrow().values().cloned().collect();
+        // Only those are touched: one updated keeps the scroll from being composited.
+        for card in self.pages.values().chain(&fences) {
+            if card.read(cx).placed_live() {
+                card.update(cx, |_, cx| cx.notify());
+            }
+        }
         let released_own_turn = self.own_turn.as_ref().is_some_and(|anchor| anchor.held);
         self.release_own_turn_hold();
         if self.own_turn.is_some() {
