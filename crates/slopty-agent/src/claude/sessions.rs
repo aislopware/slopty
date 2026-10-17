@@ -11,10 +11,12 @@
 //! pid, the session it holds, its folder, how it runs (`kind`) and its process's start
 //! (`procStart`, `ps -o lstart=` in UTC), which tells a pid used again from the one that wrote.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock};
 use std::time::SystemTime;
 
+use parking_lot::Mutex;
 use slopty_core::WallMs;
 use slopty_proto::thread::wire::{
     EXPANDED_CHARS, Expanded, PROMPT_HIT_BYTES, PastSession, PromptHit,
@@ -105,18 +107,20 @@ fn files(home: &Path, cwd: &Path, session: &str) -> Vec<PathBuf> {
 /// The whole of what `content` names, clipped in a thread of session `session` run in `cwd`.
 ///
 /// It is read from the session's files: a text cut at [`EXPANDED_CHARS`], or a picture's bytes;
-/// [`Expanded::Gone`] when no file holds it any more.
+/// [`Expanded::Gone`] when no file holds it any more. Only the record's own line is read, found
+/// by an index of each file's lines kept across expands, so a long session costs one line per
+/// expand and a byte that is not UTF-8 costs only its own line.
 #[must_use]
 pub fn expand(home: &Path, cwd: &Path, session: &str, content: &ContentRef) -> Expanded {
     let Some((_thread, at)) = super::history::text_ref(content) else { return Expanded::Gone };
     let image = matches!(at.part, Part::Image { .. });
     for file in files(home, cwd, session) {
-        let Ok(jsonl) = std::fs::read_to_string(&file) else { continue };
+        let Some(line) = record_line(&file, &at.record) else { continue };
         if image {
-            if let Some(bytes) = crate::conversation::image_bytes(&jsonl, &at) {
+            if let Some(bytes) = crate::conversation::image_bytes(&line, &at) {
                 return Expanded::Bytes(bytes);
             }
-        } else if let Some(mut text) = crate::conversation::full_text(&jsonl, &at) {
+        } else if let Some(mut text) = crate::conversation::full_text(&line, &at) {
             if let Some((cut, _)) = text.char_indices().nth(EXPANDED_CHARS) {
                 text.truncate(cut);
             }
@@ -124,6 +128,114 @@ pub fn expand(home: &Path, cwd: &Path, session: &str, content: &ContentRef) -> E
         }
     }
     Expanded::Gone
+}
+
+/// How a record's id appears in a transcript line, Claude Code writing it compact.
+const UUID_KEY: &str = "\"uuid\":\"";
+
+/// How many transcript files keep their [`RecordIndex`] at once.
+const INDEXED_FILES: usize = 8;
+
+/// Where the line of each record named by a `"uuid"` lies in one transcript file, as far as it
+/// was read (`len`, the end of its last whole line). Claude Code only appends, so a file found
+/// longer is indexed on from `len`; one found shorter was written anew and is indexed again.
+#[derive(Debug, Default)]
+struct RecordIndex {
+    len: u64,
+    by_uuid: HashMap<String, Vec<(u64, usize)>>,
+}
+
+/// The index of each transcript file read lately, each behind its own lock so that expands of
+/// different files read at once and two of the same file index it once.
+type Indexes = HashMap<PathBuf, Arc<Mutex<RecordIndex>>>;
+
+static INDEXES: LazyLock<Mutex<Indexes>> = LazyLock::new(Mutex::default);
+
+/// The line of `file` that holds record `uuid` (its bytes decoded, a byte that is not UTF-8
+/// replaced); `None` when the file has no such record or cannot be read.
+fn record_line(file: &Path, uuid: &str) -> Option<String> {
+    let index = {
+        let mut all = INDEXES.lock();
+        if !all.contains_key(file) && all.len() >= INDEXED_FILES {
+            let old = all.keys().next().cloned();
+            if let Some(old) = old {
+                all.remove(&old);
+            }
+        }
+        Arc::clone(all.entry(file.to_path_buf()).or_default())
+    };
+    find_line(&mut index.lock(), file, uuid)
+}
+
+/// The line of `file` that holds record `uuid`, found by `index` (read on first, and read again
+/// whole when the lines it noted moved).
+fn find_line(index: &mut RecordIndex, file: &Path, uuid: &str) -> Option<String> {
+    for fresh in [false, true] {
+        if fresh {
+            *index = RecordIndex::default();
+        }
+        index.read_on(file).ok()?;
+        let spots = index.by_uuid.get(uuid)?;
+        for &(at, len) in spots {
+            let Ok(line) = read_line_at(file, at, len) else { continue };
+            let record: Option<serde_json::Value> = serde_json::from_str(&line).ok();
+            if record.as_ref().and_then(|r| r.get("uuid")).and_then(serde_json::Value::as_str)
+                == Some(uuid)
+            {
+                return Some(line);
+            }
+        }
+        // The lines moved under the index: the file was written anew, as long or longer.
+    }
+    None
+}
+
+/// The `len` bytes of `file` at `at`, decoded.
+fn read_line_at(file: &Path, at: u64, len: usize) -> std::io::Result<String> {
+    use std::io::{Read as _, Seek as _};
+    let mut opened = std::fs::File::open(file)?;
+    opened.seek(std::io::SeekFrom::Start(at))?;
+    let mut bytes = vec![0; len];
+    opened.read_exact(&mut bytes)?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+impl RecordIndex {
+    /// Note the lines of `file` past [`Self::len`]: every id a line holds is noted; the reader
+    /// checks the record's own.
+    fn read_on(&mut self, file: &Path) -> std::io::Result<()> {
+        use std::io::{BufRead as _, Seek as _};
+        let mut opened = std::fs::File::open(file)?;
+        let size = opened.metadata()?.len();
+        if size < self.len {
+            *self = Self::default();
+        }
+        if size == self.len {
+            return Ok(());
+        }
+        opened.seek(std::io::SeekFrom::Start(self.len))?;
+        let mut reader = std::io::BufReader::with_capacity(256 * 1024, opened);
+        let mut line = Vec::new();
+        loop {
+            line.clear();
+            let read = reader.read_until(b'\n', &mut line)?;
+            if read == 0 || line.last() != Some(&b'\n') {
+                // The end, or a line Claude Code is still writing: read again from its start.
+                return Ok(());
+            }
+            let text = String::from_utf8_lossy(&line);
+            let mut rest: &str = &text;
+            while let Some(found) = rest.find(UUID_KEY) {
+                rest = rest.get(found.saturating_add(UUID_KEY.len())..).unwrap_or_default();
+                let Some(end) = rest.find('"') else { break };
+                let id = rest.get(..end).unwrap_or_default();
+                if !id.is_empty() {
+                    self.by_uuid.entry(id.to_owned()).or_default().push((self.len, line.len()));
+                }
+            }
+            self.len = self.len.saturating_add(u64::try_from(line.len()).unwrap_or(u64::MAX));
+        }
+    }
 }
 
 /// How much of a transcript's head, and of its tail, a listing reads.
@@ -500,6 +612,47 @@ mod tests {
         let ids: Vec<&str> = read.iter().filter_map(|r| r["uuid"].as_str()).collect();
         assert_eq!(ids, ["a", "b"]);
         assert_eq!(read[0]["text"], "word\u{fffd}");
+    }
+
+    /// A clipped text is read from its record's line alone: a byte that is not UTF-8 in
+    /// another line costs nothing, a record appended later is found, and a transcript written
+    /// anew is indexed again.
+    #[test]
+    fn an_expand_reads_its_records_line_alone() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let cwd = Path::new("/slopty-absent/work");
+        let main = transcript(home.path(), cwd, "s3");
+        std::fs::create_dir_all(main.parent().expect("dir")).expect("mkdir");
+        let said = |uuid: &str, text: &str| {
+            let record = serde_json::json!({
+                "type": "assistant", "uuid": uuid,
+                "message": { "role": "assistant", "content": [{ "type": "text", "text": text }] },
+            });
+            format!("{record}\n")
+        };
+        let ask = |uuid: &str| {
+            let at = crate::conversation::TextRef {
+                record: uuid.to_owned(),
+                part: Part::Block { index: 0 },
+            };
+            crate::claude::history::content_ref(&crate::conversation::ThreadId::Main, &at)
+        };
+        let mut bytes = b"{\"uuid\":\"bad\",\"text\":\"".to_vec();
+        bytes.extend([0xff, b'"', b'}', b'\n']);
+        bytes.extend(said("a", "first").as_bytes());
+        std::fs::write(&main, &bytes).expect("main");
+        let expand = |uuid| expand(home.path(), cwd, "s3", &ask(uuid));
+        assert_eq!(expand("a"), Expanded::Text("first".to_owned()));
+        assert_eq!(expand("b"), Expanded::Gone, "not written yet");
+
+        let mut file = std::fs::OpenOptions::new().append(true).open(&main).expect("open");
+        std::io::Write::write_all(&mut file, said("b", "second").as_bytes()).expect("append");
+        std::io::Write::write_all(&mut file, b"{\"uuid\":\"torn").expect("torn");
+        assert_eq!(expand("b"), Expanded::Text("second".to_owned()), "appended");
+
+        std::fs::write(&main, said("c", "anew")).expect("anew");
+        assert_eq!(expand("c"), Expanded::Text("anew".to_owned()), "written anew");
+        assert_eq!(expand("a"), Expanded::Gone);
     }
 
     /// One record of session `id`'s transcript, as Claude Code writes it.
