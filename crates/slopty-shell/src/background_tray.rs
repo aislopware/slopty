@@ -538,7 +538,8 @@ impl Composer {
             .aria_expanded(open)
             .flex_1()
             .min_w_0()
-            .h(px(HEADER_HEIGHT))
+            // slopty: a finger's row on a touch screen (#23).
+            .h(px(crate::surface_chrome::touch_row_height(HEADER_HEIGHT)))
             .px(px(ROW_PAD_X))
             .rounded(px(ROW_RADIUS))
             .flex()

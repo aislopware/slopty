@@ -608,34 +608,35 @@ fn disclosure(
     on_click: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
 ) -> AnyElement {
     let fade = SharedString::from(format!("{id}-hover"));
-    div()
-        .id(SharedString::from(id))
+    // slopty: a 24 px target drawn at 18 (its pad taken back), a faded hover, and its
+    // words on hover too; on a touch screen a finger's 44 around the 24 it draws (#23).
+    let (press, reach) = crate::composer::finger_press(SharedString::from(id), 24.0, 24.0);
+    crate::surface_chrome::focus_ring_within(press.m(px(-3.0 - reach)), theme, reach)
         .role(gpui::Role::Button)
         .aria_expanded(open)
-        // slopty: a 24 px target drawn at 18 (its pad taken back), a faded hover, and its
-        // words on hover too.
-        .size(px(24.0))
-        .m(px(-3.0))
-        .flex_none()
-        .rounded(px(6.0))
-        .flex()
-        .items_center()
-        .justify_center()
         .cursor_pointer()
-        .bg(crate::motion::hover_blend(&fade, gpui::transparent_black(), crate::theme::ink(0.08)))
         .on_hover(crate::motion::hover_listener(fade.clone()))
         .tab_index(0) // slopty: a tab stop.
-        .map(|el| crate::surface_chrome::focus_ring(el, theme))
         .hint(if open { "Hide details" } else { "Show details" })
         .on_click(on_click)
         .child(
-            crate::icons::icon(if open {
-                crate::icons::ALT_ARROW_DOWN
-            } else {
-                crate::icons::ALT_ARROW_RIGHT
-            })
-            .size(px(12.0))
-            .text_color(theme.text_faint),
+            div()
+                .size(px(24.0))
+                .flex_none()
+                .rounded(px(6.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(crate::motion::hover_blend(&fade, gpui::transparent_black(), crate::theme::ink(0.08)))
+                .child(
+                    crate::icons::icon(if open {
+                        crate::icons::ALT_ARROW_DOWN
+                    } else {
+                        crate::icons::ALT_ARROW_RIGHT
+                    })
+                    .size(px(12.0))
+                    .text_color(theme.text_faint),
+                ),
         )
         .into_any_element()
 }

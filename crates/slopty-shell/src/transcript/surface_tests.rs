@@ -36,6 +36,7 @@ struct Node {
     expanded: Option<bool>,
     center: Point<Pixels>,
     height: f32,
+    width: f32,
     children: Vec<NodeId>,
 }
 
@@ -59,6 +60,7 @@ fn tree(window: &Window) -> HashMap<NodeId, Node> {
                         px(((r.y0 + r.y1) / 2.0 / scale) as f32),
                     ),
                     height: ((r.y1 - r.y0) / scale) as f32,
+                    width: ((r.x1 - r.x0) / scale) as f32,
                     children: node.children().to_vec(),
                 },
             )
@@ -213,6 +215,37 @@ fn a_subagent_card_opens_in_place_and_drills_in(cx: &mut gpui::TestAppContext) {
     cx.simulate_keystrokes("cmd-enter");
     draw(cx);
     assert_eq!(*opened.borrow(), ["child-chat"]);
+}
+
+/// slopty: on a phone a tap on a subagent's card drills into its run: no room to open it in
+/// place, so it says no open state and asks the shell for the run's chat.
+#[gpui::test]
+fn a_phones_tap_on_a_subagents_card_drills_in(cx: &mut gpui::TestAppContext) {
+    let progress = SubagentProgress {
+        running: true,
+        state: SubagentProgress::RUNNING.into(),
+        step: Some("Reading parser.rs".into()),
+        chat_id: Some("child-chat".into()),
+        row: Some("task:a1".into()),
+        ..SubagentProgress::default()
+    };
+    let (transcript, cx) = open(cx, entry(MessageStatus::Complete, vec![spawn(progress)]));
+    cx.simulate_resize(gpui::size(px(390.0), px(800.0)));
+    let opened = Rc::new(RefCell::new(Vec::new()));
+    let _events = cx.update(|_, cx| {
+        let opened = opened.clone();
+        cx.subscribe(&transcript, move |_, event: &TranscriptEvent, _| {
+            if let TranscriptEvent::OpenSubagent { chat_id } = event {
+                opened.borrow_mut().push(chat_id.clone());
+            }
+        })
+    });
+    let nodes = draw(cx);
+    let card = find(&nodes, Role::Button, "Subagent Count lines").expect("the card").clone();
+    assert_eq!(card.expanded, None, "a phone's card does not open in place: {card:?}");
+    cx.simulate_click(card.center, gpui::Modifiers::default());
+    draw(cx);
+    assert_eq!(*opened.borrow(), ["child-chat"], "the tap drills in");
 }
 
 /// A background task's row opens the tray at its row; a retry says what is tried again.
@@ -638,4 +671,49 @@ fn a_running_card_says_the_clocks_time_in_every_frame(cx: &mut gpui::TestAppCont
     let first = value(cx).expect("the card");
     assert!(first.contains("42s"), "{first}");
     assert_eq!(value(cx).as_deref(), Some(first.as_str()), "drawn again, the same second");
+}
+
+/// slopty: on a touch screen a reply's controls take a finger's 44 pt press (#23): its tool
+/// group's summary row and the strip's Copy; on a Mac each is its drawn size.
+#[gpui::test]
+fn a_replys_controls_take_a_fingers_press(cx: &mut gpui::TestAppContext) {
+    let run = MessagePart::Tool {
+        id: "run".into(),
+        call: ToolCall::Exec { command: "cargo test".into() },
+        is_error: false,
+        resolved: true,
+        output: None,
+        diff: None,
+        output_ref: None,
+        output_bytes: None,
+        diff_ref: None,
+        diff_stats: None,
+        subagent_ref: None,
+        subagent_status: None,
+        subagent_tail: None,
+        facts: None,
+    };
+    crate::shell::force_touch(true);
+    let (transcript, cx) = open(cx, entry(MessageStatus::Complete, vec![run, text("All green.")]));
+    let ours = |transcript: &Entity<Transcript>, cx: &mut VisualTestContext| {
+        // The strip shows on hover; the iPad's last row shows it unasked.
+        transcript.update(cx, |this, cx| {
+            this.hovered_entry = Some(("reply".into(), "reply".into()));
+            cx.notify();
+        });
+        let nodes = draw(cx);
+        let buttons = || nodes.values().filter(|node| node.role == Role::Button);
+        let names: Vec<_> = buttons().map(|node| node.label.clone()).collect();
+        let group = buttons().find(|node| node.label.starts_with("Ran")).unwrap_or_else(|| panic!("{names:?}")).clone();
+        let copy = find(&nodes, Role::Button, "Copy message").unwrap_or_else(|| panic!("{names:?}")).clone();
+        (group.height, copy.height, copy.width)
+    };
+    let (group, copy, copy_width) = ours(&transcript, cx);
+    assert!(group >= 43.9, "the summary row under a finger's 44 pt: {group}");
+    assert!(copy.min(copy_width) >= 43.9, "Copy under a finger's 44 pt: {copy_width}x{copy}");
+
+    crate::shell::force_touch(false);
+    let (group, copy, copy_width) = ours(&transcript, cx);
+    assert_eq!(group.round(), 26.0, "as drawn on a Mac");
+    assert_eq!((copy_width.round(), copy.round()), (24.0, 24.0), "as drawn on a Mac");
 }

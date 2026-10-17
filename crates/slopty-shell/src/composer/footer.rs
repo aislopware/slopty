@@ -164,6 +164,33 @@ fn mode_words(chip: &ModeChip) -> String {
 }
 
 /// The footer's row of `segments`.
+/// slopty: a footer chip's press, a button: on a touch screen it takes a finger's 44 pt around
+/// what it draws, its margins giving the room back, so the row lays out as drawn and the wash
+/// and the ring (`focus_ring_within` with the reach) stay on the chip (#23). The reach.
+fn finger_segment(id: &'static str) -> (gpui::Stateful<gpui::Div>, f32) {
+    let reach = crate::surface_chrome::touch_reach(SEGMENT_HEIGHT);
+    let press = div()
+        .id(id)
+        .role(Role::Button)
+        .flex_none()
+        .flex()
+        .p(px(reach))
+        .m(px(-reach))
+        .text_size(crate::typography::ui_rems(11.0));
+    (press, reach)
+}
+
+/// What a footer chip draws: its height, its inset and its corners, for its wash.
+fn segment_drawn() -> gpui::Div {
+    div()
+        .flex_none()
+        .h(px(SEGMENT_HEIGHT))
+        .px(px(6.0))
+        .flex()
+        .items_center()
+        .rounded(px(Theme::CONTROL_RADIUS))
+}
+
 fn footer_row(segments: Vec<AnyElement>) -> AnyElement {
     div()
         .id("dock-footer")
@@ -418,27 +445,23 @@ impl Composer {
     /// The mode the chat's next run takes, where its agent says none of its own: quiet, as the
     /// recommended default reads; a click opens the model menu at its Mode choices.
     fn picked_mode_segment(&self, label: SharedString, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        div()
-            .id("dock-picked-mode")
-            .role(Role::Button)
+        // slopty: on a touch screen the chip takes a finger's 44 pt around what it draws (#23).
+        let (segment, reach) = finger_segment("dock-picked-mode");
+        segment
             .aria_label(SharedString::from(format!("Mode: {label}")))
-            .flex_none()
-            .h(px(SEGMENT_HEIGHT))
-            .px(px(6.0))
-            .flex()
-            .items_center()
-            .rounded(px(Theme::CONTROL_RADIUS))
-            .text_size(crate::typography::ui_rems(11.0))
             .text_color(theme.text_faint)
             .cursor_pointer()
             .tab_index(0)
-            .map(|el| crate::surface_chrome::focus_ring(el, theme))
-            .bg(motion::hover_blend("dock-picked-mode-hover", gpui::transparent_black(), crate::theme::ink(0.05)))
+            .map(|el| crate::surface_chrome::focus_ring_within(el, theme, reach))
             .on_hover(motion::hover_listener("dock-picked-mode-hover"))
             .on_click(cx.listener(|this, _, window, cx| {
                 this.pickers.update(cx, |pickers, cx| pickers.open_mode_menu(window, cx));
             }))
-            .child(label)
+            .child(
+                segment_drawn()
+                    .bg(motion::hover_blend("dock-picked-mode-hover", gpui::transparent_black(), crate::theme::ink(0.05)))
+                    .child(label),
+            )
             .into_any_element()
     }
 
@@ -566,38 +589,35 @@ impl Composer {
         let lock = chip.tone == ModeChip::DANGER;
         let open = self.footer.menu.get() == Some(&FooterMenu::Mode);
         let switchable = can_switch && chip.choices.len() > 1;
-        let segment = div()
-            .id("dock-mode")
-            .role(Role::Button)
-            .relative()
-            .flex_none()
-            .h(px(SEGMENT_HEIGHT))
-            .px(px(6.0))
-            .flex()
-            .items_center()
+        // slopty: on a touch screen the chip takes a finger's 44 pt around what it draws (#23).
+        let (segment, reach) = finger_segment("dock-mode");
+        let drawn = segment_drawn()
             .gap(px(5.0))
-            .rounded(px(Theme::CONTROL_RADIUS))
-            .text_size(crate::typography::ui_rems(11.0))
-            .font_weight(if wash.is_some() { gpui::FontWeight::MEDIUM } else { gpui::FontWeight::NORMAL })
-            .text_color(color)
             .when(lock, |el| el.child(crate::icons::icon(crate::icons::LOCK).size(px(12.0)).text_color(color)))
             .child(SharedString::from(words.clone()));
+        let segment = segment
+            .relative()
+            .font_weight(if wash.is_some() { gpui::FontWeight::MEDIUM } else { gpui::FontWeight::NORMAL })
+            .text_color(color);
         let aria = SharedString::from(format!("Mode: {words}"));
         if !switchable {
-            return segment.aria_label(aria).when_some(wash, |el, wash| el.bg(wash)).into_any_element();
+            return segment
+                .aria_label(aria)
+                .child(drawn.when_some(wash, |el, wash| el.bg(wash)))
+                .into_any_element();
         }
         let rest = wash.unwrap_or(gpui::transparent_black());
         let segment = segment
             .cursor_pointer()
             // slopty: a tab stop with the shared ring; ↩ or Space opens the menu keyed.
             .tab_index(0)
-            .map(|el| crate::surface_chrome::focus_ring(el, theme))
+            .map(|el| crate::surface_chrome::focus_ring_within(el, theme, reach))
             .aria_expanded(open)
-            .bg(if open {
+            .child(drawn.bg(if open {
                 crate::theme::ink(0.05)
             } else {
                 motion::hover_blend("dock-mode-hover", rest, crate::theme::ink(0.05))
-            })
+            }))
             .on_hover(motion::hover_listener("dock-mode-hover"))
             .action_hint("Mode", Keys::Fixed("shift-tab"), cx)
             .aria_label(aria)

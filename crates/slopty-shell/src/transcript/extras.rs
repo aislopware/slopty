@@ -893,7 +893,8 @@ impl Transcript {
                     .role(gpui::Role::Button)
                     .aria_label(label.clone())
                     .aria_expanded(open)
-                    .h(px(28.0))
+                    // slopty: a finger's row on a touch screen (#23).
+                    .h(px(crate::surface_chrome::touch_row_height(28.0)))
                     .px(px(10.0))
                     .rounded(px(Theme::CONTROL_RADIUS))
                     .flex()
@@ -983,7 +984,8 @@ impl Transcript {
             )))
             .aria_expanded(open)
             .w_full()
-            .h(px(32.0))
+            // slopty: a finger's row on a touch screen (#23).
+            .h(px(crate::surface_chrome::touch_row_height(32.0)))
             .px(px(10.0))
             .flex()
             .flex_row()

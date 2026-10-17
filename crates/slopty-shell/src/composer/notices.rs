@@ -457,6 +457,8 @@ mod tests {
             let pressed = self.pressed.clone();
             div()
                 .flex()
+                .items_start()
+                .p(px(20.0))
                 .child(
                     notice_action("composer-stall-keep", "Keep waiting", &theme)
                         .on_click(move |_, _, _| pressed.set(pressed.get() + 1)),
@@ -493,5 +495,36 @@ mod tests {
         assert_eq!(pressed.get(), 1, "Enter presses it");
         cx.update(|window, cx| window.focus_next(cx));
         assert_eq!(focused(cx).as_deref(), Some("Context —"));
+    }
+
+    /// slopty: on a touch screen the context meter takes a finger's 44 pt press, drawn 24 tall
+    /// as on a Mac (#23).
+    #[gpui::test]
+    fn the_meter_takes_a_fingers_press(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::default()));
+        let line = Line { pressed: std::rc::Rc::default() };
+        let (_, cx) = cx.add_window_view(|_, _| line);
+        let meter = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| {
+                window.set_a11y_active(true);
+                window.refresh();
+                window.draw(cx).clear(cx);
+                let scale = f64::from(window.scale_factor());
+                let tree = window.a11y_tree().expect("a tree");
+                let rect = tree
+                    .nodes
+                    .iter()
+                    .find(|(_, node)| node.label() == Some("Context —"))
+                    .and_then(|(_, node)| node.bounds())
+                    .expect("the meter");
+                (((rect.x1 - rect.x0) / scale) as f32, ((rect.y1 - rect.y0) / scale) as f32)
+            })
+        };
+        crate::shell::force_touch(true);
+        let (w, h) = meter(cx);
+        assert!(w.min(h) >= 43.9, "under a finger's 44 pt: {w}x{h}");
+        crate::shell::force_touch(false);
+        let (_, h) = meter(cx);
+        assert_eq!(h.round(), 24.0, "as drawn on a Mac");
     }
 }

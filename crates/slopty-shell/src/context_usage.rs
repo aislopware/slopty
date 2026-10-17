@@ -43,30 +43,39 @@ pub(crate) fn ring_chip(
 ) -> gpui::Stateful<gpui::Div> {
     // slopty: each ring names itself to the accessibility tree ("Plan usage 64%").
     let name = if id == "account-usage" { "Plan usage" } else { "Context" };
-    // slopty: a keyboard stop with the shared ring: Tab reaches it, Enter or Space opens it.
-    crate::surface_chrome::key_stop(div().id(id), theme)
-        .role(gpui::Role::Button)
-        .aria_label(SharedString::from(format!("{name} {label}")))
-        .flex_none()
+    // slopty: on a touch screen it takes a finger's 44 pt around the 24 it draws, its margins
+    // giving the room back; the wash and the ring stay on what it draws (#23).
+    let reach = crate::surface_chrome::touch_reach(24.0);
+    let drawn = div()
         .flex()
         .items_center()
         .gap(px(5.0))
         .h(px(24.0))
         .px(px(6.0))
         .rounded(px(6.0))
-        .text_size(crate::typography::ui_rems(11.0))
-        .text_color(text)
-        .cursor_pointer()
         // slopty: the faded hover; a percent that changes keeps its width.
         .bg(crate::motion::hover_blend(
             id,
             if open { crate::theme::ink(0.05) } else { gpui::transparent_black() },
             crate::theme::ink(0.05),
         ))
-        .on_hover(crate::motion::hover_listener(id))
         .font_features(crate::typography::tabular())
         .child(ring(fraction, arc, theme))
-        .child(SharedString::from(label))
+        .child(SharedString::from(label.clone()));
+    // slopty: a keyboard stop with the shared ring: Tab reaches it, Enter or Space opens it.
+    crate::surface_chrome::focus_ring_within(div().id(id).tab_index(0), theme, reach)
+        .on_mouse_down(gpui::MouseButton::Left, |_, window, _| window.prevent_default())
+        .role(gpui::Role::Button)
+        .aria_label(SharedString::from(format!("{name} {label}")))
+        .flex_none()
+        .flex()
+        .p(px(reach))
+        .m(px(-reach))
+        .text_size(crate::typography::ui_rems(11.0))
+        .text_color(text)
+        .cursor_pointer()
+        .on_hover(crate::motion::hover_listener(id))
+        .child(drawn)
 }
 
 /// The footer's 16px progress ring: a faint full track under a `fraction` arc

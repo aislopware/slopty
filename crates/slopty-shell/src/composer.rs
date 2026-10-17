@@ -10021,24 +10021,27 @@ impl Composer {
             SendButtonMode::Stop => {
                 // slopty: Escape stops only when the setting says so; the hint names it then.
                 let escape = crate::settings::current(cx).escape_stops_active_agent;
-                let stop = crate::surface_chrome::focus_ring(
+                // slopty: a finger's press on a touch screen, the circle drawn as before (#23).
+                let (press, reach) = finger_press("composer-stop", 28.0, 28.0);
+                let stop = crate::surface_chrome::focus_ring_within(
+                    press.role(Role::Button).tab_index(0).cursor_pointer(),
+                    &theme,
+                    reach,
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.interrupt_selected(cx)))
+                .child(
                     div()
-                        .id("composer-stop")
-                        .role(Role::Button)
-                        .tab_index(0)
+                        .id("composer-stop-drawn")
                         .size(px(28.0))
                         .flex_none()
                         .rounded_full()
-                        .bg(theme.text),
-                    &theme,
-                )
-                .flex()
-                .items_center()
-                .justify_center()
-                .cursor_pointer()
-                .hover(|s| s.opacity(0.85))
-                .on_click(cx.listener(|this, _, _, cx| this.interrupt_selected(cx)))
-                .child(div().size(px(11.0)).rounded(px(3.0)).bg(theme.bg));
+                        .bg(theme.text)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .hover(|s| s.opacity(0.85))
+                        .child(div().size(px(11.0)).rounded(px(3.0)).bg(theme.bg)),
+                );
                 if escape {
                     stop.action_hint("Stop", Keys::Fixed("escape"), cx).into_any_element()
                 } else {
@@ -10064,7 +10067,13 @@ impl Composer {
                     ComposerSendBehavior::ModEnter => Box::new(ModifiedSubmit),
                 };
                 let focus = self.input.read(cx).focus_handle.clone();
-                let send = send_circle("composer-send", reason.is_some(), &theme).role(Role::Button);
+                // slopty: a finger's press on a touch screen, the circle drawn as before (#23).
+                let (press, reach) = finger_press("composer-send", 28.0, 28.0);
+                let send = press
+                    .debug_selector(|| "composer-send".into())
+                    .role(Role::Button)
+                    .when(reason.is_none(), |el| el.cursor_pointer())
+                    .child(send_circle("composer-send-drawn", reason.is_some(), &theme));
                 match reason {
                     Some(reason) => send
                         .aria_label(label)
@@ -10072,7 +10081,7 @@ impl Composer {
                         .tooltip(crate::settings::widgets::detail_tooltip(label, reason, None))
                         .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
                         .into_any_element(),
-                    None => crate::surface_chrome::focus_ring(send.tab_index(0), &theme)
+                    None => crate::surface_chrome::focus_ring_within(send.tab_index(0), &theme, reach)
                         .on_click(cx.listener(|this, _, _, cx| this.on_submit(cx)))
                         .action_hint(label, Keys::ActionIn(action, focus), cx)
                         .into_any_element(),
@@ -10110,6 +10119,25 @@ pub(crate) fn send_circle(
                 .size(px(14.0))
                 .text_color(theme.bg),
         )
+}
+
+/// slopty: the press of a control drawn `width` by `height` pt: on a touch screen it takes a
+/// finger's 44 pt around what it draws, its negative margins giving the room back, so the layout,
+/// the drawn wash and the focus ring (`focus_ring_within` with the reach) stay put (#23). Under a
+/// pointer it is the drawn size. Returns the press and how far it reaches past each edge.
+pub(crate) fn finger_press(id: impl Into<gpui::ElementId>, width: f32, height: f32) -> (gpui::Stateful<gpui::Div>, f32) {
+    let (x, y) = (crate::surface_chrome::touch_reach(width), crate::surface_chrome::touch_reach(height));
+    let press = div()
+        .id(id)
+        .flex_none()
+        .w(px(width + 2.0 * x))
+        .h(px(height + 2.0 * y))
+        .mx(px(-x))
+        .my(px(-y))
+        .flex()
+        .items_center()
+        .justify_center();
+    (press, x.min(y))
 }
 
 /// The completion popups' floating rails run through
@@ -10679,22 +10707,16 @@ impl Render for Composer {
         // `<input type=file accept="image/*" multiple>`); paste/drop also feed
         // the same strip. The leading utility group owns the spacing between
         // this button and the model picker.
-        let attach = crate::surface_chrome::focus_ring(div().id("composer-attach"), &theme)
-            .size(px(28.0))
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded_full()
+        // slopty: a finger's press on a touch screen, the wash drawn on the 28 as before (#23).
+        let (attach_press, attach_reach) = finger_press("composer-attach", 28.0, 28.0);
+        let attach_wash = motion::hover_blend(
+            &attach_hover_key,
+            gpui::transparent_black(),
+            crate::theme::ink(0.10),
+        );
+        let attach = crate::surface_chrome::focus_ring_within(attach_press, &theme, attach_reach)
             .cursor_pointer()
-            // slopty composer-actions.tsx attach: `transition-colors`.
-            .bg(motion::hover_blend(
-                &attach_hover_key,
-                gpui::transparent_black(),
-                crate::theme::ink(0.10),
-            ))
             .on_hover(motion::hover_listener(attach_hover_key))
-            .relative()
             // slopty: dictation removed.
             .role(Role::Button)
             .tab_index(0)
@@ -10716,21 +10738,24 @@ impl Render for Composer {
                     .ok();
             })
             .child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(
-                            crate::icons::icon(crate::icons::PAPERCLIP)
-                                // Its painted bounds are centered in the 24px viewbox;
-                                // a larger glyph balances the brand icon without moving
-                                // it off-center inside the unchanged 28px hit target.
-                                .size(px(18.0))
-                                .text_color(theme.text_muted),
-                        ),
-                );
+                div()
+                    .size(px(28.0))
+                    .flex_none()
+                    .rounded_full()
+                    // slopty composer-actions.tsx attach: `transition-colors`.
+                    .bg(attach_wash)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        crate::icons::icon(crate::icons::PAPERCLIP)
+                            // Its painted bounds are centered in the 24px viewbox;
+                            // a larger glyph balances the brand icon without moving
+                            // it off-center inside the unchanged 28px hit target.
+                            .size(px(18.0))
+                            .text_color(theme.text_muted),
+                    ),
+            );
         // Staged-thumbnail strip (attachment-ui.tsx AttachmentStrip), above
         // the input inside the pill in both modes.
         let strip = self.render_attachment_strip(&theme, cx);

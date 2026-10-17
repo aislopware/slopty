@@ -160,6 +160,12 @@ thread_local! {
     static FORCE_COMPACT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+/// slopty: a test elsewhere lays its views out as a touch screen's (`on`) or a Mac's.
+#[cfg(test)]
+pub(crate) fn force_touch(on: bool) {
+    FORCE_COMPACT.with(|force| force.set(on));
+}
+
 /// Whether this build lays a narrow window out as a phone: iOS, or a test that asks.
 fn phone_platform() -> bool {
     touch_screen()

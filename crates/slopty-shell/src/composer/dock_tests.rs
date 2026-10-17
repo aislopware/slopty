@@ -33,6 +33,8 @@ struct Node {
     selected: Option<bool>,
     expanded: Option<bool>,
     y: f32,
+    w: f32,
+    h: f32,
 }
 
 fn tree(window: &Window) -> Vec<Node> {
@@ -53,6 +55,8 @@ fn tree(window: &Window) -> Vec<Node> {
                     selected: node.is_selected(),
                     expanded: node.is_expanded(),
                     y: (r.y0 / scale) as f32,
+                    w: ((r.x1 - r.x0) / scale) as f32,
+                    h: ((r.y1 - r.y0) / scale) as f32,
                 },
             )
         })
@@ -219,6 +223,41 @@ fn the_tray_puts_what_needs_you_first_and_a_failed_stop_says_why(cx: &mut TestAp
     );
     let failure = composer.read_with(cx, |composer, _| composer.failure().cloned());
     assert_eq!(failure.as_deref(), Some("Couldn't stop it while Slopty is offline. Try again once it reconnects."));
+}
+
+/// slopty: on a touch screen the composer's controls take a finger's 44 pt press (#23): Attach,
+/// Send, the mode and the tray's header; on a Mac each is its drawn size. (The context meter:
+/// `notices::tests::the_meter_takes_a_fingers_press`.)
+#[gpui::test]
+fn a_composers_controls_take_a_fingers_press(cx: &mut TestAppContext) {
+    let tray = WorkTray {
+        main: MainRow::default(),
+        rows: vec![work_row("task:a", WorkRow::COMMAND, true)],
+        counts: WorkCounts { commands: 1, ..WorkCounts::default() },
+        summary: "1 command".into(),
+        can_stop_all: true,
+    };
+    let dock = ChatDock { mode: Some(modes("default")), can: can(), ..ChatDock::default() };
+    crate::shell::force_touch(true);
+    let (composer, _, cx) = open(cx, dock, Some(tray));
+    composer.update(cx, |composer, cx| composer.input.update(cx, |input, cx| input.set_text("ship it", cx)));
+    let ours = |nodes: &[Node]| -> Vec<Node> {
+        ["Attach images", "Send message", "Mode: Default", "Expand background work"]
+            .iter()
+            .map(|label| find(nodes, Role::Button, label).unwrap_or_else(|| panic!("{label}: {:?}", labels(nodes, Role::Button))).clone())
+            .collect::<Vec<Node>>()
+    };
+    let touch = ours(&draw(cx));
+    let small: Vec<_> = touch.iter().filter(|node| node.w.min(node.h) < 43.9).map(|node| (&node.label, node.w, node.h)).collect();
+    assert!(small.is_empty(), "under a finger's 44 pt: {small:?}");
+
+    crate::shell::force_touch(false);
+    let mac = ours(&draw(cx));
+    let size = |label: &str| mac.iter().find(|node| node.label.starts_with(label)).map(|node| (node.w.round(), node.h.round())).unwrap();
+    assert_eq!(size("Attach images"), (28.0, 28.0), "as drawn on a Mac");
+    assert_eq!(size("Send message"), (28.0, 28.0), "as drawn on a Mac");
+    assert_eq!(size("Mode: Default").1, 24.0, "as drawn on a Mac");
+    assert_eq!(size("Expand background work").1, 32.0, "as drawn on a Mac");
 }
 
 /// A reveal from the transcript opens the tray at its row, an ended one included.

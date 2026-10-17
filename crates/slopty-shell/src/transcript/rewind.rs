@@ -113,25 +113,20 @@ impl Transcript {
         let busy = self.rewind.busy || self.rewind.pending.is_some();
         let message_id = message.to_string();
         let fade_key = format!("rewind-message-hover-{message}");
+        // slopty: a finger's press on a touch screen, the wash drawn on the 24 (#23).
+        let (press, reach) = super::strip_press(format!("rewind-message-{message}"));
+        let wash = if busy {
+            gpui::transparent_black()
+        } else {
+            crate::motion::hover_blend(&fade_key, gpui::transparent_black(), crate::theme::ink(0.08))
+        };
         Some(
-            div()
-                .id(SharedString::from(format!("rewind-message-{message}")))
+            super::strip_control(press, theme, reach) // slopty: a tab stop.
                 .role(gpui::Role::Button)
                 .aria_label("Rewind…")
                 .when(busy, |el| el.aria_description("Once the turn ends"))
-                .size(px(Theme::SPACE_MD * 2.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(Theme::CONTROL_RADIUS))
-                .map(|el| super::strip_control(el, theme)) // slopty: a tab stop.
                 .when(!busy, |el| {
                     el.cursor_pointer()
-                        .bg(crate::motion::hover_blend(
-                            &fade_key,
-                            gpui::transparent_black(),
-                            crate::theme::ink(0.08),
-                        ))
                         .on_hover(crate::motion::hover_listener(fade_key))
                         .on_click(cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
                             this.open_rewind_menu(
@@ -150,9 +145,11 @@ impl Transcript {
                 }))
                 .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
                 .child(
-                    crate::icons::icon(crate::icons::RESTART)
-                        .size(px(14.0))
-                        .text_color(if busy { theme.text_faint } else { theme.text_muted }),
+                    super::strip_drawn().bg(wash).child(
+                        crate::icons::icon(crate::icons::RESTART)
+                            .size(px(14.0))
+                            .text_color(if busy { theme.text_faint } else { theme.text_muted }),
+                    ),
                 )
                 .into_any_element(),
         )

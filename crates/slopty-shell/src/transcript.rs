@@ -142,6 +142,12 @@ const TOOL_TEXT_SIZE: f32 = 12.0;
 const TOOL_LABEL_SIZE: f32 = TOOL_TEXT_SIZE;
 const TOOL_LABEL_LINE_HEIGHT: f32 = 18.0;
 const TOOL_GROUP_HEADER_HEIGHT: f32 = 26.0;
+
+/// slopty: a tool group's summary row as drawn: a finger's row on a touch screen (#23).
+fn tool_group_header_height() -> f32 {
+    crate::surface_chrome::touch_row_height(TOOL_GROUP_HEADER_HEIGHT)
+}
+
 /// Compact rows retain the analytic heights used by row and group folds.
 const TOOL_TREE_ROW_HEIGHT: f32 = 32.0;
 const TOOL_FOLD: motion::MotionSpec = motion::MotionSpec::new(140, motion::EASE_OUT);
@@ -8159,23 +8165,11 @@ impl Transcript {
             let copy = copy_text.map(|text| {
                 let entry_id = copy_entry_id.clone();
                 let fade_key = format!("copy-message-hover-{entry_id}");
-                div()
-                    .id(SharedString::from(format!("copy-message-{entry_id}")))
-                    .size(px(Theme::SPACE_MD * 2.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(Theme::CONTROL_RADIUS))
+                // slopty: a finger's press on a touch screen, the wash drawn on the 24 (#23).
+                let (press, reach) = strip_press(format!("copy-message-{entry_id}"));
+                strip_control(press, &theme, reach) // slopty: a tab stop.
                     .cursor_pointer()
-                    // Same quiet icon-button treatment as the copy action
-                    // over transcript code blocks.
-                    .bg(motion::hover_blend(
-                        &fade_key,
-                        gpui::transparent_black(),
-                        crate::theme::ink(0.08),
-                    ))
-                    .on_hover(motion::hover_listener(fade_key))
-                    .map(|el| strip_control(el, &theme)) // slopty: a tab stop.
+                    .on_hover(motion::hover_listener(fade_key.clone()))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.copy_message(entry_id.clone(), text.clone(), cx)
                     }))
@@ -8183,13 +8177,23 @@ impl Transcript {
                     .role(gpui::Role::Button)
                     .hint(if copied_message { "Copied" } else { "Copy message" })
                     .child(
-                        crate::icons::icon(if copied_message {
-                            crate::icons::CHECK
-                        } else {
-                            crate::icons::COPY
-                        })
-                        .size(px(14.0))
-                        .text_color(theme.text_muted),
+                        strip_drawn()
+                            // Same quiet icon-button treatment as the copy action
+                            // over transcript code blocks.
+                            .bg(motion::hover_blend(
+                                &fade_key,
+                                gpui::transparent_black(),
+                                crate::theme::ink(0.08),
+                            ))
+                            .child(
+                                crate::icons::icon(if copied_message {
+                                    crate::icons::CHECK
+                                } else {
+                                    crate::icons::COPY
+                                })
+                                .size(px(14.0))
+                                .text_color(theme.text_muted),
+                            ),
                     )
             });
             let metadata = div()
@@ -8911,7 +8915,8 @@ impl Transcript {
             .items_center()
             .gap(px(6.0))
             .pr(px(4.0))
-            .h(px(TOOL_GROUP_HEADER_HEIGHT))
+            // slopty: a finger's row on a touch screen (#23).
+            .h(px(tool_group_header_height()))
             .cursor_pointer()
             .text_size(px(TOOL_LABEL_SIZE))
             .line_height(px(TOOL_LABEL_LINE_HEIGHT))
@@ -9252,7 +9257,7 @@ impl Transcript {
             .when(collapses, |el| {
                 el.child(reveal_tool_row(
                     header.into_any_element(),
-                    TOOL_GROUP_HEADER_HEIGHT,
+                    tool_group_header_height(),
                     header_reveal,
                 ))
             })
@@ -9485,9 +9490,30 @@ fn user_bubble_text(
 }
 
 /// slopty: a hover strip's control: a tab stop whose hairline takes the accent from the
-/// keyboard, so focus never changes its size.
-pub(super) fn strip_control<E: InteractiveElement + Styled>(el: E, theme: &Theme) -> E {
-    crate::surface_chrome::focus_ring(el.tab_index(0), theme)
+/// keyboard, so focus never changes its size; the ring stands around what it draws, `reach`
+/// inside its press ([`strip_press`]).
+pub(super) fn strip_control<E: InteractiveElement + Styled>(el: E, theme: &Theme, reach: f32) -> E {
+    crate::surface_chrome::focus_ring_within(el.tab_index(0), theme, reach)
+}
+
+/// slopty: what a hover strip's control draws, its wash and its icon.
+const STRIP_CONTROL_SIZE: f32 = Theme::SPACE_MD * 2.0;
+
+/// slopty: a hover strip control's press: a finger's 44 pt on a touch screen around the
+/// [`strip_drawn`] it holds, the layout unchanged (#23); the drawn size under a pointer.
+pub(super) fn strip_press(id: impl Into<SharedString>) -> (gpui::Stateful<gpui::Div>, f32) {
+    crate::composer::finger_press(id.into(), STRIP_CONTROL_SIZE, STRIP_CONTROL_SIZE)
+}
+
+/// slopty: a hover strip control as drawn, for its wash and its icon.
+pub(super) fn strip_drawn() -> gpui::Div {
+    div()
+        .size(px(STRIP_CONTROL_SIZE))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(Theme::CONTROL_RADIUS))
 }
 
 /// The upload status painted in a sent chip's icon well.

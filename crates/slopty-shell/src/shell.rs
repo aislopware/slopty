@@ -99,6 +99,8 @@ mod mod_panes; // slopty: a mod's pane as a tab (S2)
 mod page_panes; // slopty: a page an agent showed, as a tab (M)
 mod compact; // slopty: the phone's anatomy
 pub(crate) use compact::touch_screen; // slopty: the keyboard waits for a tap
+#[cfg(test)]
+pub(crate) use compact::force_touch; // slopty: tests lay a view out for a finger
 mod chrome_keys; // slopty: find, history, tab and picker keys, and undoing an archive
 // slopty: the window's own commands, for the menu bar (`app_menus`).
 pub use chrome_keys::{
