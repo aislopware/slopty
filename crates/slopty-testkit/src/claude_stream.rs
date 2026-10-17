@@ -1192,7 +1192,14 @@ impl Stub {
             );
             "Subagent found it."
         };
-        self.tool_result(&tool_use, summary, stopped);
+        // As Claude Code answers an `Agent` call: the run it started named by its agent id, which
+        // is how its subagent's thread is known to the call.
+        let structured = json!({
+            "status": if stopped { "stopped" } else { "completed" }, "agentId": task,
+            "agentType": "general-purpose", "prompt": "Look around",
+            "content": [{ "type": "text", "text": summary }],
+        });
+        self.tool_result_with(&tool_use, summary, stopped, &structured);
         self.pause(self.gap)?;
         let said = "Done: the agent is back.";
         self.assistant(&json!({ "type": "text", "text": said }), None, None);

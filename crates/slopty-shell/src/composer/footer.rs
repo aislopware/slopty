@@ -163,7 +163,6 @@ fn mode_words(chip: &ModeChip) -> String {
     if chip.words.trim().is_empty() { chip.label.clone() } else { chip.words.clone() }
 }
 
-/// The footer's row of `segments`.
 /// slopty: a footer chip's press, a button: on a touch screen it takes a finger's 44 pt around
 /// what it draws, its margins giving the room back, so the row lays out as drawn and the wash
 /// and the ring (`focus_ring_within` with the reach) stay on the chip (#23). The reach.
@@ -191,6 +190,7 @@ fn segment_drawn() -> gpui::Div {
         .rounded(px(Theme::CONTROL_RADIUS))
 }
 
+/// The footer's row of `segments`.
 fn footer_row(segments: Vec<AnyElement>) -> AnyElement {
     div()
         .id("dock-footer")

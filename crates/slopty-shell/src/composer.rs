@@ -10124,11 +10124,17 @@ pub(crate) fn send_circle(
 /// slopty: the press of a control drawn `width` by `height` pt: on a touch screen it takes a
 /// finger's 44 pt around what it draws, its negative margins giving the room back, so the layout,
 /// the drawn wash and the focus ring (`focus_ring_within` with the reach) stay put (#23). Under a
-/// pointer it is the drawn size. Returns the press and how far it reaches past each edge.
+/// pointer it is the drawn size. On a touch screen its press raises no keyboard: the composer's
+/// pill leaves the field unfocused for it. Returns the press and how far it reaches past each edge.
 pub(crate) fn finger_press(id: impl Into<gpui::ElementId>, width: f32, height: f32) -> (gpui::Stateful<gpui::Div>, f32) {
     let (x, y) = (crate::surface_chrome::touch_reach(width), crate::surface_chrome::touch_reach(height));
     let press = div()
         .id(id)
+        .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
+            if crate::shell::touch_screen() {
+                window.prevent_default();
+            }
+        })
         .flex_none()
         .w(px(width + 2.0 * x))
         .h(px(height + 2.0 * y))
@@ -10771,7 +10777,9 @@ impl Render for Composer {
                 cx.listener(|this, _, window, cx| {
                     // Padding and action controls are part of the text composer.
                     // Open menus keep their own keyboard/search focus.
-                    if !this.pickers.read(cx).is_open() {
+                    // slopty: on a touch screen a control's press (`finger_press`) raises no
+                    // keyboard: it marks the press, and Send lets the field go.
+                    if !this.pickers.read(cx).is_open() && !window.default_prevented() {
                         window.focus(&this.input.focus_handle(cx), cx);
                         window.prevent_default();
                     }

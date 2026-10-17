@@ -11697,7 +11697,9 @@ impl Render for Shell {
             }
         };
         // Toasts float over every phase and route.
-        let root = root.children(crate::toast::render_toaster(window, cx));
+        // slopty: on a phone above its tab bar and capsule, or its composer.
+        let lift = self.compact_toast_lift(window, cx);
+        let root = root.children(crate::toast::render_toaster(lift, window, cx));
 
         // A manually-driven tween is mid-flight: keep frames coming (the same
         // scheduling `with_animation` would have requested). Hover color fades

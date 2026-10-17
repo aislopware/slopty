@@ -33,6 +33,8 @@ const TITLE_ROW: f32 = 52.0;
 const TITLE_SIZE: f32 = 30.0;
 /// The "New chat" capsule: its height, the plus's plate and inset.
 const CAPSULE: f32 = 48.0;
+/// The room between the capsule and the tab bar.
+const CAPSULE_BELOW: f32 = 8.0;
 const PLATE: f32 = 34.0;
 const PLATE_INSET: f32 = 7.0;
 /// The tab bar's row above the home indicator.
@@ -242,6 +244,22 @@ impl Shell {
         *pages.sessions.get_or_insert(true)
     }
 
+    /// slopty: how much of the window's floor a phone's chrome holds, for the toasts to stand
+    /// above: the Chats page's tab bar and capsule, or a chat's composer over the home
+    /// indicator or the keyboard; 0 off a phone.
+    pub(super) fn compact_toast_lift(&self, window: &Window, cx: &mut App) -> f32 {
+        if !self.compact() {
+            return 0.0;
+        }
+        let insets = window.insets();
+        if self.compact_sessions_up(cx) {
+            return f32::from(insets.safe_area.bottom) + TAB_BAR + CAPSULE + CAPSULE_BELOW;
+        }
+        let floor =
+            if self.keyboard_band_held(window) { insets.effective().bottom } else { insets.safe_area.bottom };
+        f32::from(floor) + self.bottom_stack.get()
+    }
+
     fn set_compact_sessions(up: bool, cx: &mut App) {
         cx.default_global::<Pages>().sessions = Some(up);
     }
@@ -261,21 +279,11 @@ impl Shell {
         self.compact().then_some(self.viewport_width)
     }
 
-    /// slopty: whether a field holds the keyboard: something has the focus, and not one of the
-    /// shell's own handles that take keys without a field (its root, its panes, its neutral).
-    pub(super) fn keyboard_band_held(&self, window: &Window, cx: &App) -> bool {
-        let Some(focused) = window.focused(cx) else {
-            return false;
-        };
-        let shells = [
-            &self.unfocused,
-            &self.shortcut_focus,
-            &self.settings_focus,
-            &self.navigation_focus.main,
-            &self.navigation_focus.right,
-            &self.navigation_focus.tabs,
-        ];
-        !shells.into_iter().any(|handle| *handle == focused)
+    /// slopty: whether a field holds the keyboard: the focus is on a text field, the only
+    /// thing the soft keyboard comes for. A pressed button (Send) or one of the shell's own
+    /// handles holds the focus with no keyboard up.
+    pub(super) fn keyboard_band_held(&self, window: &Window) -> bool {
+        window.text_input_focused()
     }
 
     /// `page` kept clear of the system's edges and the keyboard, on iOS.
@@ -294,7 +302,7 @@ impl Shell {
         // slopty: the keyboard's band stays only while a field takes what is typed: once the
         // keyboard drops (a send lets the composer go) the page reaches the safe area again,
         // whatever keyboard frame UIKit last reported.
-        let bottom = if self.keyboard_band_held(window, cx) {
+        let bottom = if self.keyboard_band_held(window) {
             insets.effective().bottom
         } else {
             safe.bottom
@@ -466,7 +474,7 @@ impl Shell {
         div()
             .flex_none()
             .px(px(16.0))
-            .pb(px(8.0))
+            .pb(px(CAPSULE_BELOW))
             .child(crate::frost::frosted(CAPSULE / 2.0, crate::frost::MENU_BLUR, capsule))
             .into_any_element()
     }
@@ -1109,27 +1117,33 @@ mod tests {
         assert!(!typing, "the composer waits for a tap of its own (asked after the tap: {pending})");
     }
 
-    // slopty: the keyboard's band is held only while a field holds the keyboard: after a send
-    // lets the composer go, the page reaches the safe area again.
+    // slopty: the keyboard's band is held only while a text field holds the focus: a send lets
+    // the composer go, and a pressed button that keeps the focus (Send) takes no keyboard, so the
+    // page reaches the safe area again.
     #[gpui::test]
     fn the_keyboards_band_goes_with_the_field(cx: &mut gpui::TestAppContext) {
         use gpui::Focusable as _;
-        let (shell, cx) = phone(cx);
-        shell.update(cx, |shell, cx| {
-            shell.state.update(cx, |state, cx| state.select_chat(Some("fix".into()), cx));
-        });
+        let (shell, cx) = ipad(cx);
+        cx.simulate_resize(gpui::size(px(390.0), px(844.0)));
+        shell.update(cx, |shell, cx| shell.open_chat("docs".into(), cx));
         redraw(cx);
+        assert!(shell.read_with(cx, |shell, _| shell.compact()), "the phone's own layout");
         let held = |cx: &mut gpui::VisualTestContext| {
-            cx.update(|window, cx| shell.read(cx).keyboard_band_held(window, cx))
+            redraw(cx);
+            cx.update(|window, cx| shell.read(cx).keyboard_band_held(window))
         };
         cx.update(|window, cx| {
             let field = shell.read(cx).composer.read(cx).input.focus_handle(cx);
             window.focus(&field, cx);
         });
-        redraw(cx);
         assert!(held(cx), "the composer holds the keyboard");
+        let _button = cx.update(|window, cx| {
+            let button = cx.focus_handle();
+            window.focus(&button, cx);
+            button
+        });
+        assert!(!held(cx), "a pressed button holds the focus, not the keyboard");
         cx.update(|window, cx| window.blur(cx));
-        redraw(cx);
         assert!(!held(cx), "a send lets the composer go");
         cx.update(|window, cx| {
             let neutral = shell.read(cx).unfocused.clone();
@@ -1221,5 +1235,144 @@ mod tests {
         assert_eq!(summary(2, 0), "2 working");
         assert_eq!(summary(0, 1), "1 needs you");
         assert_eq!(summary(2, 3), "2 working · 3 need you");
+    }
+
+    // slopty: on a phone a subagent's card drills in: the event its tap sends opens the run on
+    // the phone's chat page, under "parent › subagent" with its way back.
+    #[gpui::test]
+    fn a_phones_subagent_card_drills_in(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) = ipad(cx);
+        cx.simulate_resize(gpui::size(px(390.0), px(844.0)));
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                state.chats.push(
+                    serde_json::from_value(serde_json::json!({
+                        "id": "look", "title": "Look", "parentChatId": "docs",
+                        "subagent": true, "inParent": true, "deviceId": "local",
+                        "archived": false, "createdAt": chrono::Utc::now(),
+                    }))
+                    .unwrap(),
+                );
+            });
+            shell.open_chat("docs".into(), cx);
+        });
+        let labels = |cx: &mut gpui::VisualTestContext| {
+            for _ in 0..3 {
+                cx.run_until_parked();
+                cx.update(|window, cx| {
+                    window.set_a11y_active(true);
+                    window.refresh();
+                    window.draw(cx).clear(cx);
+                });
+            }
+            cx.update(|window, _| {
+                let tree = window.a11y_tree().expect("a tree");
+                tree.nodes
+                    .iter()
+                    .map(|(_, node)| (node.role(), node.label().unwrap_or_default().to_owned()))
+                    .collect::<Vec<_>>()
+            })
+        };
+        let before = labels(cx);
+        assert!(shell.read_with(cx, |shell, _| shell.compact()), "the phone's own layout");
+        assert!(
+            before.iter().any(|(_, label)| label == "Back to Chats"),
+            "the phone's chat page: {before:?}"
+        );
+        let transcript = shell.read_with(cx, |shell, _| shell.transcript.clone());
+        transcript.update(cx, |_, cx| {
+            cx.emit(crate::transcript::TranscriptEvent::OpenSubagent { chat_id: "look".into() });
+        });
+        let nodes = labels(cx);
+        FORCE_COMPACT.with(|force| force.set(false));
+        use gpui::accesskit::Role as A11y;
+        assert!(
+            nodes.contains(&(A11y::Navigation, "Chat docs › Look".to_owned())),
+            "the breadcrumb: {nodes:?}"
+        );
+        assert!(nodes.contains(&(A11y::Link, "Back to Chat docs".to_owned())), "{nodes:?}");
+    }
+
+    // slopty: on a phone a toast stands above the tab bar and the New chat capsule, hiding
+    // neither; off a phone it keeps the window's corner.
+    #[gpui::test]
+    fn a_phones_toast_stands_over_its_tabs_and_capsule(cx: &mut gpui::TestAppContext) {
+        let (_shell, cx) = ipad(cx);
+        cx.simulate_resize(gpui::size(px(390.0), px(844.0)));
+        cx.update(|_, cx| {
+            cx.set_reduce_motion(true);
+            crate::toast::info(cx, "Link copied");
+        });
+        let bounds = |cx: &mut gpui::VisualTestContext| {
+            for _ in 0..3 {
+                cx.run_until_parked();
+                cx.update(|window, cx| {
+                    window.set_a11y_active(true);
+                    window.refresh();
+                    window.draw(cx).clear(cx);
+                });
+            }
+            cx.update(|window, _| {
+                let scale = f64::from(window.scale_factor());
+                let tree = window.a11y_tree().expect("a tree");
+                let find = |role: gpui::Role, starts: &str| {
+                    tree.nodes
+                        .iter()
+                        .find(|(_, node)| {
+                            node.role() == role
+                                && node.label().is_some_and(|label| label.starts_with(starts))
+                        })
+                        .and_then(|(_, node)| node.bounds())
+                        .map(|rect| ((rect.y0 / scale) as f32, (rect.y1 / scale) as f32))
+                };
+                (
+                    find(gpui::Role::Status, "Link copied"),
+                    find(gpui::Role::Button, "New chat"),
+                    find(gpui::Role::TabList, "Tabs"),
+                    f32::from(window.viewport_size().height),
+                )
+            })
+        };
+        let (toast, capsule, tabs, _) = bounds(cx);
+        let (toast, capsule, tabs) =
+            (toast.expect("the toast"), capsule.expect("the capsule"), tabs.expect("the tabs"));
+        assert!(toast.1 <= capsule.0 && toast.1 <= tabs.0, "toast {toast:?}, capsule {capsule:?}, tabs {tabs:?}");
+        FORCE_COMPACT.with(|force| force.set(false));
+        cx.simulate_resize(gpui::size(px(1320.0), px(880.0)));
+        let (toast, _, _, height) = bounds(cx);
+        let toast = toast.expect("the toast on a Mac");
+        assert!((height - toast.1 - 24.0).abs() < 0.5, "the window's corner: {toast:?} in {height}");
+    }
+
+    // slopty: on a touch screen a tap on Send lets the field go (the pill takes no focus for a
+    // control's press), so the keyboard drops and the page reaches the safe area again.
+    #[gpui::test]
+    fn a_tap_on_send_lets_the_phones_field_go(cx: &mut gpui::TestAppContext) {
+        use gpui::Focusable as _;
+        let (shell, cx) = ipad(cx);
+        cx.simulate_resize(gpui::size(px(390.0), px(844.0)));
+        shell.update(cx, |shell, cx| shell.open_chat("docs".into(), cx));
+        redraw(cx);
+        let field = shell.read_with(cx, |shell, cx| shell.composer.read(cx).input.focus_handle(cx));
+        let tap_send = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| window.focus(&field, cx));
+            shell.update(cx, |shell, cx| {
+                let input = shell.composer.read(cx).input.clone();
+                input.update(cx, |input, cx| input.set_text("hello", cx));
+            });
+            redraw(cx);
+            redraw(cx);
+            let send = cx.debug_bounds("composer-send").expect("send").center();
+            cx.simulate_click(send, gpui::Modifiers::default());
+            for _ in 0..3 {
+                cx.run_until_parked();
+                redraw(cx);
+            }
+            cx.update(|window, cx| {
+                (field.is_focused(window), shell.read(cx).keyboard_band_held(window))
+            })
+        };
+        assert_eq!(tap_send(cx), (false, false), "the phone's field and the keyboard's band go");
+        FORCE_COMPACT.with(|force| force.set(false));
     }
 }

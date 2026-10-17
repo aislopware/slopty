@@ -584,8 +584,13 @@ fn kind_icon(kind: ToastKind, theme: &Theme) -> AnyElement {
         .into_any_element()
 }
 
-/// The toaster for this window, or `None` when nothing is showing.
-pub fn render_toaster(window: &mut Window, cx: &mut App) -> Option<AnyElement> {
+/// slopty: how far over the chrome a toast stands that `lift` holds above the window's floor.
+const LIFT_GAP: f32 = 8.0;
+
+/// The toaster for this window, or `None` when nothing is showing. slopty: `lift` is how much
+/// of the window's floor the layout holds (a phone's tab bar and capsule, or its composer and
+/// the home indicator): the stack stands above it; 0 keeps the window's corner.
+pub fn render_toaster(lift: f32, window: &mut Window, cx: &mut App) -> Option<AnyElement> {
     let now = Instant::now();
     let reduced = cx.reduce_motion();
     let active = window.is_window_active();
@@ -906,7 +911,9 @@ pub fn render_toaster(window: &mut Window, cx: &mut App) -> Option<AnyElement> {
             gpui::anchored()
                 .position(point(
                     viewport.width - px(OFFSET) - px(width),
-                    viewport.height - px(OFFSET) - px(stack_height),
+                    viewport.height
+                        - px(if lift > 0.0 { lift + LIFT_GAP } else { OFFSET })
+                        - px(stack_height),
                 ))
                 .child(stack),
         )
@@ -1033,7 +1040,7 @@ mod tests {
 
     impl gpui::Render for Host {
         fn render(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
-            div().size_full().children(render_toaster(window, cx))
+            div().size_full().children(render_toaster(0.0, window, cx))
         }
     }
 
