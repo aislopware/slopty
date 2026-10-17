@@ -203,13 +203,6 @@ fn composer_width_changed(previous: Option<f32>, current: f32) -> bool {
 /// Caret blink half-period (standard textarea cadence: ~500ms on / 500ms off).
 pub const CARET_BLINK_MS: u64 = 500;
 
-/// Caret blink phase for a time since the last keystroke/caret move: solid
-/// through the first half-period (typing bursts never blink — each keystroke
-/// resets the phase), then alternating.
-pub fn caret_visible(ms_since_activity: u64) -> bool {
-    (ms_since_activity / CARET_BLINK_MS) % 2 == 0
-}
-
 /// Auto-grow: content height for a wrapped-line count.
 pub fn input_content_height(wrapped_lines: usize) -> f32 {
     wrapped_lines.max(1) as f32 * INPUT_LINE_HEIGHT
@@ -2051,10 +2044,14 @@ pub struct ComposerInput {
     /// after the input has been measured in the new mode).
     layout_epoch: u64,
     display_is_placeholder: bool,
-    /// Caret blink anchor: reset on every keystroke/caret move so the caret is
-    /// solid while typing and blinks at [`CARET_BLINK_MS`] when idle.
-    blink_anchor: Instant,
-    /// Half-period repaint driver, alive only while the input is focused.
+    // slopty: the phase is state the driver flips, never read off the wall clock as it paints,
+    // so a frame drawn again shows the caret as the frame it replaces did.
+    /// Whether the caret shows in this half-period of its blink: on again at every keystroke
+    /// and caret move, so the caret is solid while typing and blinks at [`CARET_BLINK_MS`]
+    /// when idle.
+    caret_on: bool,
+    /// Half-period driver that flips [`Self::caret_on`], alive only while the input is
+    /// focused; restarted with each reset, so its half-periods start there.
     blink_task: Option<Task<()>>,
     // slopty: dictation removed.
     // -- undo history --
@@ -2159,7 +2156,7 @@ impl ComposerInput {
             hides_bang: false,
             layout_epoch: 0,
             display_is_placeholder: true,
-            blink_anchor: Instant::now(),
+            caret_on: true,
             blink_task: None,
             // slopty: dictation removed.
             undo_stack: Vec::new(),
@@ -2214,7 +2211,8 @@ impl ComposerInput {
     /// Reset the caret blink phase (solid again) — called on every edit and
     /// caret move, matching textarea behavior.
     fn reset_blink(&mut self) {
-        self.blink_anchor = Instant::now();
+        self.caret_on = true;
+        self.blink_task = None;
     }
 
     /// Caret paint gate: focused input in an active window, in the "on" blink
@@ -2232,13 +2230,17 @@ impl ComposerInput {
                     cx.background_executor()
                         .timer(Duration::from_millis(CARET_BLINK_MS))
                         .await;
-                    if this.update(cx, |_, cx| cx.notify()).is_err() {
+                    let flipped = this.update(cx, |this: &mut Self, cx| {
+                        this.caret_on = !this.caret_on;
+                        cx.notify();
+                    });
+                    if flipped.is_err() {
                         break;
                     }
                 }
             }));
         }
-        caret_visible(self.blink_anchor.elapsed().as_millis() as u64)
+        self.caret_on
     }
 
     /// Where the input was last drawn.
@@ -14692,17 +14694,6 @@ mod tests {
         assert!(composer_flip(false, 500.0, 300.0, false, false));
         assert!(!composer_flip(true, 0.0, 300.0, false, false));
         assert!(composer_flip(false, 10.0, 150.0, false, false));
-    }
-
-    #[test]
-    fn caret_blink_phase() {
-        // Solid through the first half-period (typing burst never blinks).
-        assert!(caret_visible(0));
-        assert!(caret_visible(CARET_BLINK_MS - 1));
-        // Off for the second half-period, back on for the third.
-        assert!(!caret_visible(CARET_BLINK_MS));
-        assert!(!caret_visible(2 * CARET_BLINK_MS - 1));
-        assert!(caret_visible(2 * CARET_BLINK_MS));
     }
 
     #[test]

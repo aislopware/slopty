@@ -368,3 +368,26 @@ fn a_chat_arriving_after_an_empty_first_frame_does_not_open_by_itself(cx: &mut T
         assert_eq!(selected, None, "{step}");
     }
 }
+
+/// The composer's caret blinks as state its driver flips: a frame drawn again past a
+/// half-period of the wall clock, with no flip between, shows the caret as the frame it
+/// replaces did.
+#[gpui::test]
+fn a_caret_drawn_again_later_shows_as_it_did(cx: &mut TestAppContext) {
+    let (shell, cx) = shell(cx);
+    cx.simulate_keystrokes("cmd-1");
+    cx.run_until_parked();
+    let input = shell.read_with(cx, |shell, cx| shell.composer.read(cx).input.clone());
+    cx.update(|window, cx| {
+        window.activate_window();
+        window.focus(&input.read(cx).focus_handle(cx), cx);
+    });
+    cx.run_until_parked();
+    let shown = cx.update(|window, cx| {
+        window.is_window_active() && input.read(cx).focus_handle(cx).is_focused(window)
+    });
+    assert!(shown, "the caret is drawn: the window active, the composer focused");
+    assert_eq!(stale(cx), None, "the caret on");
+    std::thread::sleep(std::time::Duration::from_millis(crate::composer::CARET_BLINK_MS + 50));
+    assert_eq!(stale(cx), None, "past a half-period of the wall clock");
+}
