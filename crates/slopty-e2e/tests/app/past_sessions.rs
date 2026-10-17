@@ -45,21 +45,52 @@ fn escaped(dir: &Path) -> String {
     dir.to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect()
 }
 
+/// When the TUI's sessions were first asked, in ms since the epoch: a day and an hour before the
+/// run, so History says "1d" of them on whatever day the run is.
+fn asked_at() -> u64 {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap();
+    u64::try_from(now.as_millis()).unwrap().saturating_sub(25 * 3_600_000)
+}
+
+/// `at` (ms since the epoch) as Claude Code's transcripts write a moment: RFC 3339 in UTC, to the
+/// millisecond (the days-to-date step is Howard Hinnant's `civil_from_days`).
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "the days-to-civil formula cannot overflow an i64 for any moment since the epoch"
+)]
+fn rfc3339(at: u64) -> String {
+    let (secs, ms) = (i64::try_from(at / 1000).unwrap(), at % 1000);
+    let (days, of_day) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    let shifted = days + 719_468;
+    let era = shifted.div_euclid(146_097);
+    let doe = shifted - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    let (hour, minute, second) = (of_day / 3600, of_day % 3600 / 60, of_day % 60);
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{ms:03}Z")
+}
+
 /// Claude Code's own records of session `id` in `folder`, under `home`: its transcript, one
-/// prompt and answer per turn, on `main`, and the prompts in its prompt history, as the TUI
-/// writes them.
-fn seed(home: &Path, folder: &Path, id: &str, asked: &[&str], said: &[&str]) {
+/// prompt and answer per turn a minute apart from `at` (ms since the epoch), on `main`, and the
+/// prompts in its prompt history, as the TUI writes them.
+fn seed(home: &Path, folder: &Path, id: &str, at: u64, asked: &[&str], said: &[&str]) {
     let claude = home.join(".claude");
     let project = claude.join("projects").join(escaped(folder));
     std::fs::create_dir_all(&project).unwrap();
     let cwd = folder.to_string_lossy();
     let mut lines = Vec::new();
     let mut parent = serde_json::Value::Null;
+    let turn_at =
+        |turn: usize| at.saturating_add(u64::try_from(turn).unwrap().saturating_mul(60_000));
     for (turn, (prompt, answer)) in asked.iter().zip(said).enumerate() {
         let common = |uuid: &str, parent: &serde_json::Value| {
             serde_json::json!({
                 "uuid": uuid, "parentUuid": parent, "sessionId": id, "cwd": cwd,
-                "timestamp": format!("2026-10-15T10:0{turn}:00.000Z"), "isSidechain": false,
+                "timestamp": rfc3339(turn_at(turn)), "isSidechain": false,
                 "userType": "external", "entrypoint": "cli", "version": "2.1.301",
                 "gitBranch": "main",
             })
@@ -86,10 +117,8 @@ fn seed(home: &Path, folder: &Path, id: &str, asked: &[&str], said: &[&str]) {
     std::fs::write(project.join(format!("{id}.jsonl")), transcript).unwrap();
     let mut history = std::fs::read_to_string(claude.join("history.jsonl")).unwrap_or_default();
     for (turn, prompt) in asked.iter().enumerate() {
-        let at = 1_792_000_000_000_u64
-            .saturating_add(u64::try_from(turn).unwrap().saturating_mul(60_000));
         let line = serde_json::json!({
-            "display": prompt, "pastedContents": {}, "timestamp": at, "project": cwd,
+            "display": prompt, "pastedContents": {}, "timestamp": turn_at(turn), "project": cwd,
             "sessionId": id,
         });
         history.push_str(&line.to_string());
@@ -128,9 +157,10 @@ async fn stack() -> (ServedApp, PathBuf, PathBuf) {
         std::fs::create_dir_all(root.join("repo")).unwrap();
         let home = std::fs::canonicalize(root.join("home")).unwrap();
         let repo = std::fs::canonicalize(root.join("repo")).unwrap();
-        seed(&home, &repo, PARSER, &PARSER_ASKED, &PARSER_SAID);
-        seed(&home, &repo, LEXER, &LEXER_ASKED, &LEXER_SAID);
-        seed(&home, &repo, HELD, &HELD_ASKED, &HELD_SAID);
+        let at = asked_at();
+        seed(&home, &repo, PARSER, at, &PARSER_ASKED, &PARSER_SAID);
+        seed(&home, &repo, LEXER, at, &LEXER_ASKED, &LEXER_SAID);
+        seed(&home, &repo, HELD, at, &HELD_ASKED, &HELD_SAID);
         let record = root.join("heard-{conversation}.json");
         vec![("STUB_RECORD".to_owned(), record.to_string_lossy().into_owned())]
     })

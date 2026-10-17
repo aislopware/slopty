@@ -10028,7 +10028,15 @@ impl Composer {
                     &theme,
                     reach,
                 )
-                .on_click(cx.listener(|this, _, _, cx| this.interrupt_selected(cx)))
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.interrupt_selected(cx);
+                    // slopty: the press took the focus, and the button goes as the turn stops:
+                    // the field keeps the keyboard, as before the press. A finger's press took
+                    // none and raises no keyboard (`finger_press`).
+                    if !crate::shell::touch_screen() {
+                        window.focus(&this.input.focus_handle(cx), cx);
+                    }
+                }))
                 .child(
                     div()
                         .id("composer-stop-drawn")

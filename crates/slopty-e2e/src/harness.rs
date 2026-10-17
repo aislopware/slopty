@@ -37,7 +37,7 @@ const POLL: Duration = Duration::from_millis(50);
 /// A test that passes takes its root and its lock away with it. One that fails keeps its root
 /// for inspection, says where on its way out, and marks it (`.kept-for-inspection`); only the
 /// newest eight marked roots stay. A stack that failed to start, which returns an error rather
-/// than panicking, keeps its root too: only one [`StackDir::started`] goes with a pass. What a run
+/// than panicking, keeps its root too: only one whose stack came up goes with a pass. What a run
 /// killed outright left behind goes once it is two hours old, as the next root is made.
 #[derive(Debug)]
 pub struct StackDir {

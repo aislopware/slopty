@@ -1216,6 +1216,64 @@ mod tests {
         assert!((f32::from(button.size.height) - ACTION_HEIGHT).abs() < 0.5, "{button:?}");
     }
 
+    /// What the window last painted, sorted, against the same state drawn from scratch at its
+    /// moment: the lines only the frame shown holds, then those only the scratch frame holds.
+    fn stale(cx: &mut gpui::VisualTestContext) -> Option<(Vec<String>, Vec<String>)> {
+        cx.update(|window, cx| {
+            let mut shown = window.painted_primitives();
+            shown.sort_unstable();
+            window.repeat_frame_time();
+            window.refresh();
+            window.draw(cx).clear(cx);
+            let mut scratch = window.painted_primitives();
+            scratch.sort_unstable();
+            let extra: Vec<String> = shown.iter().filter(|l| !scratch.contains(l)).cloned().collect();
+            let missed: Vec<String> = scratch.iter().filter(|l| !shown.contains(l)).cloned().collect();
+            (!extra.is_empty() || !missed.is_empty()).then_some((extra, missed))
+        })
+    }
+
+    // slopty: a toast whose words take two lines comes in front of shorter ones: the collapsed
+    // stack behind it takes its height in the frames the window shows, as from scratch.
+    #[gpui::test]
+    fn a_taller_front_toast_raises_the_stack_as_from_scratch(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(Theme::dark());
+            cx.set_reduce_motion(true);
+        });
+        let (_, cx) = cx.add_window_view(|_, _| Host);
+        cx.update(|window, _| {
+            window.activate_window();
+            window.set_check_retained(Some(gpui::RetainedCheck::Panic));
+        });
+        cx.simulate_resize(gpui::size(px(1320.0), px(880.0)));
+        cx.update(|_, cx| {
+            info(cx, "agent: showed the sidebar");
+            info(cx, "agent: opened a terminal in repo");
+        });
+        cx.run_until_parked();
+        assert_eq!(stale(cx), None, "two one-line toasts");
+        cx.update(|_, cx| {
+            info(cx, "agent: opened /private/tmp/slopty-e2e-served-c3b99a60/repo/README.md");
+        });
+        cx.run_until_parked();
+        // The frames the platform delivers next, as many as the window asks for.
+        for _ in 0..4 {
+            cx.update(|window, cx| window.simulate_next_frame(cx));
+            cx.run_until_parked();
+        }
+        let heights: Vec<f32> =
+            cx.update(|_, cx| cx.global::<ToastStore>().toasts.iter().map(|t| t.height).collect());
+        assert!(heights[2] > heights[0] + 8.0, "the path takes two lines: {heights:?}");
+        let found = stale(cx).map(|(extra, missed)| {
+            let quads = |lines: &[String]| {
+                lines.iter().filter(|l| l.contains("Quad")).take(6).cloned().collect::<Vec<_>>().join("\n  ")
+            };
+            format!("shown only:\n  {}\nscratch only:\n  {}", quads(&extra), quads(&missed))
+        });
+        assert_eq!(found, None, "the taller toast in front: {heights:?}");
+    }
+
     #[test]
     fn glide_restarts_from_its_current_value() {
         let now = Instant::now();

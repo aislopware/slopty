@@ -138,8 +138,12 @@ async fn code_copies_in_place_and_ansi_draws_in_colour() {
         copy.bounds,
         again.bounds
     );
-    // The pointer on the reply shows its hover line, whose stamp is the run's moment.
-    crate::served::goldens_with(drv, &renders, "code-copy-no-shift", &[], &["Copy message"]).await;
+    // The block as it rests once Copy is back, the pointer gone from it: a pointer still on the
+    // button shows its tooltip and the reply's hover line only until an appearance's change
+    // draws the window again, so the light render and the dark one would hold different moments.
+    drv.ok(&slopty_e2e::Command::Move { x: 1300.0, y: 60.0 }).await.unwrap();
+    seen(drv, "the tooltip gone", STEP, |d| d.a11y.iter().all(|n| n.role != "Tooltip")).await;
+    goldens(drv, &renders, "code-copy-no-shift", &[]).await;
     stack.shutdown().await;
 }
 

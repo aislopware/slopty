@@ -169,7 +169,11 @@ fn before_next_draw(window: &Window, f: impl FnOnce(&mut Window, &mut App) + 'st
 /// settled on. Something may arrive between [`settle`]'s last frame and this one (a toast whose
 /// first frame guesses its height and measures it in paint, ARCHITECTURE.md "Drawing under
 /// retention"): the app is still drawing toward that state, so settle again rather than judge
-/// the frame between, at most [`RESETTLES`] times.
+/// the frame between, at most [`RESETTLES`] times. What arrived since the last frame and is
+/// still to be drawn (an agent's toast pushed after [`settle`] read its last frame) is drawn
+/// first, as the frame about to be drawn would draw it, views built again only where they were
+/// told: a frame read before it would still show what settled and be judged against a state it
+/// never drew.
 async fn on_settled_frame(
     window: AnyWindowHandle,
     cx: &mut gpui::AsyncApp,
@@ -185,6 +189,7 @@ async fn on_settled_frame(
         // a dispatched action updates it.
         let scheduled = cx.update_window(window, |_root, window, _cx| {
             before_next_draw(window, move |window, cx| {
+                window.draw(cx).clear(cx);
                 let still = last_try || still_shows(window, settled.as_ref());
                 let _sent = done_tx.send(still.then(|| frame(window, cx)));
             });

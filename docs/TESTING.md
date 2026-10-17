@@ -24,7 +24,10 @@ Tests make no sound on this Mac: the drawn screen's worker sounds only under `SL
    it judges, and only after a frame that painted nothing new (at most eight): a value measured
    while drawing reaches the views that read it a frame later (ARCHITECTURE.md, "Drawing under
    retention"), as when a narrower column flips the composer to two rows and the transcript
-   then clears the taller stack. The scratch draws show the moment the frame shown showed
+   then clears the taller stack. What changed after that frame and is not drawn yet (an agent's
+   toast pushed while the dump waited) is drawn first, as the next frame would draw it, so the
+   frame judged never predates the state the scratch draws see. The scratch draws show the
+   moment the frame shown showed
    (`Window::repeat_frame_time`): every GPUI animation of a frame and the shell's own tweens read
    the frame's one moment (`App::frame_time`), so a fade a hair short of its end in the frame
    shown is there in the frames from scratch too, though they are drawn after its end. What the
