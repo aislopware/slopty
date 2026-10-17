@@ -3445,8 +3445,9 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `thread::assets::tests`; `slopty-workerd` `threads.rs`
     `a_claude_code_page_asks_its_app_through_claude_code`.
 - ✅ **A code rewind can be undone; a command's edits and why Claude Code asks are shown (2026-10-16).**
-  - **Undoing a rewind.** Before `rewind_files`, the worker records the folder's tree as a
-    private snapshot (`refs/slopty/threads/<thread>/rewound`) and sets
+  - **Undoing a rewind** (how the folder is kept: superseded on 2026-10-17, "A rewind is
+    undone in any folder", below). Before `rewind_files`, the worker records the folder's tree
+    as a private snapshot (`refs/slopty/threads/<thread>/rewound`) and sets
     `ThreadState::rewound` (`turn`, `tree`, `at_ms`). `Intent::Unrewind { tree }` (needs
     `Cap::REWIND`) puts that tree back: removed files return, files the rewind brought back are
     removed, and modes are set. It names the tree it undoes, so an undo from a stale view is
@@ -3846,3 +3847,30 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   sidebar already says how long a chat has waited on the person ("Waiting on you since"), and the
   ladder sorts it first. Tests: `hub::ladder::tests::a_need_left_open_is_told_again_once_per_wait`
   and `a_reminder_says_how_long_it_waited`.
+
+- ✅ **A rewind is undone in any folder, and an undo puts back all of it or nothing
+  (2026-10-17).** "Undo rewind" after "Code and conversation" deleted the branch and left the
+  files rewound whenever the chat's folder was not in git, with no word of why. The worker kept
+  the folder before a rewind only as a git tree of its repository, so outside git it kept
+  nothing; the branch alone was enough for the toast to offer an undo, and the undo then only
+  deleted the branch. The e2e case `a_rewind_takes_the_turn_back_and_undo_returns_it` works in
+  such a folder. The fix:
+  - **What is kept.** Before the rewind, the worker asks Claude Code which files it would put
+    back (`rewind_files` with `dry_run`, the door Claude desktop uses too), then keeps those
+    files as they are, each with its mode, or notes that it was not there. They go in the
+    thread's own directory in the worker's data (`<snapshots>/<thread>/rewound/`, the list in
+    `files.json`, the bytes by BLAKE3). The list's hash is `Rewound::tree`, so a stale undo is
+    still refused. This holds in git or not and costs only the files the rewind changes: a
+    snapshot of a whole folder outside git could be someone's home directory. It replaces the
+    git snapshot and its `rewound` ref. Undo writes the files back and removes the ones the
+    rewind brought back. In git it then judges the tree for review as before. A turn begun after
+    the rewind still ends the offer, now outside git too.
+  - **All or nothing.** `slopty.UndoRewind` waits for the files to come back, then deletes the
+    branch. A refused undo deletes nothing, and its toast says why. A code rewind whose files
+    were not kept offers no undo. Its answer says why instead (`noUndo`), and the dock shows
+    that as a note, where it used to offer an undo that silently skipped the code.
+  - Tests: `slopty-workerd` `threads.rs` `a_branched_rewind_outside_git_is_undone` (the rewind
+    and the fork at once, then the undo and the branch's discard at once, as the dock sends them)
+    and `a_rewind_of_the_files_is_undone` (in git); `slopty-ui` `view_model::work::tests`
+    `a_rewind_goes_back_to_before_the_message` (a refused undo keeps the branch; the branch goes
+    only once the folder is back) and `a_code_rewind_undoes_by_its_folder` (`noUndo`).

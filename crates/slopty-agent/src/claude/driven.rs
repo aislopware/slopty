@@ -66,7 +66,7 @@ mod model;
 mod work;
 
 pub use asks::DIALOG_KINDS;
-pub use doors::{Ran, SURFACE_CLIENT};
+pub use doors::{Ran, RewindPreview, SURFACE_CLIENT};
 pub use ending::{ENDED, Ending, Kind as EndKind, ending};
 pub use model::THINKING_FACT;
 use model::{mode_words, switched_to};
@@ -186,6 +186,8 @@ enum Control {
     App(u64),
     /// The files put back to before turn `turn`.
     Rewind(slopty_proto::thread::TurnId),
+    /// The files a rewind would put back, asked without putting them back, by the ask's number.
+    RewindPreview(u64),
     /// One of the asks a mod's surfaces make.
     Ui(doors::Ui),
     /// A side question, asked as it stands until answered.
@@ -295,6 +297,8 @@ pub struct Driven {
     tailed: Option<WallMs>,
     /// The answers to pages' asks of their apps, not taken yet.
     app_answers: Vec<(u64, slopty_proto::visual::AppAnswer)>,
+    /// What rewinds would put back, by each ask's number, not taken yet.
+    rewind_previews: Vec<(u64, RewindPreview)>,
     /// The MCP servers' statuses as last seen, so a change asks for their tools again.
     servers: String,
     /// The surfaces the session's mods draw, and the elements in them.
@@ -395,6 +399,7 @@ impl Driven {
             outputs: Outputs::default(),
             tailed: None,
             app_answers: Vec::new(),
+            rewind_previews: Vec::new(),
             servers: String::new(),
             surfaces: doors::Surfaces::default(),
             quiet: HashSet::new(),
@@ -928,6 +933,10 @@ impl Driven {
                 Vec::new()
             }
             Control::Rewind(turn) => self.rewound(turn, &said, now),
+            Control::RewindPreview(preview) => {
+                self.rewind_previewed(preview, &said);
+                Vec::new()
+            }
             Control::Ui(ui) => self.ui_answered(&ui, &said, now),
             Control::Side(asked) => self.side_answered(asked, &said),
         }
@@ -965,6 +974,7 @@ impl Driven {
             Control::Rules => "to list its permission rules",
             Control::McpStatus => "to list its MCP servers",
             Control::App(_)
+            | Control::RewindPreview(_)
             | Control::Ui(_)
             | Control::Side(_)
             | Control::ContextUsage

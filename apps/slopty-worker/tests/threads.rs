@@ -1307,6 +1307,106 @@ mod threads {
         assert!(matches!(again, Outcome::Refused { .. }), "{again:?}");
     }
 
+    /// A rewind of the code and the conversation is undone in a folder outside git, as the
+    /// dock's "Undo rewind" does it: the rewind and the fork go at once, the worker keeps the file
+    /// the rewind takes away as Claude Code names it first (`rewind_files` with `dry_run`), and the
+    /// undo, sent with the branch's discard, writes it back.
+    #[tokio::test]
+    async fn a_branched_rewind_outside_git_is_undone() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let work = root.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        // One record per process: the branch's Claude Code is one of its own.
+        let programs = root.join("programs");
+        std::fs::create_dir_all(&programs).unwrap();
+        std::os::unix::fs::symlink(bin("slopty-stub-claude"), programs.join("claude")).unwrap();
+        let records = root.join("records");
+        std::fs::create_dir_all(&records).unwrap();
+        let env = [
+            ("PATH", slopty_testkit::env::path_with(&programs)),
+            ("STUB_RECORD", records.join(concat!("{", "pid", "}.json")).into_os_string()),
+        ];
+        let daemons = daemons_with(&root, &env).await;
+        let mut a = Client::connect(&daemons, ClientId::new()).await;
+        let thread = started(&mut a, claude_in(&work, Some("write notes.txt first words"))).await;
+        a.follow(thread).await;
+        a.until(turns_done(1)).await;
+        let notes = work.join("notes.txt");
+        assert_eq!(std::fs::read_to_string(&notes).unwrap(), "first words\n");
+        let first = a.state().turns[0].id;
+
+        // Both at once, as `slopty.Rewind` sends them.
+        let (rewind, fork) = (IntentId::new(), IntentId::new());
+        a.send(ThreadRequest::Intent {
+            id: rewind,
+            thread,
+            intent: Intent::Rewind { turn: first },
+        })
+        .await;
+        let after = Some(slopty_proto::thread::TurnId(first.0.saturating_sub(1)));
+        a.send(ThreadRequest::Intent { id: fork, thread, intent: Intent::Fork { after } }).await;
+        let dones = both_done(&mut a, [rewind, fork]).await;
+        assert_eq!(dones[&rewind], Outcome::Done);
+        let Outcome::Started { thread: branch } = dones[&fork] else { panic!("{dones:?}") };
+        let kept = a.until(|c| c.thread.as_ref().is_some_and(|s| s.rewound.is_some()));
+        tokio::time::timeout(Duration::from_secs(30), kept)
+            .await
+            .expect("the files the rewind takes back were kept, outside git too");
+        let rewound = a.state().rewound.clone().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while notes.exists() {
+            assert!(std::time::Instant::now() < deadline, "notes.txt taken back");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        // The undo and the branch's delete at once, as `slopty.UndoRewind` sends them.
+        let (undo, discard) = (IntentId::new(), IntentId::new());
+        let unrewind = Intent::Unrewind { tree: rewound.tree.clone() };
+        a.send(ThreadRequest::Intent { id: undo, thread, intent: unrewind }).await;
+        a.send(ThreadRequest::Intent { id: discard, thread: branch, intent: Intent::Discard })
+            .await;
+        let dones = both_done(&mut a, [undo, discard]).await;
+        assert_eq!(dones[&undo], Outcome::Done, "{dones:?}");
+        assert_eq!(dones[&discard], Outcome::Done, "{dones:?}");
+        assert_eq!(std::fs::read_to_string(&notes).unwrap(), "first words\n", "back with the undo");
+        a.until(|c| c.thread.as_ref().is_some_and(|s| s.rewound.is_none())).await;
+
+        let dry: Vec<Vec<bool>> = std::fs::read_dir(&records)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|e| e == "json"))
+            .map(|path| {
+                let seen: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+                heard_lines(&seen, "rewind_files")
+                    .iter()
+                    .map(|l| l["request"]["dry_run"].as_bool().unwrap_or(false))
+                    .collect()
+            })
+            .filter(|dry: &Vec<bool>| !dry.is_empty())
+            .collect();
+        assert_eq!(dry, [[true, false]], "asked what it would put back, then put it back");
+    }
+
+    /// The outcomes of intents `ids`, once each is done.
+    async fn both_done(
+        a: &mut Client,
+        ids: [IntentId; 2],
+    ) -> std::collections::HashMap<IntentId, Outcome> {
+        let mut dones = std::collections::HashMap::new();
+        a.heard(|msg| {
+            if let WorkerMsg::IntentDone(IntentDone { id, outcome }) = msg
+                && ids.contains(&id)
+            {
+                dones.insert(id, outcome);
+            }
+            (dones.len() == ids.len()).then_some(())
+        })
+        .await;
+        dones
+    }
+
     /// What keeps the worker's machine awake, from its control socket (`slopty worker awake`).
     async fn awake(daemons: &Daemons) -> slopty_proto::ctl::Awake {
         use tokio::io::AsyncWriteExt as _;

@@ -9,7 +9,7 @@
 
 use std::collections::BTreeSet;
 
-use gpui::{AppContext as _, Context, Task};
+use gpui::{Context, Task};
 use slopty_client::WorkerKey;
 use slopty_proto::thread::wire::{Intent, ThreadRow};
 use slopty_proto::thread::{
@@ -419,15 +419,20 @@ impl WorkspaceView {
                     });
                 }
             }
-            if undo.branch_chat_id.is_some() || undo.tree.is_some() {
+            // An undo puts back all the rewind took or none of it: code put back with no
+            // folder kept has no undo, and the person is told why.
+            if code && undo.tree.is_none() {
+                fields.insert("noUndo".to_owned(), NO_UNDO.into());
+            } else if undo.branch_chat_id.is_some() || undo.tree.is_some() {
                 fields.insert("undo".to_owned(), serde_json::to_value(&undo).unwrap_or_default());
             }
             Ok(RpcReply::Value(answer))
         })
     }
 
-    /// `UndoRewind`: the folder put back as it was before the rewind, the branched chat
-    /// deleted, and the chat it branched from shown again; the answer waits for the folder.
+    /// `UndoRewind`: the folder put back as it was before the rewind, then the branched chat
+    /// deleted, and the chat it branched from shown again; the answer waits for the folder. An
+    /// undo the worker refuses deletes nothing and answers why.
     fn view_undo_rewind(
         &mut self,
         params: &serde_json::Value,
@@ -448,15 +453,14 @@ impl WorkspaceView {
             .tree
             .clone()
             .map(|tree| self.view_act(&undo.chat_id, Intent::Unrewind { tree: TreeRef(tree) }, cx));
-        if let Some(branch) = &undo.branch_chat_id {
-            let delete = serde_json::json!({ "op": "deleteChat", "chatId": branch });
-            if let Err(e) = self.view_mutate(&delete, cx) {
-                return Task::ready(Err(e));
-            }
-        }
-        cx.background_spawn(async move {
+        cx.spawn(async move |this, cx| {
             if let Some(unrewound) = unrewound {
                 unrewound.await?;
+            }
+            if let Some(branch) = &undo.branch_chat_id {
+                let delete = serde_json::json!({ "op": "deleteChat", "chatId": branch });
+                this.update(cx, |this, cx| this.view_mutate(&delete, cx))
+                    .map_err(|e| RpcError::Failed(e.to_string()))??;
             }
             Ok(RpcReply::Value(serde_json::json!({ "chatId": undo.chat_id })))
         })
@@ -554,6 +558,9 @@ async fn rewound_tree(
     }
     None
 }
+
+/// Why a rewind of the code has no undo: the worker kept no folder before it.
+const NO_UNDO: &str = "The files it put back were not kept, so this rewind can't be undone";
 
 /// How often, and how many times, a rewind's folder is looked for once it is done.
 const REWOUND_EVERY: std::time::Duration = std::time::Duration::from_millis(50);

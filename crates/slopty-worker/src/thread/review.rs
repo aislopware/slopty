@@ -10,6 +10,9 @@
 //! A review is a diff between two snapshots, "now" being one taken for it. Keeping and putting
 //! back act once per intent, each checked against the blobs the review showed.
 //!
+//! A rewind is undone ([`Intent::Unrewind`]) from the files its agent said it would put back,
+//! kept just before it in the worker's own directory, in git or not.
+//!
 //! An agent's own review ([`Intent::Review`]) takes the change a review showed as commits it can
 //! name ([`Snapshots::review_range`]): Claude Code's `/code-review` takes `base...head`, Codex's
 //! reviewer the head commit.
@@ -86,6 +89,9 @@ impl Snapshots {
     async fn take_turns(self, thread: ThreadId, mut moments: mpsc::UnboundedReceiver<Moment>) {
         let mut armed: Option<TreeRef> = None;
         while let Some(moment) = moments.recv().await {
+            if let Moment::Began(turn) = moment {
+                self.rewind_outworked(thread, turn);
+            }
             let Some(repo) = self.repo(thread) else { continue };
             let (turn, edge, tree) = match moment {
                 Moment::Busy => {
@@ -100,15 +106,6 @@ impl Snapshots {
                     if self.host.update(thread, |s| (vec![], begun(s, turn))) != Some(false) {
                         continue;
                     }
-                    // A turn begun after a rewind works on the folder as it is: the rewind is not
-                    // undone over its work. (A turn told late is not one.)
-                    let _cleared = self.host.update(thread, |s| {
-                        let started = s.turns.iter().find(|t| t.id == turn).map(|t| t.started_ms);
-                        let after =
-                            s.rewound.as_ref().zip(started).is_some_and(|(r, at)| at > r.at_ms);
-                        let gone = after.then_some(Action::Rewound(None));
-                        (gone.into_iter().collect(), ())
-                    });
                     let tree = match armed.take() {
                         Some(tree) => Some(tree),
                         None => self.take(thread, &repo).await,
@@ -130,6 +127,17 @@ impl Snapshots {
                 self.judge(thread, &repo, &tree).await;
             }
         }
+    }
+
+    /// A turn begun after a rewind works on the folder as it is: the rewind is not undone over
+    /// its work, in git or not. (A turn told late is not one.)
+    fn rewind_outworked(&self, thread: ThreadId, turn: TurnId) {
+        let _cleared = self.host.update(thread, |s| {
+            let started = s.turns.iter().find(|t| t.id == turn).map(|t| t.started_ms);
+            let after = s.rewound.as_ref().zip(started).is_some_and(|(r, at)| at > r.at_ms);
+            let gone = after.then_some(Action::Rewound(None));
+            (gone.into_iter().collect(), ())
+        });
     }
 
     /// Mark whether `thread`'s tree `now` holds changes its person has not kept: anything
@@ -267,21 +275,26 @@ impl Snapshots {
 }
 
 impl Snapshots {
-    /// The folder of `thread` now, taken and kept before its files are put back to before a
-    /// turn, so the rewind can be undone ([`Intent::Unrewind`]); `None` outside git.
-    pub async fn before_rewind(&self, thread: ThreadId) -> Option<TreeRef> {
-        let repo = self.repo(thread)?;
-        let tree = self.take(thread, &repo).await?;
-        if let Err(e) = repo.hold(thread, REWOUND_REF, &tree).await {
-            tracing::warn!(%thread, "the folder before a rewind was not kept: {e}");
-            return None;
+    /// Keep `files` of `thread` as they are now, the ones its agent is about to put back to
+    /// before a turn (named as the agent names them, from the thread's folder), so the rewind can
+    /// be undone ([`Intent::Unrewind`]), in git or not: what names them, in place of the last
+    /// rewind's; `None` when they could not be kept.
+    pub async fn before_rewind(&self, thread: ThreadId, files: &[String]) -> Option<TreeRef> {
+        let cwd = self.host.update(thread, |s| (vec![], s.meta.cwd.clone()))?;
+        let lock = self.lock(thread);
+        let _held = lock.lock().await;
+        match keep(&self.rewound_dir(thread), Path::new(&cwd), files).await {
+            Ok(kept) => Some(kept),
+            Err(e) => {
+                tracing::warn!(%thread, "the files before a rewind were not kept: {e}");
+                None
+            }
         }
-        Some(tree)
     }
 
-    /// Put `thread`'s folder back as `tree`, the one taken before its last rewind, once, for
+    /// Put `thread`'s files back as `kept`, the ones kept before its last rewind, once, for
     /// intent `id`; one that is not the last rewind's is refused.
-    async fn unrewind(&self, thread: ThreadId, id: IntentId, tree: &TreeRef) -> Option<Outcome> {
+    async fn unrewind(&self, thread: ThreadId, id: IntentId, kept: &TreeRef) -> Option<Outcome> {
         if let Some(outcome) = self.host.outcome(thread, id) {
             return Some(outcome);
         }
@@ -290,21 +303,24 @@ impl Snapshots {
         }
         let refused = |reason: &str| Outcome::Refused { reason: reason.to_owned() };
         let last = self.host.update(thread, |s| (vec![], s.rewound.clone()));
-        let outcome = match (last, self.repo(thread)) {
-            (None, _) => refused("The thread is gone"),
-            (Some(None), _) => refused("There is no rewind to undo"),
-            (Some(Some(last)), _) if last.tree != *tree => {
+        let outcome = match last {
+            None => refused("The thread is gone"),
+            Some(None) => refused("There is no rewind to undo"),
+            Some(Some(last)) if last.tree != *kept => {
                 refused("That rewind is not the last one, so it cannot be undone")
             }
-            (_, None) => refused(NOT_IN_GIT),
-            (Some(Some(_)), Some(repo)) => {
+            Some(Some(_)) => {
                 let lock = self.lock(thread);
                 let held = lock.lock().await;
-                match restore(&repo, tree).await {
+                let dir = self.rewound_dir(thread);
+                match put_back(&dir, kept).await {
                     Ok(()) => {
                         self.host.apply(thread, vec![Action::Rewound(None)]);
+                        let _gone = tokio::fs::remove_dir_all(&dir).await;
                         drop(held);
-                        if let Some(now) = self.take(thread, &repo).await {
+                        if let Some(repo) = self.repo(thread)
+                            && let Some(now) = self.take(thread, &repo).await
+                        {
                             self.judge(thread, &repo, &now).await;
                         }
                         Outcome::Done
@@ -317,49 +333,95 @@ impl Snapshots {
         self.picking.lock().remove(&id);
         recorded
     }
+
+    /// Where the files before `thread`'s last rewind are kept.
+    fn rewound_dir(&self, thread: ThreadId) -> PathBuf {
+        self.dir.join(thread.to_string()).join(REWOUND_DIR)
+    }
 }
 
-/// The ref the folder before a thread's last rewind is kept under.
-const REWOUND_REF: &str = "rewound";
+/// The directory under a thread's own that keeps the files before its last rewind: their
+/// list ([`REWOUND_LIST`]) and their bytes, each by its BLAKE3 hash.
+const REWOUND_DIR: &str = "rewound";
 
-/// The working tree of `repo` made `tree` again: each file that differs written as `tree` has
-/// it, one `tree` lacks taken away. Files git ignores are left as they are.
-async fn restore(repo: &Repo, tree: &TreeRef) -> Result<(), Failed> {
-    let now = repo.take().await?;
-    for file in repo.changes(&now, tree).await? {
-        if let Some(was) = file.old_path.as_deref().filter(|was| *was != file.path) {
-            remove(&within(&repo.root, was)?).await?;
+/// The list of the files kept before a rewind, whose BLAKE3 hash names them
+/// ([`slopty_proto::thread::Rewound::tree`]).
+const REWOUND_LIST: &str = "files.json";
+
+/// One file a rewind was to put back, as it was just before.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Kept {
+    /// Where it is.
+    path: PathBuf,
+    /// Its bytes' hash and its mode; `None` when it was not there.
+    was: Option<(String, u32)>,
+}
+
+/// Keep `files` of the folder `cwd` as they are now in `dir`, in place of what it kept: what
+/// names them.
+async fn keep(dir: &Path, cwd: &Path, files: &[String]) -> Result<TreeRef, Failed> {
+    let failed = |what: &Path, e: std::io::Error| Failed(format!("{}: {e}", what.display()));
+    let fresh = dir.with_extension("new");
+    let _stale = tokio::fs::remove_dir_all(&fresh).await;
+    tokio::fs::create_dir_all(&fresh).await.map_err(|e| failed(&fresh, e))?;
+    let mut kept = Vec::new();
+    for file in files {
+        let path = cwd.join(file);
+        let plain = path
+            .components()
+            .all(|c| matches!(c, std::path::Component::RootDir | std::path::Component::Normal(_)));
+        if !plain {
+            return Err(Failed(format!("{file} is not a plain path")));
         }
-        let path = within(&repo.root, &file.path)?;
-        let Some(blob) = file.to.as_deref() else {
-            remove(&path).await?;
+        let was = match tokio::fs::read(&path).await {
+            Ok(bytes) => {
+                let meta = tokio::fs::metadata(&path).await.map_err(|e| failed(&path, e))?;
+                let mode = std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o777;
+                let hash = blake3::hash(&bytes).to_hex().to_string();
+                let at = fresh.join(&hash);
+                tokio::fs::write(&at, bytes).await.map_err(|e| failed(&at, e))?;
+                Some((hash, mode))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(failed(&path, e)),
+        };
+        kept.push(Kept { path, was });
+    }
+    let list = serde_json::to_vec(&kept).map_err(|e| Failed(e.to_string()))?;
+    let at = fresh.join(REWOUND_LIST);
+    tokio::fs::write(&at, &list).await.map_err(|e| failed(&at, e))?;
+    match tokio::fs::remove_dir_all(dir).await {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(failed(dir, e)),
+        _ => {}
+    }
+    tokio::fs::rename(&fresh, dir).await.map_err(|e| failed(dir, e))?;
+    Ok(TreeRef(blake3::hash(&list).to_hex().to_string()))
+}
+
+/// The files kept in `dir` as `kept` named them put back: each written as it was, one that was
+/// not there taken away.
+async fn put_back(dir: &Path, kept: &TreeRef) -> Result<(), Failed> {
+    let failed = |what: &Path, e: std::io::Error| Failed(format!("{}: {e}", what.display()));
+    let gone = || Failed("The files before that rewind are no longer kept".to_owned());
+    let list = tokio::fs::read(dir.join(REWOUND_LIST)).await.map_err(|_missing| gone())?;
+    if blake3::hash(&list).to_hex().as_str() != kept.0 {
+        return Err(gone());
+    }
+    let files: Vec<Kept> = serde_json::from_slice(&list).map_err(|e| Failed(e.to_string()))?;
+    for file in files {
+        let Some((hash, mode)) = file.was else {
+            remove(&file.path).await?;
             continue;
         };
-        let bytes = repo.object(blob).await?;
-        if let Some(dir) = path.parent() {
-            tokio::fs::create_dir_all(dir)
-                .await
-                .map_err(|e| Failed(format!("{}: {e}", file.path)))?;
+        let bytes = tokio::fs::read(dir.join(&hash)).await.map_err(|_missing| gone())?;
+        if let Some(parent) = file.path.parent() {
+            tokio::fs::create_dir_all(parent).await.map_err(|e| failed(parent, e))?;
         }
-        tokio::fs::write(&path, bytes).await.map_err(|e| Failed(format!("{}: {e}", file.path)))?;
-        if let Some(modes) = file.modes {
-            let mode = std::os::unix::fs::PermissionsExt::from_mode(modes.to & 0o777);
-            tokio::fs::set_permissions(&path, mode)
-                .await
-                .map_err(|e| Failed(format!("{}: {e}", file.path)))?;
-        }
+        tokio::fs::write(&file.path, bytes).await.map_err(|e| failed(&file.path, e))?;
+        let mode = std::os::unix::fs::PermissionsExt::from_mode(mode);
+        tokio::fs::set_permissions(&file.path, mode).await.map_err(|e| failed(&file.path, e))?;
     }
     Ok(())
-}
-
-/// `path` of the repository at `root`, refused when it would climb out.
-fn within(root: &Path, path: &str) -> Result<PathBuf, Failed> {
-    let relative = Path::new(path);
-    let plain = relative.components().all(|c| matches!(c, std::path::Component::Normal(_)));
-    if !plain || path.is_empty() {
-        return Err(Failed(format!("{path} is not a path in the repository")));
-    }
-    Ok(root.join(relative))
 }
 
 /// The file at `path` gone; one already gone is fine.
@@ -449,9 +511,11 @@ impl Snapshots {
         }
     }
 
-    /// Let every ref `state`'s thread keeps in its repository go, before the thread is.
+    /// Let every ref `state`'s thread keeps in its repository go, and the files kept before its
+    /// last rewind, before the thread is.
     pub async fn forget(&self, state: &ThreadState) {
         let thread = state.meta.id;
+        let _gone = tokio::fs::remove_dir_all(self.rewound_dir(thread)).await;
         let Some(repo) = self.repo(thread) else { return };
         let lock = self.lock(thread);
         let held = lock.lock().await;

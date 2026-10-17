@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
-use slopty_agent::claude::driven::{Answered, Driven};
+use slopty_agent::claude::driven::{Answered, Driven, RewindPreview};
 use slopty_agent::claude::history::Out;
 use slopty_core::{SessionId, WallMs};
 use slopty_proto::thread::{Action, Delivery, ThreadId, ThreadState};
@@ -120,6 +120,8 @@ pub(super) struct Task {
     home: PathBuf,
     /// The pages' asks of their MCP Apps under way, by number, and the next number.
     apps: (HashMap<u64, oneshot::Sender<AppAnswer>>, u64),
+    /// The rewinds asked what they would put back, by number, and the next number.
+    previews: (HashMap<u64, oneshot::Sender<RewindPreview>>, u64),
     /// When the person's status line runs again, if it is due.
     status_due: Option<tokio::time::Instant>,
     /// Whether a status line command still runs: the next waits for it.
@@ -157,6 +159,7 @@ impl Task {
             stderr,
             home,
             apps: (HashMap::new(), 0),
+            previews: (HashMap::new(), 0),
             status_due: Some(tokio::time::Instant::now()),
             status_busy: Arc::new(AtomicBool::new(false)),
             stdin: None,
@@ -320,6 +323,9 @@ impl Task {
         for (_app, reply) in self.apps.0.drain() {
             let _gone = reply.send(AppAnswer::Refused("Claude Code ended".to_owned()));
         }
+        for (_preview, reply) in self.previews.0.drain() {
+            let _gone = reply.send(Err("Claude Code ended".to_owned()));
+        }
         let _gone = ended.send((self.thread, left));
     }
 
@@ -341,10 +347,15 @@ impl Task {
         self.answer_apps();
     }
 
-    /// Give the pages what their MCP Apps answered.
+    /// Give the pages what their MCP Apps answered, and the rewinds what they would put back.
     fn answer_apps(&mut self) {
         for (app, answer) in self.driven.take_app_answers() {
             if let Some(reply) = self.apps.0.remove(&app) {
+                let _gone = reply.send(answer);
+            }
+        }
+        for (preview, answer) in self.driven.take_rewind_previews() {
+            if let Some(reply) = self.previews.0.remove(&preview) {
                 let _gone = reply.send(answer);
             }
         }
@@ -454,6 +465,13 @@ impl Task {
             ThreadAsk::Rewind { turn } => {
                 let outs = self.driven.rewind(turn, now);
                 self.take(outs);
+            }
+            ThreadAsk::RewindPreview { turn, reply } => {
+                let preview = self.previews.1;
+                self.previews.1 = preview.wrapping_add(1);
+                self.previews.0.insert(preview, reply);
+                self.driven.preview_rewind(preview, turn);
+                self.answer_apps();
             }
             ThreadAsk::Side { question, intent, history } => {
                 let outs = self.driven.side(intent, &question, &history, now);

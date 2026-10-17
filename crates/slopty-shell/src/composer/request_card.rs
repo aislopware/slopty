@@ -1373,9 +1373,15 @@ fn card_link(id: &'static str, words: SharedString, rest: gpui::Hsla, theme: &Th
 
 /// What a rewind's answer offers to undo, whenever it has an undo (a branch to delete, a folder
 /// to restore): a toast with "Undo rewind" (`slopty.UndoRewind`), which puts both back and
-/// shows the chat it answers with. The worker's refusal is an error toast.
+/// shows the chat it answers with. The worker's refusal is an error toast, and a rewind with no
+/// undo says why (`noUndo`).
 pub fn offer_undo_rewind(answer: &Value, state: Entity<AppState>, cx: &mut App) {
-    let Some(undo) = answer.get("undo").filter(|u| u.is_object()).cloned() else { return };
+    let Some(undo) = answer.get("undo").filter(|u| u.is_object()).cloned() else {
+        if let Some(why) = answer.get("noUndo").and_then(Value::as_str) {
+            crate::toast::info(cx, why.to_owned());
+        }
+        return;
+    };
     let branched = undo.get("branchChatId").and_then(Value::as_str).is_some_and(|b| !b.is_empty());
     let words = if branched { "Rewound into a new chat" } else { "Rewound the code" };
     crate::toast::offer(cx, words, "Undo rewind", Duration::from_secs(10), move |cx| {

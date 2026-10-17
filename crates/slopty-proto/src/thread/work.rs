@@ -365,14 +365,14 @@ pub struct RuleChange {
     pub scope: String,
 }
 
-/// The thread's folder as it was just before its files were put back to before a turn
-/// ([`super::wire::Intent::Rewind`]): a tree the worker took and keeps, which
-/// [`super::wire::Intent::Unrewind`] puts back.
+/// The files a rewind ([`super::wire::Intent::Rewind`]) changed, as they were just before it.
+///
+/// The worker keeps them, and [`super::wire::Intent::Unrewind`] puts them back.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Rewound {
     /// The turn whose start the files went back to.
     pub turn: super::TurnId,
-    /// The folder before, as a tree of its repository.
+    /// What names the files kept before, in git or not.
     pub tree: super::TreeRef,
     /// When.
     pub at_ms: WallMs,

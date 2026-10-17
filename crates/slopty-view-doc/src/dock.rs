@@ -480,7 +480,7 @@ pub struct RewindUndo {
     /// The chat a conversation rewind branched, deleted on undo.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch_chat_id: Option<String>,
-    /// The folder before a code rewind, as a tree of its repository, put back on undo.
+    /// What names the files the worker kept before a code rewind, put back on undo.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tree: Option<String>,
 }

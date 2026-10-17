@@ -78,8 +78,8 @@
 //! hears each line: its pid, arguments, directory, `SLOPTY_*` and `CLAUDE_*` environment, every
 //! variable's name with a digest of its value, every line it was sent (`received`), and its tools'
 //! results (`mcp`). In `STUB_RECORD`, `{session}` is the Slopty seat it runs in (`SLOPTY_SESSION`,
-//! `none` outside one) and `{conversation}` the session it was started on, so one setting serves
-//! every agent a machine runs.
+//! `none` outside one), `{conversation}` the session it was started on and `{pid}` its own pid, so
+//! one setting serves every agent a machine runs, a fork of a conversation too.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
@@ -183,6 +183,7 @@ fn knob(name: &str, args: &[String]) -> Option<String> {
         value
             .replace(concat!("{", "conversation", "}"), conversation.as_deref().unwrap_or("none"))
             .replace(concat!("{", "session", "}"), &seat)
+            .replace(concat!("{", "pid", "}"), &std::process::id().to_string())
     })
 }
 

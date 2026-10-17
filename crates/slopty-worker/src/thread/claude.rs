@@ -34,7 +34,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use slopty_agent::claude::driven::{ARGS_FACT, CUSTODY_FACT, Driven, Ran};
+use slopty_agent::claude::driven::{ARGS_FACT, CUSTODY_FACT, Driven, Ran, RewindPreview};
 use slopty_agent::claude::history::Out;
 use slopty_agent::claude::{self as agent, Session};
 use slopty_core::{SessionId, WallMs};
@@ -104,6 +104,10 @@ enum Ask {
     },
 }
 
+/// How long a rewind waits on Claude Code to say what it would put back before it goes on with
+/// no undo.
+const PREVIEW_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// What a client asks of one thread.
 #[derive(Debug)]
 enum ThreadAsk {
@@ -155,6 +159,11 @@ enum ThreadAsk {
     /// Put the files back to before turn `turn`.
     Rewind {
         turn: TurnId,
+    },
+    /// Which files a rewind to before turn `turn` would put back, nothing put back yet.
+    RewindPreview {
+        turn: TurnId,
+        reply: oneshot::Sender<RewindPreview>,
     },
     /// Ask side question `question` for intent `intent`, after the exchanges `history`
     /// (question, answer).
@@ -313,6 +322,21 @@ impl Claude {
             return AppAnswer::Refused("Claude Code threads are not served here".to_owned());
         }
         answer.await.unwrap_or_else(|_| AppAnswer::Refused("Claude Code did not answer".to_owned()))
+    }
+
+    /// Which files a rewind of `thread` to before turn `turn` would put back, asked of its
+    /// running Claude Code's checkpoints first, so they can be kept for an undo; why not while
+    /// it does not run or cannot rewind there.
+    pub async fn rewind_preview(&self, thread: ThreadId, turn: TurnId) -> RewindPreview {
+        let (reply, answer) = oneshot::channel();
+        let asked = self.at_once(thread, ThreadAsk::RewindPreview { turn, reply });
+        if asked.is_err() {
+            return Err("Claude Code is not running".to_owned());
+        }
+        match tokio::time::timeout(PREVIEW_WAIT, answer).await {
+            Ok(Ok(preview)) => preview,
+            _ => Err("Claude Code did not answer".to_owned()),
+        }
     }
 
     /// Hand Slopty's reports, worded `text`, to `thread`'s Claude Code: a message of their own,

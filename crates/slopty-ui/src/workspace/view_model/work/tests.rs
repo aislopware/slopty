@@ -303,16 +303,36 @@ fn a_rewind_goes_back_to_before_the_message(cx: &mut gpui::TestAppContext) {
     assert!(to_branch.contains(&&Intent::Name { title: "Speed up the build".into() }), "{sent:?}");
     assert!(to_branch.contains(&&Intent::Draft { text: "make it faster".into() }), "{sent:?}");
     let undo = serde_json::json!({ "undo": answer["undo"].clone() });
+    let put_back = Intent::Unrewind { tree: TreeRef("before-rewind".into()) };
+    let discarded = |sent: &[(ThreadId, slopty_proto::thread::IntentId, Intent)]| {
+        sent.iter().any(|(to, _, i)| *to == branched && *i == Intent::Discard)
+    };
+    // An undo the worker refuses lets nothing go and says why.
+    let refused = workspace
+        .update(cx, |v, cx| v.view_work_call(calls::UNDO_REWIND, &undo, cx))
+        .expect("a call of Slopty's");
+    cx.run_until_parked();
+    let sent = intents(&mut rx);
+    let Some((_, unrewind, _)) = sent.iter().find(|(to, _, i)| *to == thread && *i == put_back)
+    else {
+        panic!("the folder put back: {sent:?}");
+    };
+    let no = Outcome::Refused { reason: "There is no rewind to undo".into() };
+    workspace
+        .update(cx, |v, cx| v.thread_done(KEY, &IntentDone { id: *unrewind, outcome: no }, cx));
+    cx.run_until_parked();
+    let Some(Err(RpcError::Failed(why))) = refused.now_or_never() else {
+        panic!("the undo refused");
+    };
+    assert_eq!(why, "There is no rewind to undo");
+    assert!(!discarded(&intents(&mut rx)), "a refused undo keeps the branch");
+
     let mut undone = workspace
         .update(cx, |v, cx| v.view_work_call(calls::UNDO_REWIND, &undo, cx))
         .expect("a call of Slopty's");
     cx.run_until_parked();
     let sent = intents(&mut rx);
-    assert!(
-        sent.iter().any(|(to, _, i)| *to == branched && *i == Intent::Discard),
-        "the branch is let go: {sent:?}"
-    );
-    let put_back = Intent::Unrewind { tree: TreeRef("before-rewind".into()) };
+    assert!(!discarded(&sent), "the branch stays until the folder is back: {sent:?}");
     let Some((_, unrewind, _)) = sent.iter().find(|(to, _, i)| *to == thread && *i == put_back)
     else {
         panic!("the folder put back: {sent:?}");
@@ -323,6 +343,7 @@ fn a_rewind_goes_back_to_before_the_message(cx: &mut gpui::TestAppContext) {
         v.thread_done(KEY, &IntentDone { id: *unrewind, outcome: Outcome::Done }, cx);
     });
     cx.run_until_parked();
+    assert!(discarded(&intents(&mut rx)), "the branch is let go once the folder is back");
     let undone = value(undone.now_or_never());
     assert_eq!(undone["chatId"], thread.to_string());
 }
@@ -375,5 +396,9 @@ fn a_code_rewind_undoes_by_its_folder(cx: &mut gpui::TestAppContext) {
     let answer = value(answer.now_or_never());
     assert_eq!(answer["prompt"], "make it faster");
     assert!(answer.get("undo").is_none(), "no folder, no undo: {answer}");
+    assert!(
+        answer["noUndo"].as_str().is_some_and(|why| why.contains("can't be undone")),
+        "{answer}"
+    );
     assert!(answer.get("chatId").is_none(), "nothing branched: {answer}");
 }

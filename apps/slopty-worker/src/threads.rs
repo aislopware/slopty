@@ -353,13 +353,14 @@ impl Following {
                     }
                 });
             }
-            // The folder is taken first, so the rewind can be undone: on a task of its own.
+            // The files it puts back are kept first, so the rewind can be undone: on a task of
+            // its own.
             ThreadRequest::Intent { id, thread, intent: intent @ Intent::Rewind { turn } } => {
                 let (client, out) = (at.client, at.out.clone());
                 at.tasks.spawn(async move {
                     let before = match threads.host.outcome(thread, id) {
                         Some(_) => None,
-                        None => threads.snapshots.before_rewind(thread).await,
+                        None => before_rewind(&threads, thread, turn).await,
                     };
                     let outcome = act_as(client, &threads, thread, id, &intent);
                     if let (Outcome::Done, Some(tree)) = (&outcome, before) {
@@ -539,6 +540,23 @@ async fn fork(threads: &Threads, thread: ThreadId, id: IntentId, after: Option<T
     } else {
         let reason = format!("{} threads are not forked here", state.meta.agent.0);
         threads.host.record_start(id, refused(reason))
+    }
+}
+
+/// The files a rewind of `thread` to before turn `turn` is about to put back, as its agent names
+/// them, kept so the rewind can be undone: what names them; `None` when the agent cannot say or
+/// they could not be kept, and the rewind then has no undo.
+async fn before_rewind(threads: &Threads, thread: ThreadId, turn: TurnId) -> Option<TreeRef> {
+    let (state, _) = threads.host.state(thread)?;
+    if !state.meta.agent.is(AgentId::CLAUDE_CODE) {
+        return None;
+    }
+    match threads.claude.rewind_preview(thread, turn).await {
+        Ok(files) => threads.snapshots.before_rewind(thread, &files).await,
+        Err(why) => {
+            tracing::info!(%thread, turn = turn.0, "a rewind with no undo: {why}");
+            None
+        }
     }
 }
 

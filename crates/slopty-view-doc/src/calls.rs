@@ -39,16 +39,18 @@ pub const ASK_SIDE: &str = "slopty.AskSide";
 
 /// Go back to before a message of the person's: `{ chatId, messageId, code, conversation }`.
 /// `code` puts the files back as they were before that message's turn; `conversation` branches
-/// a new chat sharing the turns before it. → `{ prompt, chatId?, undo? }`: the message's words,
-/// for the composer; the new chat when one was branched; and what undoes the rewind
-/// ([`crate::dock::RewindUndo`]), for the dock's "Undo rewind" toast, when it can be: the folder
-/// the worker took before a code rewind, the branched chat.
+/// a new chat sharing the turns before it. → `{ prompt, chatId?, undo?, noUndo? }`: the
+/// message's words, for the composer; the new chat when one was branched; and what undoes the
+/// rewind ([`crate::dock::RewindUndo`]), for the dock's "Undo rewind" toast, when all of it can
+/// be: the files the worker kept before a code rewind, the branched chat. A code rewind whose
+/// files were not kept has no undo, and `noUndo` says why.
 pub const REWIND: &str = "slopty.Rewind";
 
 /// Undo a rewind: `{ undo }` (the [`crate::dock::RewindUndo`] the rewind answered with) →
 /// `{ chatId }`, the chat to show again, once its folder is put back as it was before the
-/// rewind. The branched chat is deleted, as its own delete does; the chat it branched from kept
-/// its conversation. Refused when a later rewind came since: only the last undoes.
+/// rewind. Then the branched chat is deleted, as its own delete does; the chat it branched from
+/// kept its conversation. Refused, deleting nothing, when a later rewind or turn came since: only
+/// the last undoes.
 pub const UNDO_REWIND: &str = "slopty.UndoRewind";
 
 /// Add or remove a permission rule: `{ chatId, add, behavior, rule, scope }` (a

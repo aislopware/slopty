@@ -1,7 +1,8 @@
 //! What Slopty asks of Claude Code beside messages and settings, each through its control
 //! protocol: an MCP App's resource read and tool called for its page, the permission rules, the
-//! context's categories, a running call moved to the background, files put back to before a turn,
-//! a `!` command's output handed over, and the surfaces its mods draw.
+//! context's categories, a running call moved to the background, files put back to before a turn
+//! (and the files that would be, asked first so the worker can keep them for an undo), a `!`
+//! command's output handed over, and the surfaces its mods draw.
 //!
 //! - **MCP Apps.** `mcp_status` names the tools whose descriptor points at a `ui://` resource; a
 //!   call of one shows as its app's page. A page's `resources/read` goes as `mcp_read_resource`,
@@ -32,6 +33,10 @@ use crate::claude::history::Out;
 
 /// How long a note about an MCP server shows, as the TUI's notification lasts.
 const MCP_NOTE_MS: u64 = 12_000;
+
+/// What a rewind would put back ([`Driven::preview_rewind`]): the files it would change, as
+/// Claude Code names them (`filesChanged`), or why it cannot rewind there.
+pub type RewindPreview = Result<Vec<String>, String>;
 
 /// The client Slopty attaches to a session's mods' surfaces as.
 pub const SURFACE_CLIENT: &str = "slopty";
@@ -196,6 +201,10 @@ impl Driven {
         match control {
             Control::App(app) => {
                 self.app_answers.push((*app, AppAnswer::Refused(error.to_owned())));
+                Vec::new()
+            }
+            Control::RewindPreview(preview) => {
+                self.rewind_previews.push((*preview, Err(error.to_owned())));
                 Vec::new()
             }
             Control::Side(asked) => self.side_failed(asked.clone(), error),
@@ -506,6 +515,35 @@ impl Driven {
         let request = json!({ "subtype": "rewind_files", "user_message_id": prompt });
         self.control(Control::Rewind(turn), &request);
         Vec::new()
+    }
+
+    /// What a rewind to before turn `turn` would put back, asked of Claude Code's checkpoints
+    /// without putting anything back (`rewind_files` with `dry_run`), by the ask's number
+    /// `preview`: answered later ([`Self::take_rewind_previews`]).
+    pub fn preview_rewind(&mut self, preview: u64, turn: TurnId) {
+        let Some(prompt) = self.history.prompt_of(turn) else {
+            let why = "that turn's message is not known".to_owned();
+            self.rewind_previews.push((preview, Err(why)));
+            return;
+        };
+        let request =
+            json!({ "subtype": "rewind_files", "user_message_id": prompt, "dry_run": true });
+        self.control(Control::RewindPreview(preview), &request);
+    }
+
+    /// What rewinds would put back since last taken, by each ask's number.
+    pub fn take_rewind_previews(&mut self) -> Vec<(u64, RewindPreview)> {
+        std::mem::take(&mut self.rewind_previews)
+    }
+
+    pub(super) fn rewind_previewed(&mut self, preview: u64, said: &Value) {
+        let answer = if said.get("canRewind").and_then(Value::as_bool) == Some(false) {
+            Err(str_at(said, "error").unwrap_or("no checkpoint for that message").to_owned())
+        } else {
+            let files = said.get("filesChanged").and_then(Value::as_array);
+            Ok(files.into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect())
+        };
+        self.rewind_previews.push((preview, answer));
     }
 
     pub(super) fn rewound(&mut self, _turn: TurnId, said: &Value, now: WallMs) -> Vec<Out> {
@@ -843,6 +881,15 @@ impl Driven {
         self.controls.retain(|_, c| !matches!(c, Control::App(_)));
         for app in apps {
             self.app_answers.push((app, AppAnswer::Refused("Claude Code ended".to_owned())));
+        }
+        let previews: Vec<u64> = self
+            .controls
+            .values()
+            .filter_map(|c| if let Control::RewindPreview(n) = c { Some(*n) } else { None })
+            .collect();
+        self.controls.retain(|_, c| !matches!(c, Control::RewindPreview(_)));
+        for preview in previews {
+            self.rewind_previews.push((preview, Err("Claude Code ended".to_owned())));
         }
         let mut asked: Vec<SideExchange> = self
             .controls

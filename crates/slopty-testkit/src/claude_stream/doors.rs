@@ -15,8 +15,9 @@
 //!   an MCP server's `elicitation` with a schema. The answer is the turn's words; an interrupt
 //!   withdraws the ask (`control_cancel_request`).
 //! - **Checkpoints.** `write <path> <words>` writes a file in the folder, kept against the turn's
-//!   message; `rewind_files` puts back every file written from that message on, and refuses a
-//!   message it holds no checkpoint for. `plan` asks `ExitPlanMode` with a plan.
+//!   message; `rewind_files` puts back every file written from that message on (with `dry_run`,
+//!   only names them), and refuses a message it holds no checkpoint for. `plan` asks `ExitPlanMode`
+//!   with a plan.
 //! - **MCP Apps.** `mcp_status` lists each `--mcp-config` server with its tools, asked as a host
 //!   with the UI extension; `mcp_read_resource` and `mcp_call` go to the server named, its error
 //!   refused.
@@ -102,7 +103,10 @@ impl Stub {
         let field = |name: &str| request.get(name).and_then(Value::as_str).map(str::to_owned);
         match subtype {
             "background_tasks" => self.backgrounded(id, field("tool_use_id").as_deref()),
-            "rewind_files" => self.rewind(id, &field("user_message_id").unwrap_or_default()),
+            "rewind_files" => {
+                let dry = request.get("dry_run").and_then(Value::as_bool).unwrap_or(false);
+                self.rewind(id, &field("user_message_id").unwrap_or_default(), dry);
+            }
             "list_permission_rules" => reply(id, Some(json!({ "state": self.rules() }))),
             "mcp_status" => {
                 let servers: Vec<Value> = self.servers().iter().map(status).collect();
@@ -417,16 +421,30 @@ impl Stub {
     }
 
     /// `rewind_files`: every file written from message `message` on, as it was before; a
-    /// message with no checkpoint is refused.
-    fn rewind(&mut self, id: &str, message: &str) {
+    /// message with no checkpoint is refused. A `dry` one only says what it would put back.
+    fn rewind(&mut self, id: &str, message: &str, dry: bool) {
         if !self.doors.prompts.iter().any(|p| p == message) {
             refuse(id, "No file checkpoint found for this message.");
             return;
         }
         let from = self.doors.prompts.iter().position(|p| p == message).unwrap_or_default();
         let later: Vec<&String> = self.doors.prompts.iter().skip(from).collect();
-        let (put_back, kept): (Vec<Checkpoint>, Vec<Checkpoint>) =
-            self.doors.checkpoints.drain(..).partition(|c| later.iter().any(|p| **p == c.message));
+        let (put_back, kept): (Vec<Checkpoint>, Vec<Checkpoint>) = self
+            .doors
+            .checkpoints
+            .iter()
+            .cloned()
+            .partition(|c| later.iter().any(|p| **p == c.message));
+        if dry {
+            let mut files: Vec<PathBuf> = Vec::new();
+            for checkpoint in put_back {
+                if !files.contains(&checkpoint.path) {
+                    files.push(checkpoint.path);
+                }
+            }
+            reply(id, Some(json!({ "canRewind": true, "filesChanged": files })));
+            return;
+        }
         self.doors.checkpoints = kept;
         let mut files: Vec<PathBuf> = Vec::new();
         let (mut insertions, mut deletions) = (0_usize, 0_usize);

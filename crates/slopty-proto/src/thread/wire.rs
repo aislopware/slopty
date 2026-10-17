@@ -402,8 +402,8 @@ pub enum Intent {
         turn: TurnId,
     },
     /// Undo the last rewind: the thread's folder put back as it was just before it
-    /// ([`ThreadState::rewound`](super::ThreadState::rewound)), named by the tree the worker
-    /// took then, so an undo of an older rewind is refused ([`Cap::REWIND`]).
+    /// ([`ThreadState::rewound`](super::ThreadState::rewound)), named by what the worker kept
+    /// then, so an undo of an older rewind is refused ([`Cap::REWIND`]).
     Unrewind {
         /// The folder before the rewind ([`Rewound::tree`](super::Rewound::tree)).
         tree: TreeRef,
