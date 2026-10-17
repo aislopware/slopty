@@ -648,10 +648,11 @@ async fn twelve_pages_in_one_chat_stay_within_budget() {
     // (a card under it goes live): the natives presented at each rest, and the cards live.
     let (x, y) = SCROLL_AT;
     let (mut most_natives, mut most_live, mut cards) = (0, 0, std::collections::BTreeSet::new());
-    // The driver scrolls in lines, eight points each in the transcript: 18 lines are 144 pt, and
-    // 25 of them go past the chat's 3600 pt.
-    for _ in 0..25 {
-        drv.scroll(x, y, 0.0, -18.0).await.unwrap();
+    // The driver's wheel is in lines, and GPUI's list scrolls 20 pt a line (`list.rs`,
+    // `pixel_delta(px(20.))`): each step of 7 lines moves the chat 140 pt, half a card, so every
+    // card rests in sight, and 28 of them (3920 pt) go past the chat's 3600 pt.
+    for _ in 0..28 {
+        drv.scroll(x, y, 0.0, -7.0).await.unwrap();
         tokio::time::sleep(Duration::from_millis(200)).await;
         let shown = drv.dump().await.unwrap();
         let in_sight: Vec<A11yNode> = shown

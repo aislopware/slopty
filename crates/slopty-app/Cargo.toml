@@ -22,6 +22,7 @@ e2e = [
     "dep:gpui_ios",
     "gpui_ios?/test-support",
     "dep:image",
+    "slopty-platform/e2e",
 ]
 
 [dependencies]

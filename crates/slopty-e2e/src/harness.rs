@@ -1254,7 +1254,7 @@ impl Stack {
         simulator: Simulator,
         env: &[(&str, &str)],
     ) -> Result<Self> {
-        let mut stack = Self::spawn_on_simulator(worker_name, simulator, env, true, false).await?;
+        let mut stack = Self::spawn_on_simulator(worker_name, simulator, env, true, None).await?;
         linked(&mut stack.driver).await?;
         Ok(stack)
     }
@@ -1269,7 +1269,22 @@ impl Stack {
         worker_name: &str,
         simulator: Simulator,
     ) -> Result<Self> {
-        let mut stack = Self::spawn_on_simulator(worker_name, simulator, &[], true, true).await?;
+        Self::launch_on_simulator_with_stand_in(worker_name, simulator, &[]).await
+    }
+
+    /// [`Self::launch_on_simulator_with_claude`] with `stand_in` in the daemons' environment,
+    /// which the stand-in reads (`STUB_TURNS`, the tools a prompt calls).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::launch_on_simulator_with_claude`].
+    pub async fn launch_on_simulator_with_stand_in(
+        worker_name: &str,
+        simulator: Simulator,
+        stand_in: &[(&str, &str)],
+    ) -> Result<Self> {
+        let mut stack =
+            Self::spawn_on_simulator(worker_name, simulator, &[], true, Some(stand_in)).await?;
         linked(&mut stack.driver).await?;
         Ok(stack)
     }
@@ -1284,25 +1299,30 @@ impl Stack {
         worker_name: &str,
         simulator: Simulator,
     ) -> Result<Self> {
-        let mut stack = Self::spawn_on_simulator(worker_name, simulator, &[], false, false).await?;
+        let mut stack = Self::spawn_on_simulator(worker_name, simulator, &[], false, None).await?;
         stack.driver.ok(&crate::Command::Ping).await?;
         Ok(stack)
     }
 
     /// The daemons here and the app in the simulator, its settings naming the server when it
-    /// `follows` it, the stand-in `claude` on the daemons' `PATH` with `claude`.
+    /// `follows` it, the stand-in `claude` on the daemons' `PATH` with `claude`, its environment
+    /// beside.
     async fn spawn_on_simulator(
         worker_name: &str,
         simulator: Simulator,
         env: &[(&str, &str)],
         follows: bool,
-        claude: bool,
+        claude: Option<&[(&str, &str)]>,
     ) -> Result<Self> {
         let dir = StackDir::new("slopty-e2e-ios-")?;
         let root = dir.path();
         let log = log_level();
-        let path = if claude { Some(stand_in_path(root).await?) } else { None };
-        let daemon_env: Vec<(&str, &str)> = path.iter().map(|p| ("PATH", p.as_str())).collect();
+        let path = if claude.is_some() { Some(stand_in_path(root).await?) } else { None };
+        let daemon_env: Vec<(&str, &str)> = path
+            .iter()
+            .map(|p| ("PATH", p.as_str()))
+            .chain(claude.unwrap_or_default().iter().copied())
+            .collect();
         let Daemons { server, children, listed, .. } =
             daemons(root, worker_name, &log, &daemon_env, false).await?;
         if follows {

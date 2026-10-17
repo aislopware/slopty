@@ -341,6 +341,20 @@ pub enum Command {
         /// `UITouch.phase`.
         phase: UiTouchPhase,
     },
+    /// A finger as UIKit itself delivers one (iOS only): a `UITouch` hit-tested where it lands
+    /// and sent through `UIApplication`, so whatever view is under it (a page's web view and its
+    /// scroll views, not only GPUI's) and their gesture recognisers decide where it goes. It
+    /// lands at `from`, moves to `to` in `steps` moves 16 ms apart and lifts there; with no
+    /// steps it is a tap, lifted 60 ms after it lands. The reply comes after the frame that
+    /// follows the lift.
+    UiFinger {
+        /// Where it lands, window points.
+        from: [f32; 2],
+        /// Where it lifts, window points.
+        to: [f32; 2],
+        /// Its moves between.
+        steps: u32,
+    },
     /// One report of the metal view's `UIPinchGestureRecognizer` (iOS only): `scale` is the
     /// change since the previous report (the view resets the recognizer to 1 after each), so
     /// a whole pinch is the product of its steps.

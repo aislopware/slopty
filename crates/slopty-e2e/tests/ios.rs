@@ -4,7 +4,8 @@
 //! run on the Mac as for the app self-test, the app runs in the booted simulator named by
 //! `SLOPTY_SIM_UDID` and binds its socket on the shared file system. The phone's anatomy (its
 //! Chats page, a chat over the whole screen) is `compact`; its frames are compared with a
-//! golden per device, `ios-phone-*.png` or `ios-pad-*.png`.
+//! golden per device, `ios-phone-*.png` or `ios-pad-*.png`. A finger over a page card, as UIKit
+//! delivers it, is `pages`.
 
 #[cfg(test)]
 mod tests {
@@ -108,3 +109,7 @@ mod tests {
 #[cfg(test)]
 #[path = "ios/compact.rs"]
 mod compact;
+/// A finger over a page card, as UIKit delivers it.
+#[cfg(test)]
+#[path = "ios/pages.rs"]
+mod pages;

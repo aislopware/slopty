@@ -10,6 +10,10 @@ description = "Process-level platform helpers shared by the Slopty apps and daem
 [lints]
 workspace = true
 
+[features]
+# A finger UIKit itself delivers (`finger`), for the app's self-test socket on iOS.
+e2e = [  ]
+
 [dependencies]
 # Whose runtime directory a Linux socket falls back to (`dirs`); on Apple, also whether the run
 # that left a drop's landing behind is still alive (`file_drop::sweep`).

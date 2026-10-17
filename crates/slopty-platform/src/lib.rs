@@ -37,6 +37,8 @@ pub mod fetch;
 pub mod file_drop;
 #[cfg(target_os = "macos")]
 pub mod files;
+#[cfg(all(target_os = "ios", feature = "e2e"))]
+pub mod finger;
 pub mod fs;
 #[cfg(target_os = "macos")]
 pub mod idle;
