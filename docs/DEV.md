@@ -54,8 +54,10 @@ zed itself so it is never behind zed while longbridge lags.
   else, which no accept writes, is refused whole and its paths named), and `--goldens review`
   brings every changed frame's render and diff to `target/e2e/artifacts/`. `--workflow-ref
   <branch>` runs that branch's `check.yml`, to try a change to it. A newer check of the same name
-  cancels the older one's run. A stopped wrapper leaves the run going; `--run <id>` with the same
-  options follows it again and applies what it accepted. `cargo xtask ci-health` prints the
+  cancels the older one's run. A lane's directory is one check's at a time (a lock on
+  `target/local/<lane>/.lock`): a second check of the lane waits, saying "waiting for <lane>'s
+  check (pid N)", or with `--no-wait` fails at once naming it. A stopped wrapper leaves the run
+  going; `--run <id>` with the same options follows it again and applies what it accepted. `cargo xtask ci-health` prints the
   day's spread of check latency beside the gate's and the Deep nightly.
 - Staging a lane's checkpoint: `cargo xtask stage <name>@<sha>…` puts into the index the blobs
   that check passed, never the working tree's, which the lane may have edited since; `remote`

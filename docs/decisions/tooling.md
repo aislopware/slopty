@@ -2369,3 +2369,12 @@ more full-window layer.
   - Tests: `remote::guest::tests::{the_simulator_is_found_by_name_or_made_on_the_newest_ios,
     a_base_is_made_from_the_live_lane_s}` (`xtask`; the second live, ignored), and the runs
     above.
+- ✅ **A lane's directory is one check's at a time** (2026-10-17). Two `remote` runs under one
+  lane name, a `--head` iOS check and an `--only` one, used `target/local/<lane>/tree` at once,
+  each syncing it to its own commit under the other's build. `remote` now holds an exclusive
+  lock on `target/local/<lane>/.lock` (its pid inside) for the whole of a check here; a second
+  check waits and says whose pid it waits for, or with `--no-wait` fails at once naming it.
+  Checks only on runners take no lock. Test:
+  `remote::tests::a_lane_s_directory_is_one_check_s_at_a_time` (`xtask`); run here, a second
+  check of `DEVLOOP` with `--no-wait` failed naming the first's pid, and one without it printed
+  "waiting for DEVLOOP's check (pid 80355)".

@@ -358,6 +358,10 @@ pub struct RemoteOpts {
     /// `none`, or Linux for Linux's own paths.
     #[arg(skip)]
     pub tests_on: Option<&'static str>,
+    /// Fail at once, naming the holder, when another check of this lane holds its directory,
+    /// rather than wait for it.
+    #[arg(long)]
+    pub no_wait: bool,
 }
 
 /// Where a check's crates are checked.
@@ -433,6 +437,9 @@ pub fn run(sh: &Shell, opts: &RemoteOpts) -> Result<()> {
         return ran;
     }
     let started = Instant::now();
+    // The lane's tree and target dirs are one check's at a time: each check syncs the tree to
+    // its own commit, under whatever another is building there.
+    let _lane = hold_lane(&root, lane(&opts.name), opts.no_wait)?;
     let sha = if opts.head {
         cmd!(sh, "git rev-parse HEAD").read()?
     } else {
@@ -565,6 +572,36 @@ pub fn run(sh: &Shell, opts: &RemoteOpts) -> Result<()> {
     };
     println!("✔ {what} passed here{and} ({}m{:02}s)", took / 60, took % 60);
     Ok(())
+}
+
+/// The lock on lane `lane`'s directory (`target/local/<lane>/.lock`, holding its holder's pid),
+/// held until dropped: waited for, saying who holds it, or with `no_wait` refused at once.
+fn hold_lane(root: &Path, lane: &str, no_wait: bool) -> Result<std::fs::File> {
+    use std::io::Write as _;
+    let dir = crate::local::dir(root, lane);
+    std::fs::create_dir_all(&dir).with_context(|| format!("create {dir}"))?;
+    let path = dir.join(".lock");
+    let mut file = std::fs::File::options()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("open {path}"))?;
+    if file.try_lock().is_err() {
+        let holder = std::fs::read_to_string(&path).unwrap_or_default();
+        let holder = holder.trim();
+        ensure!(
+            !no_wait,
+            "{lane}'s check (pid {holder}) holds target/local/{lane}: wait for it (no --no-wait), \
+             or check under another lane's name"
+        );
+        println!("  waiting for {lane}'s check (pid {holder})");
+        file.lock().with_context(|| format!("lock {path}"))?;
+    }
+    file.set_len(0)?;
+    write!(file, "{}", std::process::id())?;
+    Ok(file)
 }
 
 /// Whether the app's e2e case of a check here goes to this Mac's guest: unless
@@ -1566,6 +1603,37 @@ mod tests {
 
     fn gate(queued: bool) -> MacJob {
         MacJob { gate: true, queued, check: None }
+    }
+
+    /// A second check of a lane waits for the first to let go of the lane's directory, or with
+    /// `--no-wait` is refused at once with the holder's pid; another lane is never held up.
+    #[test]
+    fn a_lane_s_directory_is_one_check_s_at_a_time() {
+        let root = scratch("lane-lock");
+        let first = super::hold_lane(&root, "L", true).expect("free");
+        let refused = super::hold_lane(&root, "L", true).expect_err("held");
+        let pid = std::process::id().to_string();
+        assert!(refused.to_string().contains(&format!("pid {pid}")), "{refused}");
+        let other = super::hold_lane(&root, "M", true).expect("another lane's is free");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let waiting = {
+            let root = root.clone();
+            std::thread::spawn(move || {
+                let held = super::hold_lane(&root, "L", false);
+                let _sent = tx.send(held.is_ok());
+                held
+            })
+        };
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(500)).is_err(),
+            "the second check waits while the first holds the lane"
+        );
+        drop(first);
+        let took = rx.recv_timeout(std::time::Duration::from_secs(10)).expect("it goes on");
+        assert!(took, "it holds the lane once the first let go");
+        drop(waiting.join().expect("joins"));
+        drop(other);
+        let _gone = std::fs::remove_dir_all(&root);
     }
 
     /// A run's title gives back the check's name and commit; another title gives nothing.
