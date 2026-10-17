@@ -4,7 +4,7 @@
 //! when the worker cut it.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use base64::Engine as _;
 use gpui::{AppContext as _, Context, Task};
@@ -134,23 +134,42 @@ impl WorkspaceView {
         content: ContentRef,
         cx: &Context<Self>,
     ) -> Task<Option<Arc<Expanded>>> {
-        let until = Instant::now().checked_add(WHOLE_WITHIN).unwrap_or_else(Instant::now);
+        Self::view_whole_within(key, thread, content, false, cx)
+    }
+
+    /// [`Self::view_whole`]; `patient`, it waits on while the link to `key` is down, asks again
+    /// the moment it is back, and gives up only after [`WHOLE_WITHIN`] linked without an
+    /// answer. What the worker answers, [`Expanded::Gone`] too, ends the wait.
+    pub(super) fn view_whole_within(
+        key: WorkerKey,
+        thread: ThreadId,
+        content: ContentRef,
+        patient: bool,
+        cx: &Context<Self>,
+    ) -> Task<Option<Arc<Expanded>>> {
         cx.spawn(async move |this, cx| {
+            let mut until = cx.background_executor().now().checked_add(WHOLE_WITHIN);
             loop {
-                let held = this
+                let (whole, linked) = this
                     .update(cx, |view, cx| {
                         let hub = view.held_hub(key)?.clone();
                         if let Some(whole) = hub.read(cx).whole(&content) {
-                            return Some(Some(Arc::clone(whole)));
+                            return Some((Some(Arc::clone(whole)), true));
                         }
+                        let linked = hub.read(cx).linked();
                         hub.update(cx, |hub, cx| hub.expand(thread, &content, cx));
-                        Some(None)
+                        Some((None, linked))
                     })
                     .ok()??;
-                if held.is_some() {
-                    return held;
+                if whole.is_some() {
+                    return whole;
                 }
-                if Instant::now() >= until {
+                let now = cx.background_executor().now();
+                if patient && !linked {
+                    // Out of reach is not slow: the wait starts again once the link is back.
+                    until = now.checked_add(WHOLE_WITHIN);
+                }
+                if until.is_none_or(|until| now >= until) {
                     return None;
                 }
                 cx.background_executor().timer(WHOLE_EVERY).await;

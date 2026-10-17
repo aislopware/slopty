@@ -215,6 +215,9 @@ impl WorkspaceView {
         let hub = self.thread_hub(key, cx);
         hub.update(cx, ThreadHub::connected);
         self.view_resend(key, None);
+        // slopty: the pages waiting for this machine ask again.
+        #[cfg(target_vendor = "apple")]
+        self.pages_linked(key, cx);
     }
 
     /// Tell `key`'s thread hub what that machine can start now ("Continue in…"), if it has
@@ -228,10 +231,13 @@ impl WorkspaceView {
 
     /// The link to `key` went: its thread views show what they last knew. A start sent there
     /// goes on on the machine, and is kept to be taken up when the link is back.
-    pub fn threads_unlinked(&self, key: WorkerKey, cx: &mut App) {
+    pub fn threads_unlinked(&mut self, key: WorkerKey, cx: &mut Context<Self>) {
         if let Some(hub) = self.faces.threads.hubs.get(&key) {
             hub.update(cx, ThreadHub::disconnected);
         }
+        // slopty: the pages waiting for this machine say so.
+        #[cfg(target_vendor = "apple")]
+        self.pages_unlinked(key, cx);
     }
 
     /// A frame of `key`'s thread table.

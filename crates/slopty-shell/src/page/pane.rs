@@ -279,6 +279,9 @@ impl Render for PagePaneView {
                     .into_any_element()
             }
             // slopty: the surfaces' loading anatomy.
+            Some(live::HostedPage { waiting: Some(machine), .. }) => {
+                live::chrome::loading(super::waiting_words(machine), &theme, cx.entity_id(), cx).into_any_element()
+            }
             _ => live::chrome::loading("Loading the page…", &theme, cx.entity_id(), cx).into_any_element(),
         };
         let back = live::chrome::icon_button(

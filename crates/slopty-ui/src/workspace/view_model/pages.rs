@@ -171,6 +171,16 @@ enum AppWait {
     Call(String, Request, String),
 }
 
+/// An ask of a page's app on its way: where it went and what waits for it. A document or a
+/// read is asked again on the next link to its machine, as one asked into a link that went is
+/// lost with it; a tool's call is not, as it may have run.
+struct AppAsked {
+    worker: WorkerKey,
+    thread: ThreadId,
+    ask: AppAsk,
+    wait: AppWait,
+}
+
 /// One page, as the app hosts it.
 struct Page {
     /// The window it shows in.
@@ -220,7 +230,8 @@ pub(super) struct Pages {
     next: u64,
     heard: Option<futures::channel::mpsc::UnboundedSender<Heard>>,
     pump: Option<Task<()>>,
-    apps: HashMap<u64, AppWait>,
+    /// What the pages asked of their apps and wait for, by the ask's number.
+    apps: HashMap<u64, AppAsked>,
     /// The theme each window's host was last given.
     themes: HashMap<WindowId, Theme>,
     /// The files each worker follows for the pages, as last sent.
@@ -443,6 +454,7 @@ impl WorkspaceView {
             self.page_fence_moved(key, cx);
         }
         self.page_theme(window_id, window, cx);
+        let waiting = self.page_waiting(key, cx).map(Into::into);
         let host = self.view_model.pages.hosts.get(&window_id).cloned()?;
         let page = self.view_model.pages.shown.get_mut(key)?;
         let state = self.view_model.pages.states.get(key).map(|s| s.borrow().clone());
@@ -455,6 +467,7 @@ impl WorkspaceView {
                 snapshot: None,
                 height: None,
                 failed,
+                waiting: None,
                 doc: Some(doc.shown()),
             });
         }
@@ -467,6 +480,7 @@ impl WorkspaceView {
                 snapshot,
                 height,
                 failed,
+                waiting,
                 doc: None,
             });
         }
@@ -495,8 +509,84 @@ impl WorkspaceView {
             snapshot: page.snapshot.clone(),
             height,
             failed,
+            waiting,
             doc: None,
         })
+    }
+
+    /// The machine page `key`'s document waits for, by its name, while that machine is out of
+    /// reach: a page of a call whose document has not come, and that has not failed.
+    fn page_waiting(&self, key: &str, cx: &App) -> Option<String> {
+        let page = self.view_model.pages.shown.get(key)?;
+        let call = page.call.as_ref()?;
+        let failed =
+            self.view_model.pages.states.get(key).is_some_and(|s| s.borrow().failed.is_some());
+        if page.document.is_some() || page.doc.is_some() || failed {
+            return None;
+        }
+        if self.held_hub(call.key)?.read(cx).linked() {
+            return None;
+        }
+        self.workers.get(&call.key).map(|w| w.name.clone())
+    }
+
+    /// The link to `worker` went: its pages that wait for a document say so, and what their
+    /// apps were asked and may never answer: a tool's call is told its machine went, as it is
+    /// not asked again.
+    pub(in crate::workspace) fn pages_unlinked(
+        &mut self,
+        worker: WorkerKey,
+        cx: &mut Context<Self>,
+    ) {
+        let calls: Vec<u64> = self
+            .view_model
+            .pages
+            .apps
+            .iter()
+            .filter(|(_, asked)| asked.worker == worker && matches!(asked.wait, AppWait::Call(..)))
+            .map(|(id, _)| *id)
+            .collect();
+        for id in calls {
+            let why = "Its machine went out of reach before the tool answered".to_owned();
+            self.page_app_answer(id, AppAnswer::Refused(why), cx);
+        }
+        self.pages_of_moved(worker, cx);
+    }
+
+    /// The link to `worker` is back: what its pages' apps were asked and did not answer is
+    /// asked again; the pages' documents read through the thread are asked again by their own
+    /// waits ([`Self::view_whole_within`]).
+    pub(in crate::workspace) fn pages_linked(&mut self, worker: WorkerKey, cx: &mut Context<Self>) {
+        let again: Vec<ClientMsg> = self
+            .view_model
+            .pages
+            .apps
+            .iter()
+            .filter(|(_, asked)| asked.worker == worker && !matches!(asked.wait, AppWait::Call(..)))
+            .map(|(id, asked)| {
+                let (thread, ask) = (asked.thread, asked.ask.clone());
+                ClientMsg::Thread(ThreadRequest::App { thread, id: *id, ask })
+            })
+            .collect();
+        for msg in again {
+            self.send(worker, msg);
+        }
+        self.pages_of_moved(worker, cx);
+    }
+
+    /// The pages of `worker`'s calls: their cards hear that their machine came or went.
+    fn pages_of_moved(&mut self, worker: WorkerKey, cx: &mut Context<Self>) {
+        let keys: Vec<String> = self
+            .view_model
+            .pages
+            .shown
+            .iter()
+            .filter(|(_, page)| page.call.as_ref().is_some_and(|call| call.key == worker))
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in keys {
+            self.page_changed(&key, cx);
+        }
     }
 
     /// Give `window`'s host the shell's theme when it changed.
@@ -709,6 +799,21 @@ impl WorkspaceView {
             self.page_fence_load(key, &fence, cx);
             return Some(());
         }
+        if self.page_host(window_id, window, cx).is_none() {
+            return self.page_unopened(key, "its window has no page host");
+        }
+        self.page_open_call(key, window_id, cx)
+    }
+
+    /// Open page `key` of a call in `window_id`, whose host is made: its card's state, then its
+    /// document, read through its thread. A document its machine holds is waited for while the
+    /// machine is out of reach, and asked again once it is back.
+    fn page_open_call(
+        &mut self,
+        key: &str,
+        window_id: WindowId,
+        cx: &mut Context<Self>,
+    ) -> Option<()> {
         let Some((thread, item)) = page_of(key) else {
             return self.page_unopened(key, "its key names no call");
         };
@@ -722,9 +827,6 @@ impl WorkspaceView {
         let Some(ToolDetail::Page(detail)) = call.detail.clone() else {
             return self.page_unopened(key, "its call shows no page");
         };
-        if self.page_host(window_id, window, cx).is_none() {
-            return self.page_unopened(key, "its window has no page host");
-        }
         if let Some(why) = self.view_model.pages.unopened.remove(key) {
             tracing::info!(page = key, waited_on = why, "a page opens, its call here now");
         }
@@ -754,7 +856,7 @@ impl WorkspaceView {
         match detail.source {
             PageSource::Html(html) => {
                 let document = match html.full {
-                    Some(full) => Self::view_whole(worker, thread, full, cx),
+                    Some(full) => Self::view_whole_within(worker, thread, full, true, cx),
                     None => Task::ready(Some(Arc::new(Expanded::Text(html.text)))),
                 };
                 Self::page_document(key.to_owned(), title, document, cx);
@@ -762,7 +864,7 @@ impl WorkspaceView {
             PageSource::File(path) => {
                 let name = path.rsplit('/').next().unwrap_or_default().to_owned();
                 let content = ContentRef::item_asset(&item, &name);
-                let document = Self::view_whole(worker, thread, content, cx);
+                let document = Self::view_whole_within(worker, thread, content, true, cx);
                 match FileKind::of(&path) {
                     FileKind::Page => Self::page_document(key.to_owned(), title, document, cx),
                     kind => Self::page_doc_document(key.to_owned(), kind, document, cx),
@@ -1125,6 +1227,7 @@ impl WorkspaceView {
     ) {
         let heard = self.page_pump(cx);
         let Some(page) = self.view_model.pages.shown.get_mut(key) else { return };
+        page.document = Some((title.clone(), html.clone()));
         let Some(host) = self.view_model.pages.hosts.get(&page.window).cloned() else { return };
         let window = page.window;
         let ids: Rc<RefCell<Option<PageId>>> = Rc::default();
@@ -1133,7 +1236,6 @@ impl WorkspaceView {
             let Some(id) = *id_of.borrow() else { return };
             let _queued = heard.unbounded_send(Heard::File(window, id, path.to_owned(), responder));
         });
-        page.document = Some((title.clone(), html.clone()));
         let id = host.open(PageSpec { title, html, server, resources: Some(resources) });
         *ids.borrow_mut() = Some(id);
         page.id = Some(id);
@@ -1200,7 +1302,7 @@ impl WorkspaceView {
             return responder.answer(None);
         };
         let content = ContentRef::item_asset(&call.item, path);
-        let whole = Self::view_whole(call.key, call.thread, content, cx);
+        let whole = Self::view_whole_within(call.key, call.thread, content, true, cx);
         let mime = mime_guess(path);
         cx.spawn(async move |_, _| {
             let file = match whole.await.as_deref() {
@@ -1372,7 +1474,7 @@ impl WorkspaceView {
         let pages = &mut self.view_model.pages;
         let id = pages.next;
         pages.next = pages.next.saturating_add(1);
-        pages.apps.insert(id, wait);
+        pages.apps.insert(id, AppAsked { worker, thread, ask: ask.clone(), wait });
         self.send(worker, ClientMsg::Thread(ThreadRequest::App { thread, id, ask }));
     }
 
@@ -1383,7 +1485,7 @@ impl WorkspaceView {
         answer: AppAnswer,
         cx: &mut Context<Self>,
     ) {
-        let Some(wait) = self.view_model.pages.apps.remove(&id) else { return };
+        let Some(AppAsked { wait, .. }) = self.view_model.pages.apps.remove(&id) else { return };
         let host_of = |view: &Self, key: &str| {
             let page = view.view_model.pages.shown.get(key)?;
             Some((view.view_model.pages.hosts.get(&page.window).cloned()?, page.id?))
@@ -1701,6 +1803,9 @@ fn mime_guess(path: &str) -> &'static str {
         _ => "application/octet-stream",
     }
 }
+
+#[cfg(test)]
+mod link_tests;
 
 #[cfg(test)]
 mod tests {

@@ -120,6 +120,7 @@ fn hosted(doc: Option<PageDoc>) -> HostedPage {
         snapshot: None,
         height: None,
         failed: None,
+        waiting: None,
         doc,
     }
 }
@@ -310,4 +311,27 @@ fn a_live_page_moved_out_of_its_band_rests_in_the_frame_shown(cx: &mut gpui::Tes
     frame(cx);
     frame(cx);
     assert!(rests(&stand) > 0, "under the titlebar's fade it rests: {:?}", stand.borrow().acts);
+}
+
+/// A page whose document waits for its machine, out of reach, says for which machine in place
+/// of loading; once the machine is back it is loading again.
+#[gpui::test]
+fn a_page_waiting_for_its_machine_says_so(cx: &mut gpui::TestAppContext) {
+    let stand = serve(cx, HostedPage { waiting: Some("studio".into()), ..hosted(None) });
+    let (view, cx) = open_card(cx, card(PageCard::HTML, "slopty-page:1/html", "Plot"));
+    let nodes = draw(cx);
+    let group = find(&nodes, Role::Group, "Page: Plot").expect("the card's node");
+    assert_eq!(group.value, "waiting");
+    assert!(
+        nodes.values().any(|n| n.label == "Waiting for studio…"),
+        "the machine by name: {:?}",
+        nodes.values().map(|n| &n.label).collect::<Vec<_>>()
+    );
+
+    stand.borrow_mut().page = Some(hosted(None));
+    view.update(cx, |_, cx| cx.notify());
+    let nodes = draw(cx);
+    let group = find(&nodes, Role::Group, "Page: Plot").expect("the card's node");
+    assert_eq!(group.value, "loading");
+    assert!(!nodes.values().any(|n| n.label.starts_with("Waiting for")));
 }

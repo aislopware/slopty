@@ -373,6 +373,9 @@ pub struct HostedPage {
     pub height: Option<f32>,
     /// Why it cannot be shown, when it cannot.
     pub failed: Option<SharedString>,
+    /// slopty: the machine its document waits for while that machine is out of reach, by its
+    /// name: the card says so in place of loading.
+    pub waiting: Option<SharedString>,
     /// slopty: a file the app draws itself rather than in a web view (a PDF's pages, a CSV's
     /// table): the card draws this, and the page has no web view.
     pub doc: Option<crate::page::PageDoc>,

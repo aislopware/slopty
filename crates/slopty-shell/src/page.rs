@@ -185,6 +185,11 @@ pub fn presence_words(presence: Option<PagePresence>, snapshot: bool, failed: bo
     }
 }
 
+/// slopty: what a card says while its document waits for `machine`, out of reach.
+pub fn waiting_words(machine: &str) -> SharedString {
+    format!("Waiting for {machine}…").into()
+}
+
 /// A page card's kind in words: "Page", "MCP App: {server}", "File".
 pub fn kind_words(card: &PageCard) -> String {
     match card.kind.as_str() {
@@ -673,9 +678,15 @@ impl Render for PageCardView {
                 .clamp(PAGE_MIN_HEIGHT, cap)
         };
         let snapshot = hosted.as_ref().and_then(|page| page.snapshot.clone());
+        // slopty: a document that waits for its machine out of reach says so.
+        let waiting = hosted.as_ref().and_then(|page| page.waiting.clone()).filter(|_| {
+            !failed && doc.is_none() && snapshot.is_none() && presence != Some(PagePresence::Live)
+        });
         // slopty: a PDF or a table draws here natively: once read, it is live.
         let value = if doc.is_some() && !failed {
             "live"
+        } else if waiting.is_some() {
+            "waiting"
         } else {
             presence_words(presence, snapshot.is_some(), failed)
         };
@@ -710,13 +721,24 @@ impl Render for PageCardView {
                     .object_fit(ObjectFit::Fill)
                     .into_any_element(),
                 // slopty: the surfaces' loading anatomy, the spinner over its caption.
-                None => live::chrome::loading(
-                    if self.card.streaming { "Writing the page…" } else { "Loading the page…" },
-                    &theme,
-                    cx.entity_id(),
-                    cx,
-                )
-                .into_any_element(),
+                // slopty: the machine it waits for is read out, as a status.
+                None => match waiting.as_ref().filter(|_| !self.card.streaming) {
+                    Some(machine) => {
+                        let words = waiting_words(machine);
+                        live::chrome::loading(words.clone(), &theme, cx.entity_id(), cx)
+                            .id(SharedString::from(format!("{}-waiting", self.card.page)))
+                            .role(gpui::Role::Status)
+                            .aria_label(words)
+                            .into_any_element()
+                    }
+                    None => live::chrome::loading(
+                        if self.card.streaming { "Writing the page…" } else { "Loading the page…" },
+                        &theme,
+                        cx.entity_id(),
+                        cx,
+                    )
+                    .into_any_element(),
+                },
             },
         };
         let probe = self.bounds.clone();
@@ -1123,6 +1145,7 @@ mod tests {
                         snapshot: None,
                         height: None,
                         failed: None,
+                        waiting: None,
                         doc: None,
                     })
                 },

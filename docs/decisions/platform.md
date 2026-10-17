@@ -1570,6 +1570,16 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     flings the chat, a tap reaches the page, a tall page scrolls itself, and at its top or
     bottom a drag goes to the chat. Also tested: the host document's root has no overflow rule
     (`sandbox`'s unit test).
+  - **A page waits for its machine (2026-10-17).** Some pages come from their machine: clipped
+    HTML, a file, or an MCP App's view. While that machine is out of reach, such a page waits
+    and its card says "Waiting for <machine>…". It is asked again the moment the link is back.
+    The time away does not count against the 20 s a reachable machine gets. "Couldn't read its
+    page" and Try again are left for real failures: the machine answered that the page is gone,
+    or it was reachable and did not answer in time. An app's view or resource read asked into a
+    link that went is asked again by its number. A tool's call is not asked again, since it may
+    have run; the page hears that its machine went before the tool answered. Tested against a
+    fake link that drops and comes back mid-fetch (`pages::link_tests`), and in the card's
+    accessibility tree (`card_tests`).
   - **Files beside a page.** The view's requests for its own origin's other paths reach the
     app's `Resources` callback with the path under the page's folder (never `..`, `.` or an empty
     part, refused here), answered once with bytes or not found. The app backs it with the worker's
