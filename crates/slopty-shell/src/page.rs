@@ -333,7 +333,9 @@ impl PageCardView {
 
     fn engage(&mut self, cx: &mut Context<Self>) {
         self.rest = None;
-        if !self.engaged {
+        // slopty: a page rested while the card stayed engaged (a fade band, the device's cap)
+        // wakes again at the next press or hover.
+        if !self.engaged || !self.placed_live {
             self.engaged = true;
             live::page_act(&self.card.page, PageAct::Engage, cx);
         }

@@ -313,6 +313,36 @@ fn a_live_page_moved_out_of_its_band_rests_in_the_frame_shown(cx: &mut gpui::Tes
     assert!(rests(&stand) > 0, "under the titlebar's fade it rests: {:?}", stand.borrow().acts);
 }
 
+/// A live page rested while the card stayed engaged (it went into a fade band, or another page
+/// took the device's last live slot) wakes again at the next press on its picture.
+#[gpui::test]
+fn a_page_rested_while_engaged_wakes_at_the_next_press(cx: &mut gpui::TestAppContext) {
+    let stand = serve(cx, HostedPage { presence: PagePresence::Warm, ..hosted(None) });
+    let (view, cx) = open_card(cx, card(PageCard::HTML, "slopty-page:1/html", "Plot"));
+    draw(cx);
+    let engages = |stand: &Shared| stand.borrow().acts.iter().filter(|a| **a == PageAct::Engage).count();
+    let middle = view.read_with(cx, |view, _| view.bounds.get()).expect("the card was drawn").center();
+    cx.simulate_mouse_down(middle, gpui::MouseButton::Left, gpui::Modifiers::none());
+    cx.simulate_mouse_up(middle, gpui::MouseButton::Left, gpui::Modifiers::none());
+    let woken = engages(&stand);
+    assert!(woken > 0, "the first press wakes it: {:?}", stand.borrow().acts);
+
+    let set = |presence: PagePresence, cx: &mut VisualTestContext| {
+        stand.borrow_mut().page.as_mut().expect("served").presence = presence;
+        view.update(cx, |_, cx| cx.notify());
+        draw(cx);
+    };
+    set(PagePresence::Live, cx);
+    set(PagePresence::Warm, cx);
+    cx.simulate_mouse_down(middle, gpui::MouseButton::Left, gpui::Modifiers::none());
+    cx.simulate_mouse_up(middle, gpui::MouseButton::Left, gpui::Modifiers::none());
+    assert!(
+        engages(&stand) > woken,
+        "a press on the rested card wakes it again: {:?}",
+        stand.borrow().acts
+    );
+}
+
 /// A page whose document waits for its machine, out of reach, says for which machine in place
 /// of loading; once the machine is back it is loading again.
 #[gpui::test]
