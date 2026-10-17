@@ -695,8 +695,12 @@ impl Render for PageCardView {
                 }),
                 Some(PagePresence::Live),
             ) => {
+                // slopty: the wheel passes to the chat under the card. On the Mac the page
+                // takes it first, and hands the window what it cannot scroll
+                // (`slopty_platform::web::page`'s wheel); GPUI then scrolls what is under it.
                 gpui::composition::native_view(native)
                     .id(SharedString::from(format!("{}-native", self.card.page)))
+                    .block_mouse_except_scroll()
                     .size_full()
                     .into_any_element()
             }
@@ -1076,6 +1080,85 @@ mod tests {
             let found = text.matches(needle).count();
             assert!(found <= *most, "{file}: {found} px text sizes, {most} allowed; use ui_rems");
         }
+    }
+
+    /// slopty: a wheel event the page hands on (one it cannot scroll) scrolls the chat under its
+    /// card, the whole of it, as a browser's nested scroll goes on to what holds it.
+    #[gpui::test]
+    fn a_wheel_the_page_hands_on_scrolls_the_chat(cx: &mut gpui::TestAppContext) {
+        struct Chat {
+            card: gpui::AnyView,
+            scroll: gpui::ScrollHandle,
+        }
+        impl Render for Chat {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .id("chat")
+                    .size_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scroll)
+                    .child(div().h(px(100.0)))
+                    .child(self.card.clone())
+                    .child(div().h(px(2000.0)))
+            }
+        }
+        let held: Rc<std::cell::RefCell<Option<gpui::composition::NativeHost>>> = Rc::default();
+        let dir = tempfile::tempdir().unwrap();
+        let serve = Rc::clone(&held);
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            cx.set_reduce_motion(true);
+            live::serve_pages(
+                cx,
+                move |_, window, cx| {
+                    let mut native = serve.borrow_mut();
+                    if native.is_none() {
+                        *native = window.create_native_host(Default::default(), cx).ok();
+                    }
+                    Some(live::HostedPage {
+                        presence: PagePresence::Live,
+                        native: native.clone(),
+                        snapshot: None,
+                        height: None,
+                        failed: None,
+                        doc: None,
+                    })
+                },
+                |_, _, _| (),
+                |_, _, _| None,
+            );
+        });
+        let page = Arc::new(PageCard {
+            id: "slopty-page:1/html:page".into(),
+            page: "slopty-page:1/html".into(),
+            title: "Plot".into(),
+            kind: PageCard::HTML.into(),
+            ..PageCard::default()
+        });
+        let card = cx.new(|cx| PageCardView::new(page, None, None, cx));
+        let scroll = gpui::ScrollHandle::new();
+        let chat = Chat { card: card.into(), scroll: scroll.clone() };
+        let (_, cx) = cx.add_window_view(|_, _| chat);
+        cx.simulate_resize(gpui::size(px(900.0), px(800.0)));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw_and_present(cx));
+        // Under the header, in the page's body.
+        let over = gpui::point(px(450.0), px(250.0));
+        let placed = cx.update(|window, _| window.native_hit_map());
+        assert!(
+            placed.is_some_and(|map| map.native_at(over).is_some()),
+            "the page is live where the wheel turns"
+        );
+        cx.simulate_mouse_move(over, None, gpui::Modifiers::default());
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: over,
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.0), px(-144.0))),
+            ..Default::default()
+        });
+        cx.run_until_parked();
+        assert_eq!(scroll.offset().y, px(-144.0), "the chat took the whole wheel");
     }
 
     /// A card's value says how its page stands: its picture at rest, live while engaged.

@@ -1535,6 +1535,24 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **Private API, declared once.** `-[WKWebView _webProcessIdentifier]` names each page's
     `WebContent` process, for its memory and for the count of processes; a test checks the
     selector is still there.
+  - **The wheel goes on to the chat (2026-10-17).** A page scrolls while it can, and on the Mac
+    whatever it cannot take goes to the chat under its card, momentum included, as a browser's
+    nested scroll does. WebKit says which wheel events it used: its private UI delegate call
+    `_webView:didNotHandleWheelEvent:` returns each one that neither the scrolling tree nor the
+    page's process took. That covers a page with nothing to scroll, a page at its edge in the
+    wheel's direction, and the host document, which never scrolls. The delegate hands the event
+    to the window's GPUI view, and the card's native blocks the mouse except the wheel, so the
+    chat under it scrolls. A gesture that began over the chat stays with the chat when a card
+    comes under the pointer: the page's `WKWebView` subclass sends on, without showing them to
+    WebKit, the events of a gesture whose start it never saw. A wheel listener in the page was
+    ruled out: a non-passive listener makes every scroll of the page wait on its process, and
+    the frame's opaque origin hides its scroll position from the host anyway. WebKit can merge
+    events that queue up while one is in flight and returns only the last of the merged set, but
+    at the trackpad's rate a reply comes back before the next event. Tests:
+    `web::page::wheel`'s unit tests (the routing, the view class), the delegate's selectors in
+    `web::page::view`, `slopty-shell`'s `a_wheel_the_page_hands_on_scrolls_the_chat`, and the
+    e2e `pages-wheel-over-card` measure (144 pt for a 144 pt wheel). iOS is not covered: a finger
+    on a live page goes to its web view, and GPUI's touch scrolling never sees it.
   - **Files beside a page.** The view's requests for its own origin's other paths reach the
     app's `Resources` callback with the path under the page's folder (never `..`, `.` or an empty
     part, refused here), answered once with bytes or not found. The app backs it with the worker's

@@ -24,6 +24,8 @@ pub mod libs;
 mod sandbox;
 pub mod stage;
 mod view;
+#[cfg(target_os = "macos")]
+mod wheel;
 
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;

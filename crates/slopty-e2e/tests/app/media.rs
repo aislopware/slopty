@@ -674,14 +674,17 @@ async fn twelve_pages_in_one_chat_stay_within_budget() {
             most_live = most_live.max(live);
         }
     }
-    // The wheel over a live card: whether the chat under it moves (the page has nothing of its
-    // own to scroll).
+    // The wheel over a live card moves the chat under it, all of it: the page has nothing of its
+    // own to scroll, so the wheel goes on to the chat, as a browser's nested scroll does.
     let shown = drv.dump().await.unwrap();
     if let Some(card) = shown.a11y.iter().find(|n| is_card(n) && n.bounds[1] > 100.0).cloned() {
         hover(drv, &card).await;
         tokio::time::sleep(Duration::from_millis(300)).await;
         let (cx, cy) = middle(&card);
-        drv.scroll(cx, cy, 0.0, 18.0).await.unwrap();
+        // GPUI's list scrolls 20 pt a line (`list.rs`, `pixel_delta(px(20.))`): 7.2 lines are
+        // the 144 pt wheel.
+        let wheel = 144.0_f32;
+        drv.scroll(cx, cy, 0.0, wheel / 20.0).await.unwrap();
         tokio::time::sleep(Duration::from_millis(400)).await;
         let after = drv.dump().await.unwrap();
         let moved = after
@@ -690,8 +693,12 @@ async fn twelve_pages_in_one_chat_stay_within_budget() {
             .find(|n| n.label == card.label && n.role == "Group")
             .map_or(f32::NAN, |n| n.bounds[1] - card.bounds[1]);
         slopty_e2e::harness::measure(&format!(
-            "pages-wheel-over-card: the chat moved {moved:.0} pt for a 144 pt wheel"
+            "pages-wheel-over-card: the chat moved {moved:.0} pt for a {wheel:.0} pt wheel"
         ));
+        assert!(
+            (moved - wheel).abs() < 2.0,
+            "a {wheel:.0} pt wheel over a live card moves the chat as far: {moved:.1} pt"
+        );
     }
     stop.store(1, Ordering::SeqCst);
     let most_web_content = web_content.await.unwrap();

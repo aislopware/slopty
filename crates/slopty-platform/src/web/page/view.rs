@@ -11,7 +11,7 @@ use std::time::Instant;
 
 use block2::{DynBlock, RcBlock};
 use objc2::rc::Retained;
-use objc2::runtime::{AnyClass, AnyObject, NSObjectProtocol, ProtocolObject, Sel};
+use objc2::runtime::{AnyObject, NSObjectProtocol, ProtocolObject, Sel};
 use objc2::{
     AnyThread as _, DefinedClass as _, MainThreadMarker, MainThreadOnly, Message as _,
     define_class, msg_send, sel,
@@ -135,13 +135,19 @@ impl Drop for Mounted {
 
 /// A `WKWebView` for `shared`'s page: its own data store that keeps nothing, its own scheme
 /// handler, the relay in `world`, and the delegate. It loads once its rule list is in place
-/// ([`load`]). `None` without `WebKit`.
+/// ([`load`]). `None` without `WebKit`, which only iOS asks for by name.
+#[cfg_attr(
+    target_os = "macos",
+    expect(
+        clippy::unnecessary_wraps,
+        reason = "the Mac's view is a subclass, linked; iOS may miss it"
+    )
+)]
 pub(super) fn mount(
     shared: &Rc<Shared>,
     world: &WKContentWorld,
     mtm: MainThreadMarker,
 ) -> Option<Mounted> {
-    let class = AnyClass::get(c"WKWebView")?;
     // SAFETY: WebKit rule: a configuration made by `new` is complete.
     let config = unsafe { WKWebViewConfiguration::new(mtm) };
     // SAFETY: WebKit rule: a non-persistent store may be made at any time on the main thread;
@@ -192,13 +198,20 @@ pub(super) fn mount(
         );
     }
     let frame = rect(shared.width.get(), shared.height.get());
-    // SAFETY: `NSObject` rule: `alloc` on a class returns a fresh instance to initialise.
-    let allocated: objc2::rc::Allocated<AnyObject> = unsafe { msg_send![class, alloc] };
-    // SAFETY: WebKit rule: `initWithFrame:configuration:` is `WKWebView`'s designated
-    // initialiser, which copies the configuration.
-    let web: Option<Retained<AnyObject>> =
-        unsafe { msg_send![allocated, initWithFrame: frame, configuration: &*config] };
-    let web = web?;
+    // On the Mac the view hands on the wheel it cannot take (`super::wheel`).
+    #[cfg(target_os = "macos")]
+    let web: Retained<AnyObject> = super::wheel::PageWebView::new(frame, &config, mtm).into();
+    #[cfg(not(target_os = "macos"))]
+    let web = {
+        let class = objc2::runtime::AnyClass::get(c"WKWebView")?;
+        // SAFETY: `NSObject` rule: `alloc` on a class returns a fresh instance to initialise.
+        let allocated: objc2::rc::Allocated<AnyObject> = unsafe { msg_send![class, alloc] };
+        // SAFETY: WebKit rule: `initWithFrame:configuration:` is `WKWebView`'s designated
+        // initialiser, which copies the configuration.
+        let web: Option<Retained<AnyObject>> =
+            unsafe { msg_send![allocated, initWithFrame: frame, configuration: &*config] };
+        web?
+    };
     let delegate = PageDelegate::new(Rc::clone(shared), mtm);
     // SAFETY: WebKit rule: the navigation delegate is held weakly; `Mounted` keeps it as long as
     // the view.
@@ -697,6 +710,14 @@ define_class!(
             decide.call((DENY,));
         }
 
+        /// A wheel event neither the page's scrolling nor its process took (`WKUIDelegatePrivate.h`,
+        /// private, macOS): the page has nothing to scroll that way, so it goes on to the chat.
+        #[cfg(target_os = "macos")]
+        #[unsafe(method(_webView:didNotHandleWheelEvent:))]
+        fn unhandled_wheel(&self, web: &AnyObject, event: &objc2_app_kit::NSEvent) {
+            super::wheel::pass_on(web, event);
+        }
+
         /// The device's motion and orientation: never.
         #[unsafe(method(webView:requestDeviceOrientationAndMotionPermissionForOrigin:initiatedByFrame:decisionHandler:))]
         fn motion(
@@ -757,6 +778,8 @@ impl PageDelegate {
 
 #[cfg(test)]
 mod tests {
+    use objc2::runtime::AnyClass;
+
     use super::*;
 
     /// The private selector a page's process is named by is still `WebKit`'s.
@@ -786,6 +809,8 @@ mod tests {
             sel!(webView:createWebViewWithConfiguration:forNavigationAction:windowFeatures:),
             sel!(webView:requestMediaCapturePermissionForOrigin:initiatedByFrame:type:decisionHandler:),
             sel!(webViewWebContentProcessDidTerminate:),
+            #[cfg(target_os = "macos")]
+            sel!(_webView:didNotHandleWheelEvent:),
         ] {
             assert!(delegate.instance_method(wanted).is_some(), "{wanted:?}");
         }
