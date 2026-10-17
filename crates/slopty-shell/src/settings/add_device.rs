@@ -159,7 +159,16 @@ pub struct AddDeviceDialog {
     look: Option<Task<()>>,
     /// What had the keyboard before the dialog took it, given back as it closes.
     restore: Option<gpui::FocusHandle>,
+    /// The card's own: it holds the keyboard while a run goes and the button that started the
+    /// run is gone from it.
+    focus: gpui::FocusHandle,
+    /// The dialog's button (Go, Try again, Sign in, Done).
+    go_focus: gpui::FocusHandle,
+    /// The footer's quiet button (Cancel, Stop, Close), drawn in every state.
+    cancel_focus: gpui::FocusHandle,
     _events: [Subscription; 3],
+    /// Escape closes the dialog when the keyboard fell out of the card.
+    _escape: Subscription,
 }
 
 impl EventEmitter<Closed> for AddDeviceDialog {}
@@ -197,6 +206,18 @@ impl AddDeviceDialog {
             cx.subscribe_in(&password, window, go),
         ];
         let restore = window.focused(cx);
+        let ours = window.window_handle();
+        let this = cx.weak_entity();
+        let escape = cx.intercept_keystrokes(move |event, window, cx| {
+            if event.keystroke.key != "escape" || window.window_handle() != ours {
+                return;
+            }
+            let Some(this) = this.upgrade() else { return };
+            if this.read(cx).keyboard_fell_out(window, cx) {
+                this.update(cx, |dialog, cx| dialog.close(window, cx));
+                cx.stop_propagation();
+            }
+        });
         let mut dialog = Self {
             state,
             choice,
@@ -212,7 +233,11 @@ impl AddDeviceDialog {
             found: None,
             look: None,
             restore,
+            focus: cx.focus_handle(),
+            go_focus: cx.focus_handle().tab_index(0).tab_stop(true),
+            cancel_focus: cx.focus_handle().tab_index(0).tab_stop(true),
             _events: events,
+            _escape: escape,
         };
         dialog.choose(choice, window, cx);
         dialog
@@ -297,6 +322,35 @@ impl AddDeviceDialog {
         self.progress.as_ref()?.added.as_deref()
     }
 
+    /// The keyboard is where nothing hears Escape for the dialog while its card shows: on
+    /// nothing, or on one of the dialog's own handles the card no longer draws. Inside the card
+    /// its own listener hears it, and elsewhere in Settings the page does.
+    fn keyboard_fell_out(&self, window: &Window, cx: &App) -> bool {
+        // The card was drawn in the last frame: its Cancel is, in every state.
+        if !self.focus.contains(&self.cancel_focus, window) {
+            return false;
+        }
+        let Some(focused) = window.focused(cx) else { return true };
+        if self.focus.contains(&focused, window) {
+            return false;
+        }
+        [
+            self.go_focus.clone(),
+            self.cancel_focus.clone(),
+            self.target.focus_handle(cx),
+            self.address.focus_handle(cx),
+            self.password.focus_handle(cx),
+        ]
+        .contains(&focused)
+    }
+
+    /// The card takes the keyboard as a run starts or goes on: the button or field that started
+    /// it leaves the card, and what the run asks next, or the button once it is back, takes the
+    /// keyboard from the card as it draws.
+    fn hold_keyboard(&self, window: &mut Window, cx: &mut App) {
+        window.focus(&self.focus, cx);
+    }
+
     /// Close, giving the keyboard back to what had it.
     fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.restore.take() {
@@ -330,7 +384,7 @@ impl AddDeviceDialog {
                 password.update(cx, |input, cx| input.set_value("", window, cx));
                 serde_json::json!({ "run": run, "password": typed, "addKey": true })
             };
-            return self.answer(params, cx);
+            return self.answer(params, window, cx);
         }
         let (kind, typed) = match self.choice {
             Choice::ThisMac => ("thisMac", String::new()),
@@ -351,11 +405,12 @@ impl AddDeviceDialog {
             cx.notify();
             return;
         }
-        self.start(kind, typed, cx);
+        self.start(kind, typed, window, cx);
     }
 
     /// Start a run of `kind` against `target`, following its stream until it ends.
-    fn start(&mut self, kind: &'static str, target: String, cx: &mut Context<Self>) {
+    fn start(&mut self, kind: &'static str, target: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.hold_keyboard(window, cx);
         let Some(engine) = self.state.read(cx).engine().cloned() else { return };
         self.note = None;
         self.progress = None;
@@ -395,8 +450,9 @@ impl AddDeviceDialog {
     }
 
     /// Send the person's answer to the run that asked; it goes on in its own stream.
-    fn answer(&mut self, params: serde_json::Value, cx: &mut Context<Self>) {
+    fn answer(&mut self, params: serde_json::Value, window: &mut Window, cx: &mut Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else { return };
+        self.hold_keyboard(window, cx);
         self.note = None;
         // The run goes on: what it asked is answered.
         if let Some(progress) = &mut self.progress {
@@ -420,9 +476,9 @@ impl AddDeviceDialog {
     }
 
     /// A step's fix, or a server chosen, for the run that asked.
-    fn answer_with(&mut self, key: &'static str, value: String, cx: &mut Context<Self>) {
+    fn answer_with(&mut self, key: &'static str, value: String, window: &mut Window, cx: &mut Context<Self>) {
         let run = self.progress.as_ref().map_or(0, |p| p.run);
-        self.answer(serde_json::json!({ "run": run, key: value }), cx);
+        self.answer(serde_json::json!({ "run": run, key: value }), window, cx);
     }
 
     /// A node the tailnet offered, pressed: a server is connected to, a machine installed on.
@@ -621,8 +677,8 @@ impl AddDeviceDialog {
                     .map(|el| crate::surface_chrome::focus_ring(el, theme))
                     .role(gpui::Role::Button)
                     .aria_label(fix.label)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.answer_with("fix", id.clone(), cx);
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.answer_with("fix", id.clone(), window, cx);
                     }))
             });
             list = list.child(
@@ -700,8 +756,8 @@ impl AddDeviceDialog {
                             .text_color(theme.text_muted)
                             .child("Join"),
                     )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.answer_with("choose", at.clone(), cx);
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.answer_with("choose", at.clone(), window, cx);
                     })),
             );
         }
@@ -858,9 +914,30 @@ impl Render for AddDeviceDialog {
                 "Cancel",
             )
         };
+        // The keyboard stays in the card. One that fell out of it (a button or field it held
+        // went) comes back to the card, and the card hands it on to the password a run asks for
+        // or the button once it is back: Try again after a failure. A host key to trust is read
+        // first, so its button waits for a press.
+        if self.keyboard_fell_out(window, cx) {
+            self.hold_keyboard(window, cx);
+        }
+        if self.focus.is_focused(window) {
+            let asks = self.asks_key_or_password();
+            let next = if asks.is_some_and(|asks| asks.password.is_some()) {
+                Some(self.password.focus_handle(cx))
+            } else if asks.is_none() && primary.is_some() {
+                Some(self.go_focus.clone())
+            } else {
+                None
+            };
+            if let Some(next) = next {
+                window.focus(&next, cx);
+            }
+        }
         popover::dialog_card(&theme)
             .w(px(460.0))
             .id("add-device-card")
+            .track_focus(&self.focus)
             .role(gpui::Role::Dialog)
             .aria_label("Add device")
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
@@ -895,8 +972,9 @@ impl Render for AddDeviceDialog {
                     .child(
                         widgets::text_action(&theme, widgets::ActionTone::Quiet, quiet)
                             .id("add-device-cancel")
-                            .tab_index(0)
+                            .track_focus(&self.cancel_focus)
                             .role(gpui::Role::Button)
+                            .aria_label(quiet)
                             .map(|el| crate::surface_chrome::focus_ring_revealing(el, &theme))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 if !running {
@@ -911,7 +989,7 @@ impl Render for AddDeviceDialog {
                     .children(primary.map(|label| {
                         widgets::text_action(&theme, widgets::ActionTone::Solid, label)
                             .id("add-device-go")
-                            .tab_index(0)
+                            .track_focus(&self.go_focus)
                             .role(gpui::Role::Button)
                             .aria_label(label) // slopty: named in the accessibility tree.
                             .map(|el| crate::surface_chrome::focus_ring_revealing(el, &theme))
@@ -1031,6 +1109,121 @@ mod tests {
         cx.run_until_parked();
         let strip = cx.debug_bounds("add-device-failure").expect("the error strip");
         assert!(f32::from(strip.size.height) > 40.0, "title, hint and output: {strip:?}");
+    }
+
+    /// The focused node of the window's accessibility tree, as a screen reader names it.
+    fn focused(cx: &mut gpui::VisualTestContext) -> (gpui::Role, String) {
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.set_a11y_active(true);
+            window.refresh();
+            window.draw(cx).clear(cx);
+            let update = window.a11y_tree().expect("a tree");
+            let node = update
+                .nodes
+                .iter()
+                .find(|(id, _)| *id == update.focus)
+                .map(|(_, node)| node)
+                .expect("the focused node");
+            (node.role(), node.label().unwrap_or_default().to_owned())
+        })
+    }
+
+    /// Install pressed hands the keyboard to the card while the run goes and its button is
+    /// gone; a run that failed hands it to Try again, where Return tries again and Escape
+    /// closes, never to the window.
+    #[gpui::test]
+    fn a_failed_run_leaves_the_keyboard_on_try_again(cx: &mut gpui::TestAppContext) {
+        let (dialog, cx) = dialog(cx);
+        cx.run_until_parked();
+        dialog.update_in(cx, |dialog, window, cx| {
+            dialog.address.update(cx, |input, cx| input.set_value("nohost", window, cx));
+            window.focus(&dialog.go_focus, cx);
+            dialog.go(window, cx);
+            // What the run's stream brings: under way, then failed.
+            dialog.open = true;
+            dialog.progress = Some(Progress { steps: vec![step(Mark::Running)], ..Progress::default() });
+            cx.notify();
+        });
+        assert_eq!(focused(cx), (gpui::Role::Dialog, "Add device".to_owned()), "the card holds it");
+        dialog.update(cx, |dialog, cx| {
+            dialog.open = false;
+            dialog.progress = Some(Progress {
+                steps: vec![step(Mark::Failed)],
+                failure: Some(Failure { title: "Could not reach nohost".to_owned(), ..Failure::default() }),
+                ..Progress::default()
+            });
+            cx.notify();
+        });
+        assert_eq!(focused(cx), (gpui::Role::Button, "Try again".to_owned()));
+        dialog.update_in(cx, |dialog, window, cx| {
+            assert!(dialog.go_focus.is_focused(window));
+            assert!(dialog.focus.contains_focused(window, cx));
+        });
+    }
+
+    /// Counts the times `dialog` says it is done.
+    fn closes(dialog: &Entity<AddDeviceDialog>, cx: &mut gpui::VisualTestContext) -> std::rc::Rc<std::cell::Cell<u32>> {
+        let closed = std::rc::Rc::new(std::cell::Cell::new(0));
+        let seen = closed.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(dialog, move |_, _: &Closed, _| seen.set(seen.get() + 1)).detach();
+        });
+        closed
+    }
+
+    /// Escape closes the dialog with the keyboard on nothing, where a button that held it and
+    /// went leaves it.
+    #[gpui::test]
+    fn escape_closes_the_dialog_with_the_keyboard_on_nothing(cx: &mut gpui::TestAppContext) {
+        let (dialog, cx) = dialog(cx);
+        let closed = closes(&dialog, cx);
+        let _ = focused(cx);
+        cx.update(|window, cx| window.blur(cx));
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert_eq!(closed.get(), 1);
+    }
+
+    /// Escape closes the dialog with the keyboard on the card's own button once the card no
+    /// longer draws it: Go, while a run goes.
+    #[gpui::test]
+    fn escape_closes_the_dialog_with_the_keyboard_on_a_button_gone(cx: &mut gpui::TestAppContext) {
+        let (dialog, cx) = dialog(cx);
+        let closed = closes(&dialog, cx);
+        let _ = focused(cx);
+        dialog.update_in(cx, |dialog, window, cx| {
+            window.focus(&dialog.go_focus, cx);
+            dialog.open = true;
+            dialog.progress = Some(Progress { steps: vec![step(Mark::Running)], ..Progress::default() });
+            cx.notify();
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert_eq!(closed.get(), 1);
+    }
+
+    /// The footer's buttons are named for a screen reader: Cancel as well as the one that goes.
+    #[gpui::test]
+    fn the_footers_buttons_are_named(cx: &mut gpui::TestAppContext) {
+        let (_dialog, cx) = dialog(cx);
+        cx.run_until_parked();
+        let buttons = cx.update(|window, cx| {
+            window.set_a11y_active(true);
+            window.refresh();
+            window.draw(cx).clear(cx);
+            let update = window.a11y_tree().expect("a tree");
+            update
+                .nodes
+                .iter()
+                .filter(|(_, node)| node.role() == gpui::Role::Button)
+                .map(|(_, node)| node.label().unwrap_or_default().to_owned())
+                .collect::<Vec<_>>()
+        });
+        assert!(buttons.iter().any(|b| b == "Cancel"), "{buttons:?}");
+        assert!(buttons.iter().any(|b| b == "Connect"), "{buttons:?}");
+        assert!(!buttons.iter().any(String::is_empty), "no nameless button: {buttons:?}");
     }
 
     /// The run's share rides the step under way, not a bar of its own; with no step under way,

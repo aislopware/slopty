@@ -1522,22 +1522,25 @@ fn notifier() -> Rc<dyn Notifier> {
 }
 
 /// The pasteboard the clipboard is shared through: the general one, or the one named by
-/// `SLOPTY_PASTEBOARD` (the self-tests', so no test touches the human's clipboard).
+/// `SLOPTY_PASTEBOARD` (the self-tests', so no test touches the human's clipboard). A named
+/// one is GPUI's clipboard too, so every copy and paste in the app goes where the sharing
+/// looks; called as the window is made, before anything is copied.
 #[cfg(target_os = "macos")]
 fn pasteboard() -> Rc<dyn slopty_platform::pasteboard::Pasteboard> {
     use slopty_platform::pasteboard::MacPasteboard;
     match std::env::var("SLOPTY_PASTEBOARD") {
         Ok(name) if !name.is_empty() => {
             tracing::info!(%name, "clipboard on a named pasteboard");
+            gpui_platform::set_clipboard_pasteboard(&name);
             Rc::new(MacPasteboard::named(&name))
         }
         _ => Rc::new(MacPasteboard::general()),
     }
 }
 
-/// [`pasteboard`] on iOS: `UIPasteboard`, the app's own named one under the self-test. A
-/// self-test that names none still gets one of its own: the simulator's general pasteboard
-/// follows the Mac's.
+/// [`pasteboard`] on iOS: `UIPasteboard`, the app's own named one under the self-test, GPUI's
+/// clipboard too. A self-test that names none still gets one of its own: the simulator's
+/// general pasteboard follows the Mac's.
 #[cfg(target_os = "ios")]
 fn pasteboard() -> Rc<dyn slopty_platform::pasteboard::Pasteboard> {
     use slopty_platform::pasteboard::IosPasteboard;
@@ -1545,8 +1548,11 @@ fn pasteboard() -> Rc<dyn slopty_platform::pasteboard::Pasteboard> {
         std::env::var("SLOPTY_PASTEBOARD").ok().filter(|name| !name.is_empty()).or_else(|| {
             self_test().then(|| format!("com.aislopware.slopty.self-test.{}", std::process::id()))
         });
-    if let Some(board) = named.as_deref().and_then(IosPasteboard::named) {
-        tracing::info!(name = ?named, "clipboard on a named pasteboard");
+    if let Some(name) = named
+        && let Some(board) = IosPasteboard::named(&name)
+    {
+        tracing::info!(%name, "clipboard on a named pasteboard");
+        gpui_platform::set_clipboard_pasteboard(&name);
         return Rc::new(board);
     }
     Rc::new(IosPasteboard::general())

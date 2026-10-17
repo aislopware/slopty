@@ -143,6 +143,11 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Tests use a named pasteboard (`--pasteboard`, `SLOPTY_PASTEBOARD`), never the general one:
     the `slopty_worker::clip` unit tests and `slopty-worker`'s
     `the_clipboard_is_announced_fetched_and_pasted_both_ways`.
+  - The app's own copies and pastes go to the pasteboard it shares (2026-10-17). GPUI's
+    clipboard was always the general pasteboard, so under a named one Copy image and a field's
+    ⌘C reached the person's clipboard while the sharing watched the named one. `pasteboard()`
+    names its choice to GPUI too (`gpui_platform::set_clipboard_pasteboard`, gpui-fast
+    `d550137`, macOS and iOS), from one name.
 
 - ✅ **Uploads are written as `.partial` beside their name, placed per top-level entry, and
   resume from what is durable** (2026-09-25, protocol 52).
