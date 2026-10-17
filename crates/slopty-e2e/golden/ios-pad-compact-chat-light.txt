@@ -1,0 +1,26 @@
+Window (focused)
+Button │ background sleep 600
+Status │ Waiting
+Button │ History: past Claude Code sessions
+Button │ Server: e2e-server, Connected
+Button │ Settings
+Article │ You
+Paragraph │ background sleep 600
+Button │ Ran 1 command
+Article │ Claude
+Paragraph │ Done: it runs in the background.
+Group │ Background work
+Button │ Expand background work │ 1 command
+Button │ Attach images
+MultilineTextInput │ Do anything…
+Button │ Send message
+Button │ Mode: Auto
+Button │ Context 1%
+Button │ Show chat details
+Button │ Show files panel
+Button │ Show side pane
+Button │ Hide sidebar
+Button │ Back
+Button │ Forward
+Button │ New chat
+Button │ Sidebar view options

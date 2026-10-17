@@ -512,9 +512,10 @@ async fn ctl(path: &Path, request: &Value) -> Result<Value> {
     serde_json::from_str(reply.trim()).context("the worker's reply is not JSON")
 }
 
-/// Wait for a socket path from a process that is not our child (the simulator's).
+/// Wait for a socket path from a process that is not our child (the simulator's), as long as a
+/// launch may take: the app's first start on a simulator cloned fresh for the run took over 30 s.
 async fn wait_for_socket(path: &Path, what: &str) -> Result<()> {
-    let waited = tokio::time::timeout(STARTUP, async {
+    let waited = tokio::time::timeout(SIMULATOR_LAUNCH, async {
         while !path.exists() {
             tokio::time::sleep(POLL).await;
         }
@@ -522,7 +523,9 @@ async fn wait_for_socket(path: &Path, what: &str) -> Result<()> {
     .await;
     match waited {
         Ok(()) => Ok(()),
-        Err(_elapsed) => bail!("{what} did not create {} within {STARTUP:?}", path.display()),
+        Err(_elapsed) => {
+            bail!("{what} did not create {} within {SIMULATOR_LAUNCH:?}", path.display())
+        }
     }
 }
 
