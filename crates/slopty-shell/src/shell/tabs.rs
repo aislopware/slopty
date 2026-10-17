@@ -361,7 +361,10 @@ impl Shell {
         };
         let row_gap = 8.0;
         let files_width = self.files_visible_width(cx);
-        let right_pad = self.titlebar_right_pad(TITLEBAR_ACTION_EDGE_INSET);
+        // slopty: room at the edge for the outermost control's press on a touch screen (#23).
+        let right_pad = self
+            .titlebar_right_pad(TITLEBAR_ACTION_EDGE_INSET)
+            .max(crate::surface_chrome::touch_reach(28.0));
         // The title row's gaps are outside the fixed-width panel controls.
         let gap_budget = if takeover { row_gap } else { row_gap * 3.0 };
         // Match the surface's visible width, including its resize bounce,
@@ -503,6 +506,7 @@ impl Shell {
                                             header_icon_button(
                                                 "expand-changes",
                                                 right_pane_expand_icon(self.right_pane_expanded),
+                                                false,
                                                 &theme,
                                                 cx.listener(|this, _, _, cx| {
                                                     this.toggle_right_pane_expand(cx)
@@ -553,6 +557,7 @@ impl Shell {
                                 header_icon_button(
                                     "toggle-files-panel",
                                     icons::FOLDER_TREE,
+                                    self.files_panel_open(cx) && fit.files,
                                     &theme,
                                     cx.listener(|this, _, window, cx| {
                                         this.toggle_files_panel(window, cx)
@@ -561,9 +566,7 @@ impl Shell {
                                 .action_hint(files_panel_label, Keys::Action(Box::new(ToggleFiles)), cx)
                                 // slopty: no running-subagents mark; a subagent lives in its
                                 // parent's chat, not in this panel.
-                                .when(self.files_panel_open(cx) && fit.files, |button| {
-                                    button.bg(crate::theme::wash(0.09))
-                                }),
+
                             )
                             .child(header_icon_button_with(
                                 "toggle-changes",
@@ -578,6 +581,7 @@ impl Shell {
                                     16.0,
                                     theme.text_muted,
                                 ),
+                                false,
                                 &theme,
                                 cx.listener(|this, _, _, cx| this.toggle_right_pane(cx)),
                             )
@@ -609,6 +613,7 @@ impl Shell {
             header_icon_button_with(
                 "toggle-session-info",
                 icons::corner_card_glyph(16.0, theme.text_muted),
+                open,
                 &theme,
                 cx.listener(|this, _, _, cx| this.toggle_session_info(cx)),
             )
@@ -618,7 +623,6 @@ impl Shell {
                 MouseButton::Left,
                 cx.listener(|this, _, _, _| this.note_session_info_press()),
             )
-            .when(open, |button| button.bg(crate::theme::wash(0.09)))
         });
         let inner = div()
             .size_full()

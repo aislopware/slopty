@@ -305,6 +305,7 @@ impl Shell {
         let button = super::header_icon_button(
             "open-in",
             icons::FILE_CODE,
+            open,
             &theme,
             cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
                 if this.open_in.take_press_was_open() {
@@ -335,7 +336,7 @@ impl Shell {
                 gpui::MouseButton::Left,
                 cx.listener(|this, _, _, _| this.open_in.note_trigger_press()),
             )
-            .when(open, |button| button.bg(crate::theme::wash(0.09))))
+            )
             .into_any_element(),
         )
     }

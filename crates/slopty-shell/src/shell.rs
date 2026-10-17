@@ -1923,6 +1923,14 @@ pub struct Shell {
     project_icons: project_icon::ProjectIcons,
     /// Hovered row whose status is replaced by the archive control.
     chat_status_hover: Option<String>,
+    /// slopty: the time the sidebar's rows say how long ago they moved by: taken when the state
+    /// moves and on [`Self::sidebar_clock_tick`], never as a row is built, so a sidebar built
+    /// again (from scratch, or for a hover) says what the one shown says.
+    sidebar_clock: chrono::DateTime<Utc>,
+    /// slopty: when the soonest of the shown rows' times next reads differently.
+    sidebar_clock_next: std::cell::Cell<Option<chrono::DateTime<Utc>>>,
+    /// slopty: the clock's next tick, at that time.
+    sidebar_clock_tick: Option<(chrono::DateTime<Utc>, Task<()>)>,
     /// Set by an archive-pill click until the pointer next moves. gpui only
     /// re-evaluates `on_hover` on mouse movement, so the row that slides up
     /// under a still pointer would otherwise never show its archive pill;
@@ -2122,6 +2130,7 @@ pub struct Shell {
 impl Shell {
     pub fn new(state: Entity<AppState>, boot: EngineBootConfig, cx: &mut Context<Self>) -> Self {
         let observation = cx.observe(&state, |this: &mut Shell, state, cx| {
+            this.sidebar_clock = Utc::now(); // slopty: the rows' times move with the state
             this.on_state_changed(&state, cx);
             cx.notify();
         });
@@ -2375,6 +2384,9 @@ impl Shell {
             sidebar_pinned_heights: Vec::new(),
             project_icons: Default::default(),
             chat_status_hover: None,
+            sidebar_clock: Utc::now(),
+            sidebar_clock_next: std::cell::Cell::new(None),
+            sidebar_clock_tick: None,
             chat_hover_resync: false,
             sidebar_scroll: gpui::ScrollHandle::new(),
             pinned_session_drag: None,
@@ -7870,6 +7882,15 @@ impl Shell {
     }
 
     fn render_chat_sidebar(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        // slopty: the rows note when their times next read differently, and the clock ticks
+        // then (`spaces::Shell::tick_sidebar_clock`).
+        self.sidebar_clock_next.set(None);
+        let sidebar = self.render_chat_sidebar_body(theme, cx);
+        self.tick_sidebar_clock(cx);
+        sidebar
+    }
+
+    fn render_chat_sidebar_body(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         if self.sidebar_session_transfer.as_ref().is_some_and(|drag| {
             !cx.has_active_drag() || !self.sidebar_session_transfer_is_valid(&drag.payload, cx)
         }) {
@@ -8372,7 +8393,8 @@ impl Shell {
             .tab_index(0)
             .map(|el| crate::surface_chrome::focus_ring(el, theme)) // slopty: paint only (M8)
             .relative()
-            .h(px(SIDEBAR_FOOTER_BUTTON_SIZE))
+            // slopty: a finger's row on a touch screen (#23).
+            .h(px(crate::surface_chrome::touch_row_height(SIDEBAR_FOOTER_BUTTON_SIZE)))
             .min_w_0()
             .flex_shrink_1()
             .w_full()
@@ -8502,7 +8524,36 @@ impl Shell {
                     .items_center()
                     .gap(px(2.0))
                     // slopty: voice removed.
-                    .child(
+                    .child({
+                        // slopty: on a touch screen it takes presses over a finger's 44 pt
+                        // around the button it draws (#23).
+                        let reach = crate::surface_chrome::touch_reach(SIDEBAR_FOOTER_BUTTON_SIZE);
+                        let drawn = div()
+                            .size(px(SIDEBAR_FOOTER_BUTTON_SIZE))
+                            .rounded(px(8.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .bg(if settings_open {
+                                theme.glass_hover()
+                            } else {
+                                motion::hover_blend(
+                                    "settings-trigger",
+                                    theme.glass_hover().opacity(0.0),
+                                    theme.glass_hover(),
+                                )
+                            })
+                            .child(icon(icons::SETTINGS).size(px(15.0)).text_color(
+                                if settings_open {
+                                    theme.text
+                                } else {
+                                    motion::hover_blend(
+                                        "settings-trigger",
+                                        theme.text_muted,
+                                        theme.text,
+                                    )
+                                },
+                            ));
                         div()
                             .id("settings-trigger")
                             .debug_selector(|| "settings-trigger".into())
@@ -8514,37 +8565,19 @@ impl Shell {
                                 gpui::Toggled::False
                             })
                             .tab_index(0)
-                            .size(px(SIDEBAR_FOOTER_BUTTON_SIZE))
+                            .size(px(SIDEBAR_FOOTER_BUTTON_SIZE + 2.0 * reach))
+                            .m(px(-reach))
                             .flex_none()
-                            .rounded(px(8.0))
+                            .rounded(px(8.0 + reach))
                             .flex()
                             .items_center()
                             .justify_center()
                             .cursor_pointer()
-                            .bg(if settings_open {
-                                theme.glass_hover()
-                            } else {
-                                motion::hover_blend(
-                                    "settings-trigger",
-                                    theme.glass_hover().opacity(0.0),
-                                    theme.glass_hover(),
-                                )
-                            })
                             .on_hover(motion::hover_listener("settings-trigger"))
-                            .map(|el| crate::surface_chrome::focus_ring(el, &theme))
+                            .map(|el| crate::surface_chrome::focus_ring_within(el, &theme, reach))
                             .on_click(cx.listener(|this, _, _, cx| this.toggle_settings(cx)))
-                            .child(icon(icons::SETTINGS).size(px(15.0)).text_color(
-                                if settings_open {
-                                    theme.text
-                                } else {
-                                    motion::hover_blend(
-                                        "settings-trigger",
-                                        theme.text_muted,
-                                        theme.text,
-                                    )
-                                },
-                            )),
-                    ),
+                            .child(drawn)
+                    }),
             )
             .into_any_element()
     }
@@ -10647,16 +10680,17 @@ fn window_control_button_with(
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
 ) -> gpui::Stateful<gpui::Div> {
     let fade_key = format!("window-control-{id}");
-    div()
-        .id(id)
-        .debug_selector(move || id.to_owned())
+    // slopty: on a touch screen the control takes presses over a finger's 44 pt, centred on the
+    // 24 it draws, which keeps its wash and glyph (#23).
+    let reach = crate::surface_chrome::touch_reach(24.0);
+    let group = SharedString::from(format!("window-control-press-{id}"));
+    let drawn = div()
+        .id(SharedString::from(format!("{id}-drawn")))
         .size(px(24.0))
-        .flex_none()
         .flex()
         .items_center()
         .justify_center()
         .rounded(px(6.0))
-        .cursor_pointer()
         // slopty window-controls.tsx: `transition-colors` — the wash fades; the header
         // buttons' wash, so the strip's controls agree (M24).
         .bg(motion::hover_blend(
@@ -10664,6 +10698,20 @@ fn window_control_button_with(
             crate::theme::wash(0.0),
             crate::theme::wash(0.11),
         ))
+        .group_active(group.clone(), |style| style.bg(theme_pressed()))
+        .child(glyph);
+    div()
+        .id(id)
+        .debug_selector(move || id.to_owned())
+        .group(group)
+        .size(px(24.0 + 2.0 * reach))
+        .m(px(-reach))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(6.0 + reach))
+        .cursor_pointer()
         .on_hover(motion::hover_listener(fade_key))
         // Buttons in/over a titlebar drag strip must be EXCLUDED from the
         // strip's event surface entirely. `.occlude()` (gpui
@@ -10683,13 +10731,12 @@ fn window_control_button_with(
             cx.stop_propagation();
             on_click(event, window, cx)
         })
-        .child(glyph)
+        .child(drawn)
         // slopty: a button for VoiceOver (and the simulator's e2e taps), reached by Tab, pressed
         // with a darker wash, its ring a hairline that never resizes it.
         .role(gpui::Role::Button)
         .tab_index(0)
-        .map(|el| crate::surface_chrome::focus_ring(el, theme))
-        .active(|style| style.bg(theme_pressed()))
+        .map(|el| crate::surface_chrome::focus_ring_within(el, theme, reach))
 }
 
 // slopty: what a pressed chrome button shows under the pointer (Zed's `active_background`).
@@ -10819,12 +10866,15 @@ fn nav_history_button(
 ) -> AnyElement {
     use crate::settings::widgets::ActionHint as _;
     if !enabled {
+        // slopty: as wide a press as the enabled one's (#23).
+        let reach = crate::surface_chrome::touch_reach(24.0);
         return div()
             .id(id)
             .debug_selector(move || id.to_owned())
             .role(gpui::Role::Button)
             .action_hint(label, keys, cx)
-            .size(px(24.0))
+            .size(px(24.0 + 2.0 * reach))
+            .m(px(-reach))
             .flex_none()
             .flex()
             .items_center()
@@ -10850,38 +10900,56 @@ fn nav_history_button(
 fn header_icon_button(
     id: &'static str,
     icon_path: &'static str,
+    on: bool,
     theme: &Theme,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
 ) -> gpui::Stateful<gpui::Div> {
     let glyph = icon(icon_path).size(px(16.0)).text_color(theme.text_muted);
-    header_icon_button_with(id, glyph, theme, on_click)
+    header_icon_button_with(id, glyph, on, theme, on_click)
 }
 
 /// [`header_icon_button`] around a caller-drawn glyph (the morphing sidebar
 /// glyph).
+// slopty: `on` washes what it draws for a pane it shows, as an open menu's trigger is.
 fn header_icon_button_with(
     id: &'static str,
     glyph: impl IntoElement,
+    on: bool,
     theme: &Theme,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
 ) -> gpui::Stateful<gpui::Div> {
     let fade_key = format!("header-icon-{id}");
-    div()
-        .id(id)
-        .debug_selector(|| id.into())
+    // slopty: on a touch screen it takes presses over a finger's 44 pt around the 28 it draws.
+    let reach = crate::surface_chrome::touch_reach(28.0);
+    let group = SharedString::from(format!("header-icon-press-{id}"));
+    let drawn = div()
+        .id(SharedString::from(format!("{id}-drawn")))
         .size(px(28.0))
-        .flex_none()
         .flex()
         .items_center()
         .justify_center()
         .rounded(px(6.0))
-        .cursor_pointer()
         // slopty __root.tsx header buttons: `transition-colors`.
         .bg(motion::hover_blend(
             &fade_key,
             crate::theme::wash(0.0),
             crate::theme::wash(0.11),
         ))
+        .when(on, |drawn| drawn.bg(crate::theme::wash(0.09)))
+        .group_active(group.clone(), |style| style.bg(theme_pressed()))
+        .child(glyph);
+    div()
+        .id(id)
+        .debug_selector(|| id.into())
+        .group(group)
+        .size(px(28.0 + 2.0 * reach))
+        .m(px(-reach))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(6.0 + reach))
+        .cursor_pointer()
         .on_hover(motion::hover_listener(fade_key))
         // Same occlusion + click-swallowing as [`window_control_button`]: this
         // button sits inside the chat header's titlebar drag region, so its
@@ -10896,9 +10964,8 @@ fn header_icon_button_with(
         // with a darker wash.
         .role(gpui::Role::Button)
         .tab_index(0)
-        .map(|el| crate::surface_chrome::focus_ring(el, theme))
-        .active(|style| style.bg(theme_pressed()))
-        .child(glyph)
+        .map(|el| crate::surface_chrome::focus_ring_within(el, theme, reach))
+        .child(drawn)
 }
 
 impl Render for Shell {
@@ -15191,6 +15258,45 @@ mod settings_modal_regressions {
                 format!("shown only {:#?}\nscratch only {:#?}", only(&shown, &scratch), only(&scratch, &shown))
             })
         })
+    }
+
+    // slopty: the sidebar's rows say their times by the sidebar's clock, not the wall's, so a
+    // sidebar built again says what the one shown says; the clock ticks when a shown time next
+    // reads differently.
+    #[gpui::test]
+    fn the_sidebars_times_read_its_clock_and_tick_when_they_change(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        init_settings_test(settings::UiSettings::default(), dir.path(), cx);
+        let (shell, cx) = cx.add_window_view(|_, cx| test_shell(dir.path(), cx));
+        // A clock taken five minutes ago, a chat that moved half a minute before it.
+        let clock = Utc::now() - chrono::Duration::minutes(5);
+        let moved = clock - chrono::Duration::seconds(30);
+        shell.update(cx, |shell, cx| {
+            shell.debug_gate = Some(GatePhase::Ready);
+            shell.splash = SplashPhase::Gone;
+            shell.state.update(cx, |state, _| {
+                state.workspace_scope = Some(WorkspaceScope::Local);
+                state.local_device_id = Some("local".into());
+                state.chats = vec![
+                    serde_json::from_value(serde_json::json!({
+                        "id": "a", "title": "Chat a", "deviceId": "local", "archived": false,
+                        "createdAt": moved, "lastMessageAt": moved,
+                    }))
+                    .unwrap(),
+                ];
+            });
+        });
+        cx.run_until_parked();
+        shell.update(cx, |shell, _| shell.sidebar_clock = clock);
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear(cx);
+        });
+        shell.read_with(cx, |shell, _| {
+            assert_eq!(shell.sidebar_time_ago(moved).as_ref(), "now", "the sidebar's clock, not 5m");
+            let due = shell.sidebar_clock_tick.as_ref().map(|(due, _)| *due);
+            assert_eq!(due, Some(moved + chrono::Duration::seconds(60)), "ticks when it reads 1m");
+        });
     }
 
     // slopty: the sidebar under a resting pointer draws as a frame from scratch would: on a row

@@ -255,6 +255,23 @@ impl Shell {
         self.compact().then_some(self.viewport_width)
     }
 
+    /// slopty: whether a field holds the keyboard: something has the focus, and not one of the
+    /// shell's own handles that take keys without a field (its root, its panes, its neutral).
+    pub(super) fn keyboard_band_held(&self, window: &Window, cx: &App) -> bool {
+        let Some(focused) = window.focused(cx) else {
+            return false;
+        };
+        let shells = [
+            &self.unfocused,
+            &self.shortcut_focus,
+            &self.settings_focus,
+            &self.navigation_focus.main,
+            &self.navigation_focus.right,
+            &self.navigation_focus.tabs,
+        ];
+        !shells.into_iter().any(|handle| *handle == focused)
+    }
+
     /// `page` kept clear of the system's edges and the keyboard, on iOS.
     pub(super) fn compact_frame(
         &self,
@@ -268,12 +285,20 @@ impl Shell {
         }
         let insets = window.insets();
         let safe = insets.safe_area;
+        // slopty: the keyboard's band stays only while a field takes what is typed: once the
+        // keyboard drops (a send lets the composer go) the page reaches the safe area again,
+        // whatever keyboard frame UIKit last reported.
+        let bottom = if self.keyboard_band_held(window, cx) {
+            insets.effective().bottom
+        } else {
+            safe.bottom
+        };
         frame
             // A phone's chat has no sidebar: the window's own fill over the hidden column's
             // edge, which would otherwise stand as a hairline down the screen's left.
             .when(self.compact(), |frame| frame.bg(Theme::of(cx).glass()))
             .pt(safe.top)
-            .pb(insets.effective().bottom)
+            .pb(bottom)
             .pl(safe.left)
             .pr(safe.right)
     }
@@ -617,21 +642,23 @@ impl Shell {
                     .text_color(theme.text_muted)
                     .child(subtitle)
             }));
-        Some(
-            div()
-                .id("compact-nav-bar")
-                .role(gpui::Role::Group)
-                .aria_label("Navigation")
-                .relative()
-                .w_full()
-                .h(px(Theme::TITLEBAR_HEIGHT + Theme::TITLEBAR_TOP_PAD))
-                .flex()
-                .items_center()
-                .px(px(8.0))
-                .child(heading)
-                .child(lead)
-                .into_any_element(),
-        )
+        // slopty: zeron's backdrop for what scrolls under a bar: frosted glass in the window's
+        // tint (opaque where nothing is frosted), so a card under the title never reads through.
+        let bar = div()
+            .id("compact-nav-bar")
+            .debug_selector(|| "compact-nav-bar".into())
+            .role(gpui::Role::Group)
+            .aria_label("Navigation")
+            .relative()
+            .w_full()
+            .h(px(Theme::TITLEBAR_HEIGHT + Theme::TITLEBAR_TOP_PAD))
+            .bg(if theme.is_frost() { theme.glass() } else { gpui::Hsla { a: 1.0, ..theme.glass() } })
+            .flex()
+            .items_center()
+            .px(px(8.0))
+            .child(heading)
+            .child(lead);
+        Some(crate::frost::frosted(0.0, crate::frost::MENU_BLUR, bar).into_any_element())
     }
 
     /// `row`, as a phone's session row: it follows a sideways finger with the action it would
@@ -1000,11 +1027,8 @@ mod tests {
         assert!(pending(&shell, cx), "a Mac's window lands in the composer");
     }
 
-    // slopty: on an iPad a tap on a chat's row in the sidebar opens it with the keyboard down: no
-    // frame after the tap hands the composer the keyboard, whatever the tap left focused.
-    #[gpui::test]
-    fn tapping_a_chat_in_an_ipads_sidebar_leaves_the_keyboard_down(cx: &mut gpui::TestAppContext) {
-        use gpui::Focusable as _;
+    /// The full shell on a touch screen laid out as an iPad's: the sidebar beside the chat.
+    fn ipad(cx: &mut gpui::TestAppContext) -> (gpui::Entity<Shell>, &mut gpui::VisualTestContext) {
         FORCE_COMPACT.with(|force| force.set(true));
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
@@ -1012,7 +1036,7 @@ mod tests {
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
         });
-        let path = dir.path().to_path_buf();
+        let path = dir.keep(); // the shell keeps it past this setup
         let (shell, cx) = cx.add_window_view(move |_, cx| {
             let state = cx.new(|_| crate::state::AppState::new());
             let shell = Shell::new(
@@ -1046,6 +1070,15 @@ mod tests {
             shell.splash = super::super::SplashPhase::Gone;
             shell.reduced_motion = true;
         });
+        (shell, cx)
+    }
+
+    // slopty: on an iPad a tap on a chat's row in the sidebar opens it with the keyboard down: no
+    // frame after the tap hands the composer the keyboard, whatever the tap left focused.
+    #[gpui::test]
+    fn tapping_a_chat_in_an_ipads_sidebar_leaves_the_keyboard_down(cx: &mut gpui::TestAppContext) {
+        use gpui::Focusable as _;
+        let (shell, cx) = ipad(cx);
         let frames = |cx: &mut gpui::VisualTestContext| {
             for _ in 0..4 {
                 cx.run_until_parked();
@@ -1068,6 +1101,112 @@ mod tests {
         FORCE_COMPACT.with(|force| force.set(false));
         assert_eq!(opened.as_deref(), Some("docs"), "the tap opens the chat");
         assert!(!typing, "the composer waits for a tap of its own (asked after the tap: {pending})");
+    }
+
+    // slopty: the keyboard's band is held only while a field holds the keyboard: after a send
+    // lets the composer go, the page reaches the safe area again.
+    #[gpui::test]
+    fn the_keyboards_band_goes_with_the_field(cx: &mut gpui::TestAppContext) {
+        use gpui::Focusable as _;
+        let (shell, cx) = phone(cx);
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, cx| state.select_chat(Some("fix".into()), cx));
+        });
+        redraw(cx);
+        let held = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| shell.read(cx).keyboard_band_held(window, cx))
+        };
+        cx.update(|window, cx| {
+            let field = shell.read(cx).composer.read(cx).input.focus_handle(cx);
+            window.focus(&field, cx);
+        });
+        redraw(cx);
+        assert!(held(cx), "the composer holds the keyboard");
+        cx.update(|window, cx| window.blur(cx));
+        redraw(cx);
+        assert!(!held(cx), "a send lets the composer go");
+        cx.update(|window, cx| {
+            let neutral = shell.read(cx).unfocused.clone();
+            window.focus(&neutral, cx);
+        });
+        assert!(!held(cx), "the shell's own neutral holds no field");
+        FORCE_COMPACT.with(|force| force.set(false));
+    }
+
+    // slopty: the phone's navigation bar paints a backdrop over its whole width and height, so
+    // what scrolls under its title never reads through.
+    #[gpui::test]
+    fn the_phones_navigation_bar_has_a_backdrop(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) = phone(cx);
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, cx| state.select_chat(Some("fix".into()), cx));
+        });
+        redraw(cx);
+        let bar = cx.debug_bounds("compact-nav-bar").expect("the navigation bar");
+        let (painted, scale, theme) = cx.update(|window, cx| {
+            (window.painted_primitives(), window.scale_factor(), Theme::of(cx).clone())
+        });
+        let fill = if theme.is_frost() { theme.glass() } else { gpui::Hsla { a: 1.0, ..theme.glass() } };
+        assert!(fill.a > 0.0, "a fill that hides what is under it");
+        let size = format!(
+            "size: Size {{ {}px (scaled) × {}px (scaled) }}",
+            f32::from(bar.size.width) * scale,
+            f32::from(bar.size.height) * scale
+        );
+        let background = format!("background: Solid({fill:?})");
+        let backdrop = painted
+            .iter()
+            .any(|line| line.contains("Quad") && line.contains(&size) && line.contains(&background));
+        FORCE_COMPACT.with(|force| force.set(false));
+        assert!(backdrop, "no {background} over the bar's {size}");
+    }
+
+    // slopty: on an iPad every control of the shell's own takes a finger's 44 pt both ways
+    // (#23); on a Mac the same controls stay as drawn.
+    #[gpui::test]
+    fn an_ipads_controls_take_a_fingers_press(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) = ipad(cx);
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, cx| state.select_chat(Some("docs".into()), cx));
+        });
+        let buttons = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| {
+                window.set_a11y_active(true);
+                window.draw(cx).clear(cx);
+                let scale = window.scale_factor();
+                let tree = window.a11y_tree().expect("a tree");
+                tree.nodes
+                    .iter()
+                    .filter(|(_, node)| node.role() == gpui::Role::Button)
+                    .filter_map(|(_, node)| {
+                        let label = node.label()?.to_owned();
+                        let rect = node.bounds()?;
+                        let (w, h) = ((rect.x1 - rect.x0) as f32 / scale, (rect.y1 - rect.y0) as f32 / scale);
+                        Some((label, w, h))
+                    })
+                    .collect::<Vec<_>>()
+            })
+        };
+        let ours = [
+            "Hide sidebar",
+            "Back",
+            "Forward",
+            "New chat",
+            "Sidebar view options",
+            "Show chat details",
+            "Show files panel",
+            "Show side pane",
+            "Settings",
+        ];
+        let touch = buttons(cx);
+        let mine: Vec<_> = touch.iter().filter(|(label, _, _)| ours.contains(&label.as_str())).collect();
+        let small: Vec<_> = mine.iter().filter(|(_, w, h)| w.min(*h) < 43.9).collect();
+        assert!(mine.len() >= 6, "the shell's controls drawn: {touch:?}");
+        assert!(small.is_empty(), "under a finger's 44 pt: {small:?}");
+        FORCE_COMPACT.with(|force| force.set(false));
+        let mac = buttons(cx);
+        let back = mac.iter().find(|(label, _, _)| label == "Back").expect("Back on a Mac");
+        assert!((back.1 - 24.0).abs() < 0.5 && (back.2 - 24.0).abs() < 0.5, "as drawn on a Mac: {back:?}");
     }
 
     #[test]

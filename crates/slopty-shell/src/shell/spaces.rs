@@ -81,6 +81,55 @@ pub(super) fn retain_known_pins(
 // slopty: a pin or the filter is let go only while every machine is reached: a chat or project
 // on one out of reach is missing from the lists, not gone.
 /// Whether every device the workspace knows is reached now, so what the lists leave out is gone.
+/// slopty: when `format_time_ago(then, …)`, read at `now`, next says something else: the next
+/// whole minute, hour, day, week, month or year of its age. `None` past what it can say.
+pub(super) fn time_ago_changes(
+    then: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    const MINUTE: i64 = 60;
+    const HOUR: i64 = 60 * MINUTE;
+    const DAY: i64 = 24 * HOUR;
+    let age = now.signed_duration_since(then).num_seconds().max(0);
+    let next = if age < HOUR {
+        (age / MINUTE + 1) * MINUTE
+    } else if age < DAY {
+        (age / HOUR + 1) * HOUR
+    } else if age < 7 * DAY {
+        (age / DAY + 1) * DAY
+    } else if age < 35 * DAY {
+        (age / (7 * DAY) + 1) * 7 * DAY
+    } else if age < 360 * DAY {
+        ((age / (30 * DAY) + 1) * 30 * DAY).min(360 * DAY)
+    } else {
+        (age / (365 * DAY) + 1) * 365 * DAY
+    };
+    then.checked_add_signed(chrono::Duration::seconds(next))
+}
+
+// slopty: a row's time reads the same up to its next change and differently from it on.
+#[cfg(test)]
+mod time_ago_tests {
+    use super::{format_time_ago, time_ago_changes};
+
+    #[test]
+    fn a_rows_time_changes_exactly_when_the_clock_says() {
+        let then = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap_or_default();
+        let ages = [0, 1, 59, 60, 61, 3_599, 3_600, 86_399, 86_400, 604_799, 604_800, 3_023_999]
+            .into_iter()
+            .chain([3_024_000, 31_103_999, 31_104_000, 31_535_999, 31_536_000, 100_000_000]);
+        for age in ages {
+            let now = then + chrono::Duration::seconds(age);
+            let shown = format_time_ago(then, now);
+            let changes = time_ago_changes(then, now).expect("a time that changes");
+            assert!(changes > now, "{age}s: {changes} after {now}");
+            let before = changes - chrono::Duration::seconds(1);
+            assert_eq!(format_time_ago(then, before), shown, "{age}s: the same until then");
+            assert_ne!(format_time_ago(then, changes), shown, "{age}s: different from then");
+        }
+    }
+}
+
 pub(super) fn every_device_reached(state: &AppState, now: chrono::DateTime<chrono::Utc>) -> bool {
     !state.devices.is_empty()
         && state.devices.iter().all(|device| state.device_online(&device.id, now))
@@ -4472,26 +4521,54 @@ impl Shell {
     ) -> AnyElement {
         let view_open = self.sidebar_view_menu.is_open();
         let view_focus = self.sidebar_view_trigger_focus.clone();
-        let view_trigger = div()
-            .id("sidebar-view-options")
-            .role(gpui::Role::Button)
-            .aria_expanded(view_open)
-            .track_focus(&view_focus)
+        // slopty: on a touch screen the trigger takes presses over a finger's 44 pt around the
+        // 24 it draws, which keeps its wash and holds its menu where it was (#23).
+        let reach = crate::surface_chrome::touch_reach(24.0);
+        let group = SharedString::from("sidebar-view-options-press");
+        let drawn = div()
             .size(px(24.0))
-            .flex_none()
             .flex()
             .items_center()
             .justify_center()
             .rounded(px(6.0))
-            .map(|el| crate::surface_chrome::focus_ring(el, theme))
-            .cursor_pointer()
             .text_color(theme.text_muted)
             .bg(if view_open {
                 theme.glass_hover()
             } else {
                 theme.glass_hover().opacity(0.0)
             })
-            .hover(|el| el.bg(theme.glass_hover()))
+            .group_hover(group.clone(), |el| el.bg(theme.glass_hover()))
+            .child(
+                icon(icons::MORE_HORIZONTAL)
+                    .size(px(16.0))
+                    .text_color(theme.text_muted),
+            );
+        let drawn = if self.sidebar_view_menu.get().is_some() {
+            let closing = self.sidebar_view_menu.closing_since();
+            let menu = self.render_sidebar_view_menu(theme, cx);
+            drawn.relative().child(popover::anchored_menu_right(
+                "sidebar-view-options-menu",
+                menu,
+                closing,
+            ))
+        } else {
+            drawn
+        };
+        let view_trigger = div()
+            .id("sidebar-view-options")
+            .group(group)
+            .role(gpui::Role::Button)
+            .aria_expanded(view_open)
+            .track_focus(&view_focus)
+            .size(px(24.0 + 2.0 * reach))
+            .m(px(-reach))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(6.0 + reach))
+            .map(|el| crate::surface_chrome::focus_ring_within(el, theme, reach))
+            .cursor_pointer()
             // Over the titlebar's drag strip: block it, as the other titlebar
             // controls do, so a click never starts a window drag.
             .occlude()
@@ -4527,22 +4604,7 @@ impl Shell {
             }))
             // slopty: the house tooltip, out of the way while its menu is up.
             .map(|el| if view_open { el.aria_label("Sidebar view options") } else { el.hint("Sidebar view options") })
-            .child(
-                icon(icons::MORE_HORIZONTAL)
-                    .size(px(16.0))
-                    .text_color(theme.text_muted),
-            );
-        let view_trigger = if self.sidebar_view_menu.get().is_some() {
-            let closing = self.sidebar_view_menu.closing_since();
-            let menu = self.render_sidebar_view_menu(theme, cx);
-            view_trigger.relative().child(popover::anchored_menu_right(
-                "sidebar-view-options-menu",
-                menu,
-                closing,
-            ))
-        } else {
-            view_trigger
-        };
+            .child(drawn);
         view_trigger.into_any_element()
     }
 
@@ -4772,7 +4834,7 @@ impl Shell {
             .as_ref()
             .map_or(saved_pins.as_slice(), |ids| ids.as_slice());
         let state = self.state.read(cx);
-        let now = Utc::now();
+        let now = self.sidebar_clock; // slopty: the sidebar's clock
         let mut rows: Vec<(ChatIndicator, slopty_view_proto::Chat)> = state
             .sidebar_chats(now, filter.as_deref())
             .into_iter()
@@ -4871,7 +4933,7 @@ impl Shell {
             SidebarOrganization::ByProject => Some(sidebar_project_group(state, chat).0),
             // slopty: its status group.
             SidebarOrganization::ByStatus => {
-                let now = Utc::now();
+                let now = self.sidebar_clock; // slopty: the sidebar's clock
                 let status = state.display_status_for(chat, now);
                 Some(
                     super::sidebar_status::StatusGroup::of(status, state.session_for(&chat.id), now)
@@ -5037,7 +5099,7 @@ impl Shell {
             .change_request_for_chat(&chat)
             .cloned()
             .filter(|_| self.settings.sidebar_show_pull_request);
-        let now = Utc::now();
+        let now = self.sidebar_clock; // slopty: the sidebar's clock
         let session = state.session_for(&chat.id);
         let group = match self.settings.sidebar_organization {
             SidebarOrganization::ByProject => Some(sidebar_project_group(state, &chat)),
@@ -5063,12 +5125,49 @@ impl Shell {
         }
     }
 
+    /// slopty: how long ago `then` was, by the sidebar's clock; notes when that next reads
+    /// differently, for the clock's tick.
+    pub(super) fn sidebar_time_ago(&self, then: chrono::DateTime<Utc>) -> SharedString {
+        let now = self.sidebar_clock;
+        if let Some(changes) = time_ago_changes(then, now) {
+            let next = self.sidebar_clock_next.get();
+            if next.is_none_or(|next| changes < next) {
+                self.sidebar_clock_next.set(Some(changes));
+            }
+        }
+        format_time_ago(then, now).into()
+    }
+
+    /// slopty: take the clock again when the soonest time the last sidebar showed next reads
+    /// differently, and draw again then: until then every sidebar built says the same.
+    pub(super) fn tick_sidebar_clock(&mut self, cx: &mut Context<Self>) {
+        let Some(at) = self.sidebar_clock_next.take() else {
+            return;
+        };
+        // At least once a minute, as the shell's clock wakes: groups and reasons move with it.
+        let at = at.min(Utc::now() + chrono::Duration::minutes(1));
+        if self.sidebar_clock_tick.as_ref().is_some_and(|(due, _)| *due <= at) {
+            return;
+        }
+        let wait = (at - Utc::now()).to_std().unwrap_or_default() + std::time::Duration::from_millis(5);
+        let task = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(wait).await;
+            this.update(cx, |this, cx| {
+                this.sidebar_clock_tick = None;
+                this.sidebar_clock = Utc::now();
+                cx.notify();
+            })
+            .ok();
+        });
+        self.sidebar_clock_tick = Some((at, task));
+    }
+
     pub(super) fn render_active_rows(
         &mut self,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> SidebarSessionRows {
-        let now = Utc::now();
+        let now = self.sidebar_clock; // slopty: the sidebar's clock, not the wall's
         let filter = self.settings.space_filter.clone();
         let profile_key = self.active_sidebar_pin_profile_key(cx);
         let saved_pins = self.active_sidebar_pins(cx);
@@ -5351,8 +5450,7 @@ impl Shell {
                     group: _,
                     reason,
                 } = row;
-                let time_ago: SharedString =
-                    format_time_ago(chat.last_message_at.unwrap_or(chat.created_at), now).into();
+                let time_ago = self.sidebar_time_ago(chat.last_message_at.unwrap_or(chat.created_at));
                 let is_selected = selected.as_deref() == Some(chat.id.as_str());
                 let harness = self
                     .settings
@@ -5801,7 +5899,7 @@ impl Shell {
         }
         const INITIAL: usize = ARCHIVED_INITIAL_ROWS;
         const PAGE: usize = ARCHIVED_PAGE_ROWS;
-        let now = Utc::now();
+        let now = self.sidebar_clock; // slopty: the sidebar's clock
         let rows = self.archived_sidebar_chats(cx);
         if rows.is_empty() {
             return None;
@@ -5892,7 +5990,7 @@ impl Shell {
                         &chat.title.clone().unwrap_or_else(|| "New chat".into()),
                     )
                     .into(),
-                    format_time_ago(chat.last_message_at.unwrap_or(chat.created_at), now).into(),
+                    self.sidebar_time_ago(chat.last_message_at.unwrap_or(chat.created_at)),
                     row.folder.into(),
                     row.branch.map(SharedString::from),
                     row.change_request,

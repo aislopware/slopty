@@ -70,6 +70,11 @@ const CHAT_POLL: Duration = Duration::from_millis(40);
 
 /// The History header's height, and a state row's (loading, empty, failed, Show more).
 const HEADER_HEIGHT: f32 = 28.0;
+
+/// slopty: History's header row as drawn: a finger's row on a touch screen (#23).
+fn header_height() -> f32 {
+    crate::surface_chrome::touch_row_height(HEADER_HEIGHT)
+}
 const LINE_HEIGHT: f32 = 28.0;
 /// A session row's height: one line, or two with its branch.
 const ROW_HEIGHT: f32 = 30.0;
@@ -288,7 +293,7 @@ impl PastSessions {
 /// How tall History stands: its header, then while open its rows, "Show more" or the line that
 /// says where it stands.
 fn history_height(history: Option<&History>) -> f32 {
-    let Some(history) = history.filter(|h| h.open) else { return HEADER_HEIGHT };
+    let Some(history) = history.filter(|h| h.open) else { return header_height() };
     let body = match history.load.listed() {
         Some(listed) => {
             let rows: Vec<&PastRow> = listed.unopened().take(shown(history)).collect();
@@ -302,7 +307,7 @@ fn history_height(history: Option<&History>) -> f32 {
         }
         None => LINE_HEIGHT,
     };
-    HEADER_HEIGHT + BODY_INSET + body
+    header_height() + BODY_INSET + body
 }
 
 /// How many rows History shows.
@@ -370,6 +375,8 @@ impl Shell {
         )
         .id("history-toggle")
         .debug_selector(|| "history-toggle".into())
+        // slopty: a finger's row on a touch screen (#23).
+        .min_h(px(crate::surface_chrome::touch_row_height(0.0)))
         .role(gpui::Role::Button)
         .aria_label(SharedString::from(if open {
             "History, open: past Claude Code sessions"
@@ -490,7 +497,7 @@ impl Shell {
                 let key = key.to_owned();
                 move || format!("history-toggle-{key}")
             })
-            .h(px(HEADER_HEIGHT))
+            .h(px(header_height()))
             .flex_none()
             .flex()
             .items_center()

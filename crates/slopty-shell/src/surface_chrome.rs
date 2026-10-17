@@ -396,6 +396,26 @@ pub(crate) const POINTER_TARGET: f32 = 24.0;
 /// The least a finger's press target measures, either way.
 pub(crate) const TOUCH_TARGET: f32 = 44.0;
 
+/// slopty: how far past each edge a control drawn `drawn` pt takes presses: nothing under a
+/// pointer, and on a touch screen what brings it to [`TOUCH_TARGET`] (#23). The control's hit
+/// area reaches that far, its negative margins giving it back, while what it draws stays.
+pub(crate) fn touch_reach(drawn: f32) -> f32 {
+    if crate::shell::touch_screen() { ((TOUCH_TARGET - drawn) / 2.0).max(0.0) } else { 0.0 }
+}
+
+/// slopty: a text row's height drawn `drawn` pt tall: on a touch screen at least
+/// [`TOUCH_TARGET`], a finger's row, where reaching past it would take its neighbours' presses.
+pub(crate) fn touch_row_height(drawn: f32) -> f32 {
+    if crate::shell::touch_screen() { drawn.max(TOUCH_TARGET) } else { drawn }
+}
+
+/// slopty: [`focus_ring`] for a hit area reaching `reach` past the control it draws
+/// ([`touch_reach`]): the ring stands around the control, not around the hit area.
+pub(crate) fn focus_ring_within<E: InteractiveElement + Styled>(el: E, theme: &Theme, reach: f32) -> E {
+    let ring = ring(theme, RING_OFFSET - reach);
+    el.focus_visible(move |style| style.outline_ring(ring))
+}
+
 /// The press target around a small control drawn `drawn` pt square: [`POINTER_TARGET`] (or
 /// [`TOUCH_TARGET`] on a touch screen) when it draws smaller, centred on it, its margins giving
 /// the extra back so the layout is the drawn size. The caller puts the drawn control in it and
