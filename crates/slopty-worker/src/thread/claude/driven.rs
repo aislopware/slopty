@@ -295,7 +295,9 @@ impl Task {
         }
         let mut write = write;
         let _ended = write.shutdown().await;
-        let mut status = exit_status;
+        // A Claude Code that ended before `exits` was heard (one that cannot start) is told by
+        // what ptyd said of it lately.
+        let mut status = exit_status.or_else(|| self.custody.ended(self.session).map(|e| e.status));
         if status.is_none() {
             let reaped = async {
                 loop {

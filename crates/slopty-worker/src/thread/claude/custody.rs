@@ -14,7 +14,7 @@
 //! and every session this worker holds is handed back to the ptyd it reaches, as the terminals'
 //! link does.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::os::fd::{AsFd as _, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -53,6 +53,9 @@ struct Inner {
     redialing: std::sync::atomic::AtomicBool,
     /// Each child exit ptyd reports, of any session.
     exits: broadcast::Sender<(SessionId, Exit)>,
+    /// The last [`EXITS`] of them, for a task that began to listen after its child ended: a
+    /// Claude Code that cannot start exits before its driver hears [`Custody::exits`].
+    ended: parking_lot::Mutex<VecDeque<(SessionId, Exit)>>,
     /// The sessions this worker holds, each with a copy of its socket: what a ptyd reached
     /// again is handed back.
     held: parking_lot::Mutex<HashMap<SessionId, (OwnedFd, Adoptee)>>,
@@ -77,6 +80,7 @@ impl Custody {
             link: tokio::sync::Mutex::new(None),
             redialing: std::sync::atomic::AtomicBool::new(false),
             exits,
+            ended: parking_lot::Mutex::new(VecDeque::with_capacity(EXITS)),
             held: parking_lot::Mutex::new(HashMap::new()),
         };
         Self { inner: Arc::new(inner) }
@@ -92,6 +96,14 @@ impl Custody {
     #[must_use]
     pub fn exits(&self) -> broadcast::Receiver<(SessionId, Exit)> {
         self.inner.exits.subscribe()
+    }
+
+    /// How `session`'s child ended, if ptyd said so lately: what [`Self::exits`] told those
+    /// listening before it ended.
+    #[must_use]
+    pub fn ended(&self, session: SessionId) -> Option<Exit> {
+        let ended = self.inner.ended.lock();
+        ended.iter().rev().find(|(id, _)| *id == session).map(|(_, exit)| *exit)
     }
 
     /// Run `call` on the link, dialling it first when there is none. Each step on the link is
@@ -133,6 +145,13 @@ impl Custody {
             drop(tokio::spawn(async move {
                 while let Some(exit) = exits.recv().await {
                     let Some(inner) = weak.upgrade() else { return };
+                    {
+                        let mut ended = inner.ended.lock();
+                        if ended.len() == EXITS {
+                            ended.pop_front();
+                        }
+                        ended.push_back(exit);
+                    }
                     let _none = inner.exits.send(exit);
                 }
                 let Some(inner) = weak.upgrade() else { return };
