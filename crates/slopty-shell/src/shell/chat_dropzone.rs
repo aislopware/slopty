@@ -59,11 +59,22 @@ impl Shell {
             ))
     }
 
-    pub(super) fn attachment_drop_overlay(theme: &Theme) -> gpui::Stateful<gpui::Div> {
+    // slopty: drawn only while something is carried. Its hitbox lies over the whole chat, so
+    // at rest it kept every live page under it from the pointer: a native takes the pointer only
+    // where no later hitbox lies (`gpui::composition::NativeHitMap`), and no finger or click
+    // reached a page (e2e `pages`). A drag draws every frame afresh, so it shows on the first.
+    pub(super) fn attachment_drop_overlay(
+        theme: &Theme,
+        cx: &App,
+    ) -> Option<gpui::Stateful<gpui::Div>> {
         // Use typed drag styles rather than cached shell state: an external
         // FileDrop::Exited clears the payload without a final mouse move.
         // Resize markers and non-file tabs must never reveal the overlay.
-        div()
+        if !cx.has_active_drag() {
+            return None;
+        }
+        Some(
+            div()
             .id("attachment-drop-overlay")
             .absolute()
             .inset_0()
@@ -83,12 +94,19 @@ impl Shell {
                     style
                 }
             })
-            .child("Drop to attach")
+            .child("Drop to attach"))
     }
 
     /// The hint while a sidebar session is carried over a chat.
-    pub(super) fn mention_drop_overlay(theme: &Theme) -> gpui::Stateful<gpui::Div> {
-        div()
+    // slopty: drawn only while something is carried, as the attachment's overlay is.
+    pub(super) fn mention_drop_overlay(
+        theme: &Theme,
+        cx: &App,
+    ) -> Option<gpui::Stateful<gpui::Div>> {
+        if !cx.has_active_drag() {
+            return None;
+        }
+        Some(div()
             .id("mention-drop-overlay")
             .absolute()
             .inset_0()
@@ -100,6 +118,6 @@ impl Shell {
             .text_size(crate::typography::ui_rems(13.0))
             .text_color(theme.text)
             .drag_over::<SidebarSessionDrag>(|style, _, _, _| style.opacity(1.0))
-            .child("Drop to mention")
+            .child("Drop to mention"))
     }
 }

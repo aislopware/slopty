@@ -1,0 +1,12 @@
+Window
+Button │ background sleep 600
+Status │ Waiting
+Button │ History: past Claude Code sessions
+Article │ Claude
+Paragraph │ Subagent found it.
+Navigation │ background sleep 600 › Look
+Link │ Back to background sleep 600
+Status │ Runs inside background sleep 600 (focused)
+Group │ Navigation
+Heading │ Look
+Button │ Back to Chats

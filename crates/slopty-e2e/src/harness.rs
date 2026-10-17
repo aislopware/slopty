@@ -36,13 +36,16 @@ const POLL: Duration = Duration::from_millis(50);
 ///
 /// A test that passes takes its root and its lock away with it. One that fails keeps its root
 /// for inspection, says where on its way out, and marks it (`.kept-for-inspection`); only the
-/// newest eight marked roots stay. What a run killed outright left behind goes once it is two
-/// hours old, as the next root is made.
+/// newest eight marked roots stay. A stack that failed to start, which returns an error rather
+/// than panicking, keeps its root too: only one [`StackDir::started`] goes with a pass. What a run
+/// killed outright left behind goes once it is two hours old, as the next root is made.
 #[derive(Debug)]
 pub struct StackDir {
     // Declared first so it is deleted before the lock is released.
     dir: tempfile::TempDir,
     lock: Option<(std::fs::File, PathBuf)>,
+    /// Whether the stack it holds came up: until then a drop is a start that failed.
+    started: bool,
 }
 
 /// How many roots of failed tests stay for inspection: making one more removes the oldest.
@@ -80,11 +83,11 @@ impl StackDir {
                 }
                 let dir =
                     tempfile::Builder::new().prefix(&name).rand_bytes(0).tempdir_in(&parent)?;
-                return Ok(Self { dir, lock: Some((lock, lock_path)) });
+                return Ok(Self { dir, lock: Some((lock, lock_path)), started: false });
             }
         }
         let dir = tempfile::Builder::new().prefix(prefix).tempdir_in(&parent)?;
-        Ok(Self { dir, lock: None })
+        Ok(Self { dir, lock: None, started: false })
     }
 
     /// The root.
@@ -92,12 +95,18 @@ impl StackDir {
     pub fn path(&self) -> &Path {
         self.dir.path()
     }
+
+    /// The stack it holds came up: from now on only a panic keeps the root.
+    pub(crate) const fn started(&mut self) {
+        self.started = true;
+    }
 }
 
 impl Drop for StackDir {
     #[expect(clippy::print_stderr, reason = "test helper; stderr is the failed test's log")]
     fn drop(&mut self) {
-        if !std::thread::panicking() {
+        let panicking = std::thread::panicking();
+        if self.started && !panicking {
             // The root goes as the `TempDir` drops; its lock file goes with it.
             if let Some((_, path)) = &self.lock {
                 let _gone = std::fs::remove_file(path);
@@ -107,7 +116,9 @@ impl Drop for StackDir {
         self.dir.disable_cleanup(true);
         let root = self.dir.path();
         let _marked = std::fs::write(root.join(KEPT_MARK), b"");
-        eprintln!("the failed test's stack root is kept for inspection: {}", root.display());
+        let what =
+            if panicking { "the failed test's stack root" } else { "a stack that never came up" };
+        eprintln!("{what} is kept for inspection: {}", root.display());
         if let Some(parent) = root.parent() {
             drop_oldest_kept(parent);
         }
@@ -928,7 +939,7 @@ impl Stack {
     /// As [`Self::launch`].
     pub async fn launch_with(worker_name: &str, env: &[(&str, &str)]) -> Result<Self> {
         let dir = StackDir::new("slopty-e2e-")?;
-        Self::launch_in(dir, worker_name, env).await
+        Self::launch_in(dir, worker_name, env).await.map(Self::up)
     }
 
     /// [`Self::launch`] with a `HOME` of the run's own for the daemons and the app (`home`
@@ -946,7 +957,7 @@ impl Stack {
         // prompt shortens only what starts with `HOME` as written.
         let home = std::fs::canonicalize(&home)?;
         let home = home.to_string_lossy().into_owned();
-        Self::launch_in(dir, worker_name, &[("HOME", &home)]).await
+        Self::launch_in(dir, worker_name, &[("HOME", &home)]).await.map(Self::up)
     }
 
     /// [`Self::launch`] up to the app's first frame, before it is pointed at the server: what
@@ -978,7 +989,7 @@ impl Stack {
         let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
         let mut stack = Self::assemble(dir, daemons, &log, &env, false).await?;
         stack.driver.ok(&crate::Command::Ping).await?;
-        Ok(stack)
+        Ok(stack.up())
     }
 
     /// [`Self::launch_with`], but the app reaches the worker through a relay in this process
@@ -1006,7 +1017,7 @@ impl Stack {
                 .context("bind the relay")?;
         let task = tokio::spawn(async move { relay.run().await });
         let stack = Self::assemble(dir, daemons, &log, env, true).await?;
-        Ok((stack, ShapedLink { _relay: RelayTask(task) }))
+        Ok((stack.up(), ShapedLink { _relay: RelayTask(task) }))
     }
 
     /// Connect the app at its first run to the stack's server as a person does: its address
@@ -1038,7 +1049,7 @@ impl Stack {
         let at: std::net::SocketAddr = daemons.listed.parse().context("the listed address")?;
         let cut = crate::cut::Cut::bind(at, daemons.worker).await?;
         let stack = Self::assemble(dir, daemons, &log, &[], true).await?;
-        Ok((stack, cut))
+        Ok((stack.up(), cut))
     }
 
     /// `env` goes to the daemons and the app alike, on top of the defaults.
@@ -1256,7 +1267,7 @@ impl Stack {
     ) -> Result<Self> {
         let mut stack = Self::spawn_on_simulator(worker_name, simulator, env, true, None).await?;
         linked(&mut stack.driver).await?;
-        Ok(stack)
+        Ok(stack.up())
     }
 
     /// [`Self::launch_on_simulator`] with the stand-in `claude` ([`stand_in_path`]) on the
@@ -1286,7 +1297,7 @@ impl Stack {
         let mut stack =
             Self::spawn_on_simulator(worker_name, simulator, &[], true, Some(stand_in)).await?;
         linked(&mut stack.driver).await?;
-        Ok(stack)
+        Ok(stack.up())
     }
 
     /// [`Self::launch_on_simulator`] up to the first frame, before the app is pointed at the
@@ -1301,7 +1312,7 @@ impl Stack {
     ) -> Result<Self> {
         let mut stack = Self::spawn_on_simulator(worker_name, simulator, &[], false, None).await?;
         stack.driver.ok(&crate::Command::Ping).await?;
-        Ok(stack)
+        Ok(stack.up())
     }
 
     /// The daemons here and the app in the simulator, its settings naming the server when it
@@ -1342,6 +1353,12 @@ impl Stack {
             log,
             app_env,
         })
+    }
+
+    /// The stack came up: its root goes with it once its test passes.
+    const fn up(mut self) -> Self {
+        self.dir.started();
+        self
     }
 
     /// Where to put a file for this run.
@@ -1608,14 +1625,16 @@ mod tests {
         assert_eq!(std::fs::read_dir(&runs).unwrap().count(), 2, "no half-made pin is left");
     }
 
-    /// A passing test's root and lock go with it; a failing one's root stays, marked.
+    /// A passing test's root and lock go with it; a failing one's root stays, marked, as does
+    /// the root of a stack that never came up.
     #[test]
     fn a_passing_test_takes_its_root_away_and_a_failing_one_keeps_it() {
         let made = || {
             std::thread::Builder::new()
                 .name("harness::a_root_for_this_test_alone".to_owned())
                 .spawn(|| {
-                    let dir = StackDir::new("slopty-e2e-selftest-").unwrap();
+                    let mut dir = StackDir::new("slopty-e2e-selftest-").unwrap();
+                    dir.started();
                     let root = dir.path().to_owned();
                     let lock = root.with_extension("lock");
                     (dir, root, lock)
@@ -1637,6 +1656,19 @@ mod tests {
         assert!(failed.join().is_err());
         assert!(root.join(KEPT_MARK).is_file(), "a failure keeps its root, marked");
         std::fs::remove_dir_all(&root).unwrap();
+
+        // A stack that never came up returns an error, which panics nothing: its root stays.
+        let never_up = std::thread::Builder::new()
+            .name("harness::a_root_for_this_test_alone".to_owned())
+            .spawn(|| StackDir::new("slopty-e2e-selftest-").unwrap())
+            .unwrap()
+            .join()
+            .unwrap();
+        let root = never_up.path().to_owned();
+        drop(never_up);
+        assert!(root.join(KEPT_MARK).is_file(), "a start that failed keeps its root, marked");
+        std::fs::remove_dir_all(&root).unwrap();
+        let _gone = std::fs::remove_file(root.with_extension("lock"));
     }
 
     /// Only the newest roots kept for inspection stay; and what killed runs left goes once
@@ -1947,7 +1979,7 @@ impl SecondWorker {
         server: &ServerDaemon,
         extra: &[(&str, &str)],
     ) -> Result<Self> {
-        let dir = StackDir::new("slopty-e2e-second-")?;
+        let mut dir = StackDir::new("slopty-e2e-second-")?;
         let root = dir.path();
         let home = root.join("home");
         std::fs::create_dir_all(&home)?;
@@ -1974,6 +2006,7 @@ impl SecondWorker {
             let relay = std::sync::Arc::clone(&relay);
             async move { relay.run().await }
         });
+        dir.started();
         Ok(Self { worker, relay, _relay_task: RelayTask(task), address, dir })
     }
 
@@ -2181,8 +2214,9 @@ impl ServerStack {
         let worker =
             Worker::start(&root.join("worker"), worker_name, Some(server.address()), &log, &env)
                 .await?;
-        let stack = Self { dir, server, worker };
+        let mut stack = Self { dir, server, worker };
         stack.worker_online(STARTUP).await?;
+        stack.dir.started();
         Ok(stack)
     }
 
@@ -2308,7 +2342,7 @@ impl ServerFleet {
     /// When a binary is missing, a daemon dies, a worker never comes online or the app does not
     /// come up.
     pub async fn launch(near: &str, far: &str, link: slopty_shape::Link) -> Result<Self> {
-        let dir = StackDir::new("slopty-e2e-fleet-")?;
+        let mut dir = StackDir::new("slopty-e2e-fleet-")?;
         let root = dir.path();
         let log = log_level();
         let server_dir = root.join("server");
@@ -2335,6 +2369,7 @@ impl ServerFleet {
         }
         let (app, mut driver) = spawn_app(root, "app", &log, &[]).await?;
         driver.ok(&crate::Command::Ping).await?;
+        dir.started();
         Ok(Self { driver, app, near, far, server, dir })
     }
 
@@ -2467,7 +2502,7 @@ impl ServedApp {
         more_programs: &[(&str, &Path)],
         more_env: impl FnOnce(&Path) -> Vec<(String, String)>,
     ) -> Result<Self> {
-        let dir = StackDir::new("slopty-e2e-served-")?;
+        let mut dir = StackDir::new("slopty-e2e-served-")?;
         let root = dir.path();
         let more_env = more_env(root);
         let log = log_level();
@@ -2519,6 +2554,7 @@ impl ServedApp {
                 d.workers.iter().any(|w| w.name == worker_name && w.status == "connected")
             })
             .await?;
+        dir.started();
         Ok(Self { driver, app, worker, server, dir })
     }
 

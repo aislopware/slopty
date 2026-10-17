@@ -364,8 +364,8 @@ impl Shell {
                     .children(pill),
             )
             .child(div().flex_none().child(composer))
-            .child(Self::attachment_drop_overlay(Theme::of(cx)))
-            .child(Self::mention_drop_overlay(Theme::of(cx)))
+            .children(Self::attachment_drop_overlay(Theme::of(cx), cx))
+            .children(Self::mention_drop_overlay(Theme::of(cx), cx))
             .into_any_element()
     }
 }

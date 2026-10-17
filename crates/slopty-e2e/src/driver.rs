@@ -203,23 +203,38 @@ impl Driver {
     }
 
     /// A finger UIKit itself delivers, dragged from one window point to another in `steps`
-    /// moves 16 ms apart and lifted (iOS): what a page's web view sees as a person's drag.
+    /// moves 16 ms apart and lifted (iOS): what a page's web view sees as a person's drag. Gives
+    /// the view it landed on.
     ///
     /// # Errors
     ///
     /// When the app is not on iOS or the socket breaks.
-    pub async fn ui_finger_drag(&mut self, from: [f32; 2], to: [f32; 2], steps: u32) -> Result<()> {
-        self.ok(&Command::UiFinger { from, to, steps }).await
+    pub async fn ui_finger_drag(
+        &mut self,
+        from: [f32; 2],
+        to: [f32; 2],
+        steps: u32,
+    ) -> Result<String> {
+        self.finger(Command::UiFinger { from, to, steps }).await
     }
 
     /// A finger UIKit itself delivers, down and up at a window point (iOS): a tap whatever view
-    /// is under it, a page's included.
+    /// is under it, a page's included. Gives the view it landed on.
     ///
     /// # Errors
     ///
     /// When the app is not on iOS or the socket breaks.
-    pub async fn ui_finger_tap(&mut self, x: f32, y: f32) -> Result<()> {
-        self.ok(&Command::UiFinger { from: [x, y], to: [x, y], steps: 0 }).await
+    pub async fn ui_finger_tap(&mut self, x: f32, y: f32) -> Result<String> {
+        self.finger(Command::UiFinger { from: [x, y], to: [x, y], steps: 0 }).await
+    }
+
+    /// A finger's command, and the view it landed on ([`Reply::Touched`]).
+    async fn finger(&mut self, command: Command) -> Result<String> {
+        match self.call(&command).await? {
+            Reply::Touched { view } => Ok(view),
+            Reply::Error { message } => bail!("{command:?}: {message}"),
+            other => bail!("{command:?}: unexpected {other:?}"),
+        }
     }
 
     /// A trackpad's click at a window point (iOS): pressed and let go, the secondary button (a

@@ -111,7 +111,7 @@ pub(crate) fn serve(
                 // A finger UIKit itself delivers, its moves paced on the app's clock; then a
                 // frame, like any input.
                 Command::UiFinger { from, to, steps } => match finger(from, to, steps, cx).await {
-                    Ok(()) => after_frame(window, Reply::Ok, cx).await,
+                    Ok(view) => after_frame(window, Reply::Touched { view }, cx).await,
                     Err(message) => Reply::Error { message },
                 },
                 // The system's own answers, from the async task: nothing on screen changes.
@@ -278,14 +278,15 @@ async fn after_frame(window: AnyWindowHandle, answer: Reply, cx: &mut gpui::Asyn
 }
 
 /// A finger UIKit itself delivers (`slopty_platform::finger`): down at `from`, `steps` moves
-/// 16 ms apart to `to`, lifted there; with no steps a tap, lifted 60 ms after it lands.
+/// 16 ms apart to `to`, lifted there; with no steps a tap, lifted 60 ms after it lands. Gives
+/// the view it landed on.
 #[cfg(all(target_os = "ios", feature = "e2e"))]
 async fn finger(
     from: [f32; 2],
     to: [f32; 2],
     steps: u32,
     cx: &mut gpui::AsyncApp,
-) -> Result<(), String> {
+) -> Result<String, String> {
     use slopty_platform::finger::Finger;
     let point = |t: f32| {
         let [x0, y0] = from;
@@ -308,8 +309,9 @@ async fn finger(
         pause(16).await;
     }
     let (x, y) = point(1.0);
+    let landed = finger.landed().to_owned();
     finger.lift(x, y);
-    Ok(())
+    Ok(landed)
 }
 
 #[cfg(not(all(target_os = "ios", feature = "e2e")))]
@@ -319,7 +321,7 @@ async fn finger(
     _to: [f32; 2],
     _steps: u32,
     _cx: &mut gpui::AsyncApp,
-) -> Result<(), String> {
+) -> Result<String, String> {
     Err("a finger UIKit delivers is iOS only (with the e2e feature)".into())
 }
 
@@ -1158,6 +1160,26 @@ impl Workspace {
             frames: frame_info(slopty_kit::frames::stats(cx)),
             pointer: cfg!(all(target_os = "ios", feature = "e2e")).then(pointer_look),
             natives: window.presented_natives().map_or(0, |frame| frame.placements.len()),
+            native_hits: window
+                .native_hit_map()
+                .map(|map| {
+                    let rect = |b: gpui::Bounds<gpui::Pixels>| {
+                        [
+                            f32::from(b.origin.x),
+                            f32::from(b.origin.y),
+                            f32::from(b.size.width),
+                            f32::from(b.size.height),
+                        ]
+                    };
+                    map.entries
+                        .iter()
+                        .map(|entry| slopty_e2e::NativeHit {
+                            visible: rect(entry.visible),
+                            occluders: entry.occluders.iter().copied().map(rect).collect(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
             focus_path: window
                 .context_stack()
                 .iter()

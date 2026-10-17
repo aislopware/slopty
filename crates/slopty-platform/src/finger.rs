@@ -151,6 +151,7 @@ fn hid_event(at: CGPoint, phase: isize) -> HidEvent {
 /// One finger on the app's key window, from where it landed until it lifts.
 pub struct Finger {
     touch: Retained<AnyObject>,
+    landed: String,
     _main: MainThreadMarker,
 }
 
@@ -166,7 +167,7 @@ impl Finger {
             return Err(format!("UIKit no longer has {missing}"));
         }
         let at = CGPoint { x, y };
-        let window = key_window().ok_or("no window to land on")?;
+        let (window, view) = window_at(at).ok_or("no window has a view under the finger")?;
         // SAFETY: a new `UITouch`, on the main thread.
         let touch: Retained<AnyObject> = unsafe { msg_send![class!(UITouch), new] };
         // SAFETY: `UITouch`'s own setter, on the touch just made.
@@ -175,10 +176,7 @@ impl Finger {
         let () = unsafe { msg_send![&*touch, setTapCount: 1_usize] };
         // SAFETY: as above.
         let () = unsafe { msg_send![&*touch, _setLocationInWindow: at, resetPrevious: true] };
-        // SAFETY: hit testing the app's own window on the main thread; the view may be nil.
-        let view: *mut AnyObject =
-            unsafe { msg_send![&*window, hitTest: at, withEvent: std::ptr::null::<AnyObject>()] };
-        // SAFETY: as above; a nil view is what UIKit gives a touch that lands on nothing.
+        // SAFETY: as above; the view UIKit's hit test gave, in `window`.
         let () = unsafe { msg_send![&*touch, setView: view] };
         // SAFETY: an `NSObject` query.
         let gesture_view: bool =
@@ -187,9 +185,16 @@ impl Finger {
             // SAFETY: the setter it just said it has.
             let () = unsafe { msg_send![&*touch, setGestureView: view] };
         }
-        let finger = Self { touch, _main: main };
+        let finger = Self { touch, landed: classes(view), _main: main };
         finger.send(at, BEGAN);
         Ok(finger)
+    }
+
+    /// Where it landed: the hit view's class and its superviews', innermost first, joined by
+    /// ` < `.
+    #[must_use]
+    pub fn landed(&self) -> &str {
+        &self.landed
     }
 
     /// The finger, moved to `(x, y)`.
@@ -272,20 +277,45 @@ fn missing_private() -> Option<&'static str> {
         .map(|(name, _)| name)
 }
 
-/// The app's key window, else its first.
-fn key_window() -> Option<Retained<AnyObject>> {
+/// The window a finger at `at` lands in, as UIKit picks one: the frontmost shown window whose
+/// hit test finds a view there; with the view.
+fn window_at(at: CGPoint) -> Option<(Retained<AnyObject>, *mut AnyObject)> {
     // SAFETY: the shared application, on the main thread (the caller's marker).
     let application: *mut AnyObject =
         unsafe { msg_send![class!(UIApplication), sharedApplication] };
     if application.is_null() {
         return None;
     }
-    // SAFETY: `keyWindow`, nil when none is key.
-    let key: Option<Retained<AnyObject>> = unsafe { msg_send![application, keyWindow] };
-    key.or_else(|| {
-        // SAFETY: the application's windows, an array.
-        let windows: Option<Retained<AnyObject>> = unsafe { msg_send![application, windows] };
-        // SAFETY: `NSArray`'s `firstObject`, nil when empty.
-        windows.and_then(|windows| unsafe { msg_send![&*windows, firstObject] })
+    // SAFETY: the application's windows, an `NSArray` back to front.
+    let windows: Option<Retained<AnyObject>> = unsafe { msg_send![application, windows] };
+    let windows = windows?;
+    // SAFETY: `NSArray`'s count.
+    let count: usize = unsafe { msg_send![&*windows, count] };
+    (0..count).rev().find_map(|index| {
+        // SAFETY: an index under the array's count.
+        let window: Retained<AnyObject> = unsafe { msg_send![&*windows, objectAtIndex: index] };
+        // SAFETY: `UIView`'s getter.
+        let hidden: bool = unsafe { msg_send![&*window, isHidden] };
+        if hidden {
+            return None;
+        }
+        // SAFETY: hit testing the app's own window on the main thread; the view may be nil.
+        let view: *mut AnyObject =
+            unsafe { msg_send![&*window, hitTest: at, withEvent: std::ptr::null::<AnyObject>()] };
+        (!view.is_null()).then_some((window, view))
     })
+}
+
+/// `view`'s class and its superviews', innermost first, joined by ` < ` (at most eight).
+fn classes(view: *mut AnyObject) -> String {
+    let mut names = Vec::new();
+    let mut current = view;
+    while names.len() < 8 {
+        // SAFETY: a live view of the app's hierarchy, or nil, on the main thread.
+        let Some(here) = (unsafe { current.as_ref() }) else { break };
+        names.push(here.class().name().to_string_lossy().into_owned());
+        // SAFETY: `UIView`'s getter; nil at the top.
+        current = unsafe { msg_send![here, superview] };
+    }
+    names.join(" < ")
 }

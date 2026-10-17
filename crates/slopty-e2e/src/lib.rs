@@ -345,8 +345,8 @@ pub enum Command {
     /// and sent through `UIApplication`, so whatever view is under it (a page's web view and its
     /// scroll views, not only GPUI's) and their gesture recognisers decide where it goes. It
     /// lands at `from`, moves to `to` in `steps` moves 16 ms apart and lifts there; with no
-    /// steps it is a tap, lifted 60 ms after it lands. The reply comes after the frame that
-    /// follows the lift.
+    /// steps it is a tap, lifted 60 ms after it lands. The reply ([`Reply::Touched`]) says
+    /// which view it landed on, after the frame that follows the lift.
     UiFinger {
         /// Where it lands, window points.
         from: [f32; 2],
@@ -550,6 +550,12 @@ pub enum Reply {
         /// The notes.
         notes: Vec<DeliveredNote>,
     },
+    /// A [`Command::UiFinger`]: where it landed, the view UIKit hit-tested and its superviews'
+    /// classes, innermost first (`WKContentView < WKScrollView < WKWebView < …`).
+    Touched {
+        /// The classes, joined by ` < `.
+        view: String,
+    },
     /// A [`Command::OpenPush`]: the note the push opened to.
     Opened {
         /// The note.
@@ -619,6 +625,20 @@ pub struct Dump {
     /// dispatches a key (`Workspace > Terminal > …`); empty when nothing does.
     #[serde(default)]
     pub focus_path: String,
+    /// Where each native the window last presented takes the pointer, topmost first, as the
+    /// platform's hit testing reads it: its visible bounds `[x, y, w, h]` in window points, and
+    /// the hitboxes drawn above it there, which keep the pointer from it.
+    #[serde(default)]
+    pub native_hits: Vec<NativeHit>,
+}
+
+/// One native's place in the pointer's way ([`Dump::native_hits`]).
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Default)]
+pub struct NativeHit {
+    /// Where it shows and could take the pointer.
+    pub visible: [f32; 4],
+    /// The hitboxes above it within that, which take the pointer there instead.
+    pub occluders: Vec<[f32; 4]>,
 }
 
 /// The UI frame-time probe (`slopty_kit::frames`), in microseconds.
