@@ -945,6 +945,28 @@ mod tests {
         shell.update(cx, |shell, cx| assert!(shell.render_compact_nav_bar(cx).is_none()));
     }
 
+    // slopty: an empty Sessions page says its own noun and offers no key: a phone has none.
+    #[gpui::test]
+    fn an_empty_sessions_page_offers_no_key(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) = phone(cx);
+        shell.update(cx, |shell, cx| shell.state.update(cx, |state, _| state.chats.clear()));
+        redraw(cx);
+        let page = (
+            cx.debug_bounds("sidebar-empty: No sessions yet").is_some(),
+            cx.debug_bounds("sidebar-empty-key").is_some(),
+        );
+        assert_eq!(page, (true, false), "the phone's empty Sessions page");
+        FORCE_COMPACT.with(|force| force.set(false));
+        cx.simulate_resize(gpui::size(gpui::px(1320.0), gpui::px(880.0)));
+        redraw(cx);
+        let sidebar = (
+            cx.debug_bounds("sidebar-empty: No chats yet").is_some(),
+            cx.debug_bounds("sidebar-empty-key").is_some(),
+        );
+        assert_eq!(sidebar, (true, true), "the desktop sidebar names its key");
+        assert_eq!(crate::keys::combo_text_on(true, "mod-n"), "⌘N", "a Mac's key");
+    }
+
     #[test]
     fn the_capsule_says_what_runs_and_what_waits() {
         assert_eq!(summary(0, 0), "");

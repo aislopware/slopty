@@ -195,17 +195,21 @@ impl Shell {
     /// Boot landing: the most recently active visible chat once the first
     /// chats frame has synced (manual selection wins; no chats → the
     /// new-session canvas shows).
+    // slopty: once, at the first synced frame, chat or no chat: a chat arriving later (from the
+    // CLI or another device) never opens by itself.
     pub(super) fn boot_select_chat(&mut self, cx: &mut Context<Self>) {
         let first = {
             let state = self.state.read(cx);
-            if !state.chats_synced || state.selected_chat.is_some() || state.auto_selected {
+            if !state.chats_synced || state.auto_selected {
                 return;
             }
             state
-                .overview_chats(Utc::now())
-                .first()
-                .map(|(_, c)| c.id.clone())
+                .selected_chat
+                .is_none()
+                .then(|| state.overview_chats(Utc::now()).first().map(|(_, c)| c.id.clone()))
+                .flatten()
         };
+        self.state.update(cx, |s, _| s.auto_selected = true);
         if let Some(first) = first {
             self.focus_composer(cx);
             self.state

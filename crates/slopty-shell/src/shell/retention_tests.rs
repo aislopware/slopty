@@ -344,3 +344,27 @@ fn a_draft_typed_mid_turn_paints_as_from_scratch(cx: &mut TestAppContext) {
         }
     }
 }
+
+/// The boot landing happens once, at the first chats frame: a first frame with no chat leaves
+/// the new-session canvas, and a chat that arrives after (started from the CLI or another
+/// device) does not open by itself.
+#[gpui::test]
+fn a_chat_arriving_after_an_empty_first_frame_does_not_open_by_itself(cx: &mut TestAppContext) {
+    let (shell, cx) = shell(cx);
+    let chat: slopty_view_proto::Chat = serde_json::from_value(serde_json::json!({
+        "id": "later", "title": "Started elsewhere", "deviceId": "local", "archived": false,
+        "createdAt": Utc::now(), "cwd": "/work/app", "lastMessageAt": Utc::now(),
+    }))
+    .unwrap();
+    for (step, chats) in [("the first frame, empty", Vec::new()), ("a chat arrives", vec![chat])] {
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, cx| {
+                state.apply_chats(chats);
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        let selected = shell.read_with(cx, |shell, cx| shell.state.read(cx).selected_chat.clone());
+        assert_eq!(selected, None, "{step}");
+    }
+}

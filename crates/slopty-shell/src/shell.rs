@@ -8100,8 +8100,10 @@ impl Shell {
                 )
                 .into_any_element()
         } else {
-            // slopty: the empty list names the key that fills it (M16).
-            let combo = self.settings.keymap.get(ShortcutId::NewSession);
+            // slopty: the empty list names the key that fills it (M16); a phone's Sessions page
+            // has no key to offer and says its own noun.
+            let compact = self.compact();
+            let combo = if compact { "" } else { self.settings.keymap.get(ShortcutId::NewSession) };
             div()
                 .px(px(Theme::SPACE_SM))
                 .pb(px(Theme::SPACE_SM))
@@ -8110,9 +8112,17 @@ impl Shell {
                 .gap(px(6.0))
                 .text_size(crate::typography::ui_rems(12.0))
                 .text_color(theme.text_faint)
-                .child(SharedString::from("No chats yet"))
+                .child(
+                    div()
+                        .debug_selector(move || format!("sidebar-empty: {}", if compact { "No sessions yet" } else { "No chats yet" }))
+                        .child(SharedString::from(if compact { "No sessions yet" } else { "No chats yet" })),
+                )
                 .when(!combo.is_empty(), |el| {
-                    el.child(popover::kbd_hint(theme, &crate::keys::combo_text(combo)))
+                    el.child(
+                        div()
+                            .debug_selector(|| "sidebar-empty-key".to_owned())
+                            .child(popover::kbd_hint(theme, &crate::keys::combo_text(combo))),
+                    )
                 })
                 .into_any_element()
         };
