@@ -24,6 +24,8 @@ use crate::theme::Theme;
 
 /// The step line under a card's header.
 const STEP_LINE_HEIGHT: f32 = 20.0;
+/// slopty: what a card's quiet control (Stop, Open) takes in its header's row.
+const QUIET_FOOTPRINT: f32 = 18.0;
 /// The least and most room a card's child transcript may take; it takes only its rows' height
 /// within it.
 const CHILD_MIN_HEIGHT: f32 = 160.0;
@@ -349,23 +351,16 @@ impl Transcript {
             ),
             _ => None,
         };
-        // slopty: the card's hover, faded; its quiet controls fade in with it, each a 24 pt
-        // target drawn in an 18 pt footprint.
+        // slopty: the card's hover, faded; its quiet controls fade in with it, each laid out in
+        // an 18 pt footprint and pressed over 24 (44 on a touch screen: `press_target`, M25).
         let card_fade = format!("{key}-card-hover");
         let shown = crate::motion::hover_t(&card_fade);
         let quiet = |id: String, label: &'static str, glyph: &'static str| {
             let fade = format!("{id}-hover");
-            div()
-                .id(SharedString::from(id))
+            crate::surface_chrome::press_target(SharedString::from(id), QUIET_FOOTPRINT)
                 .role(gpui::Role::Button)
                 .aria_label(label)
-                .size(px(24.0))
-                .m(px(-3.0))
-                .flex_none()
                 .rounded(px(6.0))
-                .flex()
-                .items_center()
-                .justify_center()
                 .cursor_pointer()
                 .opacity(shown)
                 // slopty: a tab stop, shown while it has the keyboard.

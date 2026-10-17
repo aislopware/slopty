@@ -500,3 +500,32 @@ fn a_link_to_a_chat_says_how_it_stands_now(cx: &mut gpui::TestAppContext) {
     assert_eq!(shown(cx), "See Fix the parser · Working.");
     draw(cx);
 }
+
+/// slopty: a subagent card's quiet Open draws in its 18 pt footprint but takes a press over at
+/// least 24 pt (`surface_chrome::press_target`): a press 1.5 pt past its footprint opens the run.
+#[gpui::test]
+fn a_cards_quiet_open_takes_a_press_past_what_it_draws(cx: &mut gpui::TestAppContext) {
+    let progress = SubagentProgress {
+        running: false,
+        state: SubagentProgress::DONE.into(),
+        chat_id: Some("child-chat".into()),
+        ..SubagentProgress::default()
+    };
+    let (transcript, cx) = open(cx, entry(MessageStatus::Complete, vec![spawn(progress)]));
+    let opened = Rc::new(RefCell::new(Vec::new()));
+    let _events = cx.update(|_, cx| {
+        let opened = opened.clone();
+        cx.subscribe(&transcript, move |_, event: &TranscriptEvent, _| {
+            if let TranscriptEvent::OpenSubagent { chat_id } = event {
+                opened.borrow_mut().push(chat_id.clone());
+            }
+        })
+    });
+    let nodes = draw(cx);
+    let target = find(&nodes, Role::Button, "Open subagent").expect("the quiet Open").clone();
+    assert!(target.height >= 24.0, "pressed over 24 pt: {target:?}");
+    let past = point(target.center.x + px(10.5), target.center.y);
+    cx.simulate_click(past, gpui::Modifiers::default());
+    draw(cx);
+    assert_eq!(*opened.borrow(), ["child-chat"], "a press past the 18 pt footprint opens it");
+}
