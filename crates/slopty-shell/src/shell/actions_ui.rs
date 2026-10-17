@@ -506,21 +506,49 @@ impl Shell {
 
 
 
+    /// Back from the Delete confirmation to the editor, its name field taking the keys again.
+    fn cancel_project_action_delete(&mut self) {
+        if let Some(editor) = self.project_actions.editor.as_mut() {
+            editor.confirm_delete = false;
+            editor.focus_pending = true;
+        }
+    }
+
     pub(super) fn render_project_action_overlay(
         &mut self,
         viewport: gpui::Size<Pixels>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        // slopty: the editor and its Delete confirmation are one modal: the keyboard goes back
+        // to what had it before the editor opened, once neither is shown.
+        self.project_action_focus.sync(self.project_actions.editor.is_some(), window, cx);
+        let shell = cx.weak_entity();
         let editor = self.project_actions.editor.as_mut()?;
         if std::mem::take(&mut editor.focus_pending) {
             window.focus(&editor.name.focus_handle(cx), cx);
         }
         let theme = Theme::of(cx).clone();
         if editor.confirm_delete {
+            // The editor's fields are not drawn behind the confirmation: its card takes the keys.
+            let fields = [editor.name.focus_handle(cx), editor.command.focus_handle(cx)];
+            if fields.iter().any(|field| field.is_focused(window)) {
+                window.focus(self.project_action_focus.handle(), cx);
+            }
             let name = editor.name.read(cx).text().trim().to_string();
-            let card = popover::dialog_card(&theme)
-                .child(popover::dialog_title(&theme, "Delete action?"))
+            let card = crate::surface_chrome::modal_card(
+                popover::dialog_card(&theme),
+                "project-action-delete-card",
+                self.project_action_focus.handle(),
+                "Delete action?",
+                move |_, cx| {
+                    let _gone = shell.update(cx, |this, cx| {
+                        this.cancel_project_action_delete();
+                        cx.notify();
+                    });
+                },
+            )
+            .child(popover::dialog_title(&theme, "Delete action?"))
                 .child(div().mt(px(6.0)).child(popover::dialog_body(
                     &theme,
                     format!("“{name}” will be permanently deleted."),
@@ -535,9 +563,7 @@ impl Shell {
                             popover::btn_ghost(&theme, "Cancel", "action-delete-cancel")
                                 .id("action-delete-cancel")
                                 .on_click(cx.listener(|this, _, _, cx| {
-                                    if let Some(editor) = this.project_actions.editor.as_mut() {
-                                        editor.confirm_delete = false;
-                                    }
+                                    this.cancel_project_action_delete();
                                     cx.notify();
                                 })),
                         )
@@ -561,15 +587,20 @@ impl Shell {
         let saving = editor.saving;
         let error = editor.error.clone();
         let title = if editing { "Edit action" } else { "Add action" };
-        let mut card = popover::dialog_card(&theme)
-            .w(px(440.0))
-            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
-                if event.keystroke.key == "escape" {
+        let mut card = crate::surface_chrome::modal_card(
+            popover::dialog_card(&theme),
+            "project-action-editor-card",
+            self.project_action_focus.handle(),
+            title,
+            move |_, cx| {
+                let _gone = shell.update(cx, |this, cx| {
                     this.project_actions.editor = None;
                     cx.notify();
-                }
-            }))
-            .child(popover::dialog_title(&theme, title))
+                });
+            },
+        )
+        .w(px(440.0))
+        .child(popover::dialog_title(&theme, title))
             .child(action_field_label(&theme, "Name"))
             .child(popover::dialog_field(name.into_any_element()))
             .child(action_field_label(&theme, "Command"))

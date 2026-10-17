@@ -492,6 +492,8 @@ impl Shell {
                 None,
             ));
         }
+        self.section_focus.sync(self.section_dialog.is_some(), window, cx);
+        let shell = cx.weak_entity();
         if let Some(dialog) = &mut self.section_dialog {
             if std::mem::take(&mut dialog.focus_pending) {
                 window.focus(&dialog.input.focus_handle(cx), cx);
@@ -500,23 +502,25 @@ impl Shell {
             let input = dialog.input.clone();
             let name = input.read(cx).text().trim().to_string();
             let valid = !name.is_empty() && name.chars().count() <= 120;
-            let card = popover::dialog_card(&theme)
-                .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
-                    if event.keystroke.key == "escape" {
+            let title = if edit { "Edit section" } else { "New section" };
+            let card = crate::surface_chrome::modal_card(
+                popover::dialog_card(&theme),
+                "section-dialog-card",
+                self.section_focus.handle(),
+                title,
+                move |_, cx| {
+                    let _gone = shell.update(cx, |this, cx| {
                         this.section_dialog = None;
-                        cx.stop_propagation();
                         cx.notify();
-                    }
-                }))
-                .child(
+                    });
+                },
+            )
+            .child(
                     div()
                         .flex()
                         .items_center()
                         .justify_between()
-                        .child(popover::dialog_title(
-                            &theme,
-                            if edit { "Edit section" } else { "New section" },
-                        ))
+                        .child(popover::dialog_title(&theme, title))
                         .child(
                             div()
                                 .id("section-dialog-close")

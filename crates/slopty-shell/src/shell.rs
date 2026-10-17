@@ -1881,6 +1881,10 @@ pub struct Shell {
     // slopty: the keyboard of the delete-chat and remove-project dialogs.
     delete_focus: crate::surface_chrome::ModalFocus,
     delete_space_focus: crate::surface_chrome::ModalFocus,
+    /// Keyboard of the New/Edit section dialog, given back to what had it on close.
+    section_focus: crate::surface_chrome::ModalFocus,
+    /// Keyboard of the project action editor and its Delete confirmation.
+    project_action_focus: crate::surface_chrome::ModalFocus,
     /// Global confirmation/error dialog for the Changes-pane trash action. The
     /// RPC task is retained separately so rerenders do not cancel it.
     // slopty: no Discard changes (ruled out).
@@ -2346,6 +2350,8 @@ impl Shell {
             delete_confirm: None,
             delete_focus: crate::surface_chrome::ModalFocus::new(cx),
             delete_space_focus: crate::surface_chrome::ModalFocus::new(cx),
+            section_focus: crate::surface_chrome::ModalFocus::new(cx),
+            project_action_focus: crate::surface_chrome::ModalFocus::new(cx),
             // slopty: no Discard changes (ruled out).
             space_menu: popover::Popup::default(),
             rename_space_dialog: None,

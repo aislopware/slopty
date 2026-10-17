@@ -2872,3 +2872,51 @@ mod return_focus_tests {
         });
     }
 }
+
+// slopty: a menu row stands as zeron's does, whatever its keys draw in.
+#[cfg(test)]
+mod menu_row_tests {
+    use gpui::{Context, Render, TestAppContext, Window};
+
+    use super::*;
+
+    struct Rows;
+
+    impl Render for Rows {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let theme = Theme::of(cx).clone();
+            div()
+                .size(px(400.0))
+                .flex()
+                .flex_col()
+                .child(
+                    menu_row(&theme, false, "row-plain")
+                        .debug_selector(|| "row-plain".into())
+                        .child(div().flex_1().child("Find…")),
+                )
+                .child(
+                    menu_row(&theme, false, "row-keyed")
+                        .debug_selector(|| "row-keyed".into())
+                        .child(crate::icons::icon(crate::icons::ALT_ARROW_DOWN).size(px(16.0)))
+                        .child(div().flex_1().child("Paste"))
+                        .child(kbd_hint(&theme, "⌘V")),
+                )
+        }
+    }
+
+    /// zeron's row: `py-1.5` round 13 pt words on GPUI's own line height (φ), 33 pt at the
+    /// default size; its icon and the key hint beside the words never make it taller.
+    #[gpui::test]
+    fn a_menu_row_is_zeron_s_height_with_or_without_its_keys(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::default()));
+        let (_view, cx) = cx.add_window_view(|_, _| Rows);
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let mut height = |selector: &'static str| {
+            f32::from(cx.debug_bounds(selector).expect("row drawn").size.height)
+        };
+        let (plain, keyed) = (height("row-plain"), height("row-keyed"));
+        let zeron = 2.0 * 6.0 + 13.0 * std::f32::consts::GOLDEN_RATIO;
+        assert!((plain - zeron).abs() < 0.5, "{plain} against zeron's {zeron}");
+        assert!((keyed - plain).abs() < 0.01, "the keys keep the row: {keyed} vs {plain}");
+    }
+}

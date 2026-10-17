@@ -32,7 +32,6 @@ use crate::typography::{self, FontAvailability, UiFontFamily, UiFontSize};
 struct ImportDialog {
     input: Entity<ComposerInput>,
     _events: Subscription,
-    focus: FocusHandle,
     focus_pending: bool,
     mode: InstallMode,
     compilation: Option<SourceCompilation>,
@@ -336,6 +335,9 @@ pub struct AppearancePage {
     import_dialog: Option<ImportDialog>,
     background_adjustment_dialog: Option<BackgroundAdjustmentDialog>,
     review_entry: Option<String>,
+    // slopty: the keyboard of the Add a theme and Theme mapping dialogs, given back on close.
+    import_focus: crate::surface_chrome::ModalFocus,
+    review_focus: crate::surface_chrome::ModalFocus,
     library_error: Option<SharedString>,
     background_error: Option<SharedString>,
 }
@@ -624,6 +626,8 @@ impl AppearancePage {
             import_dialog: None,
             background_adjustment_dialog: None,
             review_entry: None,
+            import_focus: crate::surface_chrome::ModalFocus::new(cx),
+            review_focus: crate::surface_chrome::ModalFocus::new(cx),
             library_error: None,
             background_error: None,
         }
@@ -955,7 +959,6 @@ impl AppearancePage {
         self.import_dialog = Some(ImportDialog {
             input,
             _events: events,
-            focus: cx.focus_handle(),
             focus_pending: true,
             mode: InstallMode::Snapshot,
             compilation: None,
@@ -2157,7 +2160,7 @@ impl AppearancePage {
         }
         let dialog = self.import_dialog.as_ref()?;
         let input = dialog.input.clone();
-        let focus = dialog.focus.clone();
+        let focus = self.import_focus.handle().clone();
         let mode = dialog.mode;
         let compilation = dialog.compilation.clone();
         let selected = dialog.selected.clone();
@@ -2640,6 +2643,8 @@ impl AppearancePage {
             .p(px(0.0))
             .overflow_hidden()
             .track_focus(&focus)
+            .role(gpui::Role::Dialog)
+            .aria_label("Add a theme")
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
                 match popover::classify_key(
                     event.keystroke.key.as_str(),
@@ -3111,6 +3116,8 @@ impl AppearancePage {
             .w(px((f32::from(viewport.width) - 40.0).clamp(1.0, 600.0)))
             .p(px(20.0))
             .track_focus(&focus)
+            .role(gpui::Role::Dialog)
+            .aria_label("Adjust background")
             .tab_group()
             .tab_index(0)
             .tab_stop(false)
@@ -3206,9 +3213,20 @@ impl AppearancePage {
         let entry = theme_library::entries(cx)
             .into_iter()
             .find(|entry| &entry.id == entry_id)?;
-        let mut card = popover::dialog_card(theme)
-            .id("theme-review-card")
-            .w(px(660.0))
+        let page = cx.weak_entity();
+        let mut card = crate::surface_chrome::modal_card(
+            popover::dialog_card(theme),
+            "theme-review-card",
+            self.review_focus.handle(),
+            "Theme mapping",
+            move |_, cx| {
+                let _gone = page.update(cx, |this, cx| {
+                    this.review_entry = None;
+                    cx.notify();
+                });
+            },
+        )
+        .w(px(660.0))
             .max_h(px(720.0))
             .overflow_y_scroll()
             .child(popover::dialog_title(theme, "Theme mapping"))
@@ -4070,6 +4088,12 @@ impl Render for AppearancePage {
             .library_error
             .clone()
             .or_else(|| theme_library::load_warning(cx).map(SharedString::from));
+        let importing = self.background_adjustment_dialog.is_none() && self.import_dialog.is_some();
+        self.import_focus.sync(importing, window, cx);
+        let reviewing = self.background_adjustment_dialog.is_none()
+            && self.import_dialog.is_none()
+            && self.review_entry.is_some();
+        self.review_focus.sync(reviewing, window, cx);
         let modal = self
             .render_background_adjustment_dialog(window.viewport_size(), &theme, cx)
             .or_else(|| self.render_import_dialog(window.viewport_size(), &theme, window, cx))
