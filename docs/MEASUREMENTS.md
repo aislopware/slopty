@@ -17403,3 +17403,29 @@ A cipher of aes128-gcm instead of ssh's default made no consistent difference (3
 memory_pressure -Q; vm_stat; sysctl -n vm.swapusage vm.loadavg; xcrun simctl list devices | grep -c Booted
 SLOPTY_LANE=DEVLOOP cargo xtask remote --head --e2e ios --sim ipad --goldens review
 ```
+
+## 2026-10-17 — the e2e guest's disk: what fills it, and the budget
+
+Measured in `slopty-26-e2e` (90 GB disk, APFS data volume of 83 GiB) when E2's copy failed with
+"No space left on device", and after the cleanup. `du` overstates APFS clones, so freed space
+is `df`'s:
+
+| what | count | `du` | freed (`df`) |
+| --- | --- | --- | --- |
+| `Deleting-<UDID>` in the per-user temporary directory | 109 | 49 GB | 19 GB, ≈180 MB a run |
+| `slopty-e2e-bin-*` and their `.runs` pins (the harness's copies) | 3 lanes' | 4.1 GB | with the above |
+| simulators `simctl` lists as unavailable | — | — | with the above |
+| a lane's directory (`target/local/<lane>`: tree, binaries, archive) | 6 | 0.6–0.9 GB each, 4.8 GB | kept |
+| `~/Library/Developer/CoreSimulator/Devices` (two pristine, one run's) | 3 | 4.4–4.6 GB | kept |
+| `~/Library/Logs/CoreSimulator`, `…/CoreSimulator/Caches` | | 24 MB, 0 | kept |
+| `/private/tmp/slopty-e2e-*` | 0 | — | — |
+
+The data volume had 116 MiB free before and 22 GiB free after (40 GiB used). Xcode
+(≈9.8 GB) and the iOS runtime (≈8 GB) are the base's and stay. Budget: 4 lanes' directories,
+and 8 GiB free before a run's copy; a run writes at most ≈3 GB.
+
+```sh
+# in the guest (ssh admin@$(tart ip slopty-26-e2e)):
+T=$(getconf DARWIN_USER_TEMP_DIR); du -sh "$T"/Deleting-* "$T"/slopty-e2e-*; df -k /System/Volumes/Data
+du -sh ~/Library/Developer/CoreSimulator/Devices ~/Library/Logs/CoreSimulator /Volumes/Lacie/Workspace/oss/slopty/target/local/*
+```

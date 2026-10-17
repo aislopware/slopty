@@ -195,6 +195,121 @@ fn ssh(home: &Path, ip: &str, script: &str) -> Result<()> {
     Ok(())
 }
 
+/// `script` over ssh on the guest; its output.
+fn ssh_out(home: &Path, ip: &str, script: &str) -> Result<String> {
+    let out = Command::new("ssh")
+        .args(ssh_args(home))
+        .arg(ip)
+        .arg(script)
+        .stdin(Stdio::null())
+        .output()
+        .context("ssh")?;
+    ensure!(
+        out.status.success(),
+        "`{script}` on the guest: {}: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr).trim()
+    );
+    Ok(String::from_utf8(out.stdout)?)
+}
+
+/// Lanes' directories the guest keeps, the running lane's among them ([`prune`]): a lane's
+/// tree, binaries and archive took 0.6–0.9 GB, and the e2e copies of its binaries 1.4 GB more.
+const KEPT_LANES: usize = 4;
+
+/// The free space a run needs on the guest's data volume before its copy, in GiB ([`prune`]): a
+/// run writes at most a lane's directory, its binaries' copies and a simulator's data, 3 GB.
+const FREE_GIB: u64 = 8;
+
+/// The guest's free space in KiB, printed as `free <KiB>`.
+const FREE: &str = "df -k /System/Volumes/Data | awk 'NR == 2 { print \"free\", $4 }'";
+
+/// Make room for a run before its copy, or say plainly that there is none. What every run
+/// leaves goes each time: the processes and stack roots of a stopped run, the e2e harness's
+/// copies of the binaries, simulators `simctl` cannot use, and the `Deleting-<UDID>` directories
+/// `simctl delete` leaves in the temporary directory and never removes, a run's simulator each
+/// (109 of them filled the guest's 90 GB disk on 2026-10-17). Then the least recently used
+/// lanes' directories beyond [`KEPT_LANES`], and more of them, oldest first, while the volume
+/// has less than [`FREE_GIB`] free; the running lane's never.
+fn prune(home: &Path, ip: &str, dir: &Path) -> Result<()> {
+    let started = Instant::now();
+    let target = dir.join("e2e-target");
+    let lanes = dir.parent().context("a lane's directory sits in target/local")?;
+    let lane = dir.file_name().context("a lane's directory has a name")?;
+    let _unavailable = simctl(home, GUEST, &["delete", "unavailable"]);
+    let listing = ssh_out(
+        home,
+        ip,
+        &format!(
+            "pkill -9 -f '{target}/debug/[s]lopty' ; \
+             find \"$(getconf DARWIN_USER_TEMP_DIR)\" /private/tmp -maxdepth 1 \\( -name 'Deleting-*' \
+             -o -name 'slopty-e2e-*' -o -name 'stub-claude-*' \\) -exec rm -rf {{}} + ; \
+             sudo mkdir -p '{dir}' && sudo chown {USER} '{dir}' && touch '{dir}' && cd '{lanes}' && \
+             stat -f '%m %N' * && {FREE}"
+        ),
+    )?;
+    let (mut free, mut older) = lanes_by_use(&listing, lane)?;
+    let mut dropped = Vec::new();
+    while !older.is_empty() {
+        // The running lane's is one of the kept.
+        if older.len() < KEPT_LANES && free >= FREE_GIB << 20 {
+            break;
+        }
+        let oldest = older.remove(0);
+        let out = ssh_out(home, ip, &format!("sudo rm -rf '{lanes}/{oldest}' && {FREE}"))?;
+        free = lanes_by_use(&out, lane)?.0;
+        dropped.push(oldest);
+    }
+    if !dropped.is_empty() {
+        println!(
+            "  dropped {} from {GUEST}, least recently used; {:.1} GiB free ({:.1?})",
+            dropped.join(", "),
+            gib(free),
+            started.elapsed()
+        );
+    }
+    ensure!(
+        free >= FREE_GIB << 20,
+        "{GUEST} has {:.1} GiB free, short of the {FREE_GIB} GiB a run needs, with only lane \
+         {lane}'s directory left to drop: see what fills it with `sudo du -xh -d 4 \
+         /System/Volumes/Data | sort -h | tail -30` over `ssh admin@$(tart ip {GUEST})`",
+        gib(free)
+    );
+    Ok(())
+}
+
+/// KiB in GiB, for a message.
+#[expect(clippy::cast_precision_loss, reason = "a disk's size, shown to a tenth")]
+fn gib(kib: u64) -> f64 {
+    kib as f64 / f64::from(1 << 20)
+}
+
+/// From [`prune`]'s listing, `<mtime> <name>` per lane directory and `free <KiB>`: the free
+/// KiB, and every lane but `lane`, least recently used first. A name a shell could misread is
+/// left out, never dropped.
+fn lanes_by_use(listing: &str, lane: &str) -> Result<(u64, Vec<String>)> {
+    let mut free = None;
+    let mut lanes = Vec::new();
+    for line in listing.lines() {
+        let Some((first, rest)) = line.trim().split_once(' ') else { continue };
+        if first == "free" {
+            free = Some(rest.trim().parse::<u64>().with_context(|| format!("df: {line}"))?);
+            continue;
+        }
+        let Ok(mtime) = first.parse::<u64>() else { continue };
+        let plain = !rest.is_empty()
+            && rest != "."
+            && rest != ".."
+            && rest.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c));
+        if plain && rest != lane {
+            lanes.push((mtime, rest.to_owned()));
+        }
+    }
+    lanes.sort();
+    let free = free.with_context(|| format!("no free space in the guest's listing: {listing}"))?;
+    Ok((free, lanes.into_iter().map(|(_, name)| name).collect()))
+}
+
 /// `rsync -a` with `args`, over the guest's ssh.
 fn rsync(home: &Path, args: &[&str], cwd: &Path) -> Result<()> {
     let ssh = format!("ssh {}", ssh_args(home).join(" "));
@@ -449,13 +564,12 @@ pub fn e2e(root: &Path, lane: &str, sha: &str, run: &Run<'_>) -> Result<Outcome>
     let ip = up(&home)?;
     let booted = booting.elapsed();
     let copying = Instant::now();
-    // Whatever a stopped run left: its processes and the stack roots its failures kept.
+    prune(&home, &ip, &dir)?;
     ssh(
         &home,
         &ip,
         &format!(
-            "pkill -9 -f '{target}/debug/[s]lopty' ; rm -rf /private/tmp/slopty-e2e-* ; sudo mkdir -p '{dir}' && \
-             sudo chown {USER} '{dir}' && {{ [ ! -L '{target}/debug' ] || rm '{target}/debug'; }} && \
+            "{{ [ ! -L '{target}/debug' ] || rm '{target}/debug'; }} && \
              mkdir -p '{target}/debug' '{tree}' '{stage}/x' && rm -rf '{tree}/target/e2e'"
         ),
     )?;
@@ -949,6 +1063,19 @@ mod tests {
             {"identifier": "tvos-28", "version": "28.0", "platform": "tvOS", "isAvailable": true}
         ]}"#;
         assert_eq!(super::newest_ios(runtimes).expect("parses").as_deref(), Some("ios-26-10"));
+    }
+
+    /// The guest's lanes come least recently used first, the running lane's and any name a
+    /// shell could misread left out; the free space is read, and a listing without it refused.
+    #[test]
+    fn the_guest_s_lanes_go_least_recently_used_first() {
+        let listing = "1760695200 E2\n1760688000 DEVLOOP\n1760702400 B\n1760690000 C3\n\
+                       1760691000 a'b\n1760692000 ..\n  free 22950404\n";
+        let (free, older) = super::lanes_by_use(listing, "B").expect("parses");
+        assert_eq!(free, 22_950_404);
+        assert_eq!(older, ["DEVLOOP", "C3", "E2"]);
+        let _no_free = super::lanes_by_use("1760695200 E2\n", "B").unwrap_err();
+        let _not_a_number = super::lanes_by_use("free lots\n", "B").unwrap_err();
     }
 
     /// Only the goldens whose bytes the run changed, or wrote anew, reach the tree; one the

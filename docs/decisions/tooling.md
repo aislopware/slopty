@@ -2405,3 +2405,28 @@ more full-window layer.
   `remote::tests::a_lane_s_directory_is_one_check_s_at_a_time` (`xtask`); run here, a second
   check of `DEVLOOP` with `--no-wait` failed naming the first's pid, and one without it printed
   "waiting for DEVLOOP's check (pid 80355)".
+- ✅ **The e2e guest makes room before each copy, to a budget** (2026-10-17). The guest's 90 GB
+  disk filled during E2's runs and rsync failed with "No space left on device". The cause was
+  109 `Deleting-<UDID>` directories in the guest's per-user temporary directory. `simctl delete`
+  moves a simulator there and never removes it, and each run deleted its clone. The old sweep
+  of `/private/tmp/slopty-e2e-*` matched nothing, because the harness's stack roots and binary
+  copies live in that per-user directory, not in `/private/tmp`. Before each run's copy,
+  under the guest's lock, `remote` now does the following, in this order:
+  - Every time, it removes what a run leaves: a stopped run's processes, `Deleting-*`,
+    `slopty-e2e-*` (stack roots, the harness's copies of the binaries and their pins) and
+    `stub-claude-*`, in both temporary directories. It also deletes the simulators
+    `simctl delete unavailable` finds. Simulator clones that runs and spares left were already
+    deleted by name.
+  - It touches the running lane's directory, so a directory's mtime is its last run. It then
+    drops the least recently used lanes' directories beyond 4 (the running lane's counts as one
+    of the 4). Lanes are capped at 4, so the active ones stay warm, and a dropped lane only
+    copies its binaries again.
+  - It drops further lanes, oldest first, while the data volume has less than 8 GiB free. A
+    run writes at most 3 GB: a lane's directory, the binaries' copies and a simulator's data.
+  - If there is still too little space and only the running lane's directory is left, it fails
+    before copying. The message names the free space and the budget, and gives the `du`
+    command to run in the guest.
+  - Names a shell could misread are never dropped.
+  Test: `remote::guest::tests::the_guest_s_lanes_go_least_recently_used_first` (`xtask`). The
+  sizes behind the budget, and a live run, are in `docs/MEASUREMENTS.md` ("the e2e guest's
+  disk").
