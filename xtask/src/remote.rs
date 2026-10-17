@@ -20,6 +20,7 @@ use camino::{Utf8Path as Path, Utf8PathBuf as PathBuf};
 use xshell::{Shell, cmd};
 
 mod guest;
+pub mod stage;
 
 /// The workflow that runs the checks.
 const WORKFLOW: &str = "check.yml";
@@ -427,7 +428,9 @@ pub fn run(sh: &Shell, opts: &RemoteOpts) -> Result<()> {
         && !opts.accept_snapshots
         && cfg!(target_os = "macos");
     if !here {
-        return on_runners(sh, opts, &root, &dir, None, None);
+        let ran = on_runners(sh, opts, &root, &dir, None, None);
+        stage::verdict(&dir, ran.is_ok());
+        return ran;
     }
     let started = Instant::now();
     let sha = if opts.head {
@@ -436,6 +439,7 @@ pub fn run(sh: &Shell, opts: &RemoteOpts) -> Result<()> {
         format_own(sh, &opts.only);
         snapshot(sh, &root, &dir, &opts.name, &opts.only)?
     };
+    stage::started(sh, &dir, &sha, if opts.head { &[] } else { &opts.only });
     // What only a runner checks: a full check's iOS and Linux clippy and rustdoc, with Linux's
     // tests when every crate tests there too; and the e2e case or probe.
     let mut there = opts.clone();
@@ -519,6 +523,7 @@ pub fn run(sh: &Shell, opts: &RemoteOpts) -> Result<()> {
     // Each half's verdict, last, where the lane reads: the runners' failure came above the
     // local half's lines, which said "passed", and a lane took the check for green.
     let runners_failed = runners.as_ref().and_then(|r| r.as_ref().err());
+    stage::verdict(&dir, local.passed && runners_failed.is_none() && e2e_passed);
     if !local.passed || runners_failed.is_some() || !e2e_passed {
         let here = if local.passed { "passed" } else { "FAILED" };
         let here = match &e2e_said {
@@ -623,13 +628,17 @@ fn on_runners(
         let viewed: Viewed = serde_json::from_str(&viewed).context("gh run view's JSON")?;
         (Listed { id, title: viewed.title, url: viewed.url }, format!("run {id}"))
     } else {
-        let sha = match sha {
-            Some(sha) => sha.to_owned(),
-            None if opts.head => cmd!(sh, "git rev-parse HEAD").read()?,
-            None => {
+        let sha = if let Some(sha) = sha {
+            sha.to_owned()
+        } else {
+            let sha = if opts.head {
+                cmd!(sh, "git rev-parse HEAD").read()?
+            } else {
                 format_own(sh, &opts.only);
                 snapshot(sh, root, dir, &opts.name, &opts.only)?
-            }
+            };
+            stage::started(sh, dir, &sha, if opts.head { &[] } else { &opts.only });
+            sha
         };
         actions_present(sh, opts.workflow_ref.as_deref().unwrap_or(REF), &sha, opts)?;
         // The tree as it was asked about, dispatched once a Mac is free for it.

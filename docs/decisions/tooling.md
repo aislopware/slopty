@@ -2250,3 +2250,22 @@ more full-window layer.
     statistics.
   - Tests: `remote::guest::tests::only_the_goldens_a_run_wrote_come_back` (`xtask`); the
     command itself is proved by the runs above.
+- ✅ **A checkpoint lands as its check passed it** (2026-10-17). The orchestrator staged a
+  lane's paths with `git add` after its green check, but the lane had saved `transcript.rs`
+  again in between, with a call into a `page.rs` not yet landed, and the gate went red
+  (0d8fc67d, fixed forward by 80fd01c5). The check had passed a snapshot; the working tree was
+  something else by then.
+  - **Each check records what it took.** `remote` writes `target/remote/<name>/checked.json`
+    when it snapshots: the snapshot commit, its parent, and every path it changed with its mode
+    and blob, as `git diff-tree` gives them; the verdict follows when the check ends (both
+    halves and the guest's e2e green, or not). A new check of the name replaces the record at
+    once, so a check still running, or stopped, never leaves an older verdict standing.
+  - **`cargo xtask stage <name>…` stages those blobs** (`git update-index --index-info`), for
+    every name or none. It refuses a check that failed or has not ended; one a later check of
+    the same lane (`L-x` beside `L`) superseded on any of its paths; one whose path main moved
+    since (`HEAD` holds another blob there than the snapshot's parent did), since what passed
+    is then not what would land; a path the index already holds with other content; two names
+    that checked one path differently; and a check without `--only` or of `--head`, which names
+    no lane's own paths. The files the tree holds otherwise now are named and left unstaged.
+  - Test: `remote::stage::tests::staging_takes_what_the_check_passed_and_refuses_the_rest`
+    (`xtask`), on a scratch repository through `remote`'s own snapshot.

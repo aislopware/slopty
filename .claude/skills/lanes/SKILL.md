@@ -31,6 +31,7 @@ wait"; the commands: `docs/DEV.md`, "Dev loop".
   its own lane name, the same name every time (a new name, `C2x` beside `C2`, is a cold target
   dir and a cold build). Crates that test on Linux may go to runners with `--place runner`, quick
   only: a full check there takes a runner Mac for the Mac's own tests.
-- Lanes do not commit. The orchestrator stages each checkpoint by path, runs one quick gate
-  over the batch, commits by owner and lands at once. A red gate is fixed forward by the lane
-  that owns it.
+- Lanes do not commit. A checkpoint is a green `--only` check of exactly its paths: the
+  orchestrator stages what that check passed (`cargo xtask stage <name>`, never `git add`),
+  runs one quick gate over the batch, commits by owner and lands at once. A red gate is fixed
+  forward by the lane that owns it.

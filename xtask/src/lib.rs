@@ -147,6 +147,10 @@ enum Cmd {
     /// The checks of the working tree on a GitHub runner, not this Mac: `xtask check` for the
     /// crates named and an e2e case, whose accepted goldens come back into the tree.
     Remote(remote::RemoteOpts),
+    /// Stage the paths a lane's last check passed, with the blobs it passed, not the working
+    /// tree's: refused when that check failed, has not ended, a later check of the lane took the
+    /// same paths, or main moved one of them since.
+    Stage(remote::stage::StageOpts),
     /// How CI is doing: the last Deep nightly job by job (verdict, wall time, what failed),
     /// then how long each push to `gate` took to reach main, and the spread: the wait a lane
     /// feels.
@@ -409,6 +413,7 @@ pub fn main() -> Result<()> {
         Cmd::Land(opts) => land::run(&sh, &opts),
         Cmd::Promote(opts) => land::promote(&sh, &opts),
         Cmd::Remote(opts) => remote::run(&sh, &opts),
+        Cmd::Stage(opts) => remote::stage::run(&sh, &opts),
         Cmd::CiHealth { since } => health::run(&sh, since.as_deref()),
         Cmd::GateWait { hours } => remote::gate_wait(&sh, hours),
         Cmd::Toolchain { version } => toolchain::run(&sh, version.as_deref()),

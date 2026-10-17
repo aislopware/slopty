@@ -55,6 +55,12 @@ zed itself so it is never behind zed while longbridge lags.
   cancels the older one's run. A stopped wrapper leaves the run going; `--run <id>` with the same
   options follows it again and applies what it accepted. `cargo xtask ci-health` prints the
   day's spread of check latency beside the gate's and the Deep nightly.
+- Staging a lane's checkpoint: `cargo xtask stage <name>…` (the lanes' check names) puts into
+  the index the blobs each name's last check passed, never the working tree's, which the lane
+  may have edited since. It refuses, staging nothing, a check that failed or has not ended, one a
+  later check of the same lane over the same paths superseded, one whose paths main moved since,
+  and a path the index already holds otherwise; it names the files the tree holds otherwise now,
+  left unstaged. A check without `--only`, or of `--head`, stages nothing.
 - Landing a change: stage exactly it (`git add <paths>`), run `cargo gate -m '<message>'`, then
   `git commit -F target/gate/COMMIT_MSG` without restaging, then `cargo xtask land`. The local
   gate compiles nothing and takes seconds; it prints the next step when it passes. `land` pushes
