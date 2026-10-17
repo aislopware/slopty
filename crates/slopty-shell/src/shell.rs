@@ -70,6 +70,8 @@ mod chat_dropzone;
 mod chat_dropzone_tests;
 #[cfg(test)]
 mod chat_rename_tests;
+#[cfg(test)]
+mod page_pointer_tests; // slopty: live pages in a chat take the pointer
 mod command_palette;
 mod file_mutations;
 mod files_panel;
@@ -9471,15 +9473,19 @@ impl Shell {
                                     || measured_has_composer.get() != contains_composer;
                                 // slopty: the Cell moves only with the frame it asks for, so a
                                 // sub-pixel drift never leaves a retained frame reading a height
-                                // its rebuild did not.
+                                // its rebuild did not; and only once this frame is drawn, so a
+                                // frame drawn again before then (from scratch, for the retained
+                                // check) reads the height this one was built with.
                                 if changed {
-                                    measured.set(next_height);
-                                    measured_has_composer.set(contains_composer);
+                                    let (measured, measured_has_composer) =
+                                        (measured.clone(), measured_has_composer.clone());
                                     // slopty: a view notified while the window draws asks for no
                                     // frame, so the shell and the transcript under the stack are
                                     // told once this frame is drawn, which asks for the frame
                                     // that shows them both at the new height.
                                     cx.defer(move |cx| {
+                                        measured.set(next_height);
+                                        measured_has_composer.set(contains_composer);
                                         if contains_composer {
                                             let stack_h = (next_height - term_h).max(0.0);
                                             transcript.update(cx, |t, cx| t.set_bottom_clearance(stack_h, cx));
@@ -9525,8 +9531,8 @@ impl Shell {
                     })
                     .child(self.render_terminal_container(terminal_geometry, window, cx))
             })
-            .child(Self::attachment_drop_overlay(theme))
-            .child(Self::mention_drop_overlay(theme))
+            .children(Self::attachment_drop_overlay(theme, cx))
+            .children(Self::mention_drop_overlay(theme, cx))
             .into_any_element()
     }
 

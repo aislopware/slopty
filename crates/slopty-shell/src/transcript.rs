@@ -4795,7 +4795,7 @@ impl Transcript {
                 };
                 match fold.toggled_at {
                     Some(at) if !motion::reduced_motion(cx) && fold.duration_ms > 0 => {
-                        let raw = (at.elapsed().as_secs_f32() * 1000.0 / fold.duration_ms as f32)
+                        let raw = (cx.frame_time().saturating_duration_since(at).as_secs_f32() * 1000.0 / fold.duration_ms as f32)
                             .clamp(0.0, 1.0);
                         let progress = user_resize_spec(fold.user_expansion_height).progress(raw);
                         motion::lerp(fold.user_expansion_height - target, target, progress)
@@ -6953,7 +6953,7 @@ impl Transcript {
             && fold.epoch > 0
             && fold
                 .toggled_at
-                .is_some_and(|at| at.elapsed() < Duration::from_millis(duration_ms + 200))
+                .is_some_and(|at| cx.frame_time().saturating_duration_since(at) < Duration::from_millis(duration_ms + 200))
             && !motion::reduced_motion(cx);
         let ellipsis = || div().h(px(line_height)).child("...");
         let body: AnyElement = if animating {
@@ -8321,7 +8321,7 @@ impl Transcript {
         let animating = !reduce_motion
             && fold
                 .toggled_at
-                .is_some_and(|at| at.elapsed() < TOOL_FOLD.total());
+                .is_some_and(|at| now.saturating_duration_since(at) < TOOL_FOLD.total());
         if !animating {
             // Settled states render plain — open rows untouched, closed rows
             // empty until the settle sweep drops them from the row list.
@@ -8559,6 +8559,7 @@ impl Transcript {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let mut fold = self.folds.get(row_id).copied().unwrap_or_default();
+        let frame_now = cx.frame_time(); // slopty: the frame's moment, for its tweens
         let file_opener = self.tool_file_opener(cx);
         // slopty: what calls say beyond zeron's chip; a running timer draws again each second.
         let chip_facts = self.chip_facts(cx);
@@ -8619,14 +8620,14 @@ impl Transcript {
         let animate_worked = self
             .compact_worked_fade_at
             .get(row_id)
-            .is_some_and(|at| at.elapsed() < motion::FADE_IN.total());
+            .is_some_and(|at| frame_now.saturating_duration_since(*at) < motion::FADE_IN.total());
         let worked_fade_t = match worked_secs {
             Some(_) if animate_worked && !cx.reduce_motion() => self
                 .compact_worked_fade_at
                 .get(row_id)
                 .map(|at| {
                     motion::FADE_IN.progress(
-                        at.elapsed().as_secs_f32() / motion::FADE_IN.total().as_secs_f32(),
+                        frame_now.saturating_duration_since(*at).as_secs_f32() / motion::FADE_IN.total().as_secs_f32(),
                     )
                 })
                 .unwrap_or(1.0),
@@ -8641,7 +8642,7 @@ impl Transcript {
             || (!cx.reduce_motion()
                 && fold
                     .toggled_at
-                    .is_some_and(|at| at.elapsed() < TOOL_FOLD.total()));
+                    .is_some_and(|at| frame_now.saturating_duration_since(at) < TOOL_FOLD.total()));
         let tools = if body_visible {
             tools.as_slice()
         } else {
@@ -8818,7 +8819,7 @@ impl Transcript {
                         if let Some(at) = fold.toggled_at {
                             let t = TOOL_FOLD
                                 .curve
-                                .eval(at.elapsed().as_secs_f32() / TOOL_FOLD.total().as_secs_f32());
+                                .eval(frame_now.saturating_duration_since(at).as_secs_f32() / TOOL_FOLD.total().as_secs_f32());
                             if t < 1.0 {
                                 motion_active = true;
                             }
@@ -8980,7 +8981,7 @@ impl Transcript {
             if !reduce_motion
                 && fold
                     .toggled_at
-                    .is_some_and(|at| at.elapsed() < TOOL_FOLD.total())
+                    .is_some_and(|at| frame_now.saturating_duration_since(at) < TOOL_FOLD.total())
             {
                 motion_active = true;
             }
@@ -9061,7 +9062,7 @@ impl Transcript {
                 let animating = dfold.epoch > 0
                     && dfold
                         .toggled_at
-                        .is_some_and(|at| at.elapsed() < FOLD_TWEEN_WINDOW);
+                        .is_some_and(|at| frame_now.saturating_duration_since(at) < FOLD_TWEEN_WINDOW);
                 let toggle_key = key.clone();
                 let mut card = div()
                     .my(px((base_row_height - CHIP_CARD_HEIGHT) / 2.0))
