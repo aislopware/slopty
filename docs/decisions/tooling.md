@@ -2170,6 +2170,36 @@ more full-window layer.
     which noq's port lacks and the deque's defragment is written without.
   - Claude Code 2.1.302 is pinned and the fixtures are recorded on it. Its control and stream
     subtypes are the same 155 as 2.1.301's.
+- ✅ **Upstream sync of 2026-10-18: gpui-fast `f38a5c69`, gpui-kit `f865a56b`, ghostty
+  `117b5945`.** longbridge's gpui-fast `37f39597` (#74–#77) and zed `56934ec0` are in the
+  gpui-fast fork; gpui-kit is rebased onto `2154ba84` (5 upstream commits); the ghostty fork
+  merges `e3ebb1d1` (three translations, outside `paths`) and libghostty-rs is pinned to it
+  (`3ddafdfe`).
+  - #76: `.rounded().overflow_hidden()` clips its children to the rounded shape, not to its
+    rectangle. Upstream draws a clip's primitives as a group with a mask in the Metal encoder,
+    which needs a scene of grouped primitives; the fork's scene holds places in the primitive
+    lists, so the fork enters the shape as a clip in its table of edge fades instead, cut per pixel
+    in the shader (`.research/gpui-fast/SLOPTY.md`, "In the longbridge 1db7f80 merge"). #76's
+    pixel fixtures pass on Metal. The cost is the same as a rectangular clip's within noise
+    (docs/MEASUREMENTS.md, "rounded overflow clips on gpui-fast"). Where the fork differs from
+    upstream: a view inside a clip that changes is rebuilt, not drawn again; of three or more nested
+    clips none of which lies inside another, the innermost and the outermost are kept; WGPU and
+    Windows draw no rounded clip (WGPU stays zed's). Each of Slopty's rounded elements with hidden
+    overflow now cuts its children at the corners, so goldens with content under a rounded
+    corner move. Slopty's `rounded_clip` element does what `.rounded().overflow_hidden()` does
+    now.
+  - Fades and clips inside a scroll layer's content no longer keep the layer from compositing
+    its tiles: they move into the content's space with it, each tile carries its own copy, and what
+    lists and overlays draw of the content into the frame moves them back. Only callbacks handed to
+    the present still keep a layer from compositing.
+  - #74 keeps a retained frame's debug bounds to what it drew, and #75 finds a composited layer's
+    content where it shows on screen (a scrolled layer's last translation), which bears on lane
+    C3's stale-frame work. #77 adds the command palette's clipping fixtures.
+  - zed #65738 adds hot reload through Subsecond behind gpui's `hot-reload` feature, which Slopty
+    does not turn on. Every render goes through zed's `render_view`, the fork's retained views too.
+  - gpui-kit: one conflict, the input state, where #3564 moved `display_map` and prewrap up
+    and the fork's `line_number_gap` stays beside them. #3565 lets `DataTable` turn its focus ring
+    off (Slopty has no table); #3561 and #3535 are `gpui-shell`, #3571 the website.
 - ✅ **A check's first red ends it** (2026-10-17, `.research/devloop-2026-10-17.md` items 1 and
   2). The person found development far too slow, with much dead time between a lane's edit and
   its verdict. Measured over the 14 hours from 2026-10-16 14:43 UTC: 138 of 267 local checks

@@ -17431,3 +17431,23 @@ recently used beyond 4 of 6, and left 24.4 GiB free, in 3.6 s; the copy after it
 T=$(getconf DARWIN_USER_TEMP_DIR); du -sh "$T"/Deleting-* "$T"/slopty-e2e-*; df -k /System/Volumes/Data
 du -sh ~/Library/Developer/CoreSimulator/Devices ~/Library/Logs/CoreSimulator /Volumes/Lacie/Workspace/oss/slopty/target/local/*
 ```
+
+## 2026-10-18 — rounded overflow clips on gpui-fast: per pixel through the fade table, no cost
+
+gpui-fast took longbridge #76 (`.rounded().overflow_hidden()` clips its children to the rounded
+shape) as a clip in its table of edge fades, cut per pixel in the Metal shader, rather than #76's
+group encoder (`.research/gpui-fast/SLOPTY.md`, "In the longbridge 1db7f80 merge"). #76's own
+cost test, 64 descendants of a rounded clip against 64 of a rectangular one, mac-studio, debug
+build, Metal, waiting for the GPU without reading pixels back:
+
+| target | 64 rounded clips | 64 rectangular |
+| --- | --- | --- |
+| 128 px | 310 µs | 300 µs |
+| 1024 px | 314 µs | 329 µs |
+
+The same within noise; #76 reports about 0.7 ms on Metal for its groups.
+
+```sh
+# in .research/gpui-fast (the fork checkout, not Slopty's)
+cargo test -p gpui_apple --lib rounded_overflow_mask_cost -- --ignored --nocapture
+```
