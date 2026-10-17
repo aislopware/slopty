@@ -1986,6 +1986,14 @@ pub fn lint_ios(sh: &Shell) -> Result<()> {
     quiet_step(
         "clippy ios + ios-sim",
         cmd!(sh, "{cargo} clippy --keep-going --workspace {excludes...} {ios...} -- -D warnings"),
+    )?;
+    // The notification extension is built on its own (`xtask ios`), with only the features its
+    // own dependencies turn on: one that another crate turns on in the workspace's build above
+    // is not there.
+    let [_, _, sim] = TRIPLES;
+    quiet_step(
+        "check slopty-notify alone (ios-sim)",
+        cmd!(sh, "{cargo} check -p slopty-notify --lib --target {sim}"),
     )
 }
 
