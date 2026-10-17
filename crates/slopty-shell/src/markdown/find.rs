@@ -113,6 +113,10 @@ fn runs_text(runs: &[InlineRun]) -> String {
 pub fn block_texts(block: &Block, out: &mut Vec<String>) {
     match block {
         Block::Paragraph { runs } | Block::Heading { runs, .. } => out.push(runs_text(runs)),
+        // slopty: terminal output paints its text, its escapes taken out.
+        Block::CodeBlock { language, code } if super::ansi::is_ansi_fence(language.as_deref(), code) => {
+            out.extend(super::ansi::parse(language.as_deref(), code).into_iter().map(|line| line.text));
+        }
         Block::CodeBlock { code, .. } => out.extend(code.split('\n').map(str::to_owned)),
         Block::BlockQuote { children } => {
             for child in children {
@@ -228,5 +232,20 @@ mod tests {
         assert_eq!(texts[0], "Head");
         assert_eq!(texts[1], "Some find text.");
         assert_eq!(count(&texts, "find"), 5);
+    }
+
+    /// slopty: terminal output's texts are what it paints, its escapes taken out, spelled or not:
+    /// what find matches and what a screen reader reads.
+    #[test]
+    fn terminal_output_reads_without_its_escapes() {
+        let tree = crate::markdown::parser::parse_full(
+            "```ansi\n\\x1b[1;32m✓\\x1b[0m 12 passed\n\\x1b[31merror\\x1b[0m: x\n```\n\n```\n\u{1b}[2mdim\u{1b}[0m\n```\n",
+        );
+        let mut texts = Vec::new();
+        for top in &tree.blocks {
+            block_texts(&top.block, &mut texts);
+        }
+        texts.retain(|text| !text.is_empty());
+        assert_eq!(texts, ["✓ 12 passed", "error: x", "dim"]);
     }
 }

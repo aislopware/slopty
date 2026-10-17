@@ -71,11 +71,6 @@ pub fn hash_into<T: Serialize + ?Sized>(acc: &mut Vec<u8>, value: &T) {
     }
 }
 
-/// Now, in milliseconds since the epoch, as the view model's times are.
-pub fn now_ms() -> i64 {
-    chrono::Utc::now().timestamp_millis()
-}
-
 fn row(entry_id: &str, part_id: &str, version: u64, kind: RowKind) -> Row {
     Row {
         id: format!("{entry_id}#{part_id}").into(),
@@ -167,6 +162,8 @@ pub(super) struct ChipFacts {
     pub backgrounding: HashSet<String>,
     /// The transcript the chip is in, which asks for the move.
     pub transcript: gpui::WeakEntity<Transcript>,
+    /// slopty: the time a running timer reads (`Transcript::clock`), ms since the epoch.
+    pub now: i64,
 }
 
 impl ChipFacts {
@@ -180,7 +177,7 @@ impl ChipFacts {
     ) -> Option<AnyElement> {
         let running_timer = facts.timer.as_ref().filter(|_| !resolved);
         let words = match (running_timer, &facts.result) {
-            (Some(timer), _) => Some(timer_words(timer, now_ms())),
+            (Some(timer), _) => Some(timer_words(timer, self.now)),
             (None, Some(result)) => Some(result.clone()),
             (None, None) => None,
         };
@@ -345,6 +342,7 @@ impl Transcript {
             chat_id: self.work_chat(),
             backgrounding: self.work.backgrounding.clone(),
             transcript: cx.weak_entity(),
+            now: self.clock.timestamp_millis(),
         }
     }
 
@@ -358,6 +356,8 @@ impl Transcript {
             cx.background_executor().timer(TICK).await;
             this.update(cx, |this, cx| {
                 this.work.tick = None;
+                // slopty: what runs reads the time this tick took, in every frame built after it.
+                this.clock = chrono::Utc::now();
                 cx.notify();
             })
             .ok();
@@ -535,7 +535,7 @@ impl Transcript {
         if retrying {
             self.tick_soon(cx);
         }
-        let words = notice_words(note, now_ms());
+        let words = notice_words(note, self.clock.timestamp_millis());
         let tint = tone_tint(&note.tone, theme);
         let lead: AnyElement = if retrying {
             crate::loaders::mini_glyph_spinner(

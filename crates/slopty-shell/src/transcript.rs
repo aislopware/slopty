@@ -3718,6 +3718,12 @@ pub struct Transcript {
     /// slopty: a subagent's transcript open in its card (`transcript/subagents.rs`), which
     /// takes the height its rows measure: told to the card after each layout.
     fit: Option<Fit>,
+    /// slopty: the time the working line reads: taken when the transcript's state moves and on
+    /// the working timer's tick, never as a frame is built, so a frame built again (from
+    /// scratch, or for a hover) says the second the frame shown says.
+    clock: chrono::DateTime<chrono::Utc>,
+    /// slopty: the working timer's next tick, on the turn's next whole second.
+    clock_tick: Option<Task<()>>,
     /// slopty: the list's viewport as this frame began. A page row reads it while the list lays
     /// out, when asking the list itself would borrow it twice.
     page_viewport: gpui::Bounds<Pixels>,
@@ -4103,6 +4109,8 @@ impl Transcript {
             rail_enabled,
             bottom_clearance: 0.0,
             fit: None,
+            clock: chrono::Utc::now(),
+            clock_tick: None,
             page_viewport: gpui::Bounds::default(),
             rail_hover: None,
             hovered_entry: None,
@@ -4187,11 +4195,10 @@ impl Transcript {
     /// slopty: row `row` takes another height (a subagent's card opened, closed, or fit to its
     /// run): it is measured again, and the list's layer painted afresh with it, so no row under
     /// it is shown where it stood before.
+    /// As a diagram's row does, it lets the bottom pin and the own-turn runway take the new
+    /// height: a list held at its end stays there as the card grows.
     pub(crate) fn row_resized(&mut self, row: &str, cx: &mut Context<Self>) {
-        if let Some(ix) = self.rows.iter().position(|r| r.id.as_ref() == row) {
-            self.list.remeasure_items(ix..ix + 1);
-            self.viewport_layout_revision = self.viewport_layout_revision.wrapping_add(1);
-        }
+        self.diagram_layout_changed(&[SharedString::from(row.to_owned())], cx);
         cx.notify();
     }
 
@@ -4396,6 +4403,14 @@ impl Transcript {
         // wheel/touch input. Neither operation reads the borrowed ListState.
         self.user_collapse_scroll = None;
         self.cancel_user_hold();
+        // slopty: a live page the scroll moved looks again at where it lies.
+        let fences: Vec<_> = self.fences.borrow().values().cloned().collect();
+        // Only those are touched: one updated keeps the scroll from being composited.
+        for card in self.pages.values().chain(&fences) {
+            if card.read(cx).placed_live() {
+                card.update(cx, |_, cx| cx.notify());
+            }
+        }
         let released_own_turn = self.own_turn.as_ref().is_some_and(|anchor| anchor.held);
         self.release_own_turn_hold();
         if self.own_turn.is_some() {
@@ -5184,6 +5199,7 @@ impl Transcript {
 
     /// Rebuild rows from app state; splice minimal ranges into the list.
     fn sync(&mut self, cx: &mut Context<Self>) {
+        self.clock = chrono::Utc::now();
         if self.retain_on_deselect
             && self.doc_override.is_none()
             && self.state.read(cx).selected_chat.is_none()
@@ -7533,8 +7549,28 @@ impl Transcript {
         }
     }
 
+    /// slopty: take the time again at the next whole second after `start` (ms since the epoch),
+    /// or in a second, and draw again: what the working line says moves on only then.
+    fn tick_clock(&mut self, start: Option<i64>, cx: &mut Context<Self>) {
+        if self.clock_tick.is_some() {
+            return;
+        }
+        let real = chrono::Utc::now().timestamp_millis();
+        let wait = start.map_or(1000, |start| 1000 - (real - start).rem_euclid(1000));
+        let wait = Duration::from_millis(u64::try_from(wait).unwrap_or(1000).clamp(1, 1000) + 2);
+        self.clock_tick = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(wait).await;
+            this.update(cx, |this, cx| {
+                this.clock_tick = None;
+                this.clock = chrono::Utc::now();
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
     fn render_working_trailer(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let now = chrono::Utc::now();
+        let now = self.clock;
         // `turn` (the turn's start, ms) keys the rolling word and timer, so a
         // new turn's labels appear fresh instead of rolling from the last
         // turn's final values.
@@ -7612,6 +7648,9 @@ impl Transcript {
             };
             (sending, queued, elapsed, flavour_seed(&chat_id), turn)
         };
+        // slopty: the clock moves on at the timer's next whole second (a second on while it
+        // sends), so the second a frame says is the one every frame built after it says.
+        self.tick_clock(if sending || queued { None } else { Some(turn) }, cx);
         if self.compact_mode && !sending && !queued && elapsed_secs > 0 {
             let entry_id = if let Some(doc_id) = &self.doc_override {
                 self.state
@@ -7658,7 +7697,15 @@ impl Transcript {
             && self.doc_override.is_none()
             && let Some(chat) = self.chat_id.clone()
             && let Some(line) =
-                crate::composer::working_line(&chat, word, turn, elapsed_secs, cx.entity_id(), cx)
+                crate::composer::working_line(
+                    &chat,
+                    word,
+                    turn,
+                    elapsed_secs,
+                    now.timestamp_millis(),
+                    cx.entity_id(),
+                    cx,
+                )
         {
             return Some(line);
         }

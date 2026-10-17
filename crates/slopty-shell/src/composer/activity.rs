@@ -79,18 +79,19 @@ pub fn activity_words(line: &ActivityLine, word: &str, elapsed_secs: i64, now: i
 
 /// The transcript's working line for chat `chat_id` drawn from its dock, or `None` while the
 /// dock says no turn is under way (the transcript then draws its own). `turn` keys the rolling
-/// words to the turn.
+/// words to the turn. `now` is the transcript's clock (ms since the epoch), taken on its tick and
+/// not as the frame is built, so a frame built again says the second the shown one says.
 pub fn working_line(
     chat_id: &str,
     word: &str,
     turn: i64,
     elapsed_secs: i64,
+    now: i64,
     view: EntityId,
     cx: &mut App,
 ) -> Option<AnyElement> {
     let dock = super::dock::chat_dock(chat_id, cx)?;
     let line = dock.activity.as_ref()?;
-    let now = chrono::Utc::now().timestamp_millis();
     let words = activity_words(line, word, elapsed_secs, now);
     let theme = Theme::of(cx).clone();
     let reduced = cx.reduce_motion();

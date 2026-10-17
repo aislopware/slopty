@@ -325,7 +325,7 @@ impl Transcript {
             .entry(key.clone())
             .or_insert_with(|| cx.focus_handle())
             .clone();
-        let now = super::work::now_ms();
+        let now = self.clock.timestamp_millis();
         let figures = card.figures_at(now);
 
         // The trailing glyph: the working spinner, the calm clock of one waiting on its own work,

@@ -613,3 +613,29 @@ fn a_card_clicked_on_a_persons_frame_opens_on_the_next(cx: &mut gpui::TestAppCon
     let run = find(&nodes, Role::Group, "Transcript of Count lines").expect("open in place");
     assert!(run.height > 20.0, "fit to its run: {run:?}");
 }
+
+/// slopty: what runs reads the transcript's clock, taken on its tick and when its state moves,
+/// never as a frame is built: a running subagent's card says the time the clock says, and a
+/// frame built again from scratch later says the same.
+#[gpui::test]
+fn a_running_card_says_the_clocks_time_in_every_frame(cx: &mut gpui::TestAppContext) {
+    let started = 1_700_000_000_000_i64;
+    let progress = SubagentProgress {
+        running: true,
+        state: SubagentProgress::RUNNING.into(),
+        chat_id: Some("child-chat".into()),
+        started_at: Some(started),
+        ..SubagentProgress::default()
+    };
+    let (transcript, cx) = open(cx, entry(MessageStatus::Complete, vec![spawn(progress)]));
+    transcript.update(cx, |this, cx| {
+        this.clock = chrono::DateTime::from_timestamp_millis(started + 42_000).unwrap_or_default();
+        cx.notify();
+    });
+    let value = |cx: &mut VisualTestContext| {
+        find(&draw(cx), Role::Button, "Subagent Count lines").map(|card| card.value.clone())
+    };
+    let first = value(cx).expect("the card");
+    assert!(first.contains("42s"), "{first}");
+    assert_eq!(value(cx).as_deref(), Some(first.as_str()), "drawn again, the same second");
+}
