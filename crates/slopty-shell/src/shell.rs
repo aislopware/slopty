@@ -11634,6 +11634,13 @@ impl Render for Shell {
         // scheduling `with_animation` would have requested). Hover color fades
         // ride the same clock; their once-per-frame tick lives here (this is
         // the window's root render — it runs exactly once per frame).
+        // slopty: the sidebar is a cached view, drawn from its last frame when only the shell is
+        // drawn again: its hovered row reads no fade then, and the tick would drop the hover of
+        // the row the pointer rests on, so the next sidebar frame painted it unlit under the
+        // pointer while the frame shown kept its wash. The shell holds that row's hover read.
+        if let Some(row) = &self.chat_status_hover {
+            motion::hover_t(&format!("{row}-hover"));
+        }
         if self.motion_active.get() | motion::hover_fades_active() | motion::state_morphs_active() {
             window.request_animation_frame();
         }
@@ -15144,6 +15151,105 @@ mod settings_modal_regressions {
                 // slopty: appshots removed.
             })
             .unwrap();
+    }
+
+    /// What the window shows against the same state drawn from scratch, as the app's own check
+    /// judges a frame: the primitives only the frame shown paints, and only the scratch paints.
+    fn stale_sidebar(cx: &mut gpui::VisualTestContext) -> Option<String> {
+        cx.update(|window, cx| {
+            let mut shown = window.painted_primitives();
+            shown.sort_unstable();
+            window.refresh();
+            window.draw(cx).clear(cx);
+            let mut scratch = window.painted_primitives();
+            scratch.sort_unstable();
+            (shown != scratch).then(|| {
+                // What differs beyond the depths the differences push down.
+                let bare = |lines: &[String]| {
+                    let mut bare: Vec<String> = lines
+                        .iter()
+                        .map(|line| line.split_once(' ').map_or(line.clone(), |(_, rest)| rest.to_owned()))
+                        .collect();
+                    bare.sort_unstable();
+                    bare
+                };
+                let (shown, scratch) = (bare(&shown), bare(&scratch));
+                let only = |a: &[String], b: &[String]| {
+                    let mut b = b.to_vec();
+                    a.iter()
+                        .filter(|line| match b.iter().position(|other| other == *line) {
+                            Some(at) => {
+                                b.remove(at);
+                                false
+                            }
+                            None => true,
+                        })
+                        .take(6)
+                        .map(|line| line.chars().take(420).collect::<String>())
+                        .collect::<Vec<_>>()
+                };
+                format!("shown only {:#?}\nscratch only {:#?}", only(&shown, &scratch), only(&scratch, &shown))
+            })
+        })
+    }
+
+    // slopty: the sidebar under a resting pointer draws as a frame from scratch would: on a row
+    // whose hover card comes up, and on the rows "Show more" brings under it.
+    #[gpui::test]
+    fn the_sidebar_under_a_resting_pointer_is_drawn_as_from_scratch(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        init_settings_test(settings::UiSettings::default(), dir.path(), cx);
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let (shell, cx) = cx.add_window_view(|_, cx| test_shell(dir.path(), cx));
+        cx.simulate_resize(gpui::size(px(1320.0), px(1100.0)));
+        shell.update(cx, |shell, cx| {
+            shell.debug_gate = Some(GatePhase::Ready);
+            shell.splash = SplashPhase::Gone;
+            shell.reduced_motion = true;
+            shell.settings.sidebar_organization = SidebarOrganization::ByStatus;
+            shell.state.update(cx, |state, _| {
+                state.workspace_scope = Some(WorkspaceScope::Local);
+                state.local_device_id = Some("local".into());
+                state.chats = (0..12)
+                    .map(|n| {
+                        serde_json::from_value(serde_json::json!({
+                            "id": format!("c{n}"), "title": format!("Say hello {n}"),
+                            "deviceId": "local", "archived": false,
+                            "createdAt": Utc::now() - chrono::Duration::minutes(n),
+                        }))
+                        .unwrap()
+                    })
+                    .collect();
+            });
+        });
+        crate::motion::run_on(cx.executor());
+        let settle = |cx: &mut gpui::VisualTestContext, wait: std::time::Duration| {
+            cx.executor().advance_clock(wait);
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+        };
+        let mut stale = Vec::new();
+        settle(cx, std::time::Duration::ZERO);
+        stale.extend(stale_sidebar(cx).map(|s| format!("at rest: {s}")));
+        let row = cx.debug_bounds("chat-c0").expect("a sidebar row");
+        cx.simulate_mouse_move(row.center(), None, gpui::Modifiers::default());
+        settle(cx, std::time::Duration::from_millis(50));
+        stale.extend(stale_sidebar(cx).map(|s| format!("on the row: {s}")));
+        settle(cx, crate::settings::widgets::TOOLTIP_DELAY * 3);
+        stale.extend(stale_sidebar(cx).map(|s| format!("its card up: {s}")));
+        let more = cx.debug_bounds("sidebar-group-more-status:status:done");
+        if let Some(more) = more {
+            cx.simulate_click(more.center(), gpui::Modifiers::default());
+            settle(cx, std::time::Duration::from_millis(50));
+            stale.extend(stale_sidebar(cx).map(|s| format!("after Show more: {s}")));
+            settle(cx, crate::settings::widgets::TOOLTIP_DELAY * 3);
+            stale.extend(stale_sidebar(cx).map(|s| format!("a row under it: {s}")));
+        } else {
+            stale.push("no Show more drawn".to_owned());
+        }
+        assert!(stale.is_empty(), "{}", stale.join("\n\n"));
     }
 
     /// The full shell draws its sidebar as a cached view after its own

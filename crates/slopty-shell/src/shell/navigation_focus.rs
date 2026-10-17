@@ -101,6 +101,11 @@ impl Shell {
                 self.navigation_focus.right.clone(),
                 self.navigation_focus.right.clone(),
             )
+        } else if crate::shell::touch_screen() {
+            // slopty: on a touch screen the keyboard waits for a tap in the composer
+            // (`docs/decisions/ui.md`): focus recovered after a tap elsewhere, a sidebar row's,
+            // goes where no software keyboard rises.
+            (self.unfocused.clone(), self.unfocused.clone())
         } else { // slopty: voice removed.
             (self.composer.focus_handle(cx), self.unfocused.clone())
         }

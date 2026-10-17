@@ -1000,6 +1000,76 @@ mod tests {
         assert!(pending(&shell, cx), "a Mac's window lands in the composer");
     }
 
+    // slopty: on an iPad a tap on a chat's row in the sidebar opens it with the keyboard down: no
+    // frame after the tap hands the composer the keyboard, whatever the tap left focused.
+    #[gpui::test]
+    fn tapping_a_chat_in_an_ipads_sidebar_leaves_the_keyboard_down(cx: &mut gpui::TestAppContext) {
+        use gpui::Focusable as _;
+        FORCE_COMPACT.with(|force| force.set(true));
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+        });
+        let path = dir.path().to_path_buf();
+        let (shell, cx) = cx.add_window_view(move |_, cx| {
+            let state = cx.new(|_| crate::state::AppState::new());
+            let shell = Shell::new(
+                state,
+                crate::state::EngineBootConfig {
+                    data_dir: path.clone(),
+                    default_harness: slopty_view_proto::HarnessId::MOCK,
+                },
+                cx,
+            );
+            shell.state.update(cx, |state, _| {
+                state.workspace_scope = Some(slopty_view_proto::WorkspaceScope::Local);
+                state.local_device_id = Some("local".into());
+                state.chats = ["fix", "docs"]
+                    .into_iter()
+                    .map(|id| {
+                        serde_json::from_value(serde_json::json!({
+                            "id": id, "title": format!("Chat {id}"), "deviceId": "local",
+                            "archived": false, "createdAt": chrono::Utc::now(),
+                        }))
+                        .unwrap()
+                    })
+                    .collect();
+            });
+            shell
+        });
+        // An iPad's screen: the sidebar beside the chat, not the phone's pages.
+        cx.simulate_resize(gpui::size(px(1366.0), px(1024.0)));
+        shell.update(cx, |shell, _| {
+            shell.debug_gate = Some(crate::state::GatePhase::Ready);
+            shell.splash = super::super::SplashPhase::Gone;
+            shell.reduced_motion = true;
+        });
+        let frames = |cx: &mut gpui::VisualTestContext| {
+            for _ in 0..4 {
+                cx.run_until_parked();
+                cx.update(|window, cx| {
+                    window.draw(cx).clear(cx);
+                    window.simulate_next_frame(cx);
+                });
+            }
+        };
+        frames(cx);
+        assert!(!shell.read_with(cx, |shell, _| shell.compact()), "the iPad's own layout");
+        let at = cx.debug_bounds("chat-docs").expect("the chat's row").center();
+        cx.simulate_click(at, gpui::Modifiers::default());
+        let pending = shell.read_with(cx, |shell, cx| shell.composer.read(cx).focus_pending);
+        frames(cx);
+        let opened = shell.read_with(cx, |shell, cx| shell.state.read(cx).selected_chat.clone());
+        let typing = cx.update(|window, cx| {
+            shell.read(cx).composer.focus_handle(cx).contains_focused(window, cx)
+        });
+        FORCE_COMPACT.with(|force| force.set(false));
+        assert_eq!(opened.as_deref(), Some("docs"), "the tap opens the chat");
+        assert!(!typing, "the composer waits for a tap of its own (asked after the tap: {pending})");
+    }
+
     #[test]
     fn the_capsule_says_what_runs_and_what_waits() {
         assert_eq!(summary(0, 0), "");
