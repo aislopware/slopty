@@ -1551,8 +1551,25 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     at the trackpad's rate a reply comes back before the next event. Tests:
     `web::page::wheel`'s unit tests (the routing, the view class), the delegate's selectors in
     `web::page::view`, `slopty-shell`'s `a_wheel_the_page_hands_on_scrolls_the_chat`, and the
-    e2e `pages-wheel-over-card` measure (144 pt for a 144 pt wheel). iOS is not covered: a finger
-    on a live page goes to its web view, and GPUI's touch scrolling never sees it.
+    e2e `pages-wheel-over-card` measure (144 pt for a 144 pt wheel).
+  - **A finger goes on to the chat too (iOS, 2026-10-17).** UIKit has nested scrolling of its
+    own: a scroll view hands a pan it cannot take to an ancestor scroll view, and one at its
+    edge hands it on as the pan begins (`transfersVerticalScrollingToParent`). gpui-fast makes
+    each native's container that ancestor (aislopware/gpui-fast#39): a `UIScrollView` that
+    never moves its content and gives GPUI the pan as the touch it is. GPUI then scrolls and
+    flings the chat as under any finger. Taps stay the page's, and a pan the page can take
+    stays the page's to its end, as in Safari. We considered a recogniser that requires the
+    page's pans to fail, and forwarding the page's translation once it reports an edge. Both
+    guess at what UIKit already decides, and neither knows WebKit's frame scroll views. Two
+    things on our side keep the chain whole. The host document leaves its root's overflow
+    alone, since WebKit turns the web view's scroll view off for an `overflow: hidden` root,
+    and a scroll view that cannot scroll in between stops the handoff. The web view's scroll
+    view never adjusts its insets for the safe area, which would shift the page as its card
+    passes under the status bar. Tested in the simulator with real touches sent through
+    `UIApplication` (gpui-fast's `native_scroll_test`, 13 checks): a short page scrolls and
+    flings the chat, a tap reaches the page, a tall page scrolls itself, and at its top or
+    bottom a drag goes to the chat. Also tested: the host document's root has no overflow rule
+    (`sandbox`'s unit test).
   - **Files beside a page.** The view's requests for its own origin's other paths reach the
     app's `Resources` callback with the path under the page's folder (never `..`, `.` or an empty
     part, refused here), answered once with bytes or not found. The app backs it with the worker's

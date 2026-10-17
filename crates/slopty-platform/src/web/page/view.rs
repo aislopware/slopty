@@ -210,7 +210,18 @@ pub(super) fn mount(
         // initialiser, which copies the configuration.
         let web: Option<Retained<AnyObject>> =
             unsafe { msg_send![allocated, initWithFrame: frame, configuration: &*config] };
-        web?
+        let web = web?;
+        // The page's document stays put as its card passes under the window's safe area:
+        // UIKit would inset the web view's own scroll view by the overlap, and the page would
+        // shift as the chat scrolls.
+        // SAFETY: WebKit rule: `scrollView` is the view's own `UIScrollView`.
+        let scroll: Retained<AnyObject> = unsafe { msg_send![&*web, scrollView] };
+        // SAFETY: UIKit rule: `contentInsetAdjustmentBehavior` (`UIScrollView.h`) is settable
+        // at any time on the main thread.
+        unsafe {
+            let () = msg_send![&*scroll, setContentInsetAdjustmentBehavior: INSET_ADJUSTMENT_NEVER];
+        }
+        web
     };
     let delegate = PageDelegate::new(Rc::clone(shared), mtm);
     // SAFETY: WebKit rule: the navigation delegate is held weakly; `Mounted` keeps it as long as
@@ -731,6 +742,10 @@ define_class!(
         }
     }
 );
+
+/// `UIScrollViewContentInsetAdjustmentNever` (`UIScrollView.h`).
+#[cfg(target_os = "ios")]
+const INSET_ADJUSTMENT_NEVER: isize = 2;
 
 /// `WKPermissionDecisionDeny` (`WKUIDelegate.h`).
 const DENY: isize = 2;

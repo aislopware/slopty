@@ -273,7 +273,11 @@ pub(crate) fn escaped(text: &str) -> String {
 
 /// The trusted document a page is served as: no script of its own, and the view in a frame
 /// sandboxed to scripts alone (an opaque origin: no storage, no cookies, no pop-ups, no
-/// top-level navigation, no forms, no downloads, no permissions).
+/// top-level navigation, no forms, no downloads, no permissions). The frame fills it, so it
+/// has nothing to scroll; its root keeps its overflow, since an `overflow: hidden` root turns
+/// the web view's own scroll view off on iOS, and a scroll view that cannot scroll between the
+/// frame's and the window's stops UIKit handing a finger at the frame's edge on to the chat
+/// (gpui-fast's `docs/composition.md`, "Scrolling over a native").
 pub(crate) fn host_document(title: &str, view: &str, theme: &Theme) -> String {
     let title = escaped(title);
     let background = background(theme);
@@ -283,7 +287,7 @@ pub(crate) fn host_document(title: &str, view: &str, theme: &Theme) -> String {
         "<!doctype html><html><head><meta charset=\"utf-8\"><title>{title}</title>\
          <meta name=\"color-scheme\" content=\"{scheme}\">\
          <style>:root{{color-scheme:{scheme}}}html,body{{margin:0;padding:0;height:100%;\
-         overflow:hidden;background:{background}}}iframe{{display:block;border:0;width:100%;\
+         background:{background}}}iframe{{display:block;border:0;width:100%;\
          height:100%;background:{background}}}</style></head><body>\
          <iframe id=\"view\" title=\"{title}\" sandbox=\"allow-scripts\" srcdoc=\"{view}\">\
          </iframe></body></html>"
@@ -381,6 +385,7 @@ mod tests {
         assert!(!doc.contains("--bad"), "a bad name is dropped");
         assert!(!doc.contains("--evil"), "a value that ends the style is dropped");
         assert_eq!(doc.matches("<iframe").count(), 1);
+        assert!(!doc.contains("overflow"), "the root's scroll view stays on");
     }
 
     /// A report of a navigation the view tried is a refused navigation; any other a blocked load.
