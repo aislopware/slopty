@@ -93,7 +93,7 @@ use serde_json::{Map, Value, json};
 mod doors;
 
 /// What it says its version is.
-pub const VERSION: &str = "2.1.301-stub";
+pub const VERSION: &str = "2.1.302-stub";
 
 /// The pause between two deltas of a `slow` turn.
 const SLOW_STEP: Duration = Duration::from_millis(200);

@@ -299,8 +299,8 @@ mod claude {
         let why = state.open_requests().next().unwrap().reason.clone();
         assert_eq!(
             why.as_deref(),
-            Some("Permission rule Bash from localSettings requires confirmation for this command."),
-            "why it asks, in the TUI's words"
+            Some("Ask rule Bash overrides auto mode for this command."),
+            "why it asks, in the TUI's words, in the mode its terminal starts in"
         );
         let record = rig.record();
         let argv: Vec<&str> =
@@ -311,6 +311,7 @@ mod claude {
             "--replay-user-messages",
             "--permission-prompt-tool=stdio",
             "--session-id",
+            "--permission-mode=auto",
         ] {
             assert!(argv.contains(&flag), "{flag} in {argv:?}");
         }

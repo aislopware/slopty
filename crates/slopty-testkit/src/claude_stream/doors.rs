@@ -1,4 +1,4 @@
-//! The stand-in's doors beside messages, each as Claude Code 2.1.301 answers it.
+//! The stand-in's doors beside messages, each as Claude Code 2.1.302 answers it.
 //!
 //! The doors are its background work, its dialogs and forms, its file checkpoints, its MCP
 //! servers' apps, its permission rules, its mods' surfaces and its side questions.

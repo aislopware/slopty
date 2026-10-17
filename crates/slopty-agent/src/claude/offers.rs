@@ -105,6 +105,42 @@ pub fn starting_mode(home: &Path) -> String {
     starting_mode_under(&crate::managed::ManagedSettings::read(home), home)
 }
 
+/// The mode a session in the folder `cwd` starts in when its start asks for none.
+///
+/// It is [`starting_mode`] with the folder's own settings (`.claude/settings.local.json`, then
+/// `.claude/settings.json`) over the person's. A folder cannot choose auto, so one that names
+/// it says nothing.
+///
+/// The worker passes it to Claude Code as the mode, since `claude -p` given none starts in
+/// Manual on a third-party provider (2.1.302), where the person's terminal starts in this one.
+#[must_use]
+pub fn starting_mode_in(home: &Path, cwd: &Path) -> String {
+    let managed = crate::managed::ManagedSettings::read(home);
+    let mut chosen = crate::managed::ManagedSettings::default();
+    let folder = cwd.join(".claude");
+    let files = [
+        (folder.join("settings.local.json"), true),
+        (folder.join("settings.json"), true),
+        (home.join(".claude").join("settings.json"), false),
+    ];
+    for (file, of_folder) in files {
+        let Some(mut doc) = std::fs::read_to_string(&file)
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        else {
+            continue;
+        };
+        if of_folder
+            && doc.pointer("/permissions/defaultMode").and_then(Value::as_str) == Some("auto")
+            && let Some(permissions) = doc.get_mut("permissions").and_then(Value::as_object_mut)
+        {
+            permissions.remove("defaultMode");
+        }
+        chosen.add(&doc);
+    }
+    starting_mode_of(&managed, &chosen)
+}
+
 /// [`starting_mode`] under the `managed` settings, with the person's own read under `home`.
 fn starting_mode_under(managed: &crate::managed::ManagedSettings, home: &Path) -> String {
     let mut user = crate::managed::ManagedSettings::default();
@@ -139,6 +175,31 @@ fn starting_mode_of(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A folder's settings choose the mode its sessions start in over the person's, short of
+    /// auto, which a folder cannot choose.
+    #[test]
+    fn a_folders_settings_choose_its_starting_mode_short_of_auto() {
+        let home = tempfile::tempdir().expect("home");
+        let cwd = tempfile::tempdir().expect("cwd");
+        let write = |dir: &Path, name: &str, mode: &str| {
+            std::fs::create_dir_all(dir.join(".claude")).expect("mkdir");
+            let doc = serde_json::json!({ "permissions": { "defaultMode": mode } });
+            std::fs::write(dir.join(".claude").join(name), doc.to_string()).expect("write");
+        };
+        write(home.path(), "settings.json", "acceptEdits");
+        assert_eq!(starting_mode_in(home.path(), cwd.path()), "acceptEdits", "the person's");
+        write(cwd.path(), "settings.json", "plan");
+        assert_eq!(starting_mode_in(home.path(), cwd.path()), "plan", "the folder's");
+        write(cwd.path(), "settings.local.json", "auto");
+        assert_eq!(
+            starting_mode_in(home.path(), cwd.path()),
+            "plan",
+            "a folder never chooses auto"
+        );
+        write(cwd.path(), "settings.local.json", "default");
+        assert_eq!(starting_mode_in(home.path(), cwd.path()), "manual", "the local file first");
+    }
 
     #[test]
     fn every_offered_mode_says_what_it_does() {

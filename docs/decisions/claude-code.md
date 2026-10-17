@@ -2462,3 +2462,12 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     an earlier turn is refused with why.
   - **The status line** runs at most every 2 s per thread, not 300 ms: each run is a shell, and
     a worker runs one for every thread at work.
+  - **The starting mode is named** (2026-10-17, Claude Code 2.1.302). Given no
+    `--permission-mode`, `claude -p` starts in Manual on a third-party provider (the managed
+    claude's gateway), while the person's terminal starts in the mode the settings choose and
+    the composer shows that one. So a start that asks for no mode now runs in the mode the
+    terminal would: `permissions.defaultMode` from the managed settings, then the folder's
+    `.claude/settings.local.json` and `.claude/settings.json` (a folder cannot choose auto),
+    then the person's `~/.claude/settings.json`, else auto (`offers::starting_mode_in`). A
+    past session taken up again runs in it too, as shown, where it ran in Manual before. The
+    recordings and the stand-in are 2.1.302's; its control and stream messages are 2.1.301's.

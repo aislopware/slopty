@@ -805,8 +805,12 @@ impl Served {
             }
         }
         let native = resumed.clone().unwrap_or_else(|| id.to_string());
-        let mut kept =
-            agent::kept(start.model.as_deref(), start.mode.as_deref(), start.effort.as_deref());
+        // The mode the person's terminal would start in, named: `claude -p` given none starts
+        // in Manual on a third-party provider.
+        let mode = start.mode.clone().unwrap_or_else(|| {
+            agent::offers::starting_mode_in(&self.place.home, Path::new(&start.cwd))
+        });
+        let mut kept = agent::kept(start.model.as_deref(), Some(&mode), start.effort.as_deref());
         if let Some(seated) = &seated {
             kept = seat_args(kept, seated);
         }
