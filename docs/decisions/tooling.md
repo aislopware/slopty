@@ -2241,8 +2241,9 @@ more full-window layer.
     250 s in the guest, with the same tests failing each way. The check's e2e step, the
     scheduled `e2e.yml` and the guest run so; `SLOPTY_E2E_THREADS=1` in the guest, or no
     `--test-threads` locally, shows every line as it comes.
-  - **It stops when idle.** Up, the guest holds about 5 GB of this Mac's memory, whose swap the
-    lanes' builds already fill. Each run marks it used and leaves a detached watcher that stops
+  - **It stops when idle.** Up, the guest holds 2 GB of this Mac's memory idle and 5 GB in a
+    run, whose swap the lanes' builds already fill, and its `WindowServer` spins at 44–104 % of
+    a core with no display. Each run marks it used and leaves a detached watcher that stops
     it 20 minutes after the last use, unless a run holds its lock then; the next run boots it
     again (23 s on an idle Mac).
   - The run job of `check.yml` installs only what an e2e case builds (the Mac's target, no
@@ -2269,3 +2270,41 @@ more full-window layer.
     no lane's own paths. The files the tree holds otherwise now are named and left unstaged.
   - Test: `remote::stage::tests::staging_takes_what_the_check_passed_and_refuses_the_rest`
     (`xtask`), on a scratch repository through `remote`'s own snapshot.
+- ❌ **No machine-wide jobserver, no cap on a lane's test threads** (2026-10-17,
+  `.research/devloop-2026-10-17.md` item 7). This Mac's load reached 76, 94 and 133 on 10 cores
+  with its swap full, and two shell tests flaked at 133. The person allowed a jobserver for
+  every lane's cargo sized to the cores, if three lanes' checks measured side by side finish
+  sooner with it. Measured: three lanes, each in a tree and target dir of its own (warm), each
+  editing `slopty-proto` and running `xtask check -p slopty-worker --quick` (lint, then tests),
+  all three at once; with one 10-token jobserver for all three (`CARGO_MAKEFLAGS` naming a FIFO
+  every cargo and rustc of the round shared; cargo honoured it, 3 jobs instead of 10) against
+  none, alternating, five rounds each. Wall times of the round: none 398, 226, 204, 202, 203 s;
+  jobserver 285, 252, 218, 199, 197 s. It won when the rest of the Mac was busiest (the first
+  pair, other lanes' builds at load 57–74) and lost or tied once it was calm; the means are
+  within 7 %, the medians favour none (204 against 218 s). Not a win, so not adopted. The
+  reason is in the split: the lint step, the only part a jobserver bounds, took 23–115 s of
+  each lane's 200–400 s, and the tests the rest, whose processes no jobserver reaches.
+  - Capping each lane's nextest at four test threads (`NEXTEST_TEST_THREADS=4`, three lanes'
+    test runs at once) was slower: 227 and 215 s against 157 and 181 s uncapped. The tests wait
+    far more than they compute, so fewer at once only lengthens the run.
+  - What does take memory is the e2e guest: 2 GB idle and 5 GB in a run, and its
+    `WindowServer` spins at 44–104 % of a core with no display attached; it now stops after
+    20 idle minutes.
+  - The first rounds of this measurement were void and are not counted: `xtask` changes to the
+    repository its own build came from (`tools::repo_root`), so three checks run from three
+    trees all ran in the tree xtask was built in, sharing one target dir. A tree's own check
+    sets `SLOPTY_REPO_ROOT`.
+- ⏸ **Skipping a gate shard none of whose inputs changed: exact only under a sandbox, not
+  built** (2026-10-17, `.research/devloop-2026-10-17.md` item 6). The person rejected a skip by
+  package reach, an approximation (a test may read another package's files at run time), and
+  asked for an exact one. Compile-time inputs are exact already; run-time reads are not, and
+  on macOS they cannot be recorded without root (`fs_usage`, DTrace) or through the system
+  binaries tests spawn (`DYLD_INSERT_LIBRARIES` is stripped). What would make it exact is
+  enforcement: each shard's nextest under `sandbox-exec`, denying reads under the checkout but
+  for its declared inputs, so a passing shard's set is complete, and CI skipping a shard whose
+  set hashes as at its last pass. Measured over 37 gate pushes, it would have skipped 34 of 111
+  shard runs (~290 Mac-minutes in 14 hours) but shortened the gate only when the worker shard,
+  the longest, was skipped: about 70 s on 10 of the 37. With e2e off the runners, Mac minutes
+  are no longer what checks wait for. Not built: an undeclared read anywhere turns the gate
+  red until declared, and GPUI, VideoToolbox and `xcrun` under a sandbox profile on a hosted
+  runner are unproven, for about a minute on a quarter of the pushes.

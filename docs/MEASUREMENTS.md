@@ -17266,3 +17266,41 @@ turn's clock, an invite code: 0.001–0.6 % of a frame), and 2 show the machine'
 SLOPTY_LANE=DEVLOOP cargo xtask remote --head --e2e app --goldens review
 SLOPTY_LANE=DEVLOOP-rn cargo xtask remote --name DEVLOOP-rn --head --place runner --e2e app --goldens review
 ```
+
+## 2026-10-17 — three lanes' checks at once, with one jobserver and without
+
+Three trees at 73366704, each with its own warm target dir (`SLOPTY_REPO_ROOT` set, so each
+check runs in its own tree), each round appending a line to `crates/slopty-proto/src/lib.rs` in
+all three, then `xtask check -p slopty-worker --quick --part lint` and `--part tests` in each, all
+three at once (`SLOPTY_LOCAL_CHECK=1`, so the `land` nextest profile). "Jobserver": one FIFO of
+10 tokens named by `CARGO_MAKEFLAGS` for every cargo of the round. The rest of this Mac kept
+working (other lanes, the e2e guest); the load average at each round's end is shown.
+
+| round | jobserver | lint (per lane) | tests (per lane) | wall | load (1/5/15 min) |
+| --- | --- | --- | --- | --- | --- |
+| 1 | no | 112–115 s | 282–285 s | 398 s | 57 74 64 |
+| 2 | yes | 77–78 s | 203–208 s | 285 s | 28 59 61 |
+| 3 | no | 37–39 s | 183–189 s | 226 s | 27 46 55 |
+| 4 | yes | 53–54 s | 198 s | 252 s | 21 36 48 |
+| 5 | no | 23–24 s | 180–181 s | 204 s | 17 29 43 |
+| 6 | yes | 37 s | 181 s | 218 s | 13 23 37 |
+| 7 | yes | 27 s | 172 s | 199 s | 13 18 32 |
+| 8 | no | 23 s | 179 s | 202 s | 22 24 31 |
+| 9 | yes | 24 s | 170 s | 197 s | 12 20 28 |
+| 10 | no | 27 s | 176 s | 203 s | 23 24 28 |
+
+Without: mean 247 s, median 204 s; with: mean 230 s, median 218 s. No consistent win; not
+adopted (`docs/decisions/tooling.md`, "No machine-wide jobserver").
+
+Each lane's nextest capped at four threads (`NEXTEST_TEST_THREADS=4`), three test runs at
+once: 227 and 215 s a round, against 157 and 181 s uncapped.
+
+The e2e guest, idle: `WindowServer` at 44–104 % of a core (three `top` samples), the VM process
+at 84–190 % of one on the host, 2.0 GB resident idle (5.3 GB during a run).
+
+```sh
+# in each tree, all three at once; with the jobserver, first: mkfifo $F, hold it open with 9 tokens
+# written, and export CARGO_MAKEFLAGS="-j10 --jobserver-auth=fifo:$F"
+SLOPTY_REPO_ROOT=$tree SLOPTY_LOCAL_CHECK=1 xtask check -p slopty-worker --quick --part lint
+SLOPTY_REPO_ROOT=$tree SLOPTY_LOCAL_CHECK=1 xtask check -p slopty-worker --quick --part tests
+```
