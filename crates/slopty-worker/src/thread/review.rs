@@ -373,15 +373,8 @@ async fn keep(dir: &Path, cwd: &Path, files: &[String]) -> Result<TreeRef, Faile
         if !plain {
             return Err(Failed(format!("{file} is not a plain path")));
         }
-        let was = match tokio::fs::read(&path).await {
-            Ok(bytes) => {
-                let meta = tokio::fs::metadata(&path).await.map_err(|e| failed(&path, e))?;
-                let mode = std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o777;
-                let hash = blake3::hash(&bytes).to_hex().to_string();
-                let at = fresh.join(&hash);
-                tokio::fs::write(&at, bytes).await.map_err(|e| failed(&at, e))?;
-                Some((hash, mode))
-            }
+        let was = match copy_hashed(&path, &fresh).await {
+            Ok(was) => Some(was),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => return Err(failed(&path, e)),
         };
@@ -398,39 +391,144 @@ async fn keep(dir: &Path, cwd: &Path, files: &[String]) -> Result<TreeRef, Faile
     Ok(TreeRef(blake3::hash(&list).to_hex().to_string()))
 }
 
-/// The files kept in `dir` as `kept` named them put back: each written as it was, one that was
-/// not there taken away.
+/// The file at `path` copied into `dir` under its BLAKE3 hash, a piece at a time: its hash and
+/// its mode.
+async fn copy_hashed(path: &Path, dir: &Path) -> std::io::Result<(String, u32)> {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let mut from = tokio::fs::File::open(path).await?;
+    let mode = std::os::unix::fs::PermissionsExt::mode(&from.metadata().await?.permissions());
+    let staged = dir.join("copying");
+    let mut to = tokio::fs::File::create(&staged).await?;
+    let mut hasher = blake3::Hasher::new();
+    let mut piece = vec![0; 256 * 1024];
+    loop {
+        let read = from.read(&mut piece).await?;
+        let Some(read) = piece.get(..read).filter(|r| !r.is_empty()) else { break };
+        hasher.update(read);
+        to.write_all(read).await?;
+    }
+    to.flush().await?;
+    let hash = hasher.finalize().to_hex().to_string();
+    tokio::fs::rename(&staged, dir.join(&hash)).await?;
+    Ok((hash, mode & 0o777))
+}
+
+/// The files kept in `dir` as `kept` named them put back, all of them or none: each written
+/// beside its place first, then every one moved in at once, what was there set aside until all
+/// are in and moved back should one fail; one that was not there taken away.
 async fn put_back(dir: &Path, kept: &TreeRef) -> Result<(), Failed> {
-    let failed = |what: &Path, e: std::io::Error| Failed(format!("{}: {e}", what.display()));
-    let gone = || Failed("The files before that rewind are no longer kept".to_owned());
     let list = tokio::fs::read(dir.join(REWOUND_LIST)).await.map_err(|_missing| gone())?;
     if blake3::hash(&list).to_hex().as_str() != kept.0 {
         return Err(gone());
     }
     let files: Vec<Kept> = serde_json::from_slice(&list).map_err(|e| Failed(e.to_string()))?;
-    for file in files {
-        let Some((hash, mode)) = file.was else {
-            remove(&file.path).await?;
-            continue;
-        };
-        let bytes = tokio::fs::read(dir.join(&hash)).await.map_err(|_missing| gone())?;
-        if let Some(parent) = file.path.parent() {
-            tokio::fs::create_dir_all(parent).await.map_err(|e| failed(parent, e))?;
+    let mut moves = Vec::new();
+    let staged = stage(dir, &files, &mut moves).await;
+    let moved = match staged {
+        Ok(()) => swap(&mut moves).await,
+        Err(e) => Err(e),
+    };
+    match moved {
+        Ok(()) => {
+            for one in &moves {
+                let _gone = tokio::fs::remove_file(aside(&one.path)).await;
+            }
+            Ok(())
         }
-        tokio::fs::write(&file.path, bytes).await.map_err(|e| failed(&file.path, e))?;
-        let mode = std::os::unix::fs::PermissionsExt::from_mode(mode);
-        tokio::fs::set_permissions(&file.path, mode).await.map_err(|e| failed(&file.path, e))?;
+        Err(e) => {
+            undo_moves(&moves).await;
+            Err(e)
+        }
+    }
+}
+
+/// What a put back says when the files kept before the rewind are not all there.
+fn gone() -> Failed {
+    Failed("The files before that rewind are no longer kept".to_owned())
+}
+
+/// One file of a put back: where it goes, whether a copy of what it was is staged beside it,
+/// and how far it went.
+struct Move {
+    path: PathBuf,
+    staged: bool,
+    set_aside: bool,
+    moved_in: bool,
+}
+
+/// Where the file put back at `path` waits beside it.
+fn beside(path: &Path) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".slopty-unrewind");
+    path.with_file_name(name)
+}
+
+/// Where what was at `path` is set aside while the files go back.
+fn aside(path: &Path) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".slopty-rewound");
+    path.with_file_name(name)
+}
+
+/// Each file of `files` that was there, copied beside its place with its mode, noted in `moves`.
+async fn stage(dir: &Path, files: &[Kept], moves: &mut Vec<Move>) -> Result<(), Failed> {
+    let failed = |what: &Path, e: std::io::Error| Failed(format!("{}: {e}", what.display()));
+    for file in files {
+        let mut one =
+            Move { path: file.path.clone(), staged: false, set_aside: false, moved_in: false };
+        if let Some((hash, mode)) = &file.was {
+            let blob = dir.join(hash);
+            if !tokio::fs::try_exists(&blob).await.unwrap_or(false) {
+                return Err(gone());
+            }
+            if let Some(parent) = file.path.parent() {
+                tokio::fs::create_dir_all(parent).await.map_err(|e| failed(parent, e))?;
+            }
+            let at = beside(&file.path);
+            one.staged = true;
+            moves.push(one);
+            tokio::fs::copy(&blob, &at).await.map_err(|e| failed(&file.path, e))?;
+            let mode = std::os::unix::fs::PermissionsExt::from_mode(*mode);
+            tokio::fs::set_permissions(&at, mode).await.map_err(|e| failed(&file.path, e))?;
+        } else {
+            moves.push(one);
+        }
     }
     Ok(())
 }
 
-/// The file at `path` gone; one already gone is fine.
-async fn remove(path: &Path) -> Result<(), Failed> {
-    match tokio::fs::remove_file(path).await {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-            Err(Failed(format!("{}: {e}", path.display())))
+/// Every staged file of `moves` moved into its place, and every one that was not there taken
+/// away, what was there set aside first.
+async fn swap(moves: &mut [Move]) -> Result<(), Failed> {
+    for one in moves.iter_mut() {
+        match tokio::fs::rename(&one.path, aside(&one.path)).await {
+            Ok(()) => one.set_aside = true,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(Failed(format!("{}: {e}", one.path.display()))),
         }
-        _ => Ok(()),
+        if one.staged {
+            tokio::fs::rename(beside(&one.path), &one.path)
+                .await
+                .map_err(|e| Failed(format!("{}: {e}", one.path.display())))?;
+            one.moved_in = true;
+        }
+    }
+    Ok(())
+}
+
+/// The folder as it was before a put back that failed part-way: what went in taken out, what
+/// was set aside moved back, what was staged removed.
+async fn undo_moves(moves: &[Move]) {
+    for one in moves.iter().rev() {
+        if one.moved_in {
+            let _gone = tokio::fs::remove_file(&one.path).await;
+        }
+        if one.set_aside {
+            let _back = tokio::fs::rename(aside(&one.path), &one.path).await;
+        }
+        if one.staged && !one.moved_in {
+            let _gone = tokio::fs::remove_file(beside(&one.path)).await;
+        }
     }
 }
 
@@ -550,4 +648,45 @@ fn begun(state: &ThreadState, turn: TurnId) -> bool {
 /// Where what is kept starts: the first snapshot the thread took.
 fn base(state: &ThreadState) -> Option<TreeRef> {
     state.turns.iter().find_map(|t| t.before.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A put back is all or nothing: one kept file gone from the store leaves every file as the
+    /// rewind left it, and a whole store puts each back, taking away the one that was not there.
+    #[tokio::test]
+    async fn a_put_back_is_all_or_nothing() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (cwd, store) = (root.path().join("work"), root.path().join("rewound"));
+        std::fs::create_dir_all(&cwd).expect("mkdir");
+        std::fs::write(cwd.join("a.txt"), "a before\n").expect("a");
+        std::fs::write(cwd.join("b.txt"), "b before\n").expect("b");
+        let files = ["a.txt", "b.txt", "new.txt"].map(str::to_owned);
+        let kept = keep(&store, &cwd, &files).await.expect("kept");
+        std::fs::write(cwd.join("a.txt"), "a rewound\n").expect("a");
+        std::fs::write(cwd.join("b.txt"), "b rewound\n").expect("b");
+        std::fs::write(cwd.join("new.txt"), "brought back\n").expect("new");
+        let rewound = |name: &str| std::fs::read_to_string(cwd.join(name)).ok();
+
+        let b_blob = store.join(blake3::hash(b"b before\n").to_hex().as_str());
+        let b_bytes = std::fs::read(&b_blob).expect("blob");
+        std::fs::remove_file(&b_blob).expect("rm");
+        assert!(put_back(&store, &kept).await.is_err());
+        assert_eq!(rewound("a.txt").as_deref(), Some("a rewound\n"), "nothing went back");
+        assert_eq!(rewound("new.txt").as_deref(), Some("brought back\n"));
+        let left: Vec<_> =
+            std::fs::read_dir(&cwd).expect("ls").flatten().map(|e| e.file_name()).collect();
+        assert_eq!(left.len(), 3, "nothing staged is left: {left:?}");
+
+        std::fs::write(&b_blob, b_bytes).expect("blob");
+        put_back(&store, &kept).await.expect("put back");
+        assert_eq!(rewound("a.txt").as_deref(), Some("a before\n"));
+        assert_eq!(rewound("b.txt").as_deref(), Some("b before\n"));
+        assert_eq!(rewound("new.txt"), None, "it was not there");
+        let left: Vec<_> =
+            std::fs::read_dir(&cwd).expect("ls").flatten().map(|e| e.file_name()).collect();
+        assert_eq!(left.len(), 2, "nothing set aside is left: {left:?}");
+    }
 }
