@@ -15,13 +15,22 @@ wait"; the commands: `docs/DEV.md`, "Dev loop".
 - A lane keeps its crates compiling between edits, since a half-edited crate breaks the others'
   remote checks. A lane blocked by another's half-edited crate reports rather than waits.
 - A lane checks its edits with `SLOPTY_LANE=<its name> cargo xtask remote -p <its crates> --only
-  <its paths>`: this Mac answers in about a minute, runners take the rest at once (`--full`
-  before a checkpoint, since a quick check skips rustdoc). No cargo in the checkout itself.
+  <its paths>`, quick (no `--full`): fmt, host clippy and the tests, here in about a minute. The
+  gate is the full check; `--full` (iOS and Linux clippy, rustdoc, the Mac's own tests of a crate
+  Linux tests) is for a change to `cfg(target_os = "ios")`, Linux-only code or rustdoc-heavy
+  docs, not for every checkpoint. `remote` formats the lane's changed Rust files under `--only`
+  before it checks, and the first red ends the check (a failure here cancels the runners' run),
+  so a red comes back in seconds: fix it and check again. No cargo in the checkout itself.
   Checks run in the background while the lane moves on, and it reports a checkpoint on green.
+- E2e while iterating: one filtered case, `--e2e app -E 'test(<the tests the change touches>)'`,
+  and after a red `--e2e app -E failed` reruns just the tests the last run of that name failed.
+  It runs in this Mac's e2e guest in a minute or two, not on a runner Mac. The whole suite
+  (`--e2e app` with no filter) runs once per batch, before its checkpoint, not after each edit.
 - This Mac's cores are the limit, not the number of agents: at most 4 lanes at once, at most 2 of
-  them building GUI crates here. A lane spawns no sub-agents, keeps
-  one check in flight under its own lane name (a new name is a cold target dir), and sends
-  crates that test on Linux to runners with `--place runner`; only GUI crates check here.
+  them building GUI crates here. A lane spawns no sub-agents and keeps one check in flight under
+  its own lane name, the same name every time (a new name, `C2x` beside `C2`, is a cold target
+  dir and a cold build). Crates that test on Linux may go to runners with `--place runner`, quick
+  only: a full check there takes a runner Mac for the Mac's own tests.
 - Lanes do not commit. The orchestrator stages each checkpoint by path, runs one quick gate
   over the batch, commits by owner and lands at once. A red gate is fixed forward by the lane
   that owns it.

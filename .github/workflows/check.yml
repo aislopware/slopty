@@ -337,14 +337,19 @@ jobs:
           r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
           r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
           actions-cache: ${{ startsWith(inputs.runner, 'macos') && 'true' || 'false' }}
+      # A probe may try any step, so it gets every target, clippy and nightly; an e2e case only
+      # builds and runs for the Mac (the ios case for the simulator too): 25 s less setup.
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.99.1
-          components: rustfmt, clippy
+          components: ${{ inputs.probe != '' && 'rustfmt, clippy' || '' }}
           targets: >-
-            aarch64-apple-darwin, aarch64-apple-ios, aarch64-apple-ios-sim,
-            x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu, x86_64-unknown-linux-musl
-      - uses: dtolnay/rust-toolchain@nightly
+            ${{ inputs.probe != '' && 'aarch64-apple-darwin, aarch64-apple-ios,
+            aarch64-apple-ios-sim, x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu,
+            x86_64-unknown-linux-musl' || inputs.e2e == 'ios' && 'aarch64-apple-darwin,
+            aarch64-apple-ios, aarch64-apple-ios-sim' || 'aarch64-apple-darwin' }}
+      - if: inputs.probe != ''
+        uses: dtolnay/rust-toolchain@nightly
         with:
           components: rustfmt
       - uses: Swatinem/rust-cache@v2
@@ -422,9 +427,14 @@ jobs:
       - run: |
           echo "$HOME/.cache/slopty-xtask" >> "$GITHUB_PATH"
           echo "SLOPTY_XTASK=$HOME/.cache/slopty-xtask/xtask" >> "$GITHUB_ENV"
-      - run: >-
+      - if: inputs.probe != ''
+        run: >-
           xtask setup --lane tools --lane clippy-host --lane clippy-ios --lane clippy-linux
           --lane tests --lane rustdoc
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - if: inputs.probe == ''
+        run: xtask setup --lane tests
         env:
           GITHUB_TOKEN: ${{ github.token }}
       - run: mkdir -p target/remote
@@ -443,6 +453,10 @@ jobs:
           [ -n "$FILTER" ] && args+=(-E "$FILTER")
           [ "$GOLDENS" != compare ] && args+=("--$GOLDENS")
           [ "$CASE" = ios ] && args+=(--sim "$SIM")
+          # Three tests at a time on the runner's three cores: the app's suite took 103 s
+          # against 193 s one at a time, the same tests failing (`docs/decisions/tooling.md`,
+          # "An e2e case runs in a guest here").
+          [ "$CASE" = app ] && args+=(--test-threads 3)
           xtask e2e "${args[@]}" 2>&1 | tee target/remote/e2e.log
       # The goldens and snapshots the run accepted, as a patch on the commit checked, which
       # `remote` applies to the tree it came from; nothing else of the runner's tree.
@@ -458,6 +472,9 @@ jobs:
           path: target/e2e/artifacts
           if-no-files-found: ignore
           retention-days: 3
+      # How much of the build the compile cache served.
+      - if: always()
+        run: $SCCACHE_PATH --show-stats
       - if: always()
         uses: actions/upload-artifact@v4
         with:

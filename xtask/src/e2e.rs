@@ -95,6 +95,10 @@ pub struct E2eOpts {
     /// need the Screen Recording grant.
     #[arg(long)]
     screen_recording: bool,
+    /// Run this many tests at once, their output captured and shown for the failures, instead of
+    /// one at a time with every line shown as it comes (`--no-capture`).
+    #[arg(long, value_name = "N")]
+    test_threads: Option<usize>,
 }
 
 /// How a suite's tests stay out of `cargo gate`.
@@ -273,13 +277,7 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
         // the `slopty-app-e2e` bin the tests start. `--bins`, not `--bin slopty-app-e2e`: a
         // `--bin` filter applies to every selected package and would leave the daemons stale.
         // The worker carries its own `e2e` feature, the seam that stalls its control streams.
-        step(
-            "build daemons and app",
-            &cmd!(
-                sh,
-                "cargo build -p slopty-ptyd -p slopty-workerd -p slopty-serverd -p slopty-cli -p slopty -p slopty-e2e -p slopty-testkit --bins --features slopty/e2e --features slopty-workerd/e2e --features {LIVE}"
-            ),
-        )?;
+        build_app(sh, &[])?;
         std::fs::create_dir_all(&reuse)?;
         let metadata = cmd!(sh, "cargo metadata --format-version 1").quiet().read()?;
         std::fs::write(&cargo_metadata, metadata)?;
@@ -320,9 +318,18 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
         let filter_flag: &[&str] = if expr.is_empty() { &[] } else { &["-E"] };
         let ignored: &[&str] =
             if suite.kept == Kept::Ignored { &["--run-ignored", "only"] } else { &[] };
+        let output: Vec<String> = match opts.test_threads {
+            None => vec!["--no-capture".to_owned()],
+            Some(n) => vec![
+                "--test-threads".to_owned(),
+                n.to_string(),
+                "--failure-output".to_owned(),
+                "final".to_owned(),
+            ],
+        };
         let mut command = cmd!(
             sh,
-            "cargo nextest run --binaries-metadata {binaries} --cargo-metadata {cargo_metadata} --no-capture --no-fail-fast {ignored...} {filter_flag...} {expr...}"
+            "cargo nextest run --binaries-metadata {binaries} --cargo-metadata {cargo_metadata} {output...} --no-fail-fast {ignored...} {filter_flag...} {expr...}"
         );
         if suite.no_videotoolbox {
             command = command.env(NO_VIDEOTOOLBOX, "1");
@@ -391,8 +398,50 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
     }
 }
 
+/// Build every binary the app's suites spawn: the daemons, the CLI, the app with its `e2e`
+/// feature, the e2e crate's helpers and the testkit's stand-ins. `args` go to cargo, such as a
+/// `--target-dir`.
+pub fn build_app(sh: &Shell, args: &[&str]) -> Result<()> {
+    step(
+        "build daemons and app",
+        &cmd!(
+            sh,
+            "cargo build -p slopty-ptyd -p slopty-workerd -p slopty-serverd -p slopty-cli -p slopty -p slopty-e2e -p slopty-testkit --bins --features slopty/e2e --features slopty-workerd/e2e --features {LIVE} {args...}"
+        ),
+    )
+}
+
+/// The filterset the app case runs with `filter`, as [`run`] composes it for its first suite:
+/// no test that codes video or captures the screen (those need the Screen Recording grant).
+pub fn app_filterset(filter: Option<&str>) -> Option<String> {
+    let [first, _] = APP else { return None };
+    filterset(first, filter, false)
+}
+
+/// The environment the app's suites run in, with the data dir `data_dir` and the binaries in
+/// `bin_dir`: what [`run`] sets for them.
+pub fn app_env(data_dir: &str, bin_dir: &str, accept: Option<&str>) -> Vec<(String, String)> {
+    let mut env: Vec<(String, String)> = [
+        ("SLOPTY_DATA_DIR", data_dir.to_owned()),
+        ("SLOPTY_PTYD_SOCKET", format!("{data_dir}/run/ptyd.sock")),
+        ("SLOPTY_WORKER_SOCKET", format!("{data_dir}/run/worker.sock")),
+        ("SLOPTY_E2E_BIN_DIR", bin_dir.to_owned()),
+        ("SLOPTY_E2E_ARTIFACTS", format!("{data_dir}/artifacts")),
+        ("RUST_LOG", "info".to_owned()),
+        (crate::gate::BINS_FRESH, "1".to_owned()),
+        (NO_VIDEOTOOLBOX, "1".to_owned()),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_owned(), v))
+    .collect();
+    if let Some(accept) = accept {
+        env.push(("SLOPTY_E2E_ACCEPT".to_owned(), accept.to_owned()));
+    }
+    env
+}
+
 /// Nextest's exit code when the filters leave no test to run.
-const NO_TESTS_RUN: i32 = 4;
+pub const NO_TESTS_RUN: i32 = 4;
 
 /// The variable that has a process open no `VideoToolbox` session, refusing each it would
 /// (`slopty_codec::NO_VIDEOTOOLBOX`).
@@ -542,9 +591,13 @@ fn build_suite(sh: &Shell, suite: &Suite, binaries: &std::path::Path) -> Result<
     println!("▶ build {package} {test}");
     let started = std::time::Instant::now();
     let live: &[&str] = if package == LIVE_PACKAGE { &["--features", LIVE] } else { &[] };
+    // In the dev profile the binaries above were built in, so the test binary reuses every unit
+    // they compiled: in the test profile it compiled the workspace and its dependencies again,
+    // 30–100 s of every e2e run on a runner (`docs/decisions/tooling.md`, "An e2e run builds
+    // once").
     let listed = cmd!(
         sh,
-        "cargo nextest list -p {package} --test {test} {live...} --list-type binaries-only --message-format json"
+        "cargo nextest list --cargo-profile dev -p {package} --test {test} {live...} --list-type binaries-only --message-format json"
     )
     .read();
     let ok = listed.is_ok();

@@ -2125,3 +2125,124 @@ more full-window layer.
   an_anchored_tooltip_keeps_off_the_windows_edge, the_next_tooltip_shows_at_once_while_warm}`,
   `fast::tests::a11y::a_disabled_control_says_so` (the fork's fast tests, clippy and
   `script/check-upstream` pass).
+- ✅ **Upstream sync of 2026-10-17: gpui-fast `f818f638`, gpui-kit `e8d28418`, noq #823.**
+  longbridge's gpui-fast `fa133a1d` (#71–#73) and zed `322cd509` are in the gpui-fast fork;
+  gpui-kit is rebased onto `f8cf0bd9` (15 upstream commits); noq `main`'s port of quinn's fixes
+  (#823, through `58869bfb`) is cherry-picked into `vendor/noq-proto` and `vendor/noq-udp`.
+  ghostty's three commits past `b3dc3d79` are translations, outside `paths`, so the fork and
+  `vendor/ghostty` stay; libghostty-rs has not moved. zeron has nothing past `3b2f780`.
+  - #73 keeps a list row's render- and layout-time element states while its layer keeps it: a
+    Markdown reply over 4 KB (parsed in the background) no longer starts empty for a frame and
+    draws the rows after it at the wrong height when the view holding the list re-renders. This
+    is the list-layer stale band lane C3 was chasing, or part of it.
+  - #72 stops emptying the hit test while hover is frozen, so the cursor stops flickering to an
+    arrow during a wheel scroll and a click right after the wheel reaches its handler. The fork
+    holds hover more narrowly than upstream (what has not moved since the wheel began, such as the
+    sidebar's panel, stays hovered, so it is not rebuilt), and the two meet in `hides_hover`: the
+    hit test stays real, and only while a frame is drawn does hover read from what is held. Both
+    sides' tests are kept (490 fast tests pass).
+  - With #72 every hover read while a frame was drawn asked the clock whether hover was held,
+    and the retained check made as a frame begins (before its phases) read the freeze as a
+    changed hover. A wheel frame of a small scrolled view cost 18 % more instructions. The
+    fork's follow-up (`f818f638`) takes the answer once a frame and reads hover as the frame
+    draws it in those checks: the median `gpui_perf` scenario moves 0.1 %, the worst 2.7 %, which
+    is the cursor following the text (docs/MEASUREMENTS.md, "gpui-fast with longbridge
+    #71–#73"). Upstream's own tree has the same per-read clock; worth a pull request there.
+  - #71 moves hover-freeze and the profiler to `scheduler::Instant` (WASM); the fork already had
+    the profiler half.
+  - zed #64394 gives `MetalRenderer` and `WindowOptions` a Display P3 switch. Slopty stays sRGB:
+    its OKLCH tokens are converted to sRGB, and the video layer's decoded frames are BT.709.
+  - gpui-kit: one conflict, the input state, where upstream's `text_input_configuration`
+    (#3557) and the fork's `is_composing` sit side by side. #3557's defaults keep autocorrect and
+    capitalisation off, and the fork's iOS backend does not read the configuration, so nothing
+    changes on the phone. #3554, #3555 and #3562 name the input's clear button and mask toggle
+    and report a masked input as a password field to VoiceOver. #3547, #3549, #3550, #3541–#3545
+    are `gpui-shell`, which Slopty does not build; #3546 (dock toggles), #3556 (Android back) and
+    #3563 (the diff view's row-height hint) touch nothing Slopty draws.
+  - noq: one port is left out on a measurement: filling the congestion window to the byte made
+    the worst echoes beside a flood on a 2 Mbit/s lossy link 58–64 ms slower on the simulated
+    network; without it, every simulated number is what it was before (docs/MEASUREMENTS.md,
+    "noq #823 on the simulated network").
+  - noq: what was taken and why is in `vendor/noq-proto/SLOPTY.md` (patches 23–32) and
+    `vendor/noq-udp/SLOPTY.md` (4–5). The one a person would notice: the black-hole detector no
+    longer reads ordinary loss on a lossy link as a black hole and drops the path to `min_mtu`.
+    The assembler's sorted deque (quinn#2803) is not taken, since patch 18 carries quinn#2814,
+    which noq's port lacks and the deque's defragment is written without.
+  - Claude Code 2.1.302 is pinned and the fixtures are recorded on it. Its control and stream
+    subtypes are the same 155 as 2.1.301's.
+- ✅ **A check's first red ends it** (2026-10-17, `.research/devloop-2026-10-17.md` items 1 and
+  2). The person found development far too slow, with much dead time between a lane's edit and
+  its verdict. Measured over the 14 hours from 2026-10-16 14:43 UTC: 138 of 267 local checks
+  failed, half of them within 28 s (fmt, then clippy, run first); 38 of those had a runner half
+  too (a full check's lints, an e2e case), and the lane heard the verdict only when that half
+  ended, a median 16 min later: 574 lane-minutes of waiting for a red already known. The runner
+  half's run held its Mac slot all that time, and the lane's next check of the same name
+  cancelled it unread anyway. Of the runners' 42 failed lint jobs, 9 were `cargo fmt`.
+  - **A failure here cancels the runners' half.** `remote` runs both halves at once as before;
+    once the half here fails, the other stops waiting: a run not yet dispatched (still waiting
+    for a Mac slot) never is, and a dispatched one is cancelled within a second and its branch
+    deleted. The verdict names both halves, the runners' as "cancelled: the check failed here
+    first". Measured: a full check of `xtask` with a clippy failure ended in 45 s, its run
+    cancelled 1 s after dispatch (run 39005321017), where the same red waited out the lint job's
+    5–12 min before.
+  - **A failed lint job ends its run.** While a run's other jobs still go, a red lint job
+    cancels them (`remote::first_red`): the lane fixes the lint and checks again, which would
+    cancel the run anyway. A test job's red leaves an e2e case running, since its verdict is
+    the slow one to get again.
+  - **No check fails on formatting.** With `--only`, `remote` formats the Rust files the lane
+    changed under those paths (against `HEAD`, untracked ones too, only in the workspace's
+    members and `fuzz/`) with nightly rustfmt and the repository's `rustfmt.toml` before it
+    snapshots the tree, and names the files it moved. Without `--only` it formats nothing, since
+    the tree holds other lanes' files. `skip_children` keeps rustfmt to the files named.
+  - **A red e2e case reruns only what failed.** `--e2e app -E failed` takes the tests the last
+    run of the same name listed as failed in its final summaries (`FAIL`, `TIMEOUT`, a signal),
+    from the log it brought back, so the iteration after a red runs those few, not the 50.
+  - Each check's first failed step is kept in `target/remote/history.jsonl` (`local_failed`),
+    for the next breakdown.
+  - Tests: `remote::tests::{a_failed_lint_job_ends_its_run,
+    a_pause_ends_when_the_check_is_abandoned, a_rerun_takes_the_tests_the_last_summaries_failed}`
+    (`xtask`).
+- ✅ **An e2e case runs in a guest here**
+  (2026-10-17, `.research/devloop-2026-10-17.md` items 4 and 5). On a runner Mac an e2e case was two thirds compiling: about 2 min of setup, then
+  `build daemons and app` at a p50 of 501 s on three cores, then the test binary again, for a
+  p50 of 68 s of tests; 59 red e2e runs in 14 h took 900 of the account's macOS minutes, each
+  behind the cap of two Macs for checks. Here the same build is incremental in the lane's warm
+  directory, and macOS lets this Mac run two macOS guests.
+  - **`remote --e2e app` runs it in `slopty-26-e2e`**, a clone of the live lane's base under
+    tart, headless (`--no-graphics`), with 4 cores and 4 GB: no window, input or grant of this
+    Mac is touched (`docs/TESTING.md`, "Live lane in a VM"). The lane's tree (the check's
+    commit) is built into `target/local/<lane>/e2e-target`, apart from the check's own target
+    dir, whose test-profile builds of the same binaries would land on these in `debug/`. The
+    test binary goes over as a nextest archive, with the 16 binaries the suite spawns and the
+    crates' sources at the paths the tests were compiled with; one run holds the guest at a
+    time (a lock), and a second lane's waits and says so. Renders and diffs come back to
+    `target/e2e/artifacts/`, accepted goldens into the tree (only those the run wrote, never
+    another lane's edits there), and the log where `-E failed` reads it. A failure here first
+    (fmt, clippy, a test) skips it, as it cancels a runner's half. `--place runner` keeps the
+    case on a runner; `ios` and probes stay there.
+  - **The guest runs the runners' macOS** (26.6.2, 25G83) on the same paravirtual GPU, so its
+    frames are a runner's. At HEAD 73366704, review mode, the guest and a runner (run
+    39007880769) failed the same 4 of 22 tests, and of the 26 frames the log measures against
+    their goldens, 20 differed by the same fraction to 0.001 %. 16 renders are byte-identical; of the other 18,
+    16 differ only where two guest runs differ from each other too (the clock in a turn's
+    "done 6:05 AM", a fresh invite code), and 2 (Add device's server look and its failed SSH
+    run, 0.01 % and 0.4 %) show what the machine's own network answered. So a golden accepted
+    in the guest is one a runner accepts. Measured, it is the default; `SLOPTY_E2E_GUEST=0`
+    or `--place runner` sends a case to a runner, which stays the fallback (no base guest, a
+    host that is not a Mac) and keeps `ios`.
+  - **Measured** at HEAD 73366704, the app's whole suite of 22 tests: in the guest 1 min 50 s
+    end to end, the tests 97 s at three at a time (a runner: 23 min 40 s end to end, run
+    39007880769, the tests 272 s one at a time); two filtered tests 1 min 47 s end to end with
+    an 85 s incremental build after three commits, 6 s of tests. The guest booted in 23 s idle,
+    214 s with this Mac's load at 50; 500 MB of binaries copy in 3 s the first time.
+  - **Three tests at a time.** `xtask e2e` ran the suite one test at a time (`--no-capture`
+    makes nextest serial). Three at a time (`--test-threads 3`, output captured and shown for
+    the failures) took 103 s against 193 s on a runner (run 39006753376) and 97 s against
+    250 s in the guest, with the same tests failing each way. The check's e2e step, the
+    scheduled `e2e.yml` and the guest run so; `SLOPTY_E2E_THREADS=1` in the guest, or no
+    `--test-threads` locally, shows every line as it comes.
+  - The run job of `check.yml` installs only what an e2e case builds (the Mac's target, no
+    clippy, no nightly, the tests lane's tools) unless it runs a probe, and prints sccache's
+    statistics.
+  - Tests: `remote::guest::tests::only_the_goldens_a_run_wrote_come_back` (`xtask`); the
+    command itself is proved by the runs above.

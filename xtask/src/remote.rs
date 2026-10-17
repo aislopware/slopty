@@ -12,11 +12,14 @@
 //! The run is dispatched on `gate`, so it reads and fills the compile cache the gate's lanes
 //! use; a newer check of the same name cancels the older one.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail, ensure};
 use camino::{Utf8Path as Path, Utf8PathBuf as PathBuf};
 use xshell::{Shell, cmd};
+
+mod guest;
 
 /// The workflow that runs the checks.
 const WORKFLOW: &str = "check.yml";
@@ -35,6 +38,32 @@ const FINISH: Duration = Duration::from_hours(3);
 
 /// The most lines of a failed log printed; the whole log stays under `target/remote/<name>/`.
 const SHOWN: usize = 400;
+
+/// What a runner run's half of a check is told by the half here: set once the check failed here,
+/// so the runners' half stops waiting, cancels its run and returns at once.
+///
+/// The half here fails in seconds (fmt, clippy, a test: a median of 28 s over 38 such checks on
+/// 2026-10-16 and 17), while the runners' half went on for the rest of its run (a median of 16
+/// min), so a lane heard of a red it could have fixed fifteen minutes earlier, and its run held
+/// a Mac slot meanwhile. A newer check of the same name cancels that run anyway, so its verdict
+/// was never read.
+type Abandon = AtomicBool;
+
+/// Sleeps `period`, a second at a time, and says whether the check was abandoned meanwhile.
+#[expect(clippy::disallowed_methods, reason = "xtask is a script, not a library; polling GitHub")]
+fn pause(period: Duration, abandon: Option<&Abandon>) -> bool {
+    let started = Instant::now();
+    while started.elapsed() < period {
+        if abandon.is_some_and(|a| a.load(Ordering::Acquire)) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_secs(1).min(period));
+    }
+    abandon.is_some_and(|a| a.load(Ordering::Acquire))
+}
+
+/// The error a check's runners' half returns once the half here failed first.
+const ABANDONED: &str = "cancelled: the check failed here first";
 
 /// The artifacts `check.yml`'s jobs leave their logs in, one a job: the lints, the tests, and
 /// the probe or e2e case. Each holds that job's `*.log`, and the tests' and the run's a
@@ -210,11 +239,14 @@ pub fn gate_wait(sh: &Shell, hours: u64) -> Result<()> {
 /// Waits until a check of `name` taking `mine` macOS jobs may start ([`mac_verdict`]), asking
 /// every [`MAC_POLL`] and saying why while it waits. The lane keeps working meanwhile; its check
 /// only starts later.
-#[expect(clippy::disallowed_methods, reason = "xtask is a script, not a library; polling GitHub")]
-fn wait_for_mac(sh: &Shell, name: &str, mine: usize) -> Result<()> {
+fn wait_for_mac(sh: &Shell, name: &str, mine: usize, abandon: Option<&Abandon>) -> Result<()> {
     let started = Instant::now();
     let mut said = String::new();
     loop {
+        ensure!(
+            !abandon.is_some_and(|a| a.load(Ordering::Acquire)),
+            "{ABANDONED}; none dispatched"
+        );
         // A transient API error is asked again, not taken for a free Mac.
         if let Ok(jobs) = mac_jobs_in_flight(sh) {
             let Some(why) = mac_verdict(&jobs, name, mine) else {
@@ -231,7 +263,7 @@ fn wait_for_mac(sh: &Shell, name: &str, mine: usize) -> Result<()> {
             }
         }
         ensure!(started.elapsed() < FINISH, "no Mac slot for {name} after {FINISH:?}");
-        std::thread::sleep(MAC_POLL);
+        ensure!(!pause(MAC_POLL, abandon), "{ABANDONED}; none dispatched");
     }
 }
 
@@ -274,7 +306,9 @@ pub struct RemoteOpts {
     /// An `xtask e2e` case to run after the checks: app, ios, worker, …
     #[arg(long)]
     pub e2e: Option<String>,
-    /// The e2e case's nextest filterset, such as `test(a_folder_tile_browses_the_worker)`.
+    /// The e2e case's nextest filterset, such as `test(a_folder_tile_browses_the_worker)`;
+    /// `failed` runs only the tests the last run of this name failed, read from its log under
+    /// `target/remote/<name>/` (the iteration after a red).
     #[arg(short = 'E', long, requires = "e2e")]
     pub filter: Option<String>,
     /// What the e2e case does with the goldens; an accept applies the run's to the tree.
@@ -353,6 +387,16 @@ struct Listed {
 }
 
 pub fn run(sh: &Shell, opts: &RemoteOpts) -> Result<()> {
+    if opts.filter.as_deref() == Some(FAILED) {
+        let mut narrowed = opts.clone();
+        narrowed.filter = Some(last_failed(&opts.name)?);
+        println!(
+            "▶ the tests run {} failed last: {}",
+            opts.name,
+            narrowed.filter.as_deref().unwrap_or("")
+        );
+        return run(sh, &narrowed);
+    }
     ensure!(
         opts.attach.is_some()
             || !opts.packages.is_empty()
@@ -368,18 +412,28 @@ pub fn run(sh: &Shell, opts: &RemoteOpts) -> Result<()> {
     let root = crate::tools::repo_root()?;
     let dir = root.join("target").join("remote").join(&opts.name);
     std::fs::create_dir_all(&dir)?;
+    // The app's e2e case in this Mac's guest rather than on a runner Mac
+    // (`docs/decisions/tooling.md`, "An e2e case runs in a guest here").
+    let in_guest = opts.attach.is_none()
+        && opts.place == Place::Auto
+        && opts.e2e.as_deref() == Some("app")
+        && opts.probe.is_none()
+        && !opts.accept_snapshots
+        && e2e_in_guest()
+        && guest::available();
     let here = opts.attach.is_none()
-        && !opts.packages.is_empty()
+        && (!opts.packages.is_empty() || in_guest)
         && opts.place == Place::Auto
         && !opts.accept_snapshots
         && cfg!(target_os = "macos");
     if !here {
-        return on_runners(sh, opts, &root, &dir, None);
+        return on_runners(sh, opts, &root, &dir, None, None);
     }
     let started = Instant::now();
     let sha = if opts.head {
         cmd!(sh, "git rev-parse HEAD").read()?
     } else {
+        format_own(sh, &opts.only);
         snapshot(sh, &root, &dir, &opts.name, &opts.only)?
     };
     // What only a runner checks: a full check's iOS and Linux clippy and rustdoc, with Linux's
@@ -392,22 +446,63 @@ pub fn run(sh: &Shell, opts: &RemoteOpts) -> Result<()> {
     } else {
         there.packages.clear();
     }
+    if in_guest {
+        there.e2e = None;
+        there.filter = None;
+    }
     let remote = !there.packages.is_empty() || there.e2e.is_some() || there.probe.is_some();
+    let guest_said =
+        if in_guest { format!("; e2e app in the guest {}", guest::GUEST) } else { String::new() };
     println!(
-        "▶ {} checked here (fmt, host clippy, shear, typos, the Mac's tests){}",
+        "▶ {} checked here (fmt, host clippy, shear, typos, the Mac's tests){guest_said}{}",
         opts.packages.join(" "),
         if remote { format!("; on runners: {}", describe(&there)) } else { String::new() }
     );
+    // A failure here ends the runners' half at once: its run is cancelled, or never dispatched.
+    let abandon = Abandon::new(false);
     let (local, runners) = std::thread::scope(|scope| {
-        let local =
-            scope.spawn(|| crate::local::check(&root, lane(&opts.name), &sha, &opts.packages));
-        let runners = remote.then(|| on_runners(sh, &there, &root, &dir, Some(&sha)));
+        let local = scope.spawn(|| {
+            let outcome = if opts.packages.is_empty() {
+                Ok(crate::local::Outcome::nothing())
+            } else {
+                crate::local::check(&root, lane(&opts.name), &sha, &opts.packages)
+            };
+            let passed = outcome.as_ref().is_ok_and(|o| o.passed);
+            let e2e = (passed && in_guest).then(|| {
+                let run = guest::Run {
+                    name: &opts.name,
+                    filter: opts.filter.as_deref(),
+                    goldens: opts.goldens,
+                };
+                guest::e2e(&root, lane(&opts.name), &sha, &run)
+            });
+            if !passed || e2e.as_ref().is_some_and(|e| !e.as_ref().is_ok_and(|o| o.passed)) {
+                abandon.store(true, Ordering::Release);
+            }
+            outcome.map(|o| (o, e2e))
+        });
+        let runners =
+            remote.then(|| on_runners(sh, &there, &root, &dir, Some(&sha), Some(&abandon)));
         (local.join(), runners)
     });
-    let local = match local {
+    let (local, e2e) = match local {
         Ok(outcome) => outcome?,
         Err(_) => bail!("the local check panicked"),
     };
+    let e2e_said = e2e.as_ref().map(|e| match e {
+        Ok(o) => format!(
+            "{}: {} (built in {}s, copied and tested in {}s)",
+            if o.passed { "passed" } else { "FAILED" },
+            o.summary,
+            o.build.as_secs(),
+            o.tests.as_secs()
+        ),
+        Err(e) => format!("FAILED: {}", e.to_string().lines().next().unwrap_or("")),
+    });
+    if let Some(said) = &e2e_said {
+        println!("  e2e app in the guest: {said}");
+    }
+    let e2e_passed = e2e.as_ref().is_none_or(|e| e.as_ref().is_ok_and(|o| o.passed));
     let took = started.elapsed().as_secs();
     let thermal = local.thermal.map_or_else(|| "unread".to_owned(), |t| t.to_string());
     println!(
@@ -418,11 +513,18 @@ pub fn run(sh: &Shell, opts: &RemoteOpts) -> Result<()> {
         local.load
     );
     record(&root, opts, &local, runners.as_ref().map(Result::is_ok), took);
+    if let Some(Ok(o)) = &e2e {
+        record_e2e(&root, opts, o);
+    }
     // Each half's verdict, last, where the lane reads: the runners' failure came above the
     // local half's lines, which said "passed", and a lane took the check for green.
     let runners_failed = runners.as_ref().and_then(|r| r.as_ref().err());
-    if !local.passed || runners_failed.is_some() {
+    if !local.passed || runners_failed.is_some() || !e2e_passed {
         let here = if local.passed { "passed" } else { "FAILED" };
+        let here = match &e2e_said {
+            Some(said) => format!("{here}; e2e app in the guest {said}"),
+            None => here.to_owned(),
+        };
         let said = match (&runners, runners_failed) {
             (None, _) => "nothing ran there".to_owned(),
             (Some(_), None) => "passed".to_owned(),
@@ -442,6 +544,33 @@ pub fn run(sh: &Shell, opts: &RemoteOpts) -> Result<()> {
     Ok(())
 }
 
+/// Whether the app's e2e case of a check here goes to this Mac's guest: unless
+/// `SLOPTY_E2E_GUEST=0`, or `--place runner`.
+fn e2e_in_guest() -> bool {
+    std::env::var("SLOPTY_E2E_GUEST").map_or(true, |v| v != "0")
+}
+
+/// One e2e run in the guest, appended to `target/remote/e2e-history.jsonl`.
+fn record_e2e(root: &Path, opts: &RemoteOpts, outcome: &guest::Outcome) {
+    let line = serde_json::json!({
+        "at": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs()),
+        "name": opts.name,
+        "filter": opts.filter,
+        "passed": outcome.passed,
+        "build_s": outcome.build.as_secs(),
+        "tests_s": outcome.tests.as_secs(),
+        "summary": outcome.summary,
+    });
+    let path = root.join("target").join("remote").join("e2e-history.jsonl");
+    let _written = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, format!("{line}\n").as_bytes()));
+}
+
 /// One check's latency, appended to `target/remote/history.jsonl` for `ci-health`.
 fn record(
     root: &Path,
@@ -459,6 +588,7 @@ fn record(
         "packages": opts.packages,
         "local_s": local.took.as_secs(),
         "local_passed": local.passed,
+        "local_failed": local.failed,
         "runners_passed": runners,
         "total_s": took,
         "thermal": local.thermal,
@@ -483,6 +613,7 @@ fn on_runners(
     root: &Path,
     dir: &Path,
     sha: Option<&str>,
+    abandon: Option<&Abandon>,
 ) -> Result<()> {
     let started = Instant::now();
     let what = describe(opts);
@@ -495,13 +626,16 @@ fn on_runners(
         let sha = match sha {
             Some(sha) => sha.to_owned(),
             None if opts.head => cmd!(sh, "git rev-parse HEAD").read()?,
-            None => snapshot(sh, root, dir, &opts.name, &opts.only)?,
+            None => {
+                format_own(sh, &opts.only);
+                snapshot(sh, root, dir, &opts.name, &opts.only)?
+            }
         };
         actions_present(sh, opts.workflow_ref.as_deref().unwrap_or(REF), &sha, opts)?;
         // The tree as it was asked about, dispatched once a Mac is free for it.
         let macs = mac_jobs(opts);
         if macs > 0 {
-            wait_for_mac(sh, &opts.name, macs)?;
+            wait_for_mac(sh, &opts.name, macs, abandon)?;
         }
         let branch = format!("check/{}", opts.name);
         cmd!(sh, "git push --quiet --force --no-verify origin {sha}:refs/heads/{branch}")
@@ -517,11 +651,14 @@ fn on_runners(
     };
     println!("▶ {short} ({what}) on a runner: {}", run.url);
     println!("  if this is stopped: cargo xtask remote --name {} --run {} …", opts.name, run.id);
-    let conclusion = finish(sh, run.id)?;
+    let conclusion = finish(sh, run.id, abandon)?;
     if !opts.keep_branch
         && let Some((name, sha)) = checked(&run.title)
     {
         let _deleted = delete_branch(sh, name, sha);
+    }
+    if conclusion == ABANDONED {
+        bail!("{ABANDONED}: run {} cancelled", run.id);
     }
     let logs = dir.join("logs");
     if logs.exists() {
@@ -575,6 +712,64 @@ fn on_runners(
         run.url,
         dir
     )
+}
+
+/// The `-E` that reruns the e2e tests the last run of a check's name failed.
+const FAILED: &str = "failed";
+
+/// The nextest filterset of the e2e tests the last run of check `name` failed, from the e2e log
+/// it brought back (`target/remote/<name>/logs/logs-run/e2e.log`).
+fn last_failed(name: &str) -> Result<String> {
+    let log =
+        crate::tools::repo_root()?.join("target/remote").join(name).join("logs/logs-run/e2e.log");
+    let text = std::fs::read_to_string(&log)
+        .with_context(|| format!("no e2e log of the last run of {name} at {log}"))?;
+    let failed = failed_tests(&text);
+    ensure!(!failed.is_empty(), "the last e2e run of {name} failed no test ({log})");
+    Ok(failed.iter().map(|t| format!("test(={t})")).collect::<Vec<_>>().join(" | "))
+}
+
+/// The tests nextest's status lines in `log` name as failed (`FAIL`, `TIMEOUT`, a signal, a
+/// leak), each once, in order. A retry's (`TRY 1 FAIL`) is not one, and neither is the tests'
+/// own output that the summary shows under a failure.
+fn failed_tests(log: &str) -> Vec<String> {
+    let mut failed: Vec<String> = Vec::new();
+    for line in log.lines() {
+        let plain = without_colour(line);
+        let words: Vec<&str> = plain.split_whitespace().collect();
+        let [status, time, .., binary, test] = words.as_slice() else { continue };
+        let signal = status.len() > 3
+            && status.starts_with("SIG")
+            && status.chars().all(|c| c.is_ascii_uppercase());
+        let red = matches!(*status, "FAIL" | "TIMEOUT" | "LEAK-FAIL" | "ABORT") || signal;
+        if red
+            && time.starts_with('[')
+            && binary.contains("::")
+            && !failed.iter().any(|t| t == test)
+        {
+            failed.push((*test).to_owned());
+        }
+    }
+    failed
+}
+
+/// `line` without its terminal colour codes (`ESC [ … m`), which a runner's log keeps
+/// (`CARGO_TERM_COLOR=always`).
+fn without_colour(line: &str) -> String {
+    let mut plain = String::with_capacity(line.len());
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            for c in chars.by_ref() {
+                if c.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            plain.push(c);
+        }
+    }
+    plain
 }
 
 /// The paths in `git apply --numstat`'s report that no accept writes: an accept writes the e2e
@@ -669,6 +864,66 @@ fn snapshot(sh: &Shell, root: &Path, dir: &Path, name: &str, only: &[String]) ->
     let message = format!("check: {name}");
     let sha = cmd!(sh, "git commit-tree --no-gpg-sign -p HEAD -m {message} {tree}").read()?;
     Ok(sha)
+}
+
+/// Where the Rust files `cargo fmt` formats live: the workspace's members and the fuzz crate,
+/// which the gate formats on its own. Not the excluded vendored crates.
+const FORMATTED: [&str; 6] =
+    ["crates/", "apps/", "xtask/", "workspace-hack/", "vendor/gpui_tokio/", "fuzz/"];
+
+/// The Rust files a lane changed under `only` (against `HEAD`, untracked ones too), formatted in
+/// the tree with nightly rustfmt and the repository's `rustfmt.toml`, as `cargo xtask fmt` would,
+/// before they are checked: a check never fails on formatting. Of the runners' lint failures on
+/// 2026-10-16 and 17, 9 of 42 were `cargo fmt` (`.research/devloop-2026-10-17.md`). Only the
+/// lane's own paths are touched, so another lane's files never move under it; without `only`
+/// nothing is formatted and the check's fmt step judges. A file rustfmt cannot parse is left to
+/// clippy to name.
+fn format_own(sh: &Shell, only: &[String]) {
+    if only.is_empty() {
+        return;
+    }
+    let listed = |args: &[&str]| -> Vec<String> {
+        cmd!(sh, "git {args...} -- {only...}")
+            .quiet()
+            .ignore_stderr()
+            .read()
+            .map(|out| out.lines().map(str::to_owned).collect())
+            .unwrap_or_default()
+    };
+    let mut files = listed(&["diff", "--name-only", "--diff-filter=d", "HEAD"]);
+    files.extend(listed(&["ls-files", "--others", "--exclude-standard"]));
+    files.sort_unstable();
+    files.dedup();
+    files.retain(|f| {
+        Path::new(f).extension() == Some("rs")
+            && FORMATTED.iter().any(|dir| f.starts_with(dir))
+            && Path::new(f).is_file()
+    });
+    if files.is_empty() {
+        return;
+    }
+    let before: Vec<Option<Vec<u8>>> = files.iter().map(|f| std::fs::read(f).ok()).collect();
+    let f = &files;
+    let ran = cmd!(sh, "rustup run nightly rustfmt --config skip_children=true {f...}")
+        .quiet()
+        .ignore_status()
+        .output();
+    if let Ok(out) = &ran
+        && !out.status.success()
+    {
+        let why = String::from_utf8_lossy(&out.stderr);
+        println!("  rustfmt left some files as they were: {}", why.lines().next().unwrap_or(""));
+    }
+    let moved: Vec<&String> = files
+        .iter()
+        .zip(&before)
+        .filter(|(f, was)| std::fs::read(f).ok() != **was)
+        .map(|(f, _)| f)
+        .collect();
+    if !moved.is_empty() {
+        let names: Vec<&str> = moved.iter().map(|f| f.as_str()).collect();
+        println!("  formatted {} of your files before the check: {}", moved.len(), names.join(" "));
+    }
 }
 
 /// The workspaces' lock files, each beside the manifest of a workspace of its own.
@@ -980,8 +1235,13 @@ fn find(sh: &Shell, title: &str, before: &[u64]) -> Result<Listed> {
 }
 
 /// The run's conclusion once it completes, printing each change of its status meanwhile.
-#[expect(clippy::disallowed_methods, reason = "xtask is a script, not a library; polling GitHub")]
-fn finish(sh: &Shell, id: u64) -> Result<String> {
+///
+/// The first red ends it: once the lint job failed while other jobs still run, the run is
+/// cancelled and taken for failed, since the lane fixes the lint and checks again, which cancels
+/// the run anyway, and its Mac job would hold a slot meanwhile (`docs/decisions/tooling.md`, "A
+/// check's first red ends it"). Once the check failed here (`abandon`), the run is cancelled and
+/// `ABANDONED` returned.
+fn finish(sh: &Shell, id: u64, abandon: Option<&Abandon>) -> Result<String> {
     #[derive(serde::Deserialize)]
     struct State {
         status: String,
@@ -990,22 +1250,31 @@ fn finish(sh: &Shell, id: u64) -> Result<String> {
     let id = id.to_string();
     let started = Instant::now();
     let mut last = String::new();
+    let mut ended_early = false;
     loop {
         // A transient API error is asked again, not taken for the run's end.
         let state = cmd!(sh, "gh run view {id} --json status,conclusion").quiet().read();
         if let Ok(state) = state {
             let state: State = serde_json::from_str(&state).context("gh run view's JSON")?;
             if state.status == "completed" {
-                return Ok(state.conclusion);
+                return Ok(if ended_early { "failure".to_owned() } else { state.conclusion });
             }
-            if let Some((job, label)) = unservable(sh, &id) {
-                let _cancelled = cmd!(sh, "gh run cancel {id}").quiet().ignore_stderr().run();
+            let jobs = run_jobs(sh, &id).unwrap_or_default();
+            if let Some((job, label)) = unservable(&jobs) {
+                let _cancelled =
+                    cmd!(sh, "gh run cancel {id}").quiet().ignore_stdout().ignore_stderr().run();
                 bail!(
                     "run {id}'s job `{job}` is queued for runner `{label}`, which no runner \
                      serves, so it would never start; the run is cancelled. Its workflow is \
                      not the one this xtask dispatches for: land the workflow change first, or \
                      try it with --workflow-ref <branch>"
                 );
+            }
+            if !ended_early && let Some(job) = first_red(&jobs) {
+                println!("  {job} failed: the run's other jobs are cancelled");
+                let _cancelled =
+                    cmd!(sh, "gh run cancel {id}").quiet().ignore_stdout().ignore_stderr().run();
+                ended_early = true;
             }
             if state.status != last {
                 let secs = started.elapsed().as_secs();
@@ -1014,30 +1283,52 @@ fn finish(sh: &Shell, id: u64) -> Result<String> {
             }
         }
         ensure!(started.elapsed() < FINISH, "run {id} still {last} after {FINISH:?}");
-        std::thread::sleep(POLL);
+        if pause(POLL, abandon) {
+            let _cancelled =
+                cmd!(sh, "gh run cancel {id}").quiet().ignore_stdout().ignore_stderr().run();
+            return Ok(ABANDONED.to_owned());
+        }
     }
+}
+
+/// A job of a run, as the Actions API lists it.
+#[derive(serde::Deserialize, Default)]
+struct RunJob {
+    name: String,
+    status: String,
+    #[serde(default)]
+    conclusion: Option<String>,
+    labels: Vec<String>,
+}
+
+/// The jobs of run `id`.
+fn run_jobs(sh: &Shell, id: &str) -> Option<Vec<RunJob>> {
+    #[derive(serde::Deserialize)]
+    struct Jobs {
+        jobs: Vec<RunJob>,
+    }
+    let url = format!("repos/{{owner}}/{{repo}}/actions/runs/{id}/jobs");
+    let jobs: Jobs = serde_json::from_str(&cmd!(sh, "gh api {url}").quiet().read().ok()?).ok()?;
+    Some(jobs.jobs)
+}
+
+/// The lint job, when it failed while another job of its run has not completed: the red that
+/// ends the run ([`finish`]).
+fn first_red(jobs: &[RunJob]) -> Option<&str> {
+    let red = jobs
+        .iter()
+        .find(|j| j.name.starts_with("lint") && j.conclusion.as_deref() == Some("failure"))?;
+    jobs.iter().any(|j| j.status != "completed").then_some(red.name.as_str())
 }
 
 /// The runner images a check's jobs run on: what `--runner` takes and `check.yml` names.
 const RUNNERS: [&str; 3] = ["macos-26", "ubuntu-24.04", "ubuntu-24.04-arm"];
 
-/// A queued job of run `id` asking for a runner no image serves, with the label it asks for.
-fn unservable(sh: &Shell, id: &str) -> Option<(String, String)> {
-    #[derive(serde::Deserialize)]
-    struct Jobs {
-        jobs: Vec<Job>,
-    }
-    #[derive(serde::Deserialize)]
-    struct Job {
-        name: String,
-        status: String,
-        labels: Vec<String>,
-    }
-    let url = format!("repos/{{owner}}/{{repo}}/actions/runs/{id}/jobs");
-    let jobs: Jobs = serde_json::from_str(&cmd!(sh, "gh api {url}").quiet().read().ok()?).ok()?;
-    jobs.jobs.into_iter().filter(|j| j.status == "queued").find_map(|job| {
-        let label = job.labels.into_iter().find(|l| !RUNNERS.contains(&l.as_str()))?;
-        Some((job.name, label))
+/// A queued job asking for a runner no image serves, with the label it asks for.
+fn unservable(jobs: &[RunJob]) -> Option<(String, String)> {
+    jobs.iter().filter(|j| j.status == "queued").find_map(|job| {
+        let label = job.labels.iter().find(|l| !RUNNERS.contains(&l.as_str()))?;
+        Some((job.name.clone(), label.clone()))
     })
 }
 
@@ -1326,6 +1617,72 @@ mod tests {
         // back, so they are not counted against it either.
         let own = [check("A-cuts", false), check("A-cuts", false), check("W-x", false)];
         assert_eq!(mac_verdict(&own, "A-cuts", 1), None);
+    }
+
+    /// A failed lint job ends its run while another job still runs; a failed test job, a lint
+    /// job still running, or a run all done ends nothing.
+    #[test]
+    fn a_failed_lint_job_ends_its_run() {
+        let job = |name: &str, status: &str, conclusion: Option<&str>| super::RunJob {
+            name: name.to_owned(),
+            status: status.to_owned(),
+            conclusion: conclusion.map(str::to_owned),
+            labels: vec!["macos-26".to_owned()],
+        };
+        let red = job("lint (A)", "completed", Some("failure"));
+        let running = job("run (A)", "in_progress", None);
+        assert_eq!(super::first_red(&[red, running]), Some("lint (A)"));
+        let red = job("lint (A)", "completed", Some("failure"));
+        let done = job("run (A)", "completed", Some("success"));
+        assert_eq!(super::first_red(&[red, done]), None, "nothing left to cancel");
+        let tests = job("test (A)", "completed", Some("failure"));
+        let running = job("run (A)", "in_progress", None);
+        assert_eq!(super::first_red(&[tests, running]), None, "an e2e run outlives a test's red");
+        let lint = job("lint (A)", "in_progress", None);
+        let running = job("run (A)", "in_progress", None);
+        assert_eq!(super::first_red(&[lint, running]), None);
+    }
+
+    /// An abandoned check stops its pause at once; one left alone sleeps it out.
+    #[test]
+    fn a_pause_ends_when_the_check_is_abandoned() {
+        let abandon = super::Abandon::new(true);
+        let started = std::time::Instant::now();
+        assert!(super::pause(std::time::Duration::from_secs(30), Some(&abandon)));
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        assert!(!super::pause(std::time::Duration::from_millis(10), None));
+    }
+
+    /// The tests the status lines name as failed, each once; a retry's red, a slow test and
+    /// the tests' own output are not taken.
+    #[test]
+    fn a_rerun_takes_the_tests_the_last_summaries_failed() {
+        let log = "\
+        FAIL [  31.275s] ( 9/22) slopty-e2e::app interface::open_in_hands_the_folder_to_an_editor
+     Summary [ 314.916s] 22 tests run: 19 passed (2 slow), 3 failed, 1 skipped
+        SLOW [> 30.000s] (─────) slopty-e2e::app agent_ui::the_window
+        FAIL [  31.275s] ( 9/22) slopty-e2e::app interface::open_in_hands_the_folder_to_an_editor
+     TIMEOUT [ 120.000s] (19/22) slopty-e2e::app surfaces_live::the_terminal_s_floats_wear_the_shell
+  ✘ slopty-e2e app not (test(~screen_recording::)) (315.3s)
+  stdout ───
+    test interface::open_in_hands_the_folder_to_an_editor ... FAILED
+    TRY 1 FAIL [   1.000s] ( 1/1) slopty-e2e::app retried::and_passed
+     Summary [   0.001s] 1 test run: 0 passed, 1 failed
+     SIGABRT [   2.000s] ( 1/1) slopty-e2e::app streams::a_window_streams
+";
+        assert_eq!(
+            super::failed_tests(log),
+            [
+                "interface::open_in_hands_the_folder_to_an_editor",
+                "surfaces_live::the_terminal_s_floats_wear_the_shell",
+                "streams::a_window_streams",
+            ]
+        );
+        let coloured = "\u{1b}[31;1m     Summary\u{1b}[0m [ 1.0s] 1 test run\n\
+                        \u{1b}[31;1m        FAIL\u{1b}[0m [ 1.0s] (1/1) slopty-e2e::app a::b\n";
+        assert_eq!(super::failed_tests(coloured), ["a::b"]);
+        let none: [&str; 0] = [];
+        assert_eq!(super::failed_tests("     Summary [ 1s] 3 tests run: 3 passed"), none);
     }
 
     #[test]

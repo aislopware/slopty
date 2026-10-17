@@ -30,6 +30,15 @@ pub struct Outcome {
     pub thermal: Option<u8>,
     /// The highest one-minute load average seen meanwhile.
     pub load: f64,
+    /// The first line of what failed, when something did.
+    pub failed: Option<String>,
+}
+
+impl Outcome {
+    /// A check of no crates: nothing ran, nothing failed.
+    pub const fn nothing() -> Self {
+        Self { passed: true, took: Duration::ZERO, thermal: None, load: 0.0, failed: None }
+    }
 }
 
 /// The directory lane `name`'s local checks use: its lane, as `remote` groups checks.
@@ -71,8 +80,14 @@ pub fn check(root: &Utf8Path, lane: &str, sha: &str, crates: &[String]) -> Resul
     if let Some(Err(e)) = &tests {
         println!("✘ local tests: {e:#}");
     }
-    let passed = lint.is_ok() && tests.is_some_and(|t| t.is_ok());
-    Ok(Outcome { passed, took: started.elapsed(), thermal, load })
+    let failed = match (&lint, &tests) {
+        (Err(e), _) | (_, Some(Err(e))) => {
+            Some(e.to_string().lines().next().unwrap_or("").to_owned())
+        }
+        _ => None,
+    };
+    let passed = failed.is_none() && tests.is_some();
+    Ok(Outcome { passed, took: started.elapsed(), thermal, load, failed })
 }
 
 /// Point cargo at `<dir>/target` through `<dir>/.cargo/config.toml`, which cargo finds above the
@@ -80,7 +95,7 @@ pub fn check(root: &Utf8Path, lane: &str, sha: &str, crates: &[String]) -> Resul
 /// variable in rustc's environment, so a variable per lane kept every lane from reading the
 /// dependencies another had compiled (0.25 % Rust hits over 12,772 compiles, 2026-10-16;
 /// `docs/decisions/tooling.md`, "One compile cache key space").
-fn target_by_config(dir: &Utf8Path) -> Result<()> {
+pub fn target_by_config(dir: &Utf8Path) -> Result<()> {
     let config = dir.join(".cargo");
     std::fs::create_dir_all(&config).with_context(|| format!("create {config}"))?;
     let path = config.join("config.toml");

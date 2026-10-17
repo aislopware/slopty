@@ -126,7 +126,9 @@ jobs:
       - run: xtask setup --lane tests
         env:
           GITHUB_TOKEN: ${{ github.token }}
-      - run: xtask e2e app --review
+      # Three tests at a time on the runner's three cores (`docs/decisions/tooling.md`, "An e2e
+      # case runs in a guest here").
+      - run: xtask e2e app --review --test-threads 3
       - if: always()
         uses: actions/upload-artifact@v4
         with:

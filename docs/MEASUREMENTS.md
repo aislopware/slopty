@@ -17208,3 +17208,61 @@ Simulated times on tokio's paused clock, so the machine does not move them.
 SLOPTY_SIM_SEEDS=50 cargo test --release -p slopty-net --test sim -- --include-ignored \
   --nocapture --test-threads 1 every_scenario narrower video_report
 ```
+
+## 2026-10-17 — the dev loop: where a lane's wait goes, and a check's first red
+
+From `gh run list/view --json` over every run created from 2026-10-16 14:43 UTC to 2026-10-17
+04:51 (201 runs) and `target/remote/history.jsonl` (267 local checks); the breakdown and every
+lever are in `.research/devloop-2026-10-17.md`.
+
+| what | runs | runner min | macOS min |
+| --- | --- | --- | --- |
+| lane checks, green | 54 | 492 | 232 |
+| lane checks, red | 98 | 1,322 | 1,138 |
+| of those, the e2e `run` job | 59 | 900 | 900 |
+| gate (CI), green | 28 | 1,419 | 728 |
+| gate (CI), red or cancelled | 6 | 252 | 126 |
+
+- The e2e `run` job on `macos-26`: setup about 2 min, then `build daemons and app` p50 501 s
+  (p10 264, max 1,133; 568 of its 900 min), the e2e test binary 30–100 s, and the tests p50
+  68 s (156 min in all). The app suite runs its tests one at a time (`--no-capture`): 50 tests,
+  500–690 s.
+- Local checks: 138 of 267 failed, at a median 28 s; 38 had a runner half, whose verdict came a
+  median 970 s after the start: 574 lane-minutes waiting on a known red.
+- After (first red ends the check): a full check of `xtask` with a clippy failure here, 45 s
+  from start to verdict, its run cancelled 1 s after dispatch (run 39005321017); its runner lint
+  job alone took a p50 3.4 min when red, 5.8 min when green.
+
+```sh
+gh run list -R aislopware/slopty -L 400 --json databaseId,workflowName,status,conclusion,createdAt,displayTitle
+gh api "repos/aislopware/slopty/actions/runs/<id>/jobs?per_page=100&filter=latest"
+SLOPTY_LANE=DEVLOOP cargo xtask remote -p xtask --full --only xtask/src/remote.rs   # with a dead fn in it
+```
+
+## 2026-10-17 — the app's e2e case in a guest here, and three tests at a time
+
+The app's whole suite (22 tests) at HEAD 73366704, `--goldens review`, on a `macos-26` runner
+(run 39007880769) and in the guest `slopty-26-e2e` (tart, 4 cores, 4 GB, macOS 26.6.2 25G83 as
+the runner), built on this M1 Max in the lane's warm directory:
+
+| | runner | guest |
+| --- | --- | --- |
+| end to end, whole suite | 23 min 40 s | 1 min 50 s (build unchanged) |
+| end to end, two tests | 10–15 min (p50 of filtered runs) | 1 min 47 s (85 s incremental build) |
+| build daemons and app | 472–501 s | 85 s after three commits; 1 s unchanged |
+| test binary | 30–115 s | archive 1–2 s |
+| tests, one at a time | 272 s | 250 s |
+| tests, three at a time | 103 s (run 39006753376, HEAD 48b97353; 193 s one at a time) | 97 s |
+| failed tests | the same 4 | the same 4 |
+
+Of the 26 frames whose difference from their golden the log reports, 20 differ by the same
+fraction on both to 0.001 %, and the other 6 are Add device's server look, its failed SSH run
+and the invite, in two appearances each; 16 renders
+are byte-identical guest to runner, 16 more differ only where two guest runs differ too (a
+turn's clock, an invite code: 0.001–0.6 % of a frame), and 2 show the machine's own network
+(Add device's server look 0.01 %, its failed SSH run 0.4 %).
+
+```sh
+SLOPTY_LANE=DEVLOOP cargo xtask remote --head --e2e app --goldens review
+SLOPTY_LANE=DEVLOOP-rn cargo xtask remote --name DEVLOOP-rn --head --place runner --e2e app --goldens review
+```

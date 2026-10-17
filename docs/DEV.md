@@ -37,9 +37,17 @@ zed itself so it is never behind zed while longbridge lags.
   to `check/<name>`, deleted when its run ends): with `--full`, iOS and Linux clippy and rustdoc
   on an arm Linux runner, and the tests on Linux when every crate tests there
   (`gate::linux_tested`); and any e2e case or probe. A quick check of crates alone dispatches
-  nothing. `--place runner` sends all of it to runners, as before. It waits, prints the failed
+  nothing. `--place runner` sends all of it to runners, as before. With `--only` it first
+  formats the Rust files changed under those paths (nightly rustfmt), so no check fails on
+  formatting. The first red ends the check: a failure here cancels the runners' run (or never
+  dispatches it), and a failed lint job cancels its run's other jobs. It waits, prints the failed
   log's end and keeps every runner log under `target/remote/<name>/`. `--e2e app -E
-  '<filterset>'` adds an e2e case; `--goldens accept` (or `accept-all`) applies the run's goldens
+  '<filterset>'` adds an e2e case (`-E failed`: only the tests the last run of that name
+  failed). The `app` case runs here, in the headless macOS guest `slopty-26-e2e` (tart, made
+  from the live lane's base on first use): the lane's tree is built in
+  `target/local/<lane>/e2e-target` and its tests run in the guest three at a time
+  (`SLOPTY_E2E_THREADS`), one lane's run at a time; `--place runner` (or `SLOPTY_E2E_GUEST=0`) sends it to a runner Mac,
+  and `ios` and probes always go there; `--goldens accept` (or `accept-all`) applies the run's goldens
   to the tree, as `--accept-snapshots` does its insta snapshots (on runners: a patch of anything
   else, which no accept writes, is refused whole and its paths named), and `--goldens review`
   brings every changed frame's render and diff to `target/e2e/artifacts/`. `--workflow-ref
