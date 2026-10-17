@@ -45,9 +45,9 @@ actions!(terminal, [ToggleTerminal, NewTerminalTab]);
 /// slopty: the panel's key context, where its own tab keys bind.
 pub const KEY_CONTEXT: &str = "TerminalPanel";
 
-/// Bind the terminal keymap (global): Cmd+J on macOS, Ctrl+J elsewhere.
+/// Bind the terminal keymap (global): Cmd+J on Apple keyboards, Ctrl+J elsewhere.
 pub fn init(cx: &mut App) {
-    let toggle = if cfg!(target_os = "macos") {
+    let toggle = if crate::keys::MOD_IS_COMMAND { // slopty: an iPad's ⌘ too
         "cmd-j"
     } else {
         "ctrl-j"

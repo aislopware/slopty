@@ -170,6 +170,16 @@ impl Shell {
         });
     }
 
+    /// slopty: landing on a chat (opening it, the boot's landing, back and forward) gives the
+    /// composer the keyboard, but not on a touch screen, where it would raise the software
+    /// keyboard over the chat: there it comes when the person taps the composer
+    /// ([`super::touch_screen`]).
+    pub(super) fn focus_composer_on_landing(&mut self, cx: &mut Context<Self>) {
+        if !super::touch_screen() {
+            self.focus_composer(cx);
+        }
+    }
+
     /// Ctrl+Tab / Ctrl+Shift+Tab: step through the sidebar's Sessions list in
     /// the order it is drawn. Selection is immediate (no MRU overlay held open
     /// on the modifier) — one press, one session.
@@ -211,7 +221,7 @@ impl Shell {
         };
         self.state.update(cx, |s, _| s.auto_selected = true);
         if let Some(first) = first {
-            self.focus_composer(cx);
+            self.focus_composer_on_landing(cx); // slopty: not on touch
             self.state
                 .update(cx, |s, cx| s.select_chat(Some(first), cx));
         }
@@ -222,7 +232,7 @@ impl Shell {
         self.command_palette = None;
         // slopty: voice removed.
         self.set_route(Route::Chat, cx);
-        self.focus_composer(cx);
+        self.focus_composer_on_landing(cx); // slopty: not on touch
         self.nav.push(NavEntry::Chat(chat_id.clone()));
         self.state
             .update(cx, |s, cx| s.select_chat(Some(chat_id), cx));

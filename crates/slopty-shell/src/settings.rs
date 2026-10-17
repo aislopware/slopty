@@ -1108,7 +1108,7 @@ impl ShortcutId {
     }
 
     pub fn default_combo(self) -> &'static str {
-        self.default_combo_on(cfg!(target_os = "macos"))
+        self.default_combo_on(crate::keys::MOD_IS_COMMAND) // slopty: every Apple keyboard
     }
 
     /// `default_combo` for an explicit platform, so the spelling invariant is
@@ -1361,7 +1361,8 @@ pub fn combo_from_keystroke(
     cmd: bool,
     key: &str,
 ) -> Option<String> {
-    combo_from_keystroke_on(cfg!(target_os = "macos"), ctrl, alt, shift, cmd, key)
+    // slopty: an iPad's ⌘ too.
+    combo_from_keystroke_on(crate::keys::MOD_IS_COMMAND, ctrl, alt, shift, cmd, key)
 }
 
 /// [`combo_from_keystroke`] for an explicit platform — the ctrl spelling is
@@ -1456,7 +1457,7 @@ pub fn modifier_send_hint_visible(primary: bool, alt: bool, shift: bool) -> bool
 
 /// Translate a stored combo into a bindable keystroke for this platform.
 pub fn platform_combo(combo: &str) -> String {
-    platform_combo_on(cfg!(target_os = "macos"), combo)
+    platform_combo_on(crate::keys::MOD_IS_COMMAND, combo) // slopty: an iPad's ⌘ too
 }
 
 /// [`platform_combo`] for an explicit platform (see [`combo_from_keystroke_on`]).
@@ -3262,7 +3263,7 @@ mod tests {
         assert_eq!(keymap.get(ShortcutId::ToggleSidebar), "mod-b");
         assert_eq!(keymap.get(ShortcutId::ToggleChanges), "mod-r");
         assert_eq!(keymap.get(ShortcutId::ToggleTerminal), "mod-j");
-        let ctrl = if cfg!(target_os = "macos") {
+        let ctrl = if crate::keys::MOD_IS_COMMAND { // slopty
             "ctrl"
         } else {
             "mod"
@@ -3302,7 +3303,7 @@ mod tests {
     fn combo_recording() {
         // How this platform spells a recorded ctrl (see `combo_from_keystroke_on`).
         let ctrl_combo = |suffix: &str| {
-            if cfg!(target_os = "macos") {
+            if crate::keys::MOD_IS_COMMAND { // slopty
                 format!("ctrl-{suffix}")
             } else {
                 format!("mod-{suffix}")
@@ -3398,7 +3399,7 @@ mod tests {
 
     #[test]
     fn combo_translation() {
-        let primary = if cfg!(target_os = "macos") {
+        let primary = if crate::keys::MOD_IS_COMMAND { // slopty
             "cmd"
         } else {
             "ctrl"

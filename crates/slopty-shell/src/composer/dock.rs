@@ -406,9 +406,13 @@ impl Composer {
         let mut lines = Vec::new();
         let Some(chat) = self.state.read(cx).selected_chat.clone() else { return lines };
         let now = chrono::Utc::now().timestamp_millis();
+        // slopty: what still runs is said once, by the Background tray's header, by kind; the
+        // waiting line stands only while no tray of this chat says it.
+        let tray_says = self.dock.chat.as_deref() == Some(chat.as_str())
+            && self.dock.tray.as_ref().is_some_and(|tray| tray.counts.total() > 0);
         let (waiting, notes, logs) = match self.dock.dock_of(&chat) {
             Some(dock) => (
-                dock.waiting.clone().filter(|_| dock.activity.is_none()),
+                dock.waiting.clone().filter(|_| dock.activity.is_none() && !tray_says),
                 dock.notes
                     .iter()
                     .filter(|note| note_showing(note, now) && note.priority != "immediate")
@@ -456,7 +460,10 @@ impl Composer {
         vec![
             div()
                 .id("dock-lines")
-                .mx(px(8.0))
+                .debug_selector(|| "dock-lines".into())
+                // slopty: the edges every card over the composer shares (the tray's, a side
+                // answer's, a folded question's, a mod's band), so none reads as a seam.
+                .mx(px(QUEUE_SIDE_INSET))
                 .px(px(4.0))
                 .py(px(4.0))
                 .flex()

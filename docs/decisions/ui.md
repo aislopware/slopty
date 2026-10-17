@@ -13181,3 +13181,27 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `transcript::surface_tests::a_subagent_run_open_in_its_card_is_as_tall_as_its_rows`;
     `slopty-view-doc` `work::tests`; `slopty-ui` `view_model::tests::a_chat_is_made_when_its_thread_began`,
     `view_model::facts::tests`.
+- ✅ **An iPad behaves as an iPad (2026-10-17).**
+  - **"mod" is ⌘ on every Apple keyboard.** The keymap's "mod", the hints that name it and the
+    recorder read the Mac alone (`target_os = "macos"`), so an iPad's hardware keyboard bound
+    Ctrl+N and its hints said "Ctrl+N"; ⌘N did nothing. One flag decides now,
+    `keys::MOD_IS_COMMAND` (`target_vendor = "apple"`), for the keymap, the composer's word keys
+    (⌥), the terminal's toggle, Settings (⌘,) and every hint. The window verbs (⌘Q, ⌘H, ⌘M, ⌘W)
+    stay the Mac's.
+  - **On a touch screen the keyboard waits for a tap.** Opening a chat, the boot's landing on
+    one, back and forward, and a side chat's tab focused the composer, which raised the software
+    keyboard over the chat (the iPad drew a blank band where it sat). On iOS none of them takes
+    the keyboard; it comes when the person taps the composer, as in Messages. A new chat's page
+    still focuses its composer, since writing is why it was opened; the Mac is unchanged.
+  - **What runs is said once, by the tray.** A chat said "2 background tasks still running" in
+    its done line, "1 command still running" over the composer and "1 command" in the
+    Background tray. The done line carried Claude Code's count from the turn's end, a snapshot
+    that goes stale and counted differently from the tray, which lists one row per piece of work
+    and keeps it live. The done line now says the turn's time alone, and the waiting line over
+    the composer stands only while no tray says it. The quiet lines' card takes the edges every
+    card over the composer shares (`QUEUE_SIDE_INSET`), so it and the tray stand in one column.
+  - Tests: `slopty-shell` `keys::tests::every_apple_keyboard_binds_and_names_mod_as_command`,
+    `app_menus::tests::app_bindings_use_platform_settings_convention`,
+    `shell::compact::tests::opening_a_chat_on_touch_leaves_the_keyboard_down`,
+    `composer::dock_tests::what_still_runs_is_said_once_and_the_cards_share_one_column`;
+    `slopty-ui` `view_model::tests::a_done_line_leaves_what_still_runs_to_the_tray`.

@@ -912,7 +912,7 @@ mod tests {
         redraw(cx);
         assert!(cx.update(|window, _| window.is_window_active()), "the window is the active one");
         assert!(cx.debug_bounds("jump-hint-c00").is_none(), "no numbers before the key is held");
-        let held = if cfg!(target_os = "macos") {
+        let held = if crate::keys::MOD_IS_COMMAND { // slopty
             gpui::Modifiers { platform: true, ..gpui::Modifiers::default() }
         } else {
             gpui::Modifiers { control: true, ..gpui::Modifiers::default() }

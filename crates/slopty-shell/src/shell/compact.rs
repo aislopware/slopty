@@ -162,6 +162,14 @@ thread_local! {
 
 /// Whether this build lays a narrow window out as a phone: iOS, or a test that asks.
 fn phone_platform() -> bool {
+    touch_screen()
+}
+
+/// Whether this build runs on a touch screen, a phone's or an iPad's: iOS, or a test that asks.
+/// There focusing a field raises the software keyboard over the page, so opening or landing on a
+/// chat leaves the composer unfocused and the keyboard comes when the person taps it, as in
+/// Messages (`docs/decisions/ui.md`, "On a touch screen the keyboard waits for a tap").
+pub(crate) fn touch_screen() -> bool {
     #[cfg(test)]
     if FORCE_COMPACT.with(std::cell::Cell::get) {
         return true;
@@ -965,6 +973,31 @@ mod tests {
         );
         assert_eq!(sidebar, (true, true), "the desktop sidebar names its key");
         assert_eq!(crate::keys::combo_text_on(true, "mod-n"), "⌘N", "a Mac's key");
+    }
+
+    // slopty: on a touch screen, an iPad's as much as a phone's, opening or landing on a chat
+    // leaves the composer unfocused, so no software keyboard rises over it; a Mac's window
+    // still lands in the composer.
+    #[gpui::test]
+    fn opening_a_chat_on_touch_leaves_the_keyboard_down(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) = phone(cx);
+        cx.simulate_resize(gpui::size(gpui::px(1366.0), gpui::px(1024.0)));
+        let pending = |shell: &gpui::Entity<Shell>, cx: &mut gpui::VisualTestContext| {
+            shell.read_with(cx, |shell, cx| shell.composer.read(cx).focus_pending)
+        };
+        assert!(!pending(&shell, cx), "a new composer waits for a tap");
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| state.chats_synced = true);
+            shell.boot_select_chat(cx);
+        });
+        let landed = shell.read_with(cx, |shell, cx| shell.state.read(cx).selected_chat.clone());
+        assert_eq!(landed.as_deref(), Some("fix"), "the boot lands on the chat");
+        assert!(!pending(&shell, cx), "the boot's landing raises no keyboard");
+        shell.update(cx, |shell, cx| shell.open_chat("fix".into(), cx));
+        assert!(!pending(&shell, cx), "nor does opening a chat");
+        FORCE_COMPACT.with(|force| force.set(false));
+        shell.update(cx, |shell, cx| shell.open_chat("fix".into(), cx));
+        assert!(pending(&shell, cx), "a Mac's window lands in the composer");
     }
 
     #[test]

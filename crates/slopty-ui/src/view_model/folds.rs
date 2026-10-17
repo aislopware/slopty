@@ -6,9 +6,9 @@
 //!   agents stopped together read as one row naming them ("2 background agents were stopped: …"),
 //!   or give way to the agent's own row that names them. A failure is never folded.
 //! - **The turn's done line.** A turn the agent finished ends on a quiet "Worked for 1m 5s · done
-//!   3:42 PM", the TUI's line with its plain verb. What the turn leaves running takes its place
-//!   ("Waiting for 2 background agents to finish") or follows it ("· 3 background tasks still
-//!   running").
+//!   3:42 PM", the TUI's line with its plain verb. What the turn left running is not repeated
+//!   there: the agent's count is a snapshot at the turn's end, and the Background tray says what
+//!   runs now, by kind (`docs/decisions/ui.md`, "What runs is said once, by the tray").
 
 use chrono::TimeZone;
 use slopty_proto::thread::{Notice, ThreadState, TurnId, TurnState};
@@ -214,7 +214,8 @@ pub fn fold_tasks(parts: Vec<MessagePart>) -> Vec<MessagePart> {
 /// Each finished turn of `state` ends on its done line, in the last entry that answers it.
 ///
 /// `entries` come with `turns` saying which turn each answers. The turn's own footer notices
-/// (what it leaves running) go into that line.
+/// (what it left running) give way to that line, which says the turn's time alone: what still
+/// runs is the Background tray's to say, live.
 pub fn done_lines<Tz: TimeZone>(
     state: &ThreadState,
     entries: &mut [SessionMessageEntry],
@@ -234,24 +235,12 @@ pub fn done_lines<Tz: TimeZone>(
         if entry.role != MessageRole::Assistant {
             continue;
         }
-        let mut footer = Vec::new();
-        entry.parts.retain(|part| match part {
-            MessagePart::Note { note, .. } if note.kind == Notice::TURN => {
-                footer.push(note.text.clone());
-                false
-            }
-            _ => true,
-        });
+        entry.parts.retain(
+            |part| !matches!(part, MessagePart::Note { note, .. } if note.kind == Notice::TURN),
+        );
         let worked = ended.as_millis().saturating_sub(turn.started_ms.as_millis());
         let ended_at = i64::try_from(ended.as_millis()).unwrap_or(i64::MAX);
-        let said = footer.join(" · ");
-        let text = if said.starts_with("Waiting for") {
-            said
-        } else if said.is_empty() {
-            done_words(worked, ended_at, tz)
-        } else {
-            format!("{} · {said}", done_words(worked, ended_at, tz))
-        };
+        let text = done_words(worked, ended_at, tz);
         entry.parts.push(MessagePart::Note {
             id: format!("{}:done", entry.id),
             note: Box::new(NoteRow {

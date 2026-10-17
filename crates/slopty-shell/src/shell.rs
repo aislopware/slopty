@@ -98,6 +98,7 @@ mod kept_tabs; // slopty: the pane's tabs kept across launches
 mod mod_panes; // slopty: a mod's pane as a tab (S2)
 mod page_panes; // slopty: a page an agent showed, as a tab (M)
 mod compact; // slopty: the phone's anatomy
+pub(crate) use compact::touch_screen; // slopty: the keyboard waits for a tap
 mod chrome_keys; // slopty: find, history, tab and picker keys, and undoing an archive
 // slopty: the window's own commands, for the menu bar (`app_menus`).
 pub use chrome_keys::{
@@ -3234,7 +3235,8 @@ impl Shell {
             RightSurface::SideChat(id) => {
                 if let Some(tab) = self.side_chats.get(&id) {
                     tab.composer.update(cx, |composer, cx| {
-                        composer.focus_pending = true;
+                        // slopty: a side chat opened on a touch screen waits for a tap too.
+                        composer.focus_pending = !touch_screen();
                         cx.notify();
                     });
                 }
@@ -4949,7 +4951,7 @@ impl Shell {
         match entry {
             NavEntry::Chat(chat_id) => {
                 self.set_route(Route::Chat, cx);
-                self.focus_composer(cx);
+                self.focus_composer_on_landing(cx); // slopty: not on touch
                 let target = (!chat_id.is_empty()).then_some(chat_id);
                 if self.state.read(cx).selected_chat != target {
                     self.state.update(cx, |s, cx| s.select_chat(target, cx));
@@ -5659,7 +5661,7 @@ impl Shell {
     }
 
     fn update_jump_hints(&mut self, mods: &gpui::Modifiers, cx: &mut Context<Self>) {
-        let primary = if cfg!(target_os = "macos") {
+        let primary = if crate::keys::MOD_IS_COMMAND { // slopty: an iPad's ⌘ too
             mods.platform
         } else {
             mods.control

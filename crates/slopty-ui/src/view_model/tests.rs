@@ -1680,6 +1680,38 @@ fn a_goal_row_opens_its_reason_and_a_turn_ends_on_its_done_line() {
     assert!(!done.is_empty() && done.iter().all(|d| d.starts_with("Worked for ")), "{done:?}");
 }
 
+/// A turn that left work running ends on its time alone: the agent's count at the turn's end
+/// ("2 background tasks still running") is neither its own row nor part of the done line, since
+/// the Background tray says what runs now, by kind, and the two disagreed.
+#[test]
+fn a_done_line_leaves_what_still_runs_to_the_tray() {
+    use slopty_proto::thread::detail::Clipped;
+    use slopty_proto::thread::{ItemBody, Notice};
+    let mut state = fixtures::thread("tools");
+    let last = state.items.len().saturating_sub(1);
+    state.items[last].body = ItemBody::Notice(Notice::new(
+        Notice::TURN,
+        Clipped::whole("2 background tasks still running"),
+    ));
+    let entries = transcript::entries(&state, &transcript::Look::new("w"));
+    let notes: Vec<(&str, &str)> = entries
+        .iter()
+        .flat_map(|e| &e.parts)
+        .filter_map(|p| match p {
+            MessagePart::Note { note, .. } => Some((note.kind.as_str(), note.text.as_str())),
+            _ => None,
+        })
+        .collect();
+    let done: Vec<&str> = notes
+        .iter()
+        .filter(|(kind, _)| *kind == crate::view_model::folds::DONE)
+        .map(|(_, text)| *text)
+        .collect();
+    assert!(!done.is_empty(), "the turn ends on its done line: {notes:?}");
+    assert!(done.iter().all(|d| d.starts_with("Worked for ")), "{done:?}");
+    assert!(notes.iter().all(|(_, text)| !text.contains("still running")), "{notes:?}");
+}
+
 /// An agent that is not signed in says so where it runs, its own words behind it; any other
 /// failure of the model's service stays the general one.
 #[test]

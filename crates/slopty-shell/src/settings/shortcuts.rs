@@ -521,7 +521,7 @@ impl Render for ShortcutsPage {
             || send_behavior != ComposerSendBehavior::default()
             || compact_mode != COMPACT_MODE_DEFAULT
             || compact_model_picker != COMPACT_MODEL_PICKER_DEFAULT;
-        let mac = cfg!(target_os = "macos");
+        let mac = crate::keys::MOD_IS_COMMAND; // slopty: an iPad's ⌘ too
         let send_behaviors = [
             (ComposerSendBehavior::Enter, SharedString::from(crate::keys::combo_text_on(mac, "enter"))),
             (ComposerSendBehavior::ModEnter, SharedString::from(modifier_send_label(mac))),
@@ -1007,8 +1007,8 @@ mod tests {
             record_key("k", false, true, true, true),
             RecordOutcome::Set("mod-alt-shift-k".into())
         );
-        // macOS-only: elsewhere ctrl IS the primary and records as "mod".
-        #[cfg(target_os = "macos")]
+        // Apple-only: elsewhere ctrl IS the primary and records as "mod".
+        #[cfg(target_vendor = "apple")] // slopty: an iPad's ⌘ too
         assert_eq!(
             record_key("tab", true, false, true, false),
             RecordOutcome::Set("ctrl-shift-tab".into())

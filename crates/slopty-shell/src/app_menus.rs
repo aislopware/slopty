@@ -146,14 +146,15 @@ fn close_active_window(tab_first: bool, cx: &mut App) {
 /// the platform convention everywhere (Cmd+, on macOS, Ctrl+, elsewhere);
 /// window/application lifecycle shortcuts remain macOS-only.
 pub fn bind_keys(cx: &mut App) {
-    cx.bind_keys(app_key_bindings(cfg!(target_os = "macos")));
+    // slopty: Settings is ⌘, on every Apple keyboard, an iPad's too.
+    cx.bind_keys(app_key_bindings(crate::keys::MOD_IS_COMMAND, cfg!(target_os = "macos")));
 }
 
 /// The binding table behind [`bind_keys`] — `KeyBinding` construction is pure
 /// (no `App`), so unit tests can inspect it directly.
-fn app_key_bindings(macos: bool) -> Vec<KeyBinding> {
+fn app_key_bindings(command: bool, macos: bool) -> Vec<KeyBinding> {
     let mut bindings = vec![KeyBinding::new(
-        if macos { "cmd-," } else { "ctrl-," },
+        if command { "cmd-," } else { "ctrl-," }, // slopty: `command`, not `macos`
         shell::OpenSettings,
         None,
     )];
@@ -512,7 +513,7 @@ mod tests {
                 })
         };
         let combo = |source: &str| vec![Keystroke::parse(source).unwrap()];
-        let macos = app_key_bindings(true);
+        let macos = app_key_bindings(true, true);
         assert_eq!(
             find(&macos, shell::OpenSettings.name()),
             Some(combo("cmd-,"))
@@ -523,7 +524,12 @@ mod tests {
         assert_eq!(find(&macos, CloseWindow.name()), Some(combo("cmd-shift-w")));
         assert_eq!(find(&macos, Minimize.name()), Some(combo("cmd-m")));
 
-        let other = app_key_bindings(false);
+        // slopty: an iPad's keyboard opens Settings with ⌘, and has no window verbs to bind.
+        let ipad = app_key_bindings(true, false);
+        assert_eq!(find(&ipad, shell::OpenSettings.name()), Some(combo("cmd-,")));
+        assert_eq!(find(&ipad, Quit.name()), None);
+
+        let other = app_key_bindings(false, false);
         assert_eq!(
             find(&other, shell::OpenSettings.name()),
             Some(combo("ctrl-,"))

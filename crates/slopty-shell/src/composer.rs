@@ -1757,8 +1757,8 @@ fn input_bindings(context: &'static str) -> Vec<KeyBinding> {
         bindings.push(KeyBinding::new(&format!("{prefix}-z"), Undo, ctx));
         bindings.push(KeyBinding::new(&format!("shift-{prefix}-z"), Redo, ctx));
     }
-    // Word-level editing: Option on macOS, Ctrl on Windows/Linux.
-    let word_edit_prefix = if cfg!(target_os = "macos") {
+    // Word-level editing: Option on Apple keyboards, Ctrl on Windows/Linux.
+    let word_edit_prefix = if crate::keys::MOD_IS_COMMAND { // slopty: an iPad's ⌥ too
         "alt"
     } else {
         "ctrl"
@@ -1838,7 +1838,7 @@ pub fn init(cx: &mut App, send_behavior: ComposerSendBehavior) {
         }
     }
 
-    let word_edit_prefix = if cfg!(target_os = "macos") {
+    let word_edit_prefix = if crate::keys::MOD_IS_COMMAND { // slopty: an iPad's ⌥ too
         "alt"
     } else {
         "ctrl"
@@ -6192,7 +6192,9 @@ impl Composer {
             queue_edit_finishing: false,
             queue_edit_task: None,
             queue_edit_renew_task: None,
-            focus_pending: true,
+            // slopty: a new composer takes the keyboard, but not on a touch screen, where the
+            // software keyboard would rise over the chat before the person taps it.
+            focus_pending: !crate::shell::touch_screen(),
             card_focus_pending: false,
             // slopty: dictation removed.
             queue_drag: None,

@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use gpui::accesskit::NodeId;
 use gpui::{TestAppContext, VisualTestContext};
-use slopty_view_doc::dock::{ChatDock, DockCan, GoalLine, ModSurface, ModeChip, ModeChoice, SubagentKindRow};
+use slopty_view_doc::dock::{ChatDock, DockCan, GoalLine, ModSurface, ModeChip, ModeChoice, NoteLine, SubagentKindRow};
 use slopty_view_doc::work::{MainRow, WorkCounts, WorkRow, WorkTray};
 use slopty_view_doc::{MessageStatus, QueueDeliveryGate, QueuedMessage};
 
@@ -242,6 +242,46 @@ fn a_reveal_opens_the_tray_at_its_row(cx: &mut TestAppContext) {
         .find(|node| node.role == Role::ListItem && node.label.starts_with("monitor"))
         .expect("the ended row shows");
     assert_eq!(marked.selected, Some(true));
+}
+
+/// What still runs is said once, by the tray's header: the waiting line yields to it and stands
+/// only while no tray says it. The quiet lines' card shares the tray's edges, so the stack over
+/// the composer has one column (the iPad drew the lines 8 points wider on each side).
+#[gpui::test]
+fn what_still_runs_is_said_once_and_the_cards_share_one_column(cx: &mut TestAppContext) {
+    let waiting = "1 command still running";
+    let dock = ChatDock {
+        waiting: Some(waiting.into()),
+        notes: vec![NoteLine {
+            key: "n".into(),
+            text: "Indexing the repository".into(),
+            tone: NoteLine::INFO.into(),
+            priority: "low".into(),
+            at: chrono::Utc::now().timestamp_millis(),
+            until: None,
+        }],
+        can: can(),
+        ..ChatDock::default()
+    };
+    let tray = WorkTray {
+        main: MainRow::default(),
+        rows: vec![work_row("task:a", WorkRow::COMMAND, true)],
+        counts: WorkCounts { commands: 1, ..WorkCounts::default() },
+        summary: "1 command".into(),
+        can_stop_all: true,
+    };
+    let (composer, _, cx) = open(cx, dock, Some(tray));
+    let nodes = draw(cx);
+    assert!(find(&nodes, Role::Status, waiting).is_none(), "the tray says it: {:?}", labels(&nodes, Role::Status));
+    assert!(find(&nodes, Role::Status, "Indexing the repository").is_some(), "a note still shows");
+    let lines = cx.debug_bounds("dock-lines").expect("the quiet lines' card");
+    let tray = cx.debug_bounds("background-tray").expect("the tray");
+    assert_eq!((lines.left(), lines.right()), (tray.left(), tray.right()), "one column");
+
+    // With no tray up, the waiting line says it.
+    composer.update(cx, |composer, _| composer.dock.tray = None);
+    let nodes = draw(cx);
+    assert!(find(&nodes, Role::Status, waiting).is_some(), "{:?}", labels(&nodes, Role::Status));
 }
 
 /// The footer says the mode and the goal (the tray above it counts the background work); a

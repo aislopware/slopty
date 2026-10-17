@@ -2,12 +2,17 @@
 //! shortcuts page and the accessibility tree (`docs/decisions/ui.md`, "Tooltips name the action
 //! and its key").
 //!
-//! On the Mac a stroke is its modifier glyphs in ⌃⌥⇧⌘ order with no separators, then the key
-//! ("⇧⌘A"), with Claude desktop's key names (⏎ ⌫ ⇥ ␣ ← → ↑ ↓ and the word "Esc"); elsewhere it is
-//! words ("Ctrl+Shift+A"). The binding shown is the one the keymap holds when the hint draws, so
-//! a rebind shows at once and an unbound action shows nothing.
+//! On every Apple keyboard (the Mac's, an iPad's or iPhone's hardware one) a stroke is its
+//! modifier glyphs in ⌃⌥⇧⌘ order with no separators, then the key ("⇧⌘A"), with Claude desktop's
+//! key names (⏎ ⌫ ⇥ ␣ ← → ↑ ↓ and the word "Esc"); elsewhere it is words ("Ctrl+Shift+A"). The
+//! binding shown is the one the keymap holds when the hint draws, so a rebind shows at once and an
+//! unbound action shows nothing.
 
 use gpui::{Action, App, FocusHandle, KeyBinding, Modifiers, SharedString, Window};
+
+/// Whether "mod" is ⌘: on every Apple keyboard, the Mac's and an iPad's or iPhone's hardware one
+/// alike, and Ctrl elsewhere. What the keymap binds and what a hint names both follow it.
+pub const MOD_IS_COMMAND: bool = cfg!(target_vendor = "apple");
 
 /// Between the chords of a multi-stroke binding ("⌘K ⌘S"): a thin space.
 const CHORD_GAP: char = '\u{2009}';
@@ -15,7 +20,7 @@ const CHORD_GAP: char = '\u{2009}';
 /// How a key reads in Slopty's chrome: Mac glyphs in ⌃⌥⇧⌘ order with no separators ("⇧⌘A"),
 /// Claude desktop's key names (⏎ ⌫ ⇥ ␣ ← → ↑ ↓, "Esc"); elsewhere "Ctrl+Shift+A".
 pub fn stroke_text(modifiers: &Modifiers, key: &str) -> String {
-    stroke_text_on(cfg!(target_os = "macos"), modifiers, key)
+    stroke_text_on(MOD_IS_COMMAND, modifiers, key)
 }
 
 /// [`stroke_text`] for an explicit platform, so both spellings are testable on any machine.
@@ -146,7 +151,7 @@ fn global_binding(action: &dyn Action, cx: &App) -> Option<KeyBinding> {
 /// A stored combo ("mod-shift-a", "shift-tab", "escape") as [`stroke_text`] writes it, for keys a
 /// raw handler takes and no action carries, and for the shortcuts the settings store.
 pub fn combo_text(combo: &str) -> SharedString {
-    combo_text_on(cfg!(target_os = "macos"), combo).into()
+    combo_text_on(MOD_IS_COMMAND, combo).into()
 }
 
 /// [`combo_text`] for an explicit platform.
@@ -161,8 +166,8 @@ pub fn combo_text_on(mac: bool, combo: &str) -> String {
         .join(&CHORD_GAP.to_string())
 }
 
-/// One stored chord's modifiers and key. "mod" is ⌘ on the Mac and Ctrl elsewhere; a trailing
-/// "-" after a separator is the minus key ("mod--").
+/// One stored chord's modifiers and key. "mod" is ⌘ on Apple keyboards and Ctrl elsewhere
+/// ([`MOD_IS_COMMAND`]); a trailing "-" after a separator is the minus key ("mod--").
 fn parse_chord(mac: bool, chord: &str) -> (Modifiers, &str) {
     let (prefix, key) = match chord.strip_suffix("--") {
         Some(prefix) => (prefix, "-"),
@@ -201,7 +206,7 @@ pub fn aria(binding: &KeyBinding) -> SharedString {
 
 /// A stored combo in `aria-keyshortcuts` spelling (see [`combo_text`]).
 pub fn aria_combo(combo: &str) -> SharedString {
-    aria_combo_on(cfg!(target_os = "macos"), combo).into()
+    aria_combo_on(MOD_IS_COMMAND, combo).into()
 }
 
 /// [`aria_combo`] for an explicit platform.
@@ -315,6 +320,23 @@ mod tests {
         assert_eq!(aria_combo_on(true, "shift-tab"), "Shift+Tab");
         assert_eq!(aria_combo_on(true, "escape"), "Escape");
         assert_eq!(aria_combo_on(false, "mod-up"), "Control+ArrowUp");
+    }
+
+    /// Every Apple keyboard's "mod" is ⌘, an iPad's hardware one included: the keymap binds ⌘N
+    /// and the hint names ⌘N (an iPad bound Ctrl+N and named it "Ctrl+N" while the choice read
+    /// `target_os = "macos"`). Off Apple both are Ctrl.
+    #[test]
+    fn every_apple_keyboard_binds_and_names_mod_as_command() {
+        let apple = cfg!(target_vendor = "apple");
+        assert_eq!(MOD_IS_COMMAND, apple);
+        let (bound, named) = if apple { ("cmd-n", "⌘N") } else { ("ctrl-n", "Ctrl+N") };
+        assert_eq!(crate::settings::platform_combo("mod-n"), bound);
+        assert_eq!(combo_text("mod-n").as_ref(), named);
+        assert_eq!(
+            crate::settings::combo_from_keystroke(!apple, false, false, apple, "n").as_deref(),
+            Some("mod-n"),
+            "the primary key records as mod"
+        );
     }
 
     gpui::actions!(keys_test, [Probe, Contextual, Unbound]);
