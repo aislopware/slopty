@@ -128,7 +128,7 @@ impl Shell {
                 if !owner_active
                     || !source.read_with(cx, |files, cx| files.accepts_origin(&intent.origin, cx))
                 {
-                    return Err("File operation cancelled after switching sessions".into());
+                    return Err("Couldn\u{2019}t finish the file change: another chat opened first. Try it again.".into());
                 }
                 let checkout = intent
                     .origin

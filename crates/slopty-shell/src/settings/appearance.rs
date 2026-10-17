@@ -1073,7 +1073,7 @@ impl AppearancePage {
             files: true,
             directories: false,
             multiple: false,
-            prompt: Some("Choose New Thread Composer Background".into()),
+            prompt: Some("Choose a new chat background".into()),
         });
         cx.spawn(async move |this, cx| {
             let path = match receiver.await {
@@ -3768,7 +3768,7 @@ impl Render for AppearancePage {
                     div()
                         .flex_1()
                         .min_w(px(160.0))
-                        .child(widgets::row_title(&theme, "New thread background"))
+                        .child(widgets::row_title(&theme, "New chat background"))
                         .child(widgets::meta_line(&theme, background_meta)),
                 )
                 .child(

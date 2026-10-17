@@ -11,6 +11,8 @@
 //!   ⌘⇧B is where an older map's sidebar key moves.)
 //! - ⌘Z undoes the archive just made, while its toast is up.
 //! - ⇧⌘O opens "Resume a session…", the picker of Claude Code's past sessions (`past_sessions`).
+//! - ⌘. opens the next chat that needs the person, across projects and machines, then the
+//!   finished ones nobody has seen (`sidebar_status::needing_you`).
 //! - ⌥⌘O opens Open in under its button, ⇧⌘\\ expands the side pane over the chat, and ⌘I shows
 //!   or hides the chat's details card (each its titlebar button's key).
 //!
@@ -41,6 +43,7 @@ actions!(
         NextEffort,
         UndoArchive,
         ResumeSession,
+        NextNeedsYou,
         OpenIn,
         ToggleExpandPane,
         ToggleSessionInfo
@@ -90,6 +93,7 @@ pub(super) fn bind_keys(cx: &mut App, keymap: &KeymapConfig) {
         (ShortcutId::OpenBranchPicker, Box::new(OpenBranchPicker)),
         (ShortcutId::NextEffort, Box::new(NextEffort)),
         (ShortcutId::ResumeSession, Box::new(ResumeSession)),
+        (ShortcutId::NextNeedsYou, Box::new(NextNeedsYou)),
     ] {
         let combo = platform_combo(keymap.get(id));
         if combo.is_empty() {
@@ -177,6 +181,12 @@ impl Shell {
                 return;
             }
             this.toggle_resume_picker(window, cx);
+        }))
+        .on_action(cx.listener(|this, _: &NextNeedsYou, _, cx| {
+            // Under an overlay that holds the keyboard the key waits, as the chat keys do.
+            if !this.overlay_owns_keyboard(cx) {
+                this.open_next_needing_you(cx);
+            }
         }))
         .on_action(cx.listener(|this, _: &UndoArchive, window, cx| {
             if in_own_keys(window) || !this.undo_last_archive(cx) {
@@ -274,7 +284,7 @@ impl Shell {
             .map(|title| crate::transcript::single_line(&title));
         let words = match title {
             Some(title) => format!("Archived \u{201c}{title}\u{201d}"),
-            None => "Archived the session".to_owned(),
+            None => "Archived the chat".to_owned(),
         };
         let shell = cx.weak_entity();
         let undo = chat_id.clone();

@@ -79,7 +79,7 @@ impl Shell {
     ) -> bool {
         self.discard_stale_sidebar_pin_writes(cx);
         let Some(engine) = self.state.read(cx).engine().cloned() else {
-            self.set_pin_write_notice("Engine not connected. Sidebar was not changed.".into(), cx);
+            self.set_pin_write_notice("Couldn\u{2019}t change the sidebar: the Slopty engine isn\u{2019}t connected. Try again once it is.".into(), cx);
             cx.notify();
             return false;
         };

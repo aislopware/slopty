@@ -2660,14 +2660,14 @@ impl TerminalView {
                 )
             },
             |el| {
-                let accent = theme.accent;
                 el.debug_selector(move || id.to_owned())
                     .role(gpui::Role::Button)
                     .aria_label(label)
                     .tab_index(0)
                     .occlude()
                     .cursor_pointer()
-                    .focus_visible(move |style| style.border_2().border_color(accent))
+                    // The shell's ring: paint only, so focus never grows the pill.
+                    .map(|el| chrome::focus_ring(el, theme))
                     .map(chrome::keep_keyboard)
                     .on_click(cx.listener(move |this, _ev, window, cx| click(this, window, cx)))
             },
@@ -7741,6 +7741,33 @@ mod tests {
         let text = view
             .read_with(cx, |v, cx| v.search.as_ref().map(|s| s.input.read(cx).text().to_owned()));
         assert_eq!(text.as_deref(), Some(""), "no newline in the field");
+    }
+
+    /// ⌘F gives the find field the keyboard: keys typed next land in it, never in the program,
+    /// and the field says its words on its accessibility node.
+    #[gpui::test]
+    fn keys_typed_after_cmd_f_land_in_the_find_field(cx: &mut TestAppContext) {
+        let (view, mut rx, cx) = terminal(cx);
+        cx.run_until_parked();
+        drain_input(&mut rx);
+        cx.simulate_keystrokes("cmd-f");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("2 9");
+        cx.run_until_parked();
+        let text = view
+            .read_with(cx, |v, cx| v.search.as_ref().map(|s| s.input.read(cx).text().to_owned()));
+        assert_eq!(text.as_deref(), Some("29"), "the field has what was typed");
+        assert!(drain_input(&mut rx).is_empty(), "nothing typed reached the program");
+        cx.update(|window, _cx| window.set_a11y_active(true));
+        cx.run_until_parked();
+        let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
+        let field = tree
+            .iter()
+            .find(|n| n.role == "SearchInput")
+            .unwrap_or_else(|| panic!("no find field: {tree:#?}"));
+        assert_eq!(field.label.as_deref(), Some("Find"));
+        assert_eq!(field.value.as_deref(), Some("29"), "{field:?}");
+        assert!(field.focused, "the field holds the keyboard: {field:?}");
     }
 
     /// A long press held and dragged above the grid scrolls into history a tick at a time, as

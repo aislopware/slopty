@@ -241,18 +241,23 @@ pub(crate) fn tab_chip(
                 .text_color(if active { theme.text } else { theme.text_muted })
                 .child(title),
         )
-        .child(
-            // Trailing slot: the unsaved dot normally, ✕ on tab hover — two
-            // stacked layers crossfaded by the tab's hover.
+        .child({
+            // slopty: the press reaches past the 18 pt slot it draws, to 24 pt under a pointer
+            // and 44 tall on a touch screen (M25); its margins give the extra back, so the
+            // tab's layout is the slot's.
+            let (hit_w, hit_h) = close_hit_size(crate::shell::touch_screen());
+            let close_label = format!("{close_id}-{ix}");
             div()
                 .id((close_id, ix))
-                .debug_selector(move || format!("{close_id}-{ix}"))
+                .debug_selector(move || format!("{close_label}-hit"))
                 .flex_none()
-                .size(px(18.0))
-                // slopty: r 6 and a faded wash, as the strip's other controls; the tab in front
-                // names ⌘W, which closes it.
-                .rounded(px(CONTROL_RADIUS))
-                .relative()
+                .w(px(hit_w))
+                .h(px(hit_h))
+                .mx(px(-(hit_w - CLOSE_SLOT) / 2.0))
+                .my(px(-(hit_h - CLOSE_SLOT) / 2.0))
+                .flex()
+                .items_center()
+                .justify_center()
                 .role(gpui::Role::Button)
                 .aria_label("Close tab")
                 .tooltip(if active {
@@ -264,12 +269,7 @@ pub(crate) fn tab_chip(
                     Box::new(crate::settings::widgets::text_tooltip("Close tab"))
                 })
                 .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
-                .bg(crate::motion::hover_blend(
-                    &close_fade,
-                    crate::theme::wash(0.0),
-                    crate::theme::wash(0.11),
-                ))
-                .on_hover(crate::motion::hover_listener(close_fade))
+                .on_hover(crate::motion::hover_listener(close_fade.clone()))
                 // The tab owns a drag payload. Claim the close press before
                 // it reaches that parent or GPUI starts a tab drag instead of
                 // delivering the close click.
@@ -281,33 +281,82 @@ pub(crate) fn tab_chip(
                     cx.stop_propagation();
                     on_close(event, window, cx);
                 })
-                .when(dirty, |slot| {
-                    slot.child(
-                        div()
-                            .absolute()
-                            .inset_0()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .opacity(1.0 - shown)
-                            .child(div().size(px(6.0)).rounded_full().bg(theme.text_muted)),
-                    )
-                })
                 .child(
+                    // Trailing slot: the unsaved dot normally, ✕ on tab hover — two
+                    // stacked layers crossfaded by the tab's hover.
                     div()
-                        .absolute()
-                        .inset_0()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .opacity(shown)
+                        .debug_selector(move || format!("{close_id}-{ix}"))
+                        .flex_none()
+                        .size(px(CLOSE_SLOT))
+                        // slopty: r 6 and a faded wash, as the strip's other controls; the tab in
+                        // front names ⌘W, which closes it.
+                        .rounded(px(CONTROL_RADIUS))
+                        .relative()
+                        .bg(crate::motion::hover_blend(
+                            &close_fade,
+                            crate::theme::wash(0.0),
+                            crate::theme::wash(0.11),
+                        ))
+                        .when(dirty, |slot| {
+                            slot.child(
+                                div()
+                                    .absolute()
+                                    .inset_0()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .opacity(1.0 - shown)
+                                    .child(div().size(px(6.0)).rounded_full().bg(theme.text_muted)),
+                            )
+                        })
                         .child(
-                            crate::icons::icon(crate::icons::CLOSE)
-                                .size(px(12.0))
-                                .text_color(theme.text_muted),
+                            div()
+                                .absolute()
+                                .inset_0()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .opacity(shown)
+                                .child(
+                                    crate::icons::icon(crate::icons::CLOSE)
+                                        .size(px(12.0))
+                                        .text_color(theme.text_muted),
+                                ),
                         ),
-                ),
-        )
+                )
+        })
+}
+
+// slopty: a small control takes presses past what it draws (M25).
+/// The least a pointer's press target measures, either way.
+pub(crate) const POINTER_TARGET: f32 = 24.0;
+/// The least a finger's press target measures, either way.
+pub(crate) const TOUCH_TARGET: f32 = 44.0;
+
+/// The press target around a small control drawn `drawn` pt square: [`POINTER_TARGET`] (or
+/// [`TOUCH_TARGET`] on a touch screen) when it draws smaller, centred on it, its margins giving
+/// the extra back so the layout is the drawn size. The caller puts the drawn control in it and
+/// fades that one's hover with the target's group.
+pub(crate) fn press_target(id: impl Into<gpui::ElementId>, drawn: f32) -> gpui::Stateful<Div> {
+    let least = if crate::shell::touch_screen() { TOUCH_TARGET } else { POINTER_TARGET };
+    let size = drawn.max(least);
+    div()
+        .id(id)
+        .flex_none()
+        .size(px(size))
+        .m(px(-(size - drawn) / 2.0))
+        .flex()
+        .items_center()
+        .justify_center()
+}
+
+/// The slot a tab's ✕ draws in.
+const CLOSE_SLOT: f32 = 18.0;
+
+/// How far a tab's ✕ takes a press, width and height: 24 pt under a pointer; on a touch screen
+/// 44 tall, the finger's size, and only as wide as leaves the title and the next tab their own.
+const fn close_hit_size(touch: bool) -> (f32, f32) {
+    if touch { (30.0, 44.0) } else { (24.0, 24.0) }
 }
 
 /// A chip's leading glyph, quieter on inactive tabs.
@@ -503,6 +552,29 @@ mod tests {
         assert_eq!(filled(&quads, BLUE, scale).unwrap(), blue, "its neighbour holds its place");
     }
 
+    /// Every focus style of the window's frame (the shell, its sidebar and Settings) is the
+    /// ring, paint only: none adds a border, which would grow its control and shift its row.
+    #[test]
+    fn the_frames_focus_styles_are_the_ring() {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = vec![src.join("shell.rs"), src.join("settings.rs")];
+        for dir in ["shell", "settings"] {
+            for entry in std::fs::read_dir(src.join(dir)).unwrap() {
+                files.push(entry.unwrap().path());
+            }
+        }
+        let mut bordered = Vec::new();
+        for file in files.iter().filter(|f| f.extension().is_some_and(|e| e == "rs")) {
+            let text = std::fs::read_to_string(file).unwrap();
+            for (ix, line) in text.lines().enumerate() {
+                if line.contains(".focus_visible(") && !line.contains("outline_ring") {
+                    bordered.push(format!("{}:{}", file.display(), ix + 1));
+                }
+            }
+        }
+        assert!(bordered.is_empty(), "use focus_ring: {bordered:#?}");
+    }
+
     /// A row's ring sits just inside its edge, where a list's clip cannot cut it.
     #[gpui::test]
     fn an_inset_ring_sits_inside_the_edge(cx: &mut gpui::TestAppContext) {
@@ -556,6 +628,7 @@ mod tests {
 
     struct Chip {
         dirty: bool,
+        closes: Rc<Cell<usize>>,
     }
 
     impl Render for Chip {
@@ -572,7 +645,10 @@ mod tests {
                     leading: div().into_any_element(),
                 },
                 &theme,
-                |_, _, _| {},
+                {
+                    let closes = self.closes.clone();
+                    move |_, _, _| closes.set(closes.get() + 1)
+                },
             ))
         }
     }
@@ -585,7 +661,7 @@ mod tests {
             cx.set_global(Theme::dark());
             cx.set_reduce_motion(true);
         });
-        let (_, cx) = cx.add_window_view(|_, _| Chip { dirty: true });
+        let (_, cx) = cx.add_window_view(|_, _| Chip { dirty: true, closes: Rc::default() });
         let dot = Theme::dark().text_muted;
         let (quads, scale) = draw(cx);
         let shown = filled(&quads, dot, scale).expect("the unsaved dot at rest");
@@ -596,5 +672,62 @@ mod tests {
         );
         let (quads, scale) = draw(cx);
         assert!(filled(&quads, dot, scale).is_none(), "the hover hands the slot to the ✕");
+    }
+
+    /// A 20 pt control in a [`press_target`] takes a press 2 pt past its edge and keeps its
+    /// place in the row.
+    #[gpui::test]
+    fn a_press_target_reaches_past_a_small_control(cx: &mut gpui::TestAppContext) {
+        struct Row(Rc<Cell<usize>>);
+        impl Render for Row {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let presses = self.0.clone();
+                div().p(px(10.0)).flex().child(div().w(px(30.0)).h(px(20.0))).child(
+                    press_target("target", 20.0)
+                        .debug_selector(|| "target".to_owned())
+                        .on_click(move |_, _, _| presses.set(presses.get() + 1))
+                        .child(div().debug_selector(|| "drawn".to_owned()).size(px(20.0))),
+                )
+            }
+        }
+        cx.update(|cx| cx.set_global(Theme::dark()));
+        let presses = Rc::new(Cell::new(0));
+        let (_, cx) = cx.add_window_view({
+            let presses = presses.clone();
+            move |_, _| Row(presses)
+        });
+        draw(cx);
+        let drawn = cx.debug_bounds("drawn").unwrap();
+        let target = cx.debug_bounds("target").unwrap();
+        assert_eq!(f32::from(target.size.width), POINTER_TARGET);
+        assert_eq!(target.center(), drawn.center());
+        assert_eq!(f32::from(drawn.left()), 40.0, "the row lays it out at its drawn size");
+        cx.simulate_click(point(drawn.right() + px(1.5), drawn.top() - px(1.5)), Modifiers::none());
+        assert_eq!(presses.get(), 1);
+    }
+
+    /// A tab's ✕ draws in 18 pt but takes a press over 24 (44 tall on a touch screen), and the
+    /// larger target moves nothing: the slot sits where it always did.
+    #[gpui::test]
+    fn a_tabs_close_takes_a_press_past_what_it_draws(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::dark()));
+        let closes = Rc::new(Cell::new(0));
+        let (_, cx) = cx.add_window_view({
+            let closes = closes.clone();
+            move |_, _| Chip { dirty: false, closes }
+        });
+        draw(cx);
+        let tab = cx.debug_bounds("chip-0").expect("the tab");
+        let slot = cx.debug_bounds("chip-close-0").expect("the drawn slot");
+        let hit = cx.debug_bounds("chip-close-0-hit").expect("the press target");
+        assert_eq!(f32::from(slot.size.width), CLOSE_SLOT);
+        assert!(f32::from(hit.size.width) >= 24.0 && f32::from(hit.size.height) >= 24.0, "{hit:?}");
+        assert_eq!(hit.center(), slot.center(), "the target centres on the slot");
+        assert_eq!(slot.right(), tab.right() - px(4.0), "the slot holds its place");
+        // Two points outside the slot, inside the target.
+        cx.simulate_click(point(slot.left() - px(2.0), slot.center().y), Modifiers::none());
+        cx.simulate_click(point(slot.center().x, slot.bottom() + px(2.0)), Modifiers::none());
+        assert_eq!(closes.get(), 2);
+        assert_eq!(close_hit_size(true).1, 44.0, "a finger's height on a touch screen");
     }
 }

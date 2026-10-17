@@ -455,7 +455,7 @@ impl Render for PermissionsPage {
             Some(rules) if !rules.known => body.push(empty(
                 &theme,
                 "No rules yet",
-                "The agent says its rules once a session runs in this folder.",
+                "The agent says its rules once a chat runs in this folder.",
             )),
             Some(rules) => {
                 for (behavior, label, about) in BEHAVIORS {

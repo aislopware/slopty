@@ -102,8 +102,8 @@ pub(crate) use compact::touch_screen; // slopty: the keyboard waits for a tap
 mod chrome_keys; // slopty: find, history, tab and picker keys, and undoing an archive
 // slopty: the window's own commands, for the menu bar (`app_menus`).
 pub use chrome_keys::{
-    NavigateBack, NavigateForward, NewRightTab, OpenIn, ReopenClosedTab, ToggleExpandPane,
-    ToggleSessionInfo,
+    NavigateBack, NavigateForward, NewRightTab, NextNeedsYou, OpenIn, ReopenClosedTab,
+    ToggleExpandPane, ToggleSessionInfo,
 };
 mod closed_tabs; // slopty: the right pane's closed tabs, opened again
 mod open_in; // slopty: a chat's folder in the person's editor
@@ -685,7 +685,7 @@ impl SettingsSection {
             SettingsSection::Notifications => "Notifications",
             SettingsSection::Shortcuts => "Shortcuts",
             SettingsSection::General => "General",
-            SettingsSection::Archived => "Archived sessions",
+            SettingsSection::Archived => "Archived chats",
             SettingsSection::Permissions => "Permissions", // slopty: S2
         }
     }
@@ -2236,7 +2236,7 @@ impl Shell {
         let debug_gate = match std::env::var("SLOPTY_FORCE_GATE").ok().as_deref() {
             // slopty: no accounts, sync or sign-in.
             Some("failed") => Some(GatePhase::Failed(
-                "Could not reach the slopty engine on port 27901".into(),
+                "Couldn\u{2019}t reach the Slopty engine on port 27901. Restart Slopty.".into(),
             )),
             _ => None,
         };
@@ -4630,7 +4630,7 @@ impl Shell {
             })
             .when(session_id, |menu| {
                 menu.child(
-                    item("chat-copy-session", "Harness session ID".into()).on_click(cx.listener(
+                    item("chat-copy-session", "Agent session ID".into()).on_click(cx.listener(
                         move |this, _, _, cx| this.copy_harness_session_id(&session_chat_id, cx),
                     )),
                 )
@@ -4662,7 +4662,7 @@ impl Shell {
             cx.write_to_clipboard(ClipboardItem::new_string(link));
             self.show_notice(crate::toast::ToastKind::Success, "Slopty conversation link copied", cx);
         } else {
-            self.show_notice(crate::toast::ToastKind::Error, "Conversation link is not ready yet", cx);
+            self.show_notice(crate::toast::ToastKind::Error, "Couldn\u{2019}t copy the chat\u{2019}s link yet. Try again in a moment.", cx);
         }
         self.close_chat_menu(cx);
         cx.notify();
@@ -4694,7 +4694,7 @@ impl Shell {
             .and_then(|chat| chat.harness_session_id.clone());
         if let Some(id) = id.filter(|id| !id.trim().is_empty()) {
             cx.write_to_clipboard(ClipboardItem::new_string(id));
-            self.show_notice(crate::toast::ToastKind::Success, "Harness session ID copied", cx);
+            self.show_notice(crate::toast::ToastKind::Success, "Agent session ID copied", cx);
         }
         self.close_chat_menu(cx);
         cx.notify();
@@ -4846,7 +4846,7 @@ impl Shell {
             }
             if let Some(folder) = folder {
                 let on = machine.map(|machine| format!(" on {machine}")).unwrap_or_default();
-                crate::toast::info(cx, format!("No project holds {folder}{on}, so the session starts without one"));
+                crate::toast::info(cx, format!("No project holds {folder}{on}, so the chat starts without one"));
             }
         }
         let input = self.composer.read(cx).input.clone();
@@ -5185,7 +5185,7 @@ impl Shell {
     /// Fire a Mutate op; failures surface in the sidebar notice strip.
     fn mutate(&mut self, params: serde_json::Value, cx: &mut Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
-            self.show_notice(crate::toast::ToastKind::Error, "Engine not connected", cx);
+            self.show_notice(crate::toast::ToastKind::Error, "Couldn\u{2019}t reach the Slopty engine. Wait for it to connect, then try again.", cx);
             cx.notify();
             return;
         };
@@ -5245,7 +5245,7 @@ impl Shell {
         if !revealed {
             // The sidebar explains its own refusals.
             if surface == ChatRenameSurface::Explorer {
-                self.show_notice(crate::toast::ToastKind::Error, "Open this side chat's parent to rename it", cx);
+                self.show_notice(crate::toast::ToastKind::Error, "Couldn\u{2019}t rename this side chat here. Open its parent chat to rename it.", cx);
             }
             cx.notify();
             return;
@@ -5491,7 +5491,7 @@ impl Shell {
             Some(WorkspaceScope::Synced | WorkspaceScope::Development)
         );
         let result = if remote && !state.sidebar_preferences.can_edit() {
-            Err("Pins are still syncing")
+            Err("Couldn\u{2019}t pin while the sidebar syncs. Try again shortly.")
         } else {
             let current = self.active_sidebar_pins(cx);
             slopty_view_proto::validate_sidebar_pin_update(&current, pins)
@@ -6626,7 +6626,8 @@ impl Shell {
                             .role(gpui::Role::Button)
                             .aria_label("Back")
                             .tab_index(0)
-                            .focus_visible(|s| s.border_2().border_color(theme.accent))
+                            // slopty: the shell's ring, paint only (M8).
+                            .map(|el| crate::surface_chrome::focus_ring(el, &theme))
                             .cursor_pointer()
                             .on_click(cx.listener(|this, _, _, cx| this.close_settings(cx)))
                             .child(icon(icons::ARROW_LEFT).size(px(16.0)).text_color(
@@ -6771,7 +6772,8 @@ impl Shell {
                                             cx.stop_propagation();
                                         },
                                     ))
-                                    .focus_visible(|s| s.border_2().border_color(theme.accent))
+                                    // slopty: the shell's ring inside the row, paint only (M8).
+                                    .map(|el| crate::surface_chrome::focus_ring_inset(el, &theme))
                                     .cursor_pointer()
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.open_settings(item, cx)
@@ -6842,8 +6844,10 @@ impl Shell {
         let compact = search_query.is_none() && self.settings.sidebar_compact;
         let show_label = search_query.is_some() || self.settings.sidebar_show_project_label;
         // slopty: every row says which machine it runs on by that machine's kind (laptop,
-        // server, phone), so where a chat runs reads without the hover card.
-        let machine = pr_device.as_deref().and_then(|device_id| {
+        // server, phone), so where a chat runs reads without the hover card; with every chat on
+        // one machine the glyph would say nothing, so none draws (`sidebar_status::span_machines`).
+        let spans = sidebar_status::span_machines(self.state.read(cx));
+        let machine = pr_device.as_deref().filter(|_| spans).and_then(|device_id| {
             self.state.read(cx).devices.iter().find(|device| device.id == device_id).map(|device| {
                 (
                     spaces::device_glyph(&device.platform),
@@ -7783,7 +7787,7 @@ impl Shell {
         let (label, glyph): (SharedString, AnyElement) = match conn.state {
             _ if chat_state == Some(slopty_view_proto::ChatSyncState::StorageError) => (
                 // slopty: work may be lost: the failure's red, not the waiting amber.
-                "Changes could not be saved".into(),
+                "Couldn\u{2019}t save changes".into(),
                 div().size(px(5.0)).rounded_full().bg(theme.danger).into_any_element(),
             ),
             S::Disabled => return None,
@@ -8116,8 +8120,8 @@ impl Shell {
                 .text_color(theme.text_faint)
                 .child(
                     div()
-                        .debug_selector(move || format!("sidebar-empty: {}", if compact { "No sessions yet" } else { "No chats yet" }))
-                        .child(SharedString::from(if compact { "No sessions yet" } else { "No chats yet" })),
+                        .debug_selector(|| "sidebar-empty: No chats yet".to_owned())
+                        .child(SharedString::from("No chats yet")),
                 )
                 .when(!combo.is_empty(), |el| {
                     el.child(
@@ -8343,7 +8347,7 @@ impl Shell {
             .aria_label(format!("Server: {user_line}, {menu_identity}")) // slopty: the server, not an account.
             .aria_expanded(open)
             .tab_index(0)
-            .focus_visible(|s| s.border_2().border_color(theme.accent))
+            .map(|el| crate::surface_chrome::focus_ring(el, theme)) // slopty: paint only (M8)
             .relative()
             .h(px(SIDEBAR_FOOTER_BUTTON_SIZE))
             .min_w_0()

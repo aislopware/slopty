@@ -735,7 +735,7 @@ impl Shell {
             return;
         }
         let Some(engine) = self.state.read(cx).engine().cloned() else {
-            self.show_notice(crate::toast::ToastKind::Error, "Not connected", cx);
+            self.show_notice(crate::toast::ToastKind::Error, "Couldn\u{2019}t reach the Slopty engine. Wait for it to connect, then try again.", cx);
             return;
         };
         let params = serde_json::json!({
@@ -788,7 +788,7 @@ impl Shell {
             Some(picker) => picker.refused = Some((key.to_owned(), why.to_owned())),
             None => self.show_notice(
                 crate::toast::ToastKind::Error,
-                format!("The session did not open: {why}"),
+                format!("Couldn\u{2019}t open the Claude Code session. Try again. ({why})"),
                 cx,
             ),
         }
@@ -831,7 +831,7 @@ impl Shell {
             return;
         }
         let Some(scope) = self.resume_scope(cx) else {
-            self.show_notice(crate::toast::ToastKind::Error, "Connect a machine first", cx);
+            self.show_notice(crate::toast::ToastKind::Error, "Couldn\u{2019}t list past sessions with no machine connected. Add one in Settings \u{2192} Devices.", cx);
             return;
         };
         self.command_palette = None;

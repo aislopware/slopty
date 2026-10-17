@@ -305,7 +305,7 @@ fn install_staged_background(
     let data_dir = cx
         .try_global::<SettingsStore>()
         .map(|store| store.data_dir.clone())
-        .ok_or_else(|| "Unable to save the image. Restart Slopty and try again.".to_string())?;
+        .ok_or_else(|| "Couldn\u{2019}t save the image. Restart Slopty and try again.".to_string())?;
     let prepared = prepare_background_file(staged, &data_dir)?;
     commit_background(source, prepared, color, cx)
 }
@@ -334,7 +334,7 @@ fn prepare_background_file(
 ) -> Result<PreparedBackgroundFile, String> {
     let backgrounds_dir = data_dir.join(NEW_THREAD_BACKGROUND_DIR);
     std::fs::create_dir_all(&backgrounds_dir).map_err(|_| {
-        "Unable to save the image. Check folder permissions and try again.".to_string()
+        "Couldn\u{2019}t save the image. Check the folder\u{2019}s permissions and try again.".to_string()
     })?;
 
     let extension = Path::new(&staged.name)
@@ -353,7 +353,7 @@ fn prepare_background_file(
     {
         let _ = std::fs::remove_file(&temporary);
         return Err(
-            "Unable to save the image. Check folder permissions and try again.".to_string(),
+            "Couldn\u{2019}t save the image. Check the folder\u{2019}s permissions and try again.".to_string(),
         );
     }
 
@@ -374,7 +374,7 @@ fn commit_background(
     let data_dir = cx
         .try_global::<SettingsStore>()
         .map(|store| store.data_dir.clone())
-        .ok_or_else(|| "Unable to save the image. Restart Slopty and try again.".to_string())?;
+        .ok_or_else(|| "Couldn\u{2019}t save the image. Restart Slopty and try again.".to_string())?;
     let backgrounds_dir = data_dir.join(NEW_THREAD_BACKGROUND_DIR);
     let replacement = prepared.0.as_ref().unwrap().clone();
     let mut next = current(cx);
@@ -392,7 +392,7 @@ fn commit_background(
     // setting that order can leave disk pointing at an image we just deleted.
     if next.save(&data_dir).is_err() {
         return Err(
-            "Unable to save the image. Check folder permissions and try again.".to_string(),
+            "Couldn\u{2019}t save the image. Check the folder\u{2019}s permissions and try again.".to_string(),
         );
     }
     prepared.0.take();
@@ -409,7 +409,7 @@ pub fn remove_new_thread_composer_background(cx: &mut App) -> Result<(), String>
     let data_dir = cx
         .try_global::<SettingsStore>()
         .map(|store| store.data_dir.clone())
-        .ok_or_else(|| "Unable to remove the image. Restart Slopty and try again.".to_string())?;
+        .ok_or_else(|| "Couldn\u{2019}t remove the image. Restart Slopty and try again.".to_string())?;
     let mut next = current(cx);
     let previous = next.new_thread_composer_background.take();
     next.wallpaper_source = None;
@@ -419,7 +419,7 @@ pub fn remove_new_thread_composer_background(cx: &mut App) -> Result<(), String>
     }
     if next.save(&data_dir).is_err() {
         return Err(
-            "Unable to remove the image. Check folder permissions and try again.".to_string(),
+            "Couldn\u{2019}t remove the image. Check the folder\u{2019}s permissions and try again.".to_string(),
         );
     }
     replace(next, SavePolicy::Immediate, cx);
@@ -1045,11 +1045,12 @@ pub enum ShortcutId {
     OpenBranchPicker,
     NextEffort,
     ResumeSession, // slopty: Claude Code's past sessions (`shell::past_sessions`)
+    NextNeedsYou, // slopty: the next chat waiting on the person (`shell::sidebar_status`)
     JumpSession(usize),
 }
 
 impl ShortcutId {
-    pub const ALL: [ShortcutId; 17 + JUMP_SLOTS] = [ // slopty: dictation and appshots removed.
+    pub const ALL: [ShortcutId; 18 + JUMP_SLOTS] = [ // slopty: dictation and appshots removed.
         ShortcutId::RandomWallpaper,
         ShortcutId::SaveFile,
         ShortcutId::BrowserReload,
@@ -1067,6 +1068,7 @@ impl ShortcutId {
         ShortcutId::OpenBranchPicker, // slopty
         ShortcutId::NextEffort, // slopty
         ShortcutId::ResumeSession, // slopty
+        ShortcutId::NextNeedsYou, // slopty
         ShortcutId::JumpSession(0),
         ShortcutId::JumpSession(1),
         ShortcutId::JumpSession(2),
@@ -1103,6 +1105,7 @@ impl ShortcutId {
             ShortcutId::OpenBranchPicker => "Open branch picker", // slopty
             ShortcutId::NextEffort => "Next effort level", // slopty
             ShortcutId::ResumeSession => "Resume a session", // slopty
+            ShortcutId::NextNeedsYou => "Next chat that needs you", // slopty
             ShortcutId::JumpSession(slot) => JUMP_LABELS.get(slot).copied().unwrap_or(""),
         }
     }
@@ -1152,6 +1155,9 @@ impl ShortcutId {
             ShortcutId::OpenBranchPicker => "mod-alt-b",
             ShortcutId::NextEffort => "mod-shift-e",
             ShortcutId::ResumeSession => "mod-shift-o", // slopty
+            // slopty: free in the app, the terminal (its ⌘. Escape binds on iPad only, in the
+            // grid) and macOS text fields, where ⌘⇧↓ selects to the end.
+            ShortcutId::NextNeedsYou => "mod-.",
             ShortcutId::JumpSession(slot) => JUMP_DEFAULTS.get(slot).copied().unwrap_or(""),
         }
     }
@@ -1189,6 +1195,7 @@ pub struct KeymapConfig {
     pub open_branch_picker: String,
     pub next_effort: String,
     pub resume_session: String, // slopty: Claude Code's past sessions
+    pub next_needs_you: String, // slopty: the next chat waiting on the person
     /// One combo per jump slot, in slot order. A list rather than nine fields:
     /// [`UiSettings::load`] discards the WHOLE file on a parse error, so a
     /// fixed-length array would let one malformed entry reset every unrelated
@@ -1258,6 +1265,7 @@ impl Default for KeymapConfig {
             open_branch_picker: ShortcutId::OpenBranchPicker.default_combo().into(), // slopty
             next_effort: ShortcutId::NextEffort.default_combo().into(), // slopty
             resume_session: ShortcutId::ResumeSession.default_combo().into(), // slopty
+            next_needs_you: ShortcutId::NextNeedsYou.default_combo().into(), // slopty
             jump_session: JUMP_DEFAULTS.iter().map(|c| (*c).to_string()).collect(),
         }
     }
@@ -1284,6 +1292,7 @@ impl KeymapConfig {
             ShortcutId::OpenBranchPicker => &self.open_branch_picker, // slopty
             ShortcutId::NextEffort => &self.next_effort, // slopty
             ShortcutId::ResumeSession => &self.resume_session, // slopty
+            ShortcutId::NextNeedsYou => &self.next_needs_you, // slopty
             ShortcutId::JumpSession(slot) => self
                 .jump_session
                 .get(slot)
@@ -1312,6 +1321,7 @@ impl KeymapConfig {
             ShortcutId::OpenBranchPicker => self.open_branch_picker = combo, // slopty
             ShortcutId::NextEffort => self.next_effort = combo, // slopty
             ShortcutId::ResumeSession => self.resume_session = combo, // slopty
+            ShortcutId::NextNeedsYou => self.next_needs_you = combo, // slopty
             ShortcutId::JumpSession(slot) => {
                 if slot < JUMP_SLOTS {
                     if self.jump_session.len() < JUMP_SLOTS {
@@ -1850,10 +1860,10 @@ pub fn announce_set_aside(cx: &mut App) -> bool {
     };
     let words = match set_aside {
         Some(backup) => format!(
-            "Settings could not be read, so Slopty started from its defaults. The old file is kept as {}.",
+            "Couldn\u{2019}t read your settings, so Slopty started from its defaults. The old file is kept as {}.",
             backup.file_name().map_or_else(|| backup.display().to_string(), |name| name.to_string_lossy().into_owned()),
         ),
-        None => "Settings could not be read, so Slopty started from its defaults.".to_owned(),
+        None => "Couldn\u{2019}t read your settings, so Slopty started from its defaults.".to_owned(),
     };
     crate::toast::error(cx, words);
     true

@@ -117,7 +117,7 @@ impl ArchivedPage {
             return;
         }
         let Some(engine) = self.state.read(cx).engine().cloned() else {
-            self.error = Some("Engine not connected".into());
+            self.error = Some("Couldn\u{2019}t reach the Slopty engine. Wait for it to connect, then try again.".into());
             cx.notify();
             return;
         };
@@ -166,11 +166,11 @@ impl ArchivedPage {
     ) -> Option<AnyElement> {
         let count = self.delete_all_confirm.as_ref()?.len();
         let theme = Theme::of(cx).for_popup();
-        // Same card as the sidebar's single "Delete session?" confirmation.
+        // Same card as the sidebar's single "Delete chat?" confirmation.
         let card = popover::dialog_card(&theme)
             .child(popover::dialog_title(
                 &theme,
-                "Delete all archived sessions?",
+                "Delete all archived chats?",
             ))
             .child(
                 div()
@@ -553,7 +553,7 @@ impl Render for ArchivedPage {
                                                 .min_w_0()
                                                 .child(widgets::page_header(
                                                     &theme,
-                                                    "Archived sessions",
+                                                    "Archived chats",
                                                     (count > 0).then_some(count),
                                                 ))
                                                 .child(widgets::page_subtitle(
@@ -576,17 +576,17 @@ impl Render for ArchivedPage {
 
 fn delete_all_body(count: usize) -> String {
     match count {
-        1 => "1 archived session will be permanently deleted. This can\u{2019}t be undone.".into(),
+        1 => "1 archived chat will be permanently deleted. This can\u{2019}t be undone.".into(),
         n => format!(
-            "{n} archived sessions will be permanently deleted. This can\u{2019}t be undone."
+            "{n} archived chats will be permanently deleted. This can\u{2019}t be undone."
         ),
     }
 }
 
 fn delete_all_failure(failed: usize) -> String {
     match failed {
-        1 => "Couldn\u{2019}t delete 1 archived session. Try again.".into(),
-        n => format!("Couldn\u{2019}t delete {n} archived sessions. Try again."),
+        1 => "Couldn\u{2019}t delete 1 archived chat. Try again.".into(),
+        n => format!("Couldn\u{2019}t delete {n} archived chats. Try again."),
     }
 }
 
@@ -742,7 +742,7 @@ mod tests {
                     .or_else(|| crate::toast::messages(cx).last().cloned());
                 assert_eq!(
                     notice.as_deref(),
-                    Some("Couldn\u{2019}t delete 1 archived session. Try again.")
+                    Some("Couldn\u{2019}t delete 1 archived chat. Try again.")
                 );
             })
             .unwrap();
@@ -750,8 +750,8 @@ mod tests {
 
     #[test]
     fn delete_all_copy_handles_one_and_many() {
-        assert!(delete_all_body(1).starts_with("1 archived session will"));
-        assert!(delete_all_body(146).starts_with("146 archived sessions will"));
+        assert!(delete_all_body(1).starts_with("1 archived chat will"));
+        assert!(delete_all_body(146).starts_with("146 archived chats will"));
     }
 
     #[test]

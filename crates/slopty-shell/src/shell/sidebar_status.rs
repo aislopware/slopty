@@ -195,6 +195,46 @@ pub(super) fn order_by_status(rows: &mut [(ChatIndicator, Chat)], state: &AppSta
     });
 }
 
+/// The chats the "Next chat that needs you" key walks: every chat that waits on the person,
+/// across projects and machines, in the order "By status" draws them, then each finished one
+/// nobody has seen.
+pub(super) fn needing_you(state: &AppState, now: DateTime<Utc>) -> Vec<String> {
+    let mut rows: Vec<(ChatIndicator, Chat)> =
+        state.overview_chats(now).into_iter().map(|(status, chat)| (status, chat.clone())).collect();
+    order_by_status(&mut rows, state, now);
+    let group = |status: ChatIndicator, chat: &Chat| StatusGroup::of(status, state.session_for(&chat.id), now);
+    let needs = rows.iter().filter(|(status, chat)| group(*status, chat) == StatusGroup::NeedsYou);
+    let unseen =
+        rows.iter().filter(|(status, chat)| group(*status, chat) == StatusGroup::Done && chat.unseen());
+    needs.chain(unseen).map(|(_, chat)| chat.id.clone()).collect()
+}
+
+/// Whether the visible chats run on more than one machine, so a row's machine glyph tells them
+/// apart.
+pub(super) fn span_machines(state: &AppState) -> bool {
+    let mut devices = state.visible_chats().map(|chat| chat.device_id.as_str());
+    let first = devices.next();
+    devices.any(|device| Some(device) != first)
+}
+
+impl super::Shell {
+    /// The key to the next chat that needs the person ([`needing_you`]): the one after the open
+    /// chat, round the end. Whether there was one to open.
+    pub(super) fn open_next_needing_you(&mut self, cx: &mut Context<Self>) -> bool {
+        let (order, selected) = {
+            let state = self.state.read(cx);
+            (needing_you(state, Utc::now()), state.selected_chat.clone())
+        };
+        let Some(next) = super::tabs::cycle_target(&order, selected.as_deref(), true) else {
+            return false;
+        };
+        if selected.as_deref() != Some(next.as_str()) {
+            self.open_chat(next, cx);
+        }
+        true
+    }
+}
+
 /// Why a row with display status `status` stands as it does, when that is worth a line: what a
 /// waiting agent waits on, or that it summarises its context. `None` for a row whose status word
 /// says it all.
@@ -669,6 +709,54 @@ mod tests {
         std::mem::forget(dir);
         let shell = host.read_with(cx, |host, _| host.0.clone());
         (shell, cx)
+    }
+
+    /// The key walks the chats that need the person, latest started first, then the finished
+    /// one nobody has seen, and comes round again; the chat at work is never one.
+    #[gpui::test]
+    fn the_needs_you_key_walks_the_waiting_then_the_unseen(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) = sidebar(cx, crate::settings::SidebarOrganization::ByProject);
+        let order = shell.read_with(cx, |shell, cx| needing_you(shell.state.read(cx), Utc::now()));
+        assert_eq!(order, ["question", "approval", "finished"], "whatever the sidebar's organisation");
+        let mut opened = Vec::new();
+        for _ in 0..4 {
+            shell.update(cx, |shell, cx| assert!(shell.open_next_needing_you(cx)));
+            opened.push(shell.read_with(cx, |shell, cx| shell.state.read(cx).selected_chat.clone().unwrap()));
+        }
+        assert_eq!(opened, ["question", "approval", "finished", "question"]);
+        // With nobody waiting, the key opens nothing.
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| state.chats.retain(|chat| chat.id == "working"));
+            assert!(!shell.open_next_needing_you(cx));
+        });
+    }
+
+    /// A row draws its machine's glyph only while the visible chats span more than one machine.
+    #[gpui::test]
+    fn the_machine_glyph_shows_only_across_machines(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) = sidebar(cx, crate::settings::SidebarOrganization::ByStatus);
+        let device = |id: &str, platform: &str| -> slopty_view_proto::Device {
+            serde_json::from_value(serde_json::json!({ "id": id, "name": id, "platform": platform }))
+                .unwrap()
+        };
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                state.devices = vec![device("local", "macos"), device("studio", "linux")];
+            });
+        });
+        redraw(cx);
+        assert!(cx.debug_bounds("chat-question-machine").is_none(), "one machine: nothing to tell apart");
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, cx| {
+                if let Some(chat) = state.chats.iter_mut().find(|chat| chat.id == "working") {
+                    chat.device_id = "studio".into();
+                }
+                cx.notify();
+            });
+        });
+        redraw(cx);
+        assert!(cx.debug_bounds("chat-question-machine").is_some(), "two machines: each row says its own");
+        assert!(cx.debug_bounds("chat-working-machine").is_some());
     }
 
     fn top(cx: &mut gpui::VisualTestContext, id: &str) -> f32 {

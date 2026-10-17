@@ -150,7 +150,7 @@ pub(crate) fn launch(what: &Open, cx: &mut App) {
         Open::App { app, path } => {
             let spawned = std::process::Command::new("open").args(["-a", app, path]).spawn();
             if let Err(error) = spawned {
-                crate::toast::error(cx, format!("Could not open {app}: {error}"));
+                crate::toast::error(cx, format!("Couldn\u{2019}t open {app}. Check that it is installed, then try again. ({error})"));
             }
         }
     }

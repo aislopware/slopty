@@ -275,13 +275,13 @@ fn search_error_message(error: &FilesClientError, what: &str) -> SharedString {
             } else {
                 "files"
             };
-            format!("The session's device runs an older slopty — update it to search its {subject}")
+            format!("Couldn\u{2019}t search its {subject}: the chat\u{2019}s machine runs an older Slopty. Update it there.")
                 .into()
         }
-        FilesClientError::Transport(_) => "The session's device is unreachable".into(),
+        FilesClientError::Transport(_) => "Couldn\u{2019}t reach the chat\u{2019}s machine. Check that it is on and online.".into(),
         FilesClientError::Encode(_)
         | FilesClientError::Decode(_)
-        | FilesClientError::Request(_) => "Search failed".into(),
+        | FilesClientError::Request(_) => "Couldn\u{2019}t search. Try again.".into(),
     }
 }
 
@@ -595,7 +595,7 @@ impl Shell {
         }
         self.close_add_space(cx);
         let search = cx.new(|cx| {
-            ComposerInput::with_context("Search threads, commands and files…", "PaletteSearch", cx)
+            ComposerInput::with_context("Search chats, commands and files…", "PaletteSearch", cx)
         });
         let events = cx.subscribe(&search, |this, _, event, cx| {
             if matches!(event, ComposerInputEvent::Edited) {
@@ -2625,7 +2625,7 @@ mod tests {
             cx.run_until_parked();
             let files = palette_section(window, Section::Files, cx).unwrap();
             assert!(files.rows.is_empty());
-            assert_eq!(files.status.as_deref(), Some("Search failed"));
+            assert_eq!(files.status.as_deref(), Some("Couldn\u{2019}t search. Try again."));
             cx.executor().advance_clock(Duration::from_secs(10));
             assert!(engine.take(methods::WARM_WORKSPACE_SEARCH, cx).is_empty());
             assert!(engine.take(methods::SEARCH_WORKSPACE_FILES, cx).is_empty());
@@ -2988,7 +2988,7 @@ mod tests {
         engine.fail(&retry[0], "search failed");
         cx.run_until_parked();
         let section = palette_section(window, Section::InFiles, cx).unwrap();
-        assert_eq!(section.status.as_deref(), Some("Search failed"));
+        assert_eq!(section.status.as_deref(), Some("Couldn\u{2019}t search. Try again."));
         cx.executor().advance_clock(Duration::from_secs(10));
         assert!(
             engine
@@ -3009,7 +3009,7 @@ mod tests {
         assert!(
             in_files
                 .status
-                .is_some_and(|status| status.contains("update it to search its file contents"))
+                .is_some_and(|status| status.contains("runs an older Slopty. Update it there."))
         );
     }
 

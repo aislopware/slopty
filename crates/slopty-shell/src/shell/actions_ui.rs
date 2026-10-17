@@ -28,7 +28,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         if let Some(error) = setup_error {
-            self.show_notice(crate::toast::ToastKind::Error, format!("Setup action failed: {error}"), cx);
+            self.show_notice(crate::toast::ToastKind::Error, format!("Couldn\u{2019}t run the setup action. Check its command, then run it again. ({error})"), cx);
         }
         let Some(run) = setup_action else {
             cx.notify();
@@ -44,7 +44,7 @@ impl Shell {
             panel.attach_reserved_session(&chat_id, tab, run.terminal, target_device_id, cx)
         });
         if !attached {
-            self.show_notice(crate::toast::ToastKind::Error, "Setup action started, but its terminal could not be attached", cx);
+            self.show_notice(crate::toast::ToastKind::Error, "The setup action runs, but Slopty couldn\u{2019}t show its terminal. Run it again from the chat\u{2019}s actions to see it.", cx);
         }
 
         let selected = self.active_chat == chat_id;
@@ -100,7 +100,7 @@ impl Shell {
     fn refresh_project_actions(&mut self, context: ProjectActionContext, cx: &mut Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             self.project_actions
-                .mark_unavailable(&context.key, "Engine not connected".into());
+                .mark_unavailable(&context.key, "Couldn\u{2019}t reach the Slopty engine. Wait for it to connect, then try again.".into());
             cx.notify();
             return;
         };
@@ -223,7 +223,7 @@ impl Shell {
             return;
         }
         let Some(engine) = self.state.read(cx).engine().cloned() else {
-            editor.error = Some("Engine not connected".into());
+            editor.error = Some("Couldn\u{2019}t reach the Slopty engine. Wait for it to connect, then try again.".into());
             cx.notify();
             return;
         };

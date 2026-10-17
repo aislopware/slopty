@@ -602,9 +602,9 @@ impl Shell {
         let session_info_toggle = (!takeover && !on_canvas).then(|| {
             let open = self.session_info_visible(cx);
             let label = if open {
-                "Hide session details"
+                "Hide chat details"
             } else {
-                "Show session details"
+                "Show chat details"
             };
             header_icon_button_with(
                 "toggle-session-info",

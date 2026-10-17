@@ -127,7 +127,7 @@ impl Shell {
                 }
                 if since.elapsed() > OPENS_WITHIN {
                     let _gone = this.update(cx, |_, cx| {
-                        crate::toast::error(cx, "The terminal did not open, so nothing ran");
+                        crate::toast::error(cx, "Couldn\u{2019}t open the terminal, so nothing ran. Try again.");
                     });
                     return;
                 }

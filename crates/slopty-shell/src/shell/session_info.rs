@@ -380,6 +380,7 @@ impl Shell {
             let key = key.clone();
             let run = action.clone();
             let edit = action.clone();
+            let edit_target = action.id.clone();
             let label: SharedString = if action.run_on_worktree_create {
                 format!("{} (setup)", action.name).into()
             } else {
@@ -402,20 +403,14 @@ impl Shell {
                     )))
                     .child(div().flex_1().min_w_0().truncate().child(label))
                     .child(
-                        div()
-                            .id(SharedString::from(format!(
-                                "session-info-edit-action-{}",
-                                edit.id
-                            )))
-                            .size(px(22.0))
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(5.0))
+                        // slopty: drawn 22, pressed over 24 (`press_target`, M25).
+                        crate::surface_chrome::press_target(
+                            SharedString::from(format!("session-info-edit-action-{}", edit.id)),
+                            22.0,
+                        )
+                            .group(SharedString::from(format!("session-info-edit-target-{}", edit.id)))
                             .invisible()
                             .group_hover(group, |style| style.visible())
-                            .hover(|style| style.bg(crate::theme::ink(0.08)))
                             .tooltip(crate::settings::widgets::text_tooltip("Edit action"))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 cx.stop_propagation();
@@ -423,9 +418,24 @@ impl Shell {
                                 this.open_project_action_editor(Some(edit.clone()), None, cx)
                             }))
                             .child(
-                                icon(icons::SETTINGS_MINIMALISTIC)
-                                    .size(px(14.0))
-                                    .text_color(theme.text_muted),
+                                div()
+                                    .size(px(22.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded(px(5.0))
+                                    .group_hover(
+                                        SharedString::from(format!(
+                                            "session-info-edit-target-{}",
+                                            edit_target
+                                        )),
+                                        |style| style.bg(crate::theme::ink(0.08)),
+                                    )
+                                    .child(
+                                        icon(icons::SETTINGS_MINIMALISTIC)
+                                            .size(px(14.0))
+                                            .text_color(theme.text_muted),
+                                    ),
                             ),
                     )
                     .into_any_element(),

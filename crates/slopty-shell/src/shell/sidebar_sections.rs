@@ -92,7 +92,7 @@ impl Shell {
             true
         } else {
             if !self.state.read(cx).sidebar_preferences.can_edit() {
-                self.show_notice(crate::toast::ToastKind::Error, "Sidebar is still syncing. Try again shortly.", cx);
+                self.show_notice(crate::toast::ToastKind::Error, "Couldn\u{2019}t change the sidebar while it syncs. Try again shortly.", cx);
                 cx.notify();
                 return false;
             }
@@ -225,7 +225,7 @@ impl Shell {
             return;
         }
         let Some(engine) = state.engine().cloned() else {
-            self.show_notice(crate::toast::ToastKind::Error, "Engine not connected", cx);
+            self.show_notice(crate::toast::ToastKind::Error, "Couldn\u{2019}t reach the Slopty engine. Wait for it to connect, then try again.", cx);
             cx.notify();
             return;
         };
@@ -239,7 +239,7 @@ impl Shell {
             if failed > 0 {
                 let _ = this.update(cx, |this, cx| {
                     if this.state.read(cx).engine().is_some_and(|current| current.same_connection(&engine)) {
-                        this.show_notice(crate::toast::ToastKind::Error, format!("Could not archive {failed} sessions. Try again."), cx);
+                        this.show_notice(crate::toast::ToastKind::Error, if failed == 1 { "Couldn\u{2019}t archive 1 chat. Try again.".to_owned() } else { format!("Couldn\u{2019}t archive {failed} chats. Try again.") }, cx);
                         cx.notify();
                     }
                 });
@@ -279,14 +279,13 @@ impl Shell {
         let chevron = self.sidebar_disclosure_chevron(&motion_key, open, theme);
         let session_count = rows.len();
         let menu_button = show_menu.then(|| {
-            div()
-                .id(SharedString::from(format!("section-menu-{menu_id}")))
-                .size(px(20.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(4.0))
-                .hover(|el| el.bg(theme.glass_hover()))
+            // slopty: drawn 20, pressed over 24 (`press_target`, M25).
+            let target_group = SharedString::from(format!("section-menu-target-{menu_id}"));
+            crate::surface_chrome::press_target(
+                SharedString::from(format!("section-menu-{menu_id}")),
+                20.0,
+            )
+                .group(target_group.clone())
                 .on_click(
                     cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
                         this.section_menu = Some((menu_id.clone(), event.position()));
@@ -299,9 +298,18 @@ impl Shell {
                 .role(gpui::Role::Button)
                 .hint("Section options")
                 .child(
-                    icon(icons::MORE_HORIZONTAL)
-                        .size(px(14.0))
-                        .text_color(spaces::sidebar_header_glyph(theme)),
+                    div()
+                        .size(px(20.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(4.0))
+                        .group_hover(target_group, |el| el.bg(theme.glass_hover()))
+                        .child(
+                            icon(icons::MORE_HORIZONTAL)
+                                .size(px(14.0))
+                                .text_color(spaces::sidebar_header_glyph(theme)),
+                        ),
                 )
                 .into_any_element()
         });
@@ -348,7 +356,7 @@ impl Shell {
                         .items_center()
                         .text_size(crate::typography::ui_rems(12.0))
                         .text_color(theme.text_muted.opacity(0.5))
-                        .child("Drop sessions here"),
+                        .child("Drop chats here"),
                 )
             })
             .children(rows.into_iter().map(|(_, _, row)| row))
@@ -532,7 +540,7 @@ impl Shell {
                     div()
                         .mt(px(8.0))
                         .text_color(theme.text_muted)
-                        .child("Group sessions however you like"),
+                        .child("Group chats however you like"),
                 )
                 .child(
                     div()
@@ -972,7 +980,7 @@ mod tests {
                     shell
                         .sidebar_notice
                         .as_ref()
-                        .is_some_and(|text| text.contains("1 sessions"))
+                        .is_some_and(|text| text.contains("Couldn\u{2019}t archive 1 chat."))
                 );
                 assert_eq!(
                     shell.active_sidebar_sections(cx)[0].session_ids.len(),

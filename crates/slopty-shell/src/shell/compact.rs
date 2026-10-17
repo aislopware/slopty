@@ -1,14 +1,14 @@
 //! slopty: the phone's anatomy, after zeron's iOS app (`apps/ios`), built from the shell's own
-//! parts. A phone shows one page at a time: Sessions (the large title, the sidebar's list at the
-//! page's width, the "New session" capsule with what is running, and the tab bar of Sessions,
+//! parts. A phone shows one page at a time: Chats (the large title, the sidebar's list at the
+//! page's width, the "New chat" capsule with what is running, and the tab bar of Chats,
 //! Settings and Search) or the chat that was opened from it, whose sidebar button goes back.
 //! Every page keeps clear of the system's edges (the status bar, the home indicator) and of the
 //! keyboard. Wider windows (an iPad's, a Mac's) keep the shell's columns.
 //!
 //! The chat or the new-session page wears no desktop chrome there: the titlebar's sidebar and
 //! history cluster give way to a navigation bar (zeron iOS's `SessionViewController`: a back
-//! chevron to Sessions and the session's title over "project @ device"; `NewSessionViewController`:
-//! "New session" with a close button). A session row takes zeron iOS's gestures
+//! chevron to Chats and the chat's title over "project @ device"; `NewSessionViewController`:
+//! "New chat" with a close button). A chat row takes zeron iOS's gestures
 //! (`SessionListController`): a leading swipe pins it, a trailing swipe archives it (or brings it
 //! back from Archived), and a long press opens its menu.
 
@@ -31,7 +31,7 @@ const PHONE_BELOW: f32 = 700.0;
 const TITLE_ROW: f32 = 52.0;
 /// The large title's size (zeron's navigation bar: Geist semibold 30).
 const TITLE_SIZE: f32 = 30.0;
-/// The "New session" capsule: its height, the plus's plate and inset.
+/// The "New chat" capsule: its height, the plus's plate and inset.
 const CAPSULE: f32 = 48.0;
 const PLATE: f32 = 34.0;
 const PLATE_INSET: f32 = 7.0;
@@ -190,7 +190,7 @@ impl Tab {
 
     const fn label(self) -> &'static str {
         match self {
-            Self::Sessions => "Sessions",
+            Self::Sessions => "Chats",
             Self::Settings => "Settings",
             Self::Search => "Search",
         }
@@ -302,7 +302,7 @@ impl Shell {
             .text_size(ui_rems(TITLE_SIZE))
             .font_weight(gpui::FontWeight::SEMIBOLD)
             .text_color(theme.text)
-            .child("Sessions");
+            .child("Chats");
         let list = div()
             .id("compact-sessions")
             .flex_1()
@@ -314,7 +314,7 @@ impl Shell {
             div()
                 .id("compact-sessions-page")
                 .role(gpui::Role::Group)
-                .aria_label("Sessions")
+                .aria_label("Chats")
                 .size_full()
                 .relative()
                 .flex()
@@ -331,7 +331,7 @@ impl Shell {
         )
     }
 
-    /// The capsule over the tab bar: a plus, "New session", and what is running, on the glass
+    /// The capsule over the tab bar: a plus, "New chat", and what is running, on the glass
     /// zeron's accessory sits on (`AskAnythingAccessory`), the status glyph before the words.
     fn render_compact_capsule(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let (working, waiting) = {
@@ -350,9 +350,9 @@ impl Shell {
         };
         let said = summary(working, waiting);
         let label: SharedString = if said.is_empty() {
-            "New session".into()
+            "New chat".into()
         } else {
-            format!("New session, {}", said.replace(" · ", ", ")).into()
+            format!("New chat, {}", said.replace(" · ", ", ")).into()
         };
         let popup = theme.for_popup();
         let glass = popup.is_frost();
@@ -419,7 +419,7 @@ impl Shell {
                     .text_size(ui_rems(16.0))
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(popup.text)
-                    .child("New session"),
+                    .child("New chat"),
             )
             .children(glyph.map(|glyph| glyph.mr(px(-4.0))))
             .when(!said.is_empty(), |el| {
@@ -513,8 +513,8 @@ impl Shell {
 
     /// The phone's navigation bar over a chat or the new-session page, in place of the
     /// titlebar and its sidebar and history cluster; `None` off a phone. A chat: a back
-    /// chevron to Sessions, its title over "project @ device". The new-session page: "New
-    /// session" and a close button.
+    /// chevron to Chats, its title over "project @ device". The new-chat page: "New chat"
+    /// and a close button.
     pub(super) fn render_compact_nav_bar(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.compact() {
             return None;
@@ -525,7 +525,7 @@ impl Shell {
             match state.selected_chat_row() {
                 Some(chat) => {
                     let title = crate::transcript::single_line(
-                        chat.title.as_deref().filter(|title| !title.trim().is_empty()).unwrap_or("New session"),
+                        chat.title.as_deref().filter(|title| !title.trim().is_empty()).unwrap_or("New chat"),
                     );
                     let project = state.space_for_chat(chat).map(|space| space.display_name().to_owned());
                     let device = state.device_name(&chat.device_id).map(str::to_owned);
@@ -537,7 +537,7 @@ impl Shell {
                     };
                     (title.into(), subtitle.map(SharedString::from))
                 }
-                None => ("New session".into(), None),
+                None => ("New chat".into(), None),
             }
         };
         let on_canvas = self.state.read(cx).selected_chat.is_none();
@@ -567,7 +567,7 @@ impl Shell {
                 .id("compact-back")
                 .debug_selector(|| "compact-back".into())
                 .role(gpui::Role::Button)
-                .aria_label("Back to Sessions")
+                .aria_label("Back to Chats")
                 .h(px(NAV_TARGET))
                 .flex_none()
                 .pr(px(8.0))
@@ -582,7 +582,7 @@ impl Shell {
                     div()
                         .text_size(ui_rems(16.0))
                         .text_color(theme.text)
-                        .child("Sessions"),
+                        .child("Chats"),
                 )
         };
         // The title centres on the bar, whatever the lead's width; the lead's side reserves
@@ -932,7 +932,7 @@ mod tests {
         let back = cx.debug_bounds("compact-back").expect("the chat's back chevron").center();
         cx.simulate_click(back, gpui::Modifiers::default());
         cx.update(|_, cx| {
-            assert_eq!(cx.default_global::<Pages>().sessions, Some(true), "Sessions is up");
+            assert_eq!(cx.default_global::<Pages>().sessions, Some(true), "Chats is up");
         });
         // A long press opens the row's menu.
         let row = cx.debug_bounds("compact-row-fix").unwrap().center();
@@ -960,10 +960,10 @@ mod tests {
         shell.update(cx, |shell, cx| shell.state.update(cx, |state, _| state.chats.clear()));
         redraw(cx);
         let page = (
-            cx.debug_bounds("sidebar-empty: No sessions yet").is_some(),
+            cx.debug_bounds("sidebar-empty: No chats yet").is_some(),
             cx.debug_bounds("sidebar-empty-key").is_some(),
         );
-        assert_eq!(page, (true, false), "the phone's empty Sessions page");
+        assert_eq!(page, (true, false), "the phone's empty Chats page");
         FORCE_COMPACT.with(|force| force.set(false));
         cx.simulate_resize(gpui::size(gpui::px(1320.0), gpui::px(880.0)));
         redraw(cx);

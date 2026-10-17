@@ -731,7 +731,7 @@ mod pinned_session_tests {
                 shell.set_chat_pinned("normal".into(), true, cx);
                 assert_eq!(
                     shell.sidebar_notice.as_deref(),
-                    Some("Pins are still syncing")
+                    Some("Couldn\u{2019}t pin while the sidebar syncs. Try again shortly.")
                 );
                 let payload = SidebarSessionDrag {
                     chat_id: "normal".into(),
@@ -750,7 +750,7 @@ mod pinned_session_tests {
                 assert!(!shell.state.read(cx).sidebar_preferences.initialized);
                 assert_eq!(
                     shell.sidebar_notice.as_deref(),
-                    Some("Pins are still syncing")
+                    Some("Couldn\u{2019}t pin while the sidebar syncs. Try again shortly.")
                 );
                 assert!(
                     shell.sidebar_session_return.is_some(),
@@ -4919,7 +4919,7 @@ impl Shell {
             (active, archived)
         };
         if active.is_none() && archived.is_none() {
-            self.show_notice(crate::toast::ToastKind::Error, "Clear the project filter to rename this session", cx);
+            self.show_notice(crate::toast::ToastKind::Error, "Couldn\u{2019}t rename this chat here. Clear the project filter, then rename it.", cx);
             return false;
         }
         if let Some(chat) = &active {
@@ -5592,22 +5592,19 @@ impl Shell {
                 // slopty: ⌘N starts a chat in the project the sidebar is filtered to, so that
                 // project's "+" names the key.
                 let takes_new = self.settings.space_filter.as_deref() == Some(project.as_str());
-                div()
-                    .id(SharedString::from(format!(
-                        "sidebar-group-new-chat-{collapse_key}"
-                    )))
-                    .size(px(20.0))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(4.0))
+                // slopty: drawn 20, pressed over 24 (`press_target`, M25).
+                let target_group =
+                    SharedString::from(format!("sidebar-group-new-chat-target-{collapse_key}"));
+                crate::surface_chrome::press_target(
+                    SharedString::from(format!("sidebar-group-new-chat-{collapse_key}")),
+                    20.0,
+                )
+                    .group(target_group.clone())
                     .cursor_pointer()
                     .role(gpui::Role::Button)
                     .aria_label("New chat in project")
                     .opacity(0.0)
                     .group_hover(group_name.clone(), |style| style.opacity(1.0))
-                    .hover(|el| el.bg(theme.glass_hover()))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
                         this.open_new_session(Some(project.clone()), cx);
@@ -5628,9 +5625,18 @@ impl Shell {
                     .tooltip_placement(gpui::TooltipPlacement::Above)
                     .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
                     .child(
-                        icon(icons::PLUS)
-                            .size(px(14.0))
-                            .text_color(sidebar_header_glyph(theme)),
+                        div()
+                            .size(px(20.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(4.0))
+                            .group_hover(target_group, |el| el.bg(theme.glass_hover()))
+                            .child(
+                                icon(icons::PLUS)
+                                    .size(px(14.0))
+                                    .text_color(sidebar_header_glyph(theme)),
+                            ),
                     )
                     .into_any_element()
             });
@@ -5645,6 +5651,14 @@ impl Shell {
                 )
                     .group(group_name)
                 .id(SharedString::from(format!("sidebar-group-{collapse_key}")))
+                // slopty: Needs you names the key that walks it, across every project and machine.
+                .when(key == super::sidebar_status::StatusGroup::NeedsYou.key(), |el| {
+                    el.tooltip(crate::settings::widgets::action_tooltip(
+                        "Next chat that needs you",
+                        Keys::Action(Box::new(super::NextNeedsYou)),
+                    ))
+                    .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
+                })
                 .on_click(cx.listener(move |this, _, _, cx| {
                     let was_open = !this.sidebar_collapsed_groups.contains(&toggle_key);
                     this.sidebar_group_shown.remove(&toggle_key); // slopty: its first page again
@@ -6781,12 +6795,12 @@ impl Shell {
                             }
                             None => crate::toast::error(
                                 cx,
-                                format!("Cloned {name} into {into}, but it is not a project"),
+                                format!("Cloned {name} into {into}, but Slopty couldn\u{2019}t open it as a project. Add the folder from New project."),
                             ),
                         }
                     }
                     Err(error) => {
-                        crate::toast::error(cx, format!("Could not clone {name}: {error}"));
+                        crate::toast::error(cx, format!("Couldn\u{2019}t clone {name}. Check the address and your access, then try again. ({error})"));
                     }
                 }
             })
@@ -7827,11 +7841,11 @@ impl Shell {
             };
             let copy = if count == 1 {
                 format!(
-                    "Removing “{name}” permanently deletes its 1 session on {device}. This can’t be undone."
+                    "Removing “{name}” permanently deletes its 1 chat on {device}. This can’t be undone."
                 )
             } else {
                 format!(
-                    "Removing “{name}” permanently deletes its {count} sessions on {device}. This can’t be undone."
+                    "Removing “{name}” permanently deletes its {count} chats on {device}. This can’t be undone."
                 )
             };
             let card = popover::dialog_card(&theme)
@@ -8754,7 +8768,8 @@ mod home_folder_search_tests {
                 assert!(shell.state.read(cx).spaces.is_empty());
                 let said = crate::toast::messages(cx);
                 assert_eq!(said.len(), 1);
-                assert!(said[0].starts_with("Could not clone origin"), "{said:?}");
+                assert!(said[0].starts_with("Couldn\u{2019}t clone origin."), "{said:?}");
+                assert!(said[0].contains("fatal: repository not found"), "why, for Copy error: {said:?}");
             })
             .unwrap();
     }

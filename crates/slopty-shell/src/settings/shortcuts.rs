@@ -468,7 +468,7 @@ const GROUP_ORDER: [&str; 7] = [ // slopty: dictation and appshots removed.
     "Files",
     "Browser",
     "Panels",
-    "Sessions",
+    "Chats", // slopty: one word for them, as everywhere (M17)
     "Projects",
     "Jump to chat",
 ];
@@ -494,7 +494,8 @@ fn group(id: ShortcutId) -> &'static str {
         | ShortcutId::ArchiveSession
         | ShortcutId::OpenBranchPicker // slopty: the composer's branch
         | ShortcutId::NextEffort // slopty: and its effort
-        | ShortcutId::ResumeSession => "Sessions", // slopty: a past Claude Code session
+        | ShortcutId::ResumeSession // slopty: a past Claude Code session
+        | ShortcutId::NextNeedsYou => "Chats", // slopty: the next chat waiting on the person
         ShortcutId::JumpSession(_) => "Jump to chat",
     }
 }

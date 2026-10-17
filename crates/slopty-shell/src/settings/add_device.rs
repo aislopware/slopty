@@ -334,6 +334,11 @@ impl AddDeviceDialog {
         if self.focus.contains(&focused, window) {
             return false;
         }
+        // slopty: the field of the choice on show is drawn in this frame, though the last frame
+        // drew the other choice's: a tab just chosen gave it the keyboard, which stays.
+        if self.shown_field().is_some_and(|field| field.focus_handle(cx) == focused) {
+            return false;
+        }
         [
             self.go_focus.clone(),
             self.cancel_focus.clone(),
@@ -342,6 +347,16 @@ impl AddDeviceDialog {
             self.password.focus_handle(cx),
         ]
         .contains(&focused)
+    }
+
+    /// The field the choice on show draws: the machine's for Over SSH, the server's for A
+    /// server, none for this Mac.
+    const fn shown_field(&self) -> Option<&Entity<InputState>> {
+        match self.choice {
+            Choice::ThisMac => None,
+            Choice::Ssh => Some(&self.target),
+            Choice::Server => Some(&self.address),
+        }
     }
 
     /// The card takes the keyboard as a run starts or goes on: the button or field that started
@@ -817,7 +832,7 @@ impl AddDeviceDialog {
             };
             block = block
                 .child(popover::dialog_body(theme, said))
-                .child(popover::dialog_field(Input::new(&self.password).into_any_element()));
+                .child(text_field(&self.password, "Password", true, cx));
         }
         Some(block.into_any_element())
     }
@@ -837,13 +852,12 @@ impl Render for AddDeviceDialog {
         let added = self.added().map(str::to_owned);
         let failure = progress.as_ref().and_then(|p| p.failure.clone()).filter(|_| added.is_none());
         let tabs = self.render_tabs(&theme, window, cx);
-        let field = match self.choice {
-            Choice::ThisMac => None,
-            Choice::Ssh => Some(&self.target),
-            Choice::Server => Some(&self.address),
-        }
-        .map(|input| {
-            div().mt(px(12.0)).child(popover::dialog_field(Input::new(input).into_any_element()))
+        let field = self.shown_field().map(|input| {
+            let label = match self.choice {
+                Choice::Server => "Server's name or address",
+                _ => "Machine's name or address",
+            };
+            div().mt(px(12.0)).child(text_field(input, label, false, cx))
         });
         let serve_toggle = (self.choice == Choice::Ssh && !running).then(|| {
             let serve = self.serve;
@@ -997,6 +1011,21 @@ impl Render for AddDeviceDialog {
                     })),
             )
     }
+}
+
+// slopty: gpui-base's Input draws no accessibility node; its frame here is the node a screen
+// reader reads, and the keyboard on the field inside is announced on it.
+/// One of the dialog's fields in the dialog's frame, named for a screen reader and saying its
+/// words, the password's never.
+fn text_field(input: &Entity<InputState>, label: &'static str, masked: bool, cx: &App) -> AnyElement {
+    let value = input.read(cx).value();
+    div()
+        .id(label)
+        .role(if masked { gpui::Role::PasswordInput } else { gpui::Role::TextInput })
+        .aria_label(label)
+        .when(!masked && !value.is_empty(), |el| el.aria_value(value))
+        .child(popover::dialog_field(Input::new(input).into_any_element()))
+        .into_any_element()
 }
 
 /// The step the run's share is drawn on: the first under way.
@@ -1159,6 +1188,32 @@ mod tests {
         dialog.update_in(cx, |dialog, window, cx| {
             assert!(dialog.go_focus.is_focused(window));
             assert!(dialog.focus.contains_focused(window, cx));
+        });
+    }
+
+    /// Choosing Over SSH from A server gives the machine's field the keyboard, and a screen
+    /// reader reads it as a text field with what is typed in it; the password says no words.
+    #[gpui::test]
+    fn a_choice_chosen_gives_its_field_the_keyboard(cx: &mut gpui::TestAppContext) {
+        let (dialog, cx) = dialog(cx);
+        assert_eq!(focused(cx), (gpui::Role::TextInput, "Server's name or address".to_owned()));
+        dialog.update_in(cx, |dialog, window, cx| dialog.choose(Choice::Ssh, window, cx));
+        assert_eq!(focused(cx), (gpui::Role::TextInput, "Machine's name or address".to_owned()));
+        cx.simulate_input("nohost");
+        let _ = focused(cx);
+        let typed = dialog.read_with(cx, |dialog, cx| dialog.target.read(cx).value().to_string());
+        assert_eq!(typed, "nohost", "the keys land in the field");
+        let value = cx.update(|window, _| {
+            let update = window.a11y_tree().expect("a tree");
+            update
+                .nodes
+                .iter()
+                .find(|(id, _)| *id == update.focus)
+                .and_then(|(_, node)| node.value().map(str::to_owned))
+        });
+        assert_eq!(value.as_deref(), Some("nohost"));
+        dialog.update_in(cx, |dialog, window, cx| {
+            assert!(dialog.target.focus_handle(cx).is_focused(window), "not moved to Install");
         });
     }
 
