@@ -632,3 +632,58 @@ fn a_session_replays_from_its_records() {
         );
     }
 }
+
+/// A call of an MCP tool read before the session's servers were listed (a first turn's, a
+/// resumed session's) is shown as its app's page once they are, as it ended.
+#[test]
+fn an_app_call_read_before_the_servers_were_listed_shows_its_page() {
+    let records = [
+        serde_json::json!({"type": "user", "uuid": "p1", "parentUuid": null,
+            "timestamp": "2026-10-17T03:15:25.000Z",
+            "message": {"role": "user", "content": "Echo hi"}}),
+        serde_json::json!({"type": "assistant", "uuid": "a1", "parentUuid": "p1",
+            "timestamp": "2026-10-17T03:15:26.000Z",
+            "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_1",
+                "name": "mcp__apps__echo", "input": {"text": "hi"}}]}}),
+        serde_json::json!({"type": "user", "uuid": "r1", "parentUuid": "a1",
+            "timestamp": "2026-10-17T03:15:27.000Z",
+            "message": {"role": "user", "content": [{"type": "tool_result",
+                "tool_use_id": "toolu_1", "content": "hi"}]}}),
+    ];
+    let mut history = observed();
+    let mut host = Host::default();
+    host.take(history.drain());
+    host.take(history.transcript(&read(&records), &[]));
+    let id = history.meta().id;
+    let shown_of = |host: &Host| {
+        host.thread(id)
+            .items
+            .iter()
+            .find_map(|item| match &item.body {
+                ItemBody::Tool(call) if call.name == "mcp__apps__echo" => {
+                    Some((call.detail.clone(), call.state.clone()))
+                }
+                _ => None,
+            })
+            .expect("the call")
+    };
+    assert!(matches!(shown_of(&host).0, Some(detail::ToolDetail::Mcp(_))), "no app known yet");
+
+    let app = slopty_proto::visual::McpApp {
+        server: "apps".to_owned(),
+        tool: "echo".to_owned(),
+        resource_uri: "ui://apps/echo".to_owned(),
+        display_mode: None,
+        result: None,
+    };
+    let was = shown_of(&host).1;
+    host.take(history.set_apps(HashMap::from([(("apps".to_owned(), "echo".to_owned()), app)])));
+    let (shown, state) = shown_of(&host);
+    let Some(detail::ToolDetail::Page(page)) = shown else { panic!("{shown:?}") };
+    assert!(
+        matches!(&page.source, slopty_proto::visual::PageSource::App(a)
+            if a.resource_uri == "ui://apps/echo"),
+        "{page:?}"
+    );
+    assert_eq!(state, was, "as it ended");
+}

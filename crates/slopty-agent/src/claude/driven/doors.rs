@@ -441,8 +441,7 @@ impl Driven {
                 );
             }
         }
-        self.history.set_apps(apps);
-        Vec::new()
+        self.history.set_apps(apps)
     }
 
     /// A page's ask `ask` of its app, by its number `app`: answered later

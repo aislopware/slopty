@@ -274,6 +274,9 @@ struct Mapped {
     /// What each call's header and line said in the TUI's words, as last noted: a call is noted
     /// again only when they change.
     worded: HashMap<String, (Option<String>, Option<String>)>,
+    /// Calls of MCP tools shown as plain calls, as last sent, with their record: one whose tool
+    /// turns out to be an app is shown again as its page ([`History::set_apps`]).
+    mcp_plain: HashMap<String, (Item, conv::ToolCall)>,
 }
 
 impl Mapped {
@@ -294,6 +297,7 @@ impl Mapped {
             shown_as: HashMap::new(),
             told: None,
             worded: HashMap::new(),
+            mcp_plain: HashMap::new(),
         }
     }
 
@@ -830,9 +834,47 @@ impl History {
     }
 
     /// The MCP Apps the session's servers offer now, by server (as the session names its
-    /// tools, `mcp__<server>__<tool>`) and tool: a call of one shows its page from then on.
-    pub fn set_apps(&mut self, apps: HashMap<(String, String), slopty_proto::visual::McpApp>) {
+    /// tools, `mcp__<server>__<tool>`) and tool: a call of one shows its page, the calls already
+    /// shown before the servers were listed (a first turn's, a resumed session's) too.
+    pub fn set_apps(
+        &mut self,
+        apps: HashMap<(String, String), slopty_proto::visual::McpApp>,
+    ) -> Vec<Out> {
         self.apps = apps;
+        let mut again = Vec::new();
+        for (thread, mapped) in &self.threads {
+            for (entry, (item, call)) in &mapped.mcp_plain {
+                if let conv::ToolDetail::Mcp(m) = &call.detail
+                    && self.apps.contains_key(&(m.server.clone(), m.tool.clone()))
+                {
+                    again.push((
+                        thread.clone(),
+                        mapped.id,
+                        entry.clone(),
+                        item.clone(),
+                        call.clone(),
+                    ));
+                }
+            }
+        }
+        for (thread, id, entry, mut item, call) in again {
+            let ItemBody::Tool(was) = &item.body else { continue };
+            let mut shown = self.tool(&thread, &call);
+            shown.state = was.state.clone();
+            let open = !shown.state.is_final();
+            item.body = ItemBody::Tool(Box::new(shown));
+            if let Some(mapped) = self.threads.get_mut(&thread) {
+                mapped.mcp_plain.remove(&entry);
+                if open {
+                    mapped.calls.insert(entry, item.clone());
+                }
+            }
+            self.push(
+                id,
+                if open { Action::ItemUpdated(item) } else { Action::ItemCompleted(item) },
+            );
+        }
+        self.drain()
     }
 
     /// The record that began turn `turn` of the session's own thread: its prompt's record id.
@@ -1657,6 +1699,16 @@ impl History {
             mapped.calls.insert(entry.id.clone(), item.clone());
         } else {
             mapped.calls.remove(&entry.id);
+        }
+        let plain_mcp = matches!(&item.body, ItemBody::Tool(call)
+            if matches!(call.detail, Some(detail::ToolDetail::Mcp(_))));
+        match &entry.body {
+            Body::Tool(call) if plain_mcp => {
+                mapped.mcp_plain.insert(entry.id.clone(), (item.clone(), call.as_ref().clone()));
+            }
+            _ => {
+                mapped.mcp_plain.remove(&entry.id);
+            }
         }
         let item_id = item.id.clone();
         actions.push(if open { Action::ItemUpdated(item) } else { Action::ItemCompleted(item) });
