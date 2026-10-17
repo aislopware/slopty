@@ -17364,3 +17364,42 @@ after it; inside, 37–75 % of the guest's 6 GB stayed free. Making the base: th
 SLOPTY_LANE=DEVLOOP cargo xtask remote --head --e2e ios --sim iphone --goldens review
 SLOPTY_LANE=DEVLOOP-ripad cargo xtask remote --name DEVLOOP-ripad --head --place runner --e2e ios --sim ipad --goldens review
 ```
+
+## 2026-10-17 — the guest's simulator runs: memory, load, the spare, the copy
+
+Sampled every 5 s (`memory_pressure -Q`, `vm_stat`, `vm.swapusage`, `vm.loadavg`, booted
+simulators) in the guest (4 cores, 6 GB) and on the host (10 cores, 32 GB), at 8ba3827f–later
+commits, `--e2e ios --goldens review`, one simulator booted at a time:
+
+| run | host load | guest free (memory_pressure) | guest free pages | guest swap | guest load |
+| --- | --- | --- | --- | --- | --- |
+| iPad, two lanes building (`-p slopty-worker -p slopty-agent`, cold) | 35–64 | 45–81 % | 56–2,400 MB | 220–284 MB | 55–301 |
+| iPhone, the same | 34–68 | 50–81 % | 59–2,422 MB | 196–212 MB | 75–231 |
+| iPhone, nothing else building | 6–11 | 36–80 % | 57–2,686 MB | 242–290 MB | 67–241 |
+
+Host while the two lanes built: 48–77 % free, swap 20.1 GB used and not growing, the VM
+process's resident memory 2.5–11.8 GB.
+
+Simulator steps (boot and install the app):
+
+| | time | host load |
+| --- | --- | --- |
+| clone and boot a fresh one, before this change | 71–139 s | 20–40 |
+| the same, two lanes building | 102–233 s | 46–58 |
+| took a booted spare | 15–23 s | 7–19 |
+| took a spare still booting | 75–168 s | 8–75 |
+
+Copying 16 changed binaries (488–511 MB) into the guest, each changed by a byte:
+
+| | delta (rsync's default) | `--whole-file` |
+| --- | --- | --- |
+| load 6–12 | 3.4 s | 4.3 s |
+| load 28–43 (two lanes building) | 27.6–48.1 s | 6.5–12.1 s |
+
+A cipher of aes128-gcm instead of ssh's default made no consistent difference (3.7–7.1 s whole).
+
+```sh
+# every 5 s, on the host and over ssh in the guest:
+memory_pressure -Q; vm_stat; sysctl -n vm.swapusage vm.loadavg; xcrun simctl list devices | grep -c Booted
+SLOPTY_LANE=DEVLOOP cargo xtask remote --head --e2e ios --sim ipad --goldens review
+```

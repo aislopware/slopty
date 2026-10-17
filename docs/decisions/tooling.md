@@ -2342,6 +2342,33 @@ more full-window layer.
     device (booted once when the base was made, never by a run: no app, no grant, the keyboard,
     appearance and pasteboard as made), boots the clone in a reboot's time, and deletes it after
     the run. The guest's time zone (UTC) and locale (en_US) are a runner's.
+  - **One simulator up, one run at a time, at most one spare.** Lane B measured an iOS run with
+    two simulators booted in the guest: 64 MB free, 1.16 GB of swap, load 45–64, the app's main
+    thread hung 15 s at a time and the worker's lease ran out; such a run says nothing. Now an
+    iOS run starts by shutting down every simulator in the guest but the one it takes, and an
+    app run every one; runs share the guest's lock, so an iOS and an app case never run in it
+    at once.
+  - **The next run's simulator is booted ahead, under the same lock.** After an iOS run, the
+    pristine simulator of the device it used is cloned and booted as a spare, by a process of
+    its own that takes the guest's lock once the run lets go (a run that comes meanwhile waits,
+    "the next run's simulator is booting"); the next run of that device takes it, booted, and
+    one of the other device, or an app run, drops it. Nothing runs in a spare before a run
+    takes it (36 system apps, not the app), so it is as fresh as a clone made for the run. A
+    booted spare was taken in 15–23 s against 50–233 s to clone and boot one; a run that comes
+    before its spare finished waits for it, about what booting its own would take.
+  - **Changed binaries are copied whole** (`rsync --whole-file`): with the delta algorithm rsync
+    read and checksummed both sides of every changed binary, and 16 of them (490–510 MB) took
+    28–48 s with two lanes building against 6.5–12 s whole, and 233 s on a busier Mac. Not
+    shared with virtio-fs instead of copied: the guest's view of a shared directory kept a file
+    the host had replaced by rename as missing, as cargo replaces a binary and Xcode the app's
+    files, and the app then would not install ("Missing bundle ID").
+  - **6 GB is enough for one simulator.** With one booted, the guest kept 36–81 % of its memory
+    free or reclaimable (memory_pressure) through an iPad and two iPhone runs, its swap flat at
+    200–290 MB left from earlier, two lanes building beside it on the host (load 46–64) or none.
+    Its load average ran 55–300 on 4 cores either way: the simulator's own, not the host's.
+    The host stayed at 48–77 % free and its swap did not grow, while the VM process's resident
+    memory moved between 2.5 and 11.8 GB as the host compressed the guest's pages. More memory
+    would come out of the lanes' builds, which already keep 20 GB of the host in swap.
   - **Passing tests' output comes back** (`--success-output final` beside `--test-threads`, in
     the guest and on a runner): their MEASURE lines were dropped with the rest of a passing
     test's output.
