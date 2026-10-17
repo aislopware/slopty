@@ -215,6 +215,7 @@ impl Transcript {
         let Some((at, card)) = found else { return };
         if let Some(key) = card {
             self.subagents.toggled.insert(SharedString::from(key), true);
+            self.list.remeasure_items(at..at + 1);
         }
         self.scroll_to_row(at, cx);
         cx.notify();
@@ -227,13 +228,17 @@ impl Transcript {
 
     /// Open or close the card `key` of child `chat`.
     fn toggle_card(&mut self, key: SharedString, open_now: bool, cx: &mut Context<Self>) {
+        let row = key.rsplit_once("#s").map_or("", |(row, _)| row).to_owned();
         self.subagents.toggled.insert(key, !open_now);
-        cx.notify();
+        // slopty: the card's row grows or shrinks by the run under it.
+        self.row_resized(&row, cx);
     }
 
-    /// The child `chat`'s transcript, open in place: watched from its first showing.
+    /// The child `chat`'s transcript, open in place in a card of row `row`: watched from its first
+    /// showing.
     fn inline_child(
         &mut self,
+        row: &SharedString,
         chat: &str,
         live: bool,
         cx: &mut Context<Self>,
@@ -253,7 +258,7 @@ impl Transcript {
         });
         let rows = std::rc::Rc::default();
         let card = cx.weak_entity();
-        transcript.update(cx, |child, _| child.fit_to(card, std::rc::Rc::clone(&rows)));
+        transcript.update(cx, |child, _| child.fit_to(card, row.clone(), std::rc::Rc::clone(&rows)));
         self.subagents.open.insert(
             chat.to_owned(),
             InlineChild {
@@ -520,7 +525,7 @@ impl Transcript {
                 .child(SharedString::from(format!("Needs you · {ask}")))
         });
         let child = card.chat.clone().filter(|_| open).map(|chat| {
-            let (transcript, rows) = self.inline_child(&chat, card.running, cx);
+            let (transcript, rows) = self.inline_child(row_id, &chat, card.running, cx);
             // As tall as its rows, up to its room: a short run leaves no room under its last
             // line. Before its rows laid out, the room.
             // The hairline over it is its own pixel.

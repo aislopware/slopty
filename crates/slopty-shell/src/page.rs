@@ -198,6 +198,17 @@ pub fn kind_words(card: &PageCard) -> String {
     }
 }
 
+/// slopty: a page card's last header words, past its title and kind: a file's path, or HTML's
+/// `show_page`. An MCP App's kind names its server already, so its source is the tool called,
+/// and nothing where its title is that tool: each is named once.
+pub fn source_words(card: &PageCard) -> Option<String> {
+    let words = match card.kind.as_str() {
+        PageCard::APP => card.tool.clone().filter(|tool| *tool != card.title)?,
+        _ => card.source.clone(),
+    };
+    (!words.is_empty()).then_some(words)
+}
+
 /// One page card in a transcript.
 pub struct PageCardView {
     card: Arc<PageCard>,
@@ -562,7 +573,7 @@ impl PageCardView {
         let text = div()
             .min_w_0()
             .truncate()
-            .child(SharedString::from(self.card.source.clone()));
+            .child(SharedString::from(source_words(&self.card).unwrap_or_default()));
         match (&self.card.path, &self.chat) {
             (Some(path), Some(chat)) => {
                 let (path, chat) = (path.clone(), chat.clone());
@@ -794,7 +805,7 @@ impl Render for PageCardView {
             )
             .child(SharedString::from("·"))
             .child(div().flex_none().child(SharedString::from(kind_words(&self.card))))
-            .when(!self.card.source.is_empty(), |header| {
+            .when(source_words(&self.card).is_some(), |header| {
                 header
                     .child(SharedString::from("·"))
                     .child(self.source(&theme, cx))
@@ -1040,5 +1051,28 @@ mod tests {
         assert_eq!(kind_words(&card), "File");
         card.kind = PageCard::HTML.into();
         assert_eq!(kind_words(&card), "Page");
+    }
+
+    /// slopty: an MCP App's header names its server and its tool once each: "echo · MCP App:
+    /// apps", not "echo · MCP App: apps · apps · echo".
+    #[test]
+    fn an_apps_header_names_its_server_and_tool_once() {
+        let mut card = PageCard {
+            title: "echo".into(),
+            kind: PageCard::APP.into(),
+            source: "apps · echo".into(),
+            server: Some("apps".into()),
+            tool: Some("echo".into()),
+            ..PageCard::default()
+        };
+        assert_eq!(kind_words(&card), "MCP App: apps");
+        assert_eq!(source_words(&card), None);
+        card.title = "Latency".into();
+        assert_eq!(source_words(&card).as_deref(), Some("echo"));
+        card.kind = PageCard::FILE.into();
+        card.source = "/work/chart.html".into();
+        assert_eq!(source_words(&card).as_deref(), Some("/work/chart.html"));
+        card.source = String::new();
+        assert_eq!(source_words(&card), None);
     }
 }

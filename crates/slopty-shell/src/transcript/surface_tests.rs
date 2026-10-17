@@ -529,3 +529,87 @@ fn a_cards_quiet_open_takes_a_press_past_what_it_draws(cx: &mut gpui::TestAppCon
     draw(cx);
     assert_eq!(*opened.borrow(), ["child-chat"], "a press past the 18 pt footprint opens it");
 }
+
+/// slopty: a click on a subagent's card between two reads of the tree, as the self-test's driver
+/// clicks: the frames around it drawn as a person's are (no screen reader, the list scrolled onto
+/// its layer), rows under the card, its run there to fit to. Once the frames settle, the run is
+/// open in place and the frame shown is the one the same state draws from scratch: no row under
+/// the card is left where it stood before the card grew.
+#[gpui::test]
+fn a_card_clicked_on_a_persons_frame_opens_on_the_next(cx: &mut gpui::TestAppContext) {
+    let progress = SubagentProgress {
+        running: false,
+        state: SubagentProgress::DONE.into(),
+        chat_id: Some("child-chat".into()),
+        ..SubagentProgress::default()
+    };
+    let words = (0..40).map(|n| format!("Paragraph {n} of the survey.\n\n")).collect::<String>();
+    let (transcript, cx) = open(
+        cx,
+        entry(MessageStatus::Complete, vec![text(&words), spawn(progress), text("Counted.")]),
+    );
+    let said = |n: usize| SessionMessageEntry {
+        id: format!("child:{n}"),
+        parts: vec![MessagePart::Text {
+            id: format!("child:{n}:t"),
+            text: format!("Line {n} of the run."),
+        }],
+        ..entry(MessageStatus::Complete, Vec::new())
+    };
+    let state = transcript.read_with(cx, |transcript, _| transcript.state.clone());
+    state.update(cx, |state, _| state.set_subagent_snapshot("child-chat".into(), (0..3).map(said).collect()));
+    let plain = |cx: &mut VisualTestContext| {
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.set_a11y_active(false);
+            window.draw(cx).clear(cx);
+        });
+    };
+    plain(cx);
+    for dy in [-30.0, 30.0, -30.0, 30.0, -30.0, 30.0] {
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: point(px(500.0), px(400.0)),
+            delta: gpui::ScrollDelta::Pixels(point(px(0.0), px(dy))),
+            ..Default::default()
+        });
+        plain(cx);
+    }
+    // A dump: the tree from a frame of its own.
+    let card = find(&draw(cx), Role::Button, "Subagent Count lines").expect("the card").center;
+    plain(cx);
+    cx.simulate_event(gpui::MouseMoveEvent { position: card, ..Default::default() });
+    cx.simulate_event(gpui::MouseDownEvent {
+        position: card,
+        button: gpui::MouseButton::Left,
+        click_count: 1,
+        ..Default::default()
+    });
+    cx.simulate_event(gpui::MouseUpEvent {
+        position: card,
+        button: gpui::MouseButton::Left,
+        click_count: 1,
+        ..Default::default()
+    });
+    // The frames settle: the run lays out, then the card takes its height.
+    for _ in 0..4 {
+        plain(cx);
+    }
+    let painted = |window: &Window| {
+        let mut lines = window.painted_primitives();
+        lines.sort_unstable();
+        lines
+    };
+    let (shown, scratch) = cx.update(|window, cx| {
+        let shown = painted(window);
+        window.refresh();
+        window.draw(cx).clear(cx);
+        (shown, painted(window))
+    });
+    let missed: Vec<_> = scratch.iter().filter(|line| !shown.contains(line)).take(8).collect();
+    let extra: Vec<_> = shown.iter().filter(|line| !scratch.contains(line)).take(8).collect();
+    assert!(missed.is_empty() && extra.is_empty(), "stale once open: missed {missed:#?}, extra {extra:#?}");
+    let nodes = draw(cx);
+    assert_eq!(find(&nodes, Role::Button, "Subagent Count lines").and_then(|c| c.expanded), Some(true));
+    let run = find(&nodes, Role::Group, "Transcript of Count lines").expect("open in place");
+    assert!(run.height > 20.0, "fit to its run: {run:?}");
+}

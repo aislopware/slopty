@@ -272,6 +272,8 @@ fn message_article(row: &SharedString, who: &'static str, inner: AnyElement) -> 
 #[derive(Clone)]
 struct Fit {
     card: gpui::WeakEntity<Transcript>,
+    /// The card's row there.
+    row: SharedString,
     height: Rc<Cell<Option<f32>>>,
 }
 
@@ -288,9 +290,9 @@ impl Fit {
                 };
                 if moved {
                     self.height.set(now);
-                    let card = self.card.clone();
+                    let (card, row) = (self.card.clone(), self.row.clone());
                     cx.defer(move |cx| {
-                        card.update(cx, |_, cx| cx.notify()).ok();
+                        card.update(cx, |card, cx| card.row_resized(&row, cx)).ok();
                     });
                 }
             },
@@ -4173,8 +4175,24 @@ impl Transcript {
 
     /// slopty: measure the rows' height after each layout into `height`, and have `card`
     /// drawn again when it moves (a subagent's card, which takes that height up to its room).
-    pub(crate) fn fit_to(&mut self, card: gpui::WeakEntity<Transcript>, height: Rc<Cell<Option<f32>>>) {
-        self.fit = Some(Fit { card, height });
+    pub(crate) fn fit_to(
+        &mut self,
+        card: gpui::WeakEntity<Transcript>,
+        row: SharedString,
+        height: Rc<Cell<Option<f32>>>,
+    ) {
+        self.fit = Some(Fit { card, row, height });
+    }
+
+    /// slopty: row `row` takes another height (a subagent's card opened, closed, or fit to its
+    /// run): it is measured again, and the list's layer painted afresh with it, so no row under
+    /// it is shown where it stood before.
+    pub(crate) fn row_resized(&mut self, row: &str, cx: &mut Context<Self>) {
+        if let Some(ix) = self.rows.iter().position(|r| r.id.as_ref() == row) {
+            self.list.remeasure_items(ix..ix + 1);
+            self.viewport_layout_revision = self.viewport_layout_revision.wrapping_add(1);
+        }
+        cx.notify();
     }
 
     /// Shell-driven: the measured height of the bottom chrome stack the
