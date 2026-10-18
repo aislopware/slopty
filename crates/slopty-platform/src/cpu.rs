@@ -22,28 +22,43 @@ pub fn this_thread() -> Option<Duration> {
 mod tests {
     use super::*;
 
-    /// Work moves a thread's CPU time; waiting on another thread's work does not.
-    #[test]
-    fn a_threads_cpu_time_counts_its_own_work_only() {
-        let before = this_thread().unwrap();
-        let mut x = 0_u64;
-        let busy = std::time::Instant::now();
-        while busy.elapsed() < Duration::from_millis(50) {
-            x = std::hint::black_box(x.wrapping_add(1));
-        }
-        let worked = this_thread().unwrap().saturating_sub(before);
-        assert!(worked >= Duration::from_millis(20), "50 ms of work: {worked:?}");
-
-        let before = this_thread().unwrap();
-        std::thread::spawn(|| {
-            let busy = std::time::Instant::now();
-            while busy.elapsed() < Duration::from_millis(50) {
+    /// Spin on the calling thread until its own CPU clock has moved `cpu`: an amount of work
+    /// measured in what it costs, so a loaded machine only stretches how long it takes.
+    fn work(cpu: Duration) {
+        let start = this_thread().unwrap();
+        while this_thread().unwrap().saturating_sub(start) < cpu {
+            for _ in 0..1_000 {
                 std::hint::black_box(0_u64);
             }
+        }
+    }
+
+    /// Work moves a thread's CPU time, never faster than the wall clock; waiting on another
+    /// thread's work does not move it. Both sides are amounts of CPU, not of wall time: a loaded
+    /// host gives a wall-timed spin a fraction of its time on a core, too little to tell apart
+    /// from the wait.
+    #[test]
+    fn a_threads_cpu_time_counts_its_own_work_only() {
+        let wall = std::time::Instant::now();
+        let before = this_thread().unwrap();
+        work(Duration::from_millis(20));
+        let worked = this_thread().unwrap().saturating_sub(before);
+        assert!(worked >= Duration::from_millis(20), "20 ms of work: {worked:?}");
+        assert!(worked <= wall.elapsed(), "{worked:?} of CPU in {:?}", wall.elapsed());
+
+        let before = this_thread().unwrap();
+        let theirs = std::thread::spawn(|| {
+            let start = this_thread().unwrap();
+            work(Duration::from_millis(50));
+            this_thread().unwrap().saturating_sub(start)
         })
         .join()
         .unwrap();
         let idle = this_thread().unwrap().saturating_sub(before);
-        assert!(idle < Duration::from_millis(20), "another's work: {idle:?}");
+        assert!(theirs >= Duration::from_millis(50), "their 50 ms of work: {theirs:?}");
+        assert!(
+            idle < Duration::from_millis(20),
+            "waiting on {theirs:?} of another's work: {idle:?}"
+        );
     }
 }
