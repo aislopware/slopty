@@ -93,7 +93,7 @@ pub(super) fn agent_status_word(agent: &ThreadStand) -> String {
             _ => "Needs you",
         },
         Status::Working => "Working",
-        Status::Running => "Waiting",
+        Status::Running => "Background work",
         Status::Done => "Turn finished",
         Status::Failed if limited(agent) => "Limit reached",
         Status::Failed => "Failed",
@@ -266,7 +266,7 @@ mod tests {
             (asking(Request::QUESTION, "Which?", None), "Has a question"),
             (asking(Request::ELICITATION, "A port", None), "Needs input"),
             (at(Phase::Done, None), "Turn finished"),
-            (at(Phase::Waiting, Some((Wait::COMMAND, "npm run dev"))), "Waiting"),
+            (at(Phase::Waiting, Some((Wait::COMMAND, "npm run dev"))), "Background work"),
             (at(Phase::Failed, Some((Wait::LIMIT, "Hit its usage limit"))), "Limit reached"),
             (at(Phase::Failed, None), "Failed"),
         ];

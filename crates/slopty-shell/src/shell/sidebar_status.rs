@@ -6,7 +6,7 @@
 //!   their sessions started in, so nothing moves on its own while the person reads.
 //! - **Reasons.** A row that waits says why, from what the agent holds open: "Waiting for your
 //!   answer", "Plan ready for review", "Needs your approval · run cargo test"; an agent waiting
-//!   on its own work says "Waiting · 4m"; one summarising its context says so.
+//!   on its own work says "Background work · 4m"; one summarising its context says so.
 //! - **Unread weight.** A finished result nobody has seen sets its title in the heavier weight.
 //! - **The hover card's facts.** zeron's session hover card (`session_hover_card`) also says
 //!   where a row runs (project @ machine), which agent and model, how long it has stood as it is,
@@ -251,8 +251,8 @@ pub(super) fn reason(status: ChatIndicator, session: Option<&Session>, now: Date
         ChatIndicator::Completed | ChatIndicator::Idle => {
             let session = session.filter(|s| s.status == SessionStatus::Waiting)?;
             Some(match session.status_since.map(|since| format_time_ago(since, now)) {
-                Some(age) if age != "now" => format!("Waiting \u{b7} {age}"),
-                _ => "Waiting".to_owned(),
+                Some(age) if age != "now" => format!("Background work \u{b7} {age}"),
+                _ => "Background work".to_owned(),
             })
         }
     }
@@ -480,7 +480,7 @@ mod tests {
         busy.waiting_on = wait(SessionWait::COMPACTING, None);
         assert_eq!(reason(ChatIndicator::Working, Some(&busy), now).as_deref(), Some("Compacting its context"));
         let resting = session("a", SessionStatus::Waiting, now);
-        assert_eq!(reason(ChatIndicator::Idle, Some(&resting), now).as_deref(), Some("Waiting \u{b7} 4m"));
+        assert_eq!(reason(ChatIndicator::Idle, Some(&resting), now).as_deref(), Some("Background work \u{b7} 4m"));
         let done = session("a", SessionStatus::Done, now);
         assert_eq!(reason(ChatIndicator::Completed, Some(&done), now), None);
         let mut stale = resting.clone();

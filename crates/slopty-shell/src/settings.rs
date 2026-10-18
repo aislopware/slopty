@@ -1284,7 +1284,7 @@ impl ShortcutId {
             ShortcutId::ReopenClosedTab => "Reopen closed tab", // slopty
             ShortcutId::OpenBranchPicker => "Open branch picker", // slopty
             ShortcutId::NextEffort => "Next effort level", // slopty
-            ShortcutId::ResumeSession => "Resume a session", // slopty
+            ShortcutId::ResumeSession => "Resume a Claude Code session", // slopty
             ShortcutId::NextNeedsYou => "Next chat that needs you", // slopty
             ShortcutId::JumpSession(slot) => JUMP_LABELS.get(slot).copied().unwrap_or(""),
         }

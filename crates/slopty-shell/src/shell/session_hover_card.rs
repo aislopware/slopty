@@ -209,7 +209,7 @@ impl Shell {
                     .as_deref()
                     .map(|title| title.split_whitespace().collect::<Vec<_>>().join(" "))
                     .filter(|title| !title.is_empty())
-                    .unwrap_or_else(|| "New session".to_owned()),
+                    .unwrap_or_else(|| "New chat".to_owned()),
             );
             (
                 title,

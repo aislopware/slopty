@@ -50,13 +50,13 @@ fn loopback_offer(
     forward: Option<u16>,
 ) -> String {
     let wants = if asker.is_empty() || asker == machine {
-        format!("{machine} wants to open its own {host}:{port}")
+        format!("Open {host}:{port} from {machine}")
     } else {
-        format!("{asker} wants to open {host}:{port} on {machine}")
+        format!("Open {host}:{port} from {asker} on {machine}")
     };
     match forward {
-        Some(here) => format!("{wants}; it opens here at localhost:{here}"),
-        None => format!("{wants}; nothing forwards that port here yet"),
+        Some(here) => format!("{wants}: it opens here at localhost:{here}"),
+        None => format!("{wants}? Open forwards the port here"),
     }
 }
 
@@ -468,21 +468,21 @@ mod tests {
     use crate::workspace::WorkspaceView;
     use crate::workspace::rig::{KEY, hear, link, mac, shell};
 
-    /// A page on a worker's loopback is named with its port and the worker it is on, never as
-    /// this device's own, with the port that forwards it here or that none does yet.
+    /// A page on a worker's loopback is offered as "Open host:port from" the worker it is on,
+    /// never as this device's own, then where it opens here or that Open forwards the port.
     #[test]
     fn a_loopback_offer_names_its_port_its_machine_and_its_forward() {
         assert_eq!(
             loopback_offer("vite", "studio", "localhost", 5173, Some(15173)),
-            "vite wants to open localhost:5173 on studio; it opens here at localhost:15173"
+            "Open localhost:5173 from vite on studio: it opens here at localhost:15173"
         );
         assert_eq!(
             loopback_offer("studio", "studio", "localhost", 5173, None),
-            "studio wants to open its own localhost:5173; nothing forwards that port here yet"
+            "Open localhost:5173 from studio? Open forwards the port here"
         );
         assert_eq!(
             loopback_offer("", "studio", "[::1]", 8080, None),
-            "studio wants to open its own [::1]:8080; nothing forwards that port here yet"
+            "Open [::1]:8080 from studio? Open forwards the port here"
         );
     }
 
@@ -558,8 +558,7 @@ mod tests {
         assert_eq!(
             offer,
             (
-                "studio wants to open its own localhost:5173; it opens here at localhost:15173"
-                    .to_owned(),
+                "Open localhost:5173 from studio: it opens here at localhost:15173".to_owned(),
                 "http://localhost:5173/app?x=1".to_owned()
             ),
             "the worker's page, opened at its forward when Open is pressed"
