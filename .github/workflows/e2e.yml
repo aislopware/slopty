@@ -52,6 +52,12 @@ jobs:
     # A cold build of the app and its daemons on a three-core runner took over 30 minutes.
     timeout-minutes: 90
     steps:
+      # Spotlight off: it indexes every file a build and its tests write, and on a three-core
+      # runner it took 200 CPU-seconds of a 353 s build of the worker crate's tests and 106 of
+      # their 139 s run, against 1 once off (`docs/MEASUREMENTS.md`, "the gate's reds and its
+      # runners").
+      - if: runner.os == 'macOS'
+        run: sudo mdutil -a -i off
       - uses: actions/checkout@v5
         with:
           ref: ${{ inputs.sha || github.sha }}
@@ -65,12 +71,17 @@ jobs:
         with:
           toolchain: 1.99.1
           targets: aarch64-apple-darwin
-      - uses: Swatinem/rust-cache@v2
+      # The cargo cache the gate's tools lane saves (ci.yml), read only.
+      - id: cargo-home
+        uses: actions/cache/restore@v4
         with:
-          shared-key: gate
-          add-rust-environment-hash-key: false
-          cache-targets: false
-          save-if: false
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: cargo-home-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-home-
+          enableCrossOsArchive: true
       - uses: cargo-bins/cargo-binstall@main
       # As the gate's lanes compile them, so the compile cache's entries are theirs
       # (xtask/src/ci_profile.rs).

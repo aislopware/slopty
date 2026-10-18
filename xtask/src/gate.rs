@@ -2375,10 +2375,11 @@ let windows = cfg!(windows);
         }
     }
 
-    /// Every job that builds, in the gate and the checks, reads the one cargo cache keyed by the
-    /// lock, shared by every OS, and only the gate's tools lane writes it, after fetching every
-    /// package. rust-cache's key held no lock, so its one entry was restored whole on every run
-    /// and never saved again: 17 days stale, every Mac shard downloaded 184 crates.
+    /// Every job that builds, in the gate, the checks, the e2e and the Deep checks, reads the one
+    /// cargo cache keyed by the lock, shared by every OS. The gate's tools lane writes the gate's
+    /// entry and the Deep features check main's, each after fetching every package. rust-cache's
+    /// key held no lock, so its one entry was restored whole on every run and never saved
+    /// again: 17 days stale, every Mac shard downloaded 184 crates.
     #[test]
     fn the_cargo_cache_is_keyed_by_the_lock_and_saved_by_the_tools_lane() {
         let workflows = repo_root().expect("repo root").join(".github/workflows");
@@ -2387,18 +2388,23 @@ let windows = cfg!(windows);
                        restore-keys: cargo-home-\n          enableCrossOsArchive: true\n";
         let saved = "key: ${{ steps.cargo-home.outputs.cache-primary-key }}\n          \
                      enableCrossOsArchive: true\n";
-        for name in ["ci.yml", "check.yml"] {
+        for name in ["ci.yml", "check.yml", "e2e.yml", "deep.yml"] {
             let text = read(name);
             assert!(!text.contains("Swatinem/rust-cache"), "{name}: a cache keyed by the lock");
-            let builds = text.matches("uses: dtolnay/rust-toolchain@stable").count();
-            assert_eq!(
-                text.matches(restore).count(),
-                builds,
-                "{name}: every building job reads it"
-            );
-            let saves = usize::from(name == "ci.yml");
-            assert_eq!(text.matches(saved).count(), saves, "{name}: saved by the gate alone");
+            if name != "deep.yml" {
+                let builds = text.matches("uses: dtolnay/rust-toolchain@stable").count();
+                let reads = text.matches(restore).count();
+                assert_eq!(reads, builds, "{name}: every building job reads it");
+            }
+            let saves = usize::from(name == "ci.yml" || name == "deep.yml");
+            assert_eq!(text.matches(saved).count(), saves, "{name}: saved by the gate and main");
         }
+        // The Deep checks on main save main's entry, which every branch reads.
+        let deep = read("deep.yml");
+        assert_eq!(deep.matches(restore).count(), 2, "both Deep jobs that build read it");
+        let fetch = deep.split("      - id: fetch\n").nth(1).expect("the fetch before the save");
+        let (condition, _) = fetch.split_once("run: |").expect("its condition");
+        assert!(condition.contains("refs/heads/main"), "saved on main: {condition}");
         let ci = read("ci.yml");
         let fetch = ci.split("      - id: fetch\n").nth(1).expect("the fetch before the save");
         let (condition, rest) = fetch.split_once("run: |").expect("its condition");
@@ -2413,7 +2419,7 @@ let windows = cfg!(windows);
     #[test]
     fn every_mac_job_turns_spotlight_off_first() {
         let workflows = repo_root().expect("repo root").join(".github/workflows");
-        for name in ["ci.yml", "check.yml"] {
+        for name in ["ci.yml", "check.yml", "e2e.yml", "deep.yml"] {
             let text = std::fs::read_to_string(workflows.join(name)).expect("a workflow");
             let jobs: Vec<&str> = text.split("    steps:\n").collect();
             for (header, steps) in jobs.iter().zip(jobs.iter().skip(1)) {

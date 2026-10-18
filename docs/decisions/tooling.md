@@ -2525,8 +2525,10 @@ more full-window layer.
     and crates and the git clones) serves every job of every OS (`enableCrossOsArchive`; their
     contents name no host). The gate's tools lane saves it last in its job, on Linux, after
     `cargo fetch` and with only the lock's crates; a run on a new lock starts from the newest
-    entry. Supersedes "The registry cache renews with the lock, saved by the UI shard".
-  - **Spotlight is off on every Mac job**, first step: it indexed what the builds and tests
+    entry. The e2e reads it too; the Deep checks, which run on main and cannot read the gate's
+    entry, read main's, which their features check saves the same way and every branch reads.
+    Supersedes "The registry cache renews with the lock, saved by the UI shard".
+  - **Spotlight is off on every Mac job** (gate, checks, e2e, Deep, release), first step: it indexed what the builds and tests
     wrote, 200 CPU-seconds of a 353 s build of the worker crate's tests on a three-core runner
     and 106 of their 139 s run; off, 1.
   - **The tests that wait out ten seconds or more start first** (nextest `priority`, each test
