@@ -4288,12 +4288,23 @@ mod tests {
     /// connection's GET to a server on the worker, to its first byte and to its last, the
     /// three ways interleaved. `docs/MEASUREMENTS.md`, "a page through the worker's proxy".
     #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "measurement: cargo test -p slopty-workerd --release --test e2e tunnel_cost -- --ignored --nocapture"]
+    #[ignore = "measurement: cargo xtask bench --filter tunnel_cost"]
     async fn tunnel_cost() {
-        use slopty_testkit::stats::{Spread, us};
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
         const SAMPLES: usize = 300;
         const BODY: usize = 32 << 10;
+        // Every step is bounded and named: a stalled one fails here, saying which, rather than
+        // at nextest's timeout with nothing said.
+        async fn within<T>(
+            what: &str,
+            round: usize,
+            way: usize,
+            step: impl Future<Output = T>,
+        ) -> T {
+            tokio::time::timeout(STEP, step).await.unwrap_or_else(|_elapsed| {
+                panic!("round {round}, way {way}: {what} took over {STEP:?}")
+            })
+        }
         let dir = tempfile::tempdir().unwrap();
         let (_guard, worker) = connect(dir.path()).await;
         let link = slopty_client::WorkerLink::start_forwarding(worker);
@@ -4319,35 +4330,50 @@ mod tests {
         let remote = link.remote();
         let forward = remote.forward(port).unwrap();
         let proxy = remote.proxy().unwrap();
-        let socks = async move |target: Vec<u8>| {
-            let mut page = tokio::net::TcpStream::connect(("127.0.0.1", proxy)).await.unwrap();
-            page.write_all(&[5, 1, 0]).await.unwrap();
+        let socks = async move |target: Vec<u8>| -> std::io::Result<tokio::net::TcpStream> {
+            let mut page = tokio::net::TcpStream::connect(("127.0.0.1", proxy)).await?;
+            page.write_all(&[5, 1, 0]).await?;
             let mut reply = [0_u8; 10];
-            page.read_exact(&mut reply[..2]).await.unwrap();
-            page.write_all(&[&[5, 1, 0][..], &target].concat()).await.unwrap();
-            page.read_exact(&mut reply).await.unwrap();
-            page
+            page.read_exact(&mut reply[..2]).await?;
+            page.write_all(&[&[5, 1, 0][..], &target].concat()).await?;
+            page.read_exact(&mut reply).await?;
+            Ok(page)
         };
         let name = b"only-the-worker.localhost";
         let named = [&[3, 25][..], name, &port.to_be_bytes()].concat();
         let by_ip = [&[1, 127, 0, 0, 1][..], &port.to_be_bytes()].concat();
-        let mut times: [(Vec<Duration>, Vec<Duration>); 3] = Default::default();
+        // Wall time only: the worker and ptyd are other processes, and the link's tasks other
+        // threads, so the process's instructions would not be a page's cost.
+        let bench = slopty_testkit::bench::Bench::new("workerd.tunnel_cost");
+        let mut times: Vec<_> = ["forward", "proxy_by_address", "proxy_by_name"]
+            .into_iter()
+            .map(|way| {
+                let series = |end: &str| bench.series(&format!("{way}.{end}")).wall_only();
+                (series("first_byte"), series("last_byte"))
+            })
+            .collect();
         for round in 0..SAMPLES + 20 {
             for (way, (first, last)) in times.iter_mut().enumerate() {
                 let started = std::time::Instant::now();
-                let mut page = match way {
-                    0 => tokio::net::TcpStream::connect(("127.0.0.1", forward)).await.unwrap(),
-                    1 => socks(by_ip.clone()).await,
-                    _ => socks(named.clone()).await,
+                let opened = match way {
+                    0 => {
+                        within("the forward's connect", round, way, async {
+                            tokio::net::TcpStream::connect(("127.0.0.1", forward)).await
+                        })
+                        .await
+                    }
+                    1 => within("the proxy's handshake", round, way, socks(by_ip.clone())).await,
+                    _ => within("the proxy's handshake", round, way, socks(named.clone())).await,
                 };
+                let mut page = opened.unwrap();
                 page.set_nodelay(true).unwrap();
                 page.write_all(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n").await.unwrap();
                 let mut buf = vec![0_u8; 64 << 10];
-                let n = page.read(&mut buf).await.unwrap();
+                let n = within("the first byte", round, way, page.read(&mut buf)).await.unwrap();
                 let to_first = started.elapsed();
                 let mut got = n;
                 loop {
-                    let n = page.read(&mut buf).await.unwrap();
+                    let n = within("the rest", round, way, page.read(&mut buf)).await.unwrap();
                     if n == 0 {
                         break;
                     }
@@ -4356,26 +4382,14 @@ mod tests {
                 assert!(got > BODY, "the whole answer");
                 // The first rounds warm the link and the resolver's cache.
                 if round >= 20 {
-                    first.push(to_first);
-                    last.push(started.elapsed());
+                    first.record(to_first);
+                    last.record(started.elapsed());
                 }
             }
         }
-        for (way, (first, last)) in
-            ["forward", "proxy by address", "proxy by name"].iter().zip(&times)
-        {
-            let f = Spread::of_durations(first).unwrap();
-            let l = Spread::of_durations(last).unwrap();
-            eprintln!(
-                "{way}: first byte p50 {} p95 {} p99 {}; last byte p50 {} p95 {} p99 {} (n {})",
-                us(f.p50),
-                us(f.p95),
-                us(f.p99),
-                us(l.p50),
-                us(l.p95),
-                us(l.p99),
-                f.n
-            );
+        for (first, last) in times {
+            first.report().unwrap();
+            last.report().unwrap();
         }
     }
 

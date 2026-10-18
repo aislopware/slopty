@@ -6236,12 +6236,23 @@ mod checkpoint_tests {
                 raw.vt_write(chunk);
             }
         });
+        // The median of warm formats, as a live session's checkpoints are: the first in a process
+        // also pays for its allocations' first touch, 2.7 % more here, and that part moves with
+        // the machine (MEASUREMENTS, "the checkpoint's format against its budget"). Each sample
+        // follows a write, without which a checkpoint would reuse the last one's bytes. One untimed
+        // first, then five.
         let mut format = bench.series("format");
-        let bytes = format.time(|| {
+        let mut bytes = Vec::new();
+        for sample in 0..=5 {
+            e.write(b"\x1b[0m");
             let mut v = Vec::new();
-            e.checkpoint(&mut v).unwrap();
-            v
-        });
+            if sample == 0 {
+                e.checkpoint(&mut v).unwrap();
+            } else {
+                format.time(|| e.checkpoint(&mut v).unwrap());
+            }
+            bytes = v;
+        }
         let mut replay = bench.series("replay_one_chunk");
         let b = replay.time(|| {
             let mut b = engine(80, 24, 10_000);

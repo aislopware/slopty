@@ -112,13 +112,28 @@ pub fn run(sh: &Shell, opts: &BenchOpts) -> Result<()> {
         Some(f) => format!("test(/_cost$/) and test(~{f})"),
         None => "test(/_cost$/)".to_owned(),
     };
+    // The daemons the measurements spawn (`tunnel_cost` a worker and ptyd), built in release
+    // before any test starts and vouched for (`slopty_testkit::bins::FRESH`). nextest's setup
+    // script builds them in the test profile only, so a release test found none beside it and
+    // fell back to building every workspace test and binary in release inside its own 120 s
+    // timeout: `tunnel_cost` timed out there on every run since that fallback took `--tests`
+    // (0f6276f0, 2026-10-02), and the setup script's debug build of the workspace went unused.
+    let names: Vec<&str> = packages.iter().map(String::as_str).collect();
+    if let Some(spawned) = crate::gate::spawned_selection(Some(&names)) {
+        let bins = crate::gate::spawned_bin_args();
+        step(
+            "spawned binaries, release",
+            &cmd!(sh, "nice -n 10 cargo build --release {spawned...} {bins...}"),
+        )?;
+    }
     let ran = step(
         &format!("measure {}", packages.join(", ")),
         &cmd!(
             sh,
             "nice -n 10 cargo nextest run --release {selected...} --run-ignored only -E {filter} --no-capture --no-fail-fast --no-tests=pass"
         )
-        .env("SLOPTY_BENCH_OUT", &out),
+        .env("SLOPTY_BENCH_OUT", &out)
+        .env(crate::gate::BINS_FRESH, "1"),
     );
     let measured = read_measured(&out)?;
     let budgets = read_budgets(&root.join(BUDGETS))?;
