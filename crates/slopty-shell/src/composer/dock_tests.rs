@@ -751,6 +751,59 @@ fn an_approvals_digits_show_where_they_pick(cx: &mut TestAppContext) {
     assert!(composer.read_with(cx, |composer, _| !composer.wizard_open()), "3 picked, as its badge said");
 }
 
+/// A digit shows only where a key can press it: with no hardware keyboard (an iPhone or iPad
+/// held in the hand) an approval's options wear none and say none to a screen reader, and they
+/// come back as a keyboard connects.
+#[gpui::test]
+fn digits_show_only_while_a_hardware_keyboard_is_attached(cx: &mut TestAppContext) {
+    let (_composer, state, cx) = open(cx, ChatDock { can: can(), ..ChatDock::default() }, None);
+    ask(cx, &state, approval("Read src/main.rs", false));
+    cx.update(|_, cx| set_hardware_keyboard(false, cx));
+    let keys = option_keys(cx);
+    assert_eq!(keys.len(), 3, "the card, touch only: {keys:?}");
+    assert!(keys.iter().all(|(_, key)| key.is_empty()), "no digit with no keyboard: {keys:?}");
+    cx.update(|_, cx| set_hardware_keyboard(true, cx));
+    let want: Vec<(String, String)> =
+        [("Allow", "1"), ("Always allow", "2"), ("Deny", "3")].map(|(l, k)| (l.into(), k.into())).into();
+    assert_eq!(option_keys(cx), want, "a keyboard connected: the digits are back");
+}
+
+/// An "Always allow" that reaches folders shows them in full, one per line, while the pointer
+/// rests on it; a choice that reaches none shows no tooltip.
+#[gpui::test]
+fn an_always_allow_shows_the_folders_it_reaches_in_full(cx: &mut TestAppContext) {
+    let (_composer, state, cx) = open(cx, ChatDock { can: can(), ..ChatDock::default() }, None);
+    let folders = "/w/app/src/lexer\n/home/me/notes";
+    ask(
+        cx,
+        &state,
+        UserInputQuestion {
+            option_tooltips: vec![String::new(), folders.into(), String::new()],
+            ..approval("Edit src/lexer/mod.rs", false)
+        },
+    );
+    let tooltips_over = |label: &str, cx: &mut VisualTestContext| {
+        let at = cx.update(|window, _| {
+            window.set_a11y_active(true);
+            let update = window.a11y_tree().expect("a tree");
+            let scale = f64::from(window.scale_factor());
+            let r = update
+                .nodes
+                .iter()
+                .find(|(_, node)| node.role() == Role::Button && node.label() == Some(label))
+                .and_then(|(_, node)| node.bounds())
+                .expect("the option");
+            gpui::point(px(((r.x0 + r.x1) / 2.0 / scale) as f32), px(((r.y0 + r.y1) / 2.0 / scale) as f32))
+        });
+        cx.simulate_mouse_move(at, None, gpui::Modifiers::default());
+        cx.executor().advance_clock(crate::settings::widgets::TOOLTIP_DELAY * 2);
+        labels(&draw(cx), Role::Tooltip)
+    };
+    draw(cx);
+    assert_eq!(tooltips_over("Always allow", cx), [folders], "its folders, each on its own line");
+    assert!(tooltips_over("Allow", cx).is_empty(), "a once reaches no folder");
+}
+
 /// A click-only approval (anything but a known read) takes no digit, so it shows none: no badge
 /// promises a key that does nothing.
 #[gpui::test]

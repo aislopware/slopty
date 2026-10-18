@@ -556,6 +556,11 @@ pub struct UserInputQuestion {
     /// pane beside the options; empty when none has one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub option_previews: Vec<String>,
+    /// What each of `options` says while the pointer rests on it, by the same index (the folders
+    /// an "Always allow" reaches, in full, one per line); empty for one that says nothing, and no
+    /// entries at all when none says anything.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub option_tooltips: Vec<String>,
     /// Which of `options` allows the call once, where the agent takes the person's words with an
     /// allow ("Allow, and say what's next…"): its answer's labels are that option's and the
     /// words.

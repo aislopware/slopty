@@ -13323,3 +13323,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   own. The heading's counts replace the `mcp-servers` fact. Proof: `composer::dock_tests::
   a_failed_mcp_server_offers_reconnect`, `slopty-ui` `view_model::work::tests::
   the_dock_lists_the_agents_mcp_servers`.
+
+- ✅ **A card's digits show only where a key can press them (2026-10-18).** Each choice's digit
+  badge, its aria-keyshortcuts and the keyboard's ring show while a hardware keyboard is attached
+  and no field of the card holds it: always on a Mac, on an iPhone or iPad only while
+  GameController's coalesced keyboard is there, heard as the first connects and the last goes and
+  read again on each return to the front. A touch-only phone shows none: a badge there promised a
+  key that does not exist. Test: dock_tests `digits_show_only_while_a_hardware_keyboard_is_attached`.

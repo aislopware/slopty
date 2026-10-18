@@ -398,6 +398,35 @@ fn an_open_approval_is_asked_and_answered_by_its_choice() {
     );
 }
 
+/// An "Always allow" that reaches folders says them in full, one per line, while the pointer
+/// rests on it; the choices that reach none say nothing.
+#[test]
+fn a_choice_that_reaches_folders_says_them_in_full() {
+    use slopty_proto::thread::Effect;
+    let mut state = fixtures::thread("tools");
+    let mut approval = request(
+        slopty_proto::thread::Request::APPROVAL,
+        &[
+            ("allow", "Allow", Effect::Allow),
+            ("always", "Always allow", Effect::Allow),
+            ("deny", "Deny", Effect::Deny),
+        ],
+    );
+    approval.options[1].scope = Some("src/lexer, ~/notes".to_owned());
+    approval.options[1].folders = vec!["/w/app/src/lexer".to_owned(), "/home/me/notes".to_owned()];
+    state.requests.push(approval);
+    let mut entries = transcript::entries(&state, &transcript::Look::new("w"));
+    transcript::asks(&state, "w", &mut entries);
+    let (_, questions) = served(&entries).expect("the panel serves it");
+    assert_eq!(questions[0].option_tooltips, ["", "/w/app/src/lexer\n/home/me/notes", ""]);
+
+    state.requests.last_mut().expect("the approval").options[1].folders.clear();
+    let mut entries = transcript::entries(&state, &transcript::Look::new("w"));
+    transcript::asks(&state, "w", &mut entries);
+    let (_, questions) = served(&entries).expect("the panel serves it");
+    assert!(questions[0].option_tooltips.is_empty(), "no folders, no tooltips");
+}
+
 /// Claude Code held at its trust dialog has said nothing yet: its request still gets an answer of
 /// its own to be asked on.
 #[test]
@@ -1000,6 +1029,56 @@ fn pictures_go_by_paths_of_their_own() {
     });
     let path = transcript::image_path(thread, &tool_id, 0, &picture(2));
     assert_eq!(part, Some((path, "image/png".to_owned())));
+}
+
+/// A picture a call returned from reading a file is called by the file's name; one of several,
+/// or of a call that names no file, by its place among the call's pictures.
+#[test]
+fn a_picture_of_a_file_read_is_named_by_the_file() {
+    use slopty_proto::thread::detail::Clipped;
+    use slopty_proto::thread::{ContentRef, Image, ItemBody};
+    let picture = |n: u8| Image {
+        digest: format!("{n:064x}"),
+        media_type: "image/png".to_owned(),
+        bytes: 10,
+        width: 1,
+        height: 1,
+        at: ContentRef(format!("img:{n}")),
+    };
+    let names = |input: &str, images: Vec<Image>| {
+        let mut state = fixtures::thread("tools");
+        let tool = state.items.iter_mut().find(|item| shown_call(&item.body)).expect("a tool call");
+        if let ItemBody::Tool(call) = &mut tool.body {
+            call.input = Clipped::whole(input);
+            call.images = images;
+        }
+        let entries = transcript::entries(&state, &transcript::Look::new("w"));
+        entries
+            .iter()
+            .flat_map(|e| &e.parts)
+            .filter_map(|part| match part {
+                MessagePart::Image { name, .. } => Some(name.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(names(r#"{"file_path":"/w/app/shots/login.png"}"#, vec![picture(1)]), ["login.png"]);
+    assert_eq!(names(r#"{"path":"C:\\shots\\home.png"}"#, vec![picture(1)]), ["home.png"]);
+    assert_eq!(
+        names(r#"{"file_path":"/w/app/deck.pdf"}"#, vec![picture(1), picture(2)]),
+        ["Image 1", "Image 2"],
+        "pages of one file go by their place"
+    );
+    assert_eq!(
+        names(r#"{"command":"screencapture"}"#, vec![picture(1)]),
+        ["Image 1"],
+        "no file named"
+    );
+    assert_eq!(
+        names(r#"{"file_path":"/w/"}"#, vec![picture(1)]),
+        ["Image 1"],
+        "a folder names nothing"
+    );
 }
 
 /// A visual a call showed is a part after the call once the call completed, going by a path of

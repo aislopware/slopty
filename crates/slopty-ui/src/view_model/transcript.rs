@@ -161,6 +161,15 @@ pub fn image_path(thread: ThreadId, item: &str, index: usize, image: &Image) -> 
     format!("{IMAGE_SCHEME}{thread}/{item}/{index}/{digest}.{ext}")
 }
 
+/// slopty: the file a call read, by its last name (`file_path` or `path` in its input): what a
+/// picture it returned is called in the chat.
+fn image_file_name(call: &ToolCall) -> Option<String> {
+    let input: serde_json::Value = serde_json::from_str(&call.input.text).ok()?;
+    let path = ["file_path", "path"].iter().find_map(|key| input.get(*key)?.as_str())?;
+    let name = path.rsplit(['/', '\\']).next()?.trim();
+    (!name.is_empty()).then(|| super::text::escaped(name))
+}
+
 /// How a path of [`image_path`] begins.
 pub const IMAGE_SCHEME: &str = "slopty-image:";
 
@@ -380,11 +389,18 @@ pub fn entries(state: &ThreadState, look: &Look<'_>) -> Vec<SessionMessageEntry>
                     parts.push(part);
                     // slopty: the files it changed, as the TUI lists them under a command.
                     parts.extend(shell_edits(thread, &id, call));
+                    // slopty: a picture of a file read is named by the file; any other by its
+                    // place among the call's pictures.
+                    let file = image_file_name(call);
                     parts.extend(call.images.iter().enumerate().map(|(n, image)| {
+                        let name = match &file {
+                            Some(file) if call.images.len() == 1 => file.clone(),
+                            _ => format!("Image {}", n.saturating_add(1)),
+                        };
                         MessagePart::Image {
                             id: format!("{id}:image:{n}"),
                             path: image_path(thread, &id, n, image),
-                            name: format!("Image {}", n.saturating_add(1)),
+                            name,
                             mime_type: image.media_type.clone(),
                         }
                     }));
@@ -1023,6 +1039,18 @@ fn descriptions(options: &[slopty_proto::thread::detail::Offered]) -> Vec<String
     if said.iter().all(String::is_empty) { Vec::new() } else { said }
 }
 
+/// What each choice says while the pointer rests on it: the folders its scope names, each in
+/// full on a line of its own; no entries at all when no choice names any.
+fn choice_tooltips(options: &[slopty_proto::thread::Choice]) -> Vec<String> {
+    if options.iter().all(|c| c.folders.is_empty()) {
+        return Vec::new();
+    }
+    options
+        .iter()
+        .map(|c| c.folders.iter().map(|f| super::text::escaped(f)).collect::<Vec<_>>().join("\n"))
+        .collect()
+}
+
 /// The rule an approval offers to allow its like always: its allowing choice whose reach is a
 /// rule in the agent's words (`Bash(cargo test:*)`), to go to the folder's own settings unless
 /// the person picks another scope.
@@ -1293,6 +1321,7 @@ fn input(request: &Request, state: &ThreadState) -> MessagePart {
             header: escaped(&header),
             question: escaped(&question),
             options: request.options.iter().map(|c| escaped(&choice_label(request, c))).collect(),
+            option_tooltips: choice_tooltips(&request.options),
             multi_select: false,
             prefill: None,
             multiline: false,

@@ -61,7 +61,7 @@ pub use activity::working_line;
 pub(crate) use footer::ansi_color; // slopty: a code fence's terminal colours.
 pub use dock::{DockCache, chat_dock};
 pub use surfaces::{ModPane, PaneAsk};
-pub use request_card::offer_undo_rewind;
+pub use request_card::{offer_undo_rewind, set_hardware_keyboard};
 pub(crate) use history::insert_quote;
 mod chip;
 pub use chip::ChipKind;
@@ -9610,7 +9610,8 @@ impl Composer {
     /// border-white/[0.08] bg-white/[0.03] shadow-xl`), uppercase header +
     /// "1/3" counter chip, option rows with number kbd chips, a free-text
     /// override over a hairline, and Back / Next-Submit footer.
-    // slopty: `keys_live`, whether no field the card shows holds the keyboard, so its keys pick.
+    // slopty: `keys_live`, whether a key can press the card's choices: a hardware keyboard is
+    // attached and no field the card shows holds it.
     fn render_wizard(&mut self, keys_live: bool, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = Theme::of(cx).clone();
         let Some(wizard) = self.wizard.clone() else {
@@ -9676,6 +9677,7 @@ impl Composer {
         let form = request_card::is_form(&question);
         let footer = self.card_footer(&question, &theme, cx);
         let descriptions = question.option_descriptions.clone(); // slopty
+        let tooltips = question.option_tooltips.clone(); // slopty
         // slopty: the option whose preview shows: the one the pointer is over, else the keyboard's,
         // else the one picked.
         let previews = question.option_previews.iter().any(|p| !p.trim().is_empty());
@@ -9697,8 +9699,11 @@ impl Composer {
             // (typed answers win — slopty question-panel.tsx `isSel`).
             let picked = wizard.is_picked(ix) && typed_empty;
             let blocked = wizard.allow_blocked(ix); // slopty
-            // slopty: the keyboard's place, where Enter would take it.
-            let keyed = keys_pick && focused == Some(ix) && !picked;
+            // slopty: the keyboard's place, where Enter would take it, while a key can.
+            let keyed = keys_live && keys_pick && focused == Some(ix) && !picked;
+            // slopty: one rule for every card: the digit that picks it, where a key can press
+            // it, never on a click-only page; its badge and its screen reader's shortcut alike.
+            let digit = (ix < 9 && !click_only && keys_live).then(|| SharedString::from(format!("{}", ix + 1)));
             div()
                 .id(("wizard-option", ix))
                 // slopty: each choice names itself; a held-back allow says so.
@@ -9709,10 +9714,14 @@ impl Composer {
                     label.clone()
                 }))
                 .when_some(description.clone(), |el, d| el.aria_description(SharedString::from(d)))
-                // slopty: the digit that picks it, as its badge shows, for a screen reader too.
-                .when(ix < 9 && !click_only && keys_live, |el| {
-                    el.aria_keyshortcuts(SharedString::from(format!("{}", ix + 1)))
+                // slopty: what it reaches in full (an "Always allow"'s folders), while the pointer
+                // rests on it.
+                .when_some(tooltips.get(ix).filter(|t| !t.trim().is_empty()).cloned(), |el, tip| {
+                    el.tooltip(crate::settings::widgets::text_tooltip(tip))
+                        .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
                 })
+                // slopty: the digit that picks it, as its badge shows, for a screen reader too.
+                .when_some(digit.clone(), |el, digit| el.aria_keyshortcuts(digit))
                 // slopty: one dimming for what cannot act now; it says it is disabled.
                 .when(blocked, |el| el.opacity(crate::theme::DISABLED_OPACITY).cursor_default().aria_disabled(true))
                 .flex()
@@ -9775,9 +9784,7 @@ impl Composer {
                             )
                         }),
                 )
-                // slopty: one rule for every card: a digit shows where it picks, never on a
-                // click-only page nor while a field the card shows holds the keyboard.
-                .when(ix < 9 && !click_only && keys_live, |el| {
+                .when_some(digit, |el, digit| {
                     el.child(
                         // Number kbd chip: `size-[22px] rounded-md text-[11px]`.
                         div()
@@ -9798,7 +9805,7 @@ impl Composer {
                             } else {
                                 theme.text_muted.opacity(0.6)
                             })
-                            .child(SharedString::from(format!("{}", ix + 1))),
+                            .child(digit),
                     )
                 })
         });
@@ -10458,7 +10465,9 @@ impl Render for Composer {
             });
 
         if wizard_active {
-            let keys_live = !self.field_has_keyboard(window, cx);
+            // slopty: a card's keys pick only where a key can press them: a hardware keyboard
+            // attached (a Mac's always is) and no field of the card holding it.
+            let keys_live = request_card::keys_press(cx) && !self.field_has_keyboard(window, cx);
             let wizard = self.render_wizard(keys_live, cx);
             return container.child(motion::fade_quick("composer-wizard", div().child(wizard)));
         }

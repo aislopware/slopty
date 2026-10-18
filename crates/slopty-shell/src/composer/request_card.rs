@@ -44,6 +44,27 @@ pub(crate) const NEEDS_PRESENCE_WHY: &str = "The agent takes this answer only fr
 /// Under this long left, the countdown turns amber.
 const COUNTDOWN_URGENT_MS: i64 = 30_000;
 
+/// Whether a hardware keyboard is attached, so a key can press a card's choices: a Mac always
+/// has one; on iOS the app says so as `GameController` hears the first connect and the last go
+/// ([`set_hardware_keyboard`]). Until it says, an iPhone or iPad has none.
+struct HardwareKeyboard(bool);
+
+impl gpui::Global for HardwareKeyboard {}
+
+/// Say whether a hardware keyboard is attached; a change redraws every window, so the digits on
+/// a card's choices come and go with the keyboard.
+pub fn set_hardware_keyboard(attached: bool, cx: &mut App) {
+    if cx.try_global::<HardwareKeyboard>().map(|keyboard| keyboard.0) != Some(attached) {
+        cx.set_global(HardwareKeyboard(attached));
+        cx.refresh_windows();
+    }
+}
+
+/// Whether a key can press a card's choices ([`HardwareKeyboard`]).
+pub(crate) fn keys_press(cx: &App) -> bool {
+    cx.try_global::<HardwareKeyboard>().map_or(!cfg!(target_os = "ios"), |keyboard| keyboard.0)
+}
+
 /// What a form's field takes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum FieldKind {

@@ -102,6 +102,9 @@ pub struct Workspace {
     motion_watch: Option<slopty_platform::motion::Watch>,
     /// The system's wakes, unlocks, returns to the front and path changes ([`watch_resumes`]).
     resume_watch: Option<slopty_platform::resume::Watch>,
+    /// A hardware keyboard heard as it comes and goes ([`watch_hardware_keyboard`]).
+    #[cfg(target_os = "ios")]
+    keyboard_watch: Option<slopty_platform::keyboard_presence::Watch>,
     /// The person leaving this Mac: its lock, its sleep, another session
     /// (`Workspace::watch_leaving`).
     #[cfg(target_os = "macos")]
@@ -315,6 +318,8 @@ impl Workspace {
             interface_feed: None,
             motion_watch: None,
             resume_watch: None,
+            #[cfg(target_os = "ios")]
+            keyboard_watch: None,
             #[cfg(target_os = "macos")]
             leaving_watch: None,
             runtime,
@@ -1464,6 +1469,9 @@ pub fn open_workspace(cx: &mut App, handle: tokio::runtime::Handle) {
     cx.set_reduce_motion(slopty_platform::reduce_motion());
     watch_reduce_motion(&workspace, cx);
     watch_resumes(&workspace, &slopty_platform::resume::System, cx);
+    tell_hardware_keyboard(slopty_platform::hardware_keyboard_attached(), cx);
+    #[cfg(target_os = "ios")]
+    watch_hardware_keyboard(&workspace, cx);
     hangs::watch(cx);
     watch_settings(workspace.clone(), cx);
     // A tapped note brings the app forward on its chat or terminal, on whichever worker it lives.
@@ -1576,6 +1584,39 @@ fn watch_reduce_motion(workspace: &Entity<Workspace>, cx: &mut App) {
     .detach();
 }
 
+/// Tell the shell whether a hardware keyboard is attached, so a card's choices wear the digits
+/// that press them only where a key can ([`slopty_shell::composer::set_hardware_keyboard`]). The
+/// e2e build lets `SLOPTY_HARDWARE_KEYBOARD=0|1` decide instead of the platform: on the
+/// simulator `GameController` reports the Mac's keyboard about a second after launch, and a
+/// golden must not depend on which side of that its frame landed.
+fn tell_hardware_keyboard(attached: bool, cx: &mut App) {
+    #[cfg(feature = "e2e")]
+    let attached =
+        std::env::var_os("SLOPTY_HARDWARE_KEYBOARD").map_or(attached, |forced| forced == "1");
+    slopty_shell::composer::set_hardware_keyboard(attached, cx);
+}
+
+/// Tell the shell each time `GameController` hears the first hardware keyboard connect or the
+/// last one go; one that came or went while the app was away is read again on its return
+/// ([`watch_resumes`]).
+#[cfg(target_os = "ios")]
+fn watch_hardware_keyboard(workspace: &Entity<Workspace>, cx: &mut App) {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let watch = slopty_platform::keyboard_presence::watch(move |attached| {
+        let _closed = tx.send(attached);
+    });
+    workspace.update(cx, |ws, _cx| ws.keyboard_watch = Some(watch));
+    let workspace = workspace.downgrade();
+    cx.spawn(async move |cx| {
+        while let Some(attached) = rx.recv().await {
+            if workspace.update(cx, |_ws, cx| tell_hardware_keyboard(attached, cx)).is_err() {
+                return;
+            }
+        }
+    })
+    .detach();
+}
+
 /// Hear what may have killed the links under the app (the Mac waking, an unlock, a return to
 /// the front, a path change) from `source`, on the main thread ([`Workspace::resume`]). On iOS
 /// a keyboard that came or went while the app was away went unheard, so it is read again.
@@ -1598,7 +1639,10 @@ fn watch_resumes(
                 ws.person_back(resume, cx);
             });
             #[cfg(not(target_os = "macos"))]
-            let heard = workspace.update(cx, |ws, _cx| ws.resume(resume));
+            let heard = workspace.update(cx, |ws, cx| {
+                ws.resume(resume);
+                tell_hardware_keyboard(slopty_platform::hardware_keyboard_attached(), cx);
+            });
             if heard.is_err() {
                 return;
             }
