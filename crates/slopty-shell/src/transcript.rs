@@ -1217,6 +1217,20 @@ pub fn diff_to_file(diff: &slopty_view_proto::ToolDiff) -> crate::changes::FileD
     }
 }
 
+/// slopty: how a picture a tool returned is named (`slopty_ui::view_model::transcript::image_path`):
+/// a file read names its file, unlike a picture the agent generated.
+const TOOL_IMAGE_SCHEME: &str = "slopty-image:";
+
+/// slopty: what a picture in the chat is called: one a tool returned by its name ("Image:
+/// plot.png"), one the agent generated as such.
+fn image_label(path: &str, name: &str) -> SharedString {
+    if path.starts_with(TOOL_IMAGE_SCHEME) && !name.trim().is_empty() {
+        format!("Image: {name}").into()
+    } else {
+        "Preview generated image".into()
+    }
+}
+
 #[derive(Clone)]
 pub enum RowKind {
     GeneratedImage {
@@ -7323,7 +7337,7 @@ impl Transcript {
                     .w(px(dimensions.0 as f32 * scale))
                     .h(px(dimensions.1 as f32 * scale))
                     .role(gpui::Role::Button)
-                    .aria_label("Preview generated image")
+                    .aria_label(image_label(path, name))
                     .tab_index(0)
                     .cursor_pointer()
                     // slopty: the shared ring, outside the picture: focus covers none of it.
@@ -12885,6 +12899,14 @@ mod tests {
             assert!(kept, "{order}: the wheel keeps the turn's reservation");
             assert!(sunk <= 0.5, "{order}: the wheel rests {sunk}px above the end, not in the slack");
         }
+    }
+
+    /// slopty: a picture a tool returned is named by its file; one the agent generated says so.
+    #[test]
+    fn a_tool_picture_is_named_by_its_file() {
+        assert_eq!(image_label("slopty-image:7/toolu_01/0/abc.png", "plot.png"), "Image: plot.png");
+        assert_eq!(image_label("/cache/gen/image-1.png", "image-1.png"), "Preview generated image");
+        assert_eq!(image_label("slopty-image:7/toolu_01/0/abc.png", " "), "Preview generated image");
     }
 
     /// slopty: a prompt the rail jumps to lands below the titlebar the transcript fades under,
