@@ -54,7 +54,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     gpui-fast's iOS window reads. Xcode 27 ships without the Metal compiler, the CI image's
     included, until `xcodebuild -downloadComponent MetalToolchain` fetches it; without it
     gpui's macOS build script leaves the shader library empty and the app opens no window. So
-    `cargo xtask setup` fetches it, `doctor` names it, `bundle` refuses to build without it,
+    `cargo xtask setup` fetches it, here and in each CI job whose lanes build GPUI for the Mac
+    (a check runs the shader build script too; a cached target dir had hidden that until the
+    upstream sync's cold one failed), `doctor` names it, `bundle` refuses to build without it,
     and the release job fetches it before `dist`.
   - **The bindings wait for objc2's Xcode 27 release, not a fork.** objc2's framework crates
     (0.3.2) were generated from Xcode 16.4, so the four 27 calls above are declared by hand, each

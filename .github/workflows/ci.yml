@@ -549,7 +549,7 @@ jobs:
             | BETTER_UPDATE_VERSION=0.81.0 sh
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       # The image's Xcode comes without the Metal compiler the app's shaders build with, and
-      # `bundle` refuses to build without it.
+      # `bundle` refuses to build without it (the gate's jobs fetch it in `xtask setup`).
       - run: xcodebuild -downloadComponent MetalToolchain
       - run: cargo xtask dist --out dist 2>&1 | tee dist.log
       # Whether it was signed and notarised, and anything else it warned of, on the run's page.

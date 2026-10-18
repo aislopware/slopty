@@ -80,9 +80,16 @@ pub fn run(sh: &Shell, no_tools: bool, lanes: &[LaneId], tools: &[String]) -> Re
         // XcodeGen is a Swift tool with no cargo distribution; Homebrew is the supported route.
         step("brew install xcodegen", &cmd!(sh, "brew install xcodegen"))?;
     }
-    if !no_tools && everything && cfg!(target_os = "macos") && !has_metal(sh) {
-        // Xcode 27 ships without the Metal compiler GPUI's shaders build with; Apple serves
-        // it as a component, fetched with no sign-in.
+    // The lanes that build GPUI for the Mac, whose build script compiles its shaders: a check
+    // runs it too, and fails without the compiler. A cached target dir hides that until a
+    // cold one.
+    let builds_shaders = everything
+        || lanes
+            .iter()
+            .any(|lane| matches!(lane, LaneId::ClippyHost | LaneId::Tests | LaneId::Rustdoc));
+    if !no_tools && builds_shaders && cfg!(target_os = "macos") && !has_metal(sh) {
+        // Xcode 27 ships without the Metal compiler GPUI's shaders build with, a CI image's
+        // included; Apple serves it as a component, fetched with no sign-in.
         step("the Metal toolchain", &cmd!(sh, "xcodebuild -downloadComponent MetalToolchain"))?;
     }
     step("git submodules", &cmd!(sh, "git submodule update --init --recursive --depth 1"))?;
