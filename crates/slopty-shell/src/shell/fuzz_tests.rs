@@ -453,8 +453,10 @@ fn shrink(seed: u64, steps: &[Step], failed_at: usize, kind: &str) -> Vec<usize>
     keep
 }
 
-/// Run `runs` seeds from `first`, `len` steps each; shrink and report the first failure.
-fn fuzz(first: u64, runs: u64, len: usize) {
+/// Run `runs` seeds from `first`, `len` steps each, and report the first failure: shrunk to
+/// its fewest steps when `shrink` (each try a whole run: the long run's), else at once with the
+/// rerun that shrinks it.
+fn fuzz(first: u64, runs: u64, len: usize, shrink_it: bool) {
     if let (Ok(seed), Ok(keep)) = (std::env::var("SLOPTY_FUZZ_SEED"), std::env::var("SLOPTY_FUZZ_KEEP")) {
         let seed: u64 = seed.parse().expect("SLOPTY_FUZZ_SEED is a number");
         let keep: Vec<usize> = keep.split(',').map(|ix| ix.trim().parse().expect("SLOPTY_FUZZ_KEEP lists indices")).collect();
@@ -468,6 +470,18 @@ fn fuzz(first: u64, runs: u64, len: usize) {
     for seed in first..first + runs {
         let steps = steps_of(seed, len);
         let Err(failure) = run(seed, &steps) else { continue };
+        if !shrink_it {
+            panic!(
+                "the shell fuzz failed on {} (seed {seed}) at step {} {:?}, {}: {}\n\nshrink it: \
+                 SLOPTY_FUZZ_FIRST={seed} SLOPTY_FUZZ_RUNS=1 SLOPTY_FUZZ_STEPS={len} cargo nextest run \
+                 -p slopty-shell --run-ignored all a_long_fuzz_of_the_shell",
+                SCREENS[screen_of(seed)].0,
+                failure.step,
+                steps.get(failure.step),
+                failure.kind,
+                failure.detail,
+            );
+        }
         let hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
         let keep = shrink(seed, &steps, failure.step, failure.kind);
@@ -495,10 +509,12 @@ fn fuzz(first: u64, runs: u64, len: usize) {
     }
 }
 
-/// A few fixed seeds, one per screen, a short sequence each: seconds, in every check.
+/// A few fixed seeds, one per screen, a short sequence each, every oracle after every step and
+/// no shrinking: about a second here, a few on the gate's three-core runner (its `tests ui` shard
+/// is the gate's critical path). The depth is the long run's.
 #[test]
 fn a_short_fuzz_of_the_shell_finds_nothing() {
-    fuzz(1, 4, 16);
+    fuzz(1, 4, 8, false);
 }
 
 /// The nightly's: many seeds, long sequences.
@@ -507,7 +523,7 @@ fn a_short_fuzz_of_the_shell_finds_nothing() {
 fn a_long_fuzz_of_the_shell() {
     let env = |name: &str, default: u64| std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default);
     let first = env("SLOPTY_FUZZ_FIRST", 1000);
-    fuzz(first, env("SLOPTY_FUZZ_RUNS", 64), usize::try_from(env("SLOPTY_FUZZ_STEPS", 120)).unwrap_or(120));
+    fuzz(first, env("SLOPTY_FUZZ_RUNS", 64), usize::try_from(env("SLOPTY_FUZZ_STEPS", 120)).unwrap_or(120), true);
 }
 
 /// What the fuzzer found first (seed 6 on the phone, shrunk to two steps): a chat left, then
