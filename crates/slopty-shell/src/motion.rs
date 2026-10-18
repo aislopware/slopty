@@ -1173,18 +1173,16 @@ thread_local! {
     static STATE_MORPHS: RefCell<StateMorphs> = RefCell::new(StateMorphs::default());
 }
 
-/// Morph progress (0..1) of `key` toward `on` this frame.
-pub fn state_t(key: &str, on: bool, spec: MotionSpec, reduced: bool) -> f32 {
-    STATE_MORPHS.with(|morphs| {
-        morphs
-            .borrow_mut()
-            .value_at(key, on, spec, reduced, Instant::now())
-    })
+/// Morph progress (0..1) of `key` toward `on` at `now`, the frame's moment (`cx.frame_time()`).
+// slopty: the frame's moment, not the wall clock's, so a frame drawn again from scratch at the
+// same moment stands the morph where it stood.
+pub fn state_t(key: &str, on: bool, spec: MotionSpec, reduced: bool, now: Instant) -> f32 {
+    STATE_MORPHS.with(|morphs| morphs.borrow_mut().value_at(key, on, spec, reduced, now))
 }
 
-/// Frame-drive hook, beside [`hover_fades_active`]: call ONCE per window frame.
-pub fn state_morphs_active() -> bool {
-    STATE_MORPHS.with(|morphs| morphs.borrow_mut().tick_at(Instant::now()))
+/// Frame-drive hook, beside [`hover_fades_active`]: call ONCE per window frame, at its moment.
+pub fn state_morphs_active(now: Instant) -> bool {
+    STATE_MORPHS.with(|morphs| morphs.borrow_mut().tick_at(now))
 }
 
 // ---------------------------------------------------------------------------

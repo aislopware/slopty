@@ -1996,6 +1996,12 @@ impl AppState {
         });
     }
 
+    /// slopty: whether `chat_id` may be opened: it is listed, or the list has not arrived yet
+    /// (a note tapped at launch, a chat just started), so nothing says it is gone.
+    pub fn chat_listed(&self, chat_id: &str) -> bool {
+        !self.chats_synced || self.chats.iter().any(|chat| chat.id == chat_id)
+    }
+
     pub fn selected_chat_row(&self) -> Option<&Chat> {
         let id = self.selected_chat.as_deref()?;
         self.chats.iter().find(|c| c.id == id)

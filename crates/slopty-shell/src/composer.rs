@@ -82,19 +82,28 @@ const ENGINE_OFFLINE: &str = "Couldn't send while Slopty is offline. Try again o
 /// slopty: a section of the composer's stack (a failure, the dock's lines, a folded question,
 /// mod bands, the trays) that grows into its height and shrinks out of it
 /// ([`motion::reveal_height`]), so the composer and the transcript over it slide rather than
-/// jump. The column's gap rides inside the section, so a closed one takes no room at all.
+/// jump. The space under it rides inside it, so a closed one takes no room at all. No negative
+/// margin cancels a gap: the layout counts an item's margin box as at least nothing, so each
+/// closed section that pulled the column's gap back with one left that gap below the composer.
 fn stack_section(key: &'static str, section: Option<AnyElement>) -> AnyElement {
     let open = section.is_some();
     div()
         .flex_none()
         .w_full()
-        .mt(px(-Theme::SPACE_SM))
         .child(motion::reveal_height(
             key,
             open,
-            div().pt(px(Theme::SPACE_SM)).children(section),
+            div().pb(px(Theme::SPACE_SM)).children(section),
         ))
         .into_any_element()
+}
+
+/// slopty: how far a finger's target on the footer reaches below the composer's padding: on a
+/// touch screen the footer's controls take 44 pt on its 24 pt row, and the composer's box holds
+/// them whole, so the floor under it never cuts a target short.
+fn footer_touch_reach() -> f32 {
+    let reach = (crate::surface_chrome::touch_row_height(SESSION_FOOTER_HEIGHT) - SESSION_FOOTER_HEIGHT) / 2.0;
+    (reach - (Theme::SPACE_LG - Theme::SPACE_SM)).max(0.0)
 }
 
 /// Expanded-mode textarea vertical padding: `pt-4 pb-1` (slopty composer.tsx
@@ -10364,14 +10373,16 @@ impl Render for Composer {
         // The shell owns the width and its route animation. A route-dependent
         // cap here would cut a wide composer before its return glide finishes.
         let container = div()
+            .debug_selector(|| "composer-root".into()) // slopty: for the tests
             .w_full()
             .max_w(px(self.last_available_width.unwrap_or(COMPOSER_MAX_WIDTH)))
             .mx_auto()
             .flex()
             .flex_col()
-            .gap(px(Theme::SPACE_SM))
+            // slopty: no column gap: the stack's sections carry the space under them, and the
+            // selectors and the footer theirs (`stack_section`).
             .px(px(Theme::SPACE_LG))
-            .pb(px(Theme::SPACE_LG))
+            .pb(px(Theme::SPACE_LG + footer_touch_reach()))
             .child({
                 // Amber with "Warning" for the offline-ish case (engine not
                 // connected), red with "Error" for send/run failures. Click
@@ -11048,7 +11059,7 @@ impl Render for Composer {
                 div()
                     .w_full()
                     .h(px(NEW_THREAD_SELECTOR_ROW_HEIGHT * new_thread_chrome))
-                    .mb(px(-Theme::SPACE_SM * (1.0 - new_thread_chrome)))
+                    .mb(px(Theme::SPACE_SM * new_thread_chrome)) // slopty: the gap it grows
                     .px(px(10.0))
                     .flex()
                     .items_start()
@@ -11088,9 +11099,10 @@ impl Render for Composer {
             // slopty: no agent accounts: Slopty never touches a credential.
             container.child(
                 div()
+                    .debug_selector(|| "composer-footer-slot".into()) // slopty: for the tests
                     .w_full()
                     .h(px(SESSION_FOOTER_HEIGHT * bottom_slot))
-                    .mt(px(-Theme::SPACE_SM * (1.0 - bottom_slot)))
+                    .mt(px(Theme::SPACE_SM * bottom_slot)) // slopty: the gap it grows
                     .mb(px(-Theme::SPACE_SM * bottom_slot))
                     .relative()
                     .when(new_thread_chrome_opacity > 0.0, |slot| {

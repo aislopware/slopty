@@ -313,6 +313,11 @@ pub fn open_chat(chat_id: String, cx: &mut App) {
 /// closed it. slopty: harness-update banners are gone, so every target is a chat.
 fn open_notification_target(target: String, state: &gpui::Entity<state::AppState>, cx: &mut App) {
     activate_main_window(cx);
+    // slopty: a note of a chat archived or deleted since brings Slopty forward and opens nothing,
+    // rather than an empty page in that chat's name.
+    if !state.read(cx).chat_listed(&target) {
+        return;
+    }
     let shell = cx
         .windows()
         .into_iter()

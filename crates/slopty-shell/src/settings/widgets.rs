@@ -254,7 +254,8 @@ pub fn rail<V: 'static>(
 ) -> Option<AnyElement> {
     let metrics = scroll.metrics()?;
     popover::schedule_scrollbar_hide(&mut scroll.bar, cx);
-    let strip = scroll.bar.render_rail(theme, metrics)?;
+    let (now, reduced) = (cx.frame_time(), cx.reduce_motion()); // slopty: the frame's moment
+    let strip = scroll.bar.render_rail(theme, metrics, now, reduced)?;
     Some(
         strip
             .id(id)

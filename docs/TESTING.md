@@ -34,9 +34,15 @@ Tests make no sound on this Mac: the drawn screen's worker sounds only under `SL
    shared pulse drives (loaders, the title shimmer, the stream's dissolve, rolling labels) is
    notified at 30 Hz and drawn from its last paint between ticks, so it shows the moment of the
    tick it last drew on (`motion::pulse_moment`), in a frame from scratch too. What reads the
-   wall clock itself still moves between draws: the self-test runs under GPUI's Reduce Motion,
-   and a frame whose two scratch draws disagree is judged only on what holds still, at whatever
-   depth what moves leaves it.
+   wall clock itself still moves between draws: the self-test asks for GPUI's Reduce Motion (the
+   iPhone's runs in motion all the same, once its window becomes active), and a frame whose two
+   scratch draws disagree is judged only on what holds still, at whatever depth what moves
+   leaves it. The headless tests name such a read: two frames from scratch at one moment, the
+   wall clock moved on between them, must agree (`retention_tests::wobble`).
+   **Fuzzed whole.** `shell::fuzz_tests` takes the whole shell through seeded sequences of what
+   a person and the engine do, on a Mac's window, a phone's at 3 × and an iPad's, and checks
+   every step against both oracles, the model's selection and the accessibility tree; a failure
+   is shrunk to the fewest steps and printed with the variables that rerun it.
    **Every frame, as it is drawn.** The oracle judges the frames a test or a dump stops at, so a
    view that is stale for a few frames between them goes unseen. GPUI's retained check
    (`Window::set_check_retained`, gpui-fast's `fast::check_retained`) judges every frame, as

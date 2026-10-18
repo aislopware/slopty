@@ -117,7 +117,10 @@ impl RenderOnce for RevealHeight {
             natural: Rc::new(Cell::new(0.0)),
             tween: None,
         });
-        let now = Instant::now();
+        // The frame's moment, not the wall clock: a frame drawn again from scratch at the same
+        // moment (the retained check, the self-test's dump) stands the section where it stood,
+        // and a tween's last frame short of its end is drawn where it was.
+        let now = window.frame_time();
         let (height, running, natural) = state.update(cx, |state, _| {
             if state.open != open {
                 let (drawn, _) = state.height(now, reduced);

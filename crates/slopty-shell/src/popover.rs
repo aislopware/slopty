@@ -1746,9 +1746,15 @@ impl MenuScrollbarState {
     }
 
     fn scroll_countdown(&self, now: Instant) -> bool {
+        self.scroll_countdown_for(now, false)
+    }
+
+    /// slopty: the countdown under `reduced` motion skips the fade: the rail stands whole
+    /// through the linger and goes at its end.
+    fn scroll_countdown_for(&self, now: Instant, reduced: bool) -> bool {
+        let fade = if reduced { 0 } else { MENU_SCROLLBAR_FADE_MS };
         self.last_scroll_at.is_some_and(|at| {
-            now.duration_since(at)
-                < Duration::from_millis(MENU_SCROLLBAR_LINGER_MS + MENU_SCROLLBAR_FADE_MS)
+            now.saturating_duration_since(at) < Duration::from_millis(MENU_SCROLLBAR_LINGER_MS + fade)
         })
     }
 
@@ -1771,20 +1777,25 @@ impl MenuScrollbarState {
     /// open, otherwise **recent scroll motion** does — hovering the list
     /// alone shows nothing, scrolling shows it even with the pointer
     /// elsewhere (touchpad momentum), and hover+scroll is the common case.
-    pub fn visible(&self) -> bool {
-        self.grab.is_some() || self.bar_hovered || self.scroll_countdown(Instant::now())
+    ///
+    /// slopty: at `now`, the frame's moment (`cx.frame_time()`), so a frame drawn again from
+    /// scratch at that moment shows the rail as the frame shown did; under `reduced` motion
+    /// (`cx.reduce_motion()`) the rail never fades, it goes.
+    pub fn visible(&self, now: Instant, reduced: bool) -> bool {
+        self.grab.is_some() || self.bar_hovered || self.scroll_countdown_for(now, reduced)
     }
 
     /// 1 → 0 across the fade window once the scroll motion stops; full while
-    /// a drag or a track-hover holds the rail open.
-    pub fn fade(&self) -> f32 {
-        if self.grab.is_some() || self.bar_hovered {
+    /// a drag or a track-hover holds the rail open. slopty: at `now`, the frame's moment, and
+    /// whole under `reduced` motion.
+    pub fn fade(&self, now: Instant, reduced: bool) -> f32 {
+        if self.grab.is_some() || self.bar_hovered || reduced {
             return 1.0;
         }
         let Some(at) = self.last_scroll_at else {
             return 0.0;
         };
-        let elapsed = at.elapsed().as_millis() as f32;
+        let elapsed = now.saturating_duration_since(at).as_millis() as f32;
         let linger = MENU_SCROLLBAR_LINGER_MS as f32;
         let fade = MENU_SCROLLBAR_FADE_MS as f32;
         (1.0 - (elapsed - linger) / fade).clamp(0.0, 1.0)
@@ -1966,8 +1977,15 @@ impl MenuScrollbarState {
     /// onto this strip; reach for the raw element only when a surface needs
     /// different listeners. Either way `.id(...)` comes first (hover needs
     /// element state).
-    pub fn render_rail(&self, theme: &Theme, metrics: MenuScrollbarMetrics) -> Option<Div> {
-        if !self.visible() {
+    /// slopty: `now` and `reduced` as [`Self::visible`] takes them.
+    pub fn render_rail(
+        &self,
+        theme: &Theme,
+        metrics: MenuScrollbarMetrics,
+        now: Instant,
+        reduced: bool,
+    ) -> Option<Div> {
+        if !self.visible(now, reduced) {
             return None;
         }
         let active = self.active();
@@ -1985,7 +2003,7 @@ impl MenuScrollbarState {
                 .w(px(MENU_SCROLLBAR_HIT_WIDTH))
                 // Post-scroll fade: full while hovered/held, then 1 → 0
                 // across the fade window (see [`MenuScrollbarState::fade`]).
-                .opacity(self.fade())
+                .opacity(self.fade(now, reduced))
                 // The thumb is an absolute child inside a fixed-width hit
                 // rail, so hover expansion never reflows rows. Hovering the
                 // thumb itself brightens it on top of the strip-hover
@@ -2089,7 +2107,8 @@ pub fn rail<V: ScrollRailHost>(
 ) -> Option<AnyElement> {
     let metrics = host.rail_metrics()?;
     schedule_scrollbar_hide(host.rail_bar(), cx);
-    let strip = host.rail_bar().render_rail(theme, metrics)?;
+    let (now, reduced) = (cx.frame_time(), cx.reduce_motion()); // slopty: the frame's moment
+    let strip = host.rail_bar().render_rail(theme, metrics, now, reduced)?;
     Some(
         strip
             .id(id)
@@ -2167,7 +2186,8 @@ pub fn rail_for<V: 'static>(
     bar.note_scroll(&scroll);
     let metrics = bar.metrics(&scroll)?;
     schedule_scrollbar_hide(bar, cx);
-    let strip = (access.bar)(host).render_rail(theme, metrics)?;
+    let (now, reduced) = (cx.frame_time(), cx.reduce_motion()); // slopty: the frame's moment
+    let strip = (access.bar)(host).render_rail(theme, metrics, now, reduced)?;
     Some(
         strip
             .id(id)
@@ -2661,7 +2681,7 @@ mod tests {
         assert_eq!(scroll.offset(), Point::default());
         // The re-observed top offset is a fresh baseline, not motion.
         bar.note_scroll(&scroll);
-        assert!(!bar.visible());
+        assert!(!bar.visible(Instant::now(), false));
     }
 }
 

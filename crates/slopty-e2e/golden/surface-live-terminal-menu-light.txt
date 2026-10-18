@@ -13,6 +13,7 @@ Button │ Forward
 Button │ Sidebar view options
 Menu │ Command block (focused)
 MenuItem │ Copy command
+MenuItem │ Copy output
 MenuItem │ Rerun
 MenuItem │ Attach to agent
 MenuItem │ Select block

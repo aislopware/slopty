@@ -1238,3 +1238,38 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
   killing a measurement's daemons. The person ruled they are no longer needed. The rulings above
   that cite them stay as the history of why the tests took their shape; a test still drives the
   app's own UI and its own environment where that is the better test, not because a rule says so.
+
+- ✅ **The shell is fuzzed whole, and a frame drawn twice at one moment must agree** (2026-10-18).
+  The phone's "Back to …" frame failed the self-test's dump about one run in four: the
+  Background tray stood 1 px lower than in the same state drawn from scratch. The cause was
+  found from the code, not by rerunning the simulator. A stack section of the composer grew into
+  its height on the wall clock (`motion::reveal_height` read `Instant::now`), so a frame drawn
+  again from scratch a few milliseconds after the frame shown, at that frame's moment, stood the
+  growth further on. Near the end of the ease two frames from scratch round alike and the frame
+  shown does not, which `retained::stale` reports. The iPhone's self-test runs in motion, though
+  it asks for Reduce Motion: the shell's motion setting is applied again whenever the window
+  becomes active, which on iOS comes after the test socket's request. The section now reads the
+  frame's moment, as the sidebar and pane toggles' glyph morph (`motion::state_t`) and the
+  floating scroll rail's linger and fade (`popover::MenuScrollbarState`) now do too; under Reduce
+  Motion the rail no longer fades, it goes at the end of its linger, so the terminal's paint
+  oracle draws its two windows alike.
+  - A frame from scratch drawn twice at one moment with 15 ms of the wall clock between
+    (`retention_tests::wobble`) differs only where something drawn reads the wall clock. The
+    stale-frame oracle tolerates that while it moves; this check names it.
+  - `shell::fuzz_tests` drives the whole shell in a headless window from a seed: a screen (the
+    Mac window, a narrow one, an iPhone at 3 ×, an iPad) and steps of chats opened, switched,
+    drilled into and left, drafts typed and sent, shortcuts, resizes, turns starting and ending,
+    chats arriving and going, a queue, the clock, frames mid-motion and the wall clock moving on.
+    After each step: no panic (GPUI's retained check panics on a stale frame as it is drawn), no
+    stale frame, no wall-clock read, the selection the model expects, and a whole
+    accessibility tree. A failure is shrunk by delta debugging and printed as its seed and the
+    steps kept, which `SLOPTY_FUZZ_SEED` and `SLOPTY_FUZZ_KEEP` rerun. Four seeds of 16 steps
+    run in the suite; `a_long_fuzz_of_the_shell` (ignored) is the nightly's.
+  - Without the fix the proving test below fails on it, at the first frame back, on the
+    Background tray's growth. A step followed by frames or a pause is judged one frame in, so a
+    queue or a tray appearing mid-run is caught the same way. The fuzzer's first find of its own, shrunk to two steps: a chat left and then deleted elsewhere came back as an
+    empty page by the way back (⌘[) and by a note's tap. Both now open only a chat still listed,
+    or any while the list has not arrived (`AppState::chat_listed`).
+  - Proof: `shell::retention_tests::{a_phones_way_back_from_a_subagent_paints_as_from_scratch,
+    a_phones_way_back_in_motion_paints_as_from_scratch}` at 402 × 874 pt and 3 ×, and
+    `shell::fuzz_tests`.

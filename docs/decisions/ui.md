@@ -13269,3 +13269,14 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `media::formulas_sit_on_their_line_and_diagrams_draw`,
     `interface::{a_rows_hover_card_names_where_it_runs,
     a_section_dragged_by_its_header_keeps_its_place}`.
+
+- ✅ **The composer's closed sections take no room** (2026-10-18). The composer's stack sections
+  (a failure, the dock's lines, a side answer, a folded question, mod bands, the checklist, the
+  Background tray, the queue) cancelled the column's gap with a negative top margin while closed.
+  The layout counts an item's margin box as at least nothing, so each closed section kept its
+  gap, and eight of them left 64 pt under the composer's footer: on a phone the composer stopped
+  54 pt above the safe area, and on a Mac it floated as high above the window's bottom. The column
+  now has no gap; each section carries the space under it inside its growth, and the selectors
+  and the footer theirs. Proof: `shell::retention_tests::a_phones_composer_stands_on_the_floor`;
+  e2e `compact::a_phones_chat_holds_the_dock_and_a_subagents_card` holds the composer within
+  16 pt of the safe area.

@@ -229,8 +229,11 @@ async fn a_finger_over_a_live_page_scrolls_the_chat_or_the_page() {
     let mut missing: Vec<String> = Vec::new();
 
     // A tall page takes a drag it can scroll, and the chat stays. The chat opens at its end,
-    // where the tall page is.
-    let tall = live_card(drv, "Tall", top, bottom + 400.0).await;
+    // where the tall page is. A page takes up to 0.8 of the window, so on a phone the tall
+    // card over its reply stands taller than what shows: its top is under the bars (the dump
+    // cuts the card's bounds to what shows) and its end in sight.
+    let tall_top = if phone { 0.0 } else { top };
+    let tall = live_card(drv, "Tall", tall_top, bottom + 400.0).await;
     let [x, y, w, h] = tall.bounds;
     // The chat's gutter, right of the cards, where a wheel scrolls the chat and no page.
     let gutter = f32::midpoint(x + w, chat.window.width);

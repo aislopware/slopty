@@ -13,14 +13,14 @@ use slopty_view_proto::{Session, SessionStatus};
 const WINDOW: (f32, f32) = (1320.0, 880.0);
 
 /// What the window last painted, sorted.
-fn painted(window: &Window) -> Vec<String> {
+pub(super) fn painted(window: &Window) -> Vec<String> {
     let mut lines = window.painted_primitives();
     lines.sort_unstable();
     lines
 }
 
 /// What a frame drawn from scratch, at the moment the last frame showed, paints.
-fn from_scratch(window: &mut Window, cx: &mut App) -> Vec<String> {
+pub(super) fn from_scratch(window: &mut Window, cx: &mut App) -> Vec<String> {
     window.repeat_frame_time();
     window.refresh();
     window.draw(cx).clear(cx);
@@ -43,7 +43,7 @@ fn only(a: &[String], b: &[String]) -> Vec<String> {
 /// Where the frame shown differs from the same state drawn from scratch, as
 /// `slopty_kit::retained::stale` judges it: when two frames from scratch differ, only what both
 /// paint alike must be in the frame shown.
-fn stale(cx: &mut VisualTestContext) -> Option<String> {
+pub(super) fn stale(cx: &mut VisualTestContext) -> Option<String> {
     cx.update(|window, cx| {
         let shown = painted(window);
         let scratch = from_scratch(window, cx);
@@ -71,7 +71,23 @@ fn stale(cx: &mut VisualTestContext) -> Option<String> {
     })
 }
 
-fn turn(chat: &str, now: chrono::DateTime<Utc>) -> Vec<SessionMessageEntry> {
+/// What two frames from scratch at one moment, the wall clock moving on between them, paint
+/// differently: what reads the wall clock where it should read the frame's moment, which no
+/// frame drawn again can show as a frame from scratch would.
+pub(super) fn wobble(cx: &mut VisualTestContext) -> Option<String> {
+    cx.update(|window, cx| {
+        let first = from_scratch(window, cx);
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        let second = from_scratch(window, cx);
+        (first != second).then(|| {
+            let cut = |lines: &[String]| lines.iter().take(8).cloned().collect::<Vec<_>>().join("\n  ");
+            let (gone, came) = (only(&first, &second), only(&second, &first));
+            format!("drawn 15 ms of the wall clock later at the same moment:\n  {}\nbecame\n  {}", cut(&gone), cut(&came))
+        })
+    })
+}
+
+pub(super) fn turn(chat: &str, now: chrono::DateTime<Utc>) -> Vec<SessionMessageEntry> {
     let entry = |id: &str, role, parts, status| SessionMessageEntry {
         id: id.into(),
         role,
@@ -115,10 +131,68 @@ fn turn(chat: &str, now: chrono::DateTime<Utc>) -> Vec<SessionMessageEntry> {
     entries
 }
 
+/// The screen a test's shell window stands for: its size in points, its scale, whether it is a
+/// touch screen's (a phone's pages under 700 pt, an iPad's columns) and whether motion is reduced.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct Screen {
+    pub size: (f32, f32),
+    pub scale: f32,
+    pub touch: bool,
+    pub reduced: bool,
+}
+
+/// The self-test's window, motion reduced.
+pub(super) const DESKTOP: Screen = Screen { size: WINDOW, scale: 2.0, touch: false, reduced: true };
+/// The iPhone the simulator e2e runs (an iPhone 17 Pro): 402 × 874 pt at 3 ×, in motion.
+pub(super) const PHONE: Screen = Screen { size: (402.0, 874.0), scale: 3.0, touch: true, reduced: false };
+
+/// A chat of the fixtures: `parent` makes it a subagent of that chat, one that runs inside its
+/// parent's agent (and takes no messages) when `in_parent`.
+pub(super) fn chat_row(
+    id: &str,
+    ago: i64,
+    parent: Option<(&str, bool)>,
+    now: chrono::DateTime<Utc>,
+) -> slopty_view_proto::Chat {
+    let mut chat = serde_json::json!({
+        "id": id, "title": format!("Chat {id}"), "deviceId": "local", "archived": false,
+        "createdAt": now - TimeDelta::minutes(ago), "cwd": "/work/app",
+        "lastMessageAt": now - TimeDelta::seconds(30), "lastSeenAt": now,
+    });
+    if let Some((parent, in_parent)) = parent {
+        chat["parentChatId"] = parent.into();
+        chat["subagent"] = true.into();
+        chat["inParent"] = in_parent.into();
+    }
+    serde_json::from_value(chat).unwrap()
+}
+
+/// A chat's session in `status`.
+pub(super) fn session_row(id: &str, status: SessionStatus, now: chrono::DateTime<Utc>) -> Session {
+    Session {
+        last_completed_turn: None,
+        chat_id: id.into(),
+        device_id: "local".into(),
+        status,
+        started_at: Some(now - TimeDelta::minutes(1)),
+        updated_at: now,
+        running_subagents: 0,
+        status_since: Some(now - TimeDelta::seconds(20)),
+        waiting_on: None,
+    }
+}
+
 /// A shell window as the self-test's, with two chats, the first of them at work, and no chat
 /// open yet.
 fn shell(cx: &mut TestAppContext) -> (Entity<Shell>, &mut VisualTestContext) {
+    launch(cx, DESKTOP)
+}
+
+/// A shell window on `screen`, with two chats, the first of them at work, and no chat open yet.
+/// GPUI checks every frame it draws against one from scratch, and panics on a stale one.
+pub(super) fn launch(cx: &mut TestAppContext, screen: Screen) -> (Entity<Shell>, &mut VisualTestContext) {
     let dir = tempfile::tempdir().unwrap();
+    compact::force_touch(screen.touch);
     cx.update(|cx| {
         gpui_base::init(cx);
         cx.set_global(Theme::default());
@@ -126,7 +200,7 @@ fn shell(cx: &mut TestAppContext) -> (Entity<Shell>, &mut VisualTestContext) {
         settings::init(UiSettings::default(), dir.path(), cx);
         crate::composer::init(cx, ComposerSendBehavior::default());
         apply_keymap(cx, &KeymapConfig::default(), ComposerSendBehavior::default());
-        cx.set_reduce_motion(true);
+        cx.set_reduce_motion(screen.reduced);
     });
     let path = dir.path().to_path_buf();
     let (shell, cx) = cx.add_window_view(move |_, cx| {
@@ -139,31 +213,15 @@ fn shell(cx: &mut TestAppContext) -> (Entity<Shell>, &mut VisualTestContext) {
         shell.debug_gate = Some(GatePhase::Ready);
         shell.splash = SplashPhase::Gone;
         let now = Utc::now();
-        let chat = |id: &str, ago: i64| -> slopty_view_proto::Chat {
-            serde_json::from_value(serde_json::json!({
-                "id": id, "title": format!("Chat {id}"), "deviceId": "local", "archived": false,
-                "createdAt": now - TimeDelta::minutes(ago), "cwd": "/work/app",
-                "lastMessageAt": now - TimeDelta::seconds(30), "lastSeenAt": now,
-            }))
-            .unwrap()
-        };
-        let session = |id: &str, status| Session {
-            last_completed_turn: None,
-            chat_id: id.into(),
-            device_id: "local".into(),
-            status,
-            started_at: Some(now - TimeDelta::minutes(1)),
-            updated_at: now,
-            running_subagents: 0,
-            status_since: Some(now - TimeDelta::seconds(20)),
-            waiting_on: None,
-        };
         shell.state.update(cx, |state, _| {
             state.connection = slopty_view_proto::view::ConnectionStatus::Ready;
             state.workspace_scope = Some(WorkspaceScope::Local);
             state.local_device_id = Some("local".into());
-            state.chats = vec![chat("a", 1), chat("b", 2)];
-            state.apply_sessions(vec![session("a", SessionStatus::Working), session("b", SessionStatus::Done)]);
+            state.chats = vec![chat_row("a", 1, None, now), chat_row("b", 2, None, now)];
+            state.apply_sessions(vec![
+                session_row("a", SessionStatus::Working, now),
+                session_row("b", SessionStatus::Done, now),
+            ]);
         });
         shell
     });
@@ -171,9 +229,25 @@ fn shell(cx: &mut TestAppContext) -> (Entity<Shell>, &mut VisualTestContext) {
     // slopty: GPUI checks every frame that draws a view again against one drawn from scratch at
     // its moment, and panics naming the view a frame drew stale.
     cx.update(|window, _| window.set_check_retained(Some(gpui::RetainedCheck::Panic)));
-    cx.simulate_resize(gpui::size(px(WINDOW.0), px(WINDOW.1)));
+    cx.simulate_scale_factor_change(screen.scale);
+    cx.simulate_resize(gpui::size(px(screen.size.0), px(screen.size.1)));
     cx.run_until_parked();
     (shell, cx)
+}
+
+/// Frames delivered `dt` apart, as the display asks for them, until none is asked for or `cap`
+/// were drawn; how many were.
+pub(super) fn frames(cx: &mut VisualTestContext, dt: std::time::Duration, cap: usize) -> usize {
+    cx.run_until_parked();
+    for drawn in 0..cap {
+        cx.executor().advance_clock(dt);
+        if cx.update(|window, cx| window.simulate_next_frame(cx)) == 0 {
+            cx.run_until_parked();
+            return drawn;
+        }
+        cx.run_until_parked();
+    }
+    cap
 }
 
 /// ⌘1 opens the chat at work; its transcript then arrives as the engine sends it. Every frame
@@ -395,4 +469,132 @@ fn a_caret_drawn_again_later_shows_as_it_did(cx: &mut TestAppContext) {
     assert_eq!(stale(cx), None, "the caret on");
     std::thread::sleep(std::time::Duration::from_millis(crate::composer::CARET_BLINK_MS + 50));
     assert_eq!(stale(cx), None, "past a half-period of the wall clock");
+}
+
+/// A command left running in the background: the Background tray's one row.
+pub(super) fn background_tray() -> slopty_view_doc::work::WorkTray {
+    serde_json::from_value(serde_json::json!({
+        "main": { "working": false },
+        "rows": [{
+            "id": "task:sleep", "kind": "command", "noun": "command", "title": "sleep 600",
+            "state": "running", "stateWords": "running", "live": true, "wakes": true,
+            "awaited": false, "ambient": false, "figures": "", "startedAt": 0, "persistent": false,
+            "depth": 0, "canStop": true,
+        }],
+        "counts": {
+            "commands": 1, "monitors": 0, "subagents": 0, "workflows": 0, "mcp": 0, "remote": 0,
+            "teammates": 0, "other": 0, "needsYou": 0,
+        },
+        "summary": "1 command",
+        "canStopAll": true,
+    }))
+    .expect("a tray")
+}
+
+/// A phone's chat, `screen`, drilled into a subagent that runs inside it and back by its
+/// "Back to …", as the simulator's e2e takes it: the composer comes back, the chat's Background
+/// tray arrives a frame later as the view model sends it again, and a queued message comes and
+/// goes. Every frame on the way, with the wall clock moving on between the frame and the check
+/// as it does between a frame and the self-test's dump, paints what a frame from scratch at its
+/// moment paints.
+fn back_from_a_subagent(cx: &mut TestAppContext, screen: Screen) {
+    let (shell, cx) = launch(cx, screen);
+    let now = Utc::now();
+    let mut done = turn("b", now);
+    if let Some(last) = done.last_mut() {
+        last.status = Some(MessageStatus::Complete);
+    }
+    let tray = |shell: &Entity<Shell>, cx: &mut VisualTestContext| {
+        let composer = shell.read_with(cx, |shell, _| shell.composer.clone());
+        composer.update(cx, |composer, cx| composer.apply_tray("b", background_tray(), cx));
+    };
+    shell.update(cx, |shell, cx| {
+        shell.state.update(cx, |state, _| state.chats.push(chat_row("look", 0, Some(("b", true)), now)));
+        shell.open_chat("b".into(), cx);
+        shell.state.update(cx, |state, cx| {
+            state.apply_transcript(done.clone());
+            cx.notify();
+        });
+    });
+    frames(cx, std::time::Duration::from_millis(16), 120);
+    tray(&shell, cx);
+    frames(cx, std::time::Duration::from_millis(16), 120);
+    assert!(shell.read_with(cx, |shell, _| shell.compact()), "the phone's own layout");
+    assert_eq!(stale(cx), None, "the parent's chat");
+    shell.update(cx, |shell, cx| shell.open_chat("look".into(), cx));
+    frames(cx, std::time::Duration::from_millis(16), 120);
+    assert!(shell.read_with(cx, |shell, cx| shell.subagent_drill(cx).is_some()), "drilled in");
+    assert_eq!(stale(cx), None, "the subagent's run");
+    shell.update(cx, |shell, cx| assert!(shell.leave_drill(cx), "the way back"));
+    for step in 0..40 {
+        match step {
+            1 => tray(&shell, cx),
+            3 => shell.update(cx, |shell, cx| {
+                shell.state.update(cx, |state, cx| {
+                    state.queue = vec![slopty_view_doc::QueuedMessage::new("q1", "Say more", "local")];
+                    cx.notify();
+                });
+            }),
+            20 => shell.update(cx, |shell, cx| {
+                shell.state.update(cx, |state, cx| {
+                    state.queue = Vec::new();
+                    cx.notify();
+                });
+            }),
+            _ => {}
+        }
+        cx.executor().advance_clock(std::time::Duration::from_millis(16));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        std::thread::sleep(std::time::Duration::from_millis(12));
+        assert_eq!(stale(cx), None, "frame {step} back from the subagent");
+        assert_eq!(wobble(cx), None, "frame {step} back from the subagent");
+    }
+}
+
+/// The e2e's own case: the phone under Reduce Motion, as the self-test runs it.
+#[gpui::test]
+fn a_phones_way_back_from_a_subagent_paints_as_from_scratch(cx: &mut TestAppContext) {
+    back_from_a_subagent(cx, Screen { reduced: true, ..PHONE });
+}
+
+/// The same in motion: the tray and the queue grow into their height at the frame's moment, not
+/// the wall clock's.
+#[gpui::test]
+fn a_phones_way_back_in_motion_paints_as_from_scratch(cx: &mut TestAppContext) {
+    back_from_a_subagent(cx, PHONE);
+}
+
+/// A phone's chat holds its composer at the floor: under the composer's footer there is only
+/// the composer's own padding (room for a finger's 44 pt target on the 24 pt row), and under the composer only the window's floor (on iOS the safe
+/// area's, which the page frame keeps). The stack's closed sections leave no room behind: each
+/// once left the column's gap below the composer, 64 pt in all.
+#[gpui::test]
+fn a_phones_composer_stands_on_the_floor(cx: &mut TestAppContext) {
+    let (shell, cx) = launch(cx, PHONE);
+    let now = Utc::now();
+    shell.update(cx, |shell, cx| {
+        shell.open_chat("b".into(), cx);
+        shell.state.update(cx, |state, cx| {
+            state.apply_transcript(turn("b", now));
+            cx.notify();
+        });
+    });
+    frames(cx, std::time::Duration::from_millis(16), 120);
+    cx.update(|window, cx| {
+        window.refresh();
+        window.draw(cx).clear(cx);
+    });
+    let bottom = |name: &'static str, cx: &mut VisualTestContext| {
+        let bounds = cx.debug_bounds(name).unwrap_or_else(|| panic!("{name} drawn"));
+        f32::from(bounds.bottom())
+    };
+    let (root, footer, stack) =
+        (bottom("composer-root", cx), bottom("composer-footer-slot", cx), bottom("bottom-stack", cx));
+    let floor = cx.update(|window, _| f32::from(window.viewport_size().height));
+    assert!(
+        root - footer <= 10.5,
+        "under the footer ({footer}) the composer ends at {root}: only its padding between"
+    );
+    assert!((stack - floor).abs() < 0.5 && (root - floor).abs() < 0.5, "the stack {stack} and the composer {root} at the floor {floor}");
 }

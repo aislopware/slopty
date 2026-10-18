@@ -592,6 +592,7 @@ impl Shell {
                                         self.right_pane_open(cx) && fit.right,
                                         motion::GLYPH_STATE,
                                         self.reduced_motion.get(),
+                                        cx.frame_time(), // slopty: the frame's moment
                                     ),
                                     true,
                                     16.0,

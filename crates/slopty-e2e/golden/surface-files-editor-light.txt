@@ -28,11 +28,6 @@ TreeItem │ src
 TreeItem │ main.rs
 TreeItem │ NOTES.md
 TreeItem │ README.md
-Button │ Expand Chats
-Button │ New side chat
-Button │ Fork this chat
-Button │ Fork
-Button │ New side chat
 Button │ Open in…
 Button │ Show chat details
 Button │ src/main.rs

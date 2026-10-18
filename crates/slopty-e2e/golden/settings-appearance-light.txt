@@ -40,3 +40,6 @@ Button │ Terminal font: Geist Mono
 Button │ Terminal font size: 13 px
 Button │ Code & diff font: Geist Mono
 Button │ Code & diff font size: 12.5 px
+Switch │ Render math
+Button │ Math font: Fira Math
+Button │ Math size: 100%

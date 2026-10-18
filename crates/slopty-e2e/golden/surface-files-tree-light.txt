@@ -28,11 +28,6 @@ Tree │ Workspace file tree (focused)
 TreeItem │ src
 TreeItem │ NOTES.md
 TreeItem │ README.md
-Button │ Expand Chats
-Button │ New side chat
-Button │ Fork this chat
-Button │ Fork
-Button │ New side chat
 Button │ Open in…
 Button │ Show chat details
 Button │ Working tree

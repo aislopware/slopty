@@ -36,9 +36,10 @@ async fn tap(drv: &mut Driver, role: &str, label: &str) {
     drv.ui_tap(left + width / 2.0, top + height / 2.0).await.unwrap();
 }
 
-/// How far above the safe area a chat's composer row may end, points: its own padding and the
-/// mode row's, never a keyboard's band.
-const REACHES: f32 = 64.0;
+/// How far above the safe area a chat's composer row may end, points: the composer's own
+/// padding under its footer, never a keyboard's band or room the composer's closed sections
+/// left behind (64 pt of it once).
+const REACHES: f32 = 16.0;
 
 /// Apple's least touch target, points a side.
 const TOUCH_TARGET: f32 = 44.0;

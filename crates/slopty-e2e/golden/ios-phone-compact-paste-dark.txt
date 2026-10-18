@@ -1,0 +1,18 @@
+Window
+Button │ background sleep 600
+Status │ Waiting
+Button │ History: past Claude Code sessions
+Article │ You
+Paragraph │ agent
+Button │ Subagent Look │ Done
+Button │ Open subagent
+Button │ Subagent found it. │ completed
+Article │ Claude
+Paragraph │ Done: the agent is back.
+MultilineTextInput │ Do anything… │ [Image 1](slopty-image:1)  (focused)
+Button │ Attach images
+Button │ Send message
+Button │ Mode: Auto
+Button │ Context 1%
+Group │ Navigation
+Button │ Back to Chats

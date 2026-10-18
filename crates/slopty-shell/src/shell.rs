@@ -84,6 +84,8 @@ use panel_layout::{AuxiliaryPanel, FitInputs, HorizontalPanelFit, panel_content_
 mod panel_interaction_tests;
 #[cfg(test)]
 mod retention_tests; // slopty: the whole shell under retention against a frame from scratch
+#[cfg(test)]
+mod fuzz_tests; // slopty: seeded action sequences over the whole shell, shrunk on a failure
 pub(crate) mod project_icon;
 mod session_hover_card;
 mod session_info;
@@ -5018,6 +5020,9 @@ impl Shell {
                 self.set_route(Route::Chat, cx);
                 self.focus_composer_on_landing(cx); // slopty: not on touch
                 let target = (!chat_id.is_empty()).then_some(chat_id);
+                // slopty: a chat archived or deleted since it was left is not opened again as
+                // an empty page: the way back lands on the new chat's canvas instead.
+                let target = target.filter(|id| self.state.read(cx).chat_listed(id));
                 if self.state.read(cx).selected_chat != target {
                     self.state.update(cx, |s, cx| s.select_chat(target, cx));
                 }
@@ -6119,6 +6124,7 @@ impl Shell {
                         !self.settings.sidebar_collapsed,
                         motion::GLYPH_STATE,
                         self.reduced_motion.get(),
+                        cx.frame_time(), // slopty: the frame's moment
                     ),
                     false,
                     14.0, // slopty: a 24 control holds a 14 glyph
@@ -9593,6 +9599,7 @@ impl Shell {
                 // slopty: what the new height moves, told once the frame is drawn.
                 let (shell, transcript) = (cx.weak_entity(), self.transcript.clone());
                 div()
+                    .debug_selector(|| "bottom-stack".into()) // slopty: for the tests
                     .flex_none()
                     .relative()
                     .flex()
@@ -11877,7 +11884,7 @@ impl Render for Shell {
         if let Some(row) = &self.chat_status_hover {
             motion::hover_t(&format!("{row}-hover"));
         }
-        if self.motion_active.get() | motion::hover_fades_active() | motion::state_morphs_active() {
+        if self.motion_active.get() | motion::hover_fades_active() | motion::state_morphs_active(cx.frame_time()) {
             window.request_animation_frame();
         }
 
