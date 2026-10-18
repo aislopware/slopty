@@ -571,6 +571,53 @@ fn row_overhang(grid: &Grid, face: &metrics::Face, pixel_scale: f32) -> (Pixels,
     (above.max(px(0.0)), below.max(px(0.0)))
 }
 
+/// How many rows past its own the longest of `matches` runs onto, on a grid `cols` wide.
+fn hit_reach(matches: &[slopty_proto::terminal::SearchMatch], cols: u16) -> u64 {
+    let cols = u64::from(cols.max(1));
+    matches
+        .iter()
+        .map(|m| {
+            u64::from(m.col)
+                .saturating_add(u64::from(m.len))
+                .saturating_sub(1)
+                .checked_div(cols)
+                .unwrap_or(0)
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+/// The cells of line `index` that `matches` (oldest line first) cover on a grid `cols` wide, as
+/// `(start, end, current)`: a hit covers `col..col + len` of its line counted on row after row
+/// (`SearchMatch`), so one over a soft wrap marks each row it runs onto. `reach` is
+/// [`hit_reach`] of the same matches.
+fn hit_marks(
+    matches: &[slopty_proto::terminal::SearchMatch],
+    current: Option<usize>,
+    index: LineIndex,
+    cols: u16,
+    reach: u64,
+) -> impl Iterator<Item = (u16, u16, bool)> + '_ {
+    let width = u64::from(cols.max(1));
+    let first = matches.partition_point(|m| m.line.0 < index.0.saturating_sub(reach));
+    matches
+        .get(first..)
+        .unwrap_or_default()
+        .iter()
+        .enumerate()
+        .take_while(move |(_, m)| m.line <= index)
+        .filter_map(move |(k, m)| {
+            let row = index.0.saturating_sub(m.line.0).saturating_mul(width);
+            let start = u64::from(m.col).max(row);
+            let end =
+                u64::from(m.col).saturating_add(u64::from(m.len)).min(row.saturating_add(width));
+            (start < end).then(|| {
+                let cell = |at: u64| u16::try_from(at.saturating_sub(row)).unwrap_or(cols);
+                (cell(start), cell(end), current == Some(first.saturating_add(k)))
+            })
+        })
+}
+
 /// Whether a row at `y` can show anything between `clip_top` and `clip_bottom`, its ink and
 /// strokes reaching `overhang` beyond the cell box.
 fn row_in_band(
@@ -1462,6 +1509,7 @@ impl Element for TerminalElement {
             let mut blinking = false;
             let grid_cols = state.size().cols;
             let (matches, current) = view.search_highlights().unwrap_or((&[], None));
+            let hit_reach = hit_reach(matches, grid_cols);
             let link = view.link_highlight();
             let faces = cache.faces(&family, ligatures);
             let look = |blink_off| Look { faces: &faces, palette, blink_off };
@@ -1659,18 +1707,12 @@ impl Element for TerminalElement {
                 if let Some(range) = selection.and_then(|s| s.columns(index, grid_cols)) {
                     marks.push((range.start, range.end, shell_look.selection));
                 }
-                // Search hits, sorted by line: the slice for this row by binary search.
-                let first = matches.partition_point(|m| m.line < index);
-                for (k, m) in matches.iter().skip(first).enumerate() {
-                    if m.line != index {
-                        break;
-                    }
-                    let color = if current == Some(first.saturating_add(k)) {
-                        shell_look.search_current
-                    } else {
-                        shell_look.search_match
-                    };
-                    marks.push((m.col, m.col.saturating_add(m.len).min(grid_cols), color));
+                // Search hits: every one this row shows, a hit over a soft wrap on each row it
+                // runs onto, the current one stronger.
+                for (start, end, on) in hit_marks(matches, current, index, grid_cols, hit_reach) {
+                    let color =
+                        if on { shell_look.search_current } else { shell_look.search_match };
+                    marks.push((start, end, color));
                 }
                 // A link wrapped over rows is underlined on each, edge to edge in between.
                 let link = link
@@ -2290,6 +2332,25 @@ mod tests {
     use slopty_theme::Theme;
 
     use super::*;
+
+    /// Every hit on a line is marked, the current one flagged; a hit over a soft wrap marks the
+    /// rest of its first row and the start of the row it runs onto; a line with none has none.
+    #[test]
+    fn every_hit_a_row_shows_is_marked() {
+        use slopty_proto::terminal::SearchMatch;
+        let hit = |line, col, len| SearchMatch { line: LineIndex(line), col, len };
+        let matches = [hit(4, 0, 2), hit(4, 5, 2), hit(5, 1, 2), hit(6, 8, 4), hit(9, 0, 1)];
+        let reach = hit_reach(&matches, 10);
+        assert_eq!(reach, 1, "the wrapped hit runs one row on");
+        let marks =
+            |line| hit_marks(&matches, Some(2), LineIndex(line), 10, reach).collect::<Vec<_>>();
+        assert_eq!(marks(4), [(0, 2, false), (5, 7, false)], "both of a row's hits");
+        assert_eq!(marks(5), [(1, 3, true)], "the current one");
+        assert_eq!(marks(6), [(8, 10, false)], "the wrapped hit to its row's end");
+        assert_eq!(marks(7), [(0, 2, false)], "and on the row it wraps onto");
+        assert!(marks(8).is_empty(), "a row with no hit");
+        assert_eq!(marks(9), [(0, 1, false)]);
+    }
 
     /// The metrics of a grid laid out at `scale`, `Lilex` 13 pt: an 8 × 17
     /// device-pixel cell, so 8/scale × 17/scale points.

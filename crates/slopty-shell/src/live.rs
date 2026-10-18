@@ -87,9 +87,9 @@ pub struct TerminalLook {
     pub cursor: Hsla,
     /// The selection wash, translucent over whatever the program painted.
     pub selection: Hsla,
-    /// A find's hit, a lighter selection.
+    /// A find's hit, washed as the transcript's find washes a match.
     pub search_match: Hsla,
-    /// The find's hit the person is on: the selection itself.
+    /// The find's hit the person is on, washed stronger.
     pub search_current: Hsla,
     /// The quietest ink: the scrollbar's thumb, a dim trailer.
     pub faint: Hsla,
@@ -119,10 +119,11 @@ impl TerminalLook {
             foreground: theme.terminal.foreground,
             cursor: theme.cursor,
             selection: theme.terminal.selection,
-            // In-surface hits are the selection's colour (zeron's find in a file), the hit the
-            // person is on whole and the rest at half.
-            search_match: theme.selection.opacity(theme.selection.a * 0.5),
-            search_current: theme.selection,
+            // slopty: a terminal's hits wash as the transcript's find washes its matches
+            // (`markdown::find::washes`): every one plainly marked, the one the person is on
+            // stronger. Half the selection's faint wash left the rest all but unseen on dark.
+            search_match: crate::markdown::find::washes(theme).0,
+            search_current: crate::markdown::find::washes(theme).1,
             faint: theme.text_faint,
             ansi: theme.terminal.ansi,
             dark: theme.appearance.is_dark(),

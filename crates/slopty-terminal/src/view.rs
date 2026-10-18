@@ -7889,6 +7889,47 @@ mod tests {
         assert_eq!(view.read_with(cx, |v, _| v.selected_text()).as_deref(), Some("third"));
     }
 
+    /// Every hit on screen is washed where it stands, as the transcript's find washes its
+    /// matches, and the one the person is on stronger: none is left bare beside the current.
+    #[gpui::test]
+    fn every_visible_hit_is_washed(cx: &mut TestAppContext) {
+        use slopty_proto::terminal::SearchMatch;
+        let (view, _rx, cx) = terminal(cx);
+        view.update_in(cx, |view, _window, cx| {
+            view.apply(history_frame(0, &["29 a", "129", "299"]), cx);
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("cmd-f");
+        cx.run_until_parked();
+        view.update(cx, |v, cx| {
+            let search = v.search.as_mut().expect("the find bar");
+            search.matches = vec![
+                SearchMatch { line: LineIndex(0), col: 0, len: 2 },
+                SearchMatch { line: LineIndex(1), col: 1, len: 2 },
+                SearchMatch { line: LineIndex(2), col: 0, len: 2 },
+            ];
+            search.current = Some(2);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let (painted, look) = cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear(cx);
+            (
+                window.painted_primitives(),
+                slopty_shell::live::TerminalLook::from_theme(chrome::theme(cx)),
+            )
+        });
+        let washed = |color: gpui::Hsla| {
+            let fill = format!("background: Solid({color:?})");
+            painted.iter().filter(|line| line.contains("Quad") && line.contains(&fill)).count()
+        };
+        assert_eq!(washed(look.search_current), 1, "the current hit");
+        assert_eq!(washed(look.search_match), 2, "every other hit on screen");
+        assert!(look.search_match.a >= 0.2, "a wash that shows: {:?}", look.search_match);
+        assert!(look.search_current.a > look.search_match.a, "the current one stronger");
+    }
+
     /// In the find field ↩ steps to the next hit and ⇧↩ back to the one before, round the
     /// ends; ⇧↩ puts no newline in the one-line field.
     #[gpui::test]
