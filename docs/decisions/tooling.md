@@ -2170,6 +2170,15 @@ more full-window layer.
     which noq's port lacks and the deque's defragment is written without.
   - Claude Code 2.1.302 is pinned and the fixtures are recorded on it. Its control and stream
     subtypes are the same 155 as 2.1.301's.
+- ✅ **Upstream sync of 2026-10-18 (third): gpui-kit `92cbfc9d`.** gpui-kit is rebased onto
+  `9254c580` (8 upstream commits).
+  - #3574 places a `TabBar`'s sliding indicator from what it last placed and asks for the next
+    frame when the selected tab is measured elsewhere; the fork's notify on every moved tab
+    slot is dropped for it, and the notify on a moved container stays. #3528 dismisses a
+    tooltip whose trigger is removed (the fork's CI keeps upstream's tooltip test and leaves
+    the WebView out, as before). #3569 breaks a line at an HTML `<br>`, #3575 and #3576 stop
+    a slider and a searchable list from notifying with nothing changed, #3572 and #3582 are
+    table and setting builders. Slopty draws none of these components.
 - ✅ **Upstream sync of 2026-10-18 (second): gpui-kit `078ac14a`.** gpui-kit is rebased onto
   `41acc8a4` (7 upstream commits); gpui-fast and zed did not move; the ghostty fork stays at
   `117b5945` (upstream's two commits since are GTK only).
@@ -2404,6 +2413,22 @@ more full-window layer.
     shared with virtio-fs instead of copied: the guest's view of a shared directory kept a file
     the host had replaced by rename as missing, as cargo replaces a binary and Xcode the app's
     files, and the app then would not install ("Missing bundle ID").
+  - **6 GB stays, measured against 8 GB (2026-10-18), superseding the reading below.** The
+    reading below took memory_pressure's free percentage, which counts compressed and
+    reclaimable pages. Logging unused memory, the compressor and the load every 2 s through
+    the iOS pages case on the iPhone, with a GUI lane build beside it on the host, gave
+    different numbers. At 6 GB the guest ran with 77–200 MB unused for six minutes and its
+    compressor grew to 1.8 GB, at a load of 25–283; the worker then missed its 30 s to start.
+    At 8 GB it was the same: 8.0 of 8 GB used, 85–260 MB unused, the compressor to 1.8 GB, a
+    load of 84–372, and the server missed its 30 s to start. The simulator and its caches fill
+    whatever the guest has, and the run is bound by the guest's 4 cores. The host is the other
+    limit. Its 32 GB stayed full: 80–400 MB unused, its compressor at 3.6–12 GB and its swap
+    flat at 7.6 GB. The VM process's resident memory moved between 0.3 and 8.1 GB as the host
+    compressed the guest's own pages. More guest memory would be compressed by the host, and
+    would come out of the lanes' builds. What helped was work that does not page in: a
+    process's start no longer walks its symbol table (`docs/decisions/crashes.md`, "No symbol
+    walk at start"), which took `agent start` from over 30 s to 1.3–2 s. Logs:
+    `target/lanes/B/mem-{six,eight}.{guest,host}`.
   - **6 GB is enough for one simulator.** With one booted, the guest kept 36–81 % of its memory
     free or reclaimable (memory_pressure) through an iPad and two iPhone runs, its swap flat at
     200–290 MB left from earlier, two lanes building beside it on the host (load 46–64) or none.
