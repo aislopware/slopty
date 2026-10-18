@@ -2214,6 +2214,12 @@ more full-window layer.
     the WebView out, as before). #3569 breaks a line at an HTML `<br>`, #3575 and #3576 stop
     a slider and a searchable list from notifying with nothing changed, #3572 and #3582 are
     table and setting builders. Slopty draws none of these components.
+- ✅ **Upstream sync of 2026-10-18 (third): gpui-fast `d8c2c04a`, gpui-kit `91ee6c8b`.** The
+  gpui-fast fork takes two of Slopty's own changes: #46 judges a window at rest whose last frame
+  notified a view while drawing and asks for no frame (`docs/TESTING.md`), and #47 has a hover
+  listener hear no hover after a touch, so a tap on an iPad no longer opens a row's hover card
+  under the finger. gpui-kit is rebased onto `f692bb84`: #3592 quotes the tooltip test command in
+  CI, the one conflict, kept with the WebView left out as before.
 - ✅ **Upstream sync of 2026-10-18 (second): gpui-kit `078ac14a`.** gpui-kit is rebased onto
   `41acc8a4` (7 upstream commits); gpui-fast and zed did not move; the ghostty fork stays at
   `117b5945` (upstream's two commits since are GTK only).

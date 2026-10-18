@@ -62,8 +62,11 @@ Tests make no sound on this Mac: the drawn screen's worker sounds only under `SL
    focus moving while it drew), or a place that read what the frame's own drawing wrote after it
    (a row widening a column the rows before it were drawn at). What differs there waits for the
    next frame, and is reported only if that frame draws the place again and it still differs.
-   What the first frame built is not judged, because a build reads values the frame before wrote
-   as it drew. That case is still the oracle's, on settled frames. The headless retention tests
+   What a frame built is judged when its window comes to rest: a view notified while the frame
+   drew asks for no next frame, so a window whose last frame notified something while drawing,
+   and asks for no frame, is compared then with a frame from scratch in the views notified, the
+   views inside them and the views that read them; the report names what was notified and
+   suggests `cx.defer`. Other builds are still the oracle's, on settled frames. The headless retention tests
    (`shell::retention_tests`) panic on a finding. `retained::check_every_frame` turns the check
    on for a window, and `retained::stale` reports what it kept ahead of its own comparison. The
    self-test runs with it on (`GPUI_CHECK_RETAINED=record` for the Mac app and the simulator's):

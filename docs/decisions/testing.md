@@ -1333,8 +1333,9 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
     healed only by the next frame that rebuilds the list's owner. Telling a write of the same
     value from a new one is beyond what the dependency record can see.
   - Proof: `fast::tests::check_retained::a_checked_window_draws_every_frame_as_an_unchecked_one`
-    (paint, hitboxes, reuse, layout work and the a11y tree, frame for frame, and no finding). The
-    whole gpui suite runs under `GPUI_CHECK_RETAINED=panic` with no finding. The self-test
+    (paint, hitboxes, reuse, layout work and the a11y tree, frame for frame, and no finding).
+    Under `GPUI_CHECK_RETAINED=panic` the whole gpui suite fails only tests that count how often
+    views render (62, the same before and after the rest check came in at d8c2c04). The self-test
     (`harness::spawn_app`, `spawn_simulator_app`) sets `GPUI_CHECK_RETAINED=record`, and a
     finding fails the next `dump` or `render`.
 
@@ -1347,3 +1348,18 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
   with no differing pixel keeps its file, so an accept does not churn the PNG files that match.
   Without an accept, a near frame still passes, and `--review` reports it with its diff.
   - Test: `snapshot::tests::an_accept_rewrites_a_golden_on_any_differing_pixel`.
+
+- ✅ **The remote-window goldens stream the worker's drawn screen** (2026-10-18).
+  `surface-live-screen` and its takeover were never taken. Their test captured a real window,
+  which needs the Screen Recording grant. That grant is per build, through the signed launchd
+  worker, and nothing on this Mac may ask for it while someone works here over Parsec. The test
+  now starts its worker with `SLOPTY_SYNTHETIC_SCREEN=1`, so the picker lists the drawn screen's
+  two windows, the same on every Mac. Choosing "Synthetic editor" streams real video: drawn,
+  encoded by VideoToolbox, sent and decoded as any worker's. It runs in every `--e2e app` run,
+  with no grant and no `--screen-recording`. The drawn page scrolls every frame, so each golden
+  leaves out the pixels that move between two renders 300 ms apart and holds the chrome around
+  them. The test fails if nothing moves, since then the stream is not live, and the takeover
+  must draw a larger picture than the pane. Real capture keeps its proof in the live desktop
+  layer (`cargo xtask e2e screen`, the guest's `vm live`). The harness's idle window, which only
+  this test used, is gone; `slopty-capture`'s geometry tests still start the binary.
+  - Test: `surfaces_live::a_remote_window_is_a_right_pane_surface_and_takes_the_window`.
