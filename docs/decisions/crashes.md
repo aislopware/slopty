@@ -90,6 +90,14 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     read. Nothing runs on the input, terminal or frame path. Measured with a throwaway test that
     re-runs itself and times `install` in the child:
     `cargo test --release -p slopty-crash --test <timing test> -- --nocapture`.
+  - **No symbol walk at start** (2026-10-18). `dladdr` also finds the nearest symbol, which walks
+    the whole symbol table: tens of megabytes in a debug build. With the page cache warm that
+    walk is part of the 62 µs. In the e2e guest short of memory during an iOS run, its page-ins
+    held the CLI in `install` for over 20 s: a stack sample showed 514 of 586 samples in dyld's
+    `findClosestSymbol`, and `slopty agent start` missed its 30 s. The image is now found by its
+    `__TEXT` holding the reporter's code, among dyld's images (`_dyld_image_count`, the
+    executable first), and `dladdr` stays for a crash's own frames. The same run then started
+    the agent in 1.3–2 s, and the worker's start went from 9 s to 1.8–3.9 s.
   - **Known gap, `.llvm.` suffixes.** When rustc gives a function a `.llvm.<hash>` suffix to
     share it between codegen units, Apple's linker writes the debug-map stab without the suffix
     and the object file keeps it. `backtrace` (and so std's own backtraces) looks the object's

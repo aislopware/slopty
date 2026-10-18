@@ -17696,3 +17696,31 @@ clock outside the worker's crates: `claude::a_claude_code_that_never_answers_ini
 (13.7–15.6 s, slopty-net's liveness on the spawned worker). `e2e::a_watched_repository_says_…`
 (24 s) times silence after each of about twenty changes and waits on fseventsd's starts. Those
 waits are what it proves, not a timeout.
+
+## 2026-10-18 — the guest's load-only failures, fixed at their cause
+
+These follow "the e2e guest under load". Each was reproduced on purpose, then run once with
+the fix:
+
+| test | the cause | with the fix |
+| --- | --- | --- |
+| `interface::the_files_toggles_tooltip_names_its_key_under_it` | another test's app took the front, and the window's bounds change put GPUI's pointer at the real cursor, (10, −20), not the driver's (1268, 21) | the driver puts its pointer back after a bounds change; beside the hover-card test (`SLOPTY_E2E_THREADS=2`) the dark render keeps its tooltip |
+| `resume::a_resume_brings_a_dead_link_back_at_once` | a sampled "checking…" missed by a starved app's dumps | the app's count of doubts; at 30 % VM CPU it passes, resume p50 463 ms and p95 668 ms against the silence's 6.7 s |
+| `media::twelve_pages_in_one_chat_stay_within_budget` | nextest's 120 s; draw p95 by wall time | 60 s × 5 of its own, each hover waits for its card to go live, and CPU a frame is judged; 88–117 s a run |
+
+Over three guest runs, pages' main-thread CPU a frame was 105 %, 113 % and 98 % of words'.
+Their wall draw p95 was 2.2–2.6 ms against words' 3.4–13 ms, so the wall time ranked the two
+backwards. A frame costs about 30 ms of main-thread CPU in the guest's debug app. The whole
+`--e2e app` ran once with all of it: 52 of 53 passed, and the 53rd was twelve pages against a
+first bound of 110 %, now 125 %.
+
+The worker shard's never-initialized Claude Code test waits 1 s through `claude::Place`'s
+`init_wait` instead of `INIT_WAIT`'s 30 s: 30.8 s → 1.9 s.
+
+The iOS pages case's `slopty agent start` missed its 30 s. A stack sample of the CLI 8 s in
+showed it still in `slopty_crash::install`, 514 of 586 samples in dyld's `findClosestSymbol`
+(`dladdr` walking a debug binary's symbol table). The guest was short of memory: 5.9 of 6 GB
+used, the compressor at 2.4 GB, about 150 MB unused, load 90–150. With the image found from
+dyld's list, two runs started the agent 1.3 s and 2 s after the app linked, and the worker
+listened 1.8 s and 3.9 s after ptyd, against 9 s before. Both runs then failed later on a page
+card that never went live, which is beside this fix.

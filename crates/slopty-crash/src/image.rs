@@ -28,6 +28,13 @@ const N_TYPE: u8 = 0x0e;
 /// `N_SECT`, `<mach-o/nlist.h>`: defined in a section of this image.
 const N_SECT: u8 = 0x0e;
 
+// dyld's image list (`<mach-o/dyld.h>`, in libSystem), which the `libc` crate keeps only as
+// deprecated.
+unsafe extern "C" {
+    fn _dyld_image_count() -> u32;
+    fn _dyld_get_image_header(image_index: u32) -> *const c_void;
+}
+
 /// One loaded image.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct Image {
@@ -54,16 +61,30 @@ struct Symtab {
 
 impl Image {
     /// The image holding this crate, which for a Rust binary is its executable.
+    ///
+    /// Found by its `__TEXT` holding this function, among dyld's images (the executable is
+    /// the first), not by `dladdr`: `dladdr` also finds the nearest symbol, a walk through the
+    /// whole symbol table, which in a debug build of the CLI is tens of megabytes. Every process
+    /// pays this as it starts (`install` stamps the build), and on a machine short of memory the
+    /// walk's page-ins held `slopty` there for over 20 s.
     pub(crate) fn current() -> Option<Self> {
         let marker: fn() -> Option<Self> = Self::current;
-        let mut info = empty_dl_info();
-        // SAFETY: `dladdr` (dlfcn.h) looks the address up in dyld's image list and fills
-        // `info`, which outlives the call; zero comes back for an address no image holds.
-        let found = unsafe { libc::dladdr((marker as *const ()).cast(), &raw mut info) };
-        if found == 0 || info.dli_fbase.is_null() {
-            return None;
-        }
-        Self::at(info.dli_fbase.expose_provenance())
+        let marker = (marker as *const ()).addr();
+        // SAFETY: `_dyld_image_count` (mach-o/dyld.h) only reads dyld's image list.
+        let count = unsafe { _dyld_image_count() };
+        (0..count).find_map(|index| {
+            // SAFETY: `_dyld_get_image_header` reads dyld's list; an index past its end, as an
+            // image unloaded meanwhile leaves, gives null.
+            let header = unsafe { _dyld_get_image_header(index) };
+            if header.is_null() {
+                return None;
+            }
+            let image = Self::at(header.expose_provenance())?;
+            marker
+                .checked_sub(image.base)
+                .is_some_and(|offset| offset < image.text)
+                .then_some(image)
+        })
     }
 
     /// The image whose Mach-O header is loaded at `base`.
