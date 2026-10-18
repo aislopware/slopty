@@ -46,3 +46,7 @@ wait"; the commands: `docs/DEV.md`, "Dev loop".
   stops and reports, and an Opus lane takes it on from its notes. Every Sonnet diff gets the
   orchestrator's adversarial review before it is staged, and a runner's report is judged by
   Opus, never acted on as read.
+- Every turn rereads a lane's whole context, so a lane reads logs by their verdict lines, never
+  prints what it has already read, batches small reads into one command and never polls; and
+  follow-up work in a lane's own files goes to that lane while its context is warm, not to a
+  new one.
