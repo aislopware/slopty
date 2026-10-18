@@ -1421,3 +1421,84 @@ fn a_side_question_is_asked_beside_and_answered() {
         "said only on the card"
     );
 }
+
+/// What `driven` asked `subtype` with last, and its id; `None` when it asked nothing so.
+fn asked_for(driven: &mut Driven, subtype: &str) -> Option<(String, Value)> {
+    driven
+        .take_writes()
+        .iter()
+        .filter_map(|w| serde_json::from_str::<Value>(w).ok())
+        .filter(|w| w["type"] == "control_request" && w["request"]["subtype"] == subtype)
+        .map(|w| (w["request_id"].as_str().unwrap_or_default().to_owned(), w["request"].clone()))
+        .next_back()
+}
+
+fn success(id: &str, response: &Value) -> Value {
+    json!({
+        "type": "control_response",
+        "response": { "subtype": "success", "request_id": id, "response": response },
+    })
+}
+
+/// The person's name for a chat in Slopty goes to Claude Code's session as theirs
+/// (`rename_session` from the host, naming the session), once; Claude Code saying it back
+/// leaves the thread's own title alone, while a name given in Claude Code is the chat's title.
+/// An empty name goes nowhere.
+#[test]
+fn a_name_given_in_slopty_reaches_the_session_and_one_given_in_claude_code_is_the_title() {
+    let (mut driven, mut host) = driven();
+    drop(driven.take_writes());
+    host.take(driven.send("Fix the **lexer**: it drops tabs", &[], intent(1), at(1)));
+    assert!(asked_for(&mut driven, "generate_session_title").is_none(), "no title is asked for");
+    driven.rename(" Lexer ");
+    let (id, request) = asked_for(&mut driven, "rename_session").expect("renamed");
+    assert_eq!(request["title"], "Lexer");
+    assert_eq!(request["source"], "host", "the person's own rename");
+    assert_eq!(request["session_id"], SESSION);
+    host.take(driven.incoming(&success(&id, &json!({})), at(2)));
+    driven.rename("Lexer");
+    assert!(asked_for(&mut driven, "rename_session").is_none(), "the session holds it already");
+    let said = |title: &str| json!({ "type": "system", "subtype": "session_title_changed", "title": title });
+    let before = host.main(&driven).meta.title.clone();
+    host.take(driven.incoming(&said("Lexer"), at(3)));
+    assert_eq!(host.main(&driven).meta.title, before, "the person's name stays their mark");
+    host.take(driven.incoming(&said("Tabs"), at(4)));
+    assert_eq!(host.main(&driven).meta.title, "Tabs", "named in Claude Code");
+    driven.rename("");
+    assert!(asked_for(&mut driven, "rename_session").is_none(), "Claude Code takes no empty name");
+}
+
+/// A session read again takes its `custom-title` over its `ai-title`, else its first line; a
+/// name the person gave the chat in Slopty while it did not run reaches the session at start.
+#[test]
+fn a_session_read_again_takes_its_custom_title_over_its_ai_title() {
+    let mut driven = Driven::new(SESSION, "/work", at(0));
+    let mut host = Host::default();
+    host.take(driven.drain());
+    let prompt = json!({
+        "type": "user", "uuid": "u1", "sessionId": SESSION, "timestamp": "2026-10-18T10:00:00Z",
+        "message": { "role": "user", "content": "Chart:\nsales by month" },
+    });
+    let ai = json!({ "type": "ai-title", "aiTitle": "Monthly sales chart", "sessionId": SESSION });
+    let custom = json!({ "type": "custom-title", "customTitle": "Sales", "sessionId": SESSION });
+    host.take(driven.replay(&[prompt.clone(), ai.clone()], false, at(1)));
+    assert_eq!(host.main(&driven).meta.title, "Monthly sales chart");
+    let mut again = Driven::new(SESSION, "/work", at(0));
+    let mut other = Host::default();
+    other.take(again.drain());
+    other.take(again.replay(&[prompt.clone(), custom, ai], false, at(1)));
+    assert_eq!(other.main(&again).meta.title, "Sales");
+    let mut plain = Driven::new(SESSION, "/work", at(0));
+    let mut third = Host::default();
+    third.take(plain.drain());
+    third.take(plain.replay(&[prompt], false, at(1)));
+    assert_eq!(third.main(&plain).meta.title, "Chart: sales by month");
+    // A name the person gave the chat while Claude Code was not running reaches it at start.
+    let mut state = third.main(&plain).clone();
+    state.named = "Sales chart".to_owned();
+    let mut named = Driven::of(&state, at(3));
+    drop(named.take_writes());
+    named.after_initialize();
+    let (_, request) = asked_for(&mut named, "rename_session").expect("sent at start");
+    assert_eq!(request["title"], "Sales chart");
+}

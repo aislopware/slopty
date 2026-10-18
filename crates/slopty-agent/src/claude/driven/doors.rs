@@ -23,8 +23,8 @@ use std::fmt::Write as _;
 use serde_json::{Value, json};
 use slopty_core::WallMs;
 use slopty_proto::thread::{
-    Action, AgentNote, ContextCategory, ContextUsage, Delivery, IntentId, Notice, Pending,
-    PendingState, Rule, Rules, SideExchange, Surface, SurfaceEvent, TurnId,
+    Action, AgentNote, ContextCategory, ContextUsage, Delivery, IntentId, McpServer, Notice,
+    Pending, PendingState, Rule, Rules, SideExchange, Surface, SurfaceEvent, TurnId,
 };
 use slopty_proto::visual::{AppAnswer, AppAsk, AppBody, McpApp};
 
@@ -193,6 +193,9 @@ impl Driven {
         );
         self.quiet.insert(id);
         self.render(BAND, "AbovePrompt", BAND);
+        // A name the person gave the thread while no Claude Code ran reaches the session now.
+        let named = self.person_named.clone();
+        self.rename(&named);
     }
 
     /// A control request Claude Code did not answer, said nowhere: a page's ask is answered
@@ -407,11 +410,45 @@ impl Driven {
         outs
     }
 
-    /// The MCP servers' tools as `mcp_status` lists them: each that names a `ui://` resource is
-    /// an app.
+    /// Connect MCP server `server` again (the TUI's `/mcp` reconnect), on the person's word
+    /// alone: nothing here sends it on its own. The servers are asked for again once it went.
+    pub fn mcp_reconnect(&mut self, server: &str) {
+        let request = json!({ "subtype": "mcp_reconnect", "serverName": server });
+        self.control(Control::McpReconnect(server.to_owned()), &request);
+    }
+
+    /// Turn MCP server `server` on or off, as the TUI's `/mcp` does, on the person's word.
+    pub fn mcp_enable(&mut self, server: &str, enabled: bool) {
+        let request = json!({ "subtype": "mcp_toggle", "serverName": server, "enabled": enabled });
+        self.control(Control::McpEnable(server.to_owned(), enabled), &request);
+    }
+
+    /// A reconnect or a toggle went: the servers as they stand now are asked for.
+    pub(super) fn servers_changed(&mut self) -> Vec<Out> {
+        self.control(Control::McpStatus, &json!({ "subtype": "mcp_status" }));
+        Vec::new()
+    }
+
+    /// The MCP servers as `mcp_status` lists them, each with its status, and their tools: each
+    /// that names a `ui://` resource is an app.
     pub(super) fn servers_listed(&mut self, said: &Value) -> Vec<Out> {
         let mut apps = HashMap::new();
-        let servers = said.get("mcpServers").and_then(Value::as_array).into_iter().flatten();
+        let servers: Vec<&Value> =
+            said.get("mcpServers").and_then(Value::as_array).into_iter().flatten().collect();
+        let listed = servers
+            .iter()
+            .filter_map(|server| {
+                Some(McpServer {
+                    name: str_at(server, "name")?.to_owned(),
+                    status: str_at(server, "status").unwrap_or(McpServer::PENDING).to_owned(),
+                    error: str_at(server, "error").map(str::to_owned),
+                    source: str_at(server, "source")
+                        .or_else(|| str_at(server, "scope"))
+                        .map(str::to_owned),
+                })
+            })
+            .collect();
+        let mut outs = self.history.tell(Action::McpServersSet(listed));
         for server in servers {
             let Some(name) = str_at(server, "name") else { continue };
             let tools = server.get("tools").and_then(Value::as_array).into_iter().flatten();
@@ -441,7 +478,8 @@ impl Driven {
                 );
             }
         }
-        self.history.set_apps(apps)
+        outs.extend(self.history.set_apps(apps));
+        outs
     }
 
     /// A page's ask `ask` of its app, by its number `app`: answered later

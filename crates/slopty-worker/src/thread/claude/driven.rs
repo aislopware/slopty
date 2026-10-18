@@ -479,6 +479,9 @@ impl Task {
                 let outs = self.driven.side(intent, &question, &history, now);
                 self.take(outs);
             }
+            ThreadAsk::Rename { title } => self.driven.rename(&title),
+            ThreadAsk::McpReconnect { server } => self.driven.mcp_reconnect(&server),
+            ThreadAsk::McpEnable { server, enabled } => self.driven.mcp_enable(&server, enabled),
             // Written into its file by now: what Claude Code holds is read again.
             ThreadAsk::Rule { .. } => self.driven.list_rules(),
             ThreadAsk::Surface { surface, element, event } => {

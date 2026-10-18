@@ -324,7 +324,7 @@ mod claude {
         assert_eq!(record["cwd"], rig.work.to_string_lossy().as_ref());
         for (name, value) in slopty_agent::claude::ENV {
             assert!(record["inherited"].get(name).is_some(), "{name}, as the desktop app sets it");
-            if name.starts_with("CLAUDE_") {
+            if name.starts_with("CLAUDE_") || name.starts_with("API_") {
                 assert_eq!(record["env"][name], value, "{name}");
             }
         }
@@ -1488,6 +1488,64 @@ mod claude {
             Outcome::Done
         );
         rig.until(thread, "the pane gone", |s| !has(s, "deploy")).await;
+    }
+
+    /// The person's name for a chat in Slopty reaches its running Claude Code as their own
+    /// rename (`rename_session`, source `host`, naming the session), so Claude Code's own list
+    /// of sessions agrees.
+    #[tokio::test]
+    async fn a_name_given_in_slopty_reaches_claude_codes_session() {
+        let rig = Rig::new(&[]).await;
+        let (claude, _served) = rig.serve();
+        let thread = rig.started(&claude, "hello").await;
+        let native =
+            rig.until(thread, "its session", |s| !s.meta.native.is_empty()).await.meta.native;
+        claude.rename(thread, "Release notes".to_owned());
+        let record =
+            rig.record_once("the rename", |r| !heard(r, "rename_session").is_empty()).await;
+        let renamed = heard(&record, "rename_session");
+        assert_eq!(renamed[0]["request"]["title"], "Release notes");
+        assert_eq!(renamed[0]["request"]["source"], "host");
+        assert_eq!(renamed[0]["request"]["session_id"], native.as_str());
+    }
+
+    /// A failed MCP server is listed with its error, and only the person's reconnect reaches
+    /// Claude Code (`mcp_reconnect`), which connects it; one it does not list is refused before
+    /// it goes. Disabling and enabling one is `mcp_toggle`, the list following each.
+    #[tokio::test]
+    async fn a_failed_mcp_server_reconnects_only_on_the_persons_word() {
+        use slopty_proto::thread::McpServer;
+        let rig = Rig::new(&[("STUB_MCP_FAILS_ONCE", "github")]).await;
+        let (claude, _served) = rig.serve();
+        let thread = rig.started(&claude, "hello").await;
+        let status = |s: &ThreadState| {
+            s.servers.iter().find(|x| x.name == "github").map(|x| x.status.clone())
+        };
+        let state = rig
+            .until(thread, "the failed server", |s| status(s).as_deref() == Some(McpServer::FAILED))
+            .await;
+        let github = state.servers.iter().find(|x| x.name == "github").unwrap();
+        assert!(github.error.as_deref().is_some_and(|e| e.contains("Connection closed")));
+        let before = rig.record();
+        assert!(heard(&before, "mcp_reconnect").is_empty(), "never on its own");
+        let reconnect = |server: &str| Intent::McpReconnect { server: server.to_owned() };
+        assert!(refused(&rig.intent(&claude, thread, &reconnect("nope"))));
+        assert_eq!(rig.intent(&claude, thread, &reconnect("github")), Outcome::Done);
+        rig.until(thread, "connected", |s| status(s).as_deref() == Some(McpServer::CONNECTED))
+            .await;
+        let record = rig.record();
+        let asked = heard(&record, "mcp_reconnect");
+        assert_eq!(asked.len(), 1, "once, as asked");
+        assert_eq!(asked[0]["request"]["serverName"], "github");
+        let enable = |on: bool| Intent::McpEnable { server: "github".to_owned(), enabled: on };
+        assert_eq!(rig.intent(&claude, thread, &enable(false)), Outcome::Done);
+        rig.until(thread, "disabled", |s| status(s).as_deref() == Some(McpServer::DISABLED)).await;
+        assert_eq!(rig.intent(&claude, thread, &enable(true)), Outcome::Done);
+        rig.until(thread, "enabled", |s| status(s).as_deref() == Some(McpServer::CONNECTED)).await;
+        let record = rig.record();
+        let toggles: Vec<&Value> =
+            heard(&record, "mcp_toggle").into_iter().map(|t| &t["request"]["enabled"]).collect();
+        assert_eq!(toggles, [&Value::Bool(false), &Value::Bool(true)]);
     }
 
     /// Approving a plan with the context cleared is one verb: the plan's ask is denied as

@@ -186,6 +186,7 @@ pub(super) fn plan_options(prompt: &PermissionPrompt, scope: Option<String>) -> 
         label,
         effect,
         scope,
+        folders: Vec::new(),
         stops,
     };
     let mode = after_clear(prompt.before_plan.as_deref());
@@ -232,6 +233,7 @@ pub(super) fn enter_plan_options() -> Vec<Choice> {
         label: label.to_owned(),
         effect,
         scope: None,
+        folders: Vec::new(),
         stops: false,
     };
     vec![

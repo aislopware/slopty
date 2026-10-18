@@ -196,6 +196,7 @@ mod golden_thread {
                     label: "Allow".to_owned(),
                     effect: Effect::Allow,
                     scope: None,
+                    folders: Vec::new(),
                     stops: false,
                 },
                 Choice {
@@ -203,6 +204,7 @@ mod golden_thread {
                     label: "Always allow".to_owned(),
                     effect: Effect::Allow,
                     scope: Some("Bash(cargo test:*)".to_owned()),
+                    folders: Vec::new(),
                     stops: false,
                 },
                 Choice {
@@ -210,6 +212,7 @@ mod golden_thread {
                     label: "No".to_owned(),
                     effect: Effect::Deny,
                     scope: None,
+                    folders: Vec::new(),
                     stops: true,
                 },
             ],

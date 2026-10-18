@@ -227,6 +227,7 @@ mod golden_agent {
                     label: "Allow".to_owned(),
                     effect: Effect::Allow,
                     scope: Some("this session".to_owned()),
+                    folders: Vec::new(),
                     stops: false,
                 }],
                 questions: Vec::new(),

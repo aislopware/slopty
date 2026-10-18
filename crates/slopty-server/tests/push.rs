@@ -252,6 +252,7 @@ mod tests {
             label: id.to_owned(),
             effect,
             scope: None,
+            folders: Vec::new(),
             stops: false,
         };
         let mut asking = row(thread, Phase::NeedsYou, 2_000, shell);

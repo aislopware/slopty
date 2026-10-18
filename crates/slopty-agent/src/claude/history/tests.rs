@@ -8,7 +8,7 @@ use super::*;
 use crate::conversation::{Conversation, Transcripts};
 use crate::transcript::Tail;
 
-const CONVERSATIONS: [&str; 9] = [
+const CONVERSATIONS: [&str; 10] = [
     "edit",
     "tools",
     "interrupt",
@@ -18,6 +18,7 @@ const CONVERSATIONS: [&str; 9] = [
     "auto",
     "approve-edit",
     "notebook",
+    "fork",
 ];
 
 fn dir(kind: &str, scenario: &str) -> PathBuf {
@@ -686,4 +687,98 @@ fn an_app_call_read_before_the_servers_were_listed_shows_its_page() {
         "{page:?}"
     );
     assert_eq!(state, was, "as it ended");
+}
+
+/// "Always allow" says a granted folder short, as the TUI does: the chat's own folder as "this
+/// folder", one in it relative to it, one under the home from `~`, any other in full.
+#[test]
+fn a_granted_folder_is_said_relative_to_the_chats_folder_or_home() {
+    use crate::conversation::{Clipped, Grant, Suggestion, ToolDetail};
+    let places = Places { cwd: "/Users/me/work/".to_owned(), home: "/Users/me".to_owned() };
+    let said = |dirs: &[&str], mode: Option<&str>| {
+        let mut suggestions = vec![Suggestion {
+            grant: Grant::Directories {
+                directories: dirs.iter().map(|d| (*d).to_owned()).collect(),
+            },
+            destination: Some("session".to_owned()),
+        }];
+        if let Some(mode) = mode {
+            suggestions.insert(
+                0,
+                Suggestion {
+                    grant: Grant::Mode { mode: mode.to_owned() },
+                    destination: Some("session".to_owned()),
+                },
+            );
+        }
+        let prompt = PermissionPrompt {
+            reason: None,
+            ask: 1,
+            tool: "Edit".to_owned(),
+            call: None,
+            detail: ToolDetail::Other {
+                input: Clipped { text: String::new(), lines: 0, chars: 0, full: None },
+            },
+            suggestions,
+            mode: None,
+            asked_ms: WallMs::ZERO,
+            needs_presence: false,
+            input: serde_json::Value::Null,
+            exists: None,
+            context_used: None,
+            before_plan: None,
+            on_disk: None,
+            default_to_no: false,
+        };
+        grants(&prompt, &places)
+    };
+    let (_, folders) = said(&["/Users/me/work/src", " /opt/x "], None);
+    assert_eq!(folders, ["/Users/me/work/src", "/opt/x"], "in full, for the tooltip");
+    let said = |dirs: &[&str], mode: Option<&str>| said(dirs, mode).0;
+    assert_eq!(
+        said(&["/Users/me/work"], Some("acceptEdits")).as_deref(),
+        Some("edits in this folder this session")
+    );
+    assert_eq!(
+        said(&["/Users/me/work/src/lexer", "/Users/me/notes", "/Users/me", "/opt/x"], None)
+            .as_deref(),
+        Some("access to src/lexer, ~/notes, ~, /opt/x this session")
+    );
+    assert_eq!(
+        said(&["/Users/me/workbench"], None).as_deref(),
+        Some("access to ~/workbench this session")
+    );
+}
+
+/// A fork subagent (on by default in `-p` since 2.1.302), recorded from Claude Code: its card
+/// says "Fork" and its description, and its drilled view starts at its own first record, the
+/// directive it was given, never the parent's call it inherited nor that call's "Fork started";
+/// the parent's call keeps its own result, the fork's hand-back.
+#[test]
+fn a_fork_starts_at_its_own_first_record() {
+    use slopty_proto::thread::{ItemBody, ToolDetail as Detail};
+    let (observed, host, _) = replay(&dir("conversation", "fork"));
+    let main = host.thread(observed.main());
+    let call = main
+        .items
+        .iter()
+        .find_map(|i| match &i.body {
+            ItemBody::Tool(call) if call.name == "Agent" => Some(call),
+            _ => None,
+        })
+        .expect("the fork's call");
+    let Some(Detail::Agent(agent)) = &call.detail else { panic!("an agent call: {call:?}") };
+    assert_eq!(agent.agent_type.as_deref(), Some("Fork"));
+    assert_eq!(agent.description.as_deref(), Some("Count lines"));
+    let output = call.output.as_ref().map(|o| o.text.as_str()).unwrap_or_default();
+    assert!(!output.contains("Fork started"), "the parent's own result: {output}");
+    let fork = host.thread(observed.main().subagent("a0000000000000001"));
+    let first = fork.items.first().expect("the fork's records");
+    let ItemBody::User(prompt) = &first.body else { panic!("its directive first: {first:?}") };
+    assert_eq!(prompt.text.text, "Read main.rs and reply with just the number of lines.");
+    assert!(
+        !fork.items.iter().any(|i| matches!(&i.body, ItemBody::Tool(c) if c.name == "Agent")),
+        "nothing inherited: {:#?}",
+        fork.items
+    );
 }

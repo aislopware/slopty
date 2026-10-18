@@ -42,6 +42,7 @@ use crate::conversation::{
     self as conv, Body, Change, Grant, Live, LiveId, LiveKind, NoteKind, PermissionEvent,
     PermissionPrompt, ResultStatus, Settled, TextRef, Verdict,
 };
+use crate::driven::title_of;
 
 /// What the threads of a session need done.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -530,6 +531,9 @@ pub struct History {
     notices: u64,
     /// The resources each task's result linked, by the task, for its row.
     task_links: HashMap<String, Vec<slopty_proto::visual::ResourceLink>>,
+    /// The home of the machine the session runs on, which a folder granted under it is said
+    /// from (`~/…`).
+    home: String,
 }
 
 impl History {
@@ -592,6 +596,7 @@ impl History {
             apps: HashMap::new(),
             notices: 0,
             task_links: HashMap::new(),
+            home: slopty_platform::dirs::home().to_string_lossy().into_owned(),
         };
         history.meta.caps = history.caps_with(caps);
         history.out.push(Out::Begin(Box::new(history.meta.clone())));
@@ -1471,7 +1476,8 @@ impl History {
     pub fn permission(&mut self, event: &PermissionEvent) -> Vec<Out> {
         let action = match event {
             PermissionEvent::Asked(prompt) => {
-                let request = request(prompt);
+                let places = Places { cwd: self.meta.cwd.clone(), home: self.home.clone() };
+                let request = request(prompt, &places);
                 self.open.push(request.clone());
                 if let Some(call) = &request.item {
                     self.call_state(call, &ToolState::Pending { ask: request.id.clone() });
@@ -2485,18 +2491,6 @@ fn changed_by(body: &Body) -> Changed {
     Changed { added: patch.added, removed: patch.removed }
 }
 
-/// A thread's title from its first prompt: the first line, cut at a word.
-fn title_of(prompt: &str) -> String {
-    const MAX: usize = 80;
-    let line = prompt.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or_default();
-    if line.chars().count() <= MAX {
-        return line.to_owned();
-    }
-    let cut: String = line.chars().take(MAX).collect();
-    let cut = cut.rsplit_once(' ').map_or(cut.as_str(), |(head, _)| head);
-    format!("{cut}…")
-}
-
 fn usage(usage: &conv::Usage) -> Usage {
     let counts = [
         (Usage::INPUT, usage.input),
@@ -2561,12 +2555,14 @@ fn question(q: &conv::QuestionDetail) -> detail::QuestionDetail {
 }
 
 /// What "allow always" grants, worded as Claude Code's own dialog words it, to follow the
-/// button's "Always allow": "edits in /work this session", "access to /work in this project",
-/// "npm test commands in this project". A mode leads, in the folders granted with it; rules
-/// follow; an update of a kind this worker does not know is said in words. Each part ends with
-/// how long it holds, from where Claude Code keeps it.
-fn grants(prompt: &PermissionPrompt) -> Option<String> {
+/// button's "Always allow": "edits in this folder this session", "access to src in this
+/// project", "npm test commands in this project". A mode leads, in the folders granted with it;
+/// rules follow; an update of a kind this worker does not know is said in words. Each part ends
+/// with how long it holds, from where Claude Code keeps it. A folder is said short, as the TUI
+/// says it ([`folder_words`]); the folders in full come beside, for the tooltip.
+fn grants(prompt: &PermissionPrompt, places: &Places) -> (Option<String>, Vec<String>) {
     let (mut mode, mut dirs, mut rules, mut others) = (None, Vec::new(), Vec::new(), Vec::new());
+    let mut folders: Vec<String> = Vec::new();
     let (mut held, mut rules_held) = (None, None);
     for suggestion in &prompt.suggestions {
         let kept = suggestion.destination.as_deref();
@@ -2579,8 +2575,10 @@ fn grants(prompt: &PermissionPrompt) -> Option<String> {
                 }
             }
             Grant::Directories { directories } => {
-                let named: Vec<&str> =
+                let full: Vec<&str> =
                     directories.iter().map(|d| d.trim()).filter(|d| !d.is_empty()).collect();
+                let named: Vec<String> = full.iter().map(|d| folder_words(d, places)).collect();
+                folders.extend(full.iter().map(|d| (*d).to_owned()));
                 if !named.is_empty() {
                     dirs.extend(named);
                     held = held.or(kept);
@@ -2611,7 +2609,38 @@ fn grants(prompt: &PermissionPrompt) -> Option<String> {
         )
         .chain(others.into_iter().filter(|o| !o.is_empty()))
         .collect();
-    (!parts.is_empty()).then(|| parts.join("; "))
+    ((!parts.is_empty()).then(|| parts.join("; ")), folders)
+}
+
+/// Where a thread works and whose home that is, for saying a folder short.
+#[derive(Clone, Debug)]
+pub(crate) struct Places {
+    /// The thread's folder.
+    pub cwd: String,
+    /// The home of the machine it works on.
+    pub home: String,
+}
+
+/// Folder `dir` said short: "this folder" for the thread's own, a folder in it relative to
+/// it ("src/lexer"), one under the home from `~` ("~/notes"), any other in full.
+fn folder_words(dir: &str, places: &Places) -> String {
+    let trimmed = |p: &str| p.trim_end_matches('/').to_owned();
+    let (dir, cwd, home) = (trimmed(dir), trimmed(&places.cwd), trimmed(&places.home));
+    let under = |root: &str| {
+        (!root.is_empty())
+            .then(|| dir.strip_prefix(root)?.strip_prefix('/').filter(|r| !r.is_empty()))
+            .flatten()
+    };
+    if !cwd.is_empty() && dir == cwd {
+        return "this folder".to_owned();
+    }
+    if let Some(inside) = under(&cwd) {
+        return inside.to_owned();
+    }
+    if !home.is_empty() && dir == home {
+        return "~".to_owned();
+    }
+    under(&home).map_or_else(|| dir.clone(), |inside| format!("~/{inside}"))
 }
 
 /// A permission mode as what it lets through: `acceptEdits` is "edits", as Claude Code's
@@ -2682,13 +2711,14 @@ fn words(name: &str) -> String {
 }
 
 /// A held permission prompt as a request, with the answers Claude Code takes.
-fn request(prompt: &PermissionPrompt) -> Request {
+fn request(prompt: &PermissionPrompt, places: &Places) -> Request {
     let thread = conv::ThreadId::Main;
     let choice = |id: &str, label: &str, effect, scope, stops| Choice {
         id: id.to_owned(),
         label: label.to_owned(),
         effect,
         scope,
+        folders: Vec::new(),
         stops,
     };
     let deny = choice("deny", "Deny", Effect::Deny, None, false);
@@ -2705,7 +2735,7 @@ fn request(prompt: &PermissionPrompt) -> Request {
         // its request suggests (carried back as "Always allow" carries its suggestions), with
         // edits still asked about, or keep planning.
         conv::ToolDetail::Plan { .. } => {
-            let options = cards::plan_options(prompt, grants(prompt));
+            let options = cards::plan_options(prompt, grants(prompt, places).0);
             (Request::PLAN, "Ready to code?".to_owned(), options, Vec::new(), None)
         }
         _ if prompt.tool == "EnterPlanMode" => {
@@ -2715,13 +2745,9 @@ fn request(prompt: &PermissionPrompt) -> Request {
         detail => {
             let mut options = vec![choice("allow", "Allow", Effect::Allow, None, false)];
             if !prompt.suggestions.is_empty() {
-                options.push(choice(
-                    "always",
-                    "Always allow",
-                    Effect::Allow,
-                    grants(prompt),
-                    false,
-                ));
+                let (scope, folders) = grants(prompt, places);
+                let always = choice("always", "Always allow", Effect::Allow, scope, false);
+                options.push(Choice { folders, ..always });
             }
             options.extend([deny, deny_stop]);
             // A request Claude Code would start on "No" (`default_to_no`) lists its deny first,
@@ -2775,6 +2801,24 @@ pub fn branch_in(records: &[serde_json::Value]) -> Option<&str> {
         .filter(|b| !b.is_empty())
 }
 
+/// Claude Code's own titles for the session its `records` hold, each the last one written.
+///
+/// The name the person gave it (`custom-title`), and the title Claude Code made (`ai-title`),
+/// as its resume picker reads them.
+#[must_use]
+pub fn titles_in(records: &[serde_json::Value]) -> (Option<&str>, Option<&str>) {
+    let last = |kind: &str, key: &str| {
+        records
+            .iter()
+            .rev()
+            .filter(|r| r.get("type").and_then(serde_json::Value::as_str) == Some(kind))
+            .find_map(|r| r.get(key).and_then(serde_json::Value::as_str))
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+    };
+    (last("custom-title", "customTitle"), last("ai-title", "aiTitle"))
+}
+
 /// The main thread of a Claude Code session rebuilt from its `records` alone.
 ///
 /// The records are its main transcript's, then each subagent's (whose records name their agent),
@@ -2800,6 +2844,10 @@ pub fn replay(records: &[serde_json::Value]) -> ThreadState {
     }
     if let Some(branch) = branch_in(records) {
         outs.extend(history.fact(BRANCH_FACT, Some(branch)));
+    }
+    let (custom, ai) = titles_in(records);
+    if let Some(title) = custom.or(ai) {
+        outs.extend(history.named(title));
     }
     outs.extend(history.rest(WallMs::ZERO));
     let mut state = ThreadState::new(history.meta().clone());

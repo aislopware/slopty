@@ -425,6 +425,12 @@ impl Following {
                     slopty_worker::thread::marks::act(state, &intent, now)
                 });
                 let outcome = marked.unwrap_or_else(|| refused("no such thread".to_owned()));
+                // Claude Code's session takes the person's name too, so its own list agrees.
+                if let (Intent::Name { title }, Outcome::Done) = (&intent, &outcome)
+                    && threads.host.state(thread).is_some_and(|(s, _)| claude::is_claude(&s))
+                {
+                    threads.claude.rename(thread, title.trim().to_owned());
+                }
                 at.post(WorkerMsg::IntentDone(IntentDone { id, outcome }));
             }
             ThreadRequest::Intent { id, thread, intent: Intent::KeepAside } => {

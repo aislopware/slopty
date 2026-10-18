@@ -89,8 +89,11 @@ pub const DRIVEN: [&str; 13] = [
 /// Its output is flushed at once, MCP servers connect without holding the first turn, and its
 /// questions to the person are asked over the stream; it says itself when it is idle, running
 /// or waiting on the person, keeps checkpoints of the files it changes so they can be put back,
-/// and hosts MCP Apps (its servers' `ui://` pages are shown by Slopty).
-pub const ENV: [(&str, &str); 6] = [
+/// and hosts MCP Apps (its servers' `ui://` pages are shown by Slopty). A request to the API may
+/// take 15 minutes before it times out, not Claude Code's own 10, as the desktop app allows a
+/// long turn; an `env` the person sets in Claude Code's settings still wins.
+pub const ENV: [(&str, &str); 7] = [
+    ("API_TIMEOUT_MS", "900000"),
     ("CLAUDE_CODE_EAGER_FLUSH", "1"),
     ("MCP_CONNECTION_NONBLOCKING", "true"),
     ("CLAUDE_CODE_ENABLE_ASK_USER_QUESTION_TOOL", "true"),

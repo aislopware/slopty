@@ -362,12 +362,12 @@ struct Glance {
 impl Glance {
     /// The session's title, as Claude Code's resume picker shows it.
     fn title(&self) -> Option<String> {
-        [&self.named, &self.titled, &self.summary, &self.first]
+        [&self.named, &self.titled, &self.summary]
             .into_iter()
             .flatten()
-            .map(|t| t.trim())
+            .map(|t| t.trim().to_owned())
+            .chain(self.first.as_deref().map(crate::driven::title_of))
             .find(|t| !t.is_empty())
-            .map(str::to_owned)
     }
 
     /// The session's last prompt, cut to [`PROMPT_HIT_BYTES`].

@@ -267,7 +267,8 @@ impl Driven {
         let input = called.map(|(_, input)| input);
         let mut started = BackgroundTask {
             item: call.clone().map(ItemId),
-            agent_type: str_at(message, "subagent_type").map(str::to_owned),
+            agent_type: str_at(message, "subagent_type")
+                .map(|t| crate::conversation::agent_kind(t.to_owned())),
             parent: str_at(message, "parent_task_id").map(str::to_owned),
             ambient: bool_at(message, "ambient") || bool_at(message, "skip_transcript"),
             awaited: bool_at(message, "awaited"),

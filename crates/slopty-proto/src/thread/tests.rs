@@ -81,6 +81,7 @@ fn request(id: &str) -> Request {
             label: "Allow".to_owned(),
             effect: Effect::Allow,
             scope: None,
+            folders: Vec::new(),
             stops: false,
         }],
         questions: Vec::new(),

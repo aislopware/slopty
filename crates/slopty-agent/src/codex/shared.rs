@@ -1955,7 +1955,7 @@ fn title_of(thread: &p::Thread) -> String {
         .name
         .clone()
         .filter(|n| !n.is_empty())
-        .unwrap_or_else(|| thread.preview.lines().next().unwrap_or_default().to_owned())
+        .unwrap_or_else(|| crate::driven::title_of(&thread.preview))
 }
 
 /// Whether Codex says a turn stopped on the account's usage or rate limit.
@@ -2129,6 +2129,7 @@ fn form_choices() -> Vec<Choice> {
         label: label.to_owned(),
         effect: Effect::Deny,
         scope: None,
+        folders: Vec::new(),
         stops,
     };
     vec![choice(DECLINE, "Decline", false), choice(CANCEL, "Cancel", true)]
@@ -2196,7 +2197,14 @@ fn push_choice<T: serde::Serialize>(
         Value::Object(one) => one.keys().next().cloned().unwrap_or_default(),
         _ => return,
     };
-    options.push(Choice { id: id.clone(), label: label.to_owned(), effect, scope, stops });
+    options.push(Choice {
+        id: id.clone(),
+        label: label.to_owned(),
+        effect,
+        scope,
+        folders: Vec::new(),
+        stops,
+    });
     answers.insert(id, value);
 }
 

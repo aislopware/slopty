@@ -175,6 +175,7 @@ fn choices(kind: &str, payload: &Value) -> (String, Option<String>, Vec<(Choice,
             label: label.to_owned(),
             effect,
             scope: None,
+            folders: Vec::new(),
             stops: false,
         };
         (choice, Value::String(id.to_owned()))
@@ -215,6 +216,7 @@ fn choices(kind: &str, payload: &Value) -> (String, Option<String>, Vec<(Choice,
                 label: "Set this goal".to_owned(),
                 effect: Effect::Allow,
                 scope: None,
+                folders: Vec::new(),
                 stops: false,
             };
             let no = Choice {
@@ -240,6 +242,7 @@ fn choices(kind: &str, payload: &Value) -> (String, Option<String>, Vec<(Choice,
                 label: label.to_owned(),
                 effect,
                 scope,
+                folders: Vec::new(),
                 stops: false,
             };
             (
@@ -362,6 +365,7 @@ fn choices(kind: &str, payload: &Value) -> (String, Option<String>, Vec<(Choice,
                         label: "Allow".to_owned(),
                         effect: Effect::Allow,
                         scope: None,
+                        folders: Vec::new(),
                         stops: false,
                     },
                     json!({ "behavior": "approve" }),
@@ -372,6 +376,7 @@ fn choices(kind: &str, payload: &Value) -> (String, Option<String>, Vec<(Choice,
                         label: "Deny".to_owned(),
                         effect: Effect::Deny,
                         scope: None,
+                        folders: Vec::new(),
                         stops: false,
                     },
                     json!({ "behavior": "deny" }),
@@ -449,6 +454,7 @@ impl Driven {
             label: label.to_owned(),
             effect,
             scope: None,
+            folders: Vec::new(),
             stops: false,
         };
         let mut options = Vec::new();

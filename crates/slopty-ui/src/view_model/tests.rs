@@ -330,6 +330,7 @@ fn request(
                 label: (*label).to_owned(),
                 effect: *effect,
                 scope: None,
+                folders: Vec::new(),
                 stops: false,
             })
             .collect(),

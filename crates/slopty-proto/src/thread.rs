@@ -1064,8 +1064,10 @@ pub struct Choice {
     /// What it means.
     pub effect: Effect,
     /// How far it reaches beyond this once, in the agent's words ("this session",
-    /// "Bash(cargo test:*)").
+    /// "Bash(cargo test:*)"), a folder said short: relative to the thread's folder, or to `~`.
     pub scope: Option<String>,
+    /// The folders `scope` names, each in full, for its tooltip; empty when it names none.
+    pub folders: Vec<String>,
     /// It also stops the turn.
     pub stops: bool,
 }

@@ -9,13 +9,14 @@ use slopty_proto::thread::{
     Action, Cap, Choice, Effect, Item, ItemBody, Liveness, Patch, Phase, RequestState, Status,
     ThreadState, ToolCall, ToolState, TurnState,
 };
+pub use title::title_of;
+
+mod title;
 
 /// Prose: answers, thinking.
 pub const PROSE: Clip = Clip { lines: 400, chars: 32_000 };
 /// A call's input or output.
 pub const OUTPUT: Clip = Clip { lines: 40, chars: 4_000 };
-/// A thread's title, from its first message, in characters.
-const TITLE_CHARS: usize = 80;
 
 /// `names` as a thread's capabilities, sorted.
 #[must_use]
@@ -44,7 +45,14 @@ pub fn effort_label(effort: &str) -> String {
 /// An answer the agent offers.
 #[must_use]
 pub fn choice(id: &str, label: &str, effect: Effect, stops: bool) -> Choice {
-    Choice { id: id.to_owned(), label: label.to_owned(), effect, scope: None, stops }
+    Choice {
+        id: id.to_owned(),
+        label: label.to_owned(),
+        effect,
+        scope: None,
+        folders: Vec::new(),
+        stops,
+    }
 }
 
 /// A tool call as an item's body.
@@ -102,16 +110,6 @@ fn range(text: &str) -> (u32, u32) {
     let start = parts.next().and_then(|s| s.parse().ok()).unwrap_or_default();
     let lines = parts.next().map_or(1, |s| s.parse().unwrap_or_default());
     (start, lines)
-}
-
-/// A thread's title from the first thing the person said: its first line, cut to a length.
-#[must_use]
-pub fn title_of(text: &str) -> String {
-    let line = text.lines().find(|l| !l.trim().is_empty()).unwrap_or_default().trim();
-    match line.char_indices().nth(TITLE_CHARS) {
-        Some((at, _)) => format!("{}…", line.get(..at).unwrap_or(line).trim_end()),
-        None => line.to_owned(),
-    }
 }
 
 /// When the usage windows in `limits` that are full have all reset: the latest of their

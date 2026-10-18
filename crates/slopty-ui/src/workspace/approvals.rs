@@ -522,6 +522,7 @@ mod tests {
             label: id.to_owned(),
             effect,
             scope: None,
+            folders: Vec::new(),
             stops: false,
         };
         RequestCard {

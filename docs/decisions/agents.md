@@ -3387,6 +3387,30 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `--include-hook-events` and `--prompt-suggestions`, plus
     `CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS`, `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING` and
     `CLAUDE_CODE_MCP_APPS_HOST`.
+  - **A request to the API may take 15 minutes.** `API_TIMEOUT_MS=900000`, as the desktop app
+    sets it, over Claude Code's own 10 minutes, so a long turn behind a slow gateway is not cut
+    off. It overrides the value Claude Code's remote settings would give; an `env` in the
+    person's Claude Code settings still wins.
+  - **A chat's title is Slopty's own until Claude Code writes one.** Slopty derives it from the
+    first message: its first line with the markdown stripped before the 80-character cut, a
+    label line ("Chart:") joined with the next. It never asks Claude Code to make a title: no
+    published door does, and it would be a model call on the person's account they did not ask
+    for. It adopts the titles Claude Code itself writes, live and on resume: a name given in
+    Claude Code (`session_title_changed`, a `custom-title`), else its `ai-title`. The person's
+    rename in Slopty wins over both, and goes to the session as `rename_session` with source
+    `host` and the session's id, the SDK's door for a rename made in the hosting app, so Claude
+    Code's own list of sessions agrees. A rename made while no Claude Code runs goes when it
+    next starts. Taking a name back stays in Slopty, since Claude Code takes no empty name.
+  - **MCP servers reconnect only on the person's word.** The context card lists each server
+    (`mcp_status`) with its status and error. Reconnect sends `mcp_reconnect`, Enable or Disable
+    sends `mcp_toggle`, and the list is asked again after each. Nothing sends either on its own:
+    a server that keeps failing would otherwise be redialled behind the person's back.
+  - **A fork starts at its own first record.** A fork subagent (`subagent_type: "fork"`, on by
+    default in `-p` since 2.1.302) inherits its parent's context. Its transcript opens with
+    `fork-context-ref` and the parent's call, and its first message answers that call ("Fork
+    started") beside its directive under Claude Code's fork boilerplate. The drilled view drops
+    the inherited records and that answer, and starts at the directive; the card names it
+    "Fork".
   - **`!` runs on the worker.** The command runs in the thread's folder for at most 10
     minutes, with 30 000 characters of output kept. While it runs it is a call of its own,
     and it is then handed to Claude Code as the person's message (`<bash-input>`,

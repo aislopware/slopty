@@ -21,6 +21,9 @@
 //! - **MCP Apps.** `mcp_status` lists each `--mcp-config` server with its tools, asked as a host
 //!   with the UI extension; `mcp_read_resource` and `mcp_call` go to the server named, its error
 //!   refused.
+//! - **MCP servers.** `STUB_MCP_FAILS_ONCE=<name>` adds server `name`, failed until an
+//!   `mcp_reconnect` names it, which connects it; `mcp_reconnect` of a server it does not list is
+//!   refused. `mcp_toggle` disables a server (`disabled` in `mcp_status`) or enables it again.
 //! - **Rules.** `list_permission_rules` reads the `permissions` of the person's, the project's and
 //!   the local settings files, and `--allowedTools` as the session's.
 //! - **Surfaces.** With `STUB_UI` set, a mod `ship` draws a pane `deploy` and the band above the
@@ -84,11 +87,19 @@ pub(super) struct Doors {
     closed: bool,
     /// The mod's button was pressed.
     shipped: bool,
+    /// `STUB_MCP_FAILS_ONCE`: the server that fails until it is reconnected, and whether it was.
+    fails_once: Option<(String, bool)>,
+    /// The servers `mcp_toggle` turned off.
+    disabled: std::collections::BTreeSet<String>,
 }
 
 impl Doors {
     pub(super) fn new() -> Self {
-        Self { ui: std::env::var_os("STUB_UI").is_some(), ..Self::default() }
+        Self {
+            ui: std::env::var_os("STUB_UI").is_some(),
+            fails_once: std::env::var("STUB_MCP_FAILS_ONCE").ok().map(|name| (name, false)),
+            ..Self::default()
+        }
     }
 
     /// The turn of message `id` begins.
@@ -109,8 +120,43 @@ impl Stub {
             }
             "list_permission_rules" => reply(id, Some(json!({ "state": self.rules() }))),
             "mcp_status" => {
-                let servers: Vec<Value> = self.servers().iter().map(status).collect();
+                let mut servers: Vec<Value> = self
+                    .servers()
+                    .iter()
+                    .map(|server| self.doors.status_of(&server.0).unwrap_or_else(|| status(server)))
+                    .collect();
+                if let Some((name, _)) = &self.doors.fails_once
+                    && !self.servers().iter().any(|(n, _)| n == name)
+                {
+                    servers.extend(self.doors.status_of(name));
+                }
                 reply(id, Some(json!({ "mcpServers": servers })));
+            }
+            "mcp_reconnect" => {
+                let server = field("serverName").unwrap_or_default();
+                let listed = self.servers().iter().any(|(n, _)| *n == server)
+                    || self.doors.fails_once.as_ref().is_some_and(|(n, _)| *n == server);
+                if !listed {
+                    refuse(id, &format!("Server not found: {server}"));
+                } else if self.doors.disabled.contains(&server) {
+                    refuse(id, &format!("Server is disabled: {server}"));
+                } else {
+                    if let Some((name, again)) = &mut self.doors.fails_once
+                        && *name == server
+                    {
+                        *again = true;
+                    }
+                    reply(id, Some(json!({})));
+                }
+            }
+            "mcp_toggle" => {
+                let server = field("serverName").unwrap_or_default();
+                if request.get("enabled").and_then(Value::as_bool) == Some(false) {
+                    self.doors.disabled.insert(server);
+                } else {
+                    self.doors.disabled.remove(&server);
+                }
+                reply(id, Some(json!({})));
             }
             "mcp_read_resource" => {
                 let uri = field("uri").unwrap_or_default();
@@ -688,6 +734,25 @@ fn normalized(server: &str) -> String {
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
         .collect()
+}
+
+impl Doors {
+    /// Server `name` as `mcp_status` says it when it is off, or the one that fails until it is
+    /// reconnected; `None` for a server that answers as its config says.
+    fn status_of(&self, name: &str) -> Option<Value> {
+        if self.disabled.contains(name) {
+            return Some(json!({ "name": name, "status": "disabled", "scope": "dynamic" }));
+        }
+        let (flaky, again) = self.fails_once.as_ref().filter(|(n, _)| n == name)?;
+        Some(if *again {
+            json!({ "name": flaky, "status": "connected", "scope": "dynamic", "tools": [] })
+        } else {
+            json!({
+                "name": flaky, "status": "failed", "scope": "dynamic",
+                "error": "MCP error -32000: Connection closed",
+            })
+        })
+    }
 }
 
 /// Server `name` as `mcp_status` says it, its tools asked for as a host with the UI extension.

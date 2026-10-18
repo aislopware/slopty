@@ -221,6 +221,21 @@ const SCENARIOS: &[Scenario] = &[
         canned: false,
         mode: "default",
     },
+    // A fork subagent (2.1.302's default in `-p`): its transcript opens with what it inherited.
+    Scenario {
+        name: "fork",
+        files: &[("main.rs", "fn main() {\n    println!(\"hello\");\n}\n")],
+        turns: &["First say the word ready. Then use the Agent tool with subagent_type \"fork\" \
+                  and description \"Count lines\", run_in_background false, telling it to Read \
+                  main.rs and reply with just the number of lines. Then reply \"done\"."],
+        allowed: "Read Agent",
+        interrupt_on: None,
+        expect: &[],
+        absent: &[],
+        wakes: 0,
+        canned: false,
+        mode: "default",
+    },
     // A notebook's cell replaced, then one inserted after it: `NotebookEdit` names cells, and
     // its result carries the notebook before and after.
     Scenario {

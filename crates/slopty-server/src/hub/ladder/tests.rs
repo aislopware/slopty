@@ -517,6 +517,7 @@ async fn needs_you_pushes_once_per_ask() {
         label: id.to_owned(),
         effect,
         scope: None,
+        folders: Vec::new(),
         stops: false,
     };
     let mut needs = asking(moved(&thread, Phase::NeedsYou, 2_000), "Run cargo test?");
@@ -1060,6 +1061,7 @@ fn approval(row: &ThreadRow, since: u64, title: &str) -> ThreadRow {
         label: id.to_owned(),
         effect,
         scope: None,
+        folders: Vec::new(),
         stops: false,
     };
     let mut needs = asking(moved(row, Phase::NeedsYou, since), title);

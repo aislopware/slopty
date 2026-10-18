@@ -73,12 +73,13 @@ use model::{mode_words, switched_to};
 pub use work::{PROGRESS_EVERY, TAIL_EVERY};
 
 /// What a driven Claude Code can do through Slopty.
-pub const CAPS: [&str; 19] = [
+pub const CAPS: [&str; 20] = [
     Cap::APPROVALS,
     Cap::BACKGROUND,
     Cap::END,
     Cap::FORK,
     Cap::INTERRUPT,
+    Cap::MCP_SERVERS,
     Cap::QUEUE,
     Cap::REWIND,
     Cap::RULES,
@@ -182,6 +183,10 @@ enum Control {
     Rules,
     /// The MCP servers and their tools, for the apps among them.
     McpStatus,
+    /// An MCP server connected again, on the person's word.
+    McpReconnect(String),
+    /// An MCP server turned on or off, on the person's word.
+    McpEnable(String, bool),
     /// A page's ask of its app, by its number.
     App(u64),
     /// The files put back to before turn `turn`.
@@ -192,6 +197,8 @@ enum Control {
     Ui(doors::Ui),
     /// A side question, asked as it stands until answered.
     Side(slopty_proto::thread::SideExchange),
+    /// The person's name for the thread, given the session as theirs (`rename_session`).
+    Rename(String),
 }
 
 /// A message given to Claude Code and not yet acknowledged.
@@ -321,6 +328,12 @@ pub struct Driven {
     /// A turn of this process has ended: the next one reads its context from the prompt cache,
     /// unless the cache expired while it waited.
     turned: bool,
+    /// The person's own name for the thread in Slopty (`ThreadState::named`), which Claude
+    /// Code's session takes as theirs; empty for none.
+    person_named: String,
+    /// The name Claude Code's session holds as the person's (`custom-title`), as last read or
+    /// given it.
+    custom_title: Option<String>,
 }
 
 impl Driven {
@@ -337,6 +350,7 @@ impl Driven {
         let mut meta = state.meta.clone();
         meta.caps.clear();
         let mut driven = Self::with(History::of(meta, &CAPS), now);
+        state.named.clone_into(&mut driven.person_named);
         driven.queued = Queue::of(
             &state
                 .pending
@@ -412,6 +426,8 @@ impl Driven {
             goal_clearing: false,
             fast: (None, false),
             turned: false,
+            person_named: String::new(),
+            custom_title: None,
         }
     }
 
@@ -471,6 +487,15 @@ impl Driven {
         }
         if let Some(branch) = super::history::branch_in(records) {
             outs.extend(self.history.fact(super::history::BRANCH_FACT, Some(branch)));
+        }
+        // A session read again takes Claude Code's own title for it: the name given it in
+        // Claude Code, else the title Claude Code made. The person's name from Slopty, which
+        // the session holds too, is theirs and stays on the thread's own mark.
+        let (custom, ai) = super::history::titles_in(records);
+        self.custom_title = custom.map(str::to_owned);
+        let theirs = custom.filter(|c| *c != self.person_named).or(ai);
+        if let Some(title) = theirs {
+            outs.extend(self.history.named(title));
         }
         if !running {
             outs.extend(self.history.rest(now));
@@ -558,6 +583,24 @@ impl Driven {
             state: PendingState::Sending,
         };
         self.give(uuid, pending, &content, now)
+    }
+
+    /// The person named the thread `title` in Slopty: Claude Code's session takes it as the
+    /// person's own (`rename_session` from the host), so its own list of sessions agrees. A
+    /// name the session holds already goes nowhere, and an empty one stays in Slopty, since
+    /// Claude Code takes no empty name.
+    pub fn rename(&mut self, title: &str) {
+        let title = title.trim();
+        title.clone_into(&mut self.person_named);
+        if title.is_empty() || self.custom_title.as_deref() == Some(title) {
+            return;
+        }
+        let request = json!({
+            "subtype": "rename_session", "title": title, "source": "host",
+            "session_id": self.history.meta().native,
+        });
+        let id = self.control(Control::Rename(title.to_owned()), &request);
+        self.quiet.insert(id);
     }
 
     /// Hand Slopty's reports, `context` as the server framed them ([`crate::reports::TAG`]), to
@@ -937,6 +980,7 @@ impl Driven {
             Control::Background(call) => self.backgrounded(call.as_deref(), &said, now),
             Control::Rules => self.rules_listed(&said),
             Control::McpStatus => self.servers_listed(&said),
+            Control::McpReconnect(_) | Control::McpEnable(..) => self.servers_changed(),
             Control::App(app) => {
                 self.app_answered(app, &said);
                 Vec::new()
@@ -948,11 +992,19 @@ impl Driven {
             }
             Control::Ui(ui) => self.ui_answered(&ui, &said, now),
             Control::Side(asked) => self.side_answered(asked, &said),
+            Control::Rename(title) => {
+                self.custom_title = Some(title);
+                Vec::new()
+            }
         }
     }
 
     /// Claude Code refused `control`, saying `error`.
     fn refused(&mut self, control: &Control, error: &str, now: WallMs) -> Vec<Out> {
+        if matches!(control, Control::McpReconnect(_) | Control::McpEnable(..)) {
+            // Its row says why, as the servers stand after it.
+            let _asked = self.servers_changed();
+        }
         // A switch that failed is said as the TUI says it.
         let said = match control {
             Control::SetModel(_) => Some(format!("Model switch failed: {error}")),
@@ -964,6 +1016,13 @@ impl Driven {
             }
             Control::Fast(_) => Some(format!("Fast mode is not available: {error}")),
             Control::Thinking(_) => Some(format!("Couldn't change thinking: {error}")),
+            Control::McpReconnect(server) => {
+                Some(format!("Failed to reconnect to {server}: {error}"))
+            }
+            Control::McpEnable(server, enabled) => {
+                let verb = if *enabled { "enable" } else { "disable" };
+                Some(format!("Couldn't {verb} {server}: {error}"))
+            }
             _ => None,
         };
         if let Some(said) = said {
@@ -982,10 +1041,12 @@ impl Driven {
             Control::Rewind(_) => "to put the files back",
             Control::Rules => "to list its permission rules",
             Control::McpStatus => "to list its MCP servers",
+            Control::McpReconnect(_) | Control::McpEnable(..) => return Vec::new(),
             Control::App(_)
             | Control::RewindPreview(_)
             | Control::Ui(_)
             | Control::Side(_)
+            | Control::Rename(_)
             | Control::ContextUsage
             | Control::Settings => {
                 return self.unanswered(control, error);
@@ -1340,9 +1401,15 @@ impl Driven {
                 let changes = self.decoder.ingest(&conv::ThreadId::Main, &record);
                 self.history.transcript(&changes, &[])
             }
-            "session_title_changed" => {
-                str_at(message, "title").map(|t| self.history.named(t)).unwrap_or_default()
-            }
+            // The session's name, as given it in Claude Code; the person's from Slopty coming
+            // back is theirs, kept on the thread's own mark.
+            "session_title_changed" => match str_at(message, "title").map(str::trim) {
+                Some(title) if !title.is_empty() => {
+                    self.custom_title = Some(title.to_owned());
+                    if title == self.person_named { Vec::new() } else { self.history.named(title) }
+                }
+                _ => Vec::new(),
+            },
             _ => Vec::new(),
         }
     }

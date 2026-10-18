@@ -151,6 +151,7 @@ mod units {
             label: id.to_owned(),
             effect,
             scope: scope.map(str::to_owned),
+            folders: Vec::new(),
             stops,
         };
         let card = |kind: &str, options| RequestCard {

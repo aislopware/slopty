@@ -53,8 +53,9 @@
 //! the turn under way as Claude Code does), `set_model`, `set_permission_mode`,
 //! `apply_flag_settings` (`effortLevel`, `fastMode`, shown in the next `init`), `stop_task` (a
 //! subagent or a background command), `get_context_usage`, and the doors' (`background_tasks`,
-//! `rewind_files`, `list_permission_rules`, `mcp_status`, `mcp_read_resource`, `mcp_call`,
-//! `side_question`, `ui_*`); any other subtype is answered with an error.
+//! `rewind_files`, `list_permission_rules`, `mcp_status`, `mcp_reconnect`, `mcp_toggle`,
+//! `mcp_read_resource`, `mcp_call`, `side_question`, `ui_*`); any other subtype is answered with
+//! an error.
 //!
 //! The conversation goes where Claude Code keeps it, `~/.claude/projects/<cwd with every
 //! character but letters and digits made '-'>/<session>.jsonl`, so `--resume <id>` (with
@@ -395,7 +396,7 @@ impl Stub {
     fn save(&self) {
         let Some(at) = &self.record else { return };
         let env: Map<String, Value> = std::env::vars()
-            .filter(|(k, _)| k.starts_with("SLOPTY_") || k.starts_with("CLAUDE_"))
+            .filter(|(k, _)| ["SLOPTY_", "CLAUDE_", "API_"].iter().any(|p| k.starts_with(p)))
             .map(|(k, v)| (k, Value::String(v)))
             .collect();
         let doc = json!({

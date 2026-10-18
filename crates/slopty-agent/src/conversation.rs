@@ -110,6 +110,9 @@ struct Thread {
     at: HashMap<String, usize>,
     tasks: Vec<Task>,
     origin: Option<Origin>,
+    /// A fork's transcript opens with what it inherited of its parent's (`fork-context-ref`):
+    /// the parent's records up to its own first message are not its.
+    inherited: bool,
     /// Its turns, oldest first; the last is the one records now add to.
     turns: Vec<Turn>,
     /// The request the assistant records now arriving belong to: its message id and the usage
@@ -381,9 +384,16 @@ impl Conversation {
         if kind == "agent_metadata" {
             self.threads.entry(source.clone()).or_default().origin = Some(Origin {
                 tool_use_id: string_at(record, "toolUseId"),
-                agent_type: string_at(record, "agentType"),
+                agent_type: string_at(record, "agentType").map(agent_kind),
                 description: string_at(record, "description"),
             });
+            return;
+        }
+        if kind == "fork-context-ref" {
+            let owner = str_at(record, "agentId")
+                .filter(|a| !a.is_empty())
+                .map_or_else(|| source.clone(), |a| ThreadId::Agent(a.to_owned()));
+            self.threads.entry(owner).or_default().inherited = true;
             return;
         }
         let Some(uuid) = str_at(record, "uuid") else { return };
@@ -392,6 +402,13 @@ impl Conversation {
             (true, _) if *source == ThreadId::Main => ThreadId::Agent(String::new()),
             _ => source.clone(),
         };
+        // What a fork inherited is its parent's: its own records begin at its first message.
+        if let Some(t) = self.threads.get_mut(&thread).filter(|t| t.inherited) {
+            if kind != "user" {
+                return;
+            }
+            t.inherited = false;
+        }
         // Only a person's prompt starts a branch. Other records may name an older parent
         // without abandoning anything: the results of parallel calls each name the record of
         // their own call.
@@ -499,17 +516,24 @@ impl Conversation {
         };
         let mut images = media::in_prompt(ctx.uuid, &blocks);
         let mut prompt_made = false;
+        // A fork's first message answers its parent's call in the context it inherited ("Fork
+        // started"), and says its directive under Claude Code's words for a fork: its prompt
+        // is the directive, and that answer is not its.
+        let seeds_fork = blocks.iter().any(|b| fork_directive(block_text(b)).is_some());
         for (index, block) in blocks.iter().enumerate() {
             let text = match block {
                 Value::String(s) => Some(s.as_str()),
                 _ if str_at(block, "type") == Some("text") => str_at(block, "text"),
                 _ if str_at(block, "type") == Some("tool_result") => {
-                    self.result(ctx, block, record.get("toolUseResult"), batch);
+                    if !seeds_fork {
+                        self.result(ctx, block, record.get("toolUseResult"), batch);
+                    }
                     None
                 }
                 _ => None,
             };
             let Some(text) = text else { continue };
+            let text = fork_directive(text).unwrap_or(text);
             let reference = || TextRef {
                 record: ctx.uuid.to_owned(),
                 part: Part::Block { index: to_u32(index) },
@@ -1327,7 +1351,7 @@ fn detail(name: &str, input: &Value, at: Option<(&str, &str)>) -> ToolDetail {
         }),
         "Agent" | "Task" => ToolDetail::Agent(AgentDetail {
             agent_id: None,
-            agent_type: text("subagent_type"),
+            agent_type: text("subagent_type").map(agent_kind),
             description: text("description"),
             name: text("name"),
             prompt: Clipped::head(
@@ -1574,7 +1598,8 @@ fn apply_result(
         ToolDetail::Agent(agent) => {
             let Some(r) = result else { return false };
             agent.agent_id = string_at(r, "agentId").or_else(|| agent.agent_id.take());
-            agent.agent_type = string_at(r, "agentType").or_else(|| agent.agent_type.take());
+            agent.agent_type =
+                string_at(r, "agentType").map(agent_kind).or_else(|| agent.agent_type.take());
             // A teammate is named by its name, as the TUI's `@name` row does.
             if str_at(r, "status") == Some("teammate_spawned") {
                 let name = string_at(r, "name").or_else(|| agent.name.clone());
@@ -2294,6 +2319,26 @@ fn part_text(record: &Value, part: &Part) -> Option<String> {
             Some(out)
         }
     }
+}
+
+/// A kind of subagent as the card names it: Claude Code's own name for it, a fork (which
+/// inherits its parent's whole context) as "Fork".
+#[must_use]
+pub fn agent_kind(name: String) -> String {
+    if name == "fork" { "Fork".to_owned() } else { name }
+}
+
+/// The words of a content block: a text block's text, a bare string as it is.
+fn block_text(block: &Value) -> &str {
+    block.as_str().or_else(|| str_at(block, "text")).unwrap_or_default()
+}
+
+/// The directive a fork's first message gives it, after Claude Code's words for a fork
+/// (`<fork-boilerplate>`): "Your directive: …".
+fn fork_directive(text: &str) -> Option<&str> {
+    let (_, after) = text.split_once("</fork-boilerplate>")?;
+    let after = after.trim();
+    Some(after.strip_prefix("Your directive:").map_or(after, str::trim))
 }
 
 #[cfg(test)]

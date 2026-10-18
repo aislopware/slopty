@@ -226,6 +226,7 @@ fn a_read_says_what_it_skipped_and_offers_the_open_requests() {
             label: "Allow".to_owned(),
             effect: Effect::Allow,
             scope: None,
+            folders: Vec::new(),
             stops: false,
         }],
         questions: Vec::new(),

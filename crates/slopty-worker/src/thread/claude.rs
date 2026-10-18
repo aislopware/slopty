@@ -172,6 +172,19 @@ enum ThreadAsk {
         intent: IntentId,
         history: Vec<(String, String)>,
     },
+    /// The person named the thread `title` in Slopty: the session takes it too.
+    Rename {
+        title: String,
+    },
+    /// Connect MCP server `server` again, on the person's word.
+    McpReconnect {
+        server: String,
+    },
+    /// Turn MCP server `server` on or off, on the person's word.
+    McpEnable {
+        server: String,
+        enabled: bool,
+    },
     /// Write a permission rule into its scope's file, then list the rules again.
     Rule {
         change: RuleChange,
@@ -342,6 +355,13 @@ impl Claude {
         }
     }
 
+    /// The person named `thread` `title` in Slopty: its running Claude Code's session takes the
+    /// name as theirs, so Claude Code's own list of sessions agrees. One that does not run
+    /// takes it when it starts again ([`Driven::of`] keeps the name).
+    pub fn rename(&self, thread: ThreadId, title: String) {
+        let _not_running = self.at_once(thread, ThreadAsk::Rename { title });
+    }
+
     /// Hand Slopty's reports, worded `text`, to `thread`'s Claude Code: a message of their own,
     /// which takes the thread up again when its Claude Code ended.
     pub fn report(&self, thread: ThreadId, text: String) -> Outcome {
@@ -456,6 +476,18 @@ impl Claude {
                     .filter_map(|s| Some((s.question.clone(), s.answer.clone()?)))
                     .collect();
                 ThreadAsk::Side { question: question.trim().to_owned(), intent: id, history }
+            }
+            Intent::McpReconnect { .. } | Intent::McpEnable { .. } if subagent => {
+                return refused("A subagent's MCP servers are its session's");
+            }
+            Intent::McpReconnect { server } | Intent::McpEnable { server, .. }
+                if !state.servers.iter().any(|s| s.name == *server) =>
+            {
+                return refused(&format!("There is no MCP server {server}"));
+            }
+            Intent::McpReconnect { server } => ThreadAsk::McpReconnect { server: server.clone() },
+            Intent::McpEnable { server, enabled } => {
+                ThreadAsk::McpEnable { server: server.clone(), enabled: *enabled }
             }
             Intent::Rule(change) => {
                 if let Err(why) = settings::checked(change) {

@@ -122,6 +122,7 @@ fn no_rule_allows_what_needs_the_person_at_the_card(cx: &mut gpui::TestAppContex
         label: id.to_owned(),
         effect,
         scope: None,
+        folders: Vec::new(),
         stops: false,
     };
     state.requests = vec![Request {
@@ -183,6 +184,7 @@ fn a_subagents_request_is_asked_and_answered_in_its_parent(cx: &mut gpui::TestAp
         label: id.to_owned(),
         effect,
         scope: None,
+        folders: Vec::new(),
         stops: false,
     };
     child.requests = vec![Request {
