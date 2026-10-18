@@ -2413,14 +2413,16 @@ more full-window layer.
     shared with virtio-fs instead of copied: the guest's view of a shared directory kept a file
     the host had replaced by rename as missing, as cargo replaces a binary and Xcode the app's
     files, and the app then would not install ("Missing bundle ID").
-  - **6 GB stays, measured against 8 GB (2026-10-18), superseding the reading below.** The
+  - **6 GB stays, measured against 8 and 10 GB (2026-10-18), superseding the reading below.** The
     reading below took memory_pressure's free percentage, which counts compressed and
     reclaimable pages. Logging unused memory, the compressor and the load every 2 s through
     the iOS pages case on the iPhone, with a GUI lane build beside it on the host, gave
     different numbers. At 6 GB the guest ran with 77–200 MB unused for six minutes and its
     compressor grew to 1.8 GB, at a load of 25–283; the worker then missed its 30 s to start.
     At 8 GB it was the same: 8.0 of 8 GB used, 85–260 MB unused, the compressor to 1.8 GB, a
-    load of 84–372, and the server missed its 30 s to start. The simulator and its caches fill
+    load of 84–372, and the server missed its 30 s to start. At 10 GB the guest stood full in
+    100 of 124 samples with 76 MB unused at the least and its compressor at 1.6 GB, and the
+    case failed on a page card that never went live, as at 6 GB. The simulator and its caches fill
     whatever the guest has, and the run is bound by the guest's 4 cores. The host is the other
     limit. Its 32 GB stayed full: 80–400 MB unused, its compressor at 3.6–12 GB and its swap
     flat at 7.6 GB. The VM process's resident memory moved between 0.3 and 8.1 GB as the host
@@ -2428,7 +2430,8 @@ more full-window layer.
     would come out of the lanes' builds. What helped was work that does not page in: a
     process's start no longer walks its symbol table (`docs/decisions/crashes.md`, "No symbol
     walk at start"), which took `agent start` from over 30 s to 1.3–2 s. Logs:
-    `target/lanes/B/mem-{six,eight}.{guest,host}`.
+    `target/lanes/B/mem-{six,eight,ten}.{guest,host}`. `remote` sets the size before every
+    boot, so a guest made at another size takes it.
   - **6 GB is enough for one simulator.** With one booted, the guest kept 36–81 % of its memory
     free or reclaimable (memory_pressure) through an iPad and two iPhone runs, its swap flat at
     200–290 MB left from earlier, two lanes building beside it on the host (load 46–64) or none.

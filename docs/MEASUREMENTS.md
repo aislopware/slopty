@@ -17724,3 +17724,26 @@ used, the compressor at 2.4 GB, about 150 MB unused, load 90–150. With the ima
 dyld's list, two runs started the agent 1.3 s and 2 s after the app linked, and the worker
 listened 1.8 s and 3.9 s after ptyd, against 9 s before. Both runs then failed later on a page
 card that never went live, which is beside this fix.
+
+## 2026-10-18 — the e2e guest at 6, 8 and 10 GB
+
+Each guest size ran the iOS pages case on the iPhone once, with a debug GUI build of
+`slopty-app` on the host. Memory was read every 2 s (`top`'s PhysMem, swap, load; the host's
+memory_pressure and the VM process's RSS):
+
+| | 6 GB | 8 GB | 10 GB |
+| --- | --- | --- | --- |
+| guest used | 5.9–6.0 GB | 7.9–8.1 GB | 10 GB in 100 of 124 samples |
+| guest unused, minimum | 77 MB | 85 MB | 76 MB |
+| guest compressor, at its peak | 1.8 GB | 1.8 GB | 1.6 GB |
+| guest load (4 cores) | 25–283 | 84–372 | 41–420 |
+| how the case ended | the worker missed its 30 s to start | the server missed its 30 s to start | the page card never went live |
+| host unused | 75 MB – 3.6 GB | 80 MB – 2.8 GB | down to 76 MB |
+| host compressor | 5.8–16 GB | 3.6–12 GB | 9.1–9.7 GB at the end |
+| host swap | 7.6 GB, flat | 7.6 GB, flat | 7.5 GB, flat |
+| VM process resident | 0.3–7.5 GB | 2.7–8.1 GB | 4.9–5.7 GB at the end |
+
+Each extra 2 GB filled at once and changed nothing that failed; the 10 GB run failed on the
+same page card as the 6 GB run after the start fix. The guest stays at 6 GB
+(`docs/decisions/tooling.md`, "6 GB stays, measured against 8 and 10 GB"). Logs:
+`target/lanes/B/mem-{six,eight,ten}.{log,guest,host,build}`.

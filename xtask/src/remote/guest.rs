@@ -50,7 +50,10 @@ const IOS_RUNTIME: &str = "23F77";
 /// The base's disk, in GB: macOS 12, Xcode 13, the runtime 8, and room for the runs.
 const DISK_GB: &str = "90";
 
-/// The guest's memory, in MB.
+/// The guest's memory, in MB: an iOS run's simulator and app filled 6, 8 and 10 GB alike, with
+/// the compressor at 1.6–1.8 GB and about 80 MB unused (`docs/decisions/tooling.md`, "6 GB
+/// stays, measured against 8 and 10 GB"). Set on every boot, so a guest made before a change
+/// takes it.
 const MEMORY_MB: &str = "6144";
 
 /// The account the guest logs in as.
@@ -69,9 +72,9 @@ fn threads() -> usize {
     std::env::var("SLOPTY_E2E_THREADS").ok().and_then(|v| v.parse().ok()).unwrap_or(3).max(1)
 }
 
-/// How long the guest stays up with no run, after which it is stopped: it holds 5 GB of this
-/// Mac's memory while up, whose swap the lanes' builds already fill, and boots again in 23 s on an
-/// idle Mac.
+/// How long the guest stays up with no run, after which it is stopped: it holds up to 6 GB of
+/// this Mac's memory while up, whose swap the lanes' builds already fill, and boots again in 23 s
+/// on an idle Mac.
 const IDLE_STOP_S: u64 = 20 * 60;
 
 /// Mark the guest used now, and leave a detached watcher that stops it once it has been idle for
@@ -414,11 +417,9 @@ fn up(home: &Path) -> Result<String> {
             }
             println!("  making the e2e guest {GUEST} from {BASE}");
             tart_out(home, &["clone", BASE, GUEST])?;
-            // Three quarters of the base's: one app and its daemons, or one simulator, at a
-            // time, while this Mac's lanes build beside it with their swap full.
-            tart_out(home, &["set", GUEST, "--memory", MEMORY_MB])?;
         }
     }
+    tart_out(home, &["set", GUEST, "--memory", MEMORY_MB])?;
     boot(home, GUEST, &[])
 }
 
