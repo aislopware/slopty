@@ -285,6 +285,7 @@ pub(crate) fn host_document(title: &str, view: &str, theme: &Theme) -> String {
     let view = escaped(&themed(view, theme));
     format!(
         "<!doctype html><html><head><meta charset=\"utf-8\"><title>{title}</title>\
+         <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
          <meta name=\"color-scheme\" content=\"{scheme}\">\
          <style>:root{{color-scheme:{scheme}}}html,body{{margin:0;padding:0;height:100%;\
          background:{background}}}iframe{{display:block;border:0;width:100%;\
@@ -386,6 +387,11 @@ mod tests {
         assert!(!doc.contains("--evil"), "a value that ends the style is dropped");
         assert_eq!(doc.matches("<iframe").count(), 1);
         assert!(!doc.contains("overflow"), "the root's scroll view stays on");
+        // A phone lays a document that names no viewport out 980 px wide, and the view's frame
+        // with it.
+        assert!(
+            doc.contains("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">")
+        );
     }
 
     /// A report of a navigation the view tried is a refused navigation; any other a blocked load.
