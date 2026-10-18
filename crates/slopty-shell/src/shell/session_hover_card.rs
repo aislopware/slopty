@@ -136,7 +136,7 @@ impl Shell {
         hovered: bool,
         cx: &mut Context<Self>,
     ) {
-        let now = Instant::now();
+        let now = crate::clock::now(cx);
         if !hovered {
             if self.session_hover_card.leave(chat_id, now) {
                 cx.notify();
@@ -187,7 +187,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let theme = Theme::of(cx).for_popup();
-        let now = Utc::now();
+        let now = crate::clock::utc(cx);
         // slopty: Slopty's facts of the row (`sidebar_status::chat_card`).
         let facts = super::sidebar_status::chat_card(self.state.read(cx), chat_id, now)?;
         let (title, project, local, online, branch, change_request) = {

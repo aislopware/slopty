@@ -1,2 +1,12 @@
 # Copied UI code keeps clippy's defaults, not the workspace's settings, so it stays diffable with
 # the source it was copied from (docs/decisions/ui.md).
+
+# slopty: the shell reads the time through `crate::clock` alone (the frame's moment, or the
+# dispatcher's clock between frames), so a frame drawn twice at one moment draws alike
+# (docs/decisions/testing.md, "Every clock in the shell is the frame's").
+disallowed-methods = [
+    { path = "std::time::Instant::now", reason = "read crate::clock::now(cx) (the frame's moment)" },
+    { path = "std::time::SystemTime::now", reason = "read crate::clock::utc(cx) (the frame's date)" },
+    { path = "chrono::Utc::now", reason = "read crate::clock::utc(cx) (the frame's date)" },
+    { path = "chrono::Local::now", reason = "read crate::clock::utc(cx) (the frame's date)" },
+]

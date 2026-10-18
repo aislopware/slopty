@@ -919,7 +919,7 @@ impl AppearancePage {
     }
 
     fn close_font_menu(&mut self, kind: FontKind, cx: &mut Context<Self>) {
-        if !self.font_menu_mut(kind).begin_close() {
+        if !self.font_menu_mut(kind).begin_close(crate::clock::now(cx)) {
             return;
         }
         match kind {
@@ -948,7 +948,7 @@ impl AppearancePage {
     }
 
     fn dismiss_font_menu(&mut self, kind: FontKind, cx: &mut Context<Self>) {
-        *self.font_dismissed_at(kind) = Some(std::time::Instant::now());
+        *self.font_dismissed_at(kind) = Some(crate::clock::now(cx));
         self.close_font_menu(kind, cx);
     }
 
@@ -957,7 +957,7 @@ impl AppearancePage {
         let just_dismissed = self
             .font_dismissed_at(kind)
             .take()
-            .is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(400));
+            .is_some_and(|at| crate::clock::now(cx).saturating_duration_since(at) < std::time::Duration::from_millis(400));
         if self.font_menu(kind).is_open() {
             self.close_font_menu(kind, cx);
         } else if !just_dismissed {
@@ -2147,7 +2147,7 @@ impl AppearancePage {
             .child(list);
 
         let open = self.font_menu(kind).is_open();
-        let closing = self.font_menu(kind).closing_since();
+        let closing = self.font_menu(kind).closing_at(crate::clock::now(cx));
         let value = SharedString::from(effective.label().to_owned());
         widgets::select_trigger(theme, format!("{slug}-font-dropdown"), open)
             .w(px(220.0))

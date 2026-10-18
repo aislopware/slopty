@@ -237,7 +237,7 @@ impl Shell {
         let target = if shown { 1.0 } else { 0.0 };
         if shown != self.session_info_shown {
             let from = self.eval_tween(self.session_info_tween, 1.0 - target);
-            self.session_info_tween = Some(WidthTween::new(from, target));
+            self.session_info_tween = Some(WidthTween::new(from, target, self.now()));
             self.session_info_shown = shown;
         }
         let reveal = self.eval_tween(self.session_info_tween, target);
@@ -267,7 +267,7 @@ impl Shell {
             return None;
         }
         let theme = Theme::of(cx).for_popup();
-        let now = Utc::now();
+        let now = crate::clock::utc(cx);
         let (chat, device, local, online, project, branch) = {
             let state = self.state.read(cx);
             let chat = state.selected_chat_row()?.clone();

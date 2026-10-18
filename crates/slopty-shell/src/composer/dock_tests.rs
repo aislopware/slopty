@@ -331,7 +331,8 @@ fn the_footer_says_mode_and_goal(cx: &mut TestAppContext) {
         mode: Some(modes("default")),
         goal: Some(GoalLine {
             condition: "all tests pass".into(),
-            set_at: chrono::Utc::now().timestamp_millis() - 5 * 3_600_000,
+            // slopty: five hours before the shell's own clock, which the footer reads.
+            set_at: cx.update(|cx| crate::clock::utc(cx)).timestamp_millis() - 5 * 3_600_000,
             ..GoalLine::default()
         }),
         can: can(),
@@ -340,7 +341,8 @@ fn the_footer_says_mode_and_goal(cx: &mut TestAppContext) {
     let (composer, _, cx) = open(cx, dock, None);
     let nodes = draw(cx);
     assert!(find(&nodes, Role::Button, "Mode: Default").is_some(), "{:?}", labels(&nodes, Role::Button));
-    let goal = find(&nodes, Role::Button, "/goal active (5h)").expect("the goal shows");
+    let goal = find(&nodes, Role::Button, "/goal active (5h)")
+        .unwrap_or_else(|| panic!("the goal shows: {:?}", labels(&nodes, Role::Button)));
     assert!(goal.description.contains("all tests pass"));
 
     let cycled = composer.update(cx, |composer, cx| composer.cycle_mode(cx));

@@ -84,7 +84,7 @@ impl FilesSurface {
     }
 
     pub(super) fn close_tree_context_menu(&mut self, cx: &mut Context<Self>) {
-        if self.tree_context_menu.begin_close() {
+        if self.tree_context_menu.begin_close(crate::clock::now(cx)) {
             popover::reap_popup(cx, |files: &mut Self| &mut files.tree_context_menu);
             cx.notify();
         }
@@ -292,7 +292,7 @@ impl FilesSurface {
             "tree-context-menu",
             menu.position,
             card.into_any_element(),
-            self.tree_context_menu.closing_since(),
+            self.tree_context_menu.closing_at(crate::clock::now(cx)),
         ))
     }
 }

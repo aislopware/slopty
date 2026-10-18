@@ -117,7 +117,7 @@ impl Shell {
         chat.parent_chat_id = Some(parent.id.clone());
         chat.title = None;
         chat.archived = false;
-        chat.created_at = Utc::now();
+        chat.created_at = crate::clock::utc(cx);
         chat.last_message_at = None;
         chat.last_message_preview = None;
         chat.last_seen_at = None;

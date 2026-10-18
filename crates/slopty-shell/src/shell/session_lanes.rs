@@ -97,7 +97,7 @@ pub(super) fn subagent_rows(state: &AppState, chat_id: &str) -> Vec<SubagentRow>
     let mut rows: Vec<SubagentRow> = Vec::new();
     for entry in &state.transcript {
         let spawned_at =
-            DateTime::<Utc>::from_timestamp_millis(entry.created_at).unwrap_or_else(Utc::now);
+            DateTime::<Utc>::from_timestamp_millis(entry.created_at).unwrap_or_default();
         for part in &entry.parts {
             let MessagePart::Tool {
                 call,
@@ -290,7 +290,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> bool {
         let parent = self.active_chat.clone();
-        let rows = child_chat_rows(self.state.read(cx), &parent, Utc::now());
+        let rows = child_chat_rows(self.state.read(cx), &parent, crate::clock::utc(cx));
         let Some(index) = rows.iter().position(|row| row.chat_id == chat_id) else {
             return false;
         };
@@ -343,7 +343,7 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let now = Utc::now();
+        let now = crate::clock::utc(cx);
         self.session_lanes.follow(&chat.id);
         let (side_chats, subagents) = {
             let state = self.state.read(cx);
@@ -622,7 +622,7 @@ impl Shell {
     ) -> gpui::Stateful<gpui::Div> {
         let key = format!("session-lanes-subagent-{}", row.doc_id);
         let mark = status_mark(key.clone(), row.indicator(), view, theme, cx);
-        let time = slopty_view_proto::view::format_time_ago(row.spawned_at, Utc::now());
+        let time = slopty_view_proto::view::format_time_ago(row.spawned_at, crate::clock::utc(cx));
         let title = row_title(format!("{key}-title"), row.title.clone());
         popover::picker_row(theme, false, false, key.clone())
             .id(SharedString::from(key))

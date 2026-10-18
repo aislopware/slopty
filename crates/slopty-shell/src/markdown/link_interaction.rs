@@ -707,7 +707,7 @@ mod rendered_tests {
     }
     impl Render for Fixture {
         fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            let mut opts = super::super::render::RenderOptions::settled("link-fixture".into());
+            let mut opts = super::super::render::RenderOptions::settled("link-fixture".into(), std::time::Instant::now());
             let activated = self.activated.clone();
             opts.link = Some(LinkUi {
                 source_session: Some("session".into()),

@@ -96,7 +96,7 @@ impl Transcript {
     }
 
     fn close_context_menu(&mut self, cx: &mut Context<Self>) {
-        if self.context_menu.menu.begin_close() {
+        if self.context_menu.menu.begin_close(crate::clock::now(cx)) {
             crate::popover::reap_popup(cx, |this: &mut Self| &mut this.context_menu.menu);
             cx.notify();
         }
@@ -176,7 +176,7 @@ impl Transcript {
             "transcript-context-menu",
             menu.position,
             card.into_any_element(),
-            self.context_menu.menu.closing_since(),
+            self.context_menu.menu.closing_at(crate::clock::now(cx)),
         ))
     }
 }

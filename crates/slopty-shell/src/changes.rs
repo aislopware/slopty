@@ -1631,11 +1631,11 @@ const FOLD_TWEEN_WINDOW: Duration = Duration::from_millis(400);
 const FOLD_TWEEN_MAX_PX: f32 = 2400.0;
 
 impl FileFold {
-    fn animating(&self) -> bool {
+    fn animating(&self, now: std::time::Instant) -> bool {
         self.epoch > 0
             && self
                 .toggled_at
-                .is_some_and(|at| at.elapsed() < FOLD_TWEEN_WINDOW)
+                .is_some_and(|at| now.saturating_duration_since(at) < FOLD_TWEEN_WINDOW)
     }
 }
 
@@ -2425,7 +2425,7 @@ impl Changes {
         fold.collapsed = !currently_collapsed;
         fold.held = false; // slopty: loaded
         fold.epoch += 1;
-        fold.toggled_at = Some(std::time::Instant::now());
+        fold.toggled_at = Some(crate::clock::now(cx));
         // The body tweens as ONE clipped stand-in row; the settle sweep
         // swaps it for steady rows (all lines, or none) once the window
         // elapses.
@@ -2480,7 +2480,7 @@ impl Changes {
                 continue;
             };
             let fold = self.folds.get(&file.path).copied().unwrap_or_default();
-            if fold.animating() {
+            if fold.animating(crate::clock::now(cx)) {
                 pending = true;
                 continue;
             }
@@ -2912,13 +2912,13 @@ impl Changes {
     }
 
     fn close_scope_menu(&mut self, cx: &mut Context<Self>) {
-        if self.scope_menu.begin_close() {
+        if self.scope_menu.begin_close(crate::clock::now(cx)) {
             popover::reap_popup(cx, |changes: &mut Self| &mut changes.scope_menu);
         }
     }
 
     fn close_ref_menu(&mut self, cx: &mut Context<Self>) {
-        if self.ref_menu.begin_close() {
+        if self.ref_menu.begin_close(crate::clock::now(cx)) {
             popover::reap_popup(cx, |changes: &mut Self| &mut changes.ref_menu);
         }
     }
@@ -3453,7 +3453,7 @@ impl Changes {
                     }),
                 );
                 let clipped = div().w_full().overflow_hidden().child(body);
-                if fold.animating() {
+                if fold.animating(crate::clock::now(cx)) {
                     clipped
                         .with_animation(
                             SharedString::from(format!("fold-{}-{}", file_diff.path, fold.epoch)),
@@ -3511,7 +3511,7 @@ impl Changes {
                 .size(px(13.0))
                 .text_color(theme.text_muted.opacity(0.7)),
         );
-        let chevron: AnyElement = if fold.animating() {
+        let chevron: AnyElement = if fold.animating(crate::clock::now(cx)) {
             chevron
                 .with_animation(
                     SharedString::from(format!(
@@ -3870,7 +3870,7 @@ impl Changes {
             );
         // slopty: no History surface (ruled out)
         let trigger = if self.scope_menu.get().is_some() {
-            let closing = self.scope_menu.closing_since();
+            let closing = self.scope_menu.closing_at(crate::clock::now(cx));
             let menu = self.render_scope_menu(&theme, cx);
             scope_trigger
                 .relative()
@@ -4036,7 +4036,7 @@ impl Changes {
                     .text_color(theme.text_muted.opacity(0.7)),
             );
         let trigger = if self.ref_menu.get().is_some() {
-            let closing = self.ref_menu.closing_since();
+            let closing = self.ref_menu.closing_at(crate::clock::now(cx));
             let menu = self.render_ref_menu(theme, cx);
             trigger.relative().child(popover::anchored_menu_below_gap(
                 "changes-ref-menu",

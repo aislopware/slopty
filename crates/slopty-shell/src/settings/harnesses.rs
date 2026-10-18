@@ -821,7 +821,7 @@ impl HarnessesPage {
                 }
                 // slopty: the plan windows its agent last published, zeron's meters.
                 if let Some(usage) = descriptor.usage.as_ref().filter(|u| installed && !u.windows.is_empty()) {
-                    let now = chrono::Utc::now();
+                    let now = crate::clock::utc(cx);
                     meta.push(
                         div()
                             .flex()

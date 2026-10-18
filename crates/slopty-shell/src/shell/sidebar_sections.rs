@@ -650,6 +650,7 @@ impl Shell {
     /// Land the lifted section in its new slot, or home when `placed` is
     /// false, gliding every section from where it last painted.
     fn end_sidebar_section_drag(&mut self, placed: bool, cx: &mut Context<Self>) {
+        let now = self.now();
         let Some(drag) = self.sidebar_section_drag.as_ref() else {
             return;
         };
@@ -668,7 +669,7 @@ impl Shell {
             );
             let step = drag.heights[drag.from] + SIDEBAR_LIST_GAP;
             for (ix, id) in drag.payload.ids.iter().enumerate() {
-                let current = drag.siblings.get(id).map_or(0.0, |slide| slide.current());
+                let current = drag.siblings.get(id).map_or(0.0, |slide| slide.current(now));
                 let target = crate::terminal::panel::slide_offset(ix, drag.from, over) * step;
                 if ix != drag.from && (current - target).abs() > 0.5 {
                     settle.insert(format!("custom:{id}"), current - target);
@@ -687,6 +688,7 @@ impl Shell {
 
     /// Each custom section's displacement this frame while one is lifted.
     pub(super) fn sidebar_section_drag_offsets(&mut self) -> Option<(usize, Vec<f32>)> {
+        let now = self.now();
         let reduced_motion = self.reduced_motion.get();
         let drag = self.sidebar_section_drag.as_mut()?;
         let (from, over) = (drag.from, drag.over);
@@ -707,13 +709,13 @@ impl Shell {
                             from: 0.0,
                             to: 0.0,
                             epoch: 0,
-                            started: std::time::Instant::now(),
+                            started: now,
                         });
-                slide.retarget(crate::terminal::panel::slide_offset(ix, from, over) * step);
+                slide.retarget(crate::terminal::panel::slide_offset(ix, from, over) * step, now);
                 if reduced_motion {
                     slide.to
                 } else {
-                    slide.current()
+                    slide.current(now)
                 }
             })
             .collect();

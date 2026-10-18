@@ -307,7 +307,7 @@ impl Changes {
                     .text_color(theme.text_muted.opacity(0.7)),
             );
         Some(if self.turn_menu.get().is_some() {
-            let closing = self.turn_menu.closing_since();
+            let closing = self.turn_menu.closing_at(crate::clock::now(cx));
             let menu = self.render_turn_menu(theme, turns, cx);
             trigger
                 .relative()
@@ -319,7 +319,7 @@ impl Changes {
     }
 
     pub(super) fn close_turn_menu(&mut self, cx: &mut Context<Self>) {
-        if self.turn_menu.begin_close() {
+        if self.turn_menu.begin_close(crate::clock::now(cx)) {
             popover::reap_popup(cx, |changes: &mut Self| &mut changes.turn_menu);
         }
     }

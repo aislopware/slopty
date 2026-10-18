@@ -60,7 +60,7 @@ impl Composer {
         let body = match (&side.answer, &side.failed) {
             (Some(answer), _) => {
                 let tree = slopty_markdown::parse_full(answer);
-                let opts = crate::markdown::render::RenderOptions::settled(SharedString::from(format!("side-{}", side.id)));
+                let opts = crate::markdown::render::RenderOptions::settled(SharedString::from(format!("side-{}", side.id)), crate::clock::now(cx));
                 div()
                     .id("dock-side-answer")
                     .max_h(px(220.0))

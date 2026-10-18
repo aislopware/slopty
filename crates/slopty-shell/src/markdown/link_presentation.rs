@@ -634,7 +634,7 @@ mod tests {
             &Theme::dark(),
             false,
         );
-        let mut opts = RenderOptions::settled("row".into());
+        let mut opts = RenderOptions::settled("row".into(), std::time::Instant::now());
         opts.workspace_root = Some("/repo".into());
         opts.link = Some(LinkUi {
             source_session: Some("chat".into()),

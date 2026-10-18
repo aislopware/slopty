@@ -1332,20 +1332,21 @@ struct SidebarSessionSlide {
 }
 
 impl SidebarSessionSlide {
-    fn current(&self) -> f32 {
-        let progress = TAB_SLIDE
-            .progress(self.started.elapsed().as_secs_f32() / TAB_SLIDE.total().as_secs_f32());
+    fn current(&self, now: std::time::Instant) -> f32 {
+        let progress = TAB_SLIDE.progress(
+            now.saturating_duration_since(self.started).as_secs_f32() / TAB_SLIDE.total().as_secs_f32(),
+        );
         motion::lerp(self.from, self.to, progress)
     }
 
-    fn retarget(&mut self, target: f32) {
+    fn retarget(&mut self, target: f32, now: std::time::Instant) {
         if (target - self.to).abs() < 0.5 {
             return;
         }
-        self.from = self.current();
+        self.from = self.current(now);
         self.to = target;
         self.epoch = self.epoch.wrapping_add(1);
-        self.started = std::time::Instant::now();
+        self.started = now;
     }
 }
 
@@ -1476,11 +1477,11 @@ struct WidthTween {
 }
 
 impl WidthTween {
-    fn new(from: f32, to: f32) -> Self {
+    fn new(from: f32, to: f32, now: std::time::Instant) -> Self {
         Self {
             from,
             to,
-            started: std::time::Instant::now(),
+            started: now,
             duration: RESIZE.total().mul_f32(motion::speed_scale()),
             curve: RESIZE.curve,
         }
@@ -1492,14 +1493,14 @@ impl WidthTween {
     /// sidebar's width, growing with the square root of the distance to
     /// 240ms. The dialog entrance curve eases into the movement and settles
     /// without overshoot, rather than starting a large column at full speed.
-    fn panel(from: f32, to: f32) -> Self {
+    fn panel(from: f32, to: f32, now: std::time::Instant) -> Self {
         let scale = ((to - from).abs() / SIDEBAR_DEFAULT)
             .sqrt()
             .clamp(1.0, 4.0 / 3.0);
         Self {
             duration: PANEL_RESIZE.total().mul_f32(motion::speed_scale() * scale),
             curve: PANEL_RESIZE.curve,
-            ..Self::new(from, to)
+            ..Self::new(from, to, now)
         }
     }
 }
@@ -2144,9 +2145,6 @@ pub struct Shell {
     /// All pane masks and chrome evaluate animation at the same frame time.
     /// A slow render must not give the native page and its titlebar different widths.
     render_time: Option<std::time::Instant>,
-    /// A deterministic clock for rendered integration tests.
-    #[cfg(test)]
-    test_time: Option<std::time::Instant>,
     splash: SplashPhase,
     splash_task: Option<Task<()>>,
     /// Focus fallback (registered on first paint — [`Shell::new`] has no
@@ -2163,6 +2161,8 @@ pub struct Shell {
     activation_sub: Option<Subscription>,
     /// Redraw scheduled for the next clock-driven change (see [`shell_clock_wake`]).
     clock: ClockRedraw,
+    /// slopty: the dispatcher, whose clock the shell's motion reads between frames.
+    executor: gpui::BackgroundExecutor,
     _state_observation: Subscription,
     _composer_events: Subscription,
     /// The primary transcript's spawn-chip events (subagent tabs).
@@ -2175,8 +2175,9 @@ pub struct Shell {
 
 impl Shell {
     pub fn new(state: Entity<AppState>, boot: EngineBootConfig, cx: &mut Context<Self>) -> Self {
+        motion::run_on(cx.background_executor().clone()); // slopty: hover flips on the dispatcher's clock
         let observation = cx.observe(&state, |this: &mut Shell, state, cx| {
-            this.sidebar_clock = Utc::now(); // slopty: the rows' times move with the state
+            this.sidebar_clock = crate::clock::utc(cx); // slopty: the rows' times move with the state
             this.on_state_changed(&state, cx);
             cx.notify();
         });
@@ -2430,7 +2431,7 @@ impl Shell {
             sidebar_pinned_heights: Vec::new(),
             project_icons: Default::default(),
             chat_status_hover: None,
-            sidebar_clock: Utc::now(),
+            sidebar_clock: crate::clock::utc(cx),
             sidebar_clock_next: std::cell::Cell::new(None),
             sidebar_clock_tick: None,
             chat_hover_resync: false,
@@ -2514,8 +2515,6 @@ impl Shell {
             reduced_motion: motion::ReducedMotion::default(),
             motion_active: std::cell::Cell::new(false),
             render_time: None,
-            #[cfg(test)]
-            test_time: None,
             splash,
             splash_task: None,
             focus_sub: None,
@@ -2524,6 +2523,7 @@ impl Shell {
             unfocused: cx.focus_handle(),
             activation_sub: None,
             clock: ClockRedraw::default(),
+            executor: cx.background_executor().clone(),
             _state_observation: observation,
             _composer_events: composer_events,
             _transcript_events: transcript_events,
@@ -2605,7 +2605,7 @@ impl Shell {
                         id: "t0".into(),
                         text,
                     }],
-                    created_at: chrono::Utc::now().timestamp_millis(),
+                    created_at: crate::clock::utc(cx).timestamp_millis(),
                     device_id: "local".into(),
                     status: None,
                     continuation_of: None,
@@ -2627,7 +2627,7 @@ impl Shell {
         // Pending sends consume completion changes silently, while questions
         // still ring immediately. Output settings do not affect the baseline.
         {
-            let now = Utc::now();
+            let now = crate::clock::utc(cx);
             type Ping = (
                 String,
                 crate::sound::SessionNotificationState,
@@ -2673,7 +2673,7 @@ impl Shell {
                         let should_play = sound != crate::sound::Sound::Attention
                             || self
                                 .attention_sound_gate
-                                .should_play(std::time::Instant::now());
+                                .should_play(crate::clock::now(cx));
                         if should_play {
                             crate::sound::play(sound);
                         }
@@ -2685,12 +2685,12 @@ impl Shell {
             if let Some(sound) = self.connectivity_notifications.update(
                 connectivity,
                 connectivity_observed,
-                std::time::Instant::now(),
+                crate::clock::now(cx),
             ) {
                 if self.settings.session_sound_enabled(sound)
                     && self
                         .attention_sound_gate
-                        .should_play(std::time::Instant::now())
+                        .should_play(crate::clock::now(cx))
                 {
                     crate::sound::play(sound);
                 }
@@ -2759,7 +2759,7 @@ impl Shell {
             && let Some(filter) = self.settings.space_filter.clone()
             && state.read(cx).space_row(&filter).is_none()
             // slopty: not while a machine is out of reach: its projects are missing, not gone.
-            && spaces::every_device_reached(state.read(cx), Utc::now())
+            && spaces::every_device_reached(state.read(cx), crate::clock::utc(cx))
         {
             self.settings.space_filter = None;
             self.schedule_save(cx);
@@ -4237,7 +4237,7 @@ impl Shell {
         let from = self.terminal_geometry.get().height;
         let key = self.panel_key(cx);
         let open = self.panels.toggle_terminal(&key);
-        self.terminal_tween = Some(WidthTween::new(from, self.terminal_target(cx)));
+        self.terminal_tween = Some(WidthTween::new(from, self.terminal_target(cx), self.now()));
         let panel = self.terminal_panel(cx);
         panel.update(cx, |panel, cx| panel.set_open(open, cx));
         if open {
@@ -4312,7 +4312,7 @@ impl Shell {
         self.pane_resize_dragging = Some(PaneResizeKind::Sidebar);
         self.sidebar_tween = None; // live drag tracks the pointer directly
         if sample.starts_bounce {
-            self.sidebar_edge_bounce = sample.edge.map(motion::ResizeEdgeBounce::new);
+            self.sidebar_edge_bounce = sample.edge.map(|edge| motion::ResizeEdgeBounce::new(edge, self.now()));
         } else if sample.edge.is_none() {
             self.sidebar_edge_bounce = None;
         }
@@ -4391,7 +4391,7 @@ impl Shell {
         self.settings.right_pane_width = sample.width;
         self.pane_resize_dragging = Some(PaneResizeKind::Right);
         if sample.starts_bounce {
-            self.right_edge_bounce = sample.edge.map(motion::ResizeEdgeBounce::new);
+            self.right_edge_bounce = sample.edge.map(|edge| motion::ResizeEdgeBounce::new(edge, self.now()));
         } else if sample.edge.is_none() {
             self.right_edge_bounce = None;
         }
@@ -4441,7 +4441,7 @@ impl Shell {
 
     /// Close the user menu through the exit animation (no-op when closed).
     fn close_user_menu(&mut self, cx: &mut Context<Self>) {
-        if self.user_menu.begin_close() {
+        if self.user_menu.begin_close(crate::clock::now(cx)) {
             popover::reap_popup(cx, |shell: &mut Self| &mut shell.user_menu);
             cx.notify();
         }
@@ -4450,7 +4450,7 @@ impl Shell {
     /// Close the session-row context menu through the exit animation.
     fn close_chat_menu(&mut self, cx: &mut Context<Self>) {
         self.chat_copy_intent.reset();
-        if self.chat_menu.begin_close() {
+        if self.chat_menu.begin_close(crate::clock::now(cx)) {
             popover::reap_popup(cx, |shell: &mut Self| &mut shell.chat_menu);
             cx.notify();
         }
@@ -5348,7 +5348,7 @@ impl Shell {
             input,
             focus_pending: true,
             reveal_until: Some(
-                std::time::Instant::now() + motion::COLLAPSE.total() + CHAT_RENAME_REVEAL_GRACE,
+                crate::clock::now(cx) + motion::COLLAPSE.total() + CHAT_RENAME_REVEAL_GRACE,
             ),
             _events: events,
             _blur: None,
@@ -5358,12 +5358,26 @@ impl Shell {
 
     /// Focus a just-opened inline rename and arm its commit-on-blur.
     fn focus_rename_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let revealing = self.chat_rename_revealing();
         let Some(rename) = self.chat_rename.as_mut() else {
             return;
         };
-        if !std::mem::take(&mut rename.focus_pending) {
+        if !rename.focus_pending {
             return;
         }
+        // slopty: the claim waits for a frame that drew the field, asking again after each frame
+        // while the row is being revealed. A field a card is still opening onto (a side chat
+        // paged out of a closed card) is in no frame yet: focused then, the frame's focus
+        // recovery hands the keyboard to the composer without the field ever losing it, so the
+        // rename stood open with no keyboard.
+        if revealing && rename.input.read(cx).drawn_bounds().is_none() {
+            let shell = cx.entity().downgrade();
+            window.on_next_frame(move |window, cx| {
+                shell.update(cx, |shell, cx| shell.focus_rename_chat(window, cx)).ok();
+            });
+            return;
+        }
+        rename.focus_pending = false;
         let focus = rename.input.focus_handle(cx);
         window.focus(&focus, cx);
         rename._blur = Some(cx.on_blur(&focus, window, |this, _, cx| {
@@ -5422,7 +5436,7 @@ impl Shell {
         self.chat_rename
             .as_ref()
             .and_then(|rename| rename.reveal_until)
-            .is_some_and(|until| std::time::Instant::now() < until)
+            .is_some_and(|until| self.now() < until)
     }
 
     /// The inline title editor for `chat_id`'s row on `surface`, if one is open.
@@ -5470,7 +5484,7 @@ impl Shell {
         let state = self.state.read(cx);
         if state.workspace_scope == Some(WorkspaceScope::Local) {
             // slopty: not while a machine is out of reach: its chats are missing, not gone.
-            if !state.chats_synced || !spaces::every_device_reached(state, Utc::now()) {
+            if !state.chats_synced || !spaces::every_device_reached(state, crate::clock::utc(cx)) {
                 return;
             }
             let known = state.chats.iter().map(|chat| chat.id.clone()).collect();
@@ -5775,27 +5789,23 @@ impl Shell {
     // ---- render pieces ----
 
     fn motion_time(&self) -> std::time::Instant {
-        #[cfg(test)]
-        if let Some(now) = self.test_time {
-            return now;
-        }
-        std::time::Instant::now()
+        // slopty: the dispatcher's clock, which a frame's moment is read from and a test moves.
+        self.executor.now()
+    }
+
+    /// slopty: the moment the shell's motion stands at: the frame's while one is drawn, the
+    /// dispatcher's clock between frames.
+    pub(super) fn now(&self) -> std::time::Instant {
+        self.render_time.unwrap_or_else(|| self.motion_time())
     }
 
     /// slopty: [`Self::motion_time`] while a frame is drawn: the frame's moment.
     fn frame_motion_time(&self, cx: &App) -> std::time::Instant {
-        #[cfg(test)]
-        if let Some(now) = self.test_time {
-            return now;
-        }
         cx.frame_time()
     }
 
     fn panel_tween(&self, from: f32, to: f32) -> WidthTween {
-        WidthTween {
-            started: self.render_time.unwrap_or_else(|| self.motion_time()),
-            ..WidthTween::panel(from, to)
-        }
+        WidthTween::panel(from, to, self.now())
     }
 
     fn tween_elapsed(&self, started: std::time::Instant) -> Duration {
@@ -6067,10 +6077,10 @@ impl Shell {
         // Persistent manual tween: reversals start from the painted value,
         // initial presentation is settled, and reduced motion snaps.
         match self.titlebar_island {
-            None => self.titlebar_island = Some(WidthTween::new(island_target, island_target)),
+            None => self.titlebar_island = Some(WidthTween::new(island_target, island_target, self.now())),
             Some(previous) if previous.to != island_target => {
                 let from = self.eval_tween(Some(previous), previous.to);
-                self.titlebar_island = Some(WidthTween::new(from, island_target));
+                self.titlebar_island = Some(WidthTween::new(from, island_target, self.now()));
             }
             _ => {}
         }
@@ -6955,7 +6965,7 @@ impl Shell {
         // whose delivery path is degraded is QUEUED, not Working — the
         // pending pill tells the truth instead of faking a spinner.
         let (queued, undelivered) = {
-            let now = Utc::now();
+            let now = crate::clock::utc(cx);
             let state = self.state.read(cx);
             (
                 state.send_queued(&id, now),
@@ -6989,7 +6999,7 @@ impl Shell {
         // slopty: why it stands as it does (`sidebar_status`): what a waiting agent waits on,
         // an agent waiting on its own work, a finished result nobody has seen.
         let (reason, waiting_self) = {
-            let now = Utc::now();
+            let now = crate::clock::utc(cx);
             let state = self.state.read(cx);
             let session = state.session_for(&id);
             let settled = !queued && !undelivered && !archived && search_query.is_none();
@@ -7017,7 +7027,7 @@ impl Shell {
         // row's own activity indicator, never in place of it: the pill takes
         // the time stamp's spot (compact) or leads the status (regular), and
         // keeps showing after the parent's own turn has settled.
-        let running_subagents = self.state.read(cx).running_subagents_for(&id, Utc::now());
+        let running_subagents = self.state.read(cx).running_subagents_for(&id, crate::clock::utc(cx));
         let subagent_pill = |suffix: &str| {
             (running_subagents > 0).then(|| {
                 crate::running_pill::running_pill(
@@ -8634,7 +8644,7 @@ impl Shell {
                 div().line_height(px(17.0)).child(user_line),
             ));
         if self.user_menu.get().is_some() {
-            let closing = self.user_menu.closing_since();
+            let closing = self.user_menu.closing_at(crate::clock::now(cx));
 
             let menu = popover::popover_card(theme)
                 .w(px(self.sidebar_content_width()
@@ -8869,7 +8879,7 @@ impl Shell {
         let selected_chat = state.read(cx).selected_chat.clone();
         let indicator = selected_chat
             .as_deref()
-            .map(|chat_id| state.read(cx).indicator_for(chat_id, Utc::now()))
+            .map(|chat_id| state.read(cx).indicator_for(chat_id, crate::clock::utc(cx)))
             .unwrap_or(Indicator::None);
         let interrupting = selected_chat
             .as_deref()
@@ -8906,7 +8916,7 @@ impl Shell {
         if let Some(menu_state) = self.chat_menu.get().cloned() {
             let chat_id = menu_state.chat_id;
             let position = menu_state.position;
-            let chat_menu_closing = self.chat_menu.closing_since();
+            let chat_menu_closing = self.chat_menu.closing_at(crate::clock::now(cx));
             let is_side_chat = matches!(menu_state.tab, Some((_, RightSurface::SideChat(_))))
                 || self
                     .state
@@ -9309,7 +9319,7 @@ impl Shell {
             .as_ref()
             .map(|background| background.adjustment)
             .unwrap_or_default();
-        let frame_time = self.render_time.unwrap_or_else(std::time::Instant::now);
+        let frame_time = self.render_time.unwrap_or_else(|| crate::clock::now(cx));
         // Prewarm even in an established thread. Decode/effect work is not
         // contingent on a hero measurement or a navigation gesture.
         let artwork = new_thread_background_setting
@@ -9881,7 +9891,7 @@ impl Shell {
     /// to a "Sending…" bridge and then the engine mode line.
     fn render_status_strip(&mut self, composer_width: f32, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
-        let now = Utc::now();
+        let now = crate::clock::utc(cx);
         // slopty: the composer's notices (a road, a usage limit, a queued send on the new-chat
         // canvas, a fresh "Stopped") draw in this reserved strip, so neither the composer nor
         // the transcript moves when one comes or goes (`composer::status_line`).
@@ -10168,7 +10178,7 @@ impl Shell {
     // slopty: no accounts, sync or sign-in.
 
     fn close_right_plus(&mut self, cx: &mut Context<Self>) {
-        if self.right_plus.begin_close() {
+        if self.right_plus.begin_close(crate::clock::now(cx)) {
             popover::reap_popup(cx, |shell: &mut Self| &mut shell.right_plus);
         }
         cx.notify();
@@ -10288,7 +10298,7 @@ impl Shell {
                     state
                         .selected_chat
                         .as_deref()
-                        .is_some_and(|id| state.indicator_for(id, Utc::now()) == Indicator::Working)
+                        .is_some_and(|id| state.indicator_for(id, crate::clock::utc(cx)) == Indicator::Working)
                 }),
                 RightSurface::Browser(id) => self
                     .browsers
@@ -10510,7 +10520,7 @@ impl Shell {
                     .text_color(theme.text_muted),
             );
         if plus_open {
-            let closing = self.right_plus.closing_since();
+            let closing = self.right_plus.closing_at(crate::clock::now(cx));
             let menu = popover::popover_card(&theme)
                 .w(px(168.0))
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_right_plus(cx)))
@@ -11136,11 +11146,12 @@ fn header_icon_button_with(
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        motion::begin_hover_frame(cx.frame_time()); // slopty: the frame's fades at its moment
         popover::return_focus(window, cx); // slopty: a closed menu gives the keyboard back
         // Every repaint (state frame, input, or the clock firing) reschedules
         // the next clock-driven one; the sidebar and transcript follow this
         // view's notifications.
-        let now = Utc::now();
+        let now = crate::clock::utc(cx);
         let wake = shell_clock_wake(self.state.read(cx), now);
         self.clock
             .arm(wake, now, |shell: &mut Shell| &mut shell.clock, cx);
@@ -11307,6 +11318,7 @@ impl Render for Shell {
                 self.titlebar_tween = Some(WidthTween::new(
                     titlebar_cluster_start(!fullscreen),
                     titlebar_cluster_start(fullscreen),
+                    self.now(),
                 ));
             }
             self.fullscreen = Some(fullscreen);
@@ -11647,7 +11659,7 @@ impl Render for Shell {
                     self.state.read(cx).selected_chat.is_some(),
                     (self.sidebar_now(), main_target_width),
                     on_chat && !self.reduced_motion.get(),
-                    self.render_time.unwrap_or_else(std::time::Instant::now),
+                    self.render_time.unwrap_or_else(|| crate::clock::now(cx)),
                 );
                 if panel_handoff {
                     self.motion_active.set(true);
@@ -11884,7 +11896,7 @@ impl Render for Shell {
         if let Some(row) = &self.chat_status_hover {
             motion::hover_t(&format!("{row}-hover"));
         }
-        if self.motion_active.get() | motion::hover_fades_active() | motion::state_morphs_active(cx.frame_time()) {
+        if self.motion_active.get() | motion::hover_fades_active(cx.frame_time()) | motion::state_morphs_active(cx.frame_time()) {
             window.request_animation_frame();
         }
 
@@ -13082,10 +13094,11 @@ mod tests {
     // slopty: no pull-request pages.
     #[test]
     fn sidebar_disclosure_motion_lands_exactly_on_its_target() {
-        let mut tween = SidebarDisclosureMotion::new(1, 240.0, 0.0);
-        tween.started = std::time::Instant::now() - motion::COLLAPSE.total().mul_f32(2.0);
-        assert_eq!(tween.current(), 0.0);
-        assert!(!tween.animating());
+        let now = std::time::Instant::now();
+        let mut tween = SidebarDisclosureMotion::new(1, 240.0, 0.0, now);
+        tween.started = now - motion::COLLAPSE.total().mul_f32(2.0);
+        assert_eq!(tween.current(now), 0.0);
+        assert!(!tween.animating(now));
     }
 }
 

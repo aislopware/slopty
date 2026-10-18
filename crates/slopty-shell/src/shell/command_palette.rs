@@ -1135,7 +1135,7 @@ impl Shell {
         let from = self.right_target(cx);
         self.panels.update(&key, |panel| panel.changes_open = true);
         if !was_open {
-            self.right_tween = Some(WidthTween::new(from, self.right_target(cx)));
+            self.right_tween = Some(WidthTween::new(from, self.right_target(cx), self.now()));
         }
         let owner = (self.active_chat.clone(), self.state.clone());
         self.add_file_surface_at(owner, path, location, window, cx);
@@ -1372,13 +1372,13 @@ impl Shell {
                 self.render_chat_row(
                     id.clone(),
                     transcript::single_line(chat.title.as_deref().unwrap_or("New chat")).into(),
-                    format_time_ago(chat.last_message_at.unwrap_or(chat.created_at), Utc::now())
+                    format_time_ago(chat.last_message_at.unwrap_or(chat.created_at), crate::clock::utc(cx))
                         .into(),
                     folder.into(),
                     branch,
                     pr,
                     harness,
-                    state.display_status_for(chat, Utc::now()),
+                    state.display_status_for(chat, crate::clock::utc(cx)),
                     active,
                     chat.archived,
                     false,

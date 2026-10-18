@@ -526,6 +526,26 @@ fn a_long_fuzz_of_the_shell() {
     fuzz(first, env("SLOPTY_FUZZ_RUNS", 64), usize::try_from(env("SLOPTY_FUZZ_STEPS", 120)).unwrap_or(120), true);
 }
 
+/// The long run's three stops on a Mac (2026-10-18), shrunk: a cached spinner in the composer
+/// drawn again after the composer's clip moved (a turn started, the window resized, a chat
+/// opened). They were the old every-frame check showing its own frame, not the shell's; they
+/// stay as the check's regression seeds.
+#[test]
+fn the_long_run_s_clip_stops_draw_alike() {
+    let stops: [(u64, &[usize]); 3] = [
+        (1044, &[1, 10, 31, 46, 47, 97]),
+        (3140, &[1, 3, 11, 13, 15, 18, 35, 42, 45]),
+        (4132, &[51, 54, 56, 66, 76]),
+    ];
+    for (seed, keep) in stops {
+        let len = keep.iter().max().map_or(0, |max| max + 1);
+        let steps = kept(&steps_of(seed, len), keep);
+        if let Err(failure) = run(seed, &steps) {
+            panic!("seed {seed} {keep:?} fails at {:?}: {}: {}", steps.get(failure.step), failure.kind, failure.detail);
+        }
+    }
+}
+
 /// What the fuzzer found first (seed 6 on the phone, shrunk to two steps): a chat left, then
 /// gone, came back as an empty page in its name. The way back skips to the canvas instead.
 #[test]

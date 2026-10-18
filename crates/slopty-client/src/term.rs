@@ -245,6 +245,10 @@ pub struct CommandBlock {
     pub command: Option<String>,
     /// The output rows, trailing blank rows trimmed, joined with newlines.
     pub output: String,
+    /// Every row from the prompt to the end is held here, so the command and the output are
+    /// whole; otherwise they stop at the first row missing, which
+    /// [`TermState::request_block`] asks for.
+    pub whole: bool,
 }
 
 impl TermState {
@@ -979,19 +983,29 @@ impl TermState {
         self.command_block(previous)
     }
 
-    /// The start of the nearest prompt strictly above `index`, among the lines held here
-    /// (uncached history is not searched).
+    /// The start of the nearest prompt strictly above `index`: among the blocks the worker
+    /// listed, which name every prompt the history holds, and the lines held here, which hold
+    /// the ones drawn since (uncached history is not searched). A prompt that scrolled away in
+    /// one burst is listed though never held.
     #[must_use]
     pub fn prompt_before(&self, index: LineIndex) -> Option<LineIndex> {
         // The cache indexes its prompts: a walk here cost 20 000 lookups a frame in a
         // flooding shell whose prompt had been evicted (MEASUREMENTS 2026-09-13).
-        self.scrollback.prompt_before(index)
+        let listed = self.blocks.range(..index).next_back().map(|(&prompt, _)| prompt);
+        self.scrollback.prompt_before(index).max(listed)
     }
 
-    /// The start of the nearest prompt strictly below `index`, among the lines held here.
+    /// The start of the nearest prompt strictly below `index`, as [`Self::prompt_before`]
+    /// finds them.
     #[must_use]
     pub fn prompt_after(&self, index: LineIndex) -> Option<LineIndex> {
-        self.scrollback.prompt_after(index).filter(|&p| p <= self.newest())
+        let listed = self.blocks.range(index.next()..).next().map(|(&prompt, _)| prompt);
+        let held = self.scrollback.prompt_after(index);
+        match (held, listed) {
+            (Some(held), Some(listed)) => Some(held.min(listed)),
+            (held, listed) => held.or(listed),
+        }
+        .filter(|&p| p <= self.newest())
     }
 
     /// The head of the command block a line belongs to: its prompt row and the typed command
@@ -1046,14 +1060,26 @@ impl TermState {
         Some((prompt, command))
     }
 
-    /// The held prompt row a line's block starts at.
+    /// The held prompt row a line's block starts at. `None` while that row is not held: the
+    /// block is then not read from an older prompt's rows.
     fn block_start(&self, index: LineIndex) -> Option<LineIndex> {
-        let prompt = if self.line(index).is_some_and(|l| l.mark.starts_prompt()) {
-            index
-        } else {
-            self.prompt_before(index)?
-        };
+        let prompt = self.block_prompt_row(index)?;
         self.line(prompt).map(|_| prompt)
+    }
+
+    /// The prompt row a line's block starts at, held here or not.
+    fn block_prompt_row(&self, index: LineIndex) -> Option<LineIndex> {
+        let starts = self.blocks.contains_key(&index)
+            || self.line(index).is_some_and(|l| l.mark.starts_prompt());
+        if starts { Some(index) } else { self.prompt_before(index) }
+    }
+
+    /// Ask the worker for the rows of the block a line belongs to that are not held here, so
+    /// that [`Self::command_block`] reads it whole once they arrive.
+    pub fn request_block(&mut self, index: LineIndex) -> Vec<Effect> {
+        let Some(prompt) = self.block_prompt_row(index) else { return Vec::new() };
+        let end = self.prompt_after(prompt).unwrap_or_else(|| self.newest().next());
+        self.request_lines(prompt, end.0.saturating_sub(prompt.0))
     }
 
     /// The status of the command typed at `prompt`: the shell reports it (`OSC 133;D`) on the
@@ -1171,12 +1197,14 @@ impl TermState {
             .prompt_after(head.prompt)
             .unwrap_or_else(|| LineIndex(self.newest().0.saturating_add(1)));
         let mut output: Vec<String> = Vec::new();
+        let mut whole = true;
         let mut i = head.body.0;
         while i < end.0 {
-            match self.line(LineIndex(i)) {
-                Some(line) => output.push(line.text()),
-                None => break,
-            }
+            let Some(line) = self.line(LineIndex(i)) else {
+                whole = false;
+                break;
+            };
+            output.push(line.text());
             i = i.saturating_add(1);
         }
         while output.last().is_some_and(String::is_empty) {
@@ -1188,6 +1216,7 @@ impl TermState {
             exit: head.exit,
             command: head.command,
             output: output.join("\n"),
+            whole,
         })
     }
 
@@ -1806,6 +1835,53 @@ mod tests {
         let _fetches: Vec<Effect> = state.scroll_to_line(LineIndex(3));
         assert_eq!(state.index_at_row(0), LineIndex(3));
         assert_eq!(state.view_offset(), 3);
+    }
+
+    /// A burst of output scrolls a block's prompt away before any frame carries its row: the
+    /// worker's list still names it, so the block under a row of that output is its own, read
+    /// whole once the rows asked for arrive, and never the block before it, whose command a
+    /// copy or a rerun would otherwise take.
+    #[test]
+    fn a_block_a_burst_scrolled_away_is_its_own() {
+        let prompt = |exit| SemanticMark::Prompt { exit, input: Some(2) };
+        let mut state = TermState::new(size());
+        let mut f = frame(1, true, 0, 0, 3, &[(0, "$ true"), (1, "")]);
+        Arc::make_mut(&mut f.updates[0].line).mark = prompt(None);
+        Arc::make_mut(&mut f.updates[1].line).mark = SemanticMark::Output;
+        state.apply(told(f, true, vec![running(0)]));
+        // `seq 9` is typed at line 2 and prints nine lines in one burst: the next frame shows
+        // lines 10 to 12, and lines 2 to 9 never came.
+        let mut f = frame(2, true, 0, 10, 13, &[(0, "8"), (1, "9"), (2, "$ ")]);
+        Arc::make_mut(&mut f.updates[0].line).mark = SemanticMark::Output;
+        Arc::make_mut(&mut f.updates[1].line).mark = SemanticMark::Output;
+        Arc::make_mut(&mut f.updates[2].line).mark = prompt(Some(0));
+        state.apply(told(f, false, vec![ended(0, Some(0), None), ended(2, Some(0), None)]));
+        state.apply(told(frame(3, false, 0, 10, 13, &[]), false, vec![running(12)]));
+
+        assert_eq!(state.prompt_before(LineIndex(10)), Some(LineIndex(2)), "the listed prompt");
+        assert_eq!(state.prompt_after(LineIndex(0)), Some(LineIndex(2)));
+        assert_eq!(state.command_block(LineIndex(10)), None, "not `true`'s block");
+        assert_eq!(state.block_prompt(LineIndex(10)), None, "nor hovered as it");
+        let before = state.command_block(LineIndex(1)).expect("`true`'s block");
+        assert_eq!((before.end, before.command.as_deref()), (LineIndex(2), Some("true")));
+        assert_eq!(
+            state.request_block(LineIndex(10)),
+            vec![Effect::Request(TermRequest::FetchLines { start: LineIndex(2), count: 8 })],
+            "the rows not held"
+        );
+        let mut lines = vec![marked("$ seq 9", prompt(Some(0)))];
+        lines.extend((1..=7).map(|n| marked(&n.to_string(), SemanticMark::Output)));
+        state.apply(TermEvent::Lines { start: LineIndex(2), lines: lines[..3].to_vec() });
+        let part = state.command_block(LineIndex(10)).expect("its prompt is in");
+        assert_eq!((part.command.as_deref(), part.output.as_str()), (Some("seq 9"), "1\n2"));
+        assert!(!part.whole, "rows still on their way");
+        state.apply(TermEvent::Lines { start: LineIndex(5), lines: lines[3..].to_vec() });
+        let block = state.command_block(LineIndex(10)).expect("`seq 9`'s block");
+        assert_eq!((block.prompt, block.end, block.exit), (LineIndex(2), LineIndex(12), Some(0)));
+        assert_eq!(block.command.as_deref(), Some("seq 9"));
+        assert_eq!(block.output, "1\n2\n3\n4\n5\n6\n7\n8\n9");
+        assert!(block.whole);
+        assert!(state.request_block(LineIndex(10)).is_empty(), "nothing left to ask");
     }
 
     /// A command continued on the next row (a `for` loop typed over two lines) is marked as

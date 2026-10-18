@@ -191,7 +191,7 @@ impl ProjectIcon {
             name,
             seed,
             media: None,
-            refreshed: std::time::Instant::now(),
+            refreshed: crate::clock::now(cx),
             _task: task,
         }
     }
@@ -399,7 +399,8 @@ impl ProjectIcons {
             return monogram(&name, &seed, selected, Theme::of(cx));
         }
         let mut cache = self.entries.borrow_mut();
-        cache.retain(|_, entity| entity.read(cx).refreshed.elapsed() < Duration::from_secs(300));
+        let now = crate::clock::now(cx);
+        cache.retain(|_, entity| now.saturating_duration_since(entity.read(cx).refreshed) < Duration::from_secs(300));
         let entity = cache
             .entry(key)
             .or_insert_with(|| {

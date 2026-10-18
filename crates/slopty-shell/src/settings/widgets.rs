@@ -51,7 +51,7 @@ pub fn column_width(window: &gpui::Window, cx: &gpui::App) -> f32 {
 pub fn dropdown(
     id: impl Into<SharedString>,
     content: gpui::Div,
-    closing: Option<std::time::Instant>,
+    closing: Option<crate::popover::Closing>,
     trigger_height: f32,
 ) -> AnyElement {
     SettingsDropdown {
@@ -68,7 +68,7 @@ pub fn dropdown(
 struct SettingsDropdown {
     id: SharedString,
     content: gpui::Div,
-    closing: Option<std::time::Instant>,
+    closing: Option<crate::popover::Closing>,
     trigger_height: f32,
     align: popover::MenuAlign,
 }
@@ -724,7 +724,7 @@ fn switch_surface_tones(theme: &Theme, base: gpui::Hsla, thumb: bool) -> (gpui::
 
 impl RenderOnce for SwitchVisual {
     fn render(self, window: &mut gpui::Window, cx: &mut gpui::App) -> impl IntoElement {
-        let now = std::time::Instant::now();
+        let now = crate::clock::now(cx);
         let target = if self.on { 1.0 } else { 0.0 };
         let reduced = crate::motion::reduced_motion(cx);
         let position = window.with_global_id(self.key.into(), |id, window| {
@@ -1050,7 +1050,7 @@ pub fn tab_selection_t(
     selected: bool,
     reduced_motion: bool,
 ) -> f32 {
-    let now = std::time::Instant::now();
+    let now = window.frame_time(); // slopty: the frame's moment
     let target = if selected { 1.0 } else { 0.0 };
     let value = window.with_global_id(key.into().into(), |id, window| {
         window.with_element_state(id, |previous: Option<TabSelectionTravel>, _| {
@@ -1326,7 +1326,7 @@ pub struct Select<V: 'static> {
 }
 
 fn close_select_rc<V: 'static>(view: &mut V, reach: &SelectReach<V>, cx: &mut Context<V>) {
-    if reach(view).menu.begin_close() {
+    if reach(view).menu.begin_close(crate::clock::now(cx)) {
         let reach = reach.clone();
         popover::reap_popup(cx, move |view: &mut V| &mut reach(view).menu);
     }
@@ -1547,7 +1547,7 @@ impl<V: 'static> Select<V> {
             trigger = trigger.child(SettingsDropdown {
                 id: format!("{id}-menu").into(),
                 content: menu,
-                closing: state.menu.closing_since(),
+                closing: state.menu.closing_at(crate::clock::now(cx)),
                 trigger_height: SELECT_HEIGHT,
                 align,
             });

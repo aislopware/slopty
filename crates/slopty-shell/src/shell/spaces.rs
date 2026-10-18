@@ -1081,14 +1081,15 @@ mod pinned_session_tests {
             epoch: 1,
             started: std::time::Instant::now() - TAB_SLIDE.total(),
         };
-        slide.retarget(2.0 * SIDEBAR_SESSION_SLOT);
+        let now = std::time::Instant::now();
+        slide.retarget(2.0 * SIDEBAR_SESSION_SLOT, now);
         assert_eq!(slide.from, SIDEBAR_SESSION_SLOT);
         assert_eq!(slide.to, 2.0 * SIDEBAR_SESSION_SLOT);
         assert_eq!(slide.epoch, 2);
-        slide.retarget(2.0 * SIDEBAR_SESSION_SLOT);
+        slide.retarget(2.0 * SIDEBAR_SESSION_SLOT, now);
         assert_eq!(slide.epoch, 2);
         slide.started -= TAB_SLIDE.total();
-        slide.retarget(0.0);
+        slide.retarget(0.0, now);
         assert_eq!(slide.from, 2.0 * SIDEBAR_SESSION_SLOT);
         assert_eq!(slide.to, 0.0);
     }
@@ -1102,13 +1103,14 @@ mod pinned_session_tests {
             epoch: 0,
             started: std::time::Instant::now() - TAB_SLIDE.total() / 2,
         };
-        let halfway = slide.current();
+        let now = std::time::Instant::now();
+        let halfway = slide.current(now);
         assert!(halfway > 0.0 && halfway < SIDEBAR_SESSION_SLOT);
-        slide.retarget(0.0);
+        slide.retarget(0.0, now);
         assert!((slide.from - halfway).abs() < 0.5);
         assert_eq!(slide.to, 0.0);
         slide.started -= TAB_SLIDE.total();
-        assert_eq!(slide.current(), 0.0);
+        assert_eq!(slide.current(now), 0.0);
     }
 
     #[test]
@@ -1473,6 +1475,8 @@ mod pinned_session_tests {
         let slot = cx.debug_bounds("session-slot-newer").unwrap();
         let target = gpui::point(slot.center().x, slot.top() + px(3.0));
         cx.simulate_mouse_move(target, Some(MouseButton::Left), gpui::Modifiers::default());
+        // slopty: a frame later on the dispatcher's clock, which the gap opens on.
+        cx.executor().advance_clock(std::time::Duration::from_millis(16));
         shell.read_with(cx, |shell, cx| {
             assert!(shell.sidebar_transfer_extra_gap("regular:status:done") > 0.0);
             assert!(shell.sidebar_session_transfer.as_ref().unwrap().siblings["newer"].to > 0.0);
@@ -1651,6 +1655,8 @@ mod pinned_session_tests {
         let row = cx.debug_bounds("chat-older").unwrap();
         let target = gpui::point(row.center().x, row.bottom() - px(3.0));
         cx.simulate_mouse_move(target, Some(MouseButton::Left), gpui::Modifiers::default());
+        // slopty: a frame later on the dispatcher's clock, which the gap opens on.
+        cx.executor().advance_clock(std::time::Duration::from_millis(16));
         shell.read_with(cx, |shell, cx| {
             assert!(shell.sidebar_transfer_extra_gap("pinned") > 0.0);
             assert_eq!(shell.active_sidebar_pins(cx), ids(&["older"]));
@@ -2709,15 +2715,16 @@ impl Shell {
         resting_height: f32,
         target_height: f32,
     ) {
+        let now = self.now();
         let previous = self.sidebar_disclosure_motion.get(key).copied();
         let from = previous
-            .filter(|motion| motion.animating())
-            .map(SidebarDisclosureMotion::current)
+            .filter(|motion| motion.animating(now))
+            .map(|motion| motion.current(now))
             .unwrap_or(resting_height);
         let epoch = previous.map_or(1, |motion| motion.epoch + 1);
         self.sidebar_disclosure_motion.insert(
             key.to_owned(),
-            SidebarDisclosureMotion::new(epoch, from, target_height),
+            SidebarDisclosureMotion::new(epoch, from, target_height, now),
         );
     }
 
@@ -2734,7 +2741,7 @@ impl Shell {
             .sidebar_disclosure_motion
             .get(key)
             .copied()
-            .filter(|motion| motion.animating())
+            .filter(|motion| motion.animating(self.now()))
         else {
             return frame.h(px(target)).into_any_element();
         };
@@ -2769,7 +2776,7 @@ impl Shell {
             .sidebar_disclosure_motion
             .get(key)
             .copied()
-            .filter(|motion| motion.animating())
+            .filter(|motion| motion.animating(self.now()))
         {
             let denominator = tween.from.max(tween.to).max(1.0);
             let from = (tween.from / denominator).clamp(0.0, 1.0);
@@ -2826,7 +2833,7 @@ impl Shell {
     /// it isn't open). Every close path funnels here so the menu always
     /// animates out instead of vanishing.
     pub(super) fn close_spaces_menu(&mut self, cx: &mut Context<Self>) {
-        if self.spaces_menu.begin_close() {
+        if self.spaces_menu.begin_close(crate::clock::now(cx)) {
             popover::reap_popup(cx, |shell: &mut Self| &mut shell.spaces_menu);
             cx.notify();
         }
@@ -2867,6 +2874,7 @@ impl Shell {
     // ---- sidebar sections ----
 
     pub(super) fn sidebar_transfer_extra_gap(&self, group: &str) -> f32 {
+        let now = self.now();
         self.sidebar_session_transfer
             .as_ref()
             .or_else(|| {
@@ -2879,7 +2887,7 @@ impl Shell {
                 if self.reduced_motion.get() {
                     gap.to
                 } else {
-                    gap.current()
+                    gap.current(now)
                 }
             })
     }
@@ -2891,6 +2899,7 @@ impl Shell {
         group: &str,
         index: usize,
     ) -> AnyElement {
+        let now = self.now();
         let returning = self.sidebar_session_transfer.is_none();
         let transfer = if let Some(drag) = self.sidebar_session_transfer.as_mut() {
             Some(drag)
@@ -2925,9 +2934,9 @@ impl Shell {
                 from: 0.0,
                 to: 0.0,
                 epoch: drag.slide.epoch,
-                started: std::time::Instant::now(),
+                started: now,
             });
-        slide.retarget(target);
+        slide.retarget(target, now);
         let (from, to, epoch) = (slide.from, slide.to, slide.epoch);
         let frame = div().relative().child(row);
         if !returning || self.reduced_motion.get() {
@@ -2971,7 +2980,7 @@ impl Shell {
                 from: 0.0,
                 to: 0.0,
                 epoch: 0,
-                started: std::time::Instant::now(),
+                started: crate::clock::now(cx),
             },
             collapsed_height: 0.0,
             section_gaps: Default::default(),
@@ -2980,13 +2989,13 @@ impl Shell {
                 from: f32::from(lifted.y),
                 to: f32::from(lifted.y),
                 epoch: self.pinned_session_drag_generation << 32,
-                started: std::time::Instant::now(),
+                started: crate::clock::now(cx),
             },
             slide_x: SidebarSessionSlide {
                 from: f32::from(lifted.x),
                 to: f32::from(lifted.x),
                 epoch: self.pinned_session_drag_generation << 32,
-                started: std::time::Instant::now(),
+                started: crate::clock::now(cx),
             },
         });
         {
@@ -3069,7 +3078,7 @@ impl Shell {
         }
         let state = self.state.read(cx);
         let visible: HashSet<String> = state
-            .sidebar_chats(Utc::now(), payload.filter.as_deref())
+            .sidebar_chats(crate::clock::utc(cx), payload.filter.as_deref())
             .into_iter()
             .map(|(_, chat)| chat.id.clone())
             .collect();
@@ -3091,7 +3100,7 @@ impl Shell {
                 self.sidebar_session_return = Some(SidebarSessionReturn {
                     transfer,
                     epoch: self.pinned_session_drag_generation,
-                    started: std::time::Instant::now(),
+                    started: crate::clock::now(cx),
                 });
                 let epoch = self.pinned_session_drag_generation;
                 cx.spawn(async move |this, cx| {
@@ -3109,16 +3118,16 @@ impl Shell {
                                 if returning.epoch != epoch {
                                     return false;
                                 }
-                                if returning.started.elapsed() >= TAB_SLIDE.total()
-                                    && returning.transfer.slide.started.elapsed()
+                                if crate::clock::now(cx).saturating_duration_since(returning.started) >= TAB_SLIDE.total()
+                                    && crate::clock::now(cx).saturating_duration_since(returning.transfer.slide.started)
                                         >= TAB_SLIDE.total()
-                                    && returning.transfer.source_collapse.started.elapsed()
+                                    && crate::clock::now(cx).saturating_duration_since(returning.transfer.source_collapse.started)
                                         >= TAB_SLIDE.total()
                                     && returning
                                         .transfer
                                         .section_gaps
                                         .values()
-                                        .all(|gap| gap.started.elapsed() >= TAB_SLIDE.total())
+                                        .all(|gap| crate::clock::now(cx).saturating_duration_since(gap.started) >= TAB_SLIDE.total())
                                 {
                                     shell.sidebar_session_return = None;
                                     cx.notify();
@@ -3147,6 +3156,7 @@ impl Shell {
         height: f32,
         theme: &Theme,
     ) -> AnyElement {
+        let now = self.now();
         // Window coordinates: the row is drawn deferred and anchored, above
         // everything and outside the sidebar's clip, so it can be carried out
         // of the sidebar (onto a composer, to mention it). Elements live for
@@ -3178,11 +3188,11 @@ impl Shell {
             (&mut transfer.slide_x, target_x),
         ] {
             if returning {
-                slide.retarget(target);
+                slide.retarget(target, now);
             } else {
                 slide.from = target;
                 slide.to = target;
-                slide.started = std::time::Instant::now();
+                slide.started = now;
             }
         }
         let (from, to) = (transfer.slide.from, transfer.slide.to);
@@ -3634,7 +3644,7 @@ impl Shell {
         let state = self.state.read(cx);
         let in_filter = state.project_filter(drag.filter.as_deref());
         let visible_ids: HashSet<String> = state
-            .overview_chats(Utc::now())
+            .overview_chats(crate::clock::utc(cx))
             .into_iter()
             .filter(|(_, chat)| in_filter(chat))
             .map(|(_, chat)| chat.id.clone())
@@ -3819,7 +3829,7 @@ impl Shell {
         if let Some(menu) = self.sidebar_view_menu.open_mut() {
             menu.hover_intent.reset();
         }
-        if self.sidebar_view_menu.begin_close() {
+        if self.sidebar_view_menu.begin_close(crate::clock::now(cx)) {
             popover::reap_popup(cx, |shell: &mut Self| &mut shell.sidebar_view_menu);
             cx.notify();
         }
@@ -4394,7 +4404,7 @@ impl Shell {
             match filter.as_deref().and_then(|id| state.space_row(id)) {
                 Some(space) => {
                     let members = state.project_members(space);
-                    let (_, offline) = state.project_device_tag(&members, Utc::now());
+                    let (_, offline) = state.project_device_tag(&members, crate::clock::utc(cx));
                     (
                         state
                             .representative_space(space)
@@ -4489,7 +4499,7 @@ impl Shell {
                     }),
             );
         let trigger = if self.spaces_menu.get().is_some() {
-            let closing = self.spaces_menu.closing_since();
+            let closing = self.spaces_menu.closing_at(crate::clock::now(cx));
             let menu = self.render_spaces_menu(theme, cx);
             trigger.relative().child(popover::anchored_menu_below(
                 "spaces-filter-menu",
@@ -4544,7 +4554,7 @@ impl Shell {
                     .text_color(theme.text_muted),
             );
         let drawn = if self.sidebar_view_menu.get().is_some() {
-            let closing = self.sidebar_view_menu.closing_since();
+            let closing = self.sidebar_view_menu.closing_at(crate::clock::now(cx));
             let menu = self.render_sidebar_view_menu(theme, cx);
             drawn.relative().child(popover::anchored_menu_right(
                 "sidebar-view-options-menu",
@@ -4652,7 +4662,7 @@ impl Shell {
                             let key = slopty_view_proto::view::project_key(space);
                             let selected = filter_key.as_deref() == Some(key.as_str());
                             let members = state.project_members(space);
-                            let (_, offline) = state.project_device_tag(&members, Utc::now());
+                            let (_, offline) = state.project_device_tag(&members, crate::clock::utc(cx));
                             (
                                 SpacesMenuRow::Space(id),
                                 state
@@ -5006,7 +5016,7 @@ impl Shell {
         let (active, archived) = {
             let state = self.state.read(cx);
             let active = state
-                .sidebar_chats(Utc::now(), self.settings.space_filter.as_deref())
+                .sidebar_chats(crate::clock::utc(cx), self.settings.space_filter.as_deref())
                 .into_iter()
                 .find(|(_, chat)| chat.id == chat_id)
                 .map(|(_, chat)| chat.clone());
@@ -5181,16 +5191,16 @@ impl Shell {
             return;
         };
         // At least once a minute, as the shell's clock wakes: groups and reasons move with it.
-        let at = at.min(Utc::now() + chrono::Duration::minutes(1));
+        let at = at.min(crate::clock::utc(cx) + chrono::Duration::minutes(1));
         if self.sidebar_clock_tick.as_ref().is_some_and(|(due, _)| *due <= at) {
             return;
         }
-        let wait = (at - Utc::now()).to_std().unwrap_or_default() + std::time::Duration::from_millis(5);
+        let wait = (at - crate::clock::utc(cx)).to_std().unwrap_or_default() + std::time::Duration::from_millis(5);
         let task = cx.spawn(async move |this, cx| {
             cx.background_executor().timer(wait).await;
             this.update(cx, |this, cx| {
                 this.sidebar_clock_tick = None;
-                this.sidebar_clock = Utc::now();
+                this.sidebar_clock = crate::clock::utc(cx);
                 cx.notify();
             })
             .ok();
@@ -5203,6 +5213,7 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> SidebarSessionRows {
+        let moment = self.now();
         let now = self.sidebar_clock; // slopty: the sidebar's clock, not the wall's
         let filter = self.settings.space_filter.clone();
         let profile_key = self.active_sidebar_pin_profile_key(cx);
@@ -5400,11 +5411,11 @@ impl Shell {
                 } else {
                     0.0
                 };
-                drag.source_collapse.retarget(target);
+                drag.source_collapse.retarget(target, moment);
                 let removed = if self.reduced_motion.get() {
                     target
                 } else {
-                    drag.source_collapse.current()
+                    drag.source_collapse.current(moment)
                 };
                 if let Some(gap) = drag.preview.as_mut() {
                     let origin = f32::from(
@@ -5429,7 +5440,7 @@ impl Shell {
                             from: 0.0,
                             to: 0.0,
                             epoch: 0,
-                            started: std::time::Instant::now(),
+                            started: crate::clock::now(cx),
                         });
                 }
                 for (group, gap) in &mut drag.section_gaps {
@@ -5442,7 +5453,7 @@ impl Shell {
                             }
                     } else {
                         0.0
-                    });
+                    }, moment);
                 }
                 break;
             }
@@ -6802,7 +6813,7 @@ impl Shell {
             git_checked_at: None,
             checkout_id: None,
             repository_id: None,
-            created_at: Utc::now(),
+            created_at: crate::clock::utc(cx),
         };
         self.state.update(cx, |s, cx| {
             if !s.spaces.iter().any(|existing| existing.id == space.id) {
@@ -6986,7 +6997,7 @@ impl Shell {
                     git_checked_at: None,
                     checkout_id: None,
                     repository_id: None,
-                    created_at: Utc::now(),
+                    created_at: crate::clock::utc(cx),
                 });
             }
             cx.notify();
@@ -7106,7 +7117,7 @@ impl Shell {
     }
 
     pub(super) fn close_project_crumb_menu(&mut self, cx: &mut Context<Self>) {
-        if self.project_crumb_menu.begin_close() {
+        if self.project_crumb_menu.begin_close(crate::clock::now(cx)) {
             popover::reap_popup(cx, |shell: &mut Self| &mut shell.project_crumb_menu);
             cx.notify();
         }
@@ -7116,7 +7127,7 @@ impl Shell {
     fn render_project_crumb_menu(
         &self,
         hidden: &[(String, String)],
-        closing: Option<std::time::Instant>,
+        closing: Option<crate::popover::Closing>,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -7240,7 +7251,7 @@ impl Shell {
         match step {
             ProjectStep::Devices => {
                 for (ix, device) in self.add_space_devices(cx).into_iter().enumerate() {
-                    let online = self.state.read(cx).device_online(&device.id, Utc::now());
+                    let online = self.state.read(cx).device_online(&device.id, crate::clock::utc(cx));
                     let name = device.name.clone();
                     rows.push(
                         row(ix)
@@ -7554,7 +7565,7 @@ impl Shell {
             self.project_crumb_menu = popover::Popup::default();
         }
         let menu_open = self.project_crumb_menu.is_open();
-        let menu_closing = self.project_crumb_menu.closing_since();
+        let menu_closing = self.project_crumb_menu.closing_at(crate::clock::now(cx));
         let menu_mounted = self.project_crumb_menu.get().is_some();
         let mut trail: Vec<AnyElement> = Vec::new();
         for (ix, spec) in specs.into_iter().enumerate() {
@@ -7825,7 +7836,7 @@ impl Shell {
     // ---- space context menu / rename / delete overlays ----
 
     fn close_space_menu(&mut self, cx: &mut Context<Self>) {
-        if self.space_menu.begin_close() {
+        if self.space_menu.begin_close(crate::clock::now(cx)) {
             popover::reap_popup(cx, |shell: &mut Self| &mut shell.space_menu);
             cx.notify();
         }
@@ -7891,7 +7902,7 @@ impl Shell {
         self.delete_space_focus.sync(self.delete_space_confirm.is_some(), window, cx);
 
         if let Some((space_id, position)) = self.space_menu.get().cloned() {
-            let closing = self.space_menu.closing_since();
+            let closing = self.space_menu.closing_at(crate::clock::now(cx));
             let rename_id = space_id.clone();
             let delete_id = space_id.clone();
             let menu = popover::popover_card(&theme)

@@ -257,7 +257,7 @@ impl VisualFrame {
             error: None,
             link_ui: None,
             local: Rc::default(),
-            started: Instant::now(),
+            started: crate::clock::now(cx),
             _tasks: tasks,
         }
     }
@@ -356,8 +356,9 @@ impl VisualFrame {
         format!("{}:{path}", self.id).into()
     }
 
-    fn time(&self) -> f64 {
-        self.started.elapsed().as_secs_f64()
+    /// slopty: seconds since the visual started, at the moment of the frame drawing it.
+    fn time(&self, now: Instant) -> f64 {
+        now.saturating_duration_since(self.started).as_secs_f64()
     }
 }
 
@@ -1370,7 +1371,7 @@ impl VisualFrame {
         let Some(runtime) = self.runtime.clone() else {
             return gpui::Empty.into_any_element();
         };
-        let (local, generation, time) = (self.local.clone(), self.generation, self.time());
+        let (local, generation, time) = (self.local.clone(), self.generation, self.time(crate::clock::now(cx)));
         let (draw, animate) = (node.draw, node.animate);
         let paint_palette = Rc::new(Palette::new(Theme::of(cx)));
         let cache_key = key.clone();
@@ -1661,11 +1662,11 @@ impl VisualFrame {
             key.clone(),
             key.clone(),
         );
-        let release = move |this: &mut VisualFrame, key: &SharedString| {
+        let release = move |this: &mut VisualFrame, key: &SharedString, now: std::time::Instant| {
             if let Some(orbit) = this.local.borrow_mut().cameras.get_mut(key)
                 && orbit.drag.take().is_some()
             {
-                orbit.spin_epoch = Instant::now();
+                orbit.spin_epoch = now;
             }
         };
         el = el
@@ -1675,7 +1676,7 @@ impl VisualFrame {
                 cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
                     cx.stop_propagation();
                     if let Some(orbit) = this.local.borrow_mut().cameras.get_mut(&down_key) {
-                        orbit.yaw += spin * orbit.spin_epoch.elapsed().as_secs_f32();
+                        orbit.yaw += spin * crate::clock::now(cx).saturating_duration_since(orbit.spin_epoch).as_secs_f32();
                         orbit.drag = Some((event.position, orbit.yaw, orbit.pitch));
                     }
                     cx.notify();
@@ -1700,14 +1701,14 @@ impl VisualFrame {
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(move |this, _: &gpui::MouseUpEvent, _, cx| {
-                    release(this, &up_key);
+                    release(this, &up_key, crate::clock::now(cx));
                     cx.notify();
                 }),
             )
             .on_mouse_up_out(
                 MouseButton::Left,
                 cx.listener(move |this, _: &gpui::MouseUpEvent, _, cx| {
-                    release(this, &out_key);
+                    release(this, &out_key, crate::clock::now(cx));
                     cx.notify();
                 }),
             );
@@ -1732,12 +1733,12 @@ impl VisualFrame {
             .or_insert(Orbit {
                 yaw: node.yaw,
                 pitch: node.pitch,
-                spin_epoch: Instant::now(),
+                spin_epoch: crate::clock::now(cx),
                 drag: None,
             });
         let yaw = match orbit.drag {
             Some(_) => orbit.yaw,
-            None => orbit.yaw + spin * orbit.spin_epoch.elapsed().as_secs_f32(),
+            None => orbit.yaw + spin * crate::clock::now(cx).saturating_duration_since(orbit.spin_epoch).as_secs_f32(),
         };
         let moving = animate || (spin != 0.0 && orbit.drag.is_none());
         let mut el = div()
@@ -1803,7 +1804,7 @@ impl VisualFrame {
         );
         // Buffers evolve every frame, so a shader with any keeps running.
         let moving = moving || !buffers.is_empty() && !cx.reduce_motion();
-        let (local, time, entity) = (self.local.clone(), self.time(), cx.entity().downgrade());
+        let (local, time, entity) = (self.local.clone(), self.time(crate::clock::now(cx)), cx.entity().downgrade());
         el.child(
             canvas(
                 move |bounds, window, cx| {
@@ -1976,12 +1977,12 @@ impl VisualFrame {
             .or_insert(Orbit {
                 yaw: node.yaw,
                 pitch: node.pitch,
-                spin_epoch: Instant::now(),
+                spin_epoch: crate::clock::now(cx),
                 drag: None,
             });
         let yaw = match orbit.drag {
             Some(_) => orbit.yaw,
-            None => orbit.yaw + spin * orbit.spin_epoch.elapsed().as_secs_f32(),
+            None => orbit.yaw + spin * crate::clock::now(cx).saturating_duration_since(orbit.spin_epoch).as_secs_f32(),
         };
         let camera = slopty_visual::Camera {
             yaw,
@@ -1990,7 +1991,7 @@ impl VisualFrame {
         };
         let moving = (spin != 0.0 && orbit.drag.is_none()) || node.animate;
         let dragging = orbit.drag.is_some();
-        let (local, generation, time) = (self.local.clone(), self.generation, self.time());
+        let (local, generation, time) = (self.local.clone(), self.generation, self.time(crate::clock::now(cx)));
         let entity = cx.entity().downgrade();
         let (draw, animate) = (node.draw, node.animate);
         let paint_palette = Rc::new(Palette::new(Theme::of(cx)));
@@ -2103,7 +2104,7 @@ impl VisualFrame {
                             };
                             // On the GPU when there is one (materials, shadows,
                             // glass, bloom); the software renderer otherwise.
-                            let started = Instant::now();
+                            let started = crate::clock::stopwatch();
                             let mut cost = None;
                             let (width, height, bgra, hints, labels) =
                                 match slopty_visual_gpu::render_scene(
@@ -2130,7 +2131,7 @@ impl VisualFrame {
                                             &rgba,
                                         );
                                         if quality == slopty_visual::Quality::Final {
-                                            cost = Some(started.elapsed());
+                                            cost = Some(crate::clock::spent(started));
                                         }
                                         (
                                             raster.width,

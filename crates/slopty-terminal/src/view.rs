@@ -582,6 +582,9 @@ pub struct TerminalView {
     attach_probe: Option<AttachProbe>,
     /// A ⌘C whose history is still arriving.
     copying: Option<Copying>,
+    /// A block item picked before its block's rows arrived: the item, the block's prompt row,
+    /// and the numbering it was picked in. It runs once they are in.
+    block_pick: Option<(BlockMenuItem, LineIndex, Option<u32>)>,
     /// Keyboard copy mode, while it is on (`view/copy.rs`).
     copy_mode: Option<copy_mode::Mode>,
     /// The buttons whose press went to the program (one bit each, as [`ProtoButton::bit`]): their
@@ -766,6 +769,7 @@ impl TerminalView {
             clip_hook: None,
             attach_probe: None,
             copying: None,
+            block_pick: None,
             copy_mode: None,
             program_buttons: 0,
             reported_cell: None,
@@ -1579,7 +1583,8 @@ impl TerminalView {
             if block.command.is_some() {
                 items.push(BlockMenuItem::CopyCommand);
             }
-            if !block.output.is_empty() {
+            // Rows not held yet may be output: they are on their way.
+            if !block.output.is_empty() || !block.whole {
                 items.push(BlockMenuItem::CopyOutput);
             }
             if block.command.is_some() {
@@ -1640,20 +1645,32 @@ impl TerminalView {
 
     /// Start the block menu's closing motion, when it is open; it goes once that has played.
     fn dismiss_block_menu(&mut self, cx: &mut Context<Self>) -> bool {
-        if !self.block_menu.begin_close() {
+        if !self.block_menu.begin_close(slopty_shell::clock::now(cx)) {
             return false;
         }
         popover::reap_popup(cx, |view: &mut Self| &mut view.block_menu);
         true
     }
 
-    /// One of the block's own items.
+    /// One of the block's own items. One that reads the block's rows waits for those not held
+    /// yet ([`Self::complete_block`]).
     fn block_item_pick(
         &mut self,
         item: BlockMenuItem,
         block: CommandBlock,
         cx: &mut Context<Self>,
     ) {
+        let block = match self.state.command_block(block.prompt) {
+            Some(read) if read.prompt == block.prompt => read,
+            _ => block,
+        };
+        if !block.whole && item != BlockMenuItem::SelectBlock {
+            self.block_pick = Some((item, block.prompt, self.state.epoch()));
+            let effects = self.state.request_block(block.prompt);
+            self.send_effects(effects, cx);
+            return;
+        }
+        self.block_pick = None;
         match item {
             BlockMenuItem::CopyCommand => {
                 if let Some(command) = block.command {
@@ -1788,7 +1805,7 @@ impl TerminalView {
     fn render_block_menu(
         &self,
         menu: &BlockMenu,
-        closing: Option<Instant>,
+        closing: Option<popover::Closing>,
         window: &Window,
         cx: &Context<Self>,
     ) -> gpui::AnyElement {
@@ -1970,15 +1987,56 @@ impl TerminalView {
     }
 
     /// Open the block menu for `block` (none off every block) at `at`.
+    /// Open the block menu on the block line `index` is in, asking for its rows not held here
+    /// (a burst of output scrolls rows away that no frame carried): the menu reads the block
+    /// again as they arrive ([`Self::complete_block`]).
     fn open_block_menu(
         &mut self,
-        block: Option<CommandBlock>,
+        index: LineIndex,
         at: gpui::Point<Pixels>,
         cx: &mut Context<Self>,
     ) {
+        let effects = self.state.request_block(index);
+        self.send_effects(effects, cx);
+        let block = self.state.command_block(index);
         let attach = self.can_attach(cx);
-        self.block_menu.open(BlockMenu { block, at, attach });
+        let epoch = self.state.epoch();
+        self.block_menu.open(BlockMenu { index, epoch, block, at, attach });
         cx.notify();
+    }
+
+    /// Send the worker what `effects` ask of it.
+    fn send_effects(&mut self, effects: Vec<Effect>, cx: &Context<Self>) {
+        for effect in effects {
+            if let Effect::Request(req) = effect {
+                self.send(req, cx);
+            }
+        }
+    }
+
+    /// Rows have arrived: the open block menu reads its block again until it is whole, and an
+    /// item picked before then runs once it is. Another numbering drops both: their rows are
+    /// gone.
+    fn complete_block(&mut self, cx: &mut Context<Self>) {
+        let epoch = self.state.epoch();
+        if let Some(menu) = self.block_menu.open_mut()
+            && menu.epoch == epoch
+            && !menu.block.as_ref().is_some_and(|block| block.whole)
+        {
+            let block = self.state.command_block(menu.index);
+            if block != menu.block {
+                menu.block = block;
+                cx.notify();
+            }
+        }
+        let Some((item, prompt, picked_in)) = self.block_pick else { return };
+        if picked_in != epoch {
+            self.block_pick = None;
+            return;
+        }
+        if let Some(block) = self.state.command_block(prompt).filter(|b| b.whole) {
+            self.block_item_pick(item, block, cx);
+        }
     }
 
     /// The session's worker is back on a new link, whose sender is `out` and whose clipboard
@@ -2456,6 +2514,7 @@ impl TerminalView {
             }
         }
         self.advance_copy(cx);
+        self.complete_block(cx);
         for effect in effects {
             match effect {
                 Effect::Request(TermRequest::Reached { marker }) => self.reached(marker, cx),
@@ -3313,8 +3372,7 @@ impl TerminalView {
                 Some(Under::Path(span)) => self.path_press = Some((span, armed, event.position)),
                 None if armed => {
                     // The phone has no right button: the armed tap on a bare row is its menu.
-                    let block = self.state.command_block(index);
-                    self.open_block_menu(block, event.position, cx);
+                    self.open_block_menu(index, event.position, cx);
                 }
                 None => {}
             }
@@ -3328,8 +3386,7 @@ impl TerminalView {
         // Right button opens the menu: the command block's items when the row is in one
         // (shell integration marks them), the terminal's own always.
         if event.button == MouseButton::Right && (!program_wants_mouse || event.modifiers.shift) {
-            let block = self.state.command_block(self.state.index_at_row(row));
-            self.open_block_menu(block, event.position, cx);
+            self.open_block_menu(self.state.index_at_row(row), event.position, cx);
             return;
         }
         if event.button == MouseButton::Left && (!program_wants_mouse || event.modifiers.shift) {
@@ -4177,11 +4234,10 @@ impl Render for TerminalView {
             .children(confirm)
             .children(foot)
             .children(rail)
-            .children(
-                self.block_menu.get().map(|m| {
-                    self.render_block_menu(m, self.block_menu.closing_since(), window, cx)
-                }),
-            )
+            .children(self.block_menu.get().map(|m| {
+                let closing = self.block_menu.closing_at(slopty_shell::clock::now(cx));
+                self.render_block_menu(m, closing, window, cx)
+            }))
     }
 }
 
@@ -4334,8 +4390,12 @@ struct Copying {
 
 /// The command-block menu a right click opened.
 struct BlockMenu {
-    /// The block under the click; `None` on a row outside every block (the terminal's own
-    /// items only).
+    /// The line the click landed on.
+    index: LineIndex,
+    /// The numbering `index` counts in.
+    epoch: Option<u32>,
+    /// The block under the click, as far as its rows are held; `None` on a row outside every
+    /// block, or while its prompt row is on its way (the terminal's own items only).
     block: Option<CommandBlock>,
     /// Where the click landed (window coordinates), the menu's anchor.
     at: gpui::Point<Pixels>,
@@ -5667,6 +5727,93 @@ mod tests {
         assert_eq!(clipboard(cx).as_deref(), Some("1\n2"));
     }
 
+    /// A right click on output whose rows a burst scrolled away, with no frame carrying them,
+    /// asks for them: Copy output is offered while they are on their way, and picked then, it
+    /// copies all of them once they are in.
+    #[gpui::test]
+    fn the_block_menu_reads_a_block_a_burst_scrolled_away(cx: &mut TestAppContext) {
+        use slopty_proto::terminal::{BlockEnd, BlockMark, Blocks};
+        let (view, mut rx, cx) = terminal(cx);
+        let prompt = |exit| SemanticMark::Prompt { exit, input: Some(2) };
+        let ended = |line| BlockMark {
+            prompt: LineIndex(line),
+            end: Some(BlockEnd { exit: Some(0), took_ms: None }),
+        };
+        let shown = |seq, first: u64, rows: [(&str, SemanticMark); 3], marks| {
+            TermEvent::Frame(Frame {
+                seq,
+                full: true,
+                epoch: 0,
+                cols: 10,
+                rows: 3,
+                cursor: Cursor::default(),
+                modes: TermModes::empty(),
+                oldest_line: LineIndex(0),
+                first_visible_line: LineIndex(first),
+                total_lines: first.saturating_add(3),
+                input_ack: 0,
+                above: None,
+                blocks: Some(Blocks { whole: false, marks }),
+                images: Vec::new(),
+                updates: rows
+                    .iter()
+                    .enumerate()
+                    .map(|(row, (text, mark))| RowUpdate {
+                        row: u16::try_from(row).unwrap(),
+                        line: marked(text, *mark).into(),
+                    })
+                    .collect(),
+            })
+        };
+        let blank = SemanticMark::Output;
+        view.update_in(cx, |view, _window, cx| {
+            let rows = [("$ true", prompt(None)), ("", blank), ("$ seq 9", prompt(Some(0)))];
+            view.apply(shown(1, 0, rows, vec![BlockMark { prompt: LineIndex(0), end: None }]), cx);
+            // `seq 9`, typed at line 2, prints in one burst: lines 3 to 9 never come.
+            let rows = [("8", blank), ("9", blank), ("$ ", prompt(Some(0)))];
+            let marks = vec![ended(0), ended(2), BlockMark { prompt: LineIndex(12), end: None }];
+            view.apply(shown(2, 10, rows, marks), cx);
+        });
+        cx.update(|window, _cx| window.set_a11y_active(true));
+        cx.run_until_parked();
+        while rx.try_recv().is_ok() {}
+
+        let on_output = view.read_with(cx, |v, _| {
+            let m = v.metrics.expect("laid out");
+            m.origin + point(m.cell_width * 0.5, m.line_height * 0.5)
+        });
+        cx.simulate_mouse_down(on_output, MouseButton::Right, gpui::Modifiers::default());
+        cx.run_until_parked();
+        let mut asked = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            if let ClientMsg::Term { req: TermRequest::FetchLines { start, count }, .. } = msg {
+                asked.push((start, count));
+            }
+        }
+        assert_eq!(asked, [(LineIndex(3), 7)], "the block's rows not held");
+        let items = |cx: &mut VisualTestContext| {
+            let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
+            tree.iter()
+                .filter(|n| n.role == "MenuItem")
+                .filter_map(|n| n.label.clone())
+                .collect::<Vec<_>>()
+        };
+        let lines: Vec<Line> = (1..=7).map(|n| marked(&n.to_string(), blank)).collect();
+        let offered = items(cx);
+        let block_first = ["Copy command".to_owned(), "Copy output".to_owned()];
+        assert!(offered.starts_with(&block_first), "{offered:?}");
+        let bounds = cx.debug_bounds("block-menu-copy-output").expect("Copy output");
+        cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        cx.update(|_, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(String::new())));
+        view.update(cx, |view, cx| {
+            view.apply(TermEvent::Lines { start: LineIndex(3), lines }, cx);
+        });
+        cx.run_until_parked();
+        let copied = cx.update(|_, cx| cx.read_from_clipboard().and_then(|i| i.text()));
+        assert_eq!(copied.as_deref(), Some("1\n2\n3\n4\n5\n6\n7\n8\n9"), "the whole output");
+    }
+
     /// A right click off any block (no shell integration, a program's output) still offers
     /// the terminal's own items: Paste, Find, Clear screen, and Copy once something is
     /// selected; each does what its shortcut does and closes the menu.
@@ -5839,6 +5986,7 @@ mod tests {
             exit,
             command: command.map(str::to_owned),
             output: output.to_owned(),
+            whole: true,
         };
         assert_eq!(
             block_context(&block(Some("false"), Some(1), "")),

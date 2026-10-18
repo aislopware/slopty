@@ -33,12 +33,14 @@ Tests make no sound on this Mac: the drawn screen's worker sounds only under `SL
    shown is there in the frames from scratch too, though they are drawn after its end. What the
    shared pulse drives (loaders, the title shimmer, the stream's dissolve, rolling labels) is
    notified at 30 Hz and drawn from its last paint between ticks, so it shows the moment of the
-   tick it last drew on (`motion::pulse_moment`), in a frame from scratch too. What reads the
-   wall clock itself still moves between draws: the self-test asks for GPUI's Reduce Motion (the
-   iPhone's runs in motion all the same, once its window becomes active), and a frame whose two
-   scratch draws disagree is judged only on what holds still, at whatever depth what moves
-   leaves it. The headless tests name such a read: two frames from scratch at one moment, the
-   wall clock moved on between them, must agree (`retention_tests::wobble`).
+   tick it last drew on (`motion::pulse_moment`), in a frame from scratch too. The shell reads
+   no other clock: `crate::clock` is its one door, and clippy refuses a wall-clock read anywhere
+   else in it (docs/decisions/testing.md, "Every clock in the shell is the frame's"). What
+   still reads the wall clock moves between draws: the self-test holds GPUI's Reduce Motion
+   (`motion::hold`), and a frame whose two scratch draws disagree is judged only on what holds
+   still, at whatever depth what moves leaves it. The headless tests name such a read: two
+   frames from scratch at one moment, the wall clock moved on between them, must agree
+   (`retention_tests::wobble`).
    **Fuzzed whole.** `shell::fuzz_tests` takes the whole shell through seeded sequences of what
    a person and the engine do, on a Mac's window, a phone's at 3 × and an iPad's, and checks
    every step against both oracles, the model's selection and the accessibility tree. The suite

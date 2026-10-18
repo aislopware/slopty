@@ -2167,16 +2167,16 @@ pub(crate) fn record_view_frame(view: &'static str) -> bool {
     }
     COUNTERS.with(|counters| {
         let mut counters = counters.borrow_mut();
-        let (start, frames) = counters.entry(view).or_insert_with(|| (Instant::now(), 0));
+        let (start, frames) = counters.entry(view).or_insert_with(|| (crate::clock::stopwatch(), 0));
         *frames += 1;
-        let elapsed = start.elapsed().as_secs_f64();
+        let elapsed = crate::clock::spent(*start).as_secs_f64();
         if elapsed >= 1.0 {
             tracing::warn!(
                 view,
                 frames_per_second = *frames as f64 / elapsed,
                 "view render cadence"
             );
-            *start = Instant::now();
+            *start = crate::clock::stopwatch();
             *frames = 0;
             return true;
         }
@@ -2853,7 +2853,7 @@ impl HighlightStore {
         let code = code.to_string();
         let source_bytes = code.len();
         let task = cx.spawn(async move |this, cx| {
-            let started = Instant::now();
+            let started = crate::clock::stopwatch();
             let document = cx
                 .background_executor()
                 .spawn(async move {
@@ -2908,7 +2908,7 @@ impl HighlightStore {
                             language = ?lang,
                             source_bytes,
                             spans = document.lines.iter().map(Vec::len).sum::<usize>(),
-                            elapsed_us = started.elapsed().as_micros() as u64,
+                            elapsed_us = crate::clock::spent(started).as_micros() as u64,
                             "syntax highlight ready"
                         );
                         entry.document = retained.then(|| Arc::downgrade(&document));
@@ -4137,7 +4137,7 @@ impl Transcript {
             rail_enabled,
             bottom_clearance: 0.0,
             fit: None,
-            clock: chrono::Utc::now(),
+            clock: crate::clock::utc(cx),
             clock_tick: None,
             page_viewport: gpui::Bounds::default(),
             rail_hover: None,
@@ -4192,7 +4192,7 @@ impl Transcript {
             // Rows rewrap at the new width, including virtual ones offscreen.
             self.list.remeasure();
             if self.pinned {
-                self.wake_spring();
+                self.wake_spring(crate::clock::now(cx));
             }
             cx.notify();
         }
@@ -4489,7 +4489,7 @@ impl Transcript {
                         this.own_turn_kick = true;
                     }
                     if this.pinned {
-                        this.wake_spring();
+                        this.wake_spring(crate::clock::now(cx));
                     }
                     this.show_jump_button = jump_visibility(this.show_jump_button, distance)
                         && !this.own_turn.as_ref().is_some_and(|a| a.held);
@@ -4512,7 +4512,7 @@ impl Transcript {
                     // arriving at it) re-engages the pin with a glide.
                     if !this.pinned {
                         this.pinned = true;
-                        this.wake_spring();
+                        this.wake_spring(crate::clock::now(cx));
                     }
                 }
                 let show = jump_visibility(this.show_jump_button, distance) && !this.pinned;
@@ -4943,7 +4943,7 @@ impl Transcript {
                 match anchor_bounds {
                     Some(b) => {
                         let err = f32::from(b.top()) - (f32::from(viewport.top()) + inset);
-                        let now = Instant::now();
+                        let now = crate::clock::now(cx);
                         let frames = match self.own_turn_last_tick {
                             Some(last) => (now.duration_since(last).as_secs_f32() * 1000.0
                                 / SPRING_FRAME_MS)
@@ -4974,7 +4974,7 @@ impl Transcript {
             }
             return;
         }
-        let now = Instant::now();
+        let now = crate::clock::now(cx);
         let frames = match self.own_turn_last_tick {
             Some(last) => (now.duration_since(last).as_secs_f32() * 1000.0 / SPRING_FRAME_MS)
                 .min(SPRING_MAX_CATCHUP_FRAMES),
@@ -5115,15 +5115,15 @@ impl Transcript {
         if viewport > 0.0 && distance > glide_max {
             self.list.scroll_by(px(distance - glide_max));
         }
-        self.wake_spring();
+        self.wake_spring(crate::clock::now(cx));
         cx.notify();
     }
 
     /// Arm the per-frame spring driver — `render` schedules the next frame
     /// while [`Self::spring_should_run`].
-    fn wake_spring(&mut self) {
+    fn wake_spring(&mut self, now: Instant) {
         if self.spring_settled_at.is_some_and(|settled| {
-            settled.elapsed() >= Duration::from_millis(SPRING_SETTLE_GRACE_MS)
+            now.saturating_duration_since(settled) >= Duration::from_millis(SPRING_SETTLE_GRACE_MS)
         }) {
             self.spring.reset();
             self.spring_last_tick = None;
@@ -5157,7 +5157,7 @@ impl Transcript {
             self.spring_last_tick = None;
             return;
         }
-        let now = Instant::now();
+        let now = crate::clock::now(cx);
         if self.spring_settled_at.is_some_and(|settled| {
             now.duration_since(settled) >= Duration::from_millis(SPRING_SETTLE_GRACE_MS)
         }) {
@@ -5227,7 +5227,8 @@ impl Transcript {
 
     /// Rebuild rows from app state; splice minimal ranges into the list.
     fn sync(&mut self, cx: &mut Context<Self>) {
-        self.clock = chrono::Utc::now();
+        self.clock = crate::clock::utc(cx);
+        let now = crate::clock::now(cx);
         if self.retain_on_deselect
             && self.doc_override.is_none()
             && self.state.read(cx).selected_chat.is_none()
@@ -5381,14 +5382,14 @@ impl Transcript {
                     && let Some(rows) = prepared.and_then(|p| p.rows.get(&entry.id))
                 {
                     // slopty: a plan's fold hides its rows here too.
-                    new_rows.extend(rows.iter().filter(|row| self.fold_shows(row)).cloned());
+                    new_rows.extend(rows.iter().filter(|row| self.fold_shows(row, now)).cloned());
                 } else {
-                    new_rows.extend(self.rows_for(entry, false));
+                    new_rows.extend(self.rows_for(entry, false, now));
                 }
             }
             if self.doc_override.is_none() {
                 for echo in state.pending_echoes() {
-                    new_rows.extend(self.rows_for(echo, true));
+                    new_rows.extend(self.rows_for(echo, true, now));
                 }
             }
             (
@@ -5531,7 +5532,7 @@ impl Transcript {
                 _ => None,
             })
             .collect();
-        let now = Instant::now();
+        let now = crate::clock::now(cx);
         let mut live_tool_groups = HashSet::new();
         for row in &new_rows {
             let RowKind::ToolGroup { tools, .. } = &row.kind else {
@@ -5782,7 +5783,7 @@ impl Transcript {
     }
 
     /// Cached row build for one entry (streaming entries bypass the cache).
-    fn rows_for(&mut self, entry: &SessionMessageEntry, pending: bool) -> Vec<Row> {
+    fn rows_for(&mut self, entry: &SessionMessageEntry, pending: bool, now: Instant) -> Vec<Row> {
         let streaming = entry.status == Some(MessageStatus::Streaming);
         // Live entries always rebuild; don't allocate a fingerprint that the
         // streaming path cannot use.
@@ -5831,20 +5832,20 @@ impl Transcript {
                 },
             );
         }
-        rows.retain(|row| self.fold_shows(row)); // slopty: shared with the prepared rows.
+        rows.retain(|row| self.fold_shows(row, now)); // slopty: shared with the prepared rows.
         rows
     }
 
     /// A row shows unless its fold is closed. A closing fold keeps its body mounted through
     /// the TOOL_FOLD tween; the shell's settle sweep drops the rows afterwards.
-    fn fold_shows(&self, row: &Row) -> bool {
+    fn fold_shows(&self, row: &Row, now: Instant) -> bool {
         match &row.compact_fold {
             None => true,
             Some(id) => self.folds.get(id).is_some_and(|fold| {
                 fold.open == Some(true)
                     || fold
                         .toggled_at
-                        .is_some_and(|at| at.elapsed() < FOLD_TWEEN_WINDOW)
+                        .is_some_and(|at| now.saturating_duration_since(at) < FOLD_TWEEN_WINDOW)
             }),
         }
     }
@@ -5913,6 +5914,7 @@ impl Transcript {
         collapsed_h: f32,
         full_h: f32,
         reduced_motion: bool,
+        now: Instant,
     ) {
         let duration_ms = user_resize_duration_ms(full_h - collapsed_h);
         // A fold owns the viewport just like explicit navigation. Release
@@ -5925,7 +5927,7 @@ impl Transcript {
         entry.from = if currently_open { full_h } else { collapsed_h };
         entry.open = Some(!currently_open);
         entry.epoch += 1;
-        entry.toggled_at = Some(Instant::now());
+        entry.toggled_at = Some(now);
         entry.duration_ms = duration_ms;
         entry.user_expansion_height = (full_h - collapsed_h).max(0.0);
 
@@ -5961,7 +5963,7 @@ impl Transcript {
                 }
             } else {
                 self.user_collapse_scroll = Some(UserCollapseScroll {
-                    started_at: Instant::now(),
+                    started_at: now,
                     duration_ms,
                     height_delta: (full_h - collapsed_h).max(0.0),
                     row_ix,
@@ -6008,6 +6010,7 @@ impl Transcript {
                     collapsed_h,
                     measured_h.get().max(collapsed_h),
                     motion::reduced_motion(cx),
+                    crate::clock::now(cx),
                 );
                 cx.notify();
             })
@@ -6027,7 +6030,7 @@ impl Transcript {
         let initial_top = scroll.initial_top;
         let target_top = scroll.target_top;
         let raw =
-            (started_at.elapsed().as_secs_f32() / (duration_ms as f32 / 1000.0)).clamp(0.0, 1.0);
+            (crate::clock::now(cx).saturating_duration_since(started_at).as_secs_f32() / (duration_ms as f32 / 1000.0)).clamp(0.0, 1.0);
         let spec = user_resize_spec(height_delta);
         let progress = spec.progress(raw);
         let desired_top = motion::lerp(initial_top, target_top, progress);
@@ -6071,7 +6074,7 @@ impl Transcript {
         let body_height = shell_ix.map(|ix| {
             let total = self.compact_fold_total(&row_id, ix);
             let fold = self.folds.get(&row_id).copied().unwrap_or_default();
-            compact_body_height(fold, total, motion::reduced_motion(cx), Instant::now())
+            compact_body_height(fold, total, motion::reduced_motion(cx), crate::clock::now(cx))
         });
         let now_open = {
             let entry = self.folds.entry(row_id.clone()).or_default();
@@ -6079,7 +6082,7 @@ impl Transcript {
             entry.from = body_height.unwrap_or(if currently_open { open_height } else { 0.0 });
             entry.open = Some(!currently_open);
             entry.epoch += 1;
-            entry.toggled_at = Some(Instant::now());
+            entry.toggled_at = Some(crate::clock::now(cx));
             entry.disclosure_at = entry.toggled_at;
             !currently_open
         };
@@ -6558,7 +6561,7 @@ impl Transcript {
                 let tweening = folds[ix].epoch > 0
                     && folds[ix]
                         .toggled_at
-                        .is_some_and(|at| at.elapsed() < FOLD_TWEEN_WINDOW);
+                        .is_some_and(|at| crate::clock::now(cx).saturating_duration_since(at) < FOLD_TWEEN_WINDOW);
                 if !opens[ix] && !tweening {
                     self.tool_images.release(&chip, Self::tool_images_of, cx);
                     return None;
@@ -6735,7 +6738,7 @@ impl Transcript {
     }
 
     fn close_image_menu(&mut self, cx: &mut Context<Self>) {
-        if self.image_menu.begin_close() {
+        if self.image_menu.begin_close(crate::clock::now(cx)) {
             crate::popover::reap_popup(cx, |this: &mut Self| &mut this.image_menu);
             cx.notify();
         }
@@ -6863,7 +6866,7 @@ impl Transcript {
             "transcript-image-menu",
             menu.position,
             card.into_any_element(),
-            self.image_menu.closing_since(),
+            self.image_menu.closing_at(crate::clock::now(cx)),
         ))
     }
 
@@ -7067,6 +7070,7 @@ impl Transcript {
                     collapsed_h,
                     measured_h.get().max(collapsed_h),
                     motion::reduced_motion(cx),
+                    crate::clock::now(cx),
                 );
                 cx.notify();
             }));
@@ -7207,7 +7211,7 @@ impl Transcript {
         }
         self.viewport_layout_revision = self.viewport_layout_revision.wrapping_add(1);
         if self.pinned {
-            self.wake_spring();
+            self.wake_spring(crate::clock::now(cx));
         }
         if self.own_turn.is_some() {
             self.own_turn_kick = true;
@@ -7559,7 +7563,7 @@ impl Transcript {
         };
         let engine = self.state.read(cx).engine().cloned();
         self.state.update(cx, |s, cx| {
-            s.retry_pending_send(&chat_id, chrono::Utc::now());
+            s.retry_pending_send(&chat_id, crate::clock::utc(cx));
             cx.notify();
         });
         if let Some(engine) = engine {
@@ -7583,14 +7587,14 @@ impl Transcript {
         if self.clock_tick.is_some() {
             return;
         }
-        let real = chrono::Utc::now().timestamp_millis();
+        let real = crate::clock::utc(cx).timestamp_millis();
         let wait = start.map_or(1000, |start| 1000 - (real - start).rem_euclid(1000));
         let wait = Duration::from_millis(u64::try_from(wait).unwrap_or(1000).clamp(1, 1000) + 2);
         self.clock_tick = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(wait).await;
             this.update(cx, |this, cx| {
                 this.clock_tick = None;
-                this.clock = chrono::Utc::now();
+                this.clock = crate::clock::utc(cx);
                 cx.notify();
             })
             .ok();
@@ -7784,6 +7788,7 @@ impl Transcript {
                                 format!("{word}…")
                             }),
                             cx.reduce_motion(),
+                            crate::clock::now(cx),
                         )),
                 )
                 .when(!sending, |el| {
@@ -7800,6 +7805,7 @@ impl Transcript {
                                 format!("working-timer-{}-{turn}", cx.entity_id()),
                                 SharedString::from(ticking_elapsed(elapsed_secs)),
                                 cx.reduce_motion(),
+                                crate::clock::now(cx),
                             )),
                     )
                 })
@@ -8052,7 +8058,7 @@ impl Transcript {
                     }
                 }
                 let highlight = self.code_highlight_for(&row.id, &tree, Some(*block_ix), cx);
-                let timer = frame_stats_enabled().then(Instant::now);
+                let timer = frame_stats_enabled().then(crate::clock::stopwatch);
                 let el = render::render_block(
                     &top.block,
                     *block_ix,
@@ -8066,7 +8072,7 @@ impl Transcript {
                         .map(|document| document.lines.as_slice()),
                 );
                 if let Some(start) = timer {
-                    record_live_frame_us(start.elapsed().as_micros() as u64);
+                    record_live_frame_us(crate::clock::spent(start).as_micros() as u64);
                 }
                 // The attach pass for this row is done (every element rendered
                 // above seeded its baseline synchronously): elements appearing
@@ -8600,7 +8606,7 @@ impl Transcript {
         let arrival_pending = !cx.reduce_motion()
             && self.tool_group_reveals.get(row_id).is_some_and(|reveal| {
                 reveal.starts.iter().flatten().any(|start| {
-                    Instant::now()
+                    crate::clock::now(cx)
                         .checked_duration_since(*start)
                         .unwrap_or_default()
                         < TOOL_CONNECTOR_REVEAL.total()
@@ -8621,7 +8627,7 @@ impl Transcript {
                 .is_some_and(|previous| previous != open)
             {
                 fold.from = reveal.rendered_height;
-                fold.toggled_at = Some(Instant::now());
+                fold.toggled_at = Some(crate::clock::now(cx));
                 fold.disclosure_at = fold.toggled_at;
                 self.folds.insert(row_id.clone(), fold);
             }
@@ -8639,7 +8645,7 @@ impl Transcript {
         let worked_secs = worked_secs.filter(|_| self.compact_mode);
         if worked_secs.is_some() && self.compact_live_entries.remove(row_id) {
             self.compact_worked_fade_at
-                .insert(row_id.clone(), Instant::now());
+                .insert(row_id.clone(), crate::clock::now(cx));
         }
         let animate_worked = self
             .compact_worked_fade_at
@@ -8925,6 +8931,7 @@ impl Transcript {
             format!("tool-group-title-{row_id}"),
             summary.clone(),
             reduce_motion,
+            crate::clock::now(cx),
         );
         let toggle_id = row_id.clone();
         // A quiet summary sits above the activity rail; its chevron occupies
@@ -9122,7 +9129,7 @@ impl Transcript {
                                 entry.from = row_height - base_row_height + CHIP_CARD_HEIGHT;
                                 entry.open = Some(!currently_open);
                                 entry.epoch += 1;
-                                entry.toggled_at = Some(Instant::now());
+                                entry.toggled_at = Some(crate::clock::now(cx));
                                 cx.notify();
                             }))
                             .child(chip_header(
@@ -10941,7 +10948,7 @@ impl Render for Transcript {
             // back), including virtual rows outside the current viewport.
             self.list.remeasure();
             if self.pinned {
-                self.wake_spring();
+                self.wake_spring(crate::clock::now(cx));
             }
             if self.own_turn.is_some() {
                 self.own_turn_kick = true;
@@ -10955,7 +10962,7 @@ impl Render for Transcript {
             // The render cache drops its laid-out text on its own.
             self.list.remeasure();
             if self.pinned {
-                self.wake_spring();
+                self.wake_spring(crate::clock::now(cx));
             }
             if self.own_turn.is_some() {
                 self.own_turn_kick = true;
@@ -10969,7 +10976,7 @@ impl Render for Transcript {
             // their anchors and all live animation/provenance state.
             self.list.remeasure();
             if self.pinned {
-                self.wake_spring();
+                self.wake_spring(crate::clock::now(cx));
             }
             if self.own_turn.is_some() {
                 self.own_turn_kick = true;
@@ -13452,7 +13459,7 @@ mod tests {
                 }
                 let total = 100.0 * folded(this) as f32;
                 this.folds.get_mut(&work_id).unwrap().toggled_at =
-                    Some(Instant::now() - FOLD_TWEEN_WINDOW);
+                    Some(crate::clock::now(cx) - FOLD_TWEEN_WINDOW);
                 this.toggle_fold(work_id.clone(), 0.0, false, cx);
                 assert_eq!(this.folds[&work_id].open, Some(false));
                 assert_eq!(
@@ -13466,7 +13473,7 @@ mod tests {
                 assert!(this.compact_fold_settle.is_some());
                 // Reopening mid-tween continues from the budget in flight.
                 this.folds.get_mut(&work_id).unwrap().toggled_at =
-                    Some(Instant::now() - TOOL_FOLD.total() / 2);
+                    Some(crate::clock::now(cx) - TOOL_FOLD.total() / 2);
                 this.toggle_fold(work_id.clone(), 0.0, false, cx);
                 let from = this.folds[&work_id].from;
                 let expected = motion::lerp(total, 0.0, TOOL_FOLD.curve.eval(0.5));
@@ -13483,7 +13490,7 @@ mod tests {
                 this.toggle_fold(work_id.clone(), 0.0, false, cx);
                 assert!(folded(this) > 0);
                 this.folds.get_mut(&work_id).unwrap().toggled_at =
-                    Some(Instant::now() - FOLD_TWEEN_WINDOW - Duration::from_millis(50));
+                    Some(crate::clock::now(cx) - FOLD_TWEEN_WINDOW - Duration::from_millis(50));
             });
             handle = Some(transcript);
         });

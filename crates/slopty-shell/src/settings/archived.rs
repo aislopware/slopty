@@ -242,7 +242,7 @@ impl Render for ArchivedPage {
             .sync(self.delete_all_confirm.is_some(), window, cx);
         let dialog = self.render_delete_all_dialog(window.viewport_size(), cx);
         let theme = Theme::of(cx).for_settings_surface();
-        let now = chrono::Utc::now();
+        let now = crate::clock::utc(cx);
         let (rows, device_names, count): (
             Vec<Chat>,
             std::collections::HashMap<String, String>,
@@ -348,7 +348,7 @@ impl Render for ArchivedPage {
                                             .text_size(crate::typography::ui_rems(11.0))
                                             .text_color(theme.text_muted)
                                             .tooltip(widgets::text_tooltip(
-                                                absolute_time(at),
+                                                absolute_time(at, now),
                                             ))
                                             .tooltip_show_delay(widgets::TOOLTIP_DELAY)
                                             .child(time_ago),
@@ -610,8 +610,8 @@ fn delete_all_failure(failed: usize) -> String {
 
 // slopty: when a relative time was, in full, for its tooltip: "Oct 16, 14:05", with the year when
 // it is not this one (M39).
-fn absolute_time(then: chrono::DateTime<chrono::Utc>) -> String {
-    absolute_time_in(then, &chrono::Local, chrono::Utc::now())
+fn absolute_time(then: chrono::DateTime<chrono::Utc>, now: chrono::DateTime<chrono::Utc>) -> String {
+    absolute_time_in(then, &chrono::Local, now)
 }
 
 fn absolute_time_in<Tz: chrono::TimeZone>(

@@ -714,7 +714,7 @@ mod tests {
 
         impl Render for Scene {
             fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-                let mut opts = render::RenderOptions::settled("inline-code-fixture".into());
+                let mut opts = render::RenderOptions::settled("inline-code-fixture".into(), std::time::Instant::now());
                 let activated = self.activated.clone();
                 opts.link = Some(LinkUi {
                     source_session: Some("chat".into()),

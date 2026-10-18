@@ -143,6 +143,7 @@ pub fn working_line(
                                 format!("working-word-{view}-{turn}"),
                                 SharedString::from(lead),
                                 reduced,
+                                crate::clock::now(cx),
                             )),
                     )
                     .when(!figures.is_empty(), |el| {

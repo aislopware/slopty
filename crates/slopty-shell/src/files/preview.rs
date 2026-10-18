@@ -3,7 +3,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     rc::Rc,
     sync::Arc,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use gpui::{
@@ -1803,11 +1803,11 @@ impl FilesSurface {
         let task_path = path.clone();
         let task_key = key.clone();
         let task = cx.spawn(async move |this, cx| {
-            let started_at = Instant::now();
+            let started_at = crate::clock::stopwatch();
             let result = client.read_file(request).await;
             tracing::trace!(
                 path = %task_path,
-                elapsed_ms = started_at.elapsed().as_millis(),
+                elapsed_ms = crate::clock::spent(started_at).as_millis(),
                 success = result.is_ok(),
                 error = ?result.as_ref().err(),
                 "workspace document reconciliation read completed"

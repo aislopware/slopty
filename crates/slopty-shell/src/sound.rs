@@ -166,13 +166,13 @@ fn run_checked(program: &str, args: &[&str], path: &Path) -> Result<(), String> 
         .stderr(std::process::Stdio::null())
         .spawn()
         .map_err(|e| format!("{program}: {e}"))?;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let deadline = crate::clock::stopwatch() + std::time::Duration::from_secs(10);
     loop {
         match child.try_wait() {
             Ok(Some(status)) if status.success() => return Ok(()),
             Ok(Some(status)) => return Err(format!("{program} exited with {status}")),
             Ok(None) => {
-                if std::time::Instant::now() >= deadline {
+                if crate::clock::stopwatch() >= deadline {
                     let _ = child.kill();
                     let _ = child.wait();
                     return Err(format!("{program} timed out"));

@@ -13,6 +13,9 @@
 //! - [`shell`] — sidebar + main panel + right-pane scaffold + gate;
 //! - [`loaders`] — slopty pulse loader, gradient spinner, boot splash.
 
+// slopty: tests read the wall clock as they please; the shell itself only through `clock`.
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
+
 // slopty: voice, dictation, the orb, appshots, the updater, sign-in, sync, agent accounts,
 // the pull-request pages and agent visuals are not taken (docs/decisions/ui.md).
 mod account_usage;
@@ -25,6 +28,7 @@ pub mod browser;
 pub mod change_requests;
 pub mod catalog;
 pub mod changes;
+pub mod clock; // slopty: the frame's moment, the shell's one clock
 mod comment_ui;
 pub mod comments;
 pub mod composer;

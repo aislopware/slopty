@@ -277,7 +277,7 @@ impl Composer {
 
     /// Close the open footer menu; the keyboard goes back to the composer when the menu had it.
     fn close_footer_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.footer.menu.begin_close() {
+        if self.footer.menu.begin_close(crate::clock::now(cx)) {
             crate::popover::reap_popup(cx, |this: &mut Self| &mut this.footer.menu);
         }
         if self.footer.keys.focus.as_ref().is_some_and(|focus| focus.is_focused(window)) {
@@ -382,7 +382,7 @@ impl Composer {
         {
             self.footer.pending_mode = None;
         }
-        let now = chrono::Utc::now().timestamp_millis();
+        let now = crate::clock::utc(cx).timestamp_millis();
         let mut segments: Vec<AnyElement> = Vec::new();
         // slopty: where ↑ has walked to among the chat's prompts.
         if self.extras.history.is_some() {
@@ -561,7 +561,7 @@ impl Composer {
         chip.child(crate::popover::anchored_menu_above_end(
             "dock-goal-menu",
             card.into_any_element(),
-            self.footer.menu.closing_since(),
+            self.footer.menu.closing_at(crate::clock::now(cx)),
         ))
         .into_any_element()
     }
@@ -717,7 +717,7 @@ impl Composer {
             .child(crate::popover::anchored_menu_above_end(
                 "dock-mode-menu",
                 card.into_any_element(),
-                self.footer.menu.closing_since(),
+                self.footer.menu.closing_at(crate::clock::now(cx)),
             ))
             .into_any_element()
     }

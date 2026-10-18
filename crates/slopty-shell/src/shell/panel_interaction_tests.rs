@@ -49,7 +49,6 @@ fn setup(cx: &mut TestAppContext) -> (tempfile::TempDir, Entity<Shell>, &mut Vis
         shell.active_chat = "a".into();
         shell.sidebar_opened_at = 1;
         shell.panel_open_sequence = 1;
-        shell.test_time = Some(std::time::Instant::now());
         shell
     });
     cx.simulate_resize(gpui::size(px(1600.0), px(900.0)));
@@ -94,11 +93,9 @@ struct Frame {
 }
 
 fn draw(shell: &Entity<Shell>, cx: &mut VisualTestContext, millis: u64) -> Frame {
-    shell.update(cx, |shell, cx| {
-        *shell.test_time.as_mut().unwrap() +=
-            Duration::from_millis(millis).mul_f32(motion::speed_scale());
-        cx.notify();
-    });
+    // slopty: the shell's motion reads the dispatcher's clock, which the test moves.
+    cx.executor().advance_clock(Duration::from_millis(millis).mul_f32(motion::speed_scale()));
+    shell.update(cx, |_, cx| cx.notify());
     cx.update(|window, cx| window.draw(cx).clear(cx));
     let mut width = |id| cx.debug_bounds(id).map_or(0.0, |b| f32::from(b.size.width));
     Frame {
@@ -561,7 +558,12 @@ fn check_side_chat_rename_scroll(cx: &mut TestAppContext, width: f32, reduced_mo
             shell.read_with(cx, |shell, cx| {
                 let rename = shell.chat_rename.as_ref().unwrap();
                 assert_eq!(rename.chat_id, chat);
-                assert!(rename.input.focus_handle(cx).is_focused(window));
+                assert!(
+                    rename.input.focus_handle(cx).is_focused(window),
+                    "{chat}'s editor has the keyboard: pending {}, the composer has it {}",
+                    rename.focus_pending,
+                    shell.composer.focus_handle(cx).is_focused(window),
+                );
             });
         });
     }

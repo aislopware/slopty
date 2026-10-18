@@ -948,6 +948,7 @@ impl Pickers {
                                     format!("compact-effort-title-{}", cx.entity_id()),
                                     effort.clone(),
                                     reduced,
+                                    crate::clock::now(cx),
                                 )),
                         )
                         // slopty: the readout says when the effort is the model's default.

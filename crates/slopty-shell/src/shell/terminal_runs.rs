@@ -4,7 +4,7 @@
 //! or one that asks for root or destroys (`sudo`, `rm`, a forced push…), is left at the prompt
 //! for the person to read and run with Enter.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use gpui::{App, Context, Window};
 
@@ -114,7 +114,7 @@ impl Shell {
         // A fresh terminal takes the line once its shell is up.
         let (chat, line) = (chat.to_owned(), line.to_owned());
         cx.spawn(async move |this, cx| {
-            let since = Instant::now();
+            let since = cx.background_executor().now();
             loop {
                 let sent = panel
                     .update(cx, |panel, cx| {
@@ -125,7 +125,7 @@ impl Shell {
                 if sent {
                     return;
                 }
-                if since.elapsed() > OPENS_WITHIN {
+                if cx.background_executor().now().saturating_duration_since(since) > OPENS_WITHIN {
                     let _gone = this.update(cx, |_, cx| {
                         crate::toast::error(cx, "Couldn\u{2019}t open the terminal, so nothing ran. Try again.");
                     });

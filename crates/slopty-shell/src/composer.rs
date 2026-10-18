@@ -2253,7 +2253,6 @@ impl ComposerInput {
     }
 
     /// Where the input was last drawn.
-    #[cfg(test)]
     pub(crate) fn drawn_bounds(&self) -> Option<Bounds<Pixels>> {
         self.last_bounds
     }
@@ -2341,7 +2340,7 @@ impl ComposerInput {
         self.invalidate_mention_tooltip();
         let (trailing, advance) = reference_suffix(self.content[range.end..].chars().next());
         let inserted = format!("{link}{trailing}");
-        self.record_edit(&range, &inserted);
+        self.record_edit(&range, &inserted, crate::clock::now(cx));
         self.edit_revision = self.edit_revision.wrapping_add(1);
         self.content =
             self.content[..range.start].to_owned() + &inserted + &self.content[range.end..];
@@ -2390,7 +2389,7 @@ impl ComposerInput {
             if separated && self.content[range.end..].starts_with(' ') {
                 range.end += 1;
             }
-            self.record_edit(&range, "");
+            self.record_edit(&range, "", crate::clock::now(cx));
             self.edit_revision = self.edit_revision.wrapping_add(1);
             self.content.replace_range(range.clone(), "");
             let shift = |offset: usize| {
@@ -2483,7 +2482,7 @@ impl ComposerInput {
             return false;
         };
         self.invalidate_mention_tooltip();
-        self.record_edit(&range, &inserted);
+        self.record_edit(&range, &inserted, crate::clock::now(cx));
         self.edit_revision = self.edit_revision.wrapping_add(1);
         self.content =
             self.content[..range.start].to_owned() + &inserted + &self.content[range.end..];
@@ -2515,7 +2514,7 @@ impl ComposerInput {
         }
         let (trailing, advance) = reference_suffix(self.content[range.end..].chars().next());
         let inserted = format!("{replacement}{trailing}");
-        self.record_edit(&range, &inserted);
+        self.record_edit(&range, &inserted, crate::clock::now(cx));
         self.edit_revision = self.edit_revision.wrapping_add(1);
         self.content =
             self.content[..range.start].to_owned() + &inserted + &self.content[range.end..];
@@ -2546,7 +2545,7 @@ impl ComposerInput {
             range.end += 1;
         }
         self.last_edit = None;
-        self.record_edit(&range, "");
+        self.record_edit(&range, "", crate::clock::now(cx));
         self.last_edit = None;
         self.edit_revision = self.edit_revision.wrapping_add(1);
         self.content.replace_range(range.clone(), "");
@@ -2810,7 +2809,7 @@ impl ComposerInput {
 
     /// Called with the range about to be replaced, BEFORE the content changes,
     /// so the pushed snapshot is the pre-edit state.
-    fn record_edit(&mut self, range: &Range<usize>, new_text: &str) {
+    fn record_edit(&mut self, range: &Range<usize>, new_text: &str, now: Instant) {
         // slopty: dictation removed.
         let kind = if new_text.is_empty() {
             EditKind::Delete
@@ -2835,10 +2834,10 @@ impl ComposerInput {
                         && range.start == *at
                         && new_text.chars().count() == 1
                         && !new_text.starts_with(['\n', ' ', '\t'])
-                        && when.elapsed() < UNDO_COALESCE
+                        && now.saturating_duration_since(*when) < UNDO_COALESCE
                 }
                 (EditKind::Delete, Some((EditKind::Delete, at, when))) => {
-                    range.end == *at && when.elapsed() < UNDO_COALESCE
+                    range.end == *at && now.saturating_duration_since(*when) < UNDO_COALESCE
                 }
                 _ => false,
             };
@@ -2854,7 +2853,7 @@ impl ComposerInput {
             EditKind::Insert => range.start + new_text.len(),
             EditKind::Delete => range.start,
         };
-        self.last_edit = coalescible.then(|| (kind, tail, Instant::now()));
+        self.last_edit = coalescible.then_some((kind, tail, now));
     }
 
     fn restore(&mut self, snapshot: EditSnapshot, cx: &mut Context<Self>) {
@@ -4510,7 +4509,7 @@ impl EntityInputHandler for ComposerInput {
         // snapshot was already taken (`replace_and_mark_text_in_range`);
         // recording here would pin undo to the half-composed text instead.
         if self.marked_range.is_none() {
-            self.record_edit(&range, new_text);
+            self.record_edit(&range, new_text, crate::clock::now(cx));
         }
         self.edit_revision = self.edit_revision.wrapping_add(1);
         self.content =
@@ -6099,7 +6098,7 @@ impl Composer {
             ComposerInputEvent::Edited | ComposerInputEvent::CursorMoved => {
                 // slopty: typing holds a card's option keys back (`request_card::KeyGuard`).
                 if matches!(event, ComposerInputEvent::Edited) {
-                    this.card.guard.typed_at = Some(Instant::now());
+                    this.card.guard.typed_at = Some(crate::clock::now(cx));
                 }
                 this.on_input_edited(cx)
             }
@@ -6236,7 +6235,7 @@ impl Composer {
             surface_bounds: Default::default(),
             last_target_height: 0.0,
             height_morph: None,
-            morph_clock: Instant::now(),
+            morph_clock: crate::clock::now(cx),
             route_snap_until: None,
             _observe: observe,
             _pickers_observe: pickers_observe,
@@ -7007,7 +7006,7 @@ impl Composer {
             .or_else(|| state.effective_device_id());
         let online = target
             .as_deref()
-            .is_none_or(|device| state.device_online(device, chrono::Utc::now()));
+            .is_none_or(|device| state.device_online(device, crate::clock::utc(cx)));
         format!(
             "{engine:?}:{:?}:{:?}:{online}",
             state.connection, state.connectivity.state
@@ -8172,7 +8171,7 @@ impl Composer {
                 // always expanded; an established session begins compact.
                 self.expanded_mode = returning_to_new_thread;
                 let now_ms =
-                    self.morph_clock.elapsed().as_secs_f32() * 1000.0 / motion::speed_scale();
+                    crate::clock::now(cx).saturating_duration_since(self.morph_clock).as_secs_f32() * 1000.0 / motion::speed_scale();
                 self.flip_morph = Some(FlipMorph::new_thread_transition(
                     self.last_rendered_height,
                     now_ms,
@@ -8181,7 +8180,7 @@ impl Composer {
             } else {
                 self.flip_morph = None;
                 self.last_rendered_height = 0.0;
-                self.route_snap_until = Some(Instant::now() + Duration::from_millis(ROUTE_SNAP_MS));
+                self.route_snap_until = Some(crate::clock::now(cx) + Duration::from_millis(ROUTE_SNAP_MS));
             }
             self.input.update(cx, |input, cx| {
                 input.set_text(draft, cx);
@@ -8218,7 +8217,7 @@ impl Composer {
                         .unwrap_or_default();
                     self.wizard = Some(Wizard::new(request_id, questions));
                     // slopty: its option keys wait while the person may still be typing.
-                    self.card.guard.shown_at = Some(Instant::now());
+                    self.card.guard.shown_at = Some(crate::clock::now(cx));
                     self.card_focus_pending = true;
                     self.input
                         .update(cx, |input, cx| input.set_text(prefill, cx));
@@ -8279,7 +8278,7 @@ impl Composer {
             return false;
         };
         matches!(
-            s.indicator_for(chat_id, chrono::Utc::now()),
+            s.indicator_for(chat_id, crate::clock::utc(cx)),
             Indicator::Working | Indicator::AwaitingInput
         )
     }
@@ -8593,7 +8592,7 @@ impl Composer {
         let text = crate::comments::with_comments(&text, &comments);
         self.preview = None;
         let message_id = uuid::Uuid::new_v4().to_string();
-        let created_at = chrono::Utc::now().timestamp_millis();
+        let created_at = crate::clock::utc(cx).timestamp_millis();
         // Existing busy chats always queue; compatibility was checked before
         // taking the draft, attachments, or review comments.
         let queue = queue && !is_new;
@@ -8717,7 +8716,7 @@ impl Composer {
                 // Working overlay until the host executes the queued command —
                 // without it a remote send flashed Completed (and could ring
                 // the done-chime) in the queue→drain→sync gap.
-                s.begin_pending_send(&chat_id, &message_id, chrono::Utc::now());
+                s.begin_pending_send(&chat_id, &message_id, crate::clock::utc(cx));
             }
             cx.notify();
         });
@@ -8889,7 +8888,7 @@ impl Composer {
                     // run spawns.
                     space_path.clone().or_else(|| {
                         Some(if scratch_folders {
-                            slopty_view_proto::projectless::scratch_cwd(&chat_id, chrono::Utc::now())
+                            slopty_view_proto::projectless::scratch_cwd(&chat_id, crate::clock::utc_at(cx.background_executor().now()))
                         } else {
                             "~".to_string()
                         })
@@ -9513,14 +9512,14 @@ impl Composer {
         {
             // slopty: a key the person meant for the composer, typed as the card came or just
             // after, goes on to the input rather than answering (`request_card::KeyGuard`).
-            if self.wizard_digit(digit, Instant::now(), cx) {
+            if self.wizard_digit(digit, crate::clock::now(cx), cx) {
                 // Consumed as a selection: stop the platform from also
                 // inserting the digit into the focused free-text input.
                 cx.stop_propagation();
                 return;
             }
         } else if key == "enter" {
-            if !input_focused && !self.card.guard.holds(Instant::now()) {
+            if !input_focused && !self.card.guard.holds(crate::clock::now(cx)) {
                 self.wizard_enter(cx); // slopty: an approval's Enter follows its rules.
                 cx.stop_propagation();
             }
@@ -9635,7 +9634,7 @@ impl Composer {
         let keys_pick = question.choices_only && !click_only;
 
         // slopty: what the card adds by the request's kind (`composer/request_card.rs`).
-        let header_chips = self.card_header_chips(&question, &theme);
+        let header_chips = self.card_header_chips(&question, crate::clock::utc(cx), &theme);
         let extras = self.render_card_extras(&wizard.request_id, &question, plan, &theme, cx);
         let revising = wizard.revising;
         let takes_words = request_card::takes_words(&question, revising);

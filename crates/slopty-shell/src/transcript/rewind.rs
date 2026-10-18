@@ -178,7 +178,7 @@ impl Transcript {
     }
 
     fn close_rewind_menu(&mut self, cx: &mut Context<Self>) {
-        if self.rewind.menu.begin_close() {
+        if self.rewind.menu.begin_close(crate::clock::now(cx)) {
             crate::popover::reap_popup(cx, |this: &mut Self| &mut this.rewind.menu);
             cx.notify();
         }
@@ -321,7 +321,7 @@ impl Transcript {
             "transcript-rewind-menu",
             menu.position,
             card.into_any_element(),
-            self.rewind.menu.closing_since(),
+            self.rewind.menu.closing_at(crate::clock::now(cx)),
         ))
     }
 }

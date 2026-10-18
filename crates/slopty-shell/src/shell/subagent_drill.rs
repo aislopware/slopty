@@ -45,7 +45,7 @@ impl Shell {
         let child = state.selected_chat_row().filter(|chat| chat.subagent)?;
         let parent_id = child.parent_chat_id.clone()?;
         let parent = state.chats.iter().find(|chat| chat.id == parent_id);
-        let running = state.indicator_for(&child.id, chrono::Utc::now())
+        let running = state.indicator_for(&child.id, crate::clock::utc(cx))
             == crate::state::Indicator::Working;
         Some(Drill {
             child: child.id.clone(),

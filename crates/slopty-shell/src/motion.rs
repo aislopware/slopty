@@ -112,7 +112,7 @@ impl Global for PulseClock {}
 /// The instant every repeating animation's phase counts from, the same for the whole process.
 fn process_epoch() -> Instant {
     static EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
-    *EPOCH.get_or_init(Instant::now)
+    *EPOCH.get_or_init(crate::clock::stopwatch) // slopty: an origin, not a moment drawn
 }
 
 /// The phase `[0,1)` at `now` of a repeating animation lasting `period`, on the process's one
@@ -590,10 +590,10 @@ pub struct ResizeEdgeBounce {
 }
 
 impl ResizeEdgeBounce {
-    pub fn new(edge: ResizeEdge) -> Self {
+    pub fn new(edge: ResizeEdge, now: Instant) -> Self {
         Self {
             edge,
-            started: Instant::now(),
+            started: now,
         }
     }
 }
@@ -821,27 +821,27 @@ pub(crate) struct DisclosureMotion {
 }
 
 impl DisclosureMotion {
-    pub(crate) fn new(epoch: u64, from: f32, to: f32) -> Self {
+    pub(crate) fn new(epoch: u64, from: f32, to: f32, now: Instant) -> Self {
         Self {
             epoch,
             from,
             to,
-            started: std::time::Instant::now(),
+            started: now,
         }
     }
 
-    pub(crate) fn current(self) -> f32 {
+    pub(crate) fn current(self, now: Instant) -> f32 {
         let total = COLLAPSE.total().as_secs_f32();
         let raw = if total > 0.0 {
-            self.started.elapsed().as_secs_f32() / total
+            now.saturating_duration_since(self.started).as_secs_f32() / total
         } else {
             1.0
         };
         lerp(self.from, self.to, COLLAPSE.progress(raw))
     }
 
-    pub(crate) fn animating(self) -> bool {
-        self.started.elapsed() < COLLAPSE.total() + Duration::from_millis(120)
+    pub(crate) fn animating(self, now: Instant) -> bool {
+        now.saturating_duration_since(self.started) < COLLAPSE.total() + Duration::from_millis(120)
     }
 }
 
@@ -976,25 +976,30 @@ impl HoverFades {
 
 thread_local! {
     static HOVER_FADES: RefCell<HoverFades> = RefCell::new(HoverFades::default());
-    /// slopty: the clock hover fades read: the wall's, or a test's ([`run_on`]).
-    static HOVER_CLOCK: RefCell<Option<gpui::BackgroundExecutor>> = const { RefCell::new(None) };
+    /// slopty: the moment of the frame the fades were last ticked for ([`hover_fades_active`]),
+    /// which every read of the frame stands at.
+    static HOVER_FRAME: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
 }
 
-/// slopty: the instant hover fades read now: a test's executor clock once [`run_on`] set it,
-/// else the wall's, so no test decides on how long the machine took.
+/// slopty: the instant a hover flips at: the dispatcher's clock, which a test moves.
 fn hover_now() -> Instant {
-    HOVER_CLOCK.with(|clock| clock.borrow().as_ref().map_or_else(Instant::now, gpui::BackgroundExecutor::now))
+    crate::clock::event_now()
 }
 
-/// slopty: run this thread's hover fades on `executor`'s clock, which a test advances.
-#[cfg(test)]
+/// slopty: the instant a fade is read at: the moment of the frame the shell ticked the fades
+/// for, so a frame drawn twice at one moment draws each fade alike; before any frame, now.
+fn hover_frame() -> Instant {
+    HOVER_FRAME.get().unwrap_or_else(hover_now)
+}
+
+/// slopty: stamp this thread's hover flips on `executor`'s clock ([`crate::clock::run_on`]).
 pub(crate) fn run_on(executor: gpui::BackgroundExecutor) {
-    HOVER_CLOCK.with(|clock| *clock.borrow_mut() = Some(executor));
+    crate::clock::run_on(executor);
 }
 
 /// Hover progress (0..1) for `key` this frame.
 pub fn hover_t(key: &str) -> f32 {
-    HOVER_FADES.with(|fades| fades.borrow_mut().value_at(key, hover_now()))
+    HOVER_FADES.with(|fades| fades.borrow_mut().value_at(key, hover_frame()))
 }
 
 /// slopty: whether the fades hold `key`, hovered or fading. They let go of a key no frame read,
@@ -1029,10 +1034,18 @@ pub fn hover_listener(
     }
 }
 
-/// Frame-drive hook: call ONCE per window frame (the shell render tail); true
-/// while any hover fade is mid-flight and frames must keep coming.
-pub fn hover_fades_active() -> bool {
-    HOVER_FADES.with(|fades| fades.borrow_mut().tick_at(hover_now()))
+/// slopty: the frame's moment, which every hover read of the frame stands at: the shell sets
+/// it as its render begins, before any element reads a fade.
+pub fn begin_hover_frame(now: Instant) {
+    HOVER_FRAME.set(Some(now));
+}
+
+/// Frame-drive hook: call ONCE per window frame (the shell render tail) with the frame's
+/// moment, which the frame's reads stand at; true while any hover fade is mid-flight and
+/// frames must keep coming.
+pub fn hover_fades_active(now: Instant) -> bool {
+    HOVER_FRAME.set(Some(now));
+    HOVER_FADES.with(|fades| fades.borrow_mut().tick_at(now))
 }
 
 /// Blend two colors by `t` the way the browser transitions them: component
@@ -1266,6 +1279,9 @@ struct MotionState {
     pause_in_background: bool,
     system: bool,
     active: bool,
+    /// slopty: the flag as a holder fixed it ([`hold`]), over the person's setting, the OS's
+    /// and the window's activation.
+    held: Option<bool>,
 }
 
 impl Global for MotionState {}
@@ -1298,6 +1314,7 @@ pub fn init(preference: ReduceMotion, pause_in_background: bool, cx: &mut App) {
         pause_in_background,
         system: false,
         active: true,
+        held: None,
     });
     refresh_system(cx);
     apply(cx);
@@ -1348,6 +1365,19 @@ pub fn set_pause_in_background(enabled: bool, cx: &mut App) {
     });
 }
 
+/// slopty: fix the flag at `reduced` for good: the e2e socket asks for Reduce Motion so every
+/// dump's frame can be judged, and neither the person's setting, the OS's nor the window
+/// becoming active (which reads the OS's again) may undo it.
+pub fn hold(reduced: bool, cx: &mut App) {
+    match state_mut(cx) {
+        Some(state) => {
+            state.held = Some(reduced);
+            apply(cx);
+        }
+        None => set_reduced_motion(cx, reduced),
+    }
+}
+
 /// Main-window focus moved. Regaining focus also re-reads the OS setting:
 /// changing it means visiting System Settings, so coming back is the moment
 /// it can have moved, without holding a platform notification observer.
@@ -1384,12 +1414,9 @@ fn apply(cx: &mut App) {
     let Some(state) = cx.try_global::<MotionState>() else {
         return;
     };
-    let reduced = resolve(
-        state.preference,
-        state.system,
-        state.pause_in_background,
-        state.active,
-    );
+    let reduced = state.held.unwrap_or_else(|| {
+        resolve(state.preference, state.system, state.pause_in_background, state.active)
+    });
     // gpui refreshes every window only when the flag actually flips.
     set_reduced_motion(cx, reduced);
 }
@@ -1536,6 +1563,7 @@ mod tests {
                     pause_in_background,
                     system,
                     active,
+                    held: None,
                 });
                 apply(cx);
                 let view = cx.new(|_| ());
@@ -1559,6 +1587,34 @@ mod tests {
                     }));
                 }
             }
+        });
+    }
+
+    /// slopty: a held flag (the e2e socket's Reduce Motion) outlasts the window becoming active,
+    /// which re-reads the OS's setting, and the person's own.
+    #[gpui::test]
+    fn a_held_reduce_motion_outlasts_activation_and_the_setting(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(MotionState {
+                preference: ReduceMotion::Off,
+                pause_in_background: false,
+                system: false,
+                active: true,
+                held: None,
+            });
+            apply(cx);
+            assert!(!reduced_motion(cx));
+            hold(true, cx);
+            assert!(reduced_motion(cx));
+            set_window_active(false, cx);
+            set_window_active(true, cx);
+            assert!(reduced_motion(cx), "activation keeps the held flag");
+            if let Some(state) = state_mut(cx) {
+                state.preference = ReduceMotion::On;
+            }
+            apply(cx);
+            hold(false, cx);
+            assert!(!reduced_motion(cx), "the hold wins over the person's setting too");
         });
     }
 
@@ -1596,6 +1652,7 @@ mod tests {
                 pause_in_background: false,
                 system: true,
                 active: true,
+                held: None,
             });
             apply(cx);
         });
@@ -1634,6 +1691,7 @@ mod tests {
                 pause_in_background: false,
                 system: true,
                 active: true,
+                held: None,
             });
             apply(cx);
             assert!(reduced_motion(cx));
@@ -2038,6 +2096,7 @@ mod tests {
                 pause_in_background: false,
                 system: true,
                 active: true,
+                held: None,
             });
             apply(cx);
             assert!(!reduced_motion(cx), "Off ignores the system");

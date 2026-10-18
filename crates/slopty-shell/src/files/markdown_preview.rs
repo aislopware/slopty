@@ -1083,7 +1083,7 @@ impl MarkdownPreview {
         range
             .filter_map(|ix| {
                 let top = self.tree.blocks.get(ix)?.clone();
-                let mut opts = RenderOptions::settled(format!("{}{ix}", self.scope).into());
+                let mut opts = RenderOptions::settled(format!("{}{ix}", self.scope).into(), crate::clock::now(cx));
                 opts.code = self.code_uis_for(&opts.row_key, &top.block, ix, cx);
                 opts.math = crate::settings::math_style(cx);
                 let editor = self.editor.as_ref().and_then(|editor| editor.upgrade());

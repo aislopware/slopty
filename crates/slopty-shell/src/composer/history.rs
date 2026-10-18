@@ -462,7 +462,7 @@ impl Composer {
             let state = self.state.read(cx);
             let Some(chat) = state.selected_chat.as_deref() else { return };
             matches!(
-                state.indicator_for(chat, chrono::Utc::now()),
+                state.indicator_for(chat, crate::clock::utc(cx)),
                 Indicator::Working | Indicator::AwaitingInput
             )
         };
@@ -496,7 +496,7 @@ impl Composer {
         }
         let next = {
             let state = self.state.read(cx);
-            let now = chrono::Utc::now();
+            let now = crate::clock::utc(cx);
             let mut online: Vec<(&str, &str)> = state
                 .devices
                 .iter()

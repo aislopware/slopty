@@ -5,7 +5,6 @@ use gpui::{
     AnyElement, App, Bounds, Element, GlobalElementId, InspectorElementId, IntoElement, LayoutId,
     Pixels, Point, Position, SharedString, Size, Style, Window, div, point, prelude::*, px,
 };
-use std::time::Instant;
 
 /// Which trigger edge the menu lines up with: `End` grows leftward from the
 /// trigger's right edge, `Start` rightward from its left edge.
@@ -20,7 +19,7 @@ pub(crate) enum MenuAlign {
 pub(crate) fn contained_menu(
     id: SharedString,
     content: gpui::Div,
-    closing: Option<Instant>,
+    closing: Option<super::Closing>,
     trigger_height: f32,
     limits: Bounds<Pixels>,
     align: MenuAlign,

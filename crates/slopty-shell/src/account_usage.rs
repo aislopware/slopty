@@ -150,8 +150,7 @@ pub(crate) fn render_usage_meter(
 }
 
 /// The plan-usage ring's card: every window's meter, read-only.
-fn usage_card(windows: &[AgentUsageWindow], theme: &Theme) -> gpui::Div {
-    let now = Utc::now();
+fn usage_card(windows: &[AgentUsageWindow], now: chrono::DateTime<Utc>, theme: &Theme) -> gpui::Div {
     popover::popover_card(theme)
         .flex()
         .flex_col()
@@ -291,7 +290,7 @@ impl AccountUsage {
     }
 
     fn dismiss(&mut self, cx: &mut Context<Self>) {
-        if self.popup.begin_close() {
+        if self.popup.begin_close(crate::clock::now(cx)) {
             popover::reap_popup(cx, |usage: &mut Self| &mut usage.popup);
         }
         cx.notify();
@@ -326,7 +325,7 @@ impl AccountUsage {
         chip.child(popover::anchored_menu_above_end(
             card.id(),
             content,
-            self.popup.closing_since(),
+            self.popup.closing_at(crate::clock::now(cx)),
         ))
         .into_any_element()
     }
@@ -383,7 +382,7 @@ impl Render for AccountUsage {
             self.trigger(
                 chip,
                 FooterCard::Usage,
-                move |_, cx| usage_card(&windows, &Theme::of(cx).for_popup()),
+                move |_, cx| usage_card(&windows, crate::clock::utc(cx), &Theme::of(cx).for_popup()),
                 cx,
             )
         });

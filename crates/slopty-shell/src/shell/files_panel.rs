@@ -682,8 +682,12 @@ mod tests {
         window
             .update(cx, |shell, window, cx| {
                 shell.active_chat = "chat".into();
-                // Widths settle immediately so the assertions see end states.
+                // Widths settle immediately so the assertions see end states. The shell reads the
+                // flag as its render pass saw it, and none runs inside this update. Before, the
+                // widths eased on the wall clock, which moved between two of these lines on a busy
+                // machine (2.476 px still to go once).
                 crate::motion::set_reduced_motion(cx, true);
+                shell.reduced_motion = crate::motion::ReducedMotion::of(cx);
                 // A fresh pane toggle lands on the surface host alone.
                 shell.toggle_right_pane(cx);
                 assert!(shell.right_pane_open(cx));

@@ -998,7 +998,7 @@ pub(crate) fn attachment_snapshot_for(source: &AttachmentKey) -> AttachmentSnaps
             AttachmentSnapshot::Loaded(image.clone())
         }
         Some(CacheEntry::Error { attempts, at }) => AttachmentSnapshot::Error {
-            retry_in: retry_delay(attempts.saturating_sub(1)).saturating_sub(at.elapsed()),
+            retry_in: retry_delay(attempts.saturating_sub(1)).saturating_sub(crate::clock::spent(*at)),
         },
         Some(CacheEntry::Loading { .. }) => AttachmentSnapshot::Loading,
         None => {
@@ -1080,7 +1080,7 @@ pub(crate) fn begin_load_for(source: &AttachmentKey) -> bool {
         }
         std::collections::hash_map::Entry::Occupied(mut o) => match o.get() {
             CacheEntry::Error { attempts, at }
-                if at.elapsed() >= retry_delay(attempts.saturating_sub(1)) =>
+                if crate::clock::spent(*at) >= retry_delay(attempts.saturating_sub(1)) =>
             {
                 let attempts = *attempts;
                 o.insert(CacheEntry::Loading { attempts });
@@ -1104,7 +1104,7 @@ impl Drop for AttachmentLoadGuard {
             };
             *entry = CacheEntry::Error {
                 attempts: attempts.saturating_add(1),
-                at: Instant::now(),
+                at: crate::clock::stopwatch(), // slopty: a retry's wait, not a moment drawn
             };
         }
     }
@@ -1136,7 +1136,7 @@ pub(crate) fn store_error_for(source: &AttachmentKey) {
         source.clone(),
         CacheEntry::Error {
             attempts,
-            at: Instant::now(),
+            at: crate::clock::stopwatch(), // slopty: a retry's wait, not a moment drawn
         },
     );
 }

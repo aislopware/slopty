@@ -2093,7 +2093,7 @@ impl Composer {
         .flatten();
         if let Some(id) = &pending_message {
             self.state.update(cx, |state, cx| {
-                state.begin_pending_send(&chat_id, id, chrono::Utc::now());
+                state.begin_pending_send(&chat_id, id, crate::clock::utc(cx));
                 cx.notify();
             });
         }

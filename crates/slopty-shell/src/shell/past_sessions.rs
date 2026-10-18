@@ -543,7 +543,7 @@ impl Shell {
 
     /// History's rows, or the line that says where it stands.
     fn render_history_body(&mut self, key: &str, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let now = chrono::Utc::now();
+        let now = crate::clock::utc(cx);
         let view = cx.entity_id();
         let Some(history) = self.past_sessions.groups.get(key) else {
             return div().into_any_element();
@@ -766,12 +766,12 @@ impl Shell {
                 return;
             };
             // The chat opens once the sidebar's list has it.
-            let since = std::time::Instant::now();
+            let since = cx.background_executor().now();
             loop {
                 let listed = this
                     .update(cx, |this, cx| this.state.read(cx).chats.iter().any(|c| c.id == chat))
                     .unwrap_or(true);
-                if listed || since.elapsed() >= CHAT_WITHIN {
+                if listed || cx.background_executor().now().saturating_duration_since(since) >= CHAT_WITHIN {
                     break;
                 }
                 cx.background_executor().timer(CHAT_POLL).await;
@@ -977,7 +977,7 @@ impl Shell {
         let theme = Theme::of(cx).for_popup();
         // slopty: a key reads as everywhere else (`keys::combo_text`).
         let shortcut = crate::keys::combo_text(self.settings.keymap.get(ShortcutId::ResumeSession));
-        let now = chrono::Utc::now();
+        let now = crate::clock::utc(cx);
         let view = cx.entity_id();
         let opening = self.past_sessions.opening.as_ref().map(|(key, _)| key.clone());
         let picker = self.past_sessions.picker.as_mut()?;

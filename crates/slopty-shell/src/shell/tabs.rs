@@ -216,7 +216,7 @@ impl Shell {
             state
                 .selected_chat
                 .is_none()
-                .then(|| state.overview_chats(Utc::now()).first().map(|(_, c)| c.id.clone()))
+                .then(|| state.overview_chats(crate::clock::utc(cx)).first().map(|(_, c)| c.id.clone()))
                 .flatten()
         };
         self.state.update(cx, |s, _| s.auto_selected = true);
@@ -441,7 +441,7 @@ impl Shell {
         // chats, counted on the session card's toggle.
         let running_lanes = {
             let state = self.state.read(cx);
-            let now = Utc::now();
+            let now = crate::clock::utc(cx);
             state.selected_chat.as_deref().map_or(0, |chat| {
                 let side_chats = state
                     .chats

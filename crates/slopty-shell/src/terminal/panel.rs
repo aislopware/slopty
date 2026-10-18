@@ -804,7 +804,7 @@ impl TerminalPanel {
     }
 
     fn close_tab_menu(&mut self, cx: &mut Context<Self>) {
-        if self.tab_menu.begin_close() {
+        if self.tab_menu.begin_close(crate::clock::now(cx)) {
             popover::reap_popup(cx, |panel: &mut Self| &mut panel.tab_menu);
         }
         cx.notify();
@@ -814,7 +814,7 @@ impl TerminalPanel {
     /// those to its left or right. Each row says its key when it has one.
     fn render_tab_menu(&mut self, window: &Window, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let TabMenu { chat, key, position } = self.tab_menu.get().cloned()?;
-        let closing = self.tab_menu.closing_since();
+        let closing = self.tab_menu.closing_at(crate::clock::now(cx));
         let theme = Theme::of(cx).for_popup();
         let close_keys = crate::keys::for_action(
             &crate::app_menus::CloseTab,

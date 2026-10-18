@@ -19,7 +19,7 @@
 
 use std::cell::Cell;
 use std::rc::Rc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use gpui::{AnyWindowHandle, App, Context, FocusHandle, Focusable as _, Global, WeakEntity, Window};
 use slopty_view_proto::TerminalSession;
@@ -624,7 +624,7 @@ impl Shell {
         let from = self.terminal_geometry.get().height;
         let key = self.panel_key(cx);
         self.panels.toggle_terminal(&key);
-        self.terminal_tween = Some(WidthTween::new(from, self.terminal_target(cx)));
+        self.terminal_tween = Some(WidthTween::new(from, self.terminal_target(cx), self.now()));
         let panel = self.terminal_panel(cx);
         panel.update(cx, |panel, cx| panel.set_open(open, cx));
         self.terminal_tween_task = Some(cx.spawn(async move |this, cx| {
@@ -805,12 +805,12 @@ impl Shell {
             let ran = match line {
                 None => None,
                 Some(line) => {
-                    let since = Instant::now();
+                    let since = cx.background_executor().now();
                     loop {
                         if cx.update(|cx| super::terminal_runs::send_line(&terminal, line, cx)) {
                             break Some(!super::terminal_runs::read_first(line));
                         }
-                        if since.elapsed() > SHELL_WITHIN {
+                        if cx.background_executor().now().saturating_duration_since(since) > SHELL_WITHIN {
                             break Some(false);
                         }
                         cx.background_executor().timer(ASK_EVERY).await;
@@ -903,7 +903,6 @@ mod tests {
             shell.debug_gate = Some(GatePhase::Ready);
             shell.splash = SplashPhase::Gone;
             shell.active_chat = "a1".into();
-            shell.test_time = Some(std::time::Instant::now());
             shell
         });
         cx.simulate_resize(gpui::size(px(1600.0), px(900.0)));

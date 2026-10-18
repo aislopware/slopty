@@ -125,11 +125,11 @@ impl<T> Popup<T> {
         matches!(self.inner, Some((_, Some(_))))
     }
 
-    /// When the exit phase began — what the render path hands to the popover
-    /// wrappers, which derive the eased exit progress from it each frame.
-    pub fn closing_since(&self) -> Option<std::time::Instant> {
+    /// The exit phase at `now`, the moment of the frame drawing it — what the render path
+    /// hands to the popover wrappers, which derive the eased exit progress from it.
+    pub fn closing_at(&self, now: std::time::Instant) -> Option<Closing> {
         match &self.inner {
-            Some((_, Some(since))) => Some(*since),
+            Some((_, Some(since))) => Some(Closing { since: *since, now }),
             _ => None,
         }
     }
@@ -159,10 +159,10 @@ impl<T> Popup<T> {
     /// Enter the exit phase. Returns `true` when this call started it (the
     /// caller then schedules [`reap_popup`]); `false` if already closing or
     /// closed.
-    pub fn begin_close(&mut self) -> bool {
+    pub fn begin_close(&mut self, now: std::time::Instant) -> bool {
         match &mut self.inner {
             Some((_, closing @ None)) => {
-                *closing = Some(std::time::Instant::now());
+                *closing = Some(now);
                 // slopty: the keyboard goes back on the window's next frame.
                 if let Some(focus) = self.return_focus.take() {
                     RETURN_FOCUS.with_borrow_mut(|slot| *slot = Some(focus));
@@ -203,9 +203,9 @@ impl<T> Popup<T> {
     /// Drop the state if the exit phase has run its course. A popup reopened
     /// (or re-closed) since the matching [`begin_close`] is left alone — the
     /// newer phase's own reap handles it.
-    pub fn finish_close(&mut self) {
+    pub fn finish_close(&mut self, now: std::time::Instant) {
         if let Some((_, Some(since))) = &self.inner
-            && since.elapsed() >= motion::MENU_OUT.total().mul_f32(motion::speed_scale())
+            && now.saturating_duration_since(*since) >= motion::MENU_OUT.total().mul_f32(motion::speed_scale())
         {
             self.inner = None;
         }
@@ -254,7 +254,7 @@ pub fn reap_popup<V: 'static, T: 'static>(
             )
             .await;
         view.update(cx, |view, cx| {
-            popup(view).finish_close();
+            popup(view).finish_close(crate::clock::now(cx));
             cx.notify();
         })
         .ok();
@@ -507,10 +507,18 @@ fn pinned_layer(layer: AnyElement) -> AnyElement {
         .into_any_element()
 }
 
-/// Eased exit progress (0..=1) for a [`Popup`] closing instant, computed from
-/// the wall clock at render time. Monotonic by construction — unlike the
-/// animation element's own clock, it can never replay from 0 mid-exit.
-fn exit_progress(since: std::time::Instant) -> f32 {
+/// slopty: a [`Popup`]'s exit phase at the moment of the frame drawing it
+/// ([`Popup::closing_at`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Closing {
+    since: std::time::Instant,
+    now: std::time::Instant,
+}
+
+/// Eased exit progress (0..=1) for a [`Popup`] closing, at the moment of the
+/// frame drawing it. Monotonic by construction — unlike the animation
+/// element's own clock, it can never replay from 0 mid-exit.
+fn exit_progress(closing: Closing) -> f32 {
     let total = motion::MENU_OUT
         .total()
         .mul_f32(motion::speed_scale())
@@ -518,7 +526,7 @@ fn exit_progress(since: std::time::Instant) -> f32 {
     let raw = if total <= 0.0 {
         1.0
     } else {
-        (since.elapsed().as_secs_f32() / total).clamp(0.0, 1.0)
+        (closing.now.saturating_duration_since(closing.since).as_secs_f32() / total).clamp(0.0, 1.0)
     };
     motion::MENU_OUT.progress(raw)
 }
@@ -597,7 +605,7 @@ const MENU_TRAVEL: f32 = 4.0;
 pub fn anchored_menu(
     id: impl Into<SharedString>,
     content: AnyElement,
-    closing: Option<std::time::Instant>,
+    closing: Option<Closing>,
 ) -> AnyElement {
     let exit = closing.map(exit_progress);
     let content = frosted_menu(exit, content);
@@ -624,7 +632,7 @@ pub fn anchored_menu(
 pub fn anchored_menu_below(
     id: impl Into<SharedString>,
     content: AnyElement,
-    closing: Option<std::time::Instant>,
+    closing: Option<Closing>,
 ) -> AnyElement {
     anchored_menu_below_gap(id, content, closing, 6.0)
 }
@@ -635,7 +643,7 @@ pub fn anchored_menu_below(
 pub fn anchored_menu_below_end(
     id: impl Into<SharedString>,
     content: AnyElement,
-    closing: Option<std::time::Instant>,
+    closing: Option<Closing>,
 ) -> AnyElement {
     let exit = closing.map(exit_progress);
     let content = frosted_menu(exit, content);
@@ -666,7 +674,7 @@ pub fn anchored_menu_below_end(
 pub fn anchored_menu_right(
     id: impl Into<SharedString>,
     content: AnyElement,
-    closing: Option<std::time::Instant>,
+    closing: Option<Closing>,
 ) -> AnyElement {
     let exit = closing.map(exit_progress);
     let content = frosted_menu(exit, content);
@@ -724,7 +732,7 @@ pub fn nested_menu(id: impl Into<SharedString>, content: AnyElement, left: bool)
 pub fn anchored_menu_below_gap(
     id: impl Into<SharedString>,
     content: AnyElement,
-    closing: Option<std::time::Instant>,
+    closing: Option<Closing>,
     gap: f32,
 ) -> AnyElement {
     anchored_menu_below_layer(id, content, closing, gap, 1)
@@ -735,7 +743,7 @@ pub fn anchored_menu_below_gap(
 pub fn anchored_menu_below_layer(
     id: impl Into<SharedString>,
     content: AnyElement,
-    closing: Option<std::time::Instant>,
+    closing: Option<Closing>,
     gap: f32,
     priority: usize,
 ) -> AnyElement {
@@ -770,7 +778,7 @@ pub fn anchored_menu_below_layer(
 pub fn anchored_menu_above(
     id: impl Into<SharedString>,
     content: AnyElement,
-    closing: Option<std::time::Instant>,
+    closing: Option<Closing>,
 ) -> AnyElement {
     let exit = closing.map(exit_progress);
     let content = frosted_menu(exit, content);
@@ -798,7 +806,7 @@ pub fn anchored_menu_above_at(
     id: impl Into<SharedString>,
     position: Point<Pixels>,
     content: AnyElement,
-    closing: Option<std::time::Instant>,
+    closing: Option<Closing>,
 ) -> AnyElement {
     div()
         .absolute()
@@ -812,7 +820,7 @@ pub fn anchored_menu_above_at(
 pub fn full_width_menu_above(
     id: impl Into<SharedString>,
     content: AnyElement,
-    closing: Option<std::time::Instant>,
+    closing: Option<Closing>,
 ) -> AnyElement {
     let exit = closing.map(exit_progress);
     let content = frosted_menu(exit, content);
@@ -838,7 +846,7 @@ pub fn full_width_menu_above(
 pub fn anchored_menu_above_end(
     id: impl Into<SharedString>,
     content: AnyElement,
-    closing: Option<std::time::Instant>,
+    closing: Option<Closing>,
 ) -> AnyElement {
     let exit = closing.map(exit_progress);
     let content = frosted_menu(exit, content);
@@ -871,7 +879,7 @@ pub fn menu_at(
     id: impl Into<SharedString>,
     position: Point<Pixels>,
     content: AnyElement,
-    closing: Option<std::time::Instant>,
+    closing: Option<Closing>,
 ) -> AnyElement {
     let exit = closing.map(exit_progress);
     let content = frosted_menu(exit, content);
@@ -1721,7 +1729,7 @@ impl MenuScrollbarState {
     /// a gpui handle (the terminal's display offset, for one) — any value
     /// that changes exactly when the visible scroll position does.
     pub fn note_scroll_offset(&mut self, position: f32) {
-        self.note_scroll_offset_at(position, Instant::now());
+        self.note_scroll_offset_at(position, crate::clock::event_now());
     }
 
     fn note_scroll_offset_at(&mut self, position: f32, at: Instant) {
@@ -1831,7 +1839,7 @@ impl MenuScrollbarState {
     /// time; its render re-arms for whatever the countdown needs then, so
     /// resumed scrolling or a refreshed linger converges on the next wake.
     pub fn arm_hide_timer(&mut self) -> Option<Duration> {
-        self.arm_hide_timer_at(Instant::now())
+        self.arm_hide_timer_at(crate::clock::event_now())
     }
 
     fn arm_hide_timer_at(&mut self, now: Instant) -> Option<Duration> {
@@ -1862,7 +1870,7 @@ impl MenuScrollbarState {
             // the rail doesn't vanish under a departing pointer (the strip's
             // own leave event usually does this first).
             self.bar_hovered = false;
-            self.last_scroll_at = Some(Instant::now());
+            self.last_scroll_at = Some(crate::clock::event_now());
         }
         true
     }
@@ -1879,7 +1887,7 @@ impl MenuScrollbarState {
         }
         self.bar_hovered = active;
         if !active {
-            self.last_scroll_at = Some(Instant::now());
+            self.last_scroll_at = Some(crate::clock::event_now());
         }
         true
     }
@@ -1957,7 +1965,7 @@ impl MenuScrollbarState {
     pub fn end_press(&mut self) -> bool {
         self.grab = None;
         // Releasing a drag lingers like a stopped scroll.
-        self.last_scroll_at = Some(Instant::now());
+        self.last_scroll_at = Some(crate::clock::event_now());
         if !self.list_hovered && self.bar_hovered {
             self.bar_hovered = false;
             true
@@ -2412,11 +2420,11 @@ mod tests {
         // close on the press (either handler order) — the note still reads
         // mounted, so the click must NOT reopen.
         popup.note_trigger_press();
-        popup.begin_close();
+        popup.begin_close(std::time::Instant::now());
         assert!(popup.take_press_was_open());
         // Out-handler first, trigger note second: mid-exit still counts.
         popup.open(1);
-        popup.begin_close();
+        popup.begin_close(std::time::Instant::now());
         popup.note_trigger_press();
         assert!(popup.take_press_was_open());
 
@@ -2958,14 +2966,14 @@ mod return_focus_tests {
             window.focus(&before, cx);
             popup.open_in((), &menu, window, cx);
             window.focus(&menu, cx);
-            assert!(popup.begin_close());
+            assert!(popup.begin_close(crate::clock::now(cx)));
             return_focus(window, cx);
             assert!(before.is_focused(window), "back where it was");
 
-            popup.finish_close();
+            popup.finish_close(crate::clock::now(cx));
             popup.open_in((), &menu, window, cx);
             window.focus(&menu, cx);
-            assert!(popup.begin_close());
+            assert!(popup.begin_close(crate::clock::now(cx)));
             window.focus(&other, cx);
             return_focus(window, cx);
             assert!(other.is_focused(window), "the row's own focus stays");

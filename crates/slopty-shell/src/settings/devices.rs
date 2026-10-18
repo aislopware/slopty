@@ -252,7 +252,7 @@ impl Render for DevicesPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::toast::take_error(&mut self.error, cx);
         let theme = Theme::of(cx).for_settings_surface();
-        let now = Utc::now();
+        let now = crate::clock::utc(cx);
         // slopty: every machine is listed, whatever the scope; Add device in place of Rename.
         let (devices, local_id) = {
             let state = self.state.read(cx);

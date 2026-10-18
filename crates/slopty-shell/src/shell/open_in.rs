@@ -238,7 +238,7 @@ impl Shell {
     }
 
     fn close_open_in(&mut self, cx: &mut Context<Self>) {
-        if self.open_in.begin_close() {
+        if self.open_in.begin_close(crate::clock::now(cx)) {
             popover::reap_popup(cx, |shell: &mut Self| &mut shell.open_in);
         }
         cx.notify();
@@ -247,7 +247,7 @@ impl Shell {
     /// The Open in menu, while it is up.
     pub(super) fn render_open_in_menu(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let OpenInMenu { chat_id, position } = self.open_in.get().cloned()?;
-        let closing = self.open_in.closing_since();
+        let closing = self.open_in.closing_at(crate::clock::now(cx));
         let theme = Theme::of(cx).for_popup();
         let choices = self.open_in_choices(&chat_id, cx);
         let mut list = div().flex().flex_col().gap(px(2.0)).child(popover::menu_heading(&theme, "Open in"));

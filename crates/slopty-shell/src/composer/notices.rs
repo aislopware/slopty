@@ -94,7 +94,7 @@ impl Composer {
     /// The selected chat's offline notice, once its road has been degraded for
     /// [`OFFLINE_GRACE`].
     pub(super) fn road_notice(&mut self, cx: &mut Context<Self>) -> Option<RoadNotice> {
-        let now = Utc::now();
+        let now = crate::clock::utc(cx);
         let (chat, degraded, offline, device) = {
             let state = self.state.read(cx);
             let chat = state.selected_chat.clone()?;
@@ -117,7 +117,7 @@ impl Composer {
         let since = match &self.extras.degraded_since {
             Some((at_chat, since)) if *at_chat == chat => *since,
             _ => {
-                let since = Instant::now();
+                let since = crate::clock::now(cx);
                 self.extras.degraded_since = Some((chat.clone(), since));
                 self.extras.degraded_task = Some(cx.spawn(async move |this, cx| {
                     cx.background_executor().timer(OFFLINE_GRACE).await;
@@ -126,7 +126,7 @@ impl Composer {
                 since
             }
         };
-        if since.elapsed() < OFFLINE_GRACE {
+        if crate::clock::now(cx).saturating_duration_since(since) < OFFLINE_GRACE {
             return None;
         }
         let name = device.as_ref().map_or("The chat's machine", |d| d.name.as_str());
@@ -146,7 +146,7 @@ impl Composer {
         let (chat, said, host) = {
             let state = self.state.read(cx);
             let chat = state.selected_chat.clone()?;
-            let now = Utc::now();
+            let now = crate::clock::utc(cx);
             let wait = state
                 .session_for(&chat)
                 .filter(|s| {
@@ -184,7 +184,7 @@ impl Composer {
     /// The limit notice's words while a usage limit holds the agent; redrawn when it lifts.
     pub(super) fn limit_notice(&mut self, cx: &mut Context<Self>) -> Option<String> {
         let resets_at = self.state.read(cx).limit_resets_at;
-        let now = Utc::now();
+        let now = crate::clock::utc(cx);
         let words = limit_words(resets_at, now)?;
         let at = resets_at?;
         if self.extras.limit_task.as_ref().is_none_or(|(when, _)| *when != at) {
@@ -205,7 +205,7 @@ impl Composer {
 
     /// A stop the run came to rest under: say "Stopped" for [`STOPPED_SHOWN`].
     pub(super) fn note_stopped(&mut self, chat: String, cx: &mut Context<Self>) {
-        self.extras.stopped = Some((chat, Instant::now()));
+        self.extras.stopped = Some((chat, crate::clock::now(cx)));
         self.extras.stopped_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(STOPPED_SHOWN).await;
             this.update(cx, |composer, cx| {
@@ -221,7 +221,7 @@ impl Composer {
     pub(super) fn stopped_notice(&self, cx: &App) -> Option<String> {
         let (chat, at) = self.extras.stopped.as_ref()?;
         (self.state.read(cx).selected_chat.as_deref() == Some(chat.as_str())
-            && at.elapsed() < STOPPED_SHOWN)
+            && crate::clock::now(cx).saturating_duration_since(*at) < STOPPED_SHOWN)
             .then(|| "Stopped".to_owned())
     }
 
@@ -229,7 +229,7 @@ impl Composer {
     fn retry_road(&mut self, chat: String, cx: &mut Context<Self>) {
         let engine = self.state.read(cx).engine().cloned();
         self.state.update(cx, |state, cx| {
-            state.retry_pending_send(&chat, Utc::now());
+            state.retry_pending_send(&chat, crate::clock::utc(cx));
             cx.notify();
         });
         let Some(engine) = engine else { return };
@@ -273,7 +273,7 @@ impl Composer {
             && (matches!(state.connectivity.state, S::Offline | S::Reconnecting)
                 || state
                     .effective_device_id()
-                    .is_some_and(|id| !state.device_online(&id, Utc::now())));
+                    .is_some_and(|id| !state.device_online(&id, crate::clock::utc(cx))));
         let offline = state.connectivity.state == S::Offline;
         degraded.then(|| {
             let text: SharedString = if offline {

@@ -1262,17 +1262,55 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
     chats arriving and going, a queue, the clock, frames mid-motion and the wall clock moving on.
     After each step: no panic (GPUI's retained check panics on a stale frame as it is drawn), no
     stale frame, no wall-clock read, the selection the model expects, and a whole
-    accessibility tree. A failure is shrunk by delta debugging and printed as its seed and the
-    steps kept, which `SLOPTY_FUZZ_SEED` and `SLOPTY_FUZZ_KEEP` rerun. Four seeds of 16 steps
-    run in the suite; `a_long_fuzz_of_the_shell` (ignored) is the nightly's.
+    accessibility tree. Four seeds of eight steps run in the suite, about a second here and
+    six on the gate's three-core runner, and name a failure at once with the run that shrinks
+    it. `a_long_fuzz_of_the_shell` (ignored) is the nightly's: it shrinks a failure by delta
+    debugging and prints its seed and the steps kept, which `SLOPTY_FUZZ_SEED` and
+    `SLOPTY_FUZZ_KEEP` rerun. The suite's run shrank too at first, up to 300 whole reruns, and
+    a failure on the gate's runner ran into nextest's 180 s limit before it printed.
   - Without the fix the proving test below fails on it, at the first frame back, on the
     Background tray's growth. A step followed by frames or a pause is judged one frame in, so a
-    queue or a tray appearing mid-run is caught the same way. The fuzzer's first find of its own, shrunk to two steps: a chat left and then deleted elsewhere came back as an
-    empty page by the way back (⌘[) and by a note's tap. Both now open only a chat still listed,
+    queue or a tray appearing mid-run is caught the same way. The fuzzer's first find of its
+    own, shrunk to two steps: a chat left and then deleted elsewhere came back as an empty page
+    by the way back (⌘[) and by a note's tap. Both now open only a chat still listed,
     or any while the list has not arrived (`AppState::chat_listed`).
   - Proof: `shell::retention_tests::{a_phones_way_back_from_a_subagent_paints_as_from_scratch,
     a_phones_way_back_in_motion_paints_as_from_scratch}` at 402 × 874 pt and 3 ×, and
     `shell::fuzz_tests`.
+
+- ✅ **Every clock in the shell is the frame's** (2026-10-18). What the shell draws reads the
+  moment of the frame being drawn (`App::frame_time`), and what an event stamps reads the same
+  clock between frames: the dispatcher's, which in a headless test moves only when the test
+  moves it. `crate::clock` is the one door: `now(cx)`, `utc(cx)` (the wall date at that moment,
+  read once with a monotonic moment and again only when the two drift a second apart, as after
+  a sleep), `event_now()` where no `App` is at hand (a hover's flip, a scroll seen), and
+  `stopwatch`/`spent` for what measures work (a log line's milliseconds, a frame's cost, a
+  task's deadline). Clippy refuses `Instant::now`, `Instant::elapsed`, `SystemTime::now`,
+  `Utc::now` and `Local::now` anywhere else in the shell (`crates/slopty-shell/clippy.toml`),
+  so a new wall-clock read does not build; the fuzzer's `wall clock` oracle catches what reaches
+  the screen another way.
+  - The long fuzz found the toast stack, after a chat was left, drawn 1 px apart by two frames
+    from scratch at one moment (seed 2011 on the iPad, three steps), and the same on a Mac and
+    after the way back (seeds 1008, 3000). About two hundred reads moved: the toasts' glide, the
+    width tweens of the panes, the hover fades, the menus' exits, the scroll rails, the rolling
+    labels, the folds, the sidebar's drags, the springs, the visuals' clocks and the rows' dates.
+  - Hover fades are read at the moment the shell's render began (`motion::begin_hover_frame`),
+    so every fade of a frame stands at one moment however its view was drawn.
+  - The shell's own test clock (`Shell::test_time`) is gone: its tests move the dispatcher's.
+  - Found on the way, both fixed: the files-panel test said reduced motion and then eased its
+    widths on the wall clock, because the shell reads the flag as its last render saw it, so a
+    busy machine left 2.476 px of a width to go; and a rename opened on a side chat paged out
+    of a closed card focused its field before any frame drew it, so the frame's focus recovery
+    gave the keyboard to the composer and the rename stood open without it. The claim now
+    waits, while the row is revealed, for a frame that drew the field.
+  - The e2e socket's Reduce Motion now holds (`motion::hold`): the shell applied the person's
+    setting and the OS's again whenever the window became active, after the socket asked.
+  - Proof: `clock::tests::one_moment_is_one_date`, `motion::tests::a_held_reduce_motion_outlasts_activation_and_the_setting`,
+    `shell::panel_interaction_tests::side_chat_rename_scrolls_to_its_row_in_a_docked_card`, and
+    the long fuzz over every form. Its three stops (seeds 1044, 3140, 4132: the composer's
+    cached spinner under a moved clip) were the old every-frame check showing its own frame;
+    on the check that leaves no trace they draw alike, and
+    `fuzz_tests::the_long_run_s_clip_stops_draw_alike` keeps them.
 
 - ✅ **The every-frame retained check leaves no trace, and the self-test runs with it on**
   (2026-10-18). GPUI's check used to draw its frame from scratch through the window's own

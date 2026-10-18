@@ -156,7 +156,7 @@ impl Composer {
         if self.dock.chat.as_deref() != Some(chat) {
             return;
         }
-        let now = chrono::Utc::now().timestamp_millis();
+        let now = crate::clock::utc(cx).timestamp_millis();
         let mut toasts = Vec::new();
         for note in dock.notes.iter().filter(|note| note_showing(note, now)) {
             if note.priority == "immediate" && self.dock.toasted.insert((note.key.clone(), note.at)) {
@@ -229,7 +229,7 @@ impl Composer {
             this.update(cx, |this, cx| {
                 this.dock.tick = None;
                 if let Some(run) = &this.dock.shell
-                    && run.ended.is_some_and(|at| at.elapsed() >= SHELL_DONE_SHOWN)
+                    && run.ended.is_some_and(|at| crate::clock::now(cx).saturating_duration_since(at) >= SHELL_DONE_SHOWN)
                 {
                     this.dock.shell = None;
                 }
@@ -301,7 +301,7 @@ impl Composer {
         self.dock.shell = Some(ShellRun {
             chat: chat.clone(),
             command: command.clone(),
-            started: Instant::now(),
+            started: crate::clock::now(cx),
             outcome: None,
             ended: None,
         });
@@ -311,7 +311,7 @@ impl Composer {
             this.update(cx, |this, cx| {
                 if let Some(run) = this.dock.shell.as_mut() {
                     run.outcome = Some(answer.map(|_| ()).map_err(|err| err.to_string()));
-                    run.ended = Some(Instant::now());
+                    run.ended = Some(crate::clock::now(cx));
                 }
                 this.dock_tick(cx);
                 cx.notify();
@@ -405,7 +405,7 @@ impl Composer {
     pub(super) fn render_dock_lines(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mut lines = Vec::new();
         let Some(chat) = self.state.read(cx).selected_chat.clone() else { return lines };
-        let now = chrono::Utc::now().timestamp_millis();
+        let now = crate::clock::utc(cx).timestamp_millis();
         // slopty: what still runs is said once, by the Background tray's header, by kind; the
         // waiting line stands only while no tray of this chat says it.
         let tray_says = self.dock.chat.as_deref() == Some(chat.as_str())
@@ -481,7 +481,7 @@ impl Composer {
     /// A `!` command's live chip: what runs and for how long, then where its output went.
     fn render_shell_run(&self, run: &ShellRun, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let elapsed = slopty_view_doc::duration_words(
-            u64::try_from(run.ended.unwrap_or_else(Instant::now).duration_since(run.started).as_millis())
+            u64::try_from(run.ended.unwrap_or_else(|| crate::clock::now(cx)).duration_since(run.started).as_millis())
                 .unwrap_or(u64::MAX),
         );
         let (words, color) = match &run.outcome {

@@ -79,8 +79,13 @@ fn total() -> Duration {
 
 /// The label for `key`: plain at rest, rolling for a moment after `text`
 /// changes. The first sight of a key never rolls.
-pub fn roll_text(key: impl Into<SharedString>, text: SharedString, reduced: bool) -> gpui::AnyElement {
-    rolling(key, text.clone(), reduced)
+pub fn roll_text(
+    key: impl Into<SharedString>,
+    text: SharedString,
+    reduced: bool,
+    now: Instant,
+) -> gpui::AnyElement {
+    rolling(key, text.clone(), reduced, now)
         .unwrap_or_else(|| div().min_w_0().truncate().child(text).into_any_element())
 }
 
@@ -90,9 +95,9 @@ pub fn rolling(
     key: impl Into<SharedString>,
     text: SharedString,
     reduced: bool,
+    now: Instant,
 ) -> Option<gpui::AnyElement> {
     let key = key.into();
-    let now = Instant::now();
     let roll = ROLLS.with(|rolls| {
         let mut rolls = rolls.borrow_mut();
         // Keys can be per-turn (the working trailer), so bound the map: past
@@ -471,7 +476,7 @@ impl Element for RollText {
         // full-rate frames for most of every agent turn were exactly the
         // battery drain the pulse clock exists to prevent. The lease lapses
         // on its own once the roll stops painting.
-        if Instant::now().saturating_duration_since(self.roll.started) < total() {
+        if crate::clock::now(cx).saturating_duration_since(self.roll.started) < total() {
             crate::motion::pulse_lease(window.current_view(), cx);
         }
     }

@@ -390,7 +390,7 @@ impl SurfaceState {
                 .into_any_element(),
             "markdown" | "md" => {
                 let tree = slopty_markdown::parse_full(&node_words(node));
-                let opts = crate::markdown::render::RenderOptions::settled(element_key);
+                let opts = crate::markdown::render::RenderOptions::settled(element_key, crate::clock::now(cx));
                 crate::markdown::render::render_tree(&tree, &opts, theme, window, &|_| None)
             }
             "svg" | "image" => {
@@ -486,7 +486,7 @@ impl Composer {
     pub(super) fn render_mod_bands(&mut self, theme: &Theme, window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let Some(chat) = self.state.read(cx).selected_chat.clone() else { return Vec::new() };
         let Some(dock) = self.dock.dock_of(&chat).cloned() else { return Vec::new() };
-        let now = chrono::Utc::now().timestamp_millis();
+        let now = crate::clock::utc(cx).timestamp_millis();
         for pane in dock.surfaces.iter().filter(|s| s.kind == ModSurface::PANE) {
             if self.surfaces.panes.insert(format!("{chat}/{}", pane.id)) {
                 let seq = cx.try_global::<PaneAsk>().map_or(1, |last| last.seq.wrapping_add(1));

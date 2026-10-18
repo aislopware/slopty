@@ -1496,7 +1496,7 @@ impl Pickers {
         self.setting_bounds = None;
         self.close_config();
         self.menu_bar = popover::MenuScrollbarState::default();
-        if self.open.begin_close() {
+        if self.open.begin_close(crate::clock::now(cx)) {
             popover::reap_popup(cx, |pickers: &mut Self| &mut pickers.open);
         }
         cx.notify();
@@ -2925,7 +2925,7 @@ impl Pickers {
     /// on the canvas's target).
     fn render_device_popover(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).for_popup();
-        let now = chrono::Utc::now();
+        let now = crate::clock::utc(cx);
         let rows = self.filtered_device_rows(cx);
         let (selected_space, effective, local, online): (
             Option<String>,
@@ -3595,14 +3595,14 @@ impl Pickers {
             )
             .when(label_loading, |el| {
                 // Nothing is named on screen: the label rolls in from empty.
-                rolling(format!("{id}-label"), SharedString::default(), true);
+                rolling(format!("{id}-label"), SharedString::default(), true, crate::clock::now(cx));
                 el.child(popover::skeleton_bar(56.0, cx.entity_id(), cx))
             })
             .when(!label_loading, |el| {
                 // A changing label rolls (Scritto-style); at rest it is the
                 // plain truncating label, or the clip-don't-ellipsize variant
                 // while the model chip's width glides.
-                let rolling = rolling(format!("{id}-label"), label.clone(), cx.reduce_motion());
+                let rolling = rolling(format!("{id}-label"), label.clone(), cx.reduce_motion(), crate::clock::now(cx));
                 el.child(match rolling {
                     Some(rolling) => rolling,
                     None if resizing => {
@@ -3618,7 +3618,7 @@ impl Pickers {
             // model name — the run's identity — truncates last.
             .when_some(suffix, |el, (suffix, tint)| {
                 let color = tint.unwrap_or(theme.text_muted.opacity(0.7));
-                let rolling = rolling(format!("{id}-suffix"), suffix.clone(), cx.reduce_motion());
+                let rolling = rolling(format!("{id}-suffix"), suffix.clone(), cx.reduce_motion(), crate::clock::now(cx));
                 el.child(if let Some(rolling) = rolling {
                     div()
                         .flex()
@@ -3696,7 +3696,7 @@ impl Pickers {
                     .flex_none()
                     .text_color(theme.text_muted.opacity(0.7)),
             )
-            .child(roll_text(format!("{id}-label"), label, cx.reduce_motion()))
+            .child(roll_text(format!("{id}-label"), label, cx.reduce_motion(), crate::clock::now(cx)))
             .child(
                 crate::icons::icon(crate::icons::ALT_ARROW_DOWN)
                     .size(px(12.0))
@@ -3755,7 +3755,7 @@ impl Pickers {
     /// edge.
     pub fn render_new_thread_target_selectors(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
-        let closing = (self.open.closing_since(), self.menu_geometry().below);
+        let closing = (self.open.closing_at(crate::clock::now(cx)), self.menu_geometry().below);
         let mut overlay: Option<(PickerKind, AnyElement)> = match self.mounted_kind() {
             Some(PickerKind::Space) => {
                 let content = self.render_space_popover(cx);
@@ -3778,7 +3778,7 @@ impl Pickers {
                 .into();
             let offline = device_id
                 .as_deref()
-                .is_some_and(|id| !state.device_online(id, chrono::Utc::now()));
+                .is_some_and(|id| !state.device_online(id, crate::clock::utc(cx)));
             let project_label: SharedString = state
                 .selected_space_row()
                 .map(|s| s.display_name().to_string())
@@ -3844,7 +3844,7 @@ impl Pickers {
         }
         self.ensure_refs(false, cx);
         let theme = Theme::of(cx).clone();
-        let closing = (self.open.closing_since(), self.menu_geometry().below);
+        let closing = (self.open.closing_at(crate::clock::now(cx)), self.menu_geometry().below);
         let mut overlay: Option<(PickerKind, AnyElement)> = match self.mounted_kind() {
             Some(PickerKind::Branch) => {
                 let content = self.render_branch_popover(cx);
@@ -3999,7 +3999,7 @@ impl Pickers {
         }
         // Refs feed the draft labels — eager + idempotent.
         self.ensure_refs(false, cx);
-        let closing = (self.open.closing_since(), self.menu_geometry().below);
+        let closing = (self.open.closing_at(crate::clock::now(cx)), self.menu_geometry().below);
         let mut overlay: Option<(PickerKind, AnyElement)> = match self.mounted_kind() {
             Some(PickerKind::Branch) => {
                 let content = self.render_branch_popover(cx);
@@ -6340,7 +6340,7 @@ fn attach_overlay(
     overlay: &mut Option<(PickerKind, AnyElement)>,
     kind: PickerKind,
     id: &'static str,
-    closing: (Option<std::time::Instant>, bool),
+    closing: (Option<popover::Closing>, bool),
 ) -> gpui::Stateful<gpui::Div> {
     if overlay.as_ref().is_some_and(|(k, _)| *k == kind)
         && let Some((_, element)) = overlay.take()
@@ -6360,7 +6360,7 @@ fn attach_overlay_below(
     overlay: &mut Option<(PickerKind, AnyElement)>,
     kind: PickerKind,
     id: &'static str,
-    closing: (Option<std::time::Instant>, bool),
+    closing: (Option<popover::Closing>, bool),
 ) -> gpui::Stateful<gpui::Div> {
     if overlay.as_ref().is_some_and(|(k, _)| *k == kind)
         && let Some((_, element)) = overlay.take()
@@ -6377,7 +6377,7 @@ fn attach_overlay_end(
     overlay: &mut Option<(PickerKind, AnyElement)>,
     kind: PickerKind,
     id: &'static str,
-    closing: (Option<std::time::Instant>, bool),
+    closing: (Option<popover::Closing>, bool),
 ) -> gpui::Stateful<gpui::Div> {
     if overlay.as_ref().is_some_and(|(k, _)| *k == kind)
         && let Some((_, element)) = overlay.take()
@@ -6518,7 +6518,7 @@ impl Render for Pickers {
         // Render the open popover's body first (mutable borrow), then the
         // chips. Branch/Checkout render in the composer FOOTER row (see
         // `render_footer`), not here.
-        let closing = (self.open.closing_since(), self.menu_geometry().below);
+        let closing = (self.open.closing_at(crate::clock::now(cx)), self.menu_geometry().below);
         let mut overlay: Option<(PickerKind, AnyElement)> = match self.mounted_kind() {
             // Footer-row pickers — their popovers mount down there.
             Some(PickerKind::Branch)

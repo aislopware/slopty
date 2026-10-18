@@ -266,7 +266,7 @@ impl Composer {
 
     fn mark_row(&mut self, row: String, cx: &mut Context<Self>) {
         self.tray.active = Some(row.clone());
-        self.tray.marked = Some((row, Instant::now()));
+        self.tray.marked = Some((row, crate::clock::now(cx)));
         self.tray.mark_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(MARK_SHOWN).await;
             this.update(cx, |this, cx| {
@@ -429,7 +429,7 @@ impl Composer {
         }
         let theme = Theme::of(cx).clone();
         let open = self.tray_open(&chat, &tray);
-        let now = chrono::Utc::now().timestamp_millis();
+        let now = crate::clock::utc(cx).timestamp_millis();
         let focus = self.tray.focus.get_or_insert_with(|| cx.focus_handle()).clone();
         let focused = focus.contains_focused(window, cx);
 

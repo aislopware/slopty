@@ -357,7 +357,7 @@ impl Transcript {
             this.update(cx, |this, cx| {
                 this.work.tick = None;
                 // slopty: what runs reads the time this tick took, in every frame built after it.
-                this.clock = chrono::Utc::now();
+                this.clock = crate::clock::utc(cx);
                 cx.notify();
             })
             .ok();

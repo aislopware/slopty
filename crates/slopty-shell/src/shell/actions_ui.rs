@@ -127,7 +127,7 @@ impl Shell {
     }
 
     fn close_project_actions_menu(&mut self, cx: &mut Context<Self>) {
-        if self.project_actions.menu.begin_close() {
+        if self.project_actions.menu.begin_close(crate::clock::now(cx)) {
             popover::reap_popup(cx, |shell: &mut Shell| &mut shell.project_actions.menu);
         }
         cx.notify();

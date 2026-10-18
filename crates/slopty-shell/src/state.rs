@@ -322,7 +322,8 @@ pub(crate) fn clock_now() -> DateTime<Utc> {
     if let Some(now) = TEST_CLOCK.with(std::cell::Cell::get) {
         return now;
     }
-    Utc::now()
+    // slopty: the date at now on the dispatcher's clock (`crate::clock`).
+    crate::clock::utc_at(crate::clock::event_now())
 }
 
 /// Pins [`clock_now`] on this test thread until dropped.
@@ -846,7 +847,7 @@ impl AppState {
     }
 
     pub fn apply_sessions(&mut self, sessions: Vec<Session>) -> bool {
-        self.apply_sessions_at(sessions, Utc::now())
+        self.apply_sessions_at(sessions, clock_now())
     }
 
     fn apply_sessions_at(&mut self, sessions: Vec<Session>, now: DateTime<Utc>) -> bool {
@@ -1033,7 +1034,7 @@ impl AppState {
             return false;
         }
         if self.connectivity.state == S::Offline
-            || !self.device_online(&chat.device_id, Utc::now())
+            || !self.device_online(&chat.device_id, clock_now())
         {
             return true;
         }
@@ -1061,7 +1062,7 @@ impl AppState {
     }
 
     pub fn apply_devices(&mut self, devices: Vec<Device>) -> bool {
-        self.apply_devices_at(devices, Utc::now())
+        self.apply_devices_at(devices, clock_now())
     }
 
     fn apply_devices_at(&mut self, mut devices: Vec<Device>, now: DateTime<Utc>) -> bool {
@@ -2605,7 +2606,7 @@ impl AppState {
         if !chat.unseen() {
             return;
         }
-        chat.last_seen_at = Some(Utc::now());
+        chat.last_seen_at = Some(crate::clock::utc(cx));
         cx.notify();
         let Some(handle) = self.engine.clone() else {
             return;

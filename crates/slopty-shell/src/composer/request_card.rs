@@ -770,7 +770,7 @@ impl Composer {
     }
 
     /// The header's chips: who asks, and when the agent stops waiting.
-    pub(super) fn card_header_chips(&mut self, question: &UserInputQuestion, theme: &Theme) -> Vec<AnyElement> {
+    pub(super) fn card_header_chips(&mut self, question: &UserInputQuestion, date: chrono::DateTime<chrono::Utc>, theme: &Theme) -> Vec<AnyElement> {
         let mut chips = Vec::new();
         if let Some(child) = question.sent_by.as_deref().filter(|c| !c.trim().is_empty()) {
             let words = format!("Sent by {child}");
@@ -818,7 +818,7 @@ impl Composer {
                     .into_any_element(),
             );
         }
-        let now = chrono::Utc::now().timestamp_millis();
+        let now = date.timestamp_millis();
         if let Some((until, words)) = question.until_ms.and_then(|until| Some((until, countdown_words(until, now)?))) {
             let urgent = until - now < COUNTDOWN_URGENT_MS;
             chips.push(

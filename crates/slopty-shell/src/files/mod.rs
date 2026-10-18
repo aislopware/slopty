@@ -889,7 +889,7 @@ impl FilesSurface {
     }
 
     fn close_editor_context_menu(&mut self, cx: &mut Context<Self>) {
-        if self.editor_context_menu.begin_close() {
+        if self.editor_context_menu.begin_close(crate::clock::now(cx)) {
             crate::popover::reap_popup(cx, |surface: &mut Self| &mut surface.editor_context_menu);
             cx.notify();
         }
@@ -937,7 +937,7 @@ impl FilesSurface {
         let editor = menu.editor.clone();
         let position = menu.position;
         let availability = menu.availability;
-        let closing = self.editor_context_menu.closing_since();
+        let closing = self.editor_context_menu.closing_at(crate::clock::now(cx));
 
         let card = crate::popover::popover_card(theme)
             .w(px(170.0))

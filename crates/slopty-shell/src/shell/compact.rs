@@ -375,7 +375,7 @@ impl Shell {
     fn render_compact_capsule(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let (working, waiting) = {
             let state = self.state.read(cx);
-            let now = chrono::Utc::now();
+            let now = crate::clock::utc(cx);
             state
                 .chats
                 .iter()
@@ -692,7 +692,7 @@ impl Shell {
         let theme = Theme::of(cx).clone();
         let pinned = self.active_sidebar_pins(cx).iter().any(|pin| pin == chat_id);
         let offset = {
-            let now = Instant::now();
+            let now = crate::clock::now(cx);
             let reduced = cx.reduce_motion();
             let swipes = cx.default_global::<Swipes>();
             match (&swipes.active, &swipes.settling) {
@@ -827,7 +827,7 @@ impl Shell {
         pinned: bool,
         cx: &mut Context<Self>,
     ) {
-        cx.default_global::<Swipes>().settling = Some((chat.clone(), swipe_offset(travel), Instant::now()));
+        cx.default_global::<Swipes>().settling = Some((chat.clone(), swipe_offset(travel), crate::clock::now(cx)));
         match act {
             Some(SwipeAct::Pin) => self.set_chat_pinned(chat, !pinned, cx),
             Some(SwipeAct::Archive) => self.set_chat_archived(chat, !archived, cx),

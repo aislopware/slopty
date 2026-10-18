@@ -224,7 +224,7 @@ impl super::Shell {
     pub(super) fn open_next_needing_you(&mut self, cx: &mut Context<Self>) -> bool {
         let (order, selected) = {
             let state = self.state.read(cx);
-            (needing_you(state, Utc::now()), state.selected_chat.clone())
+            (needing_you(state, crate::clock::utc(cx)), state.selected_chat.clone())
         };
         let Some(next) = super::tabs::cycle_target(&order, selected.as_deref(), true) else {
             return false;

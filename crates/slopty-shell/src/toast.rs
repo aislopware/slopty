@@ -181,7 +181,7 @@ fn push_for(
     if message.is_empty() {
         return None;
     }
-    let now = Instant::now();
+    let now = crate::clock::now(cx);
     let store = cx.default_global::<ToastStore>();
     // A repeat of the live front toast restarts it instead of stacking.
     if let Some(front) = store
@@ -438,7 +438,7 @@ fn copy_error(id: u64, cx: &mut App) {
 }
 
 fn dismiss(id: u64, cx: &mut App) {
-    let now = Instant::now();
+    let now = crate::clock::now(cx);
     if let Some(toast) = cx
         .default_global::<ToastStore>()
         .toasts
@@ -451,7 +451,7 @@ fn dismiss(id: u64, cx: &mut App) {
 }
 
 fn set_hovered(hovered: bool, cx: &mut App) {
-    let now = Instant::now();
+    let now = crate::clock::now(cx);
     let store = cx.default_global::<ToastStore>();
     if store.hovered == hovered {
         return;
@@ -508,7 +508,7 @@ fn schedule_wake(window: &Window, cx: &mut App) {
         Some(at) if scheduled == Some(at) => return,
         Some(at) => {
             let handle = window.window_handle();
-            let delay = at.saturating_duration_since(Instant::now());
+            let delay = at.saturating_duration_since(crate::clock::now(cx));
             let task = cx.spawn(async move |cx| {
                 cx.background_executor().timer(delay).await;
                 let _ = handle.update(cx, |_, window, _| window.refresh());
@@ -591,7 +591,7 @@ const LIFT_GAP: f32 = 8.0;
 /// of the window's floor the layout holds (a phone's tab bar and capsule, or its composer and
 /// the home indicator): the stack stands above it; 0 keeps the window's corner.
 pub fn render_toaster(lift: f32, window: &mut Window, cx: &mut App) -> Option<AnyElement> {
-    let now = Instant::now();
+    let now = crate::clock::now(cx);
     let reduced = cx.reduce_motion();
     let active = window.is_window_active();
     let theme = Theme::of(cx).for_popup();

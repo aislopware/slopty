@@ -420,14 +420,14 @@ impl Render for CodeScrollbarDragGhost {
 
 impl RenderOptions {
     /// Options for a completed (non-streaming) row — no veil, no cache.
-    pub fn settled(row_key: SharedString) -> Self {
+    pub fn settled(row_key: SharedString, now: Instant) -> Self {
         Self {
             row_key,
             media: None,
             tasks: None,
             veil: None,
             cache: None,
-            now: Instant::now(),
+            now,
             copy: None,
             link: None,
             workspace_root: None,
@@ -3241,7 +3241,7 @@ mod tests {
     impl Render for CodeSelectionHarness {
         fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             let theme = Theme::of(cx).clone();
-            let opts = RenderOptions::settled("code-selection-test".into());
+            let opts = RenderOptions::settled("code-selection-test".into(), std::time::Instant::now());
             let plain = |text: &str| {
                 vec![InlineRun {
                     text: text.into(),
@@ -3308,7 +3308,7 @@ mod tests {
                 .child(selection_frame_reset())
                 .child(render_tree(
                     &parse_full(source),
-                    &RenderOptions::settled("markdown-selection-test".into()),
+                    &RenderOptions::settled("markdown-selection-test".into(), std::time::Instant::now()),
                     &theme,
                     window,
                     &|_| None,
@@ -3394,7 +3394,7 @@ mod tests {
             let source = "Before $x = \\frac{a}{b}$ after.\n\n\
                 $$\\int_0^1 x^2\\,dx = \\frac{1}{3}$$\n\n\
                 Tail $\\nope$ text.";
-            let mut opts = RenderOptions::settled("math-selection-test".into());
+            let mut opts = RenderOptions::settled("math-selection-test".into(), std::time::Instant::now());
             opts.math = self.0;
             div()
                 .size_full()
@@ -3496,7 +3496,7 @@ mod tests {
     impl Render for MathCostHarness {
         fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             let theme = Theme::of(cx).clone();
-            let mut opts = RenderOptions::settled("math-cost".into());
+            let mut opts = RenderOptions::settled("math-cost".into(), std::time::Instant::now());
             opts.math = self.1;
             div().size_full().child(render_tree(
                 &parse_full(&self.0),
@@ -3740,7 +3740,7 @@ mod tests {
         fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             let theme = Theme::of(cx).clone();
             let pane = |prefix: &str, surface: u64| {
-                let opts = RenderOptions::settled(prefix.to_string().into());
+                let opts = RenderOptions::settled(prefix.to_string().into(), std::time::Instant::now());
                 div()
                     .w(px(320.0))
                     .h_full()
@@ -4660,7 +4660,7 @@ mod tests {
         use slopty_math::bundled::Face;
         let runs = [math_run(r"\alpha + \mathcal{B}", true)];
         let theme = Theme::dark();
-        let mut opts = RenderOptions::settled("math-style-cache".into());
+        let mut opts = RenderOptions::settled("math-style-cache".into(), std::time::Instant::now());
         opts.cache = Some(Rc::default());
         let face = |flat: &FlatText| {
             let fira = super::super::math::formula(r"\alpha + \mathcal{B}", false, Face::Fira);
@@ -4688,7 +4688,7 @@ mod tests {
     fn math_size_change_rebuilds_cached_slots() {
         let runs = [math_run(r"\alpha + \mathcal{B}", true)];
         let theme = Theme::dark();
-        let mut opts = RenderOptions::settled("math-size-cache".into());
+        let mut opts = RenderOptions::settled("math-size-cache".into(), std::time::Instant::now());
         opts.cache = Some(Rc::default());
         let first = flatten_cached(&runs, FontWeight::NORMAL, 0, 0, &opts, &theme);
         opts.math.size = 150;
