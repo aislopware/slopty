@@ -281,9 +281,9 @@ impl Render for Moved {
     }
 }
 
-/// A live page moved into a fade band by what is around it rests in the frames the window
+/// A live page moved wholly out of its band by what is around it rests in the frames the window
 /// draws, though nothing told the card itself: a frame built from scratch, which rests it, draws
-/// nothing the shown one does not.
+/// nothing the shown one does not. Partly in the band it stays live, shown there alone.
 #[gpui::test]
 fn a_live_page_moved_out_of_its_band_rests_in_the_frame_shown(cx: &mut gpui::TestAppContext) {
     let stand = serve(cx, HostedPage { presence: PagePresence::Live, ..hosted(None) });
@@ -293,7 +293,7 @@ fn a_live_page_moved_out_of_its_band_rests_in_the_frame_shown(cx: &mut gpui::Tes
     let shown = view.clone();
     let (host, cx) = cx.add_window_view(|_, _| Moved(shown.into(), 200.0));
     cx.simulate_resize(gpui::size(px(900.0), px(800.0)));
-    view.update(cx, |view, _| view.set_clear_band(100.0, 790.0));
+    view.update(cx, |view, _| view.set_clear_band(100.0, 600.0));
     let frame = |cx: &mut VisualTestContext| {
         cx.run_until_parked();
         cx.update(|window, cx| window.draw(cx).clear(cx));
@@ -310,7 +310,24 @@ fn a_live_page_moved_out_of_its_band_rests_in_the_frame_shown(cx: &mut gpui::Tes
     });
     frame(cx);
     frame(cx);
-    assert!(rests(&stand) > 0, "under the titlebar's fade it rests: {:?}", stand.borrow().acts);
+    assert_eq!(rests(&stand), 0, "partly in its band it stays live: {:?}", stand.borrow().acts);
+
+    host.update(cx, |host, cx| {
+        host.1 = 700.0;
+        cx.notify();
+    });
+    frame(cx);
+    frame(cx);
+    assert!(rests(&stand) > 0, "out of its band it rests: {:?}", stand.borrow().acts);
+
+    // A press on its picture there wakes nothing: it would rest again at once.
+    let engages = |stand: &Shared| stand.borrow().acts.iter().filter(|a| **a == PageAct::Engage).count();
+    let before = engages(&stand);
+    let below = gpui::point(px(450.0), px(770.0));
+    cx.simulate_mouse_down(below, gpui::MouseButton::Left, gpui::Modifiers::none());
+    cx.simulate_mouse_up(below, gpui::MouseButton::Left, gpui::Modifiers::none());
+    frame(cx);
+    assert_eq!(engages(&stand), before, "out of its band a press waits: {:?}", stand.borrow().acts);
 }
 
 /// A live page rested while the card stayed engaged (it went into a fade band, or another page

@@ -1528,6 +1528,24 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     least lately gives way. A page going warm takes its snapshot first, and a new height or a
     loaded view takes one too. Snapshots are BGRA, premultiplied, straight from the `CGImage`
     into a bitmap context, ready for a GPUI image, with no PNG on the way.
+  - **A live page shows within the clear band (2026-10-18).** The band is the chat below the
+    titlebar's fade and above the composer and its fade. A live page's native is clipped to it
+    (`page::BandClip`, a content mask over its prepaint and paint, so the hit map's visible rect
+    is the band's too), and past it the card draws the page's picture, which fades and frosts
+    with the chat. A page rests once none of it is in the band, and a press or hover wakes a
+    card only while some of it is. Before, a live page rested the moment any edge left the band.
+    On an iPhone the band is about 620 pt and a page's cap 0.8 of the window, 699 pt, so a tall
+    page never stayed live: a press woke it, the band rested it, its picture took the hover back
+    and woke it again, every frame (headless at the iPhone's size: Engage and Rest alternating
+    without end; e2e `pages`: the card's value read "snapshot" and a finger found the web view
+    with no native presented). The picture past the band can be older than the live page
+    (scrolled inside, or animating) until the page rests; that shows only under the fades and
+    the frost, and costs less than a page that cannot be used. The native also reports hover,
+    since its hitbox is topmost and the card's body would otherwise rest it under a pointer that
+    never left. Tests:
+    `shell::page_pointer_tests::a_page_taller_than_the_phones_band_stays_live_where_it_shows`,
+    `page::card_tests::a_live_page_moved_out_of_its_band_rests_in_the_frame_shown`, and the e2e
+    `ios::pages` case on the iPhone and iPad simulators.
   - **Network is the person's grant, per page.** `PageHost::set_network` names the origins one
     page may reach (MCP Apps' `connectDomains` and `resourceDomains`): the page gets a rule list
     of its own that lets exactly those through, its policy names them, and it reloads. A page

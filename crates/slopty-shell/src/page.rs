@@ -3,12 +3,14 @@
 //!
 //! The web view is the app's (`slopty_platform::web::page::PageHost`), handed over by the page's
 //! key through [`crate::live::page`]; this card frames it in zeron's language for foreign
-//! pixels: one muted header line (title · kind · source) over a hairline, the body rounded and
-//! opaque on the transcript's surface. At rest the page's last picture stands for it, so it
+//! pixels: a code or diagram card's frame (its corner, hairline and surface), a header bar with
+//! the page's title and its source (an app's server, a file's path; never the tool that showed
+//! it) and the actions on the right, over the body, opaque on the transcript's surface. At rest the page's last picture stands for it, so it
 //! frosts, fades and clips like any row; it goes live while the person engages it (a pointer
-//! over it, the keyboard in it) and rests again 2 s after they leave, or as soon as it scrolls
-//! into the composer's frost or the transcript's fade bands, where a native view would read as a
-//! seam.
+//! over it, the keyboard in it) and rests again 2 s after they leave, or once it has scrolled
+//! wholly out of the transcript's clear band. A live page shows only within that band, under
+//! the titlebar's fade and over the composer's frost, where a native view would read as a seam:
+//! past it the card draws the page's picture, which fades and frosts as the chat does.
 //!
 //! The header's actions show on hover (`docs/decisions/ui.md`, "A page's card carries its
 //! own actions"): Copy image (the page's last picture, as a PNG), Save (its HTML in the chat's
@@ -55,8 +57,10 @@ const PAGE_MAX_HEIGHT: f32 = 720.0;
 const PAGE_VIEWPORT_SHARE: f32 = 0.8;
 /// How long a page stays live after the pointer and the keyboard leave it.
 const REST_AFTER: Duration = Duration::from_secs(2);
-/// The header line over a page.
-const HEADER_HEIGHT: f32 = 26.0;
+/// slopty: the header bar over a page, the height of a code card's (`markdown::render`).
+const HEADER_HEIGHT: f32 = 28.0;
+/// slopty: the card's corner, the transcript's one card corner (a code or diagram card's).
+const CARD_RADIUS: f32 = crate::transcript::TRANSCRIPT_CARD_RADIUS;
 /// How long an action shows it is done.
 const DONE_FOR: Duration = Duration::from_millis(1500);
 /// The actions that show they are done, by name.
@@ -190,25 +194,13 @@ pub fn waiting_words(machine: &str) -> SharedString {
     format!("Waiting for {machine}…").into()
 }
 
-/// A page card's kind in words: "Page", "MCP App: {server}", "File".
-pub fn kind_words(card: &PageCard) -> String {
-    match card.kind.as_str() {
-        PageCard::APP => match &card.server {
-            Some(server) => format!("MCP App: {server}"),
-            None => "MCP App".to_owned(),
-        },
-        PageCard::FILE => "File".to_owned(),
-        fence::CHART_KIND => "Chart".to_owned(),
-        _ => "Page".to_owned(),
-    }
-}
-
-/// slopty: a page card's last header words, past its title and kind: a file's path, or HTML's
-/// `show_page`. An MCP App's kind names its server already, so its source is the tool called,
-/// and nothing where its title is that tool: each is named once.
+/// slopty: a page card's header words past its title: where the page comes from, an MCP App's
+/// server, a file's path or a chart's language. The tool that showed it is never named: HTML the
+/// agent wrote (`show_page`) has no source of its own.
 pub fn source_words(card: &PageCard) -> Option<String> {
     let words = match card.kind.as_str() {
-        PageCard::APP => card.tool.clone().filter(|tool| *tool != card.title)?,
+        PageCard::APP => card.server.clone()?,
+        PageCard::HTML => return None,
         _ => card.source.clone(),
     };
     (!words.is_empty()).then_some(words)
@@ -331,7 +323,21 @@ impl PageCardView {
         self.placed_live
     }
 
+    /// Whether some of the card's body lies in the band a live page may show in (or nothing says
+    /// where either is yet).
+    fn shows_in_band(&self) -> bool {
+        match (self.bounds.get(), self.clear) {
+            (Some(bounds), Some(band)) => meets_band(bounds, band),
+            _ => true,
+        }
+    }
+
     fn engage(&mut self, cx: &mut Context<Self>) {
+        // slopty: a card with none of its body in the clear band would rest the moment it went
+        // live, and the picture its rest draws takes the hover again: it waits for the band.
+        if !self.shows_in_band() {
+            return;
+        }
         self.rest = None;
         // slopty: a page rested while the card stayed engaged (a fade band, the device's cap)
         // wakes again at the next press or hover.
@@ -557,9 +563,6 @@ impl PageCardView {
             .w_full()
             .h(px(36.0))
             .px(px(Theme::SPACE_MD))
-            .rounded(px(8.0))
-            .border_1()
-            .border_color(crate::theme::hairline(0.07))
             .flex()
             .flex_row()
             .items_center()
@@ -637,8 +640,8 @@ impl Render for PageCardView {
         let in_pane = self.in_pane();
         let doc = hosted.as_ref().and_then(|page| page.doc.clone());
 
-        // A live page that scrolled into a fade band or under the composer rests at once; one
-        // in the pane is the pane's.
+        // A live page that scrolled wholly out of the clear band rests at once; one in the pane is
+        // the pane's.
         // slopty: asked once the frame is drawn. The host tells the card what changed; asked
         // while the window draws, the card it tells would wait for whatever draws next.
         let key = self.card.page.clone();
@@ -648,8 +651,7 @@ impl Render for PageCardView {
         };
         if presence == Some(PagePresence::Live)
             && !in_pane
-            && let (Some(bounds), Some((top, bottom))) = (self.bounds.get(), self.clear)
-            && (f32::from(bounds.top()) < top || f32::from(bounds.bottom()) > bottom)
+            && !self.shows_in_band()
         {
             ask(PageAct::Rest, cx);
         }
@@ -711,10 +713,31 @@ impl Render for PageCardView {
                 // slopty: the wheel passes to the chat under the card. On the Mac the page
                 // takes it first, and hands the window what it cannot scroll
                 // (`slopty_platform::web::page`'s wheel); GPUI then scrolls what is under it.
-                gpui::composition::native_view(native)
+                // Over the page the native's hitbox is topmost, so the body hears no hover: the
+                // native says it, or the card would rest under a pointer still over it.
+                let native = gpui::composition::native_view(native)
                     .id(SharedString::from(format!("{}-native", self.card.page)))
                     .block_mouse_except_scroll()
+                    .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                        if *hovered {
+                            this.engage(cx);
+                        }
+                    }))
+                    .size_full();
+                // slopty: the page shows within the clear band alone; past it, under the
+                // titlebar's fade and the composer's frost, its picture stands in, so a page
+                // taller than the band (a phone's, an expanded one) is live where it shows.
+                div()
                     .size_full()
+                    .relative()
+                    .children(snapshot.clone().map(|picture| {
+                        img(gpui::ImageSource::Render(picture))
+                            .absolute()
+                            .inset_0()
+                            .size_full()
+                            .object_fit(ObjectFit::Fill)
+                    }))
+                    .child(BandClip { band: self.clear, child: native.into_any_element() })
                     .into_any_element()
             }
             _ => match snapshot {
@@ -756,9 +779,7 @@ impl Render for PageCardView {
                 move |bounds, _, cx| {
                     if probe.get() != Some(bounds) {
                         probe.set(Some(bounds));
-                        let out = clear.is_some_and(|(top, bottom)| {
-                            f32::from(bounds.top()) < top || f32::from(bounds.bottom()) > bottom
-                        });
+                        let out = clear.is_some_and(|band| !meets_band(bounds, band));
                         let resized = (f32::from(bounds.size.width) - width).abs() > 0.5;
                         if (live_now && out) || resized {
                             let card = card.clone();
@@ -826,12 +847,10 @@ impl Render for PageCardView {
             .relative()
             .w_full()
             .h(px(height))
-            // slopty: the transcript's one card corner and hairline.
-            .rounded(px(crate::transcript::TRANSCRIPT_CARD_RADIUS))
+            // slopty: the frame's lower corners, inside its hairline.
+            .rounded_b(px(CARD_RADIUS - 1.0))
             .overflow_hidden()
             .bg(theme.bg)
-            .border_1()
-            .border_color(theme.border)
             .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                 if *hovered {
                     this.engage(cx);
@@ -857,15 +876,23 @@ impl Render for PageCardView {
             .items_center()
             .gap(px(2.0))
             .children(self.actions(doc.as_ref(), &theme, cx));
+        // slopty: a code card's header bar: the page's title and where it comes from, its actions
+        // on the right.
         let header = div()
             .h(px(HEADER_HEIGHT))
             .w_full()
             .min_w_0()
+            .flex_none()
+            .pl(px(crate::markdown::render::CODE_PADDING_X))
+            .pr(px(5.0))
+            .border_b_1()
+            .border_color(theme.border)
+            .bg(crate::theme::ink(0.02))
             .flex()
             .flex_row()
             .items_center()
             .gap(px(6.0))
-            .text_size(crate::typography::ui_rems(12.0))
+            .text_size(crate::typography::ui_rems(11.0))
             .text_color(theme.text_muted)
             .child(
                 div()
@@ -875,8 +902,6 @@ impl Render for PageCardView {
                     .text_color(theme.text.opacity(0.85))
                     .child(SharedString::from(self.card.title.clone())),
             )
-            .child(SharedString::from("·"))
-            .child(div().flex_none().child(SharedString::from(kind_words(&self.card))))
             .when(source_words(&self.card).is_some(), |header| {
                 header
                     .child(SharedString::from("·"))
@@ -963,10 +988,102 @@ impl Render for PageCardView {
             .py(px(Theme::SPACE_XS))
             .flex()
             .flex_col()
-            .child(header)
-            .child(div().h(px(1.0)).w_full().mb(px(6.0)).bg(theme.border))
-            .child(body)
+            .child(
+                // slopty: one frame for every card that shows something made (a page, an app's
+                // view, a chart), a code or diagram card's: its corner, hairline and surface.
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .rounded(px(CARD_RADIUS))
+                    .bg(crate::theme::ink(0.035))
+                    .border_1()
+                    .border_color(theme.border)
+                    .overflow_hidden()
+                    .child(header)
+                    .child(body),
+            )
             .child(asks)
+    }
+}
+
+/// slopty: whether `bounds` (window points) meets the band `(top, bottom)` a live page shows in.
+fn meets_band(bounds: Bounds<Pixels>, (top, bottom): (f32, f32)) -> bool {
+    f32::from(bounds.top()) < bottom && f32::from(bounds.bottom()) > top
+}
+
+/// slopty: draws its child clipped to the band `(top, bottom)` of the window (the transcript's, as
+/// the frame began), so a native placed in it shows, and takes the pointer, only there.
+struct BandClip {
+    band: Option<(f32, f32)>,
+    child: AnyElement,
+}
+
+impl BandClip {
+    fn mask(&self, window: &Window) -> Option<gpui::ContentMask<Pixels>> {
+        let (top, bottom) = self.band?;
+        let width = window.viewport_size().width;
+        let size = gpui::size(width, px((bottom - top).max(0.0)));
+        Some(gpui::ContentMask { bounds: Bounds::new(gpui::point(px(0.0), px(top)), size) })
+    }
+}
+
+impl IntoElement for BandClip {
+    type Element = Self;
+
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl gpui::Element for BandClip {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<gpui::ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&gpui::GlobalElementId>,
+        _inspector_id: Option<&gpui::InspectorElementId>,
+        window: &mut Window,
+        cx: &mut gpui::App,
+    ) -> (gpui::LayoutId, ()) {
+        (self.child.request_layout(window, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&gpui::GlobalElementId>,
+        _inspector_id: Option<&gpui::InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        _request_layout: &mut (),
+        window: &mut Window,
+        cx: &mut gpui::App,
+    ) {
+        let mask = self.mask(window);
+        window.with_content_mask(mask, |window| self.child.prepaint(window, cx));
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&gpui::GlobalElementId>,
+        _inspector_id: Option<&gpui::InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        _request_layout: &mut (),
+        _prepaint: &mut (),
+        window: &mut Window,
+        cx: &mut gpui::App,
+    ) {
+        let mask = self.mask(window);
+        window.with_content_mask(mask, |window| self.child.paint(window, cx));
     }
 }
 
@@ -1196,25 +1313,10 @@ mod tests {
         assert_eq!(presence_words(Some(PagePresence::Live), true, true), "error");
     }
 
-    /// The header names what the page is.
+    /// slopty: a card's header says its title and where the page comes from (an app's server, a
+    /// file's path), never the tool that showed it.
     #[test]
-    fn a_page_names_its_kind() {
-        let mut card = PageCard {
-            kind: PageCard::APP.into(),
-            server: Some("charts".into()),
-            ..PageCard::default()
-        };
-        assert_eq!(kind_words(&card), "MCP App: charts");
-        card.kind = PageCard::FILE.into();
-        assert_eq!(kind_words(&card), "File");
-        card.kind = PageCard::HTML.into();
-        assert_eq!(kind_words(&card), "Page");
-    }
-
-    /// slopty: an MCP App's header names its server and its tool once each: "echo · MCP App:
-    /// apps", not "echo · MCP App: apps · apps · echo".
-    #[test]
-    fn an_apps_header_names_its_server_and_tool_once() {
+    fn a_cards_header_names_its_source_and_no_tool() {
         let mut card = PageCard {
             title: "echo".into(),
             kind: PageCard::APP.into(),
@@ -1223,10 +1325,10 @@ mod tests {
             tool: Some("echo".into()),
             ..PageCard::default()
         };
-        assert_eq!(kind_words(&card), "MCP App: apps");
-        assert_eq!(source_words(&card), None);
-        card.title = "Latency".into();
-        assert_eq!(source_words(&card).as_deref(), Some("echo"));
+        assert_eq!(source_words(&card).as_deref(), Some("apps"), "an app's server");
+        card.kind = PageCard::HTML.into();
+        card.source = "show_page".into();
+        assert_eq!(source_words(&card), None, "HTML the agent wrote: no tool named");
         card.kind = PageCard::FILE.into();
         card.source = "/work/chart.html".into();
         assert_eq!(source_words(&card).as_deref(), Some("/work/chart.html"));

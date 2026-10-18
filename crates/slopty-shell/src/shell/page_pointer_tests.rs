@@ -176,3 +176,142 @@ fn live_pages_in_a_chat_take_the_pointer_at_the_ipads_size(cx: &mut TestAppConte
     assert_eq!(takes.len(), 2, "both live pages are placed:\n{map}");
     assert!(takes.iter().all(|&t| t), "each page takes the pointer over it:\n{map}");
 }
+
+/// The iPhone's window, in points.
+const PHONE: (f32, f32) = (402.0, 874.0);
+
+/// What the host was asked of each page, in order.
+type Acts = Rc<RefCell<Vec<(String, live::PageAct)>>>;
+
+/// Serve every page warm until it is engaged, as the app's host does: an engaged page goes live
+/// (and the one live before it rests: a phone's cap is one), a rested one goes warm, and every
+/// card hears what moved. Tall pages ask for more than any card shows.
+fn serve_engaged(cx: &mut App) -> (Rc<RefCell<HashMap<String, PagePresence>>>, Acts) {
+    use crate::live::PageAct;
+    type Watchers = Rc<RefCell<Vec<Box<dyn FnMut(&mut App)>>>>;
+    let presence: Rc<RefCell<HashMap<String, PagePresence>>> = Rc::default();
+    let natives: Rc<RefCell<HashMap<String, NativeHost>>> = Rc::default();
+    let acts: Acts = Rc::default();
+    let watchers: Watchers = Rc::default();
+    let (served, acted, heard, told, watched) =
+        (presence.clone(), presence.clone(), acts.clone(), watchers.clone(), watchers);
+    live::serve_pages(
+        cx,
+        move |page, window, cx| {
+            let now = *served.borrow().get(page).unwrap_or(&PagePresence::Warm);
+            let native = (now == PagePresence::Live).then(|| {
+                natives
+                    .borrow_mut()
+                    .entry(page.to_owned())
+                    .or_insert_with(|| {
+                        window.create_native_host(NativeHostOptions::default(), cx).unwrap()
+                    })
+                    .clone()
+            });
+            Some(HostedPage {
+                presence: now,
+                native,
+                snapshot: None,
+                height: Some(if page.ends_with("tall") { 5000.0 } else { 160.0 }),
+                failed: None,
+                waiting: None,
+                doc: None,
+            })
+        },
+        move |page, act, cx| {
+            heard.borrow_mut().push((page.to_owned(), act));
+            let mut map = acted.borrow_mut();
+            match act {
+                PageAct::Engage => {
+                    map.values_mut().filter(|v| **v == PagePresence::Live).for_each(|v| {
+                        *v = PagePresence::Warm;
+                    });
+                    map.insert(page.to_owned(), PagePresence::Live);
+                }
+                PageAct::Rest => {
+                    map.insert(page.to_owned(), PagePresence::Warm);
+                }
+                _ => return,
+            }
+            drop(map);
+            let told = told.clone();
+            cx.defer(move |cx| {
+                let mut all = std::mem::take(&mut *told.borrow_mut());
+                all.iter_mut().for_each(|f| f(cx));
+                told.borrow_mut().extend(all);
+            });
+        },
+        move |_, changed, _| {
+            watched.borrow_mut().push(changed);
+            None
+        },
+    );
+    (presence, acts)
+}
+
+/// slopty: on an iPhone a page as tall as a card goes (0.8 of the window) is taller than the
+/// band a live page may show in, below the titlebar's fade and above the composer's. A press
+/// on it made it live, the band rested it at once, and its picture took the hover back and
+/// engaged it again, for ever (e2e `pages`: the card never stayed live, and a finger found its
+/// web view half the time). It goes live and stays so, its page shown and taking the pointer
+/// within the band alone.
+#[gpui::test]
+fn a_page_taller_than_the_phones_band_stays_live_where_it_shows(cx: &mut TestAppContext) {
+    super::compact::force_touch(true);
+    let (presence, acts) = cx.update(serve_engaged);
+    let (shell, cx) = shell(cx, PHONE);
+    cx.simulate_scale_factor_change(3.0);
+    cx.simulate_keystrokes("cmd-1");
+    cx.run_until_parked();
+    let pages =
+        [html_card("slopty-page:a/short", "Short"), html_card("slopty-page:a/tall", "Tall")];
+    shell.update(cx, |shell, cx| {
+        shell.state.update(cx, |state, cx| {
+            state.apply_transcript(turn_with_pages("a", &pages));
+            cx.notify();
+        });
+    });
+    let frames = |cx: &mut VisualTestContext| {
+        for _ in 0..4 {
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw_and_present(cx));
+        }
+    };
+    cx.executor().advance_clock(Duration::from_millis(500));
+    frames(cx);
+    let said = |acts: &Acts, page: &str, act: &live::PageAct| {
+        acts.borrow().iter().filter(|(p, a)| p == page && a == act).count()
+    };
+    let tall = "slopty-page:a/tall";
+
+    // The chat opens at its end, the tall page over its last line; a press in what shows of it.
+    let at = gpui::point(px(200.0), px(400.0));
+    cx.simulate_mouse_down(at, gpui::MouseButton::Left, gpui::Modifiers::none());
+    cx.simulate_mouse_up(at, gpui::MouseButton::Left, gpui::Modifiers::none());
+    frames(cx);
+    // Past the 2 s a page stays live once the pointer has left it.
+    cx.executor().advance_clock(Duration::from_secs(3));
+    frames(cx);
+    let log = || format!("{:?}", acts.borrow());
+    assert_eq!(said(&acts, tall, &live::PageAct::Engage), 1, "one press, one wake: {}", log());
+    assert_eq!(said(&acts, tall, &live::PageAct::Rest), 0, "it stays live: {}", log());
+    assert_eq!(presence.borrow().get(tall), Some(&PagePresence::Live));
+    // The band's top: under the titlebar and its fade, over the chat's list.
+    let list = shell.update(cx, |shell, cx| shell.transcript.read(cx).list_state().viewport_bounds());
+    let top = f32::from(list.top()) + Theme::TITLEBAR_HEIGHT + Theme::TRANSCRIPT_FADE_BAND;
+    let (map, said_map) = cx.update(|window, _| {
+        let map = window.native_hit_map().expect("a native presented");
+        let said = format!("{map:#?}");
+        (map, said)
+    });
+    assert_eq!(map.entries.len(), 1, "the tall page alone is placed:\n{said_map}");
+    let shows = map.entries[0].visible;
+    assert!(
+        f32::from(shows.top()) >= top - 0.5 && f32::from(shows.bottom()) < f32::from(list.bottom()),
+        "it shows within the band alone, from {top} and over the composer: {shows:?}"
+    );
+    assert!(map.native_at(at).is_some(), "the page takes the pointer where it shows");
+    let in_fade = gpui::point(px(200.0), px(top - 10.0));
+    assert!(map.native_at(in_fade).is_none(), "under the titlebar's fade the chat has it");
+
+}

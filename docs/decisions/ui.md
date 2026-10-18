@@ -12648,6 +12648,16 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 - ✅ **A page's card carries its own actions; charts, PDFs and tables draw; math sits on the
   line (2026-10-16).** Builds on "A page never answers for the person" and "A rewind can be
   undone, a page moved, saved or copied" above.
+  - **One frame for every made thing (2026-10-18).** A page, an MCP App's view and a chart
+    fence draw in a code or diagram card's frame: its 10 pt corner, hairline and surface, and
+    its 28 pt header bar with the actions on the right. The header names the card's title and
+    where it comes from (an app's server, a file's path, a chart's language). It never names
+    the tool that showed it: "show_page" and an app's tool were Slopty's plumbing, and the
+    kind ("Page", "MCP App: …") said again what the card already shows. Before, the header was
+    a bare line over a hairline above a separate rounded body, beside framed diagrams. Zeron's
+    Luau visuals keep zeron's own unframed look. Tests:
+    `page::tests::a_cards_header_names_its_source_and_no_tool`, goldens `media-page`,
+    `media-app`, `media-files`.
   - **The card's actions.** The header shows them on hover, in the code block's icon chrome
     (22 pt, hover wash, tooltip, a check for 1.5 s once done). Each is a button node with its
     name:

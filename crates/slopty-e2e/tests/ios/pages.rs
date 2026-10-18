@@ -51,8 +51,10 @@ fn card<'a>(d: &'a Dump, title: &str) -> Option<&'a A11yNode> {
         .find(|n| n.role == "Group" && n.label.as_deref() == Some(&format!("Page: {title}")))
 }
 
-/// The card of `title` once it has drawn (its first picture, or live) and stands wholly between
-/// `top` and `bottom` (window points).
+/// The card of `title` once it has drawn (its first picture, or live) and the head of its page
+/// shows between `top` and `bottom` (window points), where a press and a finger land: a card
+/// taller than what shows (a tall page on a phone, the short one once its tap grew it) never
+/// stands there whole.
 async fn drawn_card(drv: &mut Driver, title: &str, top: f32, bottom: f32) -> A11yNode {
     let since = std::time::Instant::now();
     loop {
@@ -60,7 +62,8 @@ async fn drawn_card(drv: &mut Driver, title: &str, top: f32, bottom: f32) -> A11
         if let Some(found) = card(&dump, title) {
             let [_, y, _, h] = found.bounds;
             let drawn = matches!(found.value.as_deref(), Some("snapshot" | "live"));
-            if drawn && y >= top && y + h <= bottom {
+            let head = (y + HEADER, (y + HEADER + 40.0).min(y + h));
+            if drawn && head.0 >= top && head.1 <= bottom {
                 return found.clone();
             }
             assert!(
