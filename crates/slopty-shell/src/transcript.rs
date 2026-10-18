@@ -4266,6 +4266,12 @@ impl Transcript {
         }
     }
 
+    /// slopty: the height of the stack the transcript scrolls under ([`Self::set_bottom_clearance`]).
+    #[cfg(test)]
+    pub(crate) const fn bottom_clearance(&self) -> f32 {
+        self.bottom_clearance
+    }
+
     pub(crate) fn rail_hover(&self) -> Option<usize> {
         self.rail_hover
     }

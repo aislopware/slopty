@@ -1241,6 +1241,18 @@ pub(crate) fn lightbox_with_size(
         // slopty: the house's pending line, shown only past its grace.
         None => crate::loaders::pending("attachment-preview-load", "Loading image…").into_any_element(),
     };
+    // slopty: the caption goes under the picture as it is fitted (the viewer's own fit, never
+    // past its natural size), not under the room it may be zoomed in, which a wide picture
+    // leaves far below it.
+    let fitted_h = natural_size.map_or(max_h, |natural| {
+        let (w, h) = (f32::from(natural.width), f32::from(natural.height));
+        if w > 0.0 && h > 0.0 {
+            px(h * (f32::from(max_w) / w).min(f32::from(max_h) / h).min(1.0))
+        } else {
+            max_h
+        }
+    });
+    let caption_top = (viewport.height + fitted_h) / 2.0 + px(12.0);
     let on_close = std::rc::Rc::new(on_close);
     let close_on_key = on_close.clone();
     let close_on_button = on_close.clone(); // slopty
@@ -1289,7 +1301,6 @@ pub(crate) fn lightbox_with_size(
                     .flex_col()
                     .items_center()
                     .justify_center()
-                    .gap(px(12.0))
                     .on_key_down(move |event: &gpui::KeyDownEvent, window, cx| {
                         if event.keystroke.key == "escape" {
                             cx.stop_propagation();
@@ -1319,11 +1330,21 @@ pub(crate) fn lightbox_with_size(
                     )
                     .child(
                         div()
-                            .max_w(max_w)
-                            .overflow_hidden()
-                            .text_size(crate::typography::ui_rems(11.0))
-                            .text_color(ink(0.45))
-                            .child(preview.name.clone()),
+                            .absolute()
+                            .top(caption_top)
+                            .left_0()
+                            .w(viewport.width)
+                            .flex()
+                            .justify_center()
+                            .child(
+                                div()
+                                    .debug_selector(|| "attachment-lightbox-caption".into())
+                                    .max_w(max_w)
+                                    .overflow_hidden()
+                                    .text_size(crate::typography::ui_rems(11.0))
+                                    .text_color(ink(0.45))
+                                    .child(preview.name.clone()),
+                            ),
                     )
                     .child(close),
             ),
@@ -1385,6 +1406,35 @@ mod tests {
         let at = cx.debug_bounds("attachment-lightbox-close").expect("the close").center();
         cx.simulate_click(at, gpui::Modifiers::default());
         assert!(closed.get(), "Close closes it");
+    }
+
+    /// slopty: a wide picture's name sits just under it, not under the room it may be zoomed in.
+    #[gpui::test]
+    fn the_lightbox_names_its_picture_just_under_it(cx: &mut gpui::TestAppContext) {
+        struct Sized(PreviewImage, gpui::FocusHandle);
+        impl gpui::Render for Sized {
+            fn render(&mut self, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+                let natural = Some(gpui::size(px(640.0), px(400.0)));
+                div().size_full().child(lightbox_with_size(window, &self.0, &self.1, natural, |_, _| {}, cx))
+            }
+        }
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(crate::theme::Theme::dark());
+        });
+        let (_, cx) = cx.add_window_view(|_, cx| {
+            let png = Image::from_bytes(ImageFormat::Png, Vec::new());
+            Sized(PreviewImage::new("plot.png", Arc::new(png)), cx.focus_handle())
+        });
+        cx.simulate_resize(gpui::size(px(1200.0), px(900.0)));
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear(cx);
+        });
+        // 640x400 fits 1080x765 at its own size: centred, its bottom at 650.
+        let caption = cx.debug_bounds("attachment-lightbox-caption").expect("the caption");
+        assert_eq!(caption.origin.y, px(662.0), "12 pt under the picture: {caption:?}");
+        assert!((caption.center().x - px(600.0)).abs() < px(1.0), "centred: {caption:?}");
     }
 
     // slopty: appshots removed.

@@ -389,3 +389,69 @@ fn a_chat_at_its_end_stays_there_when_the_phones_floor_rises(cx: &mut TestAppCon
         "a chat scrolled up past what the keyboard frees keeps its top line: {up} -> {after}"
     );
 }
+
+/// A chat at its end stays there when its composer grows: the stack it scrolls under rises
+/// (a pasted picture's chip, the background strip, more lines), and its last line went under
+/// the composer (`ios-phone-compact-paste`).
+#[gpui::test]
+fn a_chat_at_its_end_stays_there_when_its_composer_grows(cx: &mut TestAppContext) {
+    super::compact::force_touch(true);
+    let (shell, cx) = shell(cx, PHONE);
+    cx.simulate_keystrokes("cmd-1");
+    cx.run_until_parked();
+    let now = Utc::now().timestamp_millis();
+    let parts = (0..40)
+        .map(|n| MessagePart::Text {
+            id: format!("a:answer:{n}"),
+            text: format!("Line {n} of a long answer, long enough to wrap on a phone's width."),
+        })
+        .collect();
+    let entry = |id: &str, role, parts, status| SessionMessageEntry {
+        id: id.into(),
+        role,
+        parts,
+        created_at: now,
+        device_id: "local".into(),
+        status,
+        continuation_of: None,
+        duration_ms: None,
+    };
+    let ask = vec![MessagePart::Text { id: "a:ask:t".into(), text: "Write a lot".into() }];
+    shell.update(cx, |shell, cx| {
+        shell.state.update(cx, |state, cx| {
+            state.apply_transcript(vec![
+                entry("a:ask", MessageRole::User, ask, None),
+                entry("a:answer", MessageRole::Assistant, parts, Some(MessageStatus::Complete)),
+            ]);
+            cx.notify();
+        });
+    });
+    let frames = |cx: &mut VisualTestContext| {
+        for _ in 0..30 {
+            cx.executor().advance_clock(Duration::from_millis(16));
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw_and_present(cx));
+        }
+    };
+    frames(cx);
+    let above = |shell: &Entity<Shell>, cx: &mut VisualTestContext| {
+        shell.update(cx, |shell, cx| shell.transcript.read(cx).distance_from_bottom())
+    };
+    assert!(above(&shell, cx) <= 0.5, "the chat opens at its end: {}", above(&shell, cx));
+    let clearance = |shell: &Entity<Shell>, cx: &mut VisualTestContext| {
+        shell.update(cx, |shell, cx| shell.transcript.read(cx).bottom_clearance())
+    };
+    let before = clearance(&shell, cx);
+
+    // The draft grows by four lines: the stack the chat scrolls under rises.
+    shell.update(cx, |shell, cx| {
+        shell.composer.update(cx, |composer, cx| {
+            composer.input.update(cx, |input, cx| input.set_text("one\ntwo\nthree\nfour\nfive", cx));
+        });
+    });
+    frames(cx);
+    let after = clearance(&shell, cx);
+    assert!(after > before + 40.0, "the composer grew: {before} -> {after}");
+    let risen = above(&shell, cx);
+    assert!(risen <= 0.5, "with the composer grown the chat stays at its end: {risen}px above it");
+}
