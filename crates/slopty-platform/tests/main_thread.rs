@@ -197,12 +197,33 @@ mod mac {
         assert_eq!(asked, tall, "the frame asked for, on a screen too short for it");
     }
 
-    /// Run the main run loop until `done`, twenty seconds at most: a page loads under a loaded
-    /// machine too.
+    /// Run the main run loop until `done`, twenty seconds at most: what a loaded page does once
+    /// it runs. Starting its process is [`until_started`]'s.
     fn until(what: &str, done: impl Fn() -> bool) {
-        let deadline = Instant::now().checked_add(Duration::from_secs(20)).unwrap();
+        until_within(what, Duration::from_secs(20), done);
+    }
+
+    /// How long a page's process may take to start and load its first document. That is
+    /// what a loaded machine stretches most (a gate's runner runs 1497 tests at once, and a
+    /// page process started there past 20 s), so it is waited for on its own, before the 20 s
+    /// of what the page then does.
+    const PROCESS_START: Duration = Duration::from_secs(120);
+
+    /// Run the main run loop until `done`, which a page's process starting and its document
+    /// loading decide, [`PROCESS_START`] at most.
+    fn until_started(what: &str, done: impl Fn() -> bool) {
+        until_within(
+            &format!("{what} (its process started and its document loaded)"),
+            PROCESS_START,
+            done,
+        );
+    }
+
+    /// Run the main run loop until `done`, `limit` at most.
+    fn until_within(what: &str, limit: Duration, done: impl Fn() -> bool) {
+        let deadline = Instant::now().checked_add(limit).unwrap();
         while !done() {
-            assert!(Instant::now() < deadline, "{what}");
+            assert!(Instant::now() < deadline, "{what}, not within {limit:?}");
             // SAFETY: CoreFoundation rule: `kCFRunLoopDefaultMode` is a constant string valid
             // for the life of the process.
             let mode = unsafe { kCFRunLoopDefaultMode };
@@ -309,7 +330,7 @@ mod mac {
         let page = objc2::rc::autoreleasepool(|_| {
             WebView::new(host, worker, &format!("http://127.0.0.1:{port}/"), sink).unwrap()
         });
-        until("the page loads", || *loaded.borrow() == 1);
+        until_started("the page loads", || *loaded.borrow() == 1);
         objc2::rc::autoreleasepool(|_| page.load(&format!("http://127.0.0.1:{port}/next")));
         until("and a second", || *loaded.borrow() == 2);
         // As the app does: the worker is forgotten as its tiles go, their pages still open.
@@ -338,7 +359,7 @@ mod mac {
             PageId, PageSpec, Presence, Refusal, Theme,
         };
 
-        use super::until;
+        use super::{until, until_started};
 
         type Events = Rc<RefCell<Vec<(PageId, PageEvent)>>>;
 
@@ -391,6 +412,23 @@ mod mac {
             }
         }
 
+        /// Run the run loop until each of `pages` has loaded its view, before the test waits on
+        /// what they do: a page's process starting is the slow part under load
+        /// ([`until_started`]), and one that failed or crashed says so at once.
+        fn view_loaded(host: &PageHost, events: &Events, pages: &[PageId]) {
+            for page in pages {
+                until_started(&format!("{page:?}'s view"), || {
+                    let ended = events.borrow().iter().find_map(|(of, event)| match event {
+                        PageEvent::Failed(why) if of == page => Some(format!("failed: {why}")),
+                        PageEvent::Crashed if of == page => Some("crashed".to_owned()),
+                        _ => None,
+                    });
+                    assert!(ended.is_none(), "{page:?} {}", ended.unwrap_or_default());
+                    host.facts(*page).is_some_and(|f| f.view_loads >= 1)
+                });
+            }
+        }
+
         /// What `page` logged under `key`, the last time it did.
         fn logged(events: &Events, page: PageId, key: &str) -> Option<Value> {
             events.borrow().iter().rev().find_map(|(of, event)| match event {
@@ -436,6 +474,7 @@ mod mac {
             let one = host.open(spec);
             let _changes = host.mount(other);
             let _changes = host.mount(one);
+            view_loaded(&host, &events, &[other, one]);
             until("the page reports", || {
                 ["network", "other", "naturalWidth"]
                     .iter()
@@ -481,6 +520,7 @@ mod mac {
             let short = host.open(page("short", &sized(300)));
             let _changes = host.mount(tall);
             let _changes = host.mount(short);
+            view_loaded(&host, &events, &[tall, short]);
             let resized = |page: PageId| {
                 events.borrow().iter().find_map(|(of, event)| match event {
                     PageEvent::Resized { asked, height } if *of == page => Some((*asked, *height)),
@@ -550,6 +590,7 @@ mod mac {
                 location = 'https://example.com/away'; }, 50));";
             let one = host.open(page("leaving", script));
             let _changes = host.mount(one);
+            view_loaded(&host, &events, &[one]);
             until("the navigation is refused", || {
                 host.facts(one).is_some_and(|f| f.navigations_refused >= 1)
             });
@@ -592,6 +633,7 @@ mod mac {
             let granted = host.open(page("granted", &script));
             let closed = host.open(page("closed", &script));
             let _changes = host.mount(granted);
+            view_loaded(&host, &events, &[granted]);
             until("the first fetch", || logged(&events, granted, "fetched").is_some());
             assert_eq!(
                 logged(&events, granted, "fetched"),
@@ -614,6 +656,7 @@ mod mac {
             assert_eq!(hits.load(Ordering::Relaxed), 1, "one fetch reached the server");
 
             let _changes = host.mount(closed);
+            view_loaded(&host, &events, &[closed]);
             until("the other page's fetch", || logged(&events, closed, "fetched").is_some());
             assert_eq!(
                 logged(&events, closed, "fetched"),
@@ -650,6 +693,7 @@ mod mac {
                 });";
             let one = host.open(page("asking", script));
             let _changes = host.mount(one);
+            view_loaded(&host, &events, &[one]);
             assert!(
                 host.notify(one, &Notice::Input(json!({ "arguments": { "v": 1 } }))),
                 "mounted"
@@ -725,9 +769,11 @@ mod mac {
             let mounted: Vec<PageId> =
                 all.iter().copied().filter(|p| host.view(*p).is_some()).collect();
             assert_eq!(mounted.len(), MOUNTED_CAP, "a view each");
-            until("every mounted page's view loads", || {
-                mounted.iter().all(|p| host.facts(*p).is_some_and(|f| f.view_loads == 1))
-            });
+            view_loaded(&host, &events, &mounted);
+            assert!(
+                mounted.iter().all(|p| host.facts(*p).is_some_and(|f| f.view_loads == 1)),
+                "each view loaded once"
+            );
             let mut pids: Vec<i32> = mounted.iter().filter_map(|p| host.process(*p)).collect();
             assert_eq!(pids.len(), MOUNTED_CAP, "each page has a process");
             let mut footprints: Vec<f64> = pids
@@ -805,6 +851,7 @@ mod mac {
             let (one, asked) = chart(&host, Chart::VegaLite, &spec.to_string());
             let started = Instant::now();
             let _changes = host.mount(one);
+            view_loaded(&host, &events, &[one]);
             until("the chart reports", || logged(&events, one, "chart").is_some());
             println!("MEASURE vega-lite fence → drawn: {:?}", started.elapsed());
             assert_eq!(logged(&events, one, "error"), None, "drawn");
@@ -839,6 +886,7 @@ mod mac {
             let (one, asked) = chart(&host, Chart::Plotly, &figure.to_string());
             let started = Instant::now();
             let _changes = host.mount(one);
+            view_loaded(&host, &events, &[one]);
             until("the chart reports", || logged(&events, one, "chart").is_some());
             println!("MEASURE plotly fence → drawn: {:?}", started.elapsed());
             assert_eq!(logged(&events, one, "error"), None, "drawn");
@@ -868,6 +916,7 @@ mod mac {
             let one = host.open(page("moving", script));
             let _changes = host.mount(one);
             let _changes = host.engage(one);
+            view_loaded(&host, &events, &[one]);
             until("it loads", || logged(&events, one, "loaded").is_some());
             let loaded = logged(&events, one, "loaded").unwrap();
             host.set_display_mode(one, "fullscreen");
