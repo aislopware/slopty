@@ -1,11 +1,11 @@
 //! Claude Code's past sessions on a real stack: sessions a stand-in "TUI" left in Claude Code's own
 //! store on the worker (a transcript under `~/.claude/projects/<folder>/` and the prompts in
 //! `~/.claude/history.jsonl`, as Claude Code writes them) are listed under the project's History,
-//! found by what was asked in them from "Resume a session…", opened with their whole conversation
-//! and continued: the stand-in Claude Code (`slopty-stub-claude`) is started on the same session
-//! (`--resume <id>`) and hears the new message. Each case is judged by the accessibility tree and
-//! by what the stand-in heard (`STUB_RECORD`, one file per session it was started on), and the
-//! worker's words in a thread by its read.
+//! found by what was asked in them from "Resume a Claude Code session…", opened with their whole
+//! conversation and continued: the stand-in Claude Code (`slopty-stub-claude`) is started on the
+//! same session (`--resume <id>`) and hears the new message. Each case is judged by the
+//! accessibility tree and by what the stand-in heard (`STUB_RECORD`, one file per session it was
+//! started on), and the worker's words in a thread by its read.
 
 use std::path::{Path, PathBuf};
 
@@ -14,7 +14,7 @@ use slopty_e2e::harness::ServedApp;
 
 use crate::served::{
     STEP, TURN, all_holding, click, goldens, heard, holding, middle, says, seen, start,
-    thread_until,
+    thread_until, unread,
 };
 
 /// The worker's name, as the CLI names the machine.
@@ -257,9 +257,9 @@ async fn noticed(stack: &ServedApp, thread: &str, words: &str) {
 /// A session the person ran in Claude Code's TUI is in its project's History, titled by its
 /// first prompt; opened, its whole conversation is the chat's, and a message sent there goes to
 /// Claude Code started on that same session in its folder (`--resume <id>`), so the TUI and the
-/// GUI share one history. "Resume a session…" (⇧⌘O) finds another by a word asked in it, the
-/// word lit in the prompt that matched, and opens it the same way. A session that became a chat
-/// leaves History.
+/// GUI share one history. "Resume a Claude Code session…" (⇧⌘O) finds another by a word asked
+/// in it, the word lit in the prompt that matched, and opens it the same way. A session that
+/// became a chat leaves History.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
 async fn a_tui_session_is_listed_opened_and_continued() {
@@ -291,6 +291,8 @@ async fn a_tui_session_is_listed_opened_and_continued() {
         chat(d, PARSER_ASKED[0]).is_some()
             && past(d, PARSER_ASKED[0]).is_none()
             && all_holding(d, "Status", "Worked for").len() == PARSER_ASKED.len()
+            // Seen as it opened: its turns, which may reach the app after the open, had ended.
+            && !unread(d, PARSER_ASKED[0])
     })
     .await;
     assert!(words(&opened).contains("Open in"), "the chat is open:\n{}", words(&opened));
@@ -318,8 +320,23 @@ async fn a_tui_session_is_listed_opened_and_continued() {
     })
     .await;
 
-    // Resume a session…: found by a word asked in it, the word lit, opened.
+    // The app has the answer drawn, as the worker said it: the chat behind the picker stands
+    // where its last turn leaves it.
     let drv = &mut stack.driver;
+    seen(drv, "the answer in the chat, its turn ended", STEP, |d| {
+        d.a11y
+            .iter()
+            .skip_while(|n| {
+                n.role != "Paragraph"
+                    || !n.label.as_deref().is_some_and(|l| l.contains("Done: Keep going"))
+            })
+            .any(|n| {
+                n.role == "Status" && n.label.as_deref().is_some_and(|l| l.contains("Worked for"))
+            })
+    })
+    .await;
+
+    // Resume a Claude Code session…: found by a word asked in it, the word lit, opened.
     drv.keys("cmd-shift-o").await.unwrap();
     seen(drv, "the picker", STEP, |d| holding(d, "Tab", "Every folder").is_some()).await;
     drv.type_text("scanner").await.unwrap();

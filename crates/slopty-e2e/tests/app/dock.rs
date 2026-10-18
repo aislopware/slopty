@@ -14,6 +14,7 @@ use slopty_e2e::{A11yNode, Driver, Dump};
 use crate::served::{
     SETTLE, STEP, TURN, all_holding, asking, click, control_requests, goldens, heard, holding,
     hover, middle, node, open_thread, says, seen, start, tell, thread_until, type_in_composer,
+    unread,
 };
 
 /// The worker's name, as the CLI names the machine.
@@ -293,7 +294,11 @@ async fn a_rewind_takes_the_turn_back_and_undo_returns_it() {
 
     let renders = stack.path("");
     let drv = &mut stack.driver;
-    let open = open_thread(drv, 1).await;
+    // The app has the ended turn before the chat opens: the open marks it seen. The window of
+    // the self-test is never active, so a turn that came after the open would stay unread.
+    seen(drv, "the ended turn in the sidebar", STEP, |d| unread(d, prompt)).await;
+    open_thread(drv, 1).await;
+    let open = seen(drv, "the opened chat seen", STEP, |d| !unread(d, prompt)).await;
     // The person's message carries "Rewind…" on its hover strip. The message is no node of the
     // tree, so the pointer goes down the transcript's right side, where a person's message
     // sits, until the strip shows.
@@ -417,7 +422,7 @@ async fn a_request_that_needs_the_person_is_refused_from_a_note() {
     let drv = &mut stack.driver;
     open_thread(drv, 1).await;
     seen(drv, "the card that needs the person", STEP, |d| {
-        node(d, "Note", "Needs you at the card").is_some() && node(d, "Button", "Red").is_some()
+        node(d, "Note", "Answer here").is_some() && node(d, "Button", "Red").is_some()
     })
     .await;
 
@@ -431,7 +436,9 @@ async fn a_request_that_needs_the_person_is_refused_from_a_note() {
         refusals.push(refused);
     }
     assert!(
-        refusals.iter().all(|r| r.contains("Needs you at the card")),
+        refusals
+            .iter()
+            .all(|r| r.contains("Answer here: the agent takes this answer only from its card")),
         "the worker said why it refused each press: {refusals:?}"
     );
     let read = stack.slopty(&["agent", "read", "--thread", &agent]).await.unwrap();

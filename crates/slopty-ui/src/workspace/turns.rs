@@ -46,7 +46,7 @@ impl WorkspaceView {
     }
 
     /// The turn `thread` is seen through: its row's mark, or this device's own ahead of it.
-    fn seen_through(&self, thread: ThreadId, row: TurnId) -> TurnId {
+    pub(super) fn seen_through(&self, thread: ThreadId, row: TurnId) -> TurnId {
         self.turns.seen.get(&thread).map_or(row, |here| row.max(*here))
     }
 

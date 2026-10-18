@@ -558,6 +558,12 @@ impl WorkspaceView {
             let row = &*standing;
             let id = self.chat_id(row.id);
             let mut chat = rows::chat(row, device);
+            // The person's look here stands at once: a seen mark on its way to the worker reads
+            // as seen until the row says it back, so no publish in between shows it unread.
+            if let Some(ended) = row.ended.filter(|e| e.turn <= self.seen_through(row.id, row.seen))
+            {
+                chat.last_seen_at = Some(rows::time(ended.at_ms));
+            }
             let place = self.view_place(device, row.cwd.as_deref(), row.repo.as_deref());
             chat.space_id = place.as_deref().map(|path| self.view_space_id(device, path));
             chat.config = Some(self.chat_config(&id, device, row));
@@ -1821,10 +1827,10 @@ mod tests {
     use slopty_core::WallMs;
     use slopty_proto::ClientMsg;
     use slopty_proto::thread::wire::{
-        Intent, IntentDone, Outcome, TableFrame, ThreadFrame, ThreadRequest,
+        Intent, IntentDone, Outcome, TableFrame, ThreadFrame, ThreadRequest, ThreadRow, TurnEnded,
     };
     use slopty_proto::thread::{
-        AgentId, Cursor, Delivery, IntentId, Liveness, Pending, PendingState, ThreadState,
+        AgentId, Cursor, Delivery, IntentId, Liveness, Pending, PendingState, ThreadState, TurnId,
     };
     use slopty_view_doc::SessionCommandPayload;
     use slopty_view_proto::HarnessId;
@@ -2717,6 +2723,47 @@ mod tests {
                 if turn == ended)
         });
         assert!(seen, "seen through its latest turn");
+    }
+
+    /// A chat opened reads seen at once, and stays so until its worker says the mark back: a
+    /// publish meanwhile, its row still unseen, shows it read. A turn that ends after the look
+    /// is unread.
+    #[gpui::test]
+    fn a_chat_opened_reads_seen_before_its_worker_says_so(cx: &mut gpui::TestAppContext) {
+        let mut state = fixtures::thread("tools");
+        state.status.liveness = Liveness::Live;
+        let row = state.row(WallMs::ZERO);
+        let ended = row.ended.expect("a turn that ended");
+        let thread = state.meta.id;
+        let (workspace, cx, _rx) = holding(&state, cx);
+        let feed = serve(&workspace, cx);
+        let unseen = |workspace: &gpui::Entity<WorkspaceView>, cx: &mut gpui::VisualTestContext| {
+            workspace.update(cx, WorkspaceView::view_publish);
+            let chats = feed.said_chats().expect("the chats");
+            chats.iter().find(|c| c.id == thread.to_string()).expect("its chat").unseen()
+        };
+        let mut seq = 1_u64;
+        let mut table = |ended: TurnEnded| {
+            seq = seq.saturating_add(1);
+            let rows = vec![ThreadRow { ended: Some(ended), ..row.clone() }];
+            TableFrame::Snapshot { cursor: Cursor { epoch: 1, seq }, rows }
+        };
+        assert!(unseen(&workspace, cx), "unread before the look");
+
+        let params = serde_json::json!({ "op": "markChatSeen", "chatId": thread.to_string() });
+        let answer = workspace.update(cx, |v, cx| v.view_call(methods::MUTATE, &params, cx));
+        assert!(answer.is_ok(), "{answer:?}");
+        cx.run_until_parked();
+        assert!(!unseen(&workspace, cx), "read at once");
+        // The worker's table moves on before the mark comes back.
+        workspace.update(cx, |v, cx| v.thread_table(KEY, &table(ended), cx));
+        cx.run_until_parked();
+        assert!(!unseen(&workspace, cx), "read while the mark is on its way");
+
+        let next = TurnEnded { turn: TurnId(ended.turn.0.saturating_add(1)), ..ended };
+        workspace.update(cx, |v, cx| v.thread_table(KEY, &table(next), cx));
+        cx.run_until_parked();
+        assert!(unseen(&workspace, cx), "a turn ended after the look is unread");
     }
 
     /// The chats wait for every machine's threads: an empty first list would read as every
