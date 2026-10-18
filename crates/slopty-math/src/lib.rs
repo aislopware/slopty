@@ -1,7 +1,7 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ c02739d), see THIRD_PARTY_NOTICES.md
 //! slopty_math — fast, low-memory LaTeX math layout for Slopty.
 //!
-//! [`layout`] turns a TeX math string into a [`Formula`]: a width, ascent and
+//! [`layout()`] turns a TeX math string into a [`Formula`]: a width, ascent and
 //! descent plus a flat list of [`Item`]s (glyph ids and rules) in points.
 //! Hosts paint it however they like — [`Formula::paint`] streams every glyph
 //! outline and rule as paths, so a painter needs no font registration at all.
@@ -119,7 +119,7 @@ impl Options {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Item {
     /// Glyph `glyph` of font `font` in the [`MathFont::chain`] (0 is the
-    /// font passed to [`layout`]), its origin at (`x`, `y`), drawn at `size`
+    /// font passed to [`layout()`]), its origin at (`x`, `y`), drawn at `size`
     /// points.
     Glyph {
         font: u8,

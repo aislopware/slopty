@@ -1,5 +1,5 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ c02739d), see THIRD_PARTY_NOTICES.md
-//! LaTeX math source → [`ast::Node`] list.
+//! LaTeX math source → [`Node`] list.
 //!
 //! A single-pass recursive-descent parser over a hand-rolled tokenizer (no
 //! macro expansion). Strict: anything it doesn't know is an error with a byte

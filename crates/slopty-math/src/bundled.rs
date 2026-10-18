@@ -94,7 +94,7 @@ pub fn font_at(index: u8) -> &'static MathFont {
     }
 }
 
-/// [`crate::layout`] in a bundled face, with glyph font indices into the
+/// [`crate::layout()`] in a bundled face, with glyph font indices into the
 /// fixed table [`font_at`] resolves — the same for every face.
 pub fn layout(source: &str, face: Face, options: &Options) -> Result<Formula, Error> {
     let mut formula = crate::layout(source, font(face), options)?;
