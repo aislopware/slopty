@@ -172,10 +172,11 @@ fn a_followed_chat_publishes_its_tray(cx: &mut gpui::TestAppContext) {
 }
 
 /// A subagent's approval is asked in its parent's chat, under its name, and the person's
-/// answer goes to the subagent's thread, not the parent's.
+/// answer goes to the subagent's thread, not the parent's, though the parent asks under the
+/// same id (each agent numbers its own asks).
 #[gpui::test]
 fn a_subagents_request_is_asked_and_answered_in_its_parent(cx: &mut gpui::TestAppContext) {
-    let parent = fixtures::empty();
+    let mut parent = fixtures::empty();
     let mut child = fixtures::empty();
     child.meta.parent = Some(Link { thread: parent.meta.id, item: ItemId("t1".into()) });
     child.meta.title = "reviewer".to_owned();
@@ -204,6 +205,8 @@ fn a_subagents_request_is_asked_and_answered_in_its_parent(cx: &mut gpui::TestAp
         until_ms: None,
         needs_presence: false,
     }];
+    parent.requests = child.requests.clone();
+    parent.requests[0].title = "Run cargo build?".to_owned();
     let (parent_id, child_id) = (parent.meta.id, child.meta.id);
     let (workspace, cx, mut rx) = holding(&[parent, child], cx);
     let said = workspace
@@ -215,17 +218,18 @@ fn a_subagents_request_is_asked_and_answered_in_its_parent(cx: &mut gpui::TestAp
         .flat_map(|entry| &entry.parts)
         .find_map(|part| match part {
             slopty_view_doc::MessagePart::Input { request_id, questions, .. } => {
-                Some((request_id.clone(), questions.first()?.sent_by.clone()))
+                let sent_by = questions.first()?.sent_by.clone();
+                sent_by.is_some().then(|| (request_id.clone(), sent_by))
             }
             _ => None,
         })
         .expect("the subagent's request, asked in its parent");
-    assert_eq!(asked.0, "ask-c");
+    assert_eq!(asked.0, format!("{child_id}/ask-c"));
     assert_eq!(asked.1.as_deref(), Some("reviewer"), "sent by the subagent");
     let params = serde_json::json!({
         "chatId": parent_id.to_string(),
         "command": SessionCommandPayload::RespondInput {
-            request_id: "ask-c".to_owned(),
+            request_id: asked.0,
             answers: vec![slopty_view_proto::UserInputAnswer {
                 question_id: "choice".to_owned(),
                 labels: vec!["Yes".to_owned()],

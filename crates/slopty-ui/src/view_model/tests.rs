@@ -385,7 +385,9 @@ fn an_open_approval_is_asked_and_answered_by_its_choice() {
     transcript::asks(&state, "w", &mut entries);
 
     let (asked, questions) = served(&entries).expect("the panel serves it");
-    assert_eq!(asked, "ask-1");
+    // Named by its thread too: another chat's first ask has the same id.
+    assert_eq!(asked, format!("{}/ask-1", state.meta.id));
+    assert_eq!(transcript::request_of(&asked), Some((state.meta.id, approval.id.clone())));
     assert_eq!(questions[0].options, ["Allow", "Deny"]);
     assert_eq!(
         transcript::answer(&approval, &[picked(&questions[0].id, "Allow")]),

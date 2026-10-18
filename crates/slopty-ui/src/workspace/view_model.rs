@@ -1425,22 +1425,25 @@ impl WorkspaceView {
             ),
             SessionCommandPayload::Interrupt {} => (Intent::Interrupt, None, None),
             SessionCommandPayload::RespondInput { request_id, answers } => {
+                let gone = || Err(RpcError::Failed("It no longer waits on an answer".to_owned()));
+                let Some((asker, ask)) = transcript::request_of(&request_id) else {
+                    return gone();
+                };
+                // slopty: a request of a chat started under this one goes back to that chat.
+                if asker != thread {
+                    return self
+                        .view_child_answer(thread, asker, &ask, &answers, cx)
+                        .unwrap_or_else(gone);
+                }
                 let state = hub
                     .read(cx)
                     .threads()
                     .mirror(thread)
                     .and_then(slopty_client::threads::Mirror::state);
                 let request = state
-                    .and_then(|state| state.requests.iter().find(|r| r.id.0 == request_id))
+                    .and_then(|state| state.requests.iter().find(|r| r.id == ask))
                     .filter(|request| request.is_open());
-                // slopty: a request of a chat started under this one goes back to that chat.
-                let Some(request) = request else {
-                    return self
-                        .view_child_answer(thread, &request_id, &answers, cx)
-                        .unwrap_or_else(|| {
-                            Err(RpcError::Failed("It no longer waits on an answer".to_owned()))
-                        });
-                };
+                let Some(request) = request else { return gone() };
                 let (choice, message) =
                     transcript::answer(request, &answers).map_err(RpcError::Failed)?;
                 (Intent::Answer { ask: request.id.clone(), choice, message }, None, None)

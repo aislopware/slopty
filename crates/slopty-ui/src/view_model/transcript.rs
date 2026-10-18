@@ -17,8 +17,8 @@ use std::collections::HashMap;
 
 use slopty_proto::thread::detail::{Clipped, Patch};
 use slopty_proto::thread::{
-    Compaction, ContentRef, Image, IntentId, ItemBody, Notice, Request, ThreadId, ThreadState,
-    ToolCall, ToolDetail, ToolState, Turn, TurnId, TurnState, kind,
+    AskId, Compaction, ContentRef, Image, IntentId, ItemBody, Notice, Request, ThreadId,
+    ThreadState, ToolCall, ToolDetail, ToolState, Turn, TurnId, TurnState, kind,
 };
 use slopty_view_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry, ToolDiffStat};
 use slopty_view_proto::{UserInputAnswer, UserInputQuestion};
@@ -900,9 +900,28 @@ pub fn asks(state: &ThreadState, device: &str, entries: &mut Vec<SessionMessageE
         .collect();
     let Some(first) = state.requests.iter().find(|request| request.is_open()) else { return };
     let at = at(first.opened_ms);
-    if let Some(entry) = tail(entries, &format!("ask:{}", first.id.0), at, device) {
+    let id = format!("ask:{}", request_key(state.meta.id, &first.id));
+    if let Some(entry) = tail(entries, &id, at, device) {
         entry.parts.extend(parts);
     }
+}
+
+/// How the shell names request `ask` of `thread`, which its answer comes back by.
+///
+/// An agent numbers its own asks, so a chat's first ask and another chat's, or one of a
+/// subagent's asked in its parent, share an id ([`request_of`] reads both back). The composer
+/// keeps the requests it answered by this name, and a second chat's approval showed no card
+/// once the first chat's question was answered.
+#[must_use]
+pub fn request_key(thread: ThreadId, ask: &AskId) -> String {
+    format!("{thread}/{}", ask.0)
+}
+
+/// The thread and the ask a request's name in the shell is ([`request_key`]).
+#[must_use]
+pub fn request_of(key: &str) -> Option<(ThreadId, AskId)> {
+    let (thread, ask) = key.split_once('/')?;
+    Some((thread.parse().ok()?, AskId(ask.to_owned())))
 }
 
 /// The open requests of the chats an agent started under this one, asked in this chat.
@@ -936,7 +955,8 @@ pub fn child_asks(
             })
             .collect();
         let at = at(first.opened_ms);
-        if let Some(entry) = tail(entries, &format!("ask:{}", first.id.0), at, device) {
+        let id = format!("ask:{}", request_key(state.meta.id, &first.id));
+        if let Some(entry) = tail(entries, &id, at, device) {
             entry.parts.extend(parts);
         }
     }
@@ -1418,12 +1438,8 @@ fn input(request: &Request, state: &ThreadState) -> MessagePart {
             question.rule.clone_from(&rule);
         }
     }
-    MessagePart::Input {
-        id: format!("ask:{}", request.id.0),
-        request_id: request.id.0.clone(),
-        questions,
-        resolved: false,
-    }
+    let request_id = request_key(state.meta.id, &request.id);
+    MessagePart::Input { id: format!("ask:{request_id}"), request_id, questions, resolved: false }
 }
 
 /// The choice and words an [`Intent::Answer`](slopty_proto::thread::wire::Intent::Answer) to

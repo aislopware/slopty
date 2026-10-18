@@ -13,7 +13,7 @@ use gpui::{Context, Task};
 use slopty_client::WorkerKey;
 use slopty_proto::thread::wire::{Intent, ThreadRow};
 use slopty_proto::thread::{
-    ItemBody, ItemId, Rule, RuleChange, SurfaceEvent, ThreadId, ThreadState, TreeRef, TurnId,
+    AskId, ItemBody, ItemId, Rule, RuleChange, SurfaceEvent, ThreadId, ThreadState, TreeRef, TurnId,
 };
 use slopty_view_doc::{RewindUndo, calls};
 use slopty_view_proto::UserInputAnswer;
@@ -139,20 +139,23 @@ impl WorkspaceView {
         Some(ChatViews { rules: rules(state, chat), dock, work })
     }
 
-    /// An answer to `RespondInput` for a request of a chat started under `thread`, sent to that
-    /// chat's thread; `None` when none of them asks it.
+    /// An answer to `RespondInput` for request `ask` of `child`, a chat started under `thread`,
+    /// sent to that chat's thread; `None` when it is no such chat's or no longer asks it.
     pub(super) fn view_child_answer(
         &mut self,
         thread: ThreadId,
-        request_id: &str,
+        child: ThreadId,
+        ask: &AskId,
         answers: &[UserInputAnswer],
         cx: &mut Context<Self>,
     ) -> Option<Result<serde_json::Value, RpcError>> {
         let (key, child, intent) =
             self.view_children(thread, cx).into_iter().find_map(|(key, row)| {
+                if row.id != child {
+                    return None;
+                }
                 let state = self.held_hub(key)?.read(cx).threads().mirror(row.id)?.state()?;
-                let request =
-                    state.requests.iter().find(|r| r.id.0 == request_id && r.is_open())?;
+                let request = state.requests.iter().find(|r| r.id == *ask && r.is_open())?;
                 let answer = transcript::answer(request, answers).map(|(choice, message)| {
                     Intent::Answer { ask: request.id.clone(), choice, message }
                 });
