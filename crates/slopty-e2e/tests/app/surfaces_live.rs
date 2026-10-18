@@ -261,15 +261,24 @@ mod stream {
 
     /// Where the picture moves between two renders a moment apart, in pixels, a few points wider
     /// each way: the window's stream, whose drawn page scrolls every frame, so its pixels are left
-    /// out of a golden while its chrome is held. `None` when nothing moved: the stream is not
-    /// live.
+    /// out of a golden while its chrome is held. Only the stream's layer is looked at, so chrome
+    /// fading in round it (the pane's overflow button, a tooltip) is no part of it. `None` when
+    /// nothing moved: the stream is not live.
     async fn moving(drv: &mut Driver, renders: &Path) -> Option<PixelRect> {
+        let layer = drv.dump().await.unwrap().screens.iter().find_map(|s| s.layer)?;
         let first = drv.render(&renders.join("moving-a.png")).await.unwrap();
         tokio::time::sleep(Duration::from_millis(300)).await;
         let second = drv.render(&renders.join("moving-b.png")).await.unwrap();
         let (a, b) = (&first.image, &second.image);
+        #[expect(clippy::cast_precision_loss, reason = "window points")]
+        let [lx, ly, lw, lh] = layer.map(|v| v as f32 * first.scale);
+        let inside = |x: u32, y: u32| {
+            #[expect(clippy::cast_precision_loss, reason = "pixels")]
+            let (x, y) = (x as f32, y as f32);
+            x >= lx && x < lx + lw && y >= ly && y < ly + lh
+        };
         let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0, 0);
-        for (x, y, pixel) in a.enumerate_pixels() {
+        for (x, y, pixel) in a.enumerate_pixels().filter(|(x, y, _)| inside(*x, *y)) {
             let other = b.get_pixel_checked(x, y)?;
             if pixel.0.iter().zip(other.0).take(3).any(|(p, q)| p.abs_diff(q) > 24) {
                 (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));

@@ -24,6 +24,6 @@ Button │ Back
 Button │ Forward
 Button │ New chat
 Button │ Sidebar view options
-Dialog │ Image 1 (focused)
-Image │ Image 1
+Dialog │ plot.png (focused)
+Image │ plot.png
 Button │ Close

@@ -29,7 +29,7 @@ Button │ Change Previous chat or side pane tab shortcut: ⌃⇧⇥
 Button │ Change Archive chat shortcut: ⇧⌘A
 Button │ Change Open branch picker shortcut: ⌥⌘B
 Button │ Change Next effort level shortcut: ⇧⌘E
-Button │ Change Resume a session shortcut: ⇧⌘O
+Button │ Change Resume a Claude Code session shortcut: ⇧⌘O
 Button │ Change Next chat that needs you shortcut: ⌘.
 Button │ Change New project shortcut: ⇧⌘N
 Button │ Change Jump to chat 1 shortcut: ⌘1

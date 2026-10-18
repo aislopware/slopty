@@ -1,0 +1,28 @@
+Window
+Button │ Say hello
+Button │ History: past Claude Code sessions
+Button │ Server: e2e-server, Connected
+Button │ Settings
+Article │ You
+Button │ Thought process
+Article │ Claude
+Paragraph │ Done: Say hello
+Status │ Worked for 1s · done 4:16 PM │ done
+Button │ Attach images
+MultilineTextInput │ Do anything…
+Button │ Send message
+Button │ Mode: Auto
+Button │ Context 1%
+Button │ Window controls
+Button │ Synthetic editor
+Button │ Close tab
+Button │ New tab
+Button │ Restore side pane
+Button │ Show files panel
+Button │ Hide side pane
+Button │ Hide sidebar
+Button │ Back
+Button │ Forward
+Button │ New chat
+Button │ Sidebar view options
+Tooltip │ Expand side pane │ ⇧⌘\
