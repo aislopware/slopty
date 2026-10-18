@@ -14,14 +14,19 @@
 //! A failure is shrunk (delta debugging: chunks of the sequence dropped, then single steps)
 //! while it still fails the same way, and printed as its seed and the steps kept, which rerun
 //! it exactly: `SLOPTY_FUZZ_SEED=<seed> SLOPTY_FUZZ_KEEP=<i,j,…>` with the long run's test
-//! name. A short fixed-seed run is part of the suite; [`a_long_fuzz_of_the_shell`] is the
-//! nightly's (`SLOPTY_FUZZ_RUNS`, `SLOPTY_FUZZ_STEPS`).
+//! name. Exactly, because every date the engine's side stamps reads the shell's own clock, the
+//! test's dispatcher's: a stamp from the wall clock set a turn's once-a-second redraw at a moment
+//! the machine's load chose, and a stop no rerun found again. A short fixed-seed run is part of
+//! the suite; [`a_long_fuzz_of_the_shell`] is the nightly's (`SLOPTY_FUZZ_RUNS`,
+//! `SLOPTY_FUZZ_STEPS`).
 
 use std::fmt::Write as _;
 use std::time::Duration;
 
+use chrono::DateTime;
+
 use gpui::{TestAppContext, TestDispatcher, VisualTestContext};
-use slopty_view_doc::{MessagePart, MessageStatus, QueuedMessage};
+use slopty_view_doc::{MessagePart, MessageRole, MessageStatus, QueuedMessage, SessionMessageEntry};
 use slopty_view_proto::SessionStatus;
 
 use super::retention_tests::{PHONE, Screen, chat_row, frames, launch, session_row, stale, turn, wobble};
@@ -161,8 +166,7 @@ impl Model {
         }
     }
 
-    fn rows(&self) -> Vec<slopty_view_proto::Chat> {
-        let now = Utc::now();
+    fn rows(&self, now: DateTime<Utc>) -> Vec<slopty_view_proto::Chat> {
         self.chats
             .iter()
             .enumerate()
@@ -172,8 +176,7 @@ impl Model {
             .collect()
     }
 
-    fn sessions(&self) -> Vec<slopty_view_proto::Session> {
-        let now = Utc::now();
+    fn sessions(&self, now: DateTime<Utc>) -> Vec<slopty_view_proto::Session> {
         self.chats
             .iter()
             .map(|(id, _)| {
@@ -190,6 +193,25 @@ struct Failure {
     step: usize,
     kind: &'static str,
     detail: String,
+}
+
+/// Now on the shell's clock, the test's dispatcher's: the date the engine's side stamps, which
+/// the shell's own dates ([`crate::clock::utc`]) are measured against.
+fn shell_now(cx: &mut VisualTestContext) -> DateTime<Utc> {
+    crate::clock::utc_at(cx.executor().now())
+}
+
+/// The model's chats and sessions, stamped now, put in the shell's state.
+fn apply_model(model: &Model, shell: &Entity<Shell>, cx: &mut VisualTestContext) {
+    let now = shell_now(cx);
+    let (rows, sessions) = (model.rows(now), model.sessions(now));
+    shell.update(cx, |shell, cx| {
+        shell.state.update(cx, |state, cx| {
+            state.apply_chats(rows);
+            state.apply_sessions(sessions);
+            cx.notify();
+        });
+    });
 }
 
 /// The selected chat.
@@ -236,7 +258,7 @@ fn take(step: &Step, shell: &Entity<Shell>, model: &mut Model, screen: usize, cx
             if *working {
                 model.working.push(id.clone());
             }
-            let sessions = model.sessions();
+            let sessions = model.sessions(shell_now(cx));
             notify_state(shell, cx, &|state| {
                 state.apply_sessions(sessions.clone());
             });
@@ -244,7 +266,7 @@ fn take(step: &Step, shell: &Entity<Shell>, model: &mut Model, screen: usize, cx
         Step::Stream(paragraphs) => {
             let Some(chat) = selected(shell, cx) else { return };
             let working = model.working.contains(&chat);
-            let mut entries = turn(&chat, Utc::now());
+            let mut entries = turn(&chat, shell_now(cx));
             if let Some(last) = entries.last_mut() {
                 if !working {
                     last.status = Some(MessageStatus::Complete);
@@ -259,22 +281,12 @@ fn take(step: &Step, shell: &Entity<Shell>, model: &mut Model, screen: usize, cx
         }
         Step::Arrive(id) => {
             model.chats.insert(0, (id.clone(), None));
-            let rows = model.rows();
-            let sessions = model.sessions();
-            notify_state(shell, cx, &|state| {
-                state.apply_chats(rows.clone());
-                state.apply_sessions(sessions.clone());
-            });
+            apply_model(model, shell, cx);
         }
         Step::Leave(id) => {
             model.chats.retain(|(chat, parent)| chat != id && parent.as_ref().is_none_or(|(p, _)| p != id));
             model.working.retain(|w| w != id);
-            let rows = model.rows();
-            let sessions = model.sessions();
-            notify_state(shell, cx, &|state| {
-                state.apply_chats(rows.clone());
-                state.apply_sessions(sessions.clone());
-            });
+            apply_model(model, shell, cx);
         }
         Step::Queue(on) => {
             let queue = if *on { vec![QueuedMessage::new("q1", "Say more", "local")] } else { Vec::new() };
@@ -337,6 +349,8 @@ fn run(seed: u64, steps: &[Step]) -> Result<(), Failure> {
                 let (shell, cx) = launch(app, SCREENS[screen].1);
                 cx.update(|window, _| window.set_a11y_active(true));
                 let mut model = Model::new();
+                // The launch's chats stamped again on the shell's clock, as the model holds them.
+                apply_model(&model, &shell, cx);
                 frames(cx, Duration::from_millis(16), 60);
                 for (ix, step) in steps.iter().enumerate() {
                     at.set(ix);
@@ -428,7 +442,12 @@ fn kept(steps: &[Step], keep: &[usize]) -> Vec<Step> {
 /// Delta debugging: the fewest of `steps` (by index) that still fail as `kind`, dropping
 /// chunks halving in size, then single steps.
 fn shrink(seed: u64, steps: &[Step], failed_at: usize, kind: &str) -> Vec<usize> {
-    let mut keep: Vec<usize> = (0..=failed_at.min(steps.len() - 1)).collect();
+    // The frames or pause after the failing step are part of it: they had it judged mid-motion,
+    // and the same step brought to rest may draw alike (seed 4255's stop, which no try without
+    // its pause failed again).
+    let paced = matches!(steps.get(failed_at + 1), Some(Step::Frames(_) | Step::Pause));
+    let last = (failed_at + usize::from(paced)).min(steps.len() - 1);
+    let mut keep: Vec<usize> = (0..=last).collect();
     // Each try is a whole run: a bounded number of them, the shortest found by then kept.
     let tries = std::cell::Cell::new(0_u32);
     let fails = |keep: &[usize]| {
@@ -544,6 +563,67 @@ fn the_long_run_s_clip_stops_draw_alike() {
             panic!("seed {seed} {keep:?} fails at {:?}: {}: {}", steps.get(failure.step), failure.kind, failure.detail);
         }
     }
+}
+
+/// The long run's stop on the iPad (seed 4255, 2026-10-18), shrunk to five steps: a transcript in,
+/// the terminal opened, the iPad turned to portrait and judged a frame later, its prompts drawn
+/// folded as at the old width where a frame from scratch folds them anew. A prompt's bubble learns
+/// its wrapped height as it paints, and a view notified while its window paints asks for no frame,
+/// so the fold waited for whatever drew next.
+#[test]
+fn the_long_run_s_ipad_fold_stop_draws_alike() {
+    let (seed, keep): (u64, &[usize]) = (4255, &[70, 78, 79, 80, 81]);
+    let steps = kept(&steps_of(seed, keep.iter().max().map_or(0, |max| max + 1)), keep);
+    if let Err(failure) = run(seed, &steps) {
+        panic!("seed {seed} {keep:?} fails at {:?}: {}: {}", steps.get(failure.step), failure.kind, failure.detail);
+    }
+}
+
+/// The same fold brought down to itself: a prompt that shows open until its first layout wraps
+/// it past five lines folds in a frame of its own, the window otherwise at rest.
+#[gpui::test]
+fn a_prompt_wrapped_past_five_lines_folds_with_nothing_else_drawing(cx: &mut TestAppContext) {
+    let (shell, cx) = launch(cx, super::retention_tests::DESKTOP);
+    let now = shell_now(cx);
+    shell.update(cx, |shell, cx| {
+        shell.state.update(cx, |state, cx| {
+            // No turn at work: no spinner and no turn's clock draws a frame of their own.
+            state.apply_sessions(vec![session_row("a", SessionStatus::Done, now), session_row("b", SessionStatus::Done, now)]);
+            cx.notify();
+        });
+        shell.open_chat("b".into(), cx);
+    });
+    cx.update(|window, _| window.set_a11y_active(true));
+    frames(cx, Duration::from_millis(16), 60);
+    // Under the 400 characters that fold a prompt before it is measured, on one line: only its
+    // layout knows it wraps past five lines in the column.
+    let prompt = format!("{}word", "word ".repeat(79));
+    let entry = |id: &str, role, text: &str, status| SessionMessageEntry {
+        id: id.into(),
+        role,
+        parts: vec![MessagePart::Text { id: format!("{id}:t"), text: text.into() }],
+        created_at: now.timestamp_millis(),
+        device_id: "local".into(),
+        status,
+        continuation_of: None,
+        duration_ms: None,
+    };
+    let entries = vec![
+        entry("b:ask", MessageRole::User, &prompt, None),
+        entry("b:answer", MessageRole::Assistant, "Done.", Some(MessageStatus::Complete)),
+    ];
+    shell.update(cx, |shell, cx| {
+        shell.state.update(cx, |state, cx| {
+            state.apply_transcript(entries);
+            cx.notify();
+        });
+    });
+    frames(cx, Duration::from_millis(16), 60);
+    assert_eq!(stale(cx), None, "the prompt as the window shows it at rest");
+    let folded = cx.update(|window, _| {
+        window.a11y_tree().is_some_and(|tree| tree.nodes.iter().any(|(_, node)| node.label() == Some("Expand message")))
+    });
+    assert!(folded, "the prompt wraps past five lines and folds");
 }
 
 /// What the fuzzer found first (seed 6 on the phone, shrunk to two steps): a chat left, then

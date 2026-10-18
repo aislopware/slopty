@@ -9504,7 +9504,11 @@ fn user_bubble_text(
                 // Invalidate the transcript once so the expander and clip are
                 // present even when glyph widths make a short-looking string
                 // exceed five visual lines.
-                cx.notify(entity_id);
+                // slopty: told once this frame is drawn: a view notified as its window paints
+                // asks for no frame (gpui-fast, as upstream), so the fold this height decides
+                // would wait for whatever drew next, and a window at rest kept the bubble as it
+                // was folded at the old width (the iPad fuzz's seed 4255).
+                cx.defer(move |cx| cx.notify(entity_id));
             }
         },
     )
