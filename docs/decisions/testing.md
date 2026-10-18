@@ -1341,9 +1341,9 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
 - ✅ **An accept rewrites a golden its frame differs from at all** (2026-10-18). `--accept` wrote
   only missing and failing goldens, so a frame within the 0.2 % tolerance kept its old PNG. Six
   goldens taken on 10-13 still drew "No sessions yet" after the app said "No chats yet", and the
-  10-17 settings PNGs drew "Archived sessions" while their `.txt` said "Archived chats": a review
+  10-17 settings PNG files drew "Archived sessions" while their `.txt` said "Archived chats": a review
   of the goldens reviewed the past. Now any pixel that counts as differing (past the channel
   slack and the shaded-edge rule) rewrites the golden, and so does any changed word. A frame
-  with no differing pixel keeps its file, so an accept does not churn the PNGs that match.
+  with no differing pixel keeps its file, so an accept does not churn the PNG files that match.
   Without an accept, a near frame still passes, and `--review` reports it with its diff.
   - Test: `snapshot::tests::an_accept_rewrites_a_golden_on_any_differing_pixel`.
