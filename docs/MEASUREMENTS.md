@@ -17507,3 +17507,166 @@ cd target/local/Z/tree/crates/slopty-shell && \
   ../../../target/debug/deps/slopty_shell-<hash> \
   markdown::render::tests::a_formula_costs_its_frame_little --exact --nocapture
 ```
+
+## 2026-10-18 — the gate's reds and its runners
+
+`docs/decisions/tooling.md`, "The gate loses its time to reds". GitHub's hosted runners: the
+Mac shards on `macos-26` (Apple M1 virtual, 3 cores, 7 GB).
+
+**A passing run** (39069617088, a re-land, compile cache warm): every job's wall time, then the
+test shards' steps.
+
+| job | wall | build (cargo) | spawned binaries | tests |
+| --- | --- | --- | --- | --- |
+| tests worker | 8:19 | 191 s (161) | 31 s | 219 s, VideoToolbox's 61 s beside |
+| tests rest | 8:03 | 296 s (266) | 25 s | 92 s |
+| tests ui | 7:31 | 308 s (284) | — | 77 s |
+| clippy-linux 4:41 · clippy-host 4:15 · rustdoc 3:31 · clippy-ios 3:30 · linux 5:16 · tools 1:05 | | | | |
+
+- sccache hits: worker 100 % (398 Rust), rest 100 % (501), UI 99.3 % (688 of 693; the 5 misses
+  are the crates the commit changed). Of the 168–200 calls it cannot cache, most are test
+  harnesses (binaries): the UI shard's 15 took 274 CPU-seconds, `slopty-shell`'s alone 150 s;
+  build scripts compiled and ran for 113–146 CPU-seconds a shard.
+- The step's wall time past cargo's own (25–30 s a shard) was cargo fetching: 184 crates
+  downloaded and every fork's clone updated, from a registry entry saved on 2026-10-01.
+- The worker's run: 603 s of tests in 214 s on 3 threads; for the last 44 s one test ran alone
+  (25 s, started at 188 s). Load average at its end 14.3 / 21.2 / 17.9.
+
+**The reds**, 2026-10-16 08:00 to 2026-10-18 (gate runs and the failed lane's log):
+
+| cause | runs |
+| --- | --- |
+| rustdoc (private or ambiguous link) | 38967442497, 38948884845, 39066125690; beside another red 38946771660, 39012459321, 38872681279 |
+| a test failed once | 39033233403, 38946771660 (worker), 38974846954, 39045212258 (linux), 39020038074, 39006050697 (ui), 38921800638 (worker) |
+| a commit missing what it calls | 39012459321, 38872681279 |
+| promote refused for a workflow file | 39009421604, 38874008656 |
+
+Four more runs were replaced while they waited (no job ran).
+
+**On a runner** (probes through `check.yml`, `macos-26`): `cargo fetch --locked --target
+aarch64-apple-darwin` from the stale entry 19 s and 26 s (runs 39101092512, 39101398945), 0 s
+once fetched. Spotlight's processes (`mds`, `mds_stores`, `mdworker_shared`), CPU time summed
+from `ps` every 2 s:
+
+| work | Spotlight on | Spotlight off |
+| --- | --- | --- |
+| build `slopty-agent` and `slopty-cli` tests, sccache warm (39101092512) | 84 s wall, 10 CPU-s | 72 s wall, 1 CPU-s |
+| the same, both off (39101398945) | — | 102 s then 96 s wall: the second build's own gain, 6 % |
+| build `slopty-worker`'s tests (39101777275) | 353 s wall, 200 CPU-s | — |
+| run them, 702 tests (39101777275) | 139 s wall, 106 CPU-s | 134 s wall, 1 CPU-s |
+
+**rustdoc in the quick check**: on HEAD `4ece33fc` (gate run 39101472696 red on rustdoc after
+about 8 minutes), `SLOPTY_LANE=G cargo xtask remote -p slopty-math` fails here in 25 s, its
+rustdoc step in 2.4 s. In a warm lane directory, rustdoc of `xtask` and `slopty-pty` took 11.5 s
+of a 47 s quick check. CI's rustdoc lane documents the whole workspace in 177 s.
+
+**The quick checks' verdict** (`target/remote/history.jsonl`, the day to 2026-10-18 13:00,
+joined with `e2e-history.jsonl`): 161 of 300 carried an e2e case in the guest (verdict p50 326 s,
+p90 1 044 s; the case p50 297 s, p90 991 s); the other 139 gave their verdict 1 s (p50), 6 s
+(p90) past their part here.
+
+```sh
+gh run view <run> --log-failed                       # a red's lane and reason
+gh run download 39069617088 -R aislopware/slopty     # JUnit and cargo-timing.html per shard
+cargo xtask remote --name G --head --runner macos-26 --probe "$(cat probe.sh)"
+cargo xtask ci-health                                # reds by lane, checks with and without e2e
+```
+
+## 2026-10-18 — the bench whole again: `tunnel_cost`'s daemons, built in release
+
+`cargo xtask bench` had not finished since 10-02: `slopty-workerd`'s `tunnel_cost` hit nextest's
+120 s timeout every run before its first round. Nothing in the tunnel hung. The test spawns a
+worker and ptyd (`slopty_testkit::bins`); nextest's setup script builds them in the test profile
+only, so a release test found none beside it and fell back to building every workspace test and
+binary in release inside its own timeout (that fallback took `--tests` on 10-02, 0f6276f0). The
+bench now builds the spawned binaries in release first, with the same selection a lane's check
+uses (`gate::spawned_selection`), and runs the measurements with `SLOPTY_BINS_FRESH`, which also
+skips the setup script's unused debug build of the whole workspace. `tunnel_cost` then runs in
+3.4–6.8 s, each step bounded and named, and reports its six series as wall-only rows.
+
+| `workerd.tunnel_cost` (p50 / p95 / p99) | first byte | last byte |
+| --- | --- | --- |
+| forward | 377 / 477 / 532 µs | 640 / 778 / 935 µs |
+| proxy by address | 452 / 577 / 690 µs | 709 / 900 / 1 028 µs |
+| proxy by name | 458 / 577 / 645 µs | 707 / 899 / 990 µs |
+
+That run had two benches side by side at a load of 40–60. Under a heavier load (a guest held at
+part of its CPU and lanes building), the forward's first byte was 2.7 ms at p50 and 8.6 ms at p95.
+The 10-01 table above was taken at a load of 10–20. Wall times are not budgeted.
+
+The whole run's verdicts against the 10-04 budgets: `engine.checkpoint_cost.format` over in every
+run (next section). Over in single runs only: `codec.decode_cost.p_1080p` (+5.6 %), `p_4k`
+(+5.9 %), `key_1080p` (+24.1 %), `engine.frame_cost.write` (+6.9 to +10.6 %) and
+`engine.frame_cost.take_frame_unchanged.60x12` (+7.7 %). The rest held. `codec.decode_cost.key_1080p`'s
+"cheaper" (−7.0 % on 10-18 at 04:34) did not hold up: eight runs measured 271 250, 274 304,
+285 664, 292 744, 293 623, 294 540, 297 338 and 366 130 instructions. The median, 293 184, is
+0.6 % under the old 295 000. A keyframe's decode counts VideoToolbox's own threads in the
+process's instructions, so this series moves with the machine. The budgets were rewritten from
+one whole run plus a run of `decode_cost` alone. That dropped the five `server.projects_cost`
+series, whose measurements are gone, and recorded the 18 series that ran without a budget
+(`checkpoint_cut_cost`, `memory_cost`, `unicode_write_cost`, the searches' `wraps`).
+
+```sh
+cargo xtask bench                    # the verdicts
+cargo xtask bench --update-budgets   # then the budgets
+cargo xtask bench --filter decode_cost --update-budgets
+```
+
+## 2026-10-18 — the checkpoint's format against its budget
+
+`engine.checkpoint_cost.format` came out 7.6 % over its budget (50 115 516 against 46 561 689,
+recorded at fc7036db on 10-04). That is not a regression in the code. Each tree below was
+exported from git with its own `vendor/ghostty` and its own toolchain file, and built and
+measured the same way on the same day:
+
+| tree | format, instructions |
+| --- | --- |
+| fc7036db (10-04, the budget's own commit) | 51 570 148, 51 769 619 |
+| 2ca3fda9 (10-11) | 52 144 536 |
+| 5620899c (10-12) | 51 621 665 |
+| 75f99cdc (10-18) | 50 626 671 |
+
+The tree that recorded 46.56 M measures 51.6–51.8 M today, and HEAD measures less than it.
+9777b2d8 and dadb18c3 do not build alone. So the gap comes from the run that recorded the
+budget, not from any commit since. The likely cause is the one-sample series' first touch.
+Six formats of one engine in one process measured 50 156 761, 49 645 077, 48 822 011,
+48 808 983, 48 808 885 and 48 814 322 instructions. The first format pays 2.7 % more for its
+allocations, and that part moves with the machine; warm, the format is steady to 0.01 %. The
+series now takes one untimed format and then five warm ones, each after a write. A live
+session's periodic checkpoints are warm too. The new budget is 49 397 326.
+
+```sh
+git archive <commit> | tar -x -C src-<commit>     # plus its vendor/ghostty from the submodule
+SLOPTY_BINS_FRESH=1 cargo nextest run --release -p slopty-engine --run-ignored only -E 'test(checkpoint_cost)' --no-capture
+```
+
+## 2026-10-18 — the e2e guest under load
+
+The guest (`slopty-26-e2e`, 4 cores, 6 GB) sampled every 5 s through three whole `--e2e app`
+runs at HEAD 75f99cdc, while the host's lanes built (host load 30 on 10 cores, 155 samples):
+
+| | p10 | p50 | p90 |
+| --- | --- | --- | --- |
+| the VM process's CPU, % of one core | 75 | 153 | 241 |
+
+The guest's load averaged 20 on its 4 cores. With the host at 66, the VM got 29–70 %, not even
+one of its four cores. The failures that came with it reproduce deterministically, without load,
+by holding the VM to part of its CPU (SIGSTOP/SIGCONT, 30 ms of every 100):
+
+| test | where the time went | now |
+| --- | --- | --- |
+| `liveness::link_with_datagrams_but_a_stalled_stream` | the test's own looks: one `slopty workers` took seconds, so the lease "ended after 8.57 s" against 7.5 s | each time a span from the start of the last look that missed the change to the end of the first that saw it, the bound held to its start; at 30 % it passes, relink 6.44–6.86 s, lease by 7.30 s |
+| `resume::a_resume_brings_a_dead_link_back_at_once` | a dump took longer than the "checking…" it sampled for | needs the app to count its doubts (handoff) |
+| `media::twelve_pages_in_one_chat_stay_within_budget` | nextest's 120 s for the default profile; 98–102 s on an idle guest | needs a slow-timeout of its own (handoff) |
+| `interface::the_files_toggles_tooltip_names_its_key_under_it` | not the CPU: alone it passes at 15 % CPU and with another app taking activation every second; beside another test's app it fails, at full CPU too | the driver's pointer kept by the app (handoff) |
+
+No handshake timed out in these runs, at 15 % CPU either. The one "closed during the handshake"
+in the logs (an iOS run on 10-17) was the app giving up a 2 s dial, which it dials again 250 ms
+later.
+
+```sh
+# the VM held to 30 %: on the host, `kill -STOP` then `kill -CONT` its
+# com.apple.Virtualization.VirtualMachine process, 70 ms stopped of every 100, through the run
+SLOPTY_E2E_THREADS=1 cargo xtask remote --head --e2e app -E 'test(=liveness::link_with_datagrams_but_a_stalled_stream)'
+SLOPTY_E2E_THREADS=2 cargo xtask remote --head --e2e app -E 'test(=interface::a_rows_hover_card_names_where_it_runs) | test(=interface::the_files_toggles_tooltip_names_its_key_under_it)'
+```

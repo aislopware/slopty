@@ -101,13 +101,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rustfmt
-      # The gate's entry, read and never saved.
-      - uses: Swatinem/rust-cache@v2
+      # The cargo cache the gate's tools lane saves (ci.yml), read and never saved.
+      - uses: actions/cache/restore@v4
         with:
-          shared-key: gate
-          add-rust-environment-hash-key: false
-          cache-targets: false
-          save-if: false
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: cargo-home-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-home-
+          enableCrossOsArchive: true
       - uses: cargo-bins/cargo-binstall@main
       - run: cp .cargo/ci-profile.toml "${CARGO_HOME:-$HOME/.cargo}/config.toml"
       # zig compiles the build scripts' C for every triple linted here.
@@ -200,6 +203,12 @@ jobs:
       run:
         shell: bash
     steps:
+      # Spotlight off: it indexes every file a build and its tests write, and on a three-core
+      # runner it took 200 CPU-seconds of a 353 s build of the worker crate's tests and 106 of
+      # their 139 s run, against 1 once off (`docs/MEASUREMENTS.md`, "the gate's reds and its
+      # runners").
+      - if: runner.os == 'macOS'
+        run: sudo mdutil -a -i off
       # As the gate's linux job: the shells the PTY tests check, tmux, and the receive buffer a
       # worker's socket asks for, with Ubuntu's completion directories made safe for zsh.
       - if: runner.os == 'Linux'
@@ -221,12 +230,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.99.1
-      - uses: Swatinem/rust-cache@v2
+      # The cargo cache the gate's tools lane saves (ci.yml), read only.
+      - uses: actions/cache/restore@v4
         with:
-          shared-key: gate
-          add-rust-environment-hash-key: false
-          cache-targets: false
-          save-if: false
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: cargo-home-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-home-
+          enableCrossOsArchive: true
       - uses: cargo-bins/cargo-binstall@main
       - run: cp .cargo/ci-profile.toml "${CARGO_HOME:-$HOME/.cargo}/config.toml"
       - uses: mlugg/setup-zig@v2
@@ -327,6 +340,12 @@ jobs:
       run:
         shell: bash
     steps:
+      # Spotlight off: it indexes every file a build and its tests write, and on a three-core
+      # runner it took 200 CPU-seconds of a 353 s build of the worker crate's tests and 106 of
+      # their 139 s run, against 1 once off (`docs/MEASUREMENTS.md`, "the gate's reds and its
+      # runners").
+      - if: runner.os == 'macOS'
+        run: sudo mdutil -a -i off
       - uses: actions/checkout@v5
         with:
           ref: ${{ inputs.sha }}
@@ -352,12 +371,16 @@ jobs:
         uses: dtolnay/rust-toolchain@nightly
         with:
           components: rustfmt
-      - uses: Swatinem/rust-cache@v2
+      # The cargo cache the gate's tools lane saves (ci.yml), read only.
+      - uses: actions/cache/restore@v4
         with:
-          shared-key: gate
-          add-rust-environment-hash-key: false
-          cache-targets: false
-          save-if: false
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: cargo-home-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-home-
+          enableCrossOsArchive: true
       - uses: cargo-bins/cargo-binstall@main
       - run: cp .cargo/ci-profile.toml "${CARGO_HOME:-$HOME/.cargo}/config.toml"
       - uses: mlugg/setup-zig@v2

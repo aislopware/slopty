@@ -15,10 +15,10 @@ wait"; the commands: `docs/DEV.md`, "Dev loop".
 - A lane keeps its crates compiling between edits, since a half-edited crate breaks the others'
   remote checks. A lane blocked by another's half-edited crate reports rather than waits.
 - A lane checks its edits with `SLOPTY_LANE=<its name> cargo xtask remote -p <its crates> --only
-  <its paths>`, quick (no `--full`): fmt, host clippy and the tests, here in about a minute. The
-  gate is the full check; `--full` (iOS and Linux clippy, rustdoc, the Mac's own tests of a crate
-  Linux tests) is for a change to `cfg(target_os = "ios")`, Linux-only code or rustdoc-heavy
-  docs, not for every checkpoint. `remote` formats the lane's changed Rust files under `--only`
+  <its paths>`, quick (no `--full`): fmt, host clippy, rustdoc and the tests, here in about a
+  minute. The gate is the full check; `--full` (iOS and Linux clippy, the Mac's own tests of a
+  crate Linux tests) is for a change to `cfg(target_os = "ios")` or Linux-only code, not for
+  every checkpoint. `remote` formats the lane's changed Rust files under `--only`
   before it checks, and the first red ends the check (a failure here cancels the runners' run),
   so a red comes back in seconds: fix it and check again. No cargo in the checkout itself.
   Checks run in the background while the lane moves on, and it reports a checkpoint on green.

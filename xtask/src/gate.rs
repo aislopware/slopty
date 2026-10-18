@@ -2375,6 +2375,60 @@ let windows = cfg!(windows);
         }
     }
 
+    /// Every job that builds, in the gate and the checks, reads the one cargo cache keyed by the
+    /// lock, shared by every OS, and only the gate's tools lane writes it, after fetching every
+    /// package. rust-cache's key held no lock, so its one entry was restored whole on every run
+    /// and never saved again: 17 days stale, every Mac shard downloaded 184 crates.
+    #[test]
+    fn the_cargo_cache_is_keyed_by_the_lock_and_saved_by_the_tools_lane() {
+        let workflows = repo_root().expect("repo root").join(".github/workflows");
+        let read = |name: &str| std::fs::read_to_string(workflows.join(name)).expect("a workflow");
+        let restore = "key: cargo-home-${{ hashFiles('Cargo.lock') }}\n          \
+                       restore-keys: cargo-home-\n          enableCrossOsArchive: true\n";
+        let saved = "key: ${{ steps.cargo-home.outputs.cache-primary-key }}\n          \
+                     enableCrossOsArchive: true\n";
+        for name in ["ci.yml", "check.yml"] {
+            let text = read(name);
+            assert!(!text.contains("Swatinem/rust-cache"), "{name}: a cache keyed by the lock");
+            let builds = text.matches("uses: dtolnay/rust-toolchain@stable").count();
+            assert_eq!(
+                text.matches(restore).count(),
+                builds,
+                "{name}: every building job reads it"
+            );
+            let saves = usize::from(name == "ci.yml");
+            assert_eq!(text.matches(saved).count(), saves, "{name}: saved by the gate alone");
+        }
+        let ci = read("ci.yml");
+        let fetch = ci.split("      - id: fetch\n").nth(1).expect("the fetch before the save");
+        let (condition, rest) = fetch.split_once("run: |").expect("its condition");
+        for term in ["refs/heads/gate", "matrix.lane == 'tools'", "cache-hit != 'true'"] {
+            assert!(condition.contains(term), "saved only {term}: {condition}");
+        }
+        assert!(rest.trim_start().starts_with("cargo fetch --locked"), "every package first");
+    }
+
+    /// Every job that may take a Mac turns Spotlight off before anything else: on a three-core
+    /// runner it indexed what the build and the tests wrote, a fifth of the CPU of a build.
+    #[test]
+    fn every_mac_job_turns_spotlight_off_first() {
+        let workflows = repo_root().expect("repo root").join(".github/workflows");
+        for name in ["ci.yml", "check.yml"] {
+            let text = std::fs::read_to_string(workflows.join(name)).expect("a workflow");
+            let jobs: Vec<&str> = text.split("    steps:\n").collect();
+            for (header, steps) in jobs.iter().zip(jobs.iter().skip(1)) {
+                let runs_on = header.rsplit("runs-on: ").next().unwrap_or_default();
+                let runs_on = runs_on.lines().next().unwrap_or_default();
+                let mac = ["macos", "matrix.os", "inputs."].iter().any(|m| runs_on.contains(m));
+                // The first step, past the comments above it.
+                let first = steps.split("\n      - ").find(|s| !s.trim_start().starts_with('#'));
+                let first = first.unwrap_or_default();
+                let off = first.contains("run: sudo mdutil -a -i off");
+                assert_eq!(off, mac, "{name}: a job on `{runs_on}` turns Spotlight off first");
+            }
+        }
+    }
+
     /// Nothing that compiles runs in the quick gate, which is the tools lane; CI carries the
     /// app's live tests in a workflow of their own, which holds no gate run back, started by
     /// `promote` on the main it pushed: a schedule checked out a commit days old.

@@ -1,10 +1,10 @@
 //! A check's crates checked on this Mac, at full power, beside the runners.
 //!
 //! `cargo xtask remote -p <crate>…` checks the commit it made of the tree (`HEAD` and the lane's
-//! own paths). Its crates' fmt, host clippy, shear, typos and tests run here, where an
+//! own paths). Its crates' fmt, host clippy, rustdoc, shear, typos and tests run here, where an
 //! incremental build returns in a minute or two and no Mac queue stands in front of it; what
-//! needs another platform (iOS and Linux clippy, rustdoc, Linux's tests, the e2e cases and
-//! probes) still runs on a runner, side by side (`docs/decisions/tooling.md`, "Checks run where
+//! needs another platform (iOS and Linux clippy, Linux's tests, the e2e cases and probes)
+//! still runs on a runner, side by side (`docs/decisions/tooling.md`, "Checks run where
 //! they return soonest").
 //!
 //! Each lane checks in a directory of its own, `target/local/<lane>/`: the commit's tree, synced
@@ -46,9 +46,9 @@ pub fn dir(root: &Utf8Path, lane: &str) -> Utf8PathBuf {
     root.join("target").join("local").join(lane)
 }
 
-/// Check `crates` at commit `sha` in lane `lane`'s directory: fmt, host clippy, shear and typos,
-/// then the tests as a Mac runner runs them, the spawned binaries built first. Prints each step
-/// as `xtask check` does.
+/// Check `crates` at commit `sha` in lane `lane`'s directory: fmt, host clippy, rustdoc, shear
+/// and typos, then the tests as a Mac runner runs them, the spawned binaries built first. Prints
+/// each step as `xtask check` does.
 pub fn check(root: &Utf8Path, lane: &str, sha: &str, crates: &[String]) -> Result<Outcome> {
     let started = Instant::now();
     // The volume keeps its floor through the build, and after it for the next.

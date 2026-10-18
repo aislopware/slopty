@@ -1,6 +1,7 @@
 //! `xtask ci-health`: how CI is doing, in one output. The last Deep nightly job by job (its
 //! verdict, wall time and what failed), each push to `gate` over the last day and how long it
-//! took to reach main ([`crate::latency`]), and how long the lanes' checks took to a verdict.
+//! took to reach main ([`crate::latency`]), the day's red gate runs by the lane that failed, and
+//! how long the lanes' checks took to a verdict.
 
 use anyhow::{Context as _, Result};
 use xshell::{Shell, cmd};
@@ -56,21 +57,61 @@ pub fn run(sh: &Shell, since: Option<&str>) -> Result<()> {
     println!();
     crate::latency::run(sh, since)?;
     println!();
+    reds(sh)?;
+    println!();
     checks()
 }
 
+/// One check's latency as `xtask remote` recorded it (`target/remote/history.jsonl`).
+#[derive(serde::Deserialize)]
+struct Check {
+    at: u64,
+    name: String,
+    full: bool,
+    total_s: u64,
+    local_s: u64,
+}
+
+/// One e2e case run in this Mac's guest (`target/remote/e2e-history.jsonl`).
+#[derive(serde::Deserialize)]
+struct GuestRun {
+    at: u64,
+    name: String,
+    build_s: u64,
+    tests_s: u64,
+}
+
+/// The e2e case `check` ran in the guest, build and tests in seconds: a run of its name recorded
+/// while it ran. `None` for a check of crates alone.
+fn guest_part(check: &Check, runs: &[GuestRun]) -> Option<u64> {
+    let from = check.at.saturating_sub(check.total_s).saturating_sub(5);
+    let to = check.at.saturating_add(5);
+    let ran = runs.iter().filter(|r| r.name == check.name && (from..=to).contains(&r.at));
+    ran.map(|r| r.build_s.saturating_add(r.tests_s)).reduce(u64::saturating_add)
+}
+
+/// `p50 …s, p90 …s` of `samples`, or `-` for none.
+fn spread(mut samples: Vec<u64>) -> String {
+    slopty_testkit::stats::Spread::of(&mut samples).map_or_else(
+        || "-".to_owned(),
+        |s| format!("p50 {}s, p90 {}s, max {}s", s.p50, s.p90, s.max),
+    )
+}
+
 /// The spread of the lanes' checks over the last day, quick and full, from what
-/// `xtask remote` recorded (`target/remote/history.jsonl`): from its start to its verdict.
+/// `xtask remote` recorded (`target/remote/history.jsonl`): from its start to its verdict. A
+/// quick check that carried an e2e case waits for it in the guest, which the part here leaves
+/// out: those are shown apart, so the verdict's gap over the part here reads as the e2e case it
+/// is and not as a queue (2026-10-18: 161 of 300 checks; the others' gap p50 1 s, p90 6 s).
 fn checks() -> Result<()> {
-    #[derive(serde::Deserialize)]
-    struct Check {
-        at: u64,
-        full: bool,
-        total_s: u64,
-        local_s: u64,
-    }
-    let path = crate::tools::repo_root()?.join("target").join("remote").join("history.jsonl");
+    let remote = crate::tools::repo_root()?.join("target").join("remote");
+    let path = remote.join("history.jsonl");
     let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let guest: Vec<GuestRun> = std::fs::read_to_string(remote.join("e2e-history.jsonl"))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .context("the clock is before 1970")?
@@ -82,20 +123,114 @@ fn checks() -> Result<()> {
         .collect();
     for full in [false, true] {
         let depth = if full { "full" } else { "quick" };
-        let of = day.iter().filter(|c| c.full == full);
-        let mut total: Vec<u64> = of.clone().map(|c| c.total_s).collect();
-        let mut here: Vec<u64> = of.map(|c| c.local_s).collect();
-        match (
-            slopty_testkit::stats::Spread::of(&mut total),
-            slopty_testkit::stats::Spread::of(&mut here),
-        ) {
-            (Some(t), Some(h)) => println!(
-                "{} {depth} checks in a day: verdict p50 {}s, p90 {}s, max {}s; the part here p50 {}s, p90 {}s",
-                t.n, t.p50, t.p90, t.max, h.p50, h.p90
-            ),
-            _ => println!("no {depth} check recorded in a day ({path})"),
+        let of: Vec<&Check> = day.iter().filter(|c| c.full == full).collect();
+        if of.is_empty() {
+            println!("no {depth} check recorded in a day ({path})");
+            continue;
+        }
+        println!(
+            "{} {depth} checks in a day: verdict {}; the part here {}",
+            of.len(),
+            spread(of.iter().map(|c| c.total_s).collect()),
+            spread(of.iter().map(|c| c.local_s).collect()),
+        );
+        let (with_e2e, crates_alone): (Vec<&Check>, Vec<&Check>) =
+            of.iter().partition(|c| guest_part(c, &guest).is_some());
+        if !with_e2e.is_empty() {
+            println!(
+                "  {} with an e2e case in the guest: verdict {}; the e2e case {}",
+                with_e2e.len(),
+                spread(with_e2e.iter().map(|c| c.total_s).collect()),
+                spread(with_e2e.iter().filter_map(|c| guest_part(c, &guest)).collect()),
+            );
+        }
+        if !crates_alone.is_empty() {
+            println!(
+                "  {} of crates alone: verdict {}; past the part here {}",
+                crates_alone.len(),
+                spread(crates_alone.iter().map(|c| c.total_s).collect()),
+                spread(crates_alone.iter().map(|c| c.total_s.saturating_sub(c.local_s)).collect()),
+            );
         }
     }
+    Ok(())
+}
+
+/// A push's run of `ci.yml` on `gate`.
+#[derive(serde::Deserialize)]
+struct GateRun {
+    #[serde(rename = "databaseId")]
+    id: u64,
+    #[serde(rename = "createdAt")]
+    at: String,
+    #[serde(rename = "headSha")]
+    sha: String,
+    conclusion: String,
+}
+
+/// What a job's failure counts as: its lane, or the promote that no token may make when a
+/// workflow file changed, which `land --wait` and `xtask promote` make from a checkout.
+fn red_cause<'a>(job: &'a str, why: &[String]) -> &'a str {
+    if job == "promote" && why.iter().any(|line| line.contains("changes .github/workflows")) {
+        "promote refused (a workflow file)"
+    } else {
+        job.strip_prefix("gate (").and_then(|j| j.strip_suffix(')')).unwrap_or(job)
+    }
+}
+
+/// The gate's red runs over the last day: each with the lanes that failed and the first line
+/// that says why, then how many reds each lane caused. A red cancelled by its newer push (the
+/// failed lane's last step) still names the step that failed. The lane that keeps naming reds is
+/// the next check to make before the push: rustdoc named 6 of 14 in the 2.5 days to 2026-10-18.
+fn reds(sh: &Shell) -> Result<()> {
+    #[derive(serde::Deserialize)]
+    struct Jobs {
+        jobs: Vec<Job>,
+    }
+    let listed = cmd!(
+        sh,
+        "gh run list --workflow ci.yml --branch gate --event push --limit 100 --json databaseId,createdAt,headSha,conclusion"
+    )
+    .quiet()
+    .read()
+    .context("gh run list")?;
+    let runs: Vec<GateRun> = serde_json::from_str(&listed).context("gh run list's JSON")?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .context("the clock is before 1970")?
+        .as_secs();
+    let since = i64::try_from(now).unwrap_or(i64::MAX).saturating_sub(86_400);
+    let day = runs.iter().filter(|r| crate::latency::epoch(&r.at).is_some_and(|at| at >= since));
+    let (mut total, mut superseded) = (0_usize, 0_usize);
+    let mut causes = std::collections::BTreeMap::<String, usize>::new();
+    for run in day.filter(|r| !matches!(r.conclusion.as_str(), "success" | "")) {
+        let id = run.id.to_string();
+        let viewed = cmd!(sh, "gh run view {id} --json jobs").quiet().read()?;
+        let Jobs { jobs } = serde_json::from_str(&viewed).context("gh run view's JSON")?;
+        let failed: Vec<&Job> =
+            jobs.iter().filter(|j| j.steps.iter().any(|s| s.conclusion == "failure")).collect();
+        if failed.is_empty() {
+            // Replaced while it waited, or cancelled with no lane red: no red of its own.
+            superseded = superseded.saturating_add(1);
+            continue;
+        }
+        total = total.saturating_add(1);
+        let sha = run.sha.get(..8).unwrap_or(&run.sha);
+        for job in failed {
+            let why = why(sh, job.id);
+            let cause = red_cause(&job.name, &why);
+            let n = causes.entry(cause.to_owned()).or_default();
+            *n = n.saturating_add(1);
+            let first = why.first().map_or("", String::as_str);
+            println!("  red {} {sha} {cause}: {first}", run.at);
+        }
+    }
+    let tally: Vec<String> = causes.iter().map(|(cause, n)| format!("{cause} {n}")).collect();
+    println!(
+        "{total} red gate runs in a day ({superseded} more replaced or cancelled with none red); \
+         by lane: {}",
+        if tally.is_empty() { "-".to_owned() } else { tally.join(", ") }
+    );
     Ok(())
 }
 
@@ -234,7 +369,37 @@ fn strip(line: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{says_why, strip};
+    use super::{Check, GuestRun, guest_part, red_cause, says_why, strip};
+
+    /// A red counts against the lane that failed; a promote refused for a workflow file counts
+    /// apart, since every lane passed.
+    #[test]
+    fn a_red_counts_against_its_lane() {
+        assert_eq!(red_cause("gate (rustdoc)", &[]), "rustdoc");
+        assert_eq!(
+            red_cause("gate (tests worker)", &["FAIL [ 2.1s] a".to_owned()]),
+            "tests worker"
+        );
+        let refused = ["##[error]5eed12fac2 changes .github/workflows, which this token may not \
+                        push; run cargo xtask promote"
+            .to_owned()];
+        assert_eq!(red_cause("promote", &refused), "promote refused (a workflow file)");
+        assert_eq!(red_cause("promote", &["##[error]not a fast-forward".to_owned()]), "promote");
+    }
+
+    /// A check's e2e part is the guest run of its name recorded while it ran, and none for a
+    /// check of crates alone or another lane's run.
+    #[test]
+    fn a_check_s_e2e_part_is_its_guest_run() {
+        let check =
+            Check { at: 1_000, name: "A".to_owned(), full: false, total_s: 300, local_s: 40 };
+        let run =
+            |at, name: &str| GuestRun { at, name: name.to_owned(), build_s: 60, tests_s: 180 };
+        assert_eq!(guest_part(&check, &[run(990, "A")]), Some(240));
+        assert_eq!(guest_part(&check, &[run(990, "B")]), None, "another lane's");
+        assert_eq!(guest_part(&check, &[run(600, "A")]), None, "before it began");
+        assert_eq!(guest_part(&check, &[]), None, "crates alone");
+    }
 
     /// A failed job's reason is the error, the failed test or the panic, without its colour;
     /// cargo's progress and its note that it waits for other jobs are not.

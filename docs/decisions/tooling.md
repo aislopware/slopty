@@ -2494,3 +2494,64 @@ more full-window layer.
   Tests: `remote::guest::tests::a_repeated_run_says_how_often_it_failed_and_what_a_fix_needs`
   and `remote::tests::a_repeat_takes_an_e2e_case_and_one_way_of_repeating` (`xtask`), and the
   runs in `docs/MEASUREMENTS.md` ("repeating a case in the guest").
+- ✅ **The gate loses its time to reds; the runners stop refetching, indexing and idling**
+  (2026-10-18). The person asked that landing be as fast as it can be while the gate keeps
+  every check. Of the gate runs from 2026-10-16 08:00 to 2026-10-18, 14 went red and needed a
+  fix and another land; a passing run takes about 8.5 minutes, so the reds, not the run, set
+  the p90 of a push's way to main (28 min). Each red, by cause
+  (`docs/MEASUREMENTS.md`, "the gate's reds and its runners"):
+  - **rustdoc, 6** (a doc linking a private item, an ambiguous or unresolved link; 4 alone,
+    2 beside a compile error), and a seventh on 2026-10-18 (run 39101472696). Every one was in
+    the docs of a crate the commit changed, which rustdoc of that crate alone names.
+  - **A test that failed once, 7**: Claude Code exiting before its driver listened, a watched
+    repository's timing, a piped handover on Linux, a dead server link's ping, a draw's budget,
+    the terminal's rail fading by the wall clock, and bash's mark lost in tmux. The owners fixed
+    the first five forward the same day; the last two are below.
+  - **A commit missing what it calls, 2**, both before `xtask stage` put into the index exactly
+    what a check passed.
+  - **A promote refused for a workflow file, 2**: every lane passed, and `land --wait` or
+    `xtask promote` moves main from a checkout.
+  The rulings:
+  - **rustdoc runs in the quick check.** `xtask check --quick`, which `remote` runs here, now
+    documents the checked crates too (`--no-deps`, warnings denied, as CI's rustdoc lane). On
+    HEAD at `4ece33fc`, whose gate run went red on rustdoc after about 8 minutes, a quick check
+    of `slopty-math` fails in 25 s, its rustdoc step in 2.4 s; `xtask` and `slopty-pty` together
+    took 11.5 s of a 47 s check. CI's rustdoc lane stays.
+  - **The cargo cache is keyed by the lock.** rust-cache with `add-rust-environment-hash-key:
+    false` leaves the lock's hash out of the key too, so its key never changed: the macOS entry
+    was saved on 2026-10-01 and restored whole on every run after, which a cache action never
+    saves again. Every Mac shard downloaded 184 crates and fetched the forks again (19–26 s on a
+    runner). Now one entry per lock (`cargo-home-<hash of Cargo.lock>`, the registry's index
+    and crates and the git clones) serves every job of every OS (`enableCrossOsArchive`; their
+    contents name no host). The gate's tools lane saves it last in its job, on Linux, after
+    `cargo fetch` and with only the lock's crates; a run on a new lock starts from the newest
+    entry. Supersedes "The registry cache renews with the lock, saved by the UI shard".
+  - **Spotlight is off on every Mac job**, first step: it indexed what the builds and tests
+    wrote, 200 CPU-seconds of a 353 s build of the worker crate's tests on a three-core runner
+    and 106 of their 139 s run; off, 1.
+  - **The tests that wait out ten seconds or more start first** (nextest `priority`, each test
+    named). The worker shard's run ended on a 25 s test started at 188 s of 214, with one test
+    running for 44 s of it.
+  - **`ci-health` tallies the day's reds by the lane that failed**, and shows apart the quick
+    checks that carried an e2e case: their verdict waits for that case in the guest (p50 297 s),
+    while a quick check of crates alone gives its verdict 1 s (p50) past its part here. The gap
+    between a quick check's verdict and its part here is the e2e case, not a queue.
+  - The two flakes left: `marks_cross_a_real_tmux_to_the_terminal_outside` typed `exit` beside
+    `false`, and a tmux whose pane's shell exits closes the pane without passing on what the
+    shell wrote last, bash's mark for `false` among it (run 39045212258). It types `exit` once
+    that mark has crossed. The terminal's rail fades by `Instant::now()`, so two windows painted
+    a moment apart differ in its alpha (`paint_oracle`, run 39020038074): the rail's owner
+    takes it.
+  Not done, with the reason:
+  - **A fourth Mac shard.** The UI shard cannot go under about 6.5 minutes: `slopty-shell`'s test
+    harness alone compiles for 150 s once its dependencies are in, and a fourth shard takes one of
+    the five Mac runners the checks and the e2e share, to save the worker shard a minute.
+  - **More test threads.** The worker shard's run held a load average of 14 to 21 on three
+    cores: its tests are bound by CPU, not by their waits.
+  - **A cached target dir.** Units come from sccache at 99–100 % hits on every shard; what it
+    cannot serve is each crate's test harness, a binary, which a restored target would rebuild
+    for any change to its crate, and about 2–3 GB a shard does not fit the 10 GB Actions cache
+    beside the rest.
+  Tests: `gate::tests::the_cargo_cache_is_keyed_by_the_lock_and_saved_by_the_tools_lane`,
+  `gate::tests::every_mac_job_turns_spotlight_off_first`, `health::tests::a_red_counts_against_its_lane`
+  and `health::tests::a_check_s_e2e_part_is_its_guest_run` (`xtask`).

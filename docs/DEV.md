@@ -31,11 +31,11 @@ zed itself so it is never behind zed while longbridge lags.
   return soonest"). `cargo xtask remote -p <crate> [-p <crate>…]` commits the working tree beside
   the real index (`--only <path>`, repeatable: `HEAD` plus the edits under those paths alone, so
   another lane's unfinished work stays out; `--head`: the commit without the tree's edits) and
-  checks that commit in two places at once. Here, at full power: fmt, host clippy, shear, typos
-  and the crates' tests as a Mac runner runs them, in the lane's own warm directory
+  checks that commit in two places at once. Here, at full power: fmt, host clippy, rustdoc,
+  shear, typos and the crates' tests as a Mac runner runs them, in the lane's own warm directory
   (`target/local/<lane>/`, `--name` or `SLOPTY_LANE`). On GitHub runners (`check.yml`, pushed
-  to `check/<name>`, deleted when its run ends): with `--full`, iOS and Linux clippy and rustdoc
-  on an arm Linux runner, and the tests on Linux when every crate tests there
+  to `check/<name>`, deleted when its run ends): with `--full`, iOS and Linux clippy on an arm
+  Linux runner, and the tests on Linux when every crate tests there
   (`gate::linux_tested`); and any e2e case or probe. A quick check of crates alone dispatches
   nothing. `--place runner` sends all of it to runners, as before. With `--only` it first
   formats the Rust files changed under those paths (nightly rustfmt), so no check fails on

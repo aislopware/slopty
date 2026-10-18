@@ -16,9 +16,10 @@
 //! other features, and every set compiled and kept its own copy of them and of the crates on
 //! top (`docs/decisions/tooling.md`, "target/ stays bounded").
 //!
-//! `--quick` keeps fmt, host clippy, nextest, shear and typos, which catch most of what goes red,
-//! in about half the time, and leaves iOS and Linux clippy and rustdoc to the gate
-//! (`docs/decisions/tooling.md`, "Lanes never wait on a check").
+//! `--quick` keeps fmt, host clippy, nextest, rustdoc, shear and typos, which catch most of what
+//! goes red, in about half the time, and leaves iOS and Linux clippy to the gate
+//! (`docs/decisions/tooling.md`, "Lanes never wait on a check" and "rustdoc runs in the quick
+//! check").
 //!
 //! A clean run is what an agent reports back. The session that lands the work still gates the
 //! index.
@@ -120,9 +121,10 @@ pub fn run(sh: &Shell, crates: &[String], quick: bool, part: Part) -> Result<()>
     if part == Part::All {
         nextest(sh, b, &[])?;
     }
-    if !quick {
-        rustdoc(sh, &names().collect::<Vec<_>>())?;
-    }
+    // Quick too: a doc's broken or private link is red only in rustdoc, and with it left to
+    // the gate it was the first cause of red gate runs (`docs/decisions/tooling.md`, "rustdoc
+    // runs in the quick check").
+    rustdoc(sh, &names().collect::<Vec<_>>())?;
     quiet_step("cargo shear", cmd!(sh, "cargo shear {p...}"))?;
     // Relative, with `--force-exclude`: `typos.toml`'s excludes hold for the named directories
     // too, as they do for the gate's run over the whole tree; typos matches them against a path

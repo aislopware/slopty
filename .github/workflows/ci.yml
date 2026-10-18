@@ -75,6 +75,12 @@ jobs:
     env:
       SLOPTY_DISK_FLOOR_GB: ${{ matrix.disk-floor-gb }}
     steps:
+      # Spotlight off: it indexes every file a build and its tests write, and on a three-core
+      # runner it took 200 CPU-seconds of a 353 s build of the worker crate's tests and 106 of
+      # their 139 s run, against 1 once off (`docs/MEASUREMENTS.md`, "the gate's reds and its
+      # runners").
+      - if: runner.os == 'macOS'
+        run: sudo mdutil -a -i off
       - uses: actions/checkout@v5
         with:
           submodules: recursive
@@ -96,33 +102,24 @@ jobs:
         uses: dtolnay/rust-toolchain@nightly
         with:
           components: rustfmt
-      # sccache holds the compiled units; this keeps only the registry, git checkouts and the
-      # installed tools. The action keys an entry by the runner's OS and architecture, so there
-      # are three: the tools lane saves x86_64 Linux's, host clippy arm Linux's and the UI shard
-      # the Macs', each after `cargo fetch` (below) has every package in it. A cache is read by
-      # its own branch and the ones based on main, so the Deep workflow saves its own on main.
-      # Keyed by the manifests and the lock too, so an entry is renewed when they change: one
-      # entry for ever went nine days stale, and every Mac job downloaded what came since and
-      # `cargo metadata` 95 crates more (22.8 s, run 38123134797). The Actions cache has the room
-      # since the compile cache moved to R2. Saved on failure too: a red lane is no reason to
-      # download it all again. On a Mac the save takes two minutes (cleaning, then a slow tar),
-      # so the shard with the most slack does it: the UI's, since xtask's build left it
-      # (`docs/decisions/tooling.md`, "The registry cache renews with the lock"). Not keyed by
-      # the toolchains a job has installed, which nothing cached depends on: the tools lane's
-      # nightly gave its entry a key the other x86_64 Linux jobs never matched, so they cloned
-      # every git dependency on every run, and one clone's TLS error failed the gate (run
-      # 38144514113).
-      - id: rust-cache
-        uses: Swatinem/rust-cache@v2
+      # sccache holds the compiled units; this holds what cargo fetches: the registry's index and
+      # crates and the git dependencies' clones, one entry per lock for every job of every OS
+      # (their contents name no host, and actions/cache keys Linux's and macOS's alike), saved
+      # by the tools lane on the gate, last in its job (below). A job on a new lock starts from
+      # the newest entry and fetches only what came since. rust-cache, keyed with no environment
+      # part, kept one key for ever, so its entry was restored whole and never saved again: 17
+      # days stale on 2026-10-18, it had every Mac shard download 184 crates and fetch every fork
+      # again on every run (`docs/decisions/tooling.md`, "The cargo cache is keyed by the lock").
+      - id: cargo-home
+        uses: actions/cache/restore@v4
         with:
-          shared-key: gate
-          add-rust-environment-hash-key: false
-          cache-targets: false
-          cache-on-failure: true
-          save-if: >-
-            ${{ github.ref == 'refs/heads/gate'
-            && (matrix.lane == 'tools' || matrix.lane == 'clippy-host'
-            || matrix.shard == 'ui') }}
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: cargo-home-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-home-
+          enableCrossOsArchive: true
       - uses: cargo-bins/cargo-binstall@main
       # Every proc-macro dependency unoptimised: sccache cannot cache one, and the workspace's
       # `package."*"` gave them opt-level 3 (xtask/src/ci_profile.rs). Cargo reads package
@@ -187,12 +184,6 @@ jobs:
           key: >-
             verdicts-${{ runner.os }}-${{ steps.image.outputs.version }}-${{
             hashFiles('assets/icon.svg', 'xtask/src/icon.rs', 'xtask/src/icon/**') }}
-      # Every package of every platform, for the cache entry the lane saves: only when it will
-      # save one, as an entry restored whole is never saved again (19–35 s a run otherwise).
-      - if: >-
-          github.ref == 'refs/heads/gate' && steps.rust-cache.outputs.cache-hit != 'true'
-          && (matrix.lane == 'clippy-host' || matrix.shard == 'ui')
-        run: cargo fetch --locked
       # xtask built once per change to what it is built from, rather than in every job: 20-90 s
       # a job (.research/ci-speed-2026-10-11.md item 4). The key names every input of its
       # build (`gate::tests::xtask_s_cache_key_names_every_input`). nextest's setup script runs
@@ -249,6 +240,30 @@ jobs:
             target/**/nextest/ci/ptys.log
             target/**/cargo-timings/cargo-timing.html
           if-no-files-found: ignore
+      # The cargo cache's entry for this lock, when none has it: every package of every platform,
+      # the lock's alone, so an entry started from an older one keeps none of its versions. Last
+      # in the tools lane, the job that ends first (a minute), on Linux, where it takes seconds:
+      # on a Mac the same save took two minutes (run 38126044772).
+      - id: fetch
+        if: >-
+          always() && github.ref == 'refs/heads/gate' && matrix.lane == 'tools'
+          && steps.cargo-home.outputs.cache-hit != 'true'
+        run: |
+          cargo fetch --locked
+          sed -n 's/^name = "\(.*\)"$/\1/p; s/^version = "\(.*\)"$/\1/p' Cargo.lock \
+            | paste -d- - - | sed 's/$/.crate/' > "$RUNNER_TEMP/locked-crates"
+          for dir in ~/.cargo/registry/cache/*/; do
+            ls "$dir" | grep -vxFf "$RUNNER_TEMP/locked-crates" | sed "s|^|$dir|" | xargs rm -f
+          done
+      - if: always() && steps.fetch.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ steps.cargo-home.outputs.cache-primary-key }}
+          enableCrossOsArchive: true
       - if: always() && matrix.lane != 'tools'
         run: $SCCACHE_PATH --show-stats
       - if: always() && runner.os == 'macOS'
@@ -303,12 +318,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.99.1
-      - uses: Swatinem/rust-cache@v2
+      # The cargo cache the tools lane saves, read only (the gate job's comment).
+      - uses: actions/cache/restore@v4
         with:
-          shared-key: gate
-          add-rust-environment-hash-key: false
-          cache-targets: false
-          save-if: false
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: cargo-home-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-home-
+          enableCrossOsArchive: true
       - uses: cargo-bins/cargo-binstall@main
       # Every proc-macro dependency unoptimised: sccache cannot cache one, and the workspace's
       # `package."*"` gave them opt-level 3 (xtask/src/ci_profile.rs). Cargo reads package
@@ -478,6 +497,12 @@ jobs:
     env:
       BETTER_UPDATE_ROBOT: ${{ secrets.BETTER_UPDATE_ROBOT }}
     steps:
+      # Spotlight off: it indexes every file a build and its tests write, and on a three-core
+      # runner it took 200 CPU-seconds of a 353 s build of the worker crate's tests and 106 of
+      # their 139 s run, against 1 once off (`docs/MEASUREMENTS.md`, "the gate's reds and its
+      # runners").
+      - if: runner.os == 'macOS'
+        run: sudo mdutil -a -i off
       - uses: actions/checkout@v5
         with:
           submodules: recursive
@@ -494,13 +519,16 @@ jobs:
           targets: >-
             aarch64-apple-darwin, aarch64-unknown-linux-gnu, x86_64-unknown-linux-gnu,
             aarch64-unknown-linux-musl, x86_64-unknown-linux-musl
-      # The gate's one entry of registry, git checkouts and tools; a release saves none of its own.
-      - uses: Swatinem/rust-cache@v2
+      # The cargo cache the gate's tools lane saves, read only; a release saves none of its own.
+      - uses: actions/cache/restore@v4
         with:
-          shared-key: gate
-          add-rust-environment-hash-key: false
-          cache-targets: false
-          save-if: false
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: cargo-home-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-home-
+          enableCrossOsArchive: true
       - uses: cargo-bins/cargo-binstall@main
       - run: cargo binstall --no-confirm git-cliff@2.14.1 cargo-zigbuild@0.23.4
         env:

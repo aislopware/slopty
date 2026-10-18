@@ -791,26 +791,28 @@ mod tests {
             size,
         };
         let child = pty.spawn_with(&spec, Some(&si)).unwrap().child;
-        let text = drive(pty, child, None, input).await;
+        let text = drive(pty, child, &[(b"", input)]).await;
         let _removed: io::Result<()> = fs::remove_dir_all(&tmp);
         text
     }
 
-    /// Type `input` into `child` on `pty`, once it has written `ready` when that is given, and
-    /// return everything written there until it exits, answering a terminal's questions on the
-    /// way.
-    async fn drive(pty: Pty, mut child: crate::Child, ready: Option<&[u8]>, input: &str) -> String {
+    /// Type each stage's input into `child` on `pty` once it has written that stage's `ready`
+    /// bytes (at once for empty ones), one stage after another, and return everything written
+    /// there until it exits, answering a terminal's questions on the way.
+    async fn drive(pty: Pty, mut child: crate::Child, stages: &[(&[u8], &str)]) -> String {
         let master = PtyMaster::new(pty.into_master()).unwrap();
-        let mut typed = ready.is_none();
-        if typed {
-            master.write_all(input.as_bytes()).await.unwrap();
-        }
+        let mut stages = stages.iter().peekable();
         let mut out = Vec::new();
         let mut buf = [0_u8; 4096];
         let mut answered = 0;
         let deadline =
             tokio::time::Instant::now().checked_add(std::time::Duration::from_secs(20)).unwrap();
         loop {
+            let seen =
+                |ready: &[u8]| ready.is_empty() || out.windows(ready.len()).any(|w| w == ready);
+            while let Some((_, input)) = stages.next_if(|(ready, _)| seen(ready)) {
+                master.write_all(input.as_bytes()).await.unwrap();
+            }
             let read = tokio::time::timeout_at(deadline, master.read(&mut buf)).await;
             let Ok(Ok(n)) = read else {
                 // EOF, an error, or a shell that never exited: what it wrote is the evidence.
@@ -828,10 +830,6 @@ mod tests {
                 master.write_all(b"\x1b[?62;22c\x1b[1;1R").await.unwrap();
             }
             answered = asked;
-            if !typed && ready.is_some_and(|ready| out.windows(ready.len()).any(|w| w == ready)) {
-                typed = true;
-                master.write_all(input.as_bytes()).await.unwrap();
-            }
         }
         let _status: io::Result<std::process::ExitStatus> = child.wait().await;
         String::from_utf8_lossy(&out).into_owned()
@@ -1411,8 +1409,12 @@ mod tests {
             return;
         };
         for (n, (shell, cd)) in every_shell().into_iter().enumerate() {
-            let input = format!("{cd}false\nexit\n");
-            let text = run_in_tmux(&format!("tmux-real-{n}"), tmux, shell, &input).await;
+            // `exit` only once `false`'s status has crossed: a tmux whose pane's shell exits
+            // closes the pane without passing on what the shell wrote last, and bash's mark
+            // for `false` went with it when `exit` was typed beside it (run 39045212258).
+            let input = format!("{cd}false\n");
+            let stages: [(&[u8], &str); 2] = [(b"\x1b]133;B", &input), (b"\x1b]133;D;1", "exit\n")];
+            let text = run_in_tmux(&format!("tmux-real-{n}"), tmux, shell, &stages).await;
             assert!(!text.contains("Ptmux;"), "{shell}: tmux unwrapped them: {text:?}");
             assert!(has_mark(&text, "A"), "{shell} prompt mark through tmux: {text:?}");
             assert!(has_mark(&text, "D;1"), "{shell} status of `false` through tmux: {text:?}");
@@ -1425,9 +1427,9 @@ mod tests {
     }
 
     /// `shell`, integrated as ptyd would start it, in the one pane of a tmux server of its own
-    /// on a PTY: `input` typed once the pane's first prompt shows outside tmux, and everything
-    /// tmux wrote returned. The server goes with the test.
-    async fn run_in_tmux(tag: &str, tmux: &str, shell: &str, input: &str) -> String {
+    /// on a PTY: each stage's input typed once its bytes show outside tmux, and everything tmux
+    /// wrote returned. The server goes with the test.
+    async fn run_in_tmux(tag: &str, tmux: &str, shell: &str, stages: &[(&[u8], &str)]) -> String {
         let tmp = std::env::temp_dir().join(format!("slopty-shell-{tag}-{}", std::process::id()));
         let _removed: io::Result<()> = fs::remove_dir_all(&tmp);
         let si = install(&tmp.join("shell")).unwrap();
@@ -1464,7 +1466,7 @@ mod tests {
         let pty = Pty::open(size).unwrap();
         let spec = SpawnSpec { command, cwd: Some(home.clone()), env, size };
         let child = pty.spawn_with(&spec, None).unwrap().child;
-        let text = drive(pty, child, Some(b"\x1b]133;B"), input).await;
+        let text = drive(pty, child, stages).await;
         let _gone = std::process::Command::new(tmux).args(["-S", &socket, "kill-server"]).output();
         let _removed: io::Result<()> = fs::remove_dir_all(&tmp);
         text
