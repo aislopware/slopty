@@ -26,16 +26,3 @@ Maps: `docs/ARCHITECTURE.md`, `docs/DECISIONS.md`, `docs/MEASUREMENTS.md`, `docs
   answers for the person, and never touches a credential (`docs/decisions/agents.md`).
 - A decision worth a paragraph goes in `docs/decisions/`, an optimisation's number in
   `docs/MEASUREMENTS.md`, in the same change. Docs paraphrase the person, never quote them.
-
-## Session safety
-
-- Tests decide on numbers. No synthetic input into a process, no screenshots of other windows,
-  no reading images back: that pattern has been flagged as surveillance tooling.
-- Agents under test are stand-ins the test starts, never a signed-in agent.
-- Never read old Claude Code transcripts (`~/.claude/projects/**/*.jsonl`).
-- Images may be opened only for design review: Slopty's renders (`crates/slopty-e2e/golden/`,
-  `target/e2e/artifacts/`) and `.research/mockups-*/`.
-- Delta may be taken apart, and run here signed in with the person's GitHub on scratch folders
-  only, capturing only its windows; values only, none of its code or assets. Its one key is the
-  person's CPA proxy, from `$CPA_API_KEY` via the clipboard, never typed or printed.
-- Kill daemons a measurement started. Worktrees and ports are shared with other sessions.

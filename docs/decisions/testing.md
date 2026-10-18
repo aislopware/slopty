@@ -163,10 +163,11 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
   temp dir and sends the payload there from the test process, with the session id read from
   the dump. A first version typed `printf … | slopty hook` into the shell under test and
   waited for the state to change: synthetic keys running a command in a shell and reading the
-  result back is the surveillance-shaped pattern CLAUDE.md forbids, and it got that session
-  flagged. Keys over the test socket drive the app's own UI only (⌘⇧L, the composer, the
-  buttons); the one line the composer sends is a shell comment, so the shell echoes it and runs
-  nothing. The same path drives the simulator, since the worker stays on the Mac.
+  result back is the surveillance-shaped pattern that got that session flagged (a rule retired
+  2026-10-18, "Session safety is retired" below). Keys over the test socket drive the app's own
+  UI only (⌘⇧L, the composer, the buttons); the one line the composer sends is a shell comment,
+  so the shell echoes it and runs nothing. The same path drives the simulator, since the worker
+  stays on the Mac.
 
 - ✅ **The self-test plays the agent with a fake `claude` on ptyd's `PATH`, never by typing**
   (2026-09-05). `Stack::launch_with_fake_claude` gives ptyd and the worker a `HOME` and a `PATH` of
@@ -1229,3 +1230,11 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
   - Proof: `cargo xtask e2e app -E 'test(=settings::the_settings_form_edits_the_file) |
     test(=stream::a_drawn_window_streams_into_its_tile)'` runs the first in the quiet group (no
     decoder at launch) and the second after the probe; both pass.
+
+- ✅ **Session safety is retired** (2026-10-18). CLAUDE.md no longer carries the session-safety
+  rules written at the project's start: no synthetic input into a process, no screenshots of
+  other windows or reading images back, signed-in agents kept out of tests, old Claude Code
+  transcripts off limits, images opened only for design review, Delta's capture limits, and
+  killing a measurement's daemons. The person ruled they are no longer needed. The rulings above
+  that cite them stay as the history of why the tests took their shape; a test still drives the
+  app's own UI and its own environment where that is the better test, not because a rule says so.

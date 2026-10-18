@@ -18,7 +18,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   path is unit-tested against `Recorder` under `cargo gate` with no Accessibility grant and
   no real event. The one live test (`SLOPTY_INPUT_E2E`) checks only that a display-stream
   move lands, and runs via `cargo xtask e2e input`. Hand-driven checks (keys into a pid +
-  window screenshots + reading them back) are banned: see `CLAUDE.md` ▸ Live tests.
+  window screenshots + reading them back) were banned until 2026-10-18
+  (`docs/decisions/testing.md`, "Session safety is retired").
 
 - ⚠️ **macOS delivers keyboard events only to the active app.** Events posted to an inactive
   pid queue up and all land the moment the app activates (observed macOS 26.5: four probe keys
