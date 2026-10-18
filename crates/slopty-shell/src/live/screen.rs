@@ -114,6 +114,10 @@ pub struct ScreenSurface {
     query: String,
     /// The picker's keyboard row, in the order shown.
     active: Option<usize>,
+    // slopty: the fade key of the row under the pointer. A view drawn from its last frame reads
+    // no fade, and the fades let an unread key go as an element gone; the row the pointer is
+    // still over says so again before it is read (`motion::hover_known`), as a page card does.
+    hovered: Option<SharedString>,
     scroll: ScrollHandle,
     // slopty: the list's floating rail, as every scrolling list has (M26).
     rail: popover::MenuScrollbarState,
@@ -186,6 +190,7 @@ impl ScreenSurface {
             search,
             query: String::new(),
             active: None,
+            hovered: None,
             scroll: ScrollHandle::new(),
             rail: popover::MenuScrollbarState::default(),
             _search_events: events,
@@ -226,6 +231,7 @@ impl ScreenSurface {
                     Err(err) => Stage::Failed(err.to_string().into()),
                 };
                 this.active = None;
+                this.hovered = None;
                 this.focus_pending = true;
                 this.sync_search_keys(cx);
                 cx.notify();
@@ -465,7 +471,11 @@ impl ScreenSurface {
         let app = choice.app().map(|app| SharedString::from(app.to_owned()));
         let picked = choice.clone();
         let key = format!("screen-choice-{}", choice.id);
-        popover::picker_row(theme, false, self.active == Some(at), key.clone())
+        let fade: SharedString = key.clone().into();
+        if self.hovered.as_ref() == Some(&fade) && !crate::motion::hover_known(&fade) {
+            crate::motion::set_hover(&fade, true, true);
+        }
+        let row = popover::picker_row(theme, false, self.active == Some(at), key.clone())
             .id(("screen-choice", at))
             .debug_selector(move || key)
             .role(gpui::Role::Button)
@@ -486,7 +496,18 @@ impl ScreenSurface {
                     .text_size(crate::typography::ui_rems(12.0))
                     .text_color(theme.text_muted)
                     .child(app)
+            }));
+        // The row's own listener drives its fade; this one tells the view which row it is.
+        div()
+            .id(("screen-choice-hover", at))
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                let now = hovered.then(|| fade.clone());
+                if *hovered || this.hovered.as_ref() == Some(&fade) {
+                    this.hovered = now;
+                    cx.notify();
+                }
             }))
+            .child(row)
             .into_any_element()
     }
 
@@ -601,6 +622,118 @@ mod tests {
         assert!(again.size.height >= px(24.0), "a dialog button: {again:?}");
         cx.simulate_click(again.center(), gpui::Modifiers::default());
         surface.read_with(cx, |s, _| assert!(matches!(s.stage, Stage::Failed(_)), "still none"));
+    }
+
+    /// A view beside the picker that frames draw again while the picker stays as it was.
+    struct Beside;
+
+    impl Render for Beside {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size(px(4.0))
+        }
+    }
+
+    /// The picker beside another view, as the shell holds it: a frame that draws only the other
+    /// one draws the picker from its last frame.
+    struct Host {
+        surface: Entity<ScreenSurface>,
+        beside: Entity<Beside>,
+    }
+
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .child(
+                    gpui::AnyView::from(self.surface.clone())
+                        .cached(gpui::StyleRefinement::default().size_full()),
+                )
+                .child(self.beside.clone())
+        }
+    }
+
+    /// The row under a resting pointer keeps its wash in every frame, as a frame from scratch
+    /// draws it. Frames that draw only the view beside the picker leave the picker as it was, so
+    /// no frame reads its row's fade, and the fades let the key go (the shell's tick,
+    /// `hover_fades_active`): the row the pointer is still over tells them again. The oracle
+    /// judges the frame shown against the same state drawn from scratch. GPUI's own check of
+    /// every frame stays off here: its frames from scratch read the fade too, and would keep
+    /// the key the window's own frames let go.
+    #[gpui::test]
+    fn a_row_under_a_resting_pointer_paints_as_from_scratch(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            cx.set_reduce_motion(true);
+        });
+        let (host, cx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Host { surface: cx.new(|cx| ScreenSurface::new(state, cx)), beside: cx.new(|_| Beside) }
+        });
+        let (surface, beside) = host.read_with(cx, |h, _| (h.surface.clone(), h.beside.clone()));
+        surface.update(cx, |s, cx| {
+            s.stage = Stage::Choices(listing());
+            s.sync_search_keys(cx);
+            cx.notify();
+        });
+        let frame = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| {
+                crate::motion::hover_fades_active(crate::clock::event_now());
+                window.draw(cx).clear(cx);
+            });
+            cx.run_until_parked();
+        };
+        frame(cx);
+        let row = cx.debug_bounds("screen-choice-w2").expect("Mail's row");
+        cx.simulate_mouse_move(row.center(), None, gpui::Modifiers::default());
+        frame(cx);
+        let washed = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, _| {
+                let scale = window.scale_factor();
+                // The hover wash, ink at 5 %, whichever ink the theme draws in.
+                window.painted_quads().iter().any(|quad| {
+                    format!("{:?}", quad.background).contains("a: 0.05")
+                        && (quad.bounds.origin.y.0 - f32::from(row.origin.y) * scale).abs() < 0.5
+                        && (quad.bounds.size.height.0 - f32::from(row.size.height) * scale).abs()
+                            < 0.5
+                })
+            })
+        };
+        assert!(washed(cx), "the row under the pointer is washed");
+        for _ in 0..3 {
+            beside.update(cx, |_, cx| cx.notify());
+            frame(cx);
+        }
+        // The frames drew the picker from its last frame: none read the row's fade, so the
+        // fades let its key go.
+        assert!(
+            !crate::motion::hover_known("screen-choice-w2"),
+            "the picker was drawn again, so this tests nothing"
+        );
+        assert!(washed(cx), "the row under the resting pointer keeps its wash");
+        // The oracle: the frame shown against the same state drawn from scratch at its moment.
+        let (shown, scratch) = cx.update(|window, cx| {
+            let mut shown = window.painted_primitives();
+            shown.sort_unstable();
+            window.repeat_frame_time();
+            window.refresh();
+            window.draw(cx).clear(cx);
+            let mut scratch = window.painted_primitives();
+            scratch.sort_unstable();
+            (shown, scratch)
+        });
+        let only = |a: &[String], b: &[String]| -> Vec<String> {
+            a.iter().filter(|line| b.binary_search(line).is_err()).take(6).cloned().collect()
+        };
+        assert!(
+            shown == scratch,
+            "the picker drawn stale; shown only:\n{}\nfrom scratch only:\n{}",
+            only(&shown, &scratch).join("\n"),
+            only(&scratch, &shown).join("\n")
+        );
+        surface.update(cx, |_, cx| cx.notify());
+        frame(cx);
+        assert!(washed(cx), "and keeps it when the picker is drawn again");
     }
 
     /// Typing in the picker's search drops the rows it no longer matches.
