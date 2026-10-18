@@ -274,7 +274,8 @@ pub enum Goldens {
     /// Compare every frame with its golden.
     #[default]
     Compare,
-    /// Write missing and failing goldens, and bring them back into the tree.
+    /// Write every golden its frame differs from by a pixel or a word, and bring them back into
+    /// the tree.
     Accept,
     /// Rewrite every golden, and bring them back into the tree.
     AcceptAll,

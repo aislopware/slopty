@@ -62,7 +62,8 @@ pub struct E2eOpts {
     /// Which tests.
     #[arg(value_enum, default_value_t = Case::App)]
     case: Case,
-    /// Write missing and failing render goldens under `crates/slopty-e2e/golden/`.
+    /// Write every render golden under `crates/slopty-e2e/golden/` that its frame differs from
+    /// by a pixel or a word, within the tolerance too.
     #[arg(long)]
     accept: bool,
     /// Rewrite every render golden under `crates/slopty-e2e/golden/`.

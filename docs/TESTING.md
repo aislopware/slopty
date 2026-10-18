@@ -85,9 +85,11 @@ Tests make no sound on this Mac: the drawn screen's worker sounds only under `SL
    composited over one slate backdrop, compared numerically with `crates/slopty-e2e/golden`,
    and what the same frame says in words (its accessibility tree's roles, labels and values, a
    line a node) compared exactly with the `.txt` beside it, so a changed word fails with the
-   lines that changed where the pixel tolerance cannot see it (`--accept` writes missing and
-   failing goldens, `--accept-all` rewrites every golden, and `--review` writes none and fails
-   on none, leaving each changed frame's render and diff in the artifacts, so a design review
+   lines that changed where the pixel tolerance cannot see it (`--accept` writes every golden
+   its frame differs from by one pixel or one word, within the tolerance too, so no golden
+   keeps drawing a word or a shade the app has since changed; `--accept-all` rewrites every
+   golden, and `--review` writes none and fails on none, leaving each changed frame's render
+   and diff in the artifacts, so a design review
    sees every golden in one run; it also draws every render again at 2x beside the 1x ones, as
    `target/e2e/artifacts/<name>@2x.png`, the set shown to the person, since a 1x render is not
    what a Retina Mac shows). `--filter <filterset>` (nextest's `-E`, such as

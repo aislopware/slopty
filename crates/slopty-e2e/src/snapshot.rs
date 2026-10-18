@@ -365,7 +365,7 @@ pub fn luma_distance(a: &[u64; LUMA_BUCKETS], b: &[u64; LUMA_BUCKETS]) -> f64 {
 pub enum Accept {
     /// Keep matching goldens and fail on changes.
     Off,
-    /// Write missing or failing goldens; keep matching goldens.
+    /// Write every golden the frame differs from, by one pixel or one word; keep the rest.
     Changed,
     /// Rewrite every golden encountered.
     All,
@@ -407,30 +407,46 @@ pub enum GoldenAction {
     Report,
 }
 
+/// How a frame compares with its golden.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Likeness {
+    /// No golden yet.
+    Missing,
+    /// No pixel and no word differs.
+    Same,
+    /// Some pixels differ, within the tolerance: the frame passes, but the golden is not it.
+    Near,
+    /// Beyond the tolerance, another size, or a word changed.
+    Apart,
+}
+
 /// Decide what action to take for a golden snapshot.
+///
+/// An accept rewrites a golden whenever the frame differs from it at all, not only when it
+/// fails: a golden kept because its frame stayed within the tolerance would go on showing a
+/// past word or shade, and a review of the goldens would review that past.
 #[must_use]
-pub const fn golden_action(
-    accept: Accept,
-    golden_exists: bool,
-    within_tolerance: bool,
-) -> GoldenAction {
-    match (accept, golden_exists, within_tolerance) {
-        (Accept::Review, false, _) | (Accept::Review, true, false) => GoldenAction::Report,
-        (_, false, _) | (Accept::All, true, _) | (Accept::Changed, true, false) => {
-            GoldenAction::Write
+pub const fn golden_action(accept: Accept, likeness: Likeness) -> GoldenAction {
+    match (accept, likeness) {
+        (Accept::Review, Likeness::Missing | Likeness::Near | Likeness::Apart) => {
+            GoldenAction::Report
         }
-        (Accept::Changed | Accept::Off | Accept::Review, true, true) => GoldenAction::Keep,
-        (Accept::Off, true, false) => GoldenAction::Fail,
+        (_, Likeness::Missing)
+        | (Accept::All, _)
+        | (Accept::Changed, Likeness::Near | Likeness::Apart) => GoldenAction::Write,
+        (Accept::Off, Likeness::Apart) => GoldenAction::Fail,
+        (Accept::Off, Likeness::Near)
+        | (Accept::Off | Accept::Changed | Accept::Review, Likeness::Same) => GoldenAction::Keep,
     }
 }
 
 /// Compare `actual` with `golden/<name>.png`, and its text with `golden/<name>.txt`.
 ///
-/// When accepting, `--accept` writes missing and failing goldens, while `--accept-all`
-/// rewrites every golden. Otherwise the frame is written to `<artifacts>/<name>.actual.png`
-/// and, when it differs beyond `tolerance`, the diff to `<artifacts>/<name>.diff.png`, and the
-/// error names both files. Its text is written to `<artifacts>/<name>.actual.txt`, and a line
-/// changed fails with the lines around it.
+/// When accepting, `--accept` writes every golden the frame differs from by a pixel or a word
+/// ([`golden_action`]), while `--accept-all` rewrites every golden. Otherwise the frame is written
+/// to `<artifacts>/<name>.actual.png` and, when it differs beyond `tolerance`, the diff to
+/// `<artifacts>/<name>.diff.png`, and the error names both files. Its text is written to
+/// `<artifacts>/<name>.actual.txt`, and a line changed fails with the lines around it.
 ///
 /// # Errors
 ///
@@ -504,7 +520,7 @@ fn pixels_match(
     let golden_exists = golden_path.exists();
     if !golden_exists {
         let total = u64::from(actual.width()).saturating_mul(u64::from(actual.height()));
-        if golden_action(accept, false, false) == GoldenAction::Report {
+        if golden_action(accept, Likeness::Missing) == GoldenAction::Report {
             eprintln!("snapshot {name}: REVIEW no golden yet; render at {}", actual_path.display());
             return Ok(Diff { differing: total, total, longest_run: 0 });
         }
@@ -520,8 +536,14 @@ fn pixels_match(
     let (diff, image) = compare_masked(actual, &golden, masks);
     let same_size = golden.dimensions() == actual.dimensions();
     let fraction = diff.fraction();
-    let within_tolerance = same_size && fraction <= tolerance && diff.longest_run < SEAM_RUN;
-    let action = golden_action(accept, true, within_tolerance);
+    let likeness = if !same_size || fraction > tolerance || diff.longest_run >= SEAM_RUN {
+        Likeness::Apart
+    } else if diff.differing > 0 {
+        Likeness::Near
+    } else {
+        Likeness::Same
+    };
+    let action = golden_action(accept, likeness);
 
     match action {
         GoldenAction::Write => {
@@ -529,7 +551,12 @@ fn pixels_match(
             actual
                 .save(&golden_path)
                 .with_context(|| format!("write {}", golden_path.display()))?;
-            eprintln!("snapshot {name}: wrote golden {}", golden_path.display());
+            eprintln!(
+                "snapshot {name}: wrote golden {} ({} of {} pixels differed)",
+                golden_path.display(),
+                diff.differing,
+                diff.total
+            );
             Ok(diff)
         }
         GoldenAction::Keep => {
@@ -604,8 +631,12 @@ fn text_matches(name: &str, text: &str, artifacts: &Path) -> Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(e).with_context(|| format!("read {}", golden_path.display())),
     };
-    let same = golden.as_deref() == Some(text);
-    match golden_action(Accept::from_env(), golden.is_some(), same) {
+    let likeness = match golden.as_deref() {
+        None => Likeness::Missing,
+        Some(golden) if golden == text => Likeness::Same,
+        Some(_) => Likeness::Apart,
+    };
+    match golden_action(Accept::from_env(), likeness) {
         GoldenAction::Keep => Ok(()),
         GoldenAction::Write => {
             std::fs::write(&golden_path, text)
@@ -904,28 +935,24 @@ mod tests {
         assert_eq!(Accept::parse(Some("other")), Accept::Off);
     }
 
+    /// Every accept mode against every likeness. An accept rewrites a golden its frame
+    /// differs from by any pixel, within the tolerance too, so no golden goes on showing what
+    /// the app no longer draws; a frame within the tolerance still passes without one.
     #[test]
-    fn golden_action_nine_combinations() {
-        // Missing golden: writes regardless of accept mode.
-        assert_eq!(golden_action(Accept::Off, false, false), GoldenAction::Write);
-        assert_eq!(golden_action(Accept::Changed, false, false), GoldenAction::Write);
-        assert_eq!(golden_action(Accept::All, false, false), GoldenAction::Write);
-        assert_eq!(golden_action(Accept::Off, false, true), GoldenAction::Write);
-        assert_eq!(golden_action(Accept::Changed, false, true), GoldenAction::Write);
-        assert_eq!(golden_action(Accept::All, false, true), GoldenAction::Write);
-
-        // Golden exists, within tolerance: keep unless All.
-        assert_eq!(golden_action(Accept::Off, true, true), GoldenAction::Keep);
-        assert_eq!(golden_action(Accept::Changed, true, true), GoldenAction::Keep);
-        assert_eq!(golden_action(Accept::All, true, true), GoldenAction::Write);
-
-        // Golden exists, beyond tolerance: fail unless accepting.
-        assert_eq!(golden_action(Accept::Off, true, false), GoldenAction::Fail);
-        assert_eq!(golden_action(Accept::Changed, true, false), GoldenAction::Write);
-        assert_eq!(golden_action(Accept::All, true, false), GoldenAction::Write);
-        assert_eq!(golden_action(Accept::Review, true, false), GoldenAction::Report);
-        assert_eq!(golden_action(Accept::Review, false, false), GoldenAction::Report);
-        assert_eq!(golden_action(Accept::Review, true, true), GoldenAction::Keep);
+    fn an_accept_rewrites_a_golden_on_any_differing_pixel() {
+        use GoldenAction::{Fail, Keep, Report, Write};
+        use Likeness::{Apart, Missing, Near, Same};
+        let table = [
+            (Accept::Off, [Write, Keep, Keep, Fail]),
+            (Accept::Changed, [Write, Keep, Write, Write]),
+            (Accept::All, [Write, Write, Write, Write]),
+            (Accept::Review, [Report, Keep, Report, Report]),
+        ];
+        for (accept, actions) in table {
+            for (likeness, action) in [Missing, Same, Near, Apart].into_iter().zip(actions) {
+                assert_eq!(golden_action(accept, likeness), action, "{accept:?} {likeness:?}");
+            }
+        }
         assert_eq!(Accept::parse(Some("review")), Accept::Review);
     }
 }
