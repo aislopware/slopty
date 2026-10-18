@@ -10,8 +10,9 @@
 //! [`check_every_frame`] has GPUI check every frame the same way, as it is drawn: a frame that
 //! drew something again from the last frame is drawn again from scratch at its moment, and what
 //! differs inside what it drew again is kept with the view that drew it (`gpui::RetainedCheck`).
-//! The window then shows the frame from scratch, so what the check found is no longer on screen
-//! for [`stale`] to see: [`stale`] reports it first.
+//! The frame from scratch leaves no trace: the window shows the frame it drew, as it would
+//! unchecked, so a checked app paints what an unchecked one does. [`stale`] reports what the
+//! check found first, named by its view, ahead of its own comparison.
 
 use gpui::{App, Window};
 
@@ -226,8 +227,7 @@ mod tests {
     }
 
     /// With GPUI checking every frame, the frame that draws the bar again untold is caught as
-    /// it is drawn, named by the bar's type, and [`stale`] reports it though the window then
-    /// shows the frame from scratch.
+    /// it is drawn, named by the bar's type, and [`stale`] reports it once.
     #[gpui::test]
     fn a_view_changed_untold_is_named_by_the_frame_check(cx: &mut TestAppContext) {
         use gpui::AppContext as _;

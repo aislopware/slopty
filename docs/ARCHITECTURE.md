@@ -1124,7 +1124,10 @@ animations follow) and every window. A
 view a sash or a drop moves is built again in its new place: the fork replays a view only where
 it was drawn.
 `retained::stale` checks all of it: it draws the same state from scratch and diffs the painted
-quads and sprites against the frame the window showed (TESTING.md, "Retained frames").
+quads and sprites against the frame the window showed (TESTING.md, "Retained frames"). In the
+self-test GPUI also checks every frame as it is drawn, against the same frame drawn from scratch
+in a shadow that leaves no trace (gpui-fast's `fast::check_retained`), so a view stale for a
+frame or two between dumps is named too (TESTING.md, "Every frame, as it is drawn").
 **Design system.** Every chrome surface draws from `slopty-theme` and nothing else (ruling
 "Design tokens" in DECISIONS): a four-step neutral ladder (`canvas`, `panel`, `raised`,
 `overlay`), one hairline (`border`), three text levels, one accent with its fill and the

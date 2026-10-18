@@ -1273,3 +1273,29 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
   - Proof: `shell::retention_tests::{a_phones_way_back_from_a_subagent_paints_as_from_scratch,
     a_phones_way_back_in_motion_paints_as_from_scratch}` at 402 × 874 pt and 3 ×, and
     `shell::fuzz_tests`.
+
+- ✅ **The every-frame retained check leaves no trace, and the self-test runs with it on**
+  (2026-10-18). GPUI's check used to draw its frame from scratch through the window's own
+  draw and show it. That changed what later frames drew: the list states it laid out, the
+  effects and notifies its renders raised, the layers it painted. The phone's compact chat
+  golden then moved 1.3 %, so the self-test ran with the check off. The frame from scratch
+  now draws in a shadow, with its own retained state, layers (off), layout engine and
+  accessibility tree. Afterwards everything it touched is put back: the hit test, the focus,
+  the invalidation, the effects and change stamps, every list's, scroll handle's and versioned
+  state's position, and the element states. The window shows the frame it drew.
+  - A frame that asked for the next one, or a place that read what the frame's own drawing
+    wrote after it, has what differs wait for the next frame. It is reported only if that frame
+    draws the place again and it still differs.
+  - Real bugs it found, fixed in gpui-fast:
+    - a view rebuilt in a splice's gap writing what a copied view read;
+    - "at its end?" asked before a list's first layout;
+    - list-layer rows judged at the snapped offset rather than the true one;
+    - a composite under a still pointer not hovering the row it moved there.
+  - One limit stays, by design: a row widening a column that the rows drawn before it read is
+    healed only by the next frame that rebuilds the list's owner. Telling a write of the same
+    value from a new one is beyond what the dependency record can see.
+  - Proof: `fast::tests::check_retained::a_checked_window_draws_every_frame_as_an_unchecked_one`
+    (paint, hitboxes, reuse, layout work and the a11y tree, frame for frame, and no finding). The
+    whole gpui suite runs under `GPUI_CHECK_RETAINED=panic` with no finding. The self-test
+    (`harness::spawn_app`, `spawn_simulator_app`) sets `GPUI_CHECK_RETAINED=record`, and a
+    finding fails the next `dump` or `render`.

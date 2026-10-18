@@ -761,6 +761,7 @@ async fn spawn_app(
         // ends; GPUI then takes the presented handler as the glass. A display that reports
         // scan-out keeps its own times.
         .env("GPUI_PRESENTED_AT_CALLBACK", "1")
+        .env(CHECK_RETAINED, "record")
         // A panic on the main thread aborts the app inside AppKit's callback, where nothing
         // unwinds: its backtrace in the test's log is all that says where.
         .env("RUST_BACKTRACE", "1")
@@ -857,6 +858,12 @@ async fn connect_with_retry(sock: &Path, child: &mut Child) -> Result<Driver> {
     }
 }
 
+/// GPUI checks every frame of the app that draws something again from the last frame against
+/// the same frame drawn from scratch, and keeps what differs, named by the view that drew it,
+/// for the next `dump` or `render` to fail with (`slopty_kit::retained::stale`). The check
+/// leaves no trace: the app draws as it would unchecked, so the goldens hold.
+const CHECK_RETAINED: &str = "GPUI_CHECK_RETAINED";
+
 /// Launch the app in a booted simulator with its socket at `root/<name>.sock` and its data
 /// under `root/<name>` (the simulator shares this file system), and connect to it. Each
 /// variable of `env` is passed as `SIMCTL_CHILD_<name>`.
@@ -882,6 +889,7 @@ async fn spawn_simulator_app(
         .env(format!("SIMCTL_CHILD_{}", crate::WORKER_GRANTS_ENV), ALL_GRANTED)
         // Glass only: the key bar stays in the frame whatever the simulator has attached.
         .env("SIMCTL_CHILD_SLOPTY_HARDWARE_KEYBOARD", "0")
+        .env(format!("SIMCTL_CHILD_{CHECK_RETAINED}"), "record")
         .envs(env.iter().map(|(k, v)| (format!("SIMCTL_CHILD_{k}"), *v)))
         // A named pasteboard: the simulator's general one follows this Mac's clipboard.
         .env(format!("SIMCTL_CHILD_{PASTEBOARD_ENV}"), pasteboard_name(root, name))
