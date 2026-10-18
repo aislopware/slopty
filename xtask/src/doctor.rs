@@ -11,6 +11,10 @@
 //! **Disk.** The free space on `target/`'s volume against the floor the gate keeps
 //! (`xtask/src/prune.rs`).
 //!
+//! **Metal.** Whether the selected Xcode compiles shaders: Xcode 27 ships without the Metal
+//! toolchain, a component `xcodebuild -downloadComponent MetalToolchain` fetches, and a bundle
+//! refuses to build without it.
+//!
 //! It changes no setting: the switch is the user's to flip.
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -70,6 +74,17 @@ pub fn run(sh: &Shell) -> Result<()> {
             "  ✓ {:.0} GB free on target/'s volume (floor {:.0} GB)",
             gb(free),
             gb(limits.floor)
+        );
+    }
+    if !cfg!(target_os = "macos") {
+        // Linux builds no shaders.
+    } else if crate::tools::has_metal(sh) {
+        println!("  ✓ the selected Xcode compiles Metal shaders");
+    } else {
+        problems = problems.saturating_add(1);
+        println!(
+            "⚠ the selected Xcode has no Metal compiler, which GPUI's shaders need: \
+             `xcodebuild -downloadComponent MetalToolchain` (`cargo xtask setup` runs it)"
         );
     }
     let _gone = std::fs::remove_dir_all(&dir);

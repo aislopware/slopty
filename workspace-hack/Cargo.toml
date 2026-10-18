@@ -22,6 +22,8 @@ doctest = false
 aho-corasick = { version = "1" }
 anstyle = { version = "1" }
 arrayvec = { version = "0.7", default-features = false, features = ["std"] }
+bit-set = { version = "0.11" }
+bit-vec = { version = "0.10" }
 bitflags = { version = "2", default-features = false, features = ["serde", "std"] }
 bstr = { version = "1" }
 bytemuck = { version = "1", default-features = false, features = ["aarch64_simd", "derive", "extern_crate_alloc", "min_const_generics", "wasm_simd"] }
@@ -40,7 +42,7 @@ either = { version = "1", features = ["use_std"] }
 fastrand = { version = "2" }
 fixedbitset = { version = "0.5", default-features = false, features = ["std"] }
 foldhash = { version = "0.2" }
-fontdb = { version = "0.23" }
+fontdb = { version = "0.24" }
 form_urlencoded = { version = "1" }
 futures-channel = { version = "0.3", features = ["sink"] }
 futures-core = { version = "0.3" }
@@ -77,10 +79,8 @@ phf = { version = "0.13", features = ["macros"] }
 phf_shared-582f2526e08bb6a0 = { package = "phf_shared", version = "0.14", default-features = false, features = ["std"] }
 phf_shared-594e8ee84c453af0 = { package = "phf_shared", version = "0.13" }
 potential_utf = { version = "0.1", default-features = false, features = ["alloc", "zerovec"] }
-ppv-lite86 = { version = "0.2", default-features = false, features = ["simd", "std"] }
 profiling = { version = "1" }
-rand = { version = "0.9", default-features = false, features = ["small_rng", "thread_rng"] }
-rand_chacha = { version = "0.9", default-features = false, features = ["std"] }
+rand = { version = "0.10" }
 raw-window-handle = { version = "0.6", default-features = false, features = ["std"] }
 regex-automata = { version = "0.4" }
 regex-syntax = { version = "0.8" }
@@ -108,9 +108,8 @@ toml_parser = { version = "1" }
 tracing = { version = "0.1" }
 tracing-core = { version = "0.1" }
 ttf-parser = { version = "0.25", features = ["no-std-float"] }
-typenum = { version = "1", default-features = false, features = ["const-generics"] }
 ucd-trie = { version = "0.1" }
-usvg = { version = "0.46" }
+usvg = { version = "0.48" }
 uuid = { version = "1", features = ["fast-rng", "serde", "v4", "v7"] }
 winnow = { version = "1" }
 writeable = { version = "0.6", default-features = false, features = ["alloc"] }
@@ -162,7 +161,6 @@ syn-7b89eefb6aaa9bf3 = { package = "syn", version = "3", features = ["extra-trai
 syn-f595c2ba2a3f28df = { package = "syn", version = "2", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
 toml_datetime = { version = "1", features = ["serde"] }
 toml_parser = { version = "1" }
-typenum = { version = "1", default-features = false, features = ["const-generics"] }
 ucd-trie = { version = "0.1" }
 winnow = { version = "1" }
 zeroize = { version = "1", features = ["zeroize_derive"] }

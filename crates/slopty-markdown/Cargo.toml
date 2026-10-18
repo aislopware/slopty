@@ -13,4 +13,4 @@ publish.workspace = true
 enum_variant_names = "allow"
 
 [dependencies]
-pulldown-cmark = "0.12"
+pulldown-cmark = "0.13"

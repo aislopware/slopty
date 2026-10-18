@@ -12,7 +12,7 @@ mod tests {
     use slopty_core::WallMs;
     use slopty_proto::thread::{
         Action, Answerer, AskId, Cap, IntentId, ItemBody, Liveness, Phase, RequestState,
-        ThreadState, ToolDetail, ToolState, TurnState, Usage,
+        ThreadState, ToolDetail, ToolState, TurnState, Usage, Wait,
     };
 
     const SESSION: &str = "ses_00000000000000000000000001";
@@ -257,7 +257,7 @@ mod tests {
     fn the_session_maps_onto_the_thread() {
         let state = replayed("turns.jsonl", false);
         assert_eq!(state.meta.native, SESSION);
-        assert_eq!(state.meta.agent_version, "1.18.34");
+        assert_eq!(state.meta.agent_version, "2.0.32");
         assert!(driven::resumable(&state.meta), "the agent loads sessions");
         assert_eq!(state.meta.title, "Say hello.");
         for cap in [Cap::APPROVALS, Cap::INTERRUPT, Cap::QUEUE, Cap::SET_MODE, Cap::SET_MODEL] {
@@ -270,10 +270,11 @@ mod tests {
         assert_eq!(state.commands.len(), 3);
 
         let ends: Vec<&TurnState> = state.turns.iter().map(|t| &t.state).collect();
+        // OpenCode 2 ends the turn of a refused call (the third) as cancelled.
         let want = [
             &TurnState::Complete,
             &TurnState::Complete,
-            &TurnState::Complete,
+            &TurnState::Interrupted,
             &TurnState::Interrupted,
         ];
         assert_eq!(ends, want);
@@ -345,19 +346,16 @@ mod tests {
         assert_eq!((turn.changed.added, turn.changed.removed), (1, 0), "the file it wrote");
     }
 
-    /// An agent's thought-level option is the meters' effort, by the name it gives its value.
+    /// An agent's thought-level option is the meters' effort, by the id of its value:
+    /// `OpenCode` 2's own `effort`, at its `default`.
     #[test]
     fn a_thought_level_option_is_the_effort() {
         let line = fixture("turns.jsonl")
             .into_iter()
             .find(|l| !l.sent && l.msg["result"].get("configOptions").is_some())
             .expect("the new session's answer");
-        let mut result = line.msg["result"].clone();
-        let level = serde_json::json!({"category": "thought_level", "currentValue": "hi",
-            "id": "effort", "name": "Effort", "type": "select",
-            "options": [{"name": "Low", "value": "lo"}, {"name": "High", "value": "hi"}]});
-        result["configOptions"].as_array_mut().unwrap().push(level);
-        let new: acp::NewSessionResponse = serde_json::from_value(result).unwrap();
+        let new: acp::NewSessionResponse =
+            serde_json::from_value(line.msg["result"].clone()).unwrap();
         let agent = slopty_agent::acp::agent_id("opencode");
         let (mut session, begun) =
             Session::new(agent, driven::thread_of(intent(0)), "/work", WallMs::ZERO);
@@ -371,7 +369,7 @@ mod tests {
         for action in begun.iter().chain(&opened) {
             state.apply(action);
         }
-        assert_eq!(state.meters.effort.as_deref(), Some("High"));
+        assert_eq!(state.meters.effort.as_deref(), Some("default"));
     }
 
     /// A session loaded again is the thread it was: the person's messages open its turns, and
@@ -501,6 +499,91 @@ mod tests {
                 "text: Here:",
                 "Image: 1 images",
                 "text: notes\n[file:///work/notes.md](file:///work/notes.md)"
+            ]
+        );
+    }
+
+    /// Slopty says it shows notices and compactions, and an agent's notice is a row in the
+    /// turn by its severity, its title first; a compaction is placed by its first update and
+    /// patched in place by later ones and its summary's chunks, the thread compacting while it
+    /// is under way, and a failed one says why.
+    #[test]
+    fn an_agents_notices_and_compactions_are_shown() {
+        let init = serde_json::to_value(driven::initialize()).unwrap();
+        let session_caps = &init["clientCapabilities"]["session"];
+        assert_eq!(session_caps["notices"], serde_json::json!({}), "{init}");
+        assert_eq!(session_caps["compaction"], serde_json::json!({}), "{init}");
+
+        let agent = slopty_agent::acp::agent_id("opencode");
+        let (mut session, _) =
+            Session::new(agent, driven::thread_of(intent(9)), "/work", WallMs::ZERO);
+        let mut state = ThreadState::new(session.meta().clone());
+        let (_, actions) = session.prompt("Go on.", &[], intent(1), WallMs::ZERO);
+        for action in &actions {
+            state.apply(action);
+        }
+        let mut tell = |state: &mut ThreadState, update: Value| {
+            let params = serde_json::json!({ "sessionId": SESSION, "update": update });
+            for action in &session.update(&params, WallMs::ZERO) {
+                state.apply(action);
+            }
+        };
+        tell(
+            &mut state,
+            serde_json::json!({ "sessionUpdate": "notice", "severity": "warning",
+                "title": "MCP server slow", "description": "github took 9 s to answer" }),
+        );
+        tell(
+            &mut state,
+            serde_json::json!({ "sessionUpdate": "compaction_update", "compactionId": "c1",
+                "status": "in_progress" }),
+        );
+        assert_eq!(
+            state.status.wait.as_ref().map(|w| w.kind.as_str()),
+            Some(Wait::COMPACTING),
+            "compacting while under way"
+        );
+        tell(
+            &mut state,
+            serde_json::json!({ "sessionUpdate": "compaction_summary_chunk", "compactionId": "c1",
+                "content": { "type": "text", "text": "Fixed the parser; " } }),
+        );
+        tell(
+            &mut state,
+            serde_json::json!({ "sessionUpdate": "compaction_summary_chunk", "compactionId": "c1",
+                "content": { "type": "text", "text": "tests pass." } }),
+        );
+        tell(
+            &mut state,
+            serde_json::json!({ "sessionUpdate": "compaction_update", "compactionId": "c1",
+                "status": "completed" }),
+        );
+        assert_eq!(state.status.wait, None, "no longer compacting");
+        tell(
+            &mut state,
+            serde_json::json!({ "sessionUpdate": "compaction_update", "compactionId": "c2",
+                "status": "failed", "error": "the model refused" }),
+        );
+        let shown: Vec<String> = state
+            .items
+            .iter()
+            .filter_map(|i| match &i.body {
+                ItemBody::Notice(n) => Some(format!("{}: {}", n.kind, n.text.text)),
+                ItemBody::Compaction(c) => Some(format!(
+                    "{}: {}",
+                    i.id.0,
+                    c.summary.as_ref().map_or("", |s| s.text.as_str())
+                )),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                "warning: MCP server slow\ngithub took 9 s to answer",
+                "compaction:c1: Fixed the parser; tests pass.",
+                "compaction:c2: ",
+                "error: Compacting the conversation failed\nthe model refused",
             ]
         );
     }

@@ -234,9 +234,11 @@ mod acp {
     async fn a_held_message_sent_now_stops_the_turn_and_goes_next() {
         let rig = Rig::new();
         let lines = lines("turns.jsonl");
-        let resent = lines[4..13].iter().map(|l| l.replace("Say hello.", "Say hello instead."));
+        let (first, stopped) = (turn_of(&lines, "Say hello."), turn_of(&lines, "Remove it again."));
+        let resent =
+            lines[first.clone()].iter().map(|l| l.replace("Say hello.", "Say hello instead."));
         let composed: Vec<String> =
-            lines[..13].iter().chain(&lines[35..44]).cloned().chain(resent).collect();
+            lines[..first.end].iter().chain(&lines[stopped]).cloned().chain(resent).collect();
         rig.replay_lines(&composed);
         let (acp, _served) = rig.serve();
         let outcome = acp.start(IntentId::new(), rig.start("acp:opencode", "Say hello.")).await;
@@ -278,12 +280,13 @@ mod acp {
         // The recording's first turn, its third call's turn stopped, then two turns the agent
         // answers as it answered the first.
         let lines = lines("turns.jsonl");
+        let (first, stopped) = (turn_of(&lines, "Say hello."), turn_of(&lines, "Remove it again."));
         let again = |text: &str| {
-            lines[4..13].iter().map(|l| l.replace("Say hello.", text)).collect::<Vec<_>>()
+            lines[first.clone()].iter().map(|l| l.replace("Say hello.", text)).collect::<Vec<_>>()
         };
-        let composed: Vec<String> = lines[..13]
+        let composed: Vec<String> = lines[..first.end]
             .iter()
-            .chain(&lines[35..44])
+            .chain(&lines[stopped])
             .cloned()
             .chain(again("Say hello later."))
             .chain(again("Say hello again."))
@@ -330,6 +333,22 @@ mod acp {
     #[tokio::test]
     async fn an_acp_thread_runs_turns_and_asks_before_it_acts() {
         let rig = Rig::new();
+        // OpenCode 2 writes the file itself. An agent that asks the client to, though
+        // `initialize` offered no file system (OpenCode 1 did), is refused: its request goes in
+        // after the allowed call's answer, as OpenCode 1's went.
+        let mut recording = lines("turns.jsonl");
+        let allowed = recording
+            .iter()
+            .position(|l| l.starts_with(r#"{"dir":"in""#) && l.contains(r#""outcome":"selected""#))
+            .expect("the allow");
+        let write = serde_json::json!({"dir": "out", "msg": {"id": 100, "jsonrpc": "2.0",
+            "method": "fs/write_text_file", "params": {"content": "made by acp\n",
+            "path": "/work/made-by-acp", "sessionId": "ses_00000000000000000000000001"}}});
+        let refusal = serde_json::json!({"dir": "in", "msg": {"error": {"code": -32_601,
+            "message": "Method not found"}, "id": 100, "jsonrpc": "2.0"}});
+        let at = allowed.saturating_add(1);
+        recording.splice(at..at, [write.to_string(), refusal.to_string()]);
+        rig.replay_lines(&recording);
         let (acp, _served) = rig.serve();
         let id = IntentId::new();
         let outcome = acp.start(id, rig.start("acp:opencode", "Say hello.")).await;
@@ -340,7 +359,7 @@ mod acp {
 
         let state = rig.until(thread, "the first turn", turn_ended(1, TurnState::Complete)).await;
         assert_eq!(state.meta.agent, slopty_agent::acp::agent_id("opencode"));
-        assert_eq!(state.meta.agent_version, "1.18.34", "as the agent said");
+        assert_eq!(state.meta.agent_version, "2.0.32", "as the agent said");
         assert_eq!(state.meta.native, "ses_00000000000000000000000001", "the agent's session");
         assert_eq!(state.meta.title, "Say hello.");
         assert!(state.meta.drive.is(Drive::DRIVEN));
@@ -351,7 +370,7 @@ mod acp {
         assert_eq!(users(&state), [("Say hello.".to_owned(), Some(id))]);
         assert_eq!(texts(&state), ["Hello, there."]);
         assert_eq!(state.meters.mode.as_deref(), Some("build"));
-        assert_eq!(state.meters.context_tokens, Some(12));
+        assert_eq!(state.meters.context_tokens, Some(32));
         assert_eq!(state.status.phase, Phase::Done);
         let record = rig.record();
         assert_eq!(record["argv"], serde_json::json!(["acp"]), "as the registry starts it");
@@ -371,7 +390,7 @@ mod acp {
         let state = rig.until(thread, "the first ask", asking(1)).await;
         assert_eq!(state.status.phase, Phase::NeedsYou);
         let request = &state.requests[0];
-        assert_eq!(request.title, "/work/made-by-acp?", "the call, as the agent titles it");
+        assert_eq!(request.title, "made-by-acp?", "the call, as the agent titles it");
         let offered: Vec<&str> = request.options.iter().map(|o| o.id.as_str()).collect();
         assert_eq!(offered, ["once", "always", "reject"], "what the agent offers, no more");
         let ask = request.id.clone();
@@ -399,7 +418,8 @@ mod acp {
         let ask = state.requests[1].id.clone();
         let reject = Intent::Answer { ask, choice: "reject".to_owned(), message: None };
         assert_eq!(rig.intent(&acp, thread, &reject).1, Outcome::Done);
-        rig.until(thread, "the rejected turn", turn_ended(3, TurnState::Complete)).await;
+        // OpenCode 2 ends the turn of a refused call as cancelled.
+        rig.until(thread, "the rejected turn", turn_ended(3, TurnState::Interrupted)).await;
 
         rig.send(&acp, thread, "Remove it again.");
         rig.until(thread, "the third ask", asking(3)).await;
@@ -519,7 +539,7 @@ mod acp {
         rig.host.apply(thread, vec![slopty_proto::thread::Action::PendingSet(left)]);
         // The load's recording, then its last turn again for the message left queued.
         let lines = lines("load.jsonl");
-        let next = lines[18..].iter().map(|l| {
+        let next = lines[turn_of(&lines, "Say hello again.")].iter().map(|l| {
             l.replace("Say hello again.", "Say hello later.").replace(r#""id":3"#, r#""id":4"#)
         });
         let composed: Vec<String> = lines.iter().cloned().chain(next).collect();
@@ -622,6 +642,22 @@ mod acp {
     /// The lines of fixture `name`.
     fn lines(name: &str) -> Vec<String> {
         std::fs::read_to_string(fixture(name)).unwrap().lines().map(str::to_owned).collect()
+    }
+
+    /// The lines of the recorded turn the person began with `prompt`: from the prompt sent to
+    /// the agent's answer that ends it, found by what they say, not by where they sit.
+    fn turn_of(lines: &[String], prompt: &str) -> std::ops::Range<usize> {
+        let said = |l: &String| {
+            let line: Value = serde_json::from_str(l).unwrap();
+            line["msg"]["method"] == "session/prompt"
+                && line["msg"]["params"]["prompt"][0]["text"] == prompt
+        };
+        let start = lines.iter().position(said).unwrap_or_else(|| panic!("no turn {prompt:?}"));
+        let end = lines[start..].iter().position(|l| l.contains("\"stopReason\"")).map_or_else(
+            || panic!("{prompt:?} never ended"),
+            |at| start.saturating_add(at).saturating_add(1),
+        );
+        start..end
     }
 
     impl Rig {
@@ -826,7 +862,9 @@ mod acp {
         let mut recording = turns[..3].to_vec();
         let mut opened: Value = serde_json::from_str(&turns[3]).unwrap();
         let options = opened["msg"]["result"]["configOptions"].as_array_mut().unwrap();
-        options.push(thought("low"));
+        // OpenCode's own level, made one with descriptions to read back.
+        let own = options.iter_mut().find(|o| o["id"] == "effort").expect("OpenCode's effort");
+        *own = thought("low");
         let after: Vec<Value> = options
             .iter()
             .map(|o| if o["id"] == "effort" { thought("high") } else { o.clone() })
@@ -858,13 +896,13 @@ mod acp {
             efforts,
             [("low", "Low", Some("Answers quickly")), ("high", "High", Some("Thinks longer"))]
         );
-        assert_eq!(state.meters.effort.as_deref(), Some("Low"));
+        assert_eq!(state.meters.effort.as_deref(), Some("low"));
 
         let max = Intent::SetEffort { effort: "max".to_owned() };
         assert!(matches!(rig.intent(&acp, thread, &max).1, Outcome::Refused { .. }));
         let high = Intent::SetEffort { effort: "high".to_owned() };
         assert_eq!(rig.intent(&acp, thread, &high).1, Outcome::Done);
-        rig.until(thread, "the agent's level", |s| s.meters.effort.as_deref() == Some("High"))
+        rig.until(thread, "the agent's level", |s| s.meters.effort.as_deref() == Some("high"))
             .await;
         // The stand-in writes its record after what it answers.
         let record = rig

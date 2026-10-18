@@ -39,7 +39,7 @@ pub fn workspace_locator(
     };
     let mut hash = Sha256::new();
     hash.update(format!("{scope:?}\0{identity}"));
-    Some(format!("{:x}", hash.finalize())[..16].to_string())
+    Some(data_encoding::HEXLOWER.encode(&hash.finalize()[..8]))
 }
 
 pub fn slopty_conversation_link(chat_id: &str, workspace: &str) -> String {

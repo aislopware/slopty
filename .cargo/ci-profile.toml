@@ -21,6 +21,9 @@ opt-level = 0
 [profile.dev.package.async-trait]
 opt-level = 0
 
+[profile.dev.package.borsh-derive]
+opt-level = 0
+
 [profile.dev.package.bytemuck_derive]
 opt-level = 0
 

@@ -220,6 +220,7 @@ fn initialize() -> Value {
             "fs": { "readTextFile": false, "writeTextFile": false },
             "terminal": false,
             "auth": { "terminal": false },
+            "session": { "notices": {}, "compaction": {} },
         },
         "clientInfo": { "name": "slopty", "title": "Slopty", "version": env!("CARGO_PKG_VERSION") },
     })
@@ -429,7 +430,7 @@ fn write_config(home: &Path, port: u16) -> Result<()> {
             } },
         } },
         "model": format!("{PROVIDER}/{MODEL}"),
-        "permission": { "edit": "ask", "bash": "ask", "webfetch": "ask" },
+        "permission": { "edit": "ask", "shell": "ask", "webfetch": "ask" },
     });
     let dir = home.join(".config/opencode");
     std::fs::create_dir_all(&dir)?;
@@ -502,13 +503,13 @@ fn answer(body: &Value) -> (Vec<Block>, &'static str) {
         .rev()
         .find(|p| field(p, "type") == "tool_result")
         .and_then(|p| field(p, "tool_use_id").as_str());
-    let write: &[&str] = &[r#"{"filePath": "made-by-acp", "#, r#""content": "made by acp\n"}"#];
-    let remove: &[&str] = &[r#"{"command": "rm made-by-acp", "#, r#""description": "Remove it"}"#];
+    let write: &[&str] = &[r#"{"path": "made-by-acp", "#, r#""content": "made by acp\n"}"#];
+    let remove: &[&str] = &[r#"{"command": "rm "#, r#"made-by-acp"}"#];
     if !tools {
         // OpenCode's own side requests: a session's title.
         (vec![Block::Text(&["A greeting"])], "end_turn")
     } else if text.contains(LOOK) {
-        let read: &[&str] = &[r#"{"filePath": "dot.png"}"#];
+        let read: &[&str] = &[r#"{"path": "dot.png"}"#];
         (vec![Block::Tool { id: "toolu_4", name: "read", input: read }], "tool_use")
     } else if result == Some("toolu_4") {
         (vec![Block::Text(&["A ", "dot."])], "end_turn")
@@ -521,9 +522,9 @@ fn answer(body: &Value) -> (Vec<Block>, &'static str) {
         let call = Block::Tool { id: "toolu_1", name: "write", input: write };
         (vec![Block::Text(&["I will ", "write it."]), call], "tool_use")
     } else if text.contains(AGAIN) {
-        (vec![Block::Tool { id: "toolu_3", name: "bash", input: remove }], "tool_use")
+        (vec![Block::Tool { id: "toolu_3", name: "shell", input: remove }], "tool_use")
     } else if text.contains(REMOVE) {
-        (vec![Block::Tool { id: "toolu_2", name: "bash", input: remove }], "tool_use")
+        (vec![Block::Tool { id: "toolu_2", name: "shell", input: remove }], "tool_use")
     } else if result == Some("toolu_1") {
         (vec![Block::Text(&["Made", " it."])], "end_turn")
     } else if result.is_some() {

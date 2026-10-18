@@ -20,7 +20,7 @@ thiserror = "2"
 # slopty: chrono served only the cut document layer; a limit's reset time takes it again.
 chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
-similar = "2"
+similar = "3"
 
 # slopty: upstream docs that Slopty's rustdoc check (private items, warnings denied) trips.
 [lints.rustdoc]

@@ -165,7 +165,7 @@ fn variant(seed: Seeds<'_>) -> ThemeVariant {
     // curation edits as well as upstream revision changes.
     variant.source.asset_hash.clear();
     let encoded = serde_json::to_vec(&variant).expect("built-in theme serializes");
-    variant.source.asset_hash = format!("sha256:{:x}", Sha256::digest(encoded));
+    variant.source.asset_hash = format!("sha256:{}", data_encoding::HEXLOWER.encode(&Sha256::digest(encoded)));
     variant
 }
 

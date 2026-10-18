@@ -26,9 +26,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   From<CVPixelBuffer>` is typed against the fork's version (0.5.2 while zed stays there), so a
   bump to 0.6 fails `slopty-ui` — it moves when the fork's does (comment beside the req).
 
-- ✅ nextest 0.9.146 · insta 1.48 · proptest 1.11 · cargo-mutants 27.1 · cargo-llvm-cov 0.9 ·
-  cargo-deny 0.20.2 · cargo-shear 1.14.0 · cargo-hack 0.6.45 · cargo-semver-checks 0.50 ·
-  typos 1.50.3 · taplo 0.10 · bacon 3.25 · samply 0.13.1 · tracing-tracy 0.12.
+- ✅ nextest 0.9.148 · insta 1.49 · proptest 1.12 · cargo-mutants 27.1 · cargo-llvm-cov 0.9 ·
+  cargo-deny 0.20.2 · cargo-shear 1.14.0 · cargo-hack 0.6.45 · cargo-semver-checks 0.51 ·
+  typos 1.51.1 · taplo 0.10 · bacon 3.26 · samply 0.13.1 · tracing-tracy 0.12.
 
 - ✅ **Releases from Conventional Commits**: `committed` 1.1.11 lints every message
   (`cargo gate` over the range since the last tag); `git-cliff` 2.14.2 computes
@@ -2643,3 +2643,33 @@ more full-window layer.
   - It was reproduced on purpose, not by rerunning the suite: the hover pair with
     `SLOPTY_E2E_THREADS=2` lost the tooltip every time, and each test alone kept it, at 15 % of
     the VM's CPU too.
+
+- ✅ **A bump reads the changelog: what it adds is taken, what it replaces is deleted
+  (2026-10-19).** The refresh moved every requirement to its newest release, breaking majors
+  included, and each changelog between the old and new was read (`.research/deps-2026-10-18/`):
+  - **Taken.** tokio 1.53.3 deprecates `AsyncFd::new` and `with_interest` as unsound (a
+    descriptor closed while registered); the PTY and the file watcher register through the
+    unsafe `register_with_interest`, each with the reason its descriptor outlives the
+    registration. ACP schema 1.12's notices and compactions (`agents.md`). fontdb 0.24 finds
+    iOS's own fonts, so an SVG's text on iOS needs nothing more. similar 3 diffs real
+    revisions markedly faster with the same output.
+    tree-sitter 0.27 takes the input's encoding (UTF-8, `None`). The libc 0.2.189 hold is gone:
+    0.2.191 puts the Mach API back on iOS.
+  - **Moved with no change of ours.** sha2 0.11's digest is an `Array` that does not format as
+    hex, so the hashes print through `data_encoding::HEXLOWER`, already in the tree; json5 1,
+    pulldown-cmark 0.13, usvg 0.48, wry 0.57, pollster 1, proptest 1.12 (rand 0.10).
+  - **Not taken.** pulldown-cmark's subscript and superscript would read "~5 min" as a
+    subscript. hyper's `max_header_size` repeats the bound `max_buf_size` already sets. libc's
+    Apple `F_SETNOSIGPIPE` has no caller: only Linux's spawn writes to a pipe its parent may
+    have closed, and it ignores `SIGPIPE` there. usvg's new `svgz` and `writer` gates stay on:
+    the writer turns an SVG into what the app draws, and `flate2` is in the graph anyway.
+    base64 0.23's SIMD lives in a separate `Simd` engine; the app encodes pictures of a few MB
+    at most, mostly off the main thread, where the scalar engine takes milliseconds.
+  - **What still holds an old major**, each a duplicate in the graph: gpui-fast (usvg 0.46, so
+    a second font stack beside 0.48's skrifa and harfrust; rand 0.9; `cocoa`), gpui-kit
+    (similar 2), insta (similar 2), and third-party pins (`phf` 0.13 through cssparser and
+    selectors, png 0.17, `cc ~1.2` in tree-sitter-sequel, `psm =0.1.24` in pest,
+    `generic-array =0.14.7` in crypto-common). Ours move in their forks; another's is forked
+    and synced with its upstream, as gpui-fast is, when its old major costs the app.
+  - **CI's actions** moved to their Node 24 majors (cache 6, checkout 7, upload-artifact 7,
+    action-gh-release 3); none of their breaking changes touches how the workflows use them.

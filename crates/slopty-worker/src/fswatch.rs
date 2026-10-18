@@ -185,7 +185,9 @@ impl Follower {
         let reactor = match state
             .queue
             .as_ref()
-            .map(|q| AsyncFd::with_interest(q.fd(), Interest::READABLE))
+            // SAFETY: the `AsyncFd` holds its own `Arc` of the queue's `OwnedFd`, so the
+            // descriptor stays open, the same queue, for as long as it is registered.
+            .map(|q| unsafe { AsyncFd::register_with_interest(q.fd(), Interest::READABLE) })
         {
             Some(Ok(fd)) => Some(fd),
             Some(Err(e)) => {

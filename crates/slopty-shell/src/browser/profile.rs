@@ -50,7 +50,7 @@ impl BrowserProfile {
         Self {
             root: data_dir
                 .join("browser")
-                .join(format!("{:x}", hash.finalize())),
+                .join(data_encoding::HEXLOWER.encode(&hash.finalize())),
         }
     }
 

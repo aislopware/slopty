@@ -1,8 +1,8 @@
 //! A process as the kernel counts it: retired instructions, footprint, descriptors, threads.
 //!
-//! Everything here reads `libproc` for a pid of the same user, which needs no root and no
-//! entitlement. On Linux the descriptors and threads come from `/proc` and the counters are
-//! `None`; elsewhere each reader returns `None`.
+//! On macOS everything here reads `libproc` for a pid of the same user, which needs no root and
+//! no entitlement. On Linux the descriptors and threads come from `/proc` and the counters are
+//! `None`; elsewhere, iOS included (whose SDK has no `libproc`), each reader returns `None`.
 //!
 //! - Instructions and cycles (`ri_instructions`, `ri_cycles` of `rusage_info_v4`) are the
 //!   process's, all threads together. On a loaded machine they move by well under a percent where
@@ -33,7 +33,7 @@ pub struct Usage {
 
 /// The counters of `pid`; `None` when it is gone or not ours to read.
 #[cfg_attr(
-    not(target_vendor = "apple"),
+    not(target_os = "macos"),
     expect(clippy::missing_const_for_fn, reason = "const only where the reader is a stub")
 )]
 #[must_use]
@@ -65,7 +65,7 @@ pub fn threads(pid: i32) -> Option<u32> {
     imp::threads(pid)
 }
 
-#[cfg(target_vendor = "apple")]
+#[cfg(target_os = "macos")]
 mod imp {
     use std::mem::MaybeUninit;
 
@@ -158,7 +158,7 @@ mod imp {
     }
 }
 
-#[cfg(not(target_vendor = "apple"))]
+#[cfg(not(target_os = "macos"))]
 mod imp {
     use super::Usage;
 

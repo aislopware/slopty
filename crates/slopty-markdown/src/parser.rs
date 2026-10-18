@@ -3864,10 +3864,11 @@ mod math_tests {
         };
         assert_eq!(tasks("- [ ] > quote\n"), 1);
         assert_eq!(tasks("- [x] Title\n  =====\n"), 1);
-        // Markers pulldown emits after their item closed check nothing off.
-        for source in ["- [ ] -\n\n- p\n", "- [x] -\n\n> - p\n", "- [x] *\n\nb\n"] {
-            assert_eq!(tasks(source), 0, "{source:?}");
-        }
+        // `[ ] -` is a task whose text is "-", as GFM reads it; pulldown-cmark 0.12 emitted its
+        // marker after the item closed.
+        assert_eq!(tasks("- [ ] -\n\n- p\n"), 1);
+        assert_eq!(tasks("- [x] -\n\n> - p\n"), 1);
+        assert_eq!(tasks("- [x] *\n\nb\n"), 1);
     }
 
     /// Hostile nesting and inputs pulldown-cmark itself panics on: the tree

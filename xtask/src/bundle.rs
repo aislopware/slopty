@@ -184,6 +184,12 @@ pub struct Bundle {
 }
 
 pub fn run(sh: &Shell, opts: &BundleOpts) -> Result<Bundle> {
+    // Without a Metal compiler GPUI's build script leaves the shader library empty, and the app
+    // it builds opens no window: a fresh Xcode 27, a CI image's included, lacks one.
+    anyhow::ensure!(
+        crate::tools::has_metal(sh),
+        "the selected Xcode has no Metal compiler: `xcodebuild -downloadComponent MetalToolchain`"
+    );
     let root = repo_root()?;
     let profile = match (opts.debug, opts.fast) {
         (true, _) => "debug",

@@ -42,9 +42,9 @@ const BASE: &str = "slopty-27-xcode";
 /// macOS build.
 const ORIGIN: &str = "slopty-27";
 
-/// The iOS simulator runtime the runners' newest is (iOS 27.0, `xcode-27` with Xcode 27.0
-/// 27A266a, read on run 39138638250); downloaded into the base by build, anonymously
-/// (`xcodebuild -downloadPlatform`).
+/// The iOS simulator runtime the runners' newest is (iOS 27.0: `xcode-27` carries no other,
+/// under Xcode 27.0 or the 27.1 the workflows select, read on run 39151273840); downloaded into
+/// the base by build, anonymously (`xcodebuild -downloadPlatform`).
 const IOS_RUNTIME: &str = "24A434";
 
 /// The base's disk, in GB: macOS 12, Xcode 13, the runtime 8, and room for the runs.

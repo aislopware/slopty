@@ -955,24 +955,27 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     (it could not open its session, or ended with an error) are dropped with the thread saying
     why, rather than handed to a fresh start that would fail the same way, over and over. The
     person's next message tries again.
-  - **The fixtures are recorded.** `cargo xtask acp fixtures` downloads OpenCode 1.18.34 from the
-    npm registry, checked against its SHA-512, and runs `opencode acp` in a scratch home with
-    nothing signed in, its model list not fetched and its own providers off. Its model is a
-    canned Messages API on loopback, set in the scratch config as the only provider, and every
-    tool asks first. The recorder sends what the adapter sends and refuses what it refuses: a
-    greeting with thinking, a write allowed once, a command rejected, a command cancelled while
-    asked about, then the session loaded in a second process and prompted again. The lines are
-    scrubbed (paths, OpenCode's time-ordered ids, times) into `turns.jsonl` and `load.jsonl`.
+  - **The fixtures are recorded.** `cargo xtask acp fixtures` downloads OpenCode 2 (2.0.32,
+    `@opencode/cli`) from the npm registry, checked against its SHA-512, and runs `opencode acp`
+    in a scratch home with nothing signed in, its model list not fetched and its own providers
+    off. Its model is a canned Messages API on loopback, set in the scratch config as the only
+    provider, and every tool asks first. The recorder sends what the adapter sends and refuses
+    what it refuses: a greeting with thinking, a write allowed once, a command rejected, a
+    command cancelled while asked about, then the session loaded in a second process and
+    prompted again. The lines are scrubbed (paths, OpenCode's time-ordered ids, times) into
+    `turns.jsonl` and `load.jsonl`. OpenCode 2 renamed its tools (`shell` for `bash`, `path`
+    for `filePath`) and asks under the shell's own name, so the canned model calls them so.
     Only `auth.jsonl`, an agent that wants a sign-in, is written to the schema by hand, since
     nothing signed out reaches it. `tests/acp.rs` holds every line to the schema's types and
     every message Slopty sends to the very JSON the agent was sent.
-  - **What the recording showed of OpenCode.** It asks the client to write the file
-    (`fs/write_text_file`) even though `initialize` offered no file system. The worker's refusal
-    leaves the write to OpenCode, which makes the file itself. A write's diff appears only in the
+  - **What the recording showed of OpenCode.** OpenCode 1 asked the client to write the file
+    (`fs/write_text_file`) though `initialize` offered no file system; OpenCode 2 writes it
+    itself, and the worker still refuses an agent that asks. A write's diff appears only in the
     permission request, and the call's end replaces it with the tool's output, so the adapter
     keeps a diff once told. A new file's diff has an empty old text where the protocol has none,
     so an empty old text reads as a write. Its loaded session ends a rejected or cancelled call
-    as failed, since nothing in the replay says why.
+    as failed, since nothing in the replay says why. OpenCode 2 ends the turn of a refused call
+    as cancelled, where OpenCode 1 told the model and went on.
   - **The person's own agents.** `[worker.acp]` in the settings names an agent and its command
     line, or replaces a known one by name, and an empty list hides one. The worker reads it at
     each start, off the runtime, so an edit needs no restart.
@@ -3898,3 +3901,37 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     and `a_rewind_of_the_files_is_undone` (in git); `slopty-ui` `view_model::work::tests`
     `a_rewind_goes_back_to_before_the_message` (a refused undo keeps the branch; the branch goes
     only once the folder is back) and `a_code_rewind_undoes_by_its_folder` (`noUndo`).
+
+- ✅ **Each agent at its newest, its changelog read for what to take (2026-10-19).** Codex
+  0.162.1 to 0.163.0, pi 1.1.0 to 1.3.0, OpenCode 1.18.34 to OpenCode 2 (2.0.32, published as
+  `@opencode/cli`; `opencode-ai` keeps the 1.x line), ACP's schema 1.12; each recording made
+  again (`cargo xtask {codex,pi,acp} fixtures`). What each brought, and the ruling:
+  - **ACP: an agent's notices and its compactions are shown** (stable since schema 1.11).
+    `initialize` says the client takes both. A notice becomes the thread's note at its level
+    (`Notice::WARNING` and `Notice::ERROR` join the open list, drawn as the warning and error
+    note lines), its title and description as the text. A compaction is an item of its own
+    (`compaction:<id>`) that starts, takes its summary as it streams, and ends; one that fails
+    adds an error note. While one runs the thread waits with "Compacting the conversation", as
+    Claude Code's does. Test: `slopty-agent` `acp.rs`
+    `an_agents_notices_and_compactions_are_shown`.
+  - **ACP, not taken.** Protocol v2 is still behind the schema's `unstable_protocol_v2`.
+    OpenCode 2 also offers `session/delete` and additional directories; Slopty deletes no
+    agent's session and gives a session one folder, so neither has a caller. Its subagent
+    events (`opencode/child-session-updates`, an `opencode/session/child_update` method) are
+    OpenCode's own door: without them its subagents' calls already reach the parent session,
+    titled by the child, and the standard door is ACP's subagents, still unstable and offered by
+    no agent recorded here.
+  - **Codex 0.163.0.** Its new wire is durable read receipts (`readState`, experimental),
+    thread exclusions on `thread/list`, prediction forks and a tool output's `retain`. Slopty's
+    unread state spans every agent and every client, so Codex's receipts for its own threads
+    would be a second truth; the others have no caller. An abandoned elicitation already
+    arrives as `serverRequest/resolved`, which withdraws the request.
+  - **An ACP thread's meters hold the agent's ids.** The mode and effort meters held the
+    option's display name, while the composer sends the meters back as the thread's choice and
+    the mode chip finds the current mode by id. OpenCode 1 named its modes as their ids, which
+    hid it; OpenCode 2's "Build" for `build` would have lost the current mode and sent a name
+    the agent does not take. Codex, pi and Claude Code's drivers already held ids.
+  - **pi 1.3.0.** Its breaking changes are in the extension API (`before_agent_start` now a
+    union on `messageType`, `sendUserMessage` needing `deliverAs`); Slopty's gate hooks only
+    `tool_call`, so nothing changes. The rest (cache-keeping thinking changes, resumed sessions
+    keeping their tools, malformed tool arguments failing instead of half-running) is pi's own.

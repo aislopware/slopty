@@ -889,7 +889,7 @@ fn convert(theme: NormalizedTheme, options: ImportOptions) -> Result<ImportResul
     for path in &theme.files {
         hasher.update(read_bounded(path, "theme source while hashing")?.as_bytes());
     }
-    report.source_hash = format!("sha256:{:x}", hasher.finalize());
+    report.source_hash = format!("sha256:{}", data_encoding::HEXLOWER.encode(&hasher.finalize()));
     output.source = ThemeSource {
         format: "vscode".into(),
         url: options.source_url,
@@ -898,7 +898,7 @@ fn convert(theme: NormalizedTheme, options: ImportOptions) -> Result<ImportResul
         asset_hash: String::new(),
     };
     let encoded = serde_json::to_vec(&output).context("could not hash generated theme")?;
-    output.source.asset_hash = format!("sha256:{:x}", Sha256::digest(encoded));
+    output.source.asset_hash = format!("sha256:{}", data_encoding::HEXLOWER.encode(&Sha256::digest(encoded)));
     report.validation = ThemeRegistry {
         families: vec![ThemeFamily {
             id: output.family_id.clone(),

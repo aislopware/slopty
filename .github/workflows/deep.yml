@@ -40,6 +40,9 @@ defaults:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
+  # Xcode 27.1, as on the Macs the gate runs here: the image selects 27.0 and carries 27.1 under
+  # this name (docs/decisions/platform.md, "Xcode 27.1").
+  DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
   # `.cargo/config.toml` wraps rustc in sccache; where it keeps its units is
   # .github/actions/sccache's call.
 
@@ -60,7 +63,7 @@ jobs:
     outputs:
       idle: ${{ steps.gate.outputs.idle }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       # sccache on R2, or the Actions cache without its credentials (.github/actions/sccache).
       - uses: ./.github/actions/sccache
         with:
@@ -108,7 +111,7 @@ jobs:
       # runners").
       - if: runner.os == 'macOS'
         run: sudo mdutil -a -i off
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
       # sccache on R2, or the Actions cache without its credentials (.github/actions/sccache).
@@ -128,7 +131,7 @@ jobs:
       # own branch, which a run on main cannot read, so the features check saves main's (below),
       # which every branch reads, the gate's included.
       - id: cargo-home
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: |
             ~/.cargo/registry/index/
@@ -145,7 +148,7 @@ jobs:
       # As in the gate (`ci.yml`): Ghostty's zig packages fetched ahead of the build, with
       # retries and a bound. Left to the build script, a fetch that stalled held asan, loom and
       # coverage silent until their 240-minute timeout (run 37156507396).
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: vendor/ghostty/zig-pkg
           key: zig-pkg-${{ hashFiles('vendor/ghostty/build.zig.zon') }}
@@ -161,7 +164,7 @@ jobs:
           cargo xtask ${{ matrix.run }} 2>&1 | tee target/deep/report.log
       # Each check's report: its log, the tests' JUnit and `leaks`' reports.
       - if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: deep-${{ matrix.slug }}
           path: |
@@ -195,7 +198,7 @@ jobs:
             slug: features
             tools: --tool cargo-hack --tool cargo-zigbuild
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
       # sccache on R2, or the Actions cache without its credentials (.github/actions/sccache).
@@ -212,7 +215,7 @@ jobs:
           components: rust-src
       # The cargo cache, as the macOS checks' (above); the features check saves main's entry.
       - id: cargo-home
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: |
             ~/.cargo/registry/index/
@@ -224,7 +227,7 @@ jobs:
       # What the fuzzers found interesting grows from night to night: restored from the last run,
       # saved under this one's.
       - if: matrix.slug == 'fuzz'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: target/fuzz/corpus
           key: fuzz-corpus-${{ github.run_id }}
@@ -234,7 +237,7 @@ jobs:
         with:
           version: 0.16.0
           use-cache: false
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: vendor/ghostty/zig-pkg
           key: zig-pkg-${{ hashFiles('vendor/ghostty/build.zig.zon') }}
@@ -261,7 +264,7 @@ jobs:
             ls "$dir" | grep -vxFf "$RUNNER_TEMP/locked-crates" | sed "s|^|$dir|" | xargs rm -f
           done
       - if: always() && steps.fetch.outcome == 'success'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: |
             ~/.cargo/registry/index/
@@ -271,7 +274,7 @@ jobs:
           enableCrossOsArchive: true
       # The fuzzers' crashes (an input for `cargo xtask fuzz --keep`) and logs too.
       - if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: deep-${{ matrix.slug }}
           path: |
@@ -289,7 +292,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
       # sccache on R2, or the Actions cache without its credentials (.github/actions/sccache).
@@ -309,7 +312,7 @@ jobs:
           mkdir -p target/deep
           cargo xtask deep miri 2>&1 | tee target/deep/report.log
       - if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: deep-miri
           path: |
@@ -337,7 +340,7 @@ jobs:
           - { package: slopty-proto, shard: 2/4 }
           - { package: slopty-proto, shard: 3/4 }
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
       # sccache on R2, or the Actions cache without its credentials (.github/actions/sccache).
@@ -357,7 +360,7 @@ jobs:
           mkdir -p target/deep
           cargo xtask deep mutants -p ${{ matrix.package }} --shard ${{ matrix.shard }} --jobs 2 --timeout 300 2>&1 | tee target/deep/report.log || true
       - if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: mutants-${{ steps.name.outputs.slug }}
           path: |

@@ -338,6 +338,7 @@ pub fn highlight_with_limits(
         .highlight(
             primary_configuration,
             request.source.as_bytes(),
+            None,
             cancellation_flag,
             |name| {
                 if name == "markdown_inline" {

@@ -28,6 +28,9 @@ env:
   # installs what it uses (`dtolnay/rust-toolchain`), and `gate::tests` holds the version to
   # the file's.
   RUSTUP_TOOLCHAIN: 1.99.1
+  # Xcode 27.1, as on the Macs the gate runs here: the image selects 27.0 and carries 27.1 under
+  # this name (docs/decisions/platform.md, "Xcode 27.1").
+  DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
   # `.cargo/config.toml` wraps rustc in sccache; where it keeps its units is
   # .github/actions/sccache's call.
 
@@ -69,9 +72,11 @@ jobs:
             os: ubuntu-24.04-arm
             targets: aarch64-apple-ios, aarch64-apple-ios-sim
           - { lane: rustdoc, os: ubuntu-24.04-arm, targets: aarch64-apple-darwin }
-          - { lane: tests, shard: ui, os: xcode-27, targets: aarch64-apple-darwin }
-          - { lane: tests, shard: worker, os: xcode-27, targets: aarch64-apple-darwin }
-          - { lane: tests, shard: rest, os: xcode-27, targets: aarch64-apple-darwin }
+          # A test shard writes at most 11 GB cold (worker; ui 9, rest 8), and the xcode-27 image
+          # starts with 39.6 GB free, under the full gate's 50.
+          - { lane: tests, shard: ui, os: xcode-27, targets: aarch64-apple-darwin, disk-floor-gb: 15 }
+          - { lane: tests, shard: worker, os: xcode-27, targets: aarch64-apple-darwin, disk-floor-gb: 15 }
+          - { lane: tests, shard: rest, os: xcode-27, targets: aarch64-apple-darwin, disk-floor-gb: 15 }
     env:
       SLOPTY_DISK_FLOOR_GB: ${{ matrix.disk-floor-gb }}
     steps:
@@ -81,7 +86,7 @@ jobs:
       # runners").
       - if: runner.os == 'macOS'
         run: sudo mdutil -a -i off
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
           # `committed` lints every commit since the last tag; the other lanes read the tree.
@@ -111,7 +116,7 @@ jobs:
       # days stale on 2026-10-18, it had every Mac shard download 184 crates and fetch every fork
       # again on every run (`docs/decisions/tooling.md`, "The cargo cache is keyed by the lock").
       - id: cargo-home
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: |
             ~/.cargo/registry/index/
@@ -147,7 +152,7 @@ jobs:
           'libghostty-rs.git#[0-9a-f]*' Cargo.lock | cut -d'#' -f2)" >> "$GITHUB_OUTPUT"
       - if: matrix.lane == 'clippy-linux' || matrix.lane == 'tests'
         id: prebuilt
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: target/ghostty-prebuilt
           key: >-
@@ -161,7 +166,7 @@ jobs:
       - if: >-
           (matrix.lane == 'clippy-linux' || matrix.lane == 'tests')
           && steps.prebuilt.outputs.cache-hit != 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: vendor/ghostty/zig-pkg
           key: zig-pkg-${{ hashFiles('vendor/ghostty/build.zig.zon') }}
@@ -178,7 +183,7 @@ jobs:
         id: image
         run: echo "version=$ImageVersion" >> "$GITHUB_OUTPUT"
       - if: matrix.shard == 'rest'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: target/verdicts
           key: >-
@@ -191,7 +196,7 @@ jobs:
       # Unoptimised, its dependencies aside: it orchestrates, and its own crates compile in half
       # the time (`docs/decisions/tooling.md`, "CI builds xtask unoptimised").
       - id: xtask
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: ~/.cache/slopty-xtask
           key: >-
@@ -205,7 +210,7 @@ jobs:
           mkdir -p ~/.cache/slopty-xtask
           cp target/xtask/debug/xtask ~/.cache/slopty-xtask/
       - if: steps.xtask.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: ~/.cache/slopty-xtask
           key: ${{ steps.xtask.outputs.cache-primary-key }}
@@ -232,7 +237,7 @@ jobs:
       # What a slow run is read from afterwards: each test's time, each unit of the build's, how
       # much of the build the compile cache served, and the pseudo-terminals held every 200 ms.
       - if: always() && matrix.lane == 'tests'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: timings-${{ matrix.shard }}
           path: |
@@ -256,7 +261,7 @@ jobs:
             ls "$dir" | grep -vxFf "$RUNNER_TEMP/locked-crates" | sed "s|^|$dir|" | xargs rm -f
           done
       - if: always() && steps.fetch.outcome == 'success'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: |
             ~/.cargo/registry/index/
@@ -305,7 +310,7 @@ jobs:
           sudo apt-get install -y -qq --no-install-recommends zsh fish tmux
           sudo sysctl -w net.core.rmem_max=8388608
           { zsh -fc 'autoload -Uz compaudit; compaudit' || true; } | xargs -r sudo chmod g-w,o-w
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
       # sccache on R2, or the Actions cache without its credentials (.github/actions/sccache).
@@ -319,7 +324,7 @@ jobs:
         with:
           toolchain: 1.99.1
       # The cargo cache the tools lane saves, read only (the gate job's comment).
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@v6
         with:
           path: |
             ~/.cargo/registry/index/
@@ -342,7 +347,7 @@ jobs:
         run: >-
           echo "key=$(git rev-parse HEAD:vendor/ghostty)-$(grep -m1 -o
           'libghostty-rs.git#[0-9a-f]*' Cargo.lock | cut -d'#' -f2)" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: target/ghostty-prebuilt
           key: ghostty-prebuilt-${{ runner.os }}-linux-${{ steps.ghostty.outputs.key }}
@@ -350,7 +355,7 @@ jobs:
       # by the root manifest's hash (which pins every package's), and fetched again with
       # retries on a miss: a fetch inside the build script failed a lane on one 502 from GitHub
       # (run 37080698786).
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: vendor/ghostty/zig-pkg
           key: zig-pkg-${{ hashFiles('vendor/ghostty/build.zig.zon') }}
@@ -364,7 +369,7 @@ jobs:
       # Unoptimised, its dependencies aside: it orchestrates, and its own crates compile in half
       # the time (`docs/decisions/tooling.md`, "CI builds xtask unoptimised").
       - id: xtask
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: ~/.cache/slopty-xtask
           key: >-
@@ -378,7 +383,7 @@ jobs:
           mkdir -p ~/.cache/slopty-xtask
           cp target/xtask/debug/xtask ~/.cache/slopty-xtask/
       - if: steps.xtask.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: ~/.cache/slopty-xtask
           key: ${{ steps.xtask.outputs.cache-primary-key }}
@@ -392,7 +397,7 @@ jobs:
       - if: always()
         run: $SCCACHE_PATH --show-stats
       - if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: timings-linux
           path: |
@@ -423,7 +428,7 @@ jobs:
       contents: write
       actions: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - run: |
@@ -503,7 +508,7 @@ jobs:
       # runners").
       - if: runner.os == 'macOS'
         run: sudo mdutil -a -i off
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
           fetch-depth: 0
@@ -520,7 +525,7 @@ jobs:
             aarch64-apple-darwin, aarch64-unknown-linux-gnu, x86_64-unknown-linux-gnu,
             aarch64-unknown-linux-musl, x86_64-unknown-linux-musl
       # The cargo cache the gate's tools lane saves, read only; a release saves none of its own.
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@v6
         with:
           path: |
             ~/.cargo/registry/index/
@@ -530,7 +535,7 @@ jobs:
           restore-keys: cargo-home-
           enableCrossOsArchive: true
       - uses: cargo-bins/cargo-binstall@main
-      - run: cargo binstall --no-confirm git-cliff@2.14.1 cargo-zigbuild@0.23.4
+      - run: cargo binstall --no-confirm git-cliff@2.14.2 cargo-zigbuild@0.23.4
         env:
           GITHUB_TOKEN: ${{ github.token }}
       # zig builds libghostty-vt and links every Linux binary, the version libghostty-vt pins.
@@ -543,6 +548,9 @@ jobs:
           curl -fsSL https://raw.githubusercontent.com/aislopware/better-update/84d3f253a039729e2a6c7c792ad620cec13897e8/install.sh \
             | BETTER_UPDATE_VERSION=0.81.0 sh
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      # The image's Xcode comes without the Metal compiler the app's shaders build with, and
+      # `bundle` refuses to build without it.
+      - run: xcodebuild -downloadComponent MetalToolchain
       - run: cargo xtask dist --out dist 2>&1 | tee dist.log
       # Whether it was signed and notarised, and anything else it warned of, on the run's page.
       - if: always()
@@ -552,7 +560,7 @@ jobs:
             grep -E '^  (signed|notarised|!)|^    ' dist.log || true
           } >> "$GITHUB_STEP_SUMMARY"
       - run: git cliff --latest --strip all > dist/notes.md
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           body_path: dist/notes.md
           files: |

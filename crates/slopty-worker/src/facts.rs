@@ -1124,7 +1124,7 @@ mod tests {
         let mine = bin.join("mine").join("agent");
         std::fs::create_dir_all(mine.parent().unwrap()).unwrap();
         let programs = [
-            (bin.join("opencode"), "echo 1.18.34"),
+            (bin.join("opencode"), "echo opencode v2.0.32"),
             (bin.join("cursor-agent"), "exit 2"),
             (bin.join("amp"), "echo amp 0.9.1"),
             (mine.clone(), "echo mine 2.0"),
@@ -1143,7 +1143,7 @@ mod tests {
         let want = Facts::from([
             ("cursor".to_owned(), Fact::Bool(true)),
             ("mine".to_owned(), Fact::Text("2.0".to_owned())),
-            ("opencode".to_owned(), Fact::Text("1.18.34".to_owned())),
+            ("opencode".to_owned(), Fact::Text("2.0.32".to_owned())),
         ]);
         assert_eq!(found, want, "amp is not amp-acp, the program that serves ACP");
     }

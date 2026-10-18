@@ -982,8 +982,10 @@ pub fn note_row(
         }
         // slopty: a prompt's origin, an MCP server's update, a message from another session.
         Notice::NOTE => split(row(NoteLine::INFO, text)),
-        // slopty: what a command printed as its errors, in red as the TUI's.
-        Notice::COMMAND_ERROR => split(row(NoteLine::ERROR, text)),
+        // slopty: what a command printed as its errors, in red as the TUI's, and an agent's own
+        // error and warning, each its title the row and the rest under it.
+        Notice::COMMAND_ERROR | Notice::ERROR => split(row(NoteLine::ERROR, text)),
+        Notice::WARNING => split(row(NoteLine::WARNING, text)),
         // slopty: the goal's check, its first line the row and the rest ("Goal: …", "Reason:
         // …") opening under it, as the TUI's verbose view adds them.
         Notice::GOAL => {

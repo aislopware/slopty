@@ -5,10 +5,10 @@
 //!
 //! `OpenCode` stands for every ACP agent: it is in the registry, it speaks ACP on stdio as
 //! `opencode acp`, and it runs with a model of the person's choosing, so a canned one on loopback
-//! serves it with no account. The build is the npm registry's `opencode-darwin-arm64` at
-//! [`VERSION`], its tarball checked against the registry's SHA-512 `integrity` and unpacked under
-//! `target/opencode/<version>`. `SLOPTY_OPENCODE` names another binary instead, which must say it
-//! is the same version. Nothing here signs in.
+//! serves it with no account. The build is `OpenCode` 2, the npm registry's
+//! `@opencode/cli-darwin-arm64` at [`VERSION`], its tarball checked against the registry's
+//! SHA-512 `integrity` and unpacked under `target/opencode/<version>`. `SLOPTY_OPENCODE` names
+//! another binary instead, which must say it is the same version. Nothing here signs in.
 
 mod fixtures;
 
@@ -25,12 +25,12 @@ use crate::tools::repo_root;
 
 /// The `OpenCode` version the ACP fixtures are recorded with. It is also what the stand-in agent
 /// (`slopty-stub-acp`) says it is.
-pub const VERSION: &str = "1.18.34";
+pub const VERSION: &str = "2.0.32";
 
 /// Names an `opencode` binary to use instead of the downloaded one.
 const OVERRIDE: &str = "SLOPTY_OPENCODE";
 
-const PACKAGE: &str = "opencode-darwin-arm64";
+const PACKAGE: &str = "@opencode/cli-darwin-arm64";
 const REGISTRY: &str = "https://registry.npmjs.org";
 /// Where the binary sits in the package.
 const BINARY: &str = "package/bin/opencode";
@@ -66,7 +66,7 @@ fn official() -> Result<PathBuf> {
         .with_context(|| format!("run {}", binary.display()))?;
     let said = String::from_utf8_lossy(&out.stdout);
     ensure!(
-        said.trim() == VERSION,
+        said.trim() == format!("opencode v{VERSION}"),
         "{} is {}, not OpenCode {VERSION}",
         binary.display(),
         said.trim()

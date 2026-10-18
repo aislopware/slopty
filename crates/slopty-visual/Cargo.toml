@@ -19,7 +19,7 @@ gltf = { version = "1.4.1", default-features = false, features = ["import", "uti
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "hdr", "webp"] }
 thiserror.workspace = true
 # Images embedded in glTF models as data URIs.
-base64 = "0.22"
+base64 = "0.23"
 
 # slopty: upstream code that clippy 1.99's defaults flag, allowed by name rather than edited, so
 # the copy stays diffable (docs/decisions/ui.md).

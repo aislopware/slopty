@@ -526,8 +526,11 @@ impl PtyMaster {
     /// Wrap a master fd for use on the tokio runtime; switches it to non-blocking.
     pub fn new(fd: OwnedFd) -> Result<Self, PtyError> {
         rustix::io::ioctl_fionbio(&fd, true).map_err(|e| PtyError::os("FIONBIO", e))?;
-        let fd = AsyncFd::with_interest(fd, Interest::READABLE | Interest::WRITABLE)
-            .map_err(|e| PtyError::os("AsyncFd", e))?;
+        // SAFETY: the `OwnedFd` is the open master, owned by the `AsyncFd` until it drops, so
+        // its descriptor stays the same open file for as long as it is registered.
+        let fd =
+            unsafe { AsyncFd::register_with_interest(fd, Interest::READABLE | Interest::WRITABLE) }
+                .map_err(|e| PtyError::os("AsyncFd", e))?;
         Ok(Self { fd })
     }
 

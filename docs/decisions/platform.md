@@ -43,6 +43,19 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     window loses nothing, so nothing asks.
   - **Watched.** `NSScreen.touchCapabilities` and the touch-scrolling additions, for a touch
     Mac, of which none has shipped.
+  - **Xcode 27.1 (2026-10-19).** Builds here and on the runners use Xcode 27.1 (27A9275): the
+    `xcode-27` image selects 27.0 and carries 27.1 as `Xcode_27.1.app`, which the workflows
+    name in `DEVELOPER_DIR`, with only the iOS 27.0 simulator runtime. Its macOS SDK is still
+    27.0; its iOS 27.1 SDK adds, for 27.1 only: a vertical bar on new hardware (a status bar
+    along a side edge, given to apps as a leading or trailing safe-area inset), arrangement view
+    controllers, overlay arrangements, a camera-capture scene accessory, and inner and outer
+    ultra-wide camera types. None is taken: they are above the 27.0 floor. The vertical bar
+    needs nothing, since the compact shell already pads by the left and right safe-area insets
+    gpui-fast's iOS window reads. Xcode 27 ships without the Metal compiler, the CI image's
+    included, until `xcodebuild -downloadComponent MetalToolchain` fetches it; without it
+    gpui's macOS build script leaves the shader library empty and the app opens no window. So
+    `cargo xtask setup` fetches it, `doctor` names it, `bundle` refuses to build without it,
+    and the release job fetches it before `dist`.
   - **The bindings wait for objc2's Xcode 27 release, not a fork.** objc2's framework crates
     (0.3.2) were generated from Xcode 16.4, so the four 27 calls above are declared by hand, each
     with a test that it answers. No other crate does better: cacao, objr and fruity are
@@ -54,7 +67,11 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     A fork that regenerated 0.3.2 from the 27 SDKs with the released translator crashes libclang
     on CoreAudio, and would be thrown away at that release. So `xtask/upstream.toml` awaits
     objc2-foundation 0.4.0: the gate says when it is out, and then the whole graph moves, any
-    dependency still on 0.3 is forked, and the hand declarations go.
+    dependency still on 0.3 is forked, and the hand declarations go. A dependency that will not
+    take something newer is forked; objc2 is taking it, in its open 0.4.0 and 0.7.0 milestones
+    (2026-10-19). Moving before the release would fork eight dependents (wry, accesskit,
+    wgpu-hal, raw-window-metal, mac-notification-sys, core-video, gpui-fast, gpui-kit) onto an
+    API that changes until it ships, then move them again when it does.
 
 - ✅ **Pure Rust.** Scripts are `xtask`. The only non-Rust files are Metal shaders and the
   XcodeGen spec that xtask generates. The iOS app's delegates and `main` are Rust too

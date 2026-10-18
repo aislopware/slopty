@@ -770,7 +770,8 @@ pub struct Notice {
     /// Open: [`Notice::API_ERROR`], [`Notice::COMMAND`], [`Notice::DECLINED`], [`Notice::INFO`],
     /// [`Notice::HOOK`], [`Notice::INTERRUPTED`], [`Notice::LIMIT`], [`Notice::REPORT`],
     /// [`Notice::REWOUND`], [`Notice::ALLOWED`], [`Notice::FALLBACK`], [`Notice::GOAL`],
-    /// [`Notice::MEMORY`], [`Notice::MODE`], [`Notice::STOPPED`], [`Notice::TURN`].
+    /// [`Notice::MEMORY`], [`Notice::MODE`], [`Notice::STOPPED`], [`Notice::TURN`],
+    /// [`Notice::NOTE`], [`Notice::WARNING`], [`Notice::ERROR`].
     pub kind: String,
     /// What it says.
     pub text: Clipped,
@@ -805,6 +806,9 @@ impl Notice {
     /// The agent ended on its own, nobody having asked: what kind of end it was in plain words,
     /// with the one thing to do next (Claude Code's out of memory, killed, crashed, signed out…).
     pub const ENDED: &'static str = "ended";
+    /// Something went wrong that the agent says in its own words, apart from a turn's failure
+    /// (an ACP agent's error notice): its first line is the row, the rest opens under it.
+    pub const ERROR: &'static str = "error";
     /// The turn went on with another model, or the model refused and another took over.
     pub const FALLBACK: &'static str = "fallback";
     /// The goal's check said it is met, not yet, or cannot be: "Goal achieved (5m · 3 turns)".
@@ -837,6 +841,9 @@ impl Notice {
     /// The turn's own footer, when the agent says more than its times: "Waiting for 2 background
     /// agents to finish", "3 background tasks still running".
     pub const TURN: &'static str = "turn";
+    /// Something the agent warns of (an ACP agent's warning notice): its first line is the row,
+    /// the rest opens under it.
+    pub const WARNING: &'static str = "warning";
 
     /// A notice of `kind` saying `text`, with no retry.
     #[must_use]

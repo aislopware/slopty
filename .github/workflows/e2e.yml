@@ -36,6 +36,9 @@ env:
   # installs what it uses (`dtolnay/rust-toolchain`), and `gate::tests` holds the version to
   # the file's.
   RUSTUP_TOOLCHAIN: 1.99.1
+  # Xcode 27.1, as on the Macs the gate runs here: the image selects 27.0 and carries 27.1 under
+  # this name (docs/decisions/platform.md, "Xcode 27.1").
+  DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
   # `.cargo/config.toml` wraps rustc in sccache; where it keeps its units is
   # .github/actions/sccache's call.
   # `promote` dispatches this on `gate`, whose cache the test shards fill: a run on main read
@@ -58,7 +61,7 @@ jobs:
       # runners").
       - if: runner.os == 'macOS'
         run: sudo mdutil -a -i off
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.sha || github.sha }}
           submodules: recursive
@@ -73,7 +76,7 @@ jobs:
           targets: aarch64-apple-darwin
       # The cargo cache the gate's tools lane saves (ci.yml), read only.
       - id: cargo-home
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: |
             ~/.cargo/registry/index/
@@ -94,12 +97,12 @@ jobs:
         run: >-
           echo "key=$(git rev-parse HEAD:vendor/ghostty)-$(grep -m1 -o
           'libghostty-rs.git#[0-9a-f]*' Cargo.lock | cut -d'#' -f2)" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: target/ghostty-prebuilt
           key: ghostty-prebuilt-${{ runner.os }}-e2e-app-${{ steps.ghostty.outputs.key }}
           restore-keys: ghostty-prebuilt-${{ runner.os }}-tests
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: vendor/ghostty/zig-pkg
           key: zig-pkg-${{ hashFiles('vendor/ghostty/build.zig.zon') }}
@@ -113,7 +116,7 @@ jobs:
       # Unoptimised, its dependencies aside: it orchestrates, and its own crates compile in half
       # the time (`docs/decisions/tooling.md`, "CI builds xtask unoptimised").
       - id: xtask
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: ~/.cache/slopty-xtask
           key: >-
@@ -127,7 +130,7 @@ jobs:
           mkdir -p ~/.cache/slopty-xtask
           cp target/xtask/debug/xtask ~/.cache/slopty-xtask/
       - if: steps.xtask.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: ~/.cache/slopty-xtask
           key: ${{ steps.xtask.outputs.cache-primary-key }}
@@ -141,7 +144,7 @@ jobs:
       # case runs in a guest here").
       - run: xtask e2e app --review --test-threads 3
       - if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: e2e-app
           path: target/e2e/artifacts

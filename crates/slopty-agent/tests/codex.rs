@@ -18,9 +18,11 @@ mod tests {
         Status, ThreadState, ToolDetail, ToolState, TurnId, TurnState,
     };
 
-    /// The notifications Slopty passes over: the app-server's remote-control state and its
-    /// deprecation notices.
-    const PASSED_OVER: [&str; 2] = ["remoteControl/status/changed", "deprecationNotice"];
+    /// The notifications Slopty passes over: the app-server's remote-control state, its
+    /// deprecation notices, and its read receipts (Slopty keeps one unread state for every
+    /// agent).
+    const PASSED_OVER: [&str; 3] =
+        ["remoteControl/status/changed", "deprecationNotice", "thread/readState/changed"];
 
     struct Line {
         client: String,

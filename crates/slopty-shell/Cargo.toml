@@ -15,7 +15,7 @@ publish.workspace = true
 slopty-veil = { path = "../slopty-veil" }
 url = "2"
 slopty-view-proto = { path = "../slopty-view-proto" }
-similar = "2"
+similar = "3"
 slopty-view-doc = { path = "../slopty-view-doc" }
 slopty-view-rpc = { path = "../slopty-view-rpc" }
 slopty-syntax = { path = "../slopty-syntax" }
@@ -31,19 +31,19 @@ futures = "0.3"
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-pulldown-cmark = "0.12"
+pulldown-cmark = "0.13"
 slopty-markdown = { path = "../slopty-markdown" }
 # slopty: zatex, Slopty's copy of zeron's maths typesetter (`markdown/math.rs`).
 slopty-math = { path = "../slopty-math", features = ["bundled"] }
-base64 = "0.22"
+base64 = "0.23"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff", "ico"] }
-usvg = "0.46"
+usvg = "0.48"
 # Mermaid's successor renderer (follows Mermaid 12; Zed's choice): every diagram kind, SVG out,
 # the cytoscape layouts Zed uses; no ELK, no export or font discovery (GPUI measures text).
 merman = { version = "0.9", default-features = false, features = ["all-diagrams", "layout-cytoscape", "svg"] }
 unicode-segmentation = "1"
 unicode-width = "0.2"
-fontdb = "0.23"
+fontdb = "0.24"
 # slopty: the code a phone or iPad scans for the server (`settings::invite`): the matrix alone.
 qrcode = { version = "0.14.1", default-features = false }
 ttf-parser = "0.25.1"
@@ -51,14 +51,15 @@ uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 anyhow = "1"
 tracing = "0.1"
-sha2 = "0.10"
+data-encoding.workspace = true
+sha2 = "0.11"
 thiserror = "2"
 # slopty: one rust-embed 8 in the graph, the workspace's.
 rust-embed = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"
-wry = { version = "0.56", default-features = false, features = ["os-webview"] }
+wry = { version = "0.57", default-features = false, features = ["os-webview"] }
 objc2 = "0.6"
 block2 = "0.6"
 objc2-app-kit = { version = "0.3.2", features = ["NSApplication", "NSHapticFeedback", "NSBitmapImageRep", "NSImage", "NSEvent", "NSResponder", "NSView", "NSWindow"] }

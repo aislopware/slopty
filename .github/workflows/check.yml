@@ -64,6 +64,9 @@ env:
   # installs what it uses (`dtolnay/rust-toolchain`), and `gate::tests` holds the version to
   # the file's.
   RUSTUP_TOOLCHAIN: 1.99.1
+  # Xcode 27.1, as on the Macs the gate runs here: the image selects 27.0 and carries 27.1 under
+  # this name (docs/decisions/platform.md, "Xcode 27.1").
+  DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
 
 jobs:
   # The checks of the crates named, in two jobs side by side (`xtask check --part`): the lints on
@@ -81,7 +84,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.sha }}
           submodules: recursive
@@ -102,7 +105,7 @@ jobs:
         with:
           components: rustfmt
       # The cargo cache the gate's tools lane saves (ci.yml), read and never saved.
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@v6
         with:
           path: |
             ~/.cargo/registry/index/
@@ -125,12 +128,12 @@ jobs:
           echo "key=$(git rev-parse HEAD:vendor/ghostty)-$(grep -m1 -o
           'libghostty-rs.git#[0-9a-f]*' Cargo.lock | cut -d'#' -f2)" >> "$GITHUB_OUTPUT"
       - if: inputs.full == 'yes'
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: target/ghostty-prebuilt
           key: ghostty-prebuilt-${{ runner.os }}-clippy-linux-${{ steps.ghostty.outputs.key }}
       - if: inputs.full == 'yes'
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: vendor/ghostty/zig-pkg
           key: zig-pkg-${{ hashFiles('vendor/ghostty/build.zig.zon') }}
@@ -145,7 +148,7 @@ jobs:
       # Unoptimised, its dependencies aside: it orchestrates, and its own crates compile in half
       # the time (`docs/decisions/tooling.md`, "CI builds xtask unoptimised").
       - id: xtask
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: ~/.cache/slopty-xtask
           key: >-
@@ -159,7 +162,7 @@ jobs:
           mkdir -p ~/.cache/slopty-xtask
           cp target/xtask/debug/xtask ~/.cache/slopty-xtask/
       - if: steps.xtask.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: ~/.cache/slopty-xtask
           key: ${{ steps.xtask.outputs.cache-primary-key }}
@@ -185,7 +188,7 @@ jobs:
       - if: always()
         run: $SCCACHE_PATH --show-stats
       - if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: logs-lint
           path: target/remote
@@ -217,7 +220,7 @@ jobs:
           sudo apt-get install -y -qq --no-install-recommends zsh fish tmux
           sudo sysctl -w net.core.rmem_max=8388608
           { zsh -fc 'autoload -Uz compaudit; compaudit' || true; } | xargs -r sudo chmod g-w,o-w
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.sha }}
           submodules: recursive
@@ -231,7 +234,7 @@ jobs:
         with:
           toolchain: 1.99.1
       # The cargo cache the gate's tools lane saves (ci.yml), read only.
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@v6
         with:
           path: |
             ~/.cargo/registry/index/
@@ -253,7 +256,7 @@ jobs:
       # The gate's builds of libghostty-vt, read only: a test shard's on a Mac, the linux job's
       # on Linux. A hit needs no zig packages.
       - id: prebuilt
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: target/ghostty-prebuilt
           key: >-
@@ -261,7 +264,7 @@ jobs:
             || 'testsworker' }}-${{ steps.ghostty.outputs.key }}
           restore-keys: ghostty-prebuilt-${{ runner.os }}-
       - if: steps.prebuilt.outputs.cache-hit != 'true'
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: vendor/ghostty/zig-pkg
           key: zig-pkg-${{ hashFiles('vendor/ghostty/build.zig.zon') }}
@@ -276,7 +279,7 @@ jobs:
       # Unoptimised, its dependencies aside: it orchestrates, and its own crates compile in half
       # the time (`docs/decisions/tooling.md`, "CI builds xtask unoptimised").
       - id: xtask
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: ~/.cache/slopty-xtask
           key: >-
@@ -290,7 +293,7 @@ jobs:
           mkdir -p ~/.cache/slopty-xtask
           cp target/xtask/debug/xtask ~/.cache/slopty-xtask/
       - if: steps.xtask.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: ~/.cache/slopty-xtask
           key: ${{ steps.xtask.outputs.cache-primary-key }}
@@ -321,7 +324,7 @@ jobs:
       - if: always()
         run: $SCCACHE_PATH --show-stats
       - if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: logs-test
           path: target/remote
@@ -346,7 +349,7 @@ jobs:
       # runners").
       - if: runner.os == 'macOS'
         run: sudo mdutil -a -i off
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.sha }}
           submodules: recursive
@@ -372,7 +375,7 @@ jobs:
         with:
           components: rustfmt
       # The cargo cache the gate's tools lane saves (ci.yml), read only.
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@v6
         with:
           path: |
             ~/.cargo/registry/index/
@@ -391,12 +394,12 @@ jobs:
         run: >-
           echo "key=$(git rev-parse HEAD:vendor/ghostty)-$(grep -m1 -o
           'libghostty-rs.git#[0-9a-f]*' Cargo.lock | cut -d'#' -f2)" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@v6
         with:
           path: target/ghostty-prebuilt
           key: ghostty-prebuilt-${{ runner.os }}-testsui-${{ steps.ghostty.outputs.key }}
           restore-keys: ghostty-prebuilt-${{ runner.os }}-
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@v6
         with:
           path: vendor/ghostty/zig-pkg
           key: zig-pkg-${{ hashFiles('vendor/ghostty/build.zig.zon') }}
@@ -407,7 +410,7 @@ jobs:
       # release, pinned by version and checksum and kept in the cache; Homebrew took minutes.
       - if: inputs.e2e == 'ios'
         id: xcodegen
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.local/xcodegen
           key: xcodegen-2.46.0-${{ runner.os }}-${{ runner.arch }}
@@ -429,7 +432,7 @@ jobs:
       # Unoptimised, its dependencies aside: it orchestrates, and its own crates compile in half
       # the time (`docs/decisions/tooling.md`, "CI builds xtask unoptimised").
       - id: xtask
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: ~/.cache/slopty-xtask
           key: >-
@@ -443,7 +446,7 @@ jobs:
           mkdir -p ~/.cache/slopty-xtask
           cp target/xtask/debug/xtask ~/.cache/slopty-xtask/
       - if: steps.xtask.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: ~/.cache/slopty-xtask
           key: ${{ steps.xtask.outputs.cache-primary-key }}
@@ -489,7 +492,7 @@ jobs:
           git add --intent-to-add -- "${accepted[@]}"
           git diff --binary -- "${accepted[@]}" > target/remote/changes.patch
       - if: ${{ always() && inputs.e2e != '' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: renders
           path: target/e2e/artifacts
@@ -499,7 +502,7 @@ jobs:
       - if: always()
         run: $SCCACHE_PATH --show-stats
       - if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: logs-run
           path: target/remote

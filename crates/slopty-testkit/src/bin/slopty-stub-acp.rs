@@ -34,8 +34,9 @@ use std::process::ExitCode;
 
 use serde_json::{Value, json};
 
-/// What the recorded agent answers to `--version`.
-const VERSION: &str = "1.18.34";
+/// The recorded agent's version, which it says to `--version` as `OpenCode` 2 does
+/// (`opencode v…`).
+const VERSION: &str = "2.0.32";
 
 /// JSON-RPC's code for an internal error.
 const INTERNAL_ERROR: i64 = -32_603;
@@ -47,7 +48,7 @@ fn main() -> ExitCode {
     let at = argv.next().map(PathBuf::from).unwrap_or_default();
     let args: Vec<String> = argv.collect();
     if args.iter().any(|a| a == "--version") {
-        println!("{VERSION}");
+        println!("opencode v{VERSION}");
         return ExitCode::SUCCESS;
     }
     match run(&at, &args) {

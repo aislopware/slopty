@@ -32,10 +32,10 @@ use slopty_proto::thread::detail::{
 };
 use slopty_proto::thread::wire::PastSession;
 use slopty_proto::thread::{
-    self, Action, Answerer, AskId, Cap, Changed, Clipped, Command, Drive, Effect, Effort, Image,
-    IntentId, Item, ItemBody, ItemId, Liveness, Meters, Mode, Model, Notice, PartKey, Pending,
-    Phase, Plan, RequestState, Status, Step, ThreadId, ThreadMeta, ThreadState, ToolCall,
-    ToolDetail, ToolState, Turn, TurnId, TurnState, UserMessage, Wait, kind,
+    self, Action, Answerer, AskId, Cap, Changed, Clipped, Command, Compaction, Drive, Effect,
+    Effort, Image, IntentId, Item, ItemBody, ItemId, Liveness, Meters, Mode, Model, Notice,
+    PartKey, Pending, Phase, Plan, RequestState, Status, Step, ThreadId, ThreadMeta, ThreadState,
+    ToolCall, ToolDetail, ToolState, Turn, TurnId, TurnState, UserMessage, Wait, kind,
 };
 
 use super::rpc;
@@ -146,13 +146,18 @@ fn file_uri(path: &str) -> String {
     uri
 }
 
-/// Slopty's `initialize`: protocol v1, and no file system or terminal offered, so the agent
-/// works with its own tools and asks before it acts.
+/// Slopty's `initialize`: protocol v1, with no file system or terminal offered.
+///
+/// The agent works with its own tools and asks before it acts. Slopty shows the agent's notices
+/// and its context compactions (stable since schema 1.11), so it says so.
 #[must_use]
 pub fn initialize() -> acp::InitializeRequest {
     let client = acp::Implementation::new("slopty", env!("CARGO_PKG_VERSION")).title("Slopty");
+    let session = acp::ClientSessionCapabilities::new()
+        .notices(acp::NoticeCapabilities::new())
+        .compaction(acp::CompactionCapabilities::new());
     acp::InitializeRequest::new(PROTOCOL)
-        .client_capabilities(acp::ClientCapabilities::new())
+        .client_capabilities(acp::ClientCapabilities::new().session(session))
         .client_info(client)
 }
 
@@ -245,6 +250,9 @@ pub struct Session {
     open: Option<Open>,
     /// Each call as the agent last told it and as the thread shows it, by the agent's id.
     calls: HashMap<String, (TurnId, Told, ToolCall)>,
+    /// Each context compaction as the thread shows it, by the agent's id, and whether it is
+    /// still under way.
+    compactions: HashMap<String, (TurnId, Compaction, bool)>,
     asked: BTreeMap<AskId, Asked>,
     /// Calls the person refused, which end rejected rather than failed.
     denied: Vec<String>,
@@ -329,6 +337,7 @@ impl Session {
             items: 0,
             open: None,
             calls: HashMap::new(),
+            compactions: HashMap::new(),
             asked: BTreeMap::new(),
             denied: Vec::new(),
             queued: Queue::default(),
@@ -549,6 +558,28 @@ impl Session {
                 meters.context_tokens = Some(usage.used);
                 meters.context_window = Some(usage.size);
                 self.meters_now(meters)
+            }
+            SessionUpdate::Notice(notice) => {
+                let kind = match notice.severity {
+                    acp::NoticeSeverity::Warning => Notice::WARNING,
+                    acp::NoticeSeverity::Error => Notice::ERROR,
+                    _ => Notice::NOTE,
+                };
+                let text = match notice.description.as_deref().map(str::trim) {
+                    Some(more) if !more.is_empty() => format!("{}\n{more}", notice.title.trim()),
+                    _ => notice.title.trim().to_owned(),
+                };
+                let mut actions = self.close(now);
+                actions.extend(self.notice(kind, &text, now));
+                actions
+            }
+            SessionUpdate::CompactionUpdate(update) => {
+                let mut actions = self.close(now);
+                actions.extend(self.compaction(update, now));
+                actions
+            }
+            SessionUpdate::CompactionSummaryChunk(chunk) => {
+                self.compaction_summary(&chunk.compaction_id.0, &chunk.content, now)
             }
             other => {
                 let update = serde_json::to_value(other).unwrap_or(Value::Null);
@@ -1280,6 +1311,73 @@ impl Session {
             .collect()
     }
 
+    /// A context compaction as the agent tells it now: the first update places it, later ones
+    /// patch it in place (its summary and error: left alone when absent, cleared by `null`).
+    fn compaction(&mut self, update: &acp::CompactionUpdate, now: WallMs) -> Vec<Action> {
+        let id = update.compaction_id.0.to_string();
+        let turn = self.turn();
+        let known = self.compactions.get(&id).cloned();
+        let (turn, mut shown, _) = known.clone().unwrap_or((
+            turn,
+            Compaction { trigger: None, before_tokens: None, after_tokens: None, summary: None },
+            true,
+        ));
+        match &update.summary {
+            MaybeUndefined::Undefined => {}
+            MaybeUndefined::Null => shown.summary = None,
+            MaybeUndefined::Value(blocks) => {
+                let text: Vec<&str> = blocks.iter().filter_map(block_text).collect();
+                shown.summary =
+                    (!text.is_empty()).then(|| Clipped::head(&text.join("\n"), PROSE, None));
+            }
+        }
+        let under_way = matches!(update.status, acp::CompactionStatus::InProgress);
+        self.compactions.insert(id.clone(), (turn, shown.clone(), under_way));
+        let item =
+            Item { id: compaction_item(&id), turn, at_ms: now, body: ItemBody::Compaction(shown) };
+        let mut actions = vec![if !under_way {
+            Action::ItemCompleted(item)
+        } else if known.is_some() {
+            Action::ItemUpdated(item)
+        } else {
+            Action::ItemStarted(item)
+        }];
+        if matches!(update.status, acp::CompactionStatus::Failed) {
+            let why = match &update.error {
+                MaybeUndefined::Value(error) if !error.trim().is_empty() => error.trim(),
+                _ => "the agent gave no reason",
+            };
+            actions.extend(self.notice(
+                Notice::ERROR,
+                &format!("Compacting the conversation failed\n{why}"),
+                now,
+            ));
+        }
+        actions.push(self.status(now));
+        actions
+    }
+
+    /// One more block of compaction `id`'s summary.
+    fn compaction_summary(&mut self, id: &str, block: &ContentBlock, now: WallMs) -> Vec<Action> {
+        let (Some(more), Some((turn, shown, under_way))) =
+            (block_text(block), self.compactions.get_mut(id))
+        else {
+            return Vec::new();
+        };
+        let text = match &shown.summary {
+            Some(was) => format!("{}{more}", was.text),
+            None => more.to_owned(),
+        };
+        shown.summary = Some(Clipped::head(&text, PROSE, None));
+        let item = Item {
+            id: compaction_item(id),
+            turn: *turn,
+            at_ms: now,
+            body: ItemBody::Compaction(shown.clone()),
+        };
+        vec![if *under_way { Action::ItemUpdated(item) } else { Action::ItemCompleted(item) }]
+    }
+
     fn notice(&mut self, kind: &str, text: &str, now: WallMs) -> Vec<Action> {
         let id = self.next_item();
         let body = ItemBody::Notice(Notice::new(kind, Clipped::whole(text)));
@@ -1334,14 +1432,9 @@ impl Session {
                     .collect()
             })
             .unwrap_or_default();
-        meters.effort =
-            self.option_of(&acp::SessionConfigOptionCategory::ThoughtLevel).and_then(|option| {
-                let current = select_current(option);
-                select_choices(option)
-                    .into_iter()
-                    .find(|(id, _)| Some(id) == current.as_ref())
-                    .map(|(_, label)| label)
-            });
+        // The meters hold the agent's ids, as every driver's do: the composer sends them back as
+        // the thread's own choice and finds their labels in `meta`.
+        meters.effort = thought.as_ref().and_then(select_current);
         meta.models = model
             .as_ref()
             .map(|o| {
@@ -1375,19 +1468,8 @@ impl Session {
                 .collect(),
         };
         meters.mode = match &mode {
-            Some(option) => {
-                let current = select_current(option);
-                select_choices(option)
-                    .into_iter()
-                    .find(|(id, _)| Some(id) == current.as_ref())
-                    .map(|(_, label)| label)
-            }
-            None => self.current_mode.as_ref().map(|current| {
-                self.modes
-                    .iter()
-                    .find(|m| *m.id.0 == **current)
-                    .map_or_else(|| current.clone(), |m| m.name.clone())
-            }),
+            Some(option) => select_current(option),
+            None => self.current_mode.clone(),
         };
         let mut names: Vec<&str> = CAPS.to_vec();
         // Whether it forks is said once, as it starts.
@@ -1447,12 +1529,19 @@ impl Session {
 
     fn status_now(&self) -> Action {
         let (phase, since_ms) = self.phase;
+        let compacting = self.compactions.values().any(|(.., under_way)| *under_way);
         let wait = self
             .asked
             .values()
             .next()
             .filter(|_| phase == Phase::NeedsYou)
-            .map(|asked| Wait { kind: "permission".to_owned(), text: asked.title.clone() });
+            .map(|asked| Wait { kind: "permission".to_owned(), text: asked.title.clone() })
+            .or_else(|| {
+                (compacting && phase == Phase::Working).then(|| Wait {
+                    kind: Wait::COMPACTING.to_owned(),
+                    text: "Compacting the conversation".to_owned(),
+                })
+            });
         Action::Status(Status { phase, wait, liveness: Liveness::Live, since_ms })
     }
 }
@@ -1469,6 +1558,19 @@ pub fn said(error: &acp::Error) -> String {
     match &error.data {
         Some(Value::String(data)) => format!("{}: {data}", error.message),
         _ => error.message.clone(),
+    }
+}
+
+/// The item a compaction is shown as, apart from the agent's calls and words.
+fn compaction_item(id: &str) -> ItemId {
+    ItemId(format!("compaction:{id}"))
+}
+
+/// What a block says, when it is words.
+const fn block_text(block: &ContentBlock) -> Option<&str> {
+    match block {
+        ContentBlock::Text(text) => Some(text.text.as_str()),
+        _ => None,
     }
 }
 

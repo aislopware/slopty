@@ -184,9 +184,11 @@ pub fn apple_cargo(sh: &Shell, ios: bool) -> Result<(&'static str, Vec<xshell::P
 pub const WORKSPACE_HACK: &str = "workspace-hack";
 
 /// Crates that only build on the host triple of the Apple ones: they wrap host-only frameworks
-/// (`ScreenCaptureKit`, `CGEvent`, PTYs) or are dev tools. The client crates (`slopty-ui`,
-/// `slopty-app`) build for iOS through the fork's `gpui_ios`.
-pub const HOST_ONLY_CRATES: [&str; 14] = [
+/// (`ScreenCaptureKit`, `CGEvent`, PTYs, `libproc`) or are dev tools. The client crates
+/// (`slopty-ui`, `slopty-app`) build for iOS through the fork's `gpui_ios`, and with them the
+/// test protocol of `slopty-e2e`, whose default harness spawns PTYs.
+pub const HOST_ONLY_CRATES: [&str; 15] = [
+    "slopty-e2e",
     "slopty-shape",
     "slopty-engine",
     "slopty-pty",
@@ -263,9 +265,12 @@ pub fn target_dir(sh: &Shell) -> Result<Utf8PathBuf> {
     Ok(serde_json::from_str::<Metadata>(&json)?.target_directory)
 }
 
-/// The repository root: the directory containing the workspace `Cargo.toml`.
+/// The repository root: the directory containing the workspace `Cargo.toml`. A test reads the
+/// tree it was built from, never the checkout [`REPO_ROOT`] names: under the gate, xtask's tests
+/// run in the index's snapshot with the variable inherited from the gate's own xtask.
 pub fn repo_root() -> Result<Utf8PathBuf> {
-    root_from(std::env::var(REPO_ROOT).ok(), env!("CARGO_MANIFEST_DIR"))
+    let named = if cfg!(test) { None } else { std::env::var(REPO_ROOT).ok() };
+    root_from(named, env!("CARGO_MANIFEST_DIR"))
 }
 
 /// The checkout an xtask built elsewhere works on: the gate's run with xtask built from its
@@ -287,6 +292,12 @@ fn root_from(named: Option<String>, manifest: &str) -> Result<Utf8PathBuf> {
 /// Whether `name` is on `PATH`.
 pub fn has(sh: &Shell, name: &str) -> bool {
     cmd!(sh, "which {name}").quiet().ignore_stderr().read().is_ok()
+}
+
+/// Whether the selected Xcode can compile Metal shaders: `metal` is a shim that fails until
+/// the Metal toolchain component is downloaded.
+pub fn has_metal(sh: &Shell) -> bool {
+    cmd!(sh, "xcrun -sdk macosx metal --version").quiet().ignore_stderr().read().is_ok()
 }
 
 /// The zig the vendored ghostty builds with: its `build.zig` minimum, and CI's `setup-zig`.

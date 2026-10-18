@@ -67,7 +67,7 @@ slopty-dnd = { path = "crates/slopty-dnd" }
 
 # core
 anyhow = "1.0.104"
-base64 = "0.22.1"
+base64 = "0.23.1"
 thiserror = "2.0.21"
 raw-window-handle = "0.6.2"
 regex = "1.13.1"
@@ -93,27 +93,27 @@ ec4rs = "1.2.0"
 # The audio ring's model checker, only under `--cfg slopty_loom` (`cargo xtask deep loom`).
 loom = "0.7.2"
 parking_lot = "0.12.5"
-uuid = { version = "1.26.1", features = [ "v4", "v7", "serde", "fast-rng" ] }
+uuid = { version = "1.28.0", features = [ "v4", "v7", "serde", "fast-rng" ] }
 # WHATWG URL parsing: the host a handed-over web page opens at, as a browser reads it.
 url = "2.5.8"
 # The MCP SDK (protocol revision 2026-07-28): the server's Streamable HTTP endpoint and the
 # `slopty mcp` stdio shim. Each crate adds the transport it serves.
-rmcp = { version = "3.5.0", default-features = false, features = [ "server", "macros" ] }
+rmcp = { version = "3.5.1", default-features = false, features = [ "server", "macros" ] }
 # The MCP tools' input schemas; the major rmcp builds on.
-schemars = { version = "1.2.2", features = [ "uuid1" ] }
+schemars = { version = "1.2.3", features = [ "uuid1" ] }
 # ACP's wire types (protocol v1), for the generic ACP adapter (`slopty_agent::acp`). The types
 # alone: the SDK (`agent-client-protocol`) brings its own async runtime beside tokio and pins an
 # older schema, and the adapter is a sans-IO codec over the worker's own pipes.
-agent-client-protocol-schema = { version = "1.10.2", default-features = false }
+agent-client-protocol-schema = { version = "1.12.0", default-features = false }
 # The server's MCP listener (HTTP/1.1 connections served one task each, admitted by peer address)
 # and the LocalAPI client (`slopty_tailnet`), which adds `client`.
-hyper = { version = "1.11.1", features = [ "server", "http1" ] }
-hyper-util = { version = "0.1.20", features = [ "tokio" ] }
+hyper = { version = "1.12.0", features = [ "server", "http1" ] }
+hyper-util = { version = "0.1.21", features = [ "tokio" ] }
 # A response's whole body, for the LocalAPI client (`slopty_tailnet`).
 http-body-util = "0.1.5"
 # The server's HTTPS client for push (rustls on ring, the system's roots), and its tests'
 # stand-ins (a relay and APNs over TLS on loopback).
-rustls = { version = "0.23.45", default-features = false, features = [ "ring", "std", "tls12" ] }
+rustls = { version = "0.23.46", default-features = false, features = [ "ring", "std", "tls12" ] }
 hyper-rustls = { version = "0.27.10", default-features = false, features = [
     "ring",
     "http2",
@@ -129,22 +129,22 @@ secrecy = "0.10.3"
 
 # serialization
 serde = { version = "1.0.229", features = [ "derive", "rc" ] }
-serde_json = "1.0.151"
+serde_json = "1.0.154"
 # `Vec<u8>` fields as one byte string (`serialize_bytes`) instead of a sequence of `u8`s: the
 # same postcard bytes, one copy instead of a call per byte (kitty images, cursor shapes).
 serde_bytes = "0.11.19"
 similar = "3.2.0"
 # The design system's fonts and assets (`slopty-kit`): the installed families' metrics, and the
 # file icons embedded in the binary on every build (iOS reads no source tree at run time).
-fontdb = "0.23.0"
+fontdb = "0.24.0"
 ttf-parser = "0.25.1"
-rust-embed = { version = "8.12.0", features = [ "debug-embed", "include-exclude" ] }
+rust-embed = { version = "8.13.0", features = [ "debug-embed", "include-exclude" ] }
 postcard = { version = "1.1.3", default-features = false, features = [ "alloc", "use-std" ] }
-zerocopy = { version = "0.8.58", features = [ "derive" ] }
-toml = "1.1.6"
+zerocopy = { version = "0.8.63", features = [ "derive" ] }
+toml = "1.1.8"
 
 # async / io
-tokio = { version = "1.53.1", features = [
+tokio = { version = "1.53.3", features = [
     "rt-multi-thread",
     "net",
     "io-util",
@@ -178,9 +178,7 @@ rustix = { version = "1.1.5", features = [
     "pipe",
     "system",
 ] }
-# Held at 0.2.189: 0.2.190 declares the `_dyld_*` image functions for macOS only, and
-# backtrace 0.3.76 (under GPUI) still calls them on iOS, so the iOS app no longer built.
-libc = "=0.2.189"
+libc = "0.2.191"
 
 # networking: n0's noq (a quinn fork) standalone, with Slopty's null crypto provider
 # (docs/decisions/transport.md). No TLS, so no ring/rustls. `fast-apple-datapath` (private
@@ -436,8 +434,8 @@ resvg = { version = "0.48.1", default-features = false }
 icns = "0.5.0"
 
 # testing
-insta = { version = "1.48.0", features = [ "yaml", "redactions" ] }
-proptest = "1.11.0"
+insta = { version = "1.49.0", features = [ "yaml", "redactions" ] }
+proptest = "1.12.0"
 tempfile = "3.27.0"
 # FSEvents, only as the measured alternative to the worker's kqueue file watch
 # (`slopty-worker/tests/fswatch.rs`; docs/decisions/workspace.md).

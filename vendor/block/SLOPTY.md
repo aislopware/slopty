@@ -9,6 +9,9 @@ of an uninhabited type is a future-incompatibility warning today and a hard erro
 (rust#74840). `Class` is now `#[repr(C)] struct Class { _priv: [u8; 0] }`, opaque but inhabited.
 The code only ever takes the statics' address (`isa: *const Class`), so behaviour is unchanged.
 
+Every `extern` names its ABI (`"C"`, which a bare `extern` meant): the toolchain warns the bare form
+is deprecated, at each of its uses in every build.
+
 The `objc_test_utils` dev-dependency is dropped: its `test_utils` path is not in the published
 crate, and nothing in Slopty runs `block`'s own tests.
 

@@ -17796,3 +17796,12 @@ iOS 27.1 simulator on this Mac (M1 Max, Xcode 27.0), each run a fresh process
 The category, not the activation, was the cost: iOS 27's asynchronous activation alone would
 have saved 8–9 ms of the 51–56. The whole setup now runs on a thread of its own, and nothing
 plays before a stream with sound opens, seconds later.
+
+## 2026-10-19 — what a test shard writes, against the macOS 27 runner's disk
+
+The xcode-27 image starts a job with 39.6 GB free, so every test shard stopped at the gate's
+50 GB floor before it built. Each shard's cold build and run on this Mac, free space sampled
+every 15 s on `target/`'s volume (`cargo gate --lane tests --shard <s>`): **worker 11 GB, ui
+9 GB, rest 8 GB** at their low point. The shards' floor is 15 GB (`ci.yml`'s matrix): above the
+largest with room for the logs and the caches restored before it, and under what the image has.
+The 50 GB default stays for a whole gate on one disk, which writes about 35 GB cold.

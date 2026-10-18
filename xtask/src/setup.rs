@@ -4,22 +4,22 @@ use anyhow::Result;
 use xshell::{Shell, cmd};
 
 use crate::gate::LaneId;
-use crate::tools::{has, step};
+use crate::tools::{has, has_metal, step};
 
 /// Tools installed with `cargo binstall`. Versions are floors; binstall fetches prebuilt binaries.
 const TOOLS: &[(&str, &str)] = &[
-    ("cargo-nextest", "0.9.146"),
+    ("cargo-nextest", "0.9.148"),
     ("cargo-deny", "0.20.2"),
     ("cargo-shear", "1.14.0"),
     ("cargo-hack", "0.6.45"),
     ("cargo-hakari", "0.9.39"),
     ("cargo-llvm-cov", "0.9.1"),
     ("cargo-mutants", "27.1.0"),
-    ("cargo-insta", "1.48.0"),
-    ("cargo-semver-checks", "0.50.0"),
-    ("typos-cli", "1.50.3"),
+    ("cargo-insta", "1.49.0"),
+    ("cargo-semver-checks", "0.51.0"),
+    ("typos-cli", "1.51.1"),
     ("taplo-cli", "0.10.0"),
-    ("bacon", "3.25.0"),
+    ("bacon", "3.26.0"),
     ("samply", "0.13.1"),
     ("git-cliff", "2.14.2"),
     ("committed", "1.1.11"),
@@ -79,6 +79,11 @@ pub fn run(sh: &Shell, no_tools: bool, lanes: &[LaneId], tools: &[String]) -> Re
     if !no_tools && everything && !has(sh, "xcodegen") {
         // XcodeGen is a Swift tool with no cargo distribution; Homebrew is the supported route.
         step("brew install xcodegen", &cmd!(sh, "brew install xcodegen"))?;
+    }
+    if !no_tools && everything && cfg!(target_os = "macos") && !has_metal(sh) {
+        // Xcode 27 ships without the Metal compiler GPUI's shaders build with; Apple serves
+        // it as a component, fetched with no sign-in.
+        step("the Metal toolchain", &cmd!(sh, "xcodebuild -downloadComponent MetalToolchain"))?;
     }
     step("git submodules", &cmd!(sh, "git submodule update --init --recursive --depth 1"))?;
     if lanes.is_empty() {
