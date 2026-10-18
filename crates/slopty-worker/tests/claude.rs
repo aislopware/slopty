@@ -130,6 +130,11 @@ mod claude {
 
         /// The driven Claude Code threads served, as a worker serves them.
         fn serve(&self) -> (Claude, tokio::task::JoinHandle<()>) {
+            self.serve_waiting(slopty_agent::claude::driven::INIT_WAIT)
+        }
+
+        /// [`Self::serve`], each Claude Code given `init_wait` to answer `initialize`.
+        fn serve_waiting(&self, init_wait: Duration) -> (Claude, tokio::task::JoinHandle<()>) {
             let (claude, asks) = Claude::channel();
             let place = Place {
                 data_dir: self.data.clone(),
@@ -137,6 +142,7 @@ mod claude {
                 path: Some(self.programs.clone().into_os_string()),
                 home: self.home.clone(),
                 machine: "rig".to_owned(),
+                init_wait,
             };
             (claude, claude::spawn(self.host.clone(), place, asks))
         }
@@ -468,17 +474,19 @@ mod claude {
         assert_eq!(state.turns.len(), 1, "nothing was stopped: {:?}", state.turns);
     }
 
-    /// A Claude Code that never answers `initialize` is said not to have started once
-    /// [`INIT_WAIT`] is up, and ended: the thread reads exited, not working for good.
+    /// A Claude Code that never answers `initialize` is said not to have started once its wait
+    /// is up, and ended: the thread reads exited, not working for good. The wait is 1 s here
+    /// rather than [`INIT_WAIT`]'s 30 s, which `driven`'s own tests prove on their clock.
     ///
     /// [`INIT_WAIT`]: slopty_agent::claude::driven::INIT_WAIT
     #[tokio::test]
     async fn a_claude_code_that_never_answers_initialize_is_said_not_to_start() {
+        const INIT_WAIT: Duration = Duration::from_secs(1);
         let rig = Rig::new(&[("STUB_NEVER_ANSWER_INIT", "1")]).await;
-        let (claude, _served) = rig.serve();
+        let (claude, _served) = rig.serve_waiting(INIT_WAIT);
         let began = Instant::now();
         let thread = rig.started(&claude, "Say hello.").await;
-        let bound = slopty_agent::claude::driven::INIT_WAIT.saturating_add(WAIT);
+        let bound = INIT_WAIT.saturating_add(WAIT);
         let state = tokio::time::timeout(bound, async {
             loop {
                 let (state, _) = rig.host.state(thread).unwrap();

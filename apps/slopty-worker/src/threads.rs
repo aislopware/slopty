@@ -138,6 +138,7 @@ pub fn start(daemon: &Daemon, asks: Adapters) {
         path: None,
         home: slopty_platform::dirs::home(),
         machine: daemon.name.clone(),
+        init_wait: slopty_agent::claude::driven::INIT_WAIT,
     };
     drop(claude::spawn(threads.host.clone(), place, asks.claude));
     if let Some(home) = codex::codex_home() {

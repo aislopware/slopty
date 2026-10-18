@@ -244,6 +244,9 @@ pub struct Place {
     pub home: PathBuf,
     /// The machine's name, as a thread whose session another Claude Code holds says it.
     pub machine: String,
+    /// How long each Claude Code has to answer `initialize` before it is said not to have
+    /// started ([`slopty_agent::claude::driven::INIT_WAIT`] for the person's).
+    pub init_wait: std::time::Duration,
 }
 
 impl Claude {
@@ -1137,7 +1140,7 @@ impl Served {
     fn serve(
         &self,
         thread: ThreadId,
-        driven: Driven,
+        mut driven: Driven,
         session: SessionId,
         taken: custody::Taken,
         first: Vec<ThreadAsk>,
@@ -1153,6 +1156,7 @@ impl Served {
             }
         };
         let stderr = self.place.data_dir.join("claude").join(format!("{session}.log"));
+        driven.set_init_wait(self.place.init_wait);
         let task = Task::new(
             self.host.clone(),
             thread,

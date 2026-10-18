@@ -260,6 +260,8 @@ pub struct Driven {
     stop_acked: Option<WallMs>,
     /// `initialize` was asked and not answered, since then.
     starting: Option<WallMs>,
+    /// How long `initialize` has to be answered ([`INIT_WAIT`] unless set).
+    init_wait: Duration,
     /// The last tool call the model made, in a few words, for a stall to name.
     last_call: Option<String>,
     /// The person's stop holds what is queued.
@@ -378,6 +380,7 @@ impl Driven {
             interrupting: None,
             stop_acked: None,
             starting: None,
+            init_wait: INIT_WAIT,
             last_call: None,
             stopped: false,
             ending: None,
@@ -480,6 +483,12 @@ impl Driven {
     /// repository).
     pub fn branch(&mut self, branch: Option<&str>) -> Vec<Out> {
         self.history.fact(super::history::BRANCH_FACT, branch)
+    }
+
+    /// Give `initialize` `wait` to be answered instead of [`INIT_WAIT`]: a worker whose tests
+    /// prove the start that never comes waits on their scale.
+    pub const fn set_init_wait(&mut self, wait: Duration) {
+        self.init_wait = wait;
     }
 
     /// The `initialize` request, which goes first to every Claude Code this drives, and again to
@@ -1678,7 +1687,7 @@ impl Driven {
         };
         let interrupt = self.interrupting.map(|at| after(at, INTERRUPT_ACK));
         let acked = self.stop_acked.filter(|_| self.running).map(|at| after(at, END_WAIT));
-        let starting = self.starting.map(|at| after(at, INIT_WAIT));
+        let starting = self.starting.map(|at| after(at, self.init_wait));
         let delivery = self
             .sends
             .iter()
@@ -1698,10 +1707,10 @@ impl Driven {
             |at: WallMs, wait: Duration| now.as_millis() >= at.as_millis().saturating_add(ms(wait));
         let mut escalate = self.interrupting.is_some_and(|at| past(at, INTERRUPT_ACK))
             || (self.running && self.stop_acked.is_some_and(|at| past(at, END_WAIT)));
-        if self.starting.is_some_and(|at| past(at, INIT_WAIT)) {
+        if self.starting.is_some_and(|at| past(at, self.init_wait)) {
             self.starting = None;
             escalate = true;
-            let said = format!("{DID_NOT_START} in {} s", INIT_WAIT.as_secs());
+            let said = format!("{DID_NOT_START} in {} s", self.init_wait.as_secs());
             outs.extend(self.history.notice(Notice::INFO, &said, now));
         }
         // Messages not acknowledged: sent again once, then held as maybe not arrived. One read
