@@ -406,7 +406,14 @@ mod tests {
     }
 
     fn choice(id: &str, effect: Effect) -> Choice {
-        Choice { id: id.to_owned(), label: id.to_owned(), effect, scope: None, stops: false }
+        Choice {
+            id: id.to_owned(),
+            label: id.to_owned(),
+            effect,
+            scope: None,
+            folders: Vec::new(),
+            stops: false,
+        }
     }
 
     /// The answer is the choice that allows or denies once, by the request the note named; a
