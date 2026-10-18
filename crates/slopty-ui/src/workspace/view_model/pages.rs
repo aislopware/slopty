@@ -704,11 +704,17 @@ impl WorkspaceView {
                 ..PageState::default()
             })
         });
+        // A web page gone cold has no document until it is made live again and loads; a file
+        // drawn natively keeps its.
+        let native = pages.shown.get(key).is_some_and(|page| page.doc.is_some());
         state.send_if_modified(|now| {
             let words = presence_words(presence.unwrap_or(Presence::Cold));
             let moved = now.presence != words;
             if moved {
                 words.clone_into(&mut now.presence);
+                if words == PageState::COLD && !native {
+                    now.loaded = false;
+                }
             }
             moved
         });

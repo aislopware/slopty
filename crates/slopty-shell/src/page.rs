@@ -180,10 +180,19 @@ pub fn theme_variables(theme: &Theme) -> Vec<(String, String)> {
 }
 
 /// What the person reads of how a page stands: its card's assistive value.
-pub fn presence_words(presence: Option<PagePresence>, snapshot: bool, failed: bool) -> &'static str {
+///
+/// slopty: live only once its document has `loaded`: a web view made live comes up empty and
+/// takes no touch until its document is in it.
+pub fn presence_words(
+    presence: Option<PagePresence>,
+    snapshot: bool,
+    failed: bool,
+    loaded: bool,
+) -> &'static str {
     match presence {
         _ if failed => "error",
-        Some(PagePresence::Live) => "live",
+        Some(PagePresence::Live) if loaded => "live",
+        Some(PagePresence::Live) if snapshot => "snapshot",
         Some(PagePresence::Warm | PagePresence::Cold) if snapshot => "snapshot",
         _ => "loading",
     }
@@ -692,7 +701,12 @@ impl Render for PageCardView {
         } else if waiting.is_some() {
             "waiting"
         } else {
-            presence_words(presence, snapshot.is_some(), failed)
+            presence_words(
+                presence,
+                snapshot.is_some(),
+                failed,
+                state.as_ref().is_some_and(|state| state.loaded),
+            )
         };
         let why = hosted
             .as_ref()
@@ -1306,11 +1320,14 @@ mod tests {
     /// A card's value says how its page stands: its picture at rest, live while engaged.
     #[test]
     fn a_page_says_how_it_stands() {
-        assert_eq!(presence_words(Some(PagePresence::Warm), true, false), "snapshot");
-        assert_eq!(presence_words(Some(PagePresence::Cold), true, false), "snapshot");
-        assert_eq!(presence_words(Some(PagePresence::Live), true, false), "live");
-        assert_eq!(presence_words(None, false, false), "loading");
-        assert_eq!(presence_words(Some(PagePresence::Live), true, true), "error");
+        assert_eq!(presence_words(Some(PagePresence::Warm), true, false, true), "snapshot");
+        assert_eq!(presence_words(Some(PagePresence::Cold), true, false, true), "snapshot");
+        assert_eq!(presence_words(Some(PagePresence::Live), true, false, true), "live");
+        assert_eq!(presence_words(None, false, false, false), "loading");
+        assert_eq!(presence_words(Some(PagePresence::Live), true, true, true), "error");
+        // Made live, its document not in it yet: what shows until it is.
+        assert_eq!(presence_words(Some(PagePresence::Live), false, false, false), "loading");
+        assert_eq!(presence_words(Some(PagePresence::Live), true, false, false), "snapshot");
     }
 
     /// slopty: a card's header says its title and where the page comes from (an app's server, a
