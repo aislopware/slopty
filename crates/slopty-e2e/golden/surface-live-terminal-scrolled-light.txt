@@ -1,4 +1,5 @@
 Window
+Label │ No chats yet
 Button │ Server: e2e-server, Connected
 Button │ Settings
 Tab │ Terminal 1

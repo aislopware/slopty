@@ -1,7 +1,4 @@
 Window (focused)
-Button │ background sleep 600
-Status │ Waiting
-Button │ History: past Claude Code sessions
 Article │ You
 Paragraph │ agent
 Button │ Subagent Look │ Done
@@ -18,3 +15,5 @@ Button │ Mode: Auto
 Button │ Context 1%
 Group │ Navigation
 Button │ Back to Chats
+Button │ Show files
+Button │ Show terminal

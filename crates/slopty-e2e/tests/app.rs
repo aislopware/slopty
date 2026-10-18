@@ -1,8 +1,9 @@
 //! The real app, driven from inside: the shell on a real stack, its live surfaces and settings,
 //! rendered with the app's own renderer and compared with the goldens.
 //!
-//! Every test is live (`#[ignore]`, run by `cargo xtask e2e app`), since it launches the app. Only
-//! the cases in `screen_recording` need a permission from the machine; they run with
+//! Every test is live (`#[ignore]`, run by `cargo xtask e2e app`), since it launches the app. None
+//! needs a permission from the machine: a remote window streams from the worker's drawn screen
+//! (`SLOPTY_SYNTHETIC_SCREEN`). Cases in a `screen_recording` module would, and run with
 //! `--screen-recording`.
 
 #[cfg(test)]

@@ -1,5 +1,6 @@
 Window (focused)
 Group │ Chats
+Label │ No chats yet
 Button │ New chat
 TabList │ Tabs
 Tab │ Chats

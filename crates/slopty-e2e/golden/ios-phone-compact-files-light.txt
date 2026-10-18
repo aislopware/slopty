@@ -1,0 +1,11 @@
+Window
+Group │ Files
+Group │ Navigation
+Heading │ Files
+Button │ Back to Chat
+Group │ Workspace files
+SearchInput │ Search files
+Button │ Show hidden files
+Tree │ Workspace file tree (focused)
+TreeItem │ src
+TreeItem │ README.md

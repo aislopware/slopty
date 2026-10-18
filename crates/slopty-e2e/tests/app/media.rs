@@ -1011,7 +1011,7 @@ async fn a_picture_a_tool_returned_shows_inline_and_opens_in_the_lightbox() {
 
     let renders = stack.path("");
     let drv = &mut stack.driver;
-    let picture = "Preview generated image";
+    let picture = "Image: plot.png";
     let shown =
         seen(drv, "the picture in the chat", STEP, |d| node(d, "Button", picture).is_some()).await;
     let button = node(&shown, "Button", picture).cloned().unwrap();

@@ -1,4 +1,5 @@
 Window
+Label │ No chats yet
 Button │ Server: e2e-server, Connected
 Button │ Settings
 Tab │ Terminal 1
@@ -11,5 +12,5 @@ Button │ Hide sidebar
 Button │ Back
 Button │ Forward
 Button │ Sidebar view options
-Status │ shell wants to open localhost:$PORT on e2e-worker; nothing forwards that port here yet
+Status │ Open localhost:$PORT from shell on e2e-worker? Open forwards the port here
 Button │ Open

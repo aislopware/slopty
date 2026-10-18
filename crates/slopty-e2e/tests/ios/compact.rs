@@ -13,23 +13,23 @@ use slopty_e2e::snapshot::{PixelRect, assert_matches_masked};
 use slopty_e2e::{Command, Driver, Dump};
 
 /// Per-step wait.
-const STEP: Duration = Duration::from_secs(30);
+pub const STEP: Duration = Duration::from_secs(30);
 /// A viewport narrower than this is a phone's (the shell's `PHONE_BELOW`).
-const PHONE_BELOW: f32 = 700.0;
+pub const PHONE_BELOW: f32 = 700.0;
 /// As the other simulator goldens: five times the noise between two runs.
 const TOLERANCE: f64 = 0.0005;
 /// Long enough for a page's entrance to come to rest.
-const SETTLE: Duration = Duration::from_millis(600);
+pub const SETTLE: Duration = Duration::from_millis(600);
 
 /// The booted simulator `cargo xtask e2e ios` installed the app on.
-fn simulator() -> Simulator {
+pub fn simulator() -> Simulator {
     let udid = std::env::var("SLOPTY_SIM_UDID").expect("SLOPTY_SIM_UDID (a booted simulator)");
     let bundle_id = std::env::var("SLOPTY_SIM_BUNDLE_ID").expect("SLOPTY_SIM_BUNDLE_ID");
     Simulator { udid, bundle_id }
 }
 
 /// Tap the middle of the `role` node labelled `label`, once it is drawn.
-async fn tap(drv: &mut Driver, role: &str, label: &str) {
+pub async fn tap(drv: &mut Driver, role: &str, label: &str) {
     let what = format!("the {role} {label}");
     let d = drv.wait_for(&what, STEP, |d| d.a11y_node(role, Some(label)).is_some()).await.unwrap();
     let [left, top, width, height] = d.a11y_node(role, Some(label)).map(|n| n.bounds).unwrap();
@@ -67,7 +67,7 @@ async fn touch_targets(drv: &mut Driver, state: &str) {
 
 /// Render the frame in light and in dark against `golden/ios-<device>-compact-<state>-*.png`;
 /// light again after.
-async fn goldens(drv: &mut Driver, dir: &Path, device: &str, state: &str) {
+pub async fn goldens(drv: &mut Driver, dir: &Path, device: &str, state: &str) {
     for (dark, appearance) in [(false, "light"), (true, "dark")] {
         drv.ok(&Command::Appearance { dark }).await.unwrap();
         tokio::time::sleep(SETTLE).await;
@@ -100,7 +100,7 @@ async fn goldens(drv: &mut Driver, dir: &Path, device: &str, state: &str) {
 }
 
 /// The Chats page is up.
-fn chats_page(d: &Dump) -> bool {
+pub fn chats_page(d: &Dump) -> bool {
     d.a11y_node("Group", Some("Chats")).is_some() && d.a11y_node("TabList", Some("Tabs")).is_some()
 }
 
@@ -164,7 +164,7 @@ async fn a_phone_opens_on_its_chats_and_one_takes_the_screen() {
 }
 
 /// A node of `d` whose label or value holds `words`, whatever its role.
-fn saying<'a>(d: &'a Dump, words: &str) -> Option<&'a slopty_e2e::A11yNode> {
+pub fn saying<'a>(d: &'a Dump, words: &str) -> Option<&'a slopty_e2e::A11yNode> {
     let holds = |s: Option<&str>| s.is_some_and(|s| s.contains(words));
     d.a11y.iter().find(|n| holds(n.label.as_deref()) || holds(n.value.as_deref()))
 }
@@ -337,8 +337,8 @@ async fn a_phones_chat_holds_the_dock_and_a_subagents_card() {
     .unwrap();
 
     // A screenshot pasted into the composer is staged as its attachment, its chip in the draft
-    // where the caret stood (zeron's inline mention, `[Image 1](slopty-image:1)`), which the
-    // thumbnail strip then leaves out.
+    // where the caret stood (zeron's inline mention, `[Image 1](slopty-image:1)`, read as its
+    // words), which the thumbnail strip then leaves out.
     let composer = drv.dump().await.unwrap();
     let [left, top, width, height] =
         composer.a11y.iter().find(|n| n.role == "MultilineTextInput").unwrap().bounds;
@@ -349,7 +349,7 @@ async fn a_phones_chat_holds_the_dock_and_a_subagents_card() {
         .wait_for("the pasted picture staged", STEP, |d| {
             d.a11y.iter().any(|n| {
                 n.role == "MultilineTextInput"
-                    && n.value.as_deref().is_some_and(|v| v.contains("](slopty-image:"))
+                    && n.value.as_deref().is_some_and(|v| v.contains("Image 1"))
             })
         })
         .await;

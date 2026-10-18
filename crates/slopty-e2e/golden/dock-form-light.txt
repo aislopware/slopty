@@ -1,6 +1,6 @@
 Window
 Button │ dialog remote_callout
-Status │ Input
+Status │ Needs you
 Button │ History: past Claude Code sessions
 Button │ Server: e2e-server, Connected
 Button │ Settings

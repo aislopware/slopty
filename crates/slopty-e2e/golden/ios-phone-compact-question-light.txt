@@ -1,0 +1,16 @@
+Window (focused)
+Article │ You
+Paragraph │ ask
+Button │ Called 1 tool
+Group │ Which color?
+Note │ Answer here
+Button │ Red
+Button │ Blue
+Button │ Chat about this
+MultilineTextInput │ Type your own answer, or pick an option above
+Button │ Skip
+Group │ Navigation
+Heading │ ask
+Button │ Back to Chats
+Button │ Show files
+Button │ Show terminal

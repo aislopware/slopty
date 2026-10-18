@@ -1,0 +1,28 @@
+Window (focused)
+Button │ bash rm -rf build
+Status │ Needs you
+Button │ ask
+Button │ History: past Claude Code sessions
+Button │ Server: e2e-server, Connected
+Button │ Settings
+Article │ You
+Paragraph │ bash rm -rf build
+Article │ Claude
+Paragraph │ Let me run it.
+Button │ Ran 1 command
+Group │ rm -rf build
+Note │ Ask rule Bash overrides auto mode for this command.
+Button │ Allow
+Button │ Always allow (rm -rf build in this project)
+Button │ Deny
+Button │ Deny and stop
+Button │ Allow, and say what's next…
+Button │ Say what to do instead…
+Button │ Show chat details
+Button │ Show files panel
+Button │ Show side pane
+Button │ Hide sidebar
+Button │ Back
+Button │ Forward
+Button │ New chat
+Button │ Sidebar view options

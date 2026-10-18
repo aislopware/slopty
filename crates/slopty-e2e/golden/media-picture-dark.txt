@@ -7,7 +7,7 @@ Button │ Settings
 Article │ You
 Paragraph │ Read the plot
 Button │ Read 1 file
-Button │ Preview generated image
+Button │ Image: plot.png
 Article │ Claude
 Paragraph │ The plot climbs in five red bars.
 Button │ Attach images

@@ -1,0 +1,24 @@
+Window (focused)
+Button │ ask
+Status │ Needs you
+Button │ History: past Claude Code sessions
+Button │ Server: e2e-server, Connected
+Button │ Settings
+Article │ You
+Paragraph │ ask
+Button │ Called 1 tool
+Group │ Which color?
+Note │ Answer here
+Button │ Red
+Button │ Blue
+Button │ Chat about this
+MultilineTextInput │ Type your own answer, or pick an option above
+Button │ Skip
+Button │ Show chat details
+Button │ Show files panel
+Button │ Show side pane
+Button │ Hide sidebar
+Button │ Back
+Button │ Forward
+Button │ New chat
+Button │ Sidebar view options

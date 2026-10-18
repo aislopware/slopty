@@ -1,13 +1,15 @@
 //! The shell's live surfaces on a real stack: a shell of the stack's worker in the terminal dock
-//! (⌘J), drawn by Slopty's own terminal in the dock's chrome, and a window of the worker's Mac as
-//! a right-pane surface, chosen from the machine's list, then taking the whole window. Each state
-//! is a golden in light and in dark.
+//! (⌘J), drawn by Slopty's own terminal in the dock's chrome, and a window of the worker's drawn
+//! screen as a right-pane surface, chosen from the machine's list, then taking the whole window.
+//! Each state is a golden in light and in dark.
 
 use std::path::Path;
 use std::time::Duration;
 
 use slopty_e2e::harness::artifacts_dir;
-use slopty_e2e::snapshot::{MAC_TOLERANCE as TOLERANCE, assert_matches};
+use slopty_e2e::snapshot::{
+    MAC_TOLERANCE as TOLERANCE, PixelRect, assert_matches, assert_matches_masked,
+};
 use slopty_e2e::{A11yNode, Button, Command, Driver, Dump, Stack};
 
 /// How long a worker round trip may take.
@@ -208,8 +210,8 @@ async fn the_terminal_s_floats_wear_the_shell() {
 }
 
 /// A page a program in the dock's shell asks to open at a local address (`$BROWSER` with a dev
-/// server's `localhost`) is offered, never opened unasked: a notice says who wants to open which
-/// host and why, with Open, and the program is told where it went.
+/// server's `localhost`) is offered, never opened unasked: a notice names the host and who asks
+/// ("Open localhost:5173 from … on …"), with Open, and the program is told where it went.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
 async fn a_local_page_a_shell_asks_for_is_offered() {
@@ -228,7 +230,9 @@ async fn a_local_page_a_shell_asks_for_is_offered() {
     drv.type_text("\"$BROWSER\" http://localhost:5173/").await.unwrap();
     drv.keys("enter").await.unwrap();
     let offer = |d: &Dump| {
-        d.a11y.iter().any(|n| n.label.as_deref().is_some_and(|l| l.contains("wants to open")))
+        d.a11y
+            .iter()
+            .any(|n| n.label.as_deref().is_some_and(|l| l.contains("Open localhost:5173 from ")))
     };
     let shown = drv.wait_for("the offer", STEP, offer).await;
     if let Err(e) = shown {
@@ -250,40 +254,112 @@ async fn a_local_page_a_shell_asks_for_is_offered() {
     stack.shutdown().await;
 }
 
-/// The cases that capture a window, which needs the Screen Recording grant
-/// (`cargo xtask e2e app --screen-recording`).
-mod screen_recording {
+/// The cases that stream video, a window of the worker's drawn screen: they run in the app
+/// suite's coding group, after the rest and behind the encoder probe (`cargo xtask e2e app`).
+mod stream {
     use super::*;
 
-    /// The right pane's picker offers a remote window; its list holds the window the test opened
-    /// on the worker's Mac, and choosing it shows its stream as a surface, which the pane's
-    /// expand button then makes the whole window.
+    /// Where the picture moves between two renders a moment apart, in pixels, a few points wider
+    /// each way: the window's stream, whose drawn page scrolls every frame, so its pixels are left
+    /// out of a golden while its chrome is held. `None` when nothing moved: the stream is not
+    /// live.
+    async fn moving(drv: &mut Driver, renders: &Path) -> Option<PixelRect> {
+        let first = drv.render(&renders.join("moving-a.png")).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let second = drv.render(&renders.join("moving-b.png")).await.unwrap();
+        let (a, b) = (&first.image, &second.image);
+        let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0, 0);
+        for (x, y, pixel) in a.enumerate_pixels() {
+            let other = b.get_pixel_checked(x, y)?;
+            if pixel.0.iter().zip(other.0).take(3).any(|(p, q)| p.abs_diff(q) > 24) {
+                (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
+            }
+        }
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "pixels")]
+        let pad = (4.0 * first.scale).round() as u32;
+        (x1 >= x0).then(|| {
+            let (left, top) = (x0.saturating_sub(pad), y0.saturating_sub(pad));
+            let span =
+                |from: u32, to: u32| to.saturating_add(pad).saturating_sub(from).saturating_add(1);
+            [left, top, span(left, x1), span(top, y1)]
+        })
+    }
+
+    /// [`goldens`] with the pixels and the words inside `masks` left out.
+    async fn goldens_masked(drv: &mut Driver, renders: &Path, name: &str, masks: &[PixelRect]) {
+        for (dark, appearance) in [(false, "light"), (true, "dark")] {
+            drv.ok(&Command::Appearance { dark }).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(600)).await;
+            let golden = format!("{name}-{appearance}");
+            let frame = drv.render(&renders.join(format!("{golden}.png"))).await.unwrap();
+            println!("A11Y {golden}\n{}", slopty_e2e::frame_text(&frame.a11y));
+            assert_matches_masked(&golden, &frame, TOLERANCE, &artifacts_dir(), masks).unwrap();
+        }
+        drv.ok(&Command::Appearance { dark: false }).await.unwrap();
+    }
+
+    /// A chat's right pane offers a remote window; its list holds the windows of the chat's
+    /// machine, and choosing one shows its stream as a surface, which the pane's expand button
+    /// then makes the whole window. The worker serves its drawn screen
+    /// (`SLOPTY_SYNTHETIC_SCREEN`): real video, encoded, sent and decoded as any worker's, with
+    /// no Screen Recording grant and the same windows on every Mac. The picture scrolls, so the
+    /// goldens hold the chrome round it.
     #[tokio::test]
-    #[ignore = "live: cargo xtask e2e app --screen-recording"]
+    #[ignore = "live: cargo xtask e2e app"]
     async fn a_remote_window_is_a_right_pane_surface_and_takes_the_window() {
-        let mut stack = Stack::launch_at_home("e2e-worker").await.unwrap();
-        let idle = stack.start_idle_window().await.unwrap();
-        let title = idle.title().to_owned();
+        use crate::served::{open_thread, says, start, thread_until};
+        const MACHINE: &str = "e2e-screen";
+        let drawn = [("SLOPTY_SYNTHETIC_SCREEN", "1")];
+        let mut stack =
+            slopty_e2e::harness::ServedApp::launch_with(MACHINE, &[], &drawn).await.unwrap();
         let renders = stack.path("");
+        let repo = stack.path("repo");
+        let agent = start(&stack, MACHINE, &repo, "Say hello").await;
+        thread_until(&stack, &agent, "said hello", |r| says(r, "Done: Say hello")).await;
         let drv = &mut stack.driver;
         drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
-        drv.wait_for("the worker", STEP, |d| d.status == "connected").await.unwrap();
+        open_thread(drv, 1).await;
 
         drv.keys("cmd-r").await.unwrap();
         click_button(drv, "Remote window").await;
-        click_button(drv, &title).await;
-        drv.wait_for("the window's stream", STEP, |d| !d.screens.is_empty()).await.unwrap();
-        // The picture's first frame, so the surface shows it rather than its wait.
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        goldens(drv, &renders, "surface-live-screen").await;
-
-        click_button(drv, "Expand panel").await;
-        drv.wait_for("the takeover", STEP, |d| node(d, "Button", "Collapse panel").is_some())
+        let title = "Synthetic editor";
+        let listed = drv
+            .wait_for("the worker's windows", STEP, |d| {
+                d.a11y.iter().any(|n| {
+                    n.role == "Button" && n.label.as_deref().is_some_and(|l| l.contains(title))
+                })
+            })
             .await
             .unwrap();
-        goldens(drv, &renders, "surface-live-screen-takeover").await;
+        let window = listed
+            .a11y
+            .iter()
+            .find(|n| n.role == "Button" && n.label.as_deref().is_some_and(|l| l.contains(title)))
+            .unwrap();
+        let (x, y) =
+            (window.bounds[0] + window.bounds[2] / 2.0, window.bounds[1] + window.bounds[3] / 2.0);
+        drv.click(x, y).await.unwrap();
+        drv.wait_for("the window's pictures", STEP, |d| d.screens.iter().any(|s| s.presented > 10))
+            .await
+            .unwrap();
+        let pane =
+            moving(drv, &renders).await.expect("the window's picture moves: its stream is live");
+        println!("MEASURE remote-window-surface: its picture {pane:?} px");
+        goldens_masked(drv, &renders, "surface-live-screen", &[pane]).await;
 
-        idle.hide().unwrap();
+        click_button(drv, "Expand side pane").await;
+        drv.wait_for("the takeover", STEP, |d| node(d, "Button", "Restore side pane").is_some())
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        let whole = moving(drv, &renders).await.expect("the taken-over picture still moves");
+        assert!(
+            u64::from(whole[2]).saturating_mul(u64::from(whole[3]))
+                > u64::from(pane[2]).saturating_mul(u64::from(pane[3])),
+            "the takeover draws the picture larger: {whole:?} against {pane:?}"
+        );
+        println!("MEASURE remote-window-takeover: its picture {whole:?} px");
+        goldens_masked(drv, &renders, "surface-live-screen-takeover", &[whole]).await;
         stack.shutdown().await;
     }
 }

@@ -1,6 +1,6 @@
 Window
 Button │ ask
-Status │ Input
+Status │ Needs you
 Button │ History: past Claude Code sessions
 Button │ Server: e2e-server, Connected
 Button │ Settings
@@ -8,7 +8,7 @@ Article │ You
 Paragraph │ ask
 Button │ Called 1 tool
 Group │ Which color? (focused)
-Note │ Needs you at the card
+Note │ Answer here
 Button │ Red
 Button │ Blue
 Button │ Chat about this

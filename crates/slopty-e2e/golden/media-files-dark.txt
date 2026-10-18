@@ -1,5 +1,5 @@
 Window
-Button │ Chart:
+Button │ Chart:…
 Status │ Done
 Button │ History: past Claude Code sessions
 Button │ Server: e2e-server, Connected
@@ -10,6 +10,7 @@ Button │ Copy image
 Button │ Open in pane
 Image │ page 1 of 1 │ drawn
 Button │ Called 1 tool
+Group │ Page: Latency │ live
 Button │ Copy table
 Button │ Open in pane
 Table │ Latency

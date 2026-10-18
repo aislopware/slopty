@@ -1,5 +1,5 @@
 Window
-Button │ Notes:
+Button │ Notes: Paragraph 1: the reply runs on so the chat scrolls.
 Status │ Done
 Button │ History: past Claude Code sessions
 Button │ Server: e2e-server, Connected

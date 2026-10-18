@@ -1,5 +1,5 @@
 Window
-Button │ Read the guide before the…
+Button │ Read the guide before the first run.
 Button │ History: past Claude Code sessions
 Button │ Server: e2e-server, Connected
 Button │ Settings

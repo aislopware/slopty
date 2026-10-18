@@ -1,5 +1,5 @@
 Window
-Button │ Output:
+Button │ Output: \x1b[1;32m✓\x1b[0m 12 passed \x1b[2m(0.4s)\x1b[0m
 Button │ History: past Claude Code sessions
 Button │ Server: e2e-server, Connected
 Button │ Settings

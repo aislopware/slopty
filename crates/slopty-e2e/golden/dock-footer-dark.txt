@@ -1,6 +1,6 @@
 Window
 Button │ background sleep 600
-Status │ Waiting
+Status │ Background work
 Button │ History: past Claude Code sessions
 Button │ Server: e2e-server, Connected
 Button │ Settings
