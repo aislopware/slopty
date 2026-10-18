@@ -73,6 +73,12 @@ impl<T: Clone> Ledger<T> {
         self.next
     }
 
+    /// Whether `key` is a work here still.
+    #[cfg(all(test, target_os = "ios"))]
+    pub(super) fn holds(&self, key: u64) -> bool {
+        self.works.contains_key(&key)
+    }
+
     /// The system refused the request: the work goes on only while the app is on screen.
     pub(super) fn refused(&mut self, key: u64) {
         self.works.remove(&key);

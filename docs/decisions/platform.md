@@ -2,8 +2,59 @@
 
 See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 
-- ✅ **Floor macOS 26.5 / iOS 26.5, Apple silicon only.** User decision 2026-09-04. No
-  availability checks, no fallbacks for older OS.
+- ✅ **Floor 27: macOS 27.0, iOS and iPadOS 27.0, Apple silicon only** (the person,
+  2026-10-18, raised from 26.5; first set 2026-09-04). No availability checks and no fallbacks for
+  an older OS, and where the floor has a newer call than a deprecated one, the newer one. The
+  raise was not taken blindly: every framework Slopty links was read in the Xcode 27.0 SDKs
+  for what 27 adds (`.research/sdk27/ADOPTION.md`, header by header), and each addition was ruled
+  on.
+  - **Adopted.** `BGTaskScheduler`'s `submitTaskRequest:completionHandler:`, which reports every
+    refusal the deprecated `error:` form missed (`continued::ios`). `AVAudioSession`'s
+    `activateWithOptions:completionHandler:`, with the category set on a thread of its own: the
+    launch waited 51–56 ms on the audio session before its first frame, 36–48 of them on the
+    category, and now waits under half a millisecond (`playback_audio_session`; MEASUREMENTS,
+    "the audio session off the launch"). `NSApplicationPresentationDisableScreenCornerInteractions` while a remote
+    screen has the keyboard full screen, so this Mac's hot corners (Quick Note by default) no
+    longer open over the remote's corners (`corners`). `systemPrefersReducedResourceUsage` and
+    its notification on iOS: while the system asks apps to scale back, a stream asks for at most
+    60 frames a second, and Low Power Mode is followed as it comes and goes (`resources`,
+    `slopty_ui::screen::stream_fps`). `UIWindowScene`'s own display link in gpui-fast's iOS
+    window, which UIKit moves with the scene to an external display (aislopware/gpui-fast#48),
+    and the window's scale and main display read from its scene, not the device's main screen
+    (gpui-fast#49), which also fixes a window on an external display of another scale.
+  - **Deprecations.** Every call 26 or 27 deprecates in those frameworks was searched for in
+    Slopty and gpui_ios; the ones found are replaced above, and the app-delegate lifecycle UIKit
+    deprecates was never used (the iOS app is scene-based).
+  - **The machines follow.** CI's Macs are GitHub's `xcode-27` image (macOS 27.0.1 26A434,
+    Xcode 27.0 27A266a, the iOS 27.0 simulator 24A434; a preview label, probed on run
+    39138638250), and the e2e guest is `slopty-27-e2e`, made from Cirrus Labs'
+    `macos-golden-gate-base` of 2026-10-03 with the runners' iOS runtime. The macOS 26 guests
+    and image are gone.
+  - **Ruled out, with why.** VideoToolbox's `ConsistentQuality` preset and
+    `ConstantQualityFactor`: rate-by-quality with look-ahead, against the low-latency rate
+    control (video.md, 2026-09-29, measured on 27.0). The low-latency super-resolution and
+    frame-interpolation processors' new size queries: the processors are 26's, and Slopty
+    streams at the client's own size. MetalFX's and Metal 4.1's additions are for 3D and
+    tensors. The real-time-safe `AVAudioSourceNode` and sink blocks: the player renders from an
+    `AudioUnit` callback already. ScreenCaptureKit's clip buffering, recording editor and
+    `isCapturing`: Slopty keeps its own stream state and records nothing. WebKit's `WKJSHandle`
+    and shared buffers: pages take their data through their URL scheme. `UTTypeMarkdown`:
+    Slopty never declares or asks for a Markdown type. `UISceneClosureConfirmation`: closing a
+    window loses nothing, so nothing asks.
+  - **Watched.** `NSScreen.touchCapabilities` and the touch-scrolling additions, for a touch
+    Mac, of which none has shipped.
+  - **The bindings wait for objc2's Xcode 27 release, not a fork.** objc2's framework crates
+    (0.3.2) were generated from Xcode 16.4, so the four 27 calls above are declared by hand, each
+    with a test that it answers. No other crate does better: cacao, objr and fruity are
+    unmaintained, servo's core-foundation-rs covers only CoreFoundation, CoreGraphics and
+    CoreText and points AppKit users to objc2, and a Swift bridge would end Rust everywhere;
+    every crate Slopty builds on (wry, accesskit, wgpu, GPUI) is on objc2 0.6 too. Upstream's
+    main already carries Xcode 27.1, for frameworks 0.4.0 and objc2 0.7, a few issues from
+    release (2026-10-18), but its core and block2 changes break every crate on objc2 at once.
+    A fork that regenerated 0.3.2 from the 27 SDKs with the released translator crashes libclang
+    on CoreAudio, and would be thrown away at that release. So `xtask/upstream.toml` awaits
+    objc2-foundation 0.4.0: the gate says when it is out, and then the whole graph moves, any
+    dependency still on 0.3 is forked, and the hand declarations go.
 
 - ✅ **Pure Rust.** Scripts are `xtask`. The only non-Rust files are Metal shaders and the
   XcodeGen spec that xtask generates. The iOS app's delegates and `main` are Rust too
@@ -437,8 +488,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `BGContinuedProcessingTask`, but it is not a workspace dependency yet; the handful of
     messages are sent by selector from the SDK headers, each with its rule. Swapping to the
     crate is a workspace dependency and a mechanical change.
-  - **The floor's submit.** `submitTaskRequest:error:` is deprecated in the iOS 27 SDK for a
-    completion-handler twin that is iOS 27 only, above the floor, so the floor's call stays.
+  - **The floor's submit.** Since the floor is 27, the request goes through
+    `submitTaskRequest:completionHandler:`; a refusal it reports later is refused in the ledger
+    as one registration's is (Floor 27, above).
   - **Needs, outside this change:** `Info.plist` gets `BGTaskSchedulerPermittedIdentifiers =
     [dev.aislopware.slopty.transfer.*]` and `UIBackgroundModes = [processing]` (xtask's iOS
     project). The simulator runs no background tasks (`BGTaskSchedulerErrorCodeUnavailable`),

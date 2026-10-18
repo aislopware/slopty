@@ -902,8 +902,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **Platform facts that shape it.**
     - `beginDraggingSessionWithItems:event:source:` wants the mouse-down that starts the drag,
       and the drag "begins at the next turn of the run loop". macOS 27 adds
-      `beginDraggingSession(items:gesture:source:)`, which needs a gesture recogniser. The
-      floor is 26.5, so the event form is the one used.
+      `beginDraggingSession(items:gesture:source:)`, which needs a gesture recogniser. Drags
+      start from GPUI's mouse events, not recognisers, and the event form is not deprecated,
+      so it stays at the 27 floor (platform.md, "Floor 27").
     - `CGEventPostToPid` puts an event into one app's stream "immediately before any event taps
       instantiated for the specified process" (`CGEvent.h`). Nothing documents it moving the
       window server's drag or the pointer, and the drag manager picks the target under the real

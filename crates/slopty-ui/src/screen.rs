@@ -453,6 +453,9 @@ pub struct ScreenView {
     /// fresh process); GPUI's hold is the one a test sees.
     #[cfg(target_os = "macos")]
     _display: Option<slopty_platform::Activity>,
+    /// Word of the system's ask to scale back and of Low Power Mode ([`Self::follow_power`]).
+    #[cfg(target_os = "ios")]
+    _power: slopty_platform::resources::Watch,
     /// The worker's last bitrate decision (`ScreenEvent::Rate`): target, verdict, cwnd-capped.
     rate: Option<(u32, RateVerdict, bool)>,
     /// What the worker says its capture target is doing (`ScreenEvent::Source`). A target that
@@ -891,15 +894,22 @@ const UNKNOWN_REFRESH_HZ: u16 = 60;
 /// The most frames a second a stream asks for: no screen here refreshes faster.
 const MAX_FPS: u16 = 120;
 
+/// The most a stream asks for while the system would have apps scale back
+/// (`slopty_platform::resources`): half the decode and presents of a `ProMotion` screen, and
+/// what nearly every display runs at.
+const REDUCED_FPS: u16 = 60;
+
 /// The frames a second a stream asks for.
 ///
 /// That is the refresh of the screen its view is on, up to `MAX_FPS`
 /// (`docs/decisions/video.md`, "The stream follows the screen's refresh"). A screen that does
-/// not say (`refresh_hz` 0) counts as 60 Hz.
+/// not say (`refresh_hz` 0) counts as 60 Hz. While the system asks apps to scale back
+/// (`reduced`), at most 60.
 #[must_use]
-pub const fn stream_fps(refresh_hz: u16) -> u16 {
+pub const fn stream_fps(refresh_hz: u16, reduced: bool) -> u16 {
     let screen = if refresh_hz == 0 { UNKNOWN_REFRESH_HZ } else { refresh_hz };
-    if screen < MAX_FPS { screen } else { MAX_FPS }
+    let ceiling = if reduced { REDUCED_FPS } else { MAX_FPS };
+    if screen < ceiling { screen } else { ceiling }
 }
 
 /// A refresh period as whole hertz; 0 for none.
@@ -948,7 +958,7 @@ pub const ASKED_CHROMA: Chroma = Chroma::Subsampled;
 #[must_use]
 pub fn quality_of(scale: f32, refresh_hz: u16) -> Quality {
     Quality {
-        fps: stream_fps(refresh_hz),
+        fps: stream_fps(refresh_hz, slopty_platform::resources::reduced()),
         scale,
         codec: VideoCodec::Hevc,
         chroma: ASKED_CHROMA,
@@ -968,6 +978,14 @@ impl ScreenView {
 
     /// Ask for the refresh of the screen `window` is on when it is not the one asked for: the
     /// view drew on another screen, or its window moved to one. Only the rate changes.
+    /// The system's ask to scale back, or Low Power Mode and with it the screen's rate, changed.
+    #[cfg(target_os = "ios")]
+    fn follow_power(&mut self) {
+        if let Some((screen, _)) = self.screen {
+            self.on_screen(screen, screen_refresh_hz(screen));
+        }
+    }
+
     fn follow_screen(&mut self, window: &Window, cx: &App) {
         let screen = window_screen(window, cx);
         if self.screen.is_some_and(|(on, _)| on == screen) {
@@ -980,7 +998,7 @@ impl ScreenView {
     /// stream asks for that rate when it is not the one it has.
     fn on_screen(&mut self, screen: Option<u32>, hz: u16) {
         self.screen = Some((screen, hz));
-        let fps = stream_fps(hz);
+        let fps = stream_fps(hz, slopty_platform::resources::reduced());
         if fps != self.quality.fps {
             self.quality.fps = fps;
             self.send(ScreenRequest::SetQuality { stream: self.stream, quality: self.quality });
@@ -1006,6 +1024,10 @@ impl ScreenView {
         cx.on_release(|view, cx| {
             view.pointer.drop_image(cx);
             cx.set_cursor_image(view.system_pointer.0, None);
+            #[cfg(target_os = "macos")]
+            if view.focus_told {
+                slopty_platform::corners::remote_keyboard(false);
+            }
         })
         .detach();
         let glass = glass::Glass::new();
@@ -1101,6 +1123,8 @@ impl ScreenView {
             #[cfg(target_os = "macos")]
             _display: (!cfg!(test))
                 .then(|| slopty_platform::Activity::display_awake("Slopty remote window")),
+            #[cfg(target_os = "ios")]
+            _power: Self::watch_power(cx),
             rate: None,
             source: SourceState::Live,
             unlocking: false,
@@ -1354,6 +1378,24 @@ impl ScreenView {
     fn toggle_hud_details(&mut self, cx: &mut Context<Self>) {
         self.hud_details = !self.hud_details;
         cx.notify();
+    }
+
+    /// Follow the system's ask to scale back and Low Power Mode for as long as the view lives.
+    #[cfg(target_os = "ios")]
+    fn watch_power(cx: &Context<Self>) -> slopty_platform::resources::Watch {
+        use futures::StreamExt as _;
+        let (tx, mut rx) = futures::channel::mpsc::unbounded();
+        cx.spawn(async move |this, cx| {
+            while rx.next().await.is_some() {
+                if this.update(cx, |view, _| view.follow_power()).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+        slopty_platform::resources::watch(move || {
+            let _sent = tx.unbounded_send(());
+        })
     }
 
     /// Read the stream's health once a second for as long as the view lives.
@@ -1792,6 +1834,9 @@ impl ScreenView {
         if focused != self.focus_told {
             self.focus_told = focused;
             self.send(ScreenRequest::Focused { stream: self.stream, focused });
+            // Full screen, this Mac's corners would open over the remote's.
+            #[cfg(target_os = "macos")]
+            slopty_platform::corners::remote_keyboard(focused);
             cx.emit(ScreenViewEvent::Keyboard(focused));
         }
     }
@@ -3139,8 +3184,11 @@ impl Render for ScreenView {
                     this.tell_focus(true, cx);
                 }
             });
-            let moved =
-                cx.observe_window_bounds(window, |this, window, cx| this.follow_screen(window, cx));
+            let moved = cx.observe_window_bounds(window, |this, window, cx| {
+                this.follow_screen(window, cx);
+                #[cfg(target_os = "macos")]
+                slopty_platform::corners::window_moved();
+            });
             self.let_go = Some((here, [blur, focus, inactive, moved]));
             // A view made for a stream a reconnect opened may have the keyboard already.
             self.tell_focus(self.focus.is_focused(window) && window.is_window_active(), cx);
@@ -4078,10 +4126,12 @@ mod tests {
     /// view lands on a screen of another rate; a screen that does not say counts as 60 Hz.
     #[test]
     fn the_rate_follows_the_screen_up_to_the_ceiling() {
-        assert_eq!(stream_fps(120), 120, "a ProMotion screen");
-        assert_eq!(stream_fps(60), 60);
-        assert_eq!(stream_fps(144), 120, "the ceiling holds");
-        assert_eq!(stream_fps(0), 60, "a screen that does not say");
+        assert_eq!(stream_fps(120, false), 120, "a ProMotion screen");
+        assert_eq!(stream_fps(60, false), 60);
+        assert_eq!(stream_fps(144, false), 120, "the ceiling holds");
+        assert_eq!(stream_fps(0, false), 60, "a screen that does not say");
+        assert_eq!(stream_fps(120, true), 60, "the system asks for less");
+        assert_eq!(stream_fps(48, true), 48, "a slower screen stays as it is");
         assert_eq!(quality_of(1.0, 120).fps, 120);
         assert_eq!(hz_of(Some(Duration::from_micros(8_333))), 120);
         assert_eq!(hz_of(Some(Duration::from_micros(16_667))), 60);

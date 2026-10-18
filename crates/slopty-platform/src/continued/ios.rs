@@ -2,7 +2,7 @@
 //!
 //! objc2 has no `BackgroundTasks` crate in this workspace yet, so the few messages sent here are
 //! typed by hand from `BackgroundTasks/BGTask.h`, `BGTaskRequest.h` and `BGTaskScheduler.h`
-//! (the iOS 26 SDK's, unchanged in 27), and the classes are looked up by name. Everything the
+//! (the iOS 27 SDK's), and the classes are looked up by name. Everything the
 //! system's task is told goes through one serial queue, the one its launch handler runs on, so
 //! a task is only ever touched from that queue.
 
@@ -82,7 +82,8 @@ fn submit(key: u64, title: &str, subtitle: &str) -> Result<(), String> {
     submit_as(&id, key, title, subtitle)
 }
 
-/// [`submit`] under identifier `id`.
+/// [`submit`] under identifier `id`: an identifier not permitted is refused here, and a request
+/// the scheduler refuses later is refused in the ledger when it answers.
 fn submit_as(id: &str, key: u64, title: &str, subtitle: &str) -> Result<(), String> {
     let scheduler = scheduler().ok_or("no BackgroundTasks")?;
     let class = AnyClass::get(c"BGContinuedProcessingTaskRequest").ok_or("no continued tasks")?;
@@ -115,12 +116,25 @@ fn submit_as(id: &str, key: u64, title: &str, subtitle: &str) -> Result<(), Stri
     let request: Retained<AnyObject> = unsafe {
         msg_send![allocated, initWithIdentifier: &*id, title: &*title, subtitle: &*subtitle]
     };
-    // SAFETY: BGTaskScheduler.h: `submitTaskRequest:error:` takes a request and returns NO with
-    // the error set when it is refused (unavailable in the simulator, not permitted, too many).
-    // Its completion-handler twin is iOS 27 and later, above the floor.
-    let submitted: Result<(), Retained<NSError>> =
-        unsafe { msg_send![&*scheduler, submitTaskRequest: &*request, error: _] };
-    submitted.map_err(|e| e.to_string())
+    let answered = RcBlock::new(move |error: *mut NSError| {
+        // SAFETY: BGTaskScheduler.h: the handler is given nil on success, else the error,
+        // valid for the call.
+        let Some(error) = (unsafe { error.as_ref() }) else { return };
+        let why = error.to_string();
+        self::queue().exec_async(move || {
+            tracing::info!(key, %why, "transfer runs only while the app is on screen");
+            LEDGER.lock().refused(key);
+        });
+    });
+    // SAFETY: BGTaskScheduler.h: `submitTaskRequest:completionHandler:` (iOS 27) takes a request
+    // and a block of one nullable `NSError *`, called once on an arbitrary queue, which the
+    // scheduler copies. It reports every refusal (unavailable in the simulator, not permitted,
+    // too many, not eligible now), some of which its deprecated `error:` twin missed.
+    unsafe {
+        let () =
+            msg_send![&*scheduler, submitTaskRequest: &*request, completionHandler: &*answered];
+    }
+    Ok(())
 }
 
 /// The system started work `key` as `task` (on the queue).
@@ -205,19 +219,36 @@ mod tests {
     /// `xcrun simctl spawn <device> <test binary> continued`).
     #[test]
     fn the_scheduler_and_continued_requests_are_there() {
-        assert!(scheduler().is_some(), "BGTaskScheduler");
+        let scheduler = scheduler().expect("BGTaskScheduler");
+        // SAFETY: NSObject rule: `respondsToSelector:` takes any selector.
+        let submits: Bool = unsafe {
+            msg_send![&*scheduler, respondsToSelector: objc2::sel!(submitTaskRequest:completionHandler:)]
+        };
+        assert!(submits.as_bool(), "iOS 27's submit");
         assert!(AnyClass::get(c"BGContinuedProcessingTaskRequest").is_some(), "iOS 26's request");
         assert!(AnyClass::get(c"BGContinuedProcessingTask").is_some(), "iOS 26's task");
     }
 
     /// Where the system will not take a work (no permitted identifier, or the simulator, which
-    /// runs no background tasks), registering and submitting say so and nothing throws.
+    /// runs no background tasks), registering or the scheduler's later answer refuses it, the
+    /// ledger forgets it, and nothing throws.
     #[test]
     fn an_unpermitted_submission_is_refused_without_throwing() {
+        let key = LEDGER.lock().begin(std::sync::Arc::new(|| {}));
         let id = format!("dev.aislopware.slopty.transfer.test-{}", std::process::id());
-        let refused = submit_as(&id, u64::MAX, "Uploading 1 file", "notes.txt");
-        println!("submission: {refused:?}");
-        assert!(refused.is_err(), "the test binary is permitted nothing");
+        match submit_as(&id, key, "Uploading 1 file", "notes.txt") {
+            Err(why) => {
+                println!("refused at registration: {why}");
+                LEDGER.lock().refused(key);
+            }
+            Ok(()) => println!("registered; waiting for the scheduler's answer"),
+        }
+        let started = std::time::Instant::now();
+        while LEDGER.lock().holds(key) && started.elapsed() < std::time::Duration::from_secs(10) {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            queue().exec_sync(|| {});
+        }
+        assert!(!LEDGER.lock().holds(key), "the test binary is permitted nothing");
     }
 
     /// A work the system cannot take (a test binary has no bundle identifier) is refused and

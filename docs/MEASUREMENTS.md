@@ -17777,3 +17777,22 @@ an hour; the hour's price on the other 7.5 M writes adds about $22. Cache reads 
 of each lane's cost and output 5–10 %. The five subagents of session 27 started before the
 change wrote only at five minutes (`ephemeral_5m_input_tokens` in their usage, none at one
 hour), the main session only at one hour. Read from each transcript's `usage` fields.
+
+## 2026-10-18 — the audio session off the launch
+
+iOS launch put the process in the `Playback` category and activated the session on the main
+thread, before its first frame (`slopty_platform::playback_audio_session`). Measured in the
+iOS 27.1 simulator on this Mac (M1 Max, Xcode 27.0), each run a fresh process
+(`audio_session_tests`, spawned with `xcrun simctl spawn`), three runs each:
+
+| step on the calling thread | before | after |
+| --- | --- | --- |
+| the shared session | 4.8–6.9 ms | on its own thread |
+| `setCategory:withOptions:` | 36.5–48.0 ms | on its own thread |
+| the preferred I/O buffer | 0.05–0.07 ms | on its own thread |
+| the activation | 8.0–9.1 ms (`setActive:`) | iOS 27's `activateWithOptions:completionHandler:` |
+| what the launch waits | 50.8–56.3 ms | 0.05–0.38 ms |
+
+The category, not the activation, was the cost: iOS 27's asynchronous activation alone would
+have saved 8–9 ms of the 51–56. The whole setup now runs on a thread of its own, and nothing
+plays before a stream with sound opens, seconds later.

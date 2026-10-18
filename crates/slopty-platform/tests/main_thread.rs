@@ -30,7 +30,7 @@ mod mac {
     use slopty_platform::web::WebView;
 
     /// Every test, by name.
-    pub const TESTS: [(&str, fn()); 15] = [
+    pub const TESTS: [(&str, fn()); 16] = [
         (
             "a_download_shows_on_its_file_and_finders_cancel_ends_it",
             a_download_shows_on_its_file_and_finders_cancel_ends_it,
@@ -49,6 +49,10 @@ mod mac {
             a_layout_names_the_key_each_character_is_on,
         ),
         ("a_keyboard_is_heard_as_it_comes_and_goes", a_keyboard_is_heard_as_it_comes_and_goes),
+        (
+            "the_corners_go_off_and_come_back_with_a_remote_keyboard",
+            the_corners_go_off_and_come_back_with_a_remote_keyboard,
+        ),
         (
             "a_page_reaches_no_network_and_no_other_page",
             pages::a_page_reaches_no_network_and_no_other_page,
@@ -74,6 +78,25 @@ mod mac {
             pages::a_page_moved_to_the_pane_keeps_its_document,
         ),
     ];
+
+    /// macOS 27 takes the corners option with the Dock hidden, and the app's options follow a
+    /// remote keyboard both ways. The test binary is never the frontmost app, so the person's
+    /// Dock and corners stay as they are.
+    fn the_corners_go_off_and_come_back_with_a_remote_keyboard() {
+        use objc2_app_kit::{NSApplication, NSApplicationPresentationOptions as O};
+        use slopty_platform::corners;
+
+        let app = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
+        let before = app.presentationOptions();
+        app.setPresentationOptions(O::AutoHideDock | O::AutoHideMenuBar);
+        corners::remote_keyboard(true);
+        let off = app.presentationOptions();
+        corners::remote_keyboard(false);
+        let back = app.presentationOptions();
+        app.setPresentationOptions(before);
+        assert_eq!(off, O::AutoHideDock | O::AutoHideMenuBar | corners::CORNERS_OFF, "taken");
+        assert_eq!(back, O::AutoHideDock | O::AutoHideMenuBar, "given back");
+    }
 
     /// The first keyboard connecting is heard as attached and the last going as gone, on the
     /// main thread, as `GameController` posts them; a dropped watch hears nothing more.

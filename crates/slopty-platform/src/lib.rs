@@ -24,6 +24,8 @@ pub mod asked_size;
 #[cfg(target_os = "macos")]
 pub mod away;
 pub mod continued;
+#[cfg(target_os = "macos")]
+pub mod corners;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 pub mod cpu;
 #[cfg(target_os = "macos")]
@@ -69,6 +71,7 @@ pub mod power;
 pub mod privacy;
 #[cfg(target_os = "macos")]
 pub mod proc_files;
+pub mod resources;
 pub mod resume;
 #[cfg(target_vendor = "apple")]
 pub mod secure_input;
@@ -349,44 +352,67 @@ const IO_BUFFER_SECONDS: f64 = 0.01;
 
 /// Put the process in the `Playback` audio session category, mixing with other apps.
 ///
-/// Remote-window audio then plays through the ring switch and alongside music. macOS has no
-/// audio session; the call is a no-op there.
+/// Remote-window audio then plays through the ring switch and alongside music. The category
+/// alone takes 36–48 ms in a fresh process and the activation 8–9 more (MEASUREMENTS, "the
+/// audio session off the launch"), and launch calls this before its first frame, so it runs
+/// on a thread of its own and returns at once; nothing plays until a stream with sound opens.
+/// macOS has no audio session; the call is a no-op there.
 #[cfg(target_vendor = "apple")]
 #[cfg_attr(target_os = "macos", expect(clippy::missing_const_for_fn, reason = "a no-op here"))]
 pub fn playback_audio_session() {
     #[cfg(target_os = "ios")]
+    if let Err(e) =
+        std::thread::Builder::new().name("audio session".to_owned()).spawn(set_up_audio_session)
     {
-        use objc2_avf_audio::{
-            AVAudioSession, AVAudioSessionCategoryOptions, AVAudioSessionCategoryPlayback,
-        };
-        // SAFETY: AVFoundation rule: the shared session is created on first use from any
-        // thread; the category constant is the framework's own static (null only if the
-        // framework failed to load, which `Option` covers).
-        let session = unsafe { AVAudioSession::sharedInstance() };
-        // SAFETY: as above.
-        let Some(category) = (unsafe { AVAudioSessionCategoryPlayback }) else { return };
-        // SAFETY: category and options are valid for `setCategory:withOptions:error:`.
-        let set = unsafe {
-            session.setCategory_withOptions_error(
-                category,
-                AVAudioSessionCategoryOptions::MixWithOthers,
-            )
-        };
-        if let Err(e) = set {
-            tracing::warn!(error = %e, "audio session category");
-            return;
+        tracing::warn!(error = %e, "audio session thread");
+    }
+}
+
+/// [`playback_audio_session`]'s work, off the main thread.
+#[cfg(target_os = "ios")]
+fn set_up_audio_session() {
+    use objc2::msg_send;
+    use objc2::runtime::Bool;
+    use objc2_avf_audio::{
+        AVAudioSession, AVAudioSessionCategoryOptions, AVAudioSessionCategoryPlayback,
+    };
+    use objc2_foundation::NSError;
+    // SAFETY: AVFoundation rule: the shared session is created on first use from any
+    // thread; the category constant is the framework's own static (null only if the
+    // framework failed to load, which `Option` covers).
+    let session = unsafe { AVAudioSession::sharedInstance() };
+    // SAFETY: as above.
+    let Some(category) = (unsafe { AVAudioSessionCategoryPlayback }) else { return };
+    // SAFETY: category and options are valid for `setCategory:withOptions:error:`.
+    let set = unsafe {
+        session
+            .setCategory_withOptions_error(category, AVAudioSessionCategoryOptions::MixWithOthers)
+    };
+    if let Err(e) = set {
+        tracing::warn!(error = %e, "audio session category");
+        return;
+    }
+    // The player renders straight from its jitter ring on the device's I/O thread, so the
+    // I/O buffer is latency the listener hears; iOS defaults to about 23 ms (1024 frames).
+    // SAFETY: AVFoundation rule: a preferred duration may be set on the shared session
+    // before it is activated; the hardware may pick a different one, which is only a hint lost.
+    if let Err(e) = unsafe { session.setPreferredIOBufferDuration_error(IO_BUFFER_SECONDS) } {
+        tracing::warn!(error = %e, "audio session I/O buffer");
+    }
+    let answered = block2::RcBlock::new(|activated: Bool, error: *mut NSError| {
+        if !activated.as_bool() {
+            // SAFETY: AVAudioSession.h: the error is set when the session did not activate,
+            // valid for the call.
+            let why = unsafe { error.as_ref() }.map(ToString::to_string).unwrap_or_default();
+            tracing::warn!(error = %why, "audio session activate");
         }
-        // The player renders straight from its jitter ring on the device's I/O thread, so the
-        // I/O buffer is latency the listener hears; iOS defaults to about 23 ms (1024 frames).
-        // SAFETY: AVFoundation rule: a preferred duration may be set on the shared session
-        // before it is activated; the hardware may pick a different one, which is only a hint lost.
-        if let Err(e) = unsafe { session.setPreferredIOBufferDuration_error(IO_BUFFER_SECONDS) } {
-            tracing::warn!(error = %e, "audio session I/O buffer");
-        }
-        // SAFETY: activating the configured shared session.
-        if let Err(e) = unsafe { session.setActive_error(true) } {
-            tracing::warn!(error = %e, "audio session activate");
-        }
+    });
+    // iOS 27's activation returns at once and answers once, on any queue.
+    // SAFETY: AVAudioSession.h: `activateWithOptions:completionHandler:` (iOS 27) takes
+    // `AVAudioSessionActivationOptions` (an `NSUInteger`, none here) and a block of
+    // `(BOOL, NSError *)` that it copies and calls once.
+    unsafe {
+        let () = msg_send![&*session, activateWithOptions: 0_usize, completionHandler: &*answered];
     }
 }
 
@@ -640,5 +666,69 @@ mod tests {
             "MEASURE reduce motion: asking the system {asked:?} a read, the kept answer {kept:?}"
         );
         assert_eq!(super::reduce_motion(), super::system_reduce_motion());
+    }
+}
+
+/// iOS's audio session, each test in a fresh process, since the first use is what launch pays
+/// (run in the simulator: `xcrun simctl spawn <device> <test binary> audio_session::<test>
+/// --nocapture`).
+#[cfg(all(test, target_os = "ios"))]
+mod audio_session_tests {
+    use std::time::Instant;
+
+    use objc2::msg_send;
+    use objc2::runtime::Bool;
+    use objc2_avf_audio::{
+        AVAudioSession, AVAudioSessionCategoryOptions, AVAudioSessionCategoryPlayback,
+    };
+
+    /// What the launch's call takes now, with iOS 27's activation, which must be there.
+    #[test]
+    fn launch_call() {
+        let started = Instant::now();
+        super::playback_audio_session();
+        let returned = started.elapsed();
+        // SAFETY: AVFoundation rule: the shared session is created on first use from any thread.
+        let session = unsafe { AVAudioSession::sharedInstance() };
+        // SAFETY: NSObject rule: `respondsToSelector:` takes any selector.
+        let answers: Bool = unsafe {
+            msg_send![&*session, respondsToSelector: objc2::sel!(activateWithOptions:completionHandler:)]
+        };
+        assert!(answers.as_bool(), "iOS 27's activation");
+        println!("MEASURE audio session: the launch's call returns in {returned:?}");
+        assert!(returned.as_millis() < 5, "the launch waits on nothing: {returned:?}");
+    }
+
+    /// The same steps with the synchronous activation the floor's call replaced, each timed.
+    #[test]
+    fn synchronous_steps() {
+        let started = Instant::now();
+        // SAFETY: as in `playback_audio_session`.
+        let session = unsafe { AVAudioSession::sharedInstance() };
+        let shared = started.elapsed();
+        // SAFETY: as above; the category constant is the framework's own static.
+        let category = unsafe { AVAudioSessionCategoryPlayback }.expect("the category");
+        let at = Instant::now();
+        // SAFETY: category and options are valid for `setCategory:withOptions:error:`.
+        let set = unsafe {
+            session.setCategory_withOptions_error(
+                category,
+                AVAudioSessionCategoryOptions::MixWithOthers,
+            )
+        };
+        let categorised = at.elapsed();
+        let at = Instant::now();
+        // SAFETY: a preferred duration may be set before the session is activated.
+        let buffer =
+            unsafe { session.setPreferredIOBufferDuration_error(super::IO_BUFFER_SECONDS) };
+        let buffered = at.elapsed();
+        let at = Instant::now();
+        // SAFETY: activating the configured shared session.
+        let on = unsafe { session.setActive_error(true) };
+        let activated = at.elapsed();
+        println!(
+            "MEASURE audio session steps: shared {shared:?}, category {categorised:?}, I/O \
+             buffer {buffered:?}, synchronous activation {activated:?} ({set:?} {buffer:?} {on:?})"
+        );
     }
 }

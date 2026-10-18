@@ -184,6 +184,18 @@ struct Vendored {
     base: String,
 }
 
+/// A release Slopty waits for: the gate warns once the registry has it.
+#[derive(Debug, Deserialize)]
+struct Awaited {
+    /// The crate on crates.io.
+    #[serde(rename = "crate")]
+    name: String,
+    /// The first version that brings what is waited for.
+    version: String,
+    /// What to do once it is out.
+    then: String,
+}
+
 /// The whole file.
 #[derive(Debug, Deserialize)]
 struct Config {
@@ -197,6 +209,8 @@ struct Config {
     libghostty_rs: Fork,
     noq: Vendored,
     zeron: zeron::Copied,
+    #[serde(default)]
+    awaited: Vec<Awaited>,
 }
 
 impl Config {
@@ -655,6 +669,19 @@ pub fn warn_if_stale() {
                 )),
             }
         }
+        for awaited in &config.awaited {
+            match newest_release(&sh, &awaited.name) {
+                Ok(newest) if at_least(&newest, &awaited.version) => stale.push(format!(
+                    "{} {newest} is out (waiting for {}): {}",
+                    awaited.name, awaited.version, awaited.then
+                )),
+                Ok(_) => {}
+                Err(error) => stale.push(format!(
+                    "{}'s releases unreadable ({error:#}); waiting for {}",
+                    awaited.name, awaited.version
+                )),
+            }
+        }
         Ok(stale)
     };
     match report() {
@@ -665,6 +692,28 @@ pub fn warn_if_stale() {
         }
         Err(error) => println!("⚠ upstream: {CONFIG} unreadable ({error:#})"),
     }
+}
+
+/// The newest stable release of `name` on crates.io. A stalled connection gives up after a few
+/// seconds rather than holding the gate.
+fn newest_release(sh: &Shell, name: &str) -> Result<String> {
+    let url = format!("https://crates.io/api/v1/crates/{name}");
+    let agent = "slopty-xtask (https://github.com/aislopware/slopty)";
+    let body = cmd!(sh, "curl -fsSL --max-time 8 -A {agent} {url}").quiet().read()?;
+    let meta: serde_json::Value = serde_json::from_str(&body).context("crates.io's answer")?;
+    meta.pointer("/crate/max_stable_version")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .context("no stable version")
+}
+
+/// Whether version `have` is `want` or later, by their numbered parts (`0.10.0` is past `0.9.1`).
+fn at_least(have: &str, want: &str) -> bool {
+    let parts = |v: &str| -> Vec<u64> {
+        let release = v.split(['-', '+']).next().unwrap_or_default();
+        release.split('.').map(|p| p.parse().unwrap_or(0)).collect()
+    };
+    parts(have) >= parts(want)
 }
 
 /// The upstream branch's head, asked of the remote without fetching. A stalled connection gives
@@ -933,7 +982,7 @@ fn check_on_runner(
         full: false,
         accept_snapshots: false,
         attach: None,
-        runner: "macos-26".to_owned(),
+        runner: "xcode-27".to_owned(),
         probe: Some(runner_script(&forks)),
         head: true,
         workflow_ref: None,
@@ -1485,6 +1534,28 @@ fn days_from_civil(date: &str) -> Result<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A release counts once its numbered parts reach the awaited one's, compared as numbers.
+    #[test]
+    fn an_awaited_release_is_out_from_its_version_on() {
+        assert!(at_least("0.4.0", "0.4.0"), "the version itself");
+        assert!(at_least("0.10.0", "0.9.1"), "by number, not by text");
+        assert!(at_least("1.0.0", "0.4.0"), "a later major");
+        assert!(!at_least("0.3.2", "0.4.0"), "the one Slopty has");
+        assert!(!at_least("0.3.10", "0.4.0"), "a later patch of it");
+        assert!(at_least("0.4.0+xcode27", "0.4.0"), "build metadata ignored");
+    }
+
+    /// `upstream.toml` reads, its awaited releases included.
+    #[test]
+    fn the_config_names_the_awaited_releases() {
+        let root = repo_root().expect("root");
+        let config = Config::load(&root).expect("upstream.toml");
+        assert!(
+            config.awaited.iter().any(|a| a.name == "objc2-foundation"),
+            "objc2's framework crates for Xcode 27"
+        );
+    }
 
     fn tracking(base_date: &str, checked: &str, check_every_days: i64) -> Tracking {
         Tracking {

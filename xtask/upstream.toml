@@ -114,3 +114,13 @@ upstream_branch = "main"
 checkout = ".research/zeron"
 map = "xtask/zeron.toml"
 base = "c02739da309118c2174f427511110046f0bfba16"
+
+# Releases Slopty waits for rather than forking: the gate warns once crates.io has one. objc2's
+# framework crates (0.3.2) were generated from Xcode 16.4, so the few 27 calls Slopty makes are
+# declared by hand; 0.4.0 is upstream's Xcode 27 release, whose core and block2 changes break
+# every crate on objc2 at once, so the whole graph moves when it is out
+# (`docs/decisions/platform.md`, "Floor 27").
+[[awaited]]
+crate = "objc2-foundation"
+version = "0.4.0"
+then = "move objc2, block2, dispatch2 and the framework crates to it, fork any dependency still on 0.3, and delete the hand-declared 27 calls (continued::ios, playback_audio_session, corners::CORNERS_OFF, resources)"
