@@ -17747,3 +17747,33 @@ Each extra 2 GB filled at once and changed nothing that failed; the 10 GB run fa
 same page card as the 6 GB run after the start fix. The guest stays at 6 GB
 (`docs/decisions/tooling.md`, "6 GB stays, measured against 8 and 10 GB"). Logs:
 `target/lanes/B/mem-{six,eight,ten}.{log,guest,host,build}`.
+
+## 2026-10-18 — first launch of a new binary, herdr under Developer Tools
+
+`cargo xtask doctor` from herdr, now listed under Developer Tools: three fresh binaries, each
+first launch against its second, median **554 µs** longer, against 261 ms on 2026-09-30 when it
+was not listed. A full tests lane launches about 100 new test binaries, so about 26 s of
+single-threaded scanning a lane is gone.
+
+## 2026-10-18 — where a lane's tokens go
+
+Read from the transcripts of session 26's six lanes (all Opus 5.5, 2026-10-18 04:00–09:15 UTC),
+priced at list: $4 input, $20 output, $0.20 cache read and $5 five-minute cache write per
+million tokens.
+
+| lane | turns | context a turn | cache read | cache write | of it, rewrites after expiry | output | cost |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| B | 1066 | 247k | 263 M | 10.1 M | 8.3 M (26) | 498k | $113 |
+| P | 1349 | 239k | 322 M | 5.0 M | 2.8 M (10) | 655k | $102 |
+| R | 829 | 252k | 209 M | 9.6 M | 8.0 M (21) | 540k | $101 |
+| Z | 586 | 235k | 138 M | 4.0 M | 3.0 M (7) | 228k | $53 |
+| G | 293 | 249k | 73 M | 1.4 M | 0.7 M (2) | 220k | $26 |
+| F | 126 | 103k | 13 M | 0.6 M | 0.3 M (2) | 69k | $7 |
+
+A rewrite is a turn that wrote more than 50k tokens to the cache and read less than it wrote:
+the context written again after its five minutes ran out. The 68 rewrites came to 23.2 M of the
+30.7 M tokens written, about $116 of $402, and became reads ($5) once a subagent's cache lasts
+an hour; the hour's price on the other 7.5 M writes adds about $22. Cache reads were 45–55 %
+of each lane's cost and output 5–10 %. The five subagents of session 27 started before the
+change wrote only at five minutes (`ephemeral_5m_input_tokens` in their usage, none at one
+hour), the main session only at one hour. Read from each transcript's `usage` fields.

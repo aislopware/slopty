@@ -794,7 +794,8 @@ more full-window layer.
     binary had before and times each first launch against its second. It names what to list:
     the outermost app among its ancestors, or else the outermost process, such as a multiplexer
     server that launchd started. It prints the exact path in System Settings. Here, from
-    herdr, the median was 261 ms a binary; the switch was not on.
+    herdr, the median was 261 ms a binary; the switch was not on. With herdr listed under
+    Developer Tools (2026-10-18) it was 554 µs, and doctor reports builds from herdr exempt.
   - It changes no setting. Developer Tools is the user's to switch on for the app it names.
 
 - ✅ **`RealtimeSanitizer` on the audio render callback, in the nightly lane** (2026-09-30).
@@ -1630,6 +1631,40 @@ more full-window layer.
     checking before a commit is cheaper than a red gate run's cycle, and it keeps unverified
     code out of the `HEAD` every lane's check stands on.
 
+- ✅ **Lanes run on the model their work needs, with an hour of cache** (2026-10-18). Until now
+  every lane ran on Opus. The six lanes of session 26 cost about $400 at list prices, and the
+  transcripts show where it went (`docs/MEASUREMENTS.md`, "2026-10-18 — where a lane's tokens
+  go"). A lane carried about 240k tokens of context into each of its 130–1350 turns, so cache
+  reads were 45–55 % of its cost; they cost $0.20 per million on Sonnet 5.5 and Opus 5.5 alike.
+  The cache writes were the other large part, and 75 % of them rewrote a context whose cache
+  had expired: a subagent's cache lasts five minutes unless it is given longer ("Subagents fall
+  outside the main-conversation TTL bucket, so they get five minutes even on a subscription
+  until you choose a longer one", https://code.claude.com/docs/en/prompt-caching), and a lane
+  waits 5–15 minutes on a check or an e2e run.
+  - Every subagent here keeps its cache for an hour (`subagentPromptCacheTtl` in
+    `.claude/settings.json`, and `experimental.cacheTtl` in each definition). An hour's write
+    costs twice the input price against 1.25 times for five minutes, but a lane's writes after
+    the first are its new turns, and the 68 rewrites of session 26 (23 M tokens) become reads.
+    This changes nothing a lane does, only what its waits cost.
+  - The model follows the work (`.claude/agents/`): `lane` (Opus) for causes, flakes, design,
+    UI and golden review, upstream adoption and synthesis, and whenever the shape is unclear;
+    `mechanic` (Sonnet 5.5, effort high) for a change specified site by site with the check
+    that proves it; `runner` (Sonnet, medium) to run long checks and report them; `reader`
+    (Sonnet, medium) to gather facts into one file with their sources. Sonnet 5.5 costs half of
+    Opus 5.5 for input, output and cache writes, so on the same turns it takes about a quarter
+    off a lane's cost, the reads being equal; a Sonnet lane that needs more turns or a redo
+    costs more than Opus would have. So Sonnet gets only work whose result a check or a
+    reviewer settles at once, and Anthropic's own guidance points the same way: price per
+    completed task, and run cheap first and re-run failures higher only where a failure signal
+    exists (the claude-api skill's cost guide, "Re-run failures at higher effort").
+  - Quality holds by three rules. A `mechanic` that meets a choice its brief did not make, or
+    the same red twice for no cause in its own diff, stops and reports, and an Opus lane takes
+    it on from its notes. Every Sonnet diff gets the orchestrator's adversarial review before it
+    is staged. A runner's report is judged by Opus, never acted on as read.
+  - Lanes spawn no sub-agents (`disallowedTools: Agent`): the Mac's cores and the paths a lane
+    owns are the limits, not the number of agents (`lanes` skill). Haiku runs nothing here:
+    the cost guide places it on high-volume work with checkable outputs, "not long agentic
+    loops".
 - ✅ **One compile cache key space on CI** (2026-10-11, `.research/ci-speed-2026-10-11.md`
   item 2). sccache v0.18.0 keys a rustc call by its arguments, its inputs, the cwd and every
   `CARGO_*` variable in its environment (`generate_hash_key`, `src/compiler/rust.rs`), less

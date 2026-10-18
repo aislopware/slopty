@@ -36,3 +36,13 @@ wait"; the commands: `docs/DEV.md`, "Dev loop".
   (`cargo xtask stage <name>@<sha>`, never `git add`),
   runs one quick gate over the batch, commits by owner and lands at once. A red gate is fixed
   forward by the lane that owns it.
+
+- Each lane runs as the agent its work needs (`.claude/agents/`; `docs/decisions/tooling.md`,
+  "Lanes run on the model their work needs"): `lane` (Opus) for anything that needs judgment
+  (causes, flakes, design, UI and golden review, upstream adoption, synthesis) and whenever the
+  shape is unclear; `mechanic` (Sonnet) only for a change the brief specifies site by site with
+  the check that proves it; `runner` (Sonnet) to run long checks and report them; `reader`
+  (Sonnet) to gather facts into a file. A `mechanic` that meets a choice the brief did not make
+  stops and reports, and an Opus lane takes it on from its notes. Every Sonnet diff gets the
+  orchestrator's adversarial review before it is staged, and a runner's report is judged by
+  Opus, never acted on as read.
