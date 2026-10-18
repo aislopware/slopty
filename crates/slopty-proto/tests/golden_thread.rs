@@ -24,11 +24,11 @@ mod golden_thread {
         Action, Activity, AgentId, AgentNote, AgentScreen, Answerer, AskId, BackgroundTask,
         CallNote, Cap, Changed, Choice, Clipped, Command, Compaction, ContentRef, ContextCategory,
         ContextUsage, Cursor, Delivery, Drive, Edge, Effect, Effort, Fork, Goal, Image, IntentId,
-        Item, ItemBody, ItemId, Limit, Link, Liveness, Meters, Mode, Model, Notice, PartKey, Patch,
-        Pending, PendingState, Phase, Plan, Request, RequestState, Retry, Rule, RuleChange, Rules,
-        SideExchange, Status, Step, SubagentKind, Surface, SurfaceEvent, TaskNote, TaskUsage,
-        ThreadId, ThreadMeta, ThreadState, ToolCall, ToolDetail, ToolState, TreeRef, Turn, TurnId,
-        TurnState, Usage, UserMessage, Wait, kind,
+        Item, ItemBody, ItemId, Limit, Link, Liveness, McpServer, Meters, Mode, Model, Notice,
+        PartKey, Patch, Pending, PendingState, Phase, Plan, Request, RequestState, Retry, Rule,
+        RuleChange, Rules, SideExchange, Status, Step, SubagentKind, Surface, SurfaceEvent,
+        TaskNote, TaskUsage, ThreadId, ThreadMeta, ThreadState, ToolCall, ToolDetail, ToolState,
+        TreeRef, Turn, TurnId, TurnState, Usage, UserMessage, Wait, kind,
     };
     use uuid::Uuid;
 
@@ -810,6 +810,11 @@ mod golden_thread {
         snap("intent_shell", &send(Intent::Shell { command: "pwd".to_owned() }));
         snap("intent_rewind", &send(Intent::Rewind { turn: TurnId(2) }));
         snap("intent_side", &send(Intent::Side { question: "Which test covers this?".to_owned() }));
+        snap("intent_mcp_reconnect", &send(Intent::McpReconnect { server: "github".to_owned() }));
+        snap(
+            "intent_mcp_enable",
+            &send(Intent::McpEnable { server: "github".to_owned(), enabled: false }),
+        );
         snap(
             "intent_rule",
             &send(Intent::Rule(RuleChange {
@@ -905,6 +910,12 @@ mod golden_thread {
                 name: "Explore".to_owned(),
                 description: "Searches the code".to_owned(),
                 model: Some("haiku".to_owned()),
+            }]),
+            Action::McpServersSet(vec![McpServer {
+                name: "github".to_owned(),
+                status: McpServer::FAILED.to_owned(),
+                error: Some("Connection closed".to_owned()),
+                source: Some("user".to_owned()),
             }]),
             Action::ContextSet(ContextUsage {
                 categories: vec![

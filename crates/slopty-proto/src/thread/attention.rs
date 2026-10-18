@@ -75,7 +75,7 @@ impl Rung {
             Self::Failed => Some("Failed"),
             Self::ToReview => Some("To review"),
             Self::Working => Some("Working"),
-            Self::Waiting => Some("Waiting"),
+            Self::Waiting => Some("Background work"),
             Self::Idle => None,
         }
     }

@@ -3,7 +3,7 @@
 //! Its background tasks' figures and the notices they end with, each call's running time and the
 //! words it ended with, the turn's live line, the goal it works towards, its passing
 //! notifications and next prompt it guesses, its permission rules, its status line, its subagent
-//! kinds, its context by category, and the surfaces its mods draw.
+//! kinds, its context by category, its MCP servers, and the surfaces its mods draw.
 //!
 //! Every shape here is agent-neutral and open where agents differ: Claude Code's stream-json
 //! drive fills them (`docs/decisions/agents.md`, "Claude Code's TUI, read from its doors"), and
@@ -283,6 +283,42 @@ pub struct ContextUsage {
     /// The share of the window at which it compacts on its own, in hundredths of a percent;
     /// `None` when it does not.
     pub auto_compact_bp: Option<u32>,
+}
+
+/// One of the agent's MCP servers, as the agent last said it ([`super::Action::McpServersSet`]).
+///
+/// What the context card lists, with a reconnect for one that is not connected and an enable
+/// or disable for any ([`super::wire::Intent::McpReconnect`], [`super::wire::Intent::McpEnable`]).
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct McpServer {
+    /// Its name, as the agent's config names it.
+    pub name: String,
+    /// Where it stands. Open: [`McpServer::CONNECTED`], [`McpServer::PENDING`],
+    /// [`McpServer::FAILED`], [`McpServer::NEEDS_AUTH`], [`McpServer::DISABLED`].
+    pub status: String,
+    /// Why it failed, in the agent's words, when it did.
+    pub error: Option<String>,
+    /// Where it is configured, in the agent's words: `user`, `project`, `local`, `plugin`.
+    pub source: Option<String>,
+}
+
+impl McpServer {
+    /// Connected, its tools offered.
+    pub const CONNECTED: &'static str = "connected";
+    /// Turned off by the person.
+    pub const DISABLED: &'static str = "disabled";
+    /// It did not connect, or the connection dropped.
+    pub const FAILED: &'static str = "failed";
+    /// It waits on the person signing in.
+    pub const NEEDS_AUTH: &'static str = "needs-auth";
+    /// Still connecting.
+    pub const PENDING: &'static str = "pending";
+
+    /// Whether a reconnect is worth offering: it is on and not connected.
+    #[must_use]
+    pub fn reconnects(&self) -> bool {
+        self.status != Self::CONNECTED && self.status != Self::DISABLED
+    }
 }
 
 /// One category of the context ("System prompt", "Messages", "Free space").

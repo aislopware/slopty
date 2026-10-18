@@ -429,6 +429,24 @@ pub enum Intent {
         /// The question.
         question: String,
     },
+    /// Connect one of the agent's MCP servers again, by its name
+    /// ([`McpServer::name`](super::McpServer::name)): one that failed, dropped or still waits
+    /// ([`Cap::MCP_SERVERS`]). Done once it went to the agent; a reconnect that fails comes
+    /// back as a notice with the agent's reason, and the servers as the agent then lists them
+    /// as [`Action::McpServersSet`]. Only the person's word sends it: Slopty never reconnects
+    /// on its own.
+    McpReconnect {
+        /// The server.
+        server: String,
+    },
+    /// Turn one of the agent's MCP servers on or off, by its name ([`Cap::MCP_SERVERS`]), as
+    /// the TUI's `/mcp` does: the agent keeps the choice in its own settings.
+    McpEnable {
+        /// The server.
+        server: String,
+        /// On, or off.
+        enabled: bool,
+    },
 }
 
 /// A file's change as a review showed it, or some of its hunks.
@@ -491,6 +509,7 @@ impl Intent {
             Self::Rule(_) => Cap::RULES,
             Self::Surface { .. } => Cap::SURFACES,
             Self::Side { .. } => Cap::SIDE,
+            Self::McpReconnect { .. } | Self::McpEnable { .. } => Cap::MCP_SERVERS,
         })
     }
 

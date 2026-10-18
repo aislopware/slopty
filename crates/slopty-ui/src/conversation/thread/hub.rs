@@ -588,6 +588,9 @@ pub fn refused_words(intent: &Intent, why: &str) -> String {
         Intent::Rule(_) => "Couldn't change the rule".to_owned(),
         Intent::Surface { .. } => "The mod didn't take it".to_owned(),
         Intent::Side { .. } => "Couldn't ask the side question".to_owned(),
+        Intent::McpReconnect { server } => format!("Couldn't reconnect {server}"),
+        Intent::McpEnable { server, enabled: true } => format!("Couldn't enable {server}"),
+        Intent::McpEnable { server, enabled: false } => format!("Couldn't disable {server}"),
     };
     format!("{what}: {why}")
 }

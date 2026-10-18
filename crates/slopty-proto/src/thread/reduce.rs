@@ -9,9 +9,9 @@ use slopty_core::WallMs;
 use super::wire::{Draft, Page, PullSeen, RequestCard, TableFrame, ThreadRow, TurnEnded};
 use super::{
     Action, Activity, AgentNote, AgentScreen, BackgroundTask, CallNote, Changed, Clipped, Command,
-    ContextUsage, Cursor, Edge, Goal, IntentId, Item, ItemBody, ItemId, Meters, PartKey, Pending,
-    Plan, Request, Rules, Status, SubagentKind, Surface, ThreadId, ThreadMeta, ToolState, Turn,
-    TurnId, TurnState,
+    ContextUsage, Cursor, Edge, Goal, IntentId, Item, ItemBody, ItemId, McpServer, Meters, PartKey,
+    Pending, Plan, Request, Rules, Status, SubagentKind, Surface, ThreadId, ThreadMeta, ToolState,
+    Turn, TurnId, TurnState,
 };
 
 /// Settled requests a thread keeps, newest last, so a client that comes back still sees who
@@ -88,6 +88,8 @@ pub struct ThreadState {
     pub agents: Vec<SubagentKind>,
     /// Its context by category, once read ([`Action::ContextSet`]).
     pub context: Option<ContextUsage>,
+    /// Its agent's MCP servers, as it last said them ([`Action::McpServersSet`]).
+    pub servers: Vec<McpServer>,
     /// What its agent's mods draw, in the order they came ([`Action::SurfaceSet`]).
     pub surfaces: Vec<Surface>,
 }
@@ -127,6 +129,7 @@ impl ThreadState {
             rewound: None,
             agents: Vec::new(),
             context: None,
+            servers: Vec::new(),
             surfaces: Vec::new(),
         }
     }
@@ -250,6 +253,7 @@ impl ThreadState {
             Action::Rewound(rewound) => self.rewound.clone_from(rewound),
             Action::AgentsSet(agents) => self.agents.clone_from(agents),
             Action::ContextSet(context) => self.context = Some(context.clone()),
+            Action::McpServersSet(servers) => self.servers.clone_from(servers),
             Action::SurfaceSet(surface) => {
                 match self.surfaces.iter_mut().find(|s| s.id == surface.id) {
                     Some(have) => *have = surface.clone(),

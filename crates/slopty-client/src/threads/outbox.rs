@@ -94,7 +94,9 @@ impl Sent {
             | Intent::Unrewind { .. }
             | Intent::Rule(_)
             | Intent::Surface { .. }
-            | Intent::Side { .. } => self.outcome.is_some(),
+            | Intent::Side { .. }
+            | Intent::McpReconnect { .. }
+            | Intent::McpEnable { .. } => self.outcome.is_some(),
         }
     }
 

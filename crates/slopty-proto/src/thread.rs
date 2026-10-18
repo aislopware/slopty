@@ -43,8 +43,8 @@ pub mod work;
 pub use detail::{Clipped, ContentRef, Image, Patch, ToolDetail};
 pub use reduce::{RESOLVED_KEPT, TableState, ThreadState};
 pub use work::{
-    Activity, AgentNote, CallNote, ContextCategory, ContextUsage, Goal, Rewound, Rule, RuleChange,
-    Rules, SideExchange, SubagentKind, Surface, SurfaceEvent, TaskNote, TaskUsage,
+    Activity, AgentNote, CallNote, ContextCategory, ContextUsage, Goal, McpServer, Rewound, Rule,
+    RuleChange, Rules, SideExchange, SubagentKind, Surface, SurfaceEvent, TaskNote, TaskUsage,
 };
 
 macro_rules! uuid_id {
@@ -250,6 +250,9 @@ impl Cap {
     pub const FORK: &'static str = "fork";
     /// [`wire::Intent::Interrupt`].
     pub const INTERRUPT: &'static str = "interrupt";
+    /// [`wire::Intent::McpReconnect`] and [`wire::Intent::McpEnable`]: the person reconnects,
+    /// enables or disables one of the agent's MCP servers ([`Action::McpServersSet`]).
+    pub const MCP_SERVERS: &'static str = "mcp-servers";
     /// [`wire::Intent::Send`] with [`Delivery::Queue`], held until the turn ends, and the
     /// editing of what is held.
     pub const QUEUE: &'static str = "queue";
@@ -1005,10 +1008,10 @@ impl Request {
     /// [`Request::CANCEL`].
     pub const ELICITATION: &'static str = "elicitation";
     /// What a card that only the person at it answers says ([`Request::needs_presence`]).
-    pub const NEEDS_PRESENCE: &'static str = "Needs you at the card";
+    pub const NEEDS_PRESENCE: &'static str = "Answer here";
     /// Why an answer from anywhere but the card is refused ([`Request::needs_presence`]).
     pub const NEEDS_PRESENCE_REFUSED: &'static str =
-        "Needs you at the card: the agent takes this answer only from its card in Slopty";
+        "Answer here: the agent takes this answer only from its card in Slopty";
     /// A plan to approve.
     pub const PLAN: &'static str = "plan";
     /// Questions for the person.
@@ -1570,6 +1573,8 @@ pub enum Action {
     /// mod beats every few seconds), else the worker's check that its process lives. A client
     /// that sees it go stale shows the turn as no longer known to run.
     Lease(WallMs),
+    /// The agent's MCP servers, in its order, as it last said them.
+    McpServersSet(Vec<McpServer>),
 }
 
 /// The first of `pending` a queue sends next: the oldest that waits for its moment, not held

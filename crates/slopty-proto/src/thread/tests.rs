@@ -498,6 +498,7 @@ fn what_a_resting_thread_left_ranks_it_above_rest() {
     let rung = |state: &ThreadState| Rung::of(&state.row(WallMs::ZERO));
     assert_eq!(rung(&state), Rung::Idle);
     assert_eq!(Rung::Idle.word(), None);
+    assert_eq!(Rung::Waiting.word(), Some("Background work"), "its own work, not the person");
     state.to_review = true;
     assert_eq!(rung(&state), Rung::ToReview);
     state.to_review = false;
@@ -718,4 +719,35 @@ fn dialogs_and_item_assets_read_back() {
     assert_eq!(asset.item_asset_of(), Some(("toolu_1", "models/a.glb")));
     assert_eq!(ContentRef("item-asset:toolu_1".to_owned()).item_asset_of(), None);
     assert_eq!(ContentRef::blob("abc").item_asset_of(), None);
+}
+
+/// The MCP servers the agent last listed replace the ones before, and a server off or connected
+/// offers no reconnect.
+#[test]
+fn mcp_servers_are_replaced_whole_and_offer_a_reconnect_only_when_down() {
+    let server = |name: &str, status: &str| McpServer {
+        name: name.to_owned(),
+        status: status.to_owned(),
+        error: None,
+        source: None,
+    };
+    let state = run(&[
+        Action::McpServersSet(vec![
+            server("a", McpServer::FAILED),
+            server("b", McpServer::PENDING),
+        ]),
+        Action::McpServersSet(vec![server("a", McpServer::CONNECTED)]),
+    ]);
+    assert_eq!(state.servers, vec![server("a", McpServer::CONNECTED)]);
+    let offers: Vec<bool> = [
+        McpServer::CONNECTED,
+        McpServer::DISABLED,
+        McpServer::FAILED,
+        McpServer::NEEDS_AUTH,
+        McpServer::PENDING,
+    ]
+    .iter()
+    .map(|status| server("s", status).reconnects())
+    .collect();
+    assert_eq!(offers, [false, false, true, true, true]);
 }
