@@ -761,7 +761,7 @@ impl Shell {
             panel.update(cx, |panel, cx| panel.select_tab_by_key(key, cx));
         }
         cx.notify();
-        let mut params = serde_json::json!({ "chatId": chat, "cols": 80, "rows": 24 });
+        let mut params = serde_json::json!({ "chatId": chat });
         if let Some(object) = params.as_object_mut() {
             if let Some(folder) = &folder {
                 object.insert("cwd".into(), serde_json::Value::String(folder.clone()));
@@ -776,6 +776,12 @@ impl Shell {
         };
         let id = format!("{}/{key}", if in_pane { "pane/terminal" } else { "terminal" });
         cx.spawn(async move |this, cx| {
+            let (cols, rows) =
+                crate::terminal::panel::TerminalPanel::grid(&panel.downgrade(), cx).await;
+            if let Some(object) = params.as_object_mut() {
+                object.insert("cols".into(), cols.into());
+                object.insert("rows".into(), rows.into());
+            }
             let opened =
                 engine.client().call_as::<TerminalSession>(methods::OPEN_TERMINAL, params).await;
             let session = match opened {

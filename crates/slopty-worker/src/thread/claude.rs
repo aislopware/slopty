@@ -24,10 +24,10 @@
 //! - **A fork at a turn** keeps the conversation through that turn: Claude Code resumes the session
 //!   at that turn's last record into a new one (`--resume-session-at`).
 //! - **Taken up from Claude Code's sessions** (`--resume <id>`): the thread is read from the
-//!   session's transcript, and Claude Code starts with the first message, none before. A session
-//!   another live Claude Code on the machine holds ([`held`]) is shown and not taken: nothing
-//!   starts on it and no message goes to it until the other ends, as Claude Code's own resume
-//!   refuses it.
+//!   session's transcript, seen through its last turn, and Claude Code starts with the first
+//!   message, none before. A session another live Claude Code on the machine holds ([`held`]) is
+//!   shown and not taken: nothing starts on it and no message goes to it until the other ends, as
+//!   Claude Code's own resume refuses it.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -880,6 +880,13 @@ impl Served {
             take(&self.host, outs);
             if let Err(why) = read {
                 say(&self.host, thread, "unread", &format!("{UNREAD}: {why}"));
+            }
+            // Taken up, it opens in front of the person, and what it held they read where it
+            // ran: seen through its last turn, so it reads so on a device the turns reach
+            // after the open.
+            let last = self.host.state(thread).and_then(|(s, _)| s.last_turn().map(|t| t.id));
+            if let Some(last) = last {
+                self.host.apply(thread, vec![Action::Seen(last)]);
             }
             if first.is_empty() {
                 // Nothing to say yet: Claude Code starts with the first message. Until then the

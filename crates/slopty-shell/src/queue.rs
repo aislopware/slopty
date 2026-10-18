@@ -23,6 +23,7 @@ use crate::motion::{self, AnimationExt as _, TAB_SLIDE};
 use crate::settings::widgets; // slopty: the house tooltip and its key.
 use crate::terminal::panel::{drop_index, slide_offset};
 use crate::theme::Theme;
+use crate::motion::HoverFade as _;
 
 /// Queue rows are replicated CRDT state, so ordinary mutations deliberately
 /// land on the local engine. Delivery and cancellation must execute on the
@@ -702,7 +703,7 @@ impl Composer {
             .when(!being_edited && !being_removed, |el| {
                 let fade = SharedString::from(format!("{key}-row-hover"));
                 el.bg(motion::hover_blend(&fade, gpui::transparent_black(), crate::theme::ink(0.05)))
-                    .on_hover(motion::hover_listener(fade))
+                    .hover_fade(fade)
             })
             .when(being_removed, |el| el.opacity(0.55))
             .cursor(gpui::CursorStyle::Arrow)
@@ -1138,7 +1139,7 @@ impl Composer {
                 .opacity(0.72 + 0.28 * hover)
                 .cursor_pointer()
                 .bg(motion::hover_blend(&fade, gpui::transparent_black(), crate::theme::ink(0.07)))
-                .on_hover(motion::hover_listener(fade))
+                .hover_fade(fade)
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(move |event, window, cx| {
                     cx.stop_propagation();
@@ -1204,7 +1205,7 @@ impl Composer {
                     .cursor_pointer()
                     .bg(motion::hover_blend(&fade, gpui::transparent_black(), crate::theme::ink(0.07)))
                     .text_color(motion::mix(theme.text_muted, theme.text, lit))
-                    .on_hover(motion::hover_listener(fade))
+                    .hover_fade(fade)
                     .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(move |event, window, cx| {
                         cx.stop_propagation();
@@ -1455,7 +1456,7 @@ impl Composer {
                 .text_color(motion::mix(theme.text_muted, theme.text, lit))
                 .cursor_pointer()
                 .bg(motion::hover_blend(&fade, gpui::transparent_black(), crate::theme::wash(0.11)))
-                .on_hover(motion::hover_listener(fade))
+                .hover_fade(fade)
                 .child(label)
         };
         Some(

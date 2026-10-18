@@ -435,13 +435,11 @@ impl Shell {
             panel.select_tab_by_key(tab, cx);
         });
 
-        let params = project_action_params(
+        let mut params = project_action_params(
             serde_json::json!({
                 "spaceId": context.key.space_id,
                 "chatId": context.chat_id,
                 "actionId": action.id,
-                "cols": 80,
-                "rows": 24,
             }),
             &context.target_device_id,
         );
@@ -450,6 +448,12 @@ impl Shell {
         let target = context.target_device_id.clone();
         let action_id = action.id.clone();
         cx.spawn(async move |this, cx| {
+            let (cols, rows) =
+                crate::terminal::panel::TerminalPanel::grid(&panel.downgrade(), cx).await;
+            if let Some(object) = params.as_object_mut() {
+                object.insert("cols".into(), cols.into());
+                object.insert("rows".into(), rows.into());
+            }
             let result = engine
                 .client()
                 .call_as::<ProjectActionRun>(methods::RUN_PROJECT_ACTION, params)

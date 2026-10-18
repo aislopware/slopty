@@ -734,8 +734,9 @@ mod claude {
         argv.windows(2).any(|w| w == ["--resume", id])
     }
 
-    /// A session the TUI left, taken up with no first message, is read from its transcript and
-    /// rests with nothing started: Claude Code starts on the session with the first message.
+    /// A session the TUI left, taken up with no first message, is read from its transcript, seen
+    /// through it, and rests with nothing started: Claude Code starts on the session with the
+    /// first message.
     #[tokio::test]
     async fn a_resumed_session_starts_claude_code_with_its_first_message() {
         let rig = Rig::new(&[]).await;
@@ -749,12 +750,15 @@ mod claude {
             .until(thread, "read from its transcript", |s| s.turns.len() == 1 && exited(s))
             .await;
         assert!(notices(&state).is_empty(), "nothing to say: {:?}", notices(&state));
+        let read = state.last_turn().map(|t| t.id);
+        assert_eq!(Some(state.seen), read, "what it held is seen");
         tokio::time::sleep(Duration::from_millis(500)).await;
         assert_eq!(rig.record(), Value::Null, "nothing started before the first message");
 
         rig.send(&claude, thread, "Keep going.");
         let state = rig.until(thread, "the turn", turn_ended(2, TurnState::Complete)).await;
         assert_eq!(state.status.liveness, Liveness::Live);
+        assert_eq!(Some(state.seen), read, "a turn of its own is unread");
         let record = rig.record();
         assert!(resumed_on(&record, id), "on the same session: {:#}", record["argv"]);
         assert_eq!(heard(&record, "user").len(), 1, "the first message, once");

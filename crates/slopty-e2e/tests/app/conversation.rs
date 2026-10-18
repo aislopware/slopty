@@ -72,6 +72,11 @@ async fn stop_and_a_turns_end_leave_the_chat_still() {
     let stopped = y_of(drv, "wait 60").await;
     println!("MEASURE stop-no-shift: the message at {running:.1} running, {stopped:.1} stopped");
     assert!((running - stopped).abs() <= 1.0, "Stop moved the chat: {running} → {stopped}");
+    // The pointer off the window: Send takes Stop's place under it, and its tooltip, shown once
+    // the pointer rests long enough, is no part of the golden.
+    let drv = &mut stack.driver;
+    drv.ok(&slopty_e2e::Command::Move { x: -1.0, y: -1.0 }).await.unwrap();
+    seen(drv, "no tooltip", STEP, |d| d.a11y.iter().all(|n| n.role != "Tooltip")).await;
     let renders = stack.path("");
     goldens(&mut stack.driver, &renders, "composer-stop-no-shift", &[]).await;
 

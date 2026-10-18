@@ -21,6 +21,7 @@ use slopty_view_doc::{SubagentProgress, SubagentStatus};
 
 use super::{CHIP_CARD_HEIGHT, ToolItem, Transcript, TranscriptEvent, subagent_tab_title};
 use crate::theme::Theme;
+use crate::motion::HoverFade as _;
 
 /// The step line under a card's header.
 const STEP_LINE_HEIGHT: f32 = 20.0;
@@ -375,7 +376,7 @@ impl Transcript {
                     move |s| s.opacity(1.0).outline_ring(ring)
                 })
                 .bg(crate::motion::hover_blend(&fade, gpui::transparent_black(), crate::theme::wash(0.11)))
-                .on_hover(crate::motion::hover_listener(fade))
+                .hover_fade(fade)
                 .tooltip(crate::settings::widgets::text_tooltip(label))
                 .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
                 .child(
@@ -575,7 +576,7 @@ impl Transcript {
             .line_height(px(super::TOOL_LABEL_LINE_HEIGHT))
             .cursor_pointer()
             .bg(crate::motion::hover_blend(&card_fade, crate::theme::ink(0.03), crate::theme::ink(0.05)))
-            .on_hover(crate::motion::hover_listener(card_fade))
+            .hover_fade(card_fade)
             .on_click(cx.listener({
                 let key = toggle_key.clone();
                 let chat = card.chat.clone();

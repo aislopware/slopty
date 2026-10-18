@@ -30,6 +30,7 @@ use crate::{
     syntax_cache::{DocumentHighlightKey, SyntaxHighlightCache},
     theme::Theme,
 };
+use crate::motion::HoverFade as _;
 
 const PREVIEW_LINE_HEIGHT: f32 = 20.0;
 /// One shared `code_font_size` setting drives two surfaces in this file that
@@ -2972,7 +2973,7 @@ impl FilesSurface {
                         .aria_label(format!("Comment on line {line}"))
                         .hover(|style| style.bg(theme.surface_card))
                         // slopty: the adder fades in with the line's hover (M23).
-                        .on_hover(crate::motion::hover_listener(reveal.clone()))
+                        .hover_fade(reveal.clone())
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.open_editor_comment_draft(target.clone(), line, window, cx)
                         }))
@@ -3045,7 +3046,7 @@ impl FilesSurface {
         let id = comment.id.clone();
         let card = crate::popover::popover_card_flush(theme)
             .id(group.clone())
-            .on_hover(crate::motion::hover_listener(reveal))
+            .hover_fade(reveal)
             .group(group.clone())
             .absolute()
             .left(px(left))
@@ -3391,7 +3392,7 @@ fn editor_comment_action(
                     gpui::transparent_black(),
                     theme.element_hover,
                 ))
-                .on_hover(crate::motion::hover_listener(id))
+                .hover_fade(id)
         })
         .child(SharedString::from(label))
 }

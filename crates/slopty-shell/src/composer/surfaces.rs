@@ -342,7 +342,7 @@ impl SurfaceState {
                                 let lit = if selected { crate::theme::ink(0.09) } else { crate::theme::ink(0.05) };
                                 el.cursor_pointer()
                                     .bg(crate::motion::hover_blend(&fade, rest, lit))
-                                    .on_hover(crate::motion::hover_listener(fade.clone()))
+                                    .hover_fade(fade.clone())
                                     .on_click(
                                     move |_, _, cx| {
                                         emit(&surface, &element, "select", Some(serde_json::Value::String(value.clone())), cx)
@@ -548,7 +548,7 @@ impl Composer {
                                     gpui::transparent_black(),
                                     crate::theme::wash(0.11),
                                 ))
-                                .on_hover(crate::motion::hover_listener(format!("mod-band-close-{}", surface.id)))
+                                .hover_fade(format!("mod-band-close-{}", surface.id))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     if live {
                                         close_emit(&close_id, "", "close", None, cx);

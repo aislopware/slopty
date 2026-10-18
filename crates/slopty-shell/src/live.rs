@@ -16,7 +16,7 @@ pub mod screen;
 
 use std::rc::Rc;
 
-use gpui::{AnyView, App, FocusHandle, Global, Hsla, SharedString, Subscription};
+use gpui::{AnyView, App, FocusHandle, Global, Hsla, Pixels, SharedString, Size, Subscription, Window};
 
 pub use chrome::floating_pill;
 
@@ -272,6 +272,26 @@ pub fn screen(id: &str, cx: &mut App) -> Option<Hosted> {
 pub fn watch(id: &str, changed: Box<dyn FnMut(&mut App)>, cx: &mut App) -> Option<Subscription> {
     let host = cx.try_global::<Host>()?.watch.clone();
     host(id, changed, cx)
+}
+
+type FitFn = dyn Fn(Size<Pixels>, &mut Window, &mut App) -> (u16, u16);
+
+/// How the app fits a terminal's grid.
+#[derive(Clone)]
+struct Fit(Rc<FitFn>);
+
+impl Global for Fit {}
+
+/// Install how a terminal's grid fits a size: `fit` gives the columns and rows a terminal view
+/// draws in it, in the look [`terminal`] gives it.
+pub fn serve_fit(cx: &mut App, fit: impl Fn(Size<Pixels>, &mut Window, &mut App) -> (u16, u16) + 'static) {
+    cx.set_global(Fit(Rc::new(fit)));
+}
+
+/// The columns and rows a terminal view draws in `size`; `None` with no host.
+pub fn fit(size: Size<Pixels>, window: &mut Window, cx: &mut App) -> Option<(u16, u16)> {
+    let fit = cx.try_global::<Fit>()?.0.clone();
+    Some(fit(size, window, cx))
 }
 
 type KeysFn = dyn Fn(&mut App);

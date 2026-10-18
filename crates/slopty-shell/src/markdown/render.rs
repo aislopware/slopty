@@ -28,6 +28,7 @@ use crate::theme::Theme;
 
 use super::parser::{Block, BlockTree, InlineRun, TableAlign};
 use super::veil::{RowVeil, apply_veil, slice_spans};
+use crate::motion::HoverFade as _;
 
 /// Gap between markdown blocks inside one message (slopty mdBlockGap).
 pub const MD_BLOCK_GAP: f32 = 12.0;
@@ -2523,7 +2524,7 @@ fn code_icon_action(
             gpui::transparent_black(),
             crate::theme::ink(0.08),
         ))
-        .on_hover(crate::motion::hover_listener(fade_key))
+        .hover_fade(fade_key)
         .on_click(move |_, window, cx| {
             cx.stop_propagation();
             handler(window, cx);
@@ -2588,7 +2589,7 @@ fn code_copy_button(
                 gpui::transparent_black(),
                 crate::theme::ink(0.08),
             ))
-            .on_hover(crate::motion::hover_listener(fade_key))
+            .hover_fade(fade_key)
             .on_click(move |_, window, cx| {
                 cx.stop_propagation();
                 handler(ix, code_text.clone(), window, cx);
@@ -2748,7 +2749,7 @@ fn table_with_copy(
             .gap(px(4.0))
             .cursor_pointer()
             .bg(crate::motion::hover_blend(&fade, gpui::transparent_black(), crate::theme::ink(0.08)))
-            .on_hover(crate::motion::hover_listener(fade))
+            .hover_fade(fade)
             .text_size(crate::typography::ui_rems(10.5))
             .text_color(theme.text_muted)
             .on_click(move |_, window, cx| {
@@ -2949,7 +2950,7 @@ fn render_code_block_source_with_actions(
             .justify_center()
             .cursor_pointer()
             .bg(crate::motion::hover_blend(&fade_key, base, hover))
-            .on_hover(crate::motion::hover_listener(fade_key))
+            .hover_fade(fade_key)
             .on_click(move |_, window, cx| {
                 cx.stop_propagation();
                 toggle(window, cx);

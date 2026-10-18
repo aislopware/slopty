@@ -23,7 +23,7 @@ mod sprite;
 pub mod url;
 mod view;
 
-pub use element::{CellMetrics, Prepared, TerminalElement};
+pub use element::{CellMetrics, Prepared, TerminalElement, fits};
 pub use view::{
     AttachBlock, AttachProbe, AttachSelection, BACK_TO_LIVE, COPY_MODE, COPY_MODE_DONE, CTX,
     ClearScreen, ClipHook, ClipPaste, CloseFind, Copy, CopyBlockOutput, CopyLastOutput, CopyMode,

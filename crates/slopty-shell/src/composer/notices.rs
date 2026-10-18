@@ -374,7 +374,7 @@ fn notice_action(id: &'static str, label: &'static str, theme: &Theme) -> gpui::
         .flex_none()
         .cursor_pointer()
         .text_color(crate::motion::hover_blend(&fade, theme.text_muted, theme.text))
-        .on_hover(crate::motion::hover_listener(fade))
+        .hover_fade(fade)
         .child(SharedString::from(label))
 }
 

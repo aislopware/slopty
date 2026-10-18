@@ -17,6 +17,7 @@ use crate::settings::{
 }; // slopty: the pull-request destination's row is gone
 use crate::state::AppState;
 use crate::theme::Theme;
+use crate::motion::HoverFade as _;
 
 /// Outcome of one keystroke while recording. Pure.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -396,7 +397,7 @@ fn binding_control(
                             widgets::select_fill(theme, false),
                             widgets::select_fill(theme, true),
                         ))
-                        .on_hover(crate::motion::hover_listener(hover_key))
+                        .hover_fade(hover_key)
                         .text_color(theme.text)
                     }
                 })

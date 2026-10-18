@@ -119,6 +119,16 @@ fn host_live_views(view: &Entity<WorkspaceView>, cx: &mut App) {
             },
         );
     }
+    // A terminal opens at the grid its view draws in the size the shell measured for it.
+    let fitted = view.downgrade();
+    slopty_shell::live::serve_fit(cx, move |size, window, cx| {
+        let look = TerminalLook::of(cx);
+        let frame =
+            slopty_terminal::GridFrame { padding: look.padding, line_height: look.line_height };
+        let theme = fitted.upgrade().map(|view| view.read(cx).theme().clone());
+        let theme = theme.unwrap_or_default();
+        slopty_terminal::fits(&theme, Some(frame), size, window, cx)
+    });
     // A transcript's Run types its line into the chat's terminal: run, or left at the prompt.
     let typed = view.downgrade();
     slopty_shell::live::serve_runs(cx, move |id, line, enter, cx| {

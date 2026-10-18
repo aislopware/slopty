@@ -15,6 +15,7 @@ use gpui::{
 };
 
 use crate::theme::Theme;
+use crate::motion::HoverFade as _;
 
 /// A toolbar control's side: zeron's icon buttons, fields and chips are this tall.
 pub const CONTROL_SIZE: f32 = crate::surface_chrome::CONTROL_SIZE;
@@ -95,7 +96,7 @@ pub fn icon_button(
             gpui::transparent_black(),
             crate::theme::ink(0.05),
         ))
-        .on_hover(crate::motion::hover_listener(id))
+        .hover_fade(id)
         // slopty: pressed reads a step darker; the ring is the shell's one (M8, M22).
         .active(|style| style.bg(crate::theme::ink(0.09)))
         .map(|el| focus_ring(el, theme))
@@ -290,7 +291,7 @@ pub fn floating_pill(
         .when(!glass, |el| el.shadow_md())
         .bg(base);
     if let Some(key) = hover_key {
-        pill = pill.on_hover(crate::motion::hover_listener(key));
+        pill = pill.hover_fade(key);
     }
     let pill = interact(pill).child(
         // The hover wash rides an inner full-height layer so it

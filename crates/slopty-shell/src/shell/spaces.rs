@@ -4458,7 +4458,7 @@ impl Shell {
                     theme.glass_hover(),
                 )
             })
-            .on_hover(motion::hover_listener("spaces-filter"))
+            .hover_fade("spaces-filter")
             .cursor_pointer()
             .on_mouse_down(
                 gpui::MouseButton::Left,

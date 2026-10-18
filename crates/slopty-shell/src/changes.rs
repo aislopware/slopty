@@ -57,6 +57,7 @@ use crate::settings::widgets::ActionHint as _;
 use crate::state::{AppState, EngineHandle};
 use crate::theme::Theme;
 use slopty_syntax::LanguageId as Lang;
+use crate::motion::HoverFade as _;
 
 // slopty: find in the diff, the whitespace filter, the changed files' tree and any turn's diff.
 mod aids;
@@ -3758,7 +3759,7 @@ impl Changes {
                         crate::theme::wash(0.0),
                         crate::theme::wash(0.14),
                     ))
-                    .on_hover(motion::hover_listener(id))
+                    .hover_fade(id)
                 }
             })
             .occlude()
@@ -3835,7 +3836,7 @@ impl Changes {
                 crate::theme::wash(0.05),
                 crate::theme::wash(0.14),
             ))
-            .on_hover(motion::hover_listener("changes-scope-trigger"))
+            .hover_fade("changes-scope-trigger")
             // slopty: a keyboard stop with the shell's ring (M8).
             .tab_index(0)
             .map(|el| crate::surface_chrome::focus_ring(el, &theme))
@@ -3999,7 +4000,7 @@ impl Changes {
                 crate::theme::wash(0.0),
                 crate::theme::wash(0.12),
             ))
-            .on_hover(motion::hover_listener("changes-ref-trigger"))
+            .hover_fade("changes-ref-trigger")
             // slopty: a keyboard stop with the shell's ring (M8).
             .tab_index(0)
             .map(|el| crate::surface_chrome::focus_ring(el, theme))

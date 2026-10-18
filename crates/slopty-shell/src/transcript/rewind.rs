@@ -14,6 +14,7 @@ use slopty_view_doc::dock::{ChatDock, DockCan};
 
 use super::{Transcript, TranscriptEvent};
 use crate::theme::Theme;
+use crate::motion::HoverFade as _;
 
 /// What the menu takes back, in its order: (label, code, conversation).
 const CHOICES: [(&str, bool, bool); 3] = [
@@ -127,7 +128,7 @@ impl Transcript {
                 .when(busy, |el| el.aria_description("Once the turn ends"))
                 .when(!busy, |el| {
                     el.cursor_pointer()
-                        .on_hover(crate::motion::hover_listener(fade_key))
+                        .hover_fade(fade_key)
                         .on_click(cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
                             this.open_rewind_menu(
                                 chat.clone(),

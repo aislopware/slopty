@@ -24,6 +24,7 @@ use gpui::{
 
 use crate::motion::CubicBezier;
 use crate::theme::Theme;
+use crate::motion::HoverFade as _;
 
 const DURATION: Duration = Duration::from_millis(4000);
 const VISIBLE: usize = 3;
@@ -949,7 +950,7 @@ fn error_copy_button(id: u64, copied: bool, theme: &Theme) -> impl IntoElement {
         .items_center()
         .justify_center()
         .bg(crate::motion::hover_blend(&fade, rest, hover))
-        .on_hover(crate::motion::hover_listener(fade.clone()))
+        .hover_fade(fade.clone())
         .cursor_pointer()
         .text_color(theme.text_muted)
         .child(crate::icons::icon(glyph).size(px(14.0)))

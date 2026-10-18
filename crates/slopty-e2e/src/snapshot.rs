@@ -88,7 +88,7 @@ impl Frame {
             })
             .cloned()
             .collect();
-        scrub_moments(&scrub_ports(&scrub_scratch(&crate::frame_text(&kept))))
+        scrub_clocks(&scrub_moments(&scrub_ports(&scrub_scratch(&crate::frame_text(&kept)))))
     }
 }
 
@@ -108,6 +108,33 @@ fn scrub_moments(text: &str) -> String {
         rest = if moment {
             out.push_str("$MOMENT");
             found.get(MOMENT.len()..).unwrap_or_default()
+        } else {
+            found
+        };
+    }
+    out.push_str(rest);
+    out
+}
+
+/// `text` with the time of day a finished turn's done line ends on ("Worked for 1s · done
+/// 4:16 PM") spelled `$CLOCK`: a live turn ends when the run gets there.
+fn scrub_clocks(text: &str) -> String {
+    const DONE: &str = "\u{b7} done ";
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(DONE) {
+        let (before, found) = rest.split_at(at.saturating_add(DONE.len()));
+        out.push_str(before);
+        // The clock runs to the end of the label: the next column or the line's end.
+        let end = found.find([' ', '\n']).map_or(found.len(), |space| {
+            let meridiem =
+                found.get(space..).is_some_and(|t| t.starts_with(" AM") || t.starts_with(" PM"));
+            if meridiem { space.saturating_add(3) } else { space }
+        });
+        let clock = found.get(..end).unwrap_or_default();
+        rest = if !clock.is_empty() && clock.bytes().next().is_some_and(|b| b.is_ascii_digit()) {
+            out.push_str("$CLOCK");
+            found.get(end..).unwrap_or_default()
         } else {
             found
         };
@@ -790,6 +817,27 @@ mod tests {
             frame.text(&[]),
             "Document \u{2502} File ~/note-$MOMENT.md\n\
              Label \u{2502} note-taking, note-2026-10 and note-\n"
+        );
+    }
+
+    /// The time of day a turn's done line ends on reads the same in every run, in either clock;
+    /// the word "done" anywhere else stays.
+    #[test]
+    fn a_done_lines_clock_reads_the_same_in_every_run() {
+        let frame = Frame {
+            image: solid(1, 1, [0, 0, 0]),
+            a11y: vec![
+                node("Status", "Worked for 1s \u{b7} done 4:16 PM", [0.0, 0.0, 1.0, 1.0]),
+                node("Status", "Worked for 2m \u{b7} done 16:16", [0.0, 0.0, 1.0, 1.0]),
+                node("Label", "Mark \u{b7} done soon", [0.0, 0.0, 1.0, 1.0]),
+            ],
+            scale: 1.0,
+        };
+        assert_eq!(
+            frame.text(&[]),
+            "Status \u{2502} Worked for 1s \u{b7} done $CLOCK\n\
+             Status \u{2502} Worked for 2m \u{b7} done $CLOCK\n\
+             Label \u{2502} Mark \u{b7} done soon\n"
         );
     }
 

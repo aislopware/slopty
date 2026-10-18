@@ -30,6 +30,7 @@ use crate::icons::{self, icon};
 use crate::motion;
 use crate::settings::widgets::ActionHint as _; // slopty: tooltips name their key.
 use crate::theme::Theme;
+use crate::motion::HoverFade as _;
 
 actions!(background_tray, [
     /// Open the Background tray and give it the keyboard (⌥B).
@@ -547,7 +548,7 @@ impl Composer {
             .gap(px(8.0))
             .cursor_pointer()
             .bg(motion::hover_blend(&toggle_hover, gpui::transparent_black(), crate::theme::ink(0.05)))
-            .on_hover(motion::hover_listener(toggle_hover))
+            .hover_fade(toggle_hover)
             .tab_index(0)
             .map(|el| crate::surface_chrome::focus_ring(el, theme))
             .on_click(cx.listener(move |this, _, _, cx| this.toggle_tray(toggle_chat.clone(), open, cx)))
@@ -601,7 +602,7 @@ impl Composer {
                         .bg(motion::hover_blend(&key, gpui::transparent_black(), crate::theme::wash(0.11)))
                         .on_click(cx.listener(|this, _, _, cx| this.stop_all(cx)))
                 })
-                .on_hover(motion::hover_listener(key))
+                .hover_fade(key)
                 .child(if stopping { "Stopping…" } else { "Stop all" })
         });
         div()
@@ -737,7 +738,7 @@ impl Composer {
                 .when(!stopping, |el| {
                     el.cursor_pointer()
                         .bg(motion::hover_blend(&stop_key, gpui::transparent_black(), crate::theme::wash(0.11)))
-                        .on_hover(motion::hover_listener(stop_key.clone()))
+                        .hover_fade(stop_key.clone())
                         .on_click(cx.listener(move |this, _, _, cx| {
                             cx.stop_propagation();
                             this.stop_row(stop_id.clone(), cx)
@@ -770,7 +771,7 @@ impl Composer {
             .opacity(if active || detail_open { 1.0 } else { motion::hover_t(&key) })
             .cursor_pointer()
             .bg(motion::hover_blend(&details_key, gpui::transparent_black(), crate::theme::wash(0.11)))
-            .on_hover(motion::hover_listener(details_key.clone()))
+            .hover_fade(details_key.clone())
             .on_click(cx.listener(move |this, _, _, cx| {
                 cx.stop_propagation();
                 let open = this.tray.detail.as_deref() == Some(detail_id.as_str());
@@ -794,7 +795,7 @@ impl Composer {
             .py(px(4.0))
             .rounded(px(ROW_RADIUS))
             .bg(bg)
-            .on_hover(motion::hover_listener(key.clone()))
+            .hover_fade(key.clone())
             .cursor_pointer()
             .on_click(cx.listener(move |this, _, _, cx| this.open_row(&open_row, cx)))
             .flex()
@@ -901,7 +902,7 @@ impl Composer {
             .gap(px(8.0))
             .cursor_pointer()
             .bg(motion::hover_blend(&hover, gpui::transparent_black(), crate::theme::ink(0.05)))
-            .on_hover(motion::hover_listener(hover))
+            .hover_fade(hover)
             .tab_index(0)
             .map(|el| crate::surface_chrome::focus_ring(el, theme))
             .on_click(cx.listener(|this, _, _, cx| {

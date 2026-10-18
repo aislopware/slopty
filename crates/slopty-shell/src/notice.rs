@@ -6,6 +6,7 @@
 use gpui::{AnyElement, App, Div, FontWeight, Hsla, SharedString, Window, div, prelude::*, px};
 
 use crate::theme::Theme;
+use crate::motion::HoverFade as _;
 
 /// The chip's header icon treatment, which also picks its metrics: the bare
 /// triangle reads lighter and rem-scales with the composer's text; the tile
@@ -122,7 +123,7 @@ pub fn notice_chip(
                     .justify_center()
                     .cursor_pointer()
                     .bg(crate::motion::hover_blend(&hover, gpui::transparent_black(), accent.opacity(0.12)))
-                    .on_hover(crate::motion::hover_listener(hover))
+                    .hover_fade(hover)
                     // slopty: a tab stop with the shell's ring.
                     .tab_index(0)
                     .map(|el| crate::surface_chrome::focus_ring(el, theme))

@@ -8,6 +8,7 @@ use crate::{
     theme::Theme,
 };
 use gpui::{AnyElement, Context, Entity, SharedString, div, prelude::*, px};
+use crate::motion::HoverFade as _;
 
 /// Align review controls with a centered document column while keeping the card full width.
 #[derive(Clone, Copy)]
@@ -324,7 +325,7 @@ fn comment_action(
                     gpui::transparent_black(),
                     theme.element_hover,
                 ))
-                .on_hover(motion::hover_listener(id))
+                .hover_fade(id)
         })
         .child(SharedString::from(label))
 }

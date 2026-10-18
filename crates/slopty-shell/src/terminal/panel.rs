@@ -16,9 +16,12 @@
 
 use std::collections::HashMap;
 
+use futures::FutureExt as _;
+use futures::channel::oneshot;
 use gpui::{
-    App, Context, Entity, FocusHandle, IntoElement, KeyBinding, MouseButton, Render,
-    SharedString, Subscription, Task, Window, actions, div, prelude::*, px,
+    App, AsyncApp, Context, Entity, FocusHandle, IntoElement, KeyBinding, MouseButton, Pixels,
+    Render, SharedString, Size, Subscription, Task, WeakEntity, Window, actions, div, prelude::*,
+    px,
 };
 
 use slopty_view_proto::TerminalSession;
@@ -34,6 +37,7 @@ use crate::state::{AppState, CANVAS_PANEL_PREFIX, EngineHandle};
 use crate::theme::Theme;
 
 use super::view::terminal_panel_bg;
+use crate::motion::HoverFade as _;
 
 /// Fixed tab width — drag-reorder math stays analytic.
 pub const TAB_WIDTH: f32 = 118.0;
@@ -246,8 +250,20 @@ pub struct TerminalPanel {
     last_selected: Option<String>,
     /// slopty: a tab's right-click menu.
     tab_menu: popover::Popup<TabMenu>,
+    /// slopty: the grid a terminal view draws in the body, as last drawn, and the size and look
+    /// it was measured for.
+    fitted: Option<(Size<Pixels>, TerminalLook, (u16, u16))>,
+    /// slopty: sessions waiting for the body's first draw to open at its grid.
+    awaiting_fit: Vec<oneshot::Sender<(u16, u16)>>,
     _observe: Subscription,
 }
+
+/// slopty: the grid a session opens at when the panel's body is not drawn: the view fits it
+/// once it is.
+const UNFITTED: (u16, u16) = (80, 24);
+
+/// slopty: how long an open waits for the body's first draw before it opens at [`UNFITTED`].
+const FIT_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// slopty: a terminal tab's right-click menu: which tab, where.
 #[derive(Clone)]
@@ -274,7 +290,54 @@ impl TerminalPanel {
             drag: None,
             last_selected: None,
             tab_menu: popover::Popup::default(),
+            fitted: None,
+            awaiting_fit: Vec::new(),
             _observe: observe,
+        }
+    }
+
+    /// slopty: the grid a session opened in `panel` starts at: what a terminal view draws in
+    /// its body, waiting for the body's first draw, so the shell never starts wider than it is
+    /// shown. One told wider pads its first prompt past the grid's edge, and zsh's partial-line
+    /// mark is left on a line of its own. A body not drawn within [`FIT_WAIT`] (a panel not
+    /// shown) gives [`UNFITTED`].
+    pub(crate) async fn grid(panel: &WeakEntity<Self>, cx: &mut AsyncApp) -> (u16, u16) {
+        let waiting = panel.update(cx, |panel, _| match &panel.fitted {
+            Some((.., grid)) => Ok(*grid),
+            None => {
+                let (tx, rx) = oneshot::channel();
+                panel.awaiting_fit.push(tx);
+                Err(rx)
+            }
+        });
+        let rx = match waiting {
+            Ok(Ok(grid)) => return grid,
+            Ok(Err(rx)) => rx,
+            Err(_) => return UNFITTED,
+        };
+        let timer = cx.background_executor().timer(FIT_WAIT);
+        futures::select_biased! {
+            grid = rx.fuse() => grid.unwrap_or(UNFITTED),
+            () = timer.fuse() => UNFITTED,
+        }
+    }
+
+    /// slopty: the body was laid out at `size`: the grid a view draws there, for the sessions
+    /// opened here. A width the right pane passes through in its tween is not one.
+    fn measured(&mut self, size: Size<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.resize_suspended {
+            return;
+        }
+        let look = TerminalLook::of(cx);
+        let known = self.fitted.as_ref().is_some_and(|(at, was, _)| *at == size && *was == look);
+        if known && self.awaiting_fit.is_empty() {
+            return;
+        }
+        // With no host to fit by, there is no grid to wait for.
+        let grid = live::fit(size, window, cx).unwrap_or(UNFITTED);
+        self.fitted = Some((size, look, grid));
+        for waiting in self.awaiting_fit.drain(..) {
+            let _gone = waiting.send(grid);
         }
     }
 
@@ -623,8 +686,12 @@ impl TerminalPanel {
             let session = match existing_session {
                 Some(session) => session,
                 None => {
-                    // slopty: the view fits the session to its own grid once drawn.
-                    let mut params = serde_json::json!({ "chatId": chat, "cols": 80, "rows": 24 });
+                    // slopty: a session shown before keeps its grid; a new one starts at the
+                    // body's.
+                    let (cols, rows) =
+                        if again.is_some() { UNFITTED } else { Self::grid(&this, cx).await };
+                    let mut params =
+                        serde_json::json!({ "chatId": chat, "cols": cols, "rows": rows });
                     if let (Some(cwd), Some(object)) = (cwd, params.as_object_mut()) {
                         object.insert("cwd".into(), serde_json::Value::String(cwd));
                     }
@@ -1057,7 +1124,7 @@ impl TerminalPanel {
                                 crate::theme::wash(0.0),
                                 crate::theme::wash(0.11),
                             ))
-                            .on_hover(motion::hover_listener(close_fade))
+                            .hover_fade(close_fade)
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 cx.stop_propagation();
                                 this.close_tab(&chat_close2, key, window, cx);
@@ -1098,7 +1165,7 @@ impl TerminalPanel {
                                 bg,
                                 theme.element_hover,
                             ))
-                            .on_hover(motion::hover_listener(format!("term-tab-{key}")))
+                            .hover_fade(format!("term-tab-{key}"))
                             .text_size(px(12.0))
                             .text_color(text_color)
                             .cursor_pointer()
@@ -1227,7 +1294,7 @@ fn strip_button(id: &'static str, glyph: &'static str, theme: &Theme) -> gpui::S
         .role(gpui::Role::Button)
         .tab_index(0)
         .bg(motion::hover_blend(&fade, crate::theme::wash(0.0), crate::theme::wash(0.11)))
-        .on_hover(motion::hover_listener(fade))
+        .hover_fade(fade)
         .active(|style| style.bg(crate::theme::wash(0.16)))
         .child(
             crate::icons::icon(glyph)
@@ -1356,6 +1423,7 @@ impl Render for TerminalPanel {
             }
         };
         let tab_menu = self.render_tab_menu(window, cx);
+        let measure = cx.weak_entity();
         div()
             .size_full()
             .flex()
@@ -1400,6 +1468,19 @@ impl Render for TerminalPanel {
                         }
                     })
                     .child(body)
+                    // slopty: the body's grid, for the sessions opened here.
+                    .child(
+                        gpui::canvas(
+                            move |bounds, window, cx| {
+                                let _gone = measure.update(cx, |panel, cx| {
+                                    panel.measured(bounds.size, window, cx);
+                                });
+                            },
+                            |_, (), _, _| {},
+                        )
+                        .absolute()
+                        .size_full(),
+                    )
                     .children(drop.map(|words| drop_overlay(words, &theme))),
             )
             .into_any_element()
@@ -1636,5 +1717,82 @@ mod progress_tests {
         *reported.borrow_mut() = None;
         cx.update(|_, cx| heard.borrow_mut().iter_mut().for_each(|changed| changed(cx)));
         settle(cx, &|cx| tab(cx).is_some_and(|(_, _, progress)| progress.is_none()));
+    }
+
+    /// A machine that opens terminal 7 and keeps what each open asked.
+    struct Asked(Arc<std::sync::Mutex<Vec<serde_json::Value>>>);
+
+    #[async_trait::async_trait]
+    impl slopty_view_rpc::RpcService for Asked {
+        async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
+            if method == methods::OPEN_TERMINAL {
+                self.0.lock().unwrap().push(params.clone());
+            }
+            Machine.handle(method, params).await
+        }
+    }
+
+    /// A tab's session opens at the grid a view draws in the panel's body, not at 80 × 24: a
+    /// shell told it is wider than it is drawn pads its first prompt past the edge. A panel
+    /// whose body is never drawn opens at 80 × 24 once its wait is over.
+    #[gpui::test]
+    fn a_session_opens_at_the_grid_its_body_draws(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let _guard = runtime.enter();
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            crate::settings::init(Default::default(), dir.path(), cx);
+            gpui_base::init(cx);
+            cx.set_global(crate::theme::Theme::default());
+            crate::live::install(cx, |_, _, _| None, |_, _| None, |_, _, _| None);
+            // A cell 8 × 16 points.
+            #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "test")]
+            crate::live::serve_fit(cx, |size, _, _| {
+                ((f32::from(size.width) / 8.0) as u16, (f32::from(size.height) / 16.0) as u16)
+            });
+        });
+        let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let engine = crate::state::EngineHandle::from_test_client(slopty_view_rpc::memory_client(
+            Arc::new(Asked(Arc::clone(&asked))) as Arc<dyn slopty_view_rpc::RpcService>,
+        ));
+        let state = cx.new(|_| {
+            let mut state = crate::state::AppState::new();
+            state.set_test_engine(engine);
+            state
+        });
+        let unshown = cx.new(|cx| TerminalPanel::new(state.clone(), cx));
+        let (panel, cx) = cx.add_window_view(|_, cx| TerminalPanel::new(state, cx));
+        cx.simulate_resize(gpui::size(gpui::px(360.0), gpui::px(400.0)));
+        panel.update(cx, |panel, cx| panel.set_open(true, cx));
+        let mut opened = None;
+        for _ in 0..300 {
+            cx.run_until_parked();
+            runtime.block_on(async {
+                for _ in 0..20 {
+                    tokio::task::yield_now().await;
+                }
+            });
+            opened = asked.lock().unwrap().first().cloned();
+            if opened.is_some() {
+                break;
+            }
+        }
+        let opened = opened.expect("the tab's session opened");
+        let fitted = panel.read_with(cx, |panel, _| panel.fitted.as_ref().map(|(.., grid)| *grid));
+        let (cols, rows) = fitted.expect("the body measured");
+        assert_eq!(cols, 45, "the body's width over the cell's");
+        assert_eq!((opened["cols"].as_u64(), opened["rows"].as_u64()), (Some(45), Some(rows.into())));
+
+        let grid = Rc::new(RefCell::new(None));
+        cx.update(|_, cx| {
+            let (panel, grid) = (unshown.downgrade(), Rc::clone(&grid));
+            cx.spawn(async move |cx| *grid.borrow_mut() = Some(TerminalPanel::grid(&panel, cx).await))
+                .detach();
+        });
+        cx.run_until_parked();
+        assert_eq!(*grid.borrow(), None, "waits for the body's first draw");
+        cx.executor().advance_clock(super::FIT_WAIT);
+        cx.run_until_parked();
+        assert_eq!(*grid.borrow(), Some(super::UNFITTED), "never drawn");
     }
 }

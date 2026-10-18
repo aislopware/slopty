@@ -33,6 +33,7 @@ use slopty_visual::{
 use crate::markdown::render::LinkUi;
 use crate::state::EngineHandle;
 use crate::theme::Theme;
+use crate::motion::HoverFade as _;
 
 /// The visual's tree changed shape; the transcript remeasures its row.
 pub struct VisualLayoutChanged;
@@ -593,7 +594,7 @@ fn failure_line(
                 .text_size(crate::typography::ui_rems(12.0))
                 .text_color(crate::motion::hover_blend(&hover, theme.text_muted, theme.text))
                 .cursor_pointer()
-                .on_hover(crate::motion::hover_listener(hover.clone()))
+                .hover_fade(hover.clone())
                 // slopty: a tab stop, its hover fading as the house's do.
                 .tab_index(0)
                 .rounded(px(4.0))
@@ -956,7 +957,7 @@ impl VisualFrame {
             .id(self.element_id(path))
             .rounded(px(6.0))
             .bg(crate::motion::hover_blend(&fade, gpui::transparent_black(), theme.glass_hover()))
-            .on_hover(crate::motion::hover_listener(fade));
+            .hover_fade(fade);
         if let Some(handler) = stack.on_click {
             el = el
                 .cursor_pointer()
@@ -1037,7 +1038,7 @@ impl VisualFrame {
                 .flex_row()
                 .when(table.hover, |el| {
                     el.bg(crate::motion::hover_blend(&fade, gpui::transparent_black(), hover))
-                        .on_hover(crate::motion::hover_listener(fade.clone()))
+                        .hover_fade(fade.clone())
                 });
             for c in 0..columns {
                 let column = column(c);

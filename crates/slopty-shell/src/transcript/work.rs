@@ -18,6 +18,7 @@ use slopty_view_doc::{NoteLine, NoteRow, TaskRow, ToolFacts, ToolTimer};
 use super::{Row, RowKind, Transcript, fnv1a};
 use crate::settings::widgets::ActionHint as _;
 use crate::theme::Theme;
+use crate::motion::HoverFade as _;
 
 /// The height of a task notice's or a notice's line.
 pub const NOTICE_ROW_HEIGHT: f32 = 26.0;
@@ -215,7 +216,7 @@ impl ChipFacts {
                             .cursor_pointer()
                             // slopty: a faded hover, and a tab stop.
                             .text_color(crate::motion::hover_blend(&fade, tint, theme.text_muted))
-                            .on_hover(crate::motion::hover_listener(fade.clone()))
+                            .hover_fade(fade.clone())
                             .tab_index(0)
                             .rounded(px(4.0))
                             .map(|el| crate::surface_chrome::focus_ring(el, theme))
@@ -268,7 +269,7 @@ impl ChipFacts {
                         theme.text,
                         crate::motion::hover_t(&format!("{part_id}-background")),
                     ))
-                    .on_hover(crate::motion::hover_listener(format!("{part_id}-background")))
+                    .hover_fade(format!("{part_id}-background"))
                     // slopty: ⌃B moves the newest running call there (`BackgroundRunningCall`).
                     .tooltip(crate::settings::widgets::action_tooltip(
                         "Run in background",
@@ -453,7 +454,7 @@ impl Transcript {
             .text_size(px(super::TOOL_TEXT_SIZE))
             // slopty: a faded hover, and a tab stop.
             .text_color(crate::motion::hover_blend(&format!("{}-task", row.id), theme.text_muted, theme.text))
-            .on_hover(crate::motion::hover_listener(format!("{}-task", row.id)))
+            .hover_fade(format!("{}-task", row.id))
             .tab_index(0)
             .rounded(px(4.0))
             .map(|el| crate::surface_chrome::focus_ring(el, theme))
@@ -615,7 +616,7 @@ fn disclosure(
         .role(gpui::Role::Button)
         .aria_expanded(open)
         .cursor_pointer()
-        .on_hover(crate::motion::hover_listener(fade.clone()))
+        .hover_fade(fade.clone())
         .tab_index(0) // slopty: a tab stop.
         .hint(if open { "Hide details" } else { "Show details" })
         .on_click(on_click)

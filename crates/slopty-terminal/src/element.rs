@@ -1297,6 +1297,90 @@ fn adjusted_height(height: u32, mult: f32) -> u32 {
     out
 }
 
+/// The grid a view of `theme`, in a host's `frame`, draws in `size`.
+///
+/// Its columns and rows, at least one each, as its element measures them. A host opens a
+/// session at it, so the shell starts at the width it is drawn at: one told wider pads its first
+/// prompt past the edge, and zsh's partial-line mark is left on a line of its own.
+pub fn fits(
+    theme: &slopty_theme::Theme,
+    frame: Option<crate::GridFrame>,
+    size: Size<Pixels>,
+    window: &Window,
+    cx: &mut App,
+) -> (u16, u16) {
+    if !cx.has_global::<ShapeCache>() {
+        cx.set_global(ShapeCache::default());
+    }
+    let candidates = &theme.typography.mono_families;
+    let family = cx.update_global::<ShapeCache, _>(|cache, _| cache.family(window, candidates));
+    Cells::of(Typed::of(theme), frame, &family, window, cx).fit(size)
+}
+
+/// What a theme sets of a grid's type.
+#[derive(Clone, Copy)]
+struct Typed {
+    font_size: Pixels,
+    line_height: f32,
+    inset: Pixels,
+    ligatures: bool,
+}
+
+impl Typed {
+    const fn of(theme: &slopty_theme::Theme) -> Self {
+        Self {
+            font_size: px(theme.typography.mono_size),
+            line_height: theme.typography.mono_line_height,
+            inset: px(theme.spacing.inset()),
+            ligatures: theme.typography.ligatures,
+        }
+    }
+}
+
+/// What a grid draws its cells with.
+struct Cells {
+    grid: Grid,
+    derived: metrics::Metrics,
+    face: metrics::Face,
+    /// The inset between the element's edges and the grid.
+    pad: Pixels,
+}
+
+impl Cells {
+    /// The cells of `family` set as `typed`, in a host's `frame`: a host's chrome sets the inset
+    /// and the row height itself, the row the font's own height stretched to it, as
+    /// `mono_line_height` stretches it. The cell is derived once per family, size and scale,
+    /// not once per frame.
+    fn of(
+        typed: Typed,
+        frame: Option<crate::GridFrame>,
+        family: &SharedString,
+        window: &Window,
+        cx: &mut App,
+    ) -> Self {
+        let Typed { font_size, ligatures, .. } = typed;
+        let pad = frame.map_or(typed.inset, |frame| px(frame.padding));
+        let (grid, derived, face) = cx.update_global::<ShapeCache, _>(|cache, _| {
+            let height_mult = frame.map_or(typed.line_height, |frame| {
+                let natural = cache.grid(window, family, ligatures, font_size, 1.0).0.line_height;
+                frame.line_height / f32::from(natural).max(1.0)
+            });
+            cache.grid(window, family, ligatures, font_size, height_mult)
+        });
+        Self { grid, derived, face, pad }
+    }
+
+    /// The columns and rows that fit in `size`, at least one each.
+    fn fit(&self, size: Size<Pixels>) -> (u16, u16) {
+        let inner = (size.width - self.pad * 2.0, size.height - self.pad * 2.0);
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "≥ 1 clamped")]
+        let fit = |space: Pixels, cell: Pixels| {
+            (f32::from(space) / f32::from(cell)).floor().max(1.0) as u16
+        };
+        (fit(inner.0, self.grid.cell_width), fit(inner.1, self.grid.line_height))
+    }
+}
+
 /// The cell geometry for `font` at `font_size`, from ghostty's derivation.
 ///
 /// The face is measured in device pixels — `font_size` times the display scale — so the cell
@@ -1405,35 +1489,15 @@ impl Element for TerminalElement {
             self.view.update(cx, |view, cx| view.set_font_family(picked.clone(), cx));
             picked
         });
-        let (base_size, height_mult, base_pad, ligatures, frame) = {
+        let (typed, frame) = {
             let view = self.view.read(cx);
-            let theme = view.theme();
-            (
-                px(theme.typography.mono_size),
-                theme.typography.mono_line_height,
-                px(theme.spacing.inset()),
-                theme.typography.ligatures,
-                view.frame(),
-            )
+            (Typed::of(view.theme()), view.frame())
         };
-        // A host's chrome sets the inset and the row height itself: the row is the font's own
-        // height stretched to it, as `mono_line_height` stretches it.
-        let base_pad = frame.map_or(base_pad, |frame| px(frame.padding));
-        // The cell is derived once per family, size and scale, not once per frame.
-        let (grid, base_derived, face) = cx.update_global::<ShapeCache, _>(|cache, _| {
-            let height_mult = frame.map_or(height_mult, |frame| {
-                let natural = cache.grid(window, &family, ligatures, base_size, 1.0).0.line_height;
-                frame.line_height / f32::from(natural).max(1.0)
-            });
-            cache.grid(window, &family, ligatures, base_size, height_mult)
-        });
-        let (base_cell_width, base_line_height) = (grid.cell_width, grid.line_height);
-        let inner = size(bounds.size.width - base_pad * 2.0, bounds.size.height - base_pad * 2.0);
-        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "≥ 1 clamped")]
-        let (cols, rows) = (
-            (f32::from(inner.width) / f32::from(base_cell_width)).floor().max(1.0) as u16,
-            (f32::from(inner.height) / f32::from(base_line_height)).floor().max(1.0) as u16,
-        );
+        let cells = Cells::of(typed, frame, &family, window, cx);
+        let (grid, base_derived, face) = (cells.grid, cells.derived, cells.face);
+        let (base_size, base_pad, ligatures) = (typed.font_size, cells.pad, typed.ligatures);
+        let base_cell_width = grid.cell_width;
+        let (cols, rows) = cells.fit(bounds.size);
         let font_size = base_size;
         let (cell_width, line_height) = (grid.cell_width, grid.line_height);
         let pad = base_pad;

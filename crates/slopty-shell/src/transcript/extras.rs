@@ -14,6 +14,7 @@ use super::{Row, RowKind, Transcript, fnv1a};
 use crate::markdown::parser::BlockTree;
 use crate::notice::{NoticeChipIcon::Tile, notice_chip};
 use crate::theme::Theme;
+use crate::motion::HoverFade as _;
 
 /// A plan shows this many source lines before it folds.
 pub const PLAN_FOLD_LINES: usize = 20;
@@ -516,7 +517,7 @@ impl Transcript {
                 theme.text,
                 0.08 * crate::motion::hover_t("quote-selection"),
             ))
-            .on_hover(crate::motion::hover_listener("quote-selection"))
+            .hover_fade("quote-selection")
             .shadow_md()
             .cursor_pointer()
             .text_size(crate::typography::ui_rems(12.5))
@@ -643,7 +644,7 @@ impl Transcript {
                 // slopty: the faded hover, at the control strength.
                 .text_color(crate::motion::mix(theme.text_muted, theme.text, crate::motion::hover_t(&fade)))
                 .bg(crate::motion::hover_blend(&fade, gpui::transparent_black(), crate::theme::wash(0.11)))
-                .on_hover(crate::motion::hover_listener(fade))
+                .hover_fade(fade)
                 .child(SharedString::from(label))
         };
         let mut actions = div().flex().flex_row().items_center().gap(px(2.0)).ml(px(-8.0));
@@ -772,7 +773,7 @@ impl Transcript {
             .text_size(crate::typography::ui_rems(12.0))
             .text_color(crate::motion::mix(theme.text_muted, theme.text, crate::motion::hover_t(&fade)))
             .bg(crate::motion::hover_blend(&fade, gpui::transparent_black(), crate::theme::wash(0.11)))
-            .on_hover(crate::motion::hover_listener(fade))
+            .hover_fade(fade)
             .on_click(move |_, _, cx| {
                 cx.write_to_clipboard(ClipboardItem::new_string(UPDATE_COMMAND.to_owned()));
                 crate::motion::copy_feedback(key.clone(), cx);
@@ -844,7 +845,7 @@ impl Transcript {
                     .tab_index(0)
                     .map(|el| crate::surface_chrome::focus_ring(el, theme))
                     .bg(crate::motion::hover_blend(&plan_copy_hover, gpui::transparent_black(), crate::theme::ink(0.08)))
-                    .on_hover(crate::motion::hover_listener(plan_copy_hover.clone()))
+                    .hover_fade(plan_copy_hover.clone())
                     .tooltip(crate::settings::widgets::text_tooltip(if copied { "Copied" } else { "Copy plan" }))
                     .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -917,7 +918,7 @@ impl Transcript {
                         gpui::transparent_black(),
                         crate::theme::wash(0.11),
                     ))
-                    .on_hover(crate::motion::hover_listener(format!("{fold}-toggle")))
+                    .hover_fade(format!("{fold}-toggle"))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.toggle_plan_fold(fold.clone(), cx)
                     }))
@@ -998,7 +999,7 @@ impl Transcript {
                 gpui::transparent_black(),
                 crate::theme::ink(0.05),
             ))
-            .on_hover(crate::motion::hover_listener(format!("{}-toggle", row.id)))
+            .hover_fade(format!("{}-toggle", row.id))
             .on_click(cx.listener(move |this, _, _, cx| {
                 if !this.extras.changes_open.remove(&toggle_id) {
                     this.extras.changes_open.insert(toggle_id.clone());
@@ -1040,7 +1041,7 @@ impl Transcript {
                         gpui::transparent_black(),
                         crate::theme::wash(0.11),
                     ))
-                    .on_hover(crate::motion::hover_listener(format!("{}-open-diff", row.id)))
+                    .hover_fade(format!("{}-open-diff", row.id))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
                         this.open_turn_diff(entry_id.clone(), window, cx);

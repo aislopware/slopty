@@ -17,6 +17,7 @@ use crate::motion;
 use crate::popover;
 use crate::settings::widgets::{ActionHint as _, Keys};
 use crate::theme::Theme;
+use crate::motion::HoverFade as _;
 
 /// The changed files' column beside the diff.
 const TREE_WIDTH: f32 = 208.0;
@@ -265,7 +266,7 @@ impl Changes {
                 crate::theme::wash(0.0),
                 crate::theme::wash(0.12),
             ))
-            .on_hover(motion::hover_listener("changes-turn-trigger"))
+            .hover_fade("changes-turn-trigger")
             // slopty: a keyboard stop with the shell's ring (M8).
             .tab_index(0)
             .map(|el| crate::surface_chrome::focus_ring(el, theme))
@@ -613,7 +614,7 @@ impl Changes {
                             } else if file.is_some() {
                                 el.cursor_pointer()
                                     .bg(motion::hover_blend(&key, crate::theme::ink(0.0), crate::theme::ink(0.05)))
-                                    .on_hover(motion::hover_listener(key.clone()))
+                                    .hover_fade(key.clone())
                             } else {
                                 el
                             }
@@ -689,7 +690,7 @@ fn glyph_toggle(
                 el.bg(crate::theme::wash(0.14))
             } else {
                 el.bg(motion::hover_blend(id, crate::theme::wash(0.0), crate::theme::wash(0.14)))
-                    .on_hover(motion::hover_listener(id))
+                    .hover_fade(id)
             }
         })
         .occlude()

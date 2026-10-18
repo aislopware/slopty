@@ -1,6 +1,7 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
 //! Alternate presentation of the same model and option mutations.
 use super::*;
+use crate::motion::HoverFade as _;
 
 pub(super) const COMPACT_WIDTH: f32 = 256.0;
 /// One-line model rows (plus the 2px gap) so about seven fit at once.
@@ -296,7 +297,7 @@ impl Pickers {
                     // Quiet until the row is hovered or the model is starred.
                     .when(!favorite && !hovered, |el| el.opacity(0.0))
                     .bg(motion::hover_blend(&star_hover, gpui::transparent_black(), crate::theme::ink(0.08)))
-                    .on_hover(motion::hover_listener(star_hover.clone()))
+                    .hover_fade(star_hover.clone())
                     .on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
                         this.toggle_model_favorite(harness, &model, cx);
@@ -539,7 +540,7 @@ impl Pickers {
                     .justify_center()
                     .cursor_pointer()
                     .bg(motion::hover_blend("compact-model-back-hover", gpui::transparent_black(), crate::theme::ink(0.05)))
-                    .on_hover(motion::hover_listener("compact-model-back-hover"))
+                    .hover_fade("compact-model-back-hover")
                     .on_click(cx.listener(|this, _, _, cx| this.show_compact_panel(cx)))
                     .child(
                         crate::icons::icon(crate::icons::ALT_ARROW_LEFT)
@@ -926,7 +927,7 @@ impl Pickers {
             .items_start()
             .justify_center()
             .cursor_pointer()
-            .on_hover(motion::hover_listener(model_key))
+            .hover_fade(model_key)
             .on_click(cx.listener(|this, _, _, cx| {
                 this.compact_keyboard = false;
                 this.show_compact_models(cx);
@@ -1031,7 +1032,7 @@ impl Pickers {
                     .justify_center()
                     .cursor_pointer()
                     .bg(crate::theme::ink(0.05 * fast_hover))
-                    .on_hover(motion::hover_listener(fast_key))
+                    .hover_fade(fast_key)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.compact_keyboard = false;
                         this.pick_option(option.clone(), choice.clone(), default, cx);

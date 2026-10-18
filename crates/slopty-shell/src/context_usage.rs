@@ -4,6 +4,7 @@ use crate::theme::Theme;
 use gpui::{IntoElement, PathBuilder, SharedString, canvas, div, point, prelude::*, px};
 use slopty_view_doc::dock::{ContextBreakdown, ContextSlice, TurnTokens};
 use slopty_view_proto::ContextUsage;
+use crate::motion::HoverFade as _;
 
 /// The context ring's trigger chip; the footer ([`crate::account_usage`])
 /// opens [`card`] from it on click.
@@ -74,7 +75,7 @@ pub(crate) fn ring_chip(
         .text_size(crate::typography::ui_rems(11.0))
         .text_color(text)
         .cursor_pointer()
-        .on_hover(crate::motion::hover_listener(id))
+        .hover_fade(id)
         .child(drawn)
 }
 

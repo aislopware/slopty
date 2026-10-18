@@ -84,6 +84,7 @@ rand = { version = "0.10" }
 raw-window-handle = { version = "0.6", default-features = false, features = ["std"] }
 regex-automata = { version = "0.4" }
 regex-syntax = { version = "0.8" }
+resvg = { version = "0.48", default-features = false, features = ["memmap-fonts", "raster-images", "system-fonts", "text"] }
 rmcp = { version = "3", default-features = false, features = ["macros", "server", "transport-io"] }
 rust-embed-utils = { version = "8", default-features = false, features = ["debug-embed", "include-exclude"] }
 rust-i18n-support = { version = "4", default-features = false, features = ["codegen"] }
@@ -93,7 +94,7 @@ serde = { version = "1", features = ["alloc", "derive", "rc"] }
 serde_core = { version = "1", features = ["alloc", "rc"] }
 serde_json = { version = "1", features = ["float_roundtrip", "preserve_order", "raw_value"] }
 sha2 = { version = "0.11" }
-similar = { version = "2", features = ["inline", "unicode"] }
+similar = { version = "3", features = ["unicode"] }
 slab = { version = "0.4" }
 smallvec = { version = "1", default-features = false, features = ["const_new", "union"] }
 socket2 = { version = "0.6", default-features = false, features = ["all"] }
@@ -107,7 +108,6 @@ toml_datetime = { version = "1", features = ["serde"] }
 toml_parser = { version = "1" }
 tracing = { version = "0.1" }
 tracing-core = { version = "0.1" }
-ttf-parser = { version = "0.25", features = ["no-std-float"] }
 ucd-trie = { version = "0.1" }
 usvg = { version = "0.48" }
 uuid = { version = "1", features = ["fast-rng", "serde", "v4", "v7"] }

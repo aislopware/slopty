@@ -56,6 +56,7 @@ use crate::syntax_cache::{DocumentHighlightKey, SyntaxHighlightCache};
 use crate::settings::widgets::ActionHint as _; // slopty: tooltips name their key.
 use crate::theme::Theme;
 use slopty_syntax::LanguageId as Lang;
+use crate::motion::HoverFade as _;
 
 // slopty: Slopty's own rows, and find in thread.
 mod context_menu; // slopty: right-click menus in the chat.
@@ -8227,7 +8228,7 @@ impl Transcript {
                 let (press, reach) = strip_press(format!("copy-message-{entry_id}"));
                 strip_control(press, &theme, reach) // slopty: a tab stop.
                     .cursor_pointer()
-                    .on_hover(motion::hover_listener(fade_key.clone()))
+                    .hover_fade(fade_key.clone())
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.copy_message(entry_id.clone(), text.clone(), cx)
                     }))

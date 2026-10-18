@@ -420,7 +420,10 @@ fn up(home: &Path) -> Result<String> {
         }
     }
     tart_out(home, &["set", GUEST, "--memory", MEMORY_MB])?;
-    boot(home, GUEST, &[])
+    let ip = boot(home, GUEST, &[])?;
+    // On every boot, so a guest cloned from a base made before takes it.
+    ssh(home, &ip, crate::vm::NO_UPDATES)?;
+    Ok(ip)
 }
 
 /// Boot `name` headless, as a process of its own; its address once a command runs in its

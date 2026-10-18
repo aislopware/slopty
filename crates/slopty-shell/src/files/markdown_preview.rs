@@ -19,6 +19,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
+use crate::motion::HoverFade as _;
 
 const MAX_MEDIA_BYTES: usize = 64 * 1024 * 1024;
 const MAX_MEDIA_ENTRIES: usize = 32;
@@ -1280,7 +1281,7 @@ impl MarkdownPreview {
                         .pb(px(render::MD_BLOCK_GAP))
                         // Include the comment gutter so moving from the block to
                         // its button never leaves the hover.
-                        .on_hover(crate::motion::hover_listener(reveal))
+                        .hover_fade(reveal)
                         .child(
                             div().w_full().flex().justify_center().px(px(24.0)).child(
                                 div()

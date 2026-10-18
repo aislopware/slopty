@@ -22,6 +22,7 @@ use gpui::{
     MouseUpEvent, NavigationDirection, Pixels, Point, Render, SharedString, Subscription, Task,
     Window, WindowControlArea, actions, div, prelude::*, px,
 };
+use crate::motion::HoverFade as _;
 
 // slopty: no accounts, sync or sign-in.
 use slopty_view_proto::WorkspaceScope; // slopty: no pull-request pages.
@@ -8615,7 +8616,7 @@ impl Shell {
                     theme.glass_hover().opacity(0.8),
                 )
             })
-            .on_hover(motion::hover_listener("user-menu-trigger"))
+            .hover_fade("user-menu-trigger")
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _, _| this.user_menu.note_trigger_press()),
@@ -8764,7 +8765,7 @@ impl Shell {
                             .items_center()
                             .justify_center()
                             .cursor_pointer()
-                            .on_hover(motion::hover_listener("settings-trigger"))
+                            .hover_fade("settings-trigger")
                             .map(|el| crate::surface_chrome::focus_ring_within(el, &theme, reach))
                             .on_click(cx.listener(|this, _, _, cx| this.toggle_settings(cx)))
                             .child(drawn)
@@ -9254,7 +9255,7 @@ impl Shell {
             .when(self.pane_resize_dragging == Some(kind), |el| {
                 el.child(drag_cursor(gpui::CursorStyle::ResizeColumn))
             })
-            .on_hover(motion::hover_listener(fade_key))
+            .hover_fade(fade_key)
             // Codex-style seam feedback: the existing 1px panel border stays
             // visible at rest; hover adds a stronger center highlight that
             // fades back into that border toward both ends.
@@ -9875,7 +9876,7 @@ impl Shell {
             .when(self.pane_resize_dragging == Some(PaneResizeKind::Terminal), |el| {
                 el.child(drag_cursor(gpui::CursorStyle::ResizeRow))
             })
-            .on_hover(motion::hover_listener(handle_key))
+            .hover_fade(handle_key)
             .child(
                 div()
                     .absolute()
@@ -10555,7 +10556,7 @@ impl Shell {
                 crate::theme::wash(0.0),
                 crate::theme::wash(0.11),
             ))
-            .on_hover(motion::hover_listener(plus_fade))
+            .hover_fade(plus_fade)
             .block_mouse_except_scroll()
             .on_mouse_down(
                 gpui::MouseButton::Left,
@@ -10960,7 +10961,7 @@ fn window_control_button_with(
         .justify_center()
         .rounded(px(6.0 + reach))
         .cursor_pointer()
-        .on_hover(motion::hover_listener(fade_key))
+        .hover_fade(fade_key)
         // Buttons in/over a titlebar drag strip must be EXCLUDED from the
         // strip's event surface entirely. `.occlude()` (gpui
         // `HitboxBehavior::BlockMouse`) makes the window hit-test STOP at the
@@ -11198,7 +11199,7 @@ fn header_icon_button_with(
         .justify_center()
         .rounded(px(6.0 + reach))
         .cursor_pointer()
-        .on_hover(motion::hover_listener(fade_key))
+        .hover_fade(fade_key)
         // Same occlusion + click-swallowing as [`window_control_button`]: this
         // button sits inside the chat header's titlebar drag region, so its
         // rect must be carved out of the strip's drag/double-click surface.

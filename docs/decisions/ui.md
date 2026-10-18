@@ -13330,3 +13330,25 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   GameController's coalesced keyboard is there, heard as the first connects and the last goes and
   read again on each return to the front. A touch-only phone shows none: a badge there promised a
   key that does not exist. Test: dock_tests `digits_show_only_while_a_hardware_keyboard_is_attached`.
+- ✅ **Reduce Motion holds the composer's caret still (2026-10-19).** A focused composer's caret
+  blinks at `CARET_BLINK_MS` in an active window; under Reduce Motion it stays on and no driver
+  wakes the app to flip it, as the mark's cursor dot already held steady, and as iOS keeps Prefer
+  Non-Blinking Cursor under Motion. The e2e holds Reduce Motion, so a simulator golden of a
+  focused composer no longer catches whichever half of the blink it landed on. Proof:
+  `composer::tests::reduce_motion_holds_the_caret_still`.
+- ✅ **A hover fade moves in every view, not only the shell's own (2026-10-19).** A fade's frames
+  came from the shell root's tail, and gpui-fast draws a view nothing notified from its last
+  frame, so a fade read in a view of its own (a settings page's select, a picker's row) kept the
+  value the flip's frame drew: a hover that never lit, or a wash left lit. Each element that fades
+  now carries `motion::fade_driver`, through `.hover_fade(key)` in place of
+  `.on_hover(hover_listener(key))`: nothing drawn, and while its fade runs it asks its own view
+  for the next frame, so only the views fading build again. Proof:
+  `motion::tests::a_fade_in_a_view_of_its_own_moves_through_every_frame`.
+- ✅ **A terminal starts at the grid it is drawn at (2026-10-19).** A session opened at 80 × 24
+  and the view fitted it once drawn, so a shell in a narrower panel (a phone's terminal page, a
+  narrow side pane) could print its first prompt before the resize reached it: zsh pads the
+  line to the width it was told, and the pad wrapped and left its partial-line mark on a line
+  of its own. The panel now measures its body as it draws (`slopty_terminal::fits`, the
+  element's own derivation, installed as `live::serve_fit`), and an open waits for that first
+  draw; a panel not drawn within half a second opens at 80 × 24. Proof:
+  `terminal::panel::progress_tests::a_session_opens_at_the_grid_its_body_draws`.

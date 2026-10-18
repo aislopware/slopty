@@ -12,6 +12,7 @@ use super::{RowKind, Transcript, USER_LINE_HEIGHT};
 use crate::motion;
 use crate::popover;
 use crate::theme::Theme;
+use crate::motion::HoverFade as _;
 
 /// The card's padding above and below its words.
 const PAD_Y: f32 = 7.0;
@@ -95,7 +96,7 @@ impl Transcript {
                 let accent = theme.accent;
                 move |style| style.border_color(accent)
             })
-            .on_hover(motion::hover_listener(key.clone()))
+            .hover_fade(key.clone())
             .cursor_pointer()
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(move |this, _, _, cx| this.scroll_to_row(ix, cx)))

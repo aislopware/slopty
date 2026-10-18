@@ -4,6 +4,7 @@
 use gpui::{Div, div, prelude::*, px};
 
 use crate::theme::Theme;
+use crate::motion::HoverFade as _;
 
 pub(crate) const HEADER_HEIGHT: f32 = Theme::TITLEBAR_HEIGHT;
 pub(crate) const CONTROL_SIZE: f32 = 24.0;
@@ -200,7 +201,7 @@ pub(crate) fn tab_chip(
     let shown = crate::motion::hover_t(&tab_fade);
     tab((id, ix), active, theme)
         .debug_selector(move || selector.to_string())
-        .on_hover(crate::motion::hover_listener(tab_fade))
+        .hover_fade(tab_fade)
         .h(px(TAB_CHIP_HEIGHT))
         .w(px(TAB_CHIP_WIDTH))
         .flex_none()
@@ -269,7 +270,7 @@ pub(crate) fn tab_chip(
                     Box::new(crate::settings::widgets::text_tooltip("Close tab"))
                 })
                 .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
-                .on_hover(crate::motion::hover_listener(close_fade.clone()))
+                .hover_fade(close_fade.clone())
                 // The tab owns a drag payload. Claim the close press before
                 // it reaches that parent or GPUI starts a tab drag instead of
                 // delivering the close click.

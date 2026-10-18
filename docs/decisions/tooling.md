@@ -2205,6 +2205,27 @@ more full-window layer.
     which noq's port lacks and the deque's defragment is written without.
   - Claude Code 2.1.302 is pinned and the fixtures are recorded on it. Its control and stream
     subtypes are the same 155 as 2.1.301's.
+- ✅ **Upstream sync of 2026-10-19: gpui-fast `eccf9139`, gpui-kit `bbe912be`, ghostty
+  `44278514`.** The gpui-fast fork takes three of Slopty's own changes: #50 draws SVGs with
+  resvg and usvg 0.48 and checks a font for a glyph through skrifa, as resvg now does, in place
+  of ttf-parser; #51 has `Window::painted_quads` and `painted_underlines` leave out the fade and
+  rounded clip a primitive's padding holds, so a quad painted in a rounded parent equals the
+  background it was painted with again (#76 had broken that); #52 puts a rounded clip's padding
+  edge on the 1/64 device pixel grid the shift module reads as exact. Its edges were added up in
+  floats, so a rounded card a whole number of pixels from where it was laid out keyed a fade
+  entry a float's noise off, and a scrolled card on iOS kept its last frame's clip. gpui-kit is rebased onto
+  `5591a658` (one upstream commit, Windows tests only) and takes similar 3, resvg 0.48 and three
+  fixes the newest gpui-fast needed:
+  - A removed button's pending or shown tooltip was dismissed from the root's render, which
+    gpui-fast no longer runs each frame, since it draws only the views that changed. The
+    trigger's element state now holds the only handle to an anchor entity, and the tooltip goes
+    on its release, after the first frame without the trigger. Slopty's own tooltips are
+    GPUI's (`slopty-shell`'s `settings::widgets`), so this reaches only gpui-component's
+    controls.
+  - The popover's motion tests step the test executor's clock, which gpui-fast's animations
+    stand at, instead of sleeping on the wall clock.
+  - The ghostty fork merges `189af86e` (translations, colour schemes, GTK and nix, outside
+    `paths`); libghostty-rs is pinned to it (`3467d5f5`).
 - ✅ **Upstream sync of 2026-10-18 (third): gpui-kit `92cbfc9d`.** gpui-kit is rebased onto
   `9254c580` (8 upstream commits).
   - #3574 places a `TabBar`'s sliding indicator from what it last placed and asks for the next

@@ -187,7 +187,7 @@ impl Composer {
                 .border_color(theme.warning.opacity(0.3))
                 // slopty: the faded hover.
                 .bg(crate::motion::hover_blend("question-strip", theme.warning.opacity(0.06), theme.warning.opacity(0.1)))
-                .on_hover(crate::motion::hover_listener("question-strip"))
+                .hover_fade("question-strip")
                 .cursor_pointer()
                 // slopty: a tab stop; its hairline takes the shared ring's accent when focused.
                 .tab_index(0)

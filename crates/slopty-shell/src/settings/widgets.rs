@@ -9,6 +9,7 @@ use gpui::{AnyElement, Context, Pixels, ScrollHandle, SharedString, Window, div,
 
 use crate::popover::{self, MenuScrollbarMetrics, MenuScrollbarState, ScrollRailHost};
 use crate::theme::Theme;
+use crate::motion::HoverFade as _;
 
 /// Width of the section column beside the settings page, published by the
 /// shell each frame so dropdowns and responsive pages measure the page pane.
@@ -1118,7 +1119,7 @@ pub fn section_tab(
         ))
         .bg(crate::motion::hover_blend(&hover_key, base_bg, hover_bg))
         .id(id.into())
-        .on_hover(crate::motion::hover_listener(hover_key))
+        .hover_fade(hover_key)
 }
 
 /// Height of every settings select trigger: centered in a 60px card row.
@@ -1159,7 +1160,7 @@ pub fn select_trigger(
         } else {
             crate::motion::hover_blend(&hover_key, select_fill(theme, false), lifted)
         })
-        .on_hover(crate::motion::hover_listener(hover_key))
+        .hover_fade(hover_key)
         .flex()
         .flex_row()
         .items_center()

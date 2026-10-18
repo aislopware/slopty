@@ -1103,7 +1103,7 @@ impl Composer {
                                 if selected { crate::theme::ink(0.09) } else { crate::theme::ink(0.03) },
                                 if selected { crate::theme::ink(0.09) } else { crate::theme::ink(0.07) },
                             ))
-                            .on_hover(crate::motion::hover_listener(format!("wizard-rule-scope-option-{ix}")))
+                            .hover_fade(format!("wizard-rule-scope-option-{ix}"))
                             .cursor_pointer()
                             // slopty: a tab stop with the shared ring; ↩ or Space picks it.
                             .tab_index(0)
@@ -1316,7 +1316,7 @@ impl Composer {
                         if selected { crate::theme::ink(0.09) } else { crate::theme::ink(0.03) },
                         if selected { crate::theme::ink(0.09) } else { crate::theme::ink(0.07) },
                     ))
-                    .on_hover(crate::motion::hover_listener(format!("wizard-form-{field_ix}-{ix}")))
+                    .hover_fade(format!("wizard-form-{field_ix}-{ix}"))
                     .cursor_pointer()
                     // slopty: a tab stop with the shared ring; ↩ or Space picks it.
                     .tab_index(0)
@@ -1389,7 +1389,7 @@ fn card_link(id: &'static str, words: SharedString, rest: gpui::Hsla, theme: &Th
         .rounded(px(Theme::CONTROL_RADIUS))
         .text_size(crate::typography::ui_rems(12.5))
         .text_color(crate::motion::hover_blend(&fade, rest, text))
-        .on_hover(crate::motion::hover_listener(fade))
+        .hover_fade(fade)
         .cursor_pointer()
         .tab_index(0)
         .child(words);

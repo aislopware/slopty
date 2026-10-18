@@ -27,6 +27,7 @@ use crate::composer::{Composer, QUEUE_COMPOSER_OVERLAP};
 use crate::icons::{self, icon};
 use crate::motion::{self, AnimationExt as _};
 use crate::theme::Theme;
+use crate::motion::HoverFade as _;
 
 /// Lists longer than this fold to a [`FOCUS_WINDOW`] around the current item.
 pub(crate) const FOLD_ABOVE: usize = 6;
@@ -415,7 +416,7 @@ impl Composer {
                 .gap(px(8.0))
                 .cursor_pointer()
                 .bg(motion::hover_blend("todo-panel-toggle-hover", gpui::transparent_black(), crate::theme::ink(0.05)))
-                .on_hover(motion::hover_listener("todo-panel-toggle-hover"))
+                .hover_fade("todo-panel-toggle-hover")
                 .tab_index(0)
                 .map(|el| crate::surface_chrome::focus_ring(el, theme))
                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -501,7 +502,7 @@ impl Composer {
                         .rounded(px(6.0))
                         .cursor_pointer()
                         .bg(motion::hover_blend("todo-panel-dismiss-hover", gpui::transparent_black(), crate::theme::wash(0.11)))
-                        .on_hover(motion::hover_listener("todo-panel-dismiss-hover"))
+                        .hover_fade("todo-panel-dismiss-hover")
                         .tab_index(0)
                         .map(|el| crate::surface_chrome::focus_ring(el, theme))
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -563,7 +564,7 @@ impl Composer {
             .gap(px(8.0))
             .cursor_pointer()
             .bg(motion::hover_blend(&fold_hover, gpui::transparent_black(), crate::theme::ink(0.05)))
-            .on_hover(motion::hover_listener(fold_hover.clone()))
+            .hover_fade(fold_hover.clone())
             .tab_index(0)
             .map(|el| crate::surface_chrome::focus_ring(el, theme))
             .on_click(cx.listener(move |this, _, _, cx| {

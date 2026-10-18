@@ -25,6 +25,7 @@ use std::time::{Duration, Instant};
 
 use crate::motion::{self, SLOPTY_PULSE};
 use crate::theme::{Theme, hairline, ink};
+use crate::motion::HoverFade as _;
 
 // ---------------------------------------------------------------------------
 // Loadable — async slot state shared by pickers/settings pages
@@ -996,8 +997,8 @@ pub fn menu_row(theme: &Theme, active: bool, fade_key: impl Into<SharedString>) 
         // Imperative form — the caller's `.id(...)` makes the element stateful
         // (hover listeners need element state, `.on_hover` needs `Stateful`).
         row.interactivity()
-            .on_hover(motion::hover_listener(fade_key));
-        row
+        .on_hover(motion::hover_listener(fade_key.clone()));
+    row.child(motion::fade_driver(fade_key))
     }
 }
 
@@ -1318,7 +1319,7 @@ pub fn find_step(
         .cursor_pointer()
         .bg(motion::hover_blend(&fade, ink(0.0), ink(0.08)))
         .active(|style| style.bg(ink(0.12)));
-    step.on_hover(motion::hover_listener(fade))
+    step.hover_fade(fade)
 }
 
 /// A find card's "3 of 12": quiet, in figures that hold their width as they count.
@@ -1367,7 +1368,8 @@ pub fn picker_row(
     let fade_key = fade_key.into();
     let mut row = row.bg(motion::hover_blend(&fade_key, ink(0.0), ink(0.05)));
     row.interactivity()
-        .on_hover(motion::hover_listener(fade_key));
+        .on_hover(motion::hover_listener(fade_key.clone()));
+    let row = row.child(motion::fade_driver(fade_key));
     if highlighted { row.bg(ink(0.05)) } else { row }
 }
 
@@ -1480,8 +1482,8 @@ pub fn btn_ghost(theme: &Theme, label: &str, fade_key: impl Into<SharedString>) 
         .cursor_pointer()
         .child(SharedString::from(label.to_string()));
     btn.interactivity()
-        .on_hover(motion::hover_listener(fade_key));
-    btn
+        .on_hover(motion::hover_listener(fade_key.clone()));
+    btn.child(motion::fade_driver(fade_key))
 }
 
 /// Primary button (`btnPrimary`): white fill, near-black text.

@@ -31,6 +31,7 @@ use slopty_view_proto::{
     UserInputQuestion, capabilities,
 };
 use slopty_view_rpc::{RpcError, methods};
+use crate::motion::HoverFade as _;
 
 // slopty: appshots removed.
 use crate::attachments::{self, StagedAttachment};
@@ -2250,6 +2251,12 @@ impl ComposerInput {
         if !focused || !window.is_window_active() {
             self.blink_task = None;
             return false;
+        }
+        // slopty: Reduce Motion holds the caret still, as iOS keeps Prefer Non-Blinking Cursor
+        // beside it under Motion: on while focused, and nothing wakes the app to flip it.
+        if crate::motion::reduced_motion(cx) {
+            self.blink_task = None;
+            return true;
         }
         if self.blink_task.is_none() {
             self.blink_task = Some(cx.spawn(async move |this, cx| {
@@ -9747,7 +9754,7 @@ impl Composer {
                         crate::theme::ink(0.06),
                     )
                 })
-                .on_hover(motion::hover_listener(format!("wizard-option-{ix}")))
+                .hover_fade(format!("wizard-option-{ix}"))
                 // slopty: the preview pane follows the pointer.
                 .when(previews, |el| {
                     el.on_mouse_move(cx.listener(move |this, _: &gpui::MouseMoveEvent, _, cx| {
@@ -10799,7 +10806,7 @@ impl Render for Composer {
         );
         let attach = crate::surface_chrome::focus_ring_within(attach_press, &theme, attach_reach)
             .cursor_pointer()
-            .on_hover(motion::hover_listener(attach_hover_key))
+            .hover_fade(attach_hover_key)
             // slopty: dictation removed.
             .role(Role::Button)
             .tab_index(0)
@@ -11271,6 +11278,39 @@ mod tests {
         cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx))
             .unwrap();
         (dir, window)
+    }
+
+    /// Under Reduce Motion the caret of a focused composer in an active window stays on, with
+    /// no driver flipping it; otherwise it is off a half-period on.
+    #[gpui::test]
+    fn reduce_motion_holds_the_caret_still(cx: &mut gpui::TestAppContext) {
+        let (_dir, handle) = composer_focus_window(cx);
+        let input = handle.update(cx, |composer, _, _| composer.input.clone()).unwrap();
+        handle
+            .update(cx, |_, window, cx| {
+                window.activate_window();
+                window.focus(&input.read(cx).focus_handle(cx), cx);
+            })
+            .unwrap();
+        let caret = |reduced: bool, cx: &mut gpui::TestAppContext| {
+            cx.update(|cx| crate::motion::set_reduced_motion(cx, reduced));
+            let shown = |cx: &mut gpui::TestAppContext| {
+                handle
+                    .update(cx, |_, window, cx| {
+                        input.update(cx, |input, cx| {
+                            (input.caret_shown(window, cx), input.blink_task.is_some())
+                        })
+                    })
+                    .unwrap()
+            };
+            input.update(cx, |input, _| input.reset_blink());
+            let _armed = shown(cx);
+            cx.executor().advance_clock(Duration::from_millis(CARET_BLINK_MS + 1));
+            cx.run_until_parked();
+            shown(cx)
+        };
+        assert_eq!(caret(false, cx), (false, true), "a half-period on, off");
+        assert_eq!(caret(true, cx), (true, false), "held still, nothing driving it");
     }
 
     fn with_composer_input(

@@ -124,7 +124,7 @@ impl Composer {
                     .rounded(px(5.0))
                     .cursor_pointer()
                     .bg(crate::motion::hover_blend("dock-side-dismiss", gpui::transparent_black(), crate::theme::wash(0.11)))
-                    .on_hover(crate::motion::hover_listener("dock-side-dismiss"))
+                    .hover_fade("dock-side-dismiss")
                     .tooltip(crate::settings::widgets::detail_tooltip(
                         "Dismiss",
                         "The next side question brings it back.",

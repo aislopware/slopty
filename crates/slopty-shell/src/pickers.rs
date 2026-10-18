@@ -29,6 +29,7 @@ use slopty_view_proto::{
     ChatConfig, FolderListing, HarnessId, Model, ReasoningLevel, RepoRef, SandboxLevel, Space,
 };
 use slopty_view_rpc::methods;
+use crate::motion::HoverFade as _;
 
 /// Display cap for the ref list (t3code shows pages of 100 with a status
 /// footer; a flat cap + "Showing X of Y refs" reads the same without
@@ -3564,7 +3565,7 @@ impl Pickers {
             } else {
                 motion::hover_blend(&id, gpui::transparent_black(), theme.element_hover)
             })
-            .on_hover(motion::hover_listener(id.clone()))
+            .hover_fade(id.clone())
             .cursor_pointer()
             .on_mouse_down(
                 gpui::MouseButton::Left,
@@ -3680,7 +3681,7 @@ impl Pickers {
             } else {
                 motion::hover_blend(&id, gpui::transparent_black(), theme.element_hover)
             })
-            .on_hover(motion::hover_listener(id.clone()))
+            .hover_fade(id.clone())
             .cursor_pointer()
             .on_mouse_down(
                 gpui::MouseButton::Left,
@@ -5060,7 +5061,7 @@ impl Pickers {
                 .justify_center()
                 .cursor_pointer()
                 .bg(motion::hover_blend(&star_hover, gpui::transparent_black(), crate::theme::ink(0.08)))
-                .on_hover(motion::hover_listener(star_hover))
+                .hover_fade(star_hover)
                 .on_click(cx.listener(move |this, _, _, cx| {
                     cx.stop_propagation();
                     this.toggle_model_favorite(harness, &star_model, cx);
@@ -6683,7 +6684,7 @@ impl Pickers {
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .text_color(motion::hover_blend(&id, theme.text_muted, theme.text))
                 .bg(motion::hover_blend(&id, gpui::transparent_black(), theme.element_hover))
-                .on_hover(motion::hover_listener(id.clone()))
+                .hover_fade(id.clone())
                 .cursor_pointer()
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.open_mode_menu(window, cx);

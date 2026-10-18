@@ -36,8 +36,8 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    Animation, AnimationElement, App, ElementId, EntityId, Global, Hsla, IntoElement, Rgba,
-    SharedString, Styled, Window, px,
+    Animation, AnimationElement, App, ElementId, EntityId, Global, Hsla, IntoElement,
+    ParentElement, Rgba, SharedString, StatefulInteractiveElement, Styled, Window, px,
 };
 use serde::{Deserialize, Serialize};
 
@@ -949,6 +949,11 @@ impl HoverFades {
         }
     }
 
+    /// Whether `key`'s fade is under way at `now`.
+    fn moving_at(&self, key: &str, now: Instant) -> bool {
+        self.entries.get(key).is_some_and(|entry| !entry.settled(now, Self::duration()))
+    }
+
     /// Once-per-frame bookkeeping: advance the frame counter, prune entries
     /// that settled back to rest or went a full frame unread (unmounted), and
     /// report whether any fade is still mid-flight (→ keep frames coming).
@@ -1018,6 +1023,38 @@ pub fn set_hover(key: &str, hovered: bool, reduced: bool) {
     });
 }
 
+/// slopty: an element's hover fade for `key`, read with [`hover_t`]/[`hover_blend`] in the
+/// same view: the pointer's flips set it ([`hover_listener`]), and while it runs, each frame the
+/// element is laid out in asks its own view for the next. The shell's frames keep coming while
+/// any fade runs, but a view the window draws from its last frame reads no fade: without its
+/// own ask, a view of its own (a settings page, a picker) would keep the frame the flip drew.
+pub trait HoverFade: StatefulInteractiveElement + ParentElement {
+    /// Fade `key` with the pointer over this element.
+    #[must_use]
+    fn hover_fade(self, key: impl Into<SharedString>) -> Self {
+        let key = key.into();
+        self.on_hover(hover_listener(key.clone())).child(fade_driver(key))
+    }
+}
+
+impl<E: StatefulInteractiveElement + ParentElement> HoverFade for E {}
+
+/// slopty: the part of [`HoverFade`] that keeps `key`'s fade moving, for an element whose own
+/// hover listener calls [`hover_listener`]'s: nothing drawn, and while the fade runs, the view
+/// it is laid out in is asked for the next frame.
+pub fn fade_driver(key: SharedString) -> impl IntoElement {
+    gpui::canvas(
+        move |_, window, _| {
+            if HOVER_FADES.with(|f| f.borrow().moving_at(&key, hover_frame())) {
+                window.request_animation_frame();
+            }
+        },
+        |_, (), _, _| {},
+    )
+    .absolute()
+    .size_0()
+}
+
 /// An `.on_hover` listener driving the fade for `key` — pair with
 /// [`hover_t`]/[`hover_blend`] reads of the same key in the same element.
 pub fn hover_listener(
@@ -1027,9 +1064,9 @@ pub fn hover_listener(
     move |hovered, window, cx| {
         set_hover(&key, *hovered, reduced_motion(cx));
         // Event-dispatch context: `request_animation_frame` is draw-phase-only
-        // (it resolves the current view) — `refresh` marks the whole window
-        // dirty, the root render re-evaluates the blend and keeps frames
-        // coming via its tail while the fade is mid-flight.
+        // (it resolves the current view) — `refresh` builds every view again
+        // for the next frame, and the element's [`fade_driver`] keeps its own
+        // view's frames coming while the fade is mid-flight.
         window.refresh();
     }
 }
@@ -1472,6 +1509,58 @@ fn refresh_system(_cx: &mut App) {}
 
 #[cfg(test)]
 mod tests {
+
+    /// A hover fade read in a view of its own, which the window draws from its last frame while
+    /// nothing notifies it, moves on through the fade: its element asks that view for each
+    /// frame until the fade settles, and the view reads the fade where it stands each time.
+    #[gpui::test]
+    fn a_fade_in_a_view_of_its_own_moves_through_every_frame(cx: &mut gpui::TestAppContext) {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        use gpui::{AppContext as _, Context, Entity, InteractiveElement as _, Render};
+
+        struct Inner(Rc<RefCell<Vec<f32>>>);
+        impl Render for Inner {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                self.0.borrow_mut().push(hover_t("inner-hover"));
+                gpui::div().id("inner").size_full().hover_fade("inner-hover")
+            }
+        }
+        struct Outer(Entity<Inner>);
+        impl Render for Outer {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                gpui::div().size_full().child(self.0.clone())
+            }
+        }
+
+        crate::clock::run_on(cx.executor());
+        let read = Rc::new(RefCell::new(Vec::new()));
+        let (_, cx) = cx.add_window_view(|_, cx| {
+            let inner = cx.new(|_| Inner(Rc::clone(&read)));
+            Outer(inner)
+        });
+        let frame = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            cx.run_until_parked();
+        };
+        frame(cx);
+        let inner = cx.debug_bounds("inner").unwrap_or_else(|| gpui::Bounds::new(
+            gpui::point(gpui::px(10.), gpui::px(10.)),
+            gpui::size(gpui::px(10.), gpui::px(10.)),
+        ));
+        cx.simulate_mouse_move(inner.center(), None, gpui::Modifiers::default());
+        frame(cx);
+        let start = read.borrow().len();
+        for _ in 0..20 {
+            cx.executor().advance_clock(Duration::from_millis(16));
+            frame(cx);
+        }
+        let seen: Vec<f32> = read.borrow()[start..].to_vec();
+        assert!(seen.windows(2).all(|w| w[0] <= w[1]), "on the way in: {seen:?}");
+        assert!(seen.iter().any(|t| *t > 0.0 && *t < 1.0), "mid-fade frames drawn: {seen:?}");
+        assert_eq!(seen.last().copied(), Some(1.0), "the fade drawn to its end: {seen:?}");
+    }
 
     // slopty: two status animations mounted 300 ms apart, even in two apps (two windows' worth
     // of pulse clocks), report one phase at one frame time.

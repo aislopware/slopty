@@ -93,6 +93,13 @@ const PROBE: Duration = Duration::from_secs(10);
 const SSH_HOST_VAR: &str = "SLOPTY_VM_SSH_HOST";
 /// What the guest runs the tests with, beside the archive.
 const GUEST_STAGE: &str = "/Users/admin/slopty-live";
+
+/// Nothing updating in a guest: macOS 27 ignores `softwareupdate --schedule off` and staged its
+/// 27.0.1 into a guest's Preboot volume, 21 GB of its disk, so the keys a management profile
+/// sets are written instead. A guest keeps the macOS the runners run.
+pub const NO_UPDATES: &str = "for key in AutomaticCheckEnabled AutomaticDownload \
+     AutomaticallyInstallMacOSUpdates CriticalUpdateInstall ConfigDataInstall; do \
+     sudo defaults write /Library/Preferences/com.apple.SoftwareUpdate \"$key\" -bool false; done";
 /// The MACs run guests take, one each: two, because macOS runs two macOS guests at most. Locally
 /// administered, so they collide with no real interface.
 const RUN_MACS: [&str; 2] = ["7e:51:0b:7e:00:01", "7e:51:0b:7e:00:02"];
@@ -653,7 +660,8 @@ fn provision(home: &Utf8Path, macos: Macos, base: &str) -> Result<()> {
              chmod 600 ~/.ssh/authorized_keys"
         ),
     )?;
-    exec_out(home, base, "sudo mdutil -a -i off >/dev/null && sudo softwareupdate --schedule off")?;
+    exec_out(home, base, "sudo mdutil -a -i off >/dev/null")?;
+    exec_out(home, base, NO_UPDATES)?;
     // slopty-pty's shell integration drives fish beside zsh and bash, and tmux for the marks
     // that cross a real one; a guest lacks nothing.
     exec_out(home, base, "/opt/homebrew/bin/brew install --quiet fish tmux >/dev/null")?;

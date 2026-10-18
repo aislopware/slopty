@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use slopty_e2e::harness::artifacts_dir;
 use slopty_e2e::snapshot::{
-    MAC_TOLERANCE as TOLERANCE, PixelRect, assert_matches, assert_matches_masked,
+    MAC_TOLERANCE as TOLERANCE, PixelRect, assert_matches, assert_matches_apart,
 };
 use slopty_e2e::{A11yNode, Button, Command, Driver, Dump, Stack};
 
@@ -294,7 +294,8 @@ mod stream {
         })
     }
 
-    /// [`goldens`] with the pixels and the words inside `masks` left out.
+    /// [`goldens`] with the pixels and the words inside `masks` left out, and the pixels of the
+    /// chat's done line, whose clock says when the run got there.
     async fn goldens_masked(drv: &mut Driver, renders: &Path, name: &str, masks: &[PixelRect]) {
         for (dark, appearance) in [(false, "light"), (true, "dark")] {
             drv.ok(&Command::Appearance { dark }).await.unwrap();
@@ -302,7 +303,16 @@ mod stream {
             let golden = format!("{name}-{appearance}");
             let frame = drv.render(&renders.join(format!("{golden}.png"))).await.unwrap();
             println!("A11Y {golden}\n{}", slopty_e2e::frame_text(&frame.a11y));
-            assert_matches_masked(&golden, &frame, TOLERANCE, &artifacts_dir(), masks).unwrap();
+            // The chat's turn ended when this run got there, and its done line says when: its
+            // words read `$CLOCK` (`Frame::text`), and its pixels are left out with the stream's.
+            let clocks = frame.a11y.iter().filter(|n| {
+                n.role == "Status" && n.label.as_deref().is_some_and(|l| l.contains("\u{b7} done "))
+            });
+            #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "pixels")]
+            let clocks = clocks.map(|n| n.bounds.map(|v| (v * frame.scale).round() as u32));
+            let pixels: Vec<PixelRect> = masks.iter().copied().chain(clocks).collect();
+            let masks = (pixels.as_slice(), masks);
+            assert_matches_apart(&golden, &frame, TOLERANCE, &artifacts_dir(), masks).unwrap();
         }
         drv.ok(&Command::Appearance { dark: false }).await.unwrap();
     }

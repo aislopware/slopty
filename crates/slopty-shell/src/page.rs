@@ -36,6 +36,7 @@ use gpui::{
 use slopty_view_doc::{PageCard, PageState, calls};
 
 use crate::live::{self, PageAct, PagePresence};
+use crate::motion::HoverFade as _;
 
 pub mod doc;
 pub mod fence;
@@ -598,7 +599,7 @@ impl PageCardView {
                         crate::theme::ink(0.06),
                         crate::theme::ink(0.1),
                     ))
-                    .on_hover(crate::motion::hover_listener(format!("{}-bring-back", self.card.page)))
+                    .hover_fade(format!("{}-bring-back", self.card.page))
                     .tab_index(0) // slopty: a tab stop.
                     .map(|el| crate::surface_chrome::focus_ring(el, theme))
                     .on_click(cx.listener(|this, _, _, cx| this.move_to_pane(false, cx)))
@@ -623,7 +624,7 @@ impl PageCardView {
                     .cursor_pointer()
                     // slopty: a faded hover, and a tab stop.
                     .text_color(crate::motion::hover_blend(&fade, theme.text_muted, theme.text))
-                    .on_hover(crate::motion::hover_listener(fade))
+                    .hover_fade(fade)
                     .tab_index(0)
                     .rounded(px(4.0))
                     .map(|el| crate::surface_chrome::focus_ring(el, theme))
@@ -995,6 +996,7 @@ impl Render for PageCardView {
                     fade(hovered, window, cx);
                 }
             }))
+            .child(crate::motion::fade_driver(self.hover_key().into()))
             .role(gpui::Role::Group)
             .aria_label(SharedString::from(format!("Page: {}", self.card.title)))
             .aria_value(value)
@@ -1136,7 +1138,7 @@ fn ask_line(
                 crate::theme::ink(0.06),
                 crate::theme::ink(0.1),
             ))
-            .on_hover(crate::motion::hover_listener(format!("{id}-{text}-hover")))
+            .hover_fade(format!("{id}-{text}-hover"))
             .tab_index(0) // slopty: a tab stop.
             .map(|el| crate::surface_chrome::focus_ring(el, theme))
             .on_click(move |event, window, cx| on_click(event, window, cx))

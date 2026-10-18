@@ -453,7 +453,7 @@ impl Composer {
             .cursor_pointer()
             .tab_index(0)
             .map(|el| crate::surface_chrome::focus_ring_within(el, theme, reach))
-            .on_hover(motion::hover_listener("dock-picked-mode-hover"))
+            .hover_fade("dock-picked-mode-hover")
             .on_click(cx.listener(|this, _, window, cx| {
                 this.pickers.update(cx, |pickers, cx| pickers.open_mode_menu(window, cx));
             }))
@@ -495,7 +495,7 @@ impl Composer {
             } else {
                 motion::hover_blend(&hover, gpui::transparent_black(), crate::theme::ink(0.05))
             })
-            .on_hover(motion::hover_listener(hover))
+            .hover_fade(hover)
             .when(!open, |el| {
                 el.tooltip(crate::settings::widgets::text_tooltip(details))
                     .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
@@ -618,7 +618,7 @@ impl Composer {
             } else {
                 motion::hover_blend("dock-mode-hover", rest, crate::theme::ink(0.05))
             }))
-            .on_hover(motion::hover_listener("dock-mode-hover"))
+            .hover_fade("dock-mode-hover")
             .action_hint("Mode", Keys::Fixed("shift-tab"), cx)
             .aria_label(aria)
             .on_mouse_down(
