@@ -13,7 +13,7 @@ use std::ffi::c_void;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{MainThreadMarker, class, msg_send, sel};
-use objc2_core_foundation::CGPoint;
+use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_foundation::NSProcessInfo;
 
 // `IOHIDEvent`'s creators (IOKit's `IOHIDEvent.h`, exported though not in the SDK): the
@@ -306,14 +306,41 @@ fn window_at(at: CGPoint) -> Option<(Retained<AnyObject>, *mut AnyObject)> {
     })
 }
 
-/// `view`'s class and its superviews', innermost first, joined by ` < ` (at most eight).
+/// `view`'s class and its superviews', innermost first, joined by ` < ` (at most sixteen, which
+/// reaches a page's web view from the frame scroll view inside it), each with its frame in the
+/// window and, for a scroll view, its offset and content size.
 fn classes(view: *mut AnyObject) -> String {
     let mut names = Vec::new();
     let mut current = view;
-    while names.len() < 8 {
+    while names.len() < 16 {
         // SAFETY: a live view of the app's hierarchy, or nil, on the main thread.
         let Some(here) = (unsafe { current.as_ref() }) else { break };
-        names.push(here.class().name().to_string_lossy().into_owned());
+        // Where it lies in the window, and for a scroll view where it stands in its content:
+        // which view a touch found is read against what covers the point.
+        // SAFETY: `UIView`'s getters and its conversion to the window (nil); main thread.
+        let window: CGRect = unsafe {
+            let bounds: CGRect = msg_send![here, bounds];
+            msg_send![here, convertRect: bounds, toView: std::ptr::null_mut::<AnyObject>()]
+        };
+        let mut said = format!(
+            "{}[{:.0},{:.0} {:.0}x{:.0}",
+            here.class().name().to_string_lossy(),
+            window.origin.x,
+            window.origin.y,
+            window.size.width,
+            window.size.height
+        );
+        // SAFETY: `respondsToSelector:` on any object; `UIScrollView`'s getters where it does.
+        if unsafe { msg_send![here, respondsToSelector: sel!(contentOffset)] } {
+            let (offset, size): (CGPoint, CGSize) =
+                unsafe { (msg_send![here, contentOffset], msg_send![here, contentSize]) };
+            said.push_str(&format!(
+                " at {:.0},{:.0} of {:.0}x{:.0}",
+                offset.x, offset.y, size.width, size.height
+            ));
+        }
+        said.push(']');
+        names.push(said);
         // SAFETY: `UIView`'s getter; nil at the top.
         current = unsafe { msg_send![here, superview] };
     }

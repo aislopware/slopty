@@ -1546,6 +1546,18 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `shell::page_pointer_tests::a_page_taller_than_the_phones_band_stays_live_where_it_shows`,
     `page::card_tests::a_live_page_moved_out_of_its_band_rests_in_the_frame_shown`, and the e2e
     `ios::pages` case on the iPhone and iPad simulators.
+  - **A page is the finger's wherever it shows live, from the moment it wakes (2026-10-18).** A
+    touch over any shown part of a live page reaches the page: its own script hears it, and a
+    page that can scroll scrolls itself (the e2e reads both from the page's own word). One thing
+    stood in the way on iOS, found with the finger's landing chain, which now gives each view's
+    frame in the window and a scroll view's offset and content size (`slopty_platform::finger`).
+    The view model dropped a page's native host when it rested, so its web view left the window
+    and came back at the next wake with the layout it had when it left: a phone's tall page
+    showed content 980 x 258, then 304 x 80, then 304 x 699 over its first second live, and a
+    touch below the stale content fell to WebKit's own scroll view. A mounted page now keeps its
+    native host, warm as live; GPUI hides the container while it does not place it, and the web
+    view stays in the window, laid out at its size (`workspace::view_model::pages`). Test: the
+    e2e `ios::pages` case, iPhone and iPad.
   - **Network is the person's grant, per page.** `PageHost::set_network` names the origins one
     page may reach (MCP Apps' `connectDomains` and `resourceDomains`): the page gets a rule list
     of its own that lets exactly those through, its policy names them, and it reloads. A page

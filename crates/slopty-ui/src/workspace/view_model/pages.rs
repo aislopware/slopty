@@ -485,7 +485,12 @@ impl WorkspaceView {
             });
         }
         let presence = page.id.and_then(|id| host.presence(id)).unwrap_or(Presence::Cold);
-        if presence == Presence::Live && page.native.is_none() {
+        // A mounted page keeps its native host, warm as live: its web view stays in the window,
+        // in a container GPUI hides while it does not place it, so WebKit keeps laying it out
+        // at its size. Dropped at rest, the view left the window, and woken it came back with
+        // the layout it had when it left: a phone's tall page took no touch over most of it for
+        // a second (e2e `pages`: its content 980 x 258, then 304 x 80, then 304 x 699).
+        if presence != Presence::Cold && page.native.is_none() {
             page.native = page.id.and_then(|id| {
                 let view = host.view(id)?;
                 let options = gpui::composition::NativeHostOptions {
@@ -494,13 +499,14 @@ impl WorkspaceView {
                     label: Some("Page".into()),
                 };
                 let native = window.create_native_host(options, cx).ok()?;
-                // SAFETY: `view` is the page's live WKWebView, mounted while it is live, and this
-                // runs on the main thread (gpui-fast's `NativeHost::attach_view` contract).
+                // SAFETY: `view` is the page's WKWebView, mounted while the page is warm or live,
+                // and this runs on the main thread (gpui-fast's `NativeHost::attach_view`
+                // contract).
                 unsafe { native.attach_view(view) }.ok()?;
                 Some(native)
             });
         }
-        if presence != Presence::Live {
+        if presence == Presence::Cold {
             page.native = None;
         }
         Some(HostedPage {

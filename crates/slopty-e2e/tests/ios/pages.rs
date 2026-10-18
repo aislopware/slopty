@@ -104,7 +104,8 @@ async fn live_card(drv: &mut Driver, title: &str, top: f32, bottom: f32) -> A11y
     }
 }
 
-/// Where the card of `title` is now, its top and height.
+/// Where the card of `title` is now, its top and height. The dump cuts a card's bounds to what
+/// shows, so a card whose top went under the bars says the bars' edge: its end tells where it is.
 async fn where_is(drv: &mut Driver, title: &str) -> (f32, f32) {
     let dump = drv.dump().await.unwrap();
     let found = card(&dump, title).unwrap_or_else(|| panic!("no {title} card"));
@@ -315,13 +316,15 @@ async fn a_finger_over_a_live_page_scrolls_the_chat_or_the_page() {
     let short_card = live_card(drv, "Short", top, bottom).await;
     let [x, y, w, _] = short_card.bounds;
     let from = [x + w / 2.0, y + HEADER + 20.0];
-    let (before, _) = where_is(drv, "Short").await;
+    // Its end, which stays in sight while its top goes under the bars.
+    let end = |(y, h): (f32, f32)| y + h;
+    let before = end(where_is(drv, "Short").await);
     let natives = natives_said(drv).await;
     let landed = drv.ui_finger_drag(from, [from[0], from[1] - DRAG], MOVES).await.unwrap();
     measure(&format!("pages-touch-landed {device} short drag: {landed}; {natives}"));
-    let (lifted, _) = where_is(drv, "Short").await;
+    let lifted = end(where_is(drv, "Short").await);
     tokio::time::sleep(Duration::from_millis(600)).await;
-    let (coasted, _) = where_is(drv, "Short").await;
+    let coasted = end(where_is(drv, "Short").await);
     measure(&format!(
         "pages-touch-short {device}: a {DRAG} pt drag over a page with nothing to scroll moved \
          the chat {:.1} pt by the lift, {:.1} pt more in its fling",
