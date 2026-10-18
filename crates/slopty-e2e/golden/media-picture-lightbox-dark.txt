@@ -1,0 +1,29 @@
+Window
+Button │ Say hello
+Status │ Done
+Button │ History: past Claude Code sessions
+Button │ Server: e2e-server, Connected
+Button │ Settings
+Article │ You
+Paragraph │ Read the plot
+Button │ Read 1 file
+Button │ Preview generated image
+Article │ Claude
+Paragraph │ The plot climbs in five red bars.
+Button │ Attach images
+MultilineTextInput │ Do anything…
+Button │ Send message
+Button │ Mode: Auto
+Button │ Context 1%
+Button │ Open in…
+Button │ Show chat details
+Button │ Show files panel
+Button │ Show side pane
+Button │ Hide sidebar
+Button │ Back
+Button │ Forward
+Button │ New chat
+Button │ Sidebar view options
+Dialog │ Image 1 (focused)
+Image │ Image 1
+Button │ Close

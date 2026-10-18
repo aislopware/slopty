@@ -774,6 +774,32 @@ const APP_PROMPT: &str = "Echo hi through the app";
 /// (`slopty-stub-mcp-apps`), then an answer: what Claude Code writes for a call of an app's
 /// tool.
 fn echo_recording(folder: &std::path::Path) {
+    let echoed = json!([{ "type": "text", "text": "hi" }]);
+    recorded_turn(
+        folder,
+        APP_PROMPT,
+        &json!({
+            "type": "tool_use", "id": "toolu_01", "name": "mcp__apps__echo",
+            "input": { "text": "hi" },
+        }),
+        &echoed,
+        json!({ "content": echoed, "structuredContent": { "echo": "hi", "hostUi": true } }),
+        "Echoed hi through the app's page.",
+    );
+}
+
+/// A recorded turn of one call, in `folder` as `STUB_REPLAY` reads it: `prompt`, the assistant's
+/// `call` (its id `toolu_01`), the result Claude Code writes for it (`content` in the message,
+/// `tool_use_result` beside it), then `answer`. The folder is `/work` to the recording, which
+/// the replay moves to the chat's own.
+fn recorded_turn(
+    folder: &std::path::Path,
+    prompt: &str,
+    call: &serde_json::Value,
+    content: &serde_json::Value,
+    tool_use_result: serde_json::Value,
+    answer: &str,
+) {
     const ID: &str = "00000000-0000-4000-8000-0000000000";
     const SESSION: &str = "00000000-0000-4000-8000-000000000001";
     let record = |n: u32, parent: Option<u32>, kind: &str, at: u32, message: serde_json::Value| {
@@ -795,48 +821,27 @@ fn echo_recording(folder: &std::path::Path) {
             "stop_reason": stop, "type": "message", "usage": { "input_tokens": 2, "output_tokens": 20 },
         })
     };
-    let echoed = json!([{ "type": "text", "text": "hi" }]);
     let mut result = record(
         5,
         Some(4),
         "user",
         2,
         json!({ "role": "user", "content": [{
-        "type": "tool_result", "tool_use_id": "toolu_01", "content": echoed,
+        "type": "tool_result", "tool_use_id": "toolu_01", "content": content,
     }] }),
     );
     result["sourceToolAssistantUUID"] = json!(format!("{ID}04"));
-    result["toolUseResult"] =
-        json!({ "content": echoed, "structuredContent": { "echo": "hi", "hostUi": true } });
+    result["toolUseResult"] = tool_use_result;
     let lines = [
-        record(3, None, "user", 0, json!({ "role": "user", "content": APP_PROMPT })),
-        record(
-            4,
-            Some(3),
-            "assistant",
-            1,
-            said(
-                json!([{
-                    "type": "tool_use", "id": "toolu_01", "name": "mcp__apps__echo",
-                    "input": { "text": "hi" },
-                }]),
-                "msg_01",
-                "tool_use",
-            ),
-        ),
+        record(3, None, "user", 0, json!({ "role": "user", "content": prompt })),
+        record(4, Some(3), "assistant", 1, said(json!([call]), "msg_01", "tool_use")),
         result,
         record(
             6,
             Some(5),
             "assistant",
             3,
-            said(
-                json!([{
-                    "type": "text", "text": "Echoed hi through the app's page.",
-                }]),
-                "msg_02",
-                "end_turn",
-            ),
+            said(json!([{ "type": "text", "text": answer }]), "msg_02", "end_turn"),
         ),
     ];
     std::fs::create_dir_all(folder).unwrap();
@@ -915,5 +920,161 @@ async fn an_mcp_app_call_shows_its_page_read_through_claude_code() {
     tokio::time::sleep(SETTLE).await;
     let drv = &mut stack.driver;
     goldens(drv, &renders, "media-app", &[]).await;
+    stack.shutdown().await;
+}
+
+/// The picture prompt, as the recording below says it.
+const PICTURE_PROMPT: &str = "Read the plot";
+
+/// The plot's ink: its frame and its bars, a red no theme draws.
+const PLOT_RED: [u8; 3] = [222, 64, 40];
+
+/// A plot `width` by `height`: a white field framed in [`PLOT_RED`] with five bars of it, so where
+/// the red reaches is where the picture is drawn, at whatever size.
+fn plot_png(width: u32, height: u32) -> Vec<u8> {
+    let red = image::Rgba([PLOT_RED[0], PLOT_RED[1], PLOT_RED[2], 255]);
+    let mut plot = image::RgbaImage::from_pixel(width, height, image::Rgba([250, 250, 250, 255]));
+    for (x, y, pixel) in plot.enumerate_pixels_mut() {
+        let frame = x < 6 || y < 6 || x >= width.saturating_sub(6) || y >= height.saturating_sub(6);
+        let column = x / 40;
+        let rise = height.saturating_mul(column.saturating_add(2)) / 14;
+        let bar = column % 2 == 1 && column < 11 && y > height.saturating_sub(rise);
+        if frame || bar {
+            *pixel = red;
+        }
+    }
+    let mut png = std::io::Cursor::new(Vec::new());
+    plot.write_to(&mut png, image::ImageFormat::Png).unwrap();
+    png.into_inner()
+}
+
+/// Where `frame` draws [`PLOT_RED`], in points: its left, top, width and height.
+fn red_extent(frame: &slopty_e2e::snapshot::Frame) -> Option<[f32; 4]> {
+    let near = |p: &image::Rgba<u8>| p.0.iter().zip(PLOT_RED).all(|(a, b)| a.abs_diff(b) <= 24);
+    let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0, 0);
+    for (x, y, pixel) in frame.image.enumerate_pixels() {
+        if near(pixel) {
+            (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
+        }
+    }
+    #[expect(clippy::cast_precision_loss, reason = "pixel coordinates fit f32 exactly")]
+    let pt = |v: u32| v as f32 / frame.scale;
+    (x1 >= x0).then(|| {
+        [
+            pt(x0),
+            pt(y0),
+            pt(x1.saturating_sub(x0).saturating_add(1)),
+            pt(y1.saturating_sub(y0).saturating_add(1)),
+        ]
+    })
+}
+
+/// A picture a tool returned shows in the chat, and opens large: the stand-in plays Claude Code's
+/// own record of a `Read` of a PNG (the image block in the result, the file in `toolUseResult`,
+/// as 2.1.302 writes them), the worker keeps the picture in the thread, and the shell reads it
+/// back through it (`slopty-image:`) and draws it after the call, scaled into its 512 by 420
+/// frame. A click opens the lightbox over a scrim, the picture larger and centred; Esc closes
+/// it, and the keyboard is back on the picture.
+#[tokio::test]
+#[ignore = "live: cargo xtask e2e app"]
+async fn a_picture_a_tool_returned_shows_inline_and_opens_in_the_lightbox() {
+    let mut stack = ServedApp::launch_rooted(MACHINE, &[], |root| {
+        let replay = json!({ PICTURE_PROMPT: root.join("read-plot") });
+        vec![("STUB_REPLAY".to_owned(), replay.to_string())]
+    })
+    .await
+    .unwrap();
+    let (width, height) = (640, 400);
+    let png = plot_png(width, height);
+    std::fs::write(stack.path("repo").join("plot.png"), &png).unwrap();
+    let data = data_encoding::BASE64.encode(&png);
+    recorded_turn(
+        &stack.path("read-plot"),
+        PICTURE_PROMPT,
+        &json!({ "type": "tool_use", "id": "toolu_01", "name": "Read",
+            "input": { "file_path": "/work/plot.png" } }),
+        &json!([{ "type": "image", "source": {
+            "type": "base64", "data": data, "media_type": "image/png",
+        } }]),
+        json!({ "type": "image", "file": {
+            "base64": data, "type": "image/png", "originalSize": png.len(),
+            "dimensions": { "originalWidth": width, "originalHeight": height,
+                "displayWidth": width, "displayHeight": height },
+        } }),
+        "The plot climbs in five red bars.",
+    );
+    let repo = stack.path("repo");
+    let agent = start(&stack, MACHINE, &repo, "Say hello").await;
+    thread_until(&stack, &agent, "said hello", |r| says(r, "Done: Say hello")).await;
+    tell(&mut stack, PICTURE_PROMPT).await;
+    thread_until(&stack, &agent, "read the plot", |r| says(r, "five red bars")).await;
+
+    let renders = stack.path("");
+    let drv = &mut stack.driver;
+    let picture = "Preview generated image";
+    let shown =
+        seen(drv, "the picture in the chat", STEP, |d| node(d, "Button", picture).is_some()).await;
+    let button = node(&shown, "Button", picture).cloned().unwrap();
+    tokio::time::sleep(SETTLE).await;
+    let inline = drv.render(&renders.join("inline.png")).await.unwrap();
+    let [in_x, in_y, in_w, in_h] = red_extent(&inline).expect("the picture is drawn in the chat");
+    // 640 by 400 scaled into the 512-wide frame, where its button is.
+    assert!((in_w - 512.0).abs() <= 2.0 && (in_h - 320.0).abs() <= 2.0, "inline {in_w}x{in_h}");
+    let [bx, by, bw, bh] = button.bounds;
+    assert!(
+        (in_x - bx).abs() <= 2.0 && (in_y - by).abs() <= 2.0,
+        "at its button {:?}",
+        button.bounds
+    );
+    assert!(
+        (in_w - bw).abs() <= 2.0 && (in_h - bh).abs() <= 2.0,
+        "as its button {:?}",
+        button.bounds
+    );
+    println!("MEASURE inline-picture: {in_w:.0}x{in_h:.0} pt of a {width}x{height} PNG");
+    goldens(drv, &renders, "media-picture", &[]).await;
+
+    let (x, y) = middle(&button);
+    drv.click(x, y).await.unwrap();
+    tokio::time::sleep(SETTLE).await;
+    let open = drv.render(&renders.join("lightbox.png")).await.unwrap();
+    let [lx, ly, lw, lh] = red_extent(&open).expect("the lightbox draws the picture");
+    #[expect(clippy::cast_precision_loss, reason = "pixel counts fit f32 exactly")]
+    let (ww, wh) =
+        (open.image.width() as f32 / open.scale, open.image.height() as f32 / open.scale);
+    assert!(
+        lw > in_w * 1.1 && lh > in_h * 1.1,
+        "larger than inline: {lw}x{lh} against {in_w}x{in_h}"
+    );
+    assert!(
+        (lw / lh - in_w / in_h).abs() < 0.02,
+        "the same shape: {lw}x{lh} against {in_w}x{in_h}"
+    );
+    assert!((lx + lw / 2.0 - ww / 2.0).abs() <= 4.0, "centred across: {lx}+{lw} in {ww}");
+    assert!(ly > 0.0 && ly + lh < wh, "inside the window: {ly}+{lh} in {wh}");
+    // The scrim is over the whole window: every pixel of a strip of the sidebar is dimmed.
+    let strip = [8.0, wh / 2.0, 160.0, 24.0];
+    #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "pixels")]
+    let area = ((strip[2] * open.scale) as usize) * ((strip[3] * open.scale) as usize);
+    let dimmed = changed_inside(&inline.image, &open.image, strip, open.scale);
+    assert!(dimmed + area / 100 >= area, "{dimmed} of {area} pixels of the sidebar dimmed");
+    println!("MEASURE lightbox-picture: {lw:.0}x{lh:.0} pt in a {ww:.0}x{wh:.0} pt window");
+    goldens(drv, &renders, "media-picture-lightbox", &[]).await;
+
+    drv.keys("escape").await.unwrap();
+    let closed = seen(drv, "the keyboard back on the picture", STEP, |d| {
+        node(d, "Button", picture).is_some_and(|n| n.focused)
+    })
+    .await;
+    let back = node(&closed, "Button", picture).cloned().unwrap();
+    tokio::time::sleep(SETTLE).await;
+    let after = drv.render(&renders.join("closed.png")).await.unwrap();
+    let extent = red_extent(&after).expect("the chat's picture again");
+    assert!(
+        extent.iter().zip([in_x, in_y, in_w, in_h]).all(|(a, b)| (a - b).abs() <= 2.0),
+        "Esc leaves the chat as it was: {extent:?} against {:?} ({:?})",
+        [in_x, in_y, in_w, in_h],
+        back.bounds
+    );
     stack.shutdown().await;
 }
