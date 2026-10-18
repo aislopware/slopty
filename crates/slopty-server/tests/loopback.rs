@@ -22,7 +22,7 @@ mod tests {
     fn caps() -> WorkerCaps {
         WorkerCaps {
             os: Os::MacOs,
-            os_version: "26.5".to_owned(),
+            os_version: "27.0".to_owned(),
             arch: "aarch64".to_owned(),
             form: slopty_proto::server::Form::Desktop,
             cpus: 8,

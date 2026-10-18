@@ -69,9 +69,9 @@ jobs:
             os: ubuntu-24.04-arm
             targets: aarch64-apple-ios, aarch64-apple-ios-sim
           - { lane: rustdoc, os: ubuntu-24.04-arm, targets: aarch64-apple-darwin }
-          - { lane: tests, shard: ui, os: macos-26, targets: aarch64-apple-darwin }
-          - { lane: tests, shard: worker, os: macos-26, targets: aarch64-apple-darwin }
-          - { lane: tests, shard: rest, os: macos-26, targets: aarch64-apple-darwin }
+          - { lane: tests, shard: ui, os: xcode-27, targets: aarch64-apple-darwin }
+          - { lane: tests, shard: worker, os: xcode-27, targets: aarch64-apple-darwin }
+          - { lane: tests, shard: rest, os: xcode-27, targets: aarch64-apple-darwin }
     env:
       SLOPTY_DISK_FLOOR_GB: ${{ matrix.disk-floor-gb }}
     steps:
@@ -486,7 +486,7 @@ jobs:
     name: release ${{ github.ref_name }}
     needs: gate
     if: github.ref_type == 'tag'
-    runs-on: macos-26
+    runs-on: xcode-27
     # `bash` named, so a step runs with pipefail: GitHub's default shell runs without it, and
     # `dist … | tee` or `curl … | sh` would pass with the command before the pipe failed.
     defaults:

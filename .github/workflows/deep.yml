@@ -84,7 +84,7 @@ jobs:
     name: ${{ matrix.check }}
     needs: wait
     if: needs.wait.outputs.idle == 'true'
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 240
     strategy:
       fail-fast: false

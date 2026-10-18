@@ -43,8 +43,8 @@ zed itself so it is never behind zed while longbridge lags.
   dispatches it), and a failed lint job cancels its run's other jobs. It waits, prints the failed
   log's end and keeps every runner log under `target/remote/<name>/`. `--e2e app -E
   '<filterset>'` adds an e2e case (`-E failed`: only the tests the last run of that name
-  failed). The `app` and `ios` cases run here, in the headless macOS guest `slopty-26-e2e`
-  (tart, cloned from `slopty-26-xcode`, which is made once from the live lane's base with this
+  failed). The `app` and `ios` cases run here, in the headless macOS guest `slopty-27-e2e`
+  (tart, cloned from `slopty-27-xcode`, which is made once from the live lane's base with this
   Mac's Xcode and the runners' iOS simulator runtime, about half an hour): the lane's tree is
   built in `target/local/<lane>/e2e-target` (the simulator's app too, with this Mac's Xcode),
   the app's tests run in the guest three at a time (`SLOPTY_E2E_THREADS`), those that code video
@@ -369,25 +369,25 @@ macOS guests for the live tests that may not run on this Mac (`docs/TESTING.md` 
 in a VM"). They run under tart (`brew install openai/tools/tart`). Everything lives under
 `SLOPTY_VM_HOME` when it is set, else `/Volumes/Lacie/vms`, and the command refuses a home on the
 startup disk (any volume of its APFS container, symlinks followed).
-`--macos 26|27` picks the guest (26 by default).
-- `cargo xtask vm create`: pull the pinned image (33 GB on disk for 26) and make the base
-  `slopty-26`: 4 cores, 8 GB, this lane's SSH key, the worker's TCC grants, fish, no Spotlight
+`--macos 27` picks the guest's release, the floor's and the only one so far.
+- `cargo xtask vm create`: pull the pinned image (34 GB) and make the base
+  `slopty-27`: 4 cores, 8 GB, this lane's SSH key, the worker's TCC grants, fish, no Spotlight
   or software update. The pulled manifest is hashed against the pinned digest. `--fresh` makes it again. Nothing boots the base after this; every guest is
   a copy-on-write clone of it.
-- `cargo xtask vm start|stop`: the long-lived `slopty-26-dev` guest, headless (`--name` for
+- `cargo xtask vm start|stop`: the long-lived `slopty-27-dev` guest, headless (`--name` for
   another). `cargo xtask vm ssh [-- cmd]` reaches it over SSH. `cargo xtask vm exec -- cmd` runs
   a command in its logged-in session, where events post and the grants hold.
 - `cargo xtask vm deploy`: build `slopty-ptyd`, `slopty-worker` and `slopty` (from cargo's own
   target dir), clone the guest if it does not exist yet, and run `slopty worker deploy` against
   it. This Mac's address is added to the guest's `[network] allow`, other settings kept. The worker
-  answers at `<guest ip>:45550` (`tart ip slopty-26-dev`, with `TART_HOME=/Volumes/Lacie/vms/tart`).
+  answers at `<guest ip>:45550` (`tart ip slopty-27-dev`, with `TART_HOME=/Volumes/Lacie/vms/tart`).
   `--app` instead deploys as the app does, over the system `ssh`, into a fresh clone of the base
   (one that never had a worker): it runs `slopty-deploy`'s `guest` test, which meets the guest's
   unknown host key, trusts the fingerprint shown, installs, and pings the worker. `--keep` leaves
   the guest. The QUIC leg needs the Local Network grant for the app the terminal runs under.
 - `cargo xtask vm live -p <crate> [--test <target>] -- <nextest filters>`: a fresh guest per run,
-  `slopty-26-run-<pid>-<time>`, deleted when the run ends or on Ctrl-C, SIGTERM or SIGHUP.
-  `--keep` names it `slopty-26-kept-<pid>-<time>` and leaves it. The run prints the clone, boot
+  `slopty-27-run-<pid>-<time>`, deleted when the run ends or on Ctrl-C, SIGTERM or SIGHUP.
+  `--keep` names it `slopty-27-kept-<pid>-<time>` and leaves it. The run prints the clone, boot
   and deploy times, and the results land under `target/vm/<guest>/`. Run guests take one of two
   fixed MACs, locked for the run, so DHCP leases stay at two however many runs there are.
 - `cargo xtask vm e2e`: the lane's proof (a host test against the guest's worker, a real HID

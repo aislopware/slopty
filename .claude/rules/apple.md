@@ -11,7 +11,8 @@ paths:
 
 # Apple code
 
-- Floor macOS 26.5 / iOS 26.5 on Apple silicon: no availability checks, no fallbacks.
+- Floor macOS 27.0 / iOS and iPadOS 27.0 on Apple silicon: no availability checks, no fallbacks;
+  the floor's newest API over its deprecated twin (`docs/decisions/platform.md`, "Floor 27").
 - Every `unsafe` block names the framework or ABI rule it relies on.
 - Apple constants come from the objc2 statics. A `CFSTR` constant is spelled once, beside its
   use, naming its header.

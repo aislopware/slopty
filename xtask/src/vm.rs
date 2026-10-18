@@ -15,10 +15,10 @@
 //! - `create` pulls the image. tart checks every layer against its digest, and a pull that stops
 //!   resumes: it writes into a directory named after the image, and the next pull skips each layer
 //!   whose bytes there already hash to the layer's digest. The pulled manifest is then hashed here
-//!   against the pin. Then it makes the base guest from the image (`slopty-26`, `slopty-27`):
-//!   [`CPUS`] and [`MEMORY_MB`], the key, the worker's own TCC grants, fish, no Spotlight, no
-//!   software update. Nothing boots the base again; every other guest is a copy-on-write clone.
-//! - `start`/`stop`/`ssh`/`exec`/`deploy` work on a long-lived clone (`slopty-26-dev`). A guest
+//!   against the pin. Then it makes the base guest from the image (`slopty-27`): [`CPUS`] and
+//!   [`MEMORY_MB`], the key, the worker's own TCC grants, fish, no Spotlight, no software update.
+//!   Nothing boots the base again; every other guest is a copy-on-write clone.
+//! - `start`/`stop`/`ssh`/`exec`/`deploy` work on a long-lived clone (`slopty-27-dev`). A guest
 //!   runs headless (`--no-graphics`) on tart's shared NAT network, where this Mac reaches it at its
 //!   own address. (The host-only network, `--net-host`, runs Softnet as root, which needs a sudo
 //!   rule this lane does not install.)
@@ -227,11 +227,8 @@ pub struct LiveOpts {
 /// A macOS release a guest runs.
 #[derive(ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Macos {
-    /// macOS 26 (Tahoe), the floor's major release.
+    /// macOS 27, the floor's major release.
     #[default]
-    #[value(name = "26")]
-    V26,
-    /// macOS 27.
     #[value(name = "27")]
     V27,
 }
@@ -240,13 +237,9 @@ impl Macos {
     /// The Cirrus Labs base image, by digest: a new one is taken on purpose, never by a tag moving.
     const fn image(self) -> &'static str {
         match self {
-            // macOS 26.6.2 (25G83), uploaded 2026-09-05.
-            Self::V26 => {
-                "ghcr.io/cirruslabs/macos-tahoe-base@sha256:1b093499716409d29e8b5336844528e1cae375db97d2ad8e5aeff78cf0da201e"
-            }
-            // macOS 27.0, uploaded 2026-09-21.
+            // macOS 27, uploaded 2026-10-03.
             Self::V27 => {
-                "ghcr.io/cirruslabs/macos-golden-gate-base@sha256:9a2f20d179d6418a128dcb76c593588ea85a263dbfa286e757db63f3d949af7c"
+                "ghcr.io/cirruslabs/macos-golden-gate-base@sha256:5302a9ea6cd68c059d00fa253fe75c8ebdf4e0dc8c45d4e136ecc6e7a4c02b70"
             }
         }
     }
@@ -254,7 +247,6 @@ impl Macos {
     /// The base guest's name.
     const fn base(self) -> &'static str {
         match self {
-            Self::V26 => "slopty-26",
             Self::V27 => "slopty-27",
         }
     }
@@ -262,7 +254,6 @@ impl Macos {
     /// The major version `sw_vers` says.
     const fn major(self) -> &'static str {
         match self {
-            Self::V26 => "26",
             Self::V27 => "27",
         }
     }
@@ -678,15 +669,11 @@ fn provision(home: &Utf8Path, macos: Macos, base: &str) -> Result<()> {
          auth_version, indirect_object_identifier_type, indirect_object_identifier) VALUES {rows};"
     );
     // macOS 27 keeps the user's database in a container tccd holds open.
-    let user_db = if macos == Macos::V26 {
-        "$HOME/Library/Application Support/com.apple.TCC/TCC.db".to_owned()
-    } else {
-        exec_out(
-            home,
-            base,
-            "sudo lsof -a -u $(id -u) -c tccd -Fn | sed -n 's|^n\\(/private/var/containers/Data/ProtectedSystem/.*/com.apple.TCC/TCC.db\\)$|\\1|p' | head -n 1",
-        )?
-    };
+    let user_db = exec_out(
+        home,
+        base,
+        "sudo lsof -a -u $(id -u) -c tccd -Fn | sed -n 's|^n\\(/private/var/containers/Data/ProtectedSystem/.*/com.apple.TCC/TCC.db\\)$|\\1|p' | head -n 1",
+    )?;
     ensure!(!user_db.is_empty(), "no user TCC database open in {base}");
     for db in ["/Library/Application Support/com.apple.TCC/TCC.db", user_db.as_str()] {
         exec_out(home, base, &format!("sudo sqlite3 \"{db}\" \"{insert}\""))?;
@@ -1591,7 +1578,7 @@ mod tests {
     /// An image is taken by digest, so a tag moving upstream never changes a guest here.
     #[test]
     fn every_image_is_pinned_by_digest() {
-        for macos in [Macos::V26, Macos::V27] {
+        for &macos in Macos::value_variants() {
             let (_repo, digest) = macos.image().split_once("@sha256:").expect("a digest");
             assert_eq!(digest.len(), 64, "{}", macos.image());
             assert!(digest.bytes().all(|b| b.is_ascii_hexdigit()), "{}", macos.image());
@@ -1604,18 +1591,18 @@ mod tests {
     #[test]
     fn only_a_run_guest_whose_process_is_gone_is_reaped() {
         let names = [
-            "slopty-26",
-            "slopty-26-dev",
-            "slopty-26-new",
-            "slopty-26-run-100-1790000000",
+            "slopty-27",
+            "slopty-27-dev",
+            "slopty-27-new",
+            "slopty-27-run-100-1790000000",
             "slopty-27-run-200-1790000001",
-            "slopty-26-kept-100-1790000002",
-            "slopty-26-run-x-1",
+            "slopty-27-kept-100-1790000002",
+            "slopty-27-run-x-1",
         ];
         let reaped = orphans(names, |pid| pid == 200);
-        assert_eq!(reaped, ["slopty-26-run-100-1790000000"]);
-        assert_eq!(run_pid("slopty-26-run-4079-1790753744"), Some(4079));
-        assert_eq!(run_pid("slopty-26-kept-4079-1790753744"), None);
+        assert_eq!(reaped, ["slopty-27-run-100-1790000000"]);
+        assert_eq!(run_pid("slopty-27-run-4079-1790753744"), Some(4079));
+        assert_eq!(run_pid("slopty-27-kept-4079-1790753744"), None);
     }
 
     /// A zero signal tells a live process from one that has exited and been reaped.

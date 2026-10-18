@@ -48,7 +48,7 @@ env:
 jobs:
   e2e-app:
     name: e2e (app)
-    runs-on: macos-26
+    runs-on: xcode-27
     # A cold build of the app and its daemons on a three-core runner took over 30 minutes.
     timeout-minutes: 90
     steps:

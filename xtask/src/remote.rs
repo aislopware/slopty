@@ -80,7 +80,7 @@ fn test_runner(packages: &[String], full: bool) -> &'static str {
     let linux = crate::gate::linux_tested();
     let on_linux = packages.iter().all(|p| linux.contains(&p.as_str()));
     let mac_too = full && !mac_tested(packages).is_empty();
-    if !packages.is_empty() && on_linux && !mac_too { "ubuntu-24.04" } else { "macos-26" }
+    if !packages.is_empty() && on_linux && !mac_too { "ubuntu-24.04" } else { "xcode-27" }
 }
 
 /// Those of `packages` whose tests a gate's Mac shard runs, all or some: those a Linux check of
@@ -101,9 +101,15 @@ const MAC_POLL: Duration = Duration::from_secs(60);
 /// How many macOS jobs the check asked for takes: the tests when they need a Mac, and a probe
 /// or an e2e case on a Mac. Linux's never wait.
 fn mac_jobs(opts: &RemoteOpts) -> usize {
-    let tests = !opts.packages.is_empty() && tests_on(opts).starts_with("macos");
-    let run = (opts.probe.is_some() || opts.e2e.is_some()) && opts.runner.starts_with("macos");
+    let tests = !opts.packages.is_empty() && a_mac(tests_on(opts));
+    let run = (opts.probe.is_some() || opts.e2e.is_some()) && a_mac(&opts.runner);
     usize::from(tests).saturating_add(usize::from(run))
+}
+
+/// Whether a runner label names a Mac: GitHub's `macos-*` images and its `xcode-*` ones, which
+/// carry a macOS of their own.
+fn a_mac(label: &str) -> bool {
+    label.starts_with("macos") || label.starts_with("xcode")
 }
 
 /// A macOS job queued or running in the repository's Actions.
@@ -189,7 +195,7 @@ fn mac_jobs_in_flight(sh: &Shell) -> Result<Vec<MacJob>> {
                 .then(|| run.display_title.split(' ').nth(1).map(str::to_owned))
                 .flatten();
             for job in jobs.jobs {
-                let mac = job.labels.iter().any(|l| l.starts_with("macos"));
+                let mac = job.labels.iter().any(|l| a_mac(l));
                 if mac && matches!(job.status.as_str(), "queued" | "in_progress" | "waiting") {
                     let queued = job.status != "in_progress";
                     found.push(MacJob { gate, queued, check: check.clone() });
@@ -344,8 +350,8 @@ pub struct RemoteOpts {
     /// one: wait for it, print what failed and apply what it accepted, as the same options say.
     #[arg(long = "run", value_name = "ID")]
     pub attach: Option<u64>,
-    /// The runner image: macos-26, or ubuntu-24.04 / ubuntu-24.04-arm for what needs no Mac.
-    #[arg(long, default_value = "macos-26")]
+    /// The runner image: xcode-27, or ubuntu-24.04 / ubuntu-24.04-arm for what needs no Mac.
+    #[arg(long, default_value = "xcode-27")]
     pub runner: String,
     /// A shell command to run on the runner after its setup, to try a step there.
     #[arg(long)]
@@ -910,7 +916,7 @@ fn describe(opts: &RemoteOpts) -> String {
     if let Some(probe) = &opts.probe {
         parts.push(format!("probe `{probe}`"));
     }
-    if opts.runner != "macos-26" {
+    if opts.runner != "xcode-27" {
         parts.push(format!("on {}", opts.runner));
     }
     parts.join(", ")
@@ -1168,8 +1174,8 @@ fn dispatched(opts: &RemoteOpts, sha: &str) -> Vec<(&'static str, String)> {
         ("sim", opts.sim.clone(), "iphone"),
         ("snapshots", snapshots.to_owned(), "compare"),
         ("full", (if opts.full { "yes" } else { "no" }).to_owned(), "no"),
-        ("runner", opts.runner.clone(), "macos-26"),
-        ("test_runner", tests_on(opts).to_owned(), "macos-26"),
+        ("runner", opts.runner.clone(), "xcode-27"),
+        ("test_runner", tests_on(opts).to_owned(), "xcode-27"),
         ("probe", opts.probe.clone().unwrap_or_default(), ""),
     ];
     fields
@@ -1406,7 +1412,7 @@ fn first_red(jobs: &[RunJob]) -> Option<&str> {
 }
 
 /// The runner images a check's jobs run on: what `--runner` takes and `check.yml` names.
-const RUNNERS: [&str; 3] = ["macos-26", "ubuntu-24.04", "ubuntu-24.04-arm"];
+const RUNNERS: [&str; 3] = ["xcode-27", "ubuntu-24.04", "ubuntu-24.04-arm"];
 
 /// A queued job asking for a runner no image serves, with the label it asks for.
 fn unservable(jobs: &[RunJob]) -> Option<(String, String)> {
@@ -1696,10 +1702,10 @@ mod tests {
             super::test_runner(&packages, full)
         };
         assert_eq!(of(&["slopty-client"], false), "ubuntu-24.04");
-        assert_eq!(of(&["slopty-client"], true), "macos-26");
-        assert_eq!(of(&["slopty-serverd"], true), "macos-26");
+        assert_eq!(of(&["slopty-client"], true), "xcode-27");
+        assert_eq!(of(&["slopty-serverd"], true), "xcode-27");
         assert_eq!(of(&["slopty-proto", "slopty-server"], true), "ubuntu-24.04");
-        assert_eq!(of(&["slopty-ui"], false), "macos-26");
+        assert_eq!(of(&["slopty-ui"], false), "xcode-27");
     }
 
     #[test]
@@ -1763,7 +1769,7 @@ mod tests {
             name: name.to_owned(),
             status: status.to_owned(),
             conclusion: conclusion.map(str::to_owned),
-            labels: vec!["macos-26".to_owned()],
+            labels: vec!["xcode-27".to_owned()],
         };
         let red = job("lint (A)", "completed", Some("failure"));
         let running = job("run (A)", "in_progress", None);

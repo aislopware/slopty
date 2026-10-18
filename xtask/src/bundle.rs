@@ -43,7 +43,7 @@ const BUNDLE_ID: &str = "dev.aislopware.slopty";
 /// Product name (the `.app` name and what the Finder shows).
 pub const PRODUCT: &str = "Slopty";
 /// Floor, as `LSMinimumSystemVersion`.
-const MACOS_VERSION: &str = "26.5";
+const MACOS_VERSION: &str = "27.0";
 /// Binaries copied into `Contents/MacOS`, the app first.
 pub const BINARIES: [&str; 5] =
     ["slopty-app", "slopty-worker", "slopty-ptyd", "slopty-server", "slopty"];

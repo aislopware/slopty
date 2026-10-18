@@ -24,8 +24,8 @@ LIBGHOSTTY_VT_SYS_PREBUILT_DIR = { value = "target/ghostty-prebuilt", relative =
 # app and its File Provider share (`slopty_platform::files::TEAM`). A build signed by another
 # team sets its own in the environment, which cargo leaves standing over this one.
 SLOPTY_TEAM = "UK58J62H8L"
-MACOSX_DEPLOYMENT_TARGET = "26.5"
-IPHONEOS_DEPLOYMENT_TARGET = "26.5"
+MACOSX_DEPLOYMENT_TARGET = "27.0"
+IPHONEOS_DEPLOYMENT_TARGET = "27.0"
 
 [target.aarch64-apple-darwin]
 rustflags = [ "-C", "target-cpu=apple-m1" ]

@@ -6,7 +6,7 @@ directory and the orchestration verbs, and is never on the data path. **Clients*
 iPhone and iPad app, and the `slopty` CLI that people and AI agents run) show every worker's
 agents, terminals, files and screens in one interface, several workers mixed: zeron's shell,
 copied as Slopty's own (`slopty-shell`), fed by Slopty's view model. Every agent (Claude Code, Codex, pi, any ACP agent) is one thread in
-one agent-neutral model. Everything is Rust. Floor: macOS 26.5 / iOS 26.5, Apple silicon.
+one agent-neutral model. Everything is Rust. Floor: macOS 27.0 / iOS and iPadOS 27.0, Apple silicon.
 
 This file is the map. Rulings and their evidence live under [docs/decisions/](DECISIONS.md), one file per topic.
 

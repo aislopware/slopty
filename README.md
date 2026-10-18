@@ -22,7 +22,7 @@ One Mac can play all three roles.
 
 ## Install
 
-Requires macOS 26.5 or later on Apple silicon. Download `Slopty-<version>-macos-arm64.zip` from
+Requires macOS 27 or later on Apple silicon. Download `Slopty-<version>-macos-arm64.zip` from
 [Releases](https://github.com/aislopware/slopty/releases), unzip it and move `Slopty.app` to
 Applications. Slopty offers the move itself when it is opened from somewhere else, because the
 machine it sets up runs from the app.

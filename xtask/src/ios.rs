@@ -29,7 +29,7 @@ const SHARED_KEYCHAIN: &str = "$(AppIdentifierPrefix)dev.aislopware.slopty.share
 const PRODUCT: &str = "Slopty";
 /// Deployment target (the project floor). Simulators run the newest installed iOS runtime at
 /// or above it ([`sim_runtime`]): the floor is what the app needs, not what the tests run on.
-const IOS_VERSION: &str = "26.5";
+const IOS_VERSION: &str = "27.0";
 
 /// Which simulator `sim` boots; each is created on first use.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
@@ -706,14 +706,14 @@ mod tests {
             serde_json::json!({ "runtimes": runtimes }).to_string()
         };
         let installed = list(vec![
-            runtime("ios-26-4", "26.4", "iOS", true),
             runtime("ios-26-5", "26.5", "iOS", true),
             runtime("ios-27-0", "27.0", "iOS", true),
-            runtime("ios-27-1", "27.1", "iOS", false),
+            runtime("ios-27-1", "27.1", "iOS", true),
+            runtime("ios-27-2", "27.2", "iOS", false),
             runtime("tvos-28-0", "28.0", "tvOS", true),
         ]);
-        assert_eq!(newest_runtime(&installed).unwrap().as_deref(), Some("ios-27-0"));
-        let old = list(vec![runtime("ios-26-4", "26.4", "iOS", true)]);
+        assert_eq!(newest_runtime(&installed).unwrap().as_deref(), Some("ios-27-1"));
+        let old = list(vec![runtime("ios-26-5", "26.5", "iOS", true)]);
         assert_eq!(newest_runtime(&old).unwrap(), None, "below the floor");
         newest_runtime("not json").unwrap_err();
     }

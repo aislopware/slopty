@@ -25,7 +25,7 @@ pub const SOURCE: &str = "assets/icon.svg";
 /// The icon's name: the `.icon` document, `CFBundleIconName`, and the fallback `.icns`.
 pub const NAME: &str = "AppIcon";
 /// Floor the icon is compiled for (the project floor).
-const MINIMUM_OS: &str = "26.5";
+const MINIMUM_OS: &str = "27.0";
 /// Id prefix of the dots in [`SOURCE`], followed by `<column>-<row>`.
 const DOT_ID: &str = "dot-";
 /// Id of the cursor dot, the one the app blinks.

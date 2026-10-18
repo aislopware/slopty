@@ -2425,7 +2425,8 @@ let windows = cfg!(windows);
             for (header, steps) in jobs.iter().zip(jobs.iter().skip(1)) {
                 let runs_on = header.rsplit("runs-on: ").next().unwrap_or_default();
                 let runs_on = runs_on.lines().next().unwrap_or_default();
-                let mac = ["macos", "matrix.os", "inputs."].iter().any(|m| runs_on.contains(m));
+                let mac =
+                    ["macos", "xcode", "matrix.os", "inputs."].iter().any(|m| runs_on.contains(m));
                 // The first step, past the comments above it.
                 let first = steps.split("\n      - ").find(|s| !s.trim_start().starts_with('#'));
                 let first = first.unwrap_or_default();
@@ -2449,7 +2450,7 @@ let windows = cfg!(windows);
             "host clippy on CI, on Linux"
         );
         assert_eq!(
-            workflow.matches(", os: macos-26,").count(),
+            workflow.matches(", os: xcode-27,").count(),
             Shard::value_variants().len(),
             "only the test shards take one of the five macOS runners"
         );

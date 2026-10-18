@@ -37,11 +37,11 @@ on:
         description: "yes: every check (iOS and Linux clippy, rustdoc); no: fmt, host clippy, tests"
         default: "no"
       runner:
-        description: The runner image of the probe and the e2e case (macos-26, ubuntu-24.04, ubuntu-24.04-arm)
-        default: macos-26
+        description: The runner image of the probe and the e2e case (xcode-27, ubuntu-24.04, ubuntu-24.04-arm)
+        default: xcode-27
       test_runner:
         description: The runner image of the tests (`remote` picks Linux when every crate tests there), or none
-        default: macos-26
+        default: xcode-27
       probe:
         description: A shell command to run after setup, for trying a step on a runner
         default: ""
@@ -226,7 +226,7 @@ jobs:
         with:
           r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
           r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
-          actions-cache: ${{ startsWith(inputs.test_runner, 'macos') && 'true' || 'false' }}
+          actions-cache: ${{ !startsWith(inputs.test_runner, 'ubuntu') && 'true' || 'false' }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.99.1
@@ -355,7 +355,7 @@ jobs:
         with:
           r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
           r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
-          actions-cache: ${{ startsWith(inputs.runner, 'macos') && 'true' || 'false' }}
+          actions-cache: ${{ !startsWith(inputs.runner, 'ubuntu') && 'true' || 'false' }}
       # A probe may try any step, so it gets every target, clippy and nightly; an e2e case only
       # builds and runs for the Mac (the ios case for the simulator too): 25 s less setup.
       - uses: dtolnay/rust-toolchain@stable

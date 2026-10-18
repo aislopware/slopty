@@ -7,7 +7,7 @@
 //! warm directory, and the tests run in a long-lived guest ([`GUEST`]) that shows nothing on this
 //! Mac (`--no-graphics`) and touches none of its windows, input or grants, as the live lane's
 //! guests do (`docs/TESTING.md`, "Live lane in a VM"). The guest runs the runners' very macOS
-//! build (26.6.2, 25G83) on Apple's paravirtual GPU, as a runner does.
+//! build (27.0.1, 26A434, `xcode-27`) on Apple's paravirtual GPU, as a runner does.
 //!
 //! - The lane's tree is the check's commit (`gate::snapshot_commit`), built into
 //!   `target/local/<lane>/e2e-target` with the e2e features, apart from the check's own target dir,
@@ -32,20 +32,20 @@ use xshell::Shell;
 use super::Goldens;
 
 /// The guest that runs the e2e cases, a clone of [`BASE`].
-pub const GUEST: &str = "slopty-26-e2e";
+pub const GUEST: &str = "slopty-27-e2e";
 
 /// The base it is cloned from: [`ORIGIN`] with Xcode and the runners' iOS simulator runtime
 /// ([`make_base`]).
-const BASE: &str = "slopty-26-xcode";
+const BASE: &str = "slopty-27-xcode";
 
 /// The live lane's base (`cargo xtask vm create`), which [`BASE`] is made from: the runners'
 /// macOS build.
-const ORIGIN: &str = "slopty-26";
+const ORIGIN: &str = "slopty-27";
 
-/// The iOS simulator runtime the runners' newest is (iOS 26.5, `macos-26` with Xcode 26.6, read on
-/// run 39017057929); downloaded into the base by build, anonymously (`xcodebuild
-/// -downloadPlatform`).
-const IOS_RUNTIME: &str = "23F77";
+/// The iOS simulator runtime the runners' newest is (iOS 27.0, `xcode-27` with Xcode 27.0
+/// 27A266a, read on run 39138638250); downloaded into the base by build, anonymously
+/// (`xcodebuild -downloadPlatform`).
+const IOS_RUNTIME: &str = "24A434";
 
 /// The base's disk, in GB: macOS 12, Xcode 13, the runtime 8, and room for the runs.
 const DISK_GB: &str = "90";
@@ -505,10 +505,11 @@ fn fill_base(home: &Path, making: &str) -> Result<()> {
         home,
         &ip,
         // `repairDisk` may grow the container itself, and `resizeContainer` then refuses the size
-        // it already has: what counts is the size after.
+        // it already has: what counts is the size after. macOS 27 keeps a 5.4 GB Recovery
+        // container after it, so 90 GB leaves the system 78.
         "yes | sudo diskutil repairDisk disk0 >/dev/null 2>&1; \
          sudo diskutil apfs resizeContainer disk0s2 0 >/dev/null 2>&1; \
-         df -g / | awk 'NR == 2 { exit ($2 < 80) }'",
+         df -g / | awk 'NR == 2 { exit ($2 < 75) }'",
     )?;
     let to = format!("{ip}:/Users/{USER}/");
     rsync(home, &[xcode.as_str(), &to], home)?;
@@ -1249,12 +1250,12 @@ mod tests {
 
     /// The base is made from the live lane's: Xcode, the runners' iOS runtime, both simulators.
     /// Live: 28 minutes and an 8.5 GB download, past nextest's deadline for xtask (`cargo test -p
-    /// xtask --lib -- --ignored a_base_is_made`); it makes `slopty-26-xcode-test` and deletes it.
+    /// xtask --lib -- --ignored a_base_is_made`); it makes `slopty-27-xcode-test` and deletes it.
     #[test]
     #[ignore = "live: makes a macOS guest"]
     fn a_base_is_made_from_the_live_lane_s() {
         let home = super::home();
-        let base = "slopty-26-xcode-test";
+        let base = "slopty-27-xcode-test";
         if super::has_guest(&home, base).expect("tart") {
             super::tart_out(&home, &["delete", base]).expect("delete the last test's");
         }
@@ -1281,7 +1282,7 @@ mod tests {
     #[test]
     fn the_simulator_is_found_by_name_or_made_on_the_newest_ios() {
         let devices = r#"{"devices": {
-            "com.apple.CoreSimulator.SimRuntime.iOS-26-5": [
+            "com.apple.CoreSimulator.SimRuntime.iOS-27-0": [
                 {"name": "Slopty iPad", "udid": "76FFF7A1-9F82-4F1D-8E6C-2FEDA6CCF705"},
                 {"name": "Slopty iPhone", "udid": "EAA99FB6-E2BE-4FFE-B921-2413AC6653E4"}
             ]}}"#;
@@ -1291,12 +1292,12 @@ mod tests {
         );
         assert_eq!(super::named_device(devices, "Slopty Watch").expect("parses"), None);
         let runtimes = r#"{"runtimes": [
-            {"identifier": "ios-26-2", "version": "26.2", "platform": "iOS", "isAvailable": true},
-            {"identifier": "ios-26-10", "version": "26.10", "platform": "iOS", "isAvailable": true},
-            {"identifier": "ios-27", "version": "27.0", "platform": "iOS", "isAvailable": false},
+            {"identifier": "ios-27-2", "version": "27.2", "platform": "iOS", "isAvailable": true},
+            {"identifier": "ios-27-10", "version": "27.10", "platform": "iOS", "isAvailable": true},
+            {"identifier": "ios-28", "version": "28.0", "platform": "iOS", "isAvailable": false},
             {"identifier": "tvos-28", "version": "28.0", "platform": "tvOS", "isAvailable": true}
         ]}"#;
-        assert_eq!(super::newest_ios(runtimes).expect("parses").as_deref(), Some("ios-26-10"));
+        assert_eq!(super::newest_ios(runtimes).expect("parses").as_deref(), Some("ios-27-10"));
     }
 
     /// The guest's lanes come least recently used first, the running lane's and any name a
