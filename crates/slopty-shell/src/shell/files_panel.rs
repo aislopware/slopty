@@ -1,4 +1,4 @@
-// Derived from zeron (MIT, github.com/zeronsh/zeron @ 75b7260), see THIRD_PARTY_NOTICES.md
+// Derived from zeron (MIT, github.com/zeronsh/zeron @ c02739d), see THIRD_PARTY_NOTICES.md
 //! Session-owned explorer chrome, independent of the surface tab host.
 
 use super::*;
@@ -269,16 +269,13 @@ impl Shell {
         }
         let key = self.panel_key(cx);
         if !self.files.contains_key(&key) {
-            let chats_open = self.settings.files_chats_open; // slopty: remembered
             let files = cx.new(|cx| {
-                let mut files = FilesSurface::new_explorer(
+                FilesSurface::new_explorer(
                     self.state.clone(),
                     self.active_chat.clone(),
                     self.settings.files_show_all,
                     cx,
-                );
-                files.set_chats_open(chats_open, cx);
-                files
+                )
             });
             let owner = key.clone();
             let sub = cx.subscribe_in(
@@ -336,25 +333,6 @@ impl Shell {
                     FilesEvent::ShowAllFilesChanged(show_all) => {
                         this.set_files_show_all(*show_all, cx)
                     }
-                    // Footer rows land in the surface host beside the explorer,
-                    // through the same paths a spawn chip and a side-chat tab use.
-                    // slopty: the Chats section stays as the person left it.
-                    FilesEvent::ChatsOpenChanged(open) => this.set_files_chats_open(*open, cx),
-                    FilesEvent::OpenChildChat(chat_id) => this.open_child_chat_tab(chat_id, cx),
-                    FilesEvent::RenameChildChat(chat_id) => {
-                        this.open_rename_chat(chat_id.clone(), cx)
-                    }
-                    FilesEvent::ChildChatContextMenu { chat_id, position } => {
-                        this.chat_menu.open(ChatMenuState {
-                            chat_id: chat_id.clone(),
-                            tab: None,
-                            position: *position,
-                            page: ChatMenuPage::Root,
-                        });
-                        cx.notify();
-                    }
-                    FilesEvent::NewChildChat => this.create_child_chat(None, cx),
-                    FilesEvent::ForkChat => this.create_side_chat(cx),
                     _ => cx.notify(),
                 },
             );

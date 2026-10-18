@@ -1,138 +1,510 @@
-//! TeX math typeset to SVG, for a client to draw as an image: `$…$` in a line, `$$…$$` on its
-//! own (`slopty_markdown::Math`).
+// Derived from zeron (MIT, github.com/zeronsh/zeron @ c02739d), see THIRD_PARTY_NOTICES.md
+//! slopty_math — fast, low-memory LaTeX math layout for Slopty.
 //!
-//! `RaTeX` parses and lays out the TeX as `KaTeX` would, and writes the `KaTeX` fonts' glyphs into
-//! the SVG as paths, so it is self-contained: it needs no font installed and no JavaScript, and
-//! draws the same on every client. GPUI-free, so the shell, the view model and a test read it
-//! alike; the shell rasterises the SVG at the size it paints ([`Formula::width`],
-//! [`Formula::height`]) and sets it on the line by its [`Formula::baseline`].
+//! [`layout`] turns a TeX math string into a [`Formula`]: a width, ascent and
+//! descent plus a flat list of [`Item`]s (glyph ids and rules) in points.
+//! Hosts paint it however they like — [`Formula::paint`] streams every glyph
+//! outline and rule as paths, so a painter needs no font registration at all.
 //!
-//! A formula that does not parse, or one too large to lay out, is a [`TypesetError`] with
-//! `RaTeX`'s words for it: the transcript then shows its source.
+//! # Any math font
+//!
+//! Layout reads every metric from the font's OpenType MATH table: script
+//! scales, fraction/radical/limit gaps, the axis, italic corrections, accent
+//! attachments, cut-in kerns, size variants and extensible assemblies. Load
+//! any MATH font with [`MathFont::new`] (STIX Two Math, Latin Modern Math,
+//! Libertinus Math, Fira Math, New Computer Modern Math, Cambria Math, …) and
+//! the same source renders in that font's own design; nothing is tuned per font.
+//!
+//! # Scope
+//!
+//! The common LaTeX math set: letters, digits, Greek, ~300 symbols, `^ _ '`,
+//! `\frac`/`\dfrac`/`\tfrac`/`\binom`/`\over`, `\sqrt[n]{}`, large operators
+//! with limits, named operators and `\operatorname`, `\left \middle \right`,
+//! `\big`…`\Bigg`, accents (incl. wide and arrow accents), `\overline`,
+//! `\underline`, `\overbrace`, `\underbrace`, `\overset`, `\underset`,
+//! `\stackrel`, `\xrightarrow`, math alphabets (`\mathbf \mathbb \mathcal
+//! \mathfrak \mathsf \mathtt \boldsymbol`), `\text`, spacing commands, styles,
+//! `\boxed`, `\not`, `\phantom`, and the `matrix`/`pmatrix`/…/`cases`/
+//! `aligned`/`gathered`/`array` environments. No macros.
+//!
+//! Parsing is strict — an unknown command is an [`Error`] with a byte range —
+//! so hosts can show the source for anything slopty_math can't render faithfully
+//! (including half-streamed formulas).
+//!
+//! # Cost
+//!
+//! One pass to parse, one to lay out; no allocation per glyph beyond its
+//! 20-byte [`Item`]. Glyph metrics are cached inside [`MathFont`]. Inputs are
+//! bounded by [`Options`] (bytes, nesting depth, emitted items), so hostile
+//! source can't run away with time or memory.
 
-#![forbid(unsafe_code)]
+mod ast;
+#[cfg(feature = "bundled")]
+pub mod bundled;
+mod font;
+mod layout;
+mod parse;
+mod symbols;
+mod unicode;
 
-use ratex_layout::{LayoutOptions, layout, to_display_list, validate_layout};
-use ratex_svg::{SvgColorSyntax, SvgOptions, render_to_svg_with_color_syntax};
-use ratex_types::color::Color;
-use ratex_types::math_style::MathStyle;
+#[cfg(test)]
+mod tests;
 
-/// The longest TeX typeset: a longer one is shown as its source.
-pub const TEX_MAX: usize = 8 * 1024;
+use std::ops::Range;
 
-/// How a formula is set.
-#[derive(Clone, Copy, Debug, PartialEq)]
+pub use font::{FontError, MathFont, PathSink};
+
+/// Layout options.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Options {
-    /// On its own (`$$…$$`, display style) rather than in the line (`$…$`, text style).
+    /// Font size in points (the em of text-style math).
+    pub size: f32,
+    /// Display style (`$$…$$`): big operators, limits above and below.
+    /// Otherwise inline text style.
     pub display: bool,
-    /// Pixels per em: the size of the text around it.
-    pub font_size: f32,
-    /// Its colour, red, green, blue and alpha from 0 to 1: the text's.
-    pub color: [f32; 4],
+    /// Longest accepted source, in bytes.
+    pub max_bytes: usize,
+    /// Deepest accepted nesting (groups, arguments, environments). Parsing
+    /// and layout recurse once per level, and script chains (`x^{x^{…}}`)
+    /// reach the full depth: at the default a release build needs about
+    /// 192 KB of stack, a debug build about 1.5 MB (20 nested `\overbrace`s
+    /// already fill 512 KB). Run layout on a thread with a few MB of stack —
+    /// not a 512 KB secondary or dispatch-queue thread.
+    pub max_depth: usize,
+    /// Most items a formula may emit (bounds memory and paint time), and at
+    /// most 64 plus 8 per source byte; layout work is bounded at a few times
+    /// this.
+    pub max_items: usize,
+    /// Widest accepted formula, in ems. Anything wider (or any item farther
+    /// out) is [`ErrorKind::TooLarge`], so hosts never size a slot, row or
+    /// backing store from a runaway formula.
+    pub max_width: f32,
+    /// Tallest accepted formula (ascent plus descent), in ems.
+    pub max_height: f32,
 }
 
-/// A formula, typeset.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Formula {
-    /// A whole SVG document, its glyphs as paths.
-    pub svg: String,
-    /// Its width in pixels.
-    pub width: f32,
-    /// Its height in pixels, from its top to the bottom of its lowest descent.
-    pub height: f32,
-    /// How far its baseline is from its top, in pixels: where the line's text sits.
-    pub baseline: f32,
-}
-
-/// Why a formula was not typeset.
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-pub enum TypesetError {
-    /// The TeX is longer than [`TEX_MAX`].
-    #[error("the formula is longer than {TEX_MAX} bytes")]
-    TooLong,
-    /// The TeX does not parse.
-    #[error("{0}")]
-    Parse(String),
-    /// It lays out larger than `RaTeX` allows.
-    #[error("{0}")]
-    TooLarge(String),
-}
-
-/// `tex` typeset as `options` say.
-///
-/// # Errors
-///
-/// When it is too long, does not parse, or lays out too large.
-pub fn render(tex: &str, options: &Options) -> Result<Formula, TypesetError> {
-    if tex.len() > TEX_MAX {
-        return Err(TypesetError::TooLong);
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            size: 16.0,
+            display: false,
+            max_bytes: 16 * 1024,
+            max_depth: 64,
+            max_items: 20_000,
+            max_width: 2000.0,
+            max_height: 200.0,
+        }
     }
-    let nodes = ratex_parser::parser::parse(tex).map_err(|e| TypesetError::Parse(e.message))?;
-    let style = if options.display { MathStyle::Display } else { MathStyle::Text };
-    let [r, g, b, a] = options.color;
-    let laid = layout(
-        &nodes,
-        &LayoutOptions::default().with_style(style).with_color(Color::new(r, g, b, a)),
-    );
-    validate_layout(&laid).map_err(TypesetError::TooLarge)?;
-    let list = to_display_list(&laid);
-    let em = f64::from(options.font_size);
-    let svg = SvgOptions {
-        font_size: em,
-        padding: 0.0,
-        stroke_width: em / 40.0 * 1.5,
-        embed_glyphs: true,
-        font_dir: String::new(),
+}
+
+impl Options {
+    pub fn inline(size: f32) -> Self {
+        Self {
+            size,
+            ..Self::default()
+        }
+    }
+
+    pub fn display(size: f32) -> Self {
+        Self {
+            size,
+            display: true,
+            ..Self::default()
+        }
+    }
+}
+
+/// One positioned piece of a formula. Coordinates are points, y down, with
+/// the origin on the formula's baseline at its left edge.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Item {
+    /// Glyph `glyph` of font `font` in the [`MathFont::chain`] (0 is the
+    /// font passed to [`layout`]), its origin at (`x`, `y`), drawn at `size`
+    /// points.
+    Glyph {
+        font: u8,
+        glyph: u16,
+        x: f32,
+        y: f32,
+        size: f32,
+    },
+    /// A filled rectangle (fraction bars, radical overbars, …); (`x`, `y`)
+    /// is its top-left corner.
+    Rule {
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+    },
+}
+
+impl Item {
+    fn shifted(self, dx: f32, dy: f32) -> Self {
+        match self {
+            Item::Glyph {
+                font,
+                glyph,
+                x,
+                y,
+                size,
+            } => Item::Glyph {
+                font,
+                glyph,
+                x: x + dx,
+                y: y + dy,
+                size,
+            },
+            Item::Rule {
+                x,
+                y,
+                width,
+                height,
+            } => Item::Rule {
+                x: x + dx,
+                y: y + dy,
+                width,
+                height,
+            },
+        }
+    }
+}
+
+/// A laid-out formula.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Formula {
+    /// Advance width, points.
+    pub width: f32,
+    /// Extent above the baseline, points.
+    pub ascent: f32,
+    /// Extent below the baseline, points.
+    pub descent: f32,
+    /// Leftmost and rightmost extent of everything the formula paints,
+    /// together with its advance box (so `left <= min(0, width)` and
+    /// `right >= max(0, width)`), in points from the origin. Hosts reserve
+    /// `right - left` and put the origin `-left` in from the slot's left
+    /// edge, so neither negative space nor overhanging ink paints over the
+    /// text beside a formula.
+    pub left: f32,
+    pub right: f32,
+    pub items: Vec<Item>,
+}
+
+impl Formula {
+    pub fn height(&self) -> f32 {
+        self.ascent + self.descent
+    }
+
+    /// The width a host reserves: everything painted plus the advance box
+    /// (see [`Formula::left`]).
+    pub fn span(&self) -> f32 {
+        self.right - self.left
+    }
+
+    /// Streams every glyph outline and rule as paths, the formula's baseline
+    /// origin placed at (`x`, `y`). Fill with the non-zero rule.
+    pub fn paint(&self, font: &MathFont, x: f32, y: f32, sink: &mut dyn PathSink) {
+        for item in &self.items {
+            match *item {
+                Item::Glyph {
+                    font: index,
+                    glyph,
+                    x: gx,
+                    y: gy,
+                    size,
+                } => font.at(index).outline(glyph, size, x + gx, y + gy, sink),
+                Item::Rule {
+                    x: rx,
+                    y: ry,
+                    width,
+                    height,
+                } => {
+                    let (l, t) = (x + rx, y + ry);
+                    sink.move_to(l, t);
+                    sink.line_to(l + width, t);
+                    sink.line_to(l + width, t + height);
+                    sink.line_to(l, t + height);
+                    sink.close();
+                }
+            }
+        }
+    }
+
+    /// A standalone SVG of the formula (for debugging and snapshots).
+    pub fn to_svg(&self, font: &MathFont) -> String {
+        struct Svg(String);
+        impl PathSink for Svg {
+            fn move_to(&mut self, x: f32, y: f32) {
+                self.0.push_str(&format!("M{x:.2} {y:.2}"));
+            }
+            fn line_to(&mut self, x: f32, y: f32) {
+                self.0.push_str(&format!("L{x:.2} {y:.2}"));
+            }
+            fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
+                self.0.push_str(&format!("Q{x1:.2} {y1:.2} {x:.2} {y:.2}"));
+            }
+            fn cubic_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
+                self.0
+                    .push_str(&format!("C{x1:.2} {y1:.2} {x2:.2} {y2:.2} {x:.2} {y:.2}"));
+            }
+            fn close(&mut self) {
+                self.0.push('Z');
+            }
+        }
+        let mut path = Svg(String::new());
+        self.paint(font, 0.0, self.ascent, &mut path);
+        format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w:.2}\" height=\"{h:.2}\" viewBox=\"0 0 {w:.2} {h:.2}\"><path d=\"{d}\"/></svg>",
+            w = self.width,
+            h = self.height(),
+            d = path.0
+        )
+    }
+}
+
+/// Why a formula couldn't be laid out.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Error {
+    pub kind: ErrorKind,
+    /// Byte range in the source the error points at.
+    pub range: Range<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ErrorKind {
+    UnknownCommand(String),
+    UnknownEnvironment(String),
+    Unexpected(String),
+    Unsupported(String),
+    MissingArgument,
+    MissingBrace,
+    MissingBracket,
+    MissingRight,
+    MissingEnd(String),
+    MismatchedEnvironment {
+        expected: String,
+        found: String,
+    },
+    MissingDelimiter,
+    BadDelimiter,
+    BadDimension,
+    DoubleScript,
+    /// The font has no glyph for this character.
+    MissingGlyph(char),
+    TooLong,
+    TooDeep,
+    TooLarge,
+    /// [`Options::size`] isn't a positive, finite number.
+    BadSize,
+    /// Layout failed unexpectedly (a bug): the host shows the source.
+    Internal,
+}
+
+impl Error {
+    pub(crate) fn new(kind: ErrorKind, range: Range<usize>) -> Self {
+        Self { kind, range }
+    }
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use ErrorKind::*;
+        match &self.kind {
+            UnknownCommand(name) => write!(f, "unknown command \\{name}"),
+            UnknownEnvironment(name) => write!(f, "unknown environment {name}"),
+            Unexpected(what) => write!(f, "unexpected {what}"),
+            Unsupported(what) => write!(f, "unsupported: {what}"),
+            MissingArgument => f.write_str("missing argument"),
+            MissingBrace => f.write_str("missing }"),
+            MissingBracket => f.write_str("missing ]"),
+            MissingRight => f.write_str("\\left without \\right"),
+            MissingEnd(name) => write!(f, "missing \\end{{{name}}}"),
+            MismatchedEnvironment { expected, found } => {
+                write!(f, "\\begin{{{expected}}} ended by \\end{{{found}}}")
+            }
+            MissingDelimiter => f.write_str("missing delimiter"),
+            BadDelimiter => f.write_str("not a delimiter"),
+            BadDimension => f.write_str("bad dimension"),
+            DoubleScript => f.write_str("double superscript or subscript"),
+            MissingGlyph(ch) => write!(f, "font has no glyph for {ch:?}"),
+            TooLong => f.write_str("formula too long"),
+            TooDeep => f.write_str("formula nested too deeply"),
+            TooLarge => f.write_str("formula too large"),
+            BadSize => f.write_str("font size must be positive and finite"),
+            Internal => f.write_str("formula could not be laid out"),
+        }?;
+        write!(f, " at {}..{}", self.range.start, self.range.end)
+    }
+}
+
+impl std::error::Error for Error {}
+
+/// Where a missing glyph came from: the token at `start` when it spells the
+/// character, else the character's first literal use (text inside
+/// `\operatorname`), else the whole formula (a symbol a command produced).
+fn glyph_range(source: &str, start: usize, ch: char) -> Range<usize> {
+    let token = token_at(source, start);
+    let spelled = source
+        .get(token.clone())
+        .is_some_and(|t| t.starts_with('\\') || t.contains(ch));
+    if start > 0 && spelled {
+        return token;
+    }
+    match source.find(ch) {
+        Some(i) => i..i + ch.len_utf8(),
+        None if start > 0 => token,
+        None => 0..source.len(),
+    }
+}
+
+/// The source token starting at `start`: a command or one character.
+fn token_at(source: &str, start: usize) -> Range<usize> {
+    let Some(rest) = source.get(start..) else {
+        return start..start;
     };
-    let svg = render_to_svg_with_color_syntax(&list, &svg, SvgColorSyntax::Rgba);
-    #[expect(clippy::cast_possible_truncation, reason = "a formula's size in pixels fits an f32")]
-    let px = |ems: f64| (ems * em) as f32;
+    let mut chars = rest.chars();
+    let len = match chars.next() {
+        Some('\\') => {
+            let name = &rest[1..];
+            1 + match name.find(|c: char| !c.is_ascii_alphabetic()) {
+                Some(0) => name.chars().next().map_or(0, char::len_utf8),
+                Some(n) => n,
+                None => name.len(),
+            }
+        }
+        Some(c) => c.len_utf8(),
+        None => 0,
+    };
+    start..start + len
+}
+
+/// Lays out TeX math `source` (without `$` delimiters) in `font`. Hosts run
+/// this on agent output in their render paths, so a panic (a layout bug) is
+/// an [`ErrorKind::Internal`] error rather than a crash.
+pub fn layout(source: &str, font: &MathFont, options: &Options) -> Result<Formula, Error> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        lay_out(source, font, options)
+    }))
+    .unwrap_or_else(|_| Err(Error::new(ErrorKind::Internal, 0..source.len())))
+}
+
+fn lay_out(source: &str, font: &MathFont, options: &Options) -> Result<Formula, Error> {
+    if source.len() > options.max_bytes {
+        return Err(Error::new(ErrorKind::TooLong, 0..source.len()));
+    }
+    if !(options.size.is_finite() && options.size > 0.0) {
+        return Err(Error::new(ErrorKind::BadSize, 0..0));
+    }
+    let nodes = parse::parse(source, options.max_depth)?;
+    let style = if options.display {
+        ast::Style::Display
+    } else {
+        ast::Style::Text
+    };
+    // Items are bounded by the source too: real TeX emits about one per
+    // character plus a few per stretchy delimiter, while nested `\left(`
+    // around a tall body multiplied 434 bytes into 18,000 items — paint and
+    // memory every host pays per formula.
+    let max_items = options.max_items.min(64 + 8 * source.len());
+    let mut ctx = layout::Ctx::new(font, options.size, max_items);
+    let b = ctx.list(&nodes, layout::St::new(style)).map_err(|mut e| {
+        match e.kind {
+            ErrorKind::TooLarge => e.range = 0..source.len(),
+            ErrorKind::MissingGlyph(ch) => e.range = glyph_range(source, e.range.start, ch),
+            _ => {}
+        }
+        e
+    })?;
+    let (w, h) = (
+        options.max_width * options.size,
+        options.max_height * options.size,
+    );
+    // A huge `size` (or bound) overflows the bounds to infinity, which every
+    // extent would pass.
+    if !(w.is_finite() && h.is_finite()) {
+        return Err(Error::new(ErrorKind::TooLarge, 0..source.len()));
+    }
+    // Hosts size a formula's slot, line or row from its box, so the box must
+    // hold all of its ink: anything painted outside would land on the
+    // surrounding text (a negative row gap moves a whole row out of the box:
+    // `\text{Approve}\\[-40em]\\`; negative space moves ink left of the
+    // origin). Vertically the box grows to cover the ink; horizontally the
+    // advance stays TeX's and `left`/`right` report the painted extent.
+    let ink = ink_bounds(&b.items, font);
+    let ascent = b.h.max(ink.top);
+    let descent = b.d.max(ink.bottom).max(-ascent);
+    let left = ink.left.min(b.w).min(0.0);
+    let right = ink.right.max(b.w).max(0.0);
+    // Room is bounded by the source too: real TeX sets well under an em or
+    // two per byte (`\quad` is one em in five), while spacing alone
+    // (`\hspace{100em}`, `\\[100em]`) would make a few bytes reserve a
+    // page of blank slot, line or row in every host.
+    let budget = (4.0 + 2.0 * source.len() as f32) * options.size;
+    let fits = b.w.abs() <= w && right - left <= w.min(budget) && ascent + descent <= h.min(budget);
+    if !fits {
+        return Err(Error::new(ErrorKind::TooLarge, 0..source.len()));
+    }
+    let mut items = b.items;
+    // Hosts keep formulas around (caches, prepared rows): drop growth slack.
+    items.shrink_to_fit();
     Ok(Formula {
-        svg,
-        width: px(list.width),
-        height: px(list.height + list.depth),
-        baseline: px(list.height),
+        width: b.w,
+        ascent,
+        descent,
+        left,
+        right,
+        items,
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// The extent of everything `items` paint, in points: `left`/`right` from
+/// the origin, `top` above and `bottom` below the baseline (negative infinity
+/// when nothing is painted, so an empty formula keeps its own box).
+struct Ink {
+    left: f32,
+    right: f32,
+    top: f32,
+    bottom: f32,
+}
 
-    fn set(tex: &str, display: bool) -> Result<Formula, TypesetError> {
-        render(tex, &Options { display, font_size: 14.0, color: [0.1, 0.2, 0.3, 1.0] })
+fn ink_bounds(items: &[Item], font: &MathFont) -> Ink {
+    let mut ink = Ink {
+        left: 0.0,
+        right: 0.0,
+        top: f32::NEG_INFINITY,
+        bottom: f32::NEG_INFINITY,
+    };
+    let mut add = |left: f32, right: f32, top: f32, bottom: f32| {
+        ink.left = ink.left.min(left);
+        ink.right = ink.right.max(right);
+        ink.top = ink.top.max(top);
+        ink.bottom = ink.bottom.max(bottom);
+    };
+    for item in items {
+        match *item {
+            Item::Glyph {
+                font: index,
+                glyph,
+                x,
+                y,
+                size,
+            } => {
+                let face = font.at(index);
+                let m = face.metrics(glyph);
+                let scale = size / face.upem();
+                add(
+                    x + m.x_min * scale,
+                    x + m.x_max * scale,
+                    m.height * scale - y,
+                    m.depth * scale + y,
+                );
+            }
+            Item::Rule {
+                x,
+                y,
+                width,
+                height,
+            } => add(x.min(x + width), x.max(x + width), -y, y + height),
+        }
     }
-
-    /// A fraction set on its own stands taller than a letter in the line, its glyphs are paths
-    /// in its own colour, and its baseline lies within it.
-    #[test]
-    fn a_fraction_is_taller_than_a_letter_and_self_contained() {
-        let frac = set(r"\frac{a}{b}", true).unwrap();
-        let letter = set("a", false).unwrap();
-        assert!(frac.height > letter.height * 1.5, "{} against {}", frac.height, letter.height);
-        assert!(frac.width > 0.0 && letter.width > 0.0);
-        assert!(frac.baseline > 0.0 && frac.baseline < frac.height);
-        assert!(
-            frac.svg.starts_with("<svg") || frac.svg.starts_with("<?xml"),
-            "{}",
-            frac.svg.get(..40).unwrap_or_default()
-        );
-        assert!(frac.svg.contains("<path"), "glyphs as paths");
-        assert!(!frac.svg.contains("<text"), "no font needed");
-    }
-
-    /// A formula that does not parse says why, and one past the cap is not tried.
-    #[test]
-    fn a_malformed_formula_says_why() {
-        assert!(matches!(set(r"\frac{a", true), Err(TypesetError::Parse(_))));
-        assert!(matches!(set(r"\nosuchcommand{x}", false), Err(TypesetError::Parse(_))));
-        assert_eq!(set(&"x".repeat(TEX_MAX + 1), false), Err(TypesetError::TooLong));
-    }
-
-    /// The same formula is the same SVG every time, so a client can cache it by its source.
-    #[test]
-    fn typesetting_is_deterministic() {
-        let tex = r"\int_0^1 x^2\,dx = \tfrac{1}{3}";
-        assert_eq!(set(tex, true).unwrap(), set(tex, true).unwrap());
-    }
+    ink
 }

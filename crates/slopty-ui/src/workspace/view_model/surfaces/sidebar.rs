@@ -134,4 +134,40 @@ mod tests {
         let state = sidebar.apply(&SidebarPinChange::Unpin { session_id: "a".to_owned() });
         assert_eq!(state.pinned_session_ids, ["b"]);
     }
+
+    /// A section dragged by its header lands between its anchors and keeps its members; one
+    /// deleted meanwhile moves nowhere.
+    #[test]
+    fn a_dragged_section_keeps_its_place() {
+        let mut sidebar = Sidebar(OnceCell::from(SidebarPreferencesState::default()));
+        for id in ["a", "b", "c"] {
+            let create = SidebarSectionChange::Create { id: id.to_owned(), name: id.to_owned() };
+            sidebar.apply(&SidebarPinChange::Section { change: create });
+        }
+        let assign = SidebarSectionChange::Assign {
+            session_id: "t".to_owned(),
+            section_id: Some("c".to_owned()),
+            after: None,
+            before: None,
+        };
+        sidebar.apply(&SidebarPinChange::Section { change: assign });
+        let order = |state: &SidebarPreferencesState| {
+            state.sections.iter().map(|s| s.id.clone()).collect::<Vec<_>>()
+        };
+        let moved =
+            |id: &str, after: Option<&str>, before: Option<&str>| SidebarPinChange::Section {
+                change: SidebarSectionChange::Move {
+                    id: id.to_owned(),
+                    after: after.map(str::to_owned),
+                    before: before.map(str::to_owned),
+                },
+            };
+        let state = sidebar.apply(&moved("c", None, Some("a")));
+        assert_eq!(order(&state), ["c", "a", "b"]);
+        assert_eq!(state.sections.first().map(|s| s.session_ids.clone()), Some(vec!["t".into()]));
+        let state = sidebar.apply(&moved("a", Some("b"), None));
+        assert_eq!(order(&state), ["c", "b", "a"]);
+        let state = sidebar.apply(&moved("gone", None, Some("c")));
+        assert_eq!(order(&state), ["c", "b", "a"], "a section no longer here moves nowhere");
+    }
 }

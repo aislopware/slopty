@@ -1,4 +1,4 @@
-// Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
+// Derived from zeron (MIT, github.com/zeronsh/zeron @ c02739d), see THIRD_PARTY_NOTICES.md
 //! Native, virtualized preview of a file's current Markdown buffer.
 use crate::image_media::release_media;
 use crate::{
@@ -72,7 +72,7 @@ fn strip_outside_links(block: &mut Block) {
             header.iter_mut().for_each(|runs| strip_runs(runs));
             rows.iter_mut().flatten().for_each(|runs| strip_runs(runs));
         }
-        Block::CodeBlock { .. } | Block::Rule => {}
+        Block::CodeBlock { .. } | Block::Math { .. } | Block::Rule => {}
     }
 }
 
@@ -192,6 +192,7 @@ pub(super) struct MarkdownPreview {
     visible_rows: HashSet<gpui::SharedString>,
     code_fences: HashMap<SharedString, render::CodeFenceRuntime>,
     code_fences_generation: u64,
+    math_generation: u64,
     copied_code: Option<(SharedString, usize)>,
     copied_clear: Option<Task<()>>,
     needs_focus: bool,
@@ -422,6 +423,7 @@ impl MarkdownPreview {
             visible_rows: HashSet::new(),
             code_fences: HashMap::new(),
             code_fences_generation: crate::settings::code_fences_generation(cx),
+            math_generation: crate::settings::math_generation(cx),
             copied_code: None,
             copied_clear: None,
             needs_focus: true,
@@ -1083,6 +1085,7 @@ impl MarkdownPreview {
                 let top = self.tree.blocks.get(ix)?.clone();
                 let mut opts = RenderOptions::settled(format!("{}{ix}", self.scope).into());
                 opts.code = self.code_uis_for(&opts.row_key, &top.block, ix, cx);
+                opts.math = crate::settings::math_style(cx);
                 let editor = self.editor.as_ref().and_then(|editor| editor.upgrade());
                 let source = self.parsed_source.clone();
                 opts.tasks = Some(render::TaskUi {
@@ -1336,6 +1339,11 @@ impl Render for MarkdownPreview {
             for runtime in self.code_fences.values() {
                 runtime.scroll.set_offset(gpui::Point::default());
             }
+            self.list.remeasure();
+        }
+        let math_generation = crate::settings::math_generation(cx);
+        if self.math_generation != math_generation {
+            self.math_generation = math_generation;
             self.list.remeasure();
         }
         if self.needs_focus {

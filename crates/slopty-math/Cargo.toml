@@ -2,20 +2,18 @@
 name = "slopty-math"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "TeX math typeset to a self-contained SVG with RaTeX, for the transcript to draw as an image; GPUI-free"
+description = "Fast, low-memory LaTeX math layout over any OpenType math font"
 
-[lints]
-workspace = true
-
+# Parser + TeX layout driven entirely by the font's MATH table, emitting a flat
+# display list (glyph ids and rules). UI-free: hosts paint the glyph outlines.
 [dependencies]
-# KaTeX-compatible TeX in pure Rust (MIT): parse, lay out, then SVG with the KaTeX fonts' glyphs
-# as paths, so the SVG draws the same wherever it goes, with no font or JavaScript
-# (docs/decisions/ui.md, "Math typeset with RaTeX").
-ratex-layout = "0.1.15"
-ratex-parser = "0.1.15"
-ratex-svg = { version = "0.1.15", features = [ "embed-fonts" ] }
-ratex-types = "0.1.15"
-thiserror.workspace = true
+ttf-parser.workspace = true
+
+[features]
+# Six math faces compiled in (`slopty_math::bundled`), ~4 MB of read-only data;
+# a face is only parsed (and its pages touched) once something uses it.
+bundled = [  ]
+
+# slopty: no dev-dependencies: tiny-skia drew only the examples, which are not taken.

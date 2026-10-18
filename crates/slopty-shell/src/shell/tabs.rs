@@ -1,4 +1,4 @@
-// Derived from zeron (MIT, github.com/zeronsh/zeron @ 75b7260), see THIRD_PARTY_NOTICES.md
+// Derived from zeron (MIT, github.com/zeronsh/zeron @ c02739d), see THIRD_PARTY_NOTICES.md
 //! Session navigation — the horizontal tab strip is gone (wing 2026-08-10):
 //! the activity sidebar IS the session list, and the titlebar names the
 //! selected session (harness brand icon + title). A `+` new-session button
@@ -437,6 +437,25 @@ impl Shell {
             content_width,
         } = self.titlebar_trailing_layout(on_canvas, cx);
 
+        // What runs alongside the open chat: its working subagents and side
+        // chats, counted on the session card's toggle.
+        let running_lanes = {
+            let state = self.state.read(cx);
+            let now = Utc::now();
+            state.selected_chat.as_deref().map_or(0, |chat| {
+                let side_chats = state
+                    .chats
+                    .iter()
+                    .filter(|side| {
+                        !side.archived
+                            && side.parent_chat_id.as_deref() == Some(chat)
+                            && state.display_status_for(side, now)
+                                == slopty_view_proto::ChatIndicator::Working
+                    })
+                    .count() as u32;
+                state.running_subagents_for(chat, now) + side_chats
+            })
+        };
         let trailing: Option<gpui::AnyElement> = if on_canvas {
             None
         } else {
@@ -563,10 +582,7 @@ impl Shell {
                                         this.toggle_files_panel(window, cx)
                                     }),
                                 )
-                                .action_hint(files_panel_label, Keys::Action(Box::new(ToggleFiles)), cx)
-                                // slopty: no running-subagents mark; a subagent lives in its
-                                // parent's chat, not in this panel.
-
+                                .action_hint(files_panel_label, Keys::Action(Box::new(ToggleFiles)), cx),
                             )
                             .child(header_icon_button_with(
                                 "toggle-changes",
@@ -623,6 +639,11 @@ impl Shell {
                 MouseButton::Left,
                 cx.listener(|this, _, _, _| this.note_session_info_press()),
             )
+            // Running subagents and side chats ride the card's lanes: the
+            // button counts them, open or closed, for as long as they run.
+            .when(running_lanes > 0, |button| {
+                crate::running_pill::mark_titlebar_button(button, running_lanes, &theme)
+            })
         });
         let inner = div()
             .size_full()

@@ -1,4 +1,4 @@
-// Derived from zeron (MIT, github.com/zeronsh/zeron @ 75b7260), see THIRD_PARTY_NOTICES.md
+// Derived from zeron (MIT, github.com/zeronsh/zeron @ c02739d), see THIRD_PARTY_NOTICES.md
 //! Workspace file browsing surface.
 
 use std::{
@@ -33,8 +33,6 @@ pub mod mutations;
 pub mod preview;
 mod rename;
 pub mod search;
-mod sections;
-pub(crate) use sections::absolute_time;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod tree;
@@ -406,21 +404,6 @@ pub enum FilesEvent {
     ShowAllFilesChanged(bool),
     CloseReady,
     CloseCancelled,
-    // slopty: subagents open from the sidebar; the footer keeps Chats only.
-    /// The person opened (`true`) or closed the Chats section: remembered.
-    ChatsOpenChanged(bool),
-    /// A footer row: open this side chat (by id) in the right pane.
-    OpenChildChat(String),
-    /// A footer row's double-click: edit this side chat's title in place.
-    RenameChildChat(String),
-    ChildChatContextMenu {
-        chat_id: String,
-        position: Point<Pixels>,
-    },
-    /// The Chats header's "+": start a fresh side chat of the active chat.
-    NewChildChat,
-    /// The Chats header's fork: fork the active chat into a side chat.
-    ForkChat,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -496,8 +479,6 @@ pub struct FilesSurface {
     loads: HashMap<(String, Option<String>), Task<()>>,
     error: Option<SharedString>,
     started: bool,
-    /// The Chats footer under the tree.
-    sections: sections::ExplorerSections,
     _observe: Subscription,
     _search_events: Subscription,
 }
@@ -526,9 +507,6 @@ impl Render for FilesSurface {
             self.render_explorer(&theme, cx).into_any_element()
         };
         let editor_context_menu = self.render_editor_context_menu(&theme, cx);
-        // The explorer docks its Chats section under the tree;
-        // an editor surface has no footer.
-        let sections = (!is_editor).then(|| self.render_sections(&theme, cx));
         div()
             .id(SharedString::from(format!(
                 "files-surface-{}",
@@ -556,7 +534,6 @@ impl Render for FilesSurface {
                     .as_ref()
                     .map(|message| crate::popover::error_row(&theme, message).into_any_element()),
             )
-            .children(sections)
             .children(editor_context_menu)
             .children(self.render_tree_context_menu(&theme, window, cx))
             .children(self.render_tree_delete(&theme, window, cx))
@@ -826,9 +803,6 @@ impl FilesSurface {
                 this.ensure_loaded(cx);
             }
             this.sync_active_markdown_comments(cx);
-            if !this.presentation.is_editor() {
-                this.refresh_sections(cx);
-            }
         });
         // The list state exposes no scroll handle, so the floating rail
         // bridges scroll activity through the scroll handler (the
@@ -892,7 +866,6 @@ impl FilesSurface {
             loads: HashMap::new(),
             error: None,
             started: false,
-            sections: sections::ExplorerSections::default(),
             _observe: observe,
             _search_events: search_events,
         };

@@ -1,4 +1,4 @@
-// Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
+// Derived from zeron (MIT, github.com/zeronsh/zeron @ c02739d), see THIRD_PARTY_NOTICES.md
 //! The right-pane "Changes" content (feature-inventory §1.11): a unified-diff
 //! viewer over `WatchCheckoutDiffs`.
 //!
@@ -5882,18 +5882,8 @@ rename to new_name.rs
     #[test]
     #[ignore = "slopty: gpui-fast makes its Mac platform on the main thread only, and a test runs on another"]
     fn native_diff_font_geometry() {
-        // Windows headless mode uses NoopTextSystem. This regression needs
-        // actual DirectWrite metrics, as it does CoreText/fontconfig elsewhere.
-        let platform = gpui_platform::current_platform(!cfg!(windows));
-        let text_system =
-            gpui::WindowTextSystem::new(Arc::new(gpui::TextSystem::new(platform.text_system())));
-        text_system
-            .add_fonts(
-                crate::typography::bundled_font_faces()
-                    .map(std::borrow::Cow::Borrowed)
-                    .collect(),
-            )
-            .unwrap();
+        // This regression needs actual DirectWrite/CoreText/fontconfig metrics.
+        let (_native, text_system) = crate::typography::native_text_system();
         let mut theme = Theme::dark();
         theme.font_mono = "Geist".into();
         let wide = "W".repeat(100);

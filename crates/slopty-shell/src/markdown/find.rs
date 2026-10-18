@@ -137,6 +137,8 @@ pub fn block_texts(block: &Block, out: &mut Vec<String>) {
             }
         }
         Block::Rule => {}
+        // A formula on its own is one text element, which copies as its source.
+        Block::Math { tex } => out.push(format!("$${tex}$$")),
     }
 }
 

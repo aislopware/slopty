@@ -471,7 +471,8 @@ pub struct ViewModel {
 /// Its composer's chips, put in each agent's words on the way; the thread's queue of messages
 /// sent while the agent works, whose files stay chips beside the words; and a chat with no
 /// project in a dated scratch folder of its own, which the view model makes on its machine
-/// before the agent starts there. Updating an agent Slopty does not do.
+/// before the agent starts there. Sidebar sections keep the order the person drags them into.
+/// Updating an agent Slopty does not do.
 #[must_use]
 pub fn capabilities() -> Vec<String> {
     use slopty_view_proto::capabilities as can;
@@ -483,6 +484,7 @@ pub fn capabilities() -> Vec<String> {
         can::MESSAGE_QUEUE_CLEAN_ATTACHMENT_TEXT_V1,
         can::MESSAGE_QUEUE_EDIT_LEASE_V1,
         can::PROJECTLESS_SCRATCH_V1,
+        can::SIDEBAR_SECTION_ORDER_V1,
     ]
     .into_iter()
     .map(str::to_owned)

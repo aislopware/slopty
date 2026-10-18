@@ -1,4 +1,4 @@
-// Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
+// Derived from zeron (MIT, github.com/zeronsh/zeron @ c02739d), see THIRD_PARTY_NOTICES.md
 //! Device-local interface typography: bundled font registration, the persisted
 //! catalog choice, and the effective family installed into [`crate::theme::Theme`].
 
@@ -319,6 +319,27 @@ const GEIST_MONO: [&[u8]; 8] = [
 /// Font faces shared by the interface and SVG text-to-path conversion.
 pub(crate) fn bundled_font_faces() -> impl Iterator<Item = &'static [u8]> {
     GEIST.iter().chain(GEIST_MONO.iter()).copied()
+}
+
+/// The native font backend, not TestAppContext's simulated metrics, with the
+/// bundled faces registered. Platforms can't be created concurrently, so the
+/// guard serializes the tests that use one.
+#[cfg(test)]
+pub(crate) fn native_text_system() -> (std::sync::MutexGuard<'static, ()>, gpui::WindowTextSystem) {
+    static NATIVE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let guard = NATIVE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Windows headless mode uses NoopTextSystem; DirectWrite needs a full
+    // platform, as CoreText/fontconfig do elsewhere.
+    let platform = gpui_platform::current_platform(!cfg!(windows));
+    let text_system = gpui::WindowTextSystem::new(std::sync::Arc::new(gpui::TextSystem::new(
+        platform.text_system(),
+    )));
+    text_system
+        .add_fonts(bundled_font_faces().map(Cow::Borrowed).collect())
+        .unwrap();
+    (guard, text_system)
 }
 
 fn register_family(cx: &App, family: &UiFontFamily, faces: &'static [&'static [u8]]) -> bool {

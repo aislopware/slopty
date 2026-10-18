@@ -1,4 +1,4 @@
-// Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
+// Derived from zeron (MIT, github.com/zeronsh/zeron @ c02739d), see THIRD_PARTY_NOTICES.md
 //! Our own markdown stack — pulldown-cmark parse into a [`parser::BlockTree`],
 //! block-level incremental reparse for streaming, gpui rendering, and a
 //! Tree-sitter paint-only syntax highlighting. No zed GPL crates.
@@ -22,6 +22,7 @@ mod link_destination;
 mod link_interaction;
 mod link_presentation;
 pub mod links;
+pub(crate) mod math;
 pub use slopty_markdown::{mend, parser};
 pub mod render;
 pub mod selection;
@@ -31,6 +32,5 @@ pub use parser::{Block, BlockTree, IncrementalParser, InlineRun, InlineStyle, pa
 
 pub(crate) mod ansi; // slopty: terminal output in its colours.
 pub(crate) mod chat_links; // slopty: links to chats as live chips.
-pub(crate) mod math; // slopty: TeX math.
 pub mod mermaid;
 pub(crate) mod mermaid_cache;

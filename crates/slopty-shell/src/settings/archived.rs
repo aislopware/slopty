@@ -348,7 +348,7 @@ impl Render for ArchivedPage {
                                             .text_size(crate::typography::ui_rems(11.0))
                                             .text_color(theme.text_muted)
                                             .tooltip(widgets::text_tooltip(
-                                                crate::files::absolute_time(at),
+                                                absolute_time(at),
                                             ))
                                             .tooltip_show_delay(widgets::TOOLTIP_DELAY)
                                             .child(time_ago),
@@ -608,6 +608,30 @@ fn delete_all_failure(failed: usize) -> String {
     }
 }
 
+// slopty: when a relative time was, in full, for its tooltip: "Oct 16, 14:05", with the year when
+// it is not this one (M39).
+fn absolute_time(then: chrono::DateTime<chrono::Utc>) -> String {
+    absolute_time_in(then, &chrono::Local, chrono::Utc::now())
+}
+
+fn absolute_time_in<Tz: chrono::TimeZone>(
+    then: chrono::DateTime<chrono::Utc>,
+    zone: &Tz,
+    now: chrono::DateTime<chrono::Utc>,
+) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    use chrono::Datelike as _;
+    let local = then.with_timezone(zone);
+    let clock = crate::transcript::clock_format();
+    if local.year() == now.with_timezone(zone).year() {
+        local.format(&format!("%b %-d, {clock}")).to_string()
+    } else {
+        local.format(&format!("%b %-d %Y, {clock}")).to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -782,5 +806,23 @@ mod tests {
             .map(|c| c.id.as_str())
             .collect();
         assert_eq!(ids, ["side"]);
+    }
+
+    #[test]
+    fn a_relative_time_reads_in_full_on_hover() {
+        use chrono::{DateTime, Utc};
+        let at = |text: &str| DateTime::parse_from_rfc3339(text).unwrap().with_timezone(&Utc);
+        let now = at("2026-10-17T09:00:00Z");
+        // slopty: the time of day as the system's clock says it, 12 or 24 hour.
+        let (afternoon, morning) = if crate::transcript::clock_format() == "%H:%M" {
+            ("14:05", "07:30")
+        } else {
+            ("2:05 PM", "7:30 AM")
+        };
+        assert_eq!(absolute_time_in(at("2026-10-16T14:05:00Z"), &Utc, now), format!("Oct 16, {afternoon}"));
+        assert_eq!(
+            absolute_time_in(at("2025-03-02T07:30:00Z"), &Utc, now),
+            format!("Mar 2 2025, {morning}")
+        );
     }
 }

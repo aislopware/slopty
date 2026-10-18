@@ -43,9 +43,9 @@ fork = "https://github.com/aislopware/gpui-kit.git"
 branch = "main"
 checkout = ".research/gpui-kit"
 strategy = "rebase"
-base = "2154ba84afd2e771f117fd17e55c060dd5e03fd4"
+base = "41acc8a40b3c85c43ea80b972be9925d06b567a9"
 base_date = "2026-10-18"
-checked = "2026-10-17"
+checked = "2026-10-18"
 # It lands several changes a day, so every gate asks.
 check_every_days = 0
 
@@ -113,4 +113,4 @@ upstream = "https://github.com/zeronsh/zeron.git"
 upstream_branch = "main"
 checkout = ".research/zeron"
 map = "xtask/zeron.toml"
-base = "3b2f78027a2c31622c39c35716da4d6e1af8de15"
+base = "c02739da309118c2174f427511110046f0bfba16"

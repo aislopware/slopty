@@ -1,4 +1,4 @@
-// Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
+// Derived from zeron (MIT, github.com/zeronsh/zeron @ c02739d), see THIRD_PARTY_NOTICES.md
 //! File links written as inline code.
 //!
 //! Agents name files in code spans — "all under `dir/`:" followed by bare
@@ -196,7 +196,7 @@ fn link_block(
                 align: align.clone(),
             })
         }
-        Block::CodeBlock { .. } | Block::Rule => None,
+        Block::CodeBlock { .. } | Block::Math { .. } | Block::Rule => None,
     }
 }
 
@@ -285,7 +285,7 @@ fn code_spans<'a>(block: &'a Block, out: &mut Vec<&'a str>) {
             .iter()
             .flatten()
             .for_each(|child| code_spans(child, out)),
-        Block::CodeBlock { .. } | Block::Rule => {}
+        Block::CodeBlock { .. } | Block::Math { .. } | Block::Rule => {}
     }
 }
 
@@ -429,7 +429,7 @@ mod tests {
                         .flatten()
                         .for_each(|cell| out.extend(cell.clone()));
                 }
-                Block::CodeBlock { .. } | Block::Rule => {}
+                Block::CodeBlock { .. } | Block::Math { .. } | Block::Rule => {}
             }
         }
         for top in &tree.blocks {

@@ -2170,6 +2170,18 @@ more full-window layer.
     which noq's port lacks and the deque's defragment is written without.
   - Claude Code 2.1.302 is pinned and the fixtures are recorded on it. Its control and stream
     subtypes are the same 155 as 2.1.301's.
+- ✅ **Upstream sync of 2026-10-18 (second): gpui-kit `078ac14a`.** gpui-kit is rebased onto
+  `41acc8a4` (7 upstream commits); gpui-fast and zed did not move; the ghostty fork stays at
+  `117b5945` (upstream's two commits since are GTK only).
+  - #3567 selects and toggles a `Tree` entry on a full click instead of mouse down. The fork's
+    `gpui-shell` host test merged the rows drawn after the press with those drawn after the
+    release, so the folder the click collapsed still showed its child; it now presses, drops the
+    press's rows and releases. Slopty draws no `Tree`.
+  - gpui-kit: one conflict, `text/inline.rs`, where #3580 (`editor_host`, a public API for
+    external editors) adds `editor_piece` and reports a leaf's layout in prepaint, and the fork
+    boxes the retained layout; the report reads the boxed layout. #3570 and #3581 keep `<pre>`
+    text through the HTML minifier, #3524 renames setting fields, #3548 is `gpui-shell`, #3579
+    the website: none reaches Slopty.
 - ✅ **Upstream sync of 2026-10-18: gpui-fast `f38a5c69`, gpui-kit `f865a56b`, ghostty
   `117b5945`.** longbridge's gpui-fast `37f39597` (#74–#77) and zed `56934ec0` are in the
   gpui-fast fork; gpui-kit is rebased onto `2154ba84` (5 upstream commits); the ghostty fork

@@ -12385,7 +12385,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `view_model::tests::a_shown_visual_follows_its_call_by_a_path_of_its_own`; zeron's own
     `slopty-visual` tests.
 
-- ✅ **Math typeset with RaTeX (2026-10-16).** Markdown reads `$…$` and `$$…$$` as math
+- ❌ **Math typeset with RaTeX (2026-10-16; superseded 2026-10-18 by "Math typeset by zatex").**
+  Markdown reads `$…$` and `$$…$$` as math
   (pulldown-cmark's `ENABLE_MATH`), as runs of their own that are never merged or autolinked.
   Money, code and a formula still open while it streams stay text, and a streamed formula
   settles equal to a full parse.
@@ -12688,7 +12689,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     afresh, its last picture standing until the new one draws; a PDF keeps its pictures until
     each page is drawn again.
   - **Inline math is typeset (supersedes "set like inline code" in "Math typeset with
-    RaTeX").** A `$…$` formula is typeset in text style at the body's size. It is drawn in
+    RaTeX"; itself superseded 2026-10-18 by "Math typeset by zatex").** A `$…$` formula is typeset in text style at the body's size. It is drawn in
     place of its TeX through gpui-fast's inline boxes (`StyledText::with_inline_boxes`,
     aislopware/gpui-fast#35):
     - the line shows one box as wide as the formula, its baseline on the line's;
@@ -13205,3 +13206,66 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `shell::compact::tests::opening_a_chat_on_touch_leaves_the_keyboard_down`,
     `composer::dock_tests::what_still_runs_is_said_once_and_the_cards_share_one_column`;
     `slopty-ui` `view_model::tests::a_done_line_leaves_what_still_runs_to_the_tray`.
+- ✅ **zeron adopted to `c02739d` (2026-10-18).** Taken: sections reorder by dragging their
+  header (#909), the session hover card beside each sidebar row (#903), the session card's
+  lanes of side chats and subagents (#895) and LaTeX math with zatex (#912).
+  - **Section order.** Slopty's workspace is local, so the shell keeps the sections and their
+    order in its own interface settings (`sidebarSectionsByProfile`), as zeron does for a
+    local workspace. The view model also applies `SidebarSectionChange::Move` as the shell
+    projects it and claims `sidebar-section-order-v1`, so a move asked of it is answered.
+    zeron's synced registry document is not taken (`[skip]`). Section headers are buttons
+    named by their section.
+  - **The hover card replaces Slopty's tooltip card.** Two popups over one row would stack, so
+    zeron's card (its dwell, its warm follow, dismissed by a press, scroll, drag or menu) is the
+    only one. It carries Slopty's facts by `// slopty:` edits: the machine beside the project,
+    the agent and model, how long the chat has stood as it is, the folder of a chat with no
+    project, and how many subagents run, as a count. A screen reader reads it as the row's
+    tooltip.
+  - **Subagents stay out of the sidebar.** #895 moves the explorer's Subagents and Chats footer
+    into a lanes card under the session card, not into the sidebar list, so the sidebar keeps
+    no subagent rows. A subagent's row there drills into its run as its card in the chat does
+    (`open_chat` plus the drill focus), since Slopty has no subagent tab. The session card's
+    toggle counts running subagents and working side chats. The explorer's remembered
+    Chats-open setting goes with the footer. "New side chat" names ⌘; in its tooltip.
+- ✅ **Math typeset by zatex (2026-10-18).** zeron's zatex (#912) replaces RaTeX; RaTeX and
+  Slopty's own math module are deleted. zatex is `crates/slopty-math` (`xtask/zeron.toml` maps
+  `crates/zatex` there, its package `slopty-math`), copied as written and never reformatted.
+  The shell's math is zeron's: `pulldown-cmark` math with its dollar heuristics (prices, shell
+  variables, URLs and code stay text), formulas painted from GPUI's glyph atlas over reserved
+  no-break spaces, copy and selection giving `$tex$`, and the Render math, Math font and Math
+  size settings.
+  - **Why zatex.** The two were held to the same 198 formulas models write (the corpus and
+    harness: `.research/math-zatex-vs-ratex-2026-10-18/`; numbers in `docs/MEASUREMENTS.md`).
+    - *Speed.* zatex lays a formula out in a few microseconds, about 30 to 45 times faster than
+      RaTeX's parse, layout and SVG. RaTeX then rasterises the SVG at each scale and colour
+      (about 0.3 ms more), which zatex never does.
+    - *Crispness.* zatex's glyphs go through the text system's atlas like the words around
+      them, hinted and placed at the device's pixels. RaTeX's are a picture made at one scale.
+    - *Colour.* A theme or veil fade recolours zatex's glyphs for free; RaTeX typeset again
+      for each colour.
+    - *Fonts.* zatex reads any OpenType MATH font: six are bundled and the setting picks one.
+    - *Input it refuses.* zatex bounds bytes, depth, items, work and extent, and refuses ink
+      outside its box, so a hostile reply cannot stall the frame or paint over text.
+    - *Convergence.* It is zeron's, so every later adopt brings its fixes.
+  - **What RaTeX did better.** KaTeX parity: RaTeX set 191 of the 198, zatex 179. Slopty's
+    copy adds what models write most among the gaps, as `// slopty:` edits: `\pmod`, `\bmod`,
+    `\pod`, `\mod`, `\substack`, `\hline` (its rule left out), the italic capital Greek,
+    `\llbracket`/`\rrbracket` and `\href`'s text, bringing it to 186. Still refused and shown
+    as their source: macros (`\def`, `\newcommand`), `\cancel`, `\genfrac`, `\raisebox`,
+    mhchem and `\verb`. `\color` sets in the text's colour.
+  - **Binary size and licences.** About even: a stripped binary carrying zatex and its six
+    faces grows 4.43 MB, one carrying RaTeX with its embedded KaTeX glyphs 4.15 MB. The fonts
+    are OFL-1.1 (Fira Math, STIX Two Math, Libertinus Math, Euler Math) and the GUST Font
+    License (New Computer Modern Math, TeX Gyre Pagella Math); each licence sits beside its
+    font in `crates/slopty-math/fonts/`.
+  - **Assistive technologies.** Each formula, in a line or on its own, is a math node labelled
+    with its TeX over what it paints (a `// slopty:` edit to `MathGlyphs`).
+  - Tests: `slopty-math` (zeron's, and `tests::slopty_commands_typeset`); `slopty-shell`
+    `markdown::math::tests`, `markdown::render::tests::{markdown_math_paints_and_copies_its_tex_source,
+    a_formula_costs_its_frame_little}`,
+    `transcript::surface_tests::display_formulas_typeset_once_settled`,
+    `shell::session_hover_card::tests`; `slopty-ui`
+    `workspace::view_model::surfaces::sidebar::tests::a_dragged_section_keeps_its_place`; e2e
+    `media::formulas_sit_on_their_line_and_diagrams_draw`,
+    `interface::{a_rows_hover_card_names_where_it_runs,
+    a_section_dragged_by_its_header_keeps_its_place}`.

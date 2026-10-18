@@ -25,6 +25,9 @@ provenance = "// Derived from zeron (MIT, github.com/zeronsh/zeron @ {base}), se
 "crates/visual" = "crates/slopty-visual"
 "crates/visual-gpu" = "crates/slopty-visual-gpu"
 "scripts/fixtures/markdown-preview" = "crates/slopty-shell/fixtures/markdown-preview"
+# zatex (#912), its LaTeX math layout over OpenType MATH fonts, is Slopty's maths typesetter
+# (docs/decisions/ui.md, "Math typeset by zatex").
+"crates/zatex" = "crates/slopty-math"
 # Excerpts of the engine and the agent drivers: the types and helpers the shell reads.
 "crates/engine/src/registry.rs" = "crates/slopty-shell/src/catalog/registry.rs"
 "crates/harness/src/claude/catalog.rs" = "crates/slopty-shell/src/catalog/claude.rs"
@@ -79,6 +82,23 @@ to = "crate::catalog::harness::install::"
 [[rename]]
 from = "zeron_harness::supports_titles"
 to = "crate::catalog::harness::supports_titles"
+
+# zatex is `slopty-math`: its package name first, then the crate's paths.
+[[rename]]
+from = "name = \"zatex\""
+to = "name = \"slopty-math\""
+
+[[rename]]
+from = "zatex = {"
+to = "slopty-math = {"
+
+[[rename]]
+from = "-p zatex"
+to = "-p slopty-math"
+
+[[rename]]
+from = "zatex"
+to = "slopty_math"
 
 [[rename]]
 from = "zeron_ui"
@@ -149,6 +169,10 @@ paths = [
     "crates/preview/",
     "crates/sync/",
     "crates/text/",
+    # The synced registry document: Slopty keeps the sidebar's pins and sections in its view
+    # model (`interface/sidebar.json`), applied as the shell projects them.
+    "crates/doc/src/registry.rs",
+    "crates/doc/src/registry/",
     # Voice, dictation and the orb.
     "crates/orb/",
     "crates/voice/",
@@ -209,6 +233,8 @@ paths = [
     "crates/ui/tests/voice_orb_geometry.rs",
     "crates/ui/src/shell/files_panel_workspace_tests.rs",
     "crates/ui/build.rs",
+    # zatex's benchmark and font-sheet examples (its numbers: docs/MEASUREMENTS.md).
+    "crates/zatex/examples/",
     # zeron's mark: the shell draws Slopty's (`crates/slopty-shell/assets/icons/slopty-logo.svg`).
     "crates/ui/assets/icons/zeron-logo.svg",
     # The repository's own files: Slopty has its own.

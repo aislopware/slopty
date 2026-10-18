@@ -1,4 +1,4 @@
-// Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
+// Derived from zeron (MIT, github.com/zeronsh/zeron @ c02739d), see THIRD_PARTY_NOTICES.md
 //! Width-dependent presentation; selection offsets always refer to original text.
 use super::render::FlatText;
 use gpui::{SharedString, TextRun};
@@ -121,13 +121,17 @@ pub fn truncate(
         if measure(label, &runs) <= width {
             continue;
         }
-        let boundaries: Vec<_> = label.grapheme_indices(true).map(|(i, _)| i).collect();
+        // A cut never lands inside a formula's slot: the whole formula
+        // shows or goes into the ellipsis.
+        let boundaries: Vec<_> = label
+            .grapheme_indices(true)
+            .map(|(i, _)| i)
+            .filter(|&i| !inside_slot(flat, range.start + i))
+            .collect();
         let candidate = |end: usize| {
             let text = format!("{}…", &label[..end]);
             let mut runs = slice_runs(&runs, 0..end);
-            let mut ellipsis = slice_runs(&flat.runs, range.start + end..range.end).remove(0);
-            ellipsis.len = '…'.len_utf8();
-            runs.push(ellipsis);
+            runs.push(ellipsis_run(flat, range.start + end..range.end));
             (text, runs)
         };
         let mut low = 0;
@@ -156,9 +160,7 @@ pub fn truncate(
         runs.extend(slice_runs(&flat.runs, at..omitted.start));
         let start = text.len();
         text.push('…');
-        let mut style = slice_runs(&flat.runs, omitted.clone()).remove(0);
-        style.len = '…'.len_utf8();
-        runs.push(style);
+        runs.push(ellipsis_run(flat, omitted.clone()));
         at = omitted.end;
         offsets.omissions.push((omitted, start..text.len()));
     }
@@ -181,8 +183,21 @@ pub fn truncate(
             .collect(),
         code_ranges: flat.code_ranges.iter().map(shown).collect(),
         file_glyphs: flat.file_glyphs.iter().map(shown).collect(),
-        math: flat.math.iter().map(|(r, tex)| (shown(r), tex.clone())).collect(), // slopty:
-        math_size: flat.math_size,
+        // A formula cut away with its label leaves no slot to paint over.
+        math: flat
+            .math
+            .iter()
+            .filter(|slot| {
+                !offsets
+                    .omissions
+                    .iter()
+                    .any(|(omitted, _)| omitted.contains(&slot.range.start))
+            })
+            .map(|slot| super::math::MathSlot {
+                range: shown(&slot.range),
+                ..slot.clone()
+            })
+            .collect(),
         original: Some(OriginalText {
             text: flat
                 .original
@@ -191,6 +206,33 @@ pub fn truncate(
             offsets,
         }),
     }
+}
+
+/// Whether `at` falls strictly inside a formula's slot.
+fn inside_slot(flat: &FlatText, at: usize) -> bool {
+    // Slots are in text order and disjoint: the first ending past `at` is the
+    // only one that can hold it (asked per character, so no scan).
+    let i = flat.math.partition_point(|slot| slot.range.end <= at);
+    flat.math
+        .get(i)
+        .is_some_and(|slot| slot.range.start < at && at < slot.range.end)
+}
+
+/// The run an ellipsis standing for `omitted` is styled with: the first
+/// omitted text that isn't a formula's slot (whose pinned font and missing
+/// underline are the slot's own), else the first omitted run.
+fn ellipsis_run(flat: &FlatText, omitted: Range<usize>) -> TextRun {
+    // Slots are in text order, so adjacent ones chain.
+    let mut at = omitted.start;
+    for slot in &flat.math {
+        if slot.range.start == at {
+            at = slot.range.end;
+        }
+    }
+    let style = if at < omitted.end { at } else { omitted.start };
+    let mut run = slice_runs(&flat.runs, style..omitted.end).remove(0);
+    run.len = '…'.len_utf8();
+    run
 }
 
 use super::render::{INLINE_CODE_INSET_Y, RenderOptions, range_rects};
@@ -327,8 +369,14 @@ fn with_file_link_glyphs(flat: &FlatText, opts: &RenderOptions) -> FlatText {
             .collect(),
         code_ranges: flat.code_ranges.iter().map(&map_range).collect(),
         file_glyphs: glyphs,
-        math: flat.math.iter().map(|(r, tex)| (map_range(r), tex.clone())).collect(), // slopty:
-        math_size: flat.math_size,
+        math: flat
+            .math
+            .iter()
+            .map(|slot| super::math::MathSlot {
+                range: map_range(&slot.range),
+                ..slot.clone()
+            })
+            .collect(),
         original: Some(OriginalText {
             text: flat
                 .original

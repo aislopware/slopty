@@ -324,8 +324,8 @@ fn markdown_images_say_how_they_stand(cx: &mut gpui::TestAppContext) {
     assert_eq!(find(&nodes, Role::Image, "web").map(|node| node.value.as_str()), Some("remote"));
 }
 
-/// A settled formula typesets taller than a line, labelled with its TeX; a broken one shows its
-/// source with the value "error"; the streaming tail keeps text.
+/// A formula typesets taller than a line, its math node labelled with its TeX; one zatex cannot
+/// set shows its source; a formula still streaming in keeps its text.
 #[gpui::test]
 fn display_formulas_typeset_once_settled(cx: &mut gpui::TestAppContext) {
     let (transcript, cx) = open(
@@ -334,15 +334,17 @@ fn display_formulas_typeset_once_settled(cx: &mut gpui::TestAppContext) {
     );
     let nodes = draw(cx);
     let formula = find(&nodes, Role::Math, "\\frac{a}{b}").expect("the formula");
-    assert!(formula.value.is_empty());
     assert!(formula.height > 22.0, "taller than a line: {formula:?}");
-    let broken = find(&nodes, Role::Math, "\\nosuchcommand{x}").expect("the broken formula");
-    assert_eq!(broken.value, "error");
+    assert!(find(&nodes, Role::Math, "\\nosuchcommand{x}").is_none(), "not typeset");
+    assert!(
+        nodes.values().any(|node| node.label.contains("\\nosuchcommand{x}")),
+        "the broken formula shows its source"
+    );
 
-    // The same reply still streaming: its last block draws no formula yet.
+    // A reply still streaming a formula in: its open `$$` draws no formula yet.
     transcript.update(cx, |this, cx| {
         this.state.update(cx, |state, _| {
-            state.transcript = vec![entry(MessageStatus::Streaming, vec![text("$$\\frac{a}{b}$$")])];
+            state.transcript = vec![entry(MessageStatus::Streaming, vec![text("$$\\frac{a}")])];
             state.transcript_revision += 1;
         });
         this.sync(cx);

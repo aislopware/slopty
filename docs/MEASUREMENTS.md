@@ -17467,3 +17467,43 @@ to take inside one session. An app run pays only its tests. Every failed run's l
 came back, and so did run 1's stack root (860 KB). Run 2's root did not, because the harness
 removes a root whose stack failed to start (`the worker did not print its address in time`)
 rather than keeping it.
+
+## 2026-10-18 — math typeset by zatex against RaTeX
+
+`docs/decisions/ui.md`, "Math typeset by zatex". mac-studio (M1 Max), macOS 27, load average
+25 to 45 from other lanes' builds, so the absolute times move between runs (two runs below);
+the ratios hold.
+
+**Coverage and layout**, 198 formulas models write (`corpus.txt`: inline unless marked `D`),
+release build. zatex sets them in Fira Math; RaTeX's time is its parse, layout and SVG, then
+resvg rasterising that SVG at 2x, as the shell drew it.
+
+| | zatex (zeron's) | zatex (Slopty's copy) | RaTeX 0.1.15 |
+| --- | --- | --- | --- |
+| formulas set | 179 of 198 | 186 of 198 | 191 of 198 |
+| layout per formula, run 1 | 2.0 to 3.0 µs | — | 129 to 133 µs |
+| layout per formula, run 2 | — | 10.3 µs | 295 µs |
+| rasterising its picture at 2x | none (glyph atlas) | none | 315 µs (run 1), 1.04 ms (run 2) |
+| what a formula keeps | 6 items, about 120 bytes | | an 8.8 KB SVG, then its bitmap |
+
+**Binary size**: a release binary that sets one formula, stripped (`src/bin/only_*.rs`): an
+empty one 343,376 bytes, with zatex and its six bundled faces 4,775,536 (+4.43 MB), with RaTeX
+and its embedded KaTeX glyphs 4,492,976 (+4.15 MB). The six faces are 4.07 MB of that.
+
+**A frame in the shell**, debug build, GPUI's test platform (`slopty-shell`
+`markdown::render::tests::a_formula_costs_its_frame_little`): a reply of 40 paragraphs, each
+with a formula in its line and one on its own (80 formulas), against the same reply with math
+off. Three runs: the first frame 5.5 to 6.0 ms against 2.1 to 2.6 ms, later frames 5.1 to 6.1
+ms against 2.0 to 2.4 ms, so about 0.04 ms per formula either way.
+
+```sh
+# The comparison (zatex from .research/zeron, RaTeX from crates.io):
+cd .research/math-zatex-vs-ratex-2026-10-18 && cargo build --release --bins
+./target/release/mathcmp out              # run 1; FACE=cm for Computer Modern
+# Slopty's copy: the same program with `zatex = { package = "slopty-math", path = ... }`.
+strip -o /tmp/z target/release/only_zatex && stat -f %z /tmp/z   # and only_ratex, only_none
+# The frame, after a check built it (SLOPTY_LANE=Z cargo xtask remote -p slopty-shell):
+cd target/local/Z/tree/crates/slopty-shell && \
+  ../../../target/debug/deps/slopty_shell-<hash> \
+  markdown::render::tests::a_formula_costs_its_frame_little --exact --nocapture
+```

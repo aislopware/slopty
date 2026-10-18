@@ -72,7 +72,7 @@ fn block(block: &Block, label: &dyn Fn(&str) -> Option<String>) -> Option<Block>
                 .collect();
             changed.then(|| Block::List { ordered_start: *ordered_start, items })
         }
-        Block::Table { .. } | Block::CodeBlock { .. } | Block::Rule => None,
+        Block::Table { .. } | Block::CodeBlock { .. } | Block::Rule | Block::Math { .. } => None,
     }
 }
 
@@ -141,7 +141,9 @@ pub fn as_drawn(block: &Block) -> Block {
             ordered_start: *ordered_start,
             items: items.iter().map(|item| item.iter().map(as_drawn).collect()).collect(),
         },
-        Block::Table { .. } | Block::CodeBlock { .. } | Block::Rule => block.clone(),
+        Block::Table { .. } | Block::CodeBlock { .. } | Block::Rule | Block::Math { .. } => {
+            block.clone()
+        }
     }
 }
 

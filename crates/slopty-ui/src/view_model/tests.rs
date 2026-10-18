@@ -496,7 +496,7 @@ fn an_open_turn_of_a_thread_at_rest_reads_as_finished() {
 
 /// The shell may queue messages with their files kept as chips, send its chips, and start a
 /// chat with no project in a scratch folder of its own: Slopty answers each. A scratch folder
-/// is no project.
+/// is no project. Its sidebar sections may be dragged into an order.
 #[test]
 fn the_shell_is_told_what_slopty_answers() {
     use slopty_view_proto::capabilities as can;
@@ -507,6 +507,7 @@ fn the_shell_is_told_what_slopty_answers() {
         can::MESSAGE_QUEUE_ACTIONS_V1,
         can::MESSAGE_QUEUE_CLEAN_ATTACHMENT_TEXT_V1,
         can::PROJECTLESS_SCRATCH_V1,
+        can::SIDEBAR_SECTION_ORDER_V1,
     ] {
         assert!(claimed.iter().any(|c| c == capability), "{capability}");
     }

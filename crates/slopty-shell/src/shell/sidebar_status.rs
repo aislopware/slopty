@@ -8,14 +8,15 @@
 //!   answer", "Plan ready for review", "Needs your approval · run cargo test"; an agent waiting
 //!   on its own work says "Waiting · 4m"; one summarising its context says so.
 //! - **Unread weight.** A finished result nobody has seen sets its title in the heavier weight.
-//! - **The hover card.** Hovering a row shows where it runs (project @ machine, folder, branch),
-//!   which agent and model, how long it has stood as it is, and its running subagents.
+//! - **The hover card's facts.** zeron's session hover card (`session_hover_card`) also says
+//!   where a row runs (project @ machine), which agent and model, how long it has stood as it is,
+//!   and how many subagents it has running.
 //! - **Show more.** A group shows its first [`REST_FIRST`] rows at rest, then "Show N more",
 //!   which adds [`REST_PAGE`] at a time, as desktop's groups and the Archived shelf do. A row that
 //!   needs the person or is at work always shows, and so does the open chat.
 
 use chrono::{DateTime, Local, Utc};
-use gpui::{AnyElement, AnyView, App, Context, IntoElement, Render, SharedString, Window, div, prelude::*, px};
+use gpui::{AnyElement, Context, IntoElement, SharedString, div, prelude::*, px};
 use slopty_view_proto::{Chat, ChatIndicator, Session, SessionStatus, SessionWait};
 
 use crate::icons::{self, icon};
@@ -286,17 +287,13 @@ pub(super) fn waiting_on_itself(session: Option<&Session>, now: DateTime<Utc>) -
     live(session, now).is_some_and(|s| s.status == SessionStatus::Waiting)
 }
 
-/// What a row's hover card says, line by line.
+/// What a row's hover card says beyond zeron's, line by line.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(super) struct ChatCard {
-    pub title: SharedString,
     /// "project @ machine", or "@ machine" for a chat with no project.
     pub place: Option<SharedString>,
-    /// Whether its machine answers now.
-    pub online: bool,
     /// Its folder, its middle elided when long.
     pub folder: Option<SharedString>,
-    pub branch: Option<SharedString>,
     /// "Claude Code · opus · High"
     pub agent: Option<SharedString>,
     /// "Working for 3m", "Waiting on you since 14:02", "Done 5m ago"
@@ -343,10 +340,6 @@ pub(super) fn chat_card(state: &AppState, chat_id: &str, now: DateTime<Utc>) -> 
         .or(chat.cwd.as_deref())
         .filter(|cwd| !cwd.is_empty())
         .map(elide_middle);
-    let branch = crate::change_requests::conversation_branch(chat, &state.spaces)
-        .map(str::trim)
-        .filter(|branch| !branch.is_empty())
-        .map(str::to_owned);
     let agent = chat.config.as_ref().map(|config| {
         let mut words = vec![agent_name(config.harness).to_owned()];
         words.extend(config.model.clone().filter(|model| !model.is_empty()));
@@ -355,11 +348,8 @@ pub(super) fn chat_card(state: &AppState, chat_id: &str, now: DateTime<Utc>) -> 
     });
     let subagents = state.running_subagents_for(chat_id, now);
     Some(ChatCard {
-        title: crate::transcript::single_line(chat.title.as_deref().unwrap_or("New chat")).into(),
         place: place.map(SharedString::from),
-        online: state.device_online(&chat.device_id, now),
         folder: folder.map(SharedString::from),
-        branch: branch.map(SharedString::from),
         agent: agent.map(SharedString::from),
         status: status_words(chat, status, session, now).map(SharedString::from),
         subagents: (subagents > 0).then(|| {
@@ -430,121 +420,6 @@ fn status_words(chat: &Chat, status: ChatIndicator, session: Option<&Session>, n
             }
         }
     })
-}
-
-/// The `.tooltip(..)` that shows chat `chat_id`'s card, built from the state when it opens.
-pub(super) fn hover_card(
-    state: gpui::Entity<AppState>,
-    chat_id: String,
-) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
-    move |_, cx| {
-        let card = chat_card(state.read(cx), &chat_id, Utc::now()).unwrap_or_default();
-        cx.new(|_| ChatHoverCard { card }).into()
-    }
-}
-
-/// The card's width: room for a long title and a folder without wrapping.
-const CARD_WIDTH: f32 = 280.0;
-
-/// The hover card: zeron's frosted popup card (12 corners, the popup plane) with the session's
-/// title over one line per fact, each led by its glyph.
-struct ChatHoverCard {
-    card: ChatCard,
-}
-
-impl Render for ChatHoverCard {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::of(cx).for_popup();
-        let card = &self.card;
-        let line = |glyph: &'static str, words: SharedString, theme: &Theme| -> AnyElement {
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(8.0))
-                .min_h(px(20.0))
-                .child(icon(glyph).size(px(13.0)).flex_none().text_color(theme.text_muted))
-                .child(div().flex_1().min_w_0().truncate().child(words))
-                .into_any_element()
-        };
-        // What a screen reader says of the card: its lines in order, one per line.
-        let spoken = [
-            &card.place,
-            &card.folder,
-            &card.branch,
-            &card.agent,
-            &card.status,
-            &card.subagents,
-        ]
-        .into_iter()
-        .flatten()
-        .map(SharedString::as_ref)
-        .collect::<Vec<&str>>()
-        .join("\n");
-        let mut lines: Vec<AnyElement> = Vec::new();
-        if let Some(place) = card.place.clone() {
-            // slopty: online needs no mark; offline wears the muted Wi-Fi-off.
-            let dot = (!card.online).then(|| {
-                icon(icons::WIFI_OFF).size(px(11.0)).flex_none().text_color(theme.text_muted)
-            });
-            lines.push(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(8.0))
-                    .min_h(px(20.0))
-                    .child(icon(icons::REMOTE_SERVER).size(px(13.0)).flex_none().text_color(theme.text_muted))
-                    .child(div().flex_1().min_w_0().truncate().child(place))
-                    .children(dot)
-                    .into_any_element(),
-            );
-        }
-        if let Some(folder) = card.folder.clone() {
-            lines.push(line(icons::FOLDER, folder, &theme));
-        }
-        if let Some(branch) = card.branch.clone() {
-            lines.push(line(icons::GIT_BRANCH, branch, &theme));
-        }
-        if let Some(agent) = card.agent.clone() {
-            lines.push(line(icons::BOT, agent, &theme));
-        }
-        if let Some(status) = card.status.clone() {
-            lines.push(line(icons::CLOCK_CIRCLE, status, &theme));
-        }
-        if let Some(subagents) = card.subagents.clone() {
-            lines.push(line(icons::LIST, subagents, &theme));
-        }
-        let body = div()
-            .id("sidebar-hover-card")
-            .debug_selector(|| "sidebar-hover-card".into())
-            .role(gpui::Role::Tooltip)
-            .aria_label(card.title.clone())
-            .aria_value(spoken)
-            .w(px(CARD_WIDTH))
-            .p(px(12.0))
-            .rounded(px(12.0))
-            .border_1()
-            .border_color(theme.border)
-            .bg(crate::popover::surface_bg(&theme))
-            .when(!theme.is_frost(), |el| el.shadow_lg())
-            .flex()
-            .flex_col()
-            .gap(px(6.0))
-            .text_size(crate::typography::ui_rems(12.0))
-            .text_color(theme.text_muted)
-            .child(
-                div()
-                    .text_size(crate::typography::ui_rems(13.0))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(theme.text)
-                    .line_clamp(2)
-                    .child(card.title.clone()),
-            )
-            .children(lines);
-        // A gap from the pointer, then the card.
-        div().pt(px(6.0)).child(crate::frost::frosted(12.0, crate::frost::MENU_BLUR, body))
-    }
 }
 
 #[cfg(test)]
@@ -630,8 +505,8 @@ mod tests {
     /// A sidebar alone, drawn from a shell with no engine.
     struct SidebarHost(gpui::Entity<super::super::Shell>);
 
-    impl Render for SidebarHost {
-        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    impl gpui::Render for SidebarHost {
+        fn render(&mut self, _: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
             self.0.update(cx, |shell, cx| {
                 div().w(px(300.0)).h(px(900.0)).child(shell.render_chat_sidebar(&Theme::default(), cx))
             })
