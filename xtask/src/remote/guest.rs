@@ -754,40 +754,29 @@ pub fn e2e(root: &Path, lane: &str, sha: &str, run: &Run<'_>) -> Result<Outcome>
             Some(sim) => Some(simulator(&home, sim, &stage.join("Slopty.app"))?),
             None => None,
         };
-        let (filter, env) = match &simulator {
-            Some(udid) => (
-                crate::e2e::ios_filterset(run.filter),
+        // The app's tests run in two groups, those that code video last and apart
+        // (`crate::e2e::APP`); the simulator's in one.
+        let groups: Vec<Group> = match &simulator {
+            Some(udid) => vec![(
+                crate::e2e::ios_filterset(run.filter).unwrap_or_default(),
                 crate::e2e::ios_env(data.as_str(), debug.as_str(), accept, udid),
-            ),
-            None => (
-                crate::e2e::app_filterset(run.filter),
-                crate::e2e::app_env(data.as_str(), debug.as_str(), accept),
-            ),
+                false,
+            )],
+            None => crate::e2e::app_filtersets(run.filter)
+                .into_iter()
+                .map(|(filter, codes)| {
+                    let mut env = crate::e2e::app_env(data.as_str(), debug.as_str(), accept);
+                    env.retain(|(key, _)| !codes || key != crate::e2e::NO_VIDEOTOOLBOX);
+                    (filter, env, codes)
+                })
+                .collect(),
         };
-        let filter = filter.unwrap_or_default();
         // One app in one simulator: its tests take turns.
         let output = match if simulator.is_some() { 1 } else { threads() } {
             1 => "--no-capture".to_owned(),
             // Passing tests' output too: their MEASURE lines are what a run reports.
             n => format!("--test-threads {n} --failure-output final --success-output final"),
         };
-        let mut command = tart(&home);
-        command.args(["exec", GUEST, "/usr/bin/env"]);
-        for (key, value) in env {
-            command.arg(format!("{key}={value}"));
-        }
-        command.arg(format!("INSTA_WORKSPACE_ROOT={tree}"));
-        command.args([
-            "/bin/sh",
-            "-c",
-            &format!(
-                "mkdir -p '{data}/run' '{data}/artifacts' && cd '{tree}' && exec '{stage}/cargo-nextest' \
-                 nextest run --config-file '{stage}/nextest.toml' --archive-file '{archive}' \
-                 --extract-to '{stage}/x' --extract-overwrite --workspace-remap '{tree}' \
-                 --run-ignored only {output} --retries 0 --no-fail-fast -E \"$0\""
-            ),
-            &filter,
-        ]);
         if most > 1 {
             println!(
                 "  run {at} of {}{most}",
@@ -795,14 +784,76 @@ pub fn e2e(root: &Path, lane: &str, sha: &str, run: &Run<'_>) -> Result<Outcome>
             );
         }
         let this_log = if most == 1 { log.clone() } else { kept.join(format!("run-{at}.log")) };
-        let this = teed(command, &this_log);
         ran = at;
-        let this = match this {
-            Ok(this) => this,
-            Err(error) => {
-                status = Some(Err(error));
-                break;
+        // The run's word: the first group that failed, else one that ran tests, else the first.
+        let (mut this, mut failing, mut error) = (None::<std::process::ExitStatus>, false, None);
+        for (group, (filter, env, codes)) in groups.iter().enumerate() {
+            // The guest's encoder, a virtual Mac's, codes one keyframe in time or the tests that
+            // code are skipped, as on a runner (`crate::e2e::coding_step`).
+            if *codes {
+                let probe =
+                    format!("perl -e 'alarm 20; exec @ARGV' '{debug}/{}'", crate::e2e::PROBE);
+                if ssh(&home, &ip, &probe).is_err() {
+                    println!(
+                        "  ⚠ {GUEST}'s encoder does not answer: the tests that code video are skipped"
+                    );
+                    continue;
+                }
             }
+            let mut command = tart(&home);
+            command.args(["exec", GUEST, "/usr/bin/env"]);
+            for (key, value) in env {
+                command.arg(format!("{key}={value}"));
+            }
+            command.arg(format!("INSTA_WORKSPACE_ROOT={tree}"));
+            command.args([
+                "/bin/sh",
+                "-c",
+                &format!(
+                    "mkdir -p '{data}/run' '{data}/artifacts' && cd '{tree}' && exec '{stage}/cargo-nextest' \
+                     nextest run --config-file '{stage}/nextest.toml' --archive-file '{archive}' \
+                     --extract-to '{stage}/x' --extract-overwrite --workspace-remap '{tree}' \
+                     --run-ignored only {output} --retries 0 --no-fail-fast -E \"$0\""
+                ),
+                filter,
+            ]);
+            // A later group's log follows the first's in the run's log.
+            let group_log = if group == 0 {
+                this_log.clone()
+            } else {
+                this_log.with_extension(format!("{group}.log"))
+            };
+            let ran_group = teed(command, &group_log);
+            if group > 0 {
+                append(&this_log, &group_log)?;
+            }
+            let ran_group = match ran_group {
+                Ok(ran_group) => ran_group,
+                Err(failed) => {
+                    error = Some(failed);
+                    break;
+                }
+            };
+            // A group its filter leaves empty passes: the caller's filter, or no test that codes.
+            let empty = ran_group.code() == Some(crate::e2e::NO_TESTS_RUN);
+            let group_passed = ran_group.code() == Some(0) || empty;
+            if failing {
+                continue;
+            }
+            if !group_passed {
+                failing = true;
+                this = Some(ran_group);
+            } else if this.is_none_or(|kept| kept.code() != Some(0)) {
+                this = Some(ran_group);
+            }
+        }
+        if let Some(error) = error {
+            status = Some(Err(error));
+            break;
+        }
+        let Some(this) = this else {
+            status = Some(Err(anyhow::anyhow!("no group of the {case} case ran")));
+            break;
         };
         let passed = this.code() == Some(0)
             || (run.filter.is_some() && this.code() == Some(crate::e2e::NO_TESTS_RUN));
@@ -913,6 +964,7 @@ fn pristine(home: &Path, guest: &str, sim: crate::ios::SimKind) -> Result<String
     let name = sim.name();
     let devices = simctl(home, guest, &["list", "devices", "available", "-j"])?;
     if let Some(udid) = named_device(&devices, name)? {
+        full_screen(home, guest, sim, &udid)?;
         return Ok(udid);
     }
     let runtimes = simctl(home, guest, &["list", "runtimes", "-j"])?;
@@ -924,7 +976,45 @@ fn pristine(home: &Path, guest: &str, sim: crate::ios::SimKind) -> Result<String
     simctl(home, guest, &["bootstatus", &udid, "-b"])?;
     simctl(home, guest, &["shutdown", &udid])?;
     println!("  booted {name} once in {guest} ({:.1?})", started.elapsed());
+    full_screen(home, guest, sim, &udid)?;
     Ok(udid)
+}
+
+/// The switches `SpringBoard` keeps for an iPad's windowed apps and Stage Manager, which Settings'
+/// Multitasking sets: both off is "Full Screen Apps". In a window, iPadOS 26 refuses an app's
+/// own turn of its scene ("The current windowing mode does not allow for programmatic changes
+/// to interface orientation"), so the landscape case could not turn.
+const WINDOWING: [&str; 2] = ["SBFlexibleWindowingUI", "SBChamoisWindowingUI"];
+
+/// Set `udid`, shut down, to run apps full screen when it is an iPad ([`WINDOWING`]); its
+/// clones take it.
+fn full_screen(home: &Path, guest: &str, sim: crate::ios::SimKind, udid: &str) -> Result<()> {
+    if sim != crate::ios::SimKind::Ipad {
+        return Ok(());
+    }
+    let prefs = format!(
+        "\"$HOME/Library/Developer/CoreSimulator/Devices/{udid}/data/Library/Preferences/com.apple.springboard\""
+    );
+    let script = WINDOWING
+        .iter()
+        .map(|key| format!("defaults write {prefs} {key} -bool false"))
+        .collect::<Vec<_>>()
+        .join(" && ");
+    tart_out(home, &["exec", guest, "/bin/sh", "-c", &script])?;
+    Ok(())
+}
+
+/// Whether `udid` runs apps full screen ([`full_screen`]): a spare cloned before it was set
+/// does not.
+fn is_full_screen(home: &Path, sim: crate::ios::SimKind, udid: &str) -> bool {
+    if sim != crate::ios::SimKind::Ipad {
+        return true;
+    }
+    let script = format!(
+        "defaults read \"$HOME/Library/Developer/CoreSimulator/Devices/{udid}/data/Library/Preferences/com.apple.springboard\" {}",
+        WINDOWING[0]
+    );
+    tart_out(home, &["exec", GUEST, "/bin/sh", "-c", &script]).is_ok_and(|out| out.trim() == "0")
 }
 
 /// The name of a run's simulator, cloned from the pristine one for `sim`.
@@ -986,6 +1076,15 @@ fn simulator(home: &Path, sim: crate::ios::SimKind, app: &Path) -> Result<String
     let name = run_device(sim);
     let devices = simctl(home, GUEST, &["list", "devices", "-j"])?;
     let spare = named_device(&devices, &spare_device(sim))?;
+    // A spare made before its pristine one ran full screen goes, for a fresh clone.
+    let spare = match spare {
+        Some(udid) if !is_full_screen(home, sim, &udid) => {
+            let _shut = simctl(home, GUEST, &["shutdown", &udid]);
+            simctl(home, GUEST, &["delete", &udid])?;
+            None
+        }
+        spare => spare,
+    };
     // Only the run's simulator is up: two beside the tests left the guest 64 MB free, in swap,
     // and the app hung 15 s at a time.
     quiet(home, spare.as_deref())?;
@@ -1134,6 +1233,18 @@ fn which(name: &str) -> Result<PathBuf> {
     let out = Command::new("which").arg(name).output().context("which")?;
     ensure!(out.status.success(), "{name} is not on PATH");
     Ok(PathBuf::from(String::from_utf8(out.stdout)?.trim()))
+}
+
+/// One nextest run of a case: its filterset, its environment, and whether its tests code video.
+type Group = (String, Vec<(String, String)>, bool);
+
+/// `from`'s lines after `to`'s.
+fn append(to: &Path, from: &Path) -> Result<()> {
+    use std::io::Write as _;
+    let lines = std::fs::read(from).with_context(|| format!("read {from}"))?;
+    let mut file =
+        std::fs::OpenOptions::new().append(true).open(to).with_context(|| format!("open {to}"))?;
+    file.write_all(&lines).with_context(|| format!("append to {to}"))
 }
 
 /// Run `command`, its output into `log` and, less the lines of what passed, onto this terminal;

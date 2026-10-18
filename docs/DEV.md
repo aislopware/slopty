@@ -47,7 +47,8 @@ zed itself so it is never behind zed while longbridge lags.
   (tart, cloned from `slopty-26-xcode`, which is made once from the live lane's base with this
   Mac's Xcode and the runners' iOS simulator runtime, about half an hour): the lane's tree is
   built in `target/local/<lane>/e2e-target` (the simulator's app too, with this Mac's Xcode),
-  the app's tests run in the guest three at a time (`SLOPTY_E2E_THREADS`), the simulator's one
+  the app's tests run in the guest three at a time (`SLOPTY_E2E_THREADS`), those that code video
+  after the rest and only when the guest's encoder codes a keyframe in time, the simulator's one
   at a time in a fresh clone of the guest's simulator (`--sim iphone|ipad`), one lane's run at
   a time; `--place runner` (or `SLOPTY_E2E_GUEST=0`) sends either to a runner Mac, and probes
   always go there; `--goldens accept` (or `accept-all`) applies the run's goldens to the tree, as `--accept-snapshots` does its insta snapshots (on runners: a patch of anything

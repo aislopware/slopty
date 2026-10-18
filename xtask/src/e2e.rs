@@ -173,12 +173,14 @@ impl Suite {
 /// The module holding a target's tests that need the Screen Recording grant; they run only
 /// with `--screen-recording`.
 const SCREEN_RECORDING: &str = "test(~screen_recording::)";
-/// The app target's tests that code video: a remote window streamed into the right pane, which
-/// needs the Screen Recording grant too. A new one left out fails in the first group, where every
-/// `VideoToolbox` session is refused ([`NO_VIDEOTOOLBOX`]), naming the call.
+/// The app target's tests that code video: each target's `stream` module (a remote window of
+/// the worker's drawn screen streamed into the right pane, no grant needed) and its
+/// `screen_recording` module (real capture, run with `--screen-recording`). A new one left out
+/// fails in the first group, where every `VideoToolbox` session is refused
+/// ([`NO_VIDEOTOOLBOX`]), naming the call.
 macro_rules! coding {
     () => {
-        "(test(~screen_recording::))"
+        "(test(~screen_recording::) | test(~stream::))"
     };
 }
 
@@ -415,11 +417,11 @@ pub fn build_app(sh: &Shell, args: &[&str]) -> Result<()> {
     )
 }
 
-/// The filterset the app case runs with `filter`, as [`run`] composes it for its first suite:
-/// no test that codes video or captures the screen (those need the Screen Recording grant).
-pub fn app_filterset(filter: Option<&str>) -> Option<String> {
-    let [first, _] = APP else { return None };
-    filterset(first, filter, false)
+/// The filtersets the app case runs with `filter`, in turn, as [`run`] composes them: first the
+/// tests that code no video, then (`true`) those that do, behind the encoder probe; neither
+/// captures the screen (that needs the Screen Recording grant).
+pub fn app_filtersets(filter: Option<&str>) -> Vec<(String, bool)> {
+    APP.iter().filter_map(|suite| Some((filterset(suite, filter, false)?, suite.codes))).collect()
 }
 
 /// The filterset the simulator case runs with `filter`, as [`run`] composes it.
@@ -487,7 +489,7 @@ const CODING_DEADLINE: std::time::Duration = std::time::Duration::from_mins(6);
 const PROBE_DEADLINE: std::time::Duration = std::time::Duration::from_mins(1);
 
 /// The probe binary (`crates/slopty-e2e/src/bin/slopty-encoder-probe.rs`).
-const PROBE: &str = "slopty-encoder-probe";
+pub const PROBE: &str = "slopty-encoder-probe";
 
 /// How a suite's run went.
 enum Ran {
@@ -651,6 +653,19 @@ fn filterset(suite: &Suite, caller: Option<&str>, screen_recording: bool) -> Opt
 mod tests {
     use super::{APP, Suite, filterset};
 
+    /// The guest runs both of the app's groups, the one that codes last and on its own.
+    #[test]
+    fn the_guest_runs_the_tests_that_code_after_the_rest() {
+        let groups = super::app_filtersets(Some("test(a)"));
+        let [(rest, false), (coding, true)] = groups.as_slice() else { panic!("{groups:?}") };
+        assert!(
+            rest.starts_with("(not ")
+                && rest.ends_with("& (test(a)) & (not test(~screen_recording::))"),
+            "{rest}"
+        );
+        assert!(coding.contains("test(~stream::)") && !coding.contains("(not (test"), "{coding}");
+    }
+
     /// The app's tests run in two groups that split the target between them on the same list of
     /// tests that code video: first the rest, opening no decoder at launch, then those, behind
     /// the probe.
@@ -662,6 +677,7 @@ mod tests {
         let (rest, coding) = (rest.only.unwrap_or_default(), coding.only.unwrap_or_default());
         assert_eq!(rest.strip_prefix("not "), Some(coding), "the same list, once negated");
         assert!(coding.contains("test(~screen_recording::)"), "{coding}");
+        assert!(coding.contains("test(~stream::)"), "a drawn screen's stream codes too: {coding}");
     }
 
     #[test]
