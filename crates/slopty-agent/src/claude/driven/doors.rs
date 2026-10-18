@@ -154,29 +154,6 @@ fn plugin_in(tree: &Value) -> Option<String> {
     }
 }
 
-/// The thread fact the MCP servers' counts are kept in, which the context card shows.
-const SERVERS_FACT: &str = "mcp-servers";
-
-/// The servers `init` lists, counted by status as the TUI's `/status` row counts them: "3
-/// connected, 1 pending, 1 failed"; `None` with none.
-fn servers_words(servers: &[Value]) -> Option<String> {
-    let mut counts: Vec<(&str, usize)> = Vec::new();
-    for server in servers {
-        let status = match str_at(server, "status").unwrap_or("pending") {
-            "needs-auth" => "need auth",
-            other => other,
-        };
-        match counts.iter_mut().find(|(s, _)| *s == status) {
-            Some((_, n)) => *n = n.saturating_add(1),
-            None => counts.push((status, 1)),
-        }
-    }
-    let order = ["connected", "pending", "need auth", "disabled", "failed"];
-    counts.sort_by_key(|(s, _)| order.iter().position(|o| o == s).unwrap_or(order.len()));
-    let words: Vec<String> = counts.iter().map(|(s, n)| format!("{n} {s}")).collect();
-    (!words.is_empty()).then(|| words.join(", "))
-}
-
 impl Driven {
     /// What only a question answers after `initialize`: the permission rules, the MCP servers'
     /// apps, and the surfaces the mods draw.
@@ -359,7 +336,7 @@ impl Driven {
         }
         self.servers = seen;
         self.control(Control::McpStatus, &json!({ "subtype": "mcp_status" }));
-        let mut outs = self.history.fact(SERVERS_FACT, servers_words(servers).as_deref());
+        let mut outs = Vec::new();
         for (name, said) in notes {
             let note = AgentNote {
                 key: format!("mcp:{name}"),

@@ -1264,8 +1264,6 @@ fn init_says_what_did_not_load_once() {
     let notes: Vec<&str> = thread.notes.iter().map(|n| n.text.as_str()).collect();
     assert_eq!(notes.iter().filter(|n| n.contains("Failed to load plugin lint")).count(), 1);
     assert!(notes.iter().any(|n| n.starts_with("MCP server \"db\" was skipped")), "{notes:?}");
-    let servers = thread.meta.facts.get("mcp-servers").map(String::as_str);
-    assert_eq!(servers, Some("1 connected, 1 failed"));
 }
 
 /// A compaction that failed says why, in the TUI's short words for its known causes.

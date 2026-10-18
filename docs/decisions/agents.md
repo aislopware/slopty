@@ -3666,7 +3666,7 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     pages by 20 behind "Show more", keeps its rows while it asks again, and says in a line of
     its own when it is reading, has nothing, or failed (the machine's words, with Try again).
     Each row's height is fixed by what it shows, so the group it closes is never clipped.
-  - **Resume a session… (⇧⌘O, and the palette).** A picker in the palette's anatomy searches
+  - **Resume a Claude Code session… (⇧⌘O, and the palette).** A picker in the palette's anatomy searches
     the person's past prompts on the open chat's machine, in its project or in every folder
     (Tab), with the worker's prompt search, and shows the prompt that matched with its words
     lit. With no words it lists the project's sessions as History does, or the machine's last
