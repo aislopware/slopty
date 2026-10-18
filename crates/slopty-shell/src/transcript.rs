@@ -3292,6 +3292,11 @@ struct OwnTurnAnchor {
     /// Once the prompt has appeared, its later disappearance is terminal
     /// (failed echo or removed entry) and the runway must retire.
     seen_prompt: bool,
+    // slopty: the person's own scroll (a wheel, a touch, its restick) moved the view under this
+    // hold. Only then is the slack under the reservation resting space; layout alone leaving
+    // the view there is put back on the exact hold, so where it rests never hangs on the order
+    // the layouts and arrivals came in.
+    scrolled: bool,
 }
 
 impl OwnTurnAnchor {
@@ -4461,7 +4466,8 @@ impl Transcript {
                 // after background streaming. A held turn can be stale while
                 // frame callbacks are paused; reasserting its old prompt here
                 // made scrolling down impossible until an upward gesture.
-                if this.own_turn.is_some() {
+                if let Some(anchor) = this.own_turn.as_mut() {
+                    anchor.scrolled = true; // slopty: the person's scroll, not layout.
                     let distance = this.distance_from_bottom();
                     let previous = this.wheel_previous_distance(distance); // slopty
                     this.last_scroll_distance = distance;
@@ -4669,6 +4675,7 @@ impl Transcript {
             held: true,
             positioned: false,
             seen_prompt: prompt_ix.is_some(),
+            scrolled: false,
         });
         self.own_turn_last_tick = None;
         self.own_turn_kick = true;
@@ -4899,10 +4906,10 @@ impl Transcript {
         }
 
         // ---- entry glide, then absolute hold -------------------------------
-        let (held, positioned) = self
+        let (held, positioned, scrolled) = self
             .own_turn
             .as_ref()
-            .map_or((false, false), |a| (a.held, a.positioned));
+            .map_or((false, false, false), |a| (a.held, a.positioned, a.scrolled));
         if !held {
             return;
         }
@@ -4924,7 +4931,8 @@ impl Transcript {
                     // The legal rest zone below the hold is the epsilon plus
                     // rounding; anything deeper is a transient-collision sink
                     // and rubber-bands back.
-                    err > 0.5 || err < -(OWN_SEND_SCROLL_SLACK_PX + 2.0)
+                    // slopty: the slack rests only a view the person scrolled there.
+                    err > 0.5 || err < -(OWN_SEND_SCROLL_SLACK_PX + 2.0) || (!scrolled && err < -0.5)
                 }
                 // Bounds vanish in the glued representation (dissolved
                 // above, so at most for this one frame) and through splice
@@ -5030,8 +5038,8 @@ impl Transcript {
             // At the hold — or resting inside the slack under it (a restick
             // that fired at the true bottom): land WITHOUT pulling the view
             // up. Only a still-above position gets the snap.
-            if err > 0.5 {
-                land(&self.list);
+            if err > 0.5 || (!scrolled && err < -0.5) {
+                land(&self.list); // slopty: or below it, where layout alone put it.
             }
             if let Some(anchor) = self.own_turn.as_mut() {
                 anchor.positioned = true;
@@ -12464,6 +12472,7 @@ mod tests {
             held: true,
             positioned: true,
             seen_prompt: true,
+            scrolled: false,
         };
         let saved = SavedViewport::capture(
             &rows,
@@ -12516,6 +12525,7 @@ mod tests {
             held: true,
             positioned: false,
             seen_prompt: false,
+            scrolled: false,
         };
 
         assert!(turn.observe_prompt(false), "fresh send waits one state gap");
@@ -12576,6 +12586,7 @@ mod tests {
             held: true,
             positioned: true,
             seen_prompt: true,
+            scrolled: false,
         };
         let saved = SavedViewport::capture(
             &outgoing,
@@ -12763,6 +12774,113 @@ mod tests {
             Some(command)
         );
         crate::markdown::selection::clear_if_owner("probe-0");
+    }
+
+    /// slopty: a sent prompt rests on its exact hold whatever order its layouts come in: layout
+    /// alone leaving the view in the slack under the reservation, before or after the reply's
+    /// rows come, is put back on the hold; the person's own wheel into it rests there (zeron's
+    /// anti-bounce rule). At the self-test's scale.
+    #[gpui::test]
+    fn a_sent_prompt_rests_on_its_hold_unless_the_person_scrolled(cx: &mut gpui::TestAppContext) {
+        struct Fixture(Entity<Transcript>);
+        impl Render for Fixture {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().child(self.0.clone())
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        });
+        const PROMPT: usize = 40;
+        let off_hold = |this: &Transcript| {
+            let Some(bounds) = this.list.bounds_for_item(PROMPT) else {
+                panic!(
+                    "the prompt is not drawn: top {:?}, {}px from the end, anchor {:?}",
+                    this.list.logical_scroll_top(),
+                    this.distance_from_bottom(),
+                    this.own_turn.as_ref().map(|a| (a.held, a.positioned, a.scrolled)),
+                )
+            };
+            f32::from(bounds.top() - this.list.viewport_bounds().top())
+                - Transcript::own_send_inset(PROMPT)
+        };
+        // Layout drift: the view moved down by no input of the person's.
+        fn drift(this: &mut Transcript, _: &mut Context<Transcript>) {
+            this.list.scroll_by(px(2.0));
+        }
+        fn reply(this: &mut Transcript, cx: &mut Context<Transcript>) {
+            let at = this.rows.len();
+            this.rows.push(viewport_row(&format!("reply-{at}"), "reply"));
+            this.list.splice(at..at, 1);
+            this.remeasure_last_row();
+            this.own_turn_kick = true;
+            cx.notify();
+        }
+        type Step = fn(&mut Transcript, &mut Context<Transcript>);
+        let orders: [(&str, [Step; 2]); 2] =
+            [("drift, then the reply", [drift, reply]), ("the reply, then drift", [reply, drift])];
+        for (order, steps) in orders {
+            let state = cx.new(|_| AppState::new());
+            let transcript = cx.new(|cx| Transcript::new(state, cx));
+            transcript.update(cx, |this, cx| {
+                this.rows = (0..=PROMPT)
+                    .map(|ix| viewport_row(&format!("row-{ix}"), &format!("entry-{ix}")))
+                    .collect();
+                this.list.reset(PROMPT + 1);
+                this.rail_enabled = false;
+                cx.notify();
+            });
+            let (_fixture, cx) = cx.add_window_view(|_, _| Fixture(transcript.clone()));
+            cx.simulate_scale_factor_change(2.0);
+            cx.simulate_resize(gpui::size(px(1000.0), px(800.0)));
+            cx.run_until_parked();
+            let frames = |cx: &mut gpui::VisualTestContext| {
+                for _ in 0..90 {
+                    transcript.update(cx, |this, cx| {
+                        // One frame's step each time.
+                        this.own_turn_last_tick = None;
+                        if this.own_turn.is_some() {
+                            this.step_own_turn(cx);
+                        }
+                        cx.notify();
+                    });
+                    cx.run_until_parked();
+                }
+            };
+            transcript.update(cx, |this, cx| this.on_own_send("chat".into(), "entry-40".into(), cx));
+            frames(cx);
+            let landed = transcript.read_with(cx, |this, _| off_hold(this));
+            assert!(landed.abs() <= 0.5, "{order}: landed {landed}px off the hold");
+            for step in steps {
+                transcript.update(cx, |this, cx| step(this, cx));
+                cx.run_until_parked();
+                frames(cx);
+            }
+            let (rest, above) =
+                transcript.read_with(cx, |this, _| (off_hold(this), this.distance_from_bottom()));
+            assert!(rest.abs() <= 0.5, "{order}: rests {rest}px off the hold");
+            assert!(
+                (above - OWN_SEND_SCROLL_SLACK_PX).abs() <= 0.5,
+                "{order}: the slack lies under the hold, {above}px"
+            );
+
+            // The person's wheel down sinks into the slack and stays there.
+            cx.simulate_event(gpui::ScrollWheelEvent {
+                position: gpui::point(px(500.0), px(400.0)),
+                delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.0), px(-40.0))),
+                ..Default::default()
+            });
+            cx.run_until_parked();
+            frames(cx);
+            // At the hold the list's end lies the slack below; sunk into it, at the end.
+            let (sunk, kept) =
+                transcript.read_with(cx, |this, _| (this.distance_from_bottom(), this.own_turn.is_some()));
+            assert!(kept, "{order}: the wheel keeps the turn's reservation");
+            assert!(sunk <= 0.5, "{order}: the wheel rests {sunk}px above the end, not in the slack");
+        }
     }
 
     /// slopty: a prompt the rail jumps to lands below the titlebar the transcript fades under,
@@ -15763,6 +15881,7 @@ mod tests {
                         held: true,
                         positioned: true,
                         seen_prompt: true,
+                        scrolled: false,
                     });
                     cx.notify();
                 });
@@ -15796,6 +15915,7 @@ mod tests {
                     held: true,
                     positioned: true,
                     seen_prompt: true,
+                    scrolled: false,
                 });
                 this.own_turn_scheduled = true;
                 // A downward scroll into output received while no layout/frame
@@ -15919,6 +16039,7 @@ mod tests {
                             held: true,
                             positioned: true,
                             seen_prompt: true,
+                            scrolled: false,
                         });
                         transcript.pinned = true;
                         transcript.spring_kick = true;
@@ -17293,6 +17414,7 @@ mod tests {
         );
         assert!(rows_for_entry(&entry, false, false, &mut parse).is_empty());
     }
+
 }
 
 // slopty: appshots removed.
