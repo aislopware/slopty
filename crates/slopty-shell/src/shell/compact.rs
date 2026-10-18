@@ -45,6 +45,11 @@ const TAB_PILL_INSET: f32 = 6.0;
 const CAPSULE_GLYPH: f32 = 12.0;
 /// The navigation bar's back and close targets.
 const NAV_TARGET: f32 = 34.0;
+/// The navigation bar's title and subtitle lines, at the default text size.
+const NAV_TITLE_LINE: f32 = 20.0;
+const NAV_SUBTITLE_LINE: f32 = 15.0;
+/// The room between the bar's last line and a drilled subagent's breadcrumb under it.
+const NAV_BREADCRUMB_GAP: f32 = 8.0;
 /// A row's swipe: travel before its axis is decided, travel that commits on release, the reach
 /// past which it resists, and the return to rest.
 const SWIPE_DECIDE: f32 = 10.0;
@@ -224,6 +229,25 @@ fn summary(working: usize, waiting: usize) -> String {
         parts.push(format!("{waiting} {verb} you"));
     }
     parts.join(" · ")
+}
+
+/// slopty: one of the phone's navigation bar's icon buttons, a finger's target, named for a
+/// screen reader.
+fn nav_icon(id: &'static str, glyph: &'static str, label: &'static str, theme: &Theme) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .debug_selector(move || id.into())
+        .role(gpui::Role::Button)
+        .aria_label(label)
+        .size(px(NAV_TARGET))
+        .flex_none()
+        .rounded_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .hover(|el| el.bg(crate::theme::wash(0.06)))
+        .cursor_pointer()
+        .child(icon(glyph).size(px(19.0)).text_color(theme.text))
 }
 
 impl Shell {
@@ -550,6 +574,45 @@ impl Shell {
             .into_any_element()
     }
 
+    /// The navigation bar's words: the chat's title, and "project @ device" under it.
+    fn compact_nav_words(&self, cx: &App) -> (SharedString, Option<SharedString>) {
+        let state = self.state.read(cx);
+        match state.selected_chat_row() {
+            Some(chat) => {
+                let title = crate::transcript::single_line(
+                    chat.title.as_deref().filter(|title| !title.trim().is_empty()).unwrap_or("New chat"),
+                );
+                let project = state.space_for_chat(chat).map(|space| space.display_name().to_owned());
+                let device = state.device_name(&chat.device_id).map(str::to_owned);
+                let subtitle = match (project, device) {
+                    (Some(project), Some(device)) => Some(format!("{project} @ {device}")),
+                    (Some(project), None) => Some(project),
+                    (None, Some(device)) => Some(device),
+                    (None, None) => None,
+                };
+                (title.into(), subtitle.map(SharedString::from))
+            }
+            None => ("New chat".into(), None),
+        }
+    }
+
+    /// slopty: where a drilled subagent's breadcrumb stands on a phone, from the page's top: its
+    /// [`NAV_BREADCRUMB_GAP`] under the navigation bar's last line, so the pill never touches
+    /// the subtitle; `None` off a phone (the breadcrumb keeps the titlebar's edge).
+    pub(super) fn compact_breadcrumb_top(&self, window: &Window, cx: &App) -> Option<f32> {
+        if !self.compact() {
+            return None;
+        }
+        let lines = if self.compact_nav_words(cx).1.is_some() {
+            NAV_TITLE_LINE + NAV_SUBTITLE_LINE
+        } else {
+            NAV_TITLE_LINE
+        };
+        let scale = f32::from(window.rem_size()) / 16.0;
+        let bar = Theme::TITLEBAR_HEIGHT + Theme::TITLEBAR_TOP_PAD;
+        Some(bar / 2.0 + lines * scale / 2.0 + NAV_BREADCRUMB_GAP)
+    }
+
     /// The phone's navigation bar over a chat or the new-session page, in place of the
     /// titlebar and its sidebar and history cluster; `None` off a phone. A chat: a back
     /// chevron to Chats, its title over "project @ device". The new-chat page: "New chat"
@@ -559,26 +622,7 @@ impl Shell {
             return None;
         }
         let theme = Theme::of(cx).clone();
-        let (title, subtitle): (SharedString, Option<SharedString>) = {
-            let state = self.state.read(cx);
-            match state.selected_chat_row() {
-                Some(chat) => {
-                    let title = crate::transcript::single_line(
-                        chat.title.as_deref().filter(|title| !title.trim().is_empty()).unwrap_or("New chat"),
-                    );
-                    let project = state.space_for_chat(chat).map(|space| space.display_name().to_owned());
-                    let device = state.device_name(&chat.device_id).map(str::to_owned);
-                    let subtitle = match (project, device) {
-                        (Some(project), Some(device)) => Some(format!("{project} @ {device}")),
-                        (Some(project), None) => Some(project),
-                        (None, Some(device)) => Some(device),
-                        (None, None) => None,
-                    };
-                    (title.into(), subtitle.map(SharedString::from))
-                }
-                None => ("New chat".into(), None),
-            }
-        };
+        let (title, subtitle) = self.compact_nav_words(cx);
         let on_canvas = self.state.read(cx).selected_chat.is_none();
         let back = |this: &mut Self, cx: &mut Context<Self>| {
             Self::set_compact_sessions(true, cx);
@@ -644,18 +688,58 @@ impl Shell {
                     .max_w_full()
                     .truncate()
                     .text_size(ui_rems(if subtitle.is_some() { 16.0 } else { 17.0 }))
+                    .line_height(ui_rems(NAV_TITLE_LINE))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(theme.text)
                     .child(title),
             )
             .children(subtitle.map(|subtitle| {
                 div()
+                    .debug_selector(|| "compact-nav-subtitle".into())
                     .max_w_full()
                     .truncate()
                     .text_size(ui_rems(11.5))
+                    .line_height(ui_rems(NAV_SUBTITLE_LINE))
                     .text_color(theme.text_muted)
                     .child(subtitle)
             }));
+        // slopty: a chat's files and its terminal, a finger's reach away (an iPad's titlebar
+        // has them; a phone's bar stands in for it).
+        let trail = (!on_canvas).then(|| {
+            let terminal_open = self.terminal_open(cx);
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .right(px(8.0))
+                .flex()
+                .items_center()
+                .gap(px(4.0))
+                .child(
+                    nav_icon("compact-files", icons::FOLDER_TREE, "Show files", &theme).on_click(cx.listener(
+                        |this, _, window, cx| {
+                            if !this.files_panel_open(cx) {
+                                this.add_files_surface(window, cx);
+                            }
+                            cx.notify();
+                        },
+                    )),
+                )
+                .child(
+                    nav_icon(
+                        "compact-terminal",
+                        icons::TERMINAL,
+                        if terminal_open { "Hide terminal" } else { "Show terminal" },
+                        &theme,
+                    )
+                    .aria_toggled(if terminal_open {
+                        gpui::accesskit::Toggled::True
+                    } else {
+                        gpui::accesskit::Toggled::False
+                    })
+                    .on_click(cx.listener(|this, _, window, cx| this.toggle_terminal(window, cx))),
+                )
+        });
         // slopty: zeron's backdrop for what scrolls under a bar: frosted glass in the window's
         // tint (opaque where nothing is frosted), so a card under the title never reads through.
         let bar = div()
@@ -671,8 +755,140 @@ impl Shell {
             .items_center()
             .px(px(8.0))
             .child(heading)
-            .child(lead);
+            .child(lead)
+            .children(trail);
         Some(crate::frost::frosted(0.0, crate::frost::MENU_BLUR, bar).into_any_element())
+    }
+
+    /// slopty: a phone's page over its chat for what an iPad shows beside it: the right pane's
+    /// surface (a file, the changes, a page) when it is open, else the files explorer, under a
+    /// bar whose back goes to the chat, or to the files a file was opened from. `None` off a
+    /// phone or with neither open.
+    pub(super) fn render_compact_side(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if !self.compact() || self.compact_sessions_up(cx) || self.active_chat.is_empty() {
+            return None;
+        }
+        let surface = self.right_pane_open(cx);
+        let files = self.files_panel_open(cx);
+        if !surface && !files {
+            return None;
+        }
+        let theme = Theme::of(cx).clone();
+        let (title, body, back_to): (SharedString, AnyElement, &'static str) = if surface {
+            let title = match self.resolved_right_active(cx) {
+                super::RightSurface::File(id) => self
+                    .file_surfaces
+                    .get(&id)
+                    .map_or_else(|| "File".into(), |file| file.read(cx).tab_title()),
+                super::RightSurface::Diff(_) => "Changes".into(),
+                super::RightSurface::Terminal(_) => "Terminal".into(),
+                super::RightSurface::Browser(_) => "Browser".into(),
+                super::RightSurface::SideChat(_) => "Side chat".into(),
+                super::RightSurface::Screen(_) => "Screen".into(),
+                super::RightSurface::ModPane(_) | super::RightSurface::Page(_) => "Page".into(),
+                super::RightSurface::Picker => "Open".into(),
+            };
+            (title, self.right_surface_content(cx), if files { "Files" } else { "Chat" })
+        } else {
+            let key = self.panel_key(cx);
+            let Some(explorer) = self.files.get(&key).cloned() else {
+                // A pane kept open across launches has its flag, not its explorer yet.
+                cx.defer_in(window, |shell, window, cx| shell.add_files_surface(window, cx));
+                return None;
+            };
+            explorer.update(cx, |files, cx| {
+                files.ensure_loaded(cx);
+                files.ensure_git_status(cx);
+            });
+            ("Files".into(), explorer.into_any_element(), "Chat")
+        };
+        let page_label = title.clone();
+        let back = div()
+            .id("compact-side-back")
+            .debug_selector(|| "compact-side-back".into())
+            .role(gpui::Role::Button)
+            .aria_label(SharedString::from(format!("Back to {back_to}")))
+            .h(px(NAV_TARGET))
+            .flex_none()
+            .pr(px(8.0))
+            .rounded_full()
+            .flex()
+            .items_center()
+            .gap(px(2.0))
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if surface {
+                    this.set_surfaces_open(false, cx);
+                } else {
+                    this.close_files_panel(cx);
+                }
+                cx.notify();
+            }))
+            .child(icon(icons::ALT_ARROW_LEFT).size(px(22.0)).text_color(theme.text))
+            .child(div().text_size(ui_rems(16.0)).text_color(theme.text).child(back_to));
+        let bar = div()
+            .id("compact-side-bar")
+            .role(gpui::Role::Group)
+            .aria_label("Navigation")
+            .relative()
+            .flex_none()
+            .w_full()
+            .h(px(Theme::TITLEBAR_HEIGHT + Theme::TITLEBAR_TOP_PAD))
+            .bg(if theme.is_frost() { theme.glass() } else { gpui::Hsla { a: 1.0, ..theme.glass() } })
+            .border_b_1()
+            .border_color(theme.border)
+            .flex()
+            .items_center()
+            .px(px(8.0))
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left(px(96.0))
+                    .right(px(96.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        div()
+                            .id("compact-side-title")
+                            .role(gpui::Role::Heading)
+                            .aria_label(title.clone())
+                            .max_w_full()
+                            .truncate()
+                            .text_size(ui_rems(17.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(theme.text)
+                            .child(title),
+                    ),
+            )
+            .child(back);
+        let insets = window.insets();
+        let safe = insets.safe_area;
+        let bottom =
+            if self.keyboard_band_held(window) { insets.effective().bottom } else { safe.bottom };
+        let overlays = self.render_overlays(window.viewport_size(), window, cx);
+        Some(
+            div()
+                .id("compact-side-page")
+                .role(gpui::Role::Group)
+                .aria_label(page_label)
+                .size_full()
+                .relative()
+                .flex()
+                .flex_col()
+                .bg(theme.panel_bg())
+                .when(cfg!(target_os = "ios"), |el| el.pt(safe.top).pb(bottom).pl(safe.left).pr(safe.right))
+                .child(bar)
+                .child(div().flex_1().min_h_0().w_full().child(body))
+                .children(overlays)
+                .into_any_element(),
+        )
     }
 
     /// `row`, as a phone's session row: it follows a sideways finger with the action it would
@@ -1005,6 +1221,11 @@ mod tests {
             cx.debug_bounds("sidebar-empty-key").is_some(),
         );
         assert_eq!(page, (true, false), "the phone's empty Chats page");
+        let read = a11y(cx);
+        assert!(
+            read.contains(&(gpui::Role::Label, "No chats yet".to_owned())),
+            "a screen reader reads the empty line: {read:?}"
+        );
         FORCE_COMPACT.with(|force| force.set(false));
         cx.simulate_resize(gpui::size(gpui::px(1320.0), gpui::px(880.0)));
         redraw(cx);
@@ -1376,5 +1597,205 @@ mod tests {
         };
         assert_eq!(tap_send(cx), (false, false), "the phone's field and the keyboard's band go");
         FORCE_COMPACT.with(|force| force.set(false));
+    }
+
+    /// The last frame's accessibility tree as (role, label), drawn with the tree on.
+    fn a11y(cx: &mut gpui::VisualTestContext) -> Vec<(gpui::Role, String)> {
+        for _ in 0..3 {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.set_a11y_active(true);
+                window.refresh();
+                window.draw(cx).clear(cx);
+            });
+        }
+        cx.update(|window, _| {
+            let tree = window.a11y_tree().expect("a tree");
+            tree.nodes
+                .iter()
+                .map(|(_, node)| (node.role(), node.label().unwrap_or_default().to_owned()))
+                .collect()
+        })
+    }
+
+    // slopty: a page that is not shown gives no nodes: on a phone's chat page the Chats list is
+    // off screen, so a screen reader reads none of its rows nor its History button; back on
+    // Chats it reads them again.
+    #[gpui::test]
+    fn a_phones_chat_page_reads_no_hidden_rows(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) = ipad(cx);
+        cx.simulate_resize(gpui::size(px(390.0), px(844.0)));
+        let rows = |read: &[(gpui::Role, String)]| {
+            read.iter()
+                .filter(|(role, label)| {
+                    *role == gpui::Role::Button && (label.contains("Chat fix") || label.contains("Chat docs"))
+                })
+                .count()
+        };
+        let chats = a11y(cx);
+        assert!(rows(&chats) >= 2, "the Chats page reads its rows: {chats:?}");
+        shell.update(cx, |shell, cx| shell.open_chat("fix".into(), cx));
+        let chat = a11y(cx);
+        let back = chat.iter().any(|(_, label)| label == "Back to Chats");
+        let hidden = rows(&chat);
+        shell.update(cx, |shell, cx| assert!(shell.compact_back(cx)));
+        let again = a11y(cx);
+        FORCE_COMPACT.with(|force| force.set(false));
+        assert!(back, "the chat page: {chat:?}");
+        assert_eq!(hidden, 0, "no hidden row on the chat page: {chat:?}");
+        assert!(rows(&again) >= 2, "back on Chats: {again:?}");
+    }
+
+    // slopty: a row's status says what it asks of the person: "Needs you" for a chat waiting on
+    // them, "Background work" for an agent at rest waiting on its own command.
+    #[gpui::test]
+    fn a_rows_status_says_whom_it_waits_on(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) = ipad(cx);
+        shell.update(cx, |shell, cx| {
+            let now = crate::clock::utc(cx);
+            shell.state.update(cx, |state, _| {
+                let session = |chat: &str, status| slopty_view_proto::Session {
+                    last_completed_turn: None,
+                    chat_id: chat.into(),
+                    device_id: "local".into(),
+                    status,
+                    started_at: Some(now),
+                    updated_at: now,
+                    running_subagents: 0,
+                    status_since: None,
+                    waiting_on: None,
+                };
+                state.sessions = vec![
+                    session("fix", slopty_view_proto::SessionStatus::AwaitingInput),
+                    session("docs", slopty_view_proto::SessionStatus::Waiting),
+                ];
+            });
+        });
+        let read = a11y(cx);
+        FORCE_COMPACT.with(|force| force.set(false));
+        let statuses: Vec<&str> = read
+            .iter()
+            .filter(|(role, _)| *role == gpui::Role::Status)
+            .map(|(_, label)| label.as_str())
+            .collect();
+        assert!(statuses.contains(&"Needs you"), "{statuses:?}");
+        assert!(statuses.contains(&"Background work"), "{statuses:?}");
+        assert!(!statuses.iter().any(|label| *label == "Input" || *label == "Waiting"), "{statuses:?}");
+    }
+
+    // slopty: on a phone a drilled subagent's breadcrumb stands 8 pt under the navigation bar's
+    // subtitle, never touching it.
+    #[gpui::test]
+    fn a_phones_breadcrumb_stands_clear_of_the_subtitle(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) = ipad(cx);
+        cx.simulate_resize(gpui::size(px(390.0), px(844.0)));
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                state.devices = vec![slopty_view_proto::Device {
+                    id: "local".into(),
+                    name: "studio".into(),
+                    platform: "macos".into(),
+                    last_seen_at: None,
+                    created_at: None,
+                    version: None,
+                    cursor_sdk_version: None,
+                    capabilities: Vec::new(),
+                    actions: Vec::new(),
+                    ssh_host: None,
+                }];
+                state.chats.push(
+                    serde_json::from_value(serde_json::json!({
+                        "id": "look", "title": "Look", "parentChatId": "docs",
+                        "subagent": true, "inParent": true, "deviceId": "local",
+                        "archived": false, "createdAt": chrono::Utc::now(),
+                    }))
+                    .unwrap(),
+                );
+            });
+            shell.open_chat("look".into(), cx);
+        });
+        let _ = a11y(cx);
+        let subtitle = cx.debug_bounds("compact-nav-subtitle");
+        let crumb = cx.update(|window, _| {
+            let scale = f64::from(window.scale_factor());
+            let tree = window.a11y_tree().expect("a tree");
+            tree.nodes
+                .iter()
+                .find(|(_, node)| node.role() == gpui::Role::Navigation && node.label().is_some_and(|l| l.contains('›')))
+                .and_then(|(_, node)| node.bounds())
+                .map(|rect| (rect.y0 / scale) as f32)
+        });
+        FORCE_COMPACT.with(|force| force.set(false));
+        let subtitle = subtitle.expect("the bar's subtitle");
+        let crumb = crumb.expect("the breadcrumb");
+        let gap = crumb - f32::from(subtitle.bottom());
+        assert!((gap - NAV_BREADCRUMB_GAP).abs() < 0.5, "the pill {crumb} under the subtitle {subtitle:?}: {gap}");
+    }
+
+    // slopty: the transcript is gone by the composer pill's bottom: its fade ends where the pill
+    // does, so nothing that scrolls under the footer below (the mode, the context) is drawn
+    // beside that footer's words; above the pill it reads whole.
+    #[gpui::test]
+    fn the_transcript_is_gone_by_the_pills_bottom(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) = ipad(cx);
+        FORCE_COMPACT.with(|force| force.set(false));
+        cx.simulate_resize(gpui::size(px(1320.0), px(880.0)));
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| state.no_project = true);
+            shell.open_chat("docs".into(), cx);
+        });
+        let _ = a11y(cx);
+        let floor = shell.read_with(cx, |shell, _| shell.pill_floor.get());
+        let pill = shell
+            .read_with(cx, |shell, cx| shell.composer.read(cx).surface_bounds().get())
+            .expect("the composer's pill");
+        let stack = cx.debug_bounds("bottom-stack").expect("the bottom stack");
+        let term_h = shell.read_with(cx, |shell, _| shell.terminal_geometry.get().height);
+        let under = f32::from(stack.bottom() - pill.bottom()) - term_h;
+        assert!(floor >= 20.0, "the footer reaches under the pill: {floor}");
+        assert!((floor - under).abs() < 0.5, "measured {floor}, drawn {under}");
+        let stack_h = f32::from(stack.size.height) - term_h;
+        let (inset, band) = super::super::transcript_floor_fade(stack_h, floor);
+        assert_eq!(inset, floor, "nothing under the footer");
+        assert!(
+            (band - (stack_h - Theme::STATUS_STRIP_HEIGHT - floor)).abs() < 0.01,
+            "the ramp spans the pill: {band}"
+        );
+        assert_eq!(super::super::transcript_floor_fade(60.0, 500.0), (36.0, 1.0), "never past the pill's top");
+    }
+
+    // slopty: a phone's chat reaches its files and its terminal by touch, as an iPad's titlebar
+    // does: the bar's Files opens a page of them whose back returns to the chat, and its
+    // Terminal shows the chat's terminal and says so.
+    #[gpui::test]
+    fn a_phones_chat_reaches_its_files_and_terminal(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) = ipad(cx);
+        cx.simulate_resize(gpui::size(px(390.0), px(844.0)));
+        shell.update(cx, |shell, cx| shell.open_chat("docs".into(), cx));
+        let has = |read: &[(gpui::Role, String)], role: gpui::Role, label: &str| {
+            read.iter().any(|(r, l)| *r == role && l == label)
+        };
+        let chat = a11y(cx);
+        let tap = |cx: &mut gpui::VisualTestContext, selector: &'static str| {
+            let at = cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector}")).center();
+            cx.simulate_click(at, gpui::Modifiers::default());
+        };
+        tap(cx, "compact-files");
+        let files = a11y(cx);
+        tap(cx, "compact-side-back");
+        let back = a11y(cx);
+        tap(cx, "compact-terminal");
+        let terminal = a11y(cx);
+        let open = shell.read_with(cx, |shell, cx| shell.terminal_open(cx));
+        FORCE_COMPACT.with(|force| force.set(false));
+        assert!(has(&chat, gpui::Role::Button, "Show files"), "{chat:?}");
+        assert!(has(&chat, gpui::Role::Button, "Show terminal"), "{chat:?}");
+        assert!(has(&files, gpui::Role::Heading, "Files"), "the files page: {files:?}");
+        assert!(has(&files, gpui::Role::Button, "Back to Chat"), "{files:?}");
+        assert!(!has(&files, gpui::Role::Button, "Back to Chats"), "the chat's page gives way: {files:?}");
+        assert!(has(&back, gpui::Role::Button, "Back to Chats"), "back on the chat: {back:?}");
+        assert!(!has(&back, gpui::Role::Heading, "Files"), "{back:?}");
+        assert!(open, "the terminal opens");
+        assert!(has(&terminal, gpui::Role::Button, "Hide terminal"), "{terminal:?}");
     }
 }

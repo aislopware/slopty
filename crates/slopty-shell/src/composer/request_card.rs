@@ -38,7 +38,9 @@ const NOTES: &str = "notes:";
 /// The most of a dialog's payload the card lists.
 const MAX_FACTS: usize = 8;
 /// What a card only the person at it answers says (`slopty_proto::thread::Request::NEEDS_PRESENCE`).
-pub(crate) const NEEDS_PRESENCE: &str = "Needs you at the card";
+pub(crate) const NEEDS_PRESENCE: &str = "Answer here";
+/// Why, in its tooltip and for a screen reader (`Request::NEEDS_PRESENCE_REFUSED`'s words).
+pub(crate) const NEEDS_PRESENCE_WHY: &str = "The agent takes this answer only from its card in Slopty";
 /// Under this long left, the countdown turns amber.
 const COUNTDOWN_URGENT_MS: i64 = 30_000;
 
@@ -803,6 +805,8 @@ impl Composer {
                     .id("wizard-needs-presence")
                     .role(Role::Note)
                     .aria_label(SharedString::from(words))
+                    .aria_description(NEEDS_PRESENCE_WHY)
+                    .tooltip(crate::settings::widgets::text_tooltip(NEEDS_PRESENCE_WHY))
                     .h(px(20.0))
                     .px(px(6.0))
                     .flex()

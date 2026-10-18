@@ -225,6 +225,8 @@ impl WorkspaceView {
             calls::SURFACE_EVENT,
             calls::CLEAR_GOAL,
             calls::SET_MODE,
+            calls::MCP_RECONNECT,
+            calls::MCP_ENABLE,
             RULES_CHAT,
         ];
         if !known.contains(&method) {
@@ -299,6 +301,21 @@ impl WorkspaceView {
                 Some(mode) => self.view_act(&chat, Intent::SetMode { mode }, cx),
                 None => Task::ready(Err(required("mode"))),
             },
+            // The person's click on the context card: never sent on Slopty's own.
+            calls::MCP_RECONNECT => match text("server") {
+                Some(server) => self.view_act(&chat, Intent::McpReconnect { server }, cx),
+                None => Task::ready(Err(required("server"))),
+            },
+            calls::MCP_ENABLE => {
+                let enabled = params.get("enabled").and_then(serde_json::Value::as_bool);
+                match (text("server"), enabled) {
+                    (Some(server), Some(enabled)) => {
+                        self.view_act(&chat, Intent::McpEnable { server, enabled }, cx)
+                    }
+                    (None, _) => Task::ready(Err(required("server"))),
+                    (_, None) => Task::ready(Err(required("enabled"))),
+                }
+            }
             _ => return None,
         })
     }

@@ -290,6 +290,26 @@ impl Composer {
         .detach();
     }
 
+    /// slopty: what the person asked of one of the agent's MCP servers on the context card, sent
+    /// to the chat's agent; a failure says so in the composer's failure chip.
+    pub(crate) fn ask_mcp_server(&mut self, asked: &crate::account_usage::McpServerAsked, cx: &mut Context<Self>) {
+        use crate::account_usage::McpServerAsked;
+        match asked {
+            McpServerAsked::Reconnect(server) => self.dock_call(
+                calls::MCP_RECONNECT,
+                serde_json::json!({ "server": server }),
+                "Couldn't reconnect the MCP server",
+                cx,
+            ),
+            McpServerAsked::Enable(server, enabled) => self.dock_call(
+                calls::MCP_ENABLE,
+                serde_json::json!({ "server": server, "enabled": enabled }),
+                if *enabled { "Couldn't enable the MCP server" } else { "Couldn't disable the MCP server" },
+                cx,
+            ),
+        }
+    }
+
     /// Run the `!` command `command` on the chat's machine; its output goes to the agent as the
     /// person's next message (`slopty.RunShell`). Whether it was sent.
     pub(super) fn run_shell(&mut self, command: String, cx: &mut Context<Self>) -> bool {

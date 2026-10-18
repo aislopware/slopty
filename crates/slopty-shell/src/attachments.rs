@@ -1243,16 +1243,45 @@ pub(crate) fn lightbox_with_size(
     };
     let on_close = std::rc::Rc::new(on_close);
     let close_on_key = on_close.clone();
+    let close_on_button = on_close.clone(); // slopty
     let press_state = preview.viewer.clone();
     let click_state = preview.viewer.clone();
+    // slopty: a close a screen reader and a finger reach (a phone has no Escape), clear of the
+    // system's edges.
+    let safe = window.insets().safe_area;
+    let close = div()
+        .id("attachment-lightbox-close")
+        .debug_selector(|| "attachment-lightbox-close".into())
+        .role(gpui::Role::Button)
+        .aria_label("Close")
+        .absolute()
+        .top(safe.top + px(12.0))
+        .right(safe.right + px(12.0))
+        .size(px(32.0))
+        .rounded_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(ink(0.10))
+        .hover(|el| el.bg(ink(0.18)))
+        .cursor_pointer()
+        .on_click(move |_, window, cx| {
+            cx.stop_propagation();
+            close_on_button(window, cx);
+        })
+        .child(crate::icons::icon(crate::icons::CLOSE).size(px(16.0)).text_color(ink(0.8)));
     gpui::deferred(
         gpui::anchored()
             .position(gpui::point(px(0.0), px(0.0)))
             .child(
                 div()
                     .id("attachment-lightbox")
+                    // slopty: a dialog named for its image, which VoiceOver can reach and close.
+                    .role(gpui::Role::Dialog)
+                    .aria_label(preview.name.clone())
                     .occlude()
                     .track_focus(focus)
+                    .relative()
                     .w(viewport.width)
                     .h(viewport.height)
                     .bg(crate::popover::scrim_alpha(0.7))
@@ -1279,7 +1308,15 @@ pub(crate) fn lightbox_with_size(
                         }
                     })
                     .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
-                    .child(div().w(max_w).h(max_h).child(content))
+                    .child(
+                        div()
+                            .id("attachment-lightbox-image")
+                            .role(gpui::Role::Image)
+                            .aria_label(preview.name.clone())
+                            .w(max_w)
+                            .h(max_h)
+                            .child(content),
+                    )
                     .child(
                         div()
                             .max_w(max_w)
@@ -1287,7 +1324,8 @@ pub(crate) fn lightbox_with_size(
                             .text_size(crate::typography::ui_rems(11.0))
                             .text_color(ink(0.45))
                             .child(preview.name.clone()),
-                    ),
+                    )
+                    .child(close),
             ),
     )
     .priority(3)
@@ -1297,6 +1335,57 @@ pub(crate) fn lightbox_with_size(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct Shown {
+        preview: PreviewImage,
+        focus: gpui::FocusHandle,
+        closed: std::rc::Rc<std::cell::Cell<bool>>,
+    }
+
+    impl gpui::Render for Shown {
+        fn render(&mut self, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+            let closed = self.closed.clone();
+            div().size_full().child(lightbox(window, &self.preview, &self.focus, move |_, _| closed.set(true), cx))
+        }
+    }
+
+    /// slopty: the lightbox is a dialog named for its image, with a Close a screen reader and a
+    /// finger reach, which closes it.
+    #[gpui::test]
+    fn the_lightbox_is_a_dialog_that_closes(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(crate::theme::Theme::dark());
+        });
+        let closed = std::rc::Rc::new(std::cell::Cell::new(false));
+        let (_, cx) = cx.add_window_view({
+            let closed = closed.clone();
+            move |_, cx| {
+                let png = {
+                    let mut bytes = std::io::Cursor::new(Vec::new());
+                    image::RgbImage::new(4, 4).write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+                    Image::from_bytes(ImageFormat::Png, bytes.into_inner())
+                };
+                Shown { preview: PreviewImage::new("chart.png", Arc::new(png)), focus: cx.focus_handle(), closed }
+            }
+        });
+        let nodes = cx.update(|window, cx| {
+            window.set_a11y_active(true);
+            window.refresh();
+            window.draw(cx).clear(cx);
+            let tree = window.a11y_tree().expect("a tree");
+            tree.nodes
+                .iter()
+                .map(|(_, node)| (node.role(), node.label().unwrap_or_default().to_owned()))
+                .collect::<Vec<_>>()
+        });
+        assert!(nodes.contains(&(gpui::Role::Dialog, "chart.png".to_owned())), "{nodes:?}");
+        assert!(nodes.contains(&(gpui::Role::Image, "chart.png".to_owned())), "{nodes:?}");
+        assert!(nodes.contains(&(gpui::Role::Button, "Close".to_owned())), "{nodes:?}");
+        let at = cx.debug_bounds("attachment-lightbox-close").expect("the close").center();
+        cx.simulate_click(at, gpui::Modifiers::default());
+        assert!(closed.get(), "Close closes it");
+    }
 
     // slopty: appshots removed.
     #[test]

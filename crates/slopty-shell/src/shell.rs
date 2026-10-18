@@ -117,7 +117,7 @@ mod closed_tabs; // slopty: the right pane's closed tabs, opened again
 mod open_in; // slopty: a chat's folder in the person's editor
 mod subagent_drill; // slopty: a subagent drilled into from its card
 mod terminal_runs; // slopty: a transcript's Run in the chat's own shell terminal
-mod past_sessions; // slopty: Claude Code's past sessions: History, and Resume a session…
+mod past_sessions; // slopty: Claude Code's past sessions: History, and Resume a Claude Code session…
 pub mod agent_ui; // slopty: an agent drives this window (`slopty ui`)
 // slopty: voice removed.
 
@@ -1106,6 +1106,15 @@ fn sidebar_row_height(compact: bool, show_label: bool, branch: bool, pr: bool) -
     }
 }
 
+/// slopty: the transcript's fade at the bottom stack: `(inset, band)` for a stack `stack_h` tall
+/// over the transcript whose composer footer reaches `floor` under the pill. Opaque from the
+/// pill's top (the status strip above it is empty air), zero by the pill's bottom, and nothing
+/// under the footer.
+fn transcript_floor_fade(stack_h: f32, floor: f32) -> (f32, f32) {
+    let floor = floor.clamp(0.0, (stack_h - Theme::STATUS_STRIP_HEIGHT).max(0.0));
+    (floor, (stack_h - Theme::STATUS_STRIP_HEIGHT - floor).max(1.0))
+}
+
 // slopty: a waiting row's reason takes a line of its own where no location line carries it
 // (compact rows, rows with Location off): 14 tall, 2 apart.
 fn sidebar_reason_height(compact: bool, show_label: bool, reason: bool) -> f32 {
@@ -1791,6 +1800,9 @@ pub struct Shell {
     /// A newly selected transcript stays hidden until this matches its route,
     /// preventing one frame at the blank canvas's stale bottom clearance.
     bottom_stack_has_composer: std::rc::Rc<std::cell::Cell<bool>>,
+    /// slopty: how far the composer's footer reaches under its pill (the pill's bottom to the
+    /// transcript's floor), measured at paint: the transcript is gone by the pill's bottom.
+    pill_floor: std::rc::Rc<std::cell::Cell<f32>>,
     /// Shared route clock and measured prepaint geometry for the persistent composer.
     composer_dock: crate::composer_dock::SharedDock,
     new_thread_artwork_ready: crate::new_thread_background_effects::Readiness,
@@ -2329,6 +2341,7 @@ impl Shell {
             // first frame's clearance isn't zero (the measure corrects it).
             bottom_stack: std::rc::Rc::new(std::cell::Cell::new(120.0)),
             bottom_stack_has_composer: std::rc::Rc::new(std::cell::Cell::new(false)),
+            pill_floor: std::rc::Rc::new(std::cell::Cell::new(0.0)),
             composer_dock: Default::default(),
             new_thread_artwork_ready: Default::default(),
             archived_open: true,
@@ -5712,7 +5725,7 @@ impl Shell {
             || self.add_space.is_some()
             || self.composer.read(cx).pickers().read(cx).is_open()
             || self.open_side_chat_pickers(cx).is_some()
-            || self.past_sessions.picker_open() // slopty: Resume a session…
+            || self.past_sessions.picker_open() // slopty: Resume a Claude Code session…
     }
 
     /// The pickers of a side chat whose picker popover is open.
@@ -6589,7 +6602,11 @@ impl Shell {
             .flex_none()
             .overflow_hidden()
             .w(px(self.sidebar_now()))
-            .child(div().h_full().pt(px(Theme::TITLEBAR_HEIGHT)).child(inner))
+            // slopty: a hidden sidebar (collapsed, fit away, a phone's chat page) draws nothing,
+            // so a screen reader never reads rows that are off screen.
+            .when(self.sidebar_now() > 0.5, |el| {
+                el.child(div().h_full().pt(px(Theme::TITLEBAR_HEIGHT)).child(inner))
+            })
             .into_any_element()
     }
 
@@ -6987,7 +7004,8 @@ impl Shell {
         } else {
             match status {
                 slopty_view_proto::ChatIndicator::Working => Some("Working"),
-                slopty_view_proto::ChatIndicator::AwaitingInput => Some("Input"),
+                // slopty: what it asks of the person, as the row's amber says it.
+                slopty_view_proto::ChatIndicator::AwaitingInput => Some("Needs you"),
                 slopty_view_proto::ChatIndicator::Errored => Some("Failed"),
                 slopty_view_proto::ChatIndicator::Completed => Some("Done"),
                 slopty_view_proto::ChatIndicator::Idle => None,
@@ -7018,8 +7036,9 @@ impl Shell {
             )
         };
         let unread = sidebar_status::unread(status) && !archived && !queued && !undelivered;
+        // slopty: an agent waiting on its own background command, never read as waiting on you.
         let status_label = if waiting_self && status_label.is_none() {
-            Some("Waiting")
+            Some("Background work")
         } else {
             status_label
         };
@@ -8319,8 +8338,12 @@ impl Shell {
                 .text_size(crate::typography::ui_rems(12.0))
                 .text_color(theme.text_faint)
                 .child(
+                    // slopty: a screen reader (and the goldens' text) reads the empty line too.
                     div()
+                        .id("sidebar-empty")
                         .debug_selector(|| "sidebar-empty: No chats yet".to_owned())
+                        .role(gpui::Role::Label)
+                        .aria_label("No chats yet")
                         .child(SharedString::from("No chats yet")),
                 )
                 .when(!combo.is_empty(), |el| {
@@ -9517,9 +9540,21 @@ impl Shell {
             .filter(|drill| drill.in_parent)
             .map(|drill| self.render_drill_bar(&drill.clone(), composer_width, window, cx));
         let drill_bar_shown = drill_bar.is_some();
-        let drill_breadcrumb = drill
-            .as_ref()
-            .map(|drill| self.render_drill_breadcrumb(&drill.clone(), cx));
+        // slopty: on a phone the pill stands clear under the navigation bar's subtitle.
+        let breadcrumb_top = self.compact_breadcrumb_top(window, cx);
+        let drill_breadcrumb = drill.as_ref().map(|drill| {
+            let crumb = self.render_drill_breadcrumb(&drill.clone(), cx);
+            match breadcrumb_top {
+                Some(top) => div()
+                    .absolute()
+                    .top(px(top - Theme::TITLEBAR_HEIGHT))
+                    .left_0()
+                    .right_0()
+                    .child(crumb)
+                    .into_any_element(),
+                None => crumb,
+            }
+        });
         let session_card = self.render_session_info(
             session_docked,
             session_reveal,
@@ -9571,7 +9606,9 @@ impl Shell {
                     // Opaque from the composer PILL's top (the reserved
                     // status strip above it is empty air), zero at the
                     // underlay's bottom edge.
-                    let bottom_band = (stack_h - Theme::STATUS_STRIP_HEIGHT).max(1.0);
+                    // slopty: and zero by the pill's BOTTOM: what scrolls under the footer
+                    // below it (the mode, the context) never reads beside that footer's words.
+                    let (floor, bottom_band) = transcript_floor_fade(stack_h, self.pill_floor.get());
                     div()
                         .absolute()
                         .inset_0()
@@ -9587,7 +9624,8 @@ impl Shell {
                             // ramping in the band just below it.
                             .inset_top(Theme::TITLEBAR_HEIGHT)
                             .band_top(Theme::TRANSCRIPT_FADE_BAND)
-                            .band_bottom(bottom_band),
+                            .band_bottom(bottom_band)
+                            .inset_bottom(floor),
                             terminal_geometry.clone(),
                         ))
                 },
@@ -9681,6 +9719,33 @@ impl Shell {
                         )
                     })
                     .child(self.render_terminal_container(terminal_geometry, window, cx))
+                    // slopty: after the composer's own measure (prepaint runs in order): where
+                    // its pill ends above the transcript's floor, for the next frame's fade.
+                    .child({
+                        let floor = self.pill_floor.clone();
+                        let surface = self.composer.read(cx).surface_bounds();
+                        let shell = cx.weak_entity();
+                        gpui::canvas(
+                            move |bounds, _, cx| {
+                                let next = surface
+                                    .get()
+                                    .filter(|_| contains_composer)
+                                    .map_or(0.0, |pill| {
+                                        (f32::from(bounds.bottom() - pill.bottom()) - term_h).max(0.0)
+                                    });
+                                if (floor.get() - next).abs() > 0.5 {
+                                    let floor = floor.clone();
+                                    cx.defer(move |cx| {
+                                        floor.set(next);
+                                        shell.update(cx, |_, cx| cx.notify()).ok();
+                                    });
+                                }
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .inset_0()
+                    })
             })
             .children(Self::attachment_drop_overlay(theme, cx))
             .children(Self::mention_drop_overlay(theme, cx))
@@ -9966,6 +10031,68 @@ impl Shell {
         }
     }
 
+    /// The right pane's active surface, drawn alone: the pane's own content, and a phone's page
+    /// of it (`compact.rs`). // slopty: one body for both.
+    pub(super) fn right_surface_content(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = Theme::of(cx).clone();
+        match self.resolved_right_active(cx) {
+            RightSurface::File(id) => {
+                if let Some(file) = self.file_surfaces.get(&id).cloned() {
+                    // Keep the last file frame behind the closing mask. Loading
+                    // while closing would reactivate suspended image resources.
+                    if self.right_pane_open(cx) {
+                        file.update(cx, |file, cx| file.ensure_loaded(cx));
+                    }
+                    file.into_any_element()
+                } else {
+                    self.render_surface_picker(cx)
+                }
+            }
+            RightSurface::Diff(id) if self.diffs.contains_key(&id) => {
+                let changes = self.diffs.get(&id).cloned().expect("checked");
+                // Idempotent — also covers a persisted-open pane on boot.
+                changes.update(cx, |changes, cx| changes.ensure_content(cx));
+                // The diff options (scope dropdown, ref selector,
+                // fold-all) moved DOWN from the titlebar band — the
+                // surface tabs own that row now; the expand/close
+                // buttons stayed up there (user request).
+                let controls =
+                    changes.update(cx, |changes, cx| changes.render_header_controls(cx));
+                div()
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .child(crate::surface_chrome::toolbar(&theme).child(controls))
+                    .child(div().flex_1().min_h_0().child(changes))
+                    .into_any_element()
+            }
+            RightSurface::Browser(id) => self
+                .browsers
+                .get(&id)
+                .cloned()
+                .map(|browser| browser.into_any_element())
+                .unwrap_or_else(|| self.render_surface_picker(cx)),
+            RightSurface::Terminal(tab) => {
+                let panel = self.right_terminal_panel(cx);
+                // Keep the embedded panel's own active tab aligned with
+                // the resolved surface (fallbacks can move it).
+                let resize_suspended = self.tween_active(self.right_tween)
+                    || self.tween_active(self.files_tween)
+                    || self.tween_active(self.sidebar_tween);
+                panel.update(cx, |panel, cx| {
+                    panel.set_resize_suspended(resize_suspended);
+                    panel.select_tab_by_key(tab, cx);
+                });
+                panel.into_any_element()
+            }
+            RightSurface::SideChat(id) => self.render_side_chat(id, cx),
+            RightSurface::Screen(id) => self.render_screen_surface(id, cx), // slopty:
+            RightSurface::ModPane(id) => self.render_mod_pane(id, cx), // slopty:
+            RightSurface::Page(id) => self.render_page_pane(id, cx), // slopty:
+            _ => self.render_surface_picker(cx),
+        }
+    }
+
     /// Right pane — the surface host (t3code RightPanelTabs): hidden by
     /// default, drag-resizable. Content is the ACTIVE surface — the Diff
     /// page (its options row + the lazy [`Changes`] viewer), workspace Files,
@@ -9978,62 +10105,7 @@ impl Shell {
         let theme = Theme::of(cx).clone();
         let showing = self.right_pane_open(cx) || self.tween_active(self.right_tween) || exiting;
         let content: AnyElement = if showing {
-            match self.resolved_right_active(cx) {
-                RightSurface::File(id) => {
-                    if let Some(file) = self.file_surfaces.get(&id).cloned() {
-                        // Keep the last file frame behind the closing mask. Loading
-                        // while closing would reactivate suspended image resources.
-                        if self.right_pane_open(cx) {
-                            file.update(cx, |file, cx| file.ensure_loaded(cx));
-                        }
-                        file.into_any_element()
-                    } else {
-                        self.render_surface_picker(cx)
-                    }
-                }
-                RightSurface::Diff(id) if self.diffs.contains_key(&id) => {
-                    let changes = self.diffs.get(&id).cloned().expect("checked");
-                    // Idempotent — also covers a persisted-open pane on boot.
-                    changes.update(cx, |changes, cx| changes.ensure_content(cx));
-                    // The diff options (scope dropdown, ref selector,
-                    // fold-all) moved DOWN from the titlebar band — the
-                    // surface tabs own that row now; the expand/close
-                    // buttons stayed up there (user request).
-                    let controls =
-                        changes.update(cx, |changes, cx| changes.render_header_controls(cx));
-                    div()
-                        .size_full()
-                        .flex()
-                        .flex_col()
-                        .child(crate::surface_chrome::toolbar(&theme).child(controls))
-                        .child(div().flex_1().min_h_0().child(changes))
-                        .into_any_element()
-                }
-                RightSurface::Browser(id) => self
-                    .browsers
-                    .get(&id)
-                    .cloned()
-                    .map(|browser| browser.into_any_element())
-                    .unwrap_or_else(|| self.render_surface_picker(cx)),
-                RightSurface::Terminal(tab) => {
-                    let panel = self.right_terminal_panel(cx);
-                    // Keep the embedded panel's own active tab aligned with
-                    // the resolved surface (fallbacks can move it).
-                    let resize_suspended = self.tween_active(self.right_tween)
-                        || self.tween_active(self.files_tween)
-                        || self.tween_active(self.sidebar_tween);
-                    panel.update(cx, |panel, cx| {
-                        panel.set_resize_suspended(resize_suspended);
-                        panel.select_tab_by_key(tab, cx);
-                    });
-                    panel.into_any_element()
-                }
-                RightSurface::SideChat(id) => self.render_side_chat(id, cx),
-                RightSurface::Screen(id) => self.render_screen_surface(id, cx), // slopty:
-                RightSurface::ModPane(id) => self.render_mod_pane(id, cx), // slopty:
-                RightSurface::Page(id) => self.render_page_pane(id, cx), // slopty:
-                _ => self.render_surface_picker(cx),
-            }
+            self.right_surface_content(cx)
         } else {
             gpui::Empty.into_any_element()
         };
@@ -11477,7 +11549,7 @@ impl Render for Shell {
                 this.random_wallpaper(cx);
             }))
             // slopty: no pull-request pages.
-            // New session works from anywhere — `open_new_session` routes back
+            // New chat works from anywhere — `open_new_session` routes back
             // to chat itself, so Settings is not a dead spot.
             .on_action(cx.listener(|this, _: &NewSession, _, cx| this.open_new_session(None, cx)))
             // Native Settings menu item and the platform convention (Cmd+, on
@@ -11639,6 +11711,10 @@ impl Render for Shell {
                 }
                 // slopty: the phone's Sessions page in place of the columns.
                 if let Some(page) = self.render_compact_sessions(window, cx) {
+                    break 'ready root.child(page);
+                }
+                // slopty: a phone's page for the chat's files or an open surface, over the chat.
+                if let Some(page) = self.render_compact_side(window, cx) {
                     break 'ready root.child(page);
                 }
                 // The Pull requests route shares this layout without the

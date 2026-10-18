@@ -400,7 +400,7 @@ pub fn entries(state: &ThreadState, look: &Look<'_>) -> Vec<SessionMessageEntry>
                         });
                     }
                     // A page it shows, from its first words on: the card shows what has come.
-                    if let Some(card) = page_card(thread, &id, call) {
+                    if let Some(card) = page_card(thread, &id, call, &state.meta.cwd) {
                         parts.push(MessagePart::Page { id: card.id.clone(), card: Box::new(card) });
                     }
                 } else if let ItemBody::Task(note) = body {

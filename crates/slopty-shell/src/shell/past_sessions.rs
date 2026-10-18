@@ -8,7 +8,7 @@
 //!   row titled by its first prompt, with how long ago and its branch where the machine says.
 //!   It lists a page and pages on with "Show more"; nothing is asked while it is shut, and the
 //!   rows already listed stand while it asks again.
-//! - **Resume a session…** (the palette, and its shortcut) searches the person's past prompts
+//! - **Resume a Claude Code session…** (the palette, and its shortcut) searches the person's past prompts
 //!   on the chat's machine, in its project or in every folder (⇥), and shows the prompt that
 //!   matched with the words lit.
 //! - **Opening** a session the machine keeps a chat of opens that chat; any other is taken up by
@@ -54,7 +54,7 @@ const EVERY_PROJECT: &str = "*";
 /// What a History row is called before its title, for a screen reader.
 pub(super) const PAST_SESSION: &str = "Past session:";
 /// The palette's entry, and the picker's title.
-pub(super) const RESUME: &str = "Resume a session\u{2026}";
+pub(super) const RESUME: &str = "Resume a Claude Code session\u{2026}";
 
 /// Rows History lists when opened, and how many more each "Show more" adds.
 const FIRST_PAGE: usize = 8;
@@ -83,8 +83,6 @@ const ROW_BRANCH_HEIGHT: f32 = 44.0;
 const GAP: f32 = 2.0;
 /// The space above History's first row.
 const BODY_INSET: f32 = 2.0;
-/// The width of a row's time slot, which "Opening…" and "Running" take without moving the title.
-const TIME_SLOT: f32 = 64.0;
 /// History's clock, which its rows' words start past.
 const HISTORY_ICON: f32 = 13.0;
 
@@ -248,7 +246,7 @@ struct Scope {
     project: Option<String>,
 }
 
-/// The "Resume a session…" picker.
+/// The "Resume a Claude Code session…" picker.
 struct Picker {
     search: Entity<ComposerInput>,
     focus: FocusHandle,
@@ -654,8 +652,14 @@ impl Shell {
             .flex()
             .items_center()
             .gap(px(8.0))
+            // slopty: the title takes the row's width up to the time, which is as wide as its
+            // words.
             .child(
                 div()
+                    .debug_selector({
+                        let key = row.key.clone();
+                        move || format!("history-title-{key}")
+                    })
                     .flex_1()
                     .min_w_0()
                     .truncate()
@@ -664,10 +668,11 @@ impl Shell {
             )
             .child(
                 div()
+                    .debug_selector({
+                        let key = row.key.clone();
+                        move || format!("history-time-{key}")
+                    })
                     .flex_none()
-                    .w(px(TIME_SLOT))
-                    .flex()
-                    .justify_end()
                     .text_size(crate::typography::ui_rems(11.0))
                     .text_color(if running { theme.warning } else { theme.text_faint })
                     .child(corner.clone()),
@@ -827,7 +832,7 @@ impl Shell {
         Some(Scope { device_id: device, space_id: None, project: None })
     }
 
-    /// "Resume a session…": the picker, or shut it when it is up.
+    /// "Resume a Claude Code session…": the picker, or shut it when it is up.
     pub(super) fn toggle_resume_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.past_sessions.picker.is_some() {
             self.close_resume_picker(Some(window), cx);
@@ -1223,9 +1228,6 @@ fn picker_row(
                 .text_size(crate::typography::ui_rems(11.0))
                 .child(
                     div()
-                        .w(px(TIME_SLOT))
-                        .flex()
-                        .justify_end()
                         .text_color(if row.running.is_some() { theme.warning } else { theme.text_faint })
                         .child(corner),
                 )
@@ -1387,5 +1389,71 @@ mod tests {
         let said = past.held_elsewhere().unwrap();
         assert!(said.contains("in a terminal on Studio"), "{said}");
         assert_eq!(past.running_words(), Some("In a terminal"));
+    }
+
+    /// A History row's title takes the row's width up to its time, which is only as wide as its
+    /// words: "1d" leaves the title all but its gap, never a fixed slot's.
+    #[gpui::test]
+    fn a_history_title_runs_up_to_its_time(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+        });
+        let path = dir.keep();
+        let (shell, cx) = cx.add_window_view(move |_, cx| {
+            let state = cx.new(|_| crate::state::AppState::new());
+            let shell = Shell::new(
+                state,
+                crate::state::EngineBootConfig {
+                    data_dir: path.clone(),
+                    default_harness: slopty_view_proto::HarnessId::MOCK,
+                },
+                cx,
+            );
+            shell.state.update(cx, |state, _| {
+                state.workspace_scope = Some(slopty_view_proto::WorkspaceScope::Local);
+                state.local_device_id = Some("local".into());
+                state.spaces = vec![serde_json::from_value(serde_json::json!({
+                    "id": "local:/work", "deviceId": "local", "path": "/work",
+                    "gitDetected": true, "createdAt": "2026-09-20T00:00:00Z",
+                }))
+                .unwrap()];
+            });
+            shell
+        });
+        cx.simulate_resize(gpui::size(px(1320.0), px(880.0)));
+        let day_ago = chrono::Utc::now().checked_sub_signed(chrono::TimeDelta::hours(25)).expect("a day ago");
+        shell.update(cx, |shell, cx| {
+            shell.debug_gate = Some(crate::state::GatePhase::Ready);
+            shell.splash = super::super::SplashPhase::Gone;
+            crate::motion::set_reduced_motion(cx, true);
+            shell.settings.sidebar_organization = SidebarOrganization::ByStatus;
+            let mut past = row("lexer");
+            past.title = Some("Rename the lexer module and every one of its callers".to_owned());
+            past.updated_at = Some(day_ago.timestamp_millis());
+            shell.past_sessions.groups.insert(
+                EVERY_PROJECT.to_owned(),
+                History {
+                    open: true,
+                    shown: FIRST_PAGE,
+                    load: Load::Listed(Listed { sessions: vec![past], ..Listed::default() }),
+                    ..History::default()
+                },
+            );
+        });
+        for _ in 0..3 {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear(cx);
+            });
+        }
+        let title = cx.debug_bounds("history-title-d:lexer").expect("the row's title");
+        let time = cx.debug_bounds("history-time-d:lexer").expect("the row's time");
+        let gap = f32::from(time.left() - title.right());
+        assert!((gap - 8.0).abs() < 0.5, "the title runs up to the time: {title:?} {time:?}");
+        assert!(f32::from(time.size.width) < 24.0, "\"1d\" is as wide as its words: {time:?}");
     }
 }

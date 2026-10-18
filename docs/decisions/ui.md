@@ -13290,3 +13290,36 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   and the footer theirs. Proof: `shell::retention_tests::a_phones_composer_stands_on_the_floor`;
   e2e `compact::a_phones_chat_holds_the_dock_and_a_subagents_card` holds the composer within
   16 pt of the safe area.
+
+- ✅ **A hidden page gives no nodes (2026-10-18).** A collapsed or fit-hidden sidebar, and the
+  phone's Chats list behind an open chat, drew its rows into a zero-width column, so VoiceOver read
+  rows nobody could see. The sidebar column now draws nothing while it is hidden. The composer's
+  value reads a chip as the words it shows ("Image 1"), never the Markdown link under it, and the
+  sidebar's empty line ("No chats yet") is a Label node. Proof: `shell::compact::tests::
+  {a_phones_chat_page_reads_no_hidden_rows, an_empty_sessions_page_offers_no_key}`,
+  `composer::attachment_chip_tests::the_field_reads_its_chips_by_their_words`.
+- ✅ **The transcript is gone by the composer pill's bottom (2026-10-18).** zeron ramps the
+  transcript's fade from the pill's top to the window's floor, so a card scrolling under the footer
+  read beside "Auto ◯ 1%". The ramp now ends at the pill's bottom, measured at paint
+  (`Shell::pill_floor`), and nothing is drawn under the footer; under the glass pill it still fades
+  through. The pill and the footer also take the pointer (`block_mouse_except_scroll`), so a
+  message under them shows no hover strip, while the wheel still scrolls. Proof:
+  `shell::compact::tests::the_transcript_is_gone_by_the_pills_bottom`,
+  `composer::dock_tests::the_composer_takes_the_pointer_from_the_row_under_it`.
+- ✅ **A phone reaches a chat's files and terminal (2026-10-18).** An iPad's titlebar has Files and
+  the terminal; a phone's navigation bar now has both. Files, and any surface the right pane
+  would show (a file opened from them, the changes, a page), open as a page over the chat whose
+  back returns to the chat, or to the files a file came from. Proof:
+  `shell::compact::tests::a_phones_chat_reaches_its_files_and_terminal`.
+- ✅ **A terminal's find washes every hit (2026-10-18).** Hits wore half the selection's wash, all
+  but invisible on dark, so "13 of 13" showed one mark. They now wash as the transcript's find does
+  (`markdown::find::washes`), the current one stronger, and a hit over a soft wrap is washed on
+  each row it covers. Proof: `slopty-terminal` `element::tests::every_hit_a_row_shows_is_marked`,
+  `view::tests::every_visible_hit_is_washed`.
+- ✅ **A failed MCP server is reconnected from the context card (2026-10-18).** The card lists the
+  agent's servers (`ThreadState::servers` through `ChatDock::servers`) with where each stands in
+  words, why one failed in its tooltip, Reconnect for one on and not connected, and Enable or
+  Disable for each; a press sends `slopty.McpReconnect` / `slopty.McpEnable`, never Slopty on its
+  own. The heading's counts replace the `mcp-servers` fact. Proof: `composer::dock_tests::
+  a_failed_mcp_server_offers_reconnect`, `slopty-ui` `view_model::work::tests::
+  the_dock_lists_the_agents_mcp_servers`.

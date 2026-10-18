@@ -37,6 +37,15 @@ pub const RUN_SHELL: &str = "slopty.RunShell";
 /// The question and its answer come in the dock ([`crate::dock::ChatDock::side`]).
 pub const ASK_SIDE: &str = "slopty.AskSide";
 
+/// Connect one of the chat agent's MCP servers again, by its name, at the person's click:
+/// `{ chatId, server }` → `{}`. What it then lists comes in the dock
+/// ([`crate::dock::ChatDock::servers`]).
+pub const MCP_RECONNECT: &str = "slopty.McpReconnect";
+
+/// Turn one of the chat agent's MCP servers on or off, by its name: `{ chatId, server, enabled }`
+/// → `{}`.
+pub const MCP_ENABLE: &str = "slopty.McpEnable";
+
 /// Go back to before a message of the person's: `{ chatId, messageId, code, conversation }`.
 /// `code` puts the files back as they were before that message's turn; `conversation` branches
 /// a new chat sharing the turns before it. → `{ prompt, chatId?, undo?, noUndo? }`: the

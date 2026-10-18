@@ -1645,6 +1645,24 @@ pub fn sent_mention_display(raw: &str) -> Option<(String, Vec<SentMentionSpan>)>
     Some((projection.display, spans))
 }
 
+/// slopty: the draft as a screen reader reads it: each chip as the words it shows ("Image 1",
+/// a file's name), never the Markdown link under it.
+fn spoken_draft(raw: &str) -> String {
+    if !has_mention_scheme(raw) {
+        return raw.to_owned();
+    }
+    let projection = TextProjection::project(raw, None, true, None, None);
+    let mut spoken = String::with_capacity(projection.display.len());
+    let mut at = 0;
+    for (_, display) in &projection.mentions {
+        spoken.push_str(&projection.display[at..display.start]);
+        spoken.push_str(&projection.display[display.clone()].trim_matches('\u{a0}').replace('\u{a0}', " "));
+        at = display.end;
+    }
+    spoken.push_str(&projection.display[at..]);
+    spoken
+}
+
 /// Direction of the last edit — a run only merges with edits of its own kind.
 #[derive(Clone, Copy, PartialEq)]
 enum EditKind {
@@ -5099,7 +5117,8 @@ impl Render for ComposerInput {
             .aria_label(self.placeholder.clone())
             .aria_placeholder(self.shown_placeholder())
             // slopty: a screen reader reads the words in the field, not only its placeholder.
-            .when(!self.content.is_empty(), |el| el.aria_value(self.content.clone()))
+            // slopty: a chip says the words it shows ("Image 1"), never the link under it.
+            .when(!self.content.is_empty(), |el| el.aria_value(spoken_draft(&self.content)))
             .key_context(self.key_context)
             .track_focus(&self.focus_handle)
             .cursor(CursorStyle::IBeam)
@@ -6074,6 +6093,11 @@ impl Composer {
             &account_usage,
             |this: &mut Self, _, _: &crate::account_usage::CompactRequested, cx| this.compact(cx),
         )
+        .detach();
+        // slopty: a server's Reconnect, Enable or Disable on the context card asks the agent.
+        cx.subscribe(&account_usage, |this: &mut Self, _, asked: &crate::account_usage::McpServerAsked, cx| {
+            this.ask_mcp_server(asked, cx);
+        })
         .detach();
         // The footer toolbar (checkout kind + ref picker) is rendered INLINE
         // by the composer from picker state — a pickers-side notify (refs
@@ -9473,6 +9497,16 @@ impl Composer {
         if self.card.guard.holds(now) {
             return false;
         }
+        // slopty: a click-only page (a long, unknown or destructive call) takes no digit, nor a
+        // form, whose answers have none: as `Wizard::press_number`, the card's own rule.
+        if self
+            .wizard
+            .as_ref()
+            .and_then(Wizard::current)
+            .is_some_and(|q| q.click_only || request_card::is_form(q))
+        {
+            return false;
+        }
         self.wizard_select(digit.saturating_sub(1), cx);
         true
     }
@@ -9675,6 +9709,10 @@ impl Composer {
                     label.clone()
                 }))
                 .when_some(description.clone(), |el, d| el.aria_description(SharedString::from(d)))
+                // slopty: the digit that picks it, as its badge shows, for a screen reader too.
+                .when(ix < 9 && !click_only && keys_live, |el| {
+                    el.aria_keyshortcuts(SharedString::from(format!("{}", ix + 1)))
+                })
                 // slopty: one dimming for what cannot act now; it says it is disabled.
                 .when(blocked, |el| el.opacity(crate::theme::DISABLED_OPACITY).cursor_default().aria_disabled(true))
                 .flex()
@@ -10367,6 +10405,15 @@ impl Render for Composer {
             .and_then(|chat| self.dock.dock_of(chat))
             .and_then(|dock| dock.context.clone());
         self.account_usage.update(cx, |usage, cx| usage.set_breakdown(breakdown, cx));
+        // slopty: and its MCP servers, with whether its agent takes the person's reconnect.
+        let (servers, act) = self
+            .state
+            .read(cx)
+            .selected_chat
+            .as_deref()
+            .and_then(|chat| self.dock.dock_of(chat))
+            .map_or((Vec::new(), false), |dock| (dock.servers.clone(), dock.can.mcp_servers));
+        self.account_usage.update(cx, |usage, cx| usage.set_servers(servers, act, cx));
         // slopty: the road, limit, queued-send and stop notices draw in the shell's reserved
         // status strip under the composer (`status_line`), so none moves the composer.
         // The shell owns the width and its route animation. A route-dependent
@@ -11009,9 +11056,15 @@ impl Render for Composer {
         // (the popover glass treatment; radius matches the pill's rounding).
         // The shell keeps this entity under one parent on both routes. The
         // surface itself never fades, and frost follows the same morph radius.
+        let dragging = cx.has_active_drag(); // slopty
         let pill_surface = div()
             .relative()
             .id("composer-surface")
+            .debug_selector(|| "composer-surface".into()) // slopty: for the tests
+            // slopty: the pill takes the pointer from the transcript scrolling under it, whose
+            // message showed its hover strip (Copy message) through the pill; the wheel still
+            // goes through and scrolls it. A drag passes, for the drop targets around it.
+            .when(!dragging, |el| el.block_mouse_except_scroll())
             .child(crate::frost::frosted(surface_radius, 16.0, body))
             .child({
                 let measured = self.surface_bounds.clone();
@@ -11099,6 +11152,10 @@ impl Render for Composer {
             container.child(
                 div()
                     .debug_selector(|| "composer-footer-slot".into()) // slopty: for the tests
+                    // slopty: and the footer under the pill, over the transcript's faded floor:
+                    // a row there takes no hover nor click, though the wheel scrolls it.
+                    .id("composer-footer-slot")
+                    .when(!dragging, |el| el.block_mouse_except_scroll())
                     .w_full()
                     .h(px(SESSION_FOOTER_HEIGHT * bottom_slot))
                     .mt(px(Theme::SPACE_SM * bottom_slot)) // slopty: the gap it grows

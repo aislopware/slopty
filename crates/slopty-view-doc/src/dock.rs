@@ -54,8 +54,40 @@ pub struct ChatDock {
     /// The side questions asked (`/btw`, `slopty.AskSide`) and their answers, newest last.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub side: Vec<SideLine>,
+    /// The agent's MCP servers as it last listed them, which the context card shows with what
+    /// the person can do to each.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub servers: Vec<McpServerRow>,
     /// What the dock may ask of the chat's agent.
     pub can: DockCan,
+}
+
+/// One of the agent's MCP servers, as the context card lists it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpServerRow {
+    /// Its name, as the agent's config names it.
+    pub name: String,
+    /// Where it stands, open: `connected`, `pending`, `failed`, `needs-auth`, `disabled`, or a
+    /// word an agent adds.
+    pub status: String,
+    /// Why it failed, in the agent's words, when it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Where it is configured, in the agent's words: `user`, `project`, `local`, `plugin`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// A reconnect is worth offering: it is on and not connected (`slopty.McpReconnect`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reconnects: bool,
+}
+
+impl McpServerRow {
+    /// Turned off by the person: what turns it on is Enable, else Disable.
+    #[must_use]
+    pub fn disabled(&self) -> bool {
+        self.status == "disabled"
+    }
 }
 
 /// What a chat's agent can be asked from the dock; a control for a verb it cannot do is not
@@ -81,6 +113,10 @@ pub struct DockCan {
     pub set_mode: bool,
     /// Ask it a side question (`slopty.AskSide`).
     pub side: bool,
+    /// Reconnect its MCP servers and turn them on or off (`slopty.McpReconnect`,
+    /// `slopty.McpEnable`).
+    #[serde(default)]
+    pub mcp_servers: bool,
 }
 
 /// A side question the person asked beside the conversation, and its answer.
@@ -377,10 +413,6 @@ pub struct ContextBreakdown {
     /// What the last turn that ended took, by kind of token.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_turn: Option<TurnTokens>,
-    /// The agent's MCP servers as its `/status` row counts them: "MCP servers: 3 connected, 1
-    /// failed".
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub servers: Option<String>,
 }
 
 /// The tokens one turn took, by kind.

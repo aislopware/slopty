@@ -167,6 +167,86 @@ fn open(
     (composer, state, cx)
 }
 
+/// The composer over a row of the transcript's, as the shell floats it: the row under the
+/// window counts its hovers and the wheel's steps.
+struct Layered {
+    composer: Entity<Composer>,
+    hovered: std::rc::Rc<std::cell::Cell<bool>>,
+    wheeled: std::rc::Rc<std::cell::Cell<usize>>,
+}
+
+impl Render for Layered {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let (hovered, wheeled) = (self.hovered.clone(), self.wheeled.clone());
+        div()
+            .size_full()
+            .relative()
+            .child(
+                div()
+                    .id("row-under")
+                    .absolute()
+                    .inset_0()
+                    .on_hover(move |on, _, _| hovered.set(*on))
+                    .on_scroll_wheel(move |_, _, _| wheeled.set(wheeled.get() + 1)),
+            )
+            .child(div().absolute().inset_0().flex().flex_col().justify_end().child(self.composer.clone()))
+    }
+}
+
+/// A pointer over the composer's pill or its footer gives no hover to the transcript's row
+/// under it (whose hover strip showed through the pill), and the wheel still scrolls it.
+#[gpui::test]
+fn the_composer_takes_the_pointer_from_the_row_under_it(cx: &mut TestAppContext) {
+    let dir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+    cx.update(|cx| {
+        gpui_base::init(cx);
+        cx.set_global(Theme::dark());
+        crate::app_menus::init(cx);
+        crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        cx.set_reduce_motion(true);
+    });
+    let state = cx.new(|_| AppState::new());
+    state.update(cx, |state, _| {
+        state.chats = vec![
+            serde_json::from_value(serde_json::json!({
+                "id": "chat", "title": "Chat", "deviceId": "dev", "archived": false,
+                "createdAt": chrono::Utc::now(), "cwd": "/work/app",
+            }))
+            .unwrap(),
+        ];
+        state.selected_chat = Some("chat".into());
+    });
+    let composer = cx.new(|cx| Composer::new(state.clone(), cx));
+    composer.update(cx, |composer, _| {
+        composer.dock.chat = Some("chat".into());
+        composer.dock.dock = Some(Arc::new(ChatDock { can: can(), ..ChatDock::default() }));
+    });
+    let hovered = std::rc::Rc::new(std::cell::Cell::new(false));
+    let wheeled = std::rc::Rc::new(std::cell::Cell::new(0));
+    let (_, cx) = cx.add_window_view({
+        let (hovered, wheeled) = (hovered.clone(), wheeled.clone());
+        move |_, _| Layered { composer, hovered, wheeled }
+    });
+    draw(cx);
+    let pill = cx.debug_bounds("composer-surface").expect("the pill");
+    let footer = cx.debug_bounds("composer-footer-slot").expect("the footer");
+    let above = gpui::point(pill.center().x, px(4.0));
+    cx.simulate_mouse_move(above, None, gpui::Modifiers::default());
+    draw(cx);
+    assert!(hovered.get(), "the row takes the pointer where nothing covers it");
+    for at in [pill.center(), footer.center()] {
+        cx.simulate_mouse_move(at, None, gpui::Modifiers::default());
+        draw(cx);
+        assert!(!hovered.get(), "no hover through the composer at {at:?}");
+    }
+    cx.simulate_event(gpui::ScrollWheelEvent {
+        position: pill.center(),
+        delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.0), px(-40.0))),
+        ..Default::default()
+    });
+    assert!(wheeled.get() > 0, "the wheel goes through to the transcript");
+}
+
 /// A question of the chat's, open in the composer.
 fn ask(cx: &mut VisualTestContext, state: &Entity<AppState>, question: UserInputQuestion) {
     state.update(cx, |state, cx| {
@@ -611,6 +691,138 @@ fn an_approvals_numbers_answer_it(cx: &mut TestAppContext) {
     assert!(composer.read_with(cx, |composer, _| !composer.wizard_open() && composer.answered_requests.contains("1")), "2 denied it");
 }
 
+/// An approval of `what`, with three options; `click_only` as the view model gates it.
+fn approval(what: &str, click_only: bool) -> UserInputQuestion {
+    UserInputQuestion {
+        id: "choice".into(),
+        header: "Approval".into(),
+        question: format!("{what}?"),
+        options: vec!["Allow".into(), "Always allow".into(), "Deny".into()],
+        choices_only: true,
+        deny_option: Some(2),
+        allow_option: Some(0),
+        click_only,
+        kind: "approval".into(),
+        ..UserInputQuestion::default()
+    }
+}
+
+/// The card's options top to bottom: each one's label and the key it says it takes.
+fn option_keys(cx: &mut VisualTestContext) -> Vec<(String, String)> {
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        window.set_a11y_active(true);
+        window.refresh();
+        window.draw(cx).clear(cx);
+        let update = window.a11y_tree().expect("a tree");
+        let mut rows: Vec<(f64, String, String)> = update
+            .nodes
+            .iter()
+            .filter(|(_, node)| node.role() == Role::Button)
+            .filter(|(_, node)| node.label().is_some_and(|l| ["Allow", "Always allow", "Deny"].contains(&l)))
+            .map(|(_, node)| {
+                (
+                    node.bounds().map_or(0.0, |r| r.y0),
+                    node.label().unwrap_or_default().to_owned(),
+                    node.keyboard_shortcut().unwrap_or_default().to_owned(),
+                )
+            })
+            .collect();
+        rows.sort_by(|a, b| a.0.total_cmp(&b.0));
+        rows.into_iter().map(|(_, label, key)| (label, key)).collect()
+    })
+}
+
+/// An approval's options wear the digits that pick them, as a question's do, and say them to a
+/// screen reader: the digit its badge shows is the one that picks it.
+#[gpui::test]
+fn an_approvals_digits_show_where_they_pick(cx: &mut TestAppContext) {
+    let (composer, state, cx) = open(cx, ChatDock { can: can(), ..ChatDock::default() }, None);
+    ask(cx, &state, approval("Read src/main.rs", false));
+    let keys = option_keys(cx);
+    let want: Vec<(String, String)> =
+        [("Allow", "1"), ("Always allow", "2"), ("Deny", "3")].map(|(l, k)| (l.into(), k.into())).into();
+    assert_eq!(keys, want, "a known read's options take their digits");
+    composer.update(cx, |composer, _| {
+        composer.card.guard =
+            request_card::KeyGuard { typed_at: None, shown_at: Some(Instant::now() - Duration::from_secs(10)) };
+    });
+    cx.simulate_input("3");
+    assert!(composer.read_with(cx, |composer, _| !composer.wizard_open()), "3 picked, as its badge said");
+}
+
+/// A click-only approval (anything but a known read) takes no digit, so it shows none: no badge
+/// promises a key that does nothing.
+#[gpui::test]
+fn a_click_only_approval_shows_no_digit(cx: &mut TestAppContext) {
+    let (composer, state, cx) = open(cx, ChatDock { can: can(), ..ChatDock::default() }, None);
+    ask(cx, &state, approval("Run touch refused.txt", true));
+    let keys = option_keys(cx);
+    assert_eq!(keys.len(), 3, "the click-only card: {keys:?}");
+    assert!(keys.iter().all(|(_, key)| key.is_empty()), "no digit on a click-only card: {keys:?}");
+    composer.update(cx, |composer, _| {
+        composer.card.guard =
+            request_card::KeyGuard { typed_at: None, shown_at: Some(Instant::now() - Duration::from_secs(10)) };
+    });
+    cx.simulate_input("1");
+    assert!(composer.read_with(cx, |composer, _| composer.answered_requests.is_empty()), "1 allowed nothing");
+}
+
+/// The context card lists the agent's MCP servers with where each stands: a failed one says
+/// why and offers Reconnect, every one Enable or Disable, and a press asks the agent (here the
+/// call cannot go, and the composer says so). Without the agent's door no control shows.
+#[gpui::test]
+fn a_failed_mcp_server_offers_reconnect(cx: &mut TestAppContext) {
+    use slopty_view_doc::dock::McpServerRow;
+    let row = |name: &str, status: &str, reconnects| McpServerRow {
+        name: name.into(),
+        status: status.into(),
+        error: (status == "failed").then(|| "connection refused".into()),
+        source: Some("project".into()),
+        reconnects,
+    };
+    let servers = vec![row("github", "connected", false), row("db", "failed", true), row("old", "disabled", false)];
+    // The card hangs off the context ring, which shows once the window is known.
+    let context = Some(slopty_view_doc::dock::ContextBreakdown { tokens: 2_000, window: 200_000, used_percent: 1, ..Default::default() });
+    let dock = ChatDock {
+        servers: servers.clone(),
+        context: context.clone(),
+        can: DockCan { mcp_servers: true, ..can() },
+        ..ChatDock::default()
+    };
+    let (composer, _, cx) = open(cx, dock, None);
+    draw(cx);
+    let usage = composer.read_with(cx, |composer, _| composer.account_usage.clone());
+    usage.update(cx, |usage, cx| usage.open_context_card(cx));
+    let nodes = draw(cx);
+    let status = nodes.iter().find(|n| n.role == Role::Status && n.label.starts_with("MCP servers"));
+    assert_eq!(status.map(|n| n.label.as_str()), Some("MCP servers: 1 connected \u{b7} 1 failed \u{b7} 1 off"));
+    let db = find(&nodes, Role::ListItem, "db, Failed").expect("the failed server's row");
+    assert_eq!(db.description, "connection refused", "why it failed");
+    let buttons = labels(&nodes, Role::Button);
+    for want in ["Reconnect db", "Disable db", "Disable github", "Enable old"] {
+        assert!(buttons.iter().any(|b| b == want), "{want} in {buttons:?}");
+    }
+    assert!(!buttons.iter().any(|b| b == "Reconnect github" || b == "Reconnect old"), "{buttons:?}");
+    let at = cx.debug_bounds("context-server-1-reconnect").expect("db's Reconnect").center();
+    cx.simulate_click(at, gpui::Modifiers::default());
+    cx.run_until_parked();
+    let failure = composer.read_with(cx, |composer, _| composer.failure().cloned());
+    assert_eq!(
+        failure.as_deref(),
+        Some("Couldn't reconnect the MCP server while Slopty is offline. Try again once it reconnects.")
+    );
+    // An agent without the door: the servers show, no control does.
+    composer.update(cx, |composer, _| {
+        composer.dock.dock = Some(Arc::new(ChatDock { servers, context, can: can(), ..ChatDock::default() }));
+    });
+    usage.update(cx, |usage, cx| usage.open_context_card(cx));
+    let nodes = draw(cx);
+    let buttons = labels(&nodes, Role::Button);
+    assert!(find(&nodes, Role::ListItem, "db, Failed").is_some(), "the servers still show");
+    assert!(!buttons.iter().any(|b| b.starts_with("Reconnect ") || b.starts_with("Disable ") || b.starts_with("Enable ")), "{buttons:?}");
+}
+
 /// A dialog Slopty does not know shows its payload and takes OK or Dismiss, never words.
 #[gpui::test]
 fn an_unknown_dialog_shows_its_payload(cx: &mut TestAppContext) {
@@ -813,7 +1025,7 @@ fn an_allow_takes_words_beside_it(cx: &mut TestAppContext) {
     let nodes = draw(cx);
     assert!(find(&nodes, Role::Button, "Allow, and say what's next…").is_some());
     assert!(nodes.iter().all(|n| !n.label.starts_with("Preview of")), "no previews, no pane");
-    assert!(find(&nodes, Role::Note, "Needs you at the card").is_none(), "any answer of the person's");
+    assert!(find(&nodes, Role::Note, "Answer here").is_none(), "any answer of the person's");
     composer.update(cx, |composer, cx| composer.set_allowing(0, cx));
     let nodes = draw(cx);
     assert!(find(&nodes, Role::Button, "Allow, and say what's next…").is_none());
@@ -827,7 +1039,7 @@ fn an_allow_takes_words_beside_it(cx: &mut TestAppContext) {
 }
 
 /// A request only the person at its card answers says so on the card, which still takes their
-/// click: "Needs you at the card".
+/// click: "Answer here", and why in its description.
 #[gpui::test]
 fn a_card_says_it_needs_the_person_at_it(cx: &mut TestAppContext) {
     let (_, state, cx) = open(cx, ChatDock { can: can(), ..ChatDock::default() }, None);
@@ -847,7 +1059,8 @@ fn a_card_says_it_needs_the_person_at_it(cx: &mut TestAppContext) {
         },
     );
     let nodes = draw(cx);
-    assert!(find(&nodes, Role::Note, "Needs you at the card").is_some(), "the card says so");
+    let chip = find(&nodes, Role::Note, "Answer here").expect("the card says so");
+    assert_eq!(chip.description, request_card::NEEDS_PRESENCE_WHY, "and why");
     assert!(find(&nodes, Role::Button, "Yes").is_some(), "and takes the person's click");
 }
 

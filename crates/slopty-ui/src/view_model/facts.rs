@@ -69,9 +69,10 @@ pub fn page_of(key: &str) -> Option<(ThreadId, &str)> {
     Some((thread.parse().ok()?, item)).filter(|(_, item)| !item.is_empty())
 }
 
-/// The card of the page `thread`'s call `item` shows, when it shows one.
+/// The card of the page `thread`'s call `item` shows, when it shows one; a file's source is said
+/// from the chat's folder `cwd` ([`path_words`]), its whole path kept in [`PageCard::path`].
 #[must_use]
-pub fn page_card(thread: ThreadId, item: &str, call: &ToolCall) -> Option<PageCard> {
+pub fn page_card(thread: ThreadId, item: &str, call: &ToolCall, cwd: &str) -> Option<PageCard> {
     let Some(ToolDetail::Page(PageDetail { title, source })) = &call.detail else { return None };
     let mut card = PageCard {
         id: format!("{item}:page"),
@@ -91,7 +92,7 @@ pub fn page_card(thread: ThreadId, item: &str, call: &ToolCall) -> Option<PageCa
         }
         PageSource::File(path) => {
             PageCard::FILE.clone_into(&mut card.kind);
-            card.source.clone_from(path);
+            card.source = path_words(path, cwd);
             card.path = Some(path.clone());
         }
         PageSource::App(app) => {
@@ -105,7 +106,14 @@ pub fn page_card(thread: ThreadId, item: &str, call: &ToolCall) -> Option<PageCa
     }
     if card.title.trim().is_empty() {
         card.title = match card.kind.as_str() {
-            PageCard::FILE => card.source.rsplit('/').next().unwrap_or_default().to_owned(),
+            PageCard::FILE => card
+                .path
+                .as_deref()
+                .unwrap_or_default()
+                .rsplit('/')
+                .next()
+                .unwrap_or_default()
+                .to_owned(),
             PageCard::APP => card.tool.clone().unwrap_or_default(),
             _ => "Page".to_owned(),
         };

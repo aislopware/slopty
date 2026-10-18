@@ -168,6 +168,48 @@ fn details(usage: Option<ContextUsage>) -> String {
     }
 }
 
+// slopty: the agent's MCP servers on the context card, each with what the person can do to it
+// (`docs/decisions/agents.md`, "A failed MCP server is reconnected from the context card").
+/// What a server's status says on its row: the agent's open word, in the TUI's `/mcp` terms.
+pub fn server_words(status: &str) -> String {
+    match status {
+        "connected" => "Connected".to_owned(),
+        "pending" => "Connecting".to_owned(),
+        "failed" => "Failed".to_owned(),
+        "needs-auth" => "Needs sign-in".to_owned(),
+        "disabled" => "Off".to_owned(),
+        other => {
+            let words = other.replace(['-', '_'], " ");
+            let mut chars = words.chars();
+            chars.next().map_or_else(String::new, |first| first.to_uppercase().chain(chars).collect())
+        }
+    }
+}
+
+/// The servers counted by what they say, the TUI's `/status` row: "2 connected · 1 failed".
+pub fn servers_summary(rows: &[slopty_view_doc::dock::McpServerRow]) -> String {
+    let mut counts: Vec<(String, usize)> = Vec::new();
+    for row in rows {
+        let words = server_words(&row.status).to_lowercase();
+        match counts.iter_mut().find(|(said, _)| *said == words) {
+            Some((_, n)) => *n = n.saturating_add(1),
+            None => counts.push((words, 1)),
+        }
+    }
+    counts.into_iter().map(|(words, n)| format!("{n} {words}")).collect::<Vec<_>>().join(" \u{b7} ")
+}
+
+/// The tone of a server's dot: connected green, one still connecting or waiting on a sign-in
+/// amber, a failure red, one turned off faint.
+pub fn server_tone(row: &slopty_view_doc::dock::McpServerRow, theme: &Theme) -> gpui::Hsla {
+    match row.status.as_str() {
+        "connected" => theme.success,
+        "failed" => theme.danger,
+        "disabled" => theme.text_faint,
+        _ => theme.warning,
+    }
+}
+
 /// The context ring's popover content. // slopty: with the agent's breakdown when it counted it.
 pub fn card(usage: Option<ContextUsage>, breakdown: Option<&ContextBreakdown>, theme: &Theme) -> gpui::Div {
     let card = crate::popover::popover_card(theme)
@@ -296,20 +338,6 @@ fn breakdown_card(card: gpui::Div, breakdown: &ContextBreakdown, theme: &Theme) 
                 .child(SharedString::from(format!("Compacts on its own at {at}%"))),
         );
     }
-    // slopty: the agent's MCP servers as its /status row counts them.
-    if let Some(servers) = breakdown.servers.clone() {
-        card = card.child(
-            div()
-                .id("context-card-servers")
-                .role(gpui::Role::Status)
-                .aria_label(SharedString::from(servers.clone()))
-                .px(px(8.0))
-                .pt(px(4.0))
-                .text_size(crate::typography::ui_rems(11.5))
-                .text_color(theme.text_faint)
-                .child(SharedString::from(servers)),
-        );
-    }
     if let Some(turn) = breakdown.last_turn {
         let words = turn_words(&turn);
         card = card.child(
@@ -404,6 +432,22 @@ mod tests {
             }))
             .contains("limit not reported")
         );
+    }
+
+    /// A server's row says where it stands in words, an agent's new word included, and the
+    /// heading counts them as the TUI's `/status` does.
+    #[test]
+    fn servers_say_where_they_stand() {
+        let row = |status: &str| slopty_view_doc::dock::McpServerRow {
+            name: status.to_owned(),
+            status: status.to_owned(),
+            ..Default::default()
+        };
+        assert_eq!(server_words("needs-auth"), "Needs sign-in");
+        assert_eq!(server_words("disabled"), "Off");
+        assert_eq!(server_words("rate-limited"), "Rate limited", "a word Slopty does not know");
+        let rows = [row("connected"), row("failed"), row("connected"), row("disabled")];
+        assert_eq!(servers_summary(&rows), "2 connected \u{b7} 1 failed \u{b7} 1 off");
     }
 
     #[test]

@@ -369,7 +369,7 @@ fn a_shown_page_is_a_card_by_its_key() {
         PageDetail { title: "Latency".into(), source: PageSource::Html(Clipped::whole("<p>")) };
     let mut shown =
         call("mcp__slopty__show_page", "mcp", Some(ToolDetail::Page(html)), ToolState::Streaming);
-    let card = page_card(thread, "t1", &shown).expect("a card");
+    let card = page_card(thread, "t1", &shown, "/work/app").expect("a card");
     assert_eq!(card.kind, PageCard::HTML);
     assert!(card.streaming);
     assert_eq!(page_of(&card.page), Some((thread, "t1")));
@@ -384,11 +384,20 @@ fn a_shown_page_is_a_card_by_its_key() {
     shown.detail =
         Some(ToolDetail::Page(PageDetail { title: String::new(), source: PageSource::App(app) }));
     shown.state = ToolState::Failed;
-    let card = page_card(thread, "t1", &shown).expect("a card");
+    let card = page_card(thread, "t1", &shown, "/work/app").expect("a card");
     assert_eq!((card.kind.as_str(), card.source.as_str()), (PageCard::APP, "charts · plot"));
     assert_eq!(card.title, "plot");
     assert!(card.failed);
     assert_eq!(page_of("slopty-page:nope/t1"), None);
+    // A file is said from the chat's folder, its whole path kept for the tooltip and the pane.
+    shown.detail = Some(ToolDetail::Page(PageDetail {
+        title: String::new(),
+        source: PageSource::File("/work/app/data/latency.csv".into()),
+    }));
+    let card = page_card(thread, "t1", &shown, "/work/app").expect("a card");
+    assert_eq!(card.source, "data/latency.csv");
+    assert_eq!(card.path.as_deref(), Some("/work/app/data/latency.csv"));
+    assert_eq!(card.title, "latency.csv");
 }
 
 /// What a command landed reads as the TUI's group line says it: a commit's sha, where a push

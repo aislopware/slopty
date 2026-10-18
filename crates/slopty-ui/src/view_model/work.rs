@@ -12,9 +12,10 @@ use slopty_proto::thread::{
     BackgroundTask, Cap, ItemBody, Notice, Phase, Rule, ThreadId, ThreadState, TurnState, Usage,
 };
 use slopty_view_doc::{
-    ActivityLine, ChatDock, ContextBreakdown, ContextSlice, DockCan, GoalLine, MainRow, ModSurface,
-    ModeChip, ModeChoice, NoteLine, PermissionRuleRow, PermissionRules, RetryLine, RuleScope,
-    SideLine, StatusSpan, SubagentKindRow, TurnTokens, WorkCounts, WorkRow, WorkTray, tokens_short,
+    ActivityLine, ChatDock, ContextBreakdown, ContextSlice, DockCan, GoalLine, MainRow,
+    McpServerRow, ModSurface, ModeChip, ModeChoice, NoteLine, PermissionRuleRow, PermissionRules,
+    RetryLine, RuleScope, SideLine, StatusSpan, SubagentKindRow, TurnTokens, WorkCounts, WorkRow,
+    WorkTray, tokens_short,
 };
 
 use super::transcript::at;
@@ -459,10 +460,6 @@ fn percent(part: u64, whole: u64) -> u8 {
 /// the agent compacts on its own, or before the window is full when it does not.
 const WARN_WITHIN: u8 = 20;
 
-/// The thread fact an agent keeps its MCP servers' counts in ("3 connected, 1 failed"), as its
-/// `/status` row says them.
-pub const SERVERS_FACT: &str = "mcp-servers";
-
 /// The context window, by category when the agent counted them.
 fn context(state: &ThreadState) -> Option<ContextBreakdown> {
     let (tokens, window, categories, auto) = match &state.context {
@@ -512,7 +509,6 @@ fn context(state: &ThreadState) -> Option<ContextBreakdown> {
         words,
         urgent,
         last_turn,
-        servers: state.meta.facts.get(SERVERS_FACT).map(|said| format!("MCP servers: {said}")),
     })
 }
 
@@ -637,7 +633,19 @@ pub fn dock(state: &ThreadState, counts: &WorkCounts, now_ms: i64) -> ChatDock {
             surfaces: can(Cap::SURFACES),
             set_mode: can(Cap::SET_MODE) && !state.meta.modes.is_empty(),
             side: can(Cap::SIDE),
+            mcp_servers: can(Cap::MCP_SERVERS),
         },
+        servers: state
+            .servers
+            .iter()
+            .map(|server| McpServerRow {
+                name: server.name.clone(),
+                status: server.status.clone(),
+                error: server.error.clone(),
+                source: server.source.clone(),
+                reconnects: server.reconnects(),
+            })
+            .collect(),
     }
 }
 

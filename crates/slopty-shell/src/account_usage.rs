@@ -171,8 +171,25 @@ pub struct AccountUsage {
     catalog_task: Option<gpui::Task<()>>,
     // slopty: the chat's context by category, from its dock (`composer/dock.rs`).
     breakdown: Option<slopty_view_doc::dock::ContextBreakdown>,
+    // slopty: the agent's MCP servers, from its dock, and whether it takes the person's
+    // reconnect and enable.
+    servers: Vec<slopty_view_doc::dock::McpServerRow>,
+    servers_act: bool,
     _state: Subscription,
 }
+
+// slopty: a server's Reconnect, Enable or Disable on the context card was pressed: the composer
+// asks the chat's agent (`slopty.McpReconnect`, `slopty.McpEnable`). Only a click sends it.
+/// What the person asked of one of the agent's MCP servers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum McpServerAsked {
+    /// Connect it again.
+    Reconnect(String),
+    /// Turn it on (`true`) or off.
+    Enable(String, bool),
+}
+
+impl gpui::EventEmitter<McpServerAsked> for AccountUsage {}
 
 // slopty: the context card's Compact row was pressed: the composer sends `/compact` through
 // the agent's own command door.
@@ -191,7 +208,122 @@ impl AccountUsage {
             compactable: std::collections::HashMap::new(),
             catalog_task: None,
             breakdown: None,
+            servers: Vec::new(),
+            servers_act: false,
         }
+    }
+
+    /// slopty: open the context card, as a click on its ring does (tests).
+    #[cfg(test)]
+    pub(crate) fn open_context_card(&mut self, cx: &mut Context<Self>) {
+        if self.popup.as_open() != Some(&FooterCard::Context) {
+            self.toggle(FooterCard::Context, cx);
+        }
+    }
+
+    // slopty: the composer hands the chat's servers over each render; cheap.
+    /// The agent's MCP servers, and whether it takes the person's reconnect and enable.
+    pub fn set_servers(
+        &mut self,
+        servers: Vec<slopty_view_doc::dock::McpServerRow>,
+        act: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.servers != servers || self.servers_act != act {
+            self.servers = servers;
+            self.servers_act = act;
+            cx.notify();
+        }
+    }
+
+    /// The card's MCP servers: a heading that counts them, then a row each with its status in
+    /// words (why it failed in its tooltip) and what the person can do to it.
+    fn servers_section(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.servers.is_empty() {
+            return None;
+        }
+        let summary = crate::context_usage::servers_summary(&self.servers);
+        let heading = div()
+            .id("context-card-servers")
+            .role(gpui::Role::Status)
+            .aria_label(SharedString::from(format!("MCP servers: {summary}")))
+            .px(px(8.0))
+            .pt(px(6.0))
+            .pb(px(2.0))
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .text_size(crate::typography::ui_rems(11.5))
+            .text_color(theme.text_faint)
+            .child(div().flex_1().child("MCP servers"))
+            .child(SharedString::from(summary));
+        let rows = self.servers.iter().enumerate().map(|(ix, row)| {
+            let words = crate::context_usage::server_words(&row.status);
+            let action = |id: &str, label: &'static str, said: String, ask: McpServerAsked| {
+                let selector = format!("context-server-{ix}-{id}");
+                div()
+                    .id(SharedString::from(selector.clone()))
+                    .debug_selector(move || selector.clone())
+                    .role(gpui::Role::Button)
+                    .aria_label(SharedString::from(said))
+                    .flex_none()
+                    .px(px(6.0))
+                    .h(px(20.0))
+                    .flex()
+                    .items_center()
+                    .rounded(px(5.0))
+                    .text_color(theme.text_muted)
+                    .cursor_pointer()
+                    .hover(|el| el.bg(theme.wash(0.08)).text_color(theme.text))
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        cx.stop_propagation();
+                        cx.emit(ask.clone());
+                    }))
+                    .child(label)
+            };
+            let name = row.name.clone();
+            let reconnect = (self.servers_act && row.reconnects).then(|| {
+                action("reconnect", "Reconnect", format!("Reconnect {name}"), McpServerAsked::Reconnect(name.clone()))
+            });
+            let toggle = self.servers_act.then(|| {
+                if row.disabled() {
+                    action("enable", "Enable", format!("Enable {name}"), McpServerAsked::Enable(name.clone(), true))
+                } else {
+                    action("disable", "Disable", format!("Disable {name}"), McpServerAsked::Enable(name.clone(), false))
+                }
+            });
+            let why = row.error.clone().filter(|e| !e.trim().is_empty());
+            let tip = match (&why, &row.source) {
+                (Some(why), Some(source)) => Some(format!("{why}\nConfigured in {source} settings")),
+                (Some(why), None) => Some(why.clone()),
+                (None, Some(source)) => Some(format!("Configured in {source} settings")),
+                (None, None) => None,
+            };
+            div()
+                .id(SharedString::from(format!("context-server-{ix}")))
+                .role(gpui::Role::ListItem)
+                .aria_label(SharedString::from(format!("{}, {words}", row.name)))
+                .when_some(why.clone(), |el, why| el.aria_description(SharedString::from(why)))
+                .when_some(tip, |el, tip| el.tooltip(crate::settings::widgets::text_tooltip(tip)))
+                .h(px(24.0))
+                .px(px(8.0))
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .text_size(crate::typography::ui_rems(11.5))
+                .child(
+                    div()
+                        .flex_none()
+                        .size(px(6.0))
+                        .rounded_full()
+                        .bg(crate::context_usage::server_tone(row, theme)),
+                )
+                .child(div().flex_1().min_w_0().truncate().text_color(theme.text_muted).child(SharedString::from(row.name.clone())))
+                .child(div().flex_none().text_color(theme.text_faint).child(SharedString::from(words)))
+                .children(reconnect)
+                .children(toggle)
+        });
+        Some(div().flex().flex_col().pb(px(2.0)).child(heading).children(rows).into_any_element())
     }
 
     // slopty: the composer hands the chat's breakdown over each render; cheap.
@@ -252,7 +384,8 @@ impl AccountUsage {
         cx: &mut Context<Self>,
     ) -> gpui::Div {
         let theme = Theme::of(cx).for_popup();
-        let card = crate::context_usage::card(context, self.breakdown.as_ref(), &theme);
+        let card = crate::context_usage::card(context, self.breakdown.as_ref(), &theme)
+            .children(self.servers_section(&theme, cx)); // slopty
         if !self.compactable() {
             return card;
         }

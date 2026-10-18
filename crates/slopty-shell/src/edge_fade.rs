@@ -86,6 +86,7 @@ pub fn edge_faded(band: f32, top: bool, bottom: bool, child: impl IntoElement) -
         band_top: None,
         band_bottom: None,
         inset_top: 0.0,
+        inset_bottom: 0.0, // slopty
         outset_bottom: 0.0,
         top,
         bottom,
@@ -106,6 +107,7 @@ pub struct EdgeFaded {
     band_top: Option<f32>,
     band_bottom: Option<f32>,
     inset_top: f32,
+    inset_bottom: f32, // slopty
     outset_bottom: f32,
     top: bool,
     bottom: bool,
@@ -200,6 +202,14 @@ impl EdgeFaded {
     /// chrome (titlebar TEXT) vanishes before it can overlap.
     pub fn inset_top(mut self, px: f32) -> Self {
         self.inset_top = px;
+        self
+    }
+
+    /// slopty: [`Self::inset_top`], for the BOTTOM edge: content between the inset edge and
+    /// the wrapper's real bottom paints fully transparent (the transcript under the composer's
+    /// footer).
+    pub fn inset_bottom(mut self, px: f32) -> Self {
+        self.inset_bottom = px;
         self
     }
 
@@ -343,6 +353,7 @@ impl EdgeFaded {
             let inset = px(self.inset_top).min(bounds.size.height);
             bounds.origin.y += inset;
             bounds.size.height -= inset;
+            bounds.size.height -= px(self.inset_bottom).min(bounds.size.height); // slopty
             bounds.size.height += px(self.outset_bottom);
             bounds.size.height = bounds.size.height.max(px(0.0));
             EdgeFade {

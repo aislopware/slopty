@@ -110,6 +110,36 @@ fn pasting_images_numbers_them_and_mentions_each_at_the_caret(cx: &mut gpui::Tes
         .unwrap();
 }
 
+/// slopty: a screen reader reads a chip as the words it shows, never the link under it: the
+/// field's value is "compare Image 1 and Image 2", not `[Image 1](slopty-image:1)`.
+#[gpui::test]
+fn the_field_reads_its_chips_by_their_words(cx: &mut gpui::TestAppContext) {
+    let (_dir, handle) = composer_focus_window(cx);
+    handle
+        .update(cx, |composer, _, cx| {
+            composer.input.update(cx, |input, cx| input.set_text("compare ", cx));
+        })
+        .unwrap();
+    paste_images(&handle, cx, 1);
+    append(&handle, cx, "and ");
+    paste_images(&handle, cx, 1);
+    let values: Vec<String> = cx
+        .update_window(handle.into(), |_, window, cx| {
+            window.set_a11y_active(true);
+            window.refresh();
+            window.draw(cx).clear(cx);
+            let tree = window.a11y_tree().expect("a tree");
+            tree.nodes
+                .iter()
+                .filter(|(_, node)| node.role() == gpui::Role::MultilineTextInput)
+                .map(|(_, node)| node.value().unwrap_or_default().to_owned())
+                .collect()
+        })
+        .unwrap();
+    assert_eq!(values, ["compare Image 1 and Image 2 "], "the draft as it reads");
+    assert!(text(&handle, cx).contains("slopty-image:1"), "the draft itself keeps its links");
+}
+
 #[gpui::test]
 fn one_undo_removes_a_paste_and_redo_restores_it(cx: &mut gpui::TestAppContext) {
     let (_dir, handle) = composer_focus_window(cx);

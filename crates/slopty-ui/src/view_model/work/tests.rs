@@ -455,3 +455,29 @@ fn side_questions_reach_the_dock() {
     assert!(dock.side[1].pending());
     assert!(!super::dock(&thread_with(&[]), &counts, 0).can.side);
 }
+
+/// The context card lists the agent's MCP servers as it last said them, a reconnect offered
+/// for one that is on and not connected, and the controls only where the agent takes them.
+#[test]
+fn the_dock_lists_the_agents_mcp_servers() {
+    let server = |name: &str, status: &str| slopty_proto::thread::McpServer {
+        name: name.to_owned(),
+        status: status.to_owned(),
+        error: (status == "failed").then(|| "connection refused".to_owned()),
+        source: Some("project".to_owned()),
+    };
+    let mut state = thread_with(&[Cap::MCP_SERVERS]);
+    state.servers =
+        vec![server("github", "connected"), server("db", "failed"), server("old", "disabled")];
+    let counts = tray(&state, &[], &chat_of).counts;
+    let got = dock(&state, &counts, 0);
+    assert!(got.can.mcp_servers);
+    let rows: Vec<(&str, bool, bool)> =
+        got.servers.iter().map(|row| (row.name.as_str(), row.reconnects, row.disabled())).collect();
+    assert_eq!(rows, [("github", false, false), ("db", true, false), ("old", false, true)]);
+    assert_eq!(got.servers[1].error.as_deref(), Some("connection refused"));
+    assert!(
+        !dock(&thread_with(&[]), &counts, 0).can.mcp_servers,
+        "no control the agent cannot take"
+    );
+}

@@ -405,7 +405,7 @@ impl Shell {
     /// animated left inset, the toggle-changes button on git projects).
     pub(super) fn render_session_title_bar(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
-        // The canvas titles as NOTHING (user request — a "New session"
+        // The canvas titles as NOTHING (user request — a "New chat"
         // header over the empty canvas was noise); the bar keeps its height,
         // drag region, and buttons. Where a session runs, and its side-chat
         // and project actions, live in the session card.
