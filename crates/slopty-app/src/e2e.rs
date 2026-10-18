@@ -58,7 +58,7 @@ pub(crate) fn serve(
         // and every dump's frame can be judged (`Dump::stale`). The frame-time measurements
         // keep the motion they measure.
         if std::env::var_os("SLOPTY_E2E_MOTION").is_none() {
-            cx.update(|cx| cx.set_reduce_motion(true));
+            cx.update(|cx| slopty_shell::motion::hold(true, cx));
         }
         // The readouts show a local link's round trip, not the one a busy machine measured, so
         // a golden never carries live timing. The dump and the predictors keep the link's own.
