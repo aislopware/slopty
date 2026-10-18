@@ -1037,8 +1037,8 @@ fn pictures_go_by_paths_of_their_own() {
 /// or of a call that names no file, by its place among the call's pictures.
 #[test]
 fn a_picture_of_a_file_read_is_named_by_the_file() {
-    use slopty_proto::thread::detail::Clipped;
-    use slopty_proto::thread::{ContentRef, Image, ItemBody};
+    use slopty_proto::thread::detail::{Clipped, ReadDetail};
+    use slopty_proto::thread::{ContentRef, Image, ItemBody, ToolDetail};
     let picture = |n: u8| Image {
         digest: format!("{n:064x}"),
         media_type: "image/png".to_owned(),
@@ -1081,6 +1081,26 @@ fn a_picture_of_a_file_read_is_named_by_the_file() {
         ["Image 1"],
         "a folder names nothing"
     );
+    // Claude's read keeps its path in the detail and no input.
+    let mut state = fixtures::thread("tools");
+    let tool = state.items.iter_mut().find(|item| shown_call(&item.body)).expect("a tool call");
+    if let ItemBody::Tool(call) = &mut tool.body {
+        call.input = Clipped::default();
+        call.detail = Some(ToolDetail::Read(ReadDetail {
+            path: "/work/plot.png".to_owned(),
+            offset: None,
+            limit: None,
+            lines: None,
+            total_lines: None,
+        }));
+        call.images = vec![picture(1)];
+    }
+    let entries = transcript::entries(&state, &transcript::Look::new("w"));
+    let named = entries.iter().flat_map(|e| &e.parts).find_map(|part| match part {
+        MessagePart::Image { name, .. } => Some(name.as_str()),
+        _ => None,
+    });
+    assert_eq!(named, Some("plot.png"), "a read's path names its picture");
 }
 
 /// A visual a call showed is a part after the call once the call completed, going by a path of

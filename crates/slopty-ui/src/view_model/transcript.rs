@@ -161,11 +161,14 @@ pub fn image_path(thread: ThreadId, item: &str, index: usize, image: &Image) -> 
     format!("{IMAGE_SCHEME}{thread}/{item}/{index}/{digest}.{ext}")
 }
 
-/// slopty: the file a call read, by its last name (`file_path` or `path` in its input): what a
-/// picture it returned is called in the chat.
+/// slopty: the file a call read, by its last name (its read's path, else `file_path` or `path`
+/// in its input): what a picture it returned is called in the chat.
 fn image_file_name(call: &ToolCall) -> Option<String> {
-    let input: serde_json::Value = serde_json::from_str(&call.input.text).ok()?;
-    let path = ["file_path", "path"].iter().find_map(|key| input.get(*key)?.as_str())?;
+    let input: Option<serde_json::Value> = serde_json::from_str(&call.input.text).ok();
+    let path = match &call.detail {
+        Some(ToolDetail::Read(read)) => read.path.as_str(),
+        _ => ["file_path", "path"].iter().find_map(|key| input.as_ref()?.get(*key)?.as_str())?,
+    };
     let name = path.rsplit(['/', '\\']).next()?.trim();
     (!name.is_empty()).then(|| super::text::escaped(name))
 }
