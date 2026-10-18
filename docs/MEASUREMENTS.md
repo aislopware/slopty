@@ -17670,3 +17670,29 @@ later.
 SLOPTY_E2E_THREADS=1 cargo xtask remote --head --e2e app -E 'test(=liveness::link_with_datagrams_but_a_stalled_stream)'
 SLOPTY_E2E_THREADS=2 cargo xtask remote --head --e2e app -E 'test(=interface::a_rows_hover_card_names_where_it_runs) | test(=interface::the_files_toggles_tooltip_names_its_key_under_it)'
 ```
+
+## 2026-10-18 — the worker shard's tests wait on what they prove
+
+The worker shard is the gate's longest. Its slowest tests waited out the product's own clocks:
+the awake look's 5 s tick, the 10 s lease, repowatch's 3 s poll. Now the awake look follows the
+thread table (at most every 200 ms, the tick kept for silence), and the lease and the poll take
+a test-scale interval through their own config (`Host::set_lease_every`,
+`repowatch::Limits::poll`). Both runs are on this Mac in lane B's tree, `-p slopty-worker -p
+slopty-workerd`, nextest's land profile, with the other lanes building beside them. Each figure
+is one test's time:
+
+| test | HEAD 49b69414 | now |
+| --- | --- | --- |
+| `claude::a_live_thread_is_leased_and_not_after_its_process_ends` | 22.9 s | 3.4 s |
+| `threads::a_driven_turn_keeps_the_machine_awake_with_nobody_linked` | 22.6 s | 7.9 s |
+| `threads::a_turn_whose_agent_died_lets_the_machine_sleep` | 12.9 s | 3.0 s |
+| `repowatch::past_its_watches_a_repository_is_looked_at_and_says_nothing_idle` | 12.1 s | 1.7 s |
+| the four | 70.5 s | 16.0 s |
+| all 835 tests' time, the setup script left out | 560 s | 523 s |
+
+The awake turn still runs 5 s, because its release is the turn's end. Two tests still wait on a
+clock outside the worker's crates: `claude::a_claude_code_that_never_answers_initialize_…`
+(30.8 s, slopty-agent's `INIT_WAIT`) and `server_link::a_server_that_stops_answering_its_pings_…`
+(13.7–15.6 s, slopty-net's liveness on the spawned worker). `e2e::a_watched_repository_says_…`
+(24 s) times silence after each of about twenty changes and waits on fseventsd's starts. Those
+waits are what it proves, not a timeout.

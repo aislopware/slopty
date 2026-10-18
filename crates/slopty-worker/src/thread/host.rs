@@ -127,6 +127,8 @@ struct Inner {
     scheduling: Arc<tokio::sync::Notify>,
     /// The starts under way, as kept ([`Host::start_under_way`]).
     under_way: Vec<UnderWay>,
+    /// How often a lease stamps its thread ([`Host::set_lease_every`]).
+    lease_every: std::time::Duration,
 }
 
 /// A [`SeatEnv`], which shows as nothing more.
@@ -433,6 +435,7 @@ impl Host {
                 seat_env: None,
                 scheduling: Arc::default(),
                 under_way,
+                lease_every: LEASE_EVERY,
             })),
         };
         Ok(host)
@@ -1202,8 +1205,10 @@ fn apply(
     hosted.log.cursor()
 }
 
-/// How often a thread whose agent's process runs is stamped alive ([`Host::lease`]): well inside
-/// the time a client waits before it shows the turn as no longer known to run.
+/// How often a thread whose agent's process runs is stamped alive ([`Host::lease`]).
+///
+/// Well inside the time a client waits before it shows the turn as no longer known to run; a
+/// test sets its own ([`Host::set_lease_every`]).
 pub const LEASE_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// A thread stamped alive for as long as this is held ([`Host::lease`]).
@@ -1230,16 +1235,23 @@ impl Drop for Lease {
 }
 
 impl Host {
-    /// Stamp `thread` alive ([`Action::Lease`]) now and every [`LEASE_EVERY`] for as long as
-    /// the lease is held: its agent's process runs. Every drive holds one while its agent's
-    /// process lives and lets it go the moment the process is gone, before it tells the
+    /// Stamp every lease taken from now on each `every` instead of [`LEASE_EVERY`]: a test
+    /// that proves the stamps and their end waits on its own scale, not the client's.
+    pub fn set_lease_every(&self, every: std::time::Duration) {
+        self.inner.lock().lease_every = every;
+    }
+
+    /// Stamp `thread` alive ([`Action::Lease`]) now and every [`LEASE_EVERY`] (or as set) for
+    /// as long as the lease is held: its agent's process runs. Every drive holds one while its
+    /// agent's process lives and lets it go the moment the process is gone, before it tells the
     /// thread how it ended, so no stamp comes after the end.
     #[must_use]
     pub fn lease(&self, thread: ThreadId) -> Lease {
         let over = Arc::new(Mutex::new(false));
         let (host, ended) = (self.clone(), Arc::clone(&over));
+        let every = self.inner.lock().lease_every;
         let task = tokio::spawn(async move {
-            let mut every = tokio::time::interval(LEASE_EVERY);
+            let mut every = tokio::time::interval(every);
             every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 every.tick().await;

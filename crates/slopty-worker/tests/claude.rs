@@ -840,10 +840,15 @@ mod claude {
     }
 
     /// A live thread is stamped alive within 15 s while its Claude Code runs, idle or not,
-    /// and never once the process is gone.
+    /// and never once the process is gone. Its lease stamps every 500 ms rather than
+    /// [`LEASE_EVERY`]'s 10 s, so the stamp and the stamps it no longer makes come at once.
+    ///
+    /// [`LEASE_EVERY`]: slopty_worker::thread::host::LEASE_EVERY
     #[tokio::test]
     async fn a_live_thread_is_leased_and_not_after_its_process_ends() {
+        const EVERY: Duration = Duration::from_millis(500);
         let rig = Rig::new(&[]).await;
+        rig.host.set_lease_every(EVERY);
         let (claude, _served) = rig.serve();
         let thread = rig.started(&claude, "Say hello.").await;
         let state = rig.until(thread, "the first turn", turn_ended(1, TurnState::Complete)).await;
@@ -865,7 +870,8 @@ mod claude {
         kill(&rig.record());
         let state = rig.until(thread, "gone", exited).await;
         let last = state.lease_ms;
-        tokio::time::sleep(slopty_worker::thread::host::LEASE_EVERY + Duration::from_secs(2)).await;
+        // Four stamps' time: one would have come were the lease still held.
+        tokio::time::sleep(EVERY.saturating_mul(4)).await;
         let (state, _) = rig.host.state(thread).unwrap();
         assert_eq!(state.lease_ms, last, "no stamp after the process ended");
         assert_ne!(state.status.liveness, Liveness::Live);

@@ -20,7 +20,7 @@ mod follow {
     use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
 
-    use slopty_worker::repowatch::{HOLD, Limits, Moves, POLL, follow, follow_within};
+    use slopty_worker::repowatch::{HOLD, Limits, Moves, follow, follow_within};
     use tokio::sync::watch;
 
     /// A change is reported within this, or the watch is no use to a person looking at it.
@@ -318,28 +318,32 @@ mod follow {
         .await;
     }
 
-    /// Past the watches a repository may hold, it is looked at every [`POLL`] instead: still
-    /// one report as it is taken up, none while idle, and a change within a look.
+    /// Past the watches a repository may hold, it is looked at every [`Limits::poll`] instead:
+    /// still one report as it is taken up, none while idle, and a change within a look. It looks
+    /// every 300 ms, a tenth of [`POLL`], so the test waits a tenth as long.
+    ///
+    /// [`POLL`]: slopty_worker::repowatch::POLL
     #[tokio::test(flavor = "multi_thread")]
     async fn past_its_watches_a_repository_is_looked_at_and_says_nothing_idle() {
+        const LOOK: Duration = Duration::from_millis(300);
         let (_dir, repo) = repository();
         let (lists, rx) = watch::channel(Vec::new());
-        let mut moves = follow_within(rx, Limits { watches: 0 });
+        let mut moves = follow_within(rx, Limits { watches: 0, poll: LOOK });
         let mut status = moves.status();
         lists.send_replace(vec![key(&repo)]);
         let up = next(&mut moves, UP).await.expect("it is taken up and says so");
         assert_eq!(up, vec![key(&repo)]);
         status.wait_for(|s| s.polled == vec![key(&repo)]).await.unwrap();
         while next(&mut moves, HOLD * 2).await.is_some() {}
-        assert_eq!(next(&mut moves, POLL * 2 + HOLD).await, None, "idle: two looks, no report");
+        assert_eq!(next(&mut moves, LOOK * 2 + HOLD).await, None, "idle: two looks, no report");
         let at = Instant::now();
         std::fs::write(repo.join("src/deep/inner/mod.rs"), "// inner, edited\n").unwrap();
-        let said = next(&mut moves, POLL + PROMPT).await.expect("a look finds the edit");
+        let said = next(&mut moves, LOOK + PROMPT).await.expect("a look finds the edit");
         assert_eq!(said, vec![key(&repo)]);
         println!("MEASURE repowatch looked at: edit → report {:?}", at.elapsed());
         // Edited again: a file already modified, whose stamp is all that moves.
         std::fs::write(repo.join("src/deep/inner/mod.rs"), "// inner, edited twice\n").unwrap();
-        let said = next(&mut moves, POLL + PROMPT).await.expect("a look finds the second edit");
+        let said = next(&mut moves, LOOK + PROMPT).await.expect("a look finds the second edit");
         assert_eq!(said, vec![key(&repo)]);
     }
 }

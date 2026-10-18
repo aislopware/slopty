@@ -26,8 +26,8 @@
 //!
 //! Where events cannot say everything (a network or FUSE volume, `FSEvents` refusing a stream,
 //! inotify past its watches, [`Limits::watches`] or the kernel's, another system), the repository
-//! is looked at every [`POLL`] instead: its `git status` and the stamps of the files it names,
-//! reported only when they moved, so a client still asks nothing while nothing changes.
+//! is looked at every [`Limits::poll`] instead: its `git status` and the stamps of the files it
+//! names, reported only when they moved, so a client still asks nothing while nothing changes.
 //!
 //! A repository is where its folders are: its worktree's top and its git directory, each by
 //! path and by inode. One deleted, renamed or replaced (`rm -rf .git && git init`, a clone moved
@@ -69,20 +69,22 @@ pub const QUIET: Duration = Duration::from_millis(30);
 /// A build writing into a tracked folder asks for at most five statuses a second, and the
 /// client folds those it is still answering into one.
 pub const HOLD: Duration = Duration::from_millis(200);
-/// How often a repository the events cannot cover is looked at.
+/// How often a repository the events cannot cover is looked at, by default ([`Limits::poll`]).
 pub const POLL: Duration = Duration::from_secs(3);
 
 /// What one client's following may cost.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
     /// The kernel watches one repository may hold: a folder each for inotify, one stream for
-    /// `FSEvents`. A repository that needs more is looked at every [`POLL`] instead.
+    /// `FSEvents`. A repository that needs more is looked at every [`Self::poll`] instead.
     pub watches: usize,
+    /// How often a repository the events cannot cover is looked at.
+    pub poll: Duration,
 }
 
 impl Default for Limits {
     fn default() -> Self {
-        Self { watches: 65_536 }
+        Self { watches: 65_536, poll: POLL }
     }
 }
 
@@ -98,7 +100,7 @@ pub struct Status {
     pub outside: Vec<String>,
     /// The tops of the repositories followed, sorted.
     pub repos: Vec<String>,
-    /// Of those, the ones looked at every [`POLL`] instead of followed by events, sorted.
+    /// Of those, the ones looked at every [`Limits::poll`] instead of followed by events, sorted.
     pub polled: Vec<String>,
     /// Of those, the ones whose watch is up or which are looked at, sorted: a change before then
     /// is in the report a watch makes as it comes up.
@@ -487,7 +489,7 @@ impl Repo {
 #[derive(Debug, Default)]
 struct Heard {
     bursts: Mutex<HashMap<PathBuf, Burst>>,
-    /// Repositories whose events gave out: they are looked at every [`POLL`] from now on.
+    /// Repositories whose events gave out: they are looked at every [`Limits::poll`] from now on.
     gave_out: Mutex<Vec<PathBuf>>,
     /// Repositories whose watch came up.
     came_up: Mutex<Vec<PathBuf>>,
@@ -556,7 +558,7 @@ enum Source {
         /// Its watch, ended when dropped.
         _watch: backend::Watch,
     },
-    /// Looked at every [`POLL`]: what the last look saw.
+    /// Looked at every [`Limits::poll`]: what the last look saw.
     Polled(Option<u64>),
 }
 
@@ -590,7 +592,7 @@ struct Follower {
 
 impl Follower {
     async fn run(mut self) {
-        let mut poll = tokio::time::interval(POLL);
+        let mut poll = tokio::time::interval(self.limits.poll);
         poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         poll.reset();
         loop {
@@ -748,7 +750,7 @@ impl Follower {
     }
 
     /// Take what the watches said of themselves: the ones up, and the ones whose events gave
-    /// out, which are looked at every [`POLL`] from now on.
+    /// out, which are looked at every [`Limits::poll`] from now on.
     fn news(&mut self) {
         let came_up = std::mem::take(&mut *self.heard.came_up.lock());
         let gave_out = std::mem::take(&mut *self.heard.gave_out.lock());

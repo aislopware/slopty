@@ -1448,8 +1448,9 @@ mod threads {
         let root = std::fs::canonicalize(dir.path()).unwrap();
         let (daemons, _record) = with_claude(&root).await;
         let mut a = Client::connect(&daemons, ClientId::new()).await;
-        // Seventy-five deltas 200 ms apart: fifteen seconds of a turn.
-        let thread = started(&mut a, claude_in(&root, Some("slow 75"))).await;
+        // Twenty-five deltas 200 ms apart: five seconds of a turn, held from its start and let
+        // go at its end, each a change of the thread's table the worker looks over at once.
+        let thread = started(&mut a, claude_in(&root, Some("slow 25"))).await;
         a.follow(thread).await;
         a.until(|c| c.thread.as_ref().is_some_and(|s| !s.items.is_empty())).await;
         a.leave().await;
@@ -1483,14 +1484,17 @@ mod threads {
         })
         .await;
         a.leave().await;
-        // Two ticks: the sample after the exit has been taken.
-        tokio::time::sleep(TWO_TICKS).await;
+        // Let go within two ticks of the exit, at the latest: the exit changes the thread's table,
+        // which the worker looks over at once.
+        let let_go =
+            |w: &slopty_proto::ctl::Awake| (w.clients, w.agents, w.system) == (0, 0, false);
+        let released = tokio::time::timeout(TWO_TICKS, awake_until(&daemons, let_go)).await;
         let now = awake(&daemons).await;
-        assert_eq!((now.clients, now.agents, now.system), (0, 0, false), "{now:?}");
+        assert!(released.is_ok(), "{now:?}");
     }
 
-    /// How often the worker looks its threads over for the sleep policy (`TICK` of the
-    /// daemon's `threads::awake`, private to its crate), twice: the sample after a change has
-    /// surely been taken by then.
+    /// How often the worker looks its threads over with nothing changed (`TICK` of the daemon's
+    /// `threads::awake`, private to its crate), twice: the latest a sample after a change is
+    /// taken, though a change of the threads' table is looked at at once.
     const TWO_TICKS: Duration = Duration::from_secs(10);
 }

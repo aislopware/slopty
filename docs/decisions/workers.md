@@ -1581,8 +1581,11 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   agents seen in terminals, whose Working came from the spinner Claude Code paints into the
   title. Since a0091d20 every Claude Code is `claude -p` with no terminal and no title, so an
   unattended worker (a phone pocketed, a laptop lid closed) could sleep mid-turn.
-  - **What counts.** Every 5 s (`threads::awake::TICK`; idle sleep comes after minutes) the
-    daemon looks the thread host over. A thread counts while it is `Working`, or `Waiting` on
+  - **What counts.** The daemon looks the thread host over as its table changes (a turn
+    begins or ends, a process goes), at most every 200 ms (`threads::awake::GAP`), and every
+    5 s besides (`TICK`) for a silence only time shows. Looking on the change (2026-10-18)
+    holds a turn from its start and lets one go as it ends, not up to a tick later, so the
+    tests of it wait on the change, not on ticks. A thread counts while it is `Working`, or `Waiting` on
     its own background work, with its agent's process live (`wake::signs`). One that waits on
     the person, rests, or whose process ended holds nothing. Every adapter counts the same
     way: Claude Code, Codex, pi and ACP.
