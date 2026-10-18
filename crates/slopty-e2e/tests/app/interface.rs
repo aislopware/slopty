@@ -98,6 +98,38 @@ fn labelled<'a>(dump: &'a slopty_e2e::Dump, words: &str) -> Option<&'a slopty_e2
     dump.a11y.iter().find(|n| n.label.as_deref().is_some_and(|label| label.contains(words)))
 }
 
+/// Rest the pointer on the point `at` names once it stands still (the same in two dumps
+/// running), until `shown` holds. A control that moves from under a resting pointer while the
+/// window settles loses its hover and its dwell, so the pointer follows it to where it now
+/// stands; the dump that shows it is returned.
+async fn rest_on(
+    drv: &mut slopty_e2e::Driver,
+    what: &str,
+    at: impl Fn(&slopty_e2e::Dump) -> Option<(f32, f32)>,
+    shown: impl Fn(&slopty_e2e::Dump) -> bool,
+) -> slopty_e2e::Dump {
+    let since = std::time::Instant::now();
+    loop {
+        let mut last = None;
+        let still = drv
+            .wait_for(&format!("{what} standing still"), STEP, |d| {
+                let now = at(d);
+                let same = now.is_some() && now == last;
+                last = now;
+                same
+            })
+            .await
+            .unwrap();
+        let point = at(&still).expect("found above");
+        drv.ok(&Command::Move { x: point.0, y: point.1 }).await.unwrap();
+        let dump = drv.wait_for(what, STEP, |d| shown(d) || at(d) != Some(point)).await.unwrap();
+        if shown(&dump) {
+            return dump;
+        }
+        assert!(since.elapsed() < STEP.saturating_mul(2), "{what}: the control never stood still");
+    }
+}
+
 /// The palette's Threads tab finds a thread by its agent's words, which no title holds: its row
 /// says who said them.
 #[tokio::test]
@@ -308,36 +340,150 @@ async fn the_server_menu_offers_devices_and_a_server_change() {
     stack.shutdown().await;
 }
 
-/// Resting on a thread's row shows its card: where it runs (its project and machine), its
-/// folder, its agent, and how long it has stood as it is.
+/// Resting on a thread's row floats zeron's session card out beside it: where it runs (its
+/// project and machine), how long it has stood as it is, and its agent; a press puts it away.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
 async fn a_rows_hover_card_names_where_it_runs() {
     let mut stack = agent_stack().await;
-    let repo = stack.path("repo");
     let drv = &mut stack.driver;
     drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
-    let shown =
-        drv.wait_for("the thread's row", STEP, |d| labelled(d, PROMPT).is_some()).await.unwrap();
     // The row's title, the leftmost node holding the prompt's words (the sidebar's).
-    let title = shown
-        .a11y
+    let title_of = |d: &slopty_e2e::Dump| {
+        d.a11y
+            .iter()
+            .filter(|n| n.label.as_deref().is_some_and(|label| label.contains(PROMPT)))
+            .min_by(|a, b| a.bounds[0].total_cmp(&b.bounds[0]))
+            .map(|n| n.bounds)
+    };
+    let card = rest_on(
+        drv,
+        "the hover card",
+        |d| title_of(d).map(|t| (t[0] + 4.0, t[1] + t[3] / 2.0)),
+        |d| d.a11y_node("Tooltip", None).is_some(),
+    )
+    .await;
+    let title = title_of(&card).unwrap();
+    let node = card.a11y_node("Tooltip", None).unwrap();
+    let words = format!(
+        "{} {}",
+        node.label.as_deref().unwrap_or_default(),
+        node.value.as_deref().unwrap_or_default()
+    );
+    assert!(words.contains(PROMPT), "its title: {words}");
+    assert!(words.contains(&format!("@ {MACHINE}")), "where it runs: {words}");
+    assert!(words.contains("Done") || words.contains("Active"), "its age: {words}");
+    let [card_x, card_y, _, card_h] = node.bounds;
+    println!("MEASURE hover card at {card_x:.0},{card_y:.0}, {card_h:.0} tall; row {title:?}");
+    assert!(card_x > title[0] + title[2], "beside the row, not over it: {card_x} vs {title:?}");
+    assert!(card_h >= 60.0, "whole: {card_h}");
+    // A press on the row has the pointer's intent: the card goes.
+    drv.click(title[0] + 4.0, title[1] + title[3] / 2.0).await.unwrap();
+    drv.wait_for("the card gone", STEP, |d| d.a11y_node("Tooltip", None).is_none()).await.unwrap();
+    stack.shutdown().await;
+}
+
+/// The sidebar's sections as this device's interface settings keep them for its local workspace
+/// (`interface/ui-settings.json`, `sidebarSectionsByProfile.local`), in the light opaque
+/// interface the harness pins.
+fn sidebar_sections(names: &[&str]) -> serde_json::Value {
+    let sections: Vec<serde_json::Value> = names
         .iter()
-        .filter(|n| n.label.as_deref().is_some_and(|label| label.contains(PROMPT)))
-        .min_by(|a, b| a.bounds[0].total_cmp(&b.bounds[0]))
-        .unwrap()
-        .bounds;
-    drv.ok(&Command::Move { x: title[0] + 4.0, y: title[1] + title[3] / 2.0 }).await.unwrap();
-    let card = drv
-        .wait_for("the hover card", STEP, |d| d.a11y_node("Tooltip", None).is_some())
+        .map(|name| {
+            serde_json::json!({
+                "id": format!("s-{}", name.to_lowercase()),
+                "name": name,
+                "session_ids": [],
+                "collapsed": false
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "appearance": "light",
+        "surface": "opaque",
+        "sidebarSectionsByProfile": { "local": sections }
+    })
+}
+
+/// The section names in `settings`' local workspace, in their order.
+fn kept_order(settings: &str) -> Vec<String> {
+    serde_json::from_str::<serde_json::Value>(settings)
+        .ok()
+        .and_then(|v| v["sidebarSectionsByProfile"]["local"].as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|s| s["name"].as_str().map(str::to_owned))
+        .collect()
+}
+
+/// A section's header, named by the section.
+fn section_header<'a>(dump: &'a slopty_e2e::Dump, name: &str) -> Option<&'a slopty_e2e::A11yNode> {
+    dump.a11y.iter().find(|n| n.role == "Button" && n.label.as_deref() == Some(name))
+}
+
+/// Dragging a section by its header moves it among the others: the last lifted above the first
+/// lands first, and the order is kept for the next launch.
+#[tokio::test]
+#[ignore = "live: cargo xtask e2e app"]
+async fn a_section_dragged_by_its_header_keeps_its_place() {
+    let mut stack = slopty_e2e::harness::ServedApp::launch_rooted("e2e-sections", &[], |root| {
+        let interface = root.join("app").join("interface");
+        std::fs::create_dir_all(&interface).unwrap();
+        let state = sidebar_sections(&["Alpha", "Beta", "Gamma"]);
+        std::fs::write(interface.join("ui-settings.json"), state.to_string()).unwrap();
+        Vec::new()
+    })
+    .await
+    .unwrap();
+    let kept = stack.path("app").join("interface").join("ui-settings.json");
+    let drv = &mut stack.driver;
+    drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
+    let shown = drv
+        .wait_for("the three sections", STEP, |d| {
+            ["Alpha", "Beta", "Gamma"].iter().all(|name| section_header(d, name).is_some())
+        })
         .await
         .unwrap();
-    let words = slopty_e2e::frame_text(&card.a11y);
-    assert!(words.contains(&format!("@ {MACHINE}")), "where it runs: {words}");
-    assert!(words.contains("repo"), "its folder {}: {words}", repo.display());
-    assert!(words.contains("Done") || words.contains("Active"), "its age: {words}");
-    let [_, card_y, _, card_h] = card.a11y_node("Tooltip", None).unwrap().bounds;
-    assert!(card_h >= 60.0 && card_y >= title[1], "under the pointer, whole: {card_y} {card_h}");
+    let top = |dump: &slopty_e2e::Dump, name: &str| section_header(dump, name).unwrap().bounds[1];
+    assert!(
+        top(&shown, "Alpha") < top(&shown, "Beta") && top(&shown, "Beta") < top(&shown, "Gamma")
+    );
+    let [gx, gy, gw, gh] = section_header(&shown, "Gamma").unwrap().bounds;
+    let [_, ay, _, _] = section_header(&shown, "Alpha").unwrap().bounds;
+    let (x, from) = (gx + gw / 3.0, gy + gh / 2.0);
+    // Lift Gamma and carry it, a step at a time, above Alpha.
+    drv.press(x, from).await.unwrap();
+    let to = ay - 4.0;
+    for step in 1..=8_u8 {
+        let y = from + (to - from) * f32::from(step) / 8.0;
+        drv.drag_to(x, y).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    }
+    drv.release(x, to).await.unwrap();
+    let moved = drv
+        .wait_for("Gamma first", STEP, |d| {
+            ["Alpha", "Beta", "Gamma"].iter().all(|name| section_header(d, name).is_some())
+                && top(d, "Gamma") < top(d, "Alpha")
+                && top(d, "Alpha") < top(d, "Beta")
+        })
+        .await
+        .unwrap();
+    println!(
+        "MEASURE sections after the drag: Gamma {:.0}, Alpha {:.0}, Beta {:.0}",
+        top(&moved, "Gamma"),
+        top(&moved, "Alpha"),
+        top(&moved, "Beta")
+    );
+    // The order is kept on disk, as the next launch reads it.
+    let started = std::time::Instant::now();
+    let order = loop {
+        let order = kept_order(&std::fs::read_to_string(&kept).unwrap_or_default());
+        if order == ["Gamma", "Alpha", "Beta"] || started.elapsed() > STEP {
+            break order;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    };
+    assert_eq!(order, ["Gamma", "Alpha", "Beta"], "kept as dragged");
     stack.shutdown().await;
 }
 
@@ -594,14 +740,14 @@ async fn the_files_toggles_tooltip_names_its_key_under_it() {
             .find(|n| n.role == "Button" && n.label.as_deref() == Some("Show files panel"))
             .map(|n| n.bounds)
     };
-    let shown = drv.wait_for("the files toggle", STEP, |d| toggle(d).is_some()).await.unwrap();
-    let [x, y, w, h] = toggle(&shown).unwrap();
+    // The chat's reply is in: its titlebar has every control it will have.
+    let middle = |d: &slopty_e2e::Dump| {
+        labelled(d, &format!("Done: {PROMPT}"))?;
+        toggle(d).map(|[x, y, w, h]| (x + w / 2.0, y + h / 2.0))
+    };
+    let tip = rest_on(drv, "its tooltip", middle, |d| d.a11y_node("Tooltip", None).is_some()).await;
+    let [x, y, w, h] = toggle(&tip).unwrap();
     let pointer = (x + w / 2.0, y + h / 2.0);
-    drv.ok(&Command::Move { x: pointer.0, y: pointer.1 }).await.unwrap();
-    let tip = drv
-        .wait_for("its tooltip", STEP, |d| d.a11y_node("Tooltip", None).is_some())
-        .await
-        .unwrap();
     let words = slopty_e2e::frame_text(&tip.a11y);
     assert!(words.contains("Show files panel") && words.contains("⌘E"), "{words}");
     let [tx, ty, tw, _] = tip.a11y_node("Tooltip", None).unwrap().bounds;
