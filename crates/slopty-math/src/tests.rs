@@ -463,13 +463,8 @@ fn nested_middle_is_bounded() {
     // linear work, not 2^31.
     let n = 31;
     let src = "\\left.".repeat(n) + &"\\middle.\\right.".repeat(n);
-    let started = std::time::Instant::now();
     assert!(layout(&src, stix(), &Options::default()).is_ok());
-    assert!(
-        started.elapsed().as_millis() < 50,
-        "{:?}",
-        started.elapsed()
-    );
+    assert_linear(&src, "nesting to the depth limit"); // slopty: see `fastest`.
     let honest = "\\left(".repeat(8) + "x" + &"\\middle| y \\right)".repeat(8);
     assert!(layout(&honest, stix(), &Options::default()).is_ok());
 }
@@ -489,6 +484,32 @@ fn missing_glyphs_point_at_their_source() {
     assert_eq!(&src[e.range.clone()], "\u{378}");
 }
 
+// slopty: a layout's time is judged against plain text of the same length laid out at the same
+// moment, fastest of five each, not against a wall-clock bound: on a loaded gate runner a linear
+// layout took 272 ms against a fixed 250 ms. Superlinear work still shows as a ratio far past
+// the bound; a uniformly slow machine no longer does.
+fn fastest(src: &str) -> std::time::Duration {
+    (0..5)
+        .map(|_| {
+            let started = std::time::Instant::now();
+            let _ = layout(src, stix(), &Options::default());
+            started.elapsed()
+        })
+        .min()
+        .unwrap()
+}
+
+// slopty: see `fastest`.
+#[track_caller]
+fn assert_linear(src: &str, what: &str) {
+    let plain = format!("\\text{{{}}}", "x".repeat(src.len().saturating_sub(7)));
+    let (took, base) = (fastest(src), fastest(&plain));
+    assert!(
+        took <= base * 8 + std::time::Duration::from_millis(5),
+        "{what}: {took:?}, plain text of its length {base:?}"
+    );
+}
+
 /// The reviewer's reproducer: `\middle` nesting around a long `\text`.
 #[test]
 fn nested_middle_with_text_stays_fast() {
@@ -500,33 +521,19 @@ fn nested_middle_with_text_stays_fast() {
             "x".repeat(fill),
             "\\right.".repeat(d)
         );
-        let started = std::time::Instant::now();
-        let _ = layout(&src, stix(), &Options::default());
-        let took = started.elapsed();
-        assert!(took.as_millis() < 250, "d={d}: {took:?}");
+        assert_linear(&src, &format!("d={d}")); // slopty: see `fastest`.
     }
     // `\middle` bodies are laid out once: deep honest nesting costs linear work.
     let honest = "\\left(".repeat(30) + "x" + &"\\middle| y \\right)".repeat(30);
-    let started = std::time::Instant::now();
     assert!(layout(&honest, stix(), &Options::default()).is_ok());
-    assert!(
-        started.elapsed().as_millis() < 50,
-        "{:?}",
-        started.elapsed()
-    );
+    assert_linear(&honest, "honest nesting"); // slopty: see `fastest`.
 }
 
 #[test]
 fn empty_cells_and_parts_count_as_work() {
     // 16 KB of empty cells: bounded by the work budget, never a hang.
     let src = format!("\\begin{{matrix}}{}\\end{{matrix}}", "&".repeat(16_000));
-    let started = std::time::Instant::now();
-    let _ = layout(&src, stix(), &Options::default());
-    assert!(
-        started.elapsed().as_millis() < 250,
-        "{:?}",
-        started.elapsed()
-    );
+    assert_linear(&src, "16 KB of empty cells"); // slopty: see `fastest`.
 }
 
 #[test]
