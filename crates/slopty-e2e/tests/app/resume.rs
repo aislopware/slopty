@@ -24,6 +24,10 @@ fn links(d: &Dump) -> u64 {
     d.workers.first().map_or(0, |w| w.links)
 }
 
+fn doubts(d: &Dump) -> u64 {
+    d.workers.first().map_or(0, |w| w.doubts)
+}
+
 fn status(d: &Dump) -> &str {
     d.workers.first().map_or("", |w| w.status.as_str())
 }
@@ -36,15 +40,14 @@ fn live_after(d: &Dump, seen: u64) -> bool {
 }
 
 /// Time from `since` to the first live row after `seen` links, and whether the tiles were set
-/// back on the way (the worker's status in doubt).
-async fn until_live(drv: &mut Driver, seen: u64, since: Instant) -> (Duration, bool) {
-    let mut doubted = false;
+/// back on the way: the app's own count of its doubts moved past `before`, so a doubt shorter
+/// than a look (a starved machine's dumps come seconds apart) is not missed.
+async fn until_live(drv: &mut Driver, seen: u64, before: u64, since: Instant) -> (Duration, bool) {
     let deadline = since.checked_add(STEP).unwrap();
     loop {
         let d = drv.dump().await.unwrap();
-        doubted |= matches!(status(&d), "checking…" | "reconnecting…");
         if live_after(&d, seen) {
-            return (since.elapsed(), doubted);
+            return (since.elapsed(), doubts(&d) > before);
         }
         assert!(Instant::now() < deadline, "never live again; last state:\n{d:#?}");
         tokio::time::sleep(QUICK).await;
@@ -86,9 +89,9 @@ async fn a_resume_brings_a_dead_link_back_at_once() {
     // The link dies with nothing said: only its silence tells.
     let mut silent = Vec::with_capacity(SILENT);
     for _ in 0..SILENT {
-        let seen = links(&drv.dump().await.unwrap());
+        let d = drv.dump().await.unwrap();
         cut.cut();
-        let (took, _doubted) = until_live(drv, seen, Instant::now()).await;
+        let (took, _doubted) = until_live(drv, links(&d), doubts(&d), Instant::now()).await;
         silent.push(took);
     }
 
@@ -96,11 +99,11 @@ async fn a_resume_brings_a_dead_link_back_at_once() {
     // moving.
     let mut resumed = Vec::with_capacity(RESUMED);
     for (n, what) in ["woke", "path-changed"].iter().cycle().take(RESUMED).enumerate() {
-        let seen = links(&drv.dump().await.unwrap());
+        let d = drv.dump().await.unwrap();
         cut.cut();
         let since = Instant::now();
         drv.ok(&Command::Resume { what: (*what).into() }).await.unwrap();
-        let (took, doubted) = until_live(drv, seen, since).await;
+        let (took, doubted) = until_live(drv, links(&d), doubts(&d), since).await;
         assert!(doubted, "death {n} ({what}): the tiles were set back while it relinked");
         resumed.push(took);
     }

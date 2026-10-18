@@ -65,6 +65,10 @@ pub(crate) fn serve(
         workspace.update(cx, |ws, cx| {
             ws.view.update(cx, |view, cx| view.pin_rtt_readout(Some(slopty_e2e::SHOWN_RTT), cx));
         });
+        #[cfg(target_os = "macos")]
+        let _pointer = cx.update_window(window, |_root, window, cx| {
+            workspace.update(cx, |_ws, cx| pointer::keep(window, cx));
+        });
         while let Some((command, reply)) = rx.recv().await {
             let answer = match command {
                 Command::Render { path, scale } => {
@@ -571,6 +575,8 @@ fn apply(
     window: &mut Window,
     cx: &mut App,
 ) -> Reply {
+    #[cfg(target_os = "macos")]
+    pointer::driven(&command, cx);
     match command {
         Command::Ping => Reply::Ok,
         Command::OpenLink { url } => {
@@ -778,6 +784,7 @@ fn apply(
         }
         Command::FramesReset => {
             slopty_kit::frames::reset(cx);
+            cx.set_global(CpuAtReset(slopty_platform::cpu::this_thread().unwrap_or_default()));
             Reply::Ok
         }
         Command::ForgetWorker { id } => {
@@ -972,7 +979,7 @@ fn render(_window: &mut Window, _cx: &mut App, _path: &str, _scale: Option<f32>)
 /// frame here, so every other frame of a run is drawn as a person's would be.
 #[cfg(feature = "e2e")]
 fn dump(workspace: &Entity<Workspace>, window: &mut Window, cx: &mut App) -> Dump {
-    let frames = frame_info(slopty_kit::frames::stats(cx));
+    let frames = frame_info(cx);
     window.draw(cx).clear(cx);
     let stale = stale(window, cx);
     window.set_a11y_active(true);
@@ -1086,10 +1093,21 @@ fn screen_info(item: ItemId, view: &ScreenView, window: &Window) -> ScreenInfo {
     }
 }
 
-/// The frame probe's numbers, microseconds.
-fn frame_info(stats: Option<slopty_kit::frames::FrameStats>) -> FrameInfo {
+/// The main thread's CPU time when the frame probe was last reset ([`Command::FramesReset`]).
+struct CpuAtReset(std::time::Duration);
+
+impl gpui::Global for CpuAtReset {}
+
+/// The frame probe's numbers, and the main thread's CPU time since its reset, microseconds. The
+/// commands run on the main thread, so its clock is the one read here.
+fn frame_info(cx: &App) -> FrameInfo {
     let us = |d: std::time::Duration| u64::try_from(d.as_micros()).unwrap_or(u64::MAX);
+    let since = cx.try_global::<CpuAtReset>().map_or(std::time::Duration::ZERO, |at| at.0);
+    let main_cpu_us =
+        slopty_platform::cpu::this_thread().map_or(0, |now| us(now.saturating_sub(since)));
+    let stats = slopty_kit::frames::stats(cx);
     stats.map_or_else(FrameInfo::default, |s| FrameInfo {
+        main_cpu_us,
         frames: s.frames,
         over_budget: s.over_budget,
         dropped: s.dropped,
@@ -1140,6 +1158,7 @@ impl Workspace {
                 rtt_us: view.rtt(key).map(|d| u64::try_from(d.as_micros()).unwrap_or(u64::MAX)),
                 clipboard_watched: watching.contains(&key),
                 links: view.links(key),
+                doubts: view.doubts(key),
             })
             .collect();
         let status = if workers.is_empty() {
@@ -1162,7 +1181,7 @@ impl Workspace {
             workers,
             status,
             dark: self.theme.variant() == slopty_theme::Variant::Dark,
-            frames: frame_info(slopty_kit::frames::stats(cx)),
+            frames: frame_info(cx),
             pointer: cfg!(all(target_os = "ios", feature = "e2e")).then(pointer_look),
             natives: window.presented_natives().map_or(0, |frame| frame.placements.len()),
             native_hits: window
@@ -1284,5 +1303,83 @@ fn face_info(m: &slopty_terminal::CellMetrics) -> FaceInfo {
         line_gap: f.line_gap as f32,
         underline_position: f.underline_position.map(|v| v as f32),
         underline_thickness: f.underline_thickness.map(|v| v as f32),
+    }
+}
+
+/// The driver's pointer, which the driver alone moves.
+///
+/// The driver's moves are synthetic events: they set GPUI's `mouse_position` and nothing else,
+/// and the real cursor stays wherever it is, outside the window. GPUI takes the real cursor's
+/// position back on every resize, move and activation change (`Window::bounds_changed`), so
+/// another app taking the front (another test's, in the e2e guest) moved the pointer off the
+/// control the driver rests on, and its hover and tooltip went (`docs/decisions/tooling.md`,
+/// "The e2e driver owns the pointer"). The pointer is put back where the driver left it, before
+/// the frame the change asks for.
+#[cfg(target_os = "macos")]
+mod pointer {
+    use gpui::{
+        App, Context, Modifiers, MouseButton, MouseMoveEvent, Pixels, PlatformInput, Point, Window,
+    };
+    use slopty_e2e::Command;
+
+    use crate::Workspace;
+
+    /// Where the driver last put the pointer, and whether a button is held there.
+    #[derive(Clone, Copy, Debug)]
+    struct Kept {
+        at: Point<Pixels>,
+        pressed: bool,
+    }
+
+    struct Pointer(Option<Kept>);
+
+    impl gpui::Global for Pointer {}
+
+    /// Put the pointer back where the driver left it whenever the window's bounds change, for as
+    /// long as the app runs.
+    pub(super) fn keep(window: &mut Window, cx: &mut Context<Workspace>) {
+        cx.set_global(Pointer(None));
+        cx.observe_window_bounds(window, |_ws, window, cx| {
+            let Some(kept) = cx.try_global::<Pointer>().and_then(|p| p.0) else { return };
+            if window.mouse_position() == kept.at {
+                return;
+            }
+            tracing::debug!(from = ?window.mouse_position(), to = ?kept.at, "the driver's pointer put back");
+            // The workspace is leased here: the move goes once the change's effects have run,
+            // before the frame it asked for.
+            window.defer(cx, move |window, cx| {
+                let _moved = window.dispatch_event(
+                    PlatformInput::MouseMove(MouseMoveEvent {
+                        position: kept.at,
+                        pressed_button: kept.pressed.then_some(MouseButton::Left),
+                        modifiers: Modifiers::default(),
+                    }),
+                    cx,
+                );
+            });
+        })
+        .detach();
+    }
+
+    /// Keep where `command` puts the pointer.
+    pub(super) fn driven(command: &Command, cx: &mut App) {
+        let kept = cx.try_global::<Pointer>().and_then(|p| p.0);
+        let at = |x: f32, y: f32| gpui::point(gpui::px(x), gpui::px(y));
+        let next = match *command {
+            Command::Move { x, y } | Command::Release { x, y } | Command::Click { x, y, .. } => {
+                Some(Kept { at: at(x, y), pressed: false })
+            }
+            Command::Drag { to_x, to_y, .. } => Some(Kept { at: at(to_x, to_y), pressed: false }),
+            Command::DragTo { x, y } | Command::Press { x, y } => {
+                Some(Kept { at: at(x, y), pressed: true })
+            }
+            Command::Scroll { x, y, .. } => {
+                Some(Kept { at: at(x, y), pressed: kept.is_some_and(|k| k.pressed) })
+            }
+            _ => kept,
+        };
+        if cx.has_global::<Pointer>() {
+            cx.set_global(Pointer(next));
+        }
     }
 }

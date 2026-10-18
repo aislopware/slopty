@@ -225,6 +225,13 @@ impl WorkerStatus {
     pub const fn is_up(&self) -> bool {
         matches!(self, Self::Connected | Self::Checking)
     }
+
+    /// Whether going from `self` to `next` sets the worker's tiles back: its link put in doubt,
+    /// checked or dialled again behind them.
+    #[must_use]
+    pub fn doubts(&self, next: &Self) -> bool {
+        matches!(next, Self::Checking | Self::Relinking) && self != next
+    }
 }
 
 /// A live connection to one worker: who this client is there and where its messages go.
@@ -259,6 +266,9 @@ struct Worker {
     away_since: Option<Duration>,
     /// How many links have come up to it: the self-test's proof that a relink landed.
     links: u64,
+    /// How many times its tiles were set back, the link in doubt ([`WorkerStatus::doubts`]): the
+    /// self-test's proof that they were, which a look at the status can miss.
+    doubts: u64,
     doc: ItemDoc,
     sessions: HashMap<SessionId, SessionSummary>,
     rtt: Option<Duration>,
@@ -325,6 +335,7 @@ impl Worker {
             outbox: None,
             away_since: None,
             links: 0,
+            doubts: 0,
             doc: ItemDoc::default(),
             sessions: HashMap::new(),
             rtt: None,
@@ -635,6 +646,13 @@ impl WorkspaceView {
     #[must_use]
     pub fn links(&self, worker: WorkerKey) -> u64 {
         self.workers.get(&worker).map_or(0, |w| w.links)
+    }
+
+    /// How many times `worker`'s tiles were set back since the app started: its link checked
+    /// or dialled again behind them ([`WorkerStatus::doubts`]).
+    #[must_use]
+    pub fn doubts(&self, worker: WorkerKey) -> u64 {
+        self.workers.get(&worker).map_or(0, |w| w.doubts)
     }
 
     /// The badge a session's last long command left, if the tile has not been looked at since.

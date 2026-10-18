@@ -24,6 +24,8 @@ pub mod asked_size;
 #[cfg(target_os = "macos")]
 pub mod away;
 pub mod continued;
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+pub mod cpu;
 #[cfg(target_os = "macos")]
 pub mod curtain;
 pub mod dirs;

@@ -2557,3 +2557,20 @@ more full-window layer.
   Tests: `gate::tests::the_cargo_cache_is_keyed_by_the_lock_and_saved_by_the_tools_lane`,
   `gate::tests::every_mac_job_turns_spotlight_off_first`, `health::tests::a_red_counts_against_its_lane`
   and `health::tests::a_check_s_e2e_part_is_its_guest_run` (`xtask`).
+- ✅ **The e2e driver owns the pointer** (2026-10-18). The app's tests run in the guest beside
+  each other's apps, in one login session, while the real cursor stays outside every window. The
+  driver's moves are synthetic events, which only set GPUI's `mouse_position`. GPUI takes the
+  real cursor's position back on every resize, move and activation change
+  (`Window::bounds_changed`). So when another test's app took the front, the pointer jumped from
+  the control the driver rested on to (10, −20), outside the window. The hover and the tooltip
+  went before the next render, and `the_files_toggles_tooltip_names_its_key_under_it` lost its
+  tooltip between the light render and the dark one whenever another app ran beside it. A probe
+  logged the change: the bounds observer fired with the window inactive and the pointer at
+  (10, −20). Every other command and observer kept the pointer where the driver left it.
+  - The driver keeps where its last move, click, press, drag or scroll put the pointer, and
+    whether a button is held. When the bounds change, it moves the pointer back there before
+    the frame the change asks for. A person's pointer is the real one, so nothing outside the
+    e2e build changes (`crates/slopty-app/src/e2e.rs`, `pointer`).
+  - It was reproduced on purpose, not by rerunning the suite: the hover pair with
+    `SLOPTY_E2E_THREADS=2` lost the tooltip every time, and each test alone kept it, at 15 % of
+    the VM's CPU too.

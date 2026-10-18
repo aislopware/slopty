@@ -120,6 +120,7 @@ impl WorkspaceView {
         let unanswered = w.fs_ops.lost();
         let said: Vec<String> =
             unanswered.iter().map(|op| slopty_client::folders::unanswered(&w.name, op)).collect();
+        w.doubts = w.doubts.saturating_add(u64::from(w.status.doubts(&status)));
         w.status = status;
         w.away_since.get_or_insert(now);
         w.link = None;
@@ -181,6 +182,7 @@ impl WorkspaceView {
         if let Some(w) = self.workers.get_mut(&key)
             && w.status != status
         {
+            w.doubts = w.doubts.saturating_add(u64::from(w.status.doubts(&status)));
             w.status = status;
             cx.notify();
         }

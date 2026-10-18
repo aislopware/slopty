@@ -670,6 +670,11 @@ pub struct FrameInfo {
     pub interval_p99_us: u64,
     /// The display period the counters are measured against.
     pub nominal_us: u64,
+    /// The CPU time the app's main thread spent since the last reset, drawing and handling what
+    /// came between the draws: what the frames cost, which a loaded machine does not stretch
+    /// as it stretches their wall time.
+    #[serde(default)]
+    pub main_cpu_us: u64,
 }
 
 impl FrameInfo {
@@ -778,6 +783,10 @@ pub struct WorkerInfo {
     /// How many links have come up to it since the app started: a relink shows here.
     #[serde(default)]
     pub links: u64,
+    /// How many times its tiles were set back since the app started, its link in doubt (being
+    /// checked, or dialled again behind them): a doubt too brief for a look to catch shows here.
+    #[serde(default)]
+    pub doubts: u64,
 }
 
 /// One tile.

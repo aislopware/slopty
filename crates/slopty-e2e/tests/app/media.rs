@@ -565,8 +565,8 @@ fn is_card(n: &A11yNode) -> bool {
 }
 
 /// Scroll the open chat to its top (where `first` reads), then down 40 steps and back up,
-/// reading the frame probe: draw p95 and the frames drawn.
-async fn scrolled(drv: &mut slopty_e2e::Driver, first: &str) -> (u64, u64) {
+/// reading the frame probe.
+async fn scrolled(drv: &mut slopty_e2e::Driver, first: &str) -> slopty_e2e::FrameInfo {
     let (x, y) = SCROLL_AT;
     for _ in 0..30 {
         drv.scroll(x, y, 0.0, 400.0).await.unwrap();
@@ -579,14 +579,41 @@ async fn scrolled(drv: &mut slopty_e2e::Driver, first: &str) -> (u64, u64) {
         tokio::time::sleep(Duration::from_millis(16)).await;
     }
     tokio::time::sleep(Duration::from_millis(300)).await;
-    let frames = drv.dump().await.unwrap().frames;
-    (frames.draw_p95_us, frames.frames)
+    drv.dump().await.unwrap().frames
+}
+
+/// The main thread's CPU time per frame `frames` drew, microseconds.
+fn cpu_per_frame(frames: &slopty_e2e::FrameInfo) -> u64 {
+    frames.main_cpu_us.checked_div(frames.frames).unwrap_or(0)
+}
+
+/// After the pointer went to `card`: dump until it is live, or [`SETTLE`] passes (a card whose
+/// middle the composer covers, or that is past the window's bottom, never goes live), and whether
+/// it went live.
+async fn after_hover(drv: &mut slopty_e2e::Driver, card: &A11yNode) -> (Dump, bool) {
+    let since = std::time::Instant::now();
+    loop {
+        let dump = drv.dump().await.unwrap();
+        let live = dump
+            .a11y
+            .iter()
+            .any(|n| is_card(n) && n.label == card.label && n.value.as_deref() == Some("live"));
+        if live || since.elapsed() >= SETTLE {
+            return (dump, live);
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 /// Twelve pages in one chat cost about what words do: the window presents at most 3 of their
 /// `WebView`s at once (the cards off screen or at rest are pictures), the app holds at most 8
-/// `WebKit` content processes through the whole run, and scrolling the chat draws its frames with
-/// a p95 within 0.3 ms of a chat as long with no page in it.
+/// `WebKit` content processes through the whole run, and scrolling the chat costs the main thread
+/// at most a quarter more CPU a frame than a chat as long with no page in it. CPU time, not the
+/// draws' wall time: the two scrolls are a minute apart, and a loaded machine stretches one's
+/// wall time and not the other's, by the time the app waits to run rather than by what it does
+/// (in the guest, words drew at a p95 of 11–13 ms and pages at 2.5 ms, while pages' CPU a frame
+/// was 105 % and 113 % of words'). A share, not a margin: what a frame costs is the build's and
+/// the machine's (about 30 ms of main-thread CPU in the guest's debug app).
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
 async fn twelve_pages_in_one_chat_stay_within_budget() {
@@ -594,7 +621,8 @@ async fn twelve_pages_in_one_chat_stay_within_budget() {
     const PAGES: &str = "Show twelve pages";
     const NATIVES: usize = 3;
     const WEB_CONTENT: usize = 8;
-    const P95_OVER_US: u64 = 300;
+    /// Pages' main-thread CPU a frame, at most, in percent of words'.
+    const CPU_PERCENT: u64 = 125;
     const WINDOW_HEIGHT: f32 = crate::served::WINDOW.1;
     let calls: Vec<serde_json::Value> = (1..=12_u32)
         .map(|n| {
@@ -635,19 +663,20 @@ async fn twelve_pages_in_one_chat_stay_within_budget() {
     })
     .await;
     tokio::time::sleep(SETTLE).await;
-    let (words_p95, words_frames) = scrolled(drv, "Section 1, line 1:").await;
+    let words_frames = scrolled(drv, "Section 1, line 1:").await;
     open_thread(drv, 1).await;
     seen(drv, "a page's card", STEP, |d| {
         d.a11y.iter().any(|n| n.label.as_deref().is_some_and(|l| l.starts_with("Page: Page ")))
     })
     .await;
     tokio::time::sleep(SETTLE).await;
-    let (pages_p95, pages_frames) = scrolled(drv, PAGES).await;
+    let pages_frames = scrolled(drv, PAGES).await;
 
     // Down the chat a step at a time from its top, the pointer resting on each card in sight
     // (a card under it goes live): the natives presented at each rest, and the cards live.
     let (x, y) = SCROLL_AT;
     let (mut most_natives, mut most_live, mut cards) = (0, 0, std::collections::BTreeSet::new());
+    let (mut hovered, mut went_live) = (0_u32, 0_u32);
     // The driver's wheel is in lines, and GPUI's list scrolls 20 pt a line (`list.rs`,
     // `pixel_delta(px(20.))`): each step of 7 lines moves the chat 140 pt, half a card, so every
     // card rests in sight, and 28 of them (3920 pt) go past the chat's 3600 pt.
@@ -664,8 +693,9 @@ async fn twelve_pages_in_one_chat_stay_within_budget() {
         for card in &in_sight {
             cards.insert(card.label.clone().unwrap_or_default());
             hover(drv, card).await;
-            tokio::time::sleep(Duration::from_millis(300)).await;
-            let dump = drv.dump().await.unwrap();
+            let (dump, live) = after_hover(drv, card).await;
+            hovered = hovered.saturating_add(1);
+            went_live = went_live.saturating_add(u32::from(live));
             let live = dump
                 .a11y
                 .iter()
@@ -680,7 +710,8 @@ async fn twelve_pages_in_one_chat_stay_within_budget() {
     let shown = drv.dump().await.unwrap();
     if let Some(card) = shown.a11y.iter().find(|n| is_card(n) && n.bounds[1] > 100.0).cloned() {
         hover(drv, &card).await;
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        let (_dump, live) = after_hover(drv, &card).await;
+        assert!(live, "the card under the pointer goes live: {:?}", card.label);
         let (cx, cy) = middle(&card);
         // GPUI's list scrolls 20 pt a line (`list.rs`, `pixel_delta(px(20.))`): 7.2 lines are
         // the 144 pt wheel.
@@ -703,14 +734,20 @@ async fn twelve_pages_in_one_chat_stay_within_budget() {
     }
     stop.store(1, Ordering::SeqCst);
     let most_web_content = web_content.await.unwrap();
+    let (pages_cpu, words_cpu) = (cpu_per_frame(&pages_frames), cpu_per_frame(&words_frames));
     slopty_e2e::harness::measure(&format!(
-        "pages-stress: 12 page cards ({} seen), at most {most_natives} natives presented \
-         and {most_live} cards live at once, at most {most_web_content} WebContent processes; \
-         scroll draw p95 {:.2} ms with pages ({pages_frames} frames), {:.2} ms in words \
-         ({words_frames} frames)",
+        "pages-stress: 12 page cards ({} seen, {went_live} of {hovered} hovered went live), at \
+         most {most_natives} natives presented and {most_live} cards live at once, at most \
+         {most_web_content} WebContent processes; scroll with pages: main-thread CPU {:.2} ms a \
+         frame, draw p95 {:.2} ms ({} frames); in words: {:.2} ms a frame, draw p95 {:.2} ms \
+         ({} frames)",
         cards.len(),
-        ms(pages_p95),
-        ms(words_p95),
+        ms(pages_cpu),
+        ms(pages_frames.draw_p95_us),
+        pages_frames.frames,
+        ms(words_cpu),
+        ms(words_frames.draw_p95_us),
+        words_frames.frames,
     ));
     assert_eq!(cards.len(), 12, "every page has its card: {cards:?}");
     assert!(most_natives <= NATIVES, "at most {NATIVES} natives presented: {most_natives}");
@@ -719,9 +756,13 @@ async fn twelve_pages_in_one_chat_stay_within_budget() {
         "at most {WEB_CONTENT} WebContent processes: {most_web_content}"
     );
     assert!(
-        pages_p95 <= words_p95.saturating_add(P95_OVER_US),
-        "scrolling past pages draws within {P95_OVER_US} µs of words at p95: {pages_p95} µs \
-         against {words_p95} µs"
+        pages_frames.frames > 0 && words_frames.frames > 0,
+        "both scrolls drew: {pages_frames:?} {words_frames:?}"
+    );
+    assert!(
+        pages_cpu.saturating_mul(100) <= words_cpu.saturating_mul(CPU_PERCENT),
+        "scrolling past pages costs the main thread at most {CPU_PERCENT} % of words' CPU a frame: \
+         {pages_cpu} µs against {words_cpu} µs"
     );
     stack.shutdown().await;
 }
