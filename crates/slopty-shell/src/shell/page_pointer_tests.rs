@@ -1,6 +1,7 @@
 // slopty: Slopty's own tests (not in zeron).
-//! slopty: live pages in a chat take the pointer: the whole shell drawn headless at the iPad's
-//! size, judged by the hit map the window presents, which the platform's hit testing reads.
+//! slopty: a chat at device scale, the whole shell drawn headless: live pages take the pointer
+//! (judged by the hit map the window presents, which the platform's hit testing reads), and a
+//! chat at its end stays there when its floor moves.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -314,4 +315,77 @@ fn a_page_taller_than_the_phones_band_stays_live_where_it_shows(cx: &mut TestApp
     let in_fade = gpui::point(px(200.0), px(top - 10.0));
     assert!(map.native_at(in_fade).is_none(), "under the titlebar's fade the chat has it");
 
+}
+
+/// slopty: a chat at its end stays at its end when its floor moves: on a phone the keyboard
+/// rising makes the chat's view shorter, and its last line went under the composer (audit #9,
+/// `ios-phone-compact-paste`). A chat the person scrolled up stays where they left it.
+#[gpui::test]
+fn a_chat_at_its_end_stays_there_when_the_phones_floor_rises(cx: &mut TestAppContext) {
+    super::compact::force_touch(true);
+    let (shell, cx) = shell(cx, PHONE);
+    cx.simulate_keystrokes("cmd-1");
+    cx.run_until_parked();
+    let now = Utc::now().timestamp_millis();
+    let parts = (0..40)
+        .map(|n| MessagePart::Text {
+            id: format!("a:answer:{n}"),
+            text: format!("Line {n} of a long answer, long enough to wrap on a phone's width."),
+        })
+        .collect();
+    let entry = |id: &str, role, parts, status| SessionMessageEntry {
+        id: id.into(),
+        role,
+        parts,
+        created_at: now,
+        device_id: "local".into(),
+        status,
+        continuation_of: None,
+        duration_ms: None,
+    };
+    let ask = vec![MessagePart::Text { id: "a:ask:t".into(), text: "Write a lot".into() }];
+    shell.update(cx, |shell, cx| {
+        shell.state.update(cx, |state, cx| {
+            state.apply_transcript(vec![
+                entry("a:ask", MessageRole::User, ask, None),
+                entry("a:answer", MessageRole::Assistant, parts, Some(MessageStatus::Complete)),
+            ]);
+            cx.notify();
+        });
+    });
+    let frames = |cx: &mut VisualTestContext| {
+        for _ in 0..30 {
+            cx.executor().advance_clock(Duration::from_millis(16));
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw_and_present(cx));
+        }
+    };
+    frames(cx);
+    let above = |shell: &Entity<Shell>, cx: &mut VisualTestContext| {
+        shell.update(cx, |shell, cx| shell.transcript.read(cx).distance_from_bottom())
+    };
+    assert!(above(&shell, cx) <= 0.5, "the chat opens at its end: {}", above(&shell, cx));
+
+    // The keyboard rises: the view is shorter.
+    cx.simulate_resize(gpui::size(px(PHONE.0), px(PHONE.1 - 330.0)));
+    frames(cx);
+    let risen = above(&shell, cx);
+    assert!(risen <= 0.5, "with the keyboard up the chat stays at its end: {risen}px above it");
+
+    // Scrolled up by the person, the chat stays where they left it when the keyboard falls.
+    cx.simulate_event(gpui::ScrollWheelEvent {
+        position: gpui::point(px(200.0), px(300.0)),
+        delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.0), px(900.0))),
+        ..Default::default()
+    });
+    frames(cx);
+    let up = above(&shell, cx);
+    cx.simulate_resize(gpui::size(px(PHONE.0), px(PHONE.1)));
+    frames(cx);
+    let after = above(&shell, cx);
+    // The line at the top stays: the view grows downward by what the keyboard frees.
+    assert!(
+        up > 600.0 && (up - after - 330.0).abs() <= 1.0,
+        "a chat scrolled up past what the keyboard frees keeps its top line: {up} -> {after}"
+    );
 }
