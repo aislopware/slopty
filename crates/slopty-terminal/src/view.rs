@@ -554,6 +554,10 @@ pub struct TerminalView {
     latency: Rc<RefCell<latency::KeyLatency>>,
     /// Text an input method is composing at the cursor (Telex, kana, …), not yet sent.
     marked: Option<String>,
+    /// Text an input method committed since the last key it did not type: what it may still
+    /// take back and replace (Telex turning a sent `e` into `ê`), the line before the cursor
+    /// as it knows it.
+    typed: String,
     /// The next key (or typed character) gets Control: the phone key bar's ⌃ toggle.
     sticky_control: bool,
     /// The next key (or typed character) gets Alt, as Meta whatever the ⌥ setting: the key
@@ -755,6 +759,7 @@ impl TerminalView {
             predictor: predictor(),
             latency: Rc::default(),
             marked: None,
+            typed: String::new(),
             sticky_control: false,
             sticky_alt: false,
             pointer_hidden: false,
@@ -2292,6 +2297,7 @@ impl TerminalView {
 
     /// Send a key as if it had been pressed with the terminal focused (key bar buttons).
     pub fn press(&mut self, keystroke: Keystroke, cx: &mut Context<Self>) {
+        self.typed.clear();
         if self.copy_mode.is_some() {
             self.copy_key(&keystroke, None, cx);
             return;
@@ -2451,6 +2457,52 @@ impl TerminalView {
     #[must_use]
     pub fn marked(&self) -> Option<&str> {
         self.marked.as_deref()
+    }
+
+    /// What an input method sees of the line: what it committed, then what it composes.
+    fn ime_text(&self) -> String {
+        let mut text = self.typed.clone();
+        text.push_str(self.marked.as_deref().unwrap_or_default());
+        text
+    }
+
+    /// Take back the committed text an input method replaces, `range` in UTF-16 units of
+    /// [`Self::ime_text`]: a ⌫ a character from the range's start to the end of what it
+    /// committed, sent as the key, so the program's line takes them back as typed. Returns what
+    /// was taken back past the range, to be typed again after its replacement; `None` when the
+    /// range holds nothing committed.
+    fn take_back(
+        &mut self,
+        range: Option<std::ops::Range<usize>>,
+        cx: &mut Context<Self>,
+    ) -> Option<String> {
+        let range = range?;
+        let chars: Vec<char> = self.typed.chars().collect();
+        // The first character at or past UTF-16 unit `unit`, by its index.
+        let at = |unit: usize| {
+            let mut units = 0_usize;
+            chars
+                .iter()
+                .position(|c| {
+                    let past = units >= unit;
+                    units = units.saturating_add(c.len_utf16());
+                    past
+                })
+                .unwrap_or(chars.len())
+        };
+        let (start, end) = (at(range.start), at(range.end));
+        if start == chars.len() {
+            return None;
+        }
+        let tail: String = chars.iter().skip(end.max(start)).collect();
+        self.typed = chars.iter().take(start).collect();
+        let backspace = Keystroke { key: "backspace".to_owned(), ..Keystroke::default() };
+        for _ in start..chars.len() {
+            if self.type_key(backspace.clone(), false, cx) {
+                cx.notify();
+            }
+        }
+        Some(tail)
     }
 
     /// Cell metrics measured by the element on its last layout.
@@ -3053,6 +3105,9 @@ impl TerminalView {
         ) {
             self.predictor.interrupt();
         }
+        if matches!(req, TermRequest::Paste { .. } | TermRequest::PastePicture(_)) {
+            self.typed.clear();
+        }
         self.post(req, cx);
     }
 
@@ -3137,6 +3192,14 @@ impl TerminalView {
     }
 
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // A key the input method did not type ends what it may replace; a bare ⌫ takes back
+        // its last character, as it does on the line.
+        let keystroke = &event.keystroke;
+        if keystroke.key == "backspace" && keystroke.modifiers == gpui::Modifiers::default() {
+            self.typed.pop();
+        } else {
+            self.typed.clear();
+        }
         // Something waiting at the foot (a held-back paste, a close): ↩ confirms it, Esc
         // drops it, any other key drops it and goes on to the program as typed (nothing is
         // swallowed).
@@ -3735,17 +3798,24 @@ impl TerminalView {
 /// treat a focused terminal as a text field: iOS raises the soft keyboard, and macOS routes
 /// printable keys through the active input method, which previews its composition here
 /// (`replace_and_mark_text_in_range`, drawn underlined at the cursor) and commits it with
-/// `replace_text_in_range`. The terminal has no editable buffer, so the only range that exists
-/// is the marked text's.
+/// `replace_text_in_range`. The terminal has no editable buffer: the text an input method sees
+/// is what it committed since the last other key (`typed`) and its composition
+/// after it. One that replaces committed text (Vietnamese Telex turning a sent `tie` into
+/// `tiê`) gets it done as on the line: a ⌫ a character taken back, then the new text.
 impl EntityInputHandler for TerminalView {
     fn text_for_range(
         &mut self,
-        _range: std::ops::Range<usize>,
-        _adjusted_range: &mut Option<std::ops::Range<usize>>,
+        range: std::ops::Range<usize>,
+        adjusted_range: &mut Option<std::ops::Range<usize>>,
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<String> {
-        None
+        let text = self.ime_text();
+        let utf16: Vec<u16> = text.encode_utf16().collect();
+        let end = range.end.min(utf16.len());
+        let start = range.start.min(end);
+        *adjusted_range = Some(start..end);
+        String::from_utf16(utf16.get(start..end)?).ok()
     }
 
     fn selected_text_range(
@@ -3754,7 +3824,8 @@ impl EntityInputHandler for TerminalView {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<UTF16Selection> {
-        Some(UTF16Selection { range: 0..0, reversed: false })
+        let caret = self.ime_text().encode_utf16().count();
+        Some(UTF16Selection { range: caret..caret, reversed: false })
     }
 
     fn marked_text_range(
@@ -3762,7 +3833,8 @@ impl EntityInputHandler for TerminalView {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<std::ops::Range<usize>> {
-        self.marked.as_ref().map(|m| 0..m.encode_utf16().count())
+        let start = self.typed.encode_utf16().count();
+        self.marked.as_ref().map(|m| start..start.saturating_add(m.encode_utf16().count()))
     }
 
     fn unmark_text(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
@@ -3773,12 +3845,15 @@ impl EntityInputHandler for TerminalView {
 
     fn replace_text_in_range(
         &mut self,
-        _range: Option<std::ops::Range<usize>>,
+        range: Option<std::ops::Range<usize>>,
         text: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let unmarked = self.marked.take().is_some();
+        let tail = self.take_back(range, cx);
+        let taken_back = tail.is_some();
+        let text = &format!("{text}{}", tail.unwrap_or_default());
         if text.is_empty() {
             cx.notify();
             return;
@@ -3827,15 +3902,16 @@ impl EntityInputHandler for TerminalView {
             self.state.scroll_to_bottom();
         }
         self.send(TermRequest::Raw(text.as_bytes().to_vec()), cx);
+        self.typed.push_str(text);
         // As with a typed key: nothing new on screen until the echo, so no frame before it.
-        if unmarked || scrolled {
+        if unmarked || scrolled || taken_back {
             cx.notify();
         }
     }
 
     fn replace_and_mark_text_in_range(
         &mut self,
-        _range: Option<std::ops::Range<usize>>,
+        range: Option<std::ops::Range<usize>>,
         new_text: &str,
         _new_selected_range: Option<std::ops::Range<usize>>,
         _window: &mut Window,
@@ -3844,6 +3920,11 @@ impl EntityInputHandler for TerminalView {
         // Copy mode reads what an input method commits, and draws nothing of its composing.
         if self.copy_mode.is_some() {
             return;
+        }
+        // Committed text taken back into the composition leaves the line first.
+        if let Some(tail) = self.take_back(range, cx).filter(|tail| !tail.is_empty()) {
+            self.send(TermRequest::Raw(tail.as_bytes().to_vec()), cx);
+            self.typed.push_str(&tail);
         }
         self.marked = (!new_text.is_empty()).then(|| new_text.to_owned());
         cx.notify();
@@ -7085,6 +7166,89 @@ mod tests {
             view.unmark_text(window, cx);
             assert_eq!(view.marked(), None);
         });
+    }
+
+    /// An input method that replaces text it already committed (Vietnamese Telex turning a
+    /// sent `tie` into `tiê`, then `tiế`) sees that text before the caret, and gets the
+    /// replacement done as on the line: a ⌫ a character taken back, then the new text. A key
+    /// it did not type ends what it may replace.
+    #[gpui::test]
+    fn an_input_method_replaces_what_it_committed(cx: &mut TestAppContext) {
+        let (tx, mut rx) = mpsc::channel(64);
+        let (view, cx) = cx.add_window_view(|_window, cx| {
+            TerminalView::new(SessionId::new(), TermSize::default(), tx, Theme::default(), cx)
+        });
+        let mut typed = move || {
+            let mut sent = Vec::new();
+            while let Ok(msg) = rx.try_recv() {
+                match msg {
+                    ClientMsg::Term { req: TermRequest::Raw(bytes), .. } => {
+                        sent.push(String::from_utf8(bytes).expect("utf-8"));
+                    }
+                    ClientMsg::Term { req: TermRequest::Key(key), .. } => {
+                        sent.push(format!("<{:?}>", key.code));
+                    }
+                    _ => {}
+                }
+            }
+            sent
+        };
+        cx.run_until_parked();
+        drop(typed());
+        view.update_in(cx, |view, window, cx| {
+            for c in ["t", "i", "e"] {
+                view.replace_text_in_range(None, c, window, cx);
+            }
+            let mut adjusted = None;
+            assert_eq!(
+                view.text_for_range(0..3, &mut adjusted, window, cx).as_deref(),
+                Some("tie")
+            );
+            assert_eq!(view.selected_text_range(false, window, cx).map(|s| s.range), Some(3..3));
+            view.replace_text_in_range(Some(2..3), "\u{ea}", window, cx);
+            view.replace_text_in_range(Some(2..3), "\u{1ebf}", window, cx);
+            let mut adjusted = None;
+            assert_eq!(
+                view.text_for_range(0..9, &mut adjusted, window, cx).as_deref(),
+                Some("ti\u{1ebf}")
+            );
+            assert_eq!(adjusted, Some(0..3), "the range is clamped to the text");
+        });
+        cx.run_until_parked();
+        let sent = typed();
+        let backspaces = sent.iter().filter(|s| s.starts_with('<')).count();
+        let text: Vec<&String> = sent.iter().filter(|s| !s.starts_with('<')).collect();
+        assert_eq!(text, ["t", "i", "e", "\u{ea}", "\u{1ebf}"], "{sent:?}");
+        assert_eq!(backspaces, 2, "one ⌫ a replacement: {sent:?}");
+
+        // Text taken back from mid-run is typed again after its replacement; a composition
+        // starts after what was committed.
+        view.update_in(cx, |view, window, cx| {
+            view.replace_text_in_range(Some(0..1), "T", window, cx);
+            view.replace_and_mark_text_in_range(None, "v", None, window, cx);
+            assert_eq!(view.marked_text_range(window, cx), Some(3..4));
+            view.unmark_text(window, cx);
+        });
+        cx.run_until_parked();
+        let sent = typed();
+        assert_eq!(sent.iter().filter(|s| s.starts_with('<')).count(), 3, "{sent:?}");
+        assert_eq!(sent.last().map(String::as_str), Some("Ti\u{1ebf}"), "{sent:?}");
+
+        // A key it did not type ends the run: nothing of it is taken back after.
+        view.update_in(cx, |view, window, cx| {
+            let enter = Keystroke { key: "enter".to_owned(), ..Keystroke::default() };
+            view.key_down(
+                &KeyDownEvent { keystroke: enter, is_held: false, prefer_character_input: false },
+                window,
+                cx,
+            );
+            let mut adjusted = None;
+            assert_eq!(view.text_for_range(0..3, &mut adjusted, window, cx).as_deref(), Some(""));
+            view.replace_text_in_range(Some(0..1), "a", window, cx);
+        });
+        cx.run_until_parked();
+        let sent = typed();
+        assert_eq!(sent.iter().filter(|s| s.starts_with('<')).count(), 1, "only the ↩: {sent:?}");
     }
 
     /// ⌘-press on a path and a pull past the slop drags the file out instead of opening it:

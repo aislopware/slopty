@@ -158,6 +158,10 @@ impl Thread {
         self.entries.last()
     }
 
+    fn get(&self, id: &str) -> Option<&Entry> {
+        self.entries.get(*self.index.get(id)?)
+    }
+
     fn get_mut(&mut self, id: &str) -> Option<&mut Entry> {
         let at = *self.index.get(id)?;
         self.entries.get_mut(at)
@@ -252,6 +256,9 @@ pub struct Conversation {
     threads: BTreeMap<ThreadId, Thread>,
     /// Which thread holds each tool call.
     calls: HashMap<String, ThreadId>,
+    /// The call that started each background task, by the task's id: a notice of a run taken
+    /// up again (a subagent sent more words) names only the task.
+    task_calls: HashMap<String, String>,
     /// What arrived for calls not seen yet, by `tool_use_id`.
     pending: HashMap<String, Vec<Pending>>,
     /// Calls that run in the background and write their output to a file, oldest first.
@@ -1026,6 +1033,14 @@ impl Conversation {
         let text = text.filter(|t| !t.text.is_empty() || images.is_empty());
         call.result = Some(ToolResult { status, text, at_ms: ctx.at_ms, images, said: said.line });
         let changed_tasks = task_change(&call.detail, call.result.as_ref());
+        let task = match &call.detail {
+            ToolDetail::Agent(agent) => agent.agent_id.clone(),
+            ToolDetail::Bash(bash) => bash.task_id.clone(),
+            _ => None,
+        };
+        if let Some(task) = task {
+            self.task_calls.insert(task, id.to_owned());
+        }
         let background = matches!(&call.detail, ToolDetail::Bash(b) if b.output_file.is_some());
         let entry = entry.clone();
         batch.upsert(&thread, entry);
@@ -1040,12 +1055,36 @@ impl Conversation {
         }
     }
 
+    /// Whether call `id` is one that starts background work: a command or a subagent.
+    fn starts_task(&self, id: &str) -> bool {
+        let entry = self.calls.get(id).and_then(|thread| self.threads.get(thread)?.get(id));
+        entry.is_some_and(|entry| {
+            matches!(&entry.body, Body::Tool(call)
+                if matches!(call.detail, ToolDetail::Bash(_) | ToolDetail::Agent(_)))
+        })
+    }
+
     fn notice(&mut self, notice: Notice, batch: &mut Batch) {
-        let Some(id) = notice.tool_use_id.clone() else { return };
-        let Some(thread) = self.calls.get(&id).cloned() else {
-            self.park(&id, Pending::Notice(notice));
-            return;
+        // The call that started the task: the one the notice names, unless that is another
+        // (the `SendMessage` that took a subagent up again), else the one its task names.
+        let by_task = notice.task_id.as_ref().and_then(|task| self.task_calls.get(task)).cloned();
+        let id = match notice.tool_use_id.clone() {
+            Some(named) if self.starts_task(&named) => named,
+            Some(named) if by_task.is_none() && !self.calls.contains_key(&named) => {
+                self.park(&named, Pending::Notice(notice));
+                return;
+            }
+            named => {
+                let Some(id) = by_task.or(named) else { return };
+                id
+            }
         };
+        if let Some(task) = &notice.task_id
+            && self.starts_task(&id)
+        {
+            self.task_calls.insert(task.clone(), id.clone());
+        }
+        let Some(thread) = self.calls.get(&id).cloned() else { return };
         let Some(entry) = self.threads.get_mut(&thread).and_then(|t| t.get_mut(&id)) else {
             return;
         };

@@ -231,3 +231,11 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   A daemon's log now looks every 10 s whether its file is still at its path and, when it is
   not, makes the folder and the file again and points stderr (and stdout) at it, as it does when
   the file passes its cap. Test: `slopty-crash` `log_gone::a_log_deleted_under_the_daemon_is_made_again`.
+
+- ✅ **A late frame is a hang only a quarter second late (2026-10-19).** The person's crash list
+  filled with hang reports of 17 to 67 ms, thirty in one launch. GPUI's monitor calls a frame
+  late once its work passes one refresh of its display (8 ms at 120 Hz), whatever budget it is
+  given, which only bounds a single blocking piece; Slopty filed every such frame. `hangs::counts`
+  files a late frame only once its active window reaches `FRAME_BUDGET` (250 ms), the budget the
+  module already meant; a single piece past the threshold, and blocking work, are filed as
+  before (`a_late_frame_is_a_hang_only_once_it_is_a_quarter_second_late`).

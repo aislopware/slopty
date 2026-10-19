@@ -107,7 +107,18 @@ impl Shell {
             Some(id) => state.chats.iter().find(|c| c.id == id).cloned(),
             None => state.selected_chat_row().cloned(),
         };
-        let Some(parent) = parent else {
+        // slopty: a subagent is its parent's agent's, not the person's: a side chat started
+        // over one hangs off the chat that started it.
+        let mut parent = parent;
+        while let Some(of) = parent
+            .as_ref()
+            .filter(|chat| chat.subagent)
+            .and_then(|chat| chat.parent_chat_id.as_deref())
+            .and_then(|id| state.chats.iter().find(|c| c.id == id))
+        {
+            parent = Some(of.clone());
+        }
+        let Some(parent) = parent.filter(|chat| !chat.subagent) else {
             self.show_side_chat_error("Start a conversation before creating a side chat.", cx);
             return;
         };
@@ -542,6 +553,36 @@ mod tests {
                 });
                 shell.close_right_surface(RightSurface::SideChat(id), window, cx);
                 assert!(!shell.side_chats.contains_key(&id));
+            })
+            .unwrap();
+    }
+
+    /// A side chat started while a subagent is open hangs off the chat that started it, a side
+    /// chat and not another subagent.
+    #[gpui::test]
+    fn a_side_chat_over_a_subagent_is_its_parents(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let window = shell_window(dir.path(), cx);
+        window
+            .update(cx, |shell, _, cx| {
+                let chat = |value: serde_json::Value| -> slopty_view_proto::Chat { serde_json::from_value(value).unwrap() };
+                let main = chat(serde_json::json!({
+                    "id": "main", "deviceId": "local", "cwd": "/tmp/main",
+                    "archived": false, "createdAt": Utc::now(),
+                }));
+                let helper = chat(serde_json::json!({
+                    "id": "helper", "deviceId": "local", "cwd": "/tmp/main", "parentChatId": "main",
+                    "subagent": true, "inParent": true, "archived": false, "createdAt": Utc::now(),
+                }));
+                shell.state.update(cx, |state, _| {
+                    state.chats = vec![main, helper];
+                    state.selected_chat = Some("helper".into());
+                });
+                shell.create_child_chat(None, cx);
+                let side = shell.side_chats[&shell.side_chat_seq].state.clone();
+                let row = side.read(cx).selected_chat_row().cloned().unwrap();
+                assert_eq!(row.parent_chat_id.as_deref(), Some("main"));
+                assert!(!row.subagent && !row.in_parent);
             })
             .unwrap();
     }

@@ -782,3 +782,204 @@ fn a_fork_starts_at_its_own_first_record() {
         fork.items
     );
 }
+
+/// Records of a session at `minute` past an hour, as Claude Code writes them.
+mod records {
+    use serde_json::{Value, json};
+
+    pub(super) fn at(second: u32) -> String {
+        format!("2026-10-19T01:{:02}:{:02}.000Z", second / 60, second % 60)
+    }
+
+    pub(super) fn prompt(uuid: &str, second: u32, agent: Option<&str>) -> Value {
+        let mut record = json!({
+            "type": "user", "uuid": uuid, "timestamp": at(second),
+            "message": { "role": "user", "content": "go" },
+        });
+        if let Some(agent) = agent {
+            record["isSidechain"] = json!(true);
+            record["agentId"] = json!(agent);
+        }
+        record
+    }
+
+    pub(super) fn call(
+        uuid: &str,
+        second: u32,
+        agent: Option<&str>,
+        id: &str,
+        name: &str,
+        input: &Value,
+    ) -> Value {
+        let mut record = json!({
+            "type": "assistant", "uuid": uuid, "timestamp": at(second),
+            "message": {
+                "id": format!("msg-{uuid}"), "role": "assistant",
+                "content": [{ "type": "tool_use", "id": id, "name": name, "input": input }],
+            },
+        });
+        if let Some(agent) = agent {
+            record["isSidechain"] = json!(true);
+            record["agentId"] = json!(agent);
+        }
+        record
+    }
+
+    pub(super) fn result(
+        uuid: &str,
+        second: u32,
+        agent: Option<&str>,
+        id: &str,
+        said: &Value,
+    ) -> Value {
+        let mut record = json!({
+            "type": "user", "uuid": uuid, "timestamp": at(second),
+            "message": {
+                "role": "user",
+                "content": [{ "type": "tool_result", "tool_use_id": id, "content": "started" }],
+            },
+            "toolUseResult": said,
+        });
+        if let Some(agent) = agent {
+            record["isSidechain"] = json!(true);
+            record["agentId"] = json!(agent);
+        }
+        record
+    }
+
+    pub(super) fn notice(second: u32, task: &str, call: Option<&str>, summary: &str) -> Value {
+        let call =
+            call.map(|call| format!("<tool-use-id>{call}</tool-use-id>\n")).unwrap_or_default();
+        let content = format!(
+            "<task-notification>\n<task-id>{task}</task-id>\n{call}<status>completed</status>\n\
+             <summary>{summary}</summary>\n</task-notification>"
+        );
+        json!({ "type": "queue-operation", "operation": "enqueue", "timestamp": at(second), "content": content })
+    }
+}
+
+/// Feed `records` to `history` and `host`, through one decoder.
+fn feed(
+    history: &mut History,
+    host: &mut Host,
+    decoder: &mut Conversation,
+    records: &[serde_json::Value],
+) {
+    for record in records {
+        let changes = decoder.ingest(&conv::ThreadId::Main, record);
+        host.take(history.transcript(&changes, &[]));
+    }
+}
+
+/// A subagent run in the background, taken up again by more words (`SendMessage`), ends when
+/// Claude Code says it finished, though that notice names only its task: its task completes and
+/// its thread is done, not left waiting on the work it said it waited on before.
+#[test]
+fn a_subagent_taken_up_again_ends_by_its_tasks_notice() {
+    use serde_json::json;
+    let (mut history, mut host, mut decoder) =
+        (observed(), Host::default(), Conversation::default());
+    host.take(history.drain());
+    let agent = json!({ "description": "Lane 2", "prompt": "go", "run_in_background": true });
+    let words = json!({ "to": "a1", "message": "go on" });
+    feed(
+        &mut history,
+        &mut host,
+        &mut decoder,
+        &[
+            records::prompt("p1", 0, None),
+            records::call("c1", 1, None, "toolu_a", "Agent", &agent),
+            records::result(
+                "r1",
+                2,
+                None,
+                "toolu_a",
+                &json!({ "isAsync": true, "status": "async_launched", "agentId": "a1" }),
+            ),
+            records::prompt("s1", 2, Some("a1")),
+            records::notice(
+                10,
+                "a1",
+                Some("toolu_a"),
+                "Agent \"Lane 2\" is waiting on its own background work",
+            ),
+            records::call("c2", 20, None, "toolu_s", "SendMessage", &words),
+            records::result("r2", 21, None, "toolu_s", &json!({ "success": true })),
+            records::notice(
+                30,
+                "a1",
+                Some("toolu_s"),
+                "Agent \"Lane 2\" is waiting on its own background work",
+            ),
+        ],
+    );
+    let sub = history.main().subagent("a1");
+    assert_eq!(host.thread(sub).status.phase, Phase::Waiting, "waiting on its own work");
+
+    feed(
+        &mut history,
+        &mut host,
+        &mut decoder,
+        &[records::notice(40, "a1", None, "Agent \"Lane 2\" finished")],
+    );
+    let task = host.thread(history.main()).tasks.iter().find(|t| t.id == "a1").cloned();
+    assert_eq!(task.map(|t| t.state), Some(BackgroundTask::COMPLETED.to_owned()));
+    let sub = host.thread(sub);
+    assert_eq!(
+        (sub.status.phase, sub.status.liveness),
+        (Phase::Done, Liveness::Exited { resumable: false })
+    );
+}
+
+/// A session read again with no Claude Code running it runs nothing it started: a subagent
+/// left at work, the work it left in the background, and the session's own command left
+/// running all ended with the last Claude Code that ran it, as of its last entry.
+#[test]
+fn a_session_at_rest_runs_nothing_it_started() {
+    use serde_json::json;
+    let (mut history, mut host, mut decoder) =
+        (observed(), Host::default(), Conversation::default());
+    host.take(history.drain());
+    let agent = json!({ "description": "Lane P", "prompt": "go", "run_in_background": true });
+    let command =
+        json!({ "command": "sleep 600", "description": "Fuzz", "run_in_background": true });
+    feed(
+        &mut history,
+        &mut host,
+        &mut decoder,
+        &[
+            records::prompt("p1", 0, None),
+            records::call("c1", 1, None, "toolu_a", "Agent", &agent),
+            records::result(
+                "r1",
+                2,
+                None,
+                "toolu_a",
+                &json!({ "isAsync": true, "status": "async_launched", "agentId": "a1" }),
+            ),
+            records::prompt("s1", 2, Some("a1")),
+            records::call("s2", 3, Some("a1"), "toolu_b", "Bash", &command),
+            records::result("s3", 4, Some("a1"), "toolu_b", &json!({ "backgroundTaskId": "b1" })),
+            records::call("c2", 5, None, "toolu_c", "Bash", &command),
+            records::result("r2", 6, None, "toolu_c", &json!({ "backgroundTaskId": "b2" })),
+        ],
+    );
+    let sub = history.main().subagent("a1");
+    let live = |host: &Host, id| host.thread(id).tasks.iter().filter(|t| t.is_live()).count();
+    assert_eq!(host.thread(sub).status.phase, Phase::Working);
+    assert_eq!((live(&host, history.main()), live(&host, sub)), (2, 1), "all at work as read");
+
+    host.take(history.rest(WallMs::from_millis(4_000_000_000_000)));
+    let stopped = host.thread(sub);
+    assert_eq!(
+        (stopped.status.phase, stopped.status.liveness),
+        (Phase::Stopped, Liveness::Exited { resumable: false })
+    );
+    assert_eq!((live(&host, history.main()), live(&host, sub)), (0, 0), "nothing runs on");
+    let tasks = &host.thread(history.main()).tasks;
+    let command = tasks.iter().find(|t| t.kind == BackgroundTask::SHELL).expect("the command");
+    // Its call is the last entry: a result joins its call's.
+    let last = command.started_ms;
+    let ended: Vec<Option<WallMs>> = tasks.iter().map(|t| t.ended_ms).collect();
+    assert!(ended.iter().all(|at| *at == Some(last)), "as of its last entry: {ended:?}");
+}

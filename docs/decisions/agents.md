@@ -3939,3 +3939,16 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     union on `messageType`, `sendUserMessage` needing `deliverAs`); Slopty's gate hooks only
     `tool_call`, so nothing changes. The rest (cache-keeping thinking changes, resumed sessions
     keeping their tools, malformed tool arguments failing instead of half-running) is pi's own.
+
+- ✅ **Nothing a session started outlives what ran it (2026-10-19).** The person saw ten
+  subagents counted as running in a chat whose agent had long finished. Replaying that session
+  found two causes. A subagent taken up again by more words (`SendMessage`) ends with a notice that
+  names only its task, and the decoder dropped a notice without a call id: it now finds the call
+  that started the task (`Conversation::task_calls`, kept from each call's result and each notice
+  naming both, and never a `SendMessage`'s id). And a session read again with no Claude Code
+  running it (`History::rest`) left at work every subagent and background task it never heard
+  end: at rest the last Claude Code that ran it is gone as of its last entry, so each such
+  subagent stopped then (one that reported and waited on its own work completed), and its own
+  background tasks, and the session's, ended with it. A subagent's own tasks also end when the
+  subagent does (`a_subagent_taken_up_again_ends_by_its_tasks_notice`,
+  `a_session_at_rest_runs_nothing_it_started`).

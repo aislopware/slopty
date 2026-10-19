@@ -7852,14 +7852,18 @@ impl Transcript {
         };
         self.rendered_rows.insert(row.id.clone());
         let theme = Theme::of(cx).clone();
-        let workspace_root = {
+        // slopty: a subagent's words to start it are its task, which its parent's agent wrote.
+        let (workspace_root, task) = {
             let state = self.state.read(cx);
-            self.chat_id
+            let chat = self
+                .chat_id
                 .as_deref()
                 .and_then(|chat_id| state.chats.iter().find(|chat| chat.id == chat_id))
-                .or_else(|| state.selected_chat_row())
-                .and_then(|chat| chat.cwd.as_deref())
-                .map(SharedString::from)
+                .or_else(|| state.selected_chat_row());
+            (
+                chat.and_then(|chat| chat.cwd.as_deref()).map(SharedString::from),
+                self.fit.is_some() || chat.is_some_and(|chat| chat.subagent),
+            )
         };
         // The viewport spans the full window (under the titlebar): the first
         // row's gap adds the titlebar's height so a top-scrolled transcript
@@ -7867,7 +7871,9 @@ impl Transcript {
         // for the titlebar — an override instance's first row keeps only the
         // ordinary turn gap, or the content sits double-chrome low.
         let top_gap = if ix == 0 {
-            if self.doc_override.is_some() {
+            if self.fit.is_some() {
+                Theme::SPACE_SM // slopty: in a card, under its header's hairline
+            } else if self.doc_override.is_some() {
                 Theme::SPACE_LG
             } else {
                 Theme::TITLEBAR_HEIGHT + Theme::SPACE_LG + 10.0
@@ -7939,7 +7945,12 @@ impl Transcript {
                             })),
                     );
                 }
-                if !text.is_empty() {
+                // slopty: a run's first words are its task, which its parent's agent wrote: a
+                // quiet paragraph, not the person's bubble, cut short in its card.
+                if !text.is_empty() && task {
+                    let lines = self.fit.is_some().then_some(subagents::TASK_LINES);
+                    column = column.child(subagents::task_words(&row.id, &text, lines, &theme));
+                } else if !text.is_empty() {
                     // `min_w_0` is load-bearing: gpui text answers min/max-content
                     // probes with its UNWRAPPED width, so without it the bubble's
                     // automatic min-size is the full single-line width — the flex
@@ -8192,6 +8203,8 @@ impl Transcript {
                     paragraph.into_any_element()
                 }
             }
+            // slopty: a run's first words are its task, which its parent's agent wrote.
+            RowKind::User { .. } if task => message_article(&row.id, "Task", inner),
             RowKind::User { .. } => message_article(&row.id, "You", inner),
             _ => inner,
         };
@@ -8220,7 +8233,8 @@ impl Transcript {
         let copy_text = row.copy_text.clone();
         let copy_entry_id = row.entry_id.clone();
         let rewind_message = row.entry_id.clone();
-        let strip = row.timestamp.map(|ms| {
+        // slopty: a run in its card shows its work, not its messages' times and actions.
+        let strip = row.timestamp.filter(|_| self.fit.is_none()).map(|ms| {
             let timestamp = div()
                 .text_size(crate::typography::ui_rems(12.0))
                 .text_color(theme.text_muted.opacity(0.55))
@@ -8267,8 +8281,9 @@ impl Transcript {
             // slopty: a time the agent never said (0) shows none; the copy action stays.
             let metadata = metadata.when(ms > 0, |el| el.child(timestamp)).children(copy);
             // slopty: a person's message can be gone back to (`transcript/rewind.rs`).
+            // slopty: not a run's task, which the person never sent.
             let metadata = metadata.children(
-                is_user_row
+                (is_user_row && !task)
                     .then(|| self.rewind_action(&rewind_message, &theme, cx))
                     .flatten(),
             );
@@ -8285,7 +8300,7 @@ impl Transcript {
                 // so the label must too — assistant label's left edge on the
                 // text's first-character x, user label's right edge on the
                 // bubble's right edge (user-reported 4px drift).
-                .when(is_user_row, |el| el.justify_end())
+                .when(is_user_row && !task, |el| el.justify_end()) // slopty: a task reads left.
                 .when(hovered, |el| {
                     el.child(motion::fade_quick(
                         SharedString::from(format!("meta-{}", row.id)),
@@ -8339,8 +8354,9 @@ impl Transcript {
             .pb(px(bottom_pad))
             // Keep side gutters as the configurable column shrinks to fit;
             // a docked side card's room comes off the right.
-            .pl(px(48.0))
-            .pr(px(48.0 + self.right_reserve))
+            // slopty: in a card, its rows start under its title.
+            .pl(px(if self.fit.is_some() { subagents::CHILD_INSET } else { 48.0 }))
+            .pr(px(if self.fit.is_some() { Theme::SPACE_MD } else { 48.0 + self.right_reserve }))
             .child(
                 div()
                     .w_full()

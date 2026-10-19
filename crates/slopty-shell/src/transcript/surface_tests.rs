@@ -414,6 +414,62 @@ fn a_subagent_run_open_in_its_card_is_as_tall_as_its_rows(cx: &mut gpui::TestApp
     assert!((run.height - cap).abs() <= 1.5, "the card's room, {cap}: {run:?}");
 }
 
+/// A subagent's card slides its run open and shut: its height eases from none to its own and
+/// back, the run held through the slide, and let go once shut. The run opens on its task, a quiet
+/// paragraph, not the person's bubble.
+#[gpui::test]
+fn a_subagent_card_slides_its_run_open_and_shut(cx: &mut gpui::TestAppContext) {
+    let progress = SubagentProgress {
+        running: false,
+        state: SubagentProgress::DONE.into(),
+        chat_id: Some("child-chat".into()),
+        ..SubagentProgress::default()
+    };
+    let (transcript, cx) = open(cx, entry(MessageStatus::Complete, vec![spawn(progress)]));
+    cx.update(|_, cx| cx.set_reduce_motion(false));
+    let task = SessionMessageEntry {
+        id: "child:task".into(),
+        role: MessageRole::User,
+        parts: vec![MessagePart::Text { id: "child:task:t".into(), text: "Count the lines".into() }],
+        ..entry(MessageStatus::Complete, Vec::new())
+    };
+    let said = |n: usize| SessionMessageEntry {
+        id: format!("child:{n}"),
+        parts: vec![MessagePart::Text { id: format!("child:{n}:t"), text: format!("Line {n} of the run.") }],
+        ..entry(MessageStatus::Complete, Vec::new())
+    };
+    let state = transcript.read_with(cx, |transcript, _| transcript.state.clone());
+    let run = std::iter::once(task).chain((0..6).map(said)).collect();
+    state.update(cx, |state, _| state.set_subagent_snapshot("child-chat".into(), run));
+    let height = |nodes: &HashMap<NodeId, Node>| {
+        find(nodes, Role::Group, "Transcript of Count lines").map(|run| run.height)
+    };
+    let step = |cx: &mut VisualTestContext, ms: u64| {
+        cx.executor().advance_clock(std::time::Duration::from_millis(ms));
+        draw(cx)
+    };
+    let nodes = draw(cx);
+    let card = find(&nodes, Role::Button, "Subagent Count lines").expect("the card").clone();
+    cx.simulate_click(card.center, gpui::Modifiers::default());
+    let first = height(&draw(cx)).expect("held from its first frame");
+    let mid = height(&step(cx, 120)).expect("sliding open");
+    let nodes = step(cx, 2000);
+    let whole = height(&nodes).expect("open");
+    assert!(first < mid && mid < whole, "it eases open: {first} < {mid} < {whole}");
+    assert!(find(&nodes, Role::Paragraph, "Task: Count the lines").is_some(), "its task, quiet");
+    assert!(find(&nodes, Role::Article, "You").is_none(), "no bubble of the person's");
+
+    let nodes = draw(cx);
+    let card = find(&nodes, Role::Button, "Subagent Count lines").expect("the card").clone();
+    cx.simulate_click(card.center, gpui::Modifiers::default());
+    let shutting = height(&step(cx, 120)).expect("held while it slides shut");
+    assert!(shutting < whole, "it eases shut: {shutting} < {whole}");
+    let nodes = step(cx, 2000);
+    assert_eq!(height(&nodes), None, "shut, its run let go");
+    let open = transcript.read_with(cx, |transcript, _| transcript.subagents.open_children());
+    assert!(open.is_empty(), "no run watched: {open:?}");
+}
+
 /// A subagent's card clicked open before its run arrived (the run is fetched once the card
 /// opens) holds its run in place on every frame after, and takes the run's height once it
 /// arrives.

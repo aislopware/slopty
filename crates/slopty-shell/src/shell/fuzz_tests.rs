@@ -56,10 +56,16 @@ const KEYS: &[&str] = &[
     "escape", "escape", "tab", "enter",
 ];
 
-/// The chats a run starts with: two at the top, a subagent of `b` that runs inside it, one of
-/// `a` that takes messages.
-const START: &[(&str, Option<(&str, bool)>)] =
-    &[("a", None), ("b", None), ("c", None), ("look", Some(("b", true))), ("helper", Some(("a", false)))];
+/// The chats a run starts with: two at the top, two subagents of `b` that run inside it (one
+/// drilled into from the other), one of `a` that takes messages.
+const START: &[(&str, Option<(&str, bool)>)] = &[
+    ("a", None),
+    ("b", None),
+    ("c", None),
+    ("look", Some(("b", true))),
+    ("peek", Some(("b", true))),
+    ("helper", Some(("a", false))),
+];
 
 #[derive(Clone, Debug, PartialEq)]
 enum Step {
@@ -404,10 +410,40 @@ fn run(seed: u64, steps: &[Step]) -> Result<(), Failure> {
                     {
                         return Err(Failure { step: ix, kind: "model", detail: format!("{id} is selected but gone") });
                     }
+                    // A subagent shown names itself and its parent over its run, from the frame it
+                    // shows in: another's name there is the last one's left over.
+                    // A phone's Sessions page, or its page of the right pane or the files, stands
+                    // over it.
+                    let drilled = shell.update(cx, |shell, cx| {
+                        let covered = shell.compact()
+                            && (shell.compact_sessions_up(cx) || shell.right_pane_open(cx) || shell.files_panel_open(cx));
+                        shell.subagent_drill(cx).map(|drill| (drill, covered))
+                    });
                     let fault = cx.update(|window, cx| {
                         window.refresh();
                         window.draw(cx).clear(cx);
-                        a11y_fault(window)
+                        a11y_fault(window).or_else(|| {
+                            let (drill, covered) = drilled.as_ref()?;
+                            let want = format!("{} › {}", drill.parent_title, drill.child_title);
+                            let tree = window.a11y_tree()?;
+                            let has = |role: gpui::accesskit::Role, label: &str| {
+                                tree.nodes.iter().any(|(_, node)| node.role() == role && node.label() == Some(label))
+                            };
+                            let named = has(gpui::accesskit::Role::Navigation, &want);
+                            // Shown is its run on screen: for one inside its parent, the bar in the
+                            // composer's place says so.
+                            let bar = format!("Runs inside {}", drill.parent_title);
+                            let shown = !covered && (!drill.in_parent || has(gpui::accesskit::Role::Status, &bar));
+                            let labels: Vec<String> = tree
+                                .nodes
+                                .iter()
+                                .filter(|(_, node)| matches!(node.role(), gpui::accesskit::Role::Navigation | gpui::accesskit::Role::Status | gpui::accesskit::Role::Tab))
+                                .map(|(_, node)| format!("{:?} {:?}", node.role(), node.label()))
+                                .collect();
+                            (shown != named).then(|| {
+                                format!("{}: run shown {shown}, breadcrumb {want:?} {named}; {labels:?}", drill.child)
+                            })
+                        })
                     });
                     if let Some(fault) = fault {
                         return Err(Failure { step: ix, kind: "a11y", detail: fault });

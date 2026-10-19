@@ -305,8 +305,16 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   (`replace_and_mark_text_in_range`/`unmark_text`), the element draws it underlined at the
   cursor over the host's cells and hides the block cursor meanwhile (what Terminal.app does),
   and the commit arrives through `replace_text_in_range` as raw bytes. Covered by the GPUI test
-  `composition_is_previewed_then_committed_as_raw_bytes` (gpui `test-support`). A live Telex
-  run was not possible from the automation session (see `cargo xtask ime` below).
+  `composition_is_previewed_then_committed_as_raw_bytes` (gpui `test-support`).
+  2026-10-19: Vietnamese typed nothing but plain letters. Upstream sends printable keys to the
+  input method first only for a source that is an input mode *and* not ASCII-capable, and macOS's
+  Vietnamese Telex and VNI are ASCII-capable input modes, so their keys went straight to the
+  terminal as keys. gpui-fast's `fast::ime::composes` takes any input mode (#55). An input method
+  may also replace text it already committed, by range (Telex turning a sent `tie` into `tiê`),
+  which a terminal has no buffer for: `TerminalView` keeps what the input method committed since
+  the last key it did not type (`typed`), shows it as the text before the caret, and does a
+  replacement as the line would take it, a ⌫ a character taken back and then the new text
+  (`an_input_method_replaces_what_it_committed`).
 
 - ✅ **`cargo xtask ime [id] [--all]`** lists/selects macOS input sources through HIToolbox's
   `TISSelectInputSource` (Carbon), for input-method testing. Caveat found 2026-09-05: the
@@ -13411,3 +13419,21 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   with its facts, and under `SLOPTY_INVARIANTS=panic`, which every e2e app sets, the app stops on
   it. Times from different clocks are never compared in a check. Proof:
   `invariants::tests::an_echo_beside_its_message_is_a_breach`.
+
+- ✅ **A subagent's card slides its run open (2026-10-19).** The person found the card's run
+  snapping open, laid out like a second chat inside the first, and the side-chat list holding
+  every subagent again. The run now slides open and shut: its height eases from where it was
+  drawn to its own (the distance-scaled curve of a person's long message), the chevron turns with
+  it as a tool group's does, the run stays mounted through the close and is let go once shut, and
+  each frame of the slide measures the card's row again (`a_subagent_card_slides_its_run_open_and_shut`).
+  Inside the card the run is the run's work, not a chat: its rows start under the card's title,
+  its first words read as its task (a quiet three-line paragraph with a rule, since the parent's
+  agent wrote them, not the person), and no row carries a time, a copy or a rewind. Drilled
+  into, a subagent's run reads its task the same way, whole, with no rewind. The
+  side-chat lane and its count on the session card's toggle leave out a chat marked `subagent`
+  (`side_chat_of`): a subagent lives in its card, the tray and the Subagents lane only. The shell
+  fuzzer starts with two subagents of one parent, so switching between them is fuzzed, and
+  checks that a subagent shown names itself and its parent in its breadcrumb in every frame. It
+  found a side chat started over an open subagent copying the subagent's marks, a second subagent
+  of it; one hangs off the chat that started the subagent now
+  (`a_side_chat_over_a_subagent_is_its_parents`).

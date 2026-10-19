@@ -450,6 +450,20 @@ impl SubagentEnd {
     }
 }
 
+/// End each of `tasks` still at work at `at`, as `state` says, but one waiting on its own work
+/// (a subagent that reported), which completed; whether any was.
+fn end_tasks(tasks: &mut [BackgroundTask], at: WallMs, state: &str) -> bool {
+    let mut ended = false;
+    for task in tasks.iter_mut().filter(|task| task.is_live()) {
+        let state =
+            if task.state == BackgroundTask::WAITING { BackgroundTask::COMPLETED } else { state };
+        state.clone_into(&mut task.state);
+        task.ended_ms = task.ended_ms.or(Some(at));
+        ended = true;
+    }
+    ended
+}
+
 /// A live block as an item.
 #[derive(Debug)]
 struct Provisional {
@@ -508,6 +522,8 @@ pub struct History {
     wall: WallMs,
     /// When the Claude Code that runs the session now started ([`Self::started`]).
     started: Option<WallMs>,
+    /// No Claude Code runs the session: the last one ended by then ([`Self::rest`]).
+    rested: Option<WallMs>,
     /// The intent that sent each of the person's messages Slopty gave the engine, by the
     /// message's id ([`Self::sent_as`]).
     intents: HashMap<String, IntentId>,
@@ -586,6 +602,7 @@ impl History {
             failed: false,
             wall: WallMs::ZERO,
             started: None,
+            rested: None,
             intents: HashMap::new(),
             stopping: None,
             stalled: None,
@@ -1215,6 +1232,17 @@ impl History {
         if let Some(end) = &end {
             outs.extend(self.ended(end, at));
         }
+        // Nothing it started runs on without it: its subagents and the work left in the
+        // background ended with the last Claude Code that ran it.
+        let ended = if self.last_at.is_zero() { at } else { self.last_at };
+        self.rested = Some(ended);
+        self.settle_subagents();
+        if let Some(main) = self.threads.get_mut(&conv::ThreadId::Main)
+            && end_tasks(&mut main.tasks, ended, BackgroundTask::KILLED)
+        {
+            let tasks = main.tasks.clone();
+            self.push(self.meta.id, Action::TasksSet(tasks));
+        }
         if self.status.is_none() {
             let phase = match end {
                 Some(End::Failed(_)) => Phase::Failed,
@@ -1502,6 +1530,7 @@ impl History {
     pub fn started(&mut self, at: WallMs) -> Vec<Out> {
         if self.started != Some(at) {
             self.started = Some(at);
+            self.rested = None;
             self.settle_subagents();
         }
         self.drain()
@@ -1837,7 +1866,7 @@ impl History {
             .collect();
         for agent in agents {
             let spawn = self.spawned.get(&agent);
-            let (wall, started) = (self.wall, self.started);
+            let (wall, started, rested) = (self.wall, self.started, self.rested);
             let Some(mapped) = self.threads.get_mut(&conv::ThreadId::Agent(agent)) else {
                 continue;
             };
@@ -1845,11 +1874,18 @@ impl History {
                 mapped.turns.values().map(|t| t.started_ms).filter(|at| !at.is_zero()).min()
             });
             let before = started.filter(|started| began.is_some_and(|began| began < *started));
+            let waiting = spawn.is_some_and(|spawn| spawn.waiting);
+            // At rest, one waiting on its own work had reported: that work ended with it.
+            let rested =
+                rested.filter(|rested| began.is_none_or(|began| began <= *rested)).map(|rested| {
+                    let end = if waiting { SubagentEnd::Completed } else { SubagentEnd::Stopped };
+                    (end, rested)
+                });
             let end = spawn
                 .and_then(|spawn| spawn.end.clone())
-                .or_else(|| before.map(|started| (SubagentEnd::Stopped, started)));
+                .or_else(|| before.map(|started| (SubagentEnd::Stopped, started)))
+                .or(rested);
             let mut actions = Vec::new();
-            let waiting = spawn.is_some_and(|spawn| spawn.waiting);
             let status = match end {
                 None if waiting => Status {
                     phase: Phase::Waiting,
@@ -1864,6 +1900,15 @@ impl History {
                 }
                 Some((end, at_ms)) => {
                     let (state, phase) = end.ended();
+                    // Its own work in the background ran inside it, and ended with it.
+                    let tasks_end = if end == SubagentEnd::Completed {
+                        BackgroundTask::COMPLETED
+                    } else {
+                        BackgroundTask::KILLED
+                    };
+                    if end_tasks(&mut mapped.tasks, at_ms, tasks_end) {
+                        actions.push(Action::TasksSet(mapped.tasks.clone()));
+                    }
                     let turn = mapped.turn;
                     if turn != TurnId::BEFORE && mapped.ended.insert(turn) {
                         let usage = mapped.turns.get(&turn).map(|t| t.usage.clone());

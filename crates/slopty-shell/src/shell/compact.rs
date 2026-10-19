@@ -257,7 +257,7 @@ impl Shell {
     }
 
     /// The Sessions page is up: the phone opens on it, a chat chosen from it leaves it.
-    fn compact_sessions_up(&self, cx: &mut App) -> bool {
+    pub(super) fn compact_sessions_up(&self, cx: &mut App) -> bool {
         let selected = self.state.read(cx).selected_chat.clone();
         let pages = cx.default_global::<Pages>();
         let changed = pages.selected != selected;

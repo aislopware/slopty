@@ -447,8 +447,7 @@ impl Shell {
                     .chats
                     .iter()
                     .filter(|side| {
-                        !side.archived
-                            && side.parent_chat_id.as_deref() == Some(chat)
+                        super::session_lanes::side_chat_of(side, chat) // slopty: no subagent
                             && state.display_status_for(side, now)
                                 == slopty_view_proto::ChatIndicator::Working
                     })

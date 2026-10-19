@@ -14,8 +14,8 @@ Paragraph │ The background command finished with exit 0. Next I'm launching th
 Button │ Subagent Count lines │ Done · 1 tool · 14.5k tokens · 4s (focused)
 Button │ Open subagent
 Group │ Transcript of Count lines
-Article │ You
-Paragraph │ Count the number of lines in the file $SCRATCH/work/main.rs. Use the Read tool on that file to do it. Do not modify any files. Reply with just the number and nothing else.
+Article │ Task
+Paragraph │ Task: Count the number of lines in the file $SCRATCH/work/main.rs. Use the Read tool on that file to do it. Do not modify any files. Reply with just the number and nothing else.
 Button │ Read 1 file
 Article │ Claude
 Paragraph │ 4

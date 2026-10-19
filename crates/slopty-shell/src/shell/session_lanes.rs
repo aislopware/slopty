@@ -177,6 +177,13 @@ pub(super) struct ChildChatRow {
     activity: DateTime<Utc>,
 }
 
+// slopty: a subagent's chat hangs off its parent too, but it lives in its parent's chat (its
+// card, the tray and the Subagents lane), never as a side chat as well.
+/// Whether `chat` is a live side chat of `parent`: one the person opened off it, not a subagent.
+pub(super) fn side_chat_of(chat: &Chat, parent: &str) -> bool {
+    !chat.archived && !chat.subagent && chat.parent_chat_id.as_deref() == Some(parent)
+}
+
 /// The live (unarchived) children of `chat_id`, most recent activity first —
 /// the same order the sidebar's Sessions list keeps.
 pub(super) fn child_chat_rows(
@@ -187,7 +194,7 @@ pub(super) fn child_chat_rows(
     let mut rows: Vec<ChildChatRow> = state
         .chats
         .iter()
-        .filter(|chat| !chat.archived && chat.parent_chat_id.as_deref() == Some(chat_id))
+        .filter(|chat| side_chat_of(chat, chat_id)) // slopty: no subagent
         .map(|chat| {
             let activity = chat.last_message_at.unwrap_or(chat.created_at);
             ChildChatRow {
@@ -889,12 +896,16 @@ mod tests {
         archived.archived = true;
         let mut titled = chat("b", Some("main"), 30);
         titled.title = Some("Investigate caching".into());
+        // A subagent hangs off it too, and lives in its card, not as a side chat.
+        let mut subagent = chat("sub", Some("main"), 40);
+        subagent.subagent = true;
         state.apply_chats(vec![
             chat("main", None, 60),
             chat("a", Some("main"), 5),
             titled,
             chat("unrelated", Some("elsewhere"), 2),
             archived,
+            subagent,
         ]);
         let rows = child_chat_rows(&state, "main", Utc::now());
         assert_eq!(

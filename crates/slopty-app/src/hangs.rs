@@ -23,7 +23,8 @@ use gpui::profiler::journal::ForegroundEvent;
 const THRESHOLD: Duration = Duration::from_millis(250);
 
 /// As much main-thread work before one frame, in pieces each shorter than [`THRESHOLD`], is a
-/// hang too: the user waited as long.
+/// hang too: the user waited as long. GPUI calls a frame late past one refresh of its display
+/// (8 ms at 120 Hz), which is a frame missed, not a hang: only one this late is filed ([`counts`]).
 const FRAME_BUDGET: Duration = THRESHOLD;
 
 /// How often the monitor's thread reads the journal. What happened meanwhile waits in the
@@ -55,14 +56,23 @@ pub(crate) fn watch(cx: &mut App) {
 fn file(poll: &HangMonitorPoll) {
     for incident in &poll.incidents {
         let (start, end) = incident.active_window();
-        let hang =
-            hang(incident.trigger, end.saturating_duration_since(start), &incident.contributors);
+        let active = end.saturating_duration_since(start);
+        if !counts(incident.trigger, active) {
+            continue;
+        }
+        let hang = hang(incident.trigger, active, &incident.contributors);
         let stall_ms = hang.stall.as_millis();
         match slopty_crash::record_hang(hang) {
             Ok(path) => tracing::warn!(stall_ms, path = %path.display(), "the main thread hung"),
             Err(error) => tracing::warn!(%error, stall_ms, "a hang went unreported"),
         }
     }
+}
+
+/// Whether an incident the monitor found, held `active` long, is a hang: a late frame only once
+/// its work came to [`FRAME_BUDGET`]; the monitor's other triggers already measure up to theirs.
+fn counts(trigger: HangTrigger, active: Duration) -> bool {
+    trigger != HangTrigger::LateFrame || active >= FRAME_BUDGET
 }
 
 /// The report of a hang: `contributors` longest first, as the monitor gives them.
@@ -115,7 +125,7 @@ mod tests {
     use gpui::profiler::hang::HangTrigger;
     use gpui::profiler::journal::ForegroundEvent;
 
-    use super::hang;
+    use super::{counts, hang};
 
     /// The instant `after` past `start`.
     fn at(start: Instant, after: Duration) -> Instant {
@@ -146,5 +156,15 @@ mod tests {
         let many = hang(HangTrigger::LateFrame, Duration::from_millis(300), &events[..1]);
         assert!(many.piled_up, "no single piece past the threshold");
         assert_eq!(many.cause, "the action file::SaveFile");
+    }
+
+    /// A frame that missed a refresh or a few is no hang; one held a quarter second is, as is
+    /// a single piece of work past the threshold.
+    #[test]
+    fn a_late_frame_is_a_hang_only_once_it_is_a_quarter_second_late() {
+        assert!(!counts(HangTrigger::LateFrame, Duration::from_millis(67)));
+        assert!(counts(HangTrigger::LateFrame, Duration::from_millis(250)));
+        assert!(counts(HangTrigger::Threshold, Duration::from_millis(260)));
+        assert!(counts(HangTrigger::BlockingWork, Duration::from_millis(250)));
     }
 }

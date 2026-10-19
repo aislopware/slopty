@@ -35,6 +35,11 @@ const CHILD_MAX_HEIGHT: f32 = 480.0;
 const CHILD_VIEWPORT_SHARE: f32 = 0.4;
 /// A window narrower than this is a phone's (`shell/compact.rs`): a card there drills in.
 const PHONE_BELOW: f32 = 700.0;
+/// Where a card's lines start: past its icon tile, under its title. Its child's rows start there
+/// too.
+pub(super) const CHILD_INSET: f32 = Theme::SPACE_SM + 18.0 + Theme::SPACE_SM;
+/// The lines of its task a card's open run shows.
+pub(super) const TASK_LINES: usize = 3;
 
 /// What subagent cards keep between frames.
 #[derive(Default)]
@@ -47,6 +52,10 @@ pub(super) struct SubagentsState {
     focus: HashMap<SharedString, FocusHandle>,
     /// Tray rows asked to stop, until their card settles.
     stopping: HashSet<String>,
+    /// Each card's run, as open as it was last drawn: whether it was open, and its height then.
+    drawn: HashMap<SharedString, (bool, f32)>,
+    /// Cards opening or closing: the height each moves from, and since when.
+    moving: HashMap<SharedString, (f32, std::time::Instant)>,
     /// The window's size as of the last frame.
     pub(super) window: gpui::Size<gpui::Pixels>,
 }
@@ -170,6 +179,8 @@ impl SubagentsState {
         let children: Vec<String> = self.open.drain().map(|(chat, _)| chat).collect();
         self.toggled.clear();
         self.stopping.clear();
+        self.drawn.clear();
+        self.moving.clear();
         if children.is_empty() {
             return;
         }
@@ -193,6 +204,29 @@ impl SubagentsState {
         let viewport = f32::from(self.window.height);
         (viewport * CHILD_VIEWPORT_SHARE).clamp(CHILD_MIN_HEIGHT, CHILD_MAX_HEIGHT)
     }
+}
+
+/// The words that started a run: its task, as its parent's agent wrote it, quiet, and cut to
+/// `lines` (its card's [`TASK_LINES`]; the whole of it drilled into).
+pub(super) fn task_words(row: &SharedString, text: &SharedString, lines: Option<usize>, theme: &Theme) -> AnyElement {
+    let words = div()
+        .id(SharedString::from(format!("{row}-task")))
+        .role(gpui::Role::Paragraph)
+        .aria_label(SharedString::from(format!("Task: {text}")))
+        .w_full()
+        .min_w_0()
+        .pl(px(Theme::SPACE_SM))
+        .border_l_2()
+        .border_color(crate::theme::hairline(0.10))
+        .text_size(crate::typography::ui_rems(12.5))
+        .line_height(crate::typography::ui_rems(18.0))
+        .text_color(theme.text_muted);
+    match lines {
+        Some(lines) => words.line_clamp(lines).text_ellipsis(),
+        None => words,
+    }
+    .child(text.clone())
+    .into_any_element()
 }
 
 impl Transcript {
@@ -306,9 +340,22 @@ impl Transcript {
         let phone = width > 0.0 && width < PHONE_BELOW;
         let can_open_in_place = card.chat.is_some() && !rail && !phone;
         let open = can_open_in_place && self.card_open(&key, frontier && card.running);
-        // A card the frontier opened closes with it, its child let go.
+        // Opening or closing, by the person or the frontier, the run slides from where it was
+        // drawn: its height eases to its own, or to none.
+        let moment = crate::clock::now(cx);
+        let reduced = crate::motion::reduced_motion(cx);
+        let drawn = self.subagents.drawn.get(&key).copied();
+        if let Some((was_open, height)) = drawn
+            && was_open != open
+            && !reduced
+        {
+            self.subagents.moving.insert(key.clone(), (height, moment));
+        }
+        let moving = self.subagents.moving.get(&key).copied();
+        // A card the frontier opened closes with it, its child let go once it slid shut.
         if let Some(chat) = card.chat.as_deref()
             && !open
+            && moving.is_none()
             && self.subagents.open.contains_key(chat)
         {
             self.close_child(chat, cx);
@@ -407,23 +454,38 @@ impl Transcript {
                 }),
             )
         });
+        // How open the run is, 0 to 1, as it slides; the chevron turns with it, as a tool
+        // group's does.
+        let (from, since) = moving.unwrap_or((0.0, moment));
+        let room = self.subagents.child_room();
+        let full = |rows: Option<f32>| rows.map_or(room, |rows| (rows + 1.0).min(room));
+        let target_rows = card
+            .chat
+            .as_deref()
+            .and_then(|chat| self.subagents.open.get(chat))
+            .and_then(|child| child.rows.get());
+        let target = if open { full(target_rows) } else { 0.0 };
+        let spec = super::user_resize_spec((target - from).abs());
+        let t = moving.map_or(1.0, |_| {
+            let raw = moment.saturating_duration_since(since).as_secs_f32() / spec.total().as_secs_f32();
+            spec.curve.eval(raw.min(1.0))
+        });
+        let height = crate::motion::lerp(from, target, t);
+        let openness = if full(target_rows) > 0.0 { (height / full(target_rows)).clamp(0.0, 1.0) } else { 0.0 };
         let chevron = can_open_in_place.then(|| {
             div()
                 .size(px(18.0))
                 .flex_none()
-                .rounded(px(5.0))
-                .bg(crate::theme::ink(0.06))
                 .flex()
                 .items_center()
                 .justify_center()
                 .child(
-                    crate::icons::icon(if open {
-                        crate::icons::ALT_ARROW_DOWN
-                    } else {
-                        crate::icons::ALT_ARROW_RIGHT
-                    })
-                    .size(px(12.0))
-                    .text_color(theme.text_faint),
+                    crate::icons::icon(crate::icons::ALT_ARROW_DOWN)
+                        .size(px(12.0))
+                        .with_transformation(gpui::Transformation::rotate(gpui::radians(
+                            -std::f32::consts::FRAC_PI_2 * (1.0 - openness),
+                        )))
+                        .text_color(theme.text_faint),
                 )
         });
         let label_tint = if card.failed { theme.danger } else { theme.text };
@@ -525,24 +587,66 @@ impl Transcript {
                 .text_color(theme.warning)
                 .child(SharedString::from(format!("Needs you · {ask}")))
         });
-        let child = card.chat.clone().filter(|_| open).map(|chat| {
+        let sliding = moving.is_some() && t < 1.0;
+        let child = card.chat.clone().filter(|_| open || sliding).map(|chat| {
             let (transcript, rows) = self.inline_child(row_id, &chat, card.running, cx);
             // As tall as its rows, up to its room: a short run leaves no room under its last
-            // line. Before its rows laid out, the room.
-            // The hairline over it is its own pixel.
-            let room = self.subagents.child_room();
-            let height = rows.map_or(room, |rows| (rows + 1.0).min(room));
+            // line. Before its rows laid out, the room. It slides open over its whole height,
+            // so nothing in it moves as it shows. The hairline over it is its own pixel.
+            let whole = if open { full(rows) } else { from.max(height) };
             div()
                 .id(SharedString::from(format!("{key}-child")))
                 .role(gpui::Role::Group)
                 .aria_label(SharedString::from(format!("Transcript of {}", card.title)))
                 .w_full()
                 .flex_none()
-                .border_t_1()
-                .border_color(crate::theme::hairline(0.06))
+                .overflow_hidden()
                 .h(px(height))
-                .child(transcript)
+                .opacity(openness)
+                .child(
+                    div()
+                        .w_full()
+                        .h(px(whole))
+                        .border_t_1()
+                        .border_color(crate::theme::hairline(0.06))
+                        .child(transcript),
+                )
         });
+        // Each frame of the slide measures the card's row again, until it lands.
+        self.subagents.drawn.insert(key.clone(), (open, height));
+        let slide = if sliding {
+            let row = row_id.clone();
+            let this = cx.weak_entity();
+            Some(
+                gpui::canvas(
+                    move |_, window, _| {
+                        window.on_next_frame(move |_, cx| {
+                            this.update(cx, |this, cx| this.row_resized(&row, cx)).ok();
+                        });
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_0(),
+            )
+        } else {
+            if moving.is_some() {
+                self.subagents.moving.remove(&key);
+                if !open {
+                    // Slid shut: let its child go, and the row take its closed height.
+                    if let Some(chat) = card.chat.as_deref() {
+                        self.close_child(chat, cx);
+                    }
+                    // After this layout, which holds the list's state.
+                    let row = row_id.clone();
+                    let this = cx.weak_entity();
+                    cx.defer(move |cx| {
+                        this.update(cx, |this, cx| this.row_resized(&row, cx)).ok();
+                    });
+                }
+            }
+            None
+        };
         let value = [card.step.clone(), Some(figures).filter(|f| !f.is_empty())]
             .into_iter()
             .flatten()
@@ -610,10 +714,12 @@ impl Transcript {
                 }
                 cx.stop_propagation();
             }))
+            .relative()
             .child(header)
             .children(step_line)
             .children(needs_you)
             .children(child)
+            .children(slide)
             .into_any_element()
     }
 }
