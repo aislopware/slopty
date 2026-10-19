@@ -8,9 +8,12 @@ Button │ Past session: Rename the lexer module to scanner, 1d
 Button │ Past session: Profile the startup path, 1d
 Button │ Server: e2e-server, Connected
 Button │ Settings
+Button │ Project: repo
+Button │ Device: past
 MultilineTextInput │ Do anything… (focused)
 Button │ Attach images
 Button │ Mode: Auto
+Button │ Model: Opus 5.5, High
 Button │ Send message
 Button │ Hide sidebar
 Button │ Back

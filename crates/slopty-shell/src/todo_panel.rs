@@ -311,7 +311,14 @@ impl Composer {
             crate::queue::queue_panel_surface(&theme, cx.has_active_drag()).child(header);
         // slopty: the list slides open and shut (`motion::reveal_height`), kept while it closes.
         let surface = {
-            let list = div().flex().flex_col().children(
+            // slopty: a list to a screen reader, each step saying how it stands.
+            let list = div()
+                .id("todo-items")
+                .role(gpui::Role::List)
+                .aria_label("Todo list")
+                .flex()
+                .flex_col()
+                .children(
                 rows(&items, show_earlier, show_later)
                     .into_iter()
                     .map(|row| match row {
@@ -420,8 +427,8 @@ impl Composer {
                         .toggle(finished);
                     cx.notify();
                 }))
-                .tooltip(crate::settings::widgets::text_tooltip(label))
-                .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
+                // slopty: no tooltip: the header says what it is, and its name stays for a screen
+                // reader, as the Background tray's does.
                 .child(
                     icon(if summary.finished() {
                         icons::CHECK
@@ -613,8 +620,16 @@ fn todo_item_row(
         TodoStatus::InProgress => (theme.text, gpui::FontWeight::MEDIUM),
         TodoStatus::Pending => (theme.text_muted, gpui::FontWeight::NORMAL),
     };
+    // slopty: each step names itself and how it stands, for a screen reader.
+    let state = match status {
+        TodoStatus::Completed => "done",
+        TodoStatus::InProgress => "in progress",
+        TodoStatus::Pending => "pending",
+    };
     div()
         .id(SharedString::from(format!("todo-item-{ix}")))
+        .role(gpui::Role::ListItem)
+        .aria_label(SharedString::from(format!("{}, {state}", item.text)))
         .min_h(px(26.0))
         .px(px(ROW_PAD_X))
         .py(px(4.0))

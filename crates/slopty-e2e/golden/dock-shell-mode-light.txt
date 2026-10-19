@@ -5,12 +5,16 @@ Button │ Server: e2e-server, Connected
 Button │ Settings
 Article │ You
 Paragraph │ Hello there
+Button │ Copy message
+Button │ Rewind…
+Article │ Claude Code
 Button │ Thought process
-Article │ Claude
 Paragraph │ Done: Hello there
+Button │ Copy message
 Button │ Attach images
 Status │ Shell mode
-MultilineTextInput │ Do anything… │ !echo bang-$((6*7)) (focused)
+MultilineTextInput │ Shell command │ !echo bang-$((6*7)) (focused)
+Button │ Model: Opus 5.5, High
 Button │ Send message
 Button │ Mode: Auto
 Button │ Context 1%

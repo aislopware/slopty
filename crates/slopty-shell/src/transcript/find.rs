@@ -253,7 +253,7 @@ impl Transcript {
         self.find.active = Some(next);
         self.publish_find(cx);
         if let Some((ix, _, _)) = self.find.locate(next) {
-            self.scroll_to_row(ix, cx);
+            self.glide_to_row(ix, false, cx); // slopty: its match marks the landing.
         }
         cx.notify();
     }

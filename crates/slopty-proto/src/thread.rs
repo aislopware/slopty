@@ -1018,10 +1018,10 @@ impl Request {
     /// [`Request::CANCEL`].
     pub const ELICITATION: &'static str = "elicitation";
     /// What a card that only the person at it answers says ([`Request::needs_presence`]).
-    pub const NEEDS_PRESENCE: &'static str = "Answer here";
+    pub const NEEDS_PRESENCE: &'static str = "Answer in Slopty";
     /// Why an answer from anywhere but the card is refused ([`Request::needs_presence`]).
     pub const NEEDS_PRESENCE_REFUSED: &'static str =
-        "Answer here: the agent takes this answer only from its card in Slopty";
+        "Answer in Slopty: the agent takes this answer only from its card";
     /// A plan to approve.
     pub const PLAN: &'static str = "plan";
     /// Questions for the person.

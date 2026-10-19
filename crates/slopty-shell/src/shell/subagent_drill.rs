@@ -85,7 +85,7 @@ impl Shell {
                         "{} › {}",
                         drill.parent_title, drill.child_title
                     )))
-                    .h(px(26.0))
+                    .h(px(crate::transcript::DRILL_CRUMB_HEIGHT)) // slopty: the run starts under it.
                     .max_w(px(560.0))
                     .px(px(10.0))
                     .flex()

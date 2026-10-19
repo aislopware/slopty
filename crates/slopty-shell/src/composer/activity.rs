@@ -101,7 +101,7 @@ pub fn working_line(
         .collect::<Vec<_>>()
         .join(" · ");
     let lead = if words.retrying { words.lead.clone() } else { format!("{}…", words.lead) };
-    let figures = words.figures.join(" · ");
+    let figures = figures_element(&words, view, turn, reduced, crate::clock::now(cx), &theme);
     Some(
         div()
             .id("working-line")
@@ -146,17 +146,7 @@ pub fn working_line(
                                 crate::clock::now(cx),
                             )),
                     )
-                    .when(!figures.is_empty(), |el| {
-                        el.child(
-                            div()
-                                .flex_none()
-                                .relative()
-                                .top(px(1.0))
-                                .text_color(theme.text_faint)
-                                .font_features(crate::typography::tabular())
-                                .child(SharedString::from(figures)),
-                        )
-                    }),
+                    .children(figures),
             )
             .when_some(words.below, |el, below| {
                 el.child(
@@ -172,10 +162,72 @@ pub fn working_line(
     )
 }
 
+/// slopty: the faint figures after the line's words: its timer, which rolls its digits under the
+/// key the transcript's own working line rolls them under (`render_working_trailer`), so the line
+/// taking over from that one mid-turn carries on rolling; then its tokens and thinking (#21).
+fn figures_element(
+    words: &ActivityWords,
+    view: EntityId,
+    turn: i64,
+    reduced: bool,
+    now: std::time::Instant,
+    theme: &Theme,
+) -> Option<gpui::Div> {
+    let (timer, rest) = match words.figures.split_first() {
+        Some((timer, rest)) if !words.retrying => (Some(timer), rest),
+        _ => (None, words.figures.as_slice()),
+    };
+    if timer.is_none() && rest.is_empty() {
+        return None;
+    }
+    let rest = rest.join(" · ");
+    Some(
+        div()
+            .flex_none()
+            .relative()
+            .top(px(1.0))
+            .flex()
+            .flex_row()
+            .text_color(theme.text_faint)
+            .font_features(crate::typography::tabular())
+            .children(timer.map(|timer| {
+                crate::roll_text::roll_text(
+                    format!("working-timer-{view}-{turn}"),
+                    SharedString::from(timer.clone()),
+                    reduced,
+                    now,
+                )
+            }))
+            .when(!rest.is_empty(), |el| {
+                el.child(SharedString::from(if timer.is_some() { format!(" · {rest}") } else { rest }))
+            }),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use slopty_view_doc::dock::RetryLine;
+
+    /// slopty: the dock's line rolls its timer under the transcript's own line's key, so taking
+    /// over from it mid-turn the digits go on rolling (#21).
+    #[test]
+    fn the_timer_rolls_on_from_the_transcripts_line() {
+        let (view, turn) = (EntityId::from(7u64), 3);
+        let key = format!("working-timer-{view}-{turn}");
+        let start = std::time::Instant::now();
+        // The transcript's line said 4s, at rest.
+        let _ = crate::roll_text::roll_text(key.clone(), "4s".into(), false, start);
+        let line = ActivityLine { started_at: Some(0), tokens: 1_200, ..ActivityLine::default() };
+        let words = activity_words(&line, "Working", 0, 5_000);
+        assert_eq!(words.figures, ["5s", "↓ 1.2k tokens"]);
+        let later = start + std::time::Duration::from_secs(1);
+        assert!(figures_element(&words, view, turn, false, later, &Theme::dark()).is_some());
+        assert!(
+            crate::roll_text::rolling(key, "4s".into(), false, later).is_some(),
+            "the dock's line moved the same timer on to 5s"
+        );
+    }
 
     /// The line names the agent's phrase, its time, its tokens and its thinking, the TUI's way.
     #[test]

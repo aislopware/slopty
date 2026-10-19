@@ -65,6 +65,9 @@ pub(crate) struct DockFeed {
     shell_task: Option<Task<()>>,
     /// The side exchange the person dismissed, by chat: its card stays away until a newer one.
     pub side_dismissed: HashMap<String, String>,
+    /// The newest note the person dismissed, by chat (its time): it and every older note stay
+    /// away; a newer one shows.
+    pub notes_dismissed: HashMap<String, i64>,
 }
 
 impl DockFeed {
@@ -385,8 +388,9 @@ impl Composer {
             .gap(px(5.0))
             .rounded(px(Theme::CONTROL_RADIUS))
             .bg(theme.accent.opacity(0.12))
+            // The tag in the interface's face: the command beside it is the mono one.
             .text_size(crate::typography::ui_rems(11.5))
-            .font_family(theme.font_mono.clone())
+            .font_weight(gpui::FontWeight::MEDIUM)
             .text_color(theme.accent)
             // slopty: the tag's name and its way out (Esc), what it does a quieter line.
             .tooltip(crate::settings::widgets::detail_tooltip(
@@ -422,7 +426,9 @@ impl Composer {
     /// The quiet lines above the tray stack: what the agent waits on once its turn ended, its
     /// passing notes and a `!` command under way. The prompt suggestion is not one of them: it
     /// shows faint in the empty draft.
-    pub(super) fn render_dock_lines(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    /// `drawer`: the inset at which they tuck in as a drawer of the tray stack (on a tray or the
+    /// composer itself), or `None` where another card stands under them.
+    pub(super) fn render_dock_lines(&mut self, drawer: Option<f32>, theme: &Theme, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mut lines = Vec::new();
         let Some(chat) = self.state.read(cx).selected_chat.clone() else { return lines };
         let now = crate::clock::utc(cx).timestamp_millis();
@@ -436,6 +442,7 @@ impl Composer {
                 dock.notes
                     .iter()
                     .filter(|note| note_showing(note, now) && note.priority != "immediate")
+                    .filter(|note| self.dock.notes_dismissed.get(&chat).is_none_or(|gone| note.at > *gone))
                     .cloned()
                     .collect::<Vec<_>>(),
                 dock.surfaces
@@ -450,7 +457,7 @@ impl Composer {
             None => (None, Vec::new(), Vec::new()),
         };
         if let Some(waiting) = waiting {
-            lines.push(caption_line("dock-waiting", None, theme.text_faint, waiting, theme, cx));
+            lines.push(caption_line("dock-waiting", None, theme.text_faint, waiting, None, theme, cx));
         }
         for note in notes {
             let dot = match note.tone.as_str() {
@@ -459,14 +466,14 @@ impl Composer {
                 _ => theme.text_faint,
             };
             let id = format!("dock-note-{}", note.key);
-            lines.push(caption_line(&id, None, dot, note.text, theme, cx));
+            lines.push(caption_line(&id, None, dot, note.text, Some((chat.clone(), note.at)), theme, cx));
         }
         // A mod's log keeps its newest line, by mod.
         let mut seen = HashSet::new();
         for (plugin, text) in logs.into_iter().rev() {
             if seen.insert(plugin.clone()) {
                 let id = format!("dock-log-{plugin}");
-                lines.push(caption_line(&id, Some(plugin), theme.text_faint, text, theme, cx));
+                lines.push(caption_line(&id, Some(plugin), theme.text_faint, text, None, theme, cx));
             }
         }
         if let Some(run) = self.dock.shell.clone().filter(|run| run.chat == chat) {
@@ -476,13 +483,29 @@ impl Composer {
             return lines;
         }
         // The transcript scrolls under these lines, so they sit on the composer's own material,
-        // one card as the trays above them are, and stay legible over whatever passes beneath.
-        vec![
-            div()
+        // and stay legible over whatever passes beneath. On the tray stack they are one more of
+        // its drawers (its top-rounded surface tucked under the layer below, one step in), so
+        // the stack reads as one object; over another card they stand as a card of its edges.
+        let card = match drawer {
+            Some(inset) => div()
                 .id("dock-lines")
                 .debug_selector(|| "dock-lines".into())
-                // slopty: the edges every card over the composer shares (the tray's, a side
-                // answer's, a folded question's, a mod's band), so none reads as a seam.
+                .mx(px(inset))
+                .mb(px(-(Theme::SPACE_SM + crate::composer::QUEUE_COMPOSER_OVERLAP)))
+                .child(crate::frost::frosted(
+                    crate::queue::PANEL_RADIUS,
+                    crate::frost::MENU_BLUR,
+                    crate::queue::queue_panel_surface(theme, cx.has_active_drag())
+                        .pt(px(crate::queue::PANEL_PAD_TOP + 4.0))
+                        .pb(px(crate::composer::QUEUE_COMPOSER_OVERLAP + crate::queue::PANEL_PAD_TOP + 4.0))
+                        .gap(px(4.0))
+                        .children(lines),
+                )),
+            None => div()
+                .id("dock-lines")
+                .debug_selector(|| "dock-lines".into())
+                // slopty: the edges every card over the composer shares (a side answer's, a
+                // folded question's, a mod's band), so none reads as a seam.
                 .mx(px(QUEUE_SIDE_INSET))
                 .px(px(4.0))
                 .py(px(4.0))
@@ -493,9 +516,9 @@ impl Composer {
                 .border_1()
                 .border_color(theme.composer_surface_border())
                 .bg(theme.composer_surface_bg())
-                .children(lines)
-                .into_any_element(),
-        ]
+                .children(lines),
+        };
+        vec![card.into_any_element()]
     }
 
     /// A `!` command's live chip: what runs and for how long, then where its output went.
@@ -550,18 +573,52 @@ impl Composer {
 }
 
 /// One quiet caption line above the composer: a dot, who says it when a mod does, the words.
+/// Words the line cuts show whole in a tooltip; a note (`dismiss`: its chat and time) takes an
+/// ✕ under the pointer that puts it, and every older note of the chat, away.
 fn caption_line(
     id: &str,
     from: Option<String>,
     dot: gpui::Hsla,
     words: String,
+    dismiss: Option<(String, i64)>,
     theme: &Theme,
-    _cx: &mut Context<Composer>,
+    cx: &mut Context<Composer>,
 ) -> AnyElement {
     let label = match &from {
         Some(from) => format!("{from}: {words}"),
         None => words.clone(),
     };
+    let hover: SharedString = format!("{id}-hover").into();
+    let close = dismiss.map(|(chat, at)| {
+        let close_hover: SharedString = format!("{id}-close-hover").into();
+        div()
+            .id(SharedString::from(format!("{id}-dismiss")))
+            .role(Role::Button)
+            .flex_none()
+            .size(px(24.0))
+            .my(px(-5.0))
+            .mr(px(-6.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(6.0))
+            .cursor_pointer()
+            // Under a pointer it comes with the hover; a touch screen has none, so there it stays.
+            .opacity(if crate::shell::touch_screen() {
+                1.0
+            } else {
+                crate::motion::hover_t(&hover).max(crate::motion::hover_t(&close_hover))
+            })
+            .bg(crate::motion::hover_blend(&close_hover, gpui::transparent_black(), crate::theme::ink(0.06)))
+            .hover_fade(close_hover)
+            .hint("Dismiss note")
+            .on_click(cx.listener(move |this, _, _, cx| {
+                let gone = this.dock.notes_dismissed.entry(chat.clone()).or_insert(at);
+                *gone = (*gone).max(at);
+                cx.notify();
+            }))
+            .child(crate::icons::icon(crate::icons::CLOSE).size(px(10.0)).text_color(theme.text_muted))
+    });
     div()
         .id(SharedString::from(id.to_owned()))
         .role(Role::Status)
@@ -573,11 +630,13 @@ fn caption_line(
         .text_size(crate::typography::ui_rems(11.0))
         .line_height(crate::typography::ui_rems(14.0))
         .text_color(theme.text_faint)
+        .when(close.is_some(), |el| el.hover_fade(hover))
         .child(div().flex_none().size(px(5.0)).rounded_full().bg(dot))
         .when_some(from, |el, from| {
             el.child(div().flex_none().text_color(theme.text_muted).child(SharedString::from(from)))
         })
-        .child(div().min_w_0().truncate().child(SharedString::from(words)))
+        .child(crate::settings::widgets::truncate_with_tip(format!("{id}-words"), words))
+        .children(close)
         .into_any_element()
 }
 

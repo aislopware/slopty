@@ -3574,16 +3574,16 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   it; every other path is refused:
   - a note's buttons: none are offered (`RequestCard::answerable` is false and
     `NoteChoice::of` is empty), so neither a phone push nor the Mac's note shows them, and a tap
-    that comes anyway says "Needs you at the card" and leaves the request waiting;
+    that comes anyway says "Answer in Slopty" and leaves the request waiting;
   - an answer from no client, meaning orchestration's `answer_request` from the CLI or the
-    tools, or a note's verdict through the server: the worker refuses it with "Needs you at the
-    card: the agent takes this answer only from its card in Slopty";
+    tools, or a note's verdict through the server: the worker refuses it with "Answer in Slopty:
+    the agent takes this answer only from its card";
   - another agent: the hub already refuses any agent's `answer_request`;
   - a rule: "Allow with rule" is refused for it, and none is offered;
   - a page: pages have no answer route.
 
   Slopty has no auto-allow of its own by rule or mode. Claude Code's own modes decide before it
-  asks. The card carries a quiet "Needs you at the card" chip.
+  asks. The card carries a quiet "Answer in Slopty" chip.
   - Tests: `slopty-agent` `claude::driven::tests::a_request_needing_the_person_is_held_for_the_card`;
     `slopty-proto` `units::{a_notes_buttons_answer_only_a_plain_yes_or_no,
     a_small_question_is_answered_by_its_options}`; `slopty-workerd` `threads::tests::only_the_card_answers_a_request_that_needs_the_person_at_it`;
@@ -3838,12 +3838,12 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   (2026-10-17).** Claude Code's `requires_user_interaction` asks a host to offer no one-tap
   answer, so a note for such a request keeps offering no button, as ruled on 2026-10-16. A
   press can still come: a note posted before the request said so, or one a phone kept. In the
-  app it said "Needs you at the card", but through the server, which a phone's background
+  app it said "Answer in Slopty", but through the server, which a phone's background
   answer and an app whose worker is not linked use, Allow and a pick found no choice in the
   thread read and said "That prompt is no longer waiting" while the prompt still waited, and
   Deny reached the worker, whose refusal read as "Couldn't reach" the machine. The thread read
   now carries `RequestRead::needs_presence`, and both paths refuse such a press without asking
-  the worker, in its words ("Needs you at the card: …"). Any answer the worker turns down says
+  the worker, in its words ("Answer in Slopty: …"). Any answer the worker turns down says
   the worker's words; only a link that failed says the machine was not reached. A press for an
   answer the request does not offer says so ("That prompt offers no such answer") rather than
   calling the prompt gone.

@@ -66,6 +66,10 @@ pub(super) fn last_heard(at: DateTime<Utc>, now: DateTime<Utc>) -> String {
     }
 }
 
+/// What the composer says while this Mac itself is offline, in the grammar of its sibling
+/// notices ("studio is out of reach · last heard 2 min ago").
+const THIS_MAC_OFFLINE: &str = "This Mac is offline · messages send when it reconnects";
+
 /// The words of a chat's offline notice: this Mac offline, or the chat's machine `name` out of
 /// reach since `last_seen`.
 pub(super) fn road_words(
@@ -75,11 +79,11 @@ pub(super) fn road_words(
     now: DateTime<Utc>,
 ) -> String {
     if this_mac_offline {
-        return "Offline — messages will send when you're back online.".to_owned();
+        return THIS_MAC_OFFLINE.to_owned();
     }
     match last_seen {
         Some(at) => format!("{name} is out of reach · last heard {}", last_heard(at, now)),
-        None => format!("{name} is out of reach · messages will send once it's back"),
+        None => format!("{name} is out of reach · messages send once it's back"),
     }
 }
 
@@ -91,6 +95,94 @@ pub(super) fn limit_words(resets_at: Option<DateTime<Utc>>, now: DateTime<Utc>) 
 }
 
 impl Composer {
+    /// slopty: a send's or a call's failure over the composer: the message itself leads (no
+    /// generic "Error" above it), amber while the engine is offline and red otherwise, with
+    /// Copy and an explicit ✕; a click elsewhere on it no longer dismisses it. It shares the
+    /// edges of every card stacked over the composer.
+    pub(super) fn render_failure(&self, message: SharedString, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let offline = message.as_ref() == ENGINE_OFFLINE;
+        let (accent, muted) = if offline { (theme.warning, theme.warning_muted) } else { (theme.danger, theme.danger_muted) };
+        let copy_key: SharedString = "composer-failure-copy".into();
+        let control = |id: &'static str, label: &'static str| {
+            let hover: SharedString = format!("{id}-hover").into();
+            div()
+                .id(id)
+                .role(Role::Button)
+                .aria_label(label)
+                .flex_none()
+                .size(px(24.0))
+                .rounded(px(6.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .bg(motion::hover_blend(&hover, gpui::transparent_black(), accent.opacity(0.12)))
+                .active(|s| s.bg(accent.opacity(0.18)))
+                .hover_fade(hover)
+                .tab_index(0)
+                .map(|el| crate::surface_chrome::focus_ring(el, theme))
+        };
+        let copy_message = message.clone();
+        let tip_key = copy_key.clone();
+        let click_key = copy_key.clone();
+        let copy = control("composer-failure-copy", "Copy message")
+            .on_click(move |_, _, cx| {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy_message.to_string()));
+                motion::copy_feedback(click_key.clone(), cx);
+            })
+            .tooltip(move |window, cx| {
+                let words = if motion::copied(&tip_key, cx) { "Copied" } else { "Copy message" };
+                crate::settings::widgets::text_tooltip(words)(window, cx)
+            })
+            .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
+            .child(crate::icons::icon(motion::copy_icon(&copy_key, cx)).size(px(12.0)).text_color(muted.opacity(0.8)));
+        let dismiss = control("composer-failure-dismiss", "Dismiss")
+            .hint("Dismiss")
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.failure = None;
+                this.failure_key = None;
+                cx.notify();
+            }))
+            .child(crate::icons::icon(crate::icons::CLOSE).size(px(12.0)).text_color(muted.opacity(0.8)));
+        div()
+            .id("composer-failure")
+            .role(if offline { Role::Status } else { Role::Alert })
+            .aria_label(message.clone())
+            .mx(px(QUEUE_SIDE_INSET))
+            .pl(px(12.0))
+            .pr(px(6.0))
+            .py(px(6.0))
+            .flex()
+            .items_start()
+            .gap(px(8.0))
+            .rounded(px(12.0))
+            .border_1()
+            .border_color(accent.opacity(0.16))
+            .bg(accent.opacity(0.05))
+            .text_size(crate::typography::ui_rems(12.0))
+            .line_height(px(16.0))
+            .child(
+                div()
+                    .flex_none()
+                    .h(px(24.0))
+                    .flex()
+                    .items_center()
+                    .child(crate::icons::icon(crate::icons::DANGER_TRIANGLE).size(px(14.0)).text_color(muted.opacity(0.9))),
+            )
+            // The message wraps, never truncates: a failure's words are meant to be read whole.
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .py(px(4.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(muted.opacity(0.95))
+                    .child(message),
+            )
+            .child(div().flex_none().flex().items_center().gap(px(2.0)).child(copy).child(dismiss))
+            .into_any_element()
+    }
+
     /// The selected chat's offline notice, once its road has been degraded for
     /// [`OFFLINE_GRACE`].
     pub(super) fn road_notice(&mut self, cx: &mut Context<Self>) -> Option<RoadNotice> {
@@ -277,9 +369,9 @@ impl Composer {
         let offline = state.connectivity.state == S::Offline;
         degraded.then(|| {
             let text: SharedString = if offline {
-                "Offline — messages will send when you're back online.".into()
+                THIS_MAC_OFFLINE.into()
             } else {
-                "Messages will send once the connection recovers.".into()
+                "Messages send once the connection is back".into()
             };
             (text, offline)
         })
@@ -435,7 +527,8 @@ mod tests {
         assert_eq!(road_words(false, "studio", ago(5), now), "studio is out of reach · last heard just now");
         assert_eq!(road_words(false, "vm", ago(7300), now), "vm is out of reach · last heard 2 h ago");
         assert!(road_words(false, "vm", None, now).starts_with("vm is out of reach"));
-        assert!(road_words(true, "vm", ago(5), now).starts_with("Offline"));
+        // slopty: this Mac offline reads as its siblings do: what happened · what follows.
+        assert_eq!(road_words(true, "vm", ago(5), now), "This Mac is offline · messages send when it reconnects");
     }
 
     #[test]

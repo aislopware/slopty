@@ -575,9 +575,14 @@ pub struct UserInputQuestion {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aside: Option<String>,
     /// Only the person at this card answers it, never a note's button, an API call or another
-    /// agent (Claude Code's `requires_user_interaction`): the card says "Needs you at the card".
+    /// agent (Claude Code's `requires_user_interaction`): the card says "Answer in Slopty".
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub needs_presence: bool,
+    // slopty: a shell command's approval leads with the command, set as code.
+    /// The first paragraph of `question` is a command the agent would run: the card draws it in
+    /// the code face.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub code: bool,
 }
 
 // slopty: "Allow with rule" (`slopty.AllowWithRule`).

@@ -7,14 +7,23 @@ Button │ Server: e2e-server, Connected
 Button │ Settings
 Article │ You
 Paragraph │ Touch three files
-Button │ Ran 1 command
+Button │ Copy message
+Button │ Rewind…
+Article │ Claude Code
+Button │ Run touch refused.txt │ Waiting for permission…
+Status │ Waiting for permission…
+Status │ Needs your approval: touch refused.txt
 Group │ touch refused.txt (focused)
+Code │ touch refused.txt
+Note │ Create refused.txt file
 Button │ Allow
 Button │ Always allow (edits in this folder this session)
 Button │ Deny
 Button │ Deny and stop
 Button │ Allow, and say what's next…
 Button │ Say what to do instead…
+Button │ Mode: Auto
+Button │ Context —
 Button │ Open in…
 Button │ Show chat details
 Button │ Show files panel

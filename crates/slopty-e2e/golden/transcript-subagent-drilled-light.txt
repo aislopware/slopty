@@ -1,13 +1,15 @@
 Window
 Button │ Survey the files
+Status │ Done
 Button │ History: past Claude Code sessions
 Button │ Server: e2e-server, Connected
 Button │ Settings
 Article │ Task
 Paragraph │ Task: Count the number of lines in the file $SCRATCH/work/main.rs. Use the Read tool on that file to do it. Do not modify any files. Reply with just the number and nothing else.
-Button │ Read 1 file
-Article │ Claude
+Article │ Claude Code
+Button │ Read main.rs
 Paragraph │ 4
+Button │ Copy message
 Navigation │ Survey the files › Count lines
 Link │ Back to Survey the files
 Status │ Runs inside Survey the files (focused)

@@ -180,12 +180,16 @@ fn selected_catalog_model<'a>(models: &'a [Model], selected: Option<&str>) -> Op
 }
 
 /// slopty: a picker trigger's tooltip names what it picks and the key that opens it (the
-/// model picker ⌘/, the branch picker ⌥⌘B, as the keymap has them now); its accessible name
-/// stays what it shows.
+/// model picker ⌘/, the branch picker ⌥⌘B, as the keymap has them now). It is a button and a
+/// tab stop with the shell's ring, says whether its menu is open, and is named by what it picks
+/// and what it shows: "Model: Opus 5.5, High".
 fn trigger_hint(
     el: gpui::Stateful<gpui::Div>,
     kind: PickerKind,
     shown: SharedString,
+    suffix: Option<&str>,
+    open: bool,
+    theme: &Theme,
     cx: &App,
 ) -> gpui::Stateful<gpui::Div> {
     let (what, action) = match kind {
@@ -199,7 +203,16 @@ fn trigger_hint(
         Some(action) => el.action_hint(what, Keys::Action(action), cx),
         None => el.hint(what),
     };
-    if shown.is_empty() { el } else { el.aria_label(shown) }
+    let el = el.role(gpui::Role::Button).tab_index(0).aria_expanded(open);
+    let el = crate::surface_chrome::focus_ring(el, theme);
+    if shown.is_empty() {
+        return el;
+    }
+    let name = match suffix.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(suffix) => format!("{what}: {shown}, {suffix}"),
+        None => format!("{what}: {shown}"),
+    };
+    el.aria_label(SharedString::from(name))
 }
 
 /// A model's default reasoning: X-High when the ladder offers it (slopty
@@ -3573,7 +3586,10 @@ impl Pickers {
                 }),
             )
             .on_click(cx.listener(move |this, _, window, cx| this.toggle(kind, window, cx)))
-            .map(|el| trigger_hint(el, kind, label.clone(), cx))
+            .map(|el| {
+                let suffix = suffix.as_ref().map(|(text, _)| text.to_string());
+                trigger_hint(el, kind, label.clone(), suffix.as_deref(), open, theme, cx)
+            })
             .when(icon_loading, |el| {
                 el.child(div().flex_none().child(crate::loaders::mini_glyph_spinner(
                     "picker-chip-loader",
@@ -3689,7 +3705,7 @@ impl Pickers {
                 }),
             )
             .on_click(cx.listener(move |this, _, window, cx| this.toggle(kind, window, cx)))
-            .map(|el| trigger_hint(el, kind, label.clone(), cx))
+            .map(|el| trigger_hint(el, kind, label.clone(), None, open, theme, cx))
             .child(
                 crate::icons::icon(icon_path)
                     .size(px(12.0))

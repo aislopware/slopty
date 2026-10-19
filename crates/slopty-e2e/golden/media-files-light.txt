@@ -4,12 +4,13 @@ Status │ Done
 Button │ History: past Claude Code sessions
 Button │ Server: e2e-server, Connected
 Button │ Settings
-Button │ Called 1 tool
+Article │ Claude Code
+Button │ Tool mcp__slopty__show_page
 Group │ Page: Report │ live
 Button │ Copy image
 Button │ Open in pane
 Image │ page 1 of 1 │ drawn
-Button │ Called 1 tool
+Button │ Tool mcp__slopty__show_page
 Group │ Page: Latency │ live
 Button │ Copy table
 Button │ Open in pane
@@ -36,6 +37,7 @@ Cell │ 43
 Cell │ 210
 Button │ Attach images
 MultilineTextInput │ Do anything… (focused)
+Button │ Model: Opus 5.5, High
 Button │ Send message
 Button │ Mode: Auto
 Button │ Context 1%

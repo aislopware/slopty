@@ -1,7 +1,7 @@
 // slopty: Slopty's own file (not in zeron).
 //! slopty: the footer under the composer, always there (the TUI's footer row): the person's
 //! status line with its colours, what the agent's mods put there, the goal it works towards
-//! ("/goal active (5h)"), and the permission mode ("Bypass permissions on", amber when nothing
+//! ("Goal · 5h"), and the permission mode ("Bypass permissions on", amber when nothing
 //! is asked), which ⇧Tab cycles in the agent's order and a click picks from a menu. The
 //! background counts are the Background tray's, right above it, so the footer does not repeat
 //! them.
@@ -121,16 +121,17 @@ fn mode_menu(chip: &ModeChip) -> crate::live::menu::Menu {
     menu
 }
 
-/// How a goal reads in the footer at `now`: "/goal active (5h)", its age's most significant
+/// How a goal reads in the footer at `now`: "Goal · 5h", its age's most significant
 /// unit, nothing in its first second.
 pub(crate) fn goal_words(goal: &GoalLine, now: i64) -> String {
     let age = u64::try_from(now.saturating_sub(goal.set_at)).unwrap_or(0);
     if age < 1_000 {
-        return "/goal active".to_owned();
+        return "Goal".to_owned();
     }
     let words = duration_words(age);
     let first = words.split(' ').next().unwrap_or(&words);
-    format!("/goal active ({first})")
+    // slopty: a plain noun and its age, never the TUI's command syntax.
+    format!("Goal · {first}")
 }
 
 /// A goal's details, for its hover and its card: the condition, how far it has come, the last
@@ -459,13 +460,15 @@ impl Composer {
             }))
             .child(
                 segment_drawn()
+                    .id("dock-picked-mode-drawn")
                     .bg(motion::hover_blend("dock-picked-mode-hover", gpui::transparent_black(), crate::theme::ink(0.05)))
+                    .active(|s| s.bg(crate::theme::ink(0.09)))
                     .child(label),
             )
             .into_any_element()
     }
 
-    /// "◎ /goal active (5h)": hover shows the condition, a click its card with Clear.
+    /// "◎ Goal · 5h": hover shows the condition, a click its card with Clear.
     fn goal_segment(&self, goal: &GoalLine, now: i64, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let words = goal_words(goal, now);
         let details = goal_details(goal, now).join("\n");
@@ -485,6 +488,8 @@ impl Composer {
             .gap(px(5.0))
             .rounded(px(Theme::CONTROL_RADIUS))
             .text_size(crate::typography::ui_rems(11.0))
+            // slopty: its age's digits keep one width as it ticks.
+            .font_features(crate::typography::tabular())
             .text_color(theme.accent)
             .cursor_pointer()
             .tab_index(0)
@@ -495,6 +500,7 @@ impl Composer {
                 motion::hover_blend(&hover, gpui::transparent_black(), crate::theme::ink(0.05))
             })
             .hover_fade(hover)
+            .active(|s| s.bg(crate::theme::ink(0.09))) // slopty: a press shows
             .when(!open, |el| {
                 el.tooltip(crate::settings::widgets::text_tooltip(details))
                     .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
@@ -612,11 +618,17 @@ impl Composer {
             .tab_index(0)
             .map(|el| crate::surface_chrome::focus_ring_within(el, theme, reach))
             .aria_expanded(open)
-            .child(drawn.bg(if open {
-                crate::theme::ink(0.05)
-            } else {
-                motion::hover_blend("dock-mode-hover", rest, crate::theme::ink(0.05))
-            }))
+            .child(
+                drawn
+                    .id("dock-mode-drawn")
+                    .bg(if open {
+                        crate::theme::ink(0.05)
+                    } else {
+                        motion::hover_blend("dock-mode-hover", rest, crate::theme::ink(0.05))
+                    })
+                    // slopty: a press shows, a step deeper than the hover.
+                    .active(|s| s.bg(crate::theme::ink(0.09))),
+            )
             .hover_fade("dock-mode-hover")
             .action_hint("Mode", Keys::Fixed("shift-tab"), cx)
             .aria_label(aria)
@@ -810,8 +822,8 @@ mod tests {
     #[test]
     fn a_goal_reads_its_age() {
         let goal = GoalLine { condition: "tests pass".into(), set_at: 0, iterations: 3, tokens: Some(41_000), last_reason: Some("2 failing".into()) };
-        assert_eq!(goal_words(&goal, 500), "/goal active");
-        assert_eq!(goal_words(&goal, 5 * 3_600_000 + 120_000), "/goal active (5h)");
+        assert_eq!(goal_words(&goal, 500), "Goal");
+        assert_eq!(goal_words(&goal, 5 * 3_600_000 + 120_000), "Goal · 5h");
         assert_eq!(
             goal_details(&goal, 90_000),
             ["Goal: tests pass", "running 1m 30s · 3 turns · 41k tokens", "Last check: 2 failing"]

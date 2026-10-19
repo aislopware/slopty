@@ -5,7 +5,8 @@
 //! parent's chat"): this card, the Background tray above the composer, and the drill-in. The
 //! card is zeron's chip anatomy: an icon tile, the task as its label, its kind and model faint
 //! on the right; under it the subagent's step and figures, live while it runs and settled to
-//! its outcome after. A click (or ↵) opens the child's transcript in place, capped in height
+//! its outcome after (slopty: a run that went well says what it answered, not "Done", which its
+//! spinner gone already says). A click (or ↵) opens the child's transcript in place, capped in height
 //! and scrolling on its own, following its end while it runs; the newest running child of the
 //! turn under way opens itself while it is what the parent waits on, and closes once the turn
 //! moves on, unless the person opened or closed it. Open (⌘↵) drills into the child as the
@@ -25,6 +26,18 @@ use crate::motion::HoverFade as _;
 
 /// The step line under a card's header.
 const STEP_LINE_HEIGHT: f32 = 20.0;
+
+/// slopty: the first line of what a run answered (its spawn call's result), its heading and
+/// strong marks left out; none when it answered nothing (#23).
+fn reply_line(tool: &ToolItem) -> Option<String> {
+    let Some(super::ToolDetail::Output { lines, .. }) = tool.detail.as_deref() else {
+        return None;
+    };
+    lines
+        .iter()
+        .map(|line| line.trim_start_matches('#').replace("**", "").trim().to_owned())
+        .find(|line| !line.is_empty())
+}
 /// slopty: what a card's quiet control (Stop, Open) takes in its header's row.
 const QUIET_FOOTPRINT: f32 = 18.0;
 /// The least and most room a card's child transcript may take; it takes only its rows' height
@@ -119,7 +132,9 @@ impl Card {
                     SubagentProgress::DONE
                 }
                 .to_owned(),
-                step: None,
+                step: (!status_running && !(tool.is_error || status_failed))
+                    .then(|| reply_line(tool))
+                    .flatten(),
                 figures: String::new(),
                 started_at: None,
                 duration_ms: None,
@@ -134,6 +149,9 @@ impl Card {
             .join(" · ");
         let step = if progress.running {
             progress.step.clone()
+        } else if progress.state == SubagentProgress::DONE && !tool.is_error {
+            // slopty: a run that went well says the first line of what it answered (#23).
+            reply_line(tool)
         } else {
             progress.outcome.clone().or_else(|| progress.step.clone())
         };
@@ -197,6 +215,12 @@ impl SubagentsState {
         let mut open: Vec<String> = self.open.keys().cloned().collect();
         open.sort();
         open
+    }
+
+    /// The transcript of child `chat`, open in place.
+    #[cfg(test)]
+    pub(super) fn child(&self, chat: &str) -> Option<Entity<Transcript>> {
+        self.open.get(chat).map(|child| child.transcript.clone())
     }
 
     /// The most room a child transcript open in a card takes: a share of the window's height.
@@ -371,7 +395,8 @@ impl Transcript {
             .subagents
             .focus
             .entry(key.clone())
-            .or_insert_with(|| cx.focus_handle())
+            // slopty: a tab stop: a tracked handle is one only when it says so (#9).
+            .or_insert_with(|| cx.focus_handle().tab_stop(true))
             .clone();
         let now = self.clock.timestamp_millis();
         let figures = card.figures_at(now);
@@ -658,6 +683,9 @@ impl Transcript {
         div()
             .id(key.clone())
             .track_focus(&focus)
+            // slopty: its ring inside its edge (the group's body clips it); Enter or Space
+            // presses it as a click does (#9).
+            .map(|card| crate::surface_chrome::focus_ring_inset(card, theme))
             .group("subagent-card")
             .role(gpui::Role::Button)
             .aria_label(SharedString::from(format!("Subagent {}", card.title)))
@@ -703,7 +731,6 @@ impl Transcript {
                             cx.emit(TranscriptEvent::OpenSubagent { chat_id: chat });
                         }
                     }
-                    "enter" if can_open_in_place => this.toggle_card(toggle_key.clone(), open, cx),
                     "." if command => {
                         if let Some(row) = key_row.clone() {
                             this.stop_subagent(row, cx);
@@ -786,9 +813,23 @@ mod tests {
         progress.state = SubagentProgress::DONE.into();
         progress.outcome = Some("Done".into());
         progress.duration_ms = Some(65_000);
-        let settled = Card::of(&spawn(Some(progress)));
-        assert_eq!(settled.step.as_deref(), Some("Done"));
+        let settled = Card::of(&spawn(Some(progress.clone())));
+        // slopty: done, it says what it answered, else nothing; not "Done" (#23).
+        assert_eq!(settled.step, None);
         assert_eq!(settled.figures_at(999_999), "12 tools · 41k tokens · 1m 5s");
+        let mut answered = spawn(Some(progress.clone()));
+        answered.detail = super::super::tool_detail(Some("\n## **4** lines\n\nagentId: a1\n"), None, None)
+            .map(std::sync::Arc::new);
+        assert_eq!(Card::of(&answered).step.as_deref(), Some("4 lines"));
+        // A run that failed or was stopped still says so.
+        progress.state = SubagentProgress::FAILED.into();
+        progress.outcome = Some("Failed: out of turns".into());
+        let mut failed = spawn(Some(progress.clone()));
+        failed.detail = answered.detail.clone();
+        assert_eq!(Card::of(&failed).step.as_deref(), Some("Failed: out of turns"));
+        progress.state = SubagentProgress::STOPPED.into();
+        progress.outcome = Some("Stopped".into());
+        assert_eq!(Card::of(&spawn(Some(progress))).step.as_deref(), Some("Stopped"));
     }
 
     /// Without progress from the view model, the card stands on what the chip carries.

@@ -127,6 +127,9 @@ const ACTIVITY_TRUNK_X: f32 = 12.5;
 const ACTIVITY_BEND_RADIUS: f32 = 6.0;
 const ACTIVITY_BRANCH_END_X: f32 = 28.0;
 const ACTIVITY_ICON_LEFT: f32 = 32.0;
+/// slopty: where an activity line's words start: a group's summary after its chevron, a lone
+/// call after its icon, a notice after its dot (#2, #4).
+const ACTIVITY_TITLE_X: f32 = 28.0;
 /// slopty: every bordered card in the transcript's column (code, files, subagents, pages,
 /// images, requests) shares one corner and the theme's hairline.
 pub(crate) const TRANSCRIPT_CARD_RADIUS: f32 = 10.0;
@@ -138,6 +141,8 @@ fn copy_message_key(entry: &str) -> String {
 /// slopty: the lane under an entry's last row: its hover strip (timestamp, copy) and, under the
 /// last row of a live turn, the working line in the same room.
 pub(crate) const ROW_LANE_HEIGHT: f32 = Theme::SPACE_SM + Theme::SPACE_MD * 2.0;
+/// slopty: the step before a person's prompt, which heads its turn (#1).
+const PROMPT_GAP: f32 = Theme::SPACE_LG + Theme::SPACE_SM;
 const ACTIVITY_ICON_SIZE: f32 = 16.0;
 const TOOL_TEXT_SIZE: f32 = 12.0;
 const TOOL_LABEL_SIZE: f32 = TOOL_TEXT_SIZE;
@@ -152,6 +157,13 @@ fn tool_group_header_height() -> f32 {
 /// Compact rows retain the analytic heights used by row and group folds.
 const TOOL_TREE_ROW_HEIGHT: f32 = 32.0;
 const TOOL_FOLD: motion::MotionSpec = motion::MotionSpec::new(140, motion::EASE_OUT);
+/// slopty: a jump's landing flash fading out (Claude's `code-reply-flash`, 1.2 s ease-out, #13).
+const LANDING_FLASH: motion::MotionSpec = motion::MotionSpec::new(1_200, motion::EASE_OUT);
+/// slopty: the person's own send coming in: faded up and risen from [`SEND_RISE`] below (#15).
+const SEND_ENTRANCE: motion::MotionSpec = motion::MotionSpec::new(300, motion::EASE_OUT_QUINT);
+const SEND_RISE: f32 = 6.0;
+/// slopty: a bubble not yet sent.
+const PENDING_OPACITY: f32 = 0.65;
 /// BoardUI task-list cadence: a slow light sweep keeps the active summary
 /// legible, while each newly appended row reveals quickly enough to read as a
 /// continuous log rather than a stack of discrete pop-ins.
@@ -205,13 +217,18 @@ const FOLD_TWEEN_WINDOW: std::time::Duration = std::time::Duration::from_millis(
 pub const USER_COLLAPSED_LINES: usize = 5;
 /// The user bubble's line box.
 pub const USER_LINE_HEIGHT: f32 = 22.0;
+/// slopty: the height of the "parent › subagent" breadcrumb a drilled subagent's run starts under
+/// (`shell/subagent_drill.rs`).
+pub(crate) const DRILL_CRUMB_HEIGHT: f32 = 26.0;
 /// Conservative first-frame soft-wrap proxy for the fixed-width long-prompt
 /// bubble. The final decision uses the wrapped `StyledText` layout, but this
 /// fallback lets clearly long prompts render their affordance immediately
 /// before that first layout has completed.
 pub const USER_COLLAPSE_CHARS: usize = 400;
 /// Vertical separation before the plain expand/collapse link.
-const USER_TOGGLE_GAP: f32 = 8.0;
+const USER_TOGGLE_GAP: f32 = 4.0;
+/// slopty: the expander's line, at its 12 pt (#6).
+const USER_TOGGLE_LINE_HEIGHT: f32 = 18.0;
 /// User-bubble attachment thumbnails (user-attachments.tsx): 112×80 thumbs in
 /// a wrapping strip. Fixed thumbnail sizes keep load-state flips from
 /// shifting the virtualizer.
@@ -265,8 +282,17 @@ fn block_words(block: &crate::markdown::Block) -> String {
     texts.join("\n")
 }
 
+/// slopty: an agent of `harness` by name, "Agent" when the chat names none (#10).
+fn agent_name(harness: Option<slopty_view_proto::HarnessId>) -> SharedString {
+    let Some(harness) = harness else { return "Agent".into() };
+    crate::settings::SKILL_COMPLETION_HARNESSES
+        .iter()
+        .find(|(id, _)| *id == harness)
+        .map_or_else(|| harness.as_str().into(), |(_, name)| (*name).into())
+}
+
 /// slopty: `inner` as the start of a message `who` said, to the accessibility tree.
-fn message_article(row: &SharedString, who: &'static str, inner: AnyElement) -> AnyElement {
+fn message_article(row: &SharedString, who: impl Into<SharedString>, inner: AnyElement) -> AnyElement {
     div()
         .id(SharedString::from(format!("{row}-message")))
         .role(gpui::Role::Article)
@@ -1289,11 +1315,11 @@ pub enum RowKind {
     InputChip {
         /// slopty: what kind of ask it was: "Question", "Approval", "Confirm", "Form", "Plan".
         label: SharedString,
-        /// First question's header (chat-view.tsx `InputChip`: the resolved
-        /// chip shows it; unresolved shows "Awaiting your answer…" — which
-        /// stays TRUE even across a run death: the composer keeps the panel
-        /// up until the user answers, and the engine delivers a dead run's
-        /// answer as a resumed turn).
+        /// What the chip shows beside its label: a question's header, an approval's command
+        /// (chat-view.tsx `InputChip`). slopty: an open ask's label says what it waits for
+        /// ("Waiting for your answer"), which stays TRUE even across a run death: the composer
+        /// keeps the panel up until the user answers, and the engine delivers a dead run's
+        /// answer as a resumed turn.
         header: SharedString,
         resolved: bool,
     },
@@ -1401,19 +1427,43 @@ fn system_twelve_hour() -> bool {
     true
 }
 
-/// Absolute hover-timestamp label, e.g. "Jul 1, 3:45 PM" — the exact
-/// `formatTimestamp` shape (utils.ts: short month, numeric day, hour,
-/// 2-digit minutes, no leading zero on the hour). Pure over an explicit
-/// timezone so tests don't depend on the host's local time.
-pub fn format_timestamp<Tz: chrono::TimeZone>(ms: i64, tz: &Tz) -> String
+/// slopty: the hover strip's time, as near as it is to `now_ms` (#17): the time alone today,
+/// "Yesterday 3:45 PM", "Jul 1, 3:45 PM" this year, "Jul 1, 2025" before. On the system's clock;
+/// pure over an explicit timezone so tests don't depend on the host's local time.
+pub fn format_timestamp_near<Tz: chrono::TimeZone>(ms: i64, now_ms: i64, tz: &Tz) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    use chrono::Datelike as _;
+    let (Some(at), Some(now)) = (
+        chrono::DateTime::from_timestamp_millis(ms),
+        chrono::DateTime::from_timestamp_millis(now_ms),
+    ) else {
+        return String::new();
+    };
+    let (at, now) = (at.with_timezone(tz), now.with_timezone(tz));
+    let (day, today) = (at.date_naive(), now.date_naive());
+    if day == today {
+        at.format(clock_format()).to_string()
+    } else if today.pred_opt() == Some(day) {
+        format!("Yesterday {}", at.format(clock_format()))
+    } else if day.year() == today.year() {
+        at.format(&format!("%b %-d, {}", clock_format())).to_string()
+    } else {
+        at.format("%b %-d, %Y").to_string()
+    }
+}
+
+/// slopty: the hover strip time's whole moment, for its tooltip: "Wednesday, Jul 1, 2026,
+/// 3:45 PM" (#17).
+pub fn format_full_timestamp<Tz: chrono::TimeZone>(ms: i64, tz: &Tz) -> String
 where
     Tz::Offset: std::fmt::Display,
 {
     match chrono::DateTime::from_timestamp_millis(ms) {
         Some(utc) => utc
             .with_timezone(tz)
-            // slopty: the system's clock.
-            .format(&format!("%b %-d, {}", clock_format()))
+            .format(&format!("%A, %b %-d, %Y, {}", clock_format()))
             .to_string(),
         None => String::new(),
     }
@@ -1720,12 +1770,23 @@ pub fn rows_for_entry(
             }
             let tools = std::mem::take(group);
             let auto_open = streaming && last_ix == last_part_ix;
+            // slopty: a request right after the group holds up its open call (#3).
+            let waiting = match entry.parts.get(last_ix + 1) {
+                Some(MessagePart::Input { resolved: false, questions, .. }) => {
+                    Some(match questions.first().map(|q| q.kind.as_str()) {
+                        Some("approval" | "retry") => "approval",
+                        Some("plan") => "your review",
+                        _ => "your answer",
+                    })
+                }
+                _ => None,
+            };
             rows.push(Row {
                 id: format!("{}#g{}", entry.id, group_ix).into(),
-                version: tool_fingerprint(&tools, auto_open),
+                version: tool_fingerprint(&tools, auto_open) ^ (u64::from(waiting.is_some()) << 63),
                 turn_start: false,
                 kind: RowKind::ToolGroup {
-                    summary: tool_group_summary(&tools).into(),
+                    summary: tool_group_summary_waiting(&tools, waiting).into(),
                     tools: Arc::new(tools),
                     auto_open,
                     worked_secs: None,
@@ -2127,9 +2188,11 @@ pub fn rows_for_entry(
         );
     }
 
-    // slopty: a settled turn says what it changed.
+    // slopty: a settled turn says what it changed, above its done line, which ends it (#4).
+    let done = rows.last().is_some_and(is_done_line);
     if !streaming && let Some(row) = extras::turn_changes_row(entry) {
-        rows.push(row);
+        let at = if done { rows.len() - 1 } else { rows.len() };
+        rows.insert(at, row);
     }
     if let Some(first) = rows.first_mut() {
         first.turn_start = true;
@@ -2142,12 +2205,22 @@ pub fn rows_for_entry(
         && let Some(last) = rows.last_mut()
         && !matches!(last.kind, RowKind::ForkMarker { .. })
     {
-        last.timestamp = Some(entry.created_at);
+        // slopty: a done line says when the turn ended; the strip under it does not say it
+        // again (#4).
+        last.timestamp = Some(if done { 0 } else { entry.created_at });
         last.copy_text = assistant_copy_text(entry);
         last.version ^= 1 << 62;
     }
     rows
 }
+
+/// slopty: whether `row` is a turn's done line ("Worked for 4s · done 9:00 AM").
+fn is_done_line(row: &Row) -> bool {
+    matches!(&row.kind, RowKind::Notice { note } if note.kind == DONE_NOTE)
+}
+
+/// slopty: the kind of a turn's done line (`slopty_ui::view_model::folds::DONE`).
+const DONE_NOTE: &str = "done";
 
 fn is_compact_work_part(ix: usize, part: &MessagePart, reply_start: Option<usize>) -> bool {
     match part {
@@ -2311,7 +2384,9 @@ fn part_prefix(id: &str) -> &str {
 /// step on either boundary so their dense chip stack has room to breathe.
 pub fn top_gap_for(prev: Option<&Row>, row: &Row) -> f32 {
     if row.turn_start {
-        return Theme::SPACE_LG;
+        // slopty: a prompt heads its turn: the big step comes before it, and its answer starts
+        // one turn gap under it, with no hidden lane between them (#1).
+        return if matches!(row.kind, RowKind::User { .. }) { PROMPT_GAP } else { Theme::SPACE_LG };
     }
     let is_md = |k: &RowKind| matches!(k, RowKind::Markdown { .. } | RowKind::LiveMarkdown { .. });
     let same_part_markdown = prev.is_some_and(|p| {
@@ -2357,9 +2432,119 @@ pub fn diff_rows(old: &[Row], new: &[Row]) -> Option<(Range<usize>, usize)> {
 /// The rule lives in `slopty_view_proto::view` so the terminal viewport reports the
 /// same summary; this only adapts the row model's [`ToolItem`] to it.
 pub fn tool_group_summary(tools: &[ToolItem]) -> String {
+    tool_group_summary_waiting(tools, None)
+}
+
+/// slopty: [`tool_group_summary`] in the tense of each call (#3): what settled is said in the
+/// past ("Read 3 files"), what is under way in its participle ("running 1 command"), and the
+/// call a request holds up says what it waits for (`waiting`, "approval") and what it is
+/// ("waiting for approval · run touch refused.txt").
+pub fn tool_group_summary_waiting(tools: &[ToolItem], waiting: Option<&str>) -> String {
     #[cfg(test)]
     FORBID_ROW_PREPARATION
         .with(|forbidden| assert!(!forbidden.get(), "tool summary formatting ran on UI thread"));
+    // The call the request holds up: the group's last one still open.
+    let held = waiting.and_then(|_| {
+        tools
+            .iter()
+            .rposition(|t| t.kind == ToolItemKind::Call && !t.resolved && !t.is_error)
+    });
+    let live = |ix: usize, t: &ToolItem| {
+        t.kind == ToolItemKind::Call && !t.resolved && !t.is_error && Some(ix) != held
+    };
+    let under_way: Vec<&ToolItem> =
+        tools.iter().enumerate().filter(|(ix, t)| live(*ix, t)).map(|(_, t)| t).collect();
+    let settled: Vec<ToolItem> = tools
+        .iter()
+        .enumerate()
+        .filter(|(ix, t)| !live(*ix, t) && Some(*ix) != held)
+        .map(|(_, t)| t.clone())
+        .collect();
+    let mut segments: Vec<String> = Vec::new();
+    let past = past_summary(&settled);
+    if !past.is_empty() {
+        segments.push(past);
+    }
+    segments.extend(live_segments(&under_way));
+    if let (Some(what), Some(ix)) = (waiting, held) {
+        let mut name = chip_name(&tools[ix]).to_string();
+        if let Some(first) = name.get_mut(..1) {
+            first.make_ascii_lowercase();
+        }
+        segments.push(format!("waiting for {what} · {name}"));
+    }
+    let mut summary = segments.join(" · ");
+    if let Some(first) = summary.get_mut(..1) {
+        first.make_ascii_uppercase();
+    }
+    summary
+}
+
+/// slopty: what the calls under way are doing, in the TUI's live verbs (#3).
+fn live_segments(tools: &[&ToolItem]) -> Vec<String> {
+    let count = |n: usize, one: &str, many: &str| if n == 1 { format!("1 {one}") } else { format!("{n} {many}") };
+    let mut commands = 0;
+    let mut listings = 0;
+    let mut edited: Vec<&str> = Vec::new();
+    let mut reads = 0;
+    let mut searches = 0;
+    let mut fetches = 0;
+    let mut todos = 0;
+    let mut other = 0;
+    for t in tools {
+        match &t.call {
+            call if lists_directory(call) => listings += 1,
+            ToolCall::Exec { .. } => commands += 1,
+            ToolCall::WriteFile { path, .. } | ToolCall::EditFile { path, .. } => {
+                if !edited.contains(&path.as_str()) {
+                    edited.push(path);
+                }
+            }
+            ToolCall::ApplyPatch { path } => {
+                let path = path.as_deref().unwrap_or("patch");
+                if !edited.contains(&path) {
+                    edited.push(path);
+                }
+            }
+            ToolCall::ReadFile { .. } => reads += 1,
+            ToolCall::Search { .. } | ToolCall::Glob { .. } | ToolCall::WebSearch { .. } => searches += 1,
+            ToolCall::WebFetch { .. } => fetches += 1,
+            ToolCall::Todo { .. } => todos += 1,
+            ToolCall::Mcp { .. } | ToolCall::Unknown { .. } => other += 1,
+        }
+    }
+    let mut segments = Vec::new();
+    if commands > 0 {
+        segments.push(format!("running {}", count(commands, "command", "commands")));
+    }
+    if listings > 0 {
+        segments.push(format!("listing {}", count(listings, "directory", "directories")));
+    }
+    match edited.as_slice() {
+        [] => {}
+        [path] => segments.push(format!("editing {}", file_badge_name(path))),
+        many => segments.push(format!("editing {} files", many.len())),
+    }
+    if reads > 0 {
+        segments.push(format!("reading {}", count(reads, "file", "files")));
+    }
+    if searches > 0 {
+        segments.push("searching".to_owned());
+    }
+    if fetches > 0 {
+        segments.push(format!("fetching {}", count(fetches, "page", "pages")));
+    }
+    if todos > 0 {
+        segments.push("updating todos".to_owned());
+    }
+    if other > 0 {
+        segments.push(format!("calling {}", count(other, "tool", "tools")));
+    }
+    segments
+}
+
+/// The summary of calls that settled, and thoughts and notes: the shared rule's past verbs.
+fn past_summary(tools: &[ToolItem]) -> String {
     // slopty: directory listings are counted apart from commands, as the TUI's group line
     // counts them ("listed 2 directories").
     // A listing that failed listed nothing: it counts as the failed command it was.
@@ -2654,6 +2839,8 @@ pub const BLOB_AFFORDANCE_HEIGHT: f32 = 24.0;
 struct ChipAffordance {
     blob_ref: SharedString,
     label: SharedString,
+    /// slopty: the fetch failed; a "Retry" follows the words (#18).
+    retry: bool,
 }
 
 /// Line cap for a FETCHED full output (a defensive ceiling, not a doc cap —
@@ -3570,6 +3757,9 @@ impl SavedViewportCache {
 pub struct Transcript {
     state: Entity<AppState>,
     list: ListState,
+    /// slopty: whether `list` aligns its rows to its top: a subagent's run, in a doc of its own
+    /// or drilled into as a chat, reads like a fresh notes page (#5).
+    list_top: bool,
     rows: Vec<Row>,
     last_source: Option<(Option<String>, TranscriptReplayState, u64)>,
     chat_id: Option<String>,
@@ -3750,7 +3940,12 @@ pub struct Transcript {
     spring_kick: bool,
     /// One `on_next_frame` callback in flight at most.
     spring_scheduled: bool,
-    scroll_anim: Option<Task<()>>,
+    /// slopty: a jump's glide under way, stepped once a frame (`rail.rs`, #13), and whether
+    /// its next frame is asked for.
+    glide: Option<crate::rail::Glide>,
+    glide_scheduled: bool,
+    /// slopty: the row a jump landed on, when, and which landing it was: it flashes (#13).
+    landed: Option<(SharedString, Instant, u64)>,
     /// Last pointer sample while markdown selection owns a left-button drag.
     selection_drag_position: Option<Point<Pixels>>,
     /// One-shot timer rescheduled only while the pointer remains in an edge
@@ -3784,6 +3979,15 @@ pub struct Transcript {
     hovered_entry: Option<(SharedString, SharedString)>,
     // slopty: on touch, the entry a long press showed the strip of (no hover there).
     pressed_entry: Option<SharedString>,
+    /// slopty: each hover strip control's focus, by its key, and what redraws the strip as it
+    /// gains or loses it: a focused control shows its strip as a hover does (#9).
+    strip_focus: HashMap<SharedString, (gpui::FocusHandle, [gpui::Subscription; 2])>,
+    /// slopty: the person's send under way (its message id) and when its bubble first drew:
+    /// it fades and rises in, as the person's own words arriving (#15).
+    send_entrance: Option<(SharedString, Option<Instant>)>,
+    /// slopty: the bubbles last drawn pending, and when each one sent: it fades up to full (#15).
+    pending_bubbles: HashSet<SharedString>,
+    sent_bubbles: HashMap<SharedString, Instant>,
     /// slopty: the last row's lane (its working line, then its timestamp strip) and the
     /// tallest that lane has drawn while it stayed last: the lane never shrinks under it, so
     /// a Stop or a turn's end swaps the working line for the strip without moving a row.
@@ -4020,6 +4224,20 @@ impl Transcript {
         Self::build(state, Some(doc_id), follow, cx)
     }
 
+    /// The list rows sit in: aligned to its top (`top`) or to its bottom.
+    fn new_list(top: bool, cx: &mut Context<Self>) -> ListState {
+        let alignment = if top { ListAlignment::Top } else { ListAlignment::Bottom };
+        let list = ListState::new(0, alignment, px(OVERDRAW_PX));
+        let weak = cx.weak_entity();
+        list.set_scroll_handler(move |event: &ListScrollEvent, _window, cx| {
+            weak.update(cx, |this: &mut Transcript, cx| {
+                this.handle_scroll(event, cx)
+            })
+            .ok();
+        });
+        list
+    }
+
     fn build(
         state: Entity<AppState>,
         doc_override: Option<String>,
@@ -4039,19 +4257,8 @@ impl Transcript {
         // materializes a Top list's past-end offset to a CONCRETE position
         // every frame (gpui list.rs: only `Bottom` re-glues to the `None`
         // sentinel), so a parked spring can't re-glue and hard-track growth.
-        let alignment = if doc_override.is_some() {
-            ListAlignment::Top
-        } else {
-            ListAlignment::Bottom
-        };
-        let list = ListState::new(0, alignment, px(OVERDRAW_PX));
-        let weak = cx.weak_entity();
-        list.set_scroll_handler(move |event: &ListScrollEvent, _window, cx| {
-            weak.update(cx, |this: &mut Transcript, cx| {
-                this.handle_scroll(event, cx)
-            })
-            .ok();
-        });
+        let list_top = doc_override.is_some();
+        let list = Self::new_list(list_top, cx);
         let observe = cx.observe(&state, |this: &mut Self, _, cx| this.sync(cx));
         cx.on_release(|this: &mut Self, cx| {
             // slopty: children open in place stop being watched with their card.
@@ -4087,6 +4294,7 @@ impl Transcript {
         let mut this = Self {
             state,
             list,
+            list_top,
             rows: Vec::new(),
             last_source: None,
             // Pre-set so `sync` never sees an attach edge — an override
@@ -4151,7 +4359,9 @@ impl Transcript {
             spring_settled_at: None,
             spring_kick: false,
             spring_scheduled: false,
-            scroll_anim: None,
+            glide: None,
+            glide_scheduled: false,
+            landed: None,
             selection_drag_position: None,
             selection_scroll_task: None,
             rail_enabled,
@@ -4163,6 +4373,10 @@ impl Transcript {
             rail_hover: None,
             hovered_entry: None,
             pressed_entry: None,
+            strip_focus: HashMap::new(),
+            send_entrance: None,
+            pending_bubbles: HashSet::new(),
+            sent_bubbles: HashMap::new(),
             last_lane: None,
             copied_code: None,
             copied_clear: None,
@@ -4402,12 +4616,68 @@ impl Transcript {
         self.spring_last_tick = None;
         self.spring_settled_at = None;
         self.spring_kick = false;
-        self.scroll_anim = None;
+        self.glide = None;
     }
 
-    /// Store the animation after [`Self::begin_scroll_navigation`].
-    pub(crate) fn set_scroll_task(&mut self, task: Task<()>) {
-        self.scroll_anim = Some(task);
+    /// slopty: store the glide after [`Self::begin_scroll_navigation`] (`rail.rs`).
+    pub(crate) fn set_glide(&mut self, glide: Option<crate::rail::Glide>) {
+        self.glide = glide;
+    }
+
+    /// slopty: the glide under way, taken to step it.
+    pub(crate) fn take_glide(&mut self) -> Option<crate::rail::Glide> {
+        self.glide.take()
+    }
+
+    /// slopty: the size and line height its prose reads at: a run in its card at the card's
+    /// compact body, under the card's title, not larger than it (#24).
+    fn markdown_body(&self) -> (f32, f32) {
+        if self.fit.is_some() {
+            (render::MD_COMPACT_TEXT_SIZE, render::MD_COMPACT_LINE_HEIGHT)
+        } else {
+            (render::MD_TEXT_SIZE, render::MD_LINE_HEIGHT)
+        }
+    }
+
+    /// slopty: whether the bubble of `entry` comes in now: the person's send under way, within
+    /// its entrance from when it first drew (#15).
+    fn bubble_enters(&mut self, entry: &SharedString, cx: &Context<Self>) -> bool {
+        let now = crate::clock::now(cx);
+        match self.send_entrance.as_mut() {
+            Some((id, at)) if id == entry => {
+                now.saturating_duration_since(*at.get_or_insert(now)) < SEND_ENTRANCE.total()
+            }
+            _ => false,
+        }
+    }
+
+    /// slopty: the bubble `row` drawn `pending` or not, and whether it is fading up from
+    /// pending to sent (#15).
+    fn bubble_sent(&mut self, row: &SharedString, pending: bool, cx: &Context<Self>) -> bool {
+        let now = crate::clock::now(cx);
+        if pending {
+            self.pending_bubbles.insert(row.clone());
+            self.sent_bubbles.remove(row);
+            return false;
+        }
+        if self.pending_bubbles.remove(row) && !motion::reduced_motion(cx) {
+            self.sent_bubbles.insert(row.clone(), now);
+        }
+        let Some(at) = self.sent_bubbles.get(row) else { return false };
+        if now.saturating_duration_since(*at) < motion::FADE_QUICK.total() {
+            return true;
+        }
+        self.sent_bubbles.remove(row);
+        false
+    }
+
+    /// slopty: mark the row at `ix` a jump landed on: it flashes and fades (#13).
+    pub(crate) fn flash_landing(&mut self, ix: usize, cx: &Context<Self>) {
+        if motion::reduced_motion(cx) {
+            return;
+        }
+        let epoch = self.landed.as_ref().map_or(0, |(_, _, epoch)| epoch + 1);
+        self.landed = self.rows.get(ix).map(|row| (row.id.clone(), crate::clock::now(cx), epoch));
     }
 
     /// Give the viewport to the user/navigation without dropping the
@@ -4679,7 +4949,7 @@ impl Transcript {
         self.spring_last_tick = None;
         self.spring_settled_at = None;
         self.spring_kick = false;
-        self.scroll_anim = None;
+        self.glide = None;
         // A glued offset re-snaps to the end on EVERY layout — the pad would
         // land and the viewport hard-track its bottom in the same frame,
         // skipping the glide entirely (rig-traced). Pin the offset to a
@@ -4690,6 +4960,9 @@ impl Transcript {
             .rows
             .iter()
             .position(|row| row.turn_start && row.entry_id == message_id.as_str());
+        // slopty: its bubble comes in as it first draws (#15).
+        self.send_entrance =
+            (!motion::reduced_motion(cx)).then(|| (SharedString::from(message_id.clone()), None));
         self.own_turn = Some(OwnTurnAnchor {
             chat_id,
             message_id: SharedString::from(message_id),
@@ -5329,6 +5602,19 @@ impl Transcript {
                 self.own_turn_last_tick = None;
             }
             self.chat_id = selected;
+            // slopty: a drilled subagent's run reads from the top, as one in its own doc does;
+            // the list takes the alignment its chat reads in (#5).
+            let top = self.doc_override.is_some() || {
+                let state = self.state.read(cx);
+                self.chat_id
+                    .as_deref()
+                    .and_then(|id| state.chats.iter().find(|chat| chat.id == id))
+                    .is_some_and(|chat| chat.subagent)
+            };
+            if top != self.list_top {
+                self.list = Self::new_list(top, cx);
+                self.list_top = top;
+            }
             self.rows.clear();
             self.tool_images.clear(cx);
             self.md_images.borrow_mut().clear(); // slopty
@@ -5341,6 +5627,9 @@ impl Transcript {
             self.historical_markdown.clear();
             self.user_folds.clear();
             self.user_heights.clear();
+            self.strip_focus.clear(); // slopty
+            self.pending_bubbles.clear(); // slopty
+            self.sent_bubbles.clear(); // slopty
             self.compact_fold_heights.clear();
             self.compact_fold_settle = None;
             self.user_hold_token = self.user_hold_token.wrapping_add(1);
@@ -5387,7 +5676,7 @@ impl Transcript {
             self.spring_last_tick = None;
             self.spring_settled_at = None;
             self.spring_kick = false;
-            self.scroll_anim = None;
+            self.glide = None;
             self.stop_selection_scroll();
         }
 
@@ -6925,9 +7214,8 @@ impl Transcript {
         let line_height =
             f32::from(crate::typography::ui_rems(USER_LINE_HEIGHT).to_pixels(window.rem_size()));
         let collapsed_text_h = USER_COLLAPSED_LINES as f32 * line_height;
-        // Include the continuation line in the resize endpoints so removing
-        // it on expansion does not make the bubble jump by a line.
-        let collapsed_h = collapsed_text_h + line_height;
+        // slopty: no continuation line: the clipped text fades out over its last line (#6).
+        let collapsed_h = collapsed_text_h;
         let measured_h = self
             .user_heights
             .entry(row_id.clone())
@@ -7009,25 +7297,26 @@ impl Transcript {
                 .toggled_at
                 .is_some_and(|at| cx.frame_time().saturating_duration_since(at) < Duration::from_millis(duration_ms + 200))
             && !motion::reduced_motion(cx);
-        let ellipsis = || div().h(px(line_height)).child("...");
+        // slopty: the clipped text fades out over its last line, as the pane's edges do (#6).
+        let faded = |clip: AnyElement| {
+            crate::edge_fade::edge_faded(line_height, false, true, clip).into_any_element()
+        };
         let body: AnyElement = if animating {
             let from = fold.from;
             let to = if expanded { full_h } else { collapsed_h };
             let resize = user_resize_spec(full_h - collapsed_h);
-            let ellipsis_h = if expanded { 0.0 } else { line_height };
-            div()
-                .child(div().overflow_hidden().child(body).with_animation(
+            let clip = div()
+                .overflow_hidden()
+                .child(body)
+                .with_animation(
                     SharedString::from(format!("{row_id}-user-resize-{}", fold.epoch)),
                     resize.animation(),
-                    move |el, t| el.h(px((motion::lerp(from, to, t) - ellipsis_h).max(0.0))),
-                ))
-                .when(!expanded, |el| el.child(ellipsis()))
-                .into_any_element()
+                    move |el, t| el.h(px(motion::lerp(from, to, t).max(0.0))),
+                )
+                .into_any_element();
+            if expanded { clip } else { faded(clip) }
         } else if collapsible && !expanded {
-            div()
-                .child(div().h(px(collapsed_text_h)).overflow_hidden().child(body))
-                .child(ellipsis())
-                .into_any_element()
+            faded(div().h(px(collapsed_text_h)).overflow_hidden().child(body).into_any_element())
         } else {
             body.into_any_element()
         };
@@ -7067,8 +7356,13 @@ impl Transcript {
             crate::icons::ALT_ARROW_DOWN
         };
         let label = if expanded { "Show less" } else { "Show more" };
-        let button = div()
-            .id(SharedString::from(format!("{row_id}-expander")))
+        // slopty: a quiet 12 pt control under the words, not a line of them, which the keyboard
+        // reaches (#6, #9).
+        let button = crate::surface_chrome::key_stop(
+            div().id(SharedString::from(format!("{row_id}-expander"))),
+            theme,
+        )
+            .rounded(px(4.0))
             .group("user-message-toggle")
             .role(gpui::Role::Button)
             .aria_label(if expanded {
@@ -7079,9 +7373,9 @@ impl Transcript {
             .aria_expanded(expanded)
             .flex()
             .items_center()
-            .gap(px(5.0))
-            .text_size(crate::typography::ui_rems(14.0))
-            .line_height(crate::typography::ui_rems(USER_LINE_HEIGHT))
+            .gap(px(4.0))
+            .text_size(crate::typography::ui_rems(12.0))
+            .line_height(crate::typography::ui_rems(USER_TOGGLE_LINE_HEIGHT))
             .text_color(theme.text_muted)
             .cursor_pointer()
             .hover(|s| s.text_color(theme.text))
@@ -7314,7 +7608,7 @@ impl Transcript {
             .flex()
             .items_center()
             .justify_center()
-            .rounded(px(12.0))
+            .rounded(px(TRANSCRIPT_CARD_RADIUS)) // slopty: the column's card (#19).
             .overflow_hidden()
             .bg(crate::theme::ink(0.045));
         match state {
@@ -7360,7 +7654,7 @@ impl Transcript {
                         gpui::img(loaded.image)
                             .size_full()
                             // The frame's overflow clip is rectangular; round the image itself.
-                            .rounded(px(12.0))
+                            .rounded(px(TRANSCRIPT_CARD_RADIUS))
                             .object_fit(gpui::ObjectFit::Contain),
                     )
                     .into_any_element()
@@ -7660,21 +7954,50 @@ impl Transcript {
             // the retry affordance, whatever the indicator fell back to.
             if self.state.read(cx).send_undelivered(&chat_id, now) {
                 let theme = Theme::of(cx).clone();
+                // slopty: what happened, then one action, under the bubble it is about (#11).
+                let under_bubble =
+                    self.rows.last().is_some_and(|row| matches!(row.kind, RowKind::User { .. }));
+                let fade = "undelivered-retry-hover";
                 return Some(
                     div()
-                        .id("undelivered-retry")
+                        .id("undelivered")
+                        .role(gpui::Role::Status)
+                        .aria_label("Not sent")
                         .flex()
                         .flex_row()
                         .items_center()
-                        .gap(px(Theme::SPACE_SM))
+                        .when(under_bubble, |el| el.justify_end())
+                        .gap(px(6.0))
                         // slopty: the row lane's anatomy (`ROW_LANE_HEIGHT`).
                         .pt(px(Theme::SPACE_SM))
                         .h(px(ROW_LANE_HEIGHT))
                         .text_size(crate::typography::ui_rems(12.0))
-                        .text_color(theme.danger)
-                        .cursor_pointer()
-                        .on_click(cx.listener(|this, _, _, cx| this.retry_send(cx)))
-                        .child(SharedString::from("Not delivered — click to retry"))
+                        .child(
+                            crate::icons::icon(crate::icons::DANGER_TRIANGLE)
+                                .flex_none()
+                                .size(px(12.0))
+                                .text_color(theme.danger),
+                        )
+                        .child(div().text_color(theme.text_muted).child("Not sent"))
+                        .child(
+                            crate::surface_chrome::key_stop(
+                                div().id("undelivered-retry"),
+                                &theme,
+                            )
+                            .role(gpui::Role::Button)
+                            .aria_label("Retry")
+                            .h(px(24.0))
+                            .px(px(8.0))
+                            .rounded(px(6.0))
+                            .flex()
+                            .items_center()
+                            .cursor_pointer()
+                            .text_color(motion::mix(theme.text_muted, theme.text, motion::hover_t(fade)))
+                            .bg(motion::hover_blend(fade, gpui::transparent_black(), crate::theme::wash(0.11)))
+                            .hover_fade(fade)
+                            .on_click(cx.listener(|this, _, _, cx| this.retry_send(cx)))
+                            .child("Retry"),
+                        )
                         .into_any_element(),
                 );
             }
@@ -7743,8 +8066,21 @@ impl Transcript {
                 entries.last().and_then(extras::working_step)
             })
             .flatten();
-        let word = if queued {
-            "Queued — will send automatically"
+        // slopty: what waits, and what it waits for (#11, #18).
+        let queued_words = queued.then(|| {
+            let state = self.state.read(cx);
+            let host = self
+                .chat_id
+                .as_deref()
+                .and_then(|id| state.chats.iter().find(|chat| chat.id == id))
+                .and_then(|chat| state.device_name(&chat.device_id));
+            match host {
+                Some(host) => format!("Queued \u{b7} sends when {host} is back"),
+                None => "Queued \u{b7} sends when its machine is back".to_owned(),
+            }
+        });
+        let word = if let Some(words) = queued_words.as_deref() {
+            words
         } else if sending {
             "Sending"
         } else if let Some(step) = step.as_deref() {
@@ -7853,7 +8189,7 @@ impl Transcript {
         self.rendered_rows.insert(row.id.clone());
         let theme = Theme::of(cx).clone();
         // slopty: a subagent's words to start it are its task, which its parent's agent wrote.
-        let (workspace_root, task) = {
+        let (workspace_root, task, agent) = {
             let state = self.state.read(cx);
             let chat = self
                 .chat_id
@@ -7863,6 +8199,8 @@ impl Transcript {
             (
                 chat.and_then(|chat| chat.cwd.as_deref()).map(SharedString::from),
                 self.fit.is_some() || chat.is_some_and(|chat| chat.subagent),
+                // slopty: a reply is said by the chat's agent, by its harness's name (#10).
+                agent_name(chat.and_then(|chat| chat.config.as_ref()).map(|config| config.harness)),
             )
         };
         // The viewport spans the full window (under the titlebar): the first
@@ -7876,7 +8214,10 @@ impl Transcript {
             } else if self.doc_override.is_some() {
                 Theme::SPACE_LG
             } else {
-                Theme::TITLEBAR_HEIGHT + Theme::SPACE_LG + 10.0
+                // slopty: a drilled subagent's run, read from its top, starts under the
+                // breadcrumb that hangs below the titlebar (#5).
+                let crumb = if self.list_top { DRILL_CRUMB_HEIGHT } else { 0.0 };
+                Theme::TITLEBAR_HEIGHT + crumb + Theme::SPACE_LG + 10.0
             }
         } else {
             top_gap_for(ix.checked_sub(1).and_then(|i| self.rows.get(i)), &row)
@@ -7899,6 +8240,144 @@ impl Transcript {
         let trailer = (ix + 1 == self.rows.len())
             .then(|| self.render_working_trailer(cx))
             .flatten();
+
+        // Hover-revealed metadata strip: a RESERVED 32px lane under the
+        // entry's last row. Timestamp, copy action, and copied feedback only
+        // flip visibility/content, so none of them shifts the virtualizer.
+        // User entries align end (under the bubble), assistant entries start.
+        // Both read timestamp first, then the copy action.
+        let is_user_row = matches!(row.kind, RowKind::User { .. });
+        let hovered = self
+            .hovered_entry
+            .as_ref()
+            .is_some_and(|(_, entry)| entry == &row.entry_id)
+            // slopty: touch has no hover: the last row's strip shows, and a long press shows
+            // any entry's.
+            || (TOUCH && (is_last || self.pressed_entry.as_ref() == Some(&row.entry_id)));
+        // slopty: the keyboard reaches the strip too: its controls stay mounted, unseen, and one
+        // holding focus shows the strip as a hover does (#9).
+        let (copy_focus, rewind_focus) = (
+            self.strip_focus(format!("copy-message-{}", row.entry_id), window, cx),
+            self.strip_focus(format!("rewind-message-{}", row.entry_id), window, cx),
+        );
+        let shown = hovered || copy_focus.is_focused(window) || rewind_focus.is_focused(window);
+        // slopty: the house's copy span (`motion::copy_feedback`).
+        let copied_message =
+            motion::copied(&copy_message_key(&row.entry_id), cx);
+        let copy_text = row.copy_text.clone();
+        let copy_entry_id = row.entry_id.clone();
+        let rewind_message = row.entry_id.clone();
+        let now_ms = self.clock.timestamp_millis();
+        // slopty: under a pointer, the person's strip waits beside the bubble's foot and takes no
+        // room under it, so their answer starts right under their question (#1). A touch screen
+        // keeps the lane, where the strip shows without a hover; an image-only send keeps it too.
+        let beside_bubble = !TOUCH
+            && !task
+            && matches!(&row.kind, RowKind::User { text, .. } if !text.is_empty());
+        // slopty: a run in its card shows its work, not its messages' times and actions; a run's
+        // task, which the person never sent, has none either.
+        let strip = row
+            .timestamp
+            .filter(|_| self.fit.is_none() && !(is_user_row && task))
+            .map(|ms| {
+            // slopty: the day only when it is not today, the full moment on hover (#17).
+            let timestamp = div()
+                .id(SharedString::from(format!("{}-time", row.id)))
+                .flex_none()
+                .text_size(crate::typography::ui_rems(12.0))
+                .text_color(theme.text_faint)
+                // A tooltip, not a name: the strip's words for assistive tech are its controls'.
+                .tooltip(crate::settings::widgets::text_tooltip(SharedString::from(
+                    format_full_timestamp(ms, &chrono::Local),
+                )))
+                .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
+                .child(SharedString::from(format_timestamp_near(ms, now_ms, &chrono::Local)));
+            let copy = copy_text.map(|text| {
+                let entry_id = copy_entry_id.clone();
+                let fade_key = format!("copy-message-hover-{entry_id}");
+                // slopty: a finger's press on a touch screen, the wash drawn on the 24 (#23).
+                let (press, reach) = strip_press(format!("copy-message-{entry_id}"));
+                strip_control(press.track_focus(&copy_focus), &theme, reach) // slopty: a tab stop.
+                    .cursor_pointer()
+                    .hover_fade(fade_key.clone())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.copy_message(entry_id.clone(), text.clone(), cx)
+                    }))
+                    // slopty: keeps its size; its tooltip says "Copied" for the span; a role.
+                    .role(gpui::Role::Button)
+                    .hint(if copied_message { "Copied" } else { "Copy message" })
+                    .child(
+                        strip_drawn()
+                            // Same quiet icon-button treatment as the copy action
+                            // over transcript code blocks.
+                            .bg(motion::hover_blend(
+                                &fade_key,
+                                gpui::transparent_black(),
+                                crate::theme::ink(0.08),
+                            ))
+                            .child(
+                                crate::icons::icon(if copied_message {
+                                    crate::icons::CHECK
+                                } else {
+                                    crate::icons::COPY
+                                })
+                                .size(px(14.0))
+                                .text_color(theme.text_muted),
+                            ),
+                    )
+            });
+            let metadata = div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(Theme::SPACE_SM));
+            // slopty: a time the agent never said (0) shows none; the copy action stays.
+            let metadata = metadata.when(ms > 0, |el| el.child(timestamp)).children(copy);
+            // slopty: a person's message can be gone back to (`transcript/rewind.rs`).
+            // slopty: not a run's task, which the person never sent.
+            let metadata = metadata.children(
+                (is_user_row && !task)
+                    .then(|| self.rewind_action(&rewind_message, &rewind_focus, &theme, cx))
+                    .flatten(),
+            );
+            // slopty: unseen until hovered or focused, but there for the keyboard (#9).
+            let metadata = if shown {
+                motion::fade_quick(SharedString::from(format!("meta-{}", row.id)), metadata)
+                    .into_any_element()
+            } else {
+                metadata.opacity(0.0).into_any_element()
+            };
+            if beside_bubble {
+                // slopty: at the bubble's foot, to its left, drawn over the gutter (#1).
+                return div()
+                    .absolute()
+                    .bottom_0()
+                    .right(gpui::relative(1.0))
+                    .h(px(STRIP_CONTROL_SIZE))
+                    .pr(px(Theme::SPACE_SM))
+                    .flex()
+                    .items_center()
+                    .child(metadata)
+                    .into_any_element();
+            }
+            div()
+                .h(px(ROW_LANE_HEIGHT))
+                .pt(px(Theme::SPACE_SM))
+                .w_full()
+                .flex()
+                .items_center()
+                // No horizontal inset: the original's `px-1` netted out flush
+                // because its message text was inset by the same amount (group
+                // padding 4 + inner VStack 4 = 8 = group 4 + px-1 4). Here the
+                // markdown text / user bubble sit AT the content column edges,
+                // so the label must too — assistant label's left edge on the
+                // text's first-character x, user label's right edge on the
+                // bubble's right edge (user-reported 4px drift).
+                .when(is_user_row && !task, |el| el.justify_end()) // slopty: a task reads left.
+                .child(metadata)
+                .into_any_element()
+        });
+        let (mut beside, strip) = if beside_bubble { (strip, None) } else { (None, strip) };
 
         let inner: AnyElement = match &row.kind {
             RowKind::User {
@@ -7960,9 +8439,7 @@ impl Transcript {
                     // slopty: the person's own words are in the accessibility tree, as the
                     // agent's are: the bubble is a paragraph saying them.
                     let spoken = text.clone();
-                    column = column.child(
-                        div().w_full().flex().justify_end().child(
-                            div()
+                    let bubble = div()
                                 .id(SharedString::from(format!("{}-said", row.id)))
                                 .role(gpui::Role::Paragraph)
                                 .aria_label(spoken)
@@ -7975,12 +8452,43 @@ impl Transcript {
                                 .text_size(crate::typography::ui_rems(14.0))
                                 .line_height(crate::typography::ui_rems(USER_LINE_HEIGHT))
                                 .text_color(theme.text)
-                                .when(pending, |el| el.opacity(0.65))
+                                .when(pending, |el| el.opacity(PENDING_OPACITY))
                                 .child(self.render_user_body(
                                     &row.id, ix, text, mentions, &theme, window, cx,
-                                )),
-                        ),
-                    );
+                                ));
+                    // slopty: a send that went through fades up to full, not in one frame (#15).
+                    let bubble = if self.bubble_sent(&row.id, pending, cx) {
+                        bubble
+                            .with_animation(
+                                SharedString::from(format!("sent-{}", row.id)),
+                                motion::FADE_QUICK.animation(),
+                                |bubble, t| bubble.opacity(motion::lerp(PENDING_OPACITY, 1.0, t)),
+                            )
+                            .into_any_element()
+                    } else {
+                        bubble.into_any_element()
+                    };
+                    // slopty: the strip waits at the bubble's foot (#1).
+                    let foot = div()
+                        .relative()
+                        .min_w_0()
+                        .flex()
+                        .child(bubble)
+                        .children(beside.take())
+                        // slopty: where the rewind menu hangs from (#20).
+                        .child(self.bubble_foot_watch(&row.entry_id));
+                    // slopty: the person's own send fades and rises in as it first draws (#15).
+                    let foot = if self.bubble_enters(&row.entry_id, cx) {
+                        foot.with_animation(
+                            SharedString::from(format!("enter-{}", row.id)),
+                            SEND_ENTRANCE.animation(),
+                            |foot, t| foot.opacity(t).top(px(SEND_RISE * (1.0 - t))),
+                        )
+                        .into_any_element()
+                    } else {
+                        foot.into_any_element()
+                    };
+                    column = column.child(div().w_full().flex().justify_end().child(foot));
                 }
                 column.into_any_element()
             }
@@ -8006,6 +8514,7 @@ impl Transcript {
                     run: self.run_ui(cx), // slopty: Run in terminal.
                     code_menu: Some(self.code_menu_ui(cx)),
                     math: crate::settings::math_style(cx),
+                    body: self.markdown_body(), // slopty: a card's run reads compact (#24).
                 };
                 let highlight = self.code_highlight_for(&row.id, &tree, Some(*block_ix), cx);
                 render::render_block(
@@ -8080,6 +8589,7 @@ impl Transcript {
                     run: self.run_ui(cx), // slopty: Run in terminal.
                     code_menu: Some(self.code_menu_ui(cx)),
                     math: crate::settings::math_style(cx),
+                    body: self.markdown_body(), // slopty: a card's run reads compact (#24).
                 };
                 if seed_history && let Some(veil) = &veil {
                     let historical = &self.historical_markdown[&row.id];
@@ -8149,7 +8659,7 @@ impl Transcript {
                 cx,
             ),
             RowKind::InputChip { label, header, resolved } => {
-                input_chip(label.clone(), header.clone(), *resolved, &theme)
+                input_chip(&row.id, label.clone(), header.clone(), *resolved, &theme)
             }
             RowKind::GeneratedImage {
                 owner,
@@ -8177,7 +8687,7 @@ impl Transcript {
         let (inner, top_gap) = self.plan_card_segment(ix, inner, top_gap, &theme);
         // slopty: the transcript's words in the accessibility tree: a markdown block is a
         // paragraph saying its plain text, and a message opens at an article named for who said
-        // it ("You" round the person's bubble, "Claude" round the reply's first block).
+        // it ("You" round the person's bubble, the agent's name round the reply's first row).
         let inner = match &row.kind {
             RowKind::Markdown { tree, block_ix } | RowKind::LiveMarkdown { tree, block_ix } => {
                 // The words as drawn: a file link by its name, a chat link as its chip.
@@ -8185,28 +8695,50 @@ impl Transcript {
                 let tree = self.inline_code_tree(tree, link.as_ref(), cx);
                 let tree = self.chat_chips(&row.id, tree, cx);
                 let words = tree.blocks.get(*block_ix).map(|top| block_words(&top.block));
-                let paragraph = div()
+                div()
                     .id(SharedString::from(format!("{}-words", row.id)))
                     .role(gpui::Role::Paragraph)
                     .aria_label(SharedString::from(words.unwrap_or_default()))
-                    .child(inner);
-                let first = !self.rows[..ix]
-                    .iter()
-                    .rev()
-                    .take_while(|before| before.entry_id == row.entry_id)
-                    .any(|before| {
-                        matches!(before.kind, RowKind::Markdown { .. } | RowKind::LiveMarkdown { .. })
-                    });
-                if first {
-                    message_article(&row.id, "Claude", paragraph.into_any_element())
-                } else {
-                    paragraph.into_any_element()
-                }
+                    .child(inner)
+                    .into_any_element()
             }
             // slopty: a run's first words are its task, which its parent's agent wrote.
             RowKind::User { .. } if task => message_article(&row.id, "Task", inner),
             RowKind::User { .. } => message_article(&row.id, "You", inner),
             _ => inner,
+        };
+        // slopty: a reply opens at its first row, whatever it is, so its first calls are heard
+        // as its own (#10).
+        let opens_entry = ix == 0 || self.rows[ix - 1].entry_id != row.entry_id;
+        let inner = if opens_entry && !matches!(row.kind, RowKind::User { .. }) {
+            message_article(&row.id, agent, inner)
+        } else {
+            inner
+        };
+        // slopty: where a jump landed flashes and fades, as Claude's reply flash does (#13).
+        let now = cx.frame_time();
+        let inner = match self.landed.as_ref().filter(|(id, at, _)| {
+            id == &row.id && now.saturating_duration_since(*at) < LANDING_FLASH.total()
+        }) {
+            Some((_, _, epoch)) => div()
+                .relative()
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(-4.0))
+                        .bottom(px(-4.0))
+                        .left(px(-6.0))
+                        .right(px(-6.0))
+                        .rounded(px(TRANSCRIPT_CARD_RADIUS))
+                        .with_animation(
+                            SharedString::from(format!("landed-{}-{epoch}", row.id)),
+                            LANDING_FLASH.animation(),
+                            |flash, t| flash.bg(crate::theme::ink(0.06 * (1.0 - t))),
+                        ),
+                )
+                .child(inner)
+                .into_any_element(),
+            None => inner,
         };
         // Diagram fences this row just requested start rendering after layout.
         self.ensure_diagram_worker(cx);
@@ -8214,101 +8746,6 @@ impl Transcript {
         let markdown = matches!(row.kind, RowKind::Markdown { .. } | RowKind::LiveMarkdown { .. });
         self.hold_md_images(&row.id, markdown, cx);
 
-        // Hover-revealed metadata strip: a RESERVED 32px lane under the
-        // entry's last row. Timestamp, copy action, and copied feedback only
-        // flip visibility/content, so none of them shifts the virtualizer.
-        // User entries align end (under the bubble), assistant entries start.
-        // Both read timestamp first, then the copy action.
-        let is_user_row = matches!(row.kind, RowKind::User { .. });
-        let hovered = self
-            .hovered_entry
-            .as_ref()
-            .is_some_and(|(_, entry)| entry == &row.entry_id)
-            // slopty: touch has no hover: the last row's strip shows, and a long press shows
-            // any entry's.
-            || (TOUCH && (is_last || self.pressed_entry.as_ref() == Some(&row.entry_id)));
-        // slopty: the house's copy span (`motion::copy_feedback`).
-        let copied_message =
-            motion::copied(&copy_message_key(&row.entry_id), cx);
-        let copy_text = row.copy_text.clone();
-        let copy_entry_id = row.entry_id.clone();
-        let rewind_message = row.entry_id.clone();
-        // slopty: a run in its card shows its work, not its messages' times and actions.
-        let strip = row.timestamp.filter(|_| self.fit.is_none()).map(|ms| {
-            let timestamp = div()
-                .text_size(crate::typography::ui_rems(12.0))
-                .text_color(theme.text_muted.opacity(0.55))
-                .child(SharedString::from(format_timestamp(ms, &chrono::Local)));
-            let copy = copy_text.map(|text| {
-                let entry_id = copy_entry_id.clone();
-                let fade_key = format!("copy-message-hover-{entry_id}");
-                // slopty: a finger's press on a touch screen, the wash drawn on the 24 (#23).
-                let (press, reach) = strip_press(format!("copy-message-{entry_id}"));
-                strip_control(press, &theme, reach) // slopty: a tab stop.
-                    .cursor_pointer()
-                    .hover_fade(fade_key.clone())
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.copy_message(entry_id.clone(), text.clone(), cx)
-                    }))
-                    // slopty: keeps its size; its tooltip says "Copied" for the span; a role.
-                    .role(gpui::Role::Button)
-                    .hint(if copied_message { "Copied" } else { "Copy message" })
-                    .child(
-                        strip_drawn()
-                            // Same quiet icon-button treatment as the copy action
-                            // over transcript code blocks.
-                            .bg(motion::hover_blend(
-                                &fade_key,
-                                gpui::transparent_black(),
-                                crate::theme::ink(0.08),
-                            ))
-                            .child(
-                                crate::icons::icon(if copied_message {
-                                    crate::icons::CHECK
-                                } else {
-                                    crate::icons::COPY
-                                })
-                                .size(px(14.0))
-                                .text_color(theme.text_muted),
-                            ),
-                    )
-            });
-            let metadata = div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(Theme::SPACE_SM));
-            // slopty: a time the agent never said (0) shows none; the copy action stays.
-            let metadata = metadata.when(ms > 0, |el| el.child(timestamp)).children(copy);
-            // slopty: a person's message can be gone back to (`transcript/rewind.rs`).
-            // slopty: not a run's task, which the person never sent.
-            let metadata = metadata.children(
-                (is_user_row && !task)
-                    .then(|| self.rewind_action(&rewind_message, &theme, cx))
-                    .flatten(),
-            );
-            div()
-                .h(px(ROW_LANE_HEIGHT))
-                .pt(px(Theme::SPACE_SM))
-                .w_full()
-                .flex()
-                .items_center()
-                // No horizontal inset: the original's `px-1` netted out flush
-                // because its message text was inset by the same amount (group
-                // padding 4 + inner VStack 4 = 8 = group 4 + px-1 4). Here the
-                // markdown text / user bubble sit AT the content column edges,
-                // so the label must too — assistant label's left edge on the
-                // text's first-character x, user label's right edge on the
-                // bubble's right edge (user-reported 4px drift).
-                .when(is_user_row && !task, |el| el.justify_end()) // slopty: a task reads left.
-                .when(hovered, |el| {
-                    el.child(motion::fade_quick(
-                        SharedString::from(format!("meta-{}", row.id)),
-                        metadata,
-                    ))
-                })
-                .into_any_element()
-        });
         // slopty: the last row's lane holds its working line, then its strip: one lane that
         // never shrinks while the row stays last, so Stop and a turn's end move nothing.
         let lane = if is_last {
@@ -8483,6 +8920,26 @@ impl Transcript {
         )
     }
 
+    /// slopty: the focus of the hover strip's control `key`, made on first use: the keyboard
+    /// reaches the control, and its focus coming or going draws the strip again (#9).
+    fn strip_focus(
+        &mut self,
+        key: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::FocusHandle {
+        if let Some((handle, _)) = self.strip_focus.get(key.as_str()) {
+            return handle.clone();
+        }
+        let handle = cx.focus_handle().tab_stop(true);
+        let redraw = [
+            cx.on_focus(&handle, window, |_, _, cx| cx.notify()),
+            cx.on_blur(&handle, window, |_, _, cx| cx.notify()),
+        ];
+        self.strip_focus.insert(key.into(), (handle.clone(), redraw));
+        handle
+    }
+
     fn copy_message(&mut self, entry_id: SharedString, text: SharedString, cx: &mut Context<Self>) {
         cx.stop_propagation();
         cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
@@ -8652,6 +9109,14 @@ impl Transcript {
         // Compact mode is the exception: EVERYTHING sits under the one work
         // accordion, spawn chips included.
         let collapses = self.compact_mode || tool_group_collapses(tools);
+        // slopty: a group of one call (or one thought) shows the call itself ("Read main.rs"),
+        // not a summary to open to learn it ("Read 1 file ›"); compact mode keeps its one fold
+        // (#2).
+        let solo = !self.compact_mode
+            && !compact_shell
+            && collapses
+            && tools.len() == 1
+            && !is_spawn_link(&tools[0]);
         let arrival_pending = !cx.reduce_motion()
             && self.tool_group_reveals.get(row_id).is_some_and(|reveal| {
                 reveal.starts.iter().flatten().any(|start| {
@@ -8664,7 +9129,7 @@ impl Transcript {
         // Compact mode never auto-opens — not for the streaming tail, and not
         // to show chips arriving mid-reveal. Collapsed-by-default is the mode.
         let effective_auto_open = auto_open || (arrival_pending && !self.compact_mode);
-        let open = !collapses || fold.open.unwrap_or(effective_auto_open);
+        let open = solo || !collapses || fold.open.unwrap_or(effective_auto_open);
         // Compact shells only change `open` through `toggle_fold`, which
         // already seeds `from` with the body's measured height — the
         // rendered-height reset below must not clobber it with the shell's
@@ -8792,6 +9257,7 @@ impl Transcript {
                 ];
                 for (blob_ref, what, bytes) in candidates {
                     let Some(blob_ref) = blob_ref else { continue };
+                    let retry = matches!(self.blob_details.get(blob_ref), Some(BlobFetch::Failed));
                     let label = match self.blob_details.get(blob_ref) {
                         Some(BlobFetch::Ready(_)) => {
                             if shown == Some(blob_ref) {
@@ -8800,9 +9266,8 @@ impl Transcript {
                             format!("Show full {what}")
                         }
                         Some(BlobFetch::Loading(_)) => format!("Loading full {what}…"),
-                        Some(BlobFetch::Failed) => {
-                            format!("Couldn't load full {what} — tap to retry")
-                        }
+                        // slopty: what happened, then one action (#18).
+                        Some(BlobFetch::Failed) => format!("Couldn't load the full {what}."),
                         None => match bytes {
                             // slopty: one size formatter ("12.3 KB").
                             Some(b) => format!("Show full {what} ({})", slopty_view_doc::bytes_short(b)),
@@ -8812,6 +9277,7 @@ impl Transcript {
                     return Some(ChipAffordance {
                         blob_ref: blob_ref.clone(),
                         label: SharedString::from(label),
+                        retry,
                     });
                 }
                 None
@@ -8958,7 +9424,9 @@ impl Transcript {
                 .sum::<f32>();
         let viewport_height = revealed_height;
         let target = if open { viewport_height } else { 0.0 };
-        let shimmer_phase = if active && !reduce_motion {
+        // slopty: a running call's row sweeps in phase with its group's title (#14).
+        let running_call = auto_open && tools.iter().any(sweeps);
+        let shimmer_phase = if (active || running_call) && !reduce_motion {
             motion::pulse_lease(cx.entity_id(), cx);
             let ticked = motion::pulse_moment(cx.entity_id(), cx); // slopty: the pulse's tick, which drew it
             self.tool_group_reveals
@@ -8968,6 +9436,8 @@ impl Transcript {
         } else {
             None
         };
+        let row_shimmer = shimmer_phase.filter(|_| running_call);
+        let shimmer_phase = shimmer_phase.filter(|_| active);
         let disclosure_progress = if reduce_motion {
             if open { 1.0 } else { 0.0 }
         } else {
@@ -8985,8 +9455,9 @@ impl Transcript {
         let toggle_id = row_id.clone();
         // A quiet summary sits above the activity rail; its chevron occupies
         // the same gutter as the rounded task-tree elbows below it.
-        let header = div()
-            .id(SharedString::from(format!("{row_id}-hdr")))
+        // slopty: a button the keyboard reaches, Enter or Space opening it (#9).
+        let header = crate::surface_chrome::key_stop(div().id(SharedString::from(format!("{row_id}-hdr"))), theme)
+            .rounded(px(4.0))
             // slopty: the group reads as a button named by its summary, open or not.
             .role(gpui::Role::Button)
             .aria_label(summary.clone())
@@ -9115,8 +9586,10 @@ impl Transcript {
                 if detail.is_none() && invocation.is_none() && !chip_has_images(tool) {
                     return reveal_tool_row(
                         tool_chip(
+                            SharedString::from(format!("{row_id}#t{ix}")),
                             tool,
                             collapses,
+                            solo,
                             ix > 0,
                             ix + 1 < tools.len(),
                             content_reveal,
@@ -9124,6 +9597,7 @@ impl Transcript {
                             continuation_reveal,
                             file_opener.as_ref(),
                             Some(&chip_facts),
+                            row_shimmer,
                             theme,
                             cx.entity_id(),
                             cx,
@@ -9146,21 +9620,27 @@ impl Transcript {
                 let toggle_key = key.clone();
                 let mut card = div()
                     .my(px((base_row_height - CHIP_CARD_HEIGHT) / 2.0))
-                    .when(collapses, |el| el.ml(px(ACTIVITY_TEXT_GAP)))
+                    .when(collapses, |el| el.ml(px(activity_text_gap(solo))))
                     .min_w_0()
                     .flex_1()
                     .flex()
                     .flex_col()
                     .overflow_hidden()
                     .when(!collapses, |card| {
-                        card.rounded(px(9.0))
+                        card.rounded(px(TRANSCRIPT_CARD_RADIUS)) // slopty: the column's card (#19).
                             .border_1()
-                            .border_color(crate::theme::hairline(0.07))
+                            .border_color(theme.border)
                             .bg(crate::theme::ink(0.03))
                     })
                     .child(
-                        div()
-                            .id(key.clone())
+                        // slopty: a button named by its call, which the keyboard reaches and
+                        // Enter or Space opens (#9, #10).
+                        chip_a11y(
+                            crate::surface_chrome::key_stop_inset(div().id(key.clone()), theme),
+                            tool,
+                            Some(open),
+                        )
+                            .rounded(px(4.0))
                             .h(px(if collapses {
                                 CHIP_CARD_HEIGHT
                             } else {
@@ -9186,6 +9666,7 @@ impl Transcript {
                                 open,
                                 file_opener.as_ref(),
                                 Some(&chip_facts),
+                                row_shimmer,
                                 theme,
                                 cx.entity_id(),
                                 cx,
@@ -9239,7 +9720,7 @@ impl Transcript {
                                 theme,
                             ));
                     }
-                    if let Some(ChipAffordance { blob_ref, label }) = affordance {
+                    if let Some(ChipAffordance { blob_ref, label, retry }) = affordance {
                         let loading = matches!(
                             self.blob_details.get(&blob_ref),
                             Some(BlobFetch::Loading(_))
@@ -9250,11 +9731,26 @@ impl Transcript {
                             .flex_none()
                             .flex()
                             .items_center()
+                            .gap(px(6.0))
                             .text_size(px(TOOL_TEXT_SIZE))
                             .text_color(theme.text_faint)
-                            .child(label);
+                            .child(label.clone())
+                            .when(retry, |row| {
+                                row.child(div().text_color(theme.text_muted).child("Retry"))
+                            });
                         if !loading {
-                            row = row
+                            // slopty: a button the keyboard reaches (#9).
+                            row = crate::surface_chrome::key_stop(row, theme)
+                                .role(gpui::Role::Button)
+                                // slopty: its Retry says what it fetches again (#18).
+                                .aria_label(if retry {
+                                    SharedString::from(
+                                        label.replace("Couldn't load", "Retry loading").trim_end_matches('.').to_owned(),
+                                    )
+                                } else {
+                                    label
+                                })
+                                .rounded(px(4.0))
                                 .cursor_pointer()
                                 .hover(|s| s.text_color(theme.text_muted))
                                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -9275,15 +9771,19 @@ impl Transcript {
                     .flex_row()
                     // Stretch the line alongside the expanded text.
                     .when(collapses, |row| {
-                        row.child(activity_rail(
-                            tool,
-                            ix > 0,
-                            ix + 1 < tools.len(),
-                            connector_reveal,
-                            continuation_reveal,
-                            base_row_height,
-                            theme,
-                        ))
+                        row.child(if solo {
+                            solo_rail(tool, base_row_height, theme)
+                        } else {
+                            activity_rail(
+                                tool,
+                                ix > 0,
+                                ix + 1 < tools.len(),
+                                connector_reveal,
+                                continuation_reveal,
+                                base_row_height,
+                                theme,
+                            )
+                        })
                     })
                     .child(card.when(collapses && content_reveal < 1.0, |card| {
                         card.relative()
@@ -9336,7 +9836,7 @@ impl Transcript {
             // Tool summaries and cards are code-adjacent chrome. Detail bodies
             // retain their explicit mono/diff typography below this boundary.
             .font_family(theme.font_sans_fixed.clone())
-            .when(collapses, |el| {
+            .when(collapses && !solo, |el| {
                 el.child(reveal_tool_row(
                     header.into_any_element(),
                     tool_group_header_height(),
@@ -9818,7 +10318,8 @@ fn error_chip(message: SharedString, theme: &Theme) -> AnyElement {
 /// A quiet fork seam. The source gets its own constrained line so long
 /// titles cannot widen a narrow side-chat pane. No message metadata lane.
 fn fork_marker(source_title: SharedString, theme: &Theme) -> AnyElement {
-    let rule = || div().flex_1().min_w_0().h(px(1.0)).bg(theme.border_strong);
+    // slopty: the hairline the other markers draw (#19).
+    let rule = || div().flex_1().min_w_0().h(px(1.0)).bg(theme.border);
     div()
         .py(px(14.0))
         .w_full()
@@ -9861,17 +10362,36 @@ fn fork_marker(source_title: SharedString, theme: &Theme) -> AnyElement {
 /// A passive one-line chip marking a question the agent asked — the
 /// interactive controls live in the composer (chat-view.tsx `InputChip`):
 /// 34px row, `rounded-[10px] border-white/[0.08] bg-white/[0.045] px-2
-/// text-[12px]`, a 20px `bg-white/[0.09]` icon tile with a 12px
-/// ChatRoundLine, the medium "Question" label, then the truncating value —
-/// the first question's header once resolved, "Awaiting your answer…" while
-/// pending. Neutral tones throughout; resolution never recolors the chip.
-fn input_chip(label: SharedString, header: SharedString, resolved: bool, theme: &Theme) -> AnyElement {
-    let value: SharedString = if resolved || label.as_ref() != QUESTION_CHIP {
-        header
-    } else {
-        "Awaiting your answer…".into()
+/// text-[12px]`, a 20px `bg-white/[0.09]` icon tile, the medium label, then the
+/// truncating value. Neutral tones throughout; resolution never recolors the chip.
+/// slopty: the tile's icon says the ask's kind, an open ask's label says what it waits for in
+/// the sidebar's words, and assistive tech reads it as a status (#8); its corner and hairline
+/// are the column's cards' (#19).
+fn input_chip(
+    id: &SharedString,
+    label: SharedString,
+    header: SharedString,
+    resolved: bool,
+    theme: &Theme,
+) -> AnyElement {
+    let icon = match label.as_ref() {
+        "Approval" => crate::icons::LOCK,
+        "Plan" => crate::icons::CHECKLIST,
+        "Form" => crate::icons::PEN,
+        "Confirm" => crate::icons::INFO_CIRCLE,
+        _ => crate::icons::CHAT_ROUND_LINE,
     };
+    let label: SharedString = match (resolved, label.as_ref()) {
+        (true, _) => label,
+        (false, "Approval") => "Needs your approval".into(),
+        (false, "Plan") => "Plan ready for review".into(),
+        (false, _) => "Waiting for your answer".into(),
+    };
+    let value = header;
     div()
+        .id(SharedString::from(format!("{id}-ask")))
+        .role(gpui::Role::Status)
+        .aria_label(SharedString::from(format!("{label}: {value}")))
         .py(px(4.0))
         .w_full()
         .child(
@@ -9882,9 +10402,9 @@ fn input_chip(label: SharedString, header: SharedString, resolved: bool, theme: 
                 .items_center()
                 .gap(px(8.0))
                 .overflow_hidden()
-                .rounded(px(10.0))
+                .rounded(px(TRANSCRIPT_CARD_RADIUS))
                 .border_1()
-                .border_color(crate::theme::hairline(0.08))
+                .border_color(theme.border)
                 .bg(crate::theme::ink(0.045))
                 .px(px(8.0))
                 .text_size(px(12.0))
@@ -9898,7 +10418,7 @@ fn input_chip(label: SharedString, header: SharedString, resolved: bool, theme: 
                         .items_center()
                         .justify_center()
                         .child(
-                            crate::icons::icon(crate::icons::CHAT_ROUND_LINE)
+                            crate::icons::icon(icon)
                                 .size(px(12.0))
                                 .text_color(theme.text_muted),
                         ),
@@ -9926,9 +10446,9 @@ fn input_chip(label: SharedString, header: SharedString, resolved: bool, theme: 
 const QUESTION_CHIP: &str = "Question";
 
 /// slopty: an ask's chip words: its kind's label, and what it shows beside it. An agent's
-/// questions show their header once answered ("Awaiting your answer…" before); any other ask
-/// (an approval, a dialog, a form) shows the ask itself, its title or its first line, so a dialog
-/// never reads as a question nobody can see.
+/// questions show their header; an approval shows what it asks to run or change (its first
+/// line); any other ask (a dialog, a form) shows its title or its first line, so a dialog never
+/// reads as a question nobody can see.
 fn input_chip_words(questions: &[slopty_view_proto::UserInputQuestion]) -> (SharedString, SharedString) {
     let Some(first) = questions.first() else {
         return (QUESTION_CHIP.into(), QUESTION_CHIP.into());
@@ -9943,8 +10463,13 @@ fn input_chip_words(questions: &[slopty_view_proto::UserInputQuestion]) -> (Shar
     };
     let header = first.header.trim();
     let asked = first.question.lines().map(str::trim).find(|line| !line.is_empty());
+    // slopty: an approval shows what it would run or change ("touch refused.txt"), not its
+    // generic header ("Bash command"), which says only the tool (#8).
+    let approval = label == "Approval";
     let value = if label == QUESTION_CHIP {
         if header.is_empty() { QUESTION_CHIP } else { header }
+    } else if approval && let Some(asked) = asked {
+        asked
     } else if header.is_empty() || header.eq_ignore_ascii_case(label) {
         asked.unwrap_or(label)
     } else {
@@ -10282,15 +10807,9 @@ impl ToolFileOpener {
 /// at the right of the ordinary static detail; done is the ordinary quiet
 /// chip; failed takes the danger tint — no status words, no live text (a
 /// header rewriting itself per stream delta read as noise — user report).
-fn chip_header_row(
-    tool: &ToolItem,
-    trail: Option<ChipTrail>,
-    file_opener: Option<&ToolFileOpener>,
-    facts: Option<&work::ChipFacts>,
-    theme: &Theme,
-    view: gpui::EntityId,
-    cx: &mut gpui::App,
-) -> gpui::Div {
+/// slopty: a call's words as its row draws them: its verb and its target ("Read",
+/// "src/main.rs"), in the TUI's words where the call has them.
+fn chip_words(tool: &ToolItem) -> (String, String) {
     let (label, detail) = match tool.kind {
         ToolItemKind::Thought => ("Thought process", String::new()),
         ToolItemKind::Note => ("Wrote", note_chip_detail(tool)),
@@ -10306,6 +10825,62 @@ fn chip_header_row(
         Some(path) if tool.kind == ToolItemKind::Call && !detail.is_empty() => path.to_owned(),
         _ => detail,
     };
+    (label, detail)
+}
+
+/// slopty: a call's row as assistive tech names it: "{verb} {target}" (#10).
+fn chip_name(tool: &ToolItem) -> SharedString {
+    let (label, detail) = chip_words(tool);
+    let detail = single_line(&detail);
+    if detail.is_empty() { label.into() } else { format!("{label} {detail}").into() }
+}
+
+/// slopty: what a call's row says it came to ("exit code 2"), for assistive tech (#10).
+fn chip_result(tool: &ToolItem) -> Option<SharedString> {
+    tool.facts.as_ref().and_then(|facts| facts.result.clone()).map(SharedString::from)
+}
+
+/// slopty: a call's row as assistive tech reads it: named by its call, valued by its result,
+/// a list item, or a button when it opens (#10).
+fn chip_a11y(row: gpui::Stateful<gpui::Div>, tool: &ToolItem, open: Option<bool>) -> gpui::Stateful<gpui::Div> {
+    let row = row
+        .role(if open.is_some() { gpui::Role::Button } else { gpui::Role::ListItem })
+        .aria_label(chip_name(tool));
+    let row = match chip_result(tool) {
+        Some(result) => row.aria_value(result),
+        None => row,
+    };
+    match open {
+        Some(open) => row.aria_expanded(open),
+        None => row,
+    }
+}
+
+/// slopty: whether a call's row says its failure across its words. The person's own Deny ended
+/// the call; it did not fail, so it reads quiet. An activity row's failure says so in its rail
+/// icon and its result words ("exit code 2"), never across the whole line, which read as the
+/// loudest thing on screen for a failure the agent expected (#7); a card, with no rail, keeps
+/// the tint.
+fn fails_loudly(tool: &ToolItem, activity: bool) -> bool {
+    let failed = (tool.is_error && !denied(tool))
+        || (tool.subagent_ref.is_some()
+            && matches!(tool.subagent_status, Some(SubagentStatus::Failed)));
+    failed && !activity
+}
+
+fn chip_header_row(
+    tool: &ToolItem,
+    trail: Option<ChipTrail>,
+    file_opener: Option<&ToolFileOpener>,
+    facts: Option<&work::ChipFacts>,
+    shimmer: Option<f32>,
+    theme: &Theme,
+    view: gpui::EntityId,
+    cx: &mut gpui::App,
+) -> gpui::Div {
+    let (label, detail) = chip_words(tool);
+    // slopty: a call under way sweeps its verb with its group title's light, in phase (#14).
+    let shimmer = shimmer.filter(|_| sweeps(tool));
     let facts_trail = facts.zip(tool.facts.as_deref()).and_then(|(chip, facts)| {
         chip.trail(&tool.part_id, facts, tool.resolved, theme)
     });
@@ -10323,18 +10898,11 @@ fn chip_header_row(
         .map(|(path, opener)| (path.to_owned(), opener.clone()));
     let running = tool.subagent_ref.is_some()
         && matches!(tool.subagent_status, Some(SubagentStatus::Running));
-    // slopty: the person's own Deny ended the call; it did not fail, so it reads quiet.
-    let failed = (tool.is_error && !denied(tool))
-        || (tool.subagent_ref.is_some()
-            && matches!(tool.subagent_status, Some(SubagentStatus::Failed)));
+    let failed = fails_loudly(tool, activity);
     // Text resolves its color during layout, so group-hover text needs stable
     // child IDs under the keyed, expandable header to retain hover state.
-    let hover_text = activity && trail.is_some() && !failed;
-    let tint = if failed {
-        theme.danger
-    } else {
-        theme.text_muted
-    };
+    let hover_text = activity && trail.is_some();
+    let tint = if failed { theme.danger } else { theme.text_muted };
     div()
         .group("tool-header")
         .h(px(if activity {
@@ -10384,7 +10952,7 @@ fn chip_header_row(
                     label.font_weight(gpui::FontWeight::MEDIUM)
                 })
                 .text_color(tint)
-                .child(SharedString::from(label))
+                .child(tool_group_title(SharedString::from(label), shimmer, theme))
                 .map(|label| {
                     if hover_text {
                         label
@@ -10428,11 +10996,7 @@ fn chip_header_row(
                         .bg(theme.ink(0.06))
                         .pl(px(1.0))
                         .pr(px(6.0))
-                        .text_color(if failed {
-                            theme.danger
-                        } else {
-                            theme.text.opacity(0.85)
-                        })
+                        .text_color(theme.text.opacity(0.85))
                         .child(
                             div()
                                 .size(px(20.0))
@@ -10569,9 +11133,7 @@ fn chip_header_row(
                     .size(px(12.0))
                     .text_color(theme.text_faint)
                     .when(activity, |caret| {
-                        caret.group_hover("tool-header", |style| {
-                            style.text_color(if failed { theme.danger } else { theme.text })
-                        })
+                        caret.group_hover("tool-header", |style| style.text_color(theme.text))
                     }),
                 ),
             })
@@ -10584,6 +11146,7 @@ fn chip_header(
     open: bool,
     file_opener: Option<&ToolFileOpener>,
     facts: Option<&work::ChipFacts>,
+    shimmer: Option<f32>,
     theme: &Theme,
     view: gpui::EntityId,
     cx: &mut gpui::App,
@@ -10593,6 +11156,7 @@ fn chip_header(
         Some(ChipTrail::Chevron { open }),
         file_opener,
         facts,
+        shimmer,
         theme,
         view,
         cx,
@@ -10814,9 +11378,14 @@ fn activity_ribbon(path: &mut PathBuilder, points: &[Point<Pixels>]) {
 }
 
 /// A plain activity row, or a card for a subagent without a linked document.
+/// slopty: `id` keys it for assistive tech, which reads it named by its call (#10); a lone call
+/// (`solo`) wears its icon on the summary's chevron column, its words on the summaries' edge
+/// (#2); `shimmer` sweeps a running call's verb (#14).
 fn tool_chip(
+    id: SharedString,
     tool: &ToolItem,
     rail: bool,
+    solo: bool,
     has_predecessor: bool,
     continues: bool,
     content_reveal: f32,
@@ -10824,6 +11393,7 @@ fn tool_chip(
     continuation_reveal: f32,
     file_opener: Option<&ToolFileOpener>,
     facts: Option<&work::ChipFacts>,
+    shimmer: Option<f32>,
     theme: &Theme,
     view: gpui::EntityId,
     cx: &mut gpui::App,
@@ -10833,26 +11403,31 @@ fn tool_chip(
     } else {
         CHIP_HEIGHT
     };
-    div()
-        .h(px(row_height))
+    let row = div().id(id);
+    let row = if is_agent_tool(tool) { row } else { chip_a11y(row, tool, None) };
+    row.h(px(row_height))
         .w_full()
         .flex_none()
         .flex()
         .flex_row()
         .when(rail, |row| {
-            row.child(activity_rail(
-                tool,
-                has_predecessor,
-                continues,
-                connector_reveal,
-                continuation_reveal,
-                row_height,
-                theme,
-            ))
+            row.child(if solo {
+                solo_rail(tool, row_height, theme)
+            } else {
+                activity_rail(
+                    tool,
+                    has_predecessor,
+                    continues,
+                    connector_reveal,
+                    continuation_reveal,
+                    row_height,
+                    theme,
+                )
+            })
         })
         .child(
             div()
-                .when(rail, |el| el.ml(px(ACTIVITY_TEXT_GAP)))
+                .when(rail, |el| el.ml(px(activity_text_gap(solo))))
                 .my(px((row_height - CHIP_CARD_HEIGHT) / 2.0))
                 .h(px(CHIP_CARD_HEIGHT))
                 .min_w_0()
@@ -10861,9 +11436,9 @@ fn tool_chip(
                 .items_center()
                 .overflow_hidden()
                 .when(!rail, |card| {
-                    card.rounded(px(9.0))
+                    card.rounded(px(TRANSCRIPT_CARD_RADIUS)) // slopty: the column's card (#19).
                         .border_1()
-                        .border_color(crate::theme::hairline(0.07))
+                        .border_color(theme.border)
                         .bg(crate::theme::ink(0.03))
                 })
                 .when(rail && content_reveal < 1.0, |card| {
@@ -10871,9 +11446,44 @@ fn tool_chip(
                         .top(px(4.0 * (1.0 - content_reveal)))
                         .opacity(content_reveal)
                 })
-                .child(chip_header_row(tool, None, file_opener, facts, theme, view, cx)),
+                .child(chip_header_row(tool, None, file_opener, facts, shimmer, theme, view, cx)),
         )
         .into_any_element()
+}
+
+/// slopty: whether `tool`'s row sweeps its words with its group title's light: a call under way,
+/// not a thought or a subagent, whose card says it runs (#14).
+fn sweeps(tool: &ToolItem) -> bool {
+    !tool.resolved && tool.kind == ToolItemKind::Call && !is_spawn_link(tool)
+}
+
+/// slopty: where an activity row's words start past its rail: after the tree's gutter, or, for
+/// a lone call, on the summaries' edge (#2).
+fn activity_text_gap(solo: bool) -> f32 {
+    if solo { ACTIVITY_TITLE_X - SOLO_RAIL_WIDTH } else { ACTIVITY_TEXT_GAP }
+}
+
+/// slopty: a lone call's rail: no tree, its icon centred on the summary chevron's column (#2).
+const SOLO_RAIL_WIDTH: f32 = 22.0;
+
+fn solo_rail(tool: &ToolItem, row_height: f32, theme: &Theme) -> gpui::Div {
+    let tint = if tool.is_error && !denied(tool) {
+        theme.danger
+    } else {
+        theme.text_muted
+    };
+    div().relative().w(px(SOLO_RAIL_WIDTH)).flex_none().child(
+        crate::icons::icon(match tool.kind {
+            ToolItemKind::Thought => crate::icons::CHAT_ROUND_LINE,
+            ToolItemKind::Note => crate::icons::PEN,
+            ToolItemKind::Call => tool_icon_path(&tool.call),
+        })
+        .absolute()
+        .left(px(ACTIVITY_TRUNK_X - ACTIVITY_ICON_SIZE / 2.0))
+        .top(px(row_height / 2.0 - ACTIVITY_ICON_SIZE / 2.0))
+        .size(px(ACTIVITY_ICON_SIZE))
+        .text_color(tint),
+    )
 }
 
 fn entry_fingerprint(entry: &SessionMessageEntry, pending: bool) -> u64 {
@@ -11090,6 +11700,19 @@ impl Render for Transcript {
         // slopty: travel no scroll decision took (a nested scroller's step) is
         // not this list's.
         self.wheel_travel = 0.0;
+        // slopty: a jump's glide steps once a frame, as the spring does (#13).
+        if self.glide.is_some() && !self.glide_scheduled {
+            self.glide_scheduled = true;
+            let entity = cx.weak_entity();
+            window.on_next_frame(move |_, cx| {
+                entity
+                    .update(cx, |this: &mut Transcript, cx| {
+                        this.glide_scheduled = false;
+                        this.step_glide(cx);
+                    })
+                    .ok();
+            });
+        }
         // Spring driver: one on_next_frame callback at a time; each tick
         // notifies, which re-enters render and schedules the next frame until
         // the spring parks. Reduced motion never schedules (sync snaps).
@@ -11337,7 +11960,8 @@ mod tests {
             state.transcript = vec![assistant(
                 "tools",
                 MessageStatus::Complete,
-                vec![tool_part("call", "pwd")],
+                // slopty: two calls: a lone one shows itself, with nothing to fold (#2).
+                vec![tool_part("call", "pwd"), tool_part("call-2", "cargo check")],
             )];
             state.transcript_revision += 1;
         });
@@ -12971,6 +13595,63 @@ mod tests {
             let row = this.list.bounds_for_item(30).expect("the row is drawn");
             let below = f32::from(row.top() - this.list.viewport_bounds().top());
             assert!((below - OWN_SEND_TOP_INSET_PX).abs() <= 0.5, "landed {below}px down");
+        });
+    }
+
+    /// slopty: with motion, a jump glides a step a frame and lands its row below the titlebar,
+    /// where it flashes (#13).
+    #[gpui::test]
+    fn a_jump_glides_on_frames_and_flashes_where_it_lands(cx: &mut gpui::TestAppContext) {
+        struct Fixture(Entity<Transcript>);
+        impl Render for Fixture {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().child(self.0.clone())
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            cx.set_reduce_motion(false);
+        });
+        let state = cx.new(|_| AppState::new());
+        let transcript = cx.new(|cx| Transcript::new(state, cx));
+        transcript.update(cx, |this, cx| {
+            this.rows =
+                (0..60).map(|ix| viewport_row(&format!("row-{ix}"), &format!("entry-{ix}"))).collect();
+            this.list.reset(60);
+            this.pinned = false;
+            this.rail_enabled = false;
+            cx.notify();
+        });
+        let (_fixture, cx) = cx.add_window_view(|_, _| Fixture(transcript.clone()));
+        cx.run_until_parked();
+        transcript.update(cx, |this, cx| this.scroll_to_row(30, cx));
+        assert!(transcript.read_with(cx, |this, _| this.glide.is_some()), "a glide, not a jump");
+        // Each frame steps it, until it lands (a frame's clock that stands still lands it at
+        // its frames' bound).
+        for _ in 0..400 {
+            if transcript.read_with(cx, |this, _| this.glide.is_none()) {
+                break;
+            }
+            cx.update(|window, cx| {
+                window.refresh();
+                let _ = window.draw(cx);
+            });
+            transcript.update(cx, |this, cx| this.step_glide(cx));
+        }
+        cx.run_until_parked();
+        transcript.read_with(cx, |this, _| {
+            assert!(this.glide.is_none(), "the glide landed");
+            let row = this.list.bounds_for_item(30).expect("the row is drawn");
+            let below = f32::from(row.top() - this.list.viewport_bounds().top());
+            assert!((below - OWN_SEND_TOP_INSET_PX).abs() <= 0.5, "landed {below}px down");
+            assert_eq!(
+                this.landed.as_ref().map(|(id, _, _)| id.as_ref()),
+                Some("row-30"),
+                "where it landed flashes"
+            );
         });
     }
 
@@ -16030,7 +16711,7 @@ mod tests {
                     this.toggle_user_fold(
                         "prompt".into(),
                         0,
-                        USER_LINE_HEIGHT * (USER_COLLAPSED_LINES + 1) as f32,
+                        USER_LINE_HEIGHT * USER_COLLAPSED_LINES as f32,
                         full_h,
                         true,
                     );
@@ -17044,6 +17725,7 @@ mod tests {
                             false,
                             Some(&self.opener),
                             None,
+                            None,
                             &theme,
                             cx.entity_id(),
                             cx,
@@ -17183,15 +17865,24 @@ mod tests {
     #[test]
     fn timestamp_strip_lands_on_the_last_settled_row() {
         use chrono::FixedOffset;
-        // Fixed zone (UTC−4): "Jul 1, 3:45 PM" — the exact formatTimestamp
-        // shape (short month, numeric day, no leading zero, 2-digit minutes).
+        // Fixed zone (UTC−4). slopty: the time as near as it is (#17): alone today,
+        // "Yesterday" the day before, the date this year, the year before it.
         let tz = FixedOffset::west_opt(4 * 3600).unwrap();
-        let ms = chrono::DateTime::parse_from_rfc3339("2026-07-01T19:45:00Z")
-            .unwrap()
-            .timestamp_millis();
+        let at = |rfc: &str| chrono::DateTime::parse_from_rfc3339(rfc).unwrap().timestamp_millis();
+        let ms = at("2026-07-01T19:45:00Z");
         // On the system's clock.
         let clock = if clock_format().contains('p') { "3:45 PM" } else { "15:45" };
-        assert_eq!(format_timestamp(ms, &tz), format!("Jul 1, {clock}"));
+        assert_eq!(format_timestamp_near(ms, at("2026-07-01T23:00:00Z"), &tz), clock);
+        assert_eq!(
+            format_timestamp_near(ms, at("2026-07-02T10:00:00Z"), &tz),
+            format!("Yesterday {clock}")
+        );
+        assert_eq!(
+            format_timestamp_near(ms, at("2026-09-02T10:00:00Z"), &tz),
+            format!("Jul 1, {clock}")
+        );
+        assert_eq!(format_timestamp_near(ms, at("2027-01-02T10:00:00Z"), &tz), "Jul 1, 2026");
+        assert_eq!(format_full_timestamp(ms, &tz), format!("Wednesday, Jul 1, 2026, {clock}"));
 
         // User entries carry the strip on their single row (pending too).
         let user = SessionMessageEntry {
@@ -17264,7 +17955,7 @@ mod tests {
     }
 
     /// slopty: a dialog's chip names it a confirm and shows its ask; an agent's question keeps
-    /// its header (the "Awaiting your answer…" is the chip's while it is open).
+    /// its header; an approval shows its command, not its generic header (#8).
     #[test]
     fn an_ask_chip_names_its_kind_and_shows_the_ask() {
         let dialog = slopty_view_proto::UserInputQuestion {
@@ -17289,6 +17980,13 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(input_chip_words(&[approval]).1.as_ref(), "Run cargo test?");
+        let bash = slopty_view_proto::UserInputQuestion {
+            kind: "approval".into(),
+            header: "Bash command".into(),
+            question: "touch refused.txt\nCreate refused.txt file".into(),
+            ..Default::default()
+        };
+        assert_eq!(input_chip_words(&[bash]), ("Approval".into(), "touch refused.txt".into()));
     }
 
     #[test]

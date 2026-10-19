@@ -4,20 +4,26 @@ Status │ Background work
 Button │ History: past Claude Code sessions
 Button │ Server: e2e-server, Connected
 Button │ Settings
+Button │ Copy message
 Article │ You
 Paragraph │ signals
+Button │ Copy message
+Button │ Rewind…
+Article │ Claude Code
 Status │ Saved 2 memories │ memory
 Status │ Allowed npm test │ allowed
 Status │ Switched to claude-sonnet-5-5 │ fallback
 Status │ PreToolUse hook failed: lint failed │ hook
-Article │ Claude
 Paragraph │ The instruction files are long: 50000 characters, over 40000
 Paragraph │ Done: signalled.
+Button │ Copy message
 Status │ Heads up from the stand-in
+Button │ Dismiss note
 Group │ Background work
 Button │ Expand background work │ 1 command
 Button │ Attach images
 MultilineTextInput │ Do anything… (focused)
+Button │ Model: Opus 5.5, High
 Button │ Send message
 Button │ Mode: Auto
 Button │ Context 1%

@@ -6,13 +6,15 @@ Button │ Server: e2e-server, Connected
 Button │ Settings
 Article │ You
 Paragraph │ background sleep 600
-Button │ Ran 1 command
-Article │ Claude
+Article │ Claude Code
+Button │ Run sleep 600 │ Running in the background · task b00000001
+Link │ Running in the background · task b00000001, in the background tray
 Paragraph │ Done: it runs in the background.
 Group │ Background work
 Button │ Expand background work │ 1 command
 Button │ Attach images
 MultilineTextInput │ Do anything…
+Button │ Model: Opus 5.5, High
 Button │ Send message
 Button │ Mode: Auto
 Button │ Context 1%

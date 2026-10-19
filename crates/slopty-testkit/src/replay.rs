@@ -120,9 +120,11 @@ impl Recording {
         }
         let mut steps = Vec::new();
         let mut prompted = false;
+        // Each call's input and id, by its `PreToolUse`: what a permission request is about.
+        let mut called: Vec<(Value, Value)> = Vec::new();
         for hook in &self.hooks {
             let event = hook.get("hook_event_name").and_then(Value::as_str).unwrap_or_default();
-            let payload = rewrite.value(hook);
+            let mut payload = rewrite.value(hook);
             let tool = hook.get("tool_use_id").and_then(Value::as_str);
             match event {
                 "SessionStart" => continue,
@@ -137,6 +139,10 @@ impl Recording {
                     continue;
                 }
                 "PreToolUse" => {
+                    if let Some(id) = payload.get("tool_use_id") {
+                        let input = payload.get("tool_input").cloned().unwrap_or(Value::Null);
+                        called.push((input, id.clone()));
+                    }
                     if let Some(id) = tool
                         && let Some(stream) = streams.iter_mut().find(|s| s.calls(id))
                     {
@@ -158,6 +164,15 @@ impl Recording {
                         if let Some(last) = last {
                             main.upto(&mut steps, last);
                         }
+                    }
+                }
+                // Claude Code's hook names no call, where its `can_use_tool` does: the call asked
+                // about is the last one called with its input.
+                "PermissionRequest" if payload.get("tool_use_id").is_none() => {
+                    let input = payload.get("tool_input").cloned().unwrap_or(Value::Null);
+                    let id = called.iter().rev().find(|(called, _)| *called == input);
+                    if let (Some((_, id)), Some(fields)) = (id, payload.as_object_mut()) {
+                        fields.insert("tool_use_id".to_owned(), id.clone());
                     }
                 }
                 _ => {}
@@ -619,6 +634,13 @@ mod tests {
         let Step::Hook { payload, .. } = &steps[at] else { panic!("not a hook") };
         assert_eq!(payload["hook_event_name"], "PermissionRequest");
         assert_eq!(payload["tool_input"]["command"], "touch refused.txt");
+        let called = steps[..at].iter().rev().find_map(|s| match s {
+            Step::Hook { payload: p, .. } if p["hook_event_name"] == "PreToolUse" => Some(p),
+            _ => None,
+        });
+        let id = called.map(|p| p["tool_use_id"].clone()).unwrap_or_default();
+        assert!(id.as_str().is_some_and(|id| !id.is_empty()), "its call's id: {id}");
+        assert_eq!(payload["tool_use_id"], id, "the request names the call it is about");
         let before: String = steps[..at]
             .iter()
             .filter_map(|s| match s {

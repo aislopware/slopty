@@ -1383,6 +1383,9 @@ fn input(request: &Request, state: &ThreadState) -> MessagePart {
             .and_then(|allow| request.options.iter().position(|c| c.id == allow.id)),
             edit_from,
             proposed: proposed(request, call),
+            // slopty: a shell command's approval sets its command as code.
+            code: matches!(request.kind.as_str(), Request::APPROVAL | Request::RETRY)
+                && call.and_then(command).is_some(),
             ..UserInputQuestion::default()
         }]
     } else if request.questions.is_empty() {

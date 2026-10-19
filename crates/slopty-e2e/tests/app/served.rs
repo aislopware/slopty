@@ -83,13 +83,13 @@ pub async fn seen(
     }
 }
 
-/// The nodes from the agent's first reply on (the `Claude` article and what follows it): the
+/// The nodes from the agent's first reply on (the `Claude Code` article and what follows it): the
 /// person's own message, the `You` article above, holds the words they typed.
 pub fn replies(dump: &Dump) -> &[A11yNode] {
     let from = dump
         .a11y
         .iter()
-        .position(|n| n.role == "Article" && n.label.as_deref() == Some("Claude"))
+        .position(|n| n.role == "Article" && n.label.as_deref() == Some("Claude Code"))
         .unwrap_or(dump.a11y.len());
     dump.a11y.get(from..).unwrap_or_default()
 }

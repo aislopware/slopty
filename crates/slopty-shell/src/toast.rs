@@ -386,6 +386,23 @@ pub fn messages(cx: &App) -> Vec<SharedString> {
         .unwrap_or_default()
 }
 
+/// slopty: `text` with every hyphen that joins two letters or digits made non-breaking (U+2011),
+/// so a machine's or a file's name ("e2e-worker") wraps whole; a dash between words, or before
+/// a flag ("-rf"), is left as it is.
+pub(crate) fn names_kept_whole(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    chars
+        .iter()
+        .enumerate()
+        .map(|(ix, &c)| {
+            let joins = c == '-'
+                && ix.checked_sub(1).and_then(|before| chars.get(before)).is_some_and(|c| c.is_alphanumeric())
+                && chars.get(ix + 1).is_some_and(|next| next.is_alphanumeric());
+            if joins { '\u{2011}' } else { c }
+        })
+        .collect()
+}
+
 // slopty: the app's tests read each toast's kind too.
 // slopty: the raw reasons behind Copy error, for the tests of what pushes them.
 /// The live toasts' details, oldest first.
@@ -778,7 +795,8 @@ pub fn render_toaster(lift: f32, window: &mut Window, cx: &mut App) -> Option<An
             .child(lead(kind, progress, id, &theme))
             // slopty: an error clamps at four lines and shows whole while the stack is hovered.
             .child({
-                let words = div().flex_1().min_w_0().child(message.clone());
+                // slopty: a hyphenated name ("e2e-worker") never breaks across two lines.
+                let words = div().flex_1().min_w_0().child(SharedString::from(names_kept_whole(&message)));
                 if kind == ToastKind::Error && !expanded { words.line_clamp(4) } else { words }
             })
             .children((kind == ToastKind::Error).then(|| {
@@ -1032,6 +1050,14 @@ fn release_swipe(id: u64, cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// slopty: a hyphenated name wraps whole; a flag's dash and a dash between words do not join.
+    #[test]
+    fn a_hyphenated_name_is_kept_whole() {
+        assert_eq!(names_kept_whole("from e2e-worker's shell"), "from e2e\u{2011}worker's shell");
+        assert_eq!(names_kept_whole("rm -rf build"), "rm -rf build");
+        assert_eq!(names_kept_whole("now - later"), "now - later");
+    }
 
     fn toast(store: &mut ToastStore, message: &str, now: Instant) {
         store.next_id += 1;

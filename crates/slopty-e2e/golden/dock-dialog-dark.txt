@@ -6,9 +6,16 @@ Button │ Server: e2e-server, Connected
 Button │ Settings
 Article │ You
 Paragraph │ dialog remote_callout
+Button │ Copy message
+Button │ Rewind…
+Article │ Claude Code
+Status │ Waiting for your answer: Go ahead?
 Group │ Go ahead? (focused)
+Note │ Go ahead with the change?
 Button │ Yes
 Button │ No
+Button │ Mode: Auto
+Button │ Context —
 Button │ Open in…
 Button │ Show chat details
 Button │ Show files panel

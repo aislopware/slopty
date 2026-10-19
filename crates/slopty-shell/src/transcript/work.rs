@@ -463,14 +463,9 @@ impl Transcript {
                     reveal_work(chat, &tray_row, cx);
                 }
             }))
-            .child(
-                div()
-                    .w(px(super::ACTIVITY_TRUNK_X * 2.0))
-                    .flex_none()
-                    .flex()
-                    .justify_center()
-                    .child(div().size(px(6.0)).rounded_full().bg(task_tint(task, theme))),
-            )
+            .child(lead_slot(Some(
+                div().size(px(6.0)).rounded_full().bg(task_tint(task, theme)).into_any_element(),
+            )))
             .child(
                 div()
                     .min_w_0()
@@ -538,17 +533,21 @@ impl Transcript {
         }
         let words = notice_words(note, self.clock.timestamp_millis());
         let tint = tone_tint(&note.tone, theme);
-        let lead: AnyElement = if retrying {
-            crate::loaders::mini_glyph_spinner(
-                format!("{}-retry", row.id),
-                2.0,
-                theme.glyph,
-                cx.entity_id(),
-                cx,
+        // slopty: a plain notice (the done line, "+N more tasks") is no list item: no dot (#4).
+        let plain = !matches!(note.tone.as_str(), NoteLine::ERROR | NoteLine::WARNING | NoteRow::SUCCESS);
+        let lead: Option<AnyElement> = if retrying {
+            Some(
+                crate::loaders::mini_glyph_spinner(
+                    format!("{}-retry", row.id),
+                    2.0,
+                    theme.glyph,
+                    cx.entity_id(),
+                    cx,
+                )
+                .into_any_element(),
             )
-            .into_any_element()
         } else {
-            div().size(px(6.0)).rounded_full().bg(tint).into_any_element()
+            (!plain).then(|| div().size(px(6.0)).rounded_full().bg(tint).into_any_element())
         };
         let detail = note.detail.as_ref().filter(|detail| !detail.trim().is_empty());
         let toggle = detail.map(|_| {
@@ -580,14 +579,7 @@ impl Transcript {
             } else {
                 theme.text_muted
             })
-            .child(
-                div()
-                    .w(px(super::ACTIVITY_TRUNK_X * 2.0))
-                    .flex_none()
-                    .flex()
-                    .justify_center()
-                    .child(lead),
-            )
+            .child(lead_slot(lead))
             .child(div().min_w_0().flex_1().truncate().child(SharedString::from(words)))
             .children(toggle);
         div()
@@ -599,6 +591,18 @@ impl Transcript {
             .children(detail.filter(|_| open).map(|detail| body_block(detail, theme)))
             .into_any_element()
     }
+}
+
+/// slopty: a notice's lead (its dot, or a retry's spinner) centred on the activity trunk, its
+/// words starting on the group summaries' edge, [`super::ACTIVITY_TITLE_X`] (#4).
+fn lead_slot(lead: Option<AnyElement>) -> gpui::Div {
+    div()
+        .w(px(super::ACTIVITY_TRUNK_X * 2.0))
+        .mr(px(super::ACTIVITY_TITLE_X - super::ACTIVITY_TRUNK_X * 2.0 - Theme::SPACE_SM))
+        .flex_none()
+        .flex()
+        .justify_center()
+        .children(lead)
 }
 
 /// The chevron that opens what sits under a notice.

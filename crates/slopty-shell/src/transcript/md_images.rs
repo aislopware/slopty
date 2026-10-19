@@ -121,8 +121,8 @@ pub(super) fn element(
     let tile = render::in_gallery(&id);
     let folder = shared.borrow().folder.clone();
     let (value, words): (&str, String) = match resolve(&image.source, folder.as_deref()) {
-        Resolved::Remote => ("remote", format!("{label} — {}", image.source)),
-        Resolved::Refused => ("refused", format!("{label} — outside this chat's folder")),
+        Resolved::Remote => ("remote", format!("{label} · {}", image.source)),
+        Resolved::Refused => ("refused", format!("{label} · outside this chat's folder")),
         Resolved::Path(path) => {
             let mut shared = shared.borrow_mut();
             let thumb = shared.thumbs.get(&path).cloned();
@@ -150,7 +150,7 @@ pub(super) fn element(
                         .child(img(image).size_full().object_fit(gpui::ObjectFit::Contain))
                         .into_any_element();
                 }
-                Some(Thumb::Failed) => ("missing", format!("{label} — not found")),
+                Some(Thumb::Failed) => ("missing", format!("{label} · not found")),
                 Some(Thumb::Loading { aspect }) => {
                     return placeholder(id, label, tile, aspect, theme);
                 }

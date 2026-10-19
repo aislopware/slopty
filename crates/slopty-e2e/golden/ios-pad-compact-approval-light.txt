@@ -7,10 +7,15 @@ Button │ Server: e2e-server, Connected
 Button │ Settings
 Article │ You
 Paragraph │ bash rm -rf build
-Article │ Claude
+Article │ Claude Code
 Paragraph │ Let me run it.
-Button │ Ran 1 command
+Button │ Run rm -rf build │ Waiting for permission…
+Status │ Waiting for permission…
+Status │ Needs your approval: rm -rf build
 Group │ rm -rf build
+Note │ Risky
+Code │ rm -rf build
+Note │ Run a command
 Note │ Ask rule Bash overrides auto mode for this command.
 Button │ Allow
 Button │ Always allow (rm -rf build in this project)
@@ -18,6 +23,8 @@ Button │ Deny
 Button │ Deny and stop
 Button │ Allow, and say what's next…
 Button │ Say what to do instead…
+Button │ Mode: Auto
+Button │ Context —
 Button │ Show chat details
 Button │ Show files panel
 Button │ Show side pane

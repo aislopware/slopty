@@ -4,14 +4,20 @@ Status │ Done
 Button │ History: past Claude Code sessions
 Button │ Server: e2e-server, Connected
 Button │ Settings
+Button │ Copy message
 Article │ You
 Paragraph │ Read the plot
-Button │ Read 1 file
+Button │ Copy message
+Button │ Rewind…
+Article │ Claude Code
+Button │ Read /work/plot.png │ Read image (5.9KB)
+Status │ Read image (5.9KB)
 Button │ Image: plot.png
-Article │ Claude
 Paragraph │ The plot climbs in five red bars.
+Button │ Copy message
 Button │ Attach images
 MultilineTextInput │ Do anything… (focused)
+Button │ Model: Opus 5.5, High
 Button │ Send message
 Button │ Mode: Auto
 Button │ Context 1%

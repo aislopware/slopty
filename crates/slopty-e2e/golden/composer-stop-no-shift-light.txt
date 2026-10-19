@@ -4,12 +4,19 @@ Status │ Done
 Button │ History: past Claude Code sessions
 Button │ Server: e2e-server, Connected
 Button │ Settings
+Button │ Copy message
 Article │ You
 Paragraph │ wait 60
-Button │ Ran 1 command
+Button │ Copy message
+Button │ Rewind…
+Article │ Claude Code
+Button │ Run sleep 60
+Status │ 5s
+Button │ Run in background
 Status │ Interrupted │ interrupted
 Button │ Attach images
 MultilineTextInput │ Do anything… (focused)
+Button │ Model: Opus 5.5, High
 Button │ Send message
 Button │ Mode: Auto
 Button │ Context 1%

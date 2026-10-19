@@ -9792,10 +9792,10 @@ impl Shell {
         // float too.
         let theme = Theme::of(cx);
         let content = |theme: &Theme| {
-            let glyph = div()
-                .text_size(crate::typography::ui_rems(13.0))
+            // slopty: the app's arrow glyph, not a text arrow.
+            let glyph = crate::icons::icon(crate::icons::ARROW_DOWN)
+                .size(px(14.0))
                 .text_color(theme.text_muted)
-                .child(SharedString::from("↓"))
                 .into_any_element();
             let words = div()
                 .text_size(crate::typography::ui_rems(13.0))

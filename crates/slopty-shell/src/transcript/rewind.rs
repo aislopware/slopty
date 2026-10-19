@@ -23,6 +23,28 @@ const CHOICES: [(&str, bool, bool); 3] = [
     ("Code only", true, false),
 ];
 
+/// The menu's width.
+const MENU_WIDTH: f32 = 240.0;
+
+/// What choice `choice` of [`CHOICES`] does, said under the menu while it is the active row (or
+/// the first, before any is): a choice that puts files back says that a shell command's changes
+/// stay, as the agent's rewind only undoes its own edits.
+fn note(choice: usize) -> String {
+    let (_, code, conversation) = CHOICES[choice];
+    let what = match (code, conversation) {
+        (true, true) => {
+            "Files and the chat go back to before this message; the message returns to the composer."
+        }
+        (false, _) => "The chat goes back; files stay as they are.",
+        (true, false) => "Files go back; the chat stays.",
+    };
+    if code {
+        format!("{what} Changes made by shell commands aren't undone.")
+    } else {
+        what.to_owned()
+    }
+}
+
 /// The choices `can` allows, as indices into [`CHOICES`].
 pub(super) fn choices(can: DockCan) -> Vec<usize> {
     CHOICES
@@ -48,6 +70,8 @@ pub(super) struct RewindState {
     pub(super) busy: bool,
     /// The rewind in flight.
     pending: Option<Task<()>>,
+    /// Where each person's bubble was last drawn, by its entry: the menu hangs from its left edge.
+    feet: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, gpui::Bounds<Pixels>>>>,
 }
 
 struct RewindMenu {
@@ -58,6 +82,22 @@ struct RewindMenu {
 }
 
 impl Transcript {
+    /// What notes where the bubble of entry `entry` draws, set in its foot.
+    pub(super) fn bubble_foot_watch(&self, entry: &SharedString) -> AnyElement {
+        let (feet, entry) = (self.rewind.feet.clone(), entry.to_string());
+        gpui::canvas(
+            move |bounds, _, _| {
+                feet.borrow_mut().insert(entry, bounds);
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .into_any_element()
+    }
+
     /// Keep the shown chat's dock watched for what its agent can be asked.
     pub(super) fn watch_rewind(&mut self, cx: &mut Context<Self>) {
         // A subagent's run shown in its card goes back only with its parent.
@@ -104,6 +144,7 @@ impl Transcript {
     pub(super) fn rewind_action(
         &self,
         message: &SharedString,
+        focus: &gpui::FocusHandle,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
@@ -122,7 +163,8 @@ impl Transcript {
             crate::motion::hover_blend(&fade_key, gpui::transparent_black(), crate::theme::ink(0.08))
         };
         Some(
-            super::strip_control(press, theme, reach) // slopty: a tab stop.
+            // slopty: a tab stop, whose focus shows its strip (#9).
+            super::strip_control(press.track_focus(focus), theme, reach)
                 .role(gpui::Role::Button)
                 .aria_label("Rewind…")
                 .when(busy, |el| el.aria_description("Once the turn ends"))
@@ -167,6 +209,12 @@ impl Transcript {
         if self.rewind.menu.take_press_was_open() {
             return;
         }
+        // Hung from the bubble's left edge, under it, not from wherever the press landed; under
+        // a bubble narrower than it, flush with its right edge, so it stays in the column.
+        let position = self.rewind.feet.borrow().get(&message).map_or(position, |foot| {
+            let left = foot.left().min(foot.right() - px(MENU_WIDTH));
+            gpui::point(left, foot.bottom() + px(Theme::SPACE_XS))
+        });
         self.rewind.menu.open(RewindMenu {
             chat,
             message,
@@ -267,6 +315,21 @@ impl Transcript {
         cx.notify();
     }
 
+    /// Have the agent of chat `chat` take back what `can` says, as its dock would.
+    #[cfg(test)]
+    pub(super) fn let_rewind(&mut self, chat: &str, can: DockCan) {
+        self.rewind.watch = Some((chat.to_owned(), Task::ready(())));
+        self.rewind.can = can;
+    }
+
+    /// What the open menu's note says: what its active row does, or its first row's before any
+    /// row is active.
+    pub(super) fn rewind_note(&self) -> Option<String> {
+        let menu = self.rewind.menu.get()?;
+        let offered = choices(self.rewind.can);
+        offered.get(menu.active.unwrap_or(0)).or(offered.first()).map(|&choice| note(choice))
+    }
+
     /// The menu of what to take back, while open.
     pub(super) fn render_rewind_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let menu = self.rewind.menu.get()?;
@@ -277,7 +340,7 @@ impl Transcript {
             .track_focus(&focus)
             .role(gpui::Role::Menu)
             .aria_label("Rewind to before this message")
-            .w(px(240.0))
+            .w(px(MENU_WIDTH))
             .flex()
             .flex_col()
             .on_key_down(cx.listener(|this, event, _, cx| this.rewind_menu_key(event, cx)))
@@ -300,15 +363,20 @@ impl Transcript {
                     .id(id)
                     .role(gpui::Role::MenuItem)
                     .aria_label(label)
+                    // The note says what the row under the pointer does, as the keys' row.
+                    .on_mouse_move(cx.listener(move |this, _: &gpui::MouseMoveEvent, _, cx| {
+                        if let Some(menu) = this.rewind.menu.open_mut()
+                            && menu.active != Some(nth)
+                        {
+                            menu.active = Some(nth);
+                            cx.notify();
+                        }
+                    }))
                     .on_click(cx.listener(move |this, _, _, cx| this.rewind_to(nth, cx)))
                     .child(label),
             );
         }
-        let note = if self.rewind.can.rewind {
-            "Files go back as they were before it; the message returns to the composer."
-        } else {
-            "The message returns to the composer."
-        };
+        let said = self.rewind_note().unwrap_or_default();
         card = card.child(
             div()
                 .px(px(8.0))
@@ -316,7 +384,7 @@ impl Transcript {
                 .pb(px(4.0))
                 .text_size(crate::typography::ui_rems(11.5))
                 .text_color(theme.text_faint)
-                .child(note),
+                .child(said),
         );
         Some(crate::popover::menu_at(
             "transcript-rewind-menu",
@@ -344,5 +412,18 @@ mod tests {
         assert_eq!(labels(can(false, true)), ["Conversation only"]);
         assert_eq!(labels(can(true, false)), ["Code only"]);
         assert!(labels(can(false, false)).is_empty());
+    }
+
+    /// The note says what each choice does, and a choice that puts files back that a shell
+    /// command's changes stay.
+    #[test]
+    fn the_note_says_what_the_choice_does() {
+        assert_eq!(
+            note(0),
+            "Files and the chat go back to before this message; the message returns to the \
+             composer. Changes made by shell commands aren't undone."
+        );
+        assert_eq!(note(1), "The chat goes back; files stay as they are.");
+        assert_eq!(note(2), "Files go back; the chat stays. Changes made by shell commands aren't undone.");
     }
 }

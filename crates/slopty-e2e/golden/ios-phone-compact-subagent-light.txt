@@ -1,5 +1,5 @@
 Window
-Article │ Claude
+Article │ Claude Code
 Paragraph │ Subagent found it.
 Navigation │ background sleep 600 › Look
 Link │ Back to background sleep 600

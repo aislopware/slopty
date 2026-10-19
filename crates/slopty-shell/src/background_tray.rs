@@ -114,6 +114,9 @@ pub(crate) struct TrayState {
     active: Option<String>,
     pub(crate) focus: Option<FocusHandle>,
     pub(crate) scroll: gpui::ScrollHandle, // slopty: the composer's rail follows it.
+    /// How far the open tray's card rises above its closed place, as last laid out: the stack
+    /// above it rides up by as much, so the tray never covers it ([`Composer::tray_lift`]).
+    lift: std::rc::Rc<std::cell::Cell<f32>>,
     /// The last reveal taken.
     seen: u64,
     mark_task: Option<gpui::Task<()>>,
@@ -132,6 +135,7 @@ impl Default for TrayState {
             active: None,
             focus: None,
             scroll: gpui::ScrollHandle::new(),
+            lift: std::rc::Rc::default(),
             seen: 0,
             mark_task: None,
         }
@@ -197,6 +201,9 @@ pub(crate) fn row_elapsed(row: &WorkRow, now: i64) -> Option<String> {
     // slopty: a live row's timer pads its seconds, so it holds its width as it counts.
     Some(if row.live {
         crate::transcript::ticking_elapsed(i64::try_from(ms / 1_000).unwrap_or(i64::MAX))
+    } else if ms < 1_000 {
+        // A run shorter than a second ran for less than one, never "0s".
+        "<1s".to_owned()
     } else {
         duration_words(ms)
     })
@@ -244,6 +251,16 @@ pub(crate) fn header_words(tray: &WorkTray) -> String {
         (n, true) => format!("{n} needs you"),
         (n, false) => format!("{n} needs you · {counts}"),
     }
+}
+
+/// Whether a row says its state in words: only where its glyph does not, so a finished row's
+/// check stands for "done" and a live row's glyph for "running"; what needs the person, a stop
+/// under way and any other outcome (failed, stopped) are said.
+pub(crate) fn shows_state(row: &WorkRow, stopping: bool) -> bool {
+    row.needs_you.is_some()
+        || stopping
+        || (!row.live && row.state != "completed")
+        || (row.live && row.state != "running")
 }
 
 /// The glyph of a row's kind.
@@ -304,6 +321,12 @@ impl Composer {
         if !tray.can_stop_all {
             self.tray.stopping_all = false;
         }
+    }
+
+    /// How far the stack above the tray rides up so the open tray's card covers none of it (the
+    /// folded question's strip, a note, the Todo tray); 0 while no tray shows.
+    pub(crate) fn tray_lift(&self) -> f32 {
+        self.tray.lift.get()
     }
 
     /// Whether the selected chat's tray is open.
@@ -432,6 +455,8 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        // No tray, nothing lifted; a tray keeps the rise it was last laid out at.
+        let rose = self.tray.lift.replace(0.0);
         let chat = self.state.read(cx).selected_chat.clone()?;
         let tray = self.dock.tray.clone()?;
         if self.dock.chat.as_deref() != Some(chat.as_str()) {
@@ -529,11 +554,21 @@ impl Composer {
                 this.on_tray_key(event, window, cx)
             }))
             .child(card);
-        // slopty: the list rises over the transcript from the closed tray's place, so nothing
-        // above it moves (the chat kept its place while the tray opened).
+        // slopty: the list rises over the transcript from the closed tray's place, so the chat
+        // keeps its place while the tray opens; what is stacked above it rides up on top of the
+        // card by how far it rose (`tray_lift`), measured as it lays out. A change asks the
+        // window for the frame that places the stack.
+        let lift = self.tray.lift.clone();
+        lift.set(rose);
         let tray = div()
             .relative()
             .h(px(closed_height()))
+            .on_children_prepainted(move |bounds, window, _| {
+                let rose = bounds.first().map_or(0.0, |card| (f32::from(card.size.height) - closed_height()).max(0.0));
+                if (lift.replace(rose) - rose).abs() > 0.25 {
+                    window.refresh();
+                }
+            })
             .child(div().absolute().left_0().right_0().bottom_0().child(tray));
         Some(
             div()
@@ -556,8 +591,12 @@ impl Composer {
         let needs = tray.counts.needs_you > 0;
         let words = header_words(tray);
         let wakes = tray.rows.iter().any(|row| row.live && row.wakes);
+        // slopty: the header's dot breathes while anything runs, on the house's one pulse clock,
+        // so a live tray never reads as a finished one; its colour still says what kind.
+        let running = tray.main.working || tray.rows.iter().any(|row| row.live && !row.ambient);
         let dot_color = if needs { theme.warning } else if wakes { theme.accent } else { theme.text_faint };
         let toggle_hover: SharedString = "background-tray-toggle-hover".into();
+        let chevron_hover: SharedString = "background-tray-chevron-hover".into();
         let label = if open { "Collapse background work" } else { "Expand background work" };
         let toggle_chat = chat.to_owned();
         let toggle = div()
@@ -587,7 +626,7 @@ impl Composer {
                     .flex_none()
                     .flex()
                     .justify_center()
-                    .child(state_dot("background-tray-dot", dot_color, wakes && !needs)),
+                    .child(state_dot("background-tray-dot", dot_color, running && !needs)),
             )
             .child(
                 div()
@@ -609,7 +648,51 @@ impl Composer {
                         motion::hover_blend(&toggle_hover, theme.text_faint, theme.text_muted)
                     })
                     .child(SharedString::from(words)),
+            );
+        let stop_all = (open && tray.can_stop_all).then(|| {
+            let stopping = self.tray.stopping_all;
+            let key: SharedString = "background-tray-stop-all".into();
+            motion::fade_quick(
+                "background-tray-stop-all-fade",
+                div()
+                    .id("background-tray-stop-all")
+                    .role(gpui::Role::Button)
+                    .aria_label(if stopping { "Stopping all…" } else { "Stop all" })
+                    .flex_none()
+                    .h(px(ACTION_SIZE))
+                    .px(px(8.0))
+                    .flex()
+                    .items_center()
+                    .rounded(px(6.0))
+                    .text_size(crate::typography::ui_rems(SUB_SIZE))
+                    .text_color(motion::hover_blend(&key, theme.text_muted, theme.text))
+                    .when(!stopping, |el| {
+                        el.cursor_pointer()
+                            .bg(motion::hover_blend(&key, gpui::transparent_black(), crate::theme::wash(0.11)))
+                            .active(|s| s.bg(crate::theme::wash(0.16)))
+                            .on_click(cx.listener(|this, _, _, cx| this.stop_all(cx)))
+                    })
+                    .hover_fade(key)
+                    .child(if stopping { "Stopping…" } else { "Stop all" }),
             )
+        });
+        // slopty: the chevron keeps one place, last, whether the tray is open or not: Stop all
+        // comes in before it, so the control under the pointer never moves as it is pressed.
+        let chevron_t = motion::hover_t(&toggle_hover).max(motion::hover_t(&chevron_hover));
+        let chevron_chat = chat.to_owned();
+        let chevron = div()
+            .id("background-tray-chevron")
+            .debug_selector(|| "background-tray-chevron".into())
+            .flex_none()
+            .size(px(ACTION_SIZE))
+            .mr(px(4.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(6.0))
+            .cursor_pointer()
+            .hover_fade(chevron_hover)
+            .on_click(cx.listener(move |this, _, _, cx| this.toggle_tray(chevron_chat.clone(), open, cx)))
             .child(
                 icon(icons::ALT_ARROW_UP)
                     .size(px(12.0))
@@ -618,37 +701,15 @@ impl Composer {
                     } else {
                         0.0
                     })))
-                    .text_color(motion::hover_blend(&toggle_hover, theme.text_muted.opacity(0.7), theme.text)),
+                    .text_color(motion::mix(theme.text_muted.opacity(0.7), theme.text, chevron_t)),
             );
-        let stop_all = (open && tray.can_stop_all).then(|| {
-            let stopping = self.tray.stopping_all;
-            let key: SharedString = "background-tray-stop-all".into();
-            div()
-                .id("background-tray-stop-all")
-                .role(gpui::Role::Button)
-                .aria_label(if stopping { "Stopping all…" } else { "Stop all" })
-                .flex_none()
-                .h(px(ACTION_SIZE))
-                .px(px(8.0))
-                .flex()
-                .items_center()
-                .rounded(px(6.0))
-                .text_size(crate::typography::ui_rems(SUB_SIZE))
-                .text_color(motion::hover_blend(&key, theme.text_muted, theme.text))
-                .when(!stopping, |el| {
-                    el.cursor_pointer()
-                        .bg(motion::hover_blend(&key, gpui::transparent_black(), crate::theme::wash(0.11)))
-                        .on_click(cx.listener(|this, _, _, cx| this.stop_all(cx)))
-                })
-                .hover_fade(key)
-                .child(if stopping { "Stopping…" } else { "Stop all" })
-        });
         div()
             .flex()
             .items_center()
             .gap(px(2.0))
             .child(toggle)
             .children(stop_all)
+            .child(chevron)
             .into_any_element()
     }
 
@@ -720,7 +781,8 @@ impl Composer {
         let figures = row_figures(row, now);
         let subline = row_subline(row);
         let state = if stopping { "stopping".to_owned() } else { row.state_words.clone() };
-        let mono = matches!(row.kind.as_str(), WorkRow::COMMAND | WorkRow::MONITOR);
+        // A command's words are code; a monitor's are its description, in the UI's face.
+        let mono = row.kind == WorkRow::COMMAND;
         let lead = row.agent_type.clone().map(|kind| match &row.model {
             Some(model) => format!("{kind} · {model}"),
             None => kind,
@@ -759,7 +821,7 @@ impl Composer {
         } else {
             theme.text_faint
         };
-        let show_state = needs || stopping || !row.live || row.state != "running";
+        let show_state = shows_state(row, stopping);
         let open_row = row.clone();
         let stop = (row.live && row.can_stop).then(|| {
             let stop_id = row.id.clone();
@@ -999,7 +1061,8 @@ pub(crate) fn detail_lines(row: &WorkRow, now: i64) -> (String, Vec<String>, Vec
         facts.push(if row.live { format!("Running for {elapsed}") } else { format!("Ran for {elapsed}") });
     }
     let what = match row.kind.as_str() {
-        WorkRow::COMMAND | WorkRow::MONITOR => "Command",
+        WorkRow::COMMAND => "Command",
+        WorkRow::MONITOR => "Watches",
         WorkRow::MCP => "Tool",
         _ => "Task",
     };
@@ -1200,6 +1263,27 @@ mod tests {
         assert_eq!(output.last().map(String::as_str), Some("Showing 10 of 12 lines"));
         shell.output = None;
         assert_eq!(detail_lines(&shell, 0).2, ["No output available"]);
+    }
+
+    /// A row's words never repeat its glyph: a finished row's check stands for "done" and a
+    /// sub-second run reads "<1s"; a failure, a stop and a request are said. A monitor's
+    /// details call its words what it watches, not a command.
+    #[test]
+    fn a_row_says_only_what_its_glyph_does_not() {
+        let mut done = row("task:a", WorkRow::MONITOR, false);
+        done.duration_ms = Some(400);
+        assert!(!shows_state(&done, false), "the check says done");
+        assert_eq!(row_figures(&done, 0), "<1s");
+        done.title = "Watch the build log".into();
+        assert!(detail_lines(&done, 0).1.contains(&"Watches: Watch the build log".to_owned()));
+        let mut failed = done.clone();
+        failed.state = "failed".into();
+        assert!(shows_state(&failed, false));
+        let live = row("task:b", WorkRow::COMMAND, true);
+        assert!(!shows_state(&live, false) && shows_state(&live, true), "stopping is said");
+        let mut asks = live.clone();
+        asks.needs_you = Some("Allow?".into());
+        assert!(shows_state(&asks, false));
     }
 
     /// A live row ticks from when it began; an ended one says how long it ran, with its figures.

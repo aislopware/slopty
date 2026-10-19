@@ -1,19 +1,16 @@
 Window (focused)
 Article │ You
 Paragraph │ agent
-Button │ Subagent Look │ Done
+Article │ Claude Code
+Button │ Subagent Look
 Button │ Open subagent
 Button │ Subagent found it. │ completed
-Article │ Claude
 Paragraph │ Done: the agent is back.
 Group │ Background work
 Button │ Expand background work │ 1 command
 MultilineTextInput │ Do anything…
 Button │ Attach images
+Button │ Model: Opus 5.5, High
 Button │ Send message
 Button │ Mode: Auto
 Button │ Context 1%
-Group │ Navigation
-Button │ Back to Chats
-Button │ Show files
-Button │ Show terminal

@@ -150,6 +150,7 @@ impl Composer {
         self.reset_slash(None, cx);
         self.input.update(cx, |input, cx| {
             input.set_text(typed, cx);
+            input.set_hint(None, cx);
             input.set_placeholder("Type your own answer, or pick an option above", cx);
             input.set_key_context(message_input_context(true), cx);
         });

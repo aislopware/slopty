@@ -4,15 +4,22 @@ Status │ Needs you
 Button │ History: past Claude Code sessions
 Button │ Server: e2e-server, Connected
 Button │ Settings
+Button │ Copy message
 Article │ You
 Paragraph │ elicit
+Button │ Copy message
+Button │ Rewind…
+Article │ Claude Code
+Status │ Waiting for your answer: tracker
 Group │ Which ticket? (focused)
 Form │ Form
 Group │ Ticket *
-MultilineTextInput
+MultilineTextInput │ Ticket
 Button │ Decline
 Button │ Cancel
 Button │ Submit form
+Button │ Mode: Auto
+Button │ Context 1%
 Button │ Open in…
 Button │ Show chat details
 Button │ Show files panel

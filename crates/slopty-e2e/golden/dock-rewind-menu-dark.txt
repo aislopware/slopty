@@ -5,13 +5,17 @@ Button │ Server: e2e-server, Connected
 Button │ Settings
 Article │ You
 Paragraph │ write notes.txt first words
-Button │ Edited 1 file
-Article │ Claude
+Button │ Copy message
+Button │ Rewind…
+Article │ Claude Code
+Button │ Write notes.txt
 Paragraph │ Done: wrote notes.txt.
-Button │ 1 file changed +1 −0
+Group │ notes.txt +1 −0
 Button │ Open diff
+Button │ Copy message
 Button │ Attach images
 MultilineTextInput │ Do anything…
+Button │ Model: Opus 5.5, High
 Button │ Send message
 Button │ Mode: Auto
 Button │ Context 1%

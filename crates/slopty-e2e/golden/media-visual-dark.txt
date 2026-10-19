@@ -5,15 +5,19 @@ Button │ Server: e2e-server, Connected
 Button │ Settings
 Article │ You
 Paragraph │ Show the latency
-Button │ Called 1 tool
+Button │ Copy message
+Button │ Rewind…
+Article │ Claude Code
+Button │ Tool mcp__slopty__show_visual
 Group │ Latency
 TabList
 Tab │ p95
 Tab │ p99
-Article │ Claude
 Paragraph │ Done: Show the latency
+Button │ Copy message
 Button │ Attach images
 MultilineTextInput │ Do anything… (focused)
+Button │ Model: Opus 5.5, High
 Button │ Send message
 Button │ Mode: Auto
 Button │ Context 1%

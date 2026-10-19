@@ -1,47 +1,69 @@
 // slopty: Slopty's own file (not in zeron).
-//! slopty: the prompt a long turn answers, held at the top while the turn scrolls, as Claude
-//! desktop holds it: once the person's prompt has scrolled away under the titlebar, a one-line
-//! card of it stays there, the turn read below. Hovered or focused it opens to five lines; a
-//! click or Enter goes back to the prompt. It leaves as the prompt comes back into view and gives
-//! way to the next prompt as that one arrives under it, and to find's card. It paints deferred, above the
-//! transcript's top fade, which would otherwise fade it with the words it stays above.
+//! slopty: the prompt a long turn answers, held at the top while the turn scrolls. Once the
+//! person's prompt has scrolled away, a band of it spans the transcript's top edge, flush under
+//! the titlebar: one quiet line of their words in the reading column, an arrow up at its end, a
+//! hairline under it. It is part of the page, not a card over it: it spans the whole width, so
+//! what scrolls under it is cut by one straight edge as by the window's, never a card's border
+//! cut through or one row's words covered beside the next; and it never grows over the rows under
+//! it. A click or Enter goes back to the prompt. It comes as the prompt goes under where it
+//! draws, leaves as the prompt comes back, gives way to the next prompt as that one arrives
+//! under it, and to find's card.
+//!
+//! Only the person's own prompts are held, and only in the conversation's own transcript: a
+//! subagent's run, in its card or opened, holds none, as its task is the agent's words and the
+//! card's or the tab's header already names it. So one band at most is ever on screen. It paints
+//! deferred, above the transcript's top fade, which would otherwise fade it with the words it
+//! stays above.
 
-use gpui::{AnyElement, Context, Pixels, SharedString, Window, div, prelude::*, px};
+use gpui::{AnimationExt as _, AnyElement, App, Context, SharedString, Window, div, prelude::*, px};
 
-use super::{RowKind, Transcript, USER_LINE_HEIGHT};
+use super::{RowKind, Transcript};
 use crate::motion;
-use crate::popover;
 use crate::theme::Theme;
 use crate::motion::HoverFade as _;
 
-/// The card's padding above and below its words.
-const PAD_Y: f32 = 7.0;
-/// How many lines a hovered or focused card opens to.
-const OPEN_LINES: f32 = 5.0;
-/// Room kept between the card and a prompt arriving under it.
+/// The band's height, its hairline under it.
+const BAND_H: f32 = 34.0;
+/// Room kept between the band and a prompt arriving under it.
 const GAP: f32 = 8.0;
 
 impl Transcript {
-    /// Where the held prompt sits below the transcript's top: under the titlebar the primary
-    /// transcript slides beneath, as find's card does.
+    /// Where the band's top sits below the transcript's: under the titlebar the primary
+    /// transcript slides beneath; at the top of a pane, which pads for the titlebar itself.
     fn sticky_top(&self) -> f32 {
-        if self.doc_override.is_some() {
-            Theme::SPACE_SM
-        } else {
-            Theme::TITLEBAR_HEIGHT + Theme::SPACE_SM
-        }
+        if self.doc_override.is_some() { 0.0 } else { Theme::TITLEBAR_HEIGHT }
     }
 
-    /// The row of the prompt to hold at the top, with the height its card takes at rest: the
-    /// last prompt before the first row read under the card's line, while that row is not a
-    /// prompt and no prompt arrives under the card. None before the list has laid out.
-    pub(super) fn sticky_prompt(&self, peek: f32) -> Option<usize> {
+    /// The band's height with its hairline.
+    pub(super) const fn sticky_height() -> f32 {
+        BAND_H + 1.0
+    }
+
+    /// Whether this transcript holds the person's prompts: not a subagent's run, in its card or
+    /// opened, whose first row is the task the agent wrote and whose header names it.
+    fn holds_prompts(&self, cx: &App) -> bool {
+        if self.fit.is_some() {
+            return false;
+        }
+        let state = self.state.read(cx);
+        let chat = self
+            .chat_id
+            .as_deref()
+            .and_then(|chat_id| state.chats.iter().find(|chat| chat.id == chat_id))
+            .or_else(|| state.selected_chat_row());
+        !chat.is_some_and(|chat| chat.subagent)
+    }
+
+    /// The row of the prompt to hold at the top: the last prompt before the first row read
+    /// under the band, while that row is not a prompt and no prompt arrives under the band. None
+    /// before the list has laid out.
+    pub(super) fn sticky_prompt(&self) -> Option<usize> {
         let is_prompt = |ix: usize| matches!(&self.rows[ix].kind, RowKind::User { text, .. } if !text.is_empty());
         let len = self.rows.len();
         if len == 0 {
             return None;
         }
-        let line = f32::from(self.list.viewport_bounds().top()) + self.sticky_top();
+        let line = f32::from(self.list.viewport_bounds().top()) + self.sticky_top() + Self::sticky_height();
         let bottom = |ix: usize| self.list.bounds_for_item(ix).map(|b| f32::from(b.bottom()));
         let mut read = self.list.logical_scroll_top().item_ix.min(len - 1);
         while bottom(read)? <= line {
@@ -54,7 +76,7 @@ impl Transcript {
             return None;
         }
         let prompt = (0..read).rev().find(|&ix| is_prompt(ix))?;
-        let under = line + peek + GAP;
+        let under = line + GAP;
         let arriving = (read + 1..len)
             .map_while(|ix| {
                 let top = f32::from(self.list.bounds_for_item(ix)?.top());
@@ -64,30 +86,71 @@ impl Transcript {
         (!arriving).then_some(prompt)
     }
 
-    /// The held prompt's card, when a prompt is held.
-    pub(super) fn render_sticky_prompt(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let line_h: Pixels = crate::typography::ui_rems(USER_LINE_HEIGHT).to_pixels(window.rem_size());
-        let line_h = f32::from(line_h);
-        let peek = line_h + 2.0 * PAD_Y + 2.0;
-        // Find's card holds the same place.
-        if self.finding() {
-            return None;
-        }
-        let ix = self.sticky_prompt(peek)?;
+    /// The prompt held, from the list's last layout: none in a subagent's run, nor while find's
+    /// card holds the place.
+    pub(super) fn held_prompt(&self, cx: &App) -> Option<usize> {
+        if self.finding() || !self.holds_prompts(cx) { None } else { self.sticky_prompt() }
+    }
+
+    /// The held prompt's band, when a prompt is held, and what draws the transcript again when
+    /// this frame's layout holds another: which prompt is held is read from a layout, and this
+    /// frame's is laid out after the band was chosen.
+    pub(super) fn render_sticky_prompt(&self, _window: &Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let held = self.held_prompt(cx);
+        let view = cx.weak_entity();
+        let watch = gpui::canvas(
+            move |_, _, cx| {
+                let Some(transcript) = view.upgrade() else { return };
+                if transcript.read(cx).held_prompt(cx) != held {
+                    cx.defer(move |cx| transcript.update(cx, |_, cx| cx.notify()));
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_0()
+        .into_any_element();
+        let mut drawn = vec![watch];
+        drawn.extend(held.and_then(|ix| self.render_held_prompt(ix, cx)));
+        drawn
+    }
+
+    /// The band of the prompt at row `ix`.
+    fn render_held_prompt(&self, ix: usize, cx: &mut Context<Self>) -> Option<AnyElement> {
         let row = &self.rows[ix];
         let RowKind::User { text, .. } = &row.kind else {
             return None;
         };
         let theme = Theme::of(cx).clone();
         let key: SharedString = format!("sticky-prompt-{}", cx.entity_id()).into();
-        let open = motion::hover_t(&key);
+        let hover = motion::hover_t(&key);
         let flat: SharedString = super::single_line(text).into();
-        let words = if open > 0.0 {
-            div().line_clamp(OPEN_LINES as usize).child(text.clone())
-        } else {
-            div().truncate().child(flat.clone())
-        };
-        let card = popover::popover_card_flush(&theme)
+        // The window's own material the transcript lies on, the titlebar's above it: frosted
+        // where it is glass, so the words under it blur rather than show through.
+        let fill = if theme.is_frost() { theme.glass() } else { theme.surface };
+        let column = div()
+            .w_full()
+            .max_w(px(self.content_width))
+            .min_w_0()
+            .flex()
+            .items_center()
+            .gap(px(Theme::SPACE_SM))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(crate::typography::ui_rems(13.0))
+                    .text_color(motion::mix(theme.text_muted, theme.text, hover))
+                    .child(flat.clone()),
+            )
+            .child(
+                crate::icons::icon(crate::icons::ARROW_UP)
+                    .flex_none()
+                    .size(px(12.0))
+                    .text_color(motion::mix(theme.text_faint, theme.text_muted, hover)),
+            );
+        let band = div()
             .id(key.clone())
             .role(gpui::Role::Button)
             .aria_label(SharedString::from(format!("Back to your prompt: {flat}")))
@@ -100,39 +163,33 @@ impl Transcript {
             .cursor_pointer()
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(move |this, _, _, cx| this.scroll_to_row(ix, cx)))
-            .min_w_0()
-            .max_w(px(self.content_width * 0.8))
-            .max_h(px(peek + open * (OPEN_LINES - 1.0) * line_h))
-            .child(
-                div()
-                    .bg(crate::theme::user_bubble_bg())
-                    .px(px(14.0))
-                    .py(px(PAD_Y))
-                    .text_size(crate::typography::ui_rems(14.0))
-                    .line_height(crate::typography::ui_rems(USER_LINE_HEIGHT))
-                    .text_color(theme.text)
-                    .child(words),
-            );
-        let card = popover::find_card_in(SharedString::from(format!("{key}-{}", row.id)), card);
+            .w_full()
+            .h(px(Self::sticky_height()))
+            .bg(fill)
+            .border_b_1()
+            .border_color(theme.border)
+            .pl(px(48.0))
+            .pr(px(48.0))
+            .flex()
+            .justify_center()
+            .child(column);
+        let band = if cx.reduce_motion() {
+            band.into_any_element()
+        } else {
+            band.with_animation(
+                SharedString::from(format!("{key}-{}", row.id)),
+                motion::FADE_QUICK.animation(),
+                |band, t| band.opacity(t),
+            )
+            .into_any_element()
+        };
         Some(
             div()
                 .absolute()
                 .top(px(self.sticky_top()))
                 .left_0()
-                .right_0()
-                .pl(px(48.0))
-                .pr(px(48.0 + self.right_reserve))
-                .flex()
-                .justify_center()
-                .child(
-                    div()
-                        .w_full()
-                        .max_w(px(self.content_width))
-                        .min_w_0()
-                        .flex()
-                        .justify_end()
-                        .child(gpui::deferred(card)),
-                )
+                .right(px(self.right_reserve))
+                .child(gpui::deferred(crate::frost::frosted(0.0, crate::frost::MENU_BLUR, band)))
                 .into_any_element(),
         )
     }
@@ -172,9 +229,9 @@ mod tests {
         }
     }
 
-    /// The prompt a long turn answers holds at the top once it has scrolled away; not while
-    /// the prompt itself is read, nor before any prompt, nor as the next prompt arrives under
-    /// it, nor while find's card holds the place.
+    /// The prompt a long turn answers holds at the top once it has scrolled under the band;
+    /// not while the prompt itself is read, nor before any prompt, nor as the next prompt
+    /// arrives under it, nor while find's card holds the place.
     #[gpui::test]
     fn a_long_turns_prompt_holds_at_the_top(cx: &mut gpui::TestAppContext) {
         struct Fixture(Entity<Transcript>);
@@ -212,30 +269,39 @@ mod tests {
                 cx.notify();
             });
             cx.run_until_parked();
-            transcript.read_with(cx, |this, _| this.sticky_prompt(40.0))
+            transcript.read_with(cx, |this, cx| this.held_prompt(cx))
         };
 
         assert_eq!(at(20, 0.0, cx), Some(5), "the turn's prompt holds");
         let shown = cx.update(|window, cx| {
-            transcript.update(cx, |this, cx| this.render_sticky_prompt(window, cx).is_some())
+            transcript.update(cx, |this, cx| this.render_sticky_prompt(window, cx).len() > 1)
         });
-        assert!(shown, "and its card is drawn");
+        assert!(shown, "and its band is drawn");
         assert_eq!(at(2, 0.0, cx), None, "no prompt before");
-        assert_eq!(at(40, 0.0, cx), None, "the next prompt is itself read");
-        // The next prompt 10px under the card's line, the row above it read there.
-        let line = Theme::TITLEBAR_HEIGHT + Theme::SPACE_SM;
+        assert_eq!(at(40, 0.0, cx), Some(40), "the next prompt holds once under the band");
+        // The next prompt at the band's foot: itself read, then 4px under it, arriving.
+        let line = Theme::TITLEBAR_HEIGHT + Transcript::sticky_height();
         transcript.update(cx, |this, cx| {
             this.list.scroll_to(ListOffset { item_ix: 40, offset_in_item: px(0.0) });
-            this.list.scroll_by(px(-(line + 10.0)));
+            this.list.scroll_by(px(-line));
             cx.notify();
         });
         cx.run_until_parked();
-        let held = transcript.read_with(cx, |this, _| this.sticky_prompt(40.0));
+        let held = transcript.read_with(cx, |this, cx| this.held_prompt(cx));
+        assert_eq!(held, None, "the next prompt is itself read");
+        assert_eq!(at(40, 0.0, cx), Some(40));
+        transcript.update(cx, |this, cx| {
+            this.list.scroll_to(ListOffset { item_ix: 40, offset_in_item: px(0.0) });
+            this.list.scroll_by(px(-(line + 4.0)));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let held = transcript.read_with(cx, |this, cx| this.held_prompt(cx));
         assert_eq!(held, None, "the next prompt arrives under it");
         assert_eq!(at(30, 0.0, cx), Some(5));
         transcript.update(cx, |this, _| this.find.open = true);
         let shown = cx.update(|window, cx| {
-            transcript.update(cx, |this, cx| this.render_sticky_prompt(window, cx).is_some())
+            transcript.update(cx, |this, cx| this.render_sticky_prompt(window, cx).len() > 1)
         });
         assert!(!shown, "find's card holds the place");
     }

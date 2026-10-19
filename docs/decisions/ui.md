@@ -13232,7 +13232,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Tests: `slopty-shell` `keys::tests::every_apple_keyboard_binds_and_names_mod_as_command`,
     `app_menus::tests::app_bindings_use_platform_settings_convention`,
     `shell::compact::tests::opening_a_chat_on_touch_leaves_the_keyboard_down`,
-    `composer::dock_tests::what_still_runs_is_said_once_and_the_cards_share_one_column`;
+    `composer::dock_tests::what_still_runs_is_said_once_and_the_lines_tuck_onto_the_tray`;
     `slopty-ui` `view_model::tests::a_done_line_leaves_what_still_runs_to_the_tray`.
 - ✅ **zeron adopted to `c02739d` (2026-10-18).** Taken: sections reorder by dragging their
   header (#909), the session hover card beside each sidebar row (#903), the session card's
@@ -13442,3 +13442,159 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   found a side chat started over an open subagent copying the subagent's marks, a second subagent
   of it; one hangs off the chat that started the subagent now
   (`a_side_chat_over_a_subagent_is_its_parents`).
+
+- ✅ **The composer's stack reads as one object, and its cards as Claude desktop's (2026-10-19).**
+  An audit of the composer and what stacks on it against Claude Code desktop and T3 Code
+  (`.research/polish-composer-2026-10-19.md`) found its polish gaps in Slopty's own additions,
+  not in zeron's pill, so those were brought up to the references, zeron's look and colours kept.
+  - A card's answer field shows the card's placeholder, never the composer's hint set before the
+    card came (`a_cards_field_shows_its_own_placeholder`).
+  - The Background tray's chevron keeps one place, last in its header, and Stop all fades in
+    before it (`the_trays_chevron_stays_put_as_it_opens`). Its dot breathes whenever anything
+    runs, on the house's one pulse clock, so a live tray never reads as a finished one. A
+    monitor's words are no longer drawn as code nor called a command ("Watches"), and a row
+    says its state in words only where its glyph does not ("done" goes, "failed" stays; a
+    sub-second run reads "<1s") (`a_row_says_only_what_its_glyph_does_not`).
+  - An open tray rises over the transcript as before, and now lifts what is stacked above it
+    (a note, a folded question's Answer, the Todo tray) by as far as its card rose, measured as
+    it lays out, so it covers none of it while the chat still keeps its place
+    (`the_tray_opens_over_the_chat_without_moving_it`).
+  - The quiet lines over the composer tuck in as one more drawer of the tray stack, one step
+    narrower than the layer they sit on, where nothing else stands between
+    (`what_still_runs_is_said_once_and_the_lines_tuck_onto_the_tray`); a note cut short shows
+    whole in a tooltip, and its ✕ under the pointer puts it and every older note of the chat
+    away until a newer one comes (`a_dismissed_note_stays_away_until_a_newer_one`).
+  - A request card's body reads as a title and, after its first blank line, a smaller muted
+    description; a title that repeats the header is said once. An approval the view model
+    judged risky (`deny_first`) wears an amber triangle and amber caps, and its deny wears the
+    default's mark even where no key can press it
+    (`a_cards_body_has_a_title_and_a_risky_approval_marks_its_deny`).
+  - The footer stays under an open card, so the mode, the goal and the context stay in reach
+    and the stack's foot no longer jumps; the card's Submit, Next, Send, Back and Skip are named
+    buttons (`a_card_keeps_the_footer_and_names_its_buttons`). The card settles in from 0.75
+    opacity and 6 px above over 220 ms, as Claude desktop promotes its approval, and the trays
+    fold shut under it rather than blink out (`the_trays_fold_under_a_card`). Its height is not
+    morphed from the pill's: it is known only once laid out, and Claude desktop does not morph
+    it either.
+  - Send cross-fades its arrow to a clock while Enter queues (`send_shows_a_clock_while_it_queues`);
+    Send, Stop, Attach, a card's options and buttons and the footer's chips show a press.
+  - The model chip and the footer's branch and checkout chips are buttons and tab stops with
+    the shell's ring, named by what they pick ("Model: Opus 5.5, High")
+    (`the_model_chip_is_a_named_button`). A form's field is named by its title, its edge turns
+    to the accent while it has the keyboard, its answers sit clear of it, and Decline and Cancel
+    say how they differ (`a_forms_field_is_named_and_its_ways_out_differ`). The Todo tray's steps
+    are a list whose items say how they stand (`the_todo_steps_say_how_they_stand`), and its
+    header no longer raises a tooltip that repeats it.
+  - A failure over the composer leads with its words (no "Error" above them), keeps Copy, and
+    goes only by its ✕, on the stack's inset (`a_failure_says_its_words_and_goes_by_its_close`).
+    Esc does not dismiss it: Esc already stops the agent or leaves shell mode there.
+  - A picked option shows a check where its digit stood (`a_picked_option_shows_a_check`). The
+    goal chip reads "Goal · 5h" in tabular digits; shell mode's tag is in the interface's face,
+    its field is named "Shell command" and Attach dims and says why
+    (`a_bang_draft_is_shell_mode`). A hyphenated name in a toast wraps whole
+    (`a_hyphenated_name_is_kept_whole`); the offline notice, the queue's edit failures and the
+    `/` menu's empty states say what happened and what to do, and an argument hint shows as
+    the agent wrote it. "Answer in Slopty" (once "Needs you at the card") wears an info mark, not a lock.
+  - Kept: the card's free-answer field and links stay at zeron's 4 px inset under the title
+    rather than moving to the option labels' edge, and its placeholder stays zeron's; that is
+    zeron's grid. The tray's pulse stays the house's one clock rather than a 1.2 s period of its
+    own, so every running dot keeps blinking together.
+
+- ✅ **The conversation reads as finished work: 24 details of the transcript, polished
+  (2026-10-19).** The person asked for every surface to reach the finish of Claude's desktop app
+  and T3 Code, with zeron's look as the base and no new features. The transcript was audited
+  against both (`.research/polish-transcript-2026-10-19.md`) and its gaps closed in rank order,
+  each proved by its test (in `transcript/surface_tests.rs` unless named otherwise).
+  - **A prompt heads its turn.** Under a pointer the person's strip (time, Copy, Rewind) waits
+    beside the bubble's foot and takes no room under it; the big step comes before a prompt
+    (24 pt) and its answer starts 16 pt under it. Touch keeps the lane, where the strip shows
+    without a hover (`a_prompt_heads_its_turn`).
+  - **A lone call shows itself** ("Read main.rs"), its icon on the summaries' chevron column,
+    instead of a summary to open (`a_lone_call_shows_itself`).
+  - **Summaries say what runs now**: "Ran 1 command · running 1 command", and a call a request
+    holds up as "waiting for approval · run touch refused.txt" (`a_summary_says_what_runs_now`).
+  - **The done line ends the turn**: after the files card, with no dot, its words on the
+    summaries' 28 pt edge, the time said once (`a_turn_ends_on_its_done_line`).
+  - **A drilled subagent reads from the top**, as one in its own document does
+    (`a_drilled_run_reads_from_the_top`). The main chat stays bottom-aligned when short: the own
+    send's runway and the tail pin rest on that glue, and a short chat resting at the top would
+    jump on its first send.
+  - **A long prompt folds quietly**: its last line fades out instead of a "…" line, and a 12 pt
+    "Show more" sits under it, reachable by Tab (`a_long_prompt_folds_quietly`).
+  - **A failed call tints only its icon and its result**, never its verb and target
+    (`a_failed_call_tints_only_its_icon_and_result`).
+  - **A request's chip names what it waits for** ("Needs your approval", "Plan ready for
+    review"), with an icon per kind, the command it asks about, and a status in the
+    accessibility tree (`a_summary_says_what_runs_now`).
+  - **Tab reaches a reply's controls**: group summaries, call rows, subagent cards, the files
+    card and Open diff, Show more, Retry, and the strip's Copy and Rewind, which stay mounted and
+    show while focused as on hover; Enter or Space presses them
+    (`the_keyboard_reaches_the_controls_of_a_reply`).
+  - **Assistive tech hears calls by their words** ("Run cargo test") and a reply's article opens
+    at its first row, named by its agent (`a_reply_opens_at_its_first_row`).
+  - **A send that never arrived says "Not sent"** under the bubble's right edge, with one quiet
+    Retry; a queued one says it sends when its machine is back
+    (`an_undelivered_send_offers_retry_under_its_bubble`).
+  - **The files card** names a lone file in itself; several open under the chevron every other
+    disclosure turns, tweened (`the_files_card_names_a_lone_file`).
+  - **A jump glides on frames and flashes where it lands**, Claude's 1.2 s fade
+    (`transcript::tests::a_jump_glides_on_frames_and_flashes_where_it_lands`).
+  - **A running call sweeps its words** in phase with its group's title
+    (`a_running_call_sweeps_its_words`).
+  - **The person's own send rises in**: 6 pt and from clear over 300 ms, only as it is sent,
+    and a pending bubble fades up to full when it sends (`an_own_send_rises_in_once`).
+  - **Find's matches stay visible in dark**, at twice light's strength
+    (`markdown::find::tests::dark_matches_stay_visible`).
+  - **The strip's time says only what is not obvious**: the time today, "Yesterday", the date
+    this year, the year before that, in the faint token, the full moment on hover
+    (`transcript::tests::timestamp_strip_lands_on_the_last_settled_row`).
+  - **One voice**: "Couldn't load the full output." with a Retry that says what it fetches
+    again, "Show details" everywhere, middle dots for em dashes
+    (`a_failed_fetch_says_so_and_offers_retry`).
+  - **One card shape**: every card in the column takes the transcript's radius and border, and
+    both marker rules the border.
+  - **Inline code has room**: a hair space each side, inside its wash, shown but never copied or
+    found, the one before held to the code so a line never breaks between them
+    (`markdown::render::tests::flatten_collects_and_merges_inline_code_ranges`).
+  - **The working line's timer rolls on** when the agent's own line takes over mid-turn, under
+    the one key (`composer::activity::tests::the_timer_rolls_on_from_the_transcripts_line`).
+  - **A settled subagent says what it answered**, the first line of its reply, not "Done";
+    a failure and a stop still say so (`transcript::subagents::tests::a_card_reads_its_step_then_its_outcome`).
+  - **A run in its card reads at the card's compact body**, 13 on 20, under its 12 pt title
+    (`a_run_in_its_card_reads_compact`).
+  - The fuzzer found the prompt held at the top choosing from the layout before the frame's
+    own: the transcript now draws again when this frame's layout holds another prompt
+    (`shell::fuzz_tests::a_short_fuzz_of_the_shell_finds_nothing`).
+  - **The held prompt is part of the page, and there is one.** The person found the floating
+    card of their prompt ugly, and saw two at once: the conversation's, and a subagent card's
+    task under it, over the card's header. Claude desktop holds only the person's own prompts
+    (its sticky skips anything not theirs) as a one-line clip hanging from the top edge; the
+    clip still floats over the words with a shadow. Slopty's is now a band across the whole
+    transcript, flush under the titlebar, in the window's own material the titlebar shows (frosted
+    where it is glass, so the words under it blur), one quiet line of the prompt in the reading column with an
+    arrow up, a hairline under it. Being full width, what scrolls under it is cut by one
+    straight edge like the window's, never a card's border cut through; it never grows over
+    the rows under it, so the hover peek to five lines is gone, the click back to the prompt
+    being the way to read it whole. The rule for one: only the person's prompts hold, and only
+    in the conversation's own transcript; a subagent's run, in its card or opened, holds none,
+    since its task is the agent's words and the header names it
+    (`transcript::sticky::tests::a_long_turns_prompt_holds_at_the_top`,
+    `a_held_prompt_spans_the_top_as_part_of_the_page`, `a_subagents_run_holds_no_prompt_of_its_own`).
+  - **The composer audit's last four, finished here.** The rewind menu's note says what the
+    row under the pointer or the keys does, the first row's before either, and a choice that
+    puts files back adds that a shell command's changes stay; the menu hangs from the bubble's
+    left edge, under it, or flush with its right edge under a narrower bubble so it never leaves
+    the column (`the_rewind_menu_hangs_from_the_bubble_and_says_what_its_row_does`,
+    `transcript::rewind::tests::the_note_says_what_the_choice_does`). A shell command's
+    approval leads with the command in the code face on a faint plate, the view model marking
+    it (`UserInputQuestion::code`; `a_commands_approval_sets_it_as_code`,
+    `a_cards_body_has_a_title_and_a_risky_approval_marks_its_deny`). A worker's loopback page
+    names the session that asked as the worker's ("e2e-worker's shell") and says that opening
+    forwards the port to this Mac, or this device on a phone or tablet
+    (`a_loopback_offer_names_its_port_its_machine_and_its_forward`). The e2e stand-in's
+    replayed permission requests now name the call they are about, as Claude Code's
+    `can_use_tool` does and its recorded hook does not, so the e2e cards read as the real app's:
+    a plain `touch` is no longer shown as risky for want of its call
+    (`replay::tests::a_permission_request_holds_the_turn_until_it_is_answered`). A request only the card
+    answers says "Answer in Slopty", which a phone's note can act on, where "Answer here" read
+    as the note itself; the refusal says the same.

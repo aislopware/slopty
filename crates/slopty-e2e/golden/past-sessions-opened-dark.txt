@@ -10,14 +10,21 @@ Button │ Server: e2e-server, Connected
 Button │ Settings
 Article │ You
 Paragraph │ Explain the parser
-Article │ Claude
+Button │ Copy message
+Button │ Rewind…
+Article │ Claude Code
 Paragraph │ The parser reads tokens one by one.
+Button │ Copy message
 Article │ You
 Paragraph │ Now add tests for it
-Article │ Claude
+Button │ Copy message
+Button │ Rewind…
+Article │ Claude Code
 Paragraph │ Tests added for the parser.
+Button │ Copy message
 Button │ Attach images
 MultilineTextInput │ Do anything… (focused)
+Button │ Model: Opus 5.5, High
 Button │ Send message
 Button │ Mode: Auto
 Button │ Open in…

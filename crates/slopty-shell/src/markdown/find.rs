@@ -194,9 +194,14 @@ pub(crate) fn paint(
     }
 }
 
-/// The washes a match paints with: every match, and the current one.
+/// The washes a match paints with: every match, and the current one. slopty: dark's are
+/// stronger, as amber at a fifth reads as brown on near-black and the matches go missing (#16).
 pub fn washes(theme: &crate::theme::Theme) -> (Hsla, Hsla) {
-    (theme.warning.opacity(0.22), theme.warning.opacity(0.55))
+    let (every, current) = match theme.appearance {
+        crate::theme::Appearance::Dark => (0.40, 0.75),
+        _ => (0.22, 0.55),
+    };
+    (theme.warning.opacity(every), theme.warning.opacity(current))
 }
 
 #[cfg(test)]
@@ -212,6 +217,14 @@ mod tests {
         assert!(matches("anything", "").is_empty());
         assert!(matches("short", "longer than it").is_empty());
         assert_eq!(matches("éÉ", "é"), [0..2, 2..4]);
+    }
+
+    /// slopty: dark's matches wash stronger than light's, every one and the current (#16).
+    #[test]
+    fn dark_matches_stay_visible() {
+        let (dark, light) = (crate::theme::Theme::dark(), crate::theme::Theme::light());
+        assert_eq!(washes(&dark), (dark.warning.opacity(0.40), dark.warning.opacity(0.75)));
+        assert_eq!(washes(&light), (light.warning.opacity(0.22), light.warning.opacity(0.55)));
     }
 
     #[test]

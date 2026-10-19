@@ -286,6 +286,12 @@ fn queue_hidden_attachments_label(labels: &[String], shown: usize) -> Option<Str
 // slopty: a stop is the person's word to halt: what was queued waits until they send again
 // (`slopty_proto::thread::Pending::STOPPED`, the reason the view model's held row carries).
 /// The reason a queued row carries while it waits on the person's stop.
+// slopty: a failed queue edit says what happened and what to do, not how the lease works.
+/// An edit the chat's machine could not start.
+const QUEUE_EDIT_FAILED: &str = "Couldn't edit this message here. Try again.";
+/// An edit the chat's machine stopped holding, the words kept.
+const QUEUE_EDIT_LOST: &str = "Couldn't save the edit; your words are still in the composer";
+
 pub(crate) const STOPPED_HOLD: &str = "Held since you stopped the turn";
 
 /// Whether `item` waits on the person's stop rather than on something else.
@@ -1618,7 +1624,7 @@ impl Composer {
             (chat_id, host_device_id, supported)
         };
         if !supported {
-            self.failure = Some("Update the chat host to edit queued messages safely".into());
+            self.failure = Some("Update Slopty on the chat's machine to edit queued messages".into()); // slopty: what to do, no jargon
             cx.notify();
             return;
         }
@@ -1694,7 +1700,7 @@ impl Composer {
                     {
                         let Some(lease_id) = reply.get("leaseId").and_then(|v| v.as_str()) else {
                             composer.failure =
-                                Some("The chat host returned an invalid edit lease".into());
+                                Some(QUEUE_EDIT_FAILED.into());
                             cx.notify();
                             return;
                         };
@@ -1702,7 +1708,7 @@ impl Composer {
                             reply.get("baseTextHash").and_then(|v| v.as_str())
                         else {
                             composer.failure =
-                                Some("The chat host returned an invalid edit lease".into());
+                                Some(QUEUE_EDIT_FAILED.into());
                             cx.notify();
                             return;
                         };
@@ -1889,7 +1895,7 @@ impl Composer {
             self.queue_edit_host_device_id.clone(),
             self.state.read(cx).engine().cloned(),
         ) else {
-            self.failure = Some("The edit lease was lost; your text is still in the editor".into());
+            self.failure = Some(QUEUE_EDIT_LOST.into());
             cx.notify();
             return;
         };
@@ -1955,7 +1961,7 @@ impl Composer {
                         }
                         _ => {
                             composer.failure = Some(
-                                "The edit lease changed; your text is still in the editor".into(),
+                                QUEUE_EDIT_LOST.into(),
                             );
                         }
                     },
@@ -2006,7 +2012,7 @@ impl Composer {
                     Ok(_) => {
                         this.update(cx, |composer, cx| {
                             composer.failure = Some(
-                                "Edit protection expired; review this message before sending"
+                                "Couldn't keep this message locked for editing; check it before sending"
                                     .into(),
                             );
                             cx.notify();

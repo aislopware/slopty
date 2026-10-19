@@ -61,8 +61,10 @@ const MAIN_RS: &str = "fn main() {\n    println!(\"hello\");\n}\n";
 /// line's moment left out ([`crate::served::goldens`]); the frame's words, as the light render
 /// said them.
 async fn goldens(drv: &mut Driver, renders: &Path, name: &str) -> String {
-    // A reply's hover line, where the pointer rests on it, says when it was sent.
-    crate::served::goldens_with(drv, renders, name, &[], &["Copy message"]).await
+    // The pointer off the transcript, so no message's hover line shows; the strip's controls are
+    // always mounted, so no row is masked.
+    drv.ok(&Command::Move { x: 10.0, y: 10.0 }).await.unwrap();
+    crate::served::goldens_with(drv, renders, name, &[], &[]).await
 }
 
 /// The first node of `dump`'s accessibility tree with role `role` whose label holds `words`.
@@ -233,8 +235,8 @@ async fn a_recorded_turn_reads_as_zeron_draws_it() {
                 .push(format!("the groups' summaries count {want} {kind} (they say {groups:?})"));
         }
     }
-    if labelled(&summary, "Button", "Updated todos").is_none() {
-        missing.push("a group's summary says \"Updated todos\"".to_owned());
+    if labelled(&summary, "Button", "Todo 2/2 done").is_none() {
+        missing.push("a group's summary says \"Todo 2/2 done\"".to_owned());
     }
     let group = labelled(&summary, "Button", "Ran ");
     // The task list's tray: both of the turn's tasks done.
@@ -271,8 +273,8 @@ async fn a_recorded_turn_reads_as_zeron_draws_it() {
     // What the turn changed closes it: the one file it wrote, with its line counts.
     let drv = &mut stack.driver;
     let summary = drv.dump().await.unwrap();
-    if labelled(&summary, "Button", "1 file changed").is_none() {
-        missing.push("the turn's changes row says 1 file changed".to_owned());
+    if labelled(&summary, "Group", "notes.md +2 −0").is_none() {
+        missing.push("the turn's changes card names its one file, notes.md +2 −0".to_owned());
     }
     if labelled(&summary, "Button", "Open diff").is_none() {
         missing.push("the turn's changes row offers Open diff".to_owned());

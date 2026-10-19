@@ -41,7 +41,8 @@ pub const OFFER_FOR: Duration = Duration::from_secs(20);
 /// What the notice says of a page on worker `machine`'s own loopback that `asker` wants.
 ///
 /// `host` and `port` are as the address names them, and `forward` the port on this device
-/// that forwards it here, if one does yet.
+/// that forwards it here, if one does yet. A session that asks is named as the worker's
+/// ("e2e-worker's shell"); the offer says what pressing Open does, and to where.
 fn loopback_offer(
     asker: &str,
     machine: &str,
@@ -52,13 +53,22 @@ fn loopback_offer(
     let wants = if asker.is_empty() || asker == machine {
         format!("Open {host}:{port} from {machine}")
     } else {
-        format!("Open {host}:{port} from {asker} on {machine}")
+        format!("Open {host}:{port} from {machine}'s {asker}")
     };
     match forward {
         Some(here) => format!("{wants}: it opens here at localhost:{here}"),
-        None => format!("{wants}? Open forwards the port here"),
+        None => format!("{wants}? Opening forwards the port to {THIS_DEVICE}."),
     }
 }
+
+/// This device, as an offer names it.
+const THIS_DEVICE: &str = if cfg!(target_os = "macos") {
+    "this Mac"
+} else if cfg!(target_os = "ios") {
+    "this device"
+} else {
+    "this computer"
+};
 
 /// The page `url` names on a worker's loopback: its port, and the rest after the host.
 fn on_loopback(url: &str) -> Option<(u16, String)> {
@@ -464,25 +474,25 @@ mod tests {
     use slopty_proto::orchestration::Port;
     use slopty_theme::Theme;
 
-    use super::{absolute, escaped, loopback_offer, on_loopback};
+    use super::{THIS_DEVICE, absolute, escaped, loopback_offer, on_loopback};
     use crate::workspace::WorkspaceView;
     use crate::workspace::rig::{KEY, hear, link, mac, shell};
 
     /// A page on a worker's loopback is offered as "Open host:port from" the worker it is on,
-    /// never as this device's own, then where it opens here or that Open forwards the port.
+    /// never as this device's own, then where it opens here or where opening forwards the port.
     #[test]
     fn a_loopback_offer_names_its_port_its_machine_and_its_forward() {
         assert_eq!(
             loopback_offer("vite", "studio", "localhost", 5173, Some(15173)),
-            "Open localhost:5173 from vite on studio: it opens here at localhost:15173"
+            "Open localhost:5173 from studio's vite: it opens here at localhost:15173"
         );
         assert_eq!(
             loopback_offer("studio", "studio", "localhost", 5173, None),
-            "Open localhost:5173 from studio? Open forwards the port here"
+            format!("Open localhost:5173 from studio? Opening forwards the port to {THIS_DEVICE}.")
         );
         assert_eq!(
             loopback_offer("", "studio", "[::1]", 8080, None),
-            "Open [::1]:8080 from studio? Open forwards the port here"
+            format!("Open [::1]:8080 from studio? Opening forwards the port to {THIS_DEVICE}.")
         );
     }
 

@@ -1547,7 +1547,7 @@ fn a_long_command_defaults_to_deny_and_ignores_enter() {
 }
 
 /// A request only the person at its card answers is served to the card as one: the card says
-/// "Needs you at the card".
+/// "Answer in Slopty".
 #[test]
 fn a_request_needing_the_person_reaches_its_card_as_one() {
     let mut state = fixtures::thread("tools");
@@ -1556,6 +1556,23 @@ fn a_request_needing_the_person_reaches_its_card_as_one() {
     let mut approval = approval_of(&mut state, "git status");
     approval.needs_presence = true;
     assert!(asked_of(&mut state, approval).needs_presence);
+}
+
+/// A shell command's approval leads with its command set as code; an approval of no command
+/// keeps its words.
+#[test]
+fn a_commands_approval_sets_it_as_code() {
+    let mut state = fixtures::thread("tools");
+    let approval = approval_of(&mut state, "rm -rf target");
+    assert!(asked_of(&mut state, approval).code, "the command as code");
+    let plain = request(
+        slopty_proto::thread::Request::APPROVAL,
+        &[
+            ("allow", "Allow", slopty_proto::thread::Effect::Allow),
+            ("deny", "Deny", slopty_proto::thread::Effect::Deny),
+        ],
+    );
+    assert!(!asked_of(&mut state, plain).code, "no command, no code");
 }
 
 /// An approval says why the agent asks, in its words.

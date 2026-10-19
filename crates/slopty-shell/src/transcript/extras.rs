@@ -3,7 +3,7 @@
 //! compaction, a subagent's news), a proposed plan as a card folded past its first lines, what
 //! a settled turn changed, and the working line's current step.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use gpui::{AnyElement, ClipboardItem, Context, SharedString, div, prelude::*, px};
@@ -15,6 +15,10 @@ use crate::markdown::parser::BlockTree;
 use crate::notice::{NoticeChipIcon::Tile, notice_chip};
 use crate::theme::Theme;
 use crate::motion::HoverFade as _;
+
+/// slopty: a turn-changes card's file row, and the pad above and below its list.
+const TURN_FILE_ROW_HEIGHT: f32 = 26.0;
+const TURN_FILES_PAD_Y: f32 = 4.0;
 
 /// A plan shows this many source lines before it folds.
 pub const PLAN_FOLD_LINES: usize = 20;
@@ -37,6 +41,8 @@ pub(super) struct ExtrasState {
     details_open: HashSet<SharedString>,
     /// Turn-changes rows whose file list is shown.
     changes_open: HashSet<SharedString>,
+    /// slopty: when each turn-changes row's list last opened or closed, for its tween (#12).
+    changes_toggled: HashMap<SharedString, std::time::Instant>,
     /// Error cards whose retry was asked for, until the thread moves past them.
     retried: HashSet<SharedString>,
     /// A selection's Quote: where the press ended, and the words.
@@ -671,7 +677,7 @@ impl Transcript {
             actions = actions.child(
                 quiet(
                     format!("{}-details", row.id),
-                    if open { "Hide details" } else { "View details" },
+                    if open { "Hide details" } else { "Show details" },
                 )
                 .on_click(cx.listener(move |this, _, _, cx| {
                     if !this.extras.details_open.remove(&id) {
@@ -943,7 +949,6 @@ impl Transcript {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let open = self.extras.changes_open.contains(&row.id);
         let root = {
             let state = self.state.read(cx);
             self.chat_id
@@ -951,6 +956,27 @@ impl Transcript {
                 .and_then(|chat_id| state.chats.iter().find(|chat| chat.id == chat_id))
                 .and_then(|chat| chat.cwd.clone())
         };
+        // slopty: one file is named in the card itself, with nothing to open (#12).
+        let single = files.len() == 1;
+        let open = !single && self.extras.changes_open.contains(&row.id);
+        // slopty: the list opens and closes over the tool folds' tween, its chevron turning with
+        // it (#12).
+        let reduce_motion = crate::motion::reduced_motion(cx);
+        let now = cx.frame_time();
+        let t = self
+            .extras
+            .changes_toggled
+            .get(&row.id)
+            .filter(|_| !reduce_motion)
+            .map_or(1.0, |at| {
+                super::TOOL_FOLD.curve.eval(
+                    now.saturating_duration_since(*at).as_secs_f32() / super::TOOL_FOLD.total().as_secs_f32(),
+                )
+            })
+            .clamp(0.0, 1.0);
+        let animating = t < 1.0;
+        let openness = if open { t } else { 1.0 - t };
+        let list_height = files.len() as f32 * TURN_FILE_ROW_HEIGHT + 2.0 * TURN_FILES_PAD_Y + 1.0;
         let (additions, deletions) = files
             .iter()
             .fold((0, 0), |(a, d), file| (a + file.additions, d + file.deletions));
@@ -973,17 +999,15 @@ impl Transcript {
                         .child(SharedString::from(format!("−{deletions}"))),
                 ))
         };
+        let label = match files.first().filter(|_| single) {
+            Some(file) => shown_path(&file.path, root.as_deref()),
+            None => turn_changes_label(files),
+        };
         let toggle_id = row.id.clone();
         let entry_id = row.entry_id.clone();
         let header = div()
             .id(SharedString::from(format!("{}-toggle", row.id)))
-            .role(gpui::Role::Button)
-            .aria_label(SharedString::from(format!(
-                "{}{}",
-                turn_changes_label(files),
-                counted(additions, deletions)
-            )))
-            .aria_expanded(open)
+            .aria_label(SharedString::from(format!("{label}{}", counted(additions, deletions))))
             .w_full()
             // slopty: a finger's row on a touch screen (#23).
             .h(px(crate::surface_chrome::touch_row_height(32.0)))
@@ -992,38 +1016,57 @@ impl Transcript {
             .flex_row()
             .items_center()
             .gap(px(8.0))
-            .cursor_pointer()
-            // slopty: the faded hover, at the row strength.
-            .bg(crate::motion::hover_blend(
-                &format!("{}-toggle", row.id),
-                gpui::transparent_black(),
-                crate::theme::ink(0.05),
-            ))
-            .hover_fade(format!("{}-toggle", row.id))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                if !this.extras.changes_open.remove(&toggle_id) {
-                    this.extras.changes_open.insert(toggle_id.clone());
+            .map(|header| {
+                if single {
+                    return header.role(gpui::Role::Group);
                 }
-                cx.notify();
-            }))
+                // slopty: a button the keyboard reaches, Enter or Space opening it (#9).
+                crate::surface_chrome::key_stop_inset(header, theme)
+                    .role(gpui::Role::Button)
+                    .aria_expanded(open)
+                    .cursor_pointer()
+                    // slopty: the faded hover, at the row strength.
+                    .bg(crate::motion::hover_blend(
+                        &format!("{}-toggle", row.id),
+                        gpui::transparent_black(),
+                        crate::theme::ink(0.05),
+                    ))
+                    .hover_fade(format!("{}-toggle", row.id))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if !this.extras.changes_open.remove(&toggle_id) {
+                            this.extras.changes_open.insert(toggle_id.clone());
+                        }
+                        this.extras
+                            .changes_toggled
+                            .insert(toggle_id.clone(), crate::clock::now(cx));
+                        cx.notify();
+                    }))
+            })
             .child(
                 crate::icons::icon(crate::icons::DOCUMENT)
+                    .flex_none()
                     .size(px(14.0))
                     .text_color(theme.text_muted),
             )
             .child(
                 div()
+                    .min_w_0()
+                    .truncate()
                     .text_size(crate::typography::ui_rems(12.5))
                     .text_color(theme.text)
-                    .child(SharedString::from(turn_changes_label(files))),
+                    .child(SharedString::from(label)),
             )
-            .children(counts(additions, deletions))
+            .children(counts(additions, deletions).map(|counts| counts.flex_none()))
             .child(div().flex_1())
             .child(
-                div()
-                    .id(SharedString::from(format!("{}-open-diff", row.id)))
+                // slopty: a button the keyboard reaches (#9).
+                crate::surface_chrome::key_stop(
+                    div().id(SharedString::from(format!("{}-open-diff", row.id))),
+                    theme,
+                )
                     .role(gpui::Role::Button)
                     .aria_label("Open diff")
+                    .flex_none()
                     .h(px(22.0))
                     .px(px(8.0))
                     .rounded(px(6.0))
@@ -1048,51 +1091,62 @@ impl Transcript {
                     }))
                     .child(SharedString::from("Open diff")),
             )
-            .child(
-                crate::icons::icon(if open {
-                    crate::icons::ALT_ARROW_UP
-                } else {
-                    crate::icons::ALT_ARROW_DOWN
-                })
-                .size(px(12.0))
-                .text_color(theme.text_muted),
-            );
-        let list = open.then(|| {
+            .when(!single, |header| {
+                // slopty: the chevron every other disclosure turns (#12).
+                header.child(
+                    crate::icons::icon(crate::icons::ALT_ARROW_DOWN)
+                        .flex_none()
+                        .size(px(12.0))
+                        .with_transformation(gpui::Transformation::rotate(gpui::radians(
+                            -std::f32::consts::FRAC_PI_2 * (1.0 - openness),
+                        )))
+                        .text_color(theme.text_muted),
+                )
+            });
+        let list = (open || animating).then(|| {
             div()
                 .w_full()
-                .border_t_1()
-                .border_color(theme.border)
-                .py(px(4.0))
-                .children(files.iter().map(|file| {
-                    let path = shown_path(&file.path, root.as_deref());
+                .h(px(list_height * openness))
+                .overflow_hidden()
+                .child(
                     div()
-                        .id(SharedString::from(format!("{}-file-{path}", row.id)))
-                        .role(gpui::Role::ListItem)
-                        .aria_label(SharedString::from(format!(
-                            "{path}{}",
-                            counted(file.additions, file.deletions)
-                        )))
                         .w_full()
-                        .h(px(26.0))
-                        .px(px(10.0))
-                        .pl(px(32.0))
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(8.0))
-                        .child(
+                        .border_t_1()
+                        .border_color(theme.border)
+                        .py(px(TURN_FILES_PAD_Y))
+                        .children(files.iter().map(|file| {
+                            let path = shown_path(&file.path, root.as_deref());
                             div()
-                                .min_w_0()
-                                .flex_1()
-                                .truncate()
-                                .text_size(crate::typography::ui_rems(12.0))
-                                .text_color(theme.text_muted)
-                                .child(SharedString::from(path)),
-                        )
-                        .children(counts(file.additions, file.deletions))
-                }))
+                                .id(SharedString::from(format!("{}-file-{path}", row.id)))
+                                .role(gpui::Role::ListItem)
+                                .aria_label(SharedString::from(format!(
+                                    "{path}{}",
+                                    counted(file.additions, file.deletions)
+                                )))
+                                .w_full()
+                                .h(px(TURN_FILE_ROW_HEIGHT))
+                                .px(px(10.0))
+                                .pl(px(32.0))
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(8.0))
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .truncate()
+                                        .text_size(crate::typography::ui_rems(12.0))
+                                        .text_color(theme.text_muted)
+                                        .child(SharedString::from(path)),
+                                )
+                                .children(counts(file.additions, file.deletions))
+                        })),
+                )
         });
+        let view = cx.entity_id();
         div()
+            .relative()
             .py(px(4.0))
             .w_full()
             .child(
@@ -1106,6 +1160,16 @@ impl Transcript {
                     .child(header)
                     .children(list),
             )
+            .when(animating, |card| {
+                card.child(
+                    gpui::canvas(
+                        |_, _, _| (),
+                        move |_, _, window, _| window.on_next_frame(move |_, cx| cx.notify(view)),
+                    )
+                    .absolute()
+                    .inset_0(),
+                )
+            })
             .into_any_element()
     }
 

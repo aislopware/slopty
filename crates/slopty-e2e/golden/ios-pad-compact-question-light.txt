@@ -6,14 +6,20 @@ Button │ Server: e2e-server, Connected
 Button │ Settings
 Article │ You
 Paragraph │ ask
-Button │ Called 1 tool
+Article │ Claude Code
+Button │ Tool AskUserQuestion │ Waiting for permission…
+Status │ Waiting for permission…
+Status │ Waiting for your answer: Color
 Group │ Which color?
-Note │ Answer here
+Note │ Answer in Slopty
 Button │ Red
 Button │ Blue
 Button │ Chat about this
 MultilineTextInput │ Type your own answer, or pick an option above
 Button │ Skip
+Button │ Submit
+Button │ Mode: Auto
+Button │ Context —
 Button │ Show chat details
 Button │ Show files panel
 Button │ Show side pane

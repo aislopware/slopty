@@ -201,7 +201,7 @@ async fn claude_code_dying_mid_turn_ends_the_turn_with_why() {
             })
     })
     .await;
-    click(drv, "Button", "View details").await;
+    click(drv, "Button", "Show details").await;
     let shown = seen(drv, "why, in the failure's details", STEP, |d| {
         d.a11y.iter().any(|n| {
             n.label.as_deref().is_some_and(|l| l.contains("crashed mid-turn"))

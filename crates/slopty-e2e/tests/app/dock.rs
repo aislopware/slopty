@@ -144,7 +144,7 @@ async fn the_background_tray_lists_work_and_stops_a_command() {
 }
 
 /// The footer under the composer says the mode and the goal: a stand-in with a command running
-/// sets a goal (`signals`). The footer reads the mode the agent is in and "/goal active", and
+/// sets a goal (`signals`). The footer reads the mode the agent is in and "Goal · 5s", and
 /// leaves the live command to the Background tray; ⇧Tab moves to the next mode through Claude
 /// Code's own door (`set_permission_mode`), and the footer follows.
 #[tokio::test]
@@ -163,7 +163,7 @@ async fn the_footer_says_the_mode_and_the_goal() {
     let drv = &mut stack.driver;
     open_thread(drv, 1).await;
     let footer = seen(drv, "the footer", STEP, |d| {
-        holding(d, "Button", "Mode: ").is_some() && holding(d, "Button", "/goal active").is_some()
+        holding(d, "Button", "Mode: ").is_some() && holding(d, "Button", "Goal").is_some()
     })
     .await;
     assert!(
@@ -174,7 +174,7 @@ async fn the_footer_says_the_mode_and_the_goal() {
     println!("MEASURE footer: {mode}");
     tokio::time::sleep(SETTLE).await;
     // The goal's age runs with the clock; its words stay out of the golden's text.
-    goldens(drv, &renders, "dock-footer", &["/goal active"]).await;
+    goldens(drv, &renders, "dock-footer", &["Goal"]).await;
 
     // ⇧Tab from the composer: the next mode, asked of Claude Code, and said by the footer.
     type_in_composer(drv, "").await;
@@ -422,7 +422,7 @@ async fn a_request_that_needs_the_person_is_refused_from_a_note() {
     let drv = &mut stack.driver;
     open_thread(drv, 1).await;
     seen(drv, "the card that needs the person", STEP, |d| {
-        node(d, "Note", "Answer here").is_some() && node(d, "Button", "Red").is_some()
+        node(d, "Note", "Answer in Slopty").is_some() && node(d, "Button", "Red").is_some()
     })
     .await;
 
@@ -438,7 +438,7 @@ async fn a_request_that_needs_the_person_is_refused_from_a_note() {
     assert!(
         refusals
             .iter()
-            .all(|r| r.contains("Answer here: the agent takes this answer only from its card")),
+            .all(|r| r.contains("Answer in Slopty: the agent takes this answer only from its card")),
         "the worker said why it refused each press: {refusals:?}"
     );
     let read = stack.slopty(&["agent", "read", "--thread", &agent]).await.unwrap();

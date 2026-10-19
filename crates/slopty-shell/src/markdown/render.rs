@@ -47,6 +47,10 @@ pub fn in_gallery(id: &str) -> bool {
 /// Body text size / line height (slopty: 14px / 22px).
 pub const MD_TEXT_SIZE: f32 = 14.0;
 pub const MD_LINE_HEIGHT: f32 = 22.0;
+/// slopty: the prose of a run read in its card, under the card's 12 pt title: Claude's compact
+/// body (#24).
+pub const MD_COMPACT_TEXT_SIZE: f32 = 13.0;
+pub const MD_COMPACT_LINE_HEIGHT: f32 = 20.0;
 /// Default code block metrics; the rendered size comes from the theme.
 pub const CODE_TEXT_SIZE: f32 = 12.5;
 pub const CODE_LINE_HEIGHT: f32 = 18.0;
@@ -125,6 +129,9 @@ pub struct RenderOptions {
     /// Whether and in which face formulas typeset; owners fill it from
     /// [`crate::settings::math_style`].
     pub math: super::math::MathStyle,
+    /// slopty: the prose's size and line height, in points: paragraphs and list items
+    /// ([`MD_TEXT_SIZE`], or [`MD_COMPACT_TEXT_SIZE`] in a card).
+    pub body: (f32, f32),
 }
 
 /// slopty: one choice of a right-click menu: its words, the key that does the same (in
@@ -436,6 +443,7 @@ impl RenderOptions {
             run: None, // slopty: no Run outside the transcript.
             code_menu: None,
             math: super::math::MathStyle::default(),
+            body: (MD_TEXT_SIZE, MD_LINE_HEIGHT),
         }
     }
 }
@@ -612,8 +620,8 @@ pub fn render_block(
     match block {
         Block::Paragraph { runs } => text_element(
             runs,
-            MD_TEXT_SIZE,
-            MD_LINE_HEIGHT,
+            opts.body.0,
+            opts.body.1,
             false,
             top_ix,
             ix,
@@ -692,7 +700,7 @@ pub fn render_block(
                     div()
                         .flex_none()
                         .min_w(px(18.0))
-                        .h(px(MD_LINE_HEIGHT))
+                        .h(px(opts.body.1))
                         .flex()
                         .items_center()
                         .child(
@@ -745,8 +753,8 @@ pub fn render_block(
                         Some(start) => div()
                             .flex_none()
                             .min_w(px(18.0))
-                            .text_size(crate::typography::ui_rems(MD_TEXT_SIZE))
-                            .line_height(crate::typography::ui_rems(MD_LINE_HEIGHT))
+                            .text_size(crate::typography::ui_rems(opts.body.0))
+                            .line_height(crate::typography::ui_rems(opts.body.1))
                             // slopty: figures that line up.
                             .text_color(theme.accent)
                             .font_features(crate::typography::tabular())
@@ -756,7 +764,7 @@ pub fn render_block(
                             .flex_none()
                             .min_w(px(18.0))
                             // Center the disc on the first text line's cap band.
-                            .h(px(MD_LINE_HEIGHT))
+                            .h(px(opts.body.1))
                             .flex()
                             .items_center()
                             .child(
@@ -1220,9 +1228,16 @@ pub fn inline_code_wash(theme: &Theme) -> Hsla {
     theme.code_wash
 }
 /// Rounded-wash geometry: small radius on a slightly inset box (paint-only —
-/// x extends 2px past the glyphs, y insets 2px from the 22px line box).
+/// x extends 1px past the glyphs, y insets 2px from the 22px line box).
+/// slopty: the wash meets the hair spaces either side of the code ([`CODE_HAIR`]), which give
+/// it room in the line rather than painting over the words beside it (#20).
 pub const INLINE_CODE_RADIUS: f32 = 4.5;
-pub const INLINE_CODE_PAD_X: f32 = 2.0;
+pub const INLINE_CODE_PAD_X: f32 = 1.0;
+/// slopty: the hair space (U+200A) either side of inline code, inside its wash: shown, but
+/// never copied or found (#20). The one before holds to the code with a word joiner (U+2060),
+/// so a line never breaks between them and leaves a sliver of wash at its end.
+pub const CODE_HAIR_BEFORE: &str = "\u{200A}\u{2060}";
+pub const CODE_HAIR_AFTER: &str = "\u{200A}";
 pub const INLINE_CODE_INSET_Y: f32 = 2.0;
 
 /// Flatten inline runs into shaped-text inputs. Pure given a theme.
@@ -1257,9 +1272,12 @@ fn flatten_runs_weighted(
     // A run may stand for a longer source text than it shows (a file link
     // labeled by its file name, a formula's slot). The source is only kept
     // when some run does.
+    // slopty: and inline code, whose hair spaces are shown but not its source (#20).
     let relabeled = runs
         .iter()
-        .any(|run| run.style.file_label.is_some() || run.style.math);
+        .any(|run| run.style.file_label.is_some() || run.style.math || run.style.code);
+    let haired = |run: &InlineRun| run.style.code && !run.style.math;
+    let mut after_code = false;
     let mut source = String::new();
     let mut omissions: Vec<(Range<usize>, Range<usize>)> = Vec::new();
     // Slots are placed by left-to-right glyph positions: in a paragraph with
@@ -1270,9 +1288,35 @@ fn flatten_runs_weighted(
             matches!(c, '\u{0590}'..='\u{08FF}' | '\u{FB1D}'..='\u{FDFF}' | '\u{FE70}'..='\u{FEFF}')
         })
     });
-    for run in runs {
+    for (run_ix, run) in runs.iter().enumerate() {
         if run.text.is_empty() {
             continue;
+        }
+        // slopty: a stretch of inline code opens and closes on a hair space (#20).
+        let hair_lead = haired(run) && !after_code;
+        let hair_trail = haired(run)
+            && !runs[run_ix + 1..].iter().find(|next| !next.text.is_empty()).is_some_and(haired);
+        after_code = haired(run);
+        let hair = |hair: &str,
+                    text: &mut String,
+                    out: &mut Vec<TextRun>,
+                    omissions: &mut Vec<(Range<usize>, Range<usize>)>,
+                    at: usize| {
+            let start = text.len();
+            text.push_str(hair);
+            omissions.push((at..at, start..text.len()));
+            out.push(TextRun {
+                len: hair.len(),
+                font: font(theme.font_sans.clone()),
+                color: inline_code_text(theme),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            });
+        };
+        let start = text.len();
+        if hair_lead {
+            hair(CODE_HAIR_BEFORE, &mut text, &mut out, &mut omissions, source.len());
         }
         // Inline math reads back as `$tex$`. A formula shows as its slot; one
         // slopty_math can't render, too big to set, or any with math off, shows
@@ -1304,13 +1348,13 @@ fn flatten_runs_weighted(
             (None, Some(delimited)) => delimited.as_str(),
             (None, None) => run.style.file_label.as_deref().unwrap_or(&run.text),
         };
-        let start = text.len();
+        let shown_start = text.len();
         text.push_str(shown);
         if relabeled {
             let source_start = source.len();
             source.push_str(run_source);
             if shown != run_source {
-                omissions.push((source_start..source.len(), start..text.len()));
+                omissions.push((source_start..source.len(), shown_start..text.len()));
             }
         }
         if let Some(Some(formula)) = formula {
@@ -1401,6 +1445,12 @@ fn flatten_runs_weighted(
                 color: Some(theme.text_muted),
             }),
         });
+        if hair_trail {
+            hair(CODE_HAIR_AFTER, &mut text, &mut out, &mut omissions, source.len());
+            if let Some(range) = code_ranges.last_mut() {
+                range.end = text.len();
+            }
+        }
     }
     FlatText {
         // The source survives for copy and selection only where a label
@@ -3328,8 +3378,11 @@ mod tests {
         })
     }
 
+    /// Where the glyph at `ix` of `key`'s copy text is drawn (slopty: past the hair spaces
+    /// inline code shows, which its copy text does not hold).
     fn selection_position(key: &str, ix: usize) -> gpui::Point<gpui::Pixels> {
-        let (_, layout, _) = selection_test_snapshot(key);
+        let (_, layout, offsets) = selection_test_snapshot(key);
+        let ix = offsets.map_or(ix, |offsets| offsets.displayed(ix));
         layout.position_for_index(ix).expect("text position")
             + point(px(0.1), layout.line_height() / 2.0)
     }
@@ -4433,11 +4486,26 @@ mod tests {
             false,
         );
         // Adjacent code runs merge into ONE wash box; separated ones don't.
-        assert_eq!(flat.code_ranges, vec![4..9, 14..17]);
+        // slopty: each box holds its hair spaces, one either side of its code (#20).
+        let (before, after) = (CODE_HAIR_BEFORE.len(), CODE_HAIR_AFTER.len());
+        assert_eq!(
+            flat.text.as_ref(),
+            format!("use {CODE_HAIR_BEFORE}foo(){CODE_HAIR_AFTER} and {CODE_HAIR_BEFORE}bar{CODE_HAIR_AFTER}")
+        );
+        let second = 4 + before + 5 + after + 5;
+        assert_eq!(
+            flat.code_ranges,
+            vec![4..4 + before + 5 + after, second..second + before + 3 + after]
+        );
+        // slopty: and they are only shown: copy and find read the source.
+        let original = flat.original.as_ref().expect("the source is kept");
+        assert_eq!(original.text.as_ref(), "use foo() and bar");
+        assert_eq!(original.offsets.original(4 + before), 4, "foo starts where it did");
+        assert_eq!(original.offsets.displayed_range(4..7), 4 + before..4 + before + 3);
         // Code text is the violet tint; the square run background is gone
         // (the rounded wash is painted by the canvas underlay instead).
-        assert_eq!(flat.runs[1].color, inline_code_text(&theme));
-        assert_eq!(flat.runs[1].background_color, None);
+        assert_eq!(flat.runs[2].color, inline_code_text(&theme));
+        assert_eq!(flat.runs[2].background_color, None);
         assert_eq!(flat.runs[0].color, theme.text);
     }
 

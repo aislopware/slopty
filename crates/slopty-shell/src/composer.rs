@@ -37,7 +37,6 @@ use crate::motion::HoverFade as _;
 use crate::attachments::{self, StagedAttachment};
 use crate::composer_markdown::{self, in_code};
 use crate::motion;
-use crate::notice::{NoticeChipIcon, notice_chip};
 use crate::pickers::Pickers;
 use crate::settings::{ComposerSendBehavior, platform_combo};
 use crate::settings::widgets::{ActionHint as _, Keys}; // slopty: tooltips name their key.
@@ -98,6 +97,22 @@ fn stack_section(key: &'static str, section: Option<AnyElement>) -> AnyElement {
         ))
         .into_any_element()
 }
+
+/// slopty: a section of the stack folding shut under a request's card: the same key as its
+/// [`stack_section`], so it shrinks from the height it stood at to nothing, its child kept
+/// while it closes.
+fn folding_section(key: &'static str, section: Option<AnyElement>) -> AnyElement {
+    div()
+        .flex_none()
+        .w_full()
+        .child(motion::reveal_height(key, false, div().pb(px(Theme::SPACE_SM)).children(section)))
+        .into_any_element()
+}
+
+/// slopty: a request's card arriving where the composer stood, as Claude desktop promotes its
+/// approval: from 0.75 opacity and 6 px above its place, settling over 220 ms on an ease-out.
+const CARD_PROMOTE: motion::MotionSpec =
+    motion::MotionSpec::new(220, motion::CubicBezier::new(0.215, 0.61, 0.355, 1.0));
 
 /// slopty: how far a finger's target on the footer reaches below the composer's padding: on a
 /// touch screen the footer's controls take 44 pt on its 24 pt row, and the composer's box holds
@@ -5121,7 +5136,8 @@ impl Render for ComposerInput {
         div()
             .id(("composer-input", cx.entity_id()))
             .role(self.accessibility_role)
-            .aria_label(self.placeholder.clone())
+            // slopty: shell mode's field is a command's, and says so.
+            .aria_label(if self.hides_bang { SharedString::from("Shell command") } else { self.placeholder.clone() })
             .aria_placeholder(self.shown_placeholder())
             // slopty: a screen reader reads the words in the field, not only its placeholder.
             // slopty: a chip says the words it shows ("Image 1"), never the link under it.
@@ -7985,7 +8001,7 @@ impl Composer {
                             if self.slash.supported {
                                 "No skills available for this project"
                             } else {
-                                "This agent does not advertise skills"
+                                "This agent has no skills" // slopty: plain words
                             }
                         } else if !crate::settings::current(cx)
                             .skill_completion(self.slash.harness.unwrap_or(HarnessId::CODEX))
@@ -7993,7 +8009,7 @@ impl Composer {
                         {
                             "No commands or skills available"
                         } else {
-                            "No slash commands available in this integration"
+                            "No commands here" // slopty: plain words
                         }
                     } else {
                         if self.slash.skill {
@@ -8022,11 +8038,13 @@ impl Composer {
                 }
                 .into();
                 let mut description = command.description.clone();
-                if let Some(hint) = &command.input_hint {
+                // slopty: the argument hint as the agent writes it ("[pr-number]"), not wrapped
+                // again in brackets of the composer's.
+                if let Some(hint) = command.input_hint.as_deref().map(str::trim).filter(|h| !h.is_empty()) {
                     if description.is_empty() {
-                        description = format!("<{hint}>");
+                        description = hint.to_owned();
                     } else {
-                        description = format!("{description} · <{hint}>");
+                        description = format!("{description} · {hint}");
                     }
                 }
                 let description: SharedString = description.into();
@@ -9727,11 +9745,14 @@ impl Composer {
         let focused = wizard.focused();
         let click_only = question.click_only;
         let keys_pick = question.choices_only && !click_only;
+        // slopty: an approval the view model judged long, unknown or destructive.
+        let risky = question.deny_first;
 
         // slopty: what the card adds by the request's kind (`composer/request_card.rs`).
         let header_chips = self.card_header_chips(&question, crate::clock::utc(cx), &theme);
         let extras = self.render_card_extras(&wizard.request_id, &question, plan, &theme, cx);
         let revising = wizard.revising;
+        let submit_words = if revising { "Send" } else if last { "Submit" } else { "Next" }; // slopty
         let takes_words = request_card::takes_words(&question, revising);
         // slopty: a form's answers stand in its footer, beside its Submit.
         let form = request_card::is_form(&question);
@@ -9759,13 +9780,21 @@ impl Composer {
             // (typed answers win — slopty question-panel.tsx `isSel`).
             let picked = wizard.is_picked(ix) && typed_empty;
             let blocked = wizard.allow_blocked(ix); // slopty
-            // slopty: the keyboard's place, where Enter would take it, while a key can.
-            let keyed = keys_live && keys_pick && focused == Some(ix) && !picked;
+            // slopty: the keyboard's place, where Enter would take it, while a key can; where no
+            // key can, a risky approval's default (its deny) still wears the mark, so a pointer
+            // or a finger sees which answer is the careful one.
+            let keyed = !picked
+                && if keys_live && keys_pick {
+                    focused == Some(ix)
+                } else {
+                    risky && question.deny_option == Some(ix)
+                };
             // slopty: one rule for every card: the digit that picks it, where a key can press
             // it, never on a click-only page; its badge and its screen reader's shortcut alike.
             let digit = (ix < 9 && !click_only && keys_live).then(|| SharedString::from(format!("{}", ix + 1)));
             div()
                 .id(("wizard-option", ix))
+                .when(keyed, |el| el.debug_selector(|| "wizard-option-keyed".into())) // slopty: for the tests
                 // slopty: each choice names itself; a held-back allow says so.
                 .role(Role::Button)
                 .aria_label(SharedString::from(if blocked {
@@ -9817,7 +9846,7 @@ impl Composer {
                         }
                     }))
                 })
-                .when(!blocked, |el| el.cursor_pointer())
+                .when(!blocked, |el| el.cursor_pointer().active(|s| s.bg(crate::theme::ink(0.12)))) // slopty: a press shows
                 .on_click(cx.listener(move |this, _, _, cx| this.wizard_select(ix, cx)))
                 .child(
                     div()
@@ -9844,7 +9873,23 @@ impl Composer {
                             )
                         }),
                 )
-                .when_some(digit, |el, digit| {
+                // slopty: a picked row shows a check where its digit stood (T3's selected
+                // option); the digit comes back when it is unpicked.
+                .when(picked, |el| {
+                    el.child(
+                        div()
+                            .id(("wizard-option-check", ix))
+                            .role(Role::Image)
+                            .aria_label("Picked")
+                            .flex_none()
+                            .size(px(22.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(crate::icons::icon(crate::icons::CHECK).size(px(14.0)).text_color(theme.text)),
+                    )
+                })
+                .when_some(digit.filter(|_| !picked), |el, digit| {
                     el.child(
                         // Number kbd chip: `size-[22px] rounded-md text-[11px]`.
                         div()
@@ -9854,17 +9899,9 @@ impl Composer {
                             .items_center()
                             .justify_center()
                             .rounded(px(6.0))
-                            .bg(if picked {
-                                crate::theme::ink(0.16)
-                            } else {
-                                crate::theme::ink(0.05)
-                            })
+                            .bg(crate::theme::ink(0.05))
                             .text_size(crate::typography::ui_rems(11.0))
-                            .text_color(if picked {
-                                theme.text
-                            } else {
-                                theme.text_muted.opacity(0.6)
-                            })
+                            .text_color(theme.text_muted.opacity(0.6))
                             .child(digit),
                     )
                 })
@@ -9903,11 +9940,28 @@ impl Composer {
                             .flex_row()
                             .items_center()
                             .gap(px(10.0))
+                            // slopty: a risky approval says so before anything else: a warning
+                            // triangle and its caps in amber.
+                            .when(risky, |el| {
+                                el.child(
+                                    div()
+                                        .id("wizard-risky")
+                                        .role(Role::Note)
+                                        .aria_label("Risky")
+                                        .flex_none()
+                                        .mr(px(-4.0))
+                                        .child(
+                                            crate::icons::icon(crate::icons::DANGER_TRIANGLE)
+                                                .size(px(11.0))
+                                                .text_color(theme.warning),
+                                        ),
+                                )
+                            })
                             .child(
                                 // slopty: small caps tracked 0.1 em, laid out exactly.
                                 crate::typography::tracked_caps(&header, 10.5, 0.1)
                                     .font_weight(gpui::FontWeight::MEDIUM)
-                                    .text_color(theme.text_muted.opacity(0.6)),
+                                    .text_color(if risky { theme.warning.opacity(0.8) } else { theme.text_muted.opacity(0.6) }),
                             )
                             // slopty: several requests open: which of them this is.
                             .when(open > 1, |el| {
@@ -9946,14 +10000,56 @@ impl Composer {
                             .children(header_chips), // slopty
                     )
                     // slopty: a request its title says whole asks no line more. A read-gated
-                    // body scrolls in place, and an edit shows its change.
+                    // body scrolls in place, and an edit shows its change. Its first paragraph
+                    // is the title; what follows a blank line describes it, smaller and muted,
+                    // and a title the header already says is not said twice.
                     .when(!body.is_empty(), |el| {
+                        let (lead, rest) = request_card::split_body(&body, &header);
                         let text = div()
-                            .text_size(crate::typography::ui_rems(15.0))
-                            .line_height(px(20.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.text)
-                            .child(SharedString::from(body.clone()));
+                            .flex()
+                            .flex_col()
+                            .when_some(lead, |el, lead| {
+                                // slopty: a command reads as code, on a plate (#4).
+                                el.child(if question.code {
+                                    div()
+                                        .id("wizard-command")
+                                        .role(Role::Code)
+                                        .aria_label(SharedString::from(lead.clone()))
+                                        .self_start()
+                                        .max_w_full()
+                                        .px(px(8.0))
+                                        .py(px(4.0))
+                                        .rounded(px(6.0))
+                                        .bg(crate::theme::ink(0.04))
+                                        .font_family(theme.font_mono.clone())
+                                        .text_size(crate::typography::ui_rems(13.0))
+                                        .line_height(px(20.0))
+                                        .text_color(theme.text)
+                                        .child(SharedString::from(lead))
+                                        .into_any_element()
+                                } else {
+                                    div()
+                                        .text_size(crate::typography::ui_rems(15.0))
+                                        .line_height(px(20.0))
+                                        .font_weight(gpui::FontWeight::MEDIUM)
+                                        .text_color(theme.text)
+                                        .child(SharedString::from(lead))
+                                        .into_any_element()
+                                })
+                            })
+                            .when_some(rest, |el, rest| {
+                                el.child(
+                                    div()
+                                        .id("wizard-description")
+                                        .role(Role::Note)
+                                        .aria_label(SharedString::from(rest.clone()))
+                                        .mt(px(4.0))
+                                        .text_size(crate::typography::ui_rems(13.0))
+                                        .line_height(px(18.0))
+                                        .text_color(theme.text_muted)
+                                        .child(SharedString::from(rest)),
+                                )
+                            });
                         if question.read_gate {
                             el.child(
                                 div()
@@ -10048,11 +10144,11 @@ impl Composer {
                     // slopty: the footer's buttons are tab stops with the shared ring.
                     .child(if revising {
                         // slopty: a revision goes back to the choices.
-                        request_card::card_button(crate::popover::btn_ghost(&theme, "Back to choices", "wizard-unrevise"), "wizard-unrevise", &theme)
+                        request_card::card_button(crate::popover::btn_ghost(&theme, "Back to choices", "wizard-unrevise"), "wizard-unrevise", "Back to choices", &theme)
                             .on_click(cx.listener(|this, _, _, cx| this.card_escape_revision(cx)))
                             .into_any_element()
                     } else if page > 0 {
-                        request_card::card_button(crate::popover::btn_ghost(&theme, "Back", "wizard-back"), "wizard-back", &theme)
+                        request_card::card_button(crate::popover::btn_ghost(&theme, "Back", "wizard-back"), "wizard-back", "Back", &theme)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.wizard_back(cx);
                             }))
@@ -10071,9 +10167,7 @@ impl Composer {
                             // as its TUI's Esc does.
                             .when(skippable, |el| {
                                 el.child(
-                                    request_card::card_button(crate::popover::btn_ghost(&theme, "Skip", "wizard-skip"), "wizard-skip", &theme)
-                                        .role(Role::Button)
-                                        .aria_label("Skip")
+                                    request_card::card_button(crate::popover::btn_ghost(&theme, "Skip", "wizard-skip"), "wizard-skip", "Skip", &theme)
                                         .on_click(cx.listener(|this, _, _, cx| this.wizard_skip(cx))),
                                 )
                             })
@@ -10082,16 +10176,17 @@ impl Composer {
                             .when(takes_words, |el| {
                                 el.child(
                                     request_card::card_button(
-                                        crate::popover::btn_primary(
-                                            &theme,
-                                            if revising { "Send" } else if last { "Submit" } else { "Next" },
-                                        ),
+                                        crate::popover::btn_primary(&theme, submit_words),
                                         "wizard-submit",
+                                        submit_words,
                                         &theme,
                                     )
                                     .px(px(16.0))
                                     .when(!can_advance, |el| {
-                                        el.opacity(crate::theme::DISABLED_OPACITY).cursor_default().aria_disabled(true)
+                                        el.opacity(crate::theme::DISABLED_OPACITY)
+                                            .active(|s| s.opacity(crate::theme::DISABLED_OPACITY)) // slopty: no press shows
+                                            .cursor_default()
+                                            .aria_disabled(true)
                                     })
                                     .on_click(cx.listener(|this, _, _, cx| this.wizard_advance(cx))),
                                 )
@@ -10101,10 +10196,124 @@ impl Composer {
         crate::frost::frosted(COMPOSER_RADIUS, crate::frost::MENU_BLUR, panel).into_any_element()
     }
 
+    /// slopty: the trays stacked on the composer, top to bottom: the checklist, the Background
+    /// tray and the queue, each `None` while it has nothing to show.
+    fn render_trays(
+        &mut self,
+        show_queue_latest_shortcut: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> (Option<AnyElement>, Option<AnyElement>, Option<AnyElement>) {
+        // The checklist tray stacks above the queue (or directly above the
+        // composer), one step narrower than what follows it.
+        let has_queue = !self.state.read(cx).queue.is_empty();
+        // slopty: the Background tray sits between the checklist and the queue.
+        let tray = self.render_background_tray(
+            QUEUE_SIDE_INSET * if has_queue { 2.0 } else { 1.0 },
+            window,
+            cx,
+        );
+        let trays_below = usize::from(has_queue) + usize::from(tray.is_some());
+        let todo = self
+            .render_todo_panel(trays_below, window, cx)
+            .map(|panel| motion::fade_quick("composer-todo", div().child(panel)).into_any_element());
+        let tray = tray.map(|tray| {
+            motion::fade_quick("composer-background-tray", div().child(tray)).into_any_element()
+        });
+        let queue = self.render_queue_panel(show_queue_latest_shortcut, window, cx).map(|panel| {
+            motion::fade_quick(
+                "composer-queue",
+                div()
+                    .mx(px(QUEUE_SIDE_INSET))
+                    // Cancel the column gap, then tuck the tray one pixel
+                    // behind the composer painted after it.
+                    .mb(px(-(Theme::SPACE_SM + QUEUE_COMPOSER_OVERLAP)))
+                    .child(panel),
+            )
+            .into_any_element()
+        });
+        (todo, tray, queue)
+    }
+
+    /// slopty: the footer under the composer (or under a request's card, which keeps it: the mode, the
+    /// goal and the context stay where they were and the card's foot does not jump): the session
+    /// footer, its dock segments and the context meter, or the new chat's git selectors as the
+    /// route trades them. `bottom_slot`: how much of its height it has grown into.
+    #[allow(clippy::too_many_arguments, reason = "the route's opacities are computed by the caller")]
+    fn render_footer_slot(
+        &mut self,
+        bottom_slot: f32,
+        new_thread_chrome_opacity: f32,
+        session_chrome_opacity: f32,
+        new_thread_git_selectors: Option<AnyElement>,
+        dragging: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let footer = (session_chrome_opacity > 0.0 && !self.side_chat).then(|| {
+            self.pickers
+                .update(cx, |pickers, cx| pickers.render_footer(cx))
+        });
+        let dock_footer = (session_chrome_opacity > 0.0)
+            .then(|| self.render_dock_footer(theme, cx))
+            .flatten();
+        // slopty: no agent accounts: Slopty never touches a credential.
+        div()
+            .debug_selector(|| "composer-footer-slot".into()) // slopty: for the tests
+            // slopty: and the footer under the pill, over the transcript's faded floor:
+            // a row there takes no hover nor click, though the wheel scrolls it.
+            .id("composer-footer-slot")
+            .when(!dragging, |el| el.block_mouse_except_scroll())
+            .w_full()
+            .h(px(SESSION_FOOTER_HEIGHT * bottom_slot))
+            .mt(px(Theme::SPACE_SM * bottom_slot)) // slopty: the gap it grows
+            .mb(px(-Theme::SPACE_SM * bottom_slot))
+            .relative()
+            .when(new_thread_chrome_opacity > 0.0, |slot| {
+                slot.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .px(px(10.0))
+                        .flex()
+                        .items_center()
+                        .opacity(new_thread_chrome_opacity)
+                        .children(new_thread_git_selectors),
+                )
+            })
+            .when(session_chrome_opacity > 0.0, |slot| {
+                slot.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .w_full()
+                        .h(px(SESSION_FOOTER_HEIGHT))
+                        .flex()
+                        .items_center()
+                        .opacity(session_chrome_opacity)
+                        .child(div().flex_1().min_w_0().children(footer.flatten()))
+                        // slopty: the status line, mods' segments, the goal, the
+                        // background counts and the permission mode.
+                        .children(dock_footer)
+                        .child(
+                            // The footer row's own 4px gap: the PR badge
+                            // ends flush with the row, so the rings keep
+                            // their distance here.
+                            div()
+                                .flex_none()
+                                .pl(px(4.0))
+                                .pr(px(10.0))
+                                .child(self.account_usage.clone()),
+                        ),
+                )
+            })
+    }
+
     // slopty: dictation removed.
     fn render_send_button(
         &mut self,
         mode: SendButtonMode,
+        queue_t: f32, // slopty: `send_circle`'s
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let theme = Theme::of(cx).clone();
@@ -10161,6 +10370,7 @@ impl Composer {
                         .items_center()
                         .justify_center()
                         .hover(|s| s.opacity(0.85))
+                        .active(|s| s.opacity(0.7)) // slopty: a press shows
                         .child(div().size(px(11.0)).rounded(px(3.0)).bg(theme.bg)),
                 );
                 if escape {
@@ -10194,7 +10404,7 @@ impl Composer {
                     .debug_selector(|| "composer-send".into())
                     .role(Role::Button)
                     .when(reason.is_none(), |el| el.cursor_pointer())
-                    .child(send_circle("composer-send-drawn", reason.is_some(), &theme));
+                    .child(send_circle("composer-send-drawn", reason.is_some(), queue_t, &theme));
                 match reason {
                     Some(reason) => send
                         .aria_label(label)
@@ -10215,9 +10425,11 @@ impl Composer {
 /// The composer's send control: a size-7 filled circle with an up arrow,
 /// dimmed and inert while `blocked`. Other message composers reuse it so
 /// sending looks the same everywhere.
+/// slopty: `queue_t` cross-fades the arrow to a clock (0 sends now, 1 queues for after the turn).
 pub(crate) fn send_circle(
     id: &'static str,
     blocked: bool,
+    queue_t: f32,
     theme: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
     div()
@@ -10233,13 +10445,23 @@ pub(crate) fn send_circle(
         // slopty: one dimming for what cannot act now.
         .when(blocked, |el| el.opacity(crate::theme::DISABLED_OPACITY).cursor_default())
         .when(!blocked, |el| {
-            el.cursor_pointer().hover(|s| s.opacity(0.85))
+            el.cursor_pointer().hover(|s| s.opacity(0.85)).active(|s| s.opacity(0.7))
         })
+        .relative()
         .child(
             crate::icons::icon(crate::icons::ARROW_UP)
                 .size(px(14.0))
-                .text_color(theme.bg),
+                .text_color(theme.bg.opacity(1.0 - queue_t)),
         )
+        .when(queue_t > 0.0, |el| {
+            el.child(
+                div().debug_selector(|| "composer-send-queued".into()).absolute().inset_0().flex().items_center().justify_center().child(
+                    crate::icons::icon(crate::icons::CLOCK_CIRCLE)
+                        .size(px(14.0))
+                        .text_color(theme.bg.opacity(queue_t)),
+                ),
+            )
+        })
 }
 
 /// slopty: the press of a control drawn `width` by `height` pt: on a touch screen it takes a
@@ -10495,41 +10717,46 @@ impl Render for Composer {
             // slopty: no column gap: the stack's sections carry the space under them, and the
             // selectors and the footer theirs (`stack_section`).
             .px(px(Theme::SPACE_LG))
-            .pb(px(Theme::SPACE_LG + footer_touch_reach()))
-            .child({
-                // Amber with "Warning" for the offline-ish case (engine not
-                // connected), red with "Error" for send/run failures. Click
-                // dismisses.
-                let chip = failure.map(|message| {
-                let offline = message.as_ref() == ENGINE_OFFLINE;
-                    notice_chip(
-                        &theme,
-                        offline,
-                        if offline { "Warning" } else { "Error" },
-                        message,
-                        NoticeChipIcon::Plain,
-                    )
-                    .id("composer-failure")
-                    .mx(px(4.0))
-                    .mt(px(6.0))
-                    .cursor_pointer()
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.failure = None;
-                        this.failure_key = None;
-                        cx.notify();
-                    }))
-                    .into_any_element()
-                });
-                // slopty: grows into its room (`stack_section`).
-                stack_section("composer-failure-section", chip)
-            });
+            .pb(px(Theme::SPACE_LG + footer_touch_reach()));
+        // slopty: the failure chip heads the stack over the composer, which an open Background
+        // tray lifts (`tray_lift`).
+        let failure_section = {
+            // slopty: the message leads, with Copy and ✕ (`render_failure`).
+            let chip = failure.map(|message| self.render_failure(message, &theme, cx));
+            // slopty: grows into its room (`stack_section`).
+            stack_section("composer-failure-section", chip)
+        };
 
         if wizard_active {
+            // slopty: the card's field shows its own placeholder, never the composer's hint (the
+            // queue's "after this turn", the agent's suggestion) set before the card came.
+            self.input.update(cx, |input, cx| input.set_hint(None, cx));
             // slopty: a card's keys pick only where a key can press them: a hardware keyboard
             // attached (a Mac's always is) and no field of the card holding it.
             let keys_live = request_card::keys_press(cx) && !self.field_has_keyboard(window, cx);
+            self.card.focused_field = self.focused_form_field(window, cx); // slopty: its edge shows it
             let wizard = self.render_wizard(keys_live, cx);
-            return container.child(motion::fade_quick("composer-wizard", div().child(wizard)));
+            // slopty: zeron hides the trays under a card; they fold shut rather than blink out
+            // (and grow back on the answer), the card settles in where the composer stood, and
+            // the footer stays under it, so the mode, the goal and the context stay in reach
+            // and the stack's foot does not jump.
+            let (todo, tray, queue) = self.render_trays(false, window, cx);
+            let card = if motion::reduced_motion(cx) {
+                div().child(wizard).into_any_element()
+            } else {
+                gpui::AnimationExt::with_animation(div().child(wizard), "composer-wizard", CARD_PROMOTE.animation(), |el, t| {
+                    el.relative().opacity(0.75 + 0.25 * t).top(px(-6.0 * (1.0 - t)))
+                })
+                .into_any_element()
+            };
+            let footer = self.render_footer_slot(1.0, 0.0, 1.0, None, cx.has_active_drag(), &theme, cx);
+            return container
+                .child(failure_section)
+                .child(folding_section("composer-todo-section", todo))
+                .child(folding_section("composer-background-section", tray))
+                .child(folding_section("composer-queue-section", queue))
+                .child(card)
+                .child(footer);
         }
 
         // What is waiting to be sent, stacked directly above the box it was
@@ -10557,51 +10784,41 @@ impl Render for Composer {
             history::queue_hint(self.run_live(cx) && self.editing_queued.is_none(), send_with_mod).map(SharedString::from)
         });
         self.input.update(cx, |input, cx| input.set_hint(hint, cx));
-        let dock_lines = self.render_dock_lines(&theme, cx);
         let side = self.render_side_card(&theme, window, cx); // slopty: `/btw`'s answer.
         let folded = self.render_folded_question(&theme, cx);
         let bands = self.render_mod_bands(&theme, window, cx);
+        let (todo, tray, queue) = self.render_trays(show_queue_latest_shortcut, window, cx);
+        // slopty: the quiet lines tuck in as one more drawer of the tray stack when nothing else
+        // stands between them and it, one step narrower than the layer they sit on.
+        let drawer = (side.is_none() && folded.is_none() && bands.is_empty()).then(|| {
+            let below = [todo.is_some(), tray.is_some(), queue.is_some()].into_iter().filter(|on| *on).count();
+            QUEUE_SIDE_INSET * (1 + below) as f32
+        });
+        let dock_lines = self.render_dock_lines(drawer, &theme, cx);
         // slopty: each grows into its room and shrinks out of it (`stack_section`).
         let lines = |lines: Vec<AnyElement>| {
             (!lines.is_empty()).then(|| {
                 div().flex().flex_col().gap(px(Theme::SPACE_SM)).children(lines).into_any_element()
             })
         };
-        let container = container
+        let upper = div()
+            .flex()
+            .flex_col()
+            .child(failure_section)
             .child(stack_section("composer-dock-lines", lines(dock_lines)))
             .child(stack_section("composer-side", side))
             .child(stack_section("composer-folded-question", folded))
             .child(stack_section("composer-mod-bands", lines(bands)));
-        // The checklist tray stacks above the queue (or directly above the
-        // composer), one step narrower than what follows it.
-        let has_queue = !self.state.read(cx).queue.is_empty();
-        // slopty: the Background tray sits between the checklist and the queue.
-        let tray = self.render_background_tray(
-            QUEUE_SIDE_INSET * if has_queue { 2.0 } else { 1.0 },
-            window,
-            cx,
-        );
-        let trays_below = usize::from(has_queue) + usize::from(tray.is_some());
-        let todo = self
-            .render_todo_panel(trays_below, window, cx)
-            .map(|panel| motion::fade_quick("composer-todo", div().child(panel)).into_any_element());
-        let tray = tray.map(|tray| {
-            motion::fade_quick("composer-background-tray", div().child(tray)).into_any_element()
-        });
-        let queue = self.render_queue_panel(show_queue_latest_shortcut, window, cx).map(|panel| {
-            motion::fade_quick(
-                "composer-queue",
-                div()
-                    .mx(px(QUEUE_SIDE_INSET))
-                    // Cancel the column gap, then tuck the tray one pixel
-                    // behind the composer painted after it.
-                    .mb(px(-(Theme::SPACE_SM + QUEUE_COMPOSER_OVERLAP)))
-                    .child(panel),
-            )
-            .into_any_element()
-        });
+        // slopty: an open Background tray rises over the transcript from its closed place; what
+        // is stacked above it rides up with it, so the card covers none of it (the folded
+        // question's Answer least of all) and the chat under the stack still keeps its place.
+        let lift = self.tray_lift();
         let container = container
-            .child(stack_section("composer-todo-section", todo))
+            .child(
+                upper
+                    .child(stack_section("composer-todo-section", todo))
+                    .when(lift > 0.0, |el| el.relative().top(px(-lift))),
+            )
             .child(stack_section("composer-background-section", tray))
             .child(stack_section("composer-queue-section", queue));
         // Escape backs out of a queue-row edit (the row keeps its old text).
@@ -10841,7 +11058,19 @@ impl Render for Composer {
             }
         });
 
-        let send_button = self.render_send_button(mode, cx);
+        // slopty: a send that waits for the turn looks it: the arrow cross-fades to a clock while
+        // Enter queues.
+        let queue_t = motion::state_t(
+            &format!("composer-send-queue-{}", cx.entity_id()),
+            mode == SendButtonMode::Queue,
+            motion::FADE_QUICK,
+            motion::reduced_motion(cx),
+            cx.frame_time(),
+        );
+        if queue_t > 0.0 && queue_t < 1.0 {
+            window.request_animation_frame();
+        }
+        let send_button = self.render_send_button(mode, queue_t, cx);
         let shell_tag = shell_mode.then(|| self.render_shell_tag(&theme, cx)); // slopty
         // slopty: dictation removed.
         let attach_action = cx.entity().downgrade();
@@ -10857,36 +11086,51 @@ impl Render for Composer {
             gpui::transparent_black(),
             crate::theme::ink(0.10),
         );
-        let attach = crate::surface_chrome::focus_ring_within(attach_press, &theme, attach_reach)
-            .cursor_pointer()
-            .hover_fade(attach_hover_key)
-            // slopty: dictation removed.
-            .role(Role::Button)
-            .tab_index(0)
-            .hint("Attach images")
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.open_file_picker(cx);
-            }))
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
-                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                    cx.stop_propagation();
+        // slopty: a `!` command takes no attachment: Attach stays in place, dimmed, and says why.
+        let attach = if shell_mode {
+            attach_press
+                .role(Role::Button)
+                .aria_disabled(true)
+                .opacity(crate::theme::DISABLED_OPACITY)
+                .aria_label("Attach images")
+                .aria_description("Shell commands take no attachments")
+                .tooltip(crate::settings::widgets::detail_tooltip("Attach images", "Shell commands take no attachments", None))
+                .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
+        } else {
+            crate::surface_chrome::focus_ring_within(attach_press, &theme, attach_reach)
+                .cursor_pointer()
+                .hover_fade(attach_hover_key)
+                // slopty: dictation removed.
+                .role(Role::Button)
+                .tab_index(0)
+                .hint("Attach images")
+                .on_click(cx.listener(move |this, _, _, cx| {
                     this.open_file_picker(cx);
-                }
-            }))
-            .on_a11y_action(gpui::AccessibleAction::Click, move |_, _, cx| {
-                attach_action
-                    .update(cx, |this, cx| {
+                }))
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                        cx.stop_propagation();
                         this.open_file_picker(cx);
-                    })
-                    .ok();
-            })
+                    }
+                }))
+                .on_a11y_action(gpui::AccessibleAction::Click, move |_, _, cx| {
+                    attach_action
+                        .update(cx, |this, cx| {
+                            this.open_file_picker(cx);
+                        })
+                        .ok();
+                })
+        };
+        let attach = attach
             .child(
                 div()
+                    .id("composer-attach-drawn") // slopty: its press shows
                     .size(px(28.0))
                     .flex_none()
                     .rounded_full()
                     // slopty composer-actions.tsx attach: `transition-colors`.
-                    .bg(attach_wash)
+                    .bg(if shell_mode { gpui::transparent_black() } else { attach_wash })
+                    .when(!shell_mode, |el| el.active(|s| s.bg(crate::theme::ink(0.16)))) // slopty
                     .flex()
                     .items_center()
                     .justify_center()
@@ -11210,65 +11454,15 @@ impl Render for Composer {
             session_chrome
         };
         let container = if bottom_slot > 0.0 {
-            let footer = (session_chrome_opacity > 0.0 && !self.side_chat).then(|| {
-                self.pickers
-                    .update(cx, |pickers, cx| pickers.render_footer(cx))
-            });
-            let dock_footer = (session_chrome_opacity > 0.0)
-                .then(|| self.render_dock_footer(&theme, cx))
-                .flatten();
-            // slopty: no agent accounts: Slopty never touches a credential.
-            container.child(
-                div()
-                    .debug_selector(|| "composer-footer-slot".into()) // slopty: for the tests
-                    // slopty: and the footer under the pill, over the transcript's faded floor:
-                    // a row there takes no hover nor click, though the wheel scrolls it.
-                    .id("composer-footer-slot")
-                    .when(!dragging, |el| el.block_mouse_except_scroll())
-                    .w_full()
-                    .h(px(SESSION_FOOTER_HEIGHT * bottom_slot))
-                    .mt(px(Theme::SPACE_SM * bottom_slot)) // slopty: the gap it grows
-                    .mb(px(-Theme::SPACE_SM * bottom_slot))
-                    .relative()
-                    .when(new_thread_chrome_opacity > 0.0, |slot| {
-                        slot.child(
-                            div()
-                                .absolute()
-                                .inset_0()
-                                .px(px(10.0))
-                                .flex()
-                                .items_center()
-                                .opacity(new_thread_chrome_opacity)
-                                .children(new_thread_git_selectors),
-                        )
-                    })
-                    .when(session_chrome_opacity > 0.0, |slot| {
-                        slot.child(
-                            div()
-                                .absolute()
-                                .inset_0()
-                                .w_full()
-                                .h(px(SESSION_FOOTER_HEIGHT))
-                                .flex()
-                                .items_center()
-                                .opacity(session_chrome_opacity)
-                                .child(div().flex_1().min_w_0().children(footer.flatten()))
-                                // slopty: the status line, mods' segments, the goal, the
-                                // background counts and the permission mode.
-                                .children(dock_footer)
-                                .child(
-                                    // The footer row's own 4px gap: the PR badge
-                                    // ends flush with the row, so the rings keep
-                                    // their distance here.
-                                    div()
-                                        .flex_none()
-                                        .pl(px(4.0))
-                                        .pr(px(10.0))
-                                        .child(self.account_usage.clone()),
-                                ),
-                        )
-                    }),
-            )
+            container.child(self.render_footer_slot(
+                bottom_slot,
+                new_thread_chrome_opacity,
+                session_chrome_opacity,
+                new_thread_git_selectors,
+                dragging,
+                &theme,
+                cx,
+            ))
         } else {
             container
         };

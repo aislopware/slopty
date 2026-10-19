@@ -5,17 +5,21 @@ Button │ Server: e2e-server, Connected
 Button │ Settings
 Article │ You
 Paragraph │ Show the page
-Button │ Called 1 tool
+Button │ Copy message
+Button │ Rewind…
+Article │ Claude Code
+Button │ Tool mcp__slopty__show_page
 Group │ Page: Probe │ live
 Button │ Copy image
 Button │ Save
 Button │ Open in pane
 Button │ Expand page
 Group │ Page
-Article │ Claude
 Paragraph │ Done: Show the page
+Button │ Copy message
 Button │ Attach images
 MultilineTextInput │ Do anything… (focused)
+Button │ Model: Opus 5.5, High
 Button │ Send message
 Button │ Mode: Auto
 Button │ Context 1%

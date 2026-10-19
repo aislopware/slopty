@@ -12,5 +12,5 @@ Button │ Hide sidebar
 Button │ Back
 Button │ Forward
 Button │ Sidebar view options
-Status │ Open localhost:$PORT from shell on e2e-worker? Open forwards the port here
+Status │ Open localhost:$PORT from e2e-worker's shell? Opening forwards the port to this Mac.
 Button │ Open

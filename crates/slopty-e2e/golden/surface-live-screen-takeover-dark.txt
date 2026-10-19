@@ -4,12 +4,14 @@ Button │ History: past Claude Code sessions
 Button │ Server: e2e-server, Connected
 Button │ Settings
 Article │ You
+Article │ Claude Code
 Button │ Thought process
-Article │ Claude
 Paragraph │ Done: Say hello
 Status │ Worked for 1s · done $CLOCK │ done
+Button │ Copy message
 Button │ Attach images
 MultilineTextInput │ Do anything…
+Button │ Model: Opus 5.5, High
 Button │ Send message
 Button │ Mode: Auto
 Button │ Context 1%
@@ -25,4 +27,3 @@ Button │ Back
 Button │ Forward
 Button │ New chat
 Button │ Sidebar view options
-Tooltip │ Expand side pane │ ⇧⌘\

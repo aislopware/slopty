@@ -1,6 +1,7 @@
 Window
 MultilineTextInput │ Do anything…
 Button │ Attach images
+Button │ Model: Opus 5.5, High
 Button │ Send message
 Button │ Mode: Auto
 Button │ Context 1%

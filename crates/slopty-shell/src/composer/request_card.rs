@@ -38,9 +38,9 @@ const NOTES: &str = "notes:";
 /// The most of a dialog's payload the card lists.
 const MAX_FACTS: usize = 8;
 /// What a card only the person at it answers says (`slopty_proto::thread::Request::NEEDS_PRESENCE`).
-pub(crate) const NEEDS_PRESENCE: &str = "Answer here";
+pub(crate) const NEEDS_PRESENCE: &str = "Answer in Slopty";
 /// Why, in its tooltip and for a screen reader (`Request::NEEDS_PRESENCE_REFUSED`'s words).
-pub(crate) const NEEDS_PRESENCE_WHY: &str = "The agent takes this answer only from its card in Slopty";
+pub(crate) const NEEDS_PRESENCE_WHY: &str = "The agent takes this answer only from its card";
 /// Under this long left, the countdown turns amber.
 const COUNTDOWN_URGENT_MS: i64 = 30_000;
 
@@ -462,6 +462,9 @@ pub(crate) struct CardState {
     pub(crate) preview_scroll: gpui::ScrollHandle,
     // slopty: the proposed change's scroll, likewise.
     pub(crate) proposed_scroll: gpui::ScrollHandle,
+    /// The form field that has the keyboard, by name, as the frame found it: its box wears the
+    /// accent edge.
+    pub(crate) focused_field: Option<String>,
 }
 
 impl Composer {
@@ -494,6 +497,15 @@ impl Composer {
             .any(|input| input.read(cx).focus_handle.is_focused(window))
     }
 
+    /// The form field that has the keyboard now, by name.
+    pub(super) fn focused_form_field(&self, window: &Window, cx: &App) -> Option<String> {
+        self.card
+            .inputs
+            .iter()
+            .find(|(_, input)| input.read(cx).focus_handle.is_focused(window))
+            .map(|(name, _)| name.clone())
+    }
+
     /// A form field's input, by the field's name.
     #[cfg(test)]
     pub(crate) fn card_input(&self, name: &str) -> Option<Entity<ComposerInput>> {
@@ -521,14 +533,19 @@ impl Composer {
                     )
                     .role(Role::Button)
                     .aria_label(SharedString::from(label.clone()))
+                    // An MCP form's two ways out differ: say how.
+                    .when_some(form_answer_tip(label), |el, tip| {
+                        el.aria_description(tip)
+                            .tooltip(crate::settings::widgets::text_tooltip(tip))
+                            .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
+                    })
+                    .active(|s| s.opacity(0.8))
                     .on_click(cx.listener(move |this, _, _, cx| this.wizard_select(ix, cx)))
                     .into_any_element()
                 })
                 .collect();
             buttons.push(
-                card_button(crate::popover::btn_primary(theme, "Submit"), "wizard-form-submit", theme)
-                    .role(Role::Button)
-                    .aria_label("Submit form")
+                card_button(crate::popover::btn_primary(theme, "Submit"), "wizard-form-submit", "Submit form", theme)
                     .px(px(16.0))
                     .on_click(cx.listener(|this, _, _, cx| this.send_form(cx)))
                     .into_any_element(),
@@ -537,14 +554,10 @@ impl Composer {
         }
         if takes_no_words(question) {
             return vec![
-                card_button(crate::popover::btn_ghost(theme, "Dismiss", "wizard-dialog-dismiss"), "wizard-dialog-dismiss", theme)
-                    .role(Role::Button)
-                    .aria_label("Dismiss")
+                card_button(crate::popover::btn_ghost(theme, "Dismiss", "wizard-dialog-dismiss"), "wizard-dialog-dismiss", "Dismiss", theme)
                     .on_click(cx.listener(|this, _, _, cx| this.answer_page_with(CANCEL.to_owned(), cx)))
                     .into_any_element(),
-                card_button(crate::popover::btn_primary(theme, "OK"), "wizard-dialog-ok", theme)
-                    .role(Role::Button)
-                    .aria_label("OK")
+                card_button(crate::popover::btn_primary(theme, "OK"), "wizard-dialog-ok", "OK", theme)
                     .px(px(16.0))
                     .on_click(cx.listener(|this, _, _, cx| this.answer_page_with("{}".to_owned(), cx)))
                     .into_any_element(),
@@ -838,7 +851,8 @@ impl Composer {
                     .text_size(crate::typography::ui_rems(10.0))
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(theme.text_muted)
-                    .child(crate::icons::icon(crate::icons::LOCK).size(px(11.0)).text_color(theme.text_muted))
+                    // An info mark, not a lock: the card is not locked, it asks for the person.
+                    .child(crate::icons::icon(crate::icons::INFO_CIRCLE).size(px(11.0)).text_color(theme.text_muted))
                     .child(SharedString::from(words))
                     .into_any_element(),
             );
@@ -1123,16 +1137,14 @@ impl Composer {
                     .justify_end()
                     .gap(px(6.0))
                     .child(
-                        card_button(crate::popover::btn_ghost(theme, "Cancel", "wizard-rule-cancel"), "wizard-rule-cancel", theme)
+                        card_button(crate::popover::btn_ghost(theme, "Cancel", "wizard-rule-cancel"), "wizard-rule-cancel", "Cancel", theme)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.card.rule = None;
                                 cx.notify();
                             })),
                     )
                     .child(
-                        card_button(crate::popover::btn_primary(theme, "Allow with rule"), "wizard-allow-with-rule", theme)
-                            .role(Role::Button)
-                            .aria_label("Allow with rule")
+                        card_button(crate::popover::btn_primary(theme, "Allow with rule"), "wizard-allow-with-rule", "Allow with rule", theme)
                             .on_click(cx.listener(|this, _, _, cx| this.allow_with_rule(cx))),
                     ),
             )
@@ -1209,13 +1221,16 @@ impl Composer {
                         .entry(field.name.clone())
                         .or_insert_with(|| {
                             let default = field.default.clone().unwrap_or_default();
+                            // The field is named by its title, which shows faint while empty.
                             cx.new(|cx| {
-                                let mut input = ComposerInput::new("", cx).with_single_line();
+                                let mut input = ComposerInput::new(field.title.clone(), cx).with_single_line();
                                 input.set_text(default, cx);
                                 input
                             })
                         })
                         .clone();
+                    // The field with the keyboard says so by its edge, in the accent.
+                    let focused = self.card.focused_field.as_deref() == Some(field.name.as_str());
                     div()
                         .h(px(30.0))
                         .px(px(10.0))
@@ -1223,7 +1238,7 @@ impl Composer {
                         .items_center()
                         .rounded(px(8.0))
                         .border_1()
-                        .border_color(crate::theme::hairline(0.1))
+                        .border_color(if focused { theme.accent.opacity(0.6) } else { crate::theme::hairline(0.1) })
                         .bg(crate::theme::ink(0.03))
                         .child(input)
                         .into_any_element()
@@ -1272,6 +1287,8 @@ impl Composer {
             .role(Role::Form)
             .aria_label("Form")
             .mt(px(12.0))
+            // Room between the last field and the card's answers, as between the title and it.
+            .mb(px(8.0))
             .flex()
             .flex_col()
             .gap(px(10.0))
@@ -1370,10 +1387,54 @@ fn render_facts(facts: &[(String, String)], theme: &Theme) -> AnyElement {
         .into_any_element()
 }
 
+/// What an MCP form's own answers do, said while the pointer rests on them: its decline (the
+/// server hears no) and its cancel (closed unanswered) read the same otherwise.
+fn form_answer_tip(label: &str) -> Option<&'static str> {
+    match label {
+        "Decline" => Some("Tell the server no"),
+        "Cancel" => Some("Close without answering"),
+        _ => None,
+    }
+}
+
+/// A card's body as its title and what describes it: the first paragraph, then whatever follows
+/// the first blank line. A title that only repeats the card's header (any case, any closing
+/// mark) is said once, by the header: the description then stands as the title.
+pub(crate) fn split_body(body: &str, header: &str) -> (Option<String>, Option<String>) {
+    let body = body.trim();
+    let mut lines = body.lines();
+    let lead: Vec<&str> = lines.by_ref().take_while(|line| !line.trim().is_empty()).collect();
+    let lead = lead.join("\n").trim().to_owned();
+    let rest = lines.collect::<Vec<_>>().join("\n").trim().to_owned();
+    let bare = |s: &str| s.trim().trim_end_matches(['?', '.', ':', '!']).to_lowercase();
+    let lead = (!lead.is_empty() && bare(&lead) != bare(header)).then_some(lead);
+    let rest = (!rest.is_empty()).then_some(rest);
+    match (lead, rest) {
+        (None, rest) => (rest, None),
+        both => both,
+    }
+}
+
 /// slopty: a card's button (`popover::btn_ghost`, `btn_primary`) as a tab stop with the shared
 /// focus ring.
-pub(super) fn card_button(button: gpui::Div, id: &'static str, theme: &Theme) -> gpui::Stateful<gpui::Div> {
-    crate::surface_chrome::focus_ring(button.id(id).tab_index(0).px(px(12.0)).py(px(6.0)), theme)
+/// It is a button to assistive tech, named `words` (a disabled one keeps its name), and a press
+/// shows.
+pub(super) fn card_button(
+    button: gpui::Div,
+    id: &'static str,
+    words: impl Into<SharedString>,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
+    // A press dims it a step, as Claude desktop's and T3's buttons answer the pointer.
+    let button = button
+        .id(id)
+        .role(Role::Button)
+        .aria_label(words.into())
+        .tab_index(0)
+        .px(px(12.0))
+        .py(px(6.0))
+        .active(|s| s.opacity(0.8));
+    crate::surface_chrome::focus_ring(button, theme)
 }
 
 /// slopty: one of the card's word buttons ("Revise…", "Edit plan…", "Edit rule…"): a tab stop
